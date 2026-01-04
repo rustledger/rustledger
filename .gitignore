@@ -48,3 +48,4 @@ target/criterion/
 
 # Documentation build
 book/
+.mcp.*

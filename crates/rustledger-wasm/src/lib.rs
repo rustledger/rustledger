@@ -268,8 +268,16 @@ pub fn validate(ledger_json: &str) -> JsValue {
 #[wasm_bindgen]
 pub fn validate_source(source: &str) -> JsValue {
     use rustledger_booking::interpolate;
+    use std::collections::HashMap;
 
     let parse_result = parse_beancount(source);
+
+    // Build line number lookup from byte offset
+    let line_starts: Vec<usize> = std::iter::once(0)
+        .chain(source.match_indices('\n').map(|(i, _)| i + 1))
+        .collect();
+    let byte_to_line =
+        |byte: usize| -> u32 { (line_starts.partition_point(|&start| start <= byte)) as u32 };
 
     // Collect parse errors
     let mut errors: Vec<Error> = parse_result
@@ -285,6 +293,27 @@ pub fn validate_source(source: &str) -> JsValue {
 
     // If parsing succeeded, run interpolation then validation
     if parse_result.errors.is_empty() {
+        // Build a map from date to line number for error reporting
+        let mut date_to_line: HashMap<String, u32> = HashMap::new();
+        for spanned in &parse_result.directives {
+            let line = byte_to_line(spanned.span.start);
+            let date = match &spanned.value {
+                Directive::Transaction(t) => t.date.to_string(),
+                Directive::Balance(b) => b.date.to_string(),
+                Directive::Open(o) => o.date.to_string(),
+                Directive::Close(c) => c.date.to_string(),
+                Directive::Pad(p) => p.date.to_string(),
+                Directive::Commodity(c) => c.date.to_string(),
+                Directive::Event(e) => e.date.to_string(),
+                Directive::Query(q) => q.date.to_string(),
+                Directive::Note(n) => n.date.to_string(),
+                Directive::Document(d) => d.date.to_string(),
+                Directive::Price(p) => p.date.to_string(),
+                Directive::Custom(c) => c.date.to_string(),
+            };
+            date_to_line.entry(date).or_insert(line);
+        }
+
         let mut directives: Vec<_> = parse_result
             .directives
             .iter()
@@ -292,15 +321,21 @@ pub fn validate_source(source: &str) -> JsValue {
             .collect();
 
         // Interpolate transactions (fill in missing amounts)
-        for directive in &mut directives {
+        for (i, directive) in directives.iter_mut().enumerate() {
             if let Directive::Transaction(txn) = directive {
-                if let Err(e) = interpolate(txn) {
-                    errors.push(Error {
-                        message: e.to_string(),
-                        line: None,
-                        column: None,
-                        severity: "error".to_string(),
-                    });
+                match interpolate(txn) {
+                    Ok(result) => {
+                        *txn = result.transaction;
+                    }
+                    Err(e) => {
+                        let line = byte_to_line(parse_result.directives[i].span.start);
+                        errors.push(Error {
+                            message: e.to_string(),
+                            line: Some(line),
+                            column: None,
+                            severity: "error".to_string(),
+                        });
+                    }
                 }
             }
         }
@@ -308,9 +343,10 @@ pub fn validate_source(source: &str) -> JsValue {
         // Run validation
         let validation_errors = validate_ledger(&directives);
         for err in validation_errors {
+            let line = date_to_line.get(&err.date.to_string()).copied();
             errors.push(Error {
                 message: err.message,
-                line: None,
+                line,
                 column: None,
                 severity: "error".to_string(),
             });
@@ -331,7 +367,7 @@ pub fn validate_source(source: &str) -> JsValue {
 #[wasm_bindgen]
 pub fn query(source: &str, query_str: &str) -> JsValue {
     use rustledger_booking::interpolate;
-    use rustledger_query::{parse as parse_query, Executor};
+    use rustledger_query::{Executor, parse as parse_query};
 
     // Parse the source
     let parse_result = parse_beancount(source);
@@ -381,7 +417,9 @@ pub fn query(source: &str, query_str: &str) -> JsValue {
 
     for directive in &mut directives {
         if let Directive::Transaction(txn) = directive {
-            let _ = interpolate(txn); // Ignore errors for query
+            if let Ok(result) = interpolate(txn) {
+                *txn = result.transaction;
+            }
         }
     }
 
@@ -428,7 +466,7 @@ pub fn version() -> String {
 /// Parses and reformats with consistent alignment.
 #[wasm_bindgen]
 pub fn format(source: &str) -> JsValue {
-    use rustledger_core::{format_directive, FormatConfig};
+    use rustledger_core::{FormatConfig, format_directive};
 
     let parse_result = parse_beancount(source);
 
@@ -501,7 +539,9 @@ pub fn expand_pads(source: &str) -> JsValue {
 
     for directive in &mut directives {
         if let Directive::Transaction(txn) = directive {
-            let _ = interpolate(txn);
+            if let Ok(result) = interpolate(txn) {
+                *txn = result.transaction;
+            }
         }
     }
 
@@ -543,8 +583,8 @@ pub fn expand_pads(source: &str) -> JsValue {
 pub fn run_plugin(source: &str, plugin_name: &str) -> JsValue {
     use rustledger_booking::interpolate;
     use rustledger_plugin::{
-        directives_to_wrappers, wrappers_to_directives, NativePluginRegistry, PluginInput,
-        PluginOptions,
+        NativePluginRegistry, PluginInput, PluginOptions, directives_to_wrappers,
+        wrappers_to_directives,
     };
 
     let parse_result = parse_beancount(source);
@@ -575,7 +615,9 @@ pub fn run_plugin(source: &str, plugin_name: &str) -> JsValue {
 
     for directive in &mut directives {
         if let Directive::Transaction(txn) = directive {
-            let _ = interpolate(txn);
+            if let Ok(result) = interpolate(txn) {
+                *txn = result.transaction;
+            }
         }
     }
 

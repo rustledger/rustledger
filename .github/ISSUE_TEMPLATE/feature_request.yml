@@ -1,0 +1,57 @@
+name: Feature Request
+description: Suggest an idea for rustledger
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for suggesting a feature!
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem Statement
+      description: Is your feature request related to a problem? Describe the problem.
+      placeholder: I'm always frustrated when...
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed Solution
+      description: Describe the solution you'd like.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives Considered
+      description: Describe any alternative solutions or features you've considered.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Which part of rustledger does this relate to?
+      options:
+        - CLI (bean-check, bean-query, etc.)
+        - Parser
+        - BQL Query Engine
+        - Plugin System
+        - Booking/Inventory
+        - Validation
+        - Documentation
+        - Other
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: compatibility
+    attributes:
+      label: Beancount Compatibility
+      options:
+        - label: This feature exists in Python Beancount
+        - label: This is a new feature not in Python Beancount

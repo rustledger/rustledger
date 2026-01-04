@@ -1,0 +1,56 @@
+name: Compatibility Issue
+description: Report a difference from Python Beancount behavior
+title: "[Compat]: "
+labels: ["compatibility"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Report a case where rustledger behaves differently from Python Beancount.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: Describe the compatibility issue.
+    validations:
+      required: true
+
+  - type: textarea
+    id: beancount-file
+    attributes:
+      label: Beancount File
+      description: Provide a minimal beancount file that shows the difference.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: python-output
+    attributes:
+      label: Python Beancount Output
+      description: What does Python Beancount output?
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: rustledger-output
+    attributes:
+      label: Rustledger Output
+      description: What does rustledger output?
+      render: text
+    validations:
+      required: true
+
+  - type: input
+    id: python-version
+    attributes:
+      label: Python Beancount Version
+      placeholder: "2.3.6"
+
+  - type: input
+    id: rustledger-version
+    attributes:
+      label: Rustledger Version
+      placeholder: "1.0.0-rc.1"

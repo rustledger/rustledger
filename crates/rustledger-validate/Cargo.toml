@@ -14,7 +14,7 @@ readme = "../../README.md"
 
 [dependencies]
 rustledger-core.workspace = true
-rustledger-booking = { path = "../rustledger-booking" }
+rustledger-booking.workspace = true
 rust_decimal.workspace = true
 thiserror.workspace = true
 chrono.workspace = true

@@ -14,7 +14,7 @@ readme = "../../README.md"
 
 [dependencies]
 rustledger-core.workspace = true
-rustledger-parser = { path = "../rustledger-parser" }
+rustledger-parser.workspace = true
 rust_decimal.workspace = true
 thiserror.workspace = true
 

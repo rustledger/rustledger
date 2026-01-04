@@ -1,0 +1,41 @@
+# treefmt configuration
+# https://github.com/numtide/treefmt
+# This file is for standalone treefmt usage outside of Nix
+
+[global]
+excludes = [
+    "target/*",
+    "result/*",
+    ".direnv/*",
+    "spec/fixtures/lima-tests/*",
+    "spec/fixtures/examples/*",
+    "*.lock",
+]
+
+[formatter.nix]
+command = "nixpkgs-fmt"
+includes = ["*.nix"]
+
+[formatter.rust]
+command = "rustfmt"
+options = ["--edition", "2021"]
+includes = ["*.rs"]
+
+[formatter.toml]
+command = "taplo"
+options = ["format"]
+includes = ["*.toml"]
+
+[formatter.markdown]
+command = "mdformat"
+includes = ["*.md"]
+excludes = ["CHANGELOG.md"]
+
+[formatter.shell]
+command = "shfmt"
+options = ["-i", "2", "-s", "-w"]
+includes = ["*.sh"]
+
+[formatter.yaml]
+command = "yamlfmt"
+includes = ["*.yaml", "*.yml"]

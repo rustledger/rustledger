@@ -1,0 +1,126 @@
+# CI workflow for beancount-rs
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -Dwarnings
+
+jobs:
+  # Fast check for quick feedback
+  check:
+    name: Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - name: Check
+        run: nix build .#checks.x86_64-linux.beancount-rs --print-build-logs
+
+  # Full test suite
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - name: Test
+        run: nix build .#checks.x86_64-linux.test --print-build-logs
+
+  # Clippy lints
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - name: Clippy
+        run: nix build .#checks.x86_64-linux.clippy --print-build-logs
+
+  # Formatting
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - name: Format
+        run: nix build .#checks.x86_64-linux.fmt --print-build-logs
+
+  # Security audit
+  audit:
+    name: Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - name: Audit
+        run: nix build .#checks.x86_64-linux.audit --print-build-logs
+
+  # Documentation
+  doc:
+    name: Documentation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - name: Doc
+        run: nix build .#checks.x86_64-linux.doc --print-build-logs
+
+  # WASM build
+  wasm:
+    name: WASM
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - name: Build WASM
+        run: nix build .#wasm --print-build-logs
+
+  # Coverage (only on main)
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - name: Coverage
+        run: nix build .#checks.x86_64-linux.coverage --print-build-logs
+      - name: Upload to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: result/lcov.info
+          fail_ci_if_error: false
+
+  # macOS build
+  macos:
+    name: macOS
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - name: Build
+        run: nix build --print-build-logs
+
+  # All checks pass
+  all-checks:
+    name: All Checks
+    runs-on: ubuntu-latest
+    needs: [check, test, clippy, fmt, audit, doc, wasm, macos]
+    steps:
+      - run: echo "All checks passed!"

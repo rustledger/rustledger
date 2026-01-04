@@ -1,0 +1,34 @@
+[package]
+name = "rustledger-query"
+description = "Beancount query engine (BQL) with SQL-like syntax for ledger queries"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+authors.workspace = true
+readme = "../../README.md"
+
+[dependencies]
+rustledger-core.workspace = true
+chumsky.workspace = true
+ariadne.workspace = true
+rust_decimal.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+regex = "1"
+
+[dev-dependencies]
+rust_decimal_macros.workspace = true
+insta.workspace = true
+criterion.workspace = true
+
+[[bench]]
+name = "query_bench"
+harness = false
+
+[lints]
+workspace = true

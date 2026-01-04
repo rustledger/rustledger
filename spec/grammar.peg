@@ -1,0 +1,346 @@
+// Beancount PEG Grammar
+// For use with pest, tree-sitter, or similar PEG parsers
+//
+// This grammar produces a concrete syntax tree. Semantic validation
+// (account lifecycle, balance checks, etc.) happens in later phases.
+
+// =============================================================================
+// TOP LEVEL
+// =============================================================================
+
+file = { SOI ~ (line ~ NEWLINE)* ~ line? ~ EOI }
+
+line = _{
+    directive
+    | option_directive
+    | include_directive
+    | plugin_directive
+    | pushtag_directive
+    | poptag_directive
+    | pushmeta_directive
+    | popmeta_directive
+    | comment_line
+    | empty_line
+}
+
+empty_line = { WHITESPACE* }
+comment_line = { WHITESPACE* ~ ";" ~ (!NEWLINE ~ ANY)* }
+
+// =============================================================================
+// DIRECTIVES
+// =============================================================================
+
+directive = {
+    date ~ WHITESPACE+ ~ (
+        transaction
+        | balance
+        | open
+        | close
+        | commodity_directive
+        | pad
+        | event
+        | query
+        | note
+        | document
+        | price
+        | custom
+    ) ~ trailing_comment? ~ (NEWLINE ~ metadata_line)*
+}
+
+// -----------------------------------------------------------------------------
+// Transaction
+// -----------------------------------------------------------------------------
+
+transaction = {
+    txn_flag ~
+    (WHITESPACE+ ~ txn_strings)? ~
+    (WHITESPACE+ ~ tags_links)* ~
+    (NEWLINE ~ (posting_line | metadata_line))+
+}
+
+txn_flag = { "*" | "!" | "txn" | "P" | "#" }
+
+txn_strings = {
+    string ~ (WHITESPACE+ ~ string)?  // payee + narration, or just narration
+}
+
+posting_line = {
+    WHITESPACE+ ~ posting ~ trailing_comment? ~ (NEWLINE ~ posting_metadata_line)*
+}
+
+posting = {
+    posting_flag? ~ account ~
+    (WHITESPACE+ ~ amount ~ cost_spec? ~ price_annotation?)?
+}
+
+posting_flag = { "*" | "!" }
+
+cost_spec = {
+    WHITESPACE* ~ "{" ~ WHITESPACE* ~ cost_comp_list? ~ WHITESPACE* ~ "}"
+    | WHITESPACE* ~ "{{" ~ WHITESPACE* ~ cost_comp_list? ~ WHITESPACE* ~ "}}"  // total cost
+}
+
+cost_comp_list = {
+    cost_comp ~ (WHITESPACE* ~ "," ~ WHITESPACE* ~ cost_comp)*
+}
+
+cost_comp = {
+    amount           // cost per unit
+    | date           // acquisition date
+    | string         // lot label
+    | "*"            // merge cost
+}
+
+price_annotation = {
+    WHITESPACE* ~ ("@@" | "@") ~ WHITESPACE* ~ amount
+}
+
+// -----------------------------------------------------------------------------
+// Balance Assertion
+// -----------------------------------------------------------------------------
+
+balance = {
+    "balance" ~ WHITESPACE+ ~ account ~ WHITESPACE+ ~ amount_with_tolerance
+}
+
+amount_with_tolerance = {
+    amount ~ (WHITESPACE* ~ "~" ~ WHITESPACE* ~ number)?
+}
+
+// -----------------------------------------------------------------------------
+// Open Account
+// -----------------------------------------------------------------------------
+
+open = {
+    "open" ~ WHITESPACE+ ~ account ~
+    (WHITESPACE+ ~ currency_list)? ~
+    (WHITESPACE+ ~ string)?  // booking method
+}
+
+currency_list = {
+    currency ~ (WHITESPACE* ~ "," ~ WHITESPACE* ~ currency)*
+}
+
+// -----------------------------------------------------------------------------
+// Close Account
+// -----------------------------------------------------------------------------
+
+close = {
+    "close" ~ WHITESPACE+ ~ account
+}
+
+// -----------------------------------------------------------------------------
+// Commodity Declaration
+// -----------------------------------------------------------------------------
+
+commodity_directive = {
+    "commodity" ~ WHITESPACE+ ~ currency
+}
+
+// -----------------------------------------------------------------------------
+// Pad
+// -----------------------------------------------------------------------------
+
+pad = {
+    "pad" ~ WHITESPACE+ ~ account ~ WHITESPACE+ ~ account
+}
+
+// -----------------------------------------------------------------------------
+// Event
+// -----------------------------------------------------------------------------
+
+event = {
+    "event" ~ WHITESPACE+ ~ string ~ WHITESPACE+ ~ string
+}
+
+// -----------------------------------------------------------------------------
+// Query
+// -----------------------------------------------------------------------------
+
+query = {
+    "query" ~ WHITESPACE+ ~ string ~ WHITESPACE+ ~ string
+}
+
+// -----------------------------------------------------------------------------
+// Note
+// -----------------------------------------------------------------------------
+
+note = {
+    "note" ~ WHITESPACE+ ~ account ~ WHITESPACE+ ~ string
+}
+
+// -----------------------------------------------------------------------------
+// Document
+// -----------------------------------------------------------------------------
+
+document = {
+    "document" ~ WHITESPACE+ ~ account ~ WHITESPACE+ ~ string ~
+    (WHITESPACE+ ~ tags_links)*
+}
+
+// -----------------------------------------------------------------------------
+// Price
+// -----------------------------------------------------------------------------
+
+price = {
+    "price" ~ WHITESPACE+ ~ currency ~ WHITESPACE+ ~ amount
+}
+
+// -----------------------------------------------------------------------------
+// Custom
+// -----------------------------------------------------------------------------
+
+custom = {
+    "custom" ~ WHITESPACE+ ~ string ~ (WHITESPACE+ ~ custom_value)*
+}
+
+custom_value = {
+    string | date | boolean | amount | account | number
+}
+
+boolean = { "TRUE" | "FALSE" }
+
+// =============================================================================
+// META DIRECTIVES (undated)
+// =============================================================================
+
+option_directive = {
+    "option" ~ WHITESPACE+ ~ string ~ WHITESPACE+ ~ string ~ trailing_comment?
+}
+
+include_directive = {
+    "include" ~ WHITESPACE+ ~ string ~ trailing_comment?
+}
+
+plugin_directive = {
+    "plugin" ~ WHITESPACE+ ~ string ~ (WHITESPACE+ ~ string)? ~ trailing_comment?
+}
+
+pushtag_directive = {
+    "pushtag" ~ WHITESPACE+ ~ tag ~ trailing_comment?
+}
+
+poptag_directive = {
+    "poptag" ~ WHITESPACE+ ~ tag ~ trailing_comment?
+}
+
+pushmeta_directive = {
+    "pushmeta" ~ WHITESPACE+ ~ metadata_key ~ ":" ~ WHITESPACE* ~ metadata_value ~ trailing_comment?
+}
+
+popmeta_directive = {
+    "popmeta" ~ WHITESPACE+ ~ metadata_key ~ ":" ~ trailing_comment?
+}
+
+// =============================================================================
+// METADATA
+// =============================================================================
+
+metadata_line = {
+    WHITESPACE+ ~ metadata_key ~ ":" ~ WHITESPACE* ~ metadata_value ~ trailing_comment?
+}
+
+posting_metadata_line = {
+    WHITESPACE+ ~ WHITESPACE+ ~ metadata_key ~ ":" ~ WHITESPACE* ~ metadata_value ~ trailing_comment?
+}
+
+metadata_key = @{ ASCII_ALPHA_LOWER ~ (ASCII_ALPHANUMERIC | "-" | "_")* }
+
+metadata_value = {
+    string
+    | account
+    | currency
+    | date
+    | tag
+    | amount
+    | number
+}
+
+// =============================================================================
+// PRIMITIVES
+// =============================================================================
+
+// Date: YYYY-MM-DD or YYYY/MM/DD
+date = @{
+    ASCII_DIGIT{4} ~ ("-" | "/") ~ ASCII_DIGIT{2} ~ ("-" | "/") ~ ASCII_DIGIT{2}
+}
+
+// Account: colon-separated, starting with root type
+account = @{
+    account_type ~ (":" ~ account_component)+
+}
+
+account_type = @{
+    "Assets" | "Liabilities" | "Equity" | "Income" | "Expenses"
+}
+
+account_component = @{
+    (ASCII_ALPHA_UPPER | ASCII_DIGIT) ~ (ASCII_ALPHANUMERIC | "-")*
+}
+
+// Currency: uppercase letters, 1-24 chars
+currency = @{
+    ASCII_ALPHA_UPPER ~ (ASCII_ALPHA_UPPER | ASCII_DIGIT | "'" | "." | "_" | "-")* ~
+    &(WHITESPACE | NEWLINE | "," | "}" | "@" | EOI)
+}
+
+// Amount: number + currency
+amount = {
+    number ~ WHITESPACE+ ~ currency
+}
+
+// Number: decimal with optional sign and grouping
+number = @{
+    "-"? ~ number_unsigned
+}
+
+number_unsigned = @{
+    (ASCII_DIGIT | ",")+ ~ ("." ~ ASCII_DIGIT+)?
+    | "." ~ ASCII_DIGIT+
+}
+
+// String: double-quoted, may be multiline
+string = @{
+    "\"" ~ string_content* ~ "\""
+}
+
+string_content = @{
+    !("\"" | "\\") ~ ANY
+    | "\\" ~ ANY
+}
+
+// Tag: #identifier
+tag = @{
+    "#" ~ (ASCII_ALPHANUMERIC | "-" | "_" | "/")+
+}
+
+// Link: ^identifier
+link = @{
+    "^" ~ (ASCII_ALPHANUMERIC | "-" | "_" | "/")+
+}
+
+tags_links = {
+    (tag | link)+
+}
+
+// =============================================================================
+// WHITESPACE & COMMENTS
+// =============================================================================
+
+trailing_comment = {
+    WHITESPACE* ~ ";" ~ (!NEWLINE ~ ANY)*
+}
+
+WHITESPACE = _{ " " | "\t" }
+NEWLINE = _{ "\r\n" | "\n" | "\r" }
+
+// =============================================================================
+// EXPRESSION GRAMMAR (for arithmetic in amounts)
+// =============================================================================
+
+// Optional: Support arithmetic expressions in amount numbers
+// Uncomment to enable: (1 + 2) * 3.5
+
+// expr = { term ~ (("+"|"-") ~ term)* }
+// term = { factor ~ (("*"|"/") ~ factor)* }
+// factor = { number | "(" ~ expr ~ ")" | "-" ~ factor }

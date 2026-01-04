@@ -1,0 +1,31 @@
+[package]
+name = "rustledger-validate"
+description = "Beancount validation with 30 error codes for ledger correctness"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+authors.workspace = true
+readme = "../../README.md"
+
+[dependencies]
+rustledger-core.workspace = true
+rustledger-booking = { path = "../rustledger-booking" }
+rust_decimal.workspace = true
+thiserror.workspace = true
+chrono.workspace = true
+
+[dev-dependencies]
+rust_decimal_macros = "1.36"
+criterion.workspace = true
+
+[[bench]]
+name = "validate_bench"
+harness = false
+
+[lints]
+workspace = true

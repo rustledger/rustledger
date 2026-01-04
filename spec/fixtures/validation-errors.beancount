@@ -1,0 +1,147 @@
+; =============================================================================
+; Validation Errors Test Fixture
+; =============================================================================
+; This file contains INTENTIONAL ERRORS to test validation.
+; Each section should produce specific errors.
+
+option "title" "Validation Errors Test"
+option "operating_currency" "USD"
+
+; =============================================================================
+; SETUP: Valid accounts for testing
+; =============================================================================
+
+2020-01-01 open Assets:Bank:Checking
+2020-01-01 open Assets:Stock "STRICT"
+2020-01-01 open Assets:USDOnly USD
+2020-01-01 open Liabilities:CreditCard
+2020-01-01 open Equity:Opening-Balances
+2020-01-01 open Income:Salary
+2020-01-01 open Expenses:Food
+
+; =============================================================================
+; ERROR: Account not opened
+; Expected: E1001 - Account "Assets:Unknown" is not open
+; =============================================================================
+
+2020-02-01 * "Using unopened account"
+  Assets:Unknown  100 USD
+  Income:Salary
+
+; =============================================================================
+; ERROR: Account already closed
+; Expected: E1003 - Account "Assets:Closed" was closed on 2020-01-15
+; =============================================================================
+
+2020-01-01 open Assets:Closed
+2020-01-15 close Assets:Closed
+
+2020-02-01 * "Using closed account"
+  Assets:Closed  100 USD
+  Income:Salary
+
+; =============================================================================
+; ERROR: Balance assertion failed
+; Expected: E2001 - Balance assertion failed
+; =============================================================================
+
+2020-03-01 * "Deposit"
+  Assets:Bank:Checking  500 USD
+  Income:Salary
+
+2020-03-02 balance Assets:Bank:Checking  1000 USD  ; WRONG: Should be 500
+
+; =============================================================================
+; ERROR: Transaction not balanced
+; Expected: E3001 - Transaction does not balance
+; =============================================================================
+
+2020-04-01 * "Unbalanced transaction"
+  Assets:Bank:Checking  100 USD
+  Expenses:Food  50 USD
+  ; Missing -150 USD
+
+; =============================================================================
+; ERROR: Multiple missing amounts
+; Expected: E3002 - Cannot interpolate: multiple postings missing amounts
+; =============================================================================
+
+2020-04-02 * "Multiple missing amounts"
+  Assets:Bank:Checking  100 USD
+  Expenses:Food
+  Liabilities:CreditCard
+  ; Two postings missing USD amount
+
+; =============================================================================
+; ERROR: No matching lot (STRICT booking)
+; Expected: E4001 - No lot matching cost spec
+; =============================================================================
+
+2020-05-01 * "Buy stock"
+  Assets:Stock  10 AAPL {150.00 USD}
+  Assets:Bank:Checking  -1500 USD
+
+2020-05-02 * "Sell with wrong cost"
+  Assets:Stock  -5 AAPL {200.00 USD}  ; No lot at 200 USD
+  Assets:Bank:Checking  1000 USD
+
+; =============================================================================
+; ERROR: Insufficient units
+; Expected: E4002 - Insufficient units
+; =============================================================================
+
+2020-05-03 * "Sell more than owned"
+  Assets:Stock  -100 AAPL {150.00 USD}  ; Only 5 remaining
+  Assets:Bank:Checking  15000 USD
+
+; =============================================================================
+; ERROR: Currency constraint violation
+; Expected: E5002 - Account does not allow currency
+; =============================================================================
+
+2020-06-01 * "Wrong currency"
+  Assets:USDOnly  100 EUR  ; Account only allows USD
+  Income:Salary
+
+; =============================================================================
+; ERROR: Duplicate open
+; Expected: E1002 - Account is already open
+; =============================================================================
+
+2020-07-01 open Assets:Bank:Checking  ; Already opened on 2020-01-01
+
+; =============================================================================
+; WARNING: Duplicate metadata key
+; Expected: E6001 - Duplicate metadata key
+; =============================================================================
+
+2020-08-01 * "Duplicate metadata"
+  note: "First note"
+  note: "Second note"
+  Assets:Bank:Checking  100 USD
+  Income:Salary
+
+; =============================================================================
+; ERROR: Pad without balance
+; Expected: E2003 - Pad without subsequent balance
+; =============================================================================
+
+2020-01-01 open Assets:Padded
+2020-09-01 pad Assets:Padded Equity:Opening-Balances
+; No subsequent balance assertion for Assets:Padded
+
+; =============================================================================
+; ERROR: Include cycle (would need separate files to test properly)
+; This is just a placeholder
+; =============================================================================
+
+; include "validation-errors.beancount"  ; Would cause cycle
+
+; =============================================================================
+; WARNING: Date in future
+; Expected: E10002 - Date in future
+; =============================================================================
+
+2030-01-01 * "Future transaction"
+  Assets:Bank:Checking  1000000 USD
+  Income:Salary

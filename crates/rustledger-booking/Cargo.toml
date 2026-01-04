@@ -1,0 +1,24 @@
+[package]
+name = "rustledger-booking"
+description = "Beancount booking engine with 7 lot matching methods and interpolation"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+authors.workspace = true
+readme = "../../README.md"
+
+[dependencies]
+rustledger-core.workspace = true
+rust_decimal.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+rust_decimal_macros = "1.36"
+
+[lints]
+workspace = true

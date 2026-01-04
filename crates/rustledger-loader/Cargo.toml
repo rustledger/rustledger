@@ -1,0 +1,22 @@
+[package]
+name = "rustledger-loader"
+description = "Beancount file loader with include resolution and options parsing"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+authors.workspace = true
+readme = "../../README.md"
+
+[dependencies]
+rustledger-core.workspace = true
+rustledger-parser = { path = "../rustledger-parser" }
+rust_decimal.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

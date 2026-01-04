@@ -1,0 +1,37 @@
+[package]
+name = "rustledger-wasm"
+description = "Beancount WebAssembly bindings for JavaScript/TypeScript"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+authors.workspace = true
+readme = "../../README.md"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+rustledger-core.workspace = true
+rustledger-parser.workspace = true
+rustledger-loader.workspace = true
+rustledger-validate.workspace = true
+rustledger-query.workspace = true
+wasm-bindgen.workspace = true
+serde-wasm-bindgen.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3"
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
+
+[lints]
+workspace = true

@@ -66,13 +66,13 @@ rust_decimal_macros = "1.36"
 tokio = { version = "1", features = ["full"] }
 
 # Internal crates
-rustledger-core = { path = "crates/rustledger-core" }
-rustledger-parser = { path = "crates/rustledger-parser" }
-rustledger-loader = { path = "crates/rustledger-loader" }
-rustledger-booking = { path = "crates/rustledger-booking" }
-rustledger-validate = { path = "crates/rustledger-validate" }
-rustledger-query = { path = "crates/rustledger-query" }
-rustledger-plugin = { path = "crates/rustledger-plugin" }
+rustledger-core = { version = "1.0.0-rc.1", path = "crates/rustledger-core" }
+rustledger-parser = { version = "1.0.0-rc.1", path = "crates/rustledger-parser" }
+rustledger-loader = { version = "1.0.0-rc.1", path = "crates/rustledger-loader" }
+rustledger-booking = { version = "1.0.0-rc.1", path = "crates/rustledger-booking" }
+rustledger-validate = { version = "1.0.0-rc.1", path = "crates/rustledger-validate" }
+rustledger-query = { version = "1.0.0-rc.1", path = "crates/rustledger-query" }
+rustledger-plugin = { version = "1.0.0-rc.1", path = "crates/rustledger-plugin" }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

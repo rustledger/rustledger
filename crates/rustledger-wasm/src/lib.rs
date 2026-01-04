@@ -113,6 +113,44 @@ pub struct QueryResult {
     pub errors: Vec<Error>,
 }
 
+/// Result of formatting.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FormatResult {
+    /// Formatted source (if successful).
+    pub formatted: Option<String>,
+    /// Format errors.
+    pub errors: Vec<Error>,
+}
+
+/// Result of pad expansion.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PadResult {
+    /// Directives with pads removed.
+    pub directives: Vec<DirectiveJson>,
+    /// Generated padding transactions.
+    pub padding_transactions: Vec<DirectiveJson>,
+    /// Pad processing errors.
+    pub errors: Vec<Error>,
+}
+
+/// Result of running a plugin.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginResult {
+    /// Modified directives.
+    pub directives: Vec<DirectiveJson>,
+    /// Plugin errors/warnings.
+    pub errors: Vec<Error>,
+}
+
+/// Plugin information.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginInfo {
+    /// Plugin name.
+    pub name: String,
+    /// Plugin description.
+    pub description: String,
+}
+
 /// Parse a Beancount source string.
 ///
 /// Returns a JSON object with the parsed ledger and any errors.
@@ -383,6 +421,301 @@ pub fn query(source: &str, query_str: &str) -> JsValue {
 #[wasm_bindgen]
 pub fn version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
+}
+
+/// Format a Beancount source string.
+///
+/// Parses and reformats with consistent alignment.
+#[wasm_bindgen]
+pub fn format(source: &str) -> JsValue {
+    use rustledger_core::{format_directive, FormatConfig};
+
+    let parse_result = parse_beancount(source);
+
+    if !parse_result.errors.is_empty() {
+        let result = FormatResult {
+            formatted: None,
+            errors: parse_result
+                .errors
+                .iter()
+                .map(|e| Error {
+                    message: e.to_string(),
+                    line: Some(e.span().0 as u32 + 1),
+                    column: None,
+                    severity: "error".to_string(),
+                })
+                .collect(),
+        };
+        return serde_wasm_bindgen::to_value(&result).unwrap_or(JsValue::NULL);
+    }
+
+    let config = FormatConfig::default();
+    let mut formatted = String::new();
+
+    for spanned in &parse_result.directives {
+        formatted.push_str(&format_directive(&spanned.value, &config));
+        formatted.push('\n');
+    }
+
+    let result = FormatResult {
+        formatted: Some(formatted),
+        errors: Vec::new(),
+    };
+
+    serde_wasm_bindgen::to_value(&result).unwrap_or(JsValue::NULL)
+}
+
+/// Process pad directives and expand them.
+///
+/// Returns directives with pad-generated transactions included.
+#[wasm_bindgen]
+pub fn expand_pads(source: &str) -> JsValue {
+    use rustledger_booking::{interpolate, process_pads};
+
+    let parse_result = parse_beancount(source);
+
+    if !parse_result.errors.is_empty() {
+        let result = PadResult {
+            directives: Vec::new(),
+            padding_transactions: Vec::new(),
+            errors: parse_result
+                .errors
+                .iter()
+                .map(|e| Error {
+                    message: e.to_string(),
+                    line: Some(e.span().0 as u32 + 1),
+                    column: None,
+                    severity: "error".to_string(),
+                })
+                .collect(),
+        };
+        return serde_wasm_bindgen::to_value(&result).unwrap_or(JsValue::NULL);
+    }
+
+    // Extract and interpolate directives
+    let mut directives: Vec<_> = parse_result
+        .directives
+        .iter()
+        .map(|s| s.value.clone())
+        .collect();
+
+    for directive in &mut directives {
+        if let Directive::Transaction(txn) = directive {
+            let _ = interpolate(txn);
+        }
+    }
+
+    // Process pads
+    let pad_result = process_pads(&directives);
+
+    let result = PadResult {
+        directives: pad_result
+            .directives
+            .iter()
+            .map(directive_to_json)
+            .collect(),
+        padding_transactions: pad_result
+            .padding_transactions
+            .iter()
+            .map(|txn| directive_to_json(&Directive::Transaction(txn.clone())))
+            .collect(),
+        errors: pad_result
+            .errors
+            .iter()
+            .map(|e| Error {
+                message: e.message.clone(),
+                line: None,
+                column: None,
+                severity: "error".to_string(),
+            })
+            .collect(),
+    };
+
+    serde_wasm_bindgen::to_value(&result).unwrap_or(JsValue::NULL)
+}
+
+/// Run a native plugin on the source.
+///
+/// Available plugins: implicit_prices, check_commodity, auto_accounts,
+/// auto_tag, leafonly, noduplicates, onecommodity, unique_prices,
+/// check_closing, close_tree, coherent_cost, sellgains, pedantic, unrealized
+#[wasm_bindgen]
+pub fn run_plugin(source: &str, plugin_name: &str) -> JsValue {
+    use rustledger_booking::interpolate;
+    use rustledger_plugin::{
+        directives_to_wrappers, wrappers_to_directives, NativePluginRegistry, PluginInput,
+        PluginOptions,
+    };
+
+    let parse_result = parse_beancount(source);
+
+    if !parse_result.errors.is_empty() {
+        let result = PluginResult {
+            directives: Vec::new(),
+            errors: parse_result
+                .errors
+                .iter()
+                .map(|e| Error {
+                    message: e.to_string(),
+                    line: Some(e.span().0 as u32 + 1),
+                    column: None,
+                    severity: "error".to_string(),
+                })
+                .collect(),
+        };
+        return serde_wasm_bindgen::to_value(&result).unwrap_or(JsValue::NULL);
+    }
+
+    // Extract and interpolate directives
+    let mut directives: Vec<_> = parse_result
+        .directives
+        .iter()
+        .map(|s| s.value.clone())
+        .collect();
+
+    for directive in &mut directives {
+        if let Directive::Transaction(txn) = directive {
+            let _ = interpolate(txn);
+        }
+    }
+
+    // Find and run the plugin
+    let registry = NativePluginRegistry::new();
+    let plugin = match registry.find(plugin_name) {
+        Some(p) => p,
+        None => {
+            let result = PluginResult {
+                directives: Vec::new(),
+                errors: vec![Error {
+                    message: format!("Unknown plugin: {plugin_name}"),
+                    line: None,
+                    column: None,
+                    severity: "error".to_string(),
+                }],
+            };
+            return serde_wasm_bindgen::to_value(&result).unwrap_or(JsValue::NULL);
+        }
+    };
+
+    // Convert directives to plugin format and run
+    let wrappers = directives_to_wrappers(&directives);
+    let input = PluginInput {
+        directives: wrappers,
+        options: PluginOptions::default(),
+        config: None,
+    };
+
+    let output = plugin.process(input);
+
+    // Convert back
+    let output_directives = match wrappers_to_directives(&output.directives) {
+        Ok(dirs) => dirs,
+        Err(e) => {
+            let result = PluginResult {
+                directives: Vec::new(),
+                errors: vec![Error {
+                    message: format!("Conversion error: {e}"),
+                    line: None,
+                    column: None,
+                    severity: "error".to_string(),
+                }],
+            };
+            return serde_wasm_bindgen::to_value(&result).unwrap_or(JsValue::NULL);
+        }
+    };
+
+    let result = PluginResult {
+        directives: output_directives.iter().map(directive_to_json).collect(),
+        errors: output
+            .errors
+            .iter()
+            .map(|e| Error {
+                message: e.message.clone(),
+                line: None,
+                column: None,
+                severity: match e.severity {
+                    rustledger_plugin::PluginErrorSeverity::Warning => "warning".to_string(),
+                    rustledger_plugin::PluginErrorSeverity::Error => "error".to_string(),
+                },
+            })
+            .collect(),
+    };
+
+    serde_wasm_bindgen::to_value(&result).unwrap_or(JsValue::NULL)
+}
+
+/// List available native plugins.
+#[wasm_bindgen]
+pub fn list_plugins() -> JsValue {
+    let plugins = vec![
+        PluginInfo {
+            name: "implicit_prices".to_string(),
+            description: "Generate price entries from transaction costs/prices".to_string(),
+        },
+        PluginInfo {
+            name: "check_commodity".to_string(),
+            description: "Verify all commodities are declared".to_string(),
+        },
+        PluginInfo {
+            name: "auto_accounts".to_string(),
+            description: "Auto-generate Open directives for used accounts".to_string(),
+        },
+        PluginInfo {
+            name: "auto_tag".to_string(),
+            description: "Auto-tag transactions by account patterns".to_string(),
+        },
+        PluginInfo {
+            name: "leafonly".to_string(),
+            description: "Error on postings to non-leaf accounts".to_string(),
+        },
+        PluginInfo {
+            name: "noduplicates".to_string(),
+            description: "Hash-based duplicate transaction detection".to_string(),
+        },
+        PluginInfo {
+            name: "onecommodity".to_string(),
+            description: "Enforce single commodity per account".to_string(),
+        },
+        PluginInfo {
+            name: "unique_prices".to_string(),
+            description: "One price per day per currency pair".to_string(),
+        },
+        PluginInfo {
+            name: "check_closing".to_string(),
+            description: "Zero balance assertion on account closing".to_string(),
+        },
+        PluginInfo {
+            name: "close_tree".to_string(),
+            description: "Close descendant accounts automatically".to_string(),
+        },
+        PluginInfo {
+            name: "coherent_cost".to_string(),
+            description: "Enforce cost OR price (not both) consistency".to_string(),
+        },
+        PluginInfo {
+            name: "sellgains".to_string(),
+            description: "Cross-check capital gains against sales".to_string(),
+        },
+        PluginInfo {
+            name: "pedantic".to_string(),
+            description: "Enable all strict validation rules".to_string(),
+        },
+        PluginInfo {
+            name: "unrealized".to_string(),
+            description: "Calculate unrealized gains/losses".to_string(),
+        },
+    ];
+
+    serde_wasm_bindgen::to_value(&plugins).unwrap_or(JsValue::NULL)
+}
+
+/// Calculate account balances.
+///
+/// Returns balances grouped by account.
+#[wasm_bindgen]
+pub fn balances(source: &str) -> JsValue {
+    // Just use the query function with BALANCES
+    query(source, "BALANCES")
 }
 
 // Helper functions

@@ -45,6 +45,7 @@
 pub mod amount;
 pub mod cost;
 pub mod directive;
+pub mod format;
 pub mod intern;
 pub mod inventory;
 pub mod position;
@@ -56,6 +57,7 @@ pub use directive::{
     Event, MetaValue, Metadata, Note, Open, Pad, Posting, Price, PriceAnnotation, Query,
     Transaction,
 };
+pub use format::{format_directive, FormatConfig};
 pub use inventory::{BookingError, BookingMethod, BookingResult, Inventory};
 pub use position::Position;
 

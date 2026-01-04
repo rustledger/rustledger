@@ -22,6 +22,7 @@ rustledger-loader.workspace = true
 rustledger-booking.workspace = true
 rustledger-validate.workspace = true
 rustledger-query.workspace = true
+rustledger-plugin = { workspace = true, default-features = false }
 wasm-bindgen.workspace = true
 serde-wasm-bindgen.workspace = true
 serde.workspace = true

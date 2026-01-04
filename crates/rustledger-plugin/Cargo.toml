@@ -12,9 +12,13 @@ categories.workspace = true
 authors.workspace = true
 readme = "../../README.md"
 
+[features]
+default = ["wasm-runtime"]
+wasm-runtime = ["wasmtime"]
+
 [dependencies]
 rustledger-core.workspace = true
-wasmtime.workspace = true
+wasmtime = { workspace = true, optional = true }
 serde.workspace = true
 rmp-serde.workspace = true
 thiserror.workspace = true

@@ -72,7 +72,7 @@ rustledger-loader = { version = "1.0.0-rc.1", path = "crates/rustledger-loader" 
 rustledger-booking = { version = "1.0.0-rc.1", path = "crates/rustledger-booking" }
 rustledger-validate = { version = "1.0.0-rc.1", path = "crates/rustledger-validate" }
 rustledger-query = { version = "1.0.0-rc.1", path = "crates/rustledger-query" }
-rustledger-plugin = { version = "1.0.0-rc.1", path = "crates/rustledger-plugin" }
+rustledger-plugin = { version = "1.0.0-rc.1", path = "crates/rustledger-plugin", default-features = false }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

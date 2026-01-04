@@ -53,6 +53,7 @@
 
 pub mod convert;
 pub mod native;
+#[cfg(feature = "wasm-runtime")]
 pub mod runtime;
 pub mod types;
 
@@ -61,6 +62,7 @@ pub use convert::{
     ConversionError,
 };
 pub use native::{NativePlugin, NativePluginRegistry};
+#[cfg(feature = "wasm-runtime")]
 pub use runtime::{
     validate_plugin_module, Plugin, PluginManager, RuntimeConfig, WatchingPluginManager,
 };

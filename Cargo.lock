@@ -1876,6 +1876,7 @@ dependencies = [
  "rustledger-core",
  "rustledger-loader",
  "rustledger-parser",
+ "rustledger-plugin",
  "rustledger-query",
  "rustledger-validate",
  "serde",

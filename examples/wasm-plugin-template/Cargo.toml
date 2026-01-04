@@ -1,0 +1,18 @@
+[package]
+name = "example-plugin"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# MessagePack for serialization (matching the host)
+rmp-serde = "1.1"
+serde = { version = "1.0", features = ["derive"] }
+
+[profile.release]
+opt-level = "s"
+lto = true

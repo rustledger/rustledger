@@ -1,0 +1,213 @@
+; =============================================================================
+; Booking Scenarios Test Fixture
+; =============================================================================
+; Tests various booking methods and lot matching scenarios.
+
+option "title" "Booking Scenarios"
+option "operating_currency" "USD"
+
+; =============================================================================
+; SETUP: Open accounts with different booking methods
+; =============================================================================
+
+2020-01-01 open Assets:Cash USD
+2020-01-01 open Assets:Stock:STRICT "STRICT"
+2020-01-01 open Assets:Stock:FIFO "FIFO"
+2020-01-01 open Assets:Stock:LIFO "LIFO"
+2020-01-01 open Assets:Stock:NONE "NONE"
+2020-01-01 open Income:CapitalGains
+2020-01-01 open Expenses:Fees
+
+; Initial cash
+2020-01-01 * "Initial cash"
+  Assets:Cash  100000 USD
+  Equity:Opening-Balances
+
+; =============================================================================
+; SCENARIO 1: STRICT Booking - Must specify exact lot
+; =============================================================================
+
+; Buy multiple lots
+2020-02-01 * "Buy AAPL lot 1"
+  Assets:Stock:STRICT  100 AAPL {150.00 USD, 2020-02-01, "lot-1"}
+  Assets:Cash  -15000 USD
+
+2020-03-01 * "Buy AAPL lot 2"
+  Assets:Stock:STRICT  100 AAPL {160.00 USD, 2020-03-01, "lot-2"}
+  Assets:Cash  -16000 USD
+
+2020-04-01 * "Buy AAPL lot 3"
+  Assets:Stock:STRICT  100 AAPL {170.00 USD, 2020-04-01, "lot-3"}
+  Assets:Cash  -17000 USD
+
+; Sell specific lot by cost
+2020-06-01 * "Sell from lot-2 by cost"
+  Assets:Stock:STRICT  -50 AAPL {160.00 USD}
+  Assets:Cash  9000 USD
+  Income:CapitalGains  -1000 USD
+
+; Sell specific lot by date
+2020-06-02 * "Sell from lot-1 by date"
+  Assets:Stock:STRICT  -50 AAPL {2020-02-01}
+  Assets:Cash  9000 USD
+  Income:CapitalGains  -1500 USD
+
+; Sell specific lot by label
+2020-06-03 * "Sell from lot-3 by label"
+  Assets:Stock:STRICT  -50 AAPL {"lot-3"}
+  Assets:Cash  9500 USD
+  Income:CapitalGains  -1000 USD
+
+; Sell entire remaining lot (total match - allowed even in STRICT)
+2020-06-04 * "Sell all remaining lot-1"
+  Assets:Stock:STRICT  -50 AAPL {150.00 USD}
+  Assets:Cash  9000 USD
+  Income:CapitalGains  -1500 USD
+
+; =============================================================================
+; SCENARIO 2: FIFO Booking - First In, First Out
+; =============================================================================
+
+; Buy multiple lots
+2020-02-01 * "Buy GOOG lot 1 (oldest)"
+  Assets:Stock:FIFO  50 GOOG {1000.00 USD, 2020-02-01}
+  Assets:Cash  -50000 USD
+
+2020-03-01 * "Buy GOOG lot 2"
+  Assets:Stock:FIFO  50 GOOG {1100.00 USD, 2020-03-01}
+  Assets:Cash  -55000 USD
+
+2020-04-01 * "Buy GOOG lot 3 (newest)"
+  Assets:Stock:FIFO  50 GOOG {1200.00 USD, 2020-04-01}
+  Assets:Cash  -60000 USD
+
+; Sell without specifying lot - FIFO takes from oldest
+2020-06-01 * "Sell GOOG - FIFO takes from oldest lot"
+  Assets:Stock:FIFO  -75 GOOG {}
+  Assets:Cash  90000 USD
+  Income:CapitalGains  ; Interpolated: 50 @ 1000 + 25 @ 1100 = 77500 cost basis
+
+; =============================================================================
+; SCENARIO 3: LIFO Booking - Last In, First Out
+; =============================================================================
+
+; Buy multiple lots
+2020-02-01 * "Buy MSFT lot 1 (oldest)"
+  Assets:Stock:LIFO  50 MSFT {200.00 USD, 2020-02-01}
+  Assets:Cash  -10000 USD
+
+2020-03-01 * "Buy MSFT lot 2"
+  Assets:Stock:LIFO  50 MSFT {220.00 USD, 2020-03-01}
+  Assets:Cash  -11000 USD
+
+2020-04-01 * "Buy MSFT lot 3 (newest)"
+  Assets:Stock:LIFO  50 MSFT {240.00 USD, 2020-04-01}
+  Assets:Cash  -12000 USD
+
+; Sell without specifying lot - LIFO takes from newest
+2020-06-01 * "Sell MSFT - LIFO takes from newest lot"
+  Assets:Stock:LIFO  -75 MSFT {}
+  Assets:Cash  18000 USD
+  Income:CapitalGains  ; Interpolated: 50 @ 240 + 25 @ 220 = 17500 cost basis
+
+; =============================================================================
+; SCENARIO 4: NONE Booking - No lot matching
+; =============================================================================
+
+; Buy
+2020-02-01 * "Buy AMZN"
+  Assets:Stock:NONE  10 AMZN {3000.00 USD}
+  Assets:Cash  -30000 USD
+
+2020-03-01 * "Buy more AMZN"
+  Assets:Stock:NONE  10 AMZN {3200.00 USD}
+  Assets:Cash  -32000 USD
+
+; Sell - creates negative position, no lot matching
+2020-06-01 * "Sell AMZN - NONE just appends"
+  Assets:Stock:NONE  -5 AMZN {3100.00 USD}
+  Assets:Cash  15500 USD
+
+; =============================================================================
+; SCENARIO 5: Partial lot reduction
+; =============================================================================
+
+2020-01-01 open Assets:Stock:Partial "FIFO"
+
+2020-02-01 * "Buy NVDA"
+  Assets:Stock:Partial  100 NVDA {500.00 USD, 2020-02-01}
+  Assets:Cash  -50000 USD
+
+; Sell partial - lot should be reduced, not removed
+2020-06-01 * "Sell 30 NVDA (partial)"
+  Assets:Stock:Partial  -30 NVDA {}
+  Assets:Cash  18000 USD
+  Income:CapitalGains
+
+2020-06-02 * "Sell 30 more NVDA (partial)"
+  Assets:Stock:Partial  -30 NVDA {}
+  Assets:Cash  18000 USD
+  Income:CapitalGains
+
+; 40 should remain
+2020-06-03 balance Assets:Stock:Partial  40 NVDA
+
+; =============================================================================
+; SCENARIO 6: Total match (multiple lots exactly consumed)
+; =============================================================================
+
+2020-01-01 open Assets:Stock:TotalMatch "STRICT"
+
+2020-02-01 * "Buy lot A"
+  Assets:Stock:TotalMatch  25 META {300.00 USD}
+  Assets:Cash  -7500 USD
+
+2020-03-01 * "Buy lot B"
+  Assets:Stock:TotalMatch  25 META {310.00 USD}
+  Assets:Cash  -7750 USD
+
+; Sell exactly 50 - total match, allowed even in STRICT
+2020-06-01 * "Sell all 50 META (total match)"
+  Assets:Stock:TotalMatch  -50 META {}
+  Assets:Cash  16000 USD
+  Income:CapitalGains
+
+; =============================================================================
+; SCENARIO 7: Same-day lots with different labels
+; =============================================================================
+
+2020-01-01 open Assets:Stock:SameDay "STRICT"
+
+2020-02-01 * "Buy morning lot"
+  Assets:Stock:SameDay  50 TSLA {700.00 USD, 2020-02-01, "morning"}
+  Assets:Cash  -35000 USD
+
+2020-02-01 * "Buy afternoon lot"
+  Assets:Stock:SameDay  50 TSLA {710.00 USD, 2020-02-01, "afternoon"}
+  Assets:Cash  -35500 USD
+
+; Must use label to distinguish
+2020-06-01 * "Sell morning lot by label"
+  Assets:Stock:SameDay  -50 TSLA {"morning"}
+  Assets:Cash  40000 USD
+  Income:CapitalGains
+
+; =============================================================================
+; SCENARIO 8: Cost without date (uses transaction date)
+; =============================================================================
+
+2020-01-01 open Assets:Stock:NoDate "FIFO"
+
+2020-02-15 * "Buy with implicit date"
+  Assets:Stock:NoDate  100 NFLX {400.00 USD}  ; Date will be 2020-02-15
+  Assets:Cash  -40000 USD
+
+2020-03-15 * "Buy with explicit date"
+  Assets:Stock:NoDate  100 NFLX {420.00 USD, 2020-03-01}  ; Different from txn date
+  Assets:Cash  -42000 USD
+
+; FIFO should take 2020-02-15 lot first (older)
+2020-06-01 * "Sell - FIFO by date"
+  Assets:Stock:NoDate  -100 NFLX {}
+  Assets:Cash  45000 USD
+  Income:CapitalGains

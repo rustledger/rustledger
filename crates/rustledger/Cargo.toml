@@ -1,0 +1,96 @@
+[package]
+name = "rustledger"
+description = "Drop-in replacement for Beancount. Pure Rust, 10x faster."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+authors.workspace = true
+readme = "../../README.md"
+
+[features]
+default = ["bean-compat"]
+# Include bean-* binaries for backwards compatibility with Python beancount.
+# Disable with: cargo install rustledger --no-default-features
+bean-compat = []
+
+# Primary binaries (always installed)
+[[bin]]
+name = "rledger-check"
+path = "src/bin/rledger_check.rs"
+
+[[bin]]
+name = "rledger-format"
+path = "src/bin/rledger_format.rs"
+
+[[bin]]
+name = "rledger-query"
+path = "src/bin/rledger_query.rs"
+
+[[bin]]
+name = "rledger-report"
+path = "src/bin/rledger_report.rs"
+
+[[bin]]
+name = "rledger-doctor"
+path = "src/bin/rledger_doctor.rs"
+
+# Compatibility binaries (installed by default, opt-out with --no-default-features)
+[[bin]]
+name = "bean-check"
+path = "src/bin/bean_check.rs"
+required-features = ["bean-compat"]
+
+[[bin]]
+name = "bean-format"
+path = "src/bin/bean_format.rs"
+required-features = ["bean-compat"]
+
+[[bin]]
+name = "bean-query"
+path = "src/bin/bean_query.rs"
+required-features = ["bean-compat"]
+
+[[bin]]
+name = "bean-report"
+path = "src/bin/bean_report.rs"
+required-features = ["bean-compat"]
+
+[[bin]]
+name = "bean-doctor"
+path = "src/bin/bean_doctor.rs"
+required-features = ["bean-compat"]
+
+[dependencies]
+rustledger-core.workspace = true
+rustledger-parser.workspace = true
+rustledger-loader.workspace = true
+rustledger-booking.workspace = true
+rustledger-validate.workspace = true
+rustledger-query.workspace = true
+rustledger-plugin.workspace = true
+clap.workspace = true
+rustyline.workspace = true
+dirs.workspace = true
+serde_json.workspace = true
+ariadne.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+rust_decimal.workspace = true
+
+[dev-dependencies]
+chrono.workspace = true
+rust_decimal_macros.workspace = true
+criterion.workspace = true
+
+[[bench]]
+name = "pipeline_bench"
+harness = false
+
+[lints]
+workspace = true

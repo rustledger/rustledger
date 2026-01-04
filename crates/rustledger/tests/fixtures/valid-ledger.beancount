@@ -1,0 +1,78 @@
+; Valid beancount file for integration testing
+; This file should parse and validate successfully with both
+; Python beancount and beancount-rs
+
+option "title" "Integration Test Ledger"
+option "operating_currency" "USD"
+
+; Open accounts
+2020-01-01 open Assets:Bank:Checking  USD
+2020-01-01 open Assets:Bank:Savings   USD
+2020-01-01 open Assets:Investment     AAPL,USD
+2020-01-01 open Liabilities:CreditCard
+2020-01-01 open Equity:Opening-Balances
+2020-01-01 open Income:Salary
+2020-01-01 open Income:Interest
+2020-01-01 open Income:CapitalGains
+2020-01-01 open Expenses:Food
+2020-01-01 open Expenses:Utilities
+2020-01-01 open Expenses:Transport
+
+; Declare commodities
+2020-01-01 commodity USD
+2020-01-01 commodity AAPL
+
+; Opening balance via transaction
+2020-01-01 * "Opening balance"
+  Assets:Bank:Checking    5000.00 USD
+  Equity:Opening-Balances -5000.00 USD
+
+2020-01-02 balance Assets:Bank:Checking  5000.00 USD
+
+; Simple transactions
+2020-01-15 * "Acme Corp" "Salary deposit"
+  Assets:Bank:Checking    3000.00 USD
+  Income:Salary          -3000.00 USD
+
+2020-01-20 * "Grocery Store" "Weekly groceries"
+  Expenses:Food           150.00 USD
+  Assets:Bank:Checking   -150.00 USD
+
+2020-02-01 * "Electric Company" "Monthly utilities"
+  Expenses:Utilities       75.50 USD
+  Assets:Bank:Checking    -75.50 USD
+
+; Transaction with tags and links
+2020-02-15 * "Restaurant" "Business lunch" #work ^invoice-123
+  Expenses:Food            45.00 USD
+  Assets:Bank:Checking    -45.00 USD
+
+; Transaction with metadata
+2020-03-01 * "Transfer" "Savings transfer"
+  receipt: "transfer-001.pdf"
+  Assets:Bank:Savings     500.00 USD
+  Assets:Bank:Checking   -500.00 USD
+
+; Stock purchase with cost
+2020-03-15 * "Broker" "Buy AAPL"
+  Assets:Investment       10 AAPL {150.00 USD}
+  Assets:Bank:Checking   -1500.00 USD
+
+; Stock sale with cost basis
+2020-06-15 * "Broker" "Sell AAPL"
+  Assets:Investment       -5 AAPL {150.00 USD} @ 175.00 USD
+  Assets:Bank:Checking    875.00 USD
+  Income:CapitalGains    -125.00 USD
+
+; Balance assertions
+2020-12-31 balance Assets:Investment  5 AAPL
+
+; Price directive
+2020-12-31 price AAPL 180.00 USD
+
+; Note and event
+2020-06-01 note Assets:Bank:Checking "Upgraded to premium account"
+2020-06-01 event "location" "San Francisco"
+
+; Close an account
+2020-12-31 close Assets:Bank:Savings

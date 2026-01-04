@@ -1,0 +1,77 @@
+name: Bug Report
+description: Report a bug in rustledger
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug!
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: A clear and concise description of the bug.
+      placeholder: What happened?
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to Reproduce
+      description: Steps to reproduce the behavior.
+      placeholder: |
+        1. Create a file with...
+        2. Run `bean-check ...`
+        3. See error
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: What did you expect to happen?
+    validations:
+      required: true
+
+  - type: textarea
+    id: beancount-file
+    attributes:
+      label: Minimal Beancount File
+      description: If applicable, provide a minimal beancount file that reproduces the issue.
+      render: text
+      placeholder: |
+        2024-01-01 open Assets:Bank USD
+        2024-01-15 * "Test"
+          Assets:Bank  100 USD
+          Income:Salary
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: What version of rustledger are you using?
+      placeholder: "1.0.0-rc.1"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating System
+      options:
+        - Linux
+        - macOS
+        - Windows
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional Context
+      description: Any other context about the problem.

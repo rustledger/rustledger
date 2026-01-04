@@ -1,0 +1,244 @@
+// Beancount Plugin Interface
+// WebAssembly Interface Types (WIT) Definition
+//
+// This file defines the interface for Beancount WASM plugins using the
+// Component Model. Plugins implementing this interface can be written in
+// any language that supports WIT/Component Model.
+
+package beancount:plugin@0.1.0;
+
+/// Core types used throughout the plugin interface.
+interface types {
+    /// A decimal amount with currency.
+    record amount {
+        /// Decimal number as string for precision.
+        number: string,
+        /// Currency code (e.g., "USD", "EUR").
+        currency: string,
+    }
+
+    /// Cost basis information for a position.
+    record cost {
+        /// Per-unit cost as decimal string.
+        number: string,
+        /// Cost currency.
+        currency: string,
+        /// Acquisition date (YYYY-MM-DD).
+        date: option<string>,
+        /// Lot label for identification.
+        label: option<string>,
+    }
+
+    /// A posting in a transaction.
+    record posting {
+        /// Full account name (e.g., "Assets:Bank:Checking").
+        account: string,
+        /// Units being posted.
+        units: option<amount>,
+        /// Cost basis specification.
+        cost: option<cost>,
+        /// Price annotation.
+        price: option<amount>,
+        /// Posting flag (e.g., "!" for warning).
+        flag: option<string>,
+        /// Key-value metadata.
+        metadata: list<tuple<string, meta-value>>,
+    }
+
+    /// Metadata value types.
+    variant meta-value {
+        /// String value.
+        text(string),
+        /// Decimal number.
+        number(string),
+        /// Date (YYYY-MM-DD).
+        date(string),
+        /// Account reference.
+        account(string),
+        /// Currency reference.
+        currency(string),
+        /// Tag reference.
+        tag(string),
+        /// Amount value.
+        amount(amount),
+        /// Boolean value.
+        boolean(bool),
+    }
+
+    /// A transaction directive.
+    record transaction {
+        /// Transaction date (YYYY-MM-DD).
+        date: string,
+        /// Transaction flag (* for completed, ! for pending).
+        flag: string,
+        /// Optional payee.
+        payee: option<string>,
+        /// Narration/description.
+        narration: string,
+        /// Tags (without # prefix).
+        tags: list<string>,
+        /// Links (without ^ prefix).
+        links: list<string>,
+        /// Metadata key-value pairs.
+        metadata: list<tuple<string, meta-value>>,
+        /// Transaction postings.
+        postings: list<posting>,
+    }
+
+    /// Balance assertion directive.
+    record balance {
+        date: string,
+        account: string,
+        amount: amount,
+        tolerance: option<string>,
+    }
+
+    /// Open account directive.
+    record open {
+        date: string,
+        account: string,
+        currencies: list<string>,
+        booking: option<string>,
+    }
+
+    /// Close account directive.
+    record close {
+        date: string,
+        account: string,
+    }
+
+    /// Commodity declaration directive.
+    record commodity {
+        date: string,
+        currency: string,
+    }
+
+    /// Pad directive.
+    record pad {
+        date: string,
+        account: string,
+        source-account: string,
+    }
+
+    /// Event directive.
+    record event-directive {
+        date: string,
+        event-type: string,
+        value: string,
+    }
+
+    /// Query directive.
+    record query-directive {
+        date: string,
+        name: string,
+        query-string: string,
+    }
+
+    /// Note directive.
+    record note {
+        date: string,
+        account: string,
+        comment: string,
+    }
+
+    /// Document directive.
+    record document {
+        date: string,
+        account: string,
+        path: string,
+    }
+
+    /// Price directive.
+    record price {
+        date: string,
+        currency: string,
+        amount: amount,
+    }
+
+    /// Custom directive.
+    record custom {
+        date: string,
+        custom-type: string,
+        values: list<string>,
+    }
+
+    /// All directive types.
+    variant directive {
+        transaction(transaction),
+        balance(balance),
+        open(open),
+        close(close),
+        commodity(commodity),
+        pad(pad),
+        event(event-directive),
+        query(query-directive),
+        note(note),
+        document(document),
+        price(price),
+        custom(custom),
+    }
+
+    /// Error severity levels.
+    enum severity {
+        /// Error that prevents processing.
+        error,
+        /// Warning that doesn't prevent processing.
+        warning,
+    }
+
+    /// Plugin error/warning.
+    record plugin-error {
+        /// Error message.
+        message: string,
+        /// Source file path.
+        source-file: option<string>,
+        /// Line number in source.
+        line-number: option<u32>,
+        /// Severity level.
+        severity: severity,
+    }
+
+    /// Plugin options from the ledger.
+    record options {
+        /// Operating currencies.
+        operating-currencies: list<string>,
+        /// Ledger title.
+        title: option<string>,
+    }
+}
+
+/// The main plugin interface.
+interface plugin {
+    use types.{directive, plugin-error, options};
+
+    /// Input to the plugin process function.
+    record plugin-input {
+        /// Directives to process.
+        directives: list<directive>,
+        /// Ledger options.
+        options: options,
+        /// Plugin-specific configuration string.
+        config: option<string>,
+    }
+
+    /// Output from the plugin process function.
+    record plugin-output {
+        /// Modified directives (may include new ones).
+        directives: list<directive>,
+        /// Errors and warnings generated.
+        errors: list<plugin-error>,
+    }
+
+    /// Process directives through the plugin.
+    ///
+    /// This is the main entry point for plugins. The plugin receives all
+    /// directives and options, and returns modified directives plus any
+    /// errors or warnings.
+    process: func(input: plugin-input) -> plugin-output;
+}
+
+/// The world that plugins must implement.
+world beancount-plugin {
+    /// Plugins export the plugin interface.
+    export plugin;
+}

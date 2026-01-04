@@ -1,0 +1,128 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/rustledger-core",
+  "crates/rustledger-parser",
+  "crates/rustledger-loader",
+  "crates/rustledger-booking",
+  "crates/rustledger-validate",
+  "crates/rustledger-query",
+  "crates/rustledger-plugin",
+  "crates/rustledger",
+  "crates/rustledger-wasm",
+]
+
+[workspace.package]
+version = "1.0.0-rc.1"
+edition = "2021"
+rust-version = "1.75"
+license = "GPL-3.0"
+repository = "https://github.com/rustledger/rustledger"
+homepage = "https://github.com/rustledger/rustledger"
+documentation = "https://docs.rs/rustledger-core"
+keywords = ["beancount", "accounting", "finance", "double-entry", "ledger"]
+categories = ["command-line-utilities", "finance", "parser-implementations"]
+authors = ["Rustledger Contributors"]
+
+[workspace.metadata.crane]
+name = "rustledger"
+
+[workspace.dependencies]
+# Core
+rust_decimal = { version = "1.36", features = ["serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+thiserror = "2"
+anyhow = "1"
+
+# Parsing
+chumsky = "1.0.0-alpha.7"
+ariadne = "0.4"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rmp-serde = "1"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+rustyline = { version = "14", features = ["derive"] }
+dirs = "5"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# WASM
+wasm-bindgen = "0.2"
+serde-wasm-bindgen = "0.6"
+wasmtime = "27"
+wat = "1"
+
+# Testing
+proptest = "1"
+criterion = "0.5"
+insta = { version = "1", features = ["yaml"] }
+rust_decimal_macros = "1.36"
+
+# Async (if needed)
+tokio = { version = "1", features = ["full"] }
+
+# Internal crates
+rustledger-core = { path = "crates/rustledger-core" }
+rustledger-parser = { path = "crates/rustledger-parser" }
+rustledger-loader = { path = "crates/rustledger-loader" }
+rustledger-booking = { path = "crates/rustledger-booking" }
+rustledger-validate = { path = "crates/rustledger-validate" }
+rustledger-query = { path = "crates/rustledger-query" }
+rustledger-plugin = { path = "crates/rustledger-plugin" }
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
+# Allow some pedantic lints
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+similar_names = "allow"
+return_self_not_must_use = "allow"
+too_many_lines = "allow"
+option_if_let_else = "allow"
+# Numeric cast warnings - we use standard patterns
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+cast_possible_wrap = "allow"
+cast_precision_loss = "allow"
+# Allow common stylistic patterns
+format_push_string = "allow"
+default_trait_access = "allow"
+unused_self = "allow"
+ptr_arg = "allow"
+match_same_arms = "allow"
+or_fun_call = "allow"
+struct_excessive_bools = "allow"
+type_complexity = "allow"
+manual_let_else = "allow"
+ref_option = "allow"
+unnecessary_wraps = "allow"
+# Allow multiple crate versions - we can't control transitive dependencies
+multiple_crate_versions = "allow"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+
+[profile.dev]
+# Faster builds in dev
+debug = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.bench]
+debug = true

@@ -1,0 +1,352 @@
+; =============================================================================
+; Beancount Syntax Edge Cases Test Fixture
+; =============================================================================
+; This file tests parser edge cases. It should parse successfully.
+; Semantic validation may produce errors (that's expected).
+
+; -----------------------------------------------------------------------------
+; OPTIONS
+; -----------------------------------------------------------------------------
+
+option "title" "Edge Cases Test"
+option "operating_currency" "USD"
+option "operating_currency" "EUR"  ; Multiple operating currencies
+
+; -----------------------------------------------------------------------------
+; ACCOUNT NAMES
+; -----------------------------------------------------------------------------
+
+; Standard accounts
+2020-01-01 open Assets:Bank:Checking
+2020-01-01 open Assets:Bank:Savings
+2020-01-01 open Liabilities:CreditCard:Chase
+2020-01-01 open Equity:Opening-Balances
+2020-01-01 open Income:Salary:Google
+2020-01-01 open Expenses:Food:Groceries
+
+; Numbers in account names
+2020-01-01 open Assets:Account123
+2020-01-01 open Assets:401k:Fidelity
+
+; Dashes in account names
+2020-01-01 open Assets:My-Bank:Checking-Account
+
+; Deep nesting
+2020-01-01 open Assets:US:CA:SF:Bank:BofA:Checking:Personal
+
+; Currency constraints
+2020-01-01 open Assets:USOnly USD
+2020-01-01 open Assets:Multi USD,EUR,GBP
+
+; Booking method
+2020-01-01 open Assets:Stock:FIFO "FIFO"
+2020-01-01 open Assets:Stock:LIFO "LIFO"
+
+; -----------------------------------------------------------------------------
+; CURRENCIES
+; -----------------------------------------------------------------------------
+
+; Standard currencies
+2020-01-01 commodity USD
+2020-01-01 commodity EUR
+2020-01-01 commodity GBP
+
+; Stock tickers
+2020-01-01 commodity AAPL
+2020-01-01 commodity GOOGL
+2020-01-01 commodity BRK.A  ; With period
+
+; Crypto
+2020-01-01 commodity BTC
+2020-01-01 commodity ETH
+
+; Vacation hours, etc.
+2020-01-01 commodity VACHR
+2020-01-01 commodity SICK
+
+; Currency with metadata
+2020-01-01 commodity CAD
+  name: "Canadian Dollar"
+  asset-class: "cash"
+  quote: "USD"
+
+; -----------------------------------------------------------------------------
+; NUMBERS
+; -----------------------------------------------------------------------------
+
+2020-02-01 * "Number formats"
+  Assets:Bank:Checking  1234.56 USD
+  Assets:Bank:Savings  -1234.56 USD
+
+2020-02-02 * "Comma grouping"
+  Assets:Bank:Checking  1,234,567.89 USD
+  Assets:Bank:Savings  -1,234,567.89 USD
+
+2020-02-03 * "No decimal"
+  Assets:Bank:Checking  1000 USD
+  Assets:Bank:Savings  -1000 USD
+
+2020-02-04 * "Leading decimal"
+  Assets:Bank:Checking  .50 USD
+  Assets:Bank:Savings  -.50 USD
+
+2020-02-05 * "Many decimal places"
+  Assets:Bank:Checking  0.123456789 BTC
+  Assets:Bank:Savings  -0.123456789 BTC
+
+2020-02-06 * "Large numbers"
+  Assets:Bank:Checking  999999999999.99 USD
+  Assets:Bank:Savings  -999999999999.99 USD
+
+; -----------------------------------------------------------------------------
+; STRINGS
+; -----------------------------------------------------------------------------
+
+2020-03-01 * "Simple narration"
+  Assets:Bank:Checking  100 USD
+  Income:Salary
+
+2020-03-02 * "Payee" "Narration"
+  Assets:Bank:Checking  100 USD
+  Income:Salary
+
+2020-03-03 * "" "Empty payee"
+  Assets:Bank:Checking  100 USD
+  Income:Salary
+
+2020-03-04 * "Quotes in \"narration\""
+  Assets:Bank:Checking  100 USD
+  Income:Salary
+
+2020-03-05 * "Multi-line
+narration with
+several lines"
+  Assets:Bank:Checking  100 USD
+  Income:Salary
+
+2020-03-06 * "Unicode: café résumé naïve 日本語 🎉"
+  Assets:Bank:Checking  100 USD
+  Income:Salary
+
+; -----------------------------------------------------------------------------
+; TRANSACTION FLAGS
+; -----------------------------------------------------------------------------
+
+2020-04-01 * "Completed"
+  Assets:Bank:Checking  100 USD
+  Income:Salary
+
+2020-04-02 ! "Pending"
+  Assets:Bank:Checking  100 USD
+  Income:Salary
+
+2020-04-03 txn "Using txn keyword"
+  Assets:Bank:Checking  100 USD
+  Income:Salary
+
+; Posting-level flags
+2020-04-04 * "Posting flags"
+  * Assets:Bank:Checking  100 USD
+  ! Income:Salary
+
+; -----------------------------------------------------------------------------
+; COSTS AND PRICES
+; -----------------------------------------------------------------------------
+
+; Simple cost
+2020-05-01 * "Buy stock"
+  Assets:Stock:FIFO  10 AAPL {150.00 USD}
+  Assets:Bank:Checking  -1500.00 USD
+
+; Cost with date
+2020-05-02 * "Buy with date"
+  Assets:Stock:FIFO  10 AAPL {150.00 USD, 2020-05-02}
+  Assets:Bank:Checking  -1500.00 USD
+
+; Cost with label
+2020-05-03 * "Buy with label"
+  Assets:Stock:FIFO  10 AAPL {150.00 USD, "lot1"}
+  Assets:Bank:Checking  -1500.00 USD
+
+; Cost with everything
+2020-05-04 * "Buy full spec"
+  Assets:Stock:FIFO  10 AAPL {150.00 USD, 2020-05-04, "lot2"}
+  Assets:Bank:Checking  -1500.00 USD
+
+; Total cost {{}}
+2020-05-05 * "Buy total cost"
+  Assets:Stock:FIFO  10 AAPL {{1500.00 USD}}
+  Assets:Bank:Checking  -1500.00 USD
+
+; Price annotation @
+2020-05-06 * "Currency conversion"
+  Assets:Bank:Checking  -100.00 USD @ 0.85 EUR
+  Assets:Euro:Checking  85.00 EUR
+
+; Total price annotation @@
+2020-05-07 * "Currency conversion total"
+  Assets:Bank:Checking  -100.00 USD @@ 85.00 EUR
+  Assets:Euro:Checking  85.00 EUR
+
+; Both cost and price
+2020-05-08 * "Sell stock"
+  Assets:Stock:FIFO  -10 AAPL {150.00 USD} @ 175.00 USD
+  Assets:Bank:Checking  1750.00 USD
+  Income:CapitalGains  -250.00 USD
+
+; -----------------------------------------------------------------------------
+; INTERPOLATION
+; -----------------------------------------------------------------------------
+
+; Missing amount (simple)
+2020-06-01 * "Interpolate simple"
+  Assets:Bank:Checking  100 USD
+  Income:Salary
+
+; Missing amount with multiple currencies
+2020-06-02 * "Interpolate multi-currency"
+  Assets:Bank:Checking  100 USD
+  Assets:Euro:Checking  50 EUR
+  Income:Salary  -100 USD
+  Income:Bonus
+
+; Missing amount with cost
+2020-06-03 * "Interpolate with cost"
+  Assets:Stock:FIFO  10 AAPL {150.00 USD}
+  Assets:Bank:Checking
+
+; -----------------------------------------------------------------------------
+; TAGS AND LINKS
+; -----------------------------------------------------------------------------
+
+2020-07-01 * "With tag" #trip-2020
+  Assets:Bank:Checking  -100 USD
+  Expenses:Food:Groceries
+
+2020-07-02 * "Multiple tags" #work #reimbursable #2020
+  Assets:Bank:Checking  -100 USD
+  Expenses:Food:Groceries
+
+2020-07-03 * "With link" ^invoice-123
+  Assets:Bank:Checking  -100 USD
+  Expenses:Food:Groceries
+
+2020-07-04 * "Tags and links" #business ^project-abc
+  Assets:Bank:Checking  -100 USD
+  Expenses:Food:Groceries
+
+pushtag #vacation-2020
+2020-07-05 * "Tagged by pushtag"
+  Assets:Bank:Checking  -100 USD
+  Expenses:Food:Groceries
+poptag #vacation-2020
+
+; -----------------------------------------------------------------------------
+; METADATA
+; -----------------------------------------------------------------------------
+
+2020-08-01 * "With metadata"
+  receipt: "receipt-001.pdf"
+  category: "food"
+  Assets:Bank:Checking  -100 USD
+  Expenses:Food:Groceries
+
+2020-08-02 * "Posting metadata"
+  Assets:Bank:Checking  -100 USD
+    memo: "grocery run"
+  Expenses:Food:Groceries
+    category: "weekly"
+
+2020-08-03 * "Various metadata types"
+  string-val: "hello"
+  date-val: 2020-08-03
+  number-val: 42.5
+  account-val: Assets:Bank:Checking
+  currency-val: USD
+  tag-val: #mytag
+  bool-val: TRUE
+  Assets:Bank:Checking  -100 USD
+  Expenses:Food:Groceries
+
+; -----------------------------------------------------------------------------
+; BALANCE AND PAD
+; -----------------------------------------------------------------------------
+
+2020-09-01 balance Assets:Bank:Checking  0 USD
+
+2020-09-02 * "Deposit"
+  Assets:Bank:Checking  1000 USD
+  Income:Salary
+
+2020-09-03 balance Assets:Bank:Checking  1000 USD
+
+; Balance with tolerance
+2020-09-04 balance Assets:Bank:Checking  1000.00 USD ~ 0.01
+
+; Pad directive
+2020-01-01 pad Assets:Bank:Savings Equity:Opening-Balances
+2020-09-05 balance Assets:Bank:Savings  5000 USD
+
+; -----------------------------------------------------------------------------
+; OTHER DIRECTIVES
+; -----------------------------------------------------------------------------
+
+; Note
+2020-10-01 note Assets:Bank:Checking "Changed to premium account"
+
+; Document
+2020-10-02 document Assets:Bank:Checking "/documents/statement-2020-10.pdf"
+
+; Event
+2020-10-03 event "location" "San Francisco, CA"
+2020-10-04 event "employer" "Google Inc."
+
+; Query
+2020-10-05 query "expenses-2020" "
+  SELECT account, sum(position)
+  WHERE year = 2020 AND account ~ 'Expenses'
+  GROUP BY account
+"
+
+; Price
+2020-10-06 price AAPL 175.00 USD
+2020-10-06 price EUR 1.18 USD
+
+; Custom
+2020-10-07 custom "budget" Assets:Bank:Checking 1000.00 USD TRUE "monthly"
+
+; Close
+2020-12-31 close Assets:Bank:Savings
+
+; -----------------------------------------------------------------------------
+; COMMENTS
+; -----------------------------------------------------------------------------
+
+; Full line comment
+
+2020-11-01 * "Transaction with inline comment" ; This is a comment
+  Assets:Bank:Checking  100 USD ; Inline on posting
+  Income:Salary ; Another inline
+
+;; Multiple semicolons
+;;; Are also valid
+
+; Org-mode style headers work because non-directive lines are ignored
+* 2020 Transactions
+** November
+
+2020-11-15 * "After org headers"
+  Assets:Bank:Checking  100 USD
+  Income:Salary
+
+; -----------------------------------------------------------------------------
+; WHITESPACE EDGE CASES
+; -----------------------------------------------------------------------------
+
+2020-12-01    *    "Extra whitespace"
+  Assets:Bank:Checking    100    USD
+  Income:Salary
+
+2020-12-02 * "Tabs for indentation"
+	Assets:Bank:Checking  100 USD
+	Income:Salary

@@ -1,0 +1,50 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+
+# Editor files
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+*.iml
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Nix
+/result
+/result-*
+.direnv/
+
+# Coverage
+*.profraw
+*.profdata
+lcov.info
+coverage/
+tarpaulin-report.html
+
+# Fuzzing
+fuzz/corpus/
+fuzz/artifacts/
+
+# Test fixtures (downloaded)
+spec/fixtures/lima-tests/
+spec/fixtures/examples/
+spec/fixtures/python-tests/
+
+# Benchmark results
+target/criterion/
+
+# Local development
+.env
+.env.local
+*.local
+
+# Logs
+*.log
+
+# Documentation build
+book/

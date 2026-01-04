@@ -1,0 +1,15 @@
+# Rust toolchain configuration
+# This ensures consistent toolchain across developers not using Nix
+# Nix users get the toolchain from flake.nix instead
+
+[toolchain]
+channel = "stable"
+components = [
+    "cargo",
+    "clippy",
+    "rust-src",
+    "rustc",
+    "rustfmt",
+    "llvm-tools-preview",
+]
+targets = ["wasm32-unknown-unknown"]

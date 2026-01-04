@@ -1,0 +1,34 @@
+[package]
+name = "rustledger-parser"
+description = "Beancount parser with error recovery and full syntax support"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+authors.workspace = true
+readme = "../../README.md"
+
+[dependencies]
+rustledger-core.workspace = true
+chumsky.workspace = true
+ariadne.workspace = true
+rust_decimal.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+rust_decimal_macros = "1.36"
+insta.workspace = true
+criterion.workspace = true
+
+[[bench]]
+name = "parser_bench"
+harness = false
+
+[lints]
+workspace = true

@@ -1,0 +1,23 @@
+# Clippy configuration
+# https://doc.rust-lang.org/clippy/configuration.html
+
+# MSRV - Minimum Supported Rust Version
+msrv = "1.75.0"
+
+# Cognitive complexity threshold
+cognitive-complexity-threshold = 25
+
+# Too many arguments threshold
+too-many-arguments-threshold = 8
+
+# Type complexity threshold
+type-complexity-threshold = 250
+
+# Trivial copy size limit (bytes)
+trivial-copy-size-limit = 16
+
+# Allow these identifiers
+allowed-idents-below-min-chars = ["i", "j", "k", "n", "x", "y", "id", "db"]
+
+# Disallowed names
+disallowed-names = ["foo", "bar", "baz", "quux"]

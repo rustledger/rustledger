@@ -1,0 +1,65 @@
+# bacon configuration
+# https://dystroy.org/bacon/
+
+default_job = "check"
+
+[jobs.check]
+command = ["cargo", "check", "--all-targets", "--color", "always"]
+need_stdout = false
+
+[jobs.check-all]
+command = ["cargo", "check", "--all-targets", "--all-features", "--color", "always"]
+need_stdout = false
+
+[jobs.clippy]
+command = [
+    "cargo", "clippy",
+    "--all-targets", "--all-features",
+    "--color", "always",
+    "--", "-D", "warnings"
+]
+need_stdout = false
+
+[jobs.test]
+command = [
+    "cargo", "test",
+    "--all-targets",
+    "--color", "always",
+    "--", "--color", "always"
+]
+need_stdout = true
+
+[jobs.nextest]
+command = [
+    "cargo", "nextest", "run",
+    "--color", "always"
+]
+need_stdout = true
+
+[jobs.doc]
+command = ["cargo", "doc", "--no-deps", "--all-features", "--color", "always"]
+need_stdout = false
+
+[jobs.doc-open]
+command = ["cargo", "doc", "--no-deps", "--all-features", "--open", "--color", "always"]
+need_stdout = false
+on_success = "back"
+
+[jobs.run]
+command = [
+    "cargo", "run",
+    "--color", "always",
+    "--"
+]
+need_stdout = true
+allow_warnings = true
+
+[keybindings]
+c = "job:check"
+a = "job:check-all"
+l = "job:clippy"
+t = "job:test"
+n = "job:nextest"
+d = "job:doc"
+o = "job:doc-open"
+r = "job:run"

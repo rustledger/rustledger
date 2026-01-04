@@ -226,9 +226,11 @@ pub fn validate(ledger_json: &str) -> JsValue {
 
 /// Validate a Beancount source string directly.
 ///
-/// Parses and validates in one step.
+/// Parses, interpolates, and validates in one step.
 #[wasm_bindgen]
 pub fn validate_source(source: &str) -> JsValue {
+    use rustledger_booking::interpolate;
+
     let parse_result = parse_beancount(source);
 
     // Collect parse errors
@@ -243,14 +245,29 @@ pub fn validate_source(source: &str) -> JsValue {
         })
         .collect();
 
-    // If parsing succeeded, run validation
+    // If parsing succeeded, run interpolation then validation
     if parse_result.errors.is_empty() {
-        let directives: Vec<_> = parse_result
+        let mut directives: Vec<_> = parse_result
             .directives
             .iter()
             .map(|s| s.value.clone())
             .collect();
 
+        // Interpolate transactions (fill in missing amounts)
+        for directive in &mut directives {
+            if let Directive::Transaction(txn) = directive {
+                if let Err(e) = interpolate(txn) {
+                    errors.push(Error {
+                        message: e.to_string(),
+                        line: None,
+                        column: None,
+                        severity: "error".to_string(),
+                    });
+                }
+            }
+        }
+
+        // Run validation
         let validation_errors = validate_ledger(&directives);
         for err in validation_errors {
             errors.push(Error {
@@ -272,9 +289,10 @@ pub fn validate_source(source: &str) -> JsValue {
 
 /// Run a BQL query on a Beancount source string.
 ///
-/// Parses the source, then executes the query.
+/// Parses the source, interpolates, then executes the query.
 #[wasm_bindgen]
 pub fn query(source: &str, query_str: &str) -> JsValue {
+    use rustledger_booking::interpolate;
     use rustledger_query::{parse as parse_query, Executor};
 
     // Parse the source
@@ -316,12 +334,18 @@ pub fn query(source: &str, query_str: &str) -> JsValue {
         }
     };
 
-    // Execute the query
-    let directives: Vec<_> = parse_result
+    // Extract and interpolate directives
+    let mut directives: Vec<_> = parse_result
         .directives
         .iter()
         .map(|s| s.value.clone())
         .collect();
+
+    for directive in &mut directives {
+        if let Directive::Transaction(txn) = directive {
+            let _ = interpolate(txn); // Ignore errors for query
+        }
+    }
 
     let mut executor = Executor::new(&directives);
     match executor.execute(&query) {

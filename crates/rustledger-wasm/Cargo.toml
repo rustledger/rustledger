@@ -19,6 +19,7 @@ crate-type = ["cdylib", "rlib"]
 rustledger-core.workspace = true
 rustledger-parser.workspace = true
 rustledger-loader.workspace = true
+rustledger-booking.workspace = true
 rustledger-validate.workspace = true
 rustledger-query.workspace = true
 wasm-bindgen.workspace = true

@@ -1872,6 +1872,7 @@ name = "rustledger-wasm"
 version = "1.0.0-rc.1"
 dependencies = [
  "chrono",
+ "rustledger-booking",
  "rustledger-core",
  "rustledger-loader",
  "rustledger-parser",

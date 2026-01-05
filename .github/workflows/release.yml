@@ -1,0 +1,201 @@
+# Release workflow - builds binaries for all platforms
+name: Release
+on:
+  push:
+    tags:
+      - 'v*'
+permissions:
+  contents: write
+env:
+  CARGO_TERM_COLOR: always
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            cross: true
+          # macOS
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          # Windows
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install cross
+        if: matrix.cross
+        uses: taiki-e/install-action@cross
+      - name: Build
+        shell: bash
+        run: |
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            cross build --release --target ${{ matrix.target }}
+          else
+            cargo build --release --target ${{ matrix.target }}
+          fi
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          cd target/${{ matrix.target }}/release
+
+          # Get version from tag
+          VERSION=${GITHUB_REF#refs/tags/}
+
+          # Create archive with all binaries
+          ARCHIVE="rustledger-${VERSION}-${{ matrix.target }}.tar.gz"
+          tar -czvf "../../../${ARCHIVE}" \
+            rledger-check rledger-format rledger-query rledger-report rledger-doctor \
+            bean-check bean-format bean-query bean-report bean-doctor
+
+          # Create checksum
+          cd ../../..
+          shasum -a 256 "$ARCHIVE" > "${ARCHIVE}.sha256"
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cd target/${{ matrix.target }}/release
+
+          # Get version from tag
+          $VERSION = $env:GITHUB_REF -replace 'refs/tags/', ''
+
+          # Create archive with all binaries
+          $ARCHIVE = "rustledger-${VERSION}-${{ matrix.target }}.zip"
+          $binaries = @(
+            "rledger-check.exe", "rledger-format.exe", "rledger-query.exe", "rledger-report.exe", "rledger-doctor.exe",
+            "bean-check.exe", "bean-format.exe", "bean-query.exe", "bean-report.exe", "bean-doctor.exe"
+          )
+          Compress-Archive -Path $binaries -DestinationPath "../../../${ARCHIVE}"
+
+          # Create checksum
+          cd ../../..
+          (Get-FileHash -Algorithm SHA256 $ARCHIVE).Hash.ToLower() + "  " + $ARCHIVE | Out-File -Encoding utf8 "${ARCHIVE}.sha256"
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: rustledger-${{ matrix.target }}
+          path: |
+            rustledger-*.tar.gz
+            rustledger-*.zip
+            rustledger-*.sha256
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: List artifacts
+        run: ls -la artifacts/
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          draft: false
+          generate_release_notes: true
+          files: |
+            artifacts/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  # Publish to crates.io
+  publish:
+    name: Publish to crates.io
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Publish crates (in dependency order)
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          # Publish in dependency order with delay between each
+          # to allow crates.io to index the previous crate
+
+          echo "Publishing rustledger-core..."
+          cargo publish -p rustledger-core --no-verify
+          sleep 30
+
+          echo "Publishing rustledger-parser..."
+          cargo publish -p rustledger-parser --no-verify
+          sleep 30
+
+          echo "Publishing rustledger-booking..."
+          cargo publish -p rustledger-booking --no-verify
+          sleep 30
+
+          echo "Publishing rustledger-loader..."
+          cargo publish -p rustledger-loader --no-verify
+          sleep 30
+
+          echo "Publishing rustledger-validate..."
+          cargo publish -p rustledger-validate --no-verify
+          sleep 30
+
+          echo "Publishing rustledger-query..."
+          cargo publish -p rustledger-query --no-verify
+          sleep 30
+
+          echo "Publishing rustledger-plugin..."
+          cargo publish -p rustledger-plugin --no-verify
+          sleep 30
+
+          echo "Publishing rustledger (CLI)..."
+          cargo publish -p rustledger --no-verify
+
+          echo "All crates published!"
+  # Publish WASM package to npm
+  publish-wasm:
+    name: Publish to npm
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+      - name: Build WASM package
+        run: |
+          cd crates/rustledger-wasm
+          wasm-pack build --target web --release
+      - name: Update package.json version
+        run: |
+          cd crates/rustledger-wasm/pkg
+          VERSION=${GITHUB_REF#refs/tags/v}
+          # Update version in package.json
+          sed -i "s/\"version\": \".*\"/\"version\": \"$VERSION\"/" package.json
+          # Update package name if needed
+          sed -i 's/"name": "rustledger-wasm"/"name": "@rustledger\/wasm"/' package.json
+      - name: Publish to npm
+        run: |
+          cd crates/rustledger-wasm/pkg
+          npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

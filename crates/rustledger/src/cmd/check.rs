@@ -1,5 +1,6 @@
 //! Shared implementation for bean-check and rledger-check commands.
 
+use crate::cmd::completions::ShellType;
 use crate::report::{self, SourceCache};
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -21,8 +22,12 @@ use tracing_subscriber::fmt::format::FmtSpan;
 #[command(author, version, about, long_about = None)]
 pub struct Args {
     /// The beancount file to check
-    #[arg(value_name = "FILE")]
-    pub file: PathBuf,
+    #[arg(value_name = "FILE", required_unless_present = "generate_completions")]
+    pub file: Option<PathBuf>,
+
+    /// Generate shell completions and exit
+    #[arg(long, value_name = "SHELL", hide = true)]
+    pub generate_completions: Option<ShellType>,
 
     /// Show verbose output including timing information
     #[arg(short, long)]
@@ -57,20 +62,23 @@ fn run(args: &Args) -> Result<ExitCode> {
     let mut stdout = io::stdout().lock();
     let start = std::time::Instant::now();
 
+    // File is guaranteed to be Some here (checked in main)
+    let file = args.file.as_ref().expect("file required");
+
     // Check if file exists
-    if !args.file.exists() {
-        anyhow::bail!("file not found: {}", args.file.display());
+    if !file.exists() {
+        anyhow::bail!("file not found: {}", file.display());
     }
 
     // Load the file
     if args.verbose && !args.quiet {
-        eprintln!("Loading {}...", args.file.display());
+        eprintln!("Loading {}...", file.display());
     }
 
     let mut loader = Loader::new();
     let load_result = loader
-        .load(&args.file)
-        .with_context(|| format!("failed to load {}", args.file.display()))?;
+        .load(file)
+        .with_context(|| format!("failed to load {}", file.display()))?;
 
     // Build source cache for error reporting
     let mut cache = SourceCache::new();
@@ -80,9 +88,9 @@ fn run(args: &Args) -> Result<ExitCode> {
     }
 
     // Also add the main file
-    let main_content = std::fs::read_to_string(&args.file)
-        .with_context(|| format!("failed to read {}", args.file.display()))?;
-    cache.add(&args.file.display().to_string(), main_content);
+    let main_content = std::fs::read_to_string(file)
+        .with_context(|| format!("failed to read {}", file.display()))?;
+    cache.add(&file.display().to_string(), main_content);
 
     // Count errors
     let mut error_count = 0;
@@ -314,7 +322,18 @@ fn run(args: &Args) -> Result<ExitCode> {
 
 /// Main entry point for the check command.
 pub fn main() -> ExitCode {
+    main_with_name("rledger-check")
+}
+
+/// Main entry point with custom binary name (for bean-check compatibility).
+pub fn main_with_name(bin_name: &str) -> ExitCode {
     let args = Args::parse();
+
+    // Handle shell completion generation
+    if let Some(shell) = args.generate_completions {
+        crate::cmd::completions::generate_completions::<Args>(shell, bin_name);
+        return ExitCode::SUCCESS;
+    }
 
     if args.verbose {
         tracing_subscriber::fmt()

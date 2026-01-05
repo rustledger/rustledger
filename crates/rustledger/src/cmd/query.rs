@@ -11,6 +11,7 @@
 //! rledger-query ledger.beancount  # Interactive mode
 //! ```
 
+use crate::cmd::completions::ShellType;
 use anyhow::{Context, Result};
 use clap::Parser;
 use rustledger_core::Directive;
@@ -30,8 +31,12 @@ use std::process::ExitCode;
 #[command(author, version, about, long_about = None)]
 struct Args {
     /// The beancount file to query
-    #[arg(value_name = "FILE")]
-    file: PathBuf,
+    #[arg(value_name = "FILE", required_unless_present = "generate_completions")]
+    file: Option<PathBuf>,
+
+    /// Generate shell completions and exit
+    #[arg(long, value_name = "SHELL", hide = true)]
+    generate_completions: Option<ShellType>,
 
     /// BQL query to execute (if not provided, enters interactive mode)
     #[arg(value_name = "QUERY", trailing_var_arg = true, num_args = 0..)]
@@ -83,7 +88,18 @@ impl std::fmt::Display for OutputFormat {
 
 /// Main entry point for the query command.
 pub fn main() -> ExitCode {
+    main_with_name("rledger-query")
+}
+
+/// Main entry point with custom binary name (for bean-query compatibility).
+pub fn main_with_name(bin_name: &str) -> ExitCode {
     let args = Args::parse();
+
+    // Handle shell completion generation
+    if let Some(shell) = args.generate_completions {
+        crate::cmd::completions::generate_completions::<Args>(shell, bin_name);
+        return ExitCode::SUCCESS;
+    }
 
     match run(&args) {
         Ok(()) => ExitCode::SUCCESS,
@@ -95,16 +111,19 @@ pub fn main() -> ExitCode {
 }
 
 fn run(args: &Args) -> Result<()> {
+    // File is guaranteed to be Some here (checked in main)
+    let file = args.file.as_ref().expect("file required");
+
     // Check if file exists
-    if !args.file.exists() {
-        anyhow::bail!("file not found: {}", args.file.display());
+    if !file.exists() {
+        anyhow::bail!("file not found: {}", file.display());
     }
 
     // Load and parse the file
     let mut loader = Loader::new();
     let load_result = loader
-        .load(&args.file)
-        .with_context(|| format!("failed to load {}", args.file.display()))?;
+        .load(file)
+        .with_context(|| format!("failed to load {}", file.display()))?;
 
     // Check for parse errors (unless --no-errors is set)
     if !load_result.errors.is_empty() && !args.no_errors {
@@ -133,7 +152,7 @@ fn run(args: &Args) -> Result<()> {
             .with_context(|| format!("failed to read query file {}", query_file.display()))?
     } else {
         // Interactive mode
-        return run_interactive(&args.file, &directives, args);
+        return run_interactive(file, &directives, args);
     };
 
     // Execute the query

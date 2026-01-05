@@ -27,6 +27,7 @@
 #![warn(missing_docs)]
 
 pub mod ast;
+pub mod completions;
 pub mod error;
 pub mod executor;
 pub mod parser;

@@ -12,6 +12,7 @@
 //! bean-doctor list-options                 # List available options
 //! ```
 
+use crate::cmd::completions::ShellType;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use rust_decimal;
@@ -29,8 +30,12 @@ use std::process::ExitCode;
 #[command(name = "bean-doctor")]
 #[command(author, version, about, long_about = None)]
 struct Args {
+    /// Generate shell completions and exit
+    #[arg(long, value_name = "SHELL", hide = true)]
+    generate_completions: Option<ShellType>,
+
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -134,9 +139,27 @@ enum Conversion {
 
 /// Main entry point for the doctor command.
 pub fn main() -> ExitCode {
+    main_with_name("rledger-doctor")
+}
+
+/// Main entry point with custom binary name (for bean-doctor compatibility).
+pub fn main_with_name(bin_name: &str) -> ExitCode {
     let args = Args::parse();
 
-    match run(args) {
+    // Handle shell completion generation
+    if let Some(shell) = args.generate_completions {
+        crate::cmd::completions::generate_completions::<Args>(shell, bin_name);
+        return ExitCode::SUCCESS;
+    }
+
+    // Command is required when not generating completions
+    let Some(command) = args.command else {
+        eprintln!("error: a subcommand is required");
+        eprintln!("For more information, try '--help'");
+        return ExitCode::from(2);
+    };
+
+    match run(command) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("error: {e:#}");
@@ -145,10 +168,10 @@ pub fn main() -> ExitCode {
     }
 }
 
-fn run(args: Args) -> Result<()> {
+fn run(command: Command) -> Result<()> {
     let mut stdout = io::stdout().lock();
 
-    match args.command {
+    match command {
         Command::Lex { file } => cmd_lex(&file, &mut stdout),
         Command::Parse { file, verbose } => cmd_parse(&file, verbose, &mut stdout),
         Command::Context { file, line } => cmd_context(&file, line, &mut stdout),

@@ -45,6 +45,7 @@ rmp-serde = "1"
 
 # CLI
 clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
 rustyline = { version = "14", features = ["derive"] }
 dirs = "5"
 tracing = "0.1"

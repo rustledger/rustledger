@@ -19,6 +19,7 @@
 //! - `prices` - Show price history
 //! - `stats` - Show ledger statistics
 
+use crate::cmd::completions::ShellType;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use rustledger_booking::interpolate;
@@ -34,13 +35,17 @@ use std::process::ExitCode;
 #[command(name = "rledger-report")]
 #[command(author, version, about, long_about = None)]
 struct Args {
+    /// Generate shell completions and exit
+    #[arg(long, value_name = "SHELL", hide = true)]
+    generate_completions: Option<ShellType>,
+
     /// The beancount file to process
     #[arg(value_name = "FILE")]
-    file: PathBuf,
+    file: Option<PathBuf>,
 
     /// The report to generate
     #[command(subcommand)]
-    report: Report,
+    report: Option<Report>,
 
     /// Show verbose output
     #[arg(short, long, global = true)]
@@ -71,9 +76,33 @@ enum Report {
 
 /// Main entry point for the report command.
 pub fn main() -> ExitCode {
+    main_with_name("rledger-report")
+}
+
+/// Main entry point with custom binary name (for bean-report compatibility).
+pub fn main_with_name(bin_name: &str) -> ExitCode {
     let args = Args::parse();
 
-    match run(&args) {
+    // Handle shell completion generation
+    if let Some(shell) = args.generate_completions {
+        crate::cmd::completions::generate_completions::<Args>(shell, bin_name);
+        return ExitCode::SUCCESS;
+    }
+
+    // File and report are required when not generating completions
+    let Some(file) = args.file else {
+        eprintln!("error: FILE is required");
+        eprintln!("For more information, try '--help'");
+        return ExitCode::from(2);
+    };
+
+    let Some(report) = args.report else {
+        eprintln!("error: a report subcommand is required");
+        eprintln!("For more information, try '--help'");
+        return ExitCode::from(2);
+    };
+
+    match run(&file, &report, args.verbose) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("error: {e:#}");
@@ -82,23 +111,23 @@ pub fn main() -> ExitCode {
     }
 }
 
-fn run(args: &Args) -> Result<()> {
+fn run(file: &PathBuf, report: &Report, verbose: bool) -> Result<()> {
     let mut stdout = io::stdout().lock();
 
     // Check if file exists
-    if !args.file.exists() {
-        anyhow::bail!("file not found: {}", args.file.display());
+    if !file.exists() {
+        anyhow::bail!("file not found: {}", file.display());
     }
 
     // Load the file
-    if args.verbose {
-        eprintln!("Loading {}...", args.file.display());
+    if verbose {
+        eprintln!("Loading {}...", file.display());
     }
 
     let mut loader = Loader::new();
     let load_result = loader
-        .load(&args.file)
-        .with_context(|| format!("failed to load {}", args.file.display()))?;
+        .load(file)
+        .with_context(|| format!("failed to load {}", file.display()))?;
 
     // Extract directives
     let mut directives: Vec<_> = load_result
@@ -117,7 +146,7 @@ fn run(args: &Args) -> Result<()> {
     }
 
     // Generate the requested report
-    match &args.report {
+    match report {
         Report::Balances { account } => {
             report_balances(&directives, account.as_deref(), &mut stdout)?;
         }
@@ -128,7 +157,7 @@ fn run(args: &Args) -> Result<()> {
             report_commodities(&directives, &mut stdout)?;
         }
         Report::Stats => {
-            report_stats(&directives, &args.file, &mut stdout)?;
+            report_stats(&directives, file, &mut stdout)?;
         }
         Report::Prices { commodity } => {
             report_prices(&directives, commodity.as_deref(), &mut stdout)?;

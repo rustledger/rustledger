@@ -1,4 +1,4 @@
 //! bean-doctor - Debugging tools for beancount files (Python beancount compatibility).
 fn main() -> std::process::ExitCode {
-    rustledger::cmd::doctor::main()
+    rustledger::cmd::doctor::main_with_name("bean-doctor")
 }

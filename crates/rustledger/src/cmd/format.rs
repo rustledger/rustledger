@@ -1,5 +1,6 @@
 //! Shared implementation for bean-format and rledger-format commands.
 
+use crate::cmd::completions::ShellType;
 use crate::format::{FormatConfig, format_directive};
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -14,8 +15,12 @@ use std::process::ExitCode;
 #[command(author, version, about, long_about = None)]
 pub struct Args {
     /// The beancount file(s) to format
-    #[arg(value_name = "FILE", required = true)]
+    #[arg(value_name = "FILE", required_unless_present = "generate_completions")]
     pub files: Vec<PathBuf>,
+
+    /// Generate shell completions and exit
+    #[arg(long, value_name = "SHELL", hide = true)]
+    pub generate_completions: Option<ShellType>,
 
     /// Output file (only valid with single input file, default: stdout)
     #[arg(short = 'o', long, value_name = "OUTPUT")]
@@ -194,7 +199,18 @@ fn format_file(file: &PathBuf, args: &Args) -> Result<ExitCode> {
 
 /// Main entry point for the format command.
 pub fn main() -> ExitCode {
+    main_with_name("rledger-format")
+}
+
+/// Main entry point with custom binary name (for bean-format compatibility).
+pub fn main_with_name(bin_name: &str) -> ExitCode {
     let args = Args::parse();
+
+    // Handle shell completion generation
+    if let Some(shell) = args.generate_completions {
+        crate::cmd::completions::generate_completions::<Args>(shell, bin_name);
+        return ExitCode::SUCCESS;
+    }
 
     match run(&args) {
         Ok(exit_code) => exit_code,

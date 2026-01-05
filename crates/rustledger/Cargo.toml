@@ -74,6 +74,7 @@ rustledger-validate.workspace = true
 rustledger-query.workspace = true
 rustledger-plugin = { workspace = true, features = ["wasm-runtime"] }
 clap.workspace = true
+clap_complete.workspace = true
 rustyline.workspace = true
 dirs.workspace = true
 serde_json.workspace = true

@@ -4,6 +4,7 @@
 //! which can be invoked by thin wrapper binaries.
 
 pub mod check;
+pub mod completions;
 pub mod doctor;
 pub mod format;
 pub mod query;

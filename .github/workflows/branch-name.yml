@@ -1,0 +1,30 @@
+# Validates branch names follow the convention
+name: Branch Name
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+jobs:
+  validate:
+    name: Validate branch name
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check branch name
+        run: |
+          BRANCH="${{ github.head_ref }}"
+          PATTERN="^(feature|fix|docs|chore|refactor)/[a-z0-9][a-z0-9-]*$"
+
+          if [[ "$BRANCH" =~ $PATTERN ]]; then
+            echo "✅ Branch name '$BRANCH' is valid"
+          else
+            echo "❌ Branch name '$BRANCH' does not match pattern"
+            echo ""
+            echo "Branch names must follow: <type>/<description>"
+            echo "  Types: feature, fix, docs, chore, refactor"
+            echo "  Description: lowercase letters, numbers, hyphens"
+            echo ""
+            echo "Examples:"
+            echo "  feature/add-csv-export"
+            echo "  fix/balance-calculation"
+            echo "  docs/update-readme"
+            exit 1
+          fi

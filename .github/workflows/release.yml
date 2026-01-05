@@ -228,6 +228,10 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
       - name: Update npm for OIDC support
         run: npm install -g npm@latest
+      - name: Wait for npm registry propagation
+        run: |
+          echo "Waiting 60s for @rustledger/wasm to propagate..."
+          sleep 60
       - name: Update version and install dependencies
         run: |
           cd packages/mcp-server

@@ -15,24 +15,36 @@ readme = "../../README.md"
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[features]
+default = ["plugins", "completions"]
+## Include native plugin support (runPlugin, listPlugins)
+plugins = ["dep:rustledger-plugin"]
+## Include BQL query completions (bqlCompletions)
+completions = []
+
 [dependencies]
 rustledger-core.workspace = true
 rustledger-parser.workspace = true
-rustledger-loader.workspace = true
 rustledger-booking.workspace = true
 rustledger-validate.workspace = true
 rustledger-query.workspace = true
-rustledger-plugin = { workspace = true, default-features = false }
+rustledger-plugin = { workspace = true, default-features = false, optional = true }
 wasm-bindgen.workspace = true
 serde-wasm-bindgen.workspace = true
 serde.workspace = true
-serde_json.workspace = true
-chrono.workspace = true
+
+# Better panic messages in WASM
+console_error_panic_hook = "0.1"
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"
+js-sys = "0.3"
 
 [package.metadata.wasm-pack.profile.release]
+# Optimize for speed (aligned with profile.wasm-release opt-level = 3)
+wasm-opt = ["-O3", "--enable-mutable-globals"]
+
+[package.metadata.wasm-pack.profile.dev]
 wasm-opt = false
 
 [lints]

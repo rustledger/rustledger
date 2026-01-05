@@ -153,6 +153,16 @@ pub struct PostingCostJson {
     pub label: Option<String>,
 }
 
+/// Error severity level.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Severity {
+    /// An error that prevents processing.
+    Error,
+    /// A warning that doesn't prevent processing.
+    Warning,
+}
+
 /// An error with source location.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Error {
@@ -163,7 +173,39 @@ pub struct Error {
     /// Column number (1-based).
     pub column: Option<u32>,
     /// Error severity.
-    pub severity: String,
+    pub severity: Severity,
+}
+
+impl Error {
+    /// Create a new error with a message.
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            line: None,
+            column: None,
+            severity: Severity::Error,
+        }
+    }
+
+    /// Create an error with a line number.
+    pub fn with_line(message: impl Into<String>, line: u32) -> Self {
+        Self {
+            message: message.into(),
+            line: Some(line),
+            column: None,
+            severity: Severity::Error,
+        }
+    }
+
+    /// Create a warning.
+    pub fn warning(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            line: None,
+            column: None,
+            severity: Severity::Warning,
+        }
+    }
 }
 
 /// Result of validation.

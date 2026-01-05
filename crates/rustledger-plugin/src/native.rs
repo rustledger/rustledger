@@ -11,7 +11,10 @@ use crate::types::{
 /// Trait for native plugins.
 pub trait NativePlugin: Send + Sync {
     /// Plugin name.
-    fn name(&self) -> &str;
+    fn name(&self) -> &'static str;
+
+    /// Plugin description.
+    fn description(&self) -> &'static str;
 
     /// Process directives and return modified directives + errors.
     fn process(&self, input: PluginInput) -> PluginOutput;
@@ -56,6 +59,11 @@ impl NativePluginRegistry {
             .map(std::convert::AsRef::as_ref)
     }
 
+    /// List all available plugins.
+    pub fn list(&self) -> Vec<&dyn NativePlugin> {
+        self.plugins.iter().map(AsRef::as_ref).collect()
+    }
+
     /// Check if a name refers to a built-in plugin.
     pub fn is_builtin(name: &str) -> bool {
         let name = name.strip_prefix("beancount.plugins.").unwrap_or(name);
@@ -95,6 +103,10 @@ pub struct ImplicitPricesPlugin;
 impl NativePlugin for ImplicitPricesPlugin {
     fn name(&self) -> &'static str {
         "implicit_prices"
+    }
+
+    fn description(&self) -> &'static str {
+        "Generate price entries from transaction costs/prices"
     }
 
     fn process(&self, input: PluginInput) -> PluginOutput {
@@ -173,6 +185,10 @@ pub struct CheckCommodityPlugin;
 impl NativePlugin for CheckCommodityPlugin {
     fn name(&self) -> &'static str {
         "check_commodity"
+    }
+
+    fn description(&self) -> &'static str {
+        "Verify all commodities are declared"
     }
 
     fn process(&self, input: PluginInput) -> PluginOutput {
@@ -299,6 +315,10 @@ impl NativePlugin for AutoTagPlugin {
         "auto_tag"
     }
 
+    fn description(&self) -> &'static str {
+        "Auto-tag transactions by account patterns"
+    }
+
     fn process(&self, input: PluginInput) -> PluginOutput {
         let directives: Vec<_> = input
             .directives
@@ -407,6 +427,10 @@ impl NativePlugin for AutoAccountsPlugin {
         "auto_accounts"
     }
 
+    fn description(&self) -> &'static str {
+        "Auto-generate Open directives for used accounts"
+    }
+
     fn process(&self, input: PluginInput) -> PluginOutput {
         use std::collections::{HashMap, HashSet};
 
@@ -480,6 +504,10 @@ impl NativePlugin for LeafOnlyPlugin {
         "leafonly"
     }
 
+    fn description(&self) -> &'static str {
+        "Error on postings to non-leaf accounts"
+    }
+
     fn process(&self, input: PluginInput) -> PluginOutput {
         use std::collections::HashSet;
 
@@ -533,9 +561,13 @@ impl NativePlugin for NoDuplicatesPlugin {
         "noduplicates"
     }
 
+    fn description(&self) -> &'static str {
+        "Hash-based duplicate transaction detection"
+    }
+
     fn process(&self, input: PluginInput) -> PluginOutput {
-        use std::collections::hash_map::DefaultHasher;
         use std::collections::HashSet;
+        use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
 
         fn hash_transaction(date: &str, txn: &TransactionData) -> u64 {
@@ -583,6 +615,10 @@ impl NativePlugin for OneCommodityPlugin {
         "onecommodity"
     }
 
+    fn description(&self) -> &'static str {
+        "Enforce single commodity per account"
+    }
+
     fn process(&self, input: PluginInput) -> PluginOutput {
         use std::collections::HashMap;
 
@@ -623,6 +659,10 @@ pub struct UniquePricesPlugin;
 impl NativePlugin for UniquePricesPlugin {
     fn name(&self) -> &'static str {
         "unique_prices"
+    }
+
+    fn description(&self) -> &'static str {
+        "One price per day per currency pair"
     }
 
     fn process(&self, input: PluginInput) -> PluginOutput {
@@ -677,6 +717,10 @@ impl DocumentDiscoveryPlugin {
 impl NativePlugin for DocumentDiscoveryPlugin {
     fn name(&self) -> &'static str {
         "document_discovery"
+    }
+
+    fn description(&self) -> &'static str {
+        "Auto-discover documents from directories"
     }
 
     fn process(&self, input: PluginInput) -> PluginOutput {
@@ -805,6 +849,10 @@ impl NativePlugin for CheckClosingPlugin {
         "check_closing"
     }
 
+    fn description(&self) -> &'static str {
+        "Zero balance assertion on account closing"
+    }
+
     fn process(&self, input: PluginInput) -> PluginOutput {
         use crate::types::{AmountData, BalanceData, MetaValueData};
 
@@ -905,6 +953,10 @@ impl NativePlugin for CloseTreePlugin {
         "close_tree"
     }
 
+    fn description(&self) -> &'static str {
+        "Close descendant accounts automatically"
+    }
+
     fn process(&self, input: PluginInput) -> PluginOutput {
         use crate::types::CloseData;
         use std::collections::HashSet;
@@ -980,6 +1032,10 @@ impl NativePlugin for CoherentCostPlugin {
         "coherent_cost"
     }
 
+    fn description(&self) -> &'static str {
+        "Enforce cost OR price (not both) consistency"
+    }
+
     fn process(&self, input: PluginInput) -> PluginOutput {
         use std::collections::{HashMap, HashSet};
 
@@ -1036,6 +1092,10 @@ pub struct SellGainsPlugin;
 impl NativePlugin for SellGainsPlugin {
     fn name(&self) -> &'static str {
         "sellgains"
+    }
+
+    fn description(&self) -> &'static str {
+        "Cross-check capital gains against sales"
     }
 
     fn process(&self, input: PluginInput) -> PluginOutput {
@@ -1113,6 +1173,10 @@ pub struct PedanticPlugin;
 impl NativePlugin for PedanticPlugin {
     fn name(&self) -> &'static str {
         "pedantic"
+    }
+
+    fn description(&self) -> &'static str {
+        "Enable all strict validation rules"
     }
 
     fn process(&self, input: PluginInput) -> PluginOutput {
@@ -1195,6 +1259,10 @@ impl Default for UnrealizedPlugin {
 impl NativePlugin for UnrealizedPlugin {
     fn name(&self) -> &'static str {
         "unrealized"
+    }
+
+    fn description(&self) -> &'static str {
+        "Calculate unrealized gains/losses"
     }
 
     fn process(&self, input: PluginInput) -> PluginOutput {

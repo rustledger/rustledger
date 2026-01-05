@@ -12,7 +12,7 @@
 //! # Example (JavaScript)
 //!
 //! ```javascript
-//! import init, { parse, validate, query } from 'beancount-wasm';
+//! import init, { parse, validateSource, query } from '@rustledger/wasm';
 //!
 //! await init();
 //!
@@ -25,7 +25,7 @@
 //!
 //! const result = parse(source);
 //! if (result.errors.length === 0) {
-//!     const validation = validate(result.ledger);
+//!     const validation = validateSource(source);
 //!     console.log('Validation errors:', validation.errors);
 //! }
 //! ```
@@ -40,123 +40,271 @@ mod utils;
 use std::collections::HashMap;
 use wasm_bindgen::prelude::*;
 
+use rustledger_booking::interpolate;
 use rustledger_core::Directive;
-use rustledger_parser::parse as parse_beancount;
+use rustledger_parser::{ParseResult as ParserResult, parse as parse_beancount};
 use rustledger_validate::validate as validate_ledger;
 
-use convert::{directive_to_json, json_to_directive, value_to_cell};
+use convert::{directive_to_json, value_to_cell};
+#[cfg(feature = "completions")]
+use types::{CompletionJson, CompletionResultJson};
 use types::{
-    CompletionJson, CompletionResultJson, Error, FormatResult, Ledger, LedgerOptions, PadResult,
-    ParseResult, PluginInfo, PluginResult, QueryResult, ValidationResult,
+    Error, FormatResult, Ledger, LedgerOptions, PadResult, ParseResult, QueryResult, Severity,
+    ValidationResult,
 };
+#[cfg(feature = "plugins")]
+use types::{PluginInfo, PluginResult};
 use utils::LineLookup;
 
-/// Parse a Beancount source string.
-///
-/// Returns a JSON object with the parsed ledger and any errors.
-#[wasm_bindgen]
-pub fn parse(source: &str) -> JsValue {
-    let result = parse_beancount(source);
+// =============================================================================
+// TypeScript Type Definitions
+// =============================================================================
 
-    let errors: Vec<Error> = result
-        .errors
-        .iter()
-        .map(|e| Error {
-            message: e.to_string(),
-            line: Some(e.span().0 as u32 + 1),
-            column: None,
-            severity: "error".to_string(),
-        })
-        .collect();
+#[wasm_bindgen(typescript_custom_section)]
+const TS_TYPES: &'static str = r#"
+/** Error severity level. */
+export type Severity = 'error' | 'warning';
 
-    let ledger = Some(Ledger {
-        directives: result
-            .directives
-            .iter()
-            .map(|spanned| directive_to_json(&spanned.value))
-            .collect(),
-        options: LedgerOptions::default(),
-    });
-
-    let parse_result = ParseResult { ledger, errors };
-
-    serde_wasm_bindgen::to_value(&parse_result).unwrap_or(JsValue::NULL)
+/** Error with source location information. */
+export interface BeancountError {
+    message: string;
+    line?: number;
+    column?: number;
+    severity: Severity;
 }
 
-/// Validate a parsed ledger.
-///
-/// Takes a ledger JSON object and returns validation errors.
-#[wasm_bindgen]
-pub fn validate(ledger_json: &str) -> JsValue {
-    // Parse the ledger JSON back to directives
-    let ledger: Result<Ledger, _> = serde_json::from_str(ledger_json);
-
-    match ledger {
-        Ok(ledger) => {
-            // Reconstruct directives from JSON
-            let mut directives = Vec::new();
-            let mut conversion_errors = Vec::new();
-
-            for dir_json in &ledger.directives {
-                match json_to_directive(dir_json) {
-                    Ok(directive) => directives.push(directive),
-                    Err(e) => conversion_errors.push(Error {
-                        message: format!("Failed to reconstruct directive: {e}"),
-                        line: None,
-                        column: None,
-                        severity: "error".to_string(),
-                    }),
-                }
-            }
-
-            if !conversion_errors.is_empty() {
-                let result = ValidationResult {
-                    valid: false,
-                    errors: conversion_errors,
-                };
-                return serde_wasm_bindgen::to_value(&result).unwrap_or(JsValue::NULL);
-            }
-
-            // Run validation
-            let validation_errors = validate_ledger(&directives);
-            let errors: Vec<Error> = validation_errors
-                .iter()
-                .map(|e| Error {
-                    message: e.message.clone(),
-                    line: None,
-                    column: None,
-                    severity: "error".to_string(),
-                })
-                .collect();
-
-            let result = ValidationResult {
-                valid: errors.is_empty(),
-                errors,
-            };
-            serde_wasm_bindgen::to_value(&result).unwrap_or(JsValue::NULL)
-        }
-        Err(e) => {
-            let result = ValidationResult {
-                valid: false,
-                errors: vec![Error {
-                    message: format!("Invalid ledger JSON: {e}"),
-                    line: None,
-                    column: None,
-                    severity: "error".to_string(),
-                }],
-            };
-            serde_wasm_bindgen::to_value(&result).unwrap_or(JsValue::NULL)
-        }
-    }
+/** Amount with number and currency. */
+export interface Amount {
+    number: string;
+    currency: string;
 }
 
-/// Validate a Beancount source string directly.
-///
-/// Parses, interpolates, and validates in one step.
-#[wasm_bindgen]
-pub fn validate_source(source: &str) -> JsValue {
-    use rustledger_booking::interpolate;
+/** Posting cost specification. */
+export interface PostingCost {
+    number_per?: string;
+    currency?: string;
+    date?: string;
+    label?: string;
+}
 
+/** A posting within a transaction. */
+export interface Posting {
+    account: string;
+    units?: Amount;
+    cost?: PostingCost;
+    price?: Amount;
+}
+
+/** Base directive with date. */
+interface BaseDirective {
+    date: string;
+}
+
+/** Transaction directive. */
+export interface TransactionDirective extends BaseDirective {
+    type: 'transaction';
+    flag: string;
+    payee?: string;
+    narration?: string;
+    tags: string[];
+    links: string[];
+    postings: Posting[];
+}
+
+/** Balance assertion directive. */
+export interface BalanceDirective extends BaseDirective {
+    type: 'balance';
+    account: string;
+    amount: Amount;
+}
+
+/** Open account directive. */
+export interface OpenDirective extends BaseDirective {
+    type: 'open';
+    account: string;
+    currencies: string[];
+    booking?: string;
+}
+
+/** Close account directive. */
+export interface CloseDirective extends BaseDirective {
+    type: 'close';
+    account: string;
+}
+
+/** All directive types. */
+export type Directive =
+    | TransactionDirective
+    | BalanceDirective
+    | OpenDirective
+    | CloseDirective
+    | { type: 'commodity'; date: string; currency: string }
+    | { type: 'pad'; date: string; account: string; source_account: string }
+    | { type: 'event'; date: string; event_type: string; value: string }
+    | { type: 'note'; date: string; account: string; comment: string }
+    | { type: 'document'; date: string; account: string; path: string }
+    | { type: 'price'; date: string; currency: string; amount: Amount }
+    | { type: 'query'; date: string; name: string; query_string: string }
+    | { type: 'custom'; date: string; custom_type: string };
+
+/** Ledger options. */
+export interface LedgerOptions {
+    operating_currencies: string[];
+    title?: string;
+}
+
+/** Parsed ledger. */
+export interface Ledger {
+    directives: Directive[];
+    options: LedgerOptions;
+}
+
+/** Result of parsing a Beancount file. */
+export interface ParseResult {
+    ledger?: Ledger;
+    errors: BeancountError[];
+}
+
+/** Result of validation. */
+export interface ValidationResult {
+    valid: boolean;
+    errors: BeancountError[];
+}
+
+/** Cell value in query results. */
+export type CellValue =
+    | null
+    | string
+    | number
+    | boolean
+    | Amount
+    | { units: Amount; cost?: { number: string; currency: string; date?: string; label?: string } }
+    | { positions: Array<{ units: Amount }> }
+    | string[];
+
+/** Result of a BQL query. */
+export interface QueryResult {
+    columns: string[];
+    rows: CellValue[][];
+    errors: BeancountError[];
+}
+
+/** Result of formatting. */
+export interface FormatResult {
+    formatted?: string;
+    errors: BeancountError[];
+}
+
+/** Result of pad expansion. */
+export interface PadResult {
+    directives: Directive[];
+    padding_transactions: Directive[];
+    errors: BeancountError[];
+}
+
+/** Result of running a plugin. */
+export interface PluginResult {
+    directives: Directive[];
+    errors: BeancountError[];
+}
+
+/** Plugin information. */
+export interface PluginInfo {
+    name: string;
+    description: string;
+}
+
+/** BQL completion suggestion. */
+export interface Completion {
+    text: string;
+    category: string;
+    description?: string;
+}
+
+/** Result of BQL completion request. */
+export interface CompletionResult {
+    completions: Completion[];
+    context: string;
+}
+
+/**
+ * A parsed and validated ledger that caches the parse result.
+ * Use this class when you need to perform multiple operations on the same
+ * source without re-parsing each time.
+ */
+export class ParsedLedger {
+    constructor(source: string);
+    free(): void;
+
+    /** Check if the ledger is valid (no parse or validation errors). */
+    isValid(): boolean;
+
+    /** Get all errors (parse + validation). */
+    getErrors(): BeancountError[];
+
+    /** Get parse errors only. */
+    getParseErrors(): BeancountError[];
+
+    /** Get validation errors only. */
+    getValidationErrors(): BeancountError[];
+
+    /** Get the parsed directives. */
+    getDirectives(): Directive[];
+
+    /** Get the ledger options. */
+    getOptions(): LedgerOptions;
+
+    /** Get the number of directives. */
+    directiveCount(): number;
+
+    /** Run a BQL query on this ledger. */
+    query(queryStr: string): QueryResult;
+
+    /** Get account balances (shorthand for query("BALANCES")). */
+    balances(): QueryResult;
+
+    /** Format the ledger source. */
+    format(): FormatResult;
+
+    /** Expand pad directives. */
+    expandPads(): PadResult;
+
+    /** Run a native plugin on this ledger. */
+    runPlugin(pluginName: string): PluginResult;
+}
+"#;
+
+// =============================================================================
+// Initialization
+// =============================================================================
+
+/// Initialize the WASM module.
+///
+/// This sets up panic hooks for better error messages in the browser console.
+/// Call this once before using any other functions.
+#[wasm_bindgen(start)]
+pub fn init() {
+    // Set up panic hook for better error messages
+    console_error_panic_hook::set_once();
+}
+
+// =============================================================================
+// Internal Helpers
+// =============================================================================
+
+/// Result of loading and interpolating a source file.
+struct LoadResult {
+    directives: Vec<Directive>,
+    options: LedgerOptions,
+    errors: Vec<Error>,
+    lookup: LineLookup,
+    parse_result: ParserResult,
+}
+
+/// Parse and interpolate a Beancount source string.
+///
+/// This is the common entry point for all processing functions.
+fn load_and_interpolate(source: &str) -> LoadResult {
     let parse_result = parse_beancount(source);
     let lookup = LineLookup::new(source);
 
@@ -164,44 +312,21 @@ pub fn validate_source(source: &str) -> JsValue {
     let mut errors: Vec<Error> = parse_result
         .errors
         .iter()
-        .map(|e| Error {
-            message: e.to_string(),
-            line: Some(lookup.byte_to_line(e.span().0)),
-            column: None,
-            severity: "error".to_string(),
-        })
+        .map(|e| Error::with_line(e.to_string(), lookup.byte_to_line(e.span().0)))
         .collect();
 
-    // If parsing succeeded, run interpolation then validation
-    if parse_result.errors.is_empty() {
-        // Build a map from date to line number for error reporting
-        let mut date_to_line: HashMap<String, u32> = HashMap::new();
-        for spanned in &parse_result.directives {
-            let line = lookup.byte_to_line(spanned.span.start);
-            let date = match &spanned.value {
-                Directive::Transaction(t) => t.date.to_string(),
-                Directive::Balance(b) => b.date.to_string(),
-                Directive::Open(o) => o.date.to_string(),
-                Directive::Close(c) => c.date.to_string(),
-                Directive::Pad(p) => p.date.to_string(),
-                Directive::Commodity(c) => c.date.to_string(),
-                Directive::Event(e) => e.date.to_string(),
-                Directive::Query(q) => q.date.to_string(),
-                Directive::Note(n) => n.date.to_string(),
-                Directive::Document(d) => d.date.to_string(),
-                Directive::Price(p) => p.date.to_string(),
-                Directive::Custom(c) => c.date.to_string(),
-            };
-            date_to_line.entry(date).or_insert(line);
-        }
+    // Extract options
+    let options = extract_options(&parse_result.options);
 
-        let mut directives: Vec<_> = parse_result
-            .directives
-            .iter()
-            .map(|s| s.value.clone())
-            .collect();
+    // Extract directives
+    let mut directives: Vec<_> = parse_result
+        .directives
+        .iter()
+        .map(|s| s.value.clone())
+        .collect();
 
-        // Interpolate transactions (fill in missing amounts)
+    // Interpolate transactions (fill in missing amounts)
+    if errors.is_empty() {
         for (i, directive) in directives.iter_mut().enumerate() {
             if let Directive::Transaction(txn) = directive {
                 match interpolate(txn) {
@@ -210,65 +335,148 @@ pub fn validate_source(source: &str) -> JsValue {
                     }
                     Err(e) => {
                         let line = lookup.byte_to_line(parse_result.directives[i].span.start);
-                        errors.push(Error {
-                            message: e.to_string(),
-                            line: Some(line),
-                            column: None,
-                            severity: "error".to_string(),
-                        });
+                        errors.push(Error::with_line(e.to_string(), line));
                     }
                 }
             }
         }
+    }
 
-        // Run validation
-        let validation_errors = validate_ledger(&directives);
-        for err in validation_errors {
+    LoadResult {
+        directives,
+        options,
+        errors,
+        lookup,
+        parse_result,
+    }
+}
+
+/// Run validation on a loaded ledger and return validation errors.
+fn run_validation(load: &LoadResult) -> Vec<Error> {
+    if !load.errors.is_empty() {
+        return Vec::new();
+    }
+
+    let mut date_to_line: HashMap<String, u32> = HashMap::new();
+    for spanned in &load.parse_result.directives {
+        let line = load.lookup.byte_to_line(spanned.span.start);
+        let date = spanned.value.date().to_string();
+        date_to_line.entry(date).or_insert(line);
+    }
+
+    validate_ledger(&load.directives)
+        .into_iter()
+        .map(|err| {
             let line = date_to_line.get(&err.date.to_string()).copied();
-            errors.push(Error {
+            Error {
                 message: err.message,
                 line,
                 column: None,
-                severity: "error".to_string(),
-            });
+                severity: Severity::Error,
+            }
+        })
+        .collect()
+}
+
+/// Serialize a value to `JsValue` using JSON-compatible settings.
+///
+/// This ensures:
+/// - `None` serializes as `null` (not `undefined`)
+/// - Maps serialize as plain objects (not ES2015 `Map`)
+fn to_js<T: serde::Serialize>(value: &T) -> Result<JsValue, JsError> {
+    let serializer = serde_wasm_bindgen::Serializer::json_compatible();
+    value
+        .serialize(&serializer)
+        .map_err(|e| JsError::new(&e.to_string()))
+}
+
+// =============================================================================
+// Public API
+// =============================================================================
+
+/// Parse a Beancount source string.
+///
+/// Returns a `ParseResult` with the parsed ledger and any errors.
+#[wasm_bindgen]
+pub fn parse(source: &str) -> Result<JsValue, JsError> {
+    let result = parse_beancount(source);
+    let lookup = LineLookup::new(source);
+
+    let errors: Vec<Error> = result
+        .errors
+        .iter()
+        .map(|e| Error::with_line(e.to_string(), lookup.byte_to_line(e.span().0)))
+        .collect();
+
+    // Extract options from parsed result
+    let options = extract_options(&result.options);
+
+    let ledger = Some(Ledger {
+        directives: result
+            .directives
+            .iter()
+            .map(|spanned| directive_to_json(&spanned.value))
+            .collect(),
+        options,
+    });
+
+    let parse_result = ParseResult { ledger, errors };
+    to_js(&parse_result)
+}
+
+/// Extract [`LedgerOptions`] from parsed option directives.
+fn extract_options(options: &[(String, String, rustledger_parser::Span)]) -> LedgerOptions {
+    let mut ledger_options = LedgerOptions::default();
+
+    for (key, value, _span) in options {
+        match key.as_str() {
+            "title" => ledger_options.title = Some(value.clone()),
+            "operating_currency" => {
+                ledger_options.operating_currencies.push(value.clone());
+            }
+            _ => {} // Ignore other options for now
         }
     }
+
+    ledger_options
+}
+
+/// Validate a Beancount source string.
+///
+/// Parses, interpolates, and validates in one step.
+/// Returns a `ValidationResult` indicating whether the ledger is valid.
+#[wasm_bindgen(js_name = "validateSource")]
+pub fn validate_source(source: &str) -> Result<JsValue, JsError> {
+    let load = load_and_interpolate(source);
+    let validation_errors = run_validation(&load);
+    let mut errors = load.errors;
+    errors.extend(validation_errors);
 
     let result = ValidationResult {
         valid: errors.is_empty(),
         errors,
     };
-
-    serde_wasm_bindgen::to_value(&result).unwrap_or(JsValue::NULL)
+    to_js(&result)
 }
 
 /// Run a BQL query on a Beancount source string.
 ///
 /// Parses the source, interpolates, then executes the query.
+/// Returns a `QueryResult` with columns, rows, and any errors.
 #[wasm_bindgen]
-pub fn query(source: &str, query_str: &str) -> JsValue {
-    use rustledger_booking::interpolate;
+pub fn query(source: &str, query_str: &str) -> Result<JsValue, JsError> {
     use rustledger_query::{Executor, parse as parse_query};
 
-    // Parse the source
-    let parse_result = parse_beancount(source);
+    let load = load_and_interpolate(source);
 
-    if !parse_result.errors.is_empty() {
+    // Return early if there were parse/interpolation errors
+    if !load.errors.is_empty() {
         let result = QueryResult {
             columns: Vec::new(),
             rows: Vec::new(),
-            errors: parse_result
-                .errors
-                .iter()
-                .map(|e| Error {
-                    message: e.to_string(),
-                    line: Some(e.span().0 as u32 + 1),
-                    column: None,
-                    severity: "error".to_string(),
-                })
-                .collect(),
+            errors: load.errors,
         };
-        return serde_wasm_bindgen::to_value(&result).unwrap_or(JsValue::NULL);
+        return to_js(&result);
     }
 
     // Parse the query
@@ -278,57 +486,13 @@ pub fn query(source: &str, query_str: &str) -> JsValue {
             let result = QueryResult {
                 columns: Vec::new(),
                 rows: Vec::new(),
-                errors: vec![Error {
-                    message: format!("Query parse error: {e}"),
-                    line: None,
-                    column: None,
-                    severity: "error".to_string(),
-                }],
+                errors: vec![Error::new(format!("Query parse error: {e}"))],
             };
-            return serde_wasm_bindgen::to_value(&result).unwrap_or(JsValue::NULL);
+            return to_js(&result);
         }
     };
 
-    let lookup = LineLookup::new(source);
-
-    // Extract and interpolate directives
-    let mut directives: Vec<_> = parse_result
-        .directives
-        .iter()
-        .map(|s| s.value.clone())
-        .collect();
-
-    let mut interpolation_errors = Vec::new();
-    for (i, directive) in directives.iter_mut().enumerate() {
-        if let Directive::Transaction(txn) = directive {
-            match interpolate(txn) {
-                Ok(result) => {
-                    *txn = result.transaction;
-                }
-                Err(e) => {
-                    let line = lookup.byte_to_line(parse_result.directives[i].span.start);
-                    interpolation_errors.push(Error {
-                        message: e.to_string(),
-                        line: Some(line),
-                        column: None,
-                        severity: "error".to_string(),
-                    });
-                }
-            }
-        }
-    }
-
-    // Return errors if interpolation failed
-    if !interpolation_errors.is_empty() {
-        let result = QueryResult {
-            columns: Vec::new(),
-            rows: Vec::new(),
-            errors: interpolation_errors,
-        };
-        return serde_wasm_bindgen::to_value(&result).unwrap_or(JsValue::NULL);
-    }
-
-    let mut executor = Executor::new(&directives);
+    let mut executor = Executor::new(&load.directives);
     match executor.execute(&query) {
         Ok(result) => {
             let rows: Vec<Vec<_>> = result
@@ -342,25 +506,22 @@ pub fn query(source: &str, query_str: &str) -> JsValue {
                 rows,
                 errors: Vec::new(),
             };
-            serde_wasm_bindgen::to_value(&query_result).unwrap_or(JsValue::NULL)
+            to_js(&query_result)
         }
         Err(e) => {
             let result = QueryResult {
                 columns: Vec::new(),
                 rows: Vec::new(),
-                errors: vec![Error {
-                    message: format!("Query execution error: {e}"),
-                    line: None,
-                    column: None,
-                    severity: "error".to_string(),
-                }],
+                errors: vec![Error::new(format!("Query execution error: {e}"))],
             };
-            serde_wasm_bindgen::to_value(&result).unwrap_or(JsValue::NULL)
+            to_js(&result)
         }
     }
 }
 
 /// Get version information.
+///
+/// Returns the version string of the rustledger-wasm package.
 #[wasm_bindgen]
 pub fn version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
@@ -369,11 +530,13 @@ pub fn version() -> String {
 /// Format a Beancount source string.
 ///
 /// Parses and reformats with consistent alignment.
+/// Returns a `FormatResult` with the formatted source or errors.
 #[wasm_bindgen]
-pub fn format(source: &str) -> JsValue {
+pub fn format(source: &str) -> Result<JsValue, JsError> {
     use rustledger_core::{FormatConfig, format_directive};
 
     let parse_result = parse_beancount(source);
+    let lookup = LineLookup::new(source);
 
     if !parse_result.errors.is_empty() {
         let result = FormatResult {
@@ -381,15 +544,10 @@ pub fn format(source: &str) -> JsValue {
             errors: parse_result
                 .errors
                 .iter()
-                .map(|e| Error {
-                    message: e.to_string(),
-                    line: Some(e.span().0 as u32 + 1),
-                    column: None,
-                    severity: "error".to_string(),
-                })
+                .map(|e| Error::with_line(e.to_string(), lookup.byte_to_line(e.span().0)))
                 .collect(),
         };
-        return serde_wasm_bindgen::to_value(&result).unwrap_or(JsValue::NULL);
+        return to_js(&result);
     }
 
     let config = FormatConfig::default();
@@ -404,54 +562,30 @@ pub fn format(source: &str) -> JsValue {
         formatted: Some(formatted),
         errors: Vec::new(),
     };
-
-    serde_wasm_bindgen::to_value(&result).unwrap_or(JsValue::NULL)
+    to_js(&result)
 }
 
 /// Process pad directives and expand them.
 ///
 /// Returns directives with pad-generated transactions included.
-#[wasm_bindgen]
-pub fn expand_pads(source: &str) -> JsValue {
-    use rustledger_booking::{interpolate, process_pads};
+#[wasm_bindgen(js_name = "expandPads")]
+pub fn expand_pads(source: &str) -> Result<JsValue, JsError> {
+    use rustledger_booking::process_pads;
 
-    let parse_result = parse_beancount(source);
+    let load = load_and_interpolate(source);
 
-    if !parse_result.errors.is_empty() {
+    // Return early if there were parse/interpolation errors
+    if !load.errors.is_empty() {
         let result = PadResult {
             directives: Vec::new(),
             padding_transactions: Vec::new(),
-            errors: parse_result
-                .errors
-                .iter()
-                .map(|e| Error {
-                    message: e.to_string(),
-                    line: Some(e.span().0 as u32 + 1),
-                    column: None,
-                    severity: "error".to_string(),
-                })
-                .collect(),
+            errors: load.errors,
         };
-        return serde_wasm_bindgen::to_value(&result).unwrap_or(JsValue::NULL);
-    }
-
-    // Extract and interpolate directives
-    let mut directives: Vec<_> = parse_result
-        .directives
-        .iter()
-        .map(|s| s.value.clone())
-        .collect();
-
-    for directive in &mut directives {
-        if let Directive::Transaction(txn) = directive {
-            if let Ok(result) = interpolate(txn) {
-                *txn = result.transaction;
-            }
-        }
+        return to_js(&result);
     }
 
     // Process pads
-    let pad_result = process_pads(&directives);
+    let pad_result = process_pads(&load.directives);
 
     let result = PadResult {
         directives: pad_result
@@ -467,63 +601,32 @@ pub fn expand_pads(source: &str) -> JsValue {
         errors: pad_result
             .errors
             .iter()
-            .map(|e| Error {
-                message: e.message.clone(),
-                line: None,
-                column: None,
-                severity: "error".to_string(),
-            })
+            .map(|e| Error::new(e.message.clone()))
             .collect(),
     };
-
-    serde_wasm_bindgen::to_value(&result).unwrap_or(JsValue::NULL)
+    to_js(&result)
 }
 
 /// Run a native plugin on the source.
 ///
-/// Available plugins: `implicit_prices`, `check_commodity`, `auto_accounts`,
-/// `auto_tag`, `leafonly`, `noduplicates`, `onecommodity`, `unique_prices`,
-/// `check_closing`, `close_tree`, `coherent_cost`, `sellgains`, `pedantic`, `unrealized`
-#[wasm_bindgen]
-pub fn run_plugin(source: &str, plugin_name: &str) -> JsValue {
-    use rustledger_booking::interpolate;
+/// Available plugins can be listed with `listPlugins()`.
+#[cfg(feature = "plugins")]
+#[wasm_bindgen(js_name = "runPlugin")]
+pub fn run_plugin(source: &str, plugin_name: &str) -> Result<JsValue, JsError> {
     use rustledger_plugin::{
         NativePluginRegistry, PluginInput, PluginOptions, directives_to_wrappers,
         wrappers_to_directives,
     };
 
-    let parse_result = parse_beancount(source);
+    let load = load_and_interpolate(source);
 
-    if !parse_result.errors.is_empty() {
+    // Return early if there were parse/interpolation errors
+    if !load.errors.is_empty() {
         let result = PluginResult {
             directives: Vec::new(),
-            errors: parse_result
-                .errors
-                .iter()
-                .map(|e| Error {
-                    message: e.to_string(),
-                    line: Some(e.span().0 as u32 + 1),
-                    column: None,
-                    severity: "error".to_string(),
-                })
-                .collect(),
+            errors: load.errors,
         };
-        return serde_wasm_bindgen::to_value(&result).unwrap_or(JsValue::NULL);
-    }
-
-    // Extract and interpolate directives
-    let mut directives: Vec<_> = parse_result
-        .directives
-        .iter()
-        .map(|s| s.value.clone())
-        .collect();
-
-    for directive in &mut directives {
-        if let Directive::Transaction(txn) = directive {
-            if let Ok(result) = interpolate(txn) {
-                *txn = result.transaction;
-            }
-        }
+        return to_js(&result);
     }
 
     // Find and run the plugin
@@ -531,18 +634,13 @@ pub fn run_plugin(source: &str, plugin_name: &str) -> JsValue {
     let Some(plugin) = registry.find(plugin_name) else {
         let result = PluginResult {
             directives: Vec::new(),
-            errors: vec![Error {
-                message: format!("Unknown plugin: {plugin_name}"),
-                line: None,
-                column: None,
-                severity: "error".to_string(),
-            }],
+            errors: vec![Error::new(format!("Unknown plugin: {plugin_name}"))],
         };
-        return serde_wasm_bindgen::to_value(&result).unwrap_or(JsValue::NULL);
+        return to_js(&result);
     };
 
     // Convert directives to plugin format and run
-    let wrappers = directives_to_wrappers(&directives);
+    let wrappers = directives_to_wrappers(&load.directives);
     let input = PluginInput {
         directives: wrappers,
         options: PluginOptions::default(),
@@ -557,14 +655,9 @@ pub fn run_plugin(source: &str, plugin_name: &str) -> JsValue {
         Err(e) => {
             let result = PluginResult {
                 directives: Vec::new(),
-                errors: vec![Error {
-                    message: format!("Conversion error: {e}"),
-                    line: None,
-                    column: None,
-                    severity: "error".to_string(),
-                }],
+                errors: vec![Error::new(format!("Conversion error: {e}"))],
             };
-            return serde_wasm_bindgen::to_value(&result).unwrap_or(JsValue::NULL);
+            return to_js(&result);
         }
     };
 
@@ -573,100 +666,52 @@ pub fn run_plugin(source: &str, plugin_name: &str) -> JsValue {
         errors: output
             .errors
             .iter()
-            .map(|e| Error {
-                message: e.message.clone(),
-                line: None,
-                column: None,
-                severity: match e.severity {
-                    rustledger_plugin::PluginErrorSeverity::Warning => "warning".to_string(),
-                    rustledger_plugin::PluginErrorSeverity::Error => "error".to_string(),
-                },
+            .map(|e| match e.severity {
+                rustledger_plugin::PluginErrorSeverity::Warning => {
+                    Error::warning(e.message.clone())
+                }
+                rustledger_plugin::PluginErrorSeverity::Error => Error::new(e.message.clone()),
             })
             .collect(),
     };
-
-    serde_wasm_bindgen::to_value(&result).unwrap_or(JsValue::NULL)
+    to_js(&result)
 }
 
 /// List available native plugins.
-#[wasm_bindgen]
-pub fn list_plugins() -> JsValue {
-    let plugins = vec![
-        PluginInfo {
-            name: "implicit_prices".to_string(),
-            description: "Generate price entries from transaction costs/prices".to_string(),
-        },
-        PluginInfo {
-            name: "check_commodity".to_string(),
-            description: "Verify all commodities are declared".to_string(),
-        },
-        PluginInfo {
-            name: "auto_accounts".to_string(),
-            description: "Auto-generate Open directives for used accounts".to_string(),
-        },
-        PluginInfo {
-            name: "auto_tag".to_string(),
-            description: "Auto-tag transactions by account patterns".to_string(),
-        },
-        PluginInfo {
-            name: "leafonly".to_string(),
-            description: "Error on postings to non-leaf accounts".to_string(),
-        },
-        PluginInfo {
-            name: "noduplicates".to_string(),
-            description: "Hash-based duplicate transaction detection".to_string(),
-        },
-        PluginInfo {
-            name: "onecommodity".to_string(),
-            description: "Enforce single commodity per account".to_string(),
-        },
-        PluginInfo {
-            name: "unique_prices".to_string(),
-            description: "One price per day per currency pair".to_string(),
-        },
-        PluginInfo {
-            name: "check_closing".to_string(),
-            description: "Zero balance assertion on account closing".to_string(),
-        },
-        PluginInfo {
-            name: "close_tree".to_string(),
-            description: "Close descendant accounts automatically".to_string(),
-        },
-        PluginInfo {
-            name: "coherent_cost".to_string(),
-            description: "Enforce cost OR price (not both) consistency".to_string(),
-        },
-        PluginInfo {
-            name: "sellgains".to_string(),
-            description: "Cross-check capital gains against sales".to_string(),
-        },
-        PluginInfo {
-            name: "pedantic".to_string(),
-            description: "Enable all strict validation rules".to_string(),
-        },
-        PluginInfo {
-            name: "unrealized".to_string(),
-            description: "Calculate unrealized gains/losses".to_string(),
-        },
-    ];
+///
+/// Returns an array of `PluginInfo` objects with name and description.
+#[cfg(feature = "plugins")]
+#[wasm_bindgen(js_name = "listPlugins")]
+pub fn list_plugins() -> Result<JsValue, JsError> {
+    use rustledger_plugin::NativePluginRegistry;
 
-    serde_wasm_bindgen::to_value(&plugins).unwrap_or(JsValue::NULL)
+    let registry = NativePluginRegistry::new();
+    let plugins: Vec<PluginInfo> = registry
+        .list()
+        .iter()
+        .map(|p| PluginInfo {
+            name: p.name().to_string(),
+            description: p.description().to_string(),
+        })
+        .collect();
+
+    to_js(&plugins)
 }
 
 /// Calculate account balances.
 ///
-/// Returns balances grouped by account.
+/// Shorthand for `query(source, "BALANCES")`.
 #[wasm_bindgen]
-pub fn balances(source: &str) -> JsValue {
-    // Just use the query function with BALANCES
+pub fn balances(source: &str) -> Result<JsValue, JsError> {
     query(source, "BALANCES")
 }
 
 /// Get BQL query completions at cursor position.
 ///
 /// Returns context-aware completions for the BQL query language.
-#[wasm_bindgen]
-pub fn bql_completions(partial_query: &str, cursor_pos: usize) -> JsValue {
+#[cfg(feature = "completions")]
+#[wasm_bindgen(js_name = "bqlCompletions")]
+pub fn bql_completions(partial_query: &str, cursor_pos: usize) -> Result<JsValue, JsError> {
     use rustledger_query::completions;
 
     let result = completions::complete(partial_query, cursor_pos);
@@ -684,13 +729,291 @@ pub fn bql_completions(partial_query: &str, cursor_pos: usize) -> JsValue {
         context: format!("{:?}", result.context),
     };
 
-    serde_wasm_bindgen::to_value(&json_result).unwrap_or(JsValue::NULL)
+    to_js(&json_result)
 }
+
+// =============================================================================
+// Stateful Ledger Class
+// =============================================================================
+
+/// A parsed and validated ledger that caches the parse result.
+///
+/// Use this class when you need to perform multiple operations on the same
+/// source without re-parsing each time.
+///
+/// # Example (JavaScript)
+///
+/// ```javascript
+/// const ledger = new ParsedLedger(source);
+/// if (ledger.isValid()) {
+///     const balances = ledger.query("BALANCES");
+///     const formatted = ledger.format();
+/// }
+/// ```
+#[wasm_bindgen]
+pub struct ParsedLedger {
+    directives: Vec<Directive>,
+    options: LedgerOptions,
+    parse_errors: Vec<Error>,
+    validation_errors: Vec<Error>,
+}
+
+#[wasm_bindgen]
+impl ParsedLedger {
+    /// Create a new `ParsedLedger` from source text.
+    ///
+    /// Parses, interpolates, and validates the source. Call `isValid()` to check for errors.
+    #[wasm_bindgen(constructor)]
+    pub fn new(source: &str) -> Self {
+        let load = load_and_interpolate(source);
+        let validation_errors = run_validation(&load);
+
+        Self {
+            directives: load.directives,
+            options: load.options,
+            parse_errors: load.errors,
+            validation_errors,
+        }
+    }
+
+    /// Check if the ledger is valid (no parse or validation errors).
+    #[wasm_bindgen(js_name = "isValid")]
+    pub fn is_valid(&self) -> bool {
+        self.parse_errors.is_empty() && self.validation_errors.is_empty()
+    }
+
+    /// Get all errors (parse + validation).
+    #[wasm_bindgen(js_name = "getErrors")]
+    pub fn get_errors(&self) -> Result<JsValue, JsError> {
+        let mut all_errors = self.parse_errors.clone();
+        all_errors.extend(self.validation_errors.clone());
+        to_js(&all_errors)
+    }
+
+    /// Get parse errors only.
+    #[wasm_bindgen(js_name = "getParseErrors")]
+    pub fn get_parse_errors(&self) -> Result<JsValue, JsError> {
+        to_js(&self.parse_errors)
+    }
+
+    /// Get validation errors only.
+    #[wasm_bindgen(js_name = "getValidationErrors")]
+    pub fn get_validation_errors(&self) -> Result<JsValue, JsError> {
+        to_js(&self.validation_errors)
+    }
+
+    /// Get the parsed directives.
+    #[wasm_bindgen(js_name = "getDirectives")]
+    pub fn get_directives(&self) -> Result<JsValue, JsError> {
+        let directives: Vec<_> = self.directives.iter().map(directive_to_json).collect();
+        to_js(&directives)
+    }
+
+    /// Get the ledger options.
+    #[wasm_bindgen(js_name = "getOptions")]
+    pub fn get_options(&self) -> Result<JsValue, JsError> {
+        to_js(&self.options)
+    }
+
+    /// Get the number of directives.
+    #[wasm_bindgen(js_name = "directiveCount")]
+    pub fn directive_count(&self) -> usize {
+        self.directives.len()
+    }
+
+    /// Run a BQL query on this ledger.
+    #[wasm_bindgen]
+    pub fn query(&self, query_str: &str) -> Result<JsValue, JsError> {
+        use rustledger_query::{Executor, parse as parse_query};
+
+        if !self.parse_errors.is_empty() {
+            let result = QueryResult {
+                columns: Vec::new(),
+                rows: Vec::new(),
+                errors: self.parse_errors.clone(),
+            };
+            return to_js(&result);
+        }
+
+        let query = match parse_query(query_str) {
+            Ok(q) => q,
+            Err(e) => {
+                let result = QueryResult {
+                    columns: Vec::new(),
+                    rows: Vec::new(),
+                    errors: vec![Error::new(format!("Query parse error: {e}"))],
+                };
+                return to_js(&result);
+            }
+        };
+
+        let mut executor = Executor::new(&self.directives);
+        match executor.execute(&query) {
+            Ok(result) => {
+                let rows: Vec<Vec<_>> = result
+                    .rows
+                    .iter()
+                    .map(|row| row.iter().map(value_to_cell).collect())
+                    .collect();
+
+                let query_result = QueryResult {
+                    columns: result.columns,
+                    rows,
+                    errors: Vec::new(),
+                };
+                to_js(&query_result)
+            }
+            Err(e) => {
+                let result = QueryResult {
+                    columns: Vec::new(),
+                    rows: Vec::new(),
+                    errors: vec![Error::new(format!("Query execution error: {e}"))],
+                };
+                to_js(&result)
+            }
+        }
+    }
+
+    /// Get account balances (shorthand for query("BALANCES")).
+    #[wasm_bindgen]
+    pub fn balances(&self) -> Result<JsValue, JsError> {
+        self.query("BALANCES")
+    }
+
+    /// Format the ledger source.
+    #[wasm_bindgen]
+    pub fn format(&self) -> Result<JsValue, JsError> {
+        use rustledger_core::{FormatConfig, format_directive};
+
+        if !self.parse_errors.is_empty() {
+            let result = FormatResult {
+                formatted: None,
+                errors: self.parse_errors.clone(),
+            };
+            return to_js(&result);
+        }
+
+        let config = FormatConfig::default();
+        let mut formatted = String::new();
+
+        for directive in &self.directives {
+            formatted.push_str(&format_directive(directive, &config));
+            formatted.push('\n');
+        }
+
+        let result = FormatResult {
+            formatted: Some(formatted),
+            errors: Vec::new(),
+        };
+        to_js(&result)
+    }
+
+    /// Expand pad directives.
+    #[wasm_bindgen(js_name = "expandPads")]
+    pub fn expand_pads(&self) -> Result<JsValue, JsError> {
+        use rustledger_booking::process_pads;
+
+        if !self.parse_errors.is_empty() {
+            let result = PadResult {
+                directives: Vec::new(),
+                padding_transactions: Vec::new(),
+                errors: self.parse_errors.clone(),
+            };
+            return to_js(&result);
+        }
+
+        let pad_result = process_pads(&self.directives);
+
+        let result = PadResult {
+            directives: pad_result
+                .directives
+                .iter()
+                .map(directive_to_json)
+                .collect(),
+            padding_transactions: pad_result
+                .padding_transactions
+                .iter()
+                .map(|txn| directive_to_json(&Directive::Transaction(txn.clone())))
+                .collect(),
+            errors: pad_result
+                .errors
+                .iter()
+                .map(|e| Error::new(e.message.clone()))
+                .collect(),
+        };
+        to_js(&result)
+    }
+
+    /// Run a native plugin on this ledger.
+    #[cfg(feature = "plugins")]
+    #[wasm_bindgen(js_name = "runPlugin")]
+    pub fn run_plugin(&self, plugin_name: &str) -> Result<JsValue, JsError> {
+        use rustledger_plugin::{
+            NativePluginRegistry, PluginInput, PluginOptions, directives_to_wrappers,
+            wrappers_to_directives,
+        };
+
+        if !self.parse_errors.is_empty() {
+            let result = PluginResult {
+                directives: Vec::new(),
+                errors: self.parse_errors.clone(),
+            };
+            return to_js(&result);
+        }
+
+        let registry = NativePluginRegistry::new();
+        let Some(plugin) = registry.find(plugin_name) else {
+            let result = PluginResult {
+                directives: Vec::new(),
+                errors: vec![Error::new(format!("Unknown plugin: {plugin_name}"))],
+            };
+            return to_js(&result);
+        };
+
+        let wrappers = directives_to_wrappers(&self.directives);
+        let input = PluginInput {
+            directives: wrappers,
+            options: PluginOptions::default(),
+            config: None,
+        };
+
+        let output = plugin.process(input);
+
+        let output_directives = match wrappers_to_directives(&output.directives) {
+            Ok(dirs) => dirs,
+            Err(e) => {
+                let result = PluginResult {
+                    directives: Vec::new(),
+                    errors: vec![Error::new(format!("Conversion error: {e}"))],
+                };
+                return to_js(&result);
+            }
+        };
+
+        let result = PluginResult {
+            directives: output_directives.iter().map(directive_to_json).collect(),
+            errors: output
+                .errors
+                .iter()
+                .map(|e| match e.severity {
+                    rustledger_plugin::PluginErrorSeverity::Warning => {
+                        Error::warning(e.message.clone())
+                    }
+                    rustledger_plugin::PluginErrorSeverity::Error => Error::new(e.message.clone()),
+                })
+                .collect(),
+        };
+        to_js(&result)
+    }
+}
+
+// =============================================================================
+// Tests
+// =============================================================================
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use types::DirectiveJson;
 
     #[test]
     fn test_parse_simple() {
@@ -714,67 +1037,34 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_ledger_reconstruction() {
-        use types::{AmountValue, PostingJson};
+    fn test_load_and_interpolate() {
+        // Valid ledger
+        let source = r#"
+2024-01-01 open Assets:Bank USD
+2024-01-01 open Expenses:Food USD
 
-        // Test that we can reconstruct directives for validation
-        let ledger = Ledger {
-            directives: vec![
-                DirectiveJson::Open {
-                    date: "2024-01-01".to_string(),
-                    account: "Assets:Bank".to_string(),
-                    currencies: vec!["USD".to_string()],
-                    booking: None,
-                },
-                DirectiveJson::Transaction {
-                    date: "2024-01-15".to_string(),
-                    flag: "*".to_string(),
-                    payee: None,
-                    narration: Some("Test".to_string()),
-                    tags: vec![],
-                    links: vec![],
-                    postings: vec![
-                        PostingJson {
-                            account: "Assets:Bank".to_string(),
-                            units: Some(AmountValue {
-                                number: "100.00".to_string(),
-                                currency: "USD".to_string(),
-                            }),
-                            cost: None,
-                            price: None,
-                        },
-                        PostingJson {
-                            account: "Equity:Opening".to_string(),
-                            units: Some(AmountValue {
-                                number: "-100.00".to_string(),
-                                currency: "USD".to_string(),
-                            }),
-                            cost: None,
-                            price: None,
-                        },
-                    ],
-                },
-            ],
-            options: LedgerOptions::default(),
-        };
+2024-01-15 * "Coffee"
+  Expenses:Food  5.00 USD
+  Assets:Bank   -5.00 USD
+"#;
+        let load = load_and_interpolate(source);
+        assert!(load.errors.is_empty());
+        assert_eq!(load.directives.len(), 3);
 
-        // Reconstruct directives from JSON
-        let mut directives = Vec::new();
-        for dir_json in &ledger.directives {
-            let directive = json_to_directive(dir_json).expect("should reconstruct directive");
-            directives.push(directive);
-        }
+        // Invalid ledger (unopened account)
+        let source = r#"
+2024-01-01 open Assets:Bank USD
 
-        // Verify we got the right directives
-        assert_eq!(directives.len(), 2);
-        assert!(matches!(directives[0], Directive::Open(_)));
-        assert!(matches!(directives[1], Directive::Transaction(_)));
-
-        // Run validation (should find Equity:Opening not opened)
-        let validation_errors = validate_ledger(&directives);
+2024-01-15 * "Coffee"
+  Expenses:Food  5.00 USD
+  Assets:Bank   -5.00 USD
+"#;
+        let load = load_and_interpolate(source);
+        assert!(load.errors.is_empty()); // Parse succeeds
+        let validation_errors = validate_ledger(&load.directives);
         assert!(
             !validation_errors.is_empty(),
-            "should detect Equity:Opening not opened"
+            "should detect Expenses:Food not opened"
         );
     }
 }

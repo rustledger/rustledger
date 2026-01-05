@@ -64,6 +64,17 @@ detect_arch() {
   esac
 }
 
+# Detect if using musl libc (Alpine, etc.)
+detect_musl() {
+  if [ -f /etc/alpine-release ]; then
+    return 0
+  fi
+  if ldd --version 2>&1 | grep -q musl; then
+    return 0
+  fi
+  return 1
+}
+
 # Get the target triple
 get_target() {
   local os="$1"
@@ -71,10 +82,17 @@ get_target() {
 
   case "$os" in
   linux)
-    case "$arch" in
-    x86_64) echo "x86_64-unknown-linux-gnu" ;;
-    aarch64) echo "aarch64-unknown-linux-gnu" ;;
-    esac
+    if detect_musl; then
+      case "$arch" in
+      x86_64) echo "x86_64-unknown-linux-musl" ;;
+      aarch64) echo "aarch64-unknown-linux-musl" ;;
+      esac
+    else
+      case "$arch" in
+      x86_64) echo "x86_64-unknown-linux-gnu" ;;
+      aarch64) echo "aarch64-unknown-linux-gnu" ;;
+      esac
+    fi
     ;;
   macos)
     case "$arch" in

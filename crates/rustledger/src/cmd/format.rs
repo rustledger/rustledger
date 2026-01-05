@@ -1,7 +1,7 @@
 //! Shared implementation for bean-format and rledger-format commands.
 
 use crate::cmd::completions::ShellType;
-use crate::format::{FormatConfig, format_directive};
+use crate::format::{format_directive, FormatConfig};
 use anyhow::{Context, Result};
 use clap::Parser;
 use rustledger_loader::Loader;

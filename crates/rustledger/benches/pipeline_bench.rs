@@ -7,7 +7,7 @@
 
 #![allow(missing_docs)]
 
-use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
 use rustledger_booking::interpolate;
 use rustledger_core::Directive;

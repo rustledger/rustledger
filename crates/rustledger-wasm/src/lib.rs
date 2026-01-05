@@ -42,7 +42,7 @@ use wasm_bindgen::prelude::*;
 
 use rustledger_booking::interpolate;
 use rustledger_core::Directive;
-use rustledger_parser::{ParseResult as ParserResult, parse as parse_beancount};
+use rustledger_parser::{parse as parse_beancount, ParseResult as ParserResult};
 use rustledger_validate::validate as validate_ledger;
 
 use convert::{directive_to_json, value_to_cell};
@@ -465,7 +465,7 @@ pub fn validate_source(source: &str) -> Result<JsValue, JsError> {
 /// Returns a `QueryResult` with columns, rows, and any errors.
 #[wasm_bindgen]
 pub fn query(source: &str, query_str: &str) -> Result<JsValue, JsError> {
-    use rustledger_query::{Executor, parse as parse_query};
+    use rustledger_query::{parse as parse_query, Executor};
 
     let load = load_and_interpolate(source);
 
@@ -533,7 +533,7 @@ pub fn version() -> String {
 /// Returns a `FormatResult` with the formatted source or errors.
 #[wasm_bindgen]
 pub fn format(source: &str) -> Result<JsValue, JsError> {
-    use rustledger_core::{FormatConfig, format_directive};
+    use rustledger_core::{format_directive, FormatConfig};
 
     let parse_result = parse_beancount(source);
     let lookup = LineLookup::new(source);
@@ -614,8 +614,8 @@ pub fn expand_pads(source: &str) -> Result<JsValue, JsError> {
 #[wasm_bindgen(js_name = "runPlugin")]
 pub fn run_plugin(source: &str, plugin_name: &str) -> Result<JsValue, JsError> {
     use rustledger_plugin::{
-        NativePluginRegistry, PluginInput, PluginOptions, directives_to_wrappers,
-        wrappers_to_directives,
+        directives_to_wrappers, wrappers_to_directives, NativePluginRegistry, PluginInput,
+        PluginOptions,
     };
 
     let load = load_and_interpolate(source);
@@ -824,7 +824,7 @@ impl ParsedLedger {
     /// Run a BQL query on this ledger.
     #[wasm_bindgen]
     pub fn query(&self, query_str: &str) -> Result<JsValue, JsError> {
-        use rustledger_query::{Executor, parse as parse_query};
+        use rustledger_query::{parse as parse_query, Executor};
 
         if !self.parse_errors.is_empty() {
             let result = QueryResult {
@@ -883,7 +883,7 @@ impl ParsedLedger {
     /// Format the ledger source.
     #[wasm_bindgen]
     pub fn format(&self) -> Result<JsValue, JsError> {
-        use rustledger_core::{FormatConfig, format_directive};
+        use rustledger_core::{format_directive, FormatConfig};
 
         if !self.parse_errors.is_empty() {
             let result = FormatResult {
@@ -949,8 +949,8 @@ impl ParsedLedger {
     #[wasm_bindgen(js_name = "runPlugin")]
     pub fn run_plugin(&self, plugin_name: &str) -> Result<JsValue, JsError> {
         use rustledger_plugin::{
-            NativePluginRegistry, PluginInput, PluginOptions, directives_to_wrappers,
-            wrappers_to_directives,
+            directives_to_wrappers, wrappers_to_directives, NativePluginRegistry, PluginInput,
+            PluginOptions,
         };
 
         if !self.parse_errors.is_empty() {

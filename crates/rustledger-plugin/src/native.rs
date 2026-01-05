@@ -566,8 +566,8 @@ impl NativePlugin for NoDuplicatesPlugin {
     }
 
     fn process(&self, input: PluginInput) -> PluginOutput {
-        use std::collections::HashSet;
         use std::collections::hash_map::DefaultHasher;
+        use std::collections::HashSet;
         use std::hash::{Hash, Hasher};
 
         fn hash_transaction(date: &str, txn: &TransactionData) -> u64 {

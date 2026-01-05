@@ -16,7 +16,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use rustledger_core::Directive;
 use rustledger_loader::Loader;
-use rustledger_query::{Executor, Value, parse as parse_query};
+use rustledger_query::{parse as parse_query, Executor, Value};
 use rustyline::error::ReadlineError;
 use rustyline::history::DefaultHistory;
 use rustyline::{DefaultEditor, Editor};

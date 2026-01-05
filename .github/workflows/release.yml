@@ -207,3 +207,34 @@ jobs:
           npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+  # Publish MCP server to npm
+  publish-mcp:
+    name: Publish MCP server to npm
+    needs: publish-wasm
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+      - name: Update version and install dependencies
+        run: |
+          cd packages/mcp-server
+          VERSION=${GITHUB_REF#refs/tags/v}
+          # Update version in package.json
+          sed -i "s/\"version\": \".*\"/\"version\": \"$VERSION\"/" package.json
+          # Update @rustledger/wasm dependency to use npm package
+          sed -i 's|"@rustledger/wasm": "file:../../crates/rustledger-wasm/pkg"|"@rustledger/wasm": "^'$VERSION'"|' package.json
+          npm install
+      - name: Build
+        run: |
+          cd packages/mcp-server
+          npm run build
+      - name: Publish to npm
+        run: |
+          cd packages/mcp-server
+          npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

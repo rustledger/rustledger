@@ -30,11 +30,8 @@ cargo install rustledger --no-default-features
 
 ### As a Library
 
-```toml
-[dependencies]
-rustledger-core = "1.0.0-rc.1"
-rustledger-parser = "1.0.0-rc.1"
-rustledger-loader = "1.0.0-rc.1"
+```bash
+cargo add rustledger-core rustledger-parser rustledger-loader
 ```
 
 ## CLI Usage

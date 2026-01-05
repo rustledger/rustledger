@@ -6,6 +6,7 @@ on:
       - 'v*'
 permissions:
   contents: write
+  id-token: write # Required for npm trusted publishing (OIDC)
 env:
   CARGO_TERM_COLOR: always
 jobs:
@@ -201,12 +202,10 @@ jobs:
           sed -i "s/\"version\": \".*\"/\"version\": \"$VERSION\"/" package.json
           # Update package name if needed
           sed -i 's/"name": "rustledger-wasm"/"name": "@rustledger\/wasm"/' package.json
-      - name: Publish to npm
+      - name: Publish to npm (trusted publishing)
         run: |
           cd crates/rustledger-wasm/pkg
-          npm publish --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          npm publish --access public --provenance
   # Publish MCP server to npm
   publish-mcp:
     name: Publish MCP server to npm
@@ -232,9 +231,7 @@ jobs:
         run: |
           cd packages/mcp-server
           npm run build
-      - name: Publish to npm
+      - name: Publish to npm (trusted publishing)
         run: |
           cd packages/mcp-server
-          npm publish --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          npm publish --access public --provenance

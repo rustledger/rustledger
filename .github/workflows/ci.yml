@@ -1,16 +1,15 @@
 # CI workflow for rustledger
 name: CI
-
 on:
   push:
     branches: [main]
   pull_request:
     branches: [main]
-
+  merge_group:
+    branches: [main]
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -Dwarnings
-
 jobs:
   check:
     name: Check
@@ -20,7 +19,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --all-features --all-targets
-
   test:
     name: Test
     runs-on: ubuntu-latest
@@ -29,7 +27,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --all-features
-
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
@@ -40,7 +37,6 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --all-features --all-targets -- -D warnings
-
   fmt:
     name: Format
     runs-on: ubuntu-latest
@@ -50,7 +46,6 @@ jobs:
         with:
           components: rustfmt
       - run: cargo fmt --all -- --check
-
   doc:
     name: Documentation
     runs-on: ubuntu-latest
@@ -61,7 +56,6 @@ jobs:
       - run: cargo doc --all-features --no-deps
         env:
           RUSTDOCFLAGS: -Dwarnings
-
   # All checks pass - required for branch protection
   build:
     name: build

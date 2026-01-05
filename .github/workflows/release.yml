@@ -207,7 +207,13 @@ jobs:
       - name: Publish to npm (trusted publishing)
         run: |
           cd crates/rustledger-wasm/pkg
-          npm publish --access public --provenance
+          VERSION=${GITHUB_REF#refs/tags/v}
+          # Use --tag next for prereleases, --tag latest for stable
+          if [[ "$VERSION" == *"-"* ]]; then
+            npm publish --access public --provenance --tag next
+          else
+            npm publish --access public --provenance
+          fi
   # Publish MCP server to npm
   publish-mcp:
     name: Publish MCP server to npm
@@ -238,4 +244,10 @@ jobs:
       - name: Publish to npm (trusted publishing)
         run: |
           cd packages/mcp-server
-          npm publish --access public --provenance
+          VERSION=${GITHUB_REF#refs/tags/v}
+          # Use --tag next for prereleases, --tag latest for stable
+          if [[ "$VERSION" == *"-"* ]]; then
+            npm publish --access public --provenance --tag next
+          else
+            npm publish --access public --provenance
+          fi

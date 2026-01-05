@@ -42,8 +42,15 @@ js-sys = "0.3"
 
 [package.metadata.wasm-pack.profile.release]
 # Optimize for speed (aligned with profile.wasm-release opt-level = 3)
-# --enable-bulk-memory required for newer Rust versions that emit memory.copy/memory.fill
-wasm-opt = ["-O3", "--enable-mutable-globals", "--enable-bulk-memory"]
+# Feature flags required for newer Rust WASM output:
+# - bulk-memory: memory.copy/memory.fill instructions
+# - nontrapping-float-to-int: i32.trunc_sat_f64_s and similar
+wasm-opt = [
+  "-O3",
+  "--enable-mutable-globals",
+  "--enable-bulk-memory",
+  "--enable-nontrapping-float-to-int",
+]
 
 [package.metadata.wasm-pack.profile.dev]
 wasm-opt = false

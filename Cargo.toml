@@ -13,7 +13,7 @@ members = [
 ]
 
 [workspace.package]
-version = "1.0.0-rc.5"
+version = "1.0.0-rc.6"
 edition = "2021"
 rust-version = "1.75"
 license = "GPL-3.0"
@@ -67,13 +67,13 @@ rust_decimal_macros = "1.36"
 tokio = { version = "1", features = ["full"] }
 
 # Internal crates
-rustledger-core = { version = "1.0.0-rc.5", path = "crates/rustledger-core" }
-rustledger-parser = { version = "1.0.0-rc.5", path = "crates/rustledger-parser" }
-rustledger-loader = { version = "1.0.0-rc.5", path = "crates/rustledger-loader" }
-rustledger-booking = { version = "1.0.0-rc.5", path = "crates/rustledger-booking" }
-rustledger-validate = { version = "1.0.0-rc.5", path = "crates/rustledger-validate" }
-rustledger-query = { version = "1.0.0-rc.5", path = "crates/rustledger-query" }
-rustledger-plugin = { version = "1.0.0-rc.5", path = "crates/rustledger-plugin", default-features = false }
+rustledger-core = { version = "1.0.0-rc.6", path = "crates/rustledger-core" }
+rustledger-parser = { version = "1.0.0-rc.6", path = "crates/rustledger-parser" }
+rustledger-loader = { version = "1.0.0-rc.6", path = "crates/rustledger-loader" }
+rustledger-booking = { version = "1.0.0-rc.6", path = "crates/rustledger-booking" }
+rustledger-validate = { version = "1.0.0-rc.6", path = "crates/rustledger-validate" }
+rustledger-query = { version = "1.0.0-rc.6", path = "crates/rustledger-query" }
+rustledger-plugin = { version = "1.0.0-rc.6", path = "crates/rustledger-plugin", default-features = false }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

@@ -137,37 +137,38 @@ jobs:
         run: |
           # Publish in dependency order with delay between each
           # to allow crates.io to index the previous crate
+          # Use || true to continue if crate already exists
 
           echo "Publishing rustledger-core..."
-          cargo publish -p rustledger-core --no-verify
+          cargo publish -p rustledger-core --no-verify || true
           sleep 30
 
           echo "Publishing rustledger-parser..."
-          cargo publish -p rustledger-parser --no-verify
+          cargo publish -p rustledger-parser --no-verify || true
           sleep 30
 
           echo "Publishing rustledger-booking..."
-          cargo publish -p rustledger-booking --no-verify
+          cargo publish -p rustledger-booking --no-verify || true
           sleep 30
 
           echo "Publishing rustledger-loader..."
-          cargo publish -p rustledger-loader --no-verify
+          cargo publish -p rustledger-loader --no-verify || true
           sleep 30
 
           echo "Publishing rustledger-validate..."
-          cargo publish -p rustledger-validate --no-verify
+          cargo publish -p rustledger-validate --no-verify || true
           sleep 30
 
           echo "Publishing rustledger-query..."
-          cargo publish -p rustledger-query --no-verify
+          cargo publish -p rustledger-query --no-verify || true
           sleep 30
 
           echo "Publishing rustledger-plugin..."
-          cargo publish -p rustledger-plugin --no-verify
+          cargo publish -p rustledger-plugin --no-verify || true
           sleep 30
 
           echo "Publishing rustledger (CLI)..."
-          cargo publish -p rustledger --no-verify
+          cargo publish -p rustledger --no-verify || true
 
           echo "All crates published!"
   # Publish WASM package to npm

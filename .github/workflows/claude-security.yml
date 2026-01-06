@@ -1,0 +1,35 @@
+# Security-focused code review using Claude Code
+name: Claude Security Review
+on:
+  pull_request:
+    types: [opened, synchronize]
+    branches: [main]
+    paths:
+      # Focus on code that could have security implications
+      - 'crates/**/*.rs'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'deny.toml'
+# Prevent concurrent reviews on the same PR
+concurrency:
+  group: claude-security-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+jobs:
+  security:
+    name: Security Review
+    runs-on: ubuntu-latest
+    # Don't run on draft PRs
+    if: github.event.pull_request.draft == false
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - uses: anthropics/claude-code-security-review@main
+        with:
+          claude-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          comment-pr: true

@@ -38,3 +38,4 @@ jobs:
 
             Be constructive and specific. If changes look good, say so briefly.
           claude_args: "--max-turns 5"
+          allowed_tools: "Edit,MultiEdit,Glob,Grep,LS,Read,Write,WebSearch,WebFetch,Bash(git*)"

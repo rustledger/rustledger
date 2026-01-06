@@ -25,5 +25,4 @@ jobs:
       - uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          claude_args: "--max-turns 10"
-          allowed_tools: "Edit,MultiEdit,Glob,Grep,LS,Read,Write,WebSearch,WebFetch,Bash(git*)"
+          claude_args: "--max-turns 10 --allowedTools WebSearch,WebFetch"

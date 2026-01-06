@@ -302,7 +302,10 @@ impl<'a> Executor<'a> {
         accounts.sort();
 
         for account in accounts {
-            let balance = self.balances.get(account).unwrap();
+            // Safety: account comes from self.balances.keys(), so it's guaranteed to exist
+            let Some(balance) = self.balances.get(account) else {
+                continue; // Defensive: skip if somehow the key disappeared
+            };
 
             // Apply AT function if specified
             let balance_value = if let Some(at_func) = &query.at_function {
@@ -561,7 +564,7 @@ impl<'a> Executor<'a> {
                         _ => {
                             return Err(QueryError::Type(
                                 "has_account expects a string pattern".to_string(),
-                            ))
+                            ));
                         }
                     };
                     // Check if any posting matches the account pattern
@@ -883,7 +886,7 @@ impl<'a> Executor<'a> {
                         _ => {
                             return Err(QueryError::Type(
                                 "ROOT second arg must be integer".to_string(),
-                            ))
+                            ));
                         }
                     }
                 } else {
@@ -1205,7 +1208,7 @@ impl<'a> Executor<'a> {
                         _ => {
                             return Err(QueryError::Type(
                                 "ROUND second arg must be integer".to_string(),
-                            ))
+                            ));
                         }
                     }
                 } else {
@@ -1352,7 +1355,7 @@ impl<'a> Executor<'a> {
                         _ => {
                             return Err(QueryError::Type(
                                 "VALUE second argument must be a currency string".to_string(),
-                            ))
+                            ));
                         }
                     }
                 } else {
@@ -1447,7 +1450,7 @@ impl<'a> Executor<'a> {
                     _ => {
                         return Err(QueryError::Type(
                             "regex requires string left operand".to_string(),
-                        ))
+                        ));
                     }
                 };
                 let pattern = match right {
@@ -1455,7 +1458,7 @@ impl<'a> Executor<'a> {
                     _ => {
                         return Err(QueryError::Type(
                             "regex requires string pattern".to_string(),
-                        ))
+                        ));
                     }
                 };
                 // Simple contains check (full regex would need regex crate)
@@ -1470,7 +1473,7 @@ impl<'a> Executor<'a> {
                             _ => {
                                 return Err(QueryError::Type(
                                     "IN requires string left operand".to_string(),
-                                ))
+                                ));
                             }
                         };
                         Ok(Value::Boolean(set.contains(&needle)))
@@ -1565,7 +1568,7 @@ impl<'a> Executor<'a> {
             _ => {
                 return Err(QueryError::Type(
                     "arithmetic requires numeric values".to_string(),
-                ))
+                ));
             }
         };
         Ok(Value::Number(op(a, b)))
@@ -1753,7 +1756,7 @@ impl<'a> Executor<'a> {
                                 _ => {
                                     return Err(QueryError::Type(
                                         "SUM requires numeric or position value".to_string(),
-                                    ))
+                                    ));
                                 }
                             }
                         }
@@ -1861,7 +1864,7 @@ impl<'a> Executor<'a> {
                                 _ => {
                                     return Err(QueryError::Type(
                                         "AVG expects numeric values".to_string(),
-                                    ))
+                                    ));
                                 }
                             }
                         }
@@ -1980,7 +1983,7 @@ impl<'a> Executor<'a> {
                 _ => {
                     return Err(QueryError::Evaluation(
                         "ORDER BY expression must reference a selected column".to_string(),
-                    ))
+                    ));
                 }
             };
             let ascending = spec.direction != SortDirection::Desc;

@@ -1,0 +1,8 @@
+; Main file with include
+option "title" "Main Ledger"
+
+include "accounts.beancount"
+
+2024-01-15 * "Grocery Store" "Weekly groceries"
+  Expenses:Food  50.00 USD
+  Assets:Bank:Checking

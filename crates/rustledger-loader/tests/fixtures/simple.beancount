@@ -1,0 +1,13 @@
+; Simple test ledger
+option "title" "Test Ledger"
+option "operating_currency" "USD"
+
+2024-01-01 open Assets:Bank:Checking USD
+2024-01-01 open Expenses:Food
+2024-01-01 open Income:Salary
+
+2024-01-15 * "Grocery Store" "Weekly groceries"
+  Expenses:Food  50.00 USD
+  Assets:Bank:Checking
+
+2024-01-31 balance Assets:Bank:Checking -50.00 USD

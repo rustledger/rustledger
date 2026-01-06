@@ -1,0 +1,6 @@
+; File with plugin directives
+plugin "beancount.plugins.leafonly"
+plugin "beancount.plugins.check_commodity" "config_string"
+
+2024-01-01 open Assets:Bank USD
+2024-01-01 open Expenses:Food

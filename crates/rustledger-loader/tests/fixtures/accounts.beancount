@@ -1,0 +1,4 @@
+; Account definitions
+2024-01-01 open Assets:Bank:Checking USD
+2024-01-01 open Expenses:Food
+2024-01-01 open Income:Salary

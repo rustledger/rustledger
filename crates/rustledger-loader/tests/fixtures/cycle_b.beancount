@@ -1,0 +1,4 @@
+; File B - includes A (creates cycle)
+include "cycle_a.beancount"
+
+2024-01-01 open Assets:B

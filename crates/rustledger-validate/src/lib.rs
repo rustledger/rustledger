@@ -477,7 +477,12 @@ fn validate_account_name(account: &str) -> Option<String> {
         }
 
         // First character must be uppercase letter or digit
-        let first_char = part.chars().next().unwrap();
+        // Safety: we just checked part.is_empty() above, so this is guaranteed to succeed
+        let Some(first_char) = part.chars().next() else {
+            // This branch is unreachable due to the is_empty check above,
+            // but we handle it defensively to avoid unwrap
+            return Some(format!("component {} is empty", i + 1));
+        };
         if !first_char.is_ascii_uppercase() && !first_char.is_ascii_digit() {
             return Some(format!(
                 "component '{part}' must start with uppercase letter or digit"

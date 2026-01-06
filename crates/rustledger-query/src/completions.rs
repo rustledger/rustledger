@@ -173,9 +173,12 @@ fn tokenize_bql(text: &str) -> Vec<String> {
                 tokens.push(current.clone());
                 current.clear();
             }
-            // Handle multi-char operators
+            // Handle multi-char operators (!=, <=, >=)
             if (c == '!' || c == '<' || c == '>') && chars.peek() == Some(&'=') {
-                tokens.push(format!("{}{}", c, chars.next().unwrap()));
+                // Safety: we just checked peek() == Some(&'='), so next() is guaranteed
+                if let Some(next_char) = chars.next() {
+                    tokens.push(format!("{c}{next_char}"));
+                }
             } else {
                 tokens.push(c.to_string());
             }

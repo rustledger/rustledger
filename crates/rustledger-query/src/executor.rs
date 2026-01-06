@@ -753,46 +753,100 @@ impl<'a> Executor<'a> {
     }
 
     /// Evaluate a function call.
+    ///
+    /// Dispatches to specialized helper methods based on function category.
     fn evaluate_function(
         &self,
         func: &FunctionCall,
         ctx: &PostingContext,
     ) -> Result<Value, QueryError> {
-        // For now, only handle simple functions
-        match func.name.to_uppercase().as_str() {
-            "YEAR" => {
-                if func.args.len() != 1 {
-                    return Err(QueryError::InvalidArguments(
-                        "YEAR".to_string(),
-                        "expected 1 argument".to_string(),
-                    ));
-                }
-                let val = self.evaluate_expr(&func.args[0], ctx)?;
-                match val {
-                    Value::Date(d) => Ok(Value::Integer(d.year().into())),
-                    _ => Err(QueryError::Type("YEAR expects a date".to_string())),
-                }
+        let name = func.name.to_uppercase();
+        match name.as_str() {
+            // Date functions
+            "YEAR" | "MONTH" | "DAY" | "WEEKDAY" | "QUARTER" | "YMONTH" | "TODAY" => {
+                self.eval_date_function(&name, func, ctx)
             }
-            "MONTH" => {
-                if func.args.len() != 1 {
-                    return Err(QueryError::InvalidArguments(
-                        "MONTH".to_string(),
-                        "expected 1 argument".to_string(),
-                    ));
-                }
-                let val = self.evaluate_expr(&func.args[0], ctx)?;
-                match val {
-                    Value::Date(d) => Ok(Value::Integer(d.month().into())),
-                    _ => Err(QueryError::Type("MONTH expects a date".to_string())),
-                }
+            // String functions
+            "LENGTH" | "UPPER" | "LOWER" | "SUBSTR" | "SUBSTRING" | "TRIM" | "STARTSWITH"
+            | "ENDSWITH" => self.eval_string_function(&name, func, ctx),
+            // Account functions
+            "PARENT" | "LEAF" | "ROOT" | "ACCOUNT_DEPTH" | "ACCOUNT_SORTKEY" => {
+                self.eval_account_function(&name, func, ctx)
             }
+            // Math functions
+            "ABS" | "NEG" | "ROUND" | "SAFEDIV" => self.eval_math_function(&name, func, ctx),
+            // Amount/Position functions
+            "NUMBER" | "CURRENCY" | "GETITEM" | "GET" | "UNITS" | "COST" | "WEIGHT" | "VALUE" => {
+                self.eval_position_function(&name, func, ctx)
+            }
+            // Utility functions
+            "COALESCE" => self.eval_coalesce(func, ctx),
+            // Aggregate functions return Null when evaluated on a single row
+            // They're handled specially in aggregate evaluation
+            "SUM" | "COUNT" | "MIN" | "MAX" | "FIRST" | "LAST" | "AVG" => Ok(Value::Null),
+            _ => Err(QueryError::UnknownFunction(func.name.clone())),
+        }
+    }
+
+    /// Evaluate date functions: `YEAR`, `MONTH`, `DAY`, `WEEKDAY`, `QUARTER`, `YMONTH`, `TODAY`.
+    fn eval_date_function(
+        &self,
+        name: &str,
+        func: &FunctionCall,
+        ctx: &PostingContext,
+    ) -> Result<Value, QueryError> {
+        if name == "TODAY" {
+            if !func.args.is_empty() {
+                return Err(QueryError::InvalidArguments(
+                    "TODAY".to_string(),
+                    "expected 0 arguments".to_string(),
+                ));
+            }
+            return Ok(Value::Date(chrono::Local::now().date_naive()));
+        }
+
+        // All other date functions expect exactly 1 argument
+        if func.args.len() != 1 {
+            return Err(QueryError::InvalidArguments(
+                name.to_string(),
+                "expected 1 argument".to_string(),
+            ));
+        }
+
+        let val = self.evaluate_expr(&func.args[0], ctx)?;
+        let date = match val {
+            Value::Date(d) => d,
+            _ => return Err(QueryError::Type(format!("{name} expects a date"))),
+        };
+
+        match name {
+            "YEAR" => Ok(Value::Integer(date.year().into())),
+            "MONTH" => Ok(Value::Integer(date.month().into())),
+            "DAY" => Ok(Value::Integer(date.day().into())),
+            "WEEKDAY" => Ok(Value::Integer(date.weekday().num_days_from_monday().into())),
+            "QUARTER" => {
+                let quarter = (date.month() - 1) / 3 + 1;
+                Ok(Value::Integer(quarter.into()))
+            }
+            "YMONTH" => Ok(Value::String(format!(
+                "{:04}-{:02}",
+                date.year(),
+                date.month()
+            ))),
+            _ => unreachable!(),
+        }
+    }
+
+    /// Evaluate string functions: `LENGTH`, `UPPER`, `LOWER`, `SUBSTR`, `TRIM`, `STARTSWITH`, `ENDSWITH`.
+    fn eval_string_function(
+        &self,
+        name: &str,
+        func: &FunctionCall,
+        ctx: &PostingContext,
+    ) -> Result<Value, QueryError> {
+        match name {
             "LENGTH" => {
-                if func.args.len() != 1 {
-                    return Err(QueryError::InvalidArguments(
-                        "LENGTH".to_string(),
-                        "expected 1 argument".to_string(),
-                    ));
-                }
+                Self::require_args(name, func, 1)?;
                 let val = self.evaluate_expr(&func.args[0], ctx)?;
                 match val {
                     Value::String(s) => Ok(Value::Integer(s.len() as i64)),
@@ -803,12 +857,7 @@ impl<'a> Executor<'a> {
                 }
             }
             "UPPER" => {
-                if func.args.len() != 1 {
-                    return Err(QueryError::InvalidArguments(
-                        "UPPER".to_string(),
-                        "expected 1 argument".to_string(),
-                    ));
-                }
+                Self::require_args(name, func, 1)?;
                 let val = self.evaluate_expr(&func.args[0], ctx)?;
                 match val {
                     Value::String(s) => Ok(Value::String(s.to_uppercase())),
@@ -816,29 +865,101 @@ impl<'a> Executor<'a> {
                 }
             }
             "LOWER" => {
-                if func.args.len() != 1 {
-                    return Err(QueryError::InvalidArguments(
-                        "LOWER".to_string(),
-                        "expected 1 argument".to_string(),
-                    ));
-                }
+                Self::require_args(name, func, 1)?;
                 let val = self.evaluate_expr(&func.args[0], ctx)?;
                 match val {
                     Value::String(s) => Ok(Value::String(s.to_lowercase())),
                     _ => Err(QueryError::Type("LOWER expects a string".to_string())),
                 }
             }
-            "PARENT" => {
-                if func.args.len() != 1 {
-                    return Err(QueryError::InvalidArguments(
-                        "PARENT".to_string(),
-                        "expected 1 argument".to_string(),
-                    ));
+            "TRIM" => {
+                Self::require_args(name, func, 1)?;
+                let val = self.evaluate_expr(&func.args[0], ctx)?;
+                match val {
+                    Value::String(s) => Ok(Value::String(s.trim().to_string())),
+                    _ => Err(QueryError::Type("TRIM expects a string".to_string())),
                 }
+            }
+            "SUBSTR" | "SUBSTRING" => self.eval_substr(func, ctx),
+            "STARTSWITH" => {
+                Self::require_args(name, func, 2)?;
+                let val = self.evaluate_expr(&func.args[0], ctx)?;
+                let prefix = self.evaluate_expr(&func.args[1], ctx)?;
+                match (val, prefix) {
+                    (Value::String(s), Value::String(p)) => Ok(Value::Boolean(s.starts_with(&p))),
+                    _ => Err(QueryError::Type(
+                        "STARTSWITH expects two strings".to_string(),
+                    )),
+                }
+            }
+            "ENDSWITH" => {
+                Self::require_args(name, func, 2)?;
+                let val = self.evaluate_expr(&func.args[0], ctx)?;
+                let suffix = self.evaluate_expr(&func.args[1], ctx)?;
+                match (val, suffix) {
+                    (Value::String(s), Value::String(p)) => Ok(Value::Boolean(s.ends_with(&p))),
+                    _ => Err(QueryError::Type("ENDSWITH expects two strings".to_string())),
+                }
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    /// Evaluate SUBSTR/SUBSTRING function.
+    fn eval_substr(&self, func: &FunctionCall, ctx: &PostingContext) -> Result<Value, QueryError> {
+        if func.args.len() < 2 || func.args.len() > 3 {
+            return Err(QueryError::InvalidArguments(
+                "SUBSTR".to_string(),
+                "expected 2 or 3 arguments".to_string(),
+            ));
+        }
+
+        let val = self.evaluate_expr(&func.args[0], ctx)?;
+        let start = self.evaluate_expr(&func.args[1], ctx)?;
+        let len = if func.args.len() == 3 {
+            Some(self.evaluate_expr(&func.args[2], ctx)?)
+        } else {
+            None
+        };
+
+        match (val, start, len) {
+            (Value::String(s), Value::Integer(start), None) => {
+                let start = start.max(0) as usize;
+                if start >= s.len() {
+                    Ok(Value::String(String::new()))
+                } else {
+                    Ok(Value::String(s[start..].to_string()))
+                }
+            }
+            (Value::String(s), Value::Integer(start), Some(Value::Integer(len))) => {
+                let start = start.max(0) as usize;
+                let len = len.max(0) as usize;
+                if start >= s.len() {
+                    Ok(Value::String(String::new()))
+                } else {
+                    let end = (start + len).min(s.len());
+                    Ok(Value::String(s[start..end].to_string()))
+                }
+            }
+            _ => Err(QueryError::Type(
+                "SUBSTR expects (string, int, [int])".to_string(),
+            )),
+        }
+    }
+
+    /// Evaluate account functions: `PARENT`, `LEAF`, `ROOT`, `ACCOUNT_DEPTH`, `ACCOUNT_SORTKEY`.
+    fn eval_account_function(
+        &self,
+        name: &str,
+        func: &FunctionCall,
+        ctx: &PostingContext,
+    ) -> Result<Value, QueryError> {
+        match name {
+            "PARENT" => {
+                Self::require_args(name, func, 1)?;
                 let val = self.evaluate_expr(&func.args[0], ctx)?;
                 match val {
                     Value::String(s) => {
-                        // Get parent account: "Expenses:Food:Coffee" -> "Expenses:Food"
                         if let Some(idx) = s.rfind(':') {
                             Ok(Value::String(s[..idx].to_string()))
                         } else {
@@ -851,16 +972,10 @@ impl<'a> Executor<'a> {
                 }
             }
             "LEAF" => {
-                if func.args.len() != 1 {
-                    return Err(QueryError::InvalidArguments(
-                        "LEAF".to_string(),
-                        "expected 1 argument".to_string(),
-                    ));
-                }
+                Self::require_args(name, func, 1)?;
                 let val = self.evaluate_expr(&func.args[0], ctx)?;
                 match val {
                     Value::String(s) => {
-                        // Get leaf account: "Expenses:Food:Coffee" -> "Coffee"
                         if let Some(idx) = s.rfind(':') {
                             Ok(Value::String(s[idx + 1..].to_string()))
                         } else {
@@ -872,261 +987,12 @@ impl<'a> Executor<'a> {
                     )),
                 }
             }
-            "ROOT" => {
-                if func.args.is_empty() || func.args.len() > 2 {
-                    return Err(QueryError::InvalidArguments(
-                        "ROOT".to_string(),
-                        "expected 1 or 2 arguments".to_string(),
-                    ));
-                }
-                let val = self.evaluate_expr(&func.args[0], ctx)?;
-                let n = if func.args.len() == 2 {
-                    match self.evaluate_expr(&func.args[1], ctx)? {
-                        Value::Integer(i) => i as usize,
-                        _ => {
-                            return Err(QueryError::Type(
-                                "ROOT second arg must be integer".to_string(),
-                            ));
-                        }
-                    }
-                } else {
-                    1 // Default: return first component only
-                };
-                match val {
-                    Value::String(s) => {
-                        // Get first n components: "Expenses:Food:Coffee" with n=2 -> "Expenses:Food"
-                        let parts: Vec<&str> = s.split(':').collect();
-                        if n >= parts.len() {
-                            Ok(Value::String(s))
-                        } else {
-                            Ok(Value::String(parts[..n].join(":")))
-                        }
-                    }
-                    _ => Err(QueryError::Type(
-                        "ROOT expects an account string".to_string(),
-                    )),
-                }
-            }
-            "ACCOUNT_SORTKEY" => {
-                // Returns a sortable key for account ordering
-                if func.args.len() != 1 {
-                    return Err(QueryError::InvalidArguments(
-                        "ACCOUNT_SORTKEY".to_string(),
-                        "expected 1 argument".to_string(),
-                    ));
-                }
-                let val = self.evaluate_expr(&func.args[0], ctx)?;
-                match val {
-                    Value::String(s) => Ok(Value::String(s)),
-                    _ => Err(QueryError::Type(
-                        "ACCOUNT_SORTKEY expects an account string".to_string(),
-                    )),
-                }
-            }
-            "ABS" => {
-                if func.args.len() != 1 {
-                    return Err(QueryError::InvalidArguments(
-                        "ABS".to_string(),
-                        "expected 1 argument".to_string(),
-                    ));
-                }
-                let val = self.evaluate_expr(&func.args[0], ctx)?;
-                match val {
-                    Value::Number(n) => Ok(Value::Number(n.abs())),
-                    Value::Integer(i) => Ok(Value::Integer(i.abs())),
-                    _ => Err(QueryError::Type("ABS expects a number".to_string())),
-                }
-            }
-            "NEG" => {
-                if func.args.len() != 1 {
-                    return Err(QueryError::InvalidArguments(
-                        "NEG".to_string(),
-                        "expected 1 argument".to_string(),
-                    ));
-                }
-                let val = self.evaluate_expr(&func.args[0], ctx)?;
-                match val {
-                    Value::Number(n) => Ok(Value::Number(-n)),
-                    Value::Integer(i) => Ok(Value::Integer(-i)),
-                    _ => Err(QueryError::Type("NEG expects a number".to_string())),
-                }
-            }
-            "DAY" => {
-                if func.args.len() != 1 {
-                    return Err(QueryError::InvalidArguments(
-                        "DAY".to_string(),
-                        "expected 1 argument".to_string(),
-                    ));
-                }
-                let val = self.evaluate_expr(&func.args[0], ctx)?;
-                match val {
-                    Value::Date(d) => Ok(Value::Integer(d.day().into())),
-                    _ => Err(QueryError::Type("DAY expects a date".to_string())),
-                }
-            }
-            "WEEKDAY" => {
-                if func.args.len() != 1 {
-                    return Err(QueryError::InvalidArguments(
-                        "WEEKDAY".to_string(),
-                        "expected 1 argument".to_string(),
-                    ));
-                }
-                let val = self.evaluate_expr(&func.args[0], ctx)?;
-                match val {
-                    Value::Date(d) => {
-                        // 0 = Monday, 6 = Sunday
-                        Ok(Value::Integer(d.weekday().num_days_from_monday().into()))
-                    }
-                    _ => Err(QueryError::Type("WEEKDAY expects a date".to_string())),
-                }
-            }
-            "QUARTER" => {
-                if func.args.len() != 1 {
-                    return Err(QueryError::InvalidArguments(
-                        "QUARTER".to_string(),
-                        "expected 1 argument".to_string(),
-                    ));
-                }
-                let val = self.evaluate_expr(&func.args[0], ctx)?;
-                match val {
-                    Value::Date(d) => {
-                        let quarter = (d.month() - 1) / 3 + 1;
-                        Ok(Value::Integer(quarter.into()))
-                    }
-                    _ => Err(QueryError::Type("QUARTER expects a date".to_string())),
-                }
-            }
-            "YMONTH" => {
-                // Returns YYYY-MM format string
-                if func.args.len() != 1 {
-                    return Err(QueryError::InvalidArguments(
-                        "YMONTH".to_string(),
-                        "expected 1 argument".to_string(),
-                    ));
-                }
-                let val = self.evaluate_expr(&func.args[0], ctx)?;
-                match val {
-                    Value::Date(d) => {
-                        Ok(Value::String(format!("{:04}-{:02}", d.year(), d.month())))
-                    }
-                    _ => Err(QueryError::Type("YMONTH expects a date".to_string())),
-                }
-            }
-            "TODAY" => {
-                // Return current date
-                if !func.args.is_empty() {
-                    return Err(QueryError::InvalidArguments(
-                        "TODAY".to_string(),
-                        "expected 0 arguments".to_string(),
-                    ));
-                }
-                Ok(Value::Date(chrono::Local::now().date_naive()))
-            }
-            // String functions
-            "SUBSTR" | "SUBSTRING" => {
-                if func.args.len() < 2 || func.args.len() > 3 {
-                    return Err(QueryError::InvalidArguments(
-                        "SUBSTR".to_string(),
-                        "expected 2 or 3 arguments".to_string(),
-                    ));
-                }
-                let val = self.evaluate_expr(&func.args[0], ctx)?;
-                let start = self.evaluate_expr(&func.args[1], ctx)?;
-                let len = if func.args.len() == 3 {
-                    Some(self.evaluate_expr(&func.args[2], ctx)?)
-                } else {
-                    None
-                };
-
-                match (val, start, len) {
-                    (Value::String(s), Value::Integer(start), None) => {
-                        let start = start.max(0) as usize;
-                        if start >= s.len() {
-                            Ok(Value::String(String::new()))
-                        } else {
-                            Ok(Value::String(s[start..].to_string()))
-                        }
-                    }
-                    (Value::String(s), Value::Integer(start), Some(Value::Integer(len))) => {
-                        let start = start.max(0) as usize;
-                        let len = len.max(0) as usize;
-                        if start >= s.len() {
-                            Ok(Value::String(String::new()))
-                        } else {
-                            let end = (start + len).min(s.len());
-                            Ok(Value::String(s[start..end].to_string()))
-                        }
-                    }
-                    _ => Err(QueryError::Type(
-                        "SUBSTR expects (string, int, [int])".to_string(),
-                    )),
-                }
-            }
-            "TRIM" => {
-                if func.args.len() != 1 {
-                    return Err(QueryError::InvalidArguments(
-                        "TRIM".to_string(),
-                        "expected 1 argument".to_string(),
-                    ));
-                }
-                let val = self.evaluate_expr(&func.args[0], ctx)?;
-                match val {
-                    Value::String(s) => Ok(Value::String(s.trim().to_string())),
-                    _ => Err(QueryError::Type("TRIM expects a string".to_string())),
-                }
-            }
-            "STARTSWITH" => {
-                if func.args.len() != 2 {
-                    return Err(QueryError::InvalidArguments(
-                        "STARTSWITH".to_string(),
-                        "expected 2 arguments".to_string(),
-                    ));
-                }
-                let val = self.evaluate_expr(&func.args[0], ctx)?;
-                let prefix = self.evaluate_expr(&func.args[1], ctx)?;
-                match (val, prefix) {
-                    (Value::String(s), Value::String(p)) => Ok(Value::Boolean(s.starts_with(&p))),
-                    _ => Err(QueryError::Type(
-                        "STARTSWITH expects two strings".to_string(),
-                    )),
-                }
-            }
-            "ENDSWITH" => {
-                if func.args.len() != 2 {
-                    return Err(QueryError::InvalidArguments(
-                        "ENDSWITH".to_string(),
-                        "expected 2 arguments".to_string(),
-                    ));
-                }
-                let val = self.evaluate_expr(&func.args[0], ctx)?;
-                let suffix = self.evaluate_expr(&func.args[1], ctx)?;
-                match (val, suffix) {
-                    (Value::String(s), Value::String(p)) => Ok(Value::Boolean(s.ends_with(&p))),
-                    _ => Err(QueryError::Type("ENDSWITH expects two strings".to_string())),
-                }
-            }
-            "COALESCE" => {
-                // Return first non-null argument
-                for arg in &func.args {
-                    let val = self.evaluate_expr(arg, ctx)?;
-                    if !matches!(val, Value::Null) {
-                        return Ok(val);
-                    }
-                }
-                Ok(Value::Null)
-            }
-            // Account functions
+            "ROOT" => self.eval_root(func, ctx),
             "ACCOUNT_DEPTH" => {
-                if func.args.len() != 1 {
-                    return Err(QueryError::InvalidArguments(
-                        "ACCOUNT_DEPTH".to_string(),
-                        "expected 1 argument".to_string(),
-                    ));
-                }
+                Self::require_args(name, func, 1)?;
                 let val = self.evaluate_expr(&func.args[0], ctx)?;
                 match val {
                     Value::String(s) => {
-                        // Depth = number of colons + 1
                         let depth = s.chars().filter(|c| *c == ':').count() + 1;
                         Ok(Value::Integer(depth as i64))
                     }
@@ -1135,14 +1001,155 @@ impl<'a> Executor<'a> {
                     )),
                 }
             }
-            // Amount/Position functions
-            "NUMBER" => {
-                if func.args.len() != 1 {
-                    return Err(QueryError::InvalidArguments(
-                        "NUMBER".to_string(),
-                        "expected 1 argument".to_string(),
+            "ACCOUNT_SORTKEY" => {
+                Self::require_args(name, func, 1)?;
+                let val = self.evaluate_expr(&func.args[0], ctx)?;
+                match val {
+                    Value::String(s) => Ok(Value::String(s)),
+                    _ => Err(QueryError::Type(
+                        "ACCOUNT_SORTKEY expects an account string".to_string(),
+                    )),
+                }
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    /// Evaluate ROOT function (takes 1-2 arguments).
+    fn eval_root(&self, func: &FunctionCall, ctx: &PostingContext) -> Result<Value, QueryError> {
+        if func.args.is_empty() || func.args.len() > 2 {
+            return Err(QueryError::InvalidArguments(
+                "ROOT".to_string(),
+                "expected 1 or 2 arguments".to_string(),
+            ));
+        }
+
+        let val = self.evaluate_expr(&func.args[0], ctx)?;
+        let n = if func.args.len() == 2 {
+            match self.evaluate_expr(&func.args[1], ctx)? {
+                Value::Integer(i) => i as usize,
+                _ => {
+                    return Err(QueryError::Type(
+                        "ROOT second arg must be integer".to_string(),
                     ));
                 }
+            }
+        } else {
+            1
+        };
+
+        match val {
+            Value::String(s) => {
+                let parts: Vec<&str> = s.split(':').collect();
+                if n >= parts.len() {
+                    Ok(Value::String(s))
+                } else {
+                    Ok(Value::String(parts[..n].join(":")))
+                }
+            }
+            _ => Err(QueryError::Type(
+                "ROOT expects an account string".to_string(),
+            )),
+        }
+    }
+
+    /// Evaluate math functions: `ABS`, `NEG`, `ROUND`, `SAFEDIV`.
+    fn eval_math_function(
+        &self,
+        name: &str,
+        func: &FunctionCall,
+        ctx: &PostingContext,
+    ) -> Result<Value, QueryError> {
+        match name {
+            "ABS" => {
+                Self::require_args(name, func, 1)?;
+                let val = self.evaluate_expr(&func.args[0], ctx)?;
+                match val {
+                    Value::Number(n) => Ok(Value::Number(n.abs())),
+                    Value::Integer(i) => Ok(Value::Integer(i.abs())),
+                    _ => Err(QueryError::Type("ABS expects a number".to_string())),
+                }
+            }
+            "NEG" => {
+                Self::require_args(name, func, 1)?;
+                let val = self.evaluate_expr(&func.args[0], ctx)?;
+                match val {
+                    Value::Number(n) => Ok(Value::Number(-n)),
+                    Value::Integer(i) => Ok(Value::Integer(-i)),
+                    _ => Err(QueryError::Type("NEG expects a number".to_string())),
+                }
+            }
+            "ROUND" => self.eval_round(func, ctx),
+            "SAFEDIV" => self.eval_safediv(func, ctx),
+            _ => unreachable!(),
+        }
+    }
+
+    /// Evaluate ROUND function (takes 1-2 arguments).
+    fn eval_round(&self, func: &FunctionCall, ctx: &PostingContext) -> Result<Value, QueryError> {
+        if func.args.is_empty() || func.args.len() > 2 {
+            return Err(QueryError::InvalidArguments(
+                "ROUND".to_string(),
+                "expected 1 or 2 arguments".to_string(),
+            ));
+        }
+
+        let val = self.evaluate_expr(&func.args[0], ctx)?;
+        let decimals = if func.args.len() == 2 {
+            match self.evaluate_expr(&func.args[1], ctx)? {
+                Value::Integer(i) => i as u32,
+                _ => {
+                    return Err(QueryError::Type(
+                        "ROUND second arg must be integer".to_string(),
+                    ));
+                }
+            }
+        } else {
+            0
+        };
+
+        match val {
+            Value::Number(n) => Ok(Value::Number(n.round_dp(decimals))),
+            Value::Integer(i) => Ok(Value::Integer(i)),
+            _ => Err(QueryError::Type("ROUND expects a number".to_string())),
+        }
+    }
+
+    /// Evaluate SAFEDIV function.
+    fn eval_safediv(&self, func: &FunctionCall, ctx: &PostingContext) -> Result<Value, QueryError> {
+        Self::require_args("SAFEDIV", func, 2)?;
+        let num = self.evaluate_expr(&func.args[0], ctx)?;
+        let den = self.evaluate_expr(&func.args[1], ctx)?;
+
+        match (num, den) {
+            (Value::Number(n), Value::Number(d)) => {
+                if d.is_zero() {
+                    Ok(Value::Number(Decimal::ZERO))
+                } else {
+                    Ok(Value::Number(n / d))
+                }
+            }
+            (Value::Integer(n), Value::Integer(d)) => {
+                if d == 0 {
+                    Ok(Value::Integer(0))
+                } else {
+                    Ok(Value::Integer(n / d))
+                }
+            }
+            _ => Err(QueryError::Type("SAFEDIV expects two numbers".to_string())),
+        }
+    }
+
+    /// Evaluate position/amount functions: `NUMBER`, `CURRENCY`, `GETITEM`, `UNITS`, `COST`, `WEIGHT`, `VALUE`.
+    fn eval_position_function(
+        &self,
+        name: &str,
+        func: &FunctionCall,
+        ctx: &PostingContext,
+    ) -> Result<Value, QueryError> {
+        match name {
+            "NUMBER" => {
+                Self::require_args(name, func, 1)?;
                 let val = self.evaluate_expr(&func.args[0], ctx)?;
                 match val {
                     Value::Amount(a) => Ok(Value::Number(a.number)),
@@ -1155,12 +1162,7 @@ impl<'a> Executor<'a> {
                 }
             }
             "CURRENCY" => {
-                if func.args.len() != 1 {
-                    return Err(QueryError::InvalidArguments(
-                        "CURRENCY".to_string(),
-                        "expected 1 argument".to_string(),
-                    ));
-                }
+                Self::require_args(name, func, 1)?;
                 let val = self.evaluate_expr(&func.args[0], ctx)?;
                 match val {
                     Value::Amount(a) => Ok(Value::String(a.currency)),
@@ -1170,255 +1172,208 @@ impl<'a> Executor<'a> {
                     )),
                 }
             }
-            "GETITEM" | "GET" => {
-                // Get item from inventory by currency
-                if func.args.len() != 2 {
-                    return Err(QueryError::InvalidArguments(
-                        "GETITEM".to_string(),
-                        "expected 2 arguments".to_string(),
-                    ));
-                }
-                let val = self.evaluate_expr(&func.args[0], ctx)?;
-                let key = self.evaluate_expr(&func.args[1], ctx)?;
-                match (val, key) {
-                    (Value::Inventory(inv), Value::String(currency)) => {
-                        let total = inv.units(&currency);
-                        if total.is_zero() {
-                            Ok(Value::Null)
-                        } else {
-                            Ok(Value::Amount(Amount::new(total, currency)))
-                        }
-                    }
-                    _ => Err(QueryError::Type(
-                        "GETITEM expects (inventory, string)".to_string(),
-                    )),
-                }
-            }
-            "ROUND" => {
-                if func.args.is_empty() || func.args.len() > 2 {
-                    return Err(QueryError::InvalidArguments(
-                        "ROUND".to_string(),
-                        "expected 1 or 2 arguments".to_string(),
-                    ));
-                }
-                let val = self.evaluate_expr(&func.args[0], ctx)?;
-                let decimals = if func.args.len() == 2 {
-                    match self.evaluate_expr(&func.args[1], ctx)? {
-                        Value::Integer(i) => i as u32,
-                        _ => {
-                            return Err(QueryError::Type(
-                                "ROUND second arg must be integer".to_string(),
-                            ));
-                        }
-                    }
-                } else {
-                    0
-                };
-                match val {
-                    Value::Number(n) => Ok(Value::Number(n.round_dp(decimals))),
-                    Value::Integer(i) => Ok(Value::Integer(i)),
-                    _ => Err(QueryError::Type("ROUND expects a number".to_string())),
-                }
-            }
-            "SAFEDIV" => {
-                // Safe division that returns 0 on divide by zero
-                if func.args.len() != 2 {
-                    return Err(QueryError::InvalidArguments(
-                        "SAFEDIV".to_string(),
-                        "expected 2 arguments".to_string(),
-                    ));
-                }
-                let num = self.evaluate_expr(&func.args[0], ctx)?;
-                let den = self.evaluate_expr(&func.args[1], ctx)?;
-                match (num, den) {
-                    (Value::Number(n), Value::Number(d)) => {
-                        if d.is_zero() {
-                            Ok(Value::Number(Decimal::ZERO))
-                        } else {
-                            Ok(Value::Number(n / d))
-                        }
-                    }
-                    (Value::Integer(n), Value::Integer(d)) => {
-                        if d == 0 {
-                            Ok(Value::Integer(0))
-                        } else {
-                            Ok(Value::Integer(n / d))
-                        }
-                    }
-                    _ => Err(QueryError::Type("SAFEDIV expects two numbers".to_string())),
-                }
-            }
-            // Position functions
-            "UNITS" => {
-                if func.args.len() != 1 {
-                    return Err(QueryError::InvalidArguments(
-                        "UNITS".to_string(),
-                        "expected 1 argument".to_string(),
-                    ));
-                }
-                let val = self.evaluate_expr(&func.args[0], ctx)?;
-                match val {
-                    Value::Position(p) => Ok(Value::Amount(p.units)),
-                    Value::Amount(a) => Ok(Value::Amount(a)),
-                    Value::Inventory(inv) => {
-                        // Sum all units by currency
-                        let positions: Vec<String> = inv
-                            .positions()
-                            .iter()
-                            .map(|p| format!("{} {}", p.units.number, p.units.currency))
-                            .collect();
-                        Ok(Value::String(positions.join(", ")))
-                    }
-                    _ => Err(QueryError::Type(
-                        "UNITS expects a position or inventory".to_string(),
-                    )),
-                }
-            }
-            "COST" => {
-                if func.args.len() != 1 {
-                    return Err(QueryError::InvalidArguments(
-                        "COST".to_string(),
-                        "expected 1 argument".to_string(),
-                    ));
-                }
-                let val = self.evaluate_expr(&func.args[0], ctx)?;
-                match val {
-                    Value::Position(p) => {
-                        if let Some(cost) = &p.cost {
-                            let total = p.units.number.abs() * cost.number;
-                            Ok(Value::Amount(Amount::new(total, cost.currency.clone())))
-                        } else {
-                            Ok(Value::Null)
-                        }
-                    }
-                    Value::Amount(a) => Ok(Value::Amount(a)), // Amount is its own cost
-                    Value::Inventory(inv) => {
-                        // Sum all costs
-                        let mut total = Decimal::ZERO;
-                        let mut currency = String::new();
-                        for pos in inv.positions() {
-                            if let Some(cost) = &pos.cost {
-                                total += pos.units.number.abs() * cost.number;
-                                if currency.is_empty() {
-                                    currency.clone_from(&cost.currency);
-                                }
-                            }
-                        }
-                        if currency.is_empty() {
-                            Ok(Value::Null)
-                        } else {
-                            Ok(Value::Amount(Amount::new(total, currency)))
-                        }
-                    }
-                    _ => Err(QueryError::Type(
-                        "COST expects a position or inventory".to_string(),
-                    )),
-                }
-            }
-            "WEIGHT" => {
-                // Weight is what's used for balancing (cost basis if available, else units)
-                if func.args.len() != 1 {
-                    return Err(QueryError::InvalidArguments(
-                        "WEIGHT".to_string(),
-                        "expected 1 argument".to_string(),
-                    ));
-                }
-                let val = self.evaluate_expr(&func.args[0], ctx)?;
-                match val {
-                    Value::Position(p) => {
-                        if let Some(cost) = &p.cost {
-                            let total = p.units.number * cost.number;
-                            Ok(Value::Amount(Amount::new(total, cost.currency.clone())))
-                        } else {
-                            Ok(Value::Amount(p.units))
-                        }
-                    }
-                    Value::Amount(a) => Ok(Value::Amount(a)),
-                    _ => Err(QueryError::Type(
-                        "WEIGHT expects a position or amount".to_string(),
-                    )),
-                }
-            }
-            "VALUE" => {
-                // Market value - convert to target currency using price database
-                if func.args.is_empty() || func.args.len() > 2 {
-                    return Err(QueryError::InvalidArguments(
-                        "VALUE".to_string(),
-                        "expected 1-2 arguments".to_string(),
-                    ));
-                }
-
-                // Get target currency from second argument or default
-                let target_currency = if func.args.len() == 2 {
-                    match self.evaluate_expr(&func.args[1], ctx)? {
-                        Value::String(s) => s,
-                        _ => {
-                            return Err(QueryError::Type(
-                                "VALUE second argument must be a currency string".to_string(),
-                            ));
-                        }
-                    }
-                } else {
-                    self.target_currency
-                        .clone()
-                        .unwrap_or_else(|| "USD".to_string())
-                };
-
-                let val = self.evaluate_expr(&func.args[0], ctx)?;
-                let date = ctx.transaction.date;
-
-                match val {
-                    Value::Position(p) => {
-                        // Convert position to target currency
-                        if p.units.currency == target_currency {
-                            Ok(Value::Amount(p.units))
-                        } else if let Some(converted) =
-                            self.price_db.convert(&p.units, &target_currency, date)
-                        {
-                            Ok(Value::Amount(converted))
-                        } else {
-                            // No price available, return units as-is
-                            Ok(Value::Amount(p.units))
-                        }
-                    }
-                    Value::Amount(a) => {
-                        if a.currency == target_currency {
-                            Ok(Value::Amount(a))
-                        } else if let Some(converted) =
-                            self.price_db.convert(&a, &target_currency, date)
-                        {
-                            Ok(Value::Amount(converted))
-                        } else {
-                            Ok(Value::Amount(a))
-                        }
-                    }
-                    Value::Inventory(inv) => {
-                        // Convert all positions in inventory to target currency and sum
-                        let mut total = Decimal::ZERO;
-                        for pos in inv.positions() {
-                            if pos.units.currency == target_currency {
-                                total += pos.units.number;
-                            } else if let Some(converted) =
-                                self.price_db.convert(&pos.units, &target_currency, date)
-                            {
-                                total += converted.number;
-                            } else {
-                                // No conversion available, skip this position
-                                // (alternatively could return error or include unconverted)
-                            }
-                        }
-                        Ok(Value::Amount(Amount::new(total, &target_currency)))
-                    }
-                    _ => Err(QueryError::Type(
-                        "VALUE expects a position or inventory".to_string(),
-                    )),
-                }
-            }
-            // Aggregate functions return Null when evaluated on a single row
-            // They're handled specially in aggregate evaluation
-            "SUM" | "COUNT" | "MIN" | "MAX" | "FIRST" | "LAST" | "AVG" => Ok(Value::Null),
-            _ => Err(QueryError::UnknownFunction(func.name.clone())),
+            "GETITEM" | "GET" => self.eval_getitem(func, ctx),
+            "UNITS" => self.eval_units(func, ctx),
+            "COST" => self.eval_cost(func, ctx),
+            "WEIGHT" => self.eval_weight(func, ctx),
+            "VALUE" => self.eval_value(func, ctx),
+            _ => unreachable!(),
         }
+    }
+
+    /// Evaluate GETITEM/GET function.
+    fn eval_getitem(&self, func: &FunctionCall, ctx: &PostingContext) -> Result<Value, QueryError> {
+        Self::require_args("GETITEM", func, 2)?;
+        let val = self.evaluate_expr(&func.args[0], ctx)?;
+        let key = self.evaluate_expr(&func.args[1], ctx)?;
+
+        match (val, key) {
+            (Value::Inventory(inv), Value::String(currency)) => {
+                let total = inv.units(&currency);
+                if total.is_zero() {
+                    Ok(Value::Null)
+                } else {
+                    Ok(Value::Amount(Amount::new(total, currency)))
+                }
+            }
+            _ => Err(QueryError::Type(
+                "GETITEM expects (inventory, string)".to_string(),
+            )),
+        }
+    }
+
+    /// Evaluate UNITS function.
+    fn eval_units(&self, func: &FunctionCall, ctx: &PostingContext) -> Result<Value, QueryError> {
+        Self::require_args("UNITS", func, 1)?;
+        let val = self.evaluate_expr(&func.args[0], ctx)?;
+
+        match val {
+            Value::Position(p) => Ok(Value::Amount(p.units)),
+            Value::Amount(a) => Ok(Value::Amount(a)),
+            Value::Inventory(inv) => {
+                let positions: Vec<String> = inv
+                    .positions()
+                    .iter()
+                    .map(|p| format!("{} {}", p.units.number, p.units.currency))
+                    .collect();
+                Ok(Value::String(positions.join(", ")))
+            }
+            _ => Err(QueryError::Type(
+                "UNITS expects a position or inventory".to_string(),
+            )),
+        }
+    }
+
+    /// Evaluate COST function.
+    fn eval_cost(&self, func: &FunctionCall, ctx: &PostingContext) -> Result<Value, QueryError> {
+        Self::require_args("COST", func, 1)?;
+        let val = self.evaluate_expr(&func.args[0], ctx)?;
+
+        match val {
+            Value::Position(p) => {
+                if let Some(cost) = &p.cost {
+                    let total = p.units.number.abs() * cost.number;
+                    Ok(Value::Amount(Amount::new(total, cost.currency.clone())))
+                } else {
+                    Ok(Value::Null)
+                }
+            }
+            Value::Amount(a) => Ok(Value::Amount(a)),
+            Value::Inventory(inv) => {
+                let mut total = Decimal::ZERO;
+                let mut currency = String::new();
+                for pos in inv.positions() {
+                    if let Some(cost) = &pos.cost {
+                        total += pos.units.number.abs() * cost.number;
+                        if currency.is_empty() {
+                            currency.clone_from(&cost.currency);
+                        }
+                    }
+                }
+                if currency.is_empty() {
+                    Ok(Value::Null)
+                } else {
+                    Ok(Value::Amount(Amount::new(total, currency)))
+                }
+            }
+            _ => Err(QueryError::Type(
+                "COST expects a position or inventory".to_string(),
+            )),
+        }
+    }
+
+    /// Evaluate WEIGHT function.
+    fn eval_weight(&self, func: &FunctionCall, ctx: &PostingContext) -> Result<Value, QueryError> {
+        Self::require_args("WEIGHT", func, 1)?;
+        let val = self.evaluate_expr(&func.args[0], ctx)?;
+
+        match val {
+            Value::Position(p) => {
+                if let Some(cost) = &p.cost {
+                    let total = p.units.number * cost.number;
+                    Ok(Value::Amount(Amount::new(total, cost.currency.clone())))
+                } else {
+                    Ok(Value::Amount(p.units))
+                }
+            }
+            Value::Amount(a) => Ok(Value::Amount(a)),
+            _ => Err(QueryError::Type(
+                "WEIGHT expects a position or amount".to_string(),
+            )),
+        }
+    }
+
+    /// Evaluate VALUE function (market value conversion).
+    fn eval_value(&self, func: &FunctionCall, ctx: &PostingContext) -> Result<Value, QueryError> {
+        if func.args.is_empty() || func.args.len() > 2 {
+            return Err(QueryError::InvalidArguments(
+                "VALUE".to_string(),
+                "expected 1-2 arguments".to_string(),
+            ));
+        }
+
+        let target_currency = if func.args.len() == 2 {
+            match self.evaluate_expr(&func.args[1], ctx)? {
+                Value::String(s) => s,
+                _ => {
+                    return Err(QueryError::Type(
+                        "VALUE second argument must be a currency string".to_string(),
+                    ));
+                }
+            }
+        } else {
+            self.target_currency
+                .clone()
+                .unwrap_or_else(|| "USD".to_string())
+        };
+
+        let val = self.evaluate_expr(&func.args[0], ctx)?;
+        let date = ctx.transaction.date;
+
+        match val {
+            Value::Position(p) => {
+                if p.units.currency == target_currency {
+                    Ok(Value::Amount(p.units))
+                } else if let Some(converted) =
+                    self.price_db.convert(&p.units, &target_currency, date)
+                {
+                    Ok(Value::Amount(converted))
+                } else {
+                    Ok(Value::Amount(p.units))
+                }
+            }
+            Value::Amount(a) => {
+                if a.currency == target_currency {
+                    Ok(Value::Amount(a))
+                } else if let Some(converted) = self.price_db.convert(&a, &target_currency, date) {
+                    Ok(Value::Amount(converted))
+                } else {
+                    Ok(Value::Amount(a))
+                }
+            }
+            Value::Inventory(inv) => {
+                let mut total = Decimal::ZERO;
+                for pos in inv.positions() {
+                    if pos.units.currency == target_currency {
+                        total += pos.units.number;
+                    } else if let Some(converted) =
+                        self.price_db.convert(&pos.units, &target_currency, date)
+                    {
+                        total += converted.number;
+                    }
+                }
+                Ok(Value::Amount(Amount::new(total, &target_currency)))
+            }
+            _ => Err(QueryError::Type(
+                "VALUE expects a position or inventory".to_string(),
+            )),
+        }
+    }
+
+    /// Evaluate COALESCE function.
+    fn eval_coalesce(
+        &self,
+        func: &FunctionCall,
+        ctx: &PostingContext,
+    ) -> Result<Value, QueryError> {
+        for arg in &func.args {
+            let val = self.evaluate_expr(arg, ctx)?;
+            if !matches!(val, Value::Null) {
+                return Ok(val);
+            }
+        }
+        Ok(Value::Null)
+    }
+
+    /// Helper to require a specific number of arguments.
+    fn require_args(name: &str, func: &FunctionCall, expected: usize) -> Result<(), QueryError> {
+        if func.args.len() != expected {
+            return Err(QueryError::InvalidArguments(
+                name.to_string(),
+                format!("expected {expected} argument(s)"),
+            ));
+        }
+        Ok(())
     }
 
     /// Evaluate a binary operation.

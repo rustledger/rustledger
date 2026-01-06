@@ -48,7 +48,7 @@ use chrono::{Local, NaiveDate};
 use rust_decimal::Decimal;
 use rustledger_core::{
     Amount, Balance, BookingMethod, Close, Directive, Document, Inventory, Open, Pad, Position,
-    Transaction,
+    Posting, Transaction,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -600,13 +600,30 @@ fn validate_transaction(
     errors: &mut Vec<ValidationError>,
 ) {
     // Check transaction structure
+    if !validate_transaction_structure(txn, errors) {
+        return; // No point checking further if no postings
+    }
+
+    // Check each posting's account lifecycle and currency constraints
+    validate_posting_accounts(state, txn, errors);
+
+    // Check transaction balance
+    validate_transaction_balance(txn, errors);
+
+    // Update inventories with booking validation
+    update_inventories(state, txn, errors);
+}
+
+/// Validate transaction structure (must have postings).
+/// Returns false if validation should stop (no postings).
+fn validate_transaction_structure(txn: &Transaction, errors: &mut Vec<ValidationError>) -> bool {
     if txn.postings.is_empty() {
         errors.push(ValidationError::new(
             ErrorCode::NoPostings,
             "Transaction must have at least one posting".to_string(),
             txn.date,
         ));
-        return; // No point checking further
+        return false;
     }
 
     if txn.postings.len() == 1 {
@@ -618,61 +635,20 @@ fn validate_transaction(
         // Continue validation - this is just a warning
     }
 
-    // Check each posting
+    true
+}
+
+/// Validate account lifecycle and currency constraints for each posting.
+fn validate_posting_accounts(
+    state: &LedgerState,
+    txn: &Transaction,
+    errors: &mut Vec<ValidationError>,
+) {
     for posting in &txn.postings {
-        // Check account lifecycle
         match state.accounts.get(&posting.account) {
             Some(account_state) => {
-                if txn.date < account_state.opened {
-                    errors.push(ValidationError::new(
-                        ErrorCode::AccountNotOpen,
-                        format!(
-                            "Account {} used on {} but not opened until {}",
-                            posting.account, txn.date, account_state.opened
-                        ),
-                        txn.date,
-                    ));
-                }
-
-                if let Some(closed) = account_state.closed {
-                    if txn.date >= closed {
-                        errors.push(ValidationError::new(
-                            ErrorCode::AccountClosed,
-                            format!(
-                                "Account {} used on {} but was closed on {}",
-                                posting.account, txn.date, closed
-                            ),
-                            txn.date,
-                        ));
-                    }
-                }
-
-                // Check currency constraints (only for complete amounts)
-                if let Some(units) = posting.amount() {
-                    if !account_state.currencies.is_empty()
-                        && !account_state.currencies.contains(&units.currency)
-                    {
-                        errors.push(ValidationError::new(
-                            ErrorCode::CurrencyNotAllowed,
-                            format!(
-                                "Currency {} not allowed in account {}",
-                                units.currency, posting.account
-                            ),
-                            txn.date,
-                        ));
-                    }
-
-                    // Check commodity declaration
-                    if state.options.require_commodities
-                        && !state.commodities.contains(&units.currency)
-                    {
-                        errors.push(ValidationError::new(
-                            ErrorCode::UndeclaredCurrency,
-                            format!("Currency {} not declared", units.currency),
-                            txn.date,
-                        ));
-                    }
-                }
+                validate_account_lifecycle(txn, posting, account_state, errors);
+                validate_posting_currency(state, txn, posting, account_state, errors);
             }
             None => {
                 errors.push(ValidationError::new(
@@ -683,8 +659,76 @@ fn validate_transaction(
             }
         }
     }
+}
 
-    // Check transaction balance
+/// Validate that an account is open at transaction time and not closed.
+fn validate_account_lifecycle(
+    txn: &Transaction,
+    posting: &Posting,
+    account_state: &AccountState,
+    errors: &mut Vec<ValidationError>,
+) {
+    if txn.date < account_state.opened {
+        errors.push(ValidationError::new(
+            ErrorCode::AccountNotOpen,
+            format!(
+                "Account {} used on {} but not opened until {}",
+                posting.account, txn.date, account_state.opened
+            ),
+            txn.date,
+        ));
+    }
+
+    if let Some(closed) = account_state.closed {
+        if txn.date >= closed {
+            errors.push(ValidationError::new(
+                ErrorCode::AccountClosed,
+                format!(
+                    "Account {} used on {} but was closed on {}",
+                    posting.account, txn.date, closed
+                ),
+                txn.date,
+            ));
+        }
+    }
+}
+
+/// Validate currency constraints and commodity declarations for a posting.
+fn validate_posting_currency(
+    state: &LedgerState,
+    txn: &Transaction,
+    posting: &Posting,
+    account_state: &AccountState,
+    errors: &mut Vec<ValidationError>,
+) {
+    let Some(units) = posting.amount() else {
+        return;
+    };
+
+    // Check currency constraints
+    if !account_state.currencies.is_empty() && !account_state.currencies.contains(&units.currency) {
+        errors.push(ValidationError::new(
+            ErrorCode::CurrencyNotAllowed,
+            format!(
+                "Currency {} not allowed in account {}",
+                units.currency, posting.account
+            ),
+            txn.date,
+        ));
+    }
+
+    // Check commodity declaration
+    if state.options.require_commodities && !state.commodities.contains(&units.currency) {
+        errors.push(ValidationError::new(
+            ErrorCode::UndeclaredCurrency,
+            format!("Currency {} not declared", units.currency),
+            txn.date,
+        ));
+    }
+}
+
+/// Validate that the transaction balances within tolerance.
+fn validate_transaction_balance(txn: &Transaction, errors: &mut Vec<ValidationError>) {
     let residuals = rustledger_booking::calculate_residual(txn);
     for (currency, residual) in residuals {
         // Use a default tolerance of 0.005 for now
@@ -696,98 +740,116 @@ fn validate_transaction(
             ));
         }
     }
+}
 
-    // Update inventories with booking validation (only for complete amounts)
+/// Update inventories with booking validation for each posting.
+fn update_inventories(
+    state: &mut LedgerState,
+    txn: &Transaction,
+    errors: &mut Vec<ValidationError>,
+) {
     for posting in &txn.postings {
-        if let Some(units) = posting.amount() {
-            if let Some(inv) = state.inventories.get_mut(&posting.account) {
-                // Get booking method for this account
-                let booking_method = state
-                    .accounts
-                    .get(&posting.account)
-                    .map(|a| a.booking)
-                    .unwrap_or_default();
+        let Some(units) = posting.amount() else {
+            continue;
+        };
+        let Some(inv) = state.inventories.get_mut(&posting.account) else {
+            continue;
+        };
 
-                // Check if this is a reduction (negative units with cost)
-                let is_reduction = units.number.is_sign_negative() && posting.cost.is_some();
+        let booking_method = state
+            .accounts
+            .get(&posting.account)
+            .map(|a| a.booking)
+            .unwrap_or_default();
 
-                if is_reduction {
-                    // For reductions, use booking to match against existing lots
-                    // The reduce method expects negative amounts (opposite sign from positions)
-                    let reduction_units = units.clone();
+        let is_reduction = units.number.is_sign_negative() && posting.cost.is_some();
 
-                    // Try to reduce from inventory
-                    match inv.reduce(&reduction_units, posting.cost.as_ref(), booking_method) {
-                        Ok(_) => {}
-                        Err(rustledger_core::BookingError::InsufficientUnits {
-                            requested,
-                            available,
-                            ..
-                        }) => {
-                            errors.push(
-                                ValidationError::new(
-                                    ErrorCode::InsufficientUnits,
-                                    format!(
-                                        "Insufficient units in {}: requested {}, available {}",
-                                        posting.account, requested, available
-                                    ),
-                                    txn.date,
-                                )
-                                .with_context(format!("currency: {}", units.currency)),
-                            );
-                        }
-                        Err(rustledger_core::BookingError::NoMatchingLot { currency, .. }) => {
-                            errors.push(
-                                ValidationError::new(
-                                    ErrorCode::NoMatchingLot,
-                                    format!(
-                                        "No matching lot for {} in {}",
-                                        currency, posting.account
-                                    ),
-                                    txn.date,
-                                )
-                                .with_context(format!("cost spec: {:?}", posting.cost)),
-                            );
-                        }
-                        Err(rustledger_core::BookingError::AmbiguousMatch {
-                            currency,
-                            num_matches,
-                        }) => {
-                            errors.push(
-                                ValidationError::new(
-                                    ErrorCode::AmbiguousLotMatch,
-                                    format!(
-                                        "Ambiguous lot match for {}: {} lots match in {}",
-                                        currency, num_matches, posting.account
-                                    ),
-                                    txn.date,
-                                )
-                                .with_context(
-                                    "Specify cost, date, or label to disambiguate".to_string(),
-                                ),
-                            );
-                        }
-                        Err(rustledger_core::BookingError::CurrencyMismatch { .. }) => {
-                            // This shouldn't happen in normal validation
-                        }
-                    }
-                } else {
-                    // For additions, just add the position
-                    let position = if let Some(cost_spec) = &posting.cost {
-                        if let Some(cost) = cost_spec.resolve(units.number, txn.date) {
-                            rustledger_core::Position::with_cost(units.clone(), cost)
-                        } else {
-                            rustledger_core::Position::simple(units.clone())
-                        }
-                    } else {
-                        rustledger_core::Position::simple(units.clone())
-                    };
-
-                    inv.add(position);
-                }
-            }
+        if is_reduction {
+            process_inventory_reduction(inv, posting, units, booking_method, txn, errors);
+        } else {
+            process_inventory_addition(inv, posting, units, txn);
         }
     }
+}
+
+/// Process an inventory reduction (selling/removing units).
+fn process_inventory_reduction(
+    inv: &mut Inventory,
+    posting: &Posting,
+    units: &Amount,
+    booking_method: BookingMethod,
+    txn: &Transaction,
+    errors: &mut Vec<ValidationError>,
+) {
+    match inv.reduce(units, posting.cost.as_ref(), booking_method) {
+        Ok(_) => {}
+        Err(rustledger_core::BookingError::InsufficientUnits {
+            requested,
+            available,
+            ..
+        }) => {
+            errors.push(
+                ValidationError::new(
+                    ErrorCode::InsufficientUnits,
+                    format!(
+                        "Insufficient units in {}: requested {}, available {}",
+                        posting.account, requested, available
+                    ),
+                    txn.date,
+                )
+                .with_context(format!("currency: {}", units.currency)),
+            );
+        }
+        Err(rustledger_core::BookingError::NoMatchingLot { currency, .. }) => {
+            errors.push(
+                ValidationError::new(
+                    ErrorCode::NoMatchingLot,
+                    format!("No matching lot for {} in {}", currency, posting.account),
+                    txn.date,
+                )
+                .with_context(format!("cost spec: {:?}", posting.cost)),
+            );
+        }
+        Err(rustledger_core::BookingError::AmbiguousMatch {
+            currency,
+            num_matches,
+        }) => {
+            errors.push(
+                ValidationError::new(
+                    ErrorCode::AmbiguousLotMatch,
+                    format!(
+                        "Ambiguous lot match for {}: {} lots match in {}",
+                        currency, num_matches, posting.account
+                    ),
+                    txn.date,
+                )
+                .with_context("Specify cost, date, or label to disambiguate".to_string()),
+            );
+        }
+        Err(rustledger_core::BookingError::CurrencyMismatch { .. }) => {
+            // This shouldn't happen in normal validation
+        }
+    }
+}
+
+/// Process an inventory addition (buying/adding units).
+fn process_inventory_addition(
+    inv: &mut Inventory,
+    posting: &Posting,
+    units: &Amount,
+    txn: &Transaction,
+) {
+    let position = if let Some(cost_spec) = &posting.cost {
+        if let Some(cost) = cost_spec.resolve(units.number, txn.date) {
+            rustledger_core::Position::with_cost(units.clone(), cost)
+        } else {
+            rustledger_core::Position::simple(units.clone())
+        }
+    } else {
+        rustledger_core::Position::simple(units.clone())
+    };
+
+    inv.add(position);
 }
 
 fn validate_pad(state: &mut LedgerState, pad: &Pad, errors: &mut Vec<ValidationError>) {

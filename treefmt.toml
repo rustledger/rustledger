@@ -4,12 +4,12 @@
 
 [global]
 excludes = [
-    "target/*",
-    "result/*",
-    ".direnv/*",
-    "spec/fixtures/lima-tests/*",
-    "spec/fixtures/examples/*",
-    "*.lock",
+  "target/*",
+  "result/*",
+  ".direnv/*",
+  "spec/fixtures/lima-tests/*",
+  "spec/fixtures/examples/*",
+  "*.lock",
 ]
 
 [formatter.nix]
@@ -17,8 +17,8 @@ command = "nixpkgs-fmt"
 includes = ["*.nix"]
 
 [formatter.rust]
-command = "rustfmt"
-options = ["--edition", "2021"]
+command = "cargo"
+options = ["fmt", "--"]
 includes = ["*.rs"]
 
 [formatter.toml]

@@ -1,0 +1,28 @@
+# Interactive Claude Code assistant for PRs and issues
+name: Claude Interactive
+on:
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+jobs:
+  respond:
+    name: Respond to @claude
+    runs-on: ubuntu-latest
+    # Only respond to @claude mentions from non-bot users
+    if: |
+      contains(github.event.comment.body, '@claude') &&
+      github.event.comment.user.type != 'Bot'
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_args: "--max-turns 10"

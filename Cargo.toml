@@ -16,7 +16,7 @@ members = [
 version = "1.0.0-rc.6"
 edition = "2021"
 rust-version = "1.75"
-license = "GPL-3.0"
+license = "GPL-3.0-only"
 repository = "https://github.com/rustledger/rustledger"
 homepage = "https://rustledger.github.io"
 documentation = "https://docs.rs/rustledger-core"
@@ -29,7 +29,7 @@ name = "rustledger"
 
 [workspace.dependencies]
 # Core
-rust_decimal = { version = "1.36", features = ["serde"] }
+rust_decimal = { version = "1.39", features = ["serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 thiserror = "2"
 anyhow = "1"
@@ -54,14 +54,14 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # WASM
 wasm-bindgen = "0.2"
 serde-wasm-bindgen = "0.6"
-wasmtime = "27"
+wasmtime = "40"
 wat = "1"
 
 # Testing
 proptest = "1"
 criterion = "0.5"
 insta = { version = "1", features = ["yaml"] }
-rust_decimal_macros = "1.36"
+rust_decimal_macros = "1.39"
 
 # Async (if needed)
 tokio = { version = "1", features = ["full"] }

@@ -3,37 +3,43 @@
 
 [graph]
 targets = [
-    "x86_64-unknown-linux-gnu",
-    "aarch64-unknown-linux-gnu",
-    "x86_64-apple-darwin",
-    "aarch64-apple-darwin",
-    "wasm32-unknown-unknown",
+  "x86_64-unknown-linux-gnu",
+  "aarch64-unknown-linux-gnu",
+  "x86_64-apple-darwin",
+  "aarch64-apple-darwin",
+  "wasm32-unknown-unknown",
 ]
 
 [advisories]
+version = 2
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
-vulnerability = "deny"
-unmaintained = "warn"
 yanked = "warn"
-notice = "warn"
+ignore = [
+  # rust_decimal 1.39 depends on rkyv 0.7.45 which has RUSTSEC-2026-0001.
+  # This is a transitive dependency we cannot control directly.
+  # The vulnerability requires OOM conditions to trigger undefined behavior,
+  # which is low-risk for our use case. Track: https://github.com/paupino/rust-decimal/issues
+  { id = "RUSTSEC-2026-0001", reason = "transitive dep via rust_decimal; low-risk OOM condition" },
+]
 
 [licenses]
-unlicensed = "deny"
-copyleft = "warn"
+version = 2
 allow = [
-    "GPL-3.0",
-    "MIT",
-    "Apache-2.0",
-    "Apache-2.0 WITH LLVM-exception",
-    "BSD-2-Clause",
-    "BSD-3-Clause",
-    "ISC",
-    "Zlib",
-    "0BSD",
-    "Unicode-DFS-2016",
-    "CC0-1.0",
-    "MPL-2.0",
+  "GPL-3.0-only",
+  "GPL-3.0-or-later",
+  "MIT",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Zlib",
+  "0BSD",
+  "Unicode-3.0",
+  "Unicode-DFS-2016",
+  "CC0-1.0",
+  "MPL-2.0",
 ]
 confidence-threshold = 0.8
 

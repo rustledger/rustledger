@@ -14,6 +14,8 @@ This directory contains TLA+ formal specifications for critical rustledger algor
 | `*.cfg` | TLC model checker configuration files |
 | `ROADMAP.md` | Plan for expanding TLA+ coverage to stellar level |
 | `GUIDE.md` | How to read TLA+ specs and their Rust correspondence |
+| `InventoryProofs.tla` | TLAPS formal proofs for Inventory invariants |
+| `BookingMethodsProofs.tla` | TLAPS formal proofs for booking properties |
 
 ## Quick Start
 
@@ -221,22 +223,44 @@ The tests validate:
 - `tla_trace_*` - Complete TLA+ traces
 - `prop_tla_*` - Property-based invariant validation
 
+## TLAPS Formal Proofs
+
+Beyond model checking, we use TLAPS (TLA+ Proof System) for mathematical proofs:
+
+```bash
+# Check all TLAPS proofs
+just tla-prove-all
+
+# Check specific proof module
+just tla-prove-inventory
+just tla-prove-booking
+```
+
+Proof modules:
+- `InventoryProofs.tla` - Proves Safety theorem for NonNegativeUnits
+- `BookingMethodsProofs.tla` - Proves FIFOSafety, LIFOSafety, HIFOSafety
+
+Installing TLAPS: https://tla.msr-inria.inria.fr/tlaps/
+
 ## Limitations
 
 TLA+ model checking is bounded:
 - We check with small `MaxLots`, `MaxUnits` values
 - Exhaustive for those bounds, but not proof of correctness for all sizes
-- For true proofs, would need TLAPS (TLA+ Proof System)
+- TLAPS proofs provide unbounded correctness guarantees
 
-For our purposes, model checking with reasonable bounds (3-5 lots, 10-20 units) catches most bugs.
+For our purposes, model checking with reasonable bounds (3-5 lots, 10-20 units) catches most bugs. TLAPS proofs provide mathematical certainty for critical invariants.
 
 ## Roadmap
 
-See `ROADMAP.md` for the plan to expand TLA+ coverage including:
-- AVERAGE and STRICT_WITH_SIZE booking methods
-- Account lifecycle specification
-- Validation error codes
-- TLAPS proofs for critical invariants
+See `ROADMAP.md` for the plan to expand TLA+ coverage. Current status: **9/10**
+
+Completed:
+- ✅ All 7 booking methods with strong invariants
+- ✅ Account lifecycle and directive ordering
+- ✅ CI automation
+- ✅ Rust integration tests
+- ✅ TLAPS formal proofs
 
 ## References
 

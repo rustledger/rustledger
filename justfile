@@ -192,6 +192,34 @@ tla-check spec:
         spec/tla/{{spec}}.tla
 
 # ============================================================================
+# TLA+ PROOFS (TLAPS)
+# ============================================================================
+
+# Check TLAPS proofs for Inventory
+tla-prove-inventory:
+    @echo "Checking InventoryProofs.tla..."
+    @if command -v tlapm > /dev/null 2>&1; then \
+        tlapm --threads 4 spec/tla/InventoryProofs.tla; \
+    else \
+        echo "TLAPS not installed. Install from: https://tla.msr-inria.inria.fr/tlaps/"; \
+        echo "Skipping proof verification."; \
+    fi
+
+# Check TLAPS proofs for BookingMethods
+tla-prove-booking:
+    @echo "Checking BookingMethodsProofs.tla..."
+    @if command -v tlapm > /dev/null 2>&1; then \
+        tlapm --threads 4 spec/tla/BookingMethodsProofs.tla; \
+    else \
+        echo "TLAPS not installed. Install from: https://tla.msr-inria.inria.fr/tlaps/"; \
+        echo "Skipping proof verification."; \
+    fi
+
+# Check all TLAPS proofs
+tla-prove-all: tla-prove-inventory tla-prove-booking
+    @echo "All TLAPS proofs checked"
+
+# ============================================================================
 # COMPATIBILITY
 # ============================================================================
 

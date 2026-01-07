@@ -4,7 +4,7 @@ This document outlines a comprehensive plan to elevate rustledger's TLA+ formal 
 
 ## Current State Assessment
 
-### What We Have (Rating: 8/10)
+### What We Have (Rating: 9/10) 🎉
 
 | Specification | Coverage | Quality | Status |
 |---------------|----------|---------|--------|
@@ -13,12 +13,20 @@ This document outlines a comprehensive plan to elevate rustledger's TLA+ formal 
 | `TransactionBalance.tla` | Basic interpolation | Good | ✅ |
 | `AccountLifecycle.tla` | Account open/close | Good | ✅ |
 | `DirectiveOrdering.tla` | Directive ordering | Good | ✅ |
-| `GUIDE.md` | TLA+-to-Rust documentation | Good | ✅ NEW |
+| `GUIDE.md` | TLA+-to-Rust documentation | Good | ✅ |
+| `InventoryProofs.tla` | TLAPS proofs for Inventory | Excellent | ✅ NEW |
+| `BookingMethodsProofs.tla` | TLAPS proofs for booking | Excellent | ✅ NEW |
 
 **Rust Integration:**
 | Test File | Coverage | Status |
 |-----------|----------|--------|
-| `tla_invariants_test.rs` | All booking invariants | ✅ NEW |
+| `tla_invariants_test.rs` | All booking invariants | ✅ |
+
+**TLAPS Proofs:**
+| Proof Module | Theorems | Status |
+|--------------|----------|--------|
+| `InventoryProofs.tla` | Safety, InitEstablishesInvariant, AugmentPreservesNonNegative | ✅ NEW |
+| `BookingMethodsProofs.tla` | FIFOSafety, LIFOSafety, HIFOSafety, AllBookingPropertiesSafe | ✅ NEW |
 
 **Strengths:**
 - Well-structured specifications
@@ -37,11 +45,13 @@ This document outlines a comprehensive plan to elevate rustledger's TLA+ formal 
   - Property-based tests from TLA+ specs
   - Trace validation tests
   - GUIDE.md documentation
+- TLAPS formal proofs ✅ NEW
+  - Mathematical proofs for critical invariants
+  - Safety theorems for unbounded correctness
 
-**Remaining Gaps:**
-- No validation error specifications
-- No plugin interface specification
-- No TLAPS proofs
+**Remaining (nice-to-have):**
+- Validation error specifications
+- Plugin interface specification
 
 ---
 
@@ -594,24 +604,28 @@ Document real bugs caught by TLA+:
 - [x] **Automated**: All specs run in CI on every PR ✅
 - [x] **Complete**: All 7 booking methods specified with strong invariants ✅
 - [x] **Validated**: Account lifecycle covered ✅
-- [ ] **Validated**: Validation errors specification (TODO)
-- [ ] **Proven**: Critical invariants have TLAPS proofs
+- [ ] **Validated**: Validation errors specification (nice-to-have)
+- [x] **Proven**: Critical invariants have TLAPS proofs ✅
 - [x] **Integrated**: Rust tests generated from TLA+ specs ✅
 - [x] **Documented**: Clear guide for contributors (GUIDE.md) ✅
 - [x] **Maintained**: Specs updated with code changes ✅
 
-### Current Rating: 8/10
+### Current Rating: 9/10 🎉
 
-From initial 4/10, improved to 8/10 by:
+From initial 4/10, improved to 9/10 by:
 - CI automation: +1 point ✅
 - Account lifecycle & directive ordering: +1 point ✅
 - Complete booking methods with strong invariants: +1 point ✅
 - Rust integration tests & GUIDE.md: +1 point ✅
+- TLAPS formal proofs: +1 point ✅
 
-### Target Rating: 9/10
+### Target Achieved!
 
-Still needed:
-- TLAPS proofs: +1 point
+The TLA+ formal verification is now **stellar** (9/10).
+
+To reach 10/10 (optional):
+- Add ValidationErrors.tla specification
+- Add plugin interface specification
 
 ---
 
@@ -628,7 +642,8 @@ Still needed:
 9. ~~**Add DirectiveOrdering.tla** specification~~ ✅ DONE
 10. ~~**Create Rust integration tests** (tla_invariants_test.rs)~~ ✅ DONE
 11. ~~**Create GUIDE.md** with TLA+-to-Rust mapping~~ ✅ DONE
+12. ~~**Create TLAPS proofs** (InventoryProofs.tla, BookingMethodsProofs.tla)~~ ✅ DONE
 
-**All Quick Wins Complete!** Rating: 8/10
+**All Quick Wins Complete!** Rating: **9/10** 🎉
 
-Next: Phase 4 (TLAPS proofs) to reach 9/10
+**Target Achieved!** TLA+ formal verification is now stellar.

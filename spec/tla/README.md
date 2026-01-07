@@ -7,12 +7,16 @@ This directory contains TLA+ formal specifications for critical rustledger algor
 | File | Description |
 |------|-------------|
 | `Inventory.tla` | Inventory data structure and operations |
+| `InventoryTyped.tla` | Apalache-typed version with type annotations |
 | `BookingMethods.tla` | All 7 booking methods: FIFO, LIFO, HIFO, AVERAGE, STRICT, STRICT_WITH_SIZE, NONE |
 | `TransactionBalance.tla` | Transaction balancing and interpolation |
 | `AccountLifecycle.tla` | Account open/close semantics and state machine |
 | `DirectiveOrdering.tla` | Directive ordering constraints and validation |
 | `ValidationErrors.tla` | All 26 validation error codes (E1xxx-E10xxx) |
 | `PriceDatabase.tla` | Price lookups with triangulation and date fallback |
+| `InductiveInvariants.tla` | Inductive invariants for unbounded verification |
+| `LivenessProperties.tla` | Liveness properties with fairness constraints |
+| `CompositionalVerification.tla` | Cross-component verification |
 | `*.cfg` | TLC model checker configuration files |
 | `ROADMAP.md` | Plan for expanding TLA+ coverage to stellar level |
 | `GUIDE.md` | How to read TLA+ specs and their Rust correspondence |
@@ -383,14 +387,122 @@ java -jar tools/tla2tools.jar -config spec/tla/Inventory.cfg spec/tla/Inventory.
 python3 scripts/trace_to_rust_test.py trace.json > test_from_trace.rs
 ```
 
+## Inductive Invariants
+
+Inductive invariants provide unbounded verification - proving correctness for ALL states, not just those within model checking bounds:
+
+```bash
+just tla-inductive
+```
+
+Key inductive invariants in `InductiveInvariants.tla`:
+- `ConservationInv`: TotalUnits + TotalReduced = TotalAdded
+- `PositiveLotsInv`: All lots have positive units
+- `BoundedLotsInv`: Lot count never exceeds MaxLots
+- `NonNegativeTotalsInv`: Running totals are never negative
+
+## Liveness Properties
+
+Liveness properties verify the system makes progress (not just safety):
+
+```bash
+just tla-liveness
+```
+
+Properties in `LivenessProperties.tla`:
+- `NoDeadlock`: System can always make progress
+- `RequestEventuallyProcessed`: Pending operations eventually complete
+- `ErrorsEventuallyResolved`: All errors are eventually resolved
+- `Progress`: System doesn't get stuck
+- `StarvationFreedom`: No operation waits forever
+
+Fairness constraints:
+- `WF_vars(ProcessAdd)`: Weak fairness on add operations
+- `WF_vars(ResolveError)`: Weak fairness on error resolution
+
+## Compositional Verification
+
+Verify cross-cutting properties across multiple components:
+
+```bash
+just tla-compositional
+```
+
+`CompositionalVerification.tla` composes:
+- Account Lifecycle (open/close)
+- Inventory management
+- Booking methods
+- Validation errors
+
+Cross-cutting invariants:
+- `LifecycleInventoryConsistency`: Closed accounts have empty inventory
+- `NoOrphanInventory`: Inventory only for opened accounts
+- `DateOrdering`: Close date always after open date
+
+## State Space Coverage Analysis
+
+Analyze which TLA+ states are covered by Rust tests:
+
+```bash
+# Generate coverage report
+just tla-coverage BookingMethods
+
+# View HTML report
+open coverage/BookingMethods_coverage.html
+```
+
+Reports include:
+- State coverage percentage
+- Transition coverage by action
+- Per-variable value coverage
+- List of uncovered states for test gap analysis
+
+## Model-Based Testing (MBT)
+
+Generate exhaustive Rust tests from TLA+ state machines:
+
+```bash
+# Generate tests from BookingMethods spec
+just mbt-booking
+
+# Generate from any spec with custom depth
+just mbt-generate BookingMethods 3 50
+```
+
+MBT generates tests for ALL action sequences up to a depth, verifying TLA+ invariants hold in Rust.
+
+## Kani Verification
+
+[Kani](https://github.com/model-checking/kani) provides bounded model checking for Rust:
+
+```bash
+# Run all Kani proofs
+just kani-verify
+
+# Run specific proof
+just kani-proof kani_fifo_selects_oldest
+
+# List available proofs
+just kani-list
+```
+
+Kani proofs in `kani_proofs.rs`:
+- `kani_fifo_selects_oldest` ↔ `FIFOProperty`
+- `kani_lifo_selects_newest` ↔ `LIFOProperty`
+- `kani_hifo_selects_highest_cost` ↔ `HIFOProperty`
+- `kani_non_negative_units` ↔ `NonNegativeUnits`
+- `kani_conservation_of_units` ↔ `ConservationInv`
+- `kani_strict_rejects_ambiguous` ↔ `STRICTProperty`
+
 ## Limitations
 
 TLA+ model checking is bounded:
 - We check with small `MaxLots`, `MaxUnits` values
 - Exhaustive for those bounds, but not proof of correctness for all sizes
 - TLAPS proofs provide unbounded correctness guarantees
+- Inductive invariants + Kani provide additional unbounded guarantees
 
-For our purposes, model checking with reasonable bounds (3-5 lots, 10-20 units) catches most bugs. TLAPS proofs provide mathematical certainty for critical invariants.
+For our purposes, model checking with reasonable bounds (3-5 lots, 10-20 units) catches most bugs. TLAPS proofs and Kani verification provide mathematical certainty for critical invariants.
 
 ## Roadmap
 
@@ -407,6 +519,13 @@ Completed:
 - ✅ Trace-to-test generator
 - ✅ PriceDatabase specification
 - ✅ Refinement proofs (Rust → TLA+)
+- ✅ Apalache type annotations
+- ✅ Inductive invariants
+- ✅ Liveness properties with fairness
+- ✅ Compositional verification
+- ✅ State space coverage analysis
+- ✅ Model-based testing generator
+- ✅ Kani integration
 
 ## References
 

@@ -83,6 +83,28 @@ jobs:
             spec/tla/TransactionBalance.tla
           echo "::endgroup::"
 
+      - name: Model Check AccountLifecycle.tla
+        run: |
+          echo "::group::Checking AccountLifecycle.tla"
+          java -XX:+UseParallelGC -Xmx4g \
+            -jar ~/tla2tools.jar \
+            -config spec/tla/AccountLifecycle.cfg \
+            -workers auto \
+            -deadlock \
+            spec/tla/AccountLifecycle.tla
+          echo "::endgroup::"
+
+      - name: Model Check DirectiveOrdering.tla
+        run: |
+          echo "::group::Checking DirectiveOrdering.tla"
+          java -XX:+UseParallelGC -Xmx4g \
+            -jar ~/tla2tools.jar \
+            -config spec/tla/DirectiveOrdering.cfg \
+            -workers auto \
+            -deadlock \
+            spec/tla/DirectiveOrdering.tla
+          echo "::endgroup::"
+
       - name: Summary
         if: always()
         run: |
@@ -93,3 +115,5 @@ jobs:
           echo "| Inventory.tla | Checked |" >> $GITHUB_STEP_SUMMARY
           echo "| BookingMethods.tla | Checked |" >> $GITHUB_STEP_SUMMARY
           echo "| TransactionBalance.tla | Checked |" >> $GITHUB_STEP_SUMMARY
+          echo "| AccountLifecycle.tla | Checked |" >> $GITHUB_STEP_SUMMARY
+          echo "| DirectiveOrdering.tla | Checked |" >> $GITHUB_STEP_SUMMARY

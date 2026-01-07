@@ -9,6 +9,8 @@ This directory contains TLA+ formal specifications for critical rustledger algor
 | `Inventory.tla` | Inventory data structure and operations |
 | `BookingMethods.tla` | FIFO, LIFO, HIFO, STRICT, NONE booking algorithms |
 | `TransactionBalance.tla` | Transaction balancing and interpolation |
+| `AccountLifecycle.tla` | Account open/close semantics and state machine |
+| `DirectiveOrdering.tla` | Directive ordering constraints and validation |
 | `*.cfg` | TLC model checker configuration files |
 | `ROADMAP.md` | Plan for expanding TLA+ coverage to stellar level |
 
@@ -24,6 +26,8 @@ just tla-all
 just tla-inventory
 just tla-booking
 just tla-balance
+just tla-lifecycle
+just tla-ordering
 
 # Run any spec by name
 just tla-check Inventory
@@ -109,6 +113,42 @@ BalancedMeansZero ==
     state = "balanced" =>
         \A curr \in AllCurrencies(transaction) :
             Abs(WeightSum(transaction, curr)) <= Tolerance
+```
+
+### AccountLifecycle.tla
+
+```tla
+\* No posting to unopened accounts
+NoPostingToUnopened ==
+    \A i \in 1..Len(postings) :
+        LET p == postings[i]
+        IN WasOpened(p.account)
+
+\* All postings are within account's active period
+PostingsInActivePeriod ==
+    \A i \in 1..Len(postings) :
+        LET p == postings[i]
+        IN /\ openDates[p.account] <= p.date
+           /\ (accountStates[p.account] = "closed" => p.date < closeDates[p.account])
+```
+
+### DirectiveOrdering.tla
+
+```tla
+\* Close always comes after open for same account
+CloseAfterOpenInvariant ==
+    \A i, j \in 1..Len(directives) :
+        (/\ directives[i].type = "open"
+         /\ directives[j].type = "close"
+         /\ directives[i].account = directives[j].account)
+        => i < j
+
+\* Transactions only reference open accounts
+TransactionsToOpenAccountsInvariant ==
+    \A i \in 1..Len(directives) :
+        directives[i].type = "transaction" =>
+            \A a \in AccountsIn(directives[i]) :
+                accountOpenDates[a] > 0
 ```
 
 ## Translating to Rust

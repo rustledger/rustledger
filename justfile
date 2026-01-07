@@ -163,8 +163,24 @@ tla-balance: tla-setup
         -deadlock \
         spec/tla/TransactionBalance.tla
 
+# Run TLA+ model checker on AccountLifecycle spec
+tla-lifecycle: tla-setup
+    java -XX:+UseParallelGC -Xmx4g -jar tools/tla2tools.jar \
+        -config spec/tla/AccountLifecycle.cfg \
+        -workers auto \
+        -deadlock \
+        spec/tla/AccountLifecycle.tla
+
+# Run TLA+ model checker on DirectiveOrdering spec
+tla-ordering: tla-setup
+    java -XX:+UseParallelGC -Xmx4g -jar tools/tla2tools.jar \
+        -config spec/tla/DirectiveOrdering.cfg \
+        -workers auto \
+        -deadlock \
+        spec/tla/DirectiveOrdering.tla
+
 # Run all TLA+ specs
-tla-all: tla-inventory tla-booking tla-balance
+tla-all: tla-inventory tla-booking tla-balance tla-lifecycle tla-ordering
     @echo "All TLA+ specifications verified"
 
 # Run specific TLA+ spec by name

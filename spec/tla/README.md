@@ -13,6 +13,7 @@ This directory contains TLA+ formal specifications for critical rustledger algor
 | `DirectiveOrdering.tla` | Directive ordering constraints and validation |
 | `*.cfg` | TLC model checker configuration files |
 | `ROADMAP.md` | Plan for expanding TLA+ coverage to stellar level |
+| `GUIDE.md` | How to read TLA+ specs and their Rust correspondence |
 
 ## Quick Start
 
@@ -194,6 +195,31 @@ TLA+ specifications are automatically checked on PRs that modify:
 - `crates/rustledger-booking/src/**` - Booking implementation
 
 See `.github/workflows/tla.yml` for details.
+
+## Rust Integration Tests
+
+TLA+ invariants are validated in Rust via property-based tests:
+
+```bash
+# Run TLA+ invariant tests
+cargo test -p rustledger-core --test tla_invariants_test
+
+# Run with more iterations
+PROPTEST_CASES=1000 cargo test -p rustledger-core --test tla_invariants_test
+```
+
+Test file: `crates/rustledger-core/tests/tla_invariants_test.rs`
+
+The tests validate:
+- `tla_non_negative_units_*` - NonNegativeUnits invariant
+- `tla_valid_lots_*` - ValidLots invariant
+- `tla_fifo_property_*` - FIFOProperty invariant
+- `tla_lifo_property_*` - LIFOProperty invariant
+- `tla_hifo_property_*` - HIFOProperty invariant
+- `tla_strict_property_*` - STRICTProperty invariant
+- `tla_average_property_*` - AVERAGEProperty invariant
+- `tla_trace_*` - Complete TLA+ traces
+- `prop_tla_*` - Property-based invariant validation
 
 ## Limitations
 

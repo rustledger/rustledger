@@ -547,6 +547,10 @@ impl Inventory {
             .map(|(i, _)| i)
             .collect();
 
+        // Sort by date for correct FIFO/LIFO ordering (oldest first)
+        // This ensures we select by acquisition date, not insertion order
+        indices.sort_by_key(|&i| self.positions[i].cost.as_ref().and_then(|c| c.date));
+
         if reverse {
             indices.reverse();
         }

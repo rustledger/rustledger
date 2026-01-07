@@ -22,6 +22,7 @@ This document outlines a comprehensive plan to elevate rustledger's TLA+ formal 
 | Test File | Coverage | Status |
 |-----------|----------|--------|
 | `tla_invariants_test.rs` | All booking invariants | ✅ |
+| `tla_validation_errors_test.rs` | All 26 error codes | ✅ NEW |
 
 **TLAPS Proofs:**
 | Proof Module | Theorems | Status |

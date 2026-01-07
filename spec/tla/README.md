@@ -234,16 +234,23 @@ See `.github/workflows/tla.yml` for details.
 TLA+ invariants are validated in Rust via property-based tests:
 
 ```bash
-# Run TLA+ invariant tests
+# Run TLA+ booking invariant tests
 cargo test -p rustledger-core --test tla_invariants_test
+
+# Run TLA+ validation error tests
+cargo test -p rustledger-validate --test tla_validation_errors_test
 
 # Run with more iterations
 PROPTEST_CASES=1000 cargo test -p rustledger-core --test tla_invariants_test
 ```
 
-Test file: `crates/rustledger-core/tests/tla_invariants_test.rs`
+Test files:
+- `crates/rustledger-core/tests/tla_invariants_test.rs` - BookingMethods.tla invariants
+- `crates/rustledger-validate/tests/tla_validation_errors_test.rs` - ValidationErrors.tla invariants
 
 The tests validate:
+
+**BookingMethods.tla (tla_invariants_test.rs):**
 - `tla_non_negative_units_*` - NonNegativeUnits invariant
 - `tla_valid_lots_*` - ValidLots invariant
 - `tla_fifo_property_*` - FIFOProperty invariant
@@ -253,6 +260,13 @@ The tests validate:
 - `tla_average_property_*` - AVERAGEProperty invariant
 - `tla_trace_*` - Complete TLA+ traces
 - `prop_tla_*` - Property-based invariant validation
+
+**ValidationErrors.tla (tla_validation_errors_test.rs):**
+- `tla_valid_error_codes_*` - ValidErrorCodes invariant (all 26 codes)
+- `tla_correct_severity_*` - CorrectSeverity invariant
+- `tla_e1001_*` through `tla_e10002_*` - Individual error code tests
+- `tla_account_lifecycle_*` - AccountLifecycleConsistent invariant
+- `tla_errors_monotonic` - ErrorsMonotonic property
 
 ## TLAPS Formal Proofs
 

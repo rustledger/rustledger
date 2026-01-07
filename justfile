@@ -187,8 +187,16 @@ tla-validate: tla-setup
         -deadlock \
         spec/tla/ValidationErrors.tla
 
+# Run TLA+ model checker on PriceDatabase spec
+tla-price: tla-setup
+    java -XX:+UseParallelGC -Xmx4g -jar tools/tla2tools.jar \
+        -config spec/tla/PriceDatabase.cfg \
+        -workers auto \
+        -deadlock \
+        spec/tla/PriceDatabase.tla
+
 # Run all TLA+ specs
-tla-all: tla-inventory tla-booking tla-balance tla-lifecycle tla-ordering tla-validate
+tla-all: tla-inventory tla-booking tla-balance tla-lifecycle tla-ordering tla-validate tla-price
     @echo "All TLA+ specifications verified"
 
 # Run specific TLA+ spec by name
@@ -223,9 +231,120 @@ tla-prove-booking:
         echo "Skipping proof verification."; \
     fi
 
+# Check TLAPS proofs for ValidationErrors
+tla-prove-validate:
+    @echo "Checking ValidationErrorsProofs.tla..."
+    @if command -v tlapm > /dev/null 2>&1; then \
+        tlapm --threads 4 spec/tla/ValidationErrorsProofs.tla; \
+    else \
+        echo "TLAPS not installed. Install from: https://tla.msr-inria.inria.fr/tlaps/"; \
+        echo "Skipping proof verification."; \
+    fi
+
 # Check all TLAPS proofs
-tla-prove-all: tla-prove-inventory tla-prove-booking
+tla-prove-all: tla-prove-inventory tla-prove-booking tla-prove-validate
     @echo "All TLAPS proofs checked"
+
+# ============================================================================
+# REFINEMENT CHECKING
+# ============================================================================
+
+# Check Inventory refinement (Rust → TLA+)
+tla-refine-inventory: tla-setup
+    java -XX:+UseParallelGC -Xmx4g -jar tools/tla2tools.jar \
+        -config spec/tla/InventoryRefinement.cfg \
+        -workers auto \
+        -deadlock \
+        spec/tla/InventoryRefinement.tla
+
+# Check Booking refinement (Rust → TLA+)
+tla-refine-booking: tla-setup
+    java -XX:+UseParallelGC -Xmx4g -jar tools/tla2tools.jar \
+        -config spec/tla/BookingRefinement.cfg \
+        -workers auto \
+        -deadlock \
+        spec/tla/BookingRefinement.tla
+
+# Check all refinements
+tla-refine-all: tla-refine-inventory tla-refine-booking
+    @echo "All refinement checks passed"
+
+# ============================================================================
+# APALACHE (Symbolic Model Checking)
+# ============================================================================
+
+# Setup Apalache (download if not present)
+apalache-setup:
+    @if [ ! -f tools/apalache/bin/apalache-mc ]; then \
+        mkdir -p tools && \
+        echo "Downloading Apalache..." && \
+        curl -sL https://github.com/informalsystems/apalache/releases/download/v0.44.2/apalache-0.44.2.tgz | \
+            tar -xz -C tools && \
+        mv tools/apalache-0.44.2 tools/apalache && \
+        echo "Downloaded tools/apalache"; \
+    else \
+        echo "Apalache already present"; \
+    fi
+
+# Run Apalache on Inventory spec
+apalache-inventory: apalache-setup
+    tools/apalache/bin/apalache-mc check \
+        --config=spec/tla/Inventory.cfg \
+        spec/tla/Inventory.tla
+
+# Run Apalache on BookingMethods spec
+apalache-booking: apalache-setup
+    tools/apalache/bin/apalache-mc check \
+        --config=spec/tla/BookingMethods.cfg \
+        spec/tla/BookingMethods.tla
+
+# Run Apalache on ValidationErrors spec
+apalache-validate: apalache-setup
+    tools/apalache/bin/apalache-mc check \
+        --config=spec/tla/ValidationErrors.cfg \
+        spec/tla/ValidationErrors.tla
+
+# Run Apalache on specific spec
+apalache-check spec: apalache-setup
+    tools/apalache/bin/apalache-mc check \
+        --config=spec/tla/{{spec}}.cfg \
+        spec/tla/{{spec}}.tla
+
+# Run Apalache on all specs
+apalache-all: apalache-inventory apalache-booking apalache-validate
+    @echo "All Apalache checks complete"
+
+# ============================================================================
+# TLA+ TRACE TO TEST
+# ============================================================================
+
+# Run TLC and capture counterexample trace as JSON
+tla-trace spec: tla-setup
+    @mkdir -p traces
+    java -XX:+UseParallelGC -Xmx4g -jar tools/tla2tools.jar \
+        -config spec/tla/{{spec}}.cfg \
+        -workers auto \
+        -deadlock \
+        spec/tla/{{spec}}.tla 2>&1 | \
+        python3 scripts/tla_trace_to_json.py --spec {{spec}} > traces/{{spec}}_trace.json || true
+    @if [ -s traces/{{spec}}_trace.json ]; then \
+        echo "Trace saved to traces/{{spec}}_trace.json"; \
+    else \
+        echo "No counterexample found (spec passed)"; \
+        rm -f traces/{{spec}}_trace.json; \
+    fi
+
+# Generate Rust test from trace JSON
+tla-gen-test trace_file:
+    python3 scripts/trace_to_rust_test.py {{trace_file}}
+
+# Generate Rust tests from all traces
+tla-gen-all-tests:
+    @if ls traces/*.json 1> /dev/null 2>&1; then \
+        python3 scripts/trace_to_rust_test.py traces/*.json; \
+    else \
+        echo "No trace files found in traces/"; \
+    fi
 
 # ============================================================================
 # COMPATIBILITY

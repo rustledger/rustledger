@@ -1043,3 +1043,214 @@ fn tla_account_lifecycle_monotonic() {
         "Cannot reopen closed account"
     );
 }
+
+// ============================================================================
+// Property-Based Tests (derived from TLA+ properties)
+// ============================================================================
+
+use proptest::prelude::*;
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(50))]
+
+    /// TLA+ CorrectSeverity: All error codes have correct severity
+    #[test]
+    fn prop_tla_correct_severity(code_index in 0usize..26) {
+        let codes = [
+            ErrorCode::AccountNotOpen,
+            ErrorCode::AccountAlreadyOpen,
+            ErrorCode::AccountClosed,
+            ErrorCode::AccountCloseNotEmpty,
+            ErrorCode::InvalidAccountName,
+            ErrorCode::BalanceAssertionFailed,
+            ErrorCode::PadWithoutBalance,
+            ErrorCode::MultiplePadForBalance,
+            ErrorCode::TransactionUnbalanced,
+            ErrorCode::MultipleInterpolation,
+            ErrorCode::NoPostings,
+            ErrorCode::SinglePosting,
+            ErrorCode::NoMatchingLot,
+            ErrorCode::InsufficientUnits,
+            ErrorCode::AmbiguousLotMatch,
+            ErrorCode::NegativeInventory,
+            ErrorCode::UndeclaredCurrency,
+            ErrorCode::CurrencyNotAllowed,
+            ErrorCode::DuplicateMetadataKey,
+            ErrorCode::InvalidMetadataValue,
+            ErrorCode::UnknownOption,
+            ErrorCode::InvalidOptionValue,
+            ErrorCode::DuplicateOption,
+            ErrorCode::DocumentNotFound,
+            ErrorCode::DateOutOfOrder,
+            ErrorCode::FutureDate,
+        ];
+
+        let code = codes[code_index];
+        let severity = code.severity();
+
+        // TLA+ CorrectSeverity invariant
+        match code {
+            ErrorCode::SinglePosting => prop_assert_eq!(severity, Severity::Warning),
+            ErrorCode::FutureDate => prop_assert_eq!(severity, Severity::Warning),
+            ErrorCode::DateOutOfOrder => prop_assert_eq!(severity, Severity::Info),
+            ErrorCode::AccountCloseNotEmpty => prop_assert_eq!(severity, Severity::Warning),
+            _ => prop_assert_eq!(severity, Severity::Error),
+        }
+    }
+
+    /// TLA+ ValidErrorCodes: All error code strings are valid
+    #[test]
+    fn prop_tla_valid_error_code_strings(code_index in 0usize..26) {
+        let codes = [
+            ErrorCode::AccountNotOpen,
+            ErrorCode::AccountAlreadyOpen,
+            ErrorCode::AccountClosed,
+            ErrorCode::AccountCloseNotEmpty,
+            ErrorCode::InvalidAccountName,
+            ErrorCode::BalanceAssertionFailed,
+            ErrorCode::PadWithoutBalance,
+            ErrorCode::MultiplePadForBalance,
+            ErrorCode::TransactionUnbalanced,
+            ErrorCode::MultipleInterpolation,
+            ErrorCode::NoPostings,
+            ErrorCode::SinglePosting,
+            ErrorCode::NoMatchingLot,
+            ErrorCode::InsufficientUnits,
+            ErrorCode::AmbiguousLotMatch,
+            ErrorCode::NegativeInventory,
+            ErrorCode::UndeclaredCurrency,
+            ErrorCode::CurrencyNotAllowed,
+            ErrorCode::DuplicateMetadataKey,
+            ErrorCode::InvalidMetadataValue,
+            ErrorCode::UnknownOption,
+            ErrorCode::InvalidOptionValue,
+            ErrorCode::DuplicateOption,
+            ErrorCode::DocumentNotFound,
+            ErrorCode::DateOutOfOrder,
+            ErrorCode::FutureDate,
+        ];
+
+        let code = codes[code_index];
+        let code_str = code.code();
+
+        // All codes must match E\d+ pattern
+        prop_assert!(code_str.starts_with('E'), "Code must start with E");
+        prop_assert!(code_str.len() >= 5, "Code must be at least 5 chars (Exxxx)");
+        prop_assert!(code_str[1..].chars().all(|c| c.is_ascii_digit()),
+            "Code suffix must be digits");
+    }
+
+    /// TLA+ AccountLifecycleConsistent: Random account operations maintain consistency
+    #[test]
+    fn prop_tla_account_lifecycle_random(
+        num_accounts in 1usize..5,
+        num_ops in 1usize..10
+    ) {
+        let mut v = validator();
+
+        // Generate account names
+        let accounts: Vec<String> = (0..num_accounts)
+            .map(|i| format!("Assets:Account{}", i))
+            .collect();
+
+        // Track expected states
+        let mut states: std::collections::HashMap<String, &str> =
+            accounts.iter().map(|a| (a.clone(), "unopened")).collect();
+
+        // Perform random operations
+        for i in 0..num_ops {
+            let account = &accounts[i % num_accounts];
+            let current_state = *states.get(account).unwrap();
+
+            match current_state {
+                "unopened" => {
+                    // Can open
+                    let open = Open {
+                        date: date(2024, 1, (i + 1) as u32),
+                        account: account.clone(),
+                        currencies: vec![],
+                        booking: None,
+                        meta: Default::default(),
+                    };
+                    let errors = v.validate_open(&open);
+                    prop_assert!(errors.is_empty(), "Should be able to open unopened account");
+                    v.process_open(&open);
+                    states.insert(account.clone(), "open");
+                }
+                "open" => {
+                    // Can close
+                    let close = Close {
+                        date: date(2024, 6, (i + 1) as u32),
+                        account: account.clone(),
+                        meta: Default::default(),
+                    };
+                    v.process_close(&close);
+                    states.insert(account.clone(), "closed");
+                }
+                "closed" => {
+                    // Cannot reopen - should generate error
+                    let reopen = Open {
+                        date: date(2024, 12, 1),
+                        account: account.clone(),
+                        currencies: vec![],
+                        booking: None,
+                        meta: Default::default(),
+                    };
+                    let errors = v.validate_open(&reopen);
+                    prop_assert!(!errors.is_empty(), "Should not be able to reopen closed account");
+                }
+                _ => unreachable!()
+            }
+        }
+    }
+
+    /// TLA+ E3003/E3004 Correctness: Posting count determines error
+    #[test]
+    fn prop_tla_posting_count_errors(num_postings in 0usize..5) {
+        let v = validator();
+
+        let postings: Vec<Posting> = (0..num_postings)
+            .map(|i| Posting {
+                account: format!("Assets:Account{}", i),
+                units: Some(Amount::new(Decimal::from(100 - i as i64 * 25), "USD")),
+                cost: None,
+                price: None,
+                flag: None,
+                meta: Default::default(),
+            })
+            .collect();
+
+        let txn = Transaction {
+            date: date(2024, 1, 15),
+            flag: '*',
+            payee: None,
+            narration: "Test".to_string(),
+            postings,
+            tags: Default::default(),
+            links: Default::default(),
+            meta: Default::default(),
+        };
+
+        let errors = v.validate_transaction_structure(&txn);
+
+        match num_postings {
+            0 => {
+                // E3003 should be generated
+                prop_assert!(has_error_code(&errors, ErrorCode::NoPostings),
+                    "E3003 should be generated for 0 postings");
+            }
+            1 => {
+                // E3004 (warning) should be generated
+                prop_assert!(has_error_code(&errors, ErrorCode::SinglePosting),
+                    "E3004 should be generated for 1 posting");
+            }
+            _ => {
+                // Neither E3003 nor E3004
+                prop_assert!(!has_error_code(&errors, ErrorCode::NoPostings),
+                    "E3003 should not be generated for {} postings", num_postings);
+                prop_assert!(!has_error_code(&errors, ErrorCode::SinglePosting),
+                    "E3004 should not be generated for {} postings", num_postings);
+            }
+        }
+    }
+}

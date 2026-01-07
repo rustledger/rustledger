@@ -35,6 +35,7 @@ tools/
 *.toolbox/
 *.out
 states/
+traces/
 
 # Test fixtures (downloaded)
 spec/fixtures/lima-tests/

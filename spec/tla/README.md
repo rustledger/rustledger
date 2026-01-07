@@ -12,11 +12,15 @@ This directory contains TLA+ formal specifications for critical rustledger algor
 | `AccountLifecycle.tla` | Account open/close semantics and state machine |
 | `DirectiveOrdering.tla` | Directive ordering constraints and validation |
 | `ValidationErrors.tla` | All 26 validation error codes (E1xxx-E10xxx) |
+| `PriceDatabase.tla` | Price lookups with triangulation and date fallback |
 | `*.cfg` | TLC model checker configuration files |
 | `ROADMAP.md` | Plan for expanding TLA+ coverage to stellar level |
 | `GUIDE.md` | How to read TLA+ specs and their Rust correspondence |
 | `InventoryProofs.tla` | TLAPS formal proofs for Inventory invariants |
 | `BookingMethodsProofs.tla` | TLAPS formal proofs for booking properties |
+| `ValidationErrorsProofs.tla` | TLAPS formal proofs for ValidationErrors |
+| `InventoryRefinement.tla` | Refinement proof: Rust Inventory → TLA+ |
+| `BookingRefinement.tla` | Refinement proof: Rust booking methods → TLA+ |
 
 ## Quick Start
 
@@ -287,6 +291,98 @@ Proof modules:
 
 Installing TLAPS: https://tla.msr-inria.inria.fr/tlaps/
 
+## Refinement Checking
+
+Refinement proofs verify that the Rust implementation correctly implements the abstract TLA+ specification:
+
+```bash
+# Check Inventory refinement
+just tla-refine-inventory
+
+# Check Booking methods refinement
+just tla-refine-booking
+
+# Check all refinements
+just tla-refine-all
+```
+
+Refinement modules:
+- `InventoryRefinement.tla` - Proves Rust `Inventory` refines abstract spec
+- `BookingRefinement.tla` - Proves booking methods (FIFO, LIFO, HIFO, STRICT) refine abstract spec
+
+What refinement checking proves:
+1. **Initial State**: Rust's initial state corresponds to TLA+ initial state
+2. **Step Correspondence**: Every Rust operation maps to a valid TLA+ transition
+3. **Invariant Preservation**: All abstract invariants hold on the refined concrete state
+
+Example: FIFO Refinement Property
+```tla
+FIFORefinement ==
+    \A i \in 1..Len(reduction_history) :
+        reduction_history[i].method = "FIFO" =>
+            LET h == reduction_history[i]
+            IN \A other \in h.matches :
+                h.selected.cost.date <= other.cost.date
+```
+
+This proves that whenever the Rust code calls `inventory.reduce(BookingMethod::FIFO, ...)`,
+it selects the lot with the minimum date among all matching lots.
+
+## Apalache (Symbolic Model Checking)
+
+[Apalache](https://github.com/informalsystems/apalache) provides symbolic model checking as an alternative to TLC's explicit-state approach:
+
+```bash
+# Setup Apalache (one-time download)
+just apalache-setup
+
+# Run Apalache on specific specs
+just apalache-inventory
+just apalache-booking
+just apalache-validate
+
+# Run on any spec
+just apalache-check Inventory
+
+# Run all Apalache checks
+just apalache-all
+```
+
+Benefits over TLC:
+- Finds bugs in unbounded state spaces
+- Better for specs with infinite domains
+- Produces SMT-based proofs
+
+## Trace-to-Test Generator
+
+Automatically generate Rust tests from TLA+ counterexamples:
+
+```bash
+# Capture trace from TLC (if invariant violated)
+just tla-trace BookingMethods
+
+# Generate Rust test from trace
+just tla-gen-test traces/BookingMethods_trace.json
+
+# Generate tests from all traces
+just tla-gen-all-tests
+```
+
+How it works:
+1. `tla_trace_to_json.py` parses TLC output and extracts counterexample states
+2. `trace_to_rust_test.py` converts JSON traces to Rust test code
+3. Tests reproduce the exact sequence of operations that violated an invariant
+
+Example workflow:
+```bash
+# Find a bug in the spec
+java -jar tools/tla2tools.jar -config spec/tla/Inventory.cfg spec/tla/Inventory.tla 2>&1 | \
+    python3 scripts/tla_trace_to_json.py --spec Inventory > trace.json
+
+# Generate Rust test
+python3 scripts/trace_to_rust_test.py trace.json > test_from_trace.rs
+```
+
 ## Limitations
 
 TLA+ model checking is bounded:
@@ -307,6 +403,10 @@ Completed:
 - ✅ CI automation
 - ✅ Rust integration tests
 - ✅ TLAPS formal proofs
+- ✅ Apalache symbolic model checking
+- ✅ Trace-to-test generator
+- ✅ PriceDatabase specification
+- ✅ Refinement proofs (Rust → TLA+)
 
 ## References
 

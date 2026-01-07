@@ -179,8 +179,16 @@ tla-ordering: tla-setup
         -deadlock \
         spec/tla/DirectiveOrdering.tla
 
+# Run TLA+ model checker on ValidationErrors spec
+tla-validate: tla-setup
+    java -XX:+UseParallelGC -Xmx4g -jar tools/tla2tools.jar \
+        -config spec/tla/ValidationErrors.cfg \
+        -workers auto \
+        -deadlock \
+        spec/tla/ValidationErrors.tla
+
 # Run all TLA+ specs
-tla-all: tla-inventory tla-booking tla-balance tla-lifecycle tla-ordering
+tla-all: tla-inventory tla-booking tla-balance tla-lifecycle tla-ordering tla-validate
     @echo "All TLA+ specifications verified"
 
 # Run specific TLA+ spec by name

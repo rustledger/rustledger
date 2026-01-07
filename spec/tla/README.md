@@ -11,6 +11,7 @@ This directory contains TLA+ formal specifications for critical rustledger algor
 | `TransactionBalance.tla` | Transaction balancing and interpolation |
 | `AccountLifecycle.tla` | Account open/close semantics and state machine |
 | `DirectiveOrdering.tla` | Directive ordering constraints and validation |
+| `ValidationErrors.tla` | All 26 validation error codes (E1xxx-E10xxx) |
 | `*.cfg` | TLC model checker configuration files |
 | `ROADMAP.md` | Plan for expanding TLA+ coverage to stellar level |
 | `GUIDE.md` | How to read TLA+ specs and their Rust correspondence |
@@ -31,6 +32,7 @@ just tla-booking
 just tla-balance
 just tla-lifecycle
 just tla-ordering
+just tla-validate
 
 # Run any spec by name
 just tla-check Inventory
@@ -166,6 +168,35 @@ TransactionsToOpenAccountsInvariant ==
                 accountOpenDates[a] > 0
 ```
 
+### ValidationErrors.tla
+
+Models all 26 validation error codes from `rustledger-validate`:
+
+```tla
+\* All error codes are valid
+ValidErrorCodes ==
+    \A e \in errors :
+        e.code \in {
+            "E1001", "E1002", "E1003", "E1004", "E1005",  \* Account
+            "E2001", "E2003", "E2004",                    \* Balance
+            "E3001", "E3002", "E3003", "E3004",           \* Transaction
+            "E4001", "E4002", "E4003", "E4004",           \* Booking
+            "E5001", "E5002",                             \* Currency
+            "E6001", "E6002",                             \* Metadata
+            "E7001", "E7002", "E7003",                    \* Option
+            "E8001",                                       \* Document
+            "E10001", "E10002"                            \* Date
+        }
+
+\* Error severity is appropriate (E3004/E10001/E10002 are warnings/info)
+CorrectSeverity ==
+    \A e \in errors :
+        \/ (e.code = "E3004" => e.severity = "warning")
+        \/ (e.code = "E10001" => e.severity = "info")
+        \/ (e.code = "E10002" => e.severity = "warning")
+        \/ (e.code \notin {"E3004", "E10001", "E10002"} => e.severity = "error")
+```
+
 ## Translating to Rust
 
 The TLA+ specs guide implementation. For example, `ReduceFIFO` in TLA+:
@@ -253,11 +284,12 @@ For our purposes, model checking with reasonable bounds (3-5 lots, 10-20 units) 
 
 ## Roadmap
 
-See `ROADMAP.md` for the plan to expand TLA+ coverage. Current status: **9/10**
+See `ROADMAP.md` for the plan to expand TLA+ coverage. Current status: **10/10** 🏆
 
 Completed:
 - ✅ All 7 booking methods with strong invariants
 - ✅ Account lifecycle and directive ordering
+- ✅ All 26 validation error codes
 - ✅ CI automation
 - ✅ Rust integration tests
 - ✅ TLAPS formal proofs

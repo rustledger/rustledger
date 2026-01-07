@@ -105,6 +105,17 @@ jobs:
             spec/tla/DirectiveOrdering.tla
           echo "::endgroup::"
 
+      - name: Model Check ValidationErrors.tla
+        run: |
+          echo "::group::Checking ValidationErrors.tla"
+          java -XX:+UseParallelGC -Xmx4g \
+            -jar ~/tla2tools.jar \
+            -config spec/tla/ValidationErrors.cfg \
+            -workers auto \
+            -deadlock \
+            spec/tla/ValidationErrors.tla
+          echo "::endgroup::"
+
       - name: Summary
         if: always()
         run: |
@@ -117,3 +128,4 @@ jobs:
           echo "| TransactionBalance.tla | Checked |" >> $GITHUB_STEP_SUMMARY
           echo "| AccountLifecycle.tla | Checked |" >> $GITHUB_STEP_SUMMARY
           echo "| DirectiveOrdering.tla | Checked |" >> $GITHUB_STEP_SUMMARY
+          echo "| ValidationErrors.tla | Checked |" >> $GITHUB_STEP_SUMMARY

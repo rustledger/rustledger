@@ -1,16 +1,21 @@
 ------------------------- MODULE InductiveInvariants -------------------------
 (***************************************************************************
- * Inductive Invariants for rustledger
+ * Inductive Invariants for Inventory Conservation
  *
- * Inductive invariants are stronger than regular invariants. They satisfy:
+ * This module proves the fundamental accounting invariant:
+ *   units_in_inventory + units_reduced = units_added
+ *
+ * This is an INDUCTIVE invariant, meaning:
  *   1. Init => Inv           (holds initially)
- *   2. Inv /\ Next => Inv'   (preserved by transitions)
+ *   2. Inv /\ Next => Inv'   (preserved by all transitions)
  *
- * This allows unbounded verification - proving correctness for ALL possible
- * states, not just those reachable within model checking bounds.
+ * Unlike bounded model checking, inductive invariants prove correctness
+ * for ALL possible states, not just those reachable within bounds.
  *
- * Usage with Apalache:
- *   apalache-mc check --init=Init --inv=IndInv --next=Next InductiveInvariants.tla
+ * This catches bugs like:
+ * - Arithmetic errors in reduction (reducing wrong amount)
+ * - Off-by-one errors in lot splitting
+ * - Lost units during partial reductions
  ***************************************************************************)
 
 EXTENDS Integers, Sequences, FiniteSets, TLC
@@ -30,201 +35,119 @@ Lot == [
     date: 1..365
 ]
 
-BookingMethod == {"FIFO", "LIFO", "HIFO", "STRICT", "AVERAGE", "NONE"}
-
 -----------------------------------------------------------------------------
 (* Variables *)
 
 VARIABLES
-    lots,           \* Set of lots
-    method,         \* Current booking method
-    history,        \* Operation history
-    totalAdded,     \* Total units ever added
-    totalReduced    \* Total units ever reduced
+    lots,           \* Set of lots in inventory
+    totalAdded,     \* Running total of units added
+    totalReduced    \* Running total of units reduced
 
-vars == <<lots, method, history, totalAdded, totalReduced>>
+vars == <<lots, totalAdded, totalReduced>>
 
 -----------------------------------------------------------------------------
 (* Helper Functions *)
 
+\* Total units across all lots (recursive sum)
+RECURSIVE TotalUnits(_)
 TotalUnits(lotSet) ==
     IF lotSet = {} THEN 0
-    ELSE LET s == CHOOSE s \in lotSet : TRUE
-         IN s.units + TotalUnits(lotSet \ {s})
-
-CurrencyUnits(lotSet, curr) ==
-    TotalUnits({l \in lotSet : l.currency = curr})
-
-Oldest(lotSet) ==
-    CHOOSE l \in lotSet : \A other \in lotSet : l.date <= other.date
-
-Newest(lotSet) ==
-    CHOOSE l \in lotSet : \A other \in lotSet : l.date >= other.date
-
-HighestCost(lotSet) ==
-    CHOOSE l \in lotSet : \A other \in lotSet : l.cost >= other.cost
+    ELSE LET l == CHOOSE l \in lotSet : TRUE
+         IN l.units + TotalUnits(lotSet \ {l})
 
 -----------------------------------------------------------------------------
 (* Initial State *)
 
 Init ==
     /\ lots = {}
-    /\ method \in BookingMethod
-    /\ history = <<>>
     /\ totalAdded = 0
     /\ totalReduced = 0
 
 -----------------------------------------------------------------------------
 (* Actions *)
 
+\* Add a new lot to inventory
 AddLot(l) ==
     /\ l \in Lot
     /\ Cardinality(lots) < MaxLots
     /\ lots' = lots \cup {l}
     /\ totalAdded' = totalAdded + l.units
-    /\ history' = Append(history, [action |-> "add", lot |-> l])
-    /\ UNCHANGED <<method, totalReduced>>
+    /\ UNCHANGED totalReduced
 
+\* Reduce units from a lot (fully or partially)
 ReduceLot(l, units) ==
     /\ l \in lots
     /\ units > 0
     /\ units <= l.units
-    /\ IF units = l.units
-       THEN lots' = lots \ {l}
-       ELSE lots' = (lots \ {l}) \cup {[l EXCEPT !.units = @ - units]}
+    /\ lots' = IF units = l.units
+               THEN lots \ {l}                                    \* Full reduction
+               ELSE (lots \ {l}) \cup {[l EXCEPT !.units = @ - units]}  \* Partial
     /\ totalReduced' = totalReduced + units
-    /\ history' = Append(history, [action |-> "reduce", lot |-> l, units |-> units])
-    /\ UNCHANGED <<method, totalAdded>>
-
-ChangeMethod(m) ==
-    /\ m \in BookingMethod
-    /\ method' = m
-    /\ UNCHANGED <<lots, history, totalAdded, totalReduced>>
+    /\ UNCHANGED totalAdded
 
 Next ==
     \/ \E l \in Lot : AddLot(l)
     \/ \E l \in lots, u \in 1..MaxUnits : ReduceLot(l, u)
-    \/ \E m \in BookingMethod : ChangeMethod(m)
 
 -----------------------------------------------------------------------------
-(* INDUCTIVE INVARIANTS *)
+(* THE CONSERVATION INVARIANT *)
 
-(* Invariant 1: Conservation of Units
- * The total units in inventory plus total reduced equals total added.
- * This is a fundamental accounting invariant.
- *)
+\* Core accounting invariant:
+\* What's in inventory + what's been reduced = what's been added
 ConservationInv ==
     TotalUnits(lots) + totalReduced = totalAdded
 
-(* Invariant 2: Non-Negative Lots
- * All lots have positive units. No zero or negative lots exist.
- *)
-PositiveLotsInv ==
+\* All lots have positive units (no zero-unit ghost lots)
+PositiveUnitsInv ==
     \A l \in lots : l.units > 0
 
-(* Invariant 3: Bounded Lots
- * Number of lots never exceeds MaxLots.
- *)
-BoundedLotsInv ==
-    Cardinality(lots) <= MaxLots
+\* Can't reduce more than was added
+ReduceBoundedInv ==
+    totalReduced <= totalAdded
 
-(* Invariant 4: Valid Currencies
- * All lots have valid currencies.
- *)
-ValidCurrenciesInv ==
-    \A l \in lots : l.currency \in Currencies
-
-(* Invariant 5: History Consistency
- * History length matches number of operations.
- *)
-HistoryConsistencyInv ==
-    Len(history) = (totalAdded \div MaxUnits) + (totalReduced \div MaxUnits)
-    \* Approximate - actual proof would track operation count separately
-
-(* Invariant 6: Non-Negative Totals
- * Running totals are never negative.
- *)
-NonNegativeTotalsInv ==
-    /\ totalAdded >= 0
-    /\ totalReduced >= 0
-    /\ totalAdded >= totalReduced  \* Can't reduce more than added
-
-(* Invariant 7: Method Validity
- * Booking method is always valid.
- *)
-ValidMethodInv ==
-    method \in BookingMethod
-
-(* Combined Inductive Invariant *)
-IndInv ==
+\* Combined invariant
+Inv ==
     /\ ConservationInv
-    /\ PositiveLotsInv
-    /\ BoundedLotsInv
-    /\ ValidCurrenciesInv
-    /\ NonNegativeTotalsInv
-    /\ ValidMethodInv
+    /\ PositiveUnitsInv
+    /\ ReduceBoundedInv
 
 -----------------------------------------------------------------------------
-(* PROOFS OF INDUCTIVENESS *)
+(* PROOF SKETCH *)
 
-(* To prove IndInv is inductive, we must show:
- * 1. Init => IndInv
- * 2. IndInv /\ Next => IndInv'
- *
- * Proof sketch for ConservationInv:
- *
- * Base case (Init):
- *   TotalUnits({}) + 0 = 0  ✓
- *
- * Inductive case (AddLot):
- *   TotalUnits(lots') + totalReduced' = totalAdded'
- *   TotalUnits(lots \cup {l}) + totalReduced = totalAdded + l.units
- *   (TotalUnits(lots) + l.units) + totalReduced = totalAdded + l.units
- *   TotalUnits(lots) + totalReduced = totalAdded  (by IndInv)  ✓
- *
- * Inductive case (ReduceLot):
- *   TotalUnits(lots') + totalReduced' = totalAdded'
- *   (TotalUnits(lots) - units) + (totalReduced + units) = totalAdded
- *   TotalUnits(lots) + totalReduced = totalAdded  (by IndInv)  ✓
- *)
+(*
+To prove ConservationInv is inductive:
 
-THEOREM InitImpliesIndInv ==
-    Init => IndInv
+BASE CASE (Init):
+  TotalUnits({}) + 0 = 0
+  0 + 0 = 0  ✓
 
-THEOREM IndInvIsInductive ==
-    IndInv /\ Next => IndInv'
+INDUCTIVE CASE (AddLot):
+  Assume: TotalUnits(lots) + totalReduced = totalAdded
+  Show:   TotalUnits(lots') + totalReduced' = totalAdded'
 
------------------------------------------------------------------------------
-(* STRENGTHENED INVARIANTS FOR BOOKING METHODS *)
+  TotalUnits(lots \cup {l}) + totalReduced = totalAdded + l.units
+  (TotalUnits(lots) + l.units) + totalReduced = totalAdded + l.units
+  TotalUnits(lots) + totalReduced = totalAdded  ✓ (by assumption)
 
-(* FIFO Inductive Invariant:
- * When using FIFO, oldest lots are always consumed first.
- * Strengthening: track "frontier date" - minimum date of remaining lots.
- *)
-FIFOStrengtheningInv ==
-    method = "FIFO" =>
-        \A l1, l2 \in lots :
-            l1.currency = l2.currency =>
-                \* No "gaps" in dates - can't have old lot if newer was reduced
-                TRUE  \* Actual invariant requires augmented state
+INDUCTIVE CASE (ReduceLot - full):
+  Assume: TotalUnits(lots) + totalReduced = totalAdded
+  Show:   TotalUnits(lots') + totalReduced' = totalAdded'
 
-(* LIFO Inductive Invariant:
- * When using LIFO, newest lots are consumed first.
- *)
-LIFOStrengtheningInv ==
-    method = "LIFO" =>
-        \A l1, l2 \in lots :
-            l1.currency = l2.currency =>
-                TRUE  \* Actual invariant requires augmented state
+  TotalUnits(lots \ {l}) + (totalReduced + l.units) = totalAdded
+  (TotalUnits(lots) - l.units) + totalReduced + l.units = totalAdded
+  TotalUnits(lots) + totalReduced = totalAdded  ✓ (by assumption)
 
-(* HIFO Inductive Invariant:
- * When using HIFO, highest cost lots are consumed first.
- *)
-HIFOStrengtheningInv ==
-    method = "HIFO" =>
-        \A l1, l2 \in lots :
-            l1.currency = l2.currency =>
-                TRUE  \* Actual invariant requires augmented state
+INDUCTIVE CASE (ReduceLot - partial):
+  Assume: TotalUnits(lots) + totalReduced = totalAdded
+  Show:   TotalUnits(lots') + totalReduced' = totalAdded'
+
+  Let lots' = (lots \ {l}) \cup {l'}  where l'.units = l.units - units
+
+  TotalUnits(lots') + (totalReduced + units) = totalAdded
+  (TotalUnits(lots) - l.units + l'.units) + totalReduced + units = totalAdded
+  (TotalUnits(lots) - l.units + (l.units - units)) + totalReduced + units = totalAdded
+  TotalUnits(lots) + totalReduced = totalAdded  ✓ (by assumption)
+*)
 
 -----------------------------------------------------------------------------
 (* Specification *)

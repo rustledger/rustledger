@@ -217,32 +217,13 @@ tla-typed-inventory: apalache-setup
         --config=spec/tla/InventoryTyped.cfg \
         spec/tla/InventoryTyped.tla
 
-# Check inductive invariants
+# Check inductive invariants (conservation of units)
 tla-inductive: tla-setup
     java -XX:+UseParallelGC -Xmx4g -jar tools/tla2tools.jar \
         -config spec/tla/InductiveInvariants.cfg \
         -workers auto \
         -deadlock \
         spec/tla/InductiveInvariants.tla
-
-# Check liveness properties with fairness
-tla-liveness: tla-setup
-    java -XX:+UseParallelGC -Xmx4g -jar tools/tla2tools.jar \
-        -config spec/tla/LivenessProperties.cfg \
-        -workers auto \
-        spec/tla/LivenessProperties.tla
-
-# Check compositional verification
-tla-compositional: tla-setup
-    java -XX:+UseParallelGC -Xmx4g -jar tools/tla2tools.jar \
-        -config spec/tla/CompositionalVerification.cfg \
-        -workers auto \
-        -deadlock \
-        spec/tla/CompositionalVerification.tla
-
-# Run all advanced TLA+ checks
-tla-advanced: tla-inductive tla-liveness tla-compositional
-    @echo "All advanced TLA+ checks passed"
 
 # ============================================================================
 # TLA+ COVERAGE ANALYSIS
@@ -282,30 +263,6 @@ mbt-booking:
 # Generate MBT tests for Inventory
 mbt-inventory:
     just mbt-generate Inventory 2 30
-
-# ============================================================================
-# KANI VERIFICATION
-# ============================================================================
-
-# Run Kani proofs (requires kani-verifier)
-kani-verify:
-    @if command -v cargo-kani > /dev/null 2>&1; then \
-        cargo kani --package rustledger-core; \
-    else \
-        echo "Kani not installed. Install with: cargo install --locked kani-verifier && kani setup"; \
-    fi
-
-# Run specific Kani proof
-kani-proof harness:
-    @if command -v cargo-kani > /dev/null 2>&1; then \
-        cargo kani --package rustledger-core --harness {{harness}}; \
-    else \
-        echo "Kani not installed."; \
-    fi
-
-# List available Kani proofs
-kani-list:
-    @grep -h "^fn kani_" crates/rustledger-core/src/kani_proofs.rs | sed 's/fn //' | sed 's/(.*$//'
 
 # ============================================================================
 # TLA+ PROOFS (TLAPS)

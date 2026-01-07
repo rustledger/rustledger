@@ -12,11 +12,9 @@ This directory contains TLA+ formal specifications for critical rustledger algor
 | `TransactionBalance.tla` | Transaction balancing and interpolation |
 | `AccountLifecycle.tla` | Account open/close semantics and state machine |
 | `DirectiveOrdering.tla` | Directive ordering constraints and validation |
-| `ValidationErrors.tla` | All 26 validation error codes (E1xxx-E10xxx) |
+| `ValidationErrors.tla` | Validation error detection - proves no false negatives |
 | `PriceDatabase.tla` | Price lookups with triangulation and date fallback |
-| `InductiveInvariants.tla` | Inductive invariants for unbounded verification |
-| `LivenessProperties.tla` | Liveness properties with fairness constraints |
-| `CompositionalVerification.tla` | Cross-component verification |
+| `InductiveInvariants.tla` | Inductive invariants (conservation of units) |
 | `*.cfg` | TLC model checker configuration files |
 | `ROADMAP.md` | Plan for expanding TLA+ coverage to stellar level |
 | `GUIDE.md` | How to read TLA+ specs and their Rust correspondence |
@@ -178,32 +176,25 @@ TransactionsToOpenAccountsInvariant ==
 
 ### ValidationErrors.tla
 
-Models all 26 validation error codes from `rustledger-validate`:
+Verifies that the validator correctly identifies ALL invalid states (no false negatives):
 
 ```tla
-\* All error codes are valid
-ValidErrorCodes ==
-    \A e \in errors :
-        e.code \in {
-            "E1001", "E1002", "E1003", "E1004", "E1005",  \* Account
-            "E2001", "E2003", "E2004",                    \* Balance
-            "E3001", "E3002", "E3003", "E3004",           \* Transaction
-            "E4001", "E4002", "E4003", "E4004",           \* Booking
-            "E5001", "E5002",                             \* Currency
-            "E6001", "E6002",                             \* Metadata
-            "E7001", "E7002", "E7003",                    \* Option
-            "E8001",                                       \* Document
-            "E10001", "E10002"                            \* Date
-        }
+\* CRITICAL INVARIANT: Every invalid transaction produces appropriate errors
+AllInvalidTransactionsDetected ==
+    \A i \in 1..Len(ledger) :
+        LET txn == ledger[i]
+        IN /\ MustFireE1001(txn) => "E1001" \in validationErrors  \* Unopened account
+           /\ MustFireE1003(txn) => "E1003" \in validationErrors  \* Closed account
+           /\ MustFireE3001(txn) => "E3001" \in validationErrors  \* Unbalanced
+           /\ MustFireE3002(txn) => "E3002" \in validationErrors  \* Multiple NULLs
+           /\ MustFireE3003(txn) => "E3003" \in validationErrors  \* No postings
 
-\* Error severity is appropriate (E3004/E10001/E10002 are warnings/info)
-CorrectSeverity ==
-    \A e \in errors :
-        \/ (e.code = "E3004" => e.severity = "warning")
-        \/ (e.code = "E10001" => e.severity = "info")
-        \/ (e.code = "E10002" => e.severity = "warning")
-        \/ (e.code \notin {"E3004", "E10001", "E10002"} => e.severity = "error")
+\* Account lifecycle is monotonic (can't reopen closed accounts)
+AccountLifecycleMonotonic ==
+    [][accountStates[a] = "closed" => accountStates'[a] = "closed"]_vars
 ```
+
+This catches bugs where the validator fails to detect invalid input.
 
 ## Translating to Rust
 
@@ -270,10 +261,10 @@ The tests validate:
 - `prop_tla_*` - Property-based invariant validation
 
 **ValidationErrors.tla (tla_validation_errors_test.rs):**
-- `tla_valid_error_codes_*` - ValidErrorCodes invariant (all 26 codes)
-- `tla_correct_severity_*` - CorrectSeverity invariant
-- `tla_e1001_*` through `tla_e10002_*` - Individual error code tests
-- `tla_account_lifecycle_*` - AccountLifecycleConsistent invariant
+- `tla_all_invalid_detected_*` - AllInvalidTransactionsDetected invariant
+- `tla_account_state_machine_*` - AccountStateMachineValid invariant
+- `tla_date_ordering_*` - DateOrderingValid invariant
+- `tla_e1001_*` through `tla_e3003_*` - Individual error detection tests
 - `tla_errors_monotonic` - ErrorsMonotonic property
 
 ## TLAPS Formal Proofs
@@ -395,49 +386,24 @@ Inductive invariants provide unbounded verification - proving correctness for AL
 just tla-inductive
 ```
 
-Key inductive invariants in `InductiveInvariants.tla`:
-- `ConservationInv`: TotalUnits + TotalReduced = TotalAdded
-- `PositiveLotsInv`: All lots have positive units
-- `BoundedLotsInv`: Lot count never exceeds MaxLots
-- `NonNegativeTotalsInv`: Running totals are never negative
+`InductiveInvariants.tla` proves the **conservation of units** invariant:
 
-## Liveness Properties
+```tla
+\* Core accounting invariant:
+\* What's in inventory + what's been reduced = what's been added
+ConservationInv ==
+    TotalUnits(lots) + totalReduced = totalAdded
 
-Liveness properties verify the system makes progress (not just safety):
+\* All lots have positive units (no zero-unit ghost lots)
+PositiveUnitsInv ==
+    \A l \in lots : l.units > 0
 
-```bash
-just tla-liveness
+\* Can't reduce more than was added
+ReduceBoundedInv ==
+    totalReduced <= totalAdded
 ```
 
-Properties in `LivenessProperties.tla`:
-- `NoDeadlock`: System can always make progress
-- `RequestEventuallyProcessed`: Pending operations eventually complete
-- `ErrorsEventuallyResolved`: All errors are eventually resolved
-- `Progress`: System doesn't get stuck
-- `StarvationFreedom`: No operation waits forever
-
-Fairness constraints:
-- `WF_vars(ProcessAdd)`: Weak fairness on add operations
-- `WF_vars(ResolveError)`: Weak fairness on error resolution
-
-## Compositional Verification
-
-Verify cross-cutting properties across multiple components:
-
-```bash
-just tla-compositional
-```
-
-`CompositionalVerification.tla` composes:
-- Account Lifecycle (open/close)
-- Inventory management
-- Booking methods
-- Validation errors
-
-Cross-cutting invariants:
-- `LifecycleInventoryConsistency`: Closed accounts have empty inventory
-- `NoOrphanInventory`: Inventory only for opened accounts
-- `DateOrdering`: Close date always after open date
+The spec includes formal proof sketches showing the invariants are truly inductive (preserved by all transitions).
 
 ## State Space Coverage Analysis
 
@@ -471,38 +437,15 @@ just mbt-generate BookingMethods 3 50
 
 MBT generates tests for ALL action sequences up to a depth, verifying TLA+ invariants hold in Rust.
 
-## Kani Verification
-
-[Kani](https://github.com/model-checking/kani) provides bounded model checking for Rust:
-
-```bash
-# Run all Kani proofs
-just kani-verify
-
-# Run specific proof
-just kani-proof kani_fifo_selects_oldest
-
-# List available proofs
-just kani-list
-```
-
-Kani proofs in `kani_proofs.rs`:
-- `kani_fifo_selects_oldest` ↔ `FIFOProperty`
-- `kani_lifo_selects_newest` ↔ `LIFOProperty`
-- `kani_hifo_selects_highest_cost` ↔ `HIFOProperty`
-- `kani_non_negative_units` ↔ `NonNegativeUnits`
-- `kani_conservation_of_units` ↔ `ConservationInv`
-- `kani_strict_rejects_ambiguous` ↔ `STRICTProperty`
-
 ## Limitations
 
 TLA+ model checking is bounded:
 - We check with small `MaxLots`, `MaxUnits` values
 - Exhaustive for those bounds, but not proof of correctness for all sizes
 - TLAPS proofs provide unbounded correctness guarantees
-- Inductive invariants + Kani provide additional unbounded guarantees
+- Inductive invariants provide additional unbounded guarantees
 
-For our purposes, model checking with reasonable bounds (3-5 lots, 10-20 units) catches most bugs. TLAPS proofs and Kani verification provide mathematical certainty for critical invariants.
+For our purposes, model checking with reasonable bounds (3-5 lots, 10-20 units) catches most bugs. TLAPS proofs provide mathematical certainty for critical invariants.
 
 ## Roadmap
 
@@ -511,7 +454,7 @@ See `ROADMAP.md` for the plan to expand TLA+ coverage. Current status: **10/10**
 Completed:
 - ✅ All 7 booking methods with strong invariants
 - ✅ Account lifecycle and directive ordering
-- ✅ All 26 validation error codes
+- ✅ Validation error detection (reachability verification)
 - ✅ CI automation
 - ✅ Rust integration tests
 - ✅ TLAPS formal proofs
@@ -520,12 +463,9 @@ Completed:
 - ✅ PriceDatabase specification
 - ✅ Refinement proofs (Rust → TLA+)
 - ✅ Apalache type annotations
-- ✅ Inductive invariants
-- ✅ Liveness properties with fairness
-- ✅ Compositional verification
+- ✅ Inductive invariants (conservation of units)
 - ✅ State space coverage analysis
 - ✅ Model-based testing generator
-- ✅ Kani integration
 
 ## References
 

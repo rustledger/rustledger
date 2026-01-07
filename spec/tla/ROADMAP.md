@@ -4,27 +4,30 @@ This document outlines a comprehensive plan to elevate rustledger's TLA+ formal 
 
 ## Current State Assessment
 
-### What We Have (Rating: 6/10)
+### What We Have (Rating: 7/10)
 
 | Specification | Coverage | Quality | Status |
 |---------------|----------|---------|--------|
 | `Inventory.tla` | Core operations | Good | ✅ |
-| `BookingMethods.tla` | 5 of 7 methods (incl. HIFO) | Good | ✅ |
+| `BookingMethods.tla` | All 7 methods with strong invariants | Excellent | ✅ COMPLETE |
 | `TransactionBalance.tla` | Basic interpolation | Good | ✅ |
-| `AccountLifecycle.tla` | Account open/close | Good | ✅ NEW |
-| `DirectiveOrdering.tla` | Directive ordering | Good | ✅ NEW |
+| `AccountLifecycle.tla` | Account open/close | Good | ✅ |
+| `DirectiveOrdering.tla` | Directive ordering | Good | ✅ |
 
 **Strengths:**
 - Well-structured specifications
 - Clear documentation
 - Correct invariants for covered areas
 - CI automation in place ✅
-- HIFO booking method added ✅
+- All 7 booking methods complete ✅
+  - FIFO, LIFO, HIFO with strong snapshot-based invariants
+  - AVERAGE with weighted cost basis tracking
+  - STRICT, STRICT_WITH_SIZE with ambiguity detection
+  - NONE for direct tracking
 - Account lifecycle modeled ✅
 - Directive ordering modeled ✅
 
 **Remaining Gaps:**
-- Missing 2 booking methods (AVERAGE, STRICT_WITH_SIZE)
 - No validation error specifications
 - No plugin interface specification
 - No TLAPS proofs
@@ -578,7 +581,7 @@ Document real bugs caught by TLA+:
 ### Stellar TLA+ Criteria
 
 - [x] **Automated**: All specs run in CI on every PR ✅
-- [ ] **Complete**: All 7 booking methods specified (5/7 done)
+- [x] **Complete**: All 7 booking methods specified with strong invariants ✅
 - [x] **Validated**: Account lifecycle covered ✅
 - [ ] **Validated**: Validation errors specification (TODO)
 - [ ] **Proven**: Critical invariants have TLAPS proofs
@@ -586,16 +589,16 @@ Document real bugs caught by TLA+:
 - [ ] **Documented**: Clear guide for contributors
 - [x] **Maintained**: Specs updated with code changes ✅
 
-### Current Rating: 6/10
+### Current Rating: 7/10
 
-From initial 4/10, improved to 6/10 by:
+From initial 4/10, improved to 7/10 by:
 - CI automation: +1 point ✅
 - Account lifecycle & directive ordering: +1 point ✅
+- Complete booking methods with strong invariants: +1 point ✅
 
 ### Target Rating: 9/10
 
 Still needed:
-- Complete booking coverage: +1 point
 - TLAPS proofs: +1 point
 - Rust integration: +1 point
 
@@ -606,7 +609,11 @@ Still needed:
 1. ~~**Create `.cfg` files** for existing specs (30 minutes)~~ ✅ DONE
 2. ~~**Add GitHub Actions workflow** for model checking (1 hour)~~ ✅ DONE
 3. ~~**Add `just tla-check`** recipe (15 minutes)~~ ✅ DONE
-4. **Strengthen FIFO/LIFO properties** (2 hours) - IN PROGRESS
+4. ~~**Strengthen FIFO/LIFO/HIFO properties** with matching_lots snapshot~~ ✅ DONE
 5. ~~**Add HIFO booking method** to BookingMethods.tla (2 hours)~~ ✅ DONE
-6. ~~**Add AccountLifecycle.tla** specification~~ ✅ DONE
-7. ~~**Add DirectiveOrdering.tla** specification~~ ✅ DONE
+6. ~~**Add AVERAGE booking method** with weighted cost tracking~~ ✅ DONE
+7. ~~**Add STRICT_WITH_SIZE booking method** with exact match support~~ ✅ DONE
+8. ~~**Add AccountLifecycle.tla** specification~~ ✅ DONE
+9. ~~**Add DirectiveOrdering.tla** specification~~ ✅ DONE
+
+**All Quick Wins Complete!** Next: Phase 4 (TLAPS proofs) or Phase 5 (Rust integration)

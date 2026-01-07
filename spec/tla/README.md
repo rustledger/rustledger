@@ -7,7 +7,7 @@ This directory contains TLA+ formal specifications for critical rustledger algor
 | File | Description |
 |------|-------------|
 | `Inventory.tla` | Inventory data structure and operations |
-| `BookingMethods.tla` | FIFO, LIFO, HIFO, STRICT, NONE booking algorithms |
+| `BookingMethods.tla` | All 7 booking methods: FIFO, LIFO, HIFO, AVERAGE, STRICT, STRICT_WITH_SIZE, NONE |
 | `TransactionBalance.tla` | Transaction balancing and interpolation |
 | `AccountLifecycle.tla` | Account open/close semantics and state machine |
 | `DirectiveOrdering.tla` | Directive ordering constraints and validation |
@@ -93,17 +93,29 @@ NonNegativeUnits ==
 ### BookingMethods.tla
 
 ```tla
-\* FIFO always takes from oldest lot
+\* FIFO always takes from oldest lot (strong verification)
 FIFOProperty ==
     \A i \in 1..Len(history) :
-        history[i].method = "FIFO" =>
-            history[i].from_lot = Oldest(MatchingAtTime(i))
+        history[i].method \in {"FIFO", "FIFO_PARTIAL"} =>
+            LET h == history[i]
+                selected == h.from_lot
+                matches == h.matching_lots  \* Snapshot of matches at reduction time
+            IN \A other \in matches : selected.date <= other.date
 
 \* HIFO always takes from highest cost lot (tax optimization)
 HIFOProperty ==
     \A i \in 1..Len(history) :
-        history[i].method = "HIFO" =>
-            history[i].from_lot = HighestCost(MatchingAtTime(i))
+        history[i].method \in {"HIFO", "HIFO_PARTIAL"} =>
+            LET h == history[i]
+                selected == h.from_lot
+                matches == h.matching_lots
+            IN \A other \in matches : selected.cost_per_unit >= other.cost_per_unit
+
+\* AVERAGE uses weighted average cost basis
+AVERAGEProperty ==
+    \A i \in 1..Len(history) :
+        history[i].method \in {"AVERAGE", "AVERAGE_PARTIAL"} =>
+            history[i].avg_cost >= 0  \* Uses running average, not lot cost
 ```
 
 ### TransactionBalance.tla

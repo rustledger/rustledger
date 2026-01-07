@@ -127,20 +127,53 @@ fuzz target duration="60":
 # TLA+
 # ============================================================================
 
+# Download TLA+ tools if not present
+tla-setup:
+    @if [ ! -f tools/tla2tools.jar ]; then \
+        mkdir -p tools && \
+        echo "Downloading TLA+ tools..." && \
+        wget -q https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar \
+            -O tools/tla2tools.jar && \
+        echo "Downloaded tools/tla2tools.jar"; \
+    else \
+        echo "TLA+ tools already present"; \
+    fi
+
 # Run TLA+ model checker on Inventory spec
-tla-inventory:
-    cd spec/tla && tlc Inventory.tla
+tla-inventory: tla-setup
+    java -XX:+UseParallelGC -Xmx4g -jar tools/tla2tools.jar \
+        -config spec/tla/Inventory.cfg \
+        -workers auto \
+        -deadlock \
+        spec/tla/Inventory.tla
 
 # Run TLA+ model checker on BookingMethods spec
-tla-booking:
-    cd spec/tla && tlc BookingMethods.tla
+tla-booking: tla-setup
+    java -XX:+UseParallelGC -Xmx4g -jar tools/tla2tools.jar \
+        -config spec/tla/BookingMethods.cfg \
+        -workers auto \
+        -deadlock \
+        spec/tla/BookingMethods.tla
 
 # Run TLA+ model checker on TransactionBalance spec
-tla-balance:
-    cd spec/tla && tlc TransactionBalance.tla
+tla-balance: tla-setup
+    java -XX:+UseParallelGC -Xmx4g -jar tools/tla2tools.jar \
+        -config spec/tla/TransactionBalance.cfg \
+        -workers auto \
+        -deadlock \
+        spec/tla/TransactionBalance.tla
 
 # Run all TLA+ specs
 tla-all: tla-inventory tla-booking tla-balance
+    @echo "All TLA+ specifications verified"
+
+# Run specific TLA+ spec by name
+tla-check spec:
+    java -XX:+UseParallelGC -Xmx4g -jar tools/tla2tools.jar \
+        -config spec/tla/{{spec}}.cfg \
+        -workers auto \
+        -deadlock \
+        spec/tla/{{spec}}.tla
 
 # ============================================================================
 # COMPATIBILITY

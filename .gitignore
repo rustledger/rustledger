@@ -30,6 +30,12 @@ tarpaulin-report.html
 fuzz/corpus/
 fuzz/artifacts/
 
+# TLA+ tools (downloaded)
+tools/
+*.toolbox/
+*.out
+states/
+
 # Test fixtures (downloaded)
 spec/fixtures/lima-tests/
 spec/fixtures/examples/

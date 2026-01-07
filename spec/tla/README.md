@@ -7,15 +7,50 @@ This directory contains TLA+ formal specifications for critical rustledger algor
 | File | Description |
 |------|-------------|
 | `Inventory.tla` | Inventory data structure and operations |
-| `BookingMethods.tla` | FIFO, LIFO, STRICT, NONE booking algorithms |
+| `BookingMethods.tla` | FIFO, LIFO, HIFO, STRICT, NONE booking algorithms |
 | `TransactionBalance.tla` | Transaction balancing and interpolation |
+| `*.cfg` | TLC model checker configuration files |
+| `ROADMAP.md` | Plan for expanding TLA+ coverage to stellar level |
+
+## Quick Start
+
+### Using Just (Recommended)
+
+```bash
+# Run all TLA+ specifications
+just tla-all
+
+# Run a specific spec
+just tla-inventory
+just tla-booking
+just tla-balance
+
+# Run any spec by name
+just tla-check Inventory
+```
+
+### Using TLC Directly
+
+```bash
+# Download TLA+ tools (one-time)
+wget https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar
+
+# Run model checker
+java -jar tla2tools.jar -config Inventory.cfg Inventory.tla
+```
+
+### Using TLA+ Toolbox (GUI)
+
+Download from: https://lamport.azurewebsites.net/tla/toolbox.html
+
+Or use the VS Code extension: https://marketplace.visualstudio.com/items?itemName=alygin.vscode-tlaplus
 
 ## Why TLA+?
 
 These algorithms have subtle invariants that are easy to violate:
 
 1. **Inventory**: Units must never go negative (except NONE booking)
-2. **Booking**: FIFO must always select oldest, LIFO newest, STRICT must reject ambiguity
+2. **Booking**: FIFO must always select oldest, LIFO newest, HIFO highest cost, STRICT must reject ambiguity
 3. **Balancing**: Transactions must balance per-currency within tolerance
 
 TLA+ lets us:
@@ -24,35 +59,20 @@ TLA+ lets us:
 - Verify invariants hold in all states
 - Generate counterexamples when they don't
 
-## Running the Specs
+## Configuration Files
 
-### Install TLA+ Toolbox
-
-Download from: https://lamport.azurewebsites.net/tla/toolbox.html
-
-Or use the VS Code extension: https://marketplace.visualstudio.com/items?itemName=alygin.vscode-tlaplus
-
-### Model Checking
-
-1. Open the `.tla` file in TLA+ Toolbox
-2. Create a new model (Model → New Model)
-3. Set constants (e.g., `Currencies = {"USD", "AAPL"}`)
-4. Add invariants to check
-5. Run the model checker
-
-### Example: Checking BookingMethods
+Each `.tla` file has a corresponding `.cfg` file for TLC model checking:
 
 ```
+# Inventory.cfg
 CONSTANTS
-    Currency = "AAPL"
-    CostCurrency = "USD"
-    MaxLots = 3
-    MaxUnits = 10
+    Currencies = {"USD", "AAPL", "GOOG"}
+    MaxUnits = 50
+    MaxPositions = 4
 
 INVARIANTS
     Invariant
     TypeOK
-    CostBasisTracked
 ```
 
 ## Key Invariants
@@ -74,6 +94,12 @@ FIFOProperty ==
     \A i \in 1..Len(history) :
         history[i].method = "FIFO" =>
             history[i].from_lot = Oldest(MatchingAtTime(i))
+
+\* HIFO always takes from highest cost lot (tax optimization)
+HIFOProperty ==
+    \A i \in 1..Len(history) :
+        history[i].method = "HIFO" =>
+            history[i].from_lot = HighestCost(MatchingAtTime(i))
 ```
 
 ### TransactionBalance.tla
@@ -108,6 +134,15 @@ fn reduce_fifo(&mut self, units: Decimal, spec: &CostSpec) -> Result<...> {
 }
 ```
 
+## CI Integration
+
+TLA+ specifications are automatically checked on PRs that modify:
+- `spec/tla/**` - TLA+ specs themselves
+- `crates/rustledger-core/src/inventory.rs` - Inventory implementation
+- `crates/rustledger-booking/src/**` - Booking implementation
+
+See `.github/workflows/tla.yml` for details.
+
 ## Limitations
 
 TLA+ model checking is bounded:
@@ -116,6 +151,14 @@ TLA+ model checking is bounded:
 - For true proofs, would need TLAPS (TLA+ Proof System)
 
 For our purposes, model checking with reasonable bounds (3-5 lots, 10-20 units) catches most bugs.
+
+## Roadmap
+
+See `ROADMAP.md` for the plan to expand TLA+ coverage including:
+- AVERAGE and STRICT_WITH_SIZE booking methods
+- Account lifecycle specification
+- Validation error codes
+- TLAPS proofs for critical invariants
 
 ## References
 

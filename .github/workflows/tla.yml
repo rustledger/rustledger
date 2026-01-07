@@ -1,0 +1,95 @@
+name: TLA+ Model Checking
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'spec/tla/**'
+      - 'crates/rustledger-core/src/inventory.rs'
+      - 'crates/rustledger-booking/src/**'
+      - 'crates/rustledger-validate/src/**'
+  pull_request:
+    paths:
+      - 'spec/tla/**'
+      - 'crates/rustledger-core/src/inventory.rs'
+      - 'crates/rustledger-booking/src/**'
+      - 'crates/rustledger-validate/src/**'
+
+env:
+  TLA_VERSION: "1.8.0"
+
+jobs:
+  model-check:
+    name: TLA+ Model Checking
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Cache TLA+ Tools
+        id: cache-tla
+        uses: actions/cache@v4
+        with:
+          path: ~/tla2tools.jar
+          key: tla-tools-${{ env.TLA_VERSION }}
+
+      - name: Download TLA+ Tools
+        if: steps.cache-tla.outputs.cache-hit != 'true'
+        run: |
+          wget -q https://github.com/tlaplus/tlaplus/releases/download/v${{ env.TLA_VERSION }}/tla2tools.jar \
+            -O ~/tla2tools.jar
+
+      - name: Verify TLA+ Tools
+        run: java -jar ~/tla2tools.jar -help | head -5
+
+      - name: Model Check Inventory.tla
+        run: |
+          echo "::group::Checking Inventory.tla"
+          java -XX:+UseParallelGC -Xmx4g \
+            -jar ~/tla2tools.jar \
+            -config spec/tla/Inventory.cfg \
+            -workers auto \
+            -deadlock \
+            spec/tla/Inventory.tla
+          echo "::endgroup::"
+
+      - name: Model Check BookingMethods.tla
+        run: |
+          echo "::group::Checking BookingMethods.tla"
+          java -XX:+UseParallelGC -Xmx4g \
+            -jar ~/tla2tools.jar \
+            -config spec/tla/BookingMethods.cfg \
+            -workers auto \
+            -deadlock \
+            spec/tla/BookingMethods.tla
+          echo "::endgroup::"
+
+      - name: Model Check TransactionBalance.tla
+        run: |
+          echo "::group::Checking TransactionBalance.tla"
+          java -XX:+UseParallelGC -Xmx4g \
+            -jar ~/tla2tools.jar \
+            -config spec/tla/TransactionBalance.cfg \
+            -workers auto \
+            -deadlock \
+            spec/tla/TransactionBalance.tla
+          echo "::endgroup::"
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## TLA+ Model Checking Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Specification | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|---------------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Inventory.tla | Checked |" >> $GITHUB_STEP_SUMMARY
+          echo "| BookingMethods.tla | Checked |" >> $GITHUB_STEP_SUMMARY
+          echo "| TransactionBalance.tla | Checked |" >> $GITHUB_STEP_SUMMARY

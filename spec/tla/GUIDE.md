@@ -15,18 +15,25 @@ TLA+ (Temporal Logic of Actions) is a formal specification language for describi
 
 ```
 spec/tla/
-├── Inventory.tla         # Core inventory operations
-├── Inventory.cfg         # TLC configuration
-├── BookingMethods.tla    # All 7 booking algorithms
-├── BookingMethods.cfg
-├── TransactionBalance.tla # Transaction balancing
-├── TransactionBalance.cfg
-├── AccountLifecycle.tla   # Account state machine
-├── AccountLifecycle.cfg
-├── DirectiveOrdering.tla  # Directive ordering rules
-├── DirectiveOrdering.cfg
-├── ROADMAP.md            # Improvement plan
-└── GUIDE.md              # This file
+├── Conservation.tla       # Core invariant: units conservation
+├── Conservation.cfg
+├── DoubleEntry.tla        # Double-entry: debits = credits
+├── DoubleEntry.cfg
+├── LotSelection.tla       # FIFO/LIFO/HIFO lot selection
+├── LotSelection.cfg
+├── AccountStateMachine.tla # Account lifecycle state machine
+├── AccountStateMachine.cfg
+├── Interpolation.tla      # NULL posting interpolation
+├── Interpolation.cfg
+├── FIFOCheck.tla          # FIFO date ordering verification
+├── FIFOCheck.cfg
+├── SimpleInventory.tla    # Demo: basic operations
+├── SimpleInventory.cfg
+├── BuggyInventory.tla     # Demo: TLC catching bugs
+├── BuggyInventory.cfg
+├── README.md              # Overview and quick start
+├── ROADMAP.md             # Status and future plans
+└── GUIDE.md               # This file
 ```
 
 ## TLA+ to Rust Mapping

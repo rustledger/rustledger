@@ -10,7 +10,7 @@ use rustledger_core::{Amount, BookingMethod, Cost, CostSpec, Inventory, Position
 /// Reproduction of TLA+ counterexample:
 /// 1. Add lot with date=2024-01-02
 /// 2. Add lot with date=2024-01-01 (OLDER but added second)
-/// 3. ReduceFIFO should select the older lot (date=2024-01-01)
+/// 3. `ReduceFIFO` should select the older lot (date=2024-01-01)
 #[test]
 fn tla_fifo_should_select_oldest_by_date_not_insertion_order() {
     let mut inv = Inventory::new();

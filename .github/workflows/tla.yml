@@ -7,13 +7,11 @@ on:
       - 'spec/tla/**'
       - 'crates/rustledger-core/src/inventory.rs'
       - 'crates/rustledger-booking/src/**'
-      - 'crates/rustledger-validate/src/**'
   pull_request:
     paths:
       - 'spec/tla/**'
       - 'crates/rustledger-core/src/inventory.rs'
       - 'crates/rustledger-booking/src/**'
-      - 'crates/rustledger-validate/src/**'
 
 env:
   TLA_VERSION: "1.8.0"
@@ -50,70 +48,180 @@ jobs:
       - name: Verify TLA+ Tools
         run: java -jar ~/tla2tools.jar -help | head -5
 
-      - name: Model Check Inventory.tla
+      - name: Model Check Conservation.tla
         run: |
-          echo "::group::Checking Inventory.tla"
-          java -XX:+UseParallelGC -Xmx4g \
+          echo "::group::Checking Conservation.tla"
+          java -XX:+UseParallelGC -Xmx2g \
             -jar ~/tla2tools.jar \
-            -config spec/tla/Inventory.cfg \
+            -config spec/tla/Conservation.cfg \
             -workers auto \
             -deadlock \
-            spec/tla/Inventory.tla
+            spec/tla/Conservation.tla
           echo "::endgroup::"
 
-      - name: Model Check BookingMethods.tla
+      - name: Model Check DoubleEntry.tla
         run: |
-          echo "::group::Checking BookingMethods.tla"
-          java -XX:+UseParallelGC -Xmx4g \
+          echo "::group::Checking DoubleEntry.tla"
+          java -XX:+UseParallelGC -Xmx2g \
             -jar ~/tla2tools.jar \
-            -config spec/tla/BookingMethods.cfg \
+            -config spec/tla/DoubleEntry.cfg \
             -workers auto \
             -deadlock \
-            spec/tla/BookingMethods.tla
+            spec/tla/DoubleEntry.tla
           echo "::endgroup::"
 
-      - name: Model Check TransactionBalance.tla
+      - name: Model Check AccountStateMachine.tla
         run: |
-          echo "::group::Checking TransactionBalance.tla"
-          java -XX:+UseParallelGC -Xmx4g \
+          echo "::group::Checking AccountStateMachine.tla"
+          java -XX:+UseParallelGC -Xmx2g \
             -jar ~/tla2tools.jar \
-            -config spec/tla/TransactionBalance.cfg \
+            -config spec/tla/AccountStateMachine.cfg \
             -workers auto \
             -deadlock \
-            spec/tla/TransactionBalance.tla
+            spec/tla/AccountStateMachine.tla
           echo "::endgroup::"
 
-      - name: Model Check AccountLifecycle.tla
+      - name: Model Check Interpolation.tla
         run: |
-          echo "::group::Checking AccountLifecycle.tla"
-          java -XX:+UseParallelGC -Xmx4g \
+          echo "::group::Checking Interpolation.tla"
+          java -XX:+UseParallelGC -Xmx2g \
             -jar ~/tla2tools.jar \
-            -config spec/tla/AccountLifecycle.cfg \
+            -config spec/tla/Interpolation.cfg \
             -workers auto \
             -deadlock \
-            spec/tla/AccountLifecycle.tla
+            spec/tla/Interpolation.tla
           echo "::endgroup::"
 
-      - name: Model Check DirectiveOrdering.tla
+      - name: Model Check FIFOCorrect.tla
         run: |
-          echo "::group::Checking DirectiveOrdering.tla"
-          java -XX:+UseParallelGC -Xmx4g \
+          echo "::group::Checking FIFOCorrect.tla"
+          java -XX:+UseParallelGC -Xmx2g \
             -jar ~/tla2tools.jar \
-            -config spec/tla/DirectiveOrdering.cfg \
+            -config spec/tla/FIFOCorrect.cfg \
             -workers auto \
             -deadlock \
-            spec/tla/DirectiveOrdering.tla
+            spec/tla/FIFOCorrect.tla
           echo "::endgroup::"
 
-      - name: Model Check ValidationErrors.tla
+      - name: Model Check LIFOCorrect.tla
         run: |
-          echo "::group::Checking ValidationErrors.tla"
-          java -XX:+UseParallelGC -Xmx4g \
+          echo "::group::Checking LIFOCorrect.tla"
+          java -XX:+UseParallelGC -Xmx2g \
             -jar ~/tla2tools.jar \
-            -config spec/tla/ValidationErrors.cfg \
+            -config spec/tla/LIFOCorrect.cfg \
             -workers auto \
             -deadlock \
-            spec/tla/ValidationErrors.tla
+            spec/tla/LIFOCorrect.tla
+          echo "::endgroup::"
+
+      - name: Model Check HIFOCorrect.tla
+        run: |
+          echo "::group::Checking HIFOCorrect.tla"
+          java -XX:+UseParallelGC -Xmx2g \
+            -jar ~/tla2tools.jar \
+            -config spec/tla/HIFOCorrect.cfg \
+            -workers auto \
+            -deadlock \
+            spec/tla/HIFOCorrect.tla
+          echo "::endgroup::"
+
+      - name: Model Check MultiCurrency.tla
+        run: |
+          echo "::group::Checking MultiCurrency.tla"
+          java -XX:+UseParallelGC -Xmx2g \
+            -jar ~/tla2tools.jar \
+            -config spec/tla/MultiCurrency.cfg \
+            -workers auto \
+            -deadlock \
+            spec/tla/MultiCurrency.tla
+          echo "::endgroup::"
+
+      - name: Model Check PriceDB.tla
+        run: |
+          echo "::group::Checking PriceDB.tla"
+          java -XX:+UseParallelGC -Xmx2g \
+            -jar ~/tla2tools.jar \
+            -config spec/tla/PriceDB.cfg \
+            -workers auto \
+            -deadlock \
+            spec/tla/PriceDB.tla
+          echo "::endgroup::"
+
+      - name: Model Check STRICTCorrect.tla
+        run: |
+          echo "::group::Checking STRICTCorrect.tla"
+          java -XX:+UseParallelGC -Xmx2g \
+            -jar ~/tla2tools.jar \
+            -config spec/tla/STRICTCorrect.cfg \
+            -workers auto \
+            -deadlock \
+            spec/tla/STRICTCorrect.tla
+          echo "::endgroup::"
+
+      - name: Model Check AVERAGECorrect.tla
+        run: |
+          echo "::group::Checking AVERAGECorrect.tla"
+          java -XX:+UseParallelGC -Xmx2g \
+            -jar ~/tla2tools.jar \
+            -config spec/tla/AVERAGECorrect.cfg \
+            -workers auto \
+            -deadlock \
+            spec/tla/AVERAGECorrect.tla
+          echo "::endgroup::"
+
+      - name: Model Check NONECorrect.tla
+        run: |
+          echo "::group::Checking NONECorrect.tla"
+          java -XX:+UseParallelGC -Xmx2g \
+            -jar ~/tla2tools.jar \
+            -config spec/tla/NONECorrect.cfg \
+            -workers auto \
+            -deadlock \
+            spec/tla/NONECorrect.tla
+          echo "::endgroup::"
+
+      - name: Model Check ValidationCorrect.tla
+        run: |
+          echo "::group::Checking ValidationCorrect.tla"
+          java -XX:+UseParallelGC -Xmx2g \
+            -jar ~/tla2tools.jar \
+            -config spec/tla/ValidationCorrect.cfg \
+            -workers auto \
+            -deadlock \
+            spec/tla/ValidationCorrect.tla
+          echo "::endgroup::"
+
+      - name: Model Check PluginCorrect.tla
+        run: |
+          echo "::group::Checking PluginCorrect.tla"
+          java -XX:+UseParallelGC -Xmx2g \
+            -jar ~/tla2tools.jar \
+            -config spec/tla/PluginCorrect.cfg \
+            -workers auto \
+            -deadlock \
+            spec/tla/PluginCorrect.tla
+          echo "::endgroup::"
+
+      - name: Model Check ConcurrentAccess.tla
+        run: |
+          echo "::group::Checking ConcurrentAccess.tla"
+          java -XX:+UseParallelGC -Xmx2g \
+            -jar ~/tla2tools.jar \
+            -config spec/tla/ConcurrentAccess.cfg \
+            -workers auto \
+            -deadlock \
+            spec/tla/ConcurrentAccess.tla
+          echo "::endgroup::"
+
+      - name: Model Check QueryExecution.tla
+        run: |
+          echo "::group::Checking QueryExecution.tla"
+          java -XX:+UseParallelGC -Xmx2g \
+            -jar ~/tla2tools.jar \
+            -config spec/tla/QueryExecution.cfg \
+            -workers auto \
+            -deadlock \
+            spec/tla/QueryExecution.tla
           echo "::endgroup::"
 
       - name: Summary
@@ -121,11 +229,23 @@ jobs:
         run: |
           echo "## TLA+ Model Checking Results" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Specification | Status |" >> $GITHUB_STEP_SUMMARY
-          echo "|---------------|--------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Inventory.tla | Checked |" >> $GITHUB_STEP_SUMMARY
-          echo "| BookingMethods.tla | Checked |" >> $GITHUB_STEP_SUMMARY
-          echo "| TransactionBalance.tla | Checked |" >> $GITHUB_STEP_SUMMARY
-          echo "| AccountLifecycle.tla | Checked |" >> $GITHUB_STEP_SUMMARY
-          echo "| DirectiveOrdering.tla | Checked |" >> $GITHUB_STEP_SUMMARY
-          echo "| ValidationErrors.tla | Checked |" >> $GITHUB_STEP_SUMMARY
+          echo "All specifications verified with TLC model checker." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Specification | Description |" >> $GITHUB_STEP_SUMMARY
+          echo "|---------------|-------------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Conservation.tla | Units conservation invariant |" >> $GITHUB_STEP_SUMMARY
+          echo "| DoubleEntry.tla | Double-entry accounting |" >> $GITHUB_STEP_SUMMARY
+          echo "| AccountStateMachine.tla | Account lifecycle |" >> $GITHUB_STEP_SUMMARY
+          echo "| Interpolation.tla | NULL posting interpolation |" >> $GITHUB_STEP_SUMMARY
+          echo "| FIFOCorrect.tla | FIFO selects oldest lot |" >> $GITHUB_STEP_SUMMARY
+          echo "| LIFOCorrect.tla | LIFO selects newest lot |" >> $GITHUB_STEP_SUMMARY
+          echo "| HIFOCorrect.tla | HIFO selects highest cost lot |" >> $GITHUB_STEP_SUMMARY
+          echo "| MultiCurrency.tla | Multi-currency conservation |" >> $GITHUB_STEP_SUMMARY
+          echo "| PriceDB.tla | Price database consistency |" >> $GITHUB_STEP_SUMMARY
+          echo "| STRICTCorrect.tla | STRICT requires exactly one lot |" >> $GITHUB_STEP_SUMMARY
+          echo "| AVERAGECorrect.tla | AVERAGE weighted cost basis |" >> $GITHUB_STEP_SUMMARY
+          echo "| NONECorrect.tla | NONE allows any reduction |" >> $GITHUB_STEP_SUMMARY
+          echo "| ValidationCorrect.tla | Balance assertion validation |" >> $GITHUB_STEP_SUMMARY
+          echo "| PluginCorrect.tla | Plugin execution ordering |" >> $GITHUB_STEP_SUMMARY
+          echo "| ConcurrentAccess.tla | Concurrent read/write safety |" >> $GITHUB_STEP_SUMMARY
+          echo "| QueryExecution.tla | BQL query execution invariants |" >> $GITHUB_STEP_SUMMARY

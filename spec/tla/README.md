@@ -2,124 +2,236 @@
 
 This directory contains TLA+ formal specifications for critical rustledger algorithms.
 
-## Files
+## Working Specifications
+
+| File | States | Description |
+|------|--------|-------------|
+| `Conservation.tla` | 679 | **Core invariant**: units_in + units_reduced = units_added |
+| `DoubleEntry.tla` | 259 | Double-entry accounting: debits = credits |
+| `FIFOCorrect.tla` | 219 | **FIFO correctness**: selects oldest lot by date |
+| `LIFOCorrect.tla` | 219 | **LIFO correctness**: selects newest lot by date |
+| `HIFOCorrect.tla` | 219 | **HIFO correctness**: selects highest cost lot |
+| `AccountStateMachine.tla` | 16,223 | Account lifecycle: unopened → open → closed |
+| `Interpolation.tla` | 481 | NULL posting interpolation (balancing amount) |
+| `MultiCurrency.tla` | 1,301 | Multi-currency conservation invariant |
+| `PriceDB.tla` | 142 | Price database: self-prices never set |
+| `STRICTCorrect.tla` | 55 | **STRICT correctness**: requires exactly one matching lot |
+| `AVERAGECorrect.tla` | 263 | **AVERAGE correctness**: weighted average cost basis |
+| `NONECorrect.tla` | 135 | **NONE correctness**: allows any reduction |
+| `ValidationCorrect.tla` | 3,141 | Balance assertion validation logic |
+| `PluginCorrect.tla` | 160 | Plugin execution ordering guarantees |
+| `ConcurrentAccess.tla` | 231 | Concurrent read/write locking invariants |
+| `QueryExecution.tla` | 10,182 | BQL query execution invariants |
+
+### Bug-Finding Specifications
+
+| File | Status | Description |
+|------|--------|-------------|
+| `FIFOCheck.tla` | FAILS | Models buggy FIFO (insertion order) - **proves the bug exists** |
+
+### Demo Specifications
 
 | File | Description |
 |------|-------------|
-| `Inventory.tla` | Inventory data structure and operations |
-| `BookingMethods.tla` | FIFO, LIFO, STRICT, NONE booking algorithms |
-| `TransactionBalance.tla` | Transaction balancing and interpolation |
+| `SimpleInventory.tla` | Demo: basic add/reduce with conservation |
+| `BuggyInventory.tla` | Demo: TLC catching a conservation violation |
 
-## Why TLA+?
+## Quick Start
 
-These algorithms have subtle invariants that are easy to violate:
+```bash
+# Run model checker on a spec
+java -jar tools/tla2tools.jar -config spec/tla/Conservation.cfg spec/tla/Conservation.tla
 
-1. **Inventory**: Units must never go negative (except NONE booking)
-2. **Booking**: FIFO must always select oldest, LIFO newest, STRICT must reject ambiguity
-3. **Balancing**: Transactions must balance per-currency within tolerance
-
-TLA+ lets us:
-- Formally specify the expected behavior
-- Model check against all possible inputs (within bounds)
-- Verify invariants hold in all states
-- Generate counterexamples when they don't
-
-## Running the Specs
-
-### Install TLA+ Toolbox
-
-Download from: https://lamport.azurewebsites.net/tla/toolbox.html
-
-Or use the VS Code extension: https://marketplace.visualstudio.com/items?itemName=alygin.vscode-tlaplus
-
-### Model Checking
-
-1. Open the `.tla` file in TLA+ Toolbox
-2. Create a new model (Model → New Model)
-3. Set constants (e.g., `Currencies = {"USD", "AAPL"}`)
-4. Add invariants to check
-5. Run the model checker
-
-### Example: Checking BookingMethods
-
-```
-CONSTANTS
-    Currency = "AAPL"
-    CostCurrency = "USD"
-    MaxLots = 3
-    MaxUnits = 10
-
-INVARIANTS
-    Invariant
-    TypeOK
-    CostBasisTracked
+# Run with multiple workers
+java -XX:+UseParallelGC -Xmx1g -jar tools/tla2tools.jar \
+    -config spec/tla/Conservation.cfg \
+    -workers auto \
+    spec/tla/Conservation.tla
 ```
 
 ## Key Invariants
 
-### Inventory.tla
-
+### Conservation.tla
 ```tla
-NonNegativeUnits ==
-    \A curr \in Currencies :
-        ~(\E op \in Range(operations) : op.type = "reduce_none")
-        => TotalUnits(inventory, curr) >= 0
+(* What's in inventory + what's been taken out = what was put in *)
+ConservationInvariant ==
+    inventory + totalReduced = totalAdded
 ```
 
-### BookingMethods.tla
-
+### DoubleEntry.tla
 ```tla
-\* FIFO always takes from oldest lot
-FIFOProperty ==
-    \A i \in 1..Len(history) :
-        history[i].method = "FIFO" =>
-            history[i].from_lot = Oldest(MatchingAtTime(i))
+(* Every transaction must balance: debits = credits *)
+TransactionsBalance ==
+    \A i \in 1..Len(ledger) : ledger[i].amount > 0
+
+(* No self-transfers *)
+NoSelfTransfer ==
+    \A i \in 1..Len(ledger) : ledger[i].debit # ledger[i].credit
 ```
 
-### TransactionBalance.tla
-
+### FIFOCorrect.tla
 ```tla
-BalancedMeansZero ==
-    state = "balanced" =>
-        \A curr \in AllCurrencies(transaction) :
-            Abs(WeightSum(transaction, curr)) <= Tolerance
+(* After a FIFO reduction, the selected date must be <= all remaining dates *)
+FIFOSelectsOldest ==
+    lastSelected.date > 0 =>
+        \A d \in lastSelected.allDates : lastSelected.date <= d
 ```
 
-## Translating to Rust
-
-The TLA+ specs guide implementation. For example, `ReduceFIFO` in TLA+:
-
+### LIFOCorrect.tla
 ```tla
-ReduceFIFO(units, spec) ==
-    /\ LET matches == Matching(spec)
-           oldest == Oldest(matches)
-       IN ...
+(* After a LIFO reduction, the selected date must be >= all remaining dates *)
+LIFOSelectsNewest ==
+    lastSelected.date > 0 =>
+        \A d \in lastSelected.allDates : lastSelected.date >= d
 ```
 
-Becomes in Rust:
+### HIFOCorrect.tla
+```tla
+(* After a HIFO reduction, the selected cost must be >= all remaining costs *)
+HIFOSelectsHighest ==
+    lastSelected.cost > 0 =>
+        \A c \in lastSelected.allCosts : lastSelected.cost >= c
+```
 
+### AccountStateMachine.tla
+```tla
+(* Closed accounts must have zero balance *)
+ClosedHaveZeroBalance ==
+    \A a \in Accounts :
+        state[a] = "closed" => balance[a] = 0
+```
+
+### Interpolation.tla
+```tla
+(* At most one NULL posting per transaction *)
+AtMostOneNull ==
+    ~(posting1 = NULL /\ posting2 = NULL)
+
+(* After completion, transaction is balanced *)
+CompleteImpliesBalanced ==
+    complete => posting1 + posting2 = 0
+```
+
+### ValidationCorrect.tla
+```tla
+(* If error was detected, the first error assertion was indeed a mismatch *)
+ErrorMeansFirstMismatch ==
+    hasError => (errorExpected # errorActual)
+
+(* Error details are set iff hasError *)
+ErrorDetailsConsistent ==
+    hasError <=> (errorExpected # UNSET /\ errorActual # UNSET)
+```
+
+### PluginCorrect.tla
+```tla
+(* Plugins execute in order: plugin p+1 doesn't start before p completes *)
+PluginsInOrder ==
+    \A p \in 1..NumPlugins :
+        (currentPlugin = p + 1) => (p \in pluginComplete)
+
+(* Each plugin processes directives in order *)
+DirectivesInOrder ==
+    \A p \in 1..NumPlugins, d \in 2..MaxDirectives :
+        HasProcessed(p, d) => HasProcessed(p, d - 1)
+```
+
+### ConcurrentAccess.tla
+```tla
+(* No data race: readers and writers are mutually exclusive *)
+NoDataRace ==
+    ~(readLock > 0 /\ writeLock)
+
+(* Write lock is exclusive - no readers when writing *)
+ExclusiveWriteLock ==
+    writeLock => (readLock = 0)
+```
+
+### QueryExecution.tla
+```tla
+(* Filter correctness: selected IDs only include matching postings *)
+FilterCorrectness ==
+    filterApplied =>
+        \A id \in selectedIds :
+            \E p \in postings : p.id = id
+
+(* Count is accurate: count equals size of matching set *)
+CountAccuracy ==
+    aggregated =>
+        queryResult.count = Cardinality({p \in postings : p.id \in selectedIds})
+```
+
+## Booking Method Verification Strategy
+
+We use two complementary approaches to verify booking methods:
+
+### 1. Bug-Finding Specs (model buggy behavior)
+`FIFOCheck.tla` models the **OLD buggy behavior** (insertion order selection) and is expected to FAIL when run with TLC. This proves the bug exists.
+
+### 2. Correctness Specs (model correct behavior)
+All booking methods now have correctness specs that PASS TLC:
+- `FIFOCorrect.tla` - First-In First-Out (select oldest by date)
+- `LIFOCorrect.tla` - Last-In First-Out (select newest by date)
+- `HIFOCorrect.tla` - Highest-In First-Out (select highest cost)
+- `STRICTCorrect.tla` - Requires exactly one matching lot
+- `AVERAGECorrect.tla` - Uses weighted average cost basis
+- `NONECorrect.tla` - Allows any reduction (most permissive)
+
+## Real Bug Found
+
+The FIFOCheck spec discovered a real bug in `inventory.rs`:
+
+**Problem**: FIFO was selecting lots by insertion order, not by acquisition date.
+
+**Counterexample from TLC**:
+1. Add lot: 10 AAPL @ $150 (date: 2024-01-02) - inserted first
+2. Add lot: 10 AAPL @ $100 (date: 2024-01-01) - inserted second
+3. Reduce 5 AAPL using FIFO
+4. **Bug**: Selected $150 lot (inserted first) instead of $100 lot (oldest by date)
+
+**Fix**: Added date sorting to `reduce_ordered()` in `inventory.rs:330`:
 ```rust
-fn reduce_fifo(&mut self, units: Decimal, spec: &CostSpec) -> Result<...> {
-    let mut matches: Vec<_> = self.matching(spec).collect();
-    matches.sort_by_key(|p| p.cost.as_ref().map(|c| c.date));
-
-    let oldest = matches.first().ok_or(BookingError::NoMatch)?;
-    // ...
-}
+indices.sort_by_key(|&i| self.positions[i].cost.as_ref().and_then(|c| c.date));
 ```
 
-## Limitations
+See `crates/rustledger-core/tests/tla_fifo_bug_test.rs` for the test case.
 
-TLA+ model checking is bounded:
-- We check with small `MaxLots`, `MaxUnits` values
-- Exhaustive for those bounds, but not proof of correctness for all sizes
-- For true proofs, would need TLAPS (TLA+ Proof System)
+## Practical TLA+ Workflow
 
-For our purposes, model checking with reasonable bounds (3-5 lots, 10-20 units) catches most bugs.
+1. **Write Spec**: Model the algorithm abstractly in TLA+
+2. **Run TLC**: Model checker exhaustively explores state space
+3. **Get Counterexample**: If invariant violated, TLC shows exact sequence
+4. **Write Test**: Convert counterexample to Rust test
+5. **Fix Bug**: Update Rust code until test passes
+6. **Verify**: All TLC states pass, test passes
+
+## Configuration Files
+
+Each `.tla` file has a matching `.cfg` file:
+
+```
+CONSTANTS
+    MaxUnits = 3
+    MaxOperations = 6
+
+INIT Init
+NEXT Next
+
+INVARIANTS
+    ConservationInvariant
+    NonNegativeInventory
+```
+
+## State Space Bounds
+
+TLC uses bounded model checking. Keep bounds small to avoid state explosion:
+- `MaxUnits = 1-3` for amounts
+- `MaxLots = 2-3` for lot counts
+- `MaxDate = 3` for date values
+- Track only `lastSelected`, not full history, to avoid sequence explosion
 
 ## References
 
 - [TLA+ Home](https://lamport.azurewebsites.net/tla/tla.html)
 - [Learn TLA+](https://learntla.com/)
-- [TLA+ Video Course](https://lamport.azurewebsites.net/video/videos.html)
-- [Specifying Systems (book)](https://lamport.azurewebsites.net/tla/book.html)
+- [TLC Model Checker](https://lamport.azurewebsites.net/tla/tools.html)

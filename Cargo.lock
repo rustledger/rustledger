@@ -1980,6 +1980,7 @@ version = "1.0.0-rc.6"
 dependencies = [
  "chrono",
  "criterion",
+ "proptest",
  "rust_decimal",
  "rust_decimal_macros",
  "rustledger-booking",

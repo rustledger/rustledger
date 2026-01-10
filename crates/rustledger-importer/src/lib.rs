@@ -32,6 +32,7 @@
 
 pub mod config;
 pub mod csv_importer;
+pub mod ofx_importer;
 pub mod registry;
 
 use anyhow::Result;
@@ -39,6 +40,7 @@ use rustledger_core::Directive;
 use std::path::Path;
 
 pub use config::ImporterConfig;
+pub use ofx_importer::OfxImporter;
 pub use registry::ImporterRegistry;
 
 /// Result of an import operation.

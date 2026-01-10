@@ -2,7 +2,7 @@
 //!
 //! Tests are based on patterns from beancount's test suite.
 
-use rustledger_loader::{LoadError, Loader, load};
+use rustledger_loader::{load, LoadError, Loader};
 use std::path::Path;
 
 fn fixtures_path(name: &str) -> std::path::PathBuf {

@@ -80,9 +80,10 @@ bean-doctor ledger.beancount context 42
 
 ```rust
 use rustledger_loader::load;
+use std::path::Path;
 
 fn main() -> anyhow::Result<()> {
-    let result = load("ledger.beancount")?;
+    let result = load(Path::new("ledger.beancount"))?;
 
     println!("Loaded {} directives", result.directives.len());
 

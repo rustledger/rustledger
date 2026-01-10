@@ -23,7 +23,7 @@ use crate::cmd::completions::ShellType;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use rustledger_booking::interpolate;
-use rustledger_core::{Directive, Inventory};
+use rustledger_core::{Directive, InternedStr, Inventory};
 use rustledger_loader::Loader;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Write};
@@ -173,7 +173,7 @@ fn report_balances<W: Write>(
     account_filter: Option<&str>,
     writer: &mut W,
 ) -> Result<()> {
-    let mut balances: BTreeMap<String, Inventory> = BTreeMap::new();
+    let mut balances: BTreeMap<InternedStr, Inventory> = BTreeMap::new();
 
     for directive in directives {
         match directive {

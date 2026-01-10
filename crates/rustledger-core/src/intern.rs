@@ -25,6 +25,8 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
 /// An interned string reference.
 ///
 /// This is a thin wrapper around `Arc<str>` that provides cheap cloning
@@ -32,6 +34,31 @@ use std::sync::Arc;
 /// share the same underlying memory.
 #[derive(Debug, Clone, Eq)]
 pub struct InternedStr(Arc<str>);
+
+impl Serialize for InternedStr {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.0.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for InternedStr {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        Ok(Self::new(s))
+    }
+}
+
+impl PartialOrd for InternedStr {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for InternedStr {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.0.cmp(&other.0)
+    }
+}
 
 impl InternedStr {
     /// Create a new interned string (without using an interner).
@@ -101,6 +128,18 @@ impl From<String> for InternedStr {
     }
 }
 
+impl From<&String> for InternedStr {
+    fn from(s: &String) -> Self {
+        Self::new(s.as_str())
+    }
+}
+
+impl From<&Self> for InternedStr {
+    fn from(s: &Self) -> Self {
+        s.clone()
+    }
+}
+
 impl PartialEq<str> for InternedStr {
     fn eq(&self, other: &str) -> bool {
         self.as_str() == other
@@ -116,6 +155,18 @@ impl PartialEq<&str> for InternedStr {
 impl PartialEq<String> for InternedStr {
     fn eq(&self, other: &String) -> bool {
         self.as_str() == other
+    }
+}
+
+impl Default for InternedStr {
+    fn default() -> Self {
+        Self::new("")
+    }
+}
+
+impl std::borrow::Borrow<str> for InternedStr {
+    fn borrow(&self) -> &str {
+        self.as_str()
     }
 }
 

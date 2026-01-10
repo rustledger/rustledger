@@ -47,8 +47,8 @@
 use chrono::{Local, NaiveDate};
 use rust_decimal::Decimal;
 use rustledger_core::{
-    Amount, Balance, BookingMethod, Close, Directive, Document, Inventory, Open, Pad, Position,
-    Posting, Transaction,
+    Amount, Balance, BookingMethod, Close, Directive, Document, InternedStr, Inventory, Open, Pad,
+    Position, Posting, Transaction,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -263,7 +263,7 @@ struct AccountState {
     /// Date closed (if closed).
     closed: Option<NaiveDate>,
     /// Allowed currencies (empty = any).
-    currencies: HashSet<String>,
+    currencies: HashSet<InternedStr>,
     /// Booking method (stored for future use in booking validation).
     #[allow(dead_code)]
     booking: BookingMethod,
@@ -286,7 +286,7 @@ pub struct ValidationOptions {
 #[derive(Debug, Clone)]
 struct PendingPad {
     /// Source account for padding.
-    source_account: String,
+    source_account: InternedStr,
     /// Date of the pad directive.
     date: NaiveDate,
 }
@@ -295,13 +295,13 @@ struct PendingPad {
 #[derive(Debug, Default)]
 pub struct LedgerState {
     /// Account states.
-    accounts: HashMap<String, AccountState>,
+    accounts: HashMap<InternedStr, AccountState>,
     /// Account inventories.
-    inventories: HashMap<String, Inventory>,
+    inventories: HashMap<InternedStr, Inventory>,
     /// Declared commodities.
-    commodities: HashSet<String>,
+    commodities: HashSet<InternedStr>,
     /// Pending pad directives (account -> list of pads).
-    pending_pads: HashMap<String, Vec<PendingPad>>,
+    pending_pads: HashMap<InternedStr, Vec<PendingPad>>,
     /// Validation options.
     options: ValidationOptions,
     /// Track previous directive date for out-of-order detection.
@@ -352,7 +352,7 @@ impl LedgerState {
 
     /// Get all account names.
     pub fn accounts(&self) -> impl Iterator<Item = &str> {
-        self.accounts.keys().map(String::as_str)
+        self.accounts.keys().map(InternedStr::as_str)
     }
 }
 
@@ -511,7 +511,7 @@ fn validate_open(state: &mut LedgerState, open: &Open, errors: &mut Vec<Validati
                 format!("Invalid account name \"{}\": {}", open.account, reason),
                 open.date,
             )
-            .with_context(open.account.clone()),
+            .with_context(open.account.to_string()),
         );
         // Continue anyway to allow further validation
     }
@@ -1129,9 +1129,11 @@ mod tests {
         ];
 
         let errors = validate(&directives);
-        assert!(errors
-            .iter()
-            .any(|e| e.code == ErrorCode::BalanceAssertionFailed));
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.code == ErrorCode::BalanceAssertionFailed)
+        );
     }
 
     #[test]
@@ -1153,16 +1155,18 @@ mod tests {
         ];
 
         let errors = validate(&directives);
-        assert!(errors
-            .iter()
-            .any(|e| e.code == ErrorCode::TransactionUnbalanced));
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.code == ErrorCode::TransactionUnbalanced)
+        );
     }
 
     #[test]
     fn test_validate_currency_not_allowed() {
         let directives = vec![
             Directive::Open(
-                Open::new(date(2024, 1, 1), "Assets:Bank").with_currencies(vec!["USD".to_string()]),
+                Open::new(date(2024, 1, 1), "Assets:Bank").with_currencies(vec!["USD".into()]),
             ),
             Directive::Open(Open::new(date(2024, 1, 1), "Income:Salary")),
             Directive::Transaction(
@@ -1176,9 +1180,11 @@ mod tests {
         ];
 
         let errors = validate(&directives);
-        assert!(errors
-            .iter()
-            .any(|e| e.code == ErrorCode::CurrencyNotAllowed));
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.code == ErrorCode::CurrencyNotAllowed)
+        );
     }
 
     #[test]
@@ -1188,7 +1194,7 @@ mod tests {
 
         let directives = vec![Directive::Open(Open {
             date: future_date,
-            account: "Assets:Bank".to_string(),
+            account: "Assets:Bank".into(),
             currencies: vec![],
             booking: None,
             meta: Default::default(),
@@ -1219,7 +1225,7 @@ mod tests {
             Directive::Open(Open::new(date(2024, 1, 1), "Assets:Bank")),
             Directive::Document(Document {
                 date: date(2024, 1, 15),
-                account: "Assets:Bank".to_string(),
+                account: "Assets:Bank".into(),
                 path: "/nonexistent/path/to/document.pdf".to_string(),
                 tags: vec![],
                 links: vec![],
@@ -1250,7 +1256,7 @@ mod tests {
     fn test_validate_document_account_not_open() {
         let directives = vec![Directive::Document(Document {
             date: date(2024, 1, 15),
-            account: "Assets:Unknown".to_string(),
+            account: "Assets:Unknown".into(),
             path: "receipt.pdf".to_string(),
             tags: vec![],
             links: vec![],

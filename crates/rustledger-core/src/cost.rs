@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use crate::Amount;
+use crate::intern::InternedStr;
 
 /// A cost represents the acquisition cost of a position (lot).
 ///
@@ -40,7 +41,7 @@ pub struct Cost {
     /// Cost per unit
     pub number: Decimal,
     /// Currency of the cost
-    pub currency: String,
+    pub currency: InternedStr,
     /// Acquisition date (optional, for lot identification)
     pub date: Option<NaiveDate>,
     /// Lot label (optional, for explicit lot identification)
@@ -50,7 +51,7 @@ pub struct Cost {
 impl Cost {
     /// Create a new cost with the given number and currency.
     #[must_use]
-    pub fn new(number: Decimal, currency: impl Into<String>) -> Self {
+    pub fn new(number: Decimal, currency: impl Into<InternedStr>) -> Self {
         Self {
             number,
             currency: currency.into(),
@@ -138,7 +139,7 @@ pub struct CostSpec {
     /// Total cost (if specified) - alternative to `number_per`
     pub number_total: Option<Decimal>,
     /// Currency of the cost (if specified)
-    pub currency: Option<String>,
+    pub currency: Option<InternedStr>,
     /// Acquisition date (if specified)
     pub date: Option<NaiveDate>,
     /// Lot label (if specified)
@@ -170,7 +171,7 @@ impl CostSpec {
 
     /// Set the currency.
     #[must_use]
-    pub fn with_currency(mut self, currency: impl Into<String>) -> Self {
+    pub fn with_currency(mut self, currency: impl Into<InternedStr>) -> Self {
         self.currency = Some(currency.into());
         self
     }
@@ -278,7 +279,7 @@ impl fmt::Display for CostSpec {
             parts.push(format!("# {n}"));
         }
         if let Some(c) = &self.currency {
-            parts.push(c.clone());
+            parts.push(c.to_string());
         }
         if let Some(d) = self.date {
             parts.push(d.to_string());

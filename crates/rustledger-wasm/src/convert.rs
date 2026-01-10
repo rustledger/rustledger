@@ -14,7 +14,7 @@ pub fn directive_to_json(directive: &Directive) -> DirectiveJson {
         match pr {
             PriceAnnotation::Unit(a) | PriceAnnotation::Total(a) => Some(AmountValue {
                 number: a.number.to_string(),
-                currency: a.currency.clone(),
+                currency: a.currency.to_string(),
             }),
             _ => None,
         }
@@ -32,14 +32,14 @@ pub fn directive_to_json(directive: &Directive) -> DirectiveJson {
                 .postings
                 .iter()
                 .map(|p| PostingJson {
-                    account: p.account.clone(),
+                    account: p.account.to_string(),
                     units: p.units.as_ref().map(|u| AmountValue {
                         number: u.number().map(|n| n.to_string()).unwrap_or_default(),
                         currency: u.currency().map(ToString::to_string).unwrap_or_default(),
                     }),
                     cost: p.cost.as_ref().map(|c| PostingCostJson {
                         number_per: c.number_per.map(|n| n.to_string()),
-                        currency: c.currency.clone(),
+                        currency: c.currency.as_ref().map(ToString::to_string),
                         date: c.date.map(|d| d.to_string()),
                         label: c.label.clone(),
                     }),
@@ -49,30 +49,30 @@ pub fn directive_to_json(directive: &Directive) -> DirectiveJson {
         },
         Directive::Balance(bal) => DirectiveJson::Balance {
             date: bal.date.to_string(),
-            account: bal.account.clone(),
+            account: bal.account.to_string(),
             amount: AmountValue {
                 number: bal.amount.number.to_string(),
-                currency: bal.amount.currency.clone(),
+                currency: bal.amount.currency.to_string(),
             },
         },
         Directive::Open(open) => DirectiveJson::Open {
             date: open.date.to_string(),
-            account: open.account.clone(),
-            currencies: open.currencies.clone(),
+            account: open.account.to_string(),
+            currencies: open.currencies.iter().map(ToString::to_string).collect(),
             booking: open.booking.as_ref().map(|b| format!("{b:?}")),
         },
         Directive::Close(close) => DirectiveJson::Close {
             date: close.date.to_string(),
-            account: close.account.clone(),
+            account: close.account.to_string(),
         },
         Directive::Commodity(comm) => DirectiveJson::Commodity {
             date: comm.date.to_string(),
-            currency: comm.currency.clone(),
+            currency: comm.currency.to_string(),
         },
         Directive::Pad(pad) => DirectiveJson::Pad {
             date: pad.date.to_string(),
-            account: pad.account.clone(),
-            source_account: pad.source_account.clone(),
+            account: pad.account.to_string(),
+            source_account: pad.source_account.to_string(),
         },
         Directive::Event(event) => DirectiveJson::Event {
             date: event.date.to_string(),
@@ -81,20 +81,20 @@ pub fn directive_to_json(directive: &Directive) -> DirectiveJson {
         },
         Directive::Note(note) => DirectiveJson::Note {
             date: note.date.to_string(),
-            account: note.account.clone(),
+            account: note.account.to_string(),
             comment: note.comment.clone(),
         },
         Directive::Document(doc) => DirectiveJson::Document {
             date: doc.date.to_string(),
-            account: doc.account.clone(),
+            account: doc.account.to_string(),
             path: doc.path.clone(),
         },
         Directive::Price(price) => DirectiveJson::Price {
             date: price.date.to_string(),
-            currency: price.currency.clone(),
+            currency: price.currency.to_string(),
             amount: AmountValue {
                 number: price.amount.number.to_string(),
-                currency: price.amount.currency.clone(),
+                currency: price.amount.currency.to_string(),
             },
         },
         Directive::Query(query) => DirectiveJson::Query {
@@ -121,16 +121,16 @@ pub fn value_to_cell(value: &rustledger_query::Value) -> CellValue {
         Value::Boolean(b) => CellValue::Boolean(*b),
         Value::Amount(a) => CellValue::Amount {
             number: a.number.to_string(),
-            currency: a.currency.clone(),
+            currency: a.currency.to_string(),
         },
         Value::Position(p) => CellValue::Position {
             units: AmountValue {
                 number: p.units.number.to_string(),
-                currency: p.units.currency.clone(),
+                currency: p.units.currency.to_string(),
             },
             cost: p.cost.as_ref().map(|c| CostValue {
                 number: c.number.to_string(),
-                currency: c.currency.clone(),
+                currency: c.currency.to_string(),
                 date: c.date.map(|d| d.to_string()),
                 label: c.label.clone(),
             }),
@@ -143,7 +143,7 @@ pub fn value_to_cell(value: &rustledger_query::Value) -> CellValue {
                     .map(|p| PositionValue {
                         units: AmountValue {
                             number: p.units.number.to_string(),
-                            currency: p.units.currency.clone(),
+                            currency: p.units.currency.to_string(),
                         },
                     })
                     .collect(),
@@ -180,7 +180,7 @@ mod tests {
             match (&spanned.value, &json) {
                 (Directive::Open(a), DirectiveJson::Open { date, account, .. }) => {
                     assert_eq!(&a.date.to_string(), date);
-                    assert_eq!(&a.account, account);
+                    assert_eq!(&a.account.to_string(), account);
                 }
                 (
                     Directive::Transaction(a),
@@ -200,9 +200,9 @@ mod tests {
                     },
                 ) => {
                     assert_eq!(&a.date.to_string(), date);
-                    assert_eq!(&a.account, account);
+                    assert_eq!(&a.account.to_string(), account);
                     assert_eq!(&a.amount.number.to_string(), &amount.number);
-                    assert_eq!(&a.amount.currency, &amount.currency);
+                    assert_eq!(&a.amount.currency.to_string(), &amount.currency);
                 }
                 _ => panic!("directive type mismatch"),
             }

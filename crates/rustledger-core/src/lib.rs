@@ -53,11 +53,12 @@ pub mod position;
 pub use amount::{Amount, IncompleteAmount};
 pub use cost::{Cost, CostSpec};
 pub use directive::{
-    sort_directives, Balance, Close, Commodity, Custom, Directive, DirectivePriority, Document,
-    Event, MetaValue, Metadata, Note, Open, Pad, Posting, Price, PriceAnnotation, Query,
-    Transaction,
+    Balance, Close, Commodity, Custom, Directive, DirectivePriority, Document, Event, MetaValue,
+    Metadata, Note, Open, Pad, Posting, Price, PriceAnnotation, Query, Transaction,
+    sort_directives,
 };
-pub use format::{format_directive, FormatConfig};
+pub use format::{FormatConfig, format_directive};
+pub use intern::{InternedStr, StringInterner};
 pub use inventory::{BookingError, BookingMethod, BookingResult, Inventory};
 pub use position::Position;
 

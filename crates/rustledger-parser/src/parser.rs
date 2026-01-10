@@ -1,6 +1,20 @@
 //! Parser implementation for beancount files.
 //!
 //! Uses chumsky for parser combinators with error recovery.
+//!
+//! # Organization
+//!
+//! This module is organized into the following sections:
+//!
+//! 1. **Main API** (lines ~30-95) - `parse()` function and result handling
+//! 2. **Tag/Meta Helpers** (lines ~98-235) - pushtag/pushmeta application
+//! 3. **File Structure** (lines ~238-320) - file, entry, whitespace parsers
+//! 4. **Special Directives** (lines ~321-400) - option, include, plugin, push/pop
+//! 5. **Primitives** (lines ~400-600) - strings, dates, numbers, expressions
+//! 6. **Amounts & Costs** (lines ~600-850) - amount, cost spec, price annotation
+//! 7. **Metadata & Accounts** (lines ~850-940) - account, flag, tag, link, metadata
+//! 8. **Transactions** (lines ~940-1180) - transaction body, postings
+//! 9. **Directive Bodies** (lines ~1180-2054) - balance, open, close, etc.
 
 use chumsky::prelude::*;
 use rust_decimal::Decimal;
@@ -13,9 +27,9 @@ use rustledger_core::{
     Transaction,
 };
 
+use crate::ParseResult;
 use crate::error::{ParseError, ParseErrorKind};
 use crate::span::{Span, Spanned};
-use crate::ParseResult;
 
 type ParserInput<'a> = &'a str;
 type ParserExtra<'a> = extra::Err<Rich<'a, char>>;
@@ -235,8 +249,8 @@ enum ParsedItem {
 }
 
 /// Main file parser.
-fn file_parser<'a>(
-) -> impl Parser<'a, ParserInput<'a>, Vec<(ParsedItem, SimpleSpan)>, ParserExtra<'a>> {
+fn file_parser<'a>()
+-> impl Parser<'a, ParserInput<'a>, Vec<(ParsedItem, SimpleSpan)>, ParserExtra<'a>> {
     // Skip leading whitespace/newlines, then parse entries with error recovery
     skip_blank_lines().ignore_then(
         // Try to parse an entry, or skip a bad line on failure
@@ -536,11 +550,7 @@ fn expr<'a>() -> impl Parser<'a, ParserInput<'a>, Decimal, ParserExtra<'a>> + Cl
             .map(|(signs, n): (Vec<char>, Decimal)| {
                 // Count minus signs - each flips the sign, plus is a no-op
                 let neg_count = signs.iter().filter(|&&c| c == '-').count();
-                if neg_count % 2 == 1 {
-                    -n
-                } else {
-                    n
-                }
+                if neg_count % 2 == 1 { -n } else { n }
             });
 
         // mul_op: * or /
@@ -610,8 +620,8 @@ fn amount<'a>() -> impl Parser<'a, ParserInput<'a>, Amount, ParserExtra<'a>> + C
 /// - `100.00 USD` - Complete amount
 /// - `100.00` - Number only (currency to be inferred)
 /// - `USD` - Currency only (number to be interpolated)
-fn incomplete_amount<'a>(
-) -> impl Parser<'a, ParserInput<'a>, IncompleteAmount, ParserExtra<'a>> + Clone {
+fn incomplete_amount<'a>()
+-> impl Parser<'a, ParserInput<'a>, IncompleteAmount, ParserExtra<'a>> + Clone {
     // Complete amount: number + currency
     let complete = number()
         .then_ignore(ws())
@@ -622,7 +632,7 @@ fn incomplete_amount<'a>(
     let number_only = number().map(IncompleteAmount::NumberOnly);
 
     // Currency only: just a currency, no number
-    let currency_only = currency().map(IncompleteAmount::CurrencyOnly);
+    let currency_only = currency().map(|c| IncompleteAmount::CurrencyOnly(c.into()));
 
     // Try complete first, then number-only, then currency-only
     choice((complete, number_only, currency_only))
@@ -741,14 +751,14 @@ fn build_cost_spec(components: Vec<CostComponent>, is_total_brace: bool) -> Cost
         match comp {
             CostComponent::Amount(num, curr) => {
                 spec.number_per = Some(num);
-                spec.currency = Some(curr);
+                spec.currency = Some(curr.into());
             }
             CostComponent::NumberOnly(num) => {
                 spec.number_per = Some(num);
             }
             CostComponent::CurrencyOnly(curr) => {
                 if spec.currency.is_none() {
-                    spec.currency = Some(curr);
+                    spec.currency = Some(curr.into());
                 }
             }
             CostComponent::Date(d) => {
@@ -769,14 +779,14 @@ fn build_cost_spec(components: Vec<CostComponent>, is_total_brace: bool) -> Cost
         match comp {
             CostComponent::Amount(num, curr) => {
                 spec.number_total = Some(num);
-                spec.currency = Some(curr);
+                spec.currency = Some(curr.into());
             }
             CostComponent::NumberOnly(num) => {
                 spec.number_total = Some(num);
             }
             CostComponent::CurrencyOnly(curr) => {
                 if spec.currency.is_none() {
-                    spec.currency = Some(curr);
+                    spec.currency = Some(curr.into());
                 }
             }
             CostComponent::Date(d) => {
@@ -807,8 +817,8 @@ fn build_cost_spec(components: Vec<CostComponent>, is_total_brace: bool) -> Cost
 /// - `@ 1.2` - number only
 /// - `@ CAD` - currency only
 /// - `@` - empty (to be interpolated)
-fn price_annotation<'a>(
-) -> impl Parser<'a, ParserInput<'a>, PriceAnnotation, ParserExtra<'a>> + Clone {
+fn price_annotation<'a>()
+-> impl Parser<'a, ParserInput<'a>, PriceAnnotation, ParserExtra<'a>> + Clone {
     // Parse the optional amount after @ or @@
     let price_amount = choice((
         // Complete amount
@@ -974,8 +984,8 @@ enum TxnHeaderItem {
 }
 
 /// Parse a transaction body.
-fn transaction_body<'a>(
-) -> impl Parser<'a, ParserInput<'a>, Box<dyn Fn(NaiveDate) -> Directive + 'a>, ParserExtra<'a>> {
+fn transaction_body<'a>()
+-> impl Parser<'a, ParserInput<'a>, Box<dyn Fn(NaiveDate) -> Directive + 'a>, ParserExtra<'a>> {
     // Header items: strings, tags, and links can be interleaved in any order
     let header_item = choice((
         string_literal().map(TxnHeaderItem::String),
@@ -1177,8 +1187,8 @@ fn posting<'a>() -> impl Parser<'a, ParserInput<'a>, Posting, ParserExtra<'a>> {
 }
 
 /// Parse a balance directive body.
-fn balance_body<'a>(
-) -> impl Parser<'a, ParserInput<'a>, Box<dyn Fn(NaiveDate) -> Directive + 'a>, ParserExtra<'a>> {
+fn balance_body<'a>()
+-> impl Parser<'a, ParserInput<'a>, Box<dyn Fn(NaiveDate) -> Directive + 'a>, ParserExtra<'a>> {
     // Amount with optional tolerance: NUMBER [~ TOLERANCE] CURRENCY [{COST}]
     // e.g., "200 USD", "200 ~ 0.002 USD", or "10 MSFT {45.30 USD}"
     let tolerance = ws()
@@ -1209,7 +1219,7 @@ fn balance_body<'a>(
             Box::new(move |date: NaiveDate| {
                 Directive::Balance(Balance {
                     date,
-                    account: acct.clone(),
+                    account: acct.clone().into(),
                     amount: amt.clone(),
                     tolerance: tol,
                     meta: meta.clone(),
@@ -1219,8 +1229,8 @@ fn balance_body<'a>(
 }
 
 /// Parse an open directive body.
-fn open_body<'a>(
-) -> impl Parser<'a, ParserInput<'a>, Box<dyn Fn(NaiveDate) -> Directive + 'a>, ParserExtra<'a>> {
+fn open_body<'a>()
+-> impl Parser<'a, ParserInput<'a>, Box<dyn Fn(NaiveDate) -> Directive + 'a>, ParserExtra<'a>> {
     just("open")
         .ignore_then(ws1())
         .ignore_then(account())
@@ -1243,8 +1253,8 @@ fn open_body<'a>(
             Box::new(move |date: NaiveDate| {
                 Directive::Open(Open {
                     date,
-                    account: acct.clone(),
-                    currencies: currencies.clone(),
+                    account: acct.clone().into(),
+                    currencies: currencies.iter().map(|c| c.clone().into()).collect(),
                     booking: booking.clone(),
                     meta: meta.clone(),
                 })
@@ -1253,8 +1263,8 @@ fn open_body<'a>(
 }
 
 /// Parse a close directive body.
-fn close_body<'a>(
-) -> impl Parser<'a, ParserInput<'a>, Box<dyn Fn(NaiveDate) -> Directive + 'a>, ParserExtra<'a>> {
+fn close_body<'a>()
+-> impl Parser<'a, ParserInput<'a>, Box<dyn Fn(NaiveDate) -> Directive + 'a>, ParserExtra<'a>> {
     just("close")
         .ignore_then(ws1())
         .ignore_then(account())
@@ -1269,7 +1279,7 @@ fn close_body<'a>(
             Box::new(move |date: NaiveDate| {
                 Directive::Close(Close {
                     date,
-                    account: acct.clone(),
+                    account: acct.clone().into(),
                     meta: meta.clone(),
                 })
             }) as Box<dyn Fn(NaiveDate) -> Directive + 'a>
@@ -1277,8 +1287,8 @@ fn close_body<'a>(
 }
 
 /// Parse a commodity directive body.
-fn commodity_body<'a>(
-) -> impl Parser<'a, ParserInput<'a>, Box<dyn Fn(NaiveDate) -> Directive + 'a>, ParserExtra<'a>> {
+fn commodity_body<'a>()
+-> impl Parser<'a, ParserInput<'a>, Box<dyn Fn(NaiveDate) -> Directive + 'a>, ParserExtra<'a>> {
     just("commodity")
         .ignore_then(ws1())
         .ignore_then(currency())
@@ -1293,7 +1303,7 @@ fn commodity_body<'a>(
                 }
                 Directive::Commodity(Commodity {
                     date,
-                    currency: curr.clone(),
+                    currency: curr.clone().into(),
                     meta,
                 })
             }) as Box<dyn Fn(NaiveDate) -> Directive + 'a>
@@ -1301,8 +1311,8 @@ fn commodity_body<'a>(
 }
 
 /// Parse a pad directive body.
-fn pad_body<'a>(
-) -> impl Parser<'a, ParserInput<'a>, Box<dyn Fn(NaiveDate) -> Directive + 'a>, ParserExtra<'a>> {
+fn pad_body<'a>()
+-> impl Parser<'a, ParserInput<'a>, Box<dyn Fn(NaiveDate) -> Directive + 'a>, ParserExtra<'a>> {
     just("pad")
         .ignore_then(ws1())
         .ignore_then(account())
@@ -1319,8 +1329,8 @@ fn pad_body<'a>(
             Box::new(move |date: NaiveDate| {
                 Directive::Pad(Pad {
                     date,
-                    account: acct.clone(),
-                    source_account: source.clone(),
+                    account: acct.clone().into(),
+                    source_account: source.clone().into(),
                     meta: meta.clone(),
                 })
             }) as Box<dyn Fn(NaiveDate) -> Directive + 'a>
@@ -1328,8 +1338,8 @@ fn pad_body<'a>(
 }
 
 /// Parse an event directive body.
-fn event_body<'a>(
-) -> impl Parser<'a, ParserInput<'a>, Box<dyn Fn(NaiveDate) -> Directive + 'a>, ParserExtra<'a>> {
+fn event_body<'a>()
+-> impl Parser<'a, ParserInput<'a>, Box<dyn Fn(NaiveDate) -> Directive + 'a>, ParserExtra<'a>> {
     just("event")
         .ignore_then(ws1())
         .ignore_then(string_literal())
@@ -1355,8 +1365,8 @@ fn event_body<'a>(
 }
 
 /// Parse a query directive body.
-fn query_body<'a>(
-) -> impl Parser<'a, ParserInput<'a>, Box<dyn Fn(NaiveDate) -> Directive + 'a>, ParserExtra<'a>> {
+fn query_body<'a>()
+-> impl Parser<'a, ParserInput<'a>, Box<dyn Fn(NaiveDate) -> Directive + 'a>, ParserExtra<'a>> {
     just("query")
         .ignore_then(ws1())
         .ignore_then(string_literal())
@@ -1377,8 +1387,8 @@ fn query_body<'a>(
 }
 
 /// Parse a note directive body.
-fn note_body<'a>(
-) -> impl Parser<'a, ParserInput<'a>, Box<dyn Fn(NaiveDate) -> Directive + 'a>, ParserExtra<'a>> {
+fn note_body<'a>()
+-> impl Parser<'a, ParserInput<'a>, Box<dyn Fn(NaiveDate) -> Directive + 'a>, ParserExtra<'a>> {
     just("note")
         .ignore_then(ws1())
         .ignore_then(account())
@@ -1395,7 +1405,7 @@ fn note_body<'a>(
             Box::new(move |date: NaiveDate| {
                 Directive::Note(Note {
                     date,
-                    account: acct.clone(),
+                    account: acct.clone().into(),
                     comment: comment.clone(),
                     meta: meta.clone(),
                 })
@@ -1404,8 +1414,8 @@ fn note_body<'a>(
 }
 
 /// Parse a document directive body.
-fn document_body<'a>(
-) -> impl Parser<'a, ParserInput<'a>, Box<dyn Fn(NaiveDate) -> Directive + 'a>, ParserExtra<'a>> {
+fn document_body<'a>()
+-> impl Parser<'a, ParserInput<'a>, Box<dyn Fn(NaiveDate) -> Directive + 'a>, ParserExtra<'a>> {
     // Tags and links after the path
     let tag_or_link = choice((
         tag().map(|t| (Some(t), None)),
@@ -1444,7 +1454,7 @@ fn document_body<'a>(
             Box::new(move |date: NaiveDate| {
                 Directive::Document(Document {
                     date,
-                    account: acct.clone(),
+                    account: acct.clone().into(),
                     path: filename.clone(),
                     tags: tags.clone(),
                     links: links.clone(),
@@ -1455,8 +1465,8 @@ fn document_body<'a>(
 }
 
 /// Parse a price directive body.
-fn price_body<'a>(
-) -> impl Parser<'a, ParserInput<'a>, Box<dyn Fn(NaiveDate) -> Directive + 'a>, ParserExtra<'a>> {
+fn price_body<'a>()
+-> impl Parser<'a, ParserInput<'a>, Box<dyn Fn(NaiveDate) -> Directive + 'a>, ParserExtra<'a>> {
     just("price")
         .ignore_then(ws1())
         .ignore_then(currency())
@@ -1473,7 +1483,7 @@ fn price_body<'a>(
             Box::new(move |date: NaiveDate| {
                 Directive::Price(Price {
                     date,
-                    currency: curr.clone(),
+                    currency: curr.clone().into(),
                     amount: amt.clone(),
                     meta: meta.clone(),
                 })
@@ -1482,8 +1492,8 @@ fn price_body<'a>(
 }
 
 /// Parse a custom directive body.
-fn custom_body<'a>(
-) -> impl Parser<'a, ParserInput<'a>, Box<dyn Fn(NaiveDate) -> Directive + 'a>, ParserExtra<'a>> {
+fn custom_body<'a>()
+-> impl Parser<'a, ParserInput<'a>, Box<dyn Fn(NaiveDate) -> Directive + 'a>, ParserExtra<'a>> {
     // Custom values can be strings, accounts, amounts, dates, booleans, etc.
     let custom_value = metadata_value();
 
@@ -1572,7 +1582,7 @@ mod tests {
             assert_eq!(txn.postings.len(), 2);
             let cost = txn.postings[0].cost.as_ref().expect("should have cost");
             assert_eq!(cost.number_per, Some(dec!(150.00)));
-            assert_eq!(cost.currency, Some("USD".to_string()));
+            assert_eq!(cost.currency, Some("USD".into()));
         } else {
             panic!("expected transaction");
         }
@@ -1589,7 +1599,7 @@ mod tests {
         if let Directive::Transaction(txn) = &result.directives[0].value {
             let cost = txn.postings[0].cost.as_ref().expect("should have cost");
             assert_eq!(cost.number_per, Some(dec!(150.00)));
-            assert_eq!(cost.currency, Some("USD".to_string()));
+            assert_eq!(cost.currency, Some("USD".into()));
             assert_eq!(
                 cost.date,
                 Some(NaiveDate::from_ymd_opt(2024, 1, 15).unwrap())
@@ -1611,7 +1621,7 @@ mod tests {
         if let Directive::Transaction(txn) = &result.directives[0].value {
             let cost = txn.postings[0].cost.as_ref().expect("should have cost");
             assert_eq!(cost.number_total, Some(dec!(1500.00)));
-            assert_eq!(cost.currency, Some("USD".to_string()));
+            assert_eq!(cost.currency, Some("USD".into()));
         } else {
             panic!("expected transaction");
         }

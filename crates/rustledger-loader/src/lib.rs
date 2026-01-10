@@ -68,6 +68,15 @@ pub enum LoadError {
         /// The parse errors.
         errors: Vec<ParseError>,
     },
+
+    /// Path traversal attempt detected.
+    #[error("path traversal not allowed: {include_path} escapes base directory {base_dir}")]
+    PathTraversal {
+        /// The include path that attempted traversal.
+        include_path: String,
+        /// The base directory.
+        base_dir: PathBuf,
+    },
 }
 
 /// Result of loading a beancount file.
@@ -105,6 +114,11 @@ pub struct Loader {
     loaded_files: HashSet<PathBuf>,
     /// Stack for cycle detection during loading.
     include_stack: Vec<PathBuf>,
+    /// Root directory for path traversal protection.
+    /// If set, includes must resolve to paths within this directory.
+    root_dir: Option<PathBuf>,
+    /// Whether to enforce path traversal protection.
+    enforce_path_security: bool,
 }
 
 impl Loader {
@@ -114,7 +128,51 @@ impl Loader {
         Self::default()
     }
 
+    /// Enable path traversal protection.
+    ///
+    /// When enabled, include directives cannot escape the root directory
+    /// of the main beancount file. This prevents malicious ledger files
+    /// from accessing sensitive files outside the ledger directory.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let result = Loader::new()
+    ///     .with_path_security(true)
+    ///     .load(Path::new("ledger.beancount"))?;
+    /// ```
+    #[must_use]
+    pub const fn with_path_security(mut self, enabled: bool) -> Self {
+        self.enforce_path_security = enabled;
+        self
+    }
+
+    /// Set a custom root directory for path security.
+    ///
+    /// By default, the root directory is the parent directory of the main file.
+    /// This method allows overriding that to a custom directory.
+    #[must_use]
+    pub fn with_root_dir(mut self, root: PathBuf) -> Self {
+        self.root_dir = Some(root);
+        self.enforce_path_security = true;
+        self
+    }
+
     /// Load a beancount file and all its includes.
+    ///
+    /// Parses the file, processes options and plugin directives, and recursively
+    /// loads any included files.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LoadError`] in the following cases:
+    ///
+    /// - [`LoadError::Io`] - Failed to read the file or an included file
+    /// - [`LoadError::IncludeCycle`] - Circular include detected
+    ///
+    /// Note: Parse errors and path traversal errors are collected in
+    /// [`LoadResult::errors`] rather than returned directly, allowing
+    /// partial results to be returned.
     pub fn load(&mut self, path: &Path) -> Result<LoadResult, LoadError> {
         let mut directives = Vec::new();
         let mut options = Options::default();
@@ -127,6 +185,11 @@ impl Loader {
             path: path.to_path_buf(),
             source: e,
         })?;
+
+        // Set root directory for path security if enabled but not explicitly set
+        if self.enforce_path_security && self.root_dir.is_none() {
+            self.root_dir = canonical.parent().map(Path::to_path_buf);
+        }
 
         self.load_recursive(
             &canonical,
@@ -225,6 +288,19 @@ impl Loader {
                     continue;
                 }
             };
+
+            // Path traversal protection: ensure include stays within root directory
+            if self.enforce_path_security {
+                if let Some(ref root) = self.root_dir {
+                    if !canonical.starts_with(root) {
+                        errors.push(LoadError::PathTraversal {
+                            include_path: include_path.clone(),
+                            base_dir: root.clone(),
+                        });
+                        continue;
+                    }
+                }
+            }
 
             if let Err(e) =
                 self.load_recursive(&canonical, directives, options, plugins, source_map, errors)

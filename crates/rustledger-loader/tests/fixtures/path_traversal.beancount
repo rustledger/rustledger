@@ -1,0 +1,7 @@
+; Test file that attempts path traversal
+option "title" "Path Traversal Test"
+
+; This include tries to escape the fixtures directory
+include "../../Cargo.toml"
+
+2024-01-01 open Assets:Bank USD

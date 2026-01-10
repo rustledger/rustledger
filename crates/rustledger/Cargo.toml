@@ -12,6 +12,9 @@ categories.workspace = true
 authors.workspace = true
 readme = "../../README.md"
 
+[lib]
+bench = false
+
 [features]
 default = ["bean-compat"]
 # Include bean-* binaries for backwards compatibility with Python beancount.

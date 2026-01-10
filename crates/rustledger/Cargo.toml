@@ -86,9 +86,9 @@ anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 rust_decimal.workspace = true
+chrono.workspace = true
 
 [dev-dependencies]
-chrono.workspace = true
 rust_decimal_macros.workspace = true
 criterion.workspace = true
 

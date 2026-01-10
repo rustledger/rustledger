@@ -37,4 +37,4 @@ jobs:
             - Documentation completeness
 
             Be constructive and specific. If changes look good, say so briefly.
-          claude_args: "--max-turns 5 --allowedTools WebSearch,WebFetch"
+          claude_args: "--max-turns 20 --allowedTools WebSearch,WebFetch"

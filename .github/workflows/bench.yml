@@ -29,16 +29,18 @@ jobs:
         if: github.event_name == 'pull_request'
         run: git checkout ${{ github.base_ref }}
       - name: Run base benchmarks
+        id: base_bench
         if: github.event_name == 'pull_request'
-        run: cargo bench --all-features -- --noplot --save-baseline base
+        continue-on-error: true
+        run: cargo bench --all-features --benches -- --save-baseline base
       - name: Checkout PR branch
         if: github.event_name == 'pull_request'
         run: git checkout ${{ github.head_ref }}
       - name: Run PR benchmarks
         if: github.event_name == 'pull_request'
-        run: cargo bench --all-features -- --noplot --save-baseline pr
+        run: cargo bench --all-features --benches -- --save-baseline pr
       - name: Compare benchmarks
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' && steps.base_bench.outcome == 'success'
         id: compare
         run: |
           echo "## Benchmark Comparison" >> $GITHUB_STEP_SUMMARY
@@ -52,7 +54,7 @@ jobs:
           # Save comparison for PR comment
           critcmp base pr > bench_comparison.txt 2>&1 || true
       - name: Post benchmark comparison as PR comment
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' && steps.base_bench.outcome == 'success'
         uses: actions/github-script@v7
         with:
           script: |
@@ -105,4 +107,4 @@ jobs:
       # For main branch pushes: just run benchmarks to ensure they work
       - name: Run benchmarks (main)
         if: github.ref == 'refs/heads/main'
-        run: cargo bench --all-features -- --noplot
+        run: cargo bench --all-features --benches

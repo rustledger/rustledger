@@ -32,13 +32,23 @@ jobs:
         id: base_bench
         if: github.event_name == 'pull_request'
         continue-on-error: true
-        run: cargo bench --all-features --benches -- --save-baseline base
+        run: |
+          cargo bench -p rustledger-core --bench inventory_bench -- --save-baseline base
+          cargo bench -p rustledger-parser --bench parser_bench -- --save-baseline base
+          cargo bench -p rustledger-query --bench query_bench -- --save-baseline base
+          cargo bench -p rustledger-validate --bench validate_bench -- --save-baseline base
+          cargo bench -p rustledger --bench pipeline_bench -- --save-baseline base
       - name: Checkout PR branch
         if: github.event_name == 'pull_request'
         run: git checkout ${{ github.head_ref }}
       - name: Run PR benchmarks
         if: github.event_name == 'pull_request'
-        run: cargo bench --all-features --benches -- --save-baseline pr
+        run: |
+          cargo bench -p rustledger-core --bench inventory_bench -- --save-baseline pr
+          cargo bench -p rustledger-parser --bench parser_bench -- --save-baseline pr
+          cargo bench -p rustledger-query --bench query_bench -- --save-baseline pr
+          cargo bench -p rustledger-validate --bench validate_bench -- --save-baseline pr
+          cargo bench -p rustledger --bench pipeline_bench -- --save-baseline pr
       - name: Compare benchmarks
         if: github.event_name == 'pull_request' && steps.base_bench.outcome == 'success'
         id: compare
@@ -107,4 +117,9 @@ jobs:
       # For main branch pushes: just run benchmarks to ensure they work
       - name: Run benchmarks (main)
         if: github.ref == 'refs/heads/main'
-        run: cargo bench --all-features --benches
+        run: |
+          cargo bench -p rustledger-core --bench inventory_bench
+          cargo bench -p rustledger-parser --bench parser_bench
+          cargo bench -p rustledger-query --bench query_bench
+          cargo bench -p rustledger-validate --bench validate_bench
+          cargo bench -p rustledger --bench pipeline_bench

@@ -52,6 +52,18 @@ struct Args {
     /// Show verbose output
     #[arg(short, long, global = true)]
     verbose: bool,
+
+    /// Output format (text, csv, json)
+    #[arg(short = 'f', long, global = true, default_value = "text")]
+    format: OutputFormat,
+}
+
+#[derive(Clone, Debug, Default, clap::ValueEnum)]
+enum OutputFormat {
+    #[default]
+    Text,
+    Csv,
+    Json,
 }
 
 #[derive(Subcommand, Debug)]
@@ -132,7 +144,7 @@ pub fn main_with_name(bin_name: &str) -> ExitCode {
         return ExitCode::from(2);
     };
 
-    match run(&file, &report, args.verbose) {
+    match run(&file, &report, args.verbose, &args.format) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("error: {e:#}");
@@ -141,7 +153,7 @@ pub fn main_with_name(bin_name: &str) -> ExitCode {
     }
 }
 
-fn run(file: &PathBuf, report: &Report, verbose: bool) -> Result<()> {
+fn run(file: &PathBuf, report: &Report, verbose: bool, format: &OutputFormat) -> Result<()> {
     let mut stdout = io::stdout().lock();
 
     // Check if file exists
@@ -178,34 +190,34 @@ fn run(file: &PathBuf, report: &Report, verbose: bool) -> Result<()> {
     // Generate the requested report
     match report {
         Report::Balances { account } => {
-            report_balances(&directives, account.as_deref(), &mut stdout)?;
+            report_balances(&directives, account.as_deref(), format, &mut stdout)?;
         }
         Report::Balsheet => {
-            report_balsheet(&directives, &mut stdout)?;
+            report_balsheet(&directives, format, &mut stdout)?;
         }
         Report::Income => {
-            report_income(&directives, &mut stdout)?;
+            report_income(&directives, format, &mut stdout)?;
         }
         Report::Journal { account, limit } => {
-            report_journal(&directives, account.as_deref(), *limit, &mut stdout)?;
+            report_journal(&directives, account.as_deref(), *limit, format, &mut stdout)?;
         }
         Report::Holdings { account } => {
-            report_holdings(&directives, account.as_deref(), &mut stdout)?;
+            report_holdings(&directives, account.as_deref(), format, &mut stdout)?;
         }
         Report::Networth { period } => {
-            report_networth(&directives, period, &mut stdout)?;
+            report_networth(&directives, period, format, &mut stdout)?;
         }
         Report::Accounts => {
-            report_accounts(&directives, &mut stdout)?;
+            report_accounts(&directives, format, &mut stdout)?;
         }
         Report::Commodities => {
-            report_commodities(&directives, &mut stdout)?;
+            report_commodities(&directives, format, &mut stdout)?;
         }
         Report::Stats => {
             report_stats(&directives, file, &mut stdout)?;
         }
         Report::Prices { commodity } => {
-            report_prices(&directives, commodity.as_deref(), &mut stdout)?;
+            report_prices(&directives, commodity.as_deref(), format, &mut stdout)?;
         }
     }
 
@@ -216,6 +228,7 @@ fn run(file: &PathBuf, report: &Report, verbose: bool) -> Result<()> {
 fn report_balances<W: Write>(
     directives: &[Directive],
     account_filter: Option<&str>,
+    format: &OutputFormat,
     writer: &mut W,
 ) -> Result<()> {
     let mut balances: BTreeMap<InternedStr, Inventory> = BTreeMap::new();
@@ -246,38 +259,86 @@ fn report_balances<W: Write>(
         }
     }
 
-    writeln!(writer, "Account Balances")?;
-    writeln!(writer, "{}", "=".repeat(60))?;
-    writeln!(writer)?;
-
+    // Collect data for output
+    let mut rows: Vec<(&str, Decimal, &str)> = Vec::new();
     for (account, inventory) in &balances {
-        // Apply filter
         if let Some(filter) = account_filter {
             if !account.starts_with(filter) {
                 continue;
             }
         }
-
-        // Skip empty balances
         if inventory.is_empty() {
             continue;
         }
-
-        writeln!(writer, "{account}")?;
         for position in inventory.positions() {
-            writeln!(
-                writer,
-                "  {:>15} {}",
-                position.units.number, position.units.currency
-            )?;
+            rows.push((account, position.units.number, &position.units.currency));
+        }
+    }
+
+    match format {
+        OutputFormat::Csv => {
+            writeln!(writer, "account,amount,currency")?;
+            for (account, amount, currency) in &rows {
+                writeln!(writer, "{},{},{}", csv_escape(account), amount, currency)?;
+            }
+        }
+        OutputFormat::Json => {
+            writeln!(writer, "[")?;
+            for (i, (account, amount, currency)) in rows.iter().enumerate() {
+                let comma = if i < rows.len() - 1 { "," } else { "" };
+                writeln!(
+                    writer,
+                    r#"  {{"account": "{}", "amount": "{}", "currency": "{}"}}{}"#,
+                    json_escape(account),
+                    amount,
+                    currency,
+                    comma
+                )?;
+            }
+            writeln!(writer, "]")?;
+        }
+        OutputFormat::Text => {
+            writeln!(writer, "Account Balances")?;
+            writeln!(writer, "{}", "=".repeat(60))?;
+            writeln!(writer)?;
+            let mut current_account = "";
+            for (account, amount, currency) in &rows {
+                if *account != current_account {
+                    writeln!(writer, "{account}")?;
+                    current_account = account;
+                }
+                writeln!(writer, "  {:>15} {}", amount, currency)?;
+            }
         }
     }
 
     Ok(())
 }
 
+/// Escape a string for CSV output.
+fn csv_escape(s: &str) -> String {
+    if s.contains(',') || s.contains('"') || s.contains('\n') {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s.to_string()
+    }
+}
+
+/// Escape a string for JSON output.
+fn json_escape(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t")
+}
+
 /// Generate an accounts list.
-fn report_accounts<W: Write>(directives: &[Directive], writer: &mut W) -> Result<()> {
+fn report_accounts<W: Write>(
+    directives: &[Directive],
+    format: &OutputFormat,
+    writer: &mut W,
+) -> Result<()> {
     let mut accounts: BTreeSet<&str> = BTreeSet::new();
 
     for directive in directives {
@@ -286,19 +347,42 @@ fn report_accounts<W: Write>(directives: &[Directive], writer: &mut W) -> Result
         }
     }
 
-    writeln!(writer, "Accounts ({} total)", accounts.len())?;
-    writeln!(writer, "{}", "=".repeat(40))?;
-    writeln!(writer)?;
+    let accounts: Vec<_> = accounts.into_iter().collect();
 
-    for account in accounts {
-        writeln!(writer, "{account}")?;
+    match format {
+        OutputFormat::Csv => {
+            writeln!(writer, "account")?;
+            for account in &accounts {
+                writeln!(writer, "{}", csv_escape(account))?;
+            }
+        }
+        OutputFormat::Json => {
+            writeln!(writer, "[")?;
+            for (i, account) in accounts.iter().enumerate() {
+                let comma = if i < accounts.len() - 1 { "," } else { "" };
+                writeln!(writer, r#"  "{}"{}"#, json_escape(account), comma)?;
+            }
+            writeln!(writer, "]")?;
+        }
+        OutputFormat::Text => {
+            writeln!(writer, "Accounts ({} total)", accounts.len())?;
+            writeln!(writer, "{}", "=".repeat(40))?;
+            writeln!(writer)?;
+            for account in &accounts {
+                writeln!(writer, "{account}")?;
+            }
+        }
     }
 
     Ok(())
 }
 
 /// Generate a commodities list.
-fn report_commodities<W: Write>(directives: &[Directive], writer: &mut W) -> Result<()> {
+fn report_commodities<W: Write>(
+    directives: &[Directive],
+    format: &OutputFormat,
+    writer: &mut W,
+) -> Result<()> {
     let mut commodities: BTreeSet<&str> = BTreeSet::new();
 
     for directive in directives {
@@ -324,12 +408,31 @@ fn report_commodities<W: Write>(directives: &[Directive], writer: &mut W) -> Res
         }
     }
 
-    writeln!(writer, "Commodities ({} total)", commodities.len())?;
-    writeln!(writer, "{}", "=".repeat(40))?;
-    writeln!(writer)?;
+    let commodities: Vec<_> = commodities.into_iter().collect();
 
-    for commodity in commodities {
-        writeln!(writer, "{commodity}")?;
+    match format {
+        OutputFormat::Csv => {
+            writeln!(writer, "commodity")?;
+            for commodity in &commodities {
+                writeln!(writer, "{commodity}")?;
+            }
+        }
+        OutputFormat::Json => {
+            writeln!(writer, "[")?;
+            for (i, commodity) in commodities.iter().enumerate() {
+                let comma = if i < commodities.len() - 1 { "," } else { "" };
+                writeln!(writer, r#"  "{}"{}"#, commodity, comma)?;
+            }
+            writeln!(writer, "]")?;
+        }
+        OutputFormat::Text => {
+            writeln!(writer, "Commodities ({} total)", commodities.len())?;
+            writeln!(writer, "{}", "=".repeat(40))?;
+            writeln!(writer)?;
+            for commodity in &commodities {
+                writeln!(writer, "{commodity}")?;
+            }
+        }
     }
 
     Ok(())
@@ -407,6 +510,7 @@ fn report_stats<W: Write>(
 fn report_prices<W: Write>(
     directives: &[Directive],
     commodity_filter: Option<&str>,
+    format: &OutputFormat,
     writer: &mut W,
 ) -> Result<()> {
     let mut prices: Vec<_> = directives
@@ -427,27 +531,52 @@ fn report_prices<W: Write>(
 
     prices.sort_by_key(|p| (p.currency.clone(), p.date));
 
-    writeln!(writer, "Price History")?;
-    writeln!(writer, "{}", "=".repeat(60))?;
-    writeln!(writer)?;
-
-    if prices.is_empty() {
-        writeln!(writer, "No price entries found.")?;
-    } else {
-        let mut current_currency = "";
-        for price in prices {
-            if price.currency != current_currency {
-                if !current_currency.is_empty() {
-                    writeln!(writer)?;
-                }
-                writeln!(writer, "{}:", price.currency)?;
-                current_currency = &price.currency;
+    match format {
+        OutputFormat::Csv => {
+            writeln!(writer, "commodity,date,price,currency")?;
+            for price in &prices {
+                writeln!(
+                    writer,
+                    "{},{},{},{}",
+                    price.currency, price.date, price.amount.number, price.amount.currency
+                )?;
             }
-            writeln!(
-                writer,
-                "  {}  {} {}",
-                price.date, price.amount.number, price.amount.currency
-            )?;
+        }
+        OutputFormat::Json => {
+            writeln!(writer, "[")?;
+            for (i, price) in prices.iter().enumerate() {
+                let comma = if i < prices.len() - 1 { "," } else { "" };
+                writeln!(
+                    writer,
+                    r#"  {{"commodity": "{}", "date": "{}", "price": "{}", "currency": "{}"}}{}"#,
+                    price.currency, price.date, price.amount.number, price.amount.currency, comma
+                )?;
+            }
+            writeln!(writer, "]")?;
+        }
+        OutputFormat::Text => {
+            writeln!(writer, "Price History")?;
+            writeln!(writer, "{}", "=".repeat(60))?;
+            writeln!(writer)?;
+            if prices.is_empty() {
+                writeln!(writer, "No price entries found.")?;
+            } else {
+                let mut current_currency = "";
+                for price in &prices {
+                    if price.currency.as_str() != current_currency {
+                        if !current_currency.is_empty() {
+                            writeln!(writer)?;
+                        }
+                        writeln!(writer, "{}:", price.currency)?;
+                        current_currency = &price.currency;
+                    }
+                    writeln!(
+                        writer,
+                        "  {}  {} {}",
+                        price.date, price.amount.number, price.amount.currency
+                    )?;
+                }
+            }
         }
     }
 
@@ -455,7 +584,11 @@ fn report_prices<W: Write>(
 }
 
 /// Generate a balance sheet report (Assets, Liabilities, Equity).
-fn report_balsheet<W: Write>(directives: &[Directive], writer: &mut W) -> Result<()> {
+fn report_balsheet<W: Write>(
+    directives: &[Directive],
+    format: &OutputFormat,
+    writer: &mut W,
+) -> Result<()> {
     let mut assets: BTreeMap<InternedStr, Inventory> = BTreeMap::new();
     let mut liabilities: BTreeMap<InternedStr, Inventory> = BTreeMap::new();
     let mut equity: BTreeMap<InternedStr, Inventory> = BTreeMap::new();
@@ -502,42 +635,32 @@ fn report_balsheet<W: Write>(directives: &[Directive], writer: &mut W) -> Result
         totals
     }
 
-    // Helper to write section
-    fn write_section<W: Write>(
-        writer: &mut W,
-        title: &str,
+    // Collect rows: (section, account, amount, currency)
+    fn collect_rows(
+        section: &str,
         balances: &BTreeMap<InternedStr, Inventory>,
-    ) -> Result<()> {
-        writeln!(writer, "{title}")?;
-        writeln!(writer, "{}", "-".repeat(60))?;
+    ) -> Vec<(String, String, Decimal, String)> {
+        let mut rows = Vec::new();
         for (account, inventory) in balances {
             if inventory.is_empty() {
                 continue;
             }
             for position in inventory.positions() {
-                writeln!(
-                    writer,
-                    "  {:>12} {:>4}  {}",
-                    position.units.number, position.units.currency, account
-                )?;
+                rows.push((
+                    section.to_string(),
+                    account.to_string(),
+                    position.units.number,
+                    position.units.currency.to_string(),
+                ));
             }
         }
-        let totals = sum_by_currency(balances);
-        writeln!(writer)?;
-        for (currency, total) in &totals {
-            writeln!(writer, "  {:>12} {:>4}  Total {title}", total, currency)?;
-        }
-        writeln!(writer)?;
-        Ok(())
+        rows
     }
 
-    writeln!(writer, "Balance Sheet")?;
-    writeln!(writer, "{}", "=".repeat(60))?;
-    writeln!(writer)?;
-
-    write_section(writer, "Assets", &assets)?;
-    write_section(writer, "Liabilities", &liabilities)?;
-    write_section(writer, "Equity", &equity)?;
+    let mut all_rows = Vec::new();
+    all_rows.extend(collect_rows("Assets", &assets));
+    all_rows.extend(collect_rows("Liabilities", &liabilities));
+    all_rows.extend(collect_rows("Equity", &equity));
 
     // Net worth = Assets - Liabilities
     let asset_totals = sum_by_currency(&assets);
@@ -547,17 +670,109 @@ fn report_balsheet<W: Write>(directives: &[Directive], writer: &mut W) -> Result
         *net_worth.entry(currency.clone()).or_default() -= amount;
     }
 
-    writeln!(writer, "Net Worth")?;
-    writeln!(writer, "{}", "-".repeat(60))?;
-    for (currency, total) in &net_worth {
-        writeln!(writer, "  {:>12} {:>4}", total, currency)?;
+    match format {
+        OutputFormat::Csv => {
+            writeln!(writer, "section,account,amount,currency")?;
+            for (section, account, amount, currency) in &all_rows {
+                writeln!(
+                    writer,
+                    "{},{},{},{}",
+                    section,
+                    csv_escape(account),
+                    amount,
+                    currency
+                )?;
+            }
+            // Add net worth rows
+            for (currency, total) in &net_worth {
+                writeln!(writer, "Net Worth,TOTAL,{},{}", total, currency)?;
+            }
+        }
+        OutputFormat::Json => {
+            writeln!(writer, "{{")?;
+            writeln!(writer, r#"  "accounts": ["#)?;
+            for (i, (section, account, amount, currency)) in all_rows.iter().enumerate() {
+                let comma = if i < all_rows.len() - 1 { "," } else { "" };
+                writeln!(
+                    writer,
+                    r#"    {{"section": "{}", "account": "{}", "amount": "{}", "currency": "{}"}}{}"#,
+                    section,
+                    json_escape(account),
+                    amount,
+                    currency,
+                    comma
+                )?;
+            }
+            writeln!(writer, "  ],")?;
+            writeln!(writer, r#"  "net_worth": {{"#)?;
+            let nw_vec: Vec<_> = net_worth.iter().collect();
+            for (i, (currency, total)) in nw_vec.iter().enumerate() {
+                let comma = if i < nw_vec.len() - 1 { "," } else { "" };
+                writeln!(writer, r#"    "{}": "{}"{}"#, currency, total, comma)?;
+            }
+            writeln!(writer, "  }}")?;
+            writeln!(writer, "}}")?;
+        }
+        OutputFormat::Text => {
+            fn write_section<W: Write>(
+                writer: &mut W,
+                title: &str,
+                balances: &BTreeMap<InternedStr, Inventory>,
+            ) -> Result<BTreeMap<String, Decimal>> {
+                writeln!(writer, "{title}")?;
+                writeln!(writer, "{}", "-".repeat(60))?;
+                for (account, inventory) in balances {
+                    if inventory.is_empty() {
+                        continue;
+                    }
+                    for position in inventory.positions() {
+                        writeln!(
+                            writer,
+                            "  {:>12} {:>4}  {}",
+                            position.units.number, position.units.currency, account
+                        )?;
+                    }
+                }
+                let mut totals: BTreeMap<String, Decimal> = BTreeMap::new();
+                for inv in balances.values() {
+                    for pos in inv.positions() {
+                        *totals.entry(pos.units.currency.to_string()).or_default() +=
+                            pos.units.number;
+                    }
+                }
+                writeln!(writer)?;
+                for (currency, total) in &totals {
+                    writeln!(writer, "  {:>12} {:>4}  Total {title}", total, currency)?;
+                }
+                writeln!(writer)?;
+                Ok(totals)
+            }
+
+            writeln!(writer, "Balance Sheet")?;
+            writeln!(writer, "{}", "=".repeat(60))?;
+            writeln!(writer)?;
+
+            write_section(writer, "Assets", &assets)?;
+            write_section(writer, "Liabilities", &liabilities)?;
+            write_section(writer, "Equity", &equity)?;
+
+            writeln!(writer, "Net Worth")?;
+            writeln!(writer, "{}", "-".repeat(60))?;
+            for (currency, total) in &net_worth {
+                writeln!(writer, "  {:>12} {:>4}", total, currency)?;
+            }
+        }
     }
 
     Ok(())
 }
 
 /// Generate an income statement report (Income and Expenses).
-fn report_income<W: Write>(directives: &[Directive], writer: &mut W) -> Result<()> {
+fn report_income<W: Write>(
+    directives: &[Directive],
+    format: &OutputFormat,
+    writer: &mut W,
+) -> Result<()> {
     let mut income: BTreeMap<InternedStr, Inventory> = BTreeMap::new();
     let mut expenses: BTreeMap<InternedStr, Inventory> = BTreeMap::new();
 
@@ -592,57 +807,132 @@ fn report_income<W: Write>(directives: &[Directive], writer: &mut W) -> Result<(
         totals
     }
 
-    fn write_section<W: Write>(
-        writer: &mut W,
-        title: &str,
+    fn collect_rows(
+        section: &str,
         balances: &BTreeMap<InternedStr, Inventory>,
-    ) -> Result<()> {
-        writeln!(writer, "{title}")?;
-        writeln!(writer, "{}", "-".repeat(60))?;
+    ) -> Vec<(String, String, Decimal, String)> {
+        let mut rows = Vec::new();
         for (account, inventory) in balances {
             if inventory.is_empty() {
                 continue;
             }
             for position in inventory.positions() {
-                writeln!(
-                    writer,
-                    "  {:>12} {:>4}  {}",
-                    position.units.number, position.units.currency, account
-                )?;
+                rows.push((
+                    section.to_string(),
+                    account.to_string(),
+                    position.units.number,
+                    position.units.currency.to_string(),
+                ));
             }
         }
-        let totals = sum_by_currency(balances);
-        writeln!(writer)?;
-        for (currency, total) in &totals {
-            writeln!(writer, "  {:>12} {:>4}  Total {title}", total, currency)?;
-        }
-        writeln!(writer)?;
-        Ok(())
+        rows
     }
 
-    writeln!(writer, "Income Statement")?;
-    writeln!(writer, "{}", "=".repeat(60))?;
-    writeln!(writer)?;
-
-    write_section(writer, "Income", &income)?;
-    write_section(writer, "Expenses", &expenses)?;
+    let mut all_rows = Vec::new();
+    all_rows.extend(collect_rows("Income", &income));
+    all_rows.extend(collect_rows("Expenses", &expenses));
 
     // Net income = -(Income) - Expenses (income is negative in double-entry)
     let income_totals = sum_by_currency(&income);
     let expense_totals = sum_by_currency(&expenses);
     let mut net_income: BTreeMap<String, Decimal> = BTreeMap::new();
     for (currency, amount) in &income_totals {
-        // Income is typically negative (credits), so we negate
         *net_income.entry(currency.clone()).or_default() -= amount;
     }
     for (currency, amount) in &expense_totals {
         *net_income.entry(currency.clone()).or_default() -= amount;
     }
 
-    writeln!(writer, "Net Income")?;
-    writeln!(writer, "{}", "-".repeat(60))?;
-    for (currency, total) in &net_income {
-        writeln!(writer, "  {:>12} {:>4}", total, currency)?;
+    match format {
+        OutputFormat::Csv => {
+            writeln!(writer, "section,account,amount,currency")?;
+            for (section, account, amount, currency) in &all_rows {
+                writeln!(
+                    writer,
+                    "{},{},{},{}",
+                    section,
+                    csv_escape(account),
+                    amount,
+                    currency
+                )?;
+            }
+            for (currency, total) in &net_income {
+                writeln!(writer, "Net Income,TOTAL,{},{}", total, currency)?;
+            }
+        }
+        OutputFormat::Json => {
+            writeln!(writer, "{{")?;
+            writeln!(writer, r#"  "accounts": ["#)?;
+            for (i, (section, account, amount, currency)) in all_rows.iter().enumerate() {
+                let comma = if i < all_rows.len() - 1 { "," } else { "" };
+                writeln!(
+                    writer,
+                    r#"    {{"section": "{}", "account": "{}", "amount": "{}", "currency": "{}"}}{}"#,
+                    section,
+                    json_escape(account),
+                    amount,
+                    currency,
+                    comma
+                )?;
+            }
+            writeln!(writer, "  ],")?;
+            writeln!(writer, r#"  "net_income": {{"#)?;
+            let ni_vec: Vec<_> = net_income.iter().collect();
+            for (i, (currency, total)) in ni_vec.iter().enumerate() {
+                let comma = if i < ni_vec.len() - 1 { "," } else { "" };
+                writeln!(writer, r#"    "{}": "{}"{}"#, currency, total, comma)?;
+            }
+            writeln!(writer, "  }}")?;
+            writeln!(writer, "}}")?;
+        }
+        OutputFormat::Text => {
+            fn write_section<W: Write>(
+                writer: &mut W,
+                title: &str,
+                balances: &BTreeMap<InternedStr, Inventory>,
+            ) -> Result<BTreeMap<String, Decimal>> {
+                writeln!(writer, "{title}")?;
+                writeln!(writer, "{}", "-".repeat(60))?;
+                for (account, inventory) in balances {
+                    if inventory.is_empty() {
+                        continue;
+                    }
+                    for position in inventory.positions() {
+                        writeln!(
+                            writer,
+                            "  {:>12} {:>4}  {}",
+                            position.units.number, position.units.currency, account
+                        )?;
+                    }
+                }
+                let mut totals: BTreeMap<String, Decimal> = BTreeMap::new();
+                for inv in balances.values() {
+                    for pos in inv.positions() {
+                        *totals.entry(pos.units.currency.to_string()).or_default() +=
+                            pos.units.number;
+                    }
+                }
+                writeln!(writer)?;
+                for (currency, total) in &totals {
+                    writeln!(writer, "  {:>12} {:>4}  Total {title}", total, currency)?;
+                }
+                writeln!(writer)?;
+                Ok(totals)
+            }
+
+            writeln!(writer, "Income Statement")?;
+            writeln!(writer, "{}", "=".repeat(60))?;
+            writeln!(writer)?;
+
+            write_section(writer, "Income", &income)?;
+            write_section(writer, "Expenses", &expenses)?;
+
+            writeln!(writer, "Net Income")?;
+            writeln!(writer, "{}", "-".repeat(60))?;
+            for (currency, total) in &net_income {
+                writeln!(writer, "  {:>12} {:>4}", total, currency)?;
+            }
+        }
     }
 
     Ok(())
@@ -653,13 +943,13 @@ fn report_journal<W: Write>(
     directives: &[Directive],
     account_filter: Option<&str>,
     limit: Option<usize>,
+    format: &OutputFormat,
     writer: &mut W,
 ) -> Result<()> {
     let mut entries: Vec<_> = directives
         .iter()
         .filter_map(|d| {
             if let Directive::Transaction(txn) = d {
-                // Filter by account if specified
                 if let Some(filter) = account_filter {
                     if !txn.postings.iter().any(|p| p.account.starts_with(filter)) {
                         return None;
@@ -674,40 +964,108 @@ fn report_journal<W: Write>(
 
     entries.sort_by_key(|t| t.date);
 
-    writeln!(writer, "Transaction Journal")?;
-    writeln!(writer, "{}", "=".repeat(80))?;
-    writeln!(writer)?;
-
     let entries_to_show = if let Some(n) = limit {
         entries.into_iter().rev().take(n).collect::<Vec<_>>()
     } else {
         entries
     };
 
-    for txn in entries_to_show {
-        let payee = txn.payee.as_deref().unwrap_or("");
-        let narration = &txn.narration;
-        let desc = if payee.is_empty() {
-            narration.to_string()
-        } else {
-            format!("{} | {}", payee, narration)
-        };
-        writeln!(writer, "{} {} {}", txn.date, txn.flag, desc)?;
-
-        for posting in &txn.postings {
-            if let Some(amount) = posting.amount() {
-                writeln!(
-                    writer,
-                    "  {:50} {:>12} {}",
-                    posting.account.as_str(),
-                    amount.number,
-                    amount.currency
-                )?;
-            } else {
-                writeln!(writer, "  {:50}", posting.account.as_str())?;
+    match format {
+        OutputFormat::Csv => {
+            writeln!(writer, "date,flag,payee,narration,account,amount,currency")?;
+            for txn in &entries_to_show {
+                let payee = txn.payee.as_deref().unwrap_or("");
+                for posting in &txn.postings {
+                    let (amount, currency) = if let Some(amt) = posting.amount() {
+                        (amt.number.to_string(), amt.currency.to_string())
+                    } else {
+                        (String::new(), String::new())
+                    };
+                    writeln!(
+                        writer,
+                        "{},{},{},{},{},{},{}",
+                        txn.date,
+                        txn.flag,
+                        csv_escape(payee),
+                        csv_escape(&txn.narration),
+                        csv_escape(&posting.account),
+                        amount,
+                        currency
+                    )?;
+                }
             }
         }
-        writeln!(writer)?;
+        OutputFormat::Json => {
+            writeln!(writer, "[")?;
+            for (i, txn) in entries_to_show.iter().enumerate() {
+                let payee = txn.payee.as_deref().unwrap_or("");
+                let comma = if i < entries_to_show.len() - 1 {
+                    ","
+                } else {
+                    ""
+                };
+                writeln!(writer, "  {{")?;
+                writeln!(writer, r#"    "date": "{}","#, txn.date)?;
+                writeln!(writer, r#"    "flag": "{}","#, txn.flag)?;
+                writeln!(writer, r#"    "payee": "{}","#, json_escape(payee))?;
+                writeln!(
+                    writer,
+                    r#"    "narration": "{}","#,
+                    json_escape(&txn.narration)
+                )?;
+                writeln!(writer, r#"    "postings": ["#)?;
+                for (j, posting) in txn.postings.iter().enumerate() {
+                    let pcomma = if j < txn.postings.len() - 1 { "," } else { "" };
+                    let (amount, currency) = if let Some(amt) = posting.amount() {
+                        (amt.number.to_string(), amt.currency.to_string())
+                    } else {
+                        (String::new(), String::new())
+                    };
+                    writeln!(
+                        writer,
+                        r#"      {{"account": "{}", "amount": "{}", "currency": "{}"}}{}"#,
+                        json_escape(&posting.account),
+                        amount,
+                        currency,
+                        pcomma
+                    )?;
+                }
+                writeln!(writer, "    ]")?;
+                writeln!(writer, "  }}{}", comma)?;
+            }
+            writeln!(writer, "]")?;
+        }
+        OutputFormat::Text => {
+            writeln!(writer, "Transaction Journal")?;
+            writeln!(writer, "{}", "=".repeat(80))?;
+            writeln!(writer)?;
+
+            for txn in &entries_to_show {
+                let payee = txn.payee.as_deref().unwrap_or("");
+                let narration = &txn.narration;
+                let desc = if payee.is_empty() {
+                    narration.to_string()
+                } else {
+                    format!("{} | {}", payee, narration)
+                };
+                writeln!(writer, "{} {} {}", txn.date, txn.flag, desc)?;
+
+                for posting in &txn.postings {
+                    if let Some(amount) = posting.amount() {
+                        writeln!(
+                            writer,
+                            "  {:50} {:>12} {}",
+                            posting.account.as_str(),
+                            amount.number,
+                            amount.currency
+                        )?;
+                    } else {
+                        writeln!(writer, "  {:50}", posting.account.as_str())?;
+                    }
+                }
+                writeln!(writer)?;
+            }
+        }
     }
 
     Ok(())
@@ -717,6 +1075,7 @@ fn report_journal<W: Write>(
 fn report_holdings<W: Write>(
     directives: &[Directive],
     account_filter: Option<&str>,
+    format: &OutputFormat,
     writer: &mut W,
 ) -> Result<()> {
     // Track holdings: account -> currency -> (units, cost_basis, cost_currency)
@@ -726,14 +1085,12 @@ fn report_holdings<W: Write>(
     for directive in directives {
         if let Directive::Transaction(txn) = directive {
             for posting in &txn.postings {
-                // Filter by account
                 if let Some(filter) = account_filter {
                     if !posting.account.starts_with(filter) {
                         continue;
                     }
                 }
 
-                // Only track Assets accounts for holdings
                 let account_str: &str = &posting.account;
                 if !account_str.starts_with("Assets:") {
                     continue;
@@ -742,7 +1099,6 @@ fn report_holdings<W: Write>(
                 if let Some(amount) = posting.amount() {
                     let account_holdings = holdings.entry(posting.account.clone()).or_default();
 
-                    // Get cost if available
                     let (cost_amount, cost_currency) = if let Some(cost_spec) = &posting.cost {
                         if let Some(cost) = cost_spec.resolve(amount.number, txn.date) {
                             (cost.number * amount.number, cost.currency.to_string())
@@ -764,30 +1120,75 @@ fn report_holdings<W: Write>(
         }
     }
 
-    writeln!(writer, "Holdings")?;
-    writeln!(writer, "{}", "=".repeat(80))?;
-    writeln!(writer)?;
-    writeln!(
-        writer,
-        "{:50} {:>12} {:>6} {:>12} {:>6}",
-        "Account", "Units", "Curr", "Cost Basis", "Curr"
-    )?;
-    writeln!(writer, "{}", "-".repeat(80))?;
-
+    // Collect rows: (account, units, currency, cost_basis, cost_currency)
+    let mut rows: Vec<(String, Decimal, String, Decimal, String)> = Vec::new();
     for (account, currencies) in &holdings {
         for (currency, (units, cost_basis, cost_currency)) in currencies {
             if *units == Decimal::ZERO {
                 continue;
             }
+            rows.push((
+                account.to_string(),
+                *units,
+                currency.clone(),
+                *cost_basis,
+                cost_currency.clone(),
+            ));
+        }
+    }
+
+    match format {
+        OutputFormat::Csv => {
+            writeln!(writer, "account,units,currency,cost_basis,cost_currency")?;
+            for (account, units, currency, cost_basis, cost_currency) in &rows {
+                writeln!(
+                    writer,
+                    "{},{},{},{},{}",
+                    csv_escape(account),
+                    units,
+                    currency,
+                    cost_basis,
+                    cost_currency
+                )?;
+            }
+        }
+        OutputFormat::Json => {
+            writeln!(writer, "[")?;
+            for (i, (account, units, currency, cost_basis, cost_currency)) in
+                rows.iter().enumerate()
+            {
+                let comma = if i < rows.len() - 1 { "," } else { "" };
+                writeln!(
+                    writer,
+                    r#"  {{"account": "{}", "units": "{}", "currency": "{}", "cost_basis": "{}", "cost_currency": "{}"}}{}"#,
+                    json_escape(account),
+                    units,
+                    currency,
+                    cost_basis,
+                    cost_currency,
+                    comma
+                )?;
+            }
+            writeln!(writer, "]")?;
+        }
+        OutputFormat::Text => {
+            writeln!(writer, "Holdings")?;
+            writeln!(writer, "{}", "=".repeat(80))?;
+            writeln!(writer)?;
             writeln!(
                 writer,
                 "{:50} {:>12} {:>6} {:>12} {:>6}",
-                account.as_str(),
-                units,
-                currency,
-                cost_basis,
-                cost_currency
+                "Account", "Units", "Curr", "Cost Basis", "Curr"
             )?;
+            writeln!(writer, "{}", "-".repeat(80))?;
+
+            for (account, units, currency, cost_basis, cost_currency) in &rows {
+                writeln!(
+                    writer,
+                    "{:50} {:>12} {:>6} {:>12} {:>6}",
+                    account, units, currency, cost_basis, cost_currency
+                )?;
+            }
         }
     }
 
@@ -795,8 +1196,12 @@ fn report_holdings<W: Write>(
 }
 
 /// Generate a net worth over time report.
-fn report_networth<W: Write>(directives: &[Directive], period: &str, writer: &mut W) -> Result<()> {
-    // Collect all transactions sorted by date
+fn report_networth<W: Write>(
+    directives: &[Directive],
+    period: &str,
+    format: &OutputFormat,
+    writer: &mut W,
+) -> Result<()> {
     let mut transactions: Vec<_> = directives
         .iter()
         .filter_map(|d| {
@@ -811,15 +1216,16 @@ fn report_networth<W: Write>(directives: &[Directive], period: &str, writer: &mu
     transactions.sort_by_key(|t| t.date);
 
     if transactions.is_empty() {
-        writeln!(writer, "No transactions found.")?;
+        match format {
+            OutputFormat::Csv => writeln!(writer, "period,currency,amount")?,
+            OutputFormat::Json => writeln!(writer, "[]")?,
+            OutputFormat::Text => writeln!(writer, "No transactions found.")?,
+        }
         return Ok(());
     }
 
-    // Running balance for Assets and Liabilities
     let mut asset_balance: BTreeMap<String, Decimal> = BTreeMap::new();
     let mut liability_balance: BTreeMap<String, Decimal> = BTreeMap::new();
-
-    // Results by period
     let mut period_results: Vec<(String, BTreeMap<String, Decimal>)> = Vec::new();
 
     let format_period = |date: rustledger_core::NaiveDate, period: &str| -> String {
@@ -827,7 +1233,7 @@ fn report_networth<W: Write>(directives: &[Directive], period: &str, writer: &mu
             "daily" => date.to_string(),
             "weekly" => format!("{}-W{:02}", date.year(), date.iso_week().week()),
             "yearly" => format!("{}", date.year()),
-            _ => format!("{}-{:02}", date.year(), date.month()), // monthly default
+            _ => format!("{}-{:02}", date.year(), date.month()),
         }
     };
 
@@ -836,7 +1242,6 @@ fn report_networth<W: Write>(directives: &[Directive], period: &str, writer: &mu
     for txn in transactions {
         let txn_period = format_period(txn.date, period);
 
-        // If period changed, record snapshot
         if txn_period != current_period && !current_period.is_empty() {
             let mut net_worth: BTreeMap<String, Decimal> = asset_balance.clone();
             for (currency, amount) in &liability_balance {
@@ -846,7 +1251,6 @@ fn report_networth<W: Write>(directives: &[Directive], period: &str, writer: &mu
         }
         current_period = txn_period;
 
-        // Update running balances
         for posting in &txn.postings {
             if let Some(amount) = posting.amount() {
                 let account_str: &str = &posting.account;
@@ -863,7 +1267,6 @@ fn report_networth<W: Write>(directives: &[Directive], period: &str, writer: &mu
         }
     }
 
-    // Final period
     if !current_period.is_empty() {
         let mut net_worth: BTreeMap<String, Decimal> = asset_balance.clone();
         for (currency, amount) in &liability_balance {
@@ -872,16 +1275,45 @@ fn report_networth<W: Write>(directives: &[Directive], period: &str, writer: &mu
         period_results.push((current_period, net_worth));
     }
 
-    writeln!(writer, "Net Worth Over Time ({})", period)?;
-    writeln!(writer, "{}", "=".repeat(60))?;
-    writeln!(writer)?;
-
-    for (period_label, net_worth) in &period_results {
-        write!(writer, "{:12}", period_label)?;
-        for (currency, amount) in net_worth {
-            write!(writer, "  {:>12} {}", amount, currency)?;
+    match format {
+        OutputFormat::Csv => {
+            writeln!(writer, "period,currency,amount")?;
+            for (period_label, net_worth) in &period_results {
+                for (currency, amount) in net_worth {
+                    writeln!(writer, "{},{},{}", period_label, currency, amount)?;
+                }
+            }
         }
-        writeln!(writer)?;
+        OutputFormat::Json => {
+            writeln!(writer, "[")?;
+            let total_entries: usize = period_results.iter().map(|(_, nw)| nw.len()).sum();
+            let mut entry_idx = 0;
+            for (period_label, net_worth) in &period_results {
+                for (currency, amount) in net_worth {
+                    entry_idx += 1;
+                    let comma = if entry_idx < total_entries { "," } else { "" };
+                    writeln!(
+                        writer,
+                        r#"  {{"period": "{}", "currency": "{}", "amount": "{}"}}{}"#,
+                        period_label, currency, amount, comma
+                    )?;
+                }
+            }
+            writeln!(writer, "]")?;
+        }
+        OutputFormat::Text => {
+            writeln!(writer, "Net Worth Over Time ({})", period)?;
+            writeln!(writer, "{}", "=".repeat(60))?;
+            writeln!(writer)?;
+
+            for (period_label, net_worth) in &period_results {
+                write!(writer, "{:12}", period_label)?;
+                for (currency, amount) in net_worth {
+                    write!(writer, "  {:>12} {}", amount, currency)?;
+                }
+                writeln!(writer)?;
+            }
+        }
     }
 
     Ok(())

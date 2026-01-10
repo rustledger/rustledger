@@ -127,6 +127,20 @@ fn run(args: &Args) -> Result<ExitCode> {
                 }
                 error_count += 1;
             }
+            LoadError::PathTraversal {
+                include_path,
+                base_dir,
+            } => {
+                if !args.quiet {
+                    writeln!(
+                        stdout,
+                        "error: path traversal not allowed: {} escapes {}",
+                        include_path,
+                        base_dir.display()
+                    )?;
+                }
+                error_count += 1;
+            }
         }
     }
 

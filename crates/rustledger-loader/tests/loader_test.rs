@@ -237,3 +237,76 @@ fn test_duplicate_include_ignored() {
         "should have exactly 2 files (main + accounts)"
     );
 }
+
+// ============================================================================
+// Path Security Tests
+// ============================================================================
+
+#[test]
+fn test_path_traversal_blocked_with_security_enabled() {
+    let path = fixtures_path("path_traversal.beancount");
+    let result = Loader::new()
+        .with_path_security(true)
+        .load(&path)
+        .expect("should load file even with blocked include");
+
+    // Should have path traversal error
+    let has_traversal_error = result
+        .errors
+        .iter()
+        .any(|e| matches!(e, LoadError::PathTraversal { .. }));
+    assert!(
+        has_traversal_error,
+        "expected PathTraversal error when security is enabled"
+    );
+
+    // Should still have the open directive from the main file
+    let opens = result
+        .directives
+        .iter()
+        .filter(|d| matches!(d.value, rustledger_core::Directive::Open(_)))
+        .count();
+    assert_eq!(opens, 1, "expected 1 open directive from main file");
+}
+
+#[test]
+fn test_path_traversal_allowed_without_security() {
+    let path = fixtures_path("path_traversal.beancount");
+    let result = load(&path).expect("should load file");
+
+    // Without security enabled, should NOT have path traversal error
+    // (though may have IO error if include target doesn't exist or parse error if not valid beancount)
+    let has_traversal_error = result
+        .errors
+        .iter()
+        .any(|e| matches!(e, LoadError::PathTraversal { .. }));
+    assert!(
+        !has_traversal_error,
+        "should not have PathTraversal error when security is disabled"
+    );
+}
+
+#[test]
+fn test_with_custom_root_dir() {
+    let path = fixtures_path("main_with_include.beancount");
+    let fixtures_dir = fixtures_path("");
+
+    // With root set to fixtures dir, include should work
+    let result = Loader::new()
+        .with_root_dir(fixtures_dir)
+        .load(&path)
+        .expect("should load file");
+
+    // Should not have path traversal errors
+    let has_traversal_error = result
+        .errors
+        .iter()
+        .any(|e| matches!(e, LoadError::PathTraversal { .. }));
+    assert!(
+        !has_traversal_error,
+        "should not have PathTraversal error for valid include"
+    );
+
+    // Should have loaded the include
+    assert_eq!(result.source_map.files().len(), 2, "should have 2 files");
+}

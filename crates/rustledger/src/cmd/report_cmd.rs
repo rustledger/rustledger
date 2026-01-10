@@ -21,7 +21,9 @@
 
 use crate::cmd::completions::ShellType;
 use anyhow::{Context, Result};
+use chrono::Datelike;
 use clap::{Parser, Subcommand};
+use rust_decimal::Decimal;
 use rustledger_booking::interpolate;
 use rustledger_core::{Directive, InternedStr, Inventory};
 use rustledger_loader::Loader;
@@ -59,6 +61,34 @@ enum Report {
         /// Filter to accounts matching this prefix
         #[arg(short, long)]
         account: Option<String>,
+    },
+    /// Balance sheet (Assets, Liabilities, Equity)
+    #[command(alias = "bal")]
+    Balsheet,
+    /// Income statement (Income and Expenses)
+    #[command(alias = "is")]
+    Income,
+    /// Transaction journal/register
+    #[command(alias = "register")]
+    Journal {
+        /// Filter to accounts matching this prefix
+        #[arg(short, long)]
+        account: Option<String>,
+        /// Limit number of entries
+        #[arg(short, long)]
+        limit: Option<usize>,
+    },
+    /// Investment holdings with cost basis
+    Holdings {
+        /// Filter to accounts matching this prefix
+        #[arg(short, long)]
+        account: Option<String>,
+    },
+    /// Net worth over time
+    Networth {
+        /// Group by period (daily, weekly, monthly, yearly)
+        #[arg(short, long, default_value = "monthly")]
+        period: String,
     },
     /// List all accounts
     Accounts,
@@ -149,6 +179,21 @@ fn run(file: &PathBuf, report: &Report, verbose: bool) -> Result<()> {
     match report {
         Report::Balances { account } => {
             report_balances(&directives, account.as_deref(), &mut stdout)?;
+        }
+        Report::Balsheet => {
+            report_balsheet(&directives, &mut stdout)?;
+        }
+        Report::Income => {
+            report_income(&directives, &mut stdout)?;
+        }
+        Report::Journal { account, limit } => {
+            report_journal(&directives, account.as_deref(), *limit, &mut stdout)?;
+        }
+        Report::Holdings { account } => {
+            report_holdings(&directives, account.as_deref(), &mut stdout)?;
+        }
+        Report::Networth { period } => {
+            report_networth(&directives, period, &mut stdout)?;
         }
         Report::Accounts => {
             report_accounts(&directives, &mut stdout)?;
@@ -404,6 +449,439 @@ fn report_prices<W: Write>(
                 price.date, price.amount.number, price.amount.currency
             )?;
         }
+    }
+
+    Ok(())
+}
+
+/// Generate a balance sheet report (Assets, Liabilities, Equity).
+fn report_balsheet<W: Write>(directives: &[Directive], writer: &mut W) -> Result<()> {
+    let mut assets: BTreeMap<InternedStr, Inventory> = BTreeMap::new();
+    let mut liabilities: BTreeMap<InternedStr, Inventory> = BTreeMap::new();
+    let mut equity: BTreeMap<InternedStr, Inventory> = BTreeMap::new();
+
+    for directive in directives {
+        if let Directive::Transaction(txn) = directive {
+            for posting in &txn.postings {
+                if let Some(amount) = posting.amount() {
+                    let account_str: &str = &posting.account;
+                    let balances = if account_str.starts_with("Assets:") {
+                        &mut assets
+                    } else if account_str.starts_with("Liabilities:") {
+                        &mut liabilities
+                    } else if account_str.starts_with("Equity:") {
+                        &mut equity
+                    } else {
+                        continue;
+                    };
+
+                    let inv = balances.entry(posting.account.clone()).or_default();
+                    let position = if let Some(cost_spec) = &posting.cost {
+                        if let Some(cost) = cost_spec.resolve(amount.number, txn.date) {
+                            rustledger_core::Position::with_cost(amount.clone(), cost)
+                        } else {
+                            rustledger_core::Position::simple(amount.clone())
+                        }
+                    } else {
+                        rustledger_core::Position::simple(amount.clone())
+                    };
+                    inv.add(position);
+                }
+            }
+        }
+    }
+
+    // Helper to sum inventory by currency
+    fn sum_by_currency(balances: &BTreeMap<InternedStr, Inventory>) -> BTreeMap<String, Decimal> {
+        let mut totals: BTreeMap<String, Decimal> = BTreeMap::new();
+        for inv in balances.values() {
+            for pos in inv.positions() {
+                *totals.entry(pos.units.currency.to_string()).or_default() += pos.units.number;
+            }
+        }
+        totals
+    }
+
+    // Helper to write section
+    fn write_section<W: Write>(
+        writer: &mut W,
+        title: &str,
+        balances: &BTreeMap<InternedStr, Inventory>,
+    ) -> Result<()> {
+        writeln!(writer, "{title}")?;
+        writeln!(writer, "{}", "-".repeat(60))?;
+        for (account, inventory) in balances {
+            if inventory.is_empty() {
+                continue;
+            }
+            for position in inventory.positions() {
+                writeln!(
+                    writer,
+                    "  {:>12} {:>4}  {}",
+                    position.units.number, position.units.currency, account
+                )?;
+            }
+        }
+        let totals = sum_by_currency(balances);
+        writeln!(writer)?;
+        for (currency, total) in &totals {
+            writeln!(writer, "  {:>12} {:>4}  Total {title}", total, currency)?;
+        }
+        writeln!(writer)?;
+        Ok(())
+    }
+
+    writeln!(writer, "Balance Sheet")?;
+    writeln!(writer, "{}", "=".repeat(60))?;
+    writeln!(writer)?;
+
+    write_section(writer, "Assets", &assets)?;
+    write_section(writer, "Liabilities", &liabilities)?;
+    write_section(writer, "Equity", &equity)?;
+
+    // Net worth = Assets - Liabilities
+    let asset_totals = sum_by_currency(&assets);
+    let liability_totals = sum_by_currency(&liabilities);
+    let mut net_worth: BTreeMap<String, Decimal> = asset_totals.clone();
+    for (currency, amount) in &liability_totals {
+        *net_worth.entry(currency.clone()).or_default() -= amount;
+    }
+
+    writeln!(writer, "Net Worth")?;
+    writeln!(writer, "{}", "-".repeat(60))?;
+    for (currency, total) in &net_worth {
+        writeln!(writer, "  {:>12} {:>4}", total, currency)?;
+    }
+
+    Ok(())
+}
+
+/// Generate an income statement report (Income and Expenses).
+fn report_income<W: Write>(directives: &[Directive], writer: &mut W) -> Result<()> {
+    let mut income: BTreeMap<InternedStr, Inventory> = BTreeMap::new();
+    let mut expenses: BTreeMap<InternedStr, Inventory> = BTreeMap::new();
+
+    for directive in directives {
+        if let Directive::Transaction(txn) = directive {
+            for posting in &txn.postings {
+                if let Some(amount) = posting.amount() {
+                    let account_str: &str = &posting.account;
+                    let balances = if account_str.starts_with("Income:") {
+                        &mut income
+                    } else if account_str.starts_with("Expenses:") {
+                        &mut expenses
+                    } else {
+                        continue;
+                    };
+
+                    let inv = balances.entry(posting.account.clone()).or_default();
+                    let position = rustledger_core::Position::simple(amount.clone());
+                    inv.add(position);
+                }
+            }
+        }
+    }
+
+    fn sum_by_currency(balances: &BTreeMap<InternedStr, Inventory>) -> BTreeMap<String, Decimal> {
+        let mut totals: BTreeMap<String, Decimal> = BTreeMap::new();
+        for inv in balances.values() {
+            for pos in inv.positions() {
+                *totals.entry(pos.units.currency.to_string()).or_default() += pos.units.number;
+            }
+        }
+        totals
+    }
+
+    fn write_section<W: Write>(
+        writer: &mut W,
+        title: &str,
+        balances: &BTreeMap<InternedStr, Inventory>,
+    ) -> Result<()> {
+        writeln!(writer, "{title}")?;
+        writeln!(writer, "{}", "-".repeat(60))?;
+        for (account, inventory) in balances {
+            if inventory.is_empty() {
+                continue;
+            }
+            for position in inventory.positions() {
+                writeln!(
+                    writer,
+                    "  {:>12} {:>4}  {}",
+                    position.units.number, position.units.currency, account
+                )?;
+            }
+        }
+        let totals = sum_by_currency(balances);
+        writeln!(writer)?;
+        for (currency, total) in &totals {
+            writeln!(writer, "  {:>12} {:>4}  Total {title}", total, currency)?;
+        }
+        writeln!(writer)?;
+        Ok(())
+    }
+
+    writeln!(writer, "Income Statement")?;
+    writeln!(writer, "{}", "=".repeat(60))?;
+    writeln!(writer)?;
+
+    write_section(writer, "Income", &income)?;
+    write_section(writer, "Expenses", &expenses)?;
+
+    // Net income = -(Income) - Expenses (income is negative in double-entry)
+    let income_totals = sum_by_currency(&income);
+    let expense_totals = sum_by_currency(&expenses);
+    let mut net_income: BTreeMap<String, Decimal> = BTreeMap::new();
+    for (currency, amount) in &income_totals {
+        // Income is typically negative (credits), so we negate
+        *net_income.entry(currency.clone()).or_default() -= amount;
+    }
+    for (currency, amount) in &expense_totals {
+        *net_income.entry(currency.clone()).or_default() -= amount;
+    }
+
+    writeln!(writer, "Net Income")?;
+    writeln!(writer, "{}", "-".repeat(60))?;
+    for (currency, total) in &net_income {
+        writeln!(writer, "  {:>12} {:>4}", total, currency)?;
+    }
+
+    Ok(())
+}
+
+/// Generate a journal/register report.
+fn report_journal<W: Write>(
+    directives: &[Directive],
+    account_filter: Option<&str>,
+    limit: Option<usize>,
+    writer: &mut W,
+) -> Result<()> {
+    let mut entries: Vec<_> = directives
+        .iter()
+        .filter_map(|d| {
+            if let Directive::Transaction(txn) = d {
+                // Filter by account if specified
+                if let Some(filter) = account_filter {
+                    if !txn.postings.iter().any(|p| p.account.starts_with(filter)) {
+                        return None;
+                    }
+                }
+                Some(txn)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    entries.sort_by_key(|t| t.date);
+
+    writeln!(writer, "Transaction Journal")?;
+    writeln!(writer, "{}", "=".repeat(80))?;
+    writeln!(writer)?;
+
+    let entries_to_show = if let Some(n) = limit {
+        entries.into_iter().rev().take(n).collect::<Vec<_>>()
+    } else {
+        entries
+    };
+
+    for txn in entries_to_show {
+        let payee = txn.payee.as_deref().unwrap_or("");
+        let narration = &txn.narration;
+        let desc = if payee.is_empty() {
+            narration.to_string()
+        } else {
+            format!("{} | {}", payee, narration)
+        };
+        writeln!(writer, "{} {} {}", txn.date, txn.flag, desc)?;
+
+        for posting in &txn.postings {
+            if let Some(amount) = posting.amount() {
+                writeln!(
+                    writer,
+                    "  {:50} {:>12} {}",
+                    posting.account.as_str(),
+                    amount.number,
+                    amount.currency
+                )?;
+            } else {
+                writeln!(writer, "  {:50}", posting.account.as_str())?;
+            }
+        }
+        writeln!(writer)?;
+    }
+
+    Ok(())
+}
+
+/// Generate a holdings report with cost basis.
+fn report_holdings<W: Write>(
+    directives: &[Directive],
+    account_filter: Option<&str>,
+    writer: &mut W,
+) -> Result<()> {
+    // Track holdings: account -> currency -> (units, cost_basis, cost_currency)
+    let mut holdings: BTreeMap<InternedStr, BTreeMap<String, (Decimal, Decimal, String)>> =
+        BTreeMap::new();
+
+    for directive in directives {
+        if let Directive::Transaction(txn) = directive {
+            for posting in &txn.postings {
+                // Filter by account
+                if let Some(filter) = account_filter {
+                    if !posting.account.starts_with(filter) {
+                        continue;
+                    }
+                }
+
+                // Only track Assets accounts for holdings
+                let account_str: &str = &posting.account;
+                if !account_str.starts_with("Assets:") {
+                    continue;
+                }
+
+                if let Some(amount) = posting.amount() {
+                    let account_holdings = holdings.entry(posting.account.clone()).or_default();
+
+                    // Get cost if available
+                    let (cost_amount, cost_currency) = if let Some(cost_spec) = &posting.cost {
+                        if let Some(cost) = cost_spec.resolve(amount.number, txn.date) {
+                            (cost.number * amount.number, cost.currency.to_string())
+                        } else {
+                            (amount.number, amount.currency.to_string())
+                        }
+                    } else {
+                        (amount.number, amount.currency.to_string())
+                    };
+
+                    let entry = account_holdings
+                        .entry(amount.currency.to_string())
+                        .or_insert((Decimal::ZERO, Decimal::ZERO, cost_currency.clone()));
+
+                    entry.0 += amount.number;
+                    entry.1 += cost_amount;
+                }
+            }
+        }
+    }
+
+    writeln!(writer, "Holdings")?;
+    writeln!(writer, "{}", "=".repeat(80))?;
+    writeln!(writer)?;
+    writeln!(
+        writer,
+        "{:50} {:>12} {:>6} {:>12} {:>6}",
+        "Account", "Units", "Curr", "Cost Basis", "Curr"
+    )?;
+    writeln!(writer, "{}", "-".repeat(80))?;
+
+    for (account, currencies) in &holdings {
+        for (currency, (units, cost_basis, cost_currency)) in currencies {
+            if *units == Decimal::ZERO {
+                continue;
+            }
+            writeln!(
+                writer,
+                "{:50} {:>12} {:>6} {:>12} {:>6}",
+                account.as_str(),
+                units,
+                currency,
+                cost_basis,
+                cost_currency
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Generate a net worth over time report.
+fn report_networth<W: Write>(directives: &[Directive], period: &str, writer: &mut W) -> Result<()> {
+    // Collect all transactions sorted by date
+    let mut transactions: Vec<_> = directives
+        .iter()
+        .filter_map(|d| {
+            if let Directive::Transaction(txn) = d {
+                Some(txn)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    transactions.sort_by_key(|t| t.date);
+
+    if transactions.is_empty() {
+        writeln!(writer, "No transactions found.")?;
+        return Ok(());
+    }
+
+    // Running balance for Assets and Liabilities
+    let mut asset_balance: BTreeMap<String, Decimal> = BTreeMap::new();
+    let mut liability_balance: BTreeMap<String, Decimal> = BTreeMap::new();
+
+    // Results by period
+    let mut period_results: Vec<(String, BTreeMap<String, Decimal>)> = Vec::new();
+
+    let format_period = |date: rustledger_core::NaiveDate, period: &str| -> String {
+        match period {
+            "daily" => date.to_string(),
+            "weekly" => format!("{}-W{:02}", date.year(), date.iso_week().week()),
+            "yearly" => format!("{}", date.year()),
+            _ => format!("{}-{:02}", date.year(), date.month()), // monthly default
+        }
+    };
+
+    let mut current_period = String::new();
+
+    for txn in transactions {
+        let txn_period = format_period(txn.date, period);
+
+        // If period changed, record snapshot
+        if txn_period != current_period && !current_period.is_empty() {
+            let mut net_worth: BTreeMap<String, Decimal> = asset_balance.clone();
+            for (currency, amount) in &liability_balance {
+                *net_worth.entry(currency.clone()).or_default() += amount;
+            }
+            period_results.push((current_period.clone(), net_worth));
+        }
+        current_period = txn_period;
+
+        // Update running balances
+        for posting in &txn.postings {
+            if let Some(amount) = posting.amount() {
+                let account_str: &str = &posting.account;
+                if account_str.starts_with("Assets:") {
+                    *asset_balance
+                        .entry(amount.currency.to_string())
+                        .or_default() += amount.number;
+                } else if account_str.starts_with("Liabilities:") {
+                    *liability_balance
+                        .entry(amount.currency.to_string())
+                        .or_default() += amount.number;
+                }
+            }
+        }
+    }
+
+    // Final period
+    if !current_period.is_empty() {
+        let mut net_worth: BTreeMap<String, Decimal> = asset_balance.clone();
+        for (currency, amount) in &liability_balance {
+            *net_worth.entry(currency.clone()).or_default() += amount;
+        }
+        period_results.push((current_period, net_worth));
+    }
+
+    writeln!(writer, "Net Worth Over Time ({})", period)?;
+    writeln!(writer, "{}", "=".repeat(60))?;
+    writeln!(writer)?;
+
+    for (period_label, net_worth) in &period_results {
+        write!(writer, "{:12}", period_label)?;
+        for (currency, amount) in net_worth {
+            write!(writer, "  {:>12} {}", amount, currency)?;
+        }
+        writeln!(writer)?;
     }
 
     Ok(())

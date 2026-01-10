@@ -8,6 +8,7 @@ members = [
   "crates/rustledger-validate",
   "crates/rustledger-query",
   "crates/rustledger-plugin",
+  "crates/rustledger-importer",
   "crates/rustledger",
   "crates/rustledger-wasm",
 ]
@@ -62,6 +63,10 @@ proptest = "1"
 criterion = "0.5"
 insta = { version = "1", features = ["yaml"] }
 rust_decimal_macros = "1.39"
+tempfile = "3"
+
+# Data formats
+csv = "1"
 
 # Async (if needed)
 tokio = { version = "1", features = ["full"] }
@@ -74,6 +79,7 @@ rustledger-booking = { version = "1.0.0-rc.6", path = "crates/rustledger-booking
 rustledger-validate = { version = "1.0.0-rc.6", path = "crates/rustledger-validate" }
 rustledger-query = { version = "1.0.0-rc.6", path = "crates/rustledger-query" }
 rustledger-plugin = { version = "1.0.0-rc.6", path = "crates/rustledger-plugin", default-features = false }
+rustledger-importer = { version = "1.0.0-rc.6", path = "crates/rustledger-importer" }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

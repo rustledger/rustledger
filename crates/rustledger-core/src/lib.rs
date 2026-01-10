@@ -58,6 +58,7 @@ pub use directive::{
     Transaction,
 };
 pub use format::{format_directive, FormatConfig};
+pub use intern::{InternedStr, StringInterner};
 pub use inventory::{BookingError, BookingMethod, BookingResult, Inventory};
 pub use position::Position;
 

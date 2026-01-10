@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::str::FromStr;
 
+use crate::intern::InternedStr;
 use crate::{Amount, CostSpec, Position};
 
 /// Booking method determines how lots are matched when reducing positions.
@@ -83,19 +84,19 @@ pub enum BookingError {
         /// Number of lots that matched.
         num_matches: usize,
         /// The currency being reduced.
-        currency: String,
+        currency: InternedStr,
     },
     /// No lots match the cost specification.
     NoMatchingLot {
         /// The currency being reduced.
-        currency: String,
+        currency: InternedStr,
         /// The cost spec that didn't match.
         cost_spec: CostSpec,
     },
     /// Not enough units in matching lots.
     InsufficientUnits {
         /// The currency being reduced.
-        currency: String,
+        currency: InternedStr,
         /// Units requested.
         requested: Decimal,
         /// Units available.
@@ -104,9 +105,9 @@ pub enum BookingError {
     /// Currency mismatch between reduction and inventory.
     CurrencyMismatch {
         /// Expected currency.
-        expected: String,
+        expected: InternedStr,
         /// Got currency.
-        got: String,
+        got: InternedStr,
     },
 }
 
@@ -234,13 +235,13 @@ impl Inventory {
     ///
     /// Returns the sum of all cost bases for positions of the given currency.
     #[must_use]
-    pub fn book_value(&self, units_currency: &str) -> HashMap<String, Decimal> {
-        let mut totals: HashMap<String, Decimal> = HashMap::new();
+    pub fn book_value(&self, units_currency: &str) -> HashMap<InternedStr, Decimal> {
+        let mut totals: HashMap<InternedStr, Decimal> = HashMap::new();
 
         for pos in &self.positions {
             if pos.units.currency == units_currency {
                 if let Some(book) = pos.book_value() {
-                    *totals.entry(book.currency).or_default() += book.number;
+                    *totals.entry(book.currency.clone()).or_default() += book.number;
                 }
             }
         }

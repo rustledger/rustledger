@@ -7,7 +7,7 @@
 use chrono::NaiveDate;
 use proptest::prelude::*;
 use rust_decimal::Decimal;
-use rustledger_core::{Amount, BookingMethod, Cost, CostSpec, Inventory, Position};
+use rustledger_core::{Amount, BookingMethod, Cost, CostSpec, InternedStr, Inventory, Position};
 
 // ============================================================================
 // Arbitrary generators
@@ -208,7 +208,7 @@ proptest! {
     #[test]
     fn prop_inventory_units_consistency(positions in prop::collection::vec(arb_position(), 1..5)) {
         let mut inv = Inventory::new();
-        let mut expected_units: std::collections::HashMap<String, Decimal> = std::collections::HashMap::new();
+        let mut expected_units: std::collections::HashMap<InternedStr, Decimal> = std::collections::HashMap::new();
 
         for pos in &positions {
             inv.add(pos.clone());
@@ -216,7 +216,7 @@ proptest! {
         }
 
         for (currency, expected) in expected_units {
-            prop_assert_eq!(inv.units(&currency), expected);
+            prop_assert_eq!(inv.units(currency.as_str()), expected);
         }
     }
 }
@@ -324,7 +324,7 @@ proptest! {
         let parsed_currency = parts[1];
 
         prop_assert_eq!(parsed_number, amount.number);
-        prop_assert_eq!(parsed_currency, amount.currency);
+        prop_assert_eq!(parsed_currency, amount.currency.as_str());
     }
 
     /// Cost Display contains key components
@@ -334,6 +334,6 @@ proptest! {
 
         // Display should contain the number and currency
         prop_assert!(display.contains(&cost.number.to_string()));
-        prop_assert!(display.contains(&cost.currency));
+        prop_assert!(display.contains(cost.currency.as_str()));
     }
 }

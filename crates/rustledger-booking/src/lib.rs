@@ -30,15 +30,15 @@ pub use pad::{expand_pads, merge_with_padding, process_pads, PadError, PadResult
 
 use rust_decimal::prelude::Signed;
 use rust_decimal::Decimal;
-use rustledger_core::{Amount, IncompleteAmount, Transaction};
+use rustledger_core::{Amount, IncompleteAmount, InternedStr, Transaction};
 use std::collections::HashMap;
 
 /// Calculate the tolerance for a set of amounts.
 ///
 /// Tolerance is the maximum of all individual amount tolerances.
 #[must_use]
-pub fn calculate_tolerance(amounts: &[&Amount]) -> HashMap<String, Decimal> {
-    let mut tolerances: HashMap<String, Decimal> = HashMap::new();
+pub fn calculate_tolerance(amounts: &[&Amount]) -> HashMap<InternedStr, Decimal> {
+    let mut tolerances: HashMap<InternedStr, Decimal> = HashMap::new();
 
     for amount in amounts {
         let tol = amount.inferred_tolerance();
@@ -56,8 +56,8 @@ pub fn calculate_tolerance(amounts: &[&Amount]) -> HashMap<String, Decimal> {
 /// Returns a map of currency -> residual amount.
 /// A balanced transaction has all residuals within tolerance.
 #[must_use]
-pub fn calculate_residual(transaction: &Transaction) -> HashMap<String, Decimal> {
-    let mut residuals: HashMap<String, Decimal> = HashMap::new();
+pub fn calculate_residual(transaction: &Transaction) -> HashMap<InternedStr, Decimal> {
+    let mut residuals: HashMap<InternedStr, Decimal> = HashMap::new();
 
     for posting in &transaction.postings {
         // Only process complete amounts
@@ -136,7 +136,7 @@ pub fn calculate_residual(transaction: &Transaction) -> HashMap<String, Decimal>
 /// Check if a transaction is balanced within tolerance.
 #[must_use]
 #[allow(clippy::implicit_hasher)]
-pub fn is_balanced(transaction: &Transaction, tolerances: &HashMap<String, Decimal>) -> bool {
+pub fn is_balanced(transaction: &Transaction, tolerances: &HashMap<InternedStr, Decimal>) -> bool {
     let residuals = calculate_residual(transaction);
 
     for (currency, residual) in residuals {

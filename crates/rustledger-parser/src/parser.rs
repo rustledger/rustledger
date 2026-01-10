@@ -1,6 +1,20 @@
 //! Parser implementation for beancount files.
 //!
 //! Uses chumsky for parser combinators with error recovery.
+//!
+//! # Organization
+//!
+//! This module is organized into the following sections:
+//!
+//! 1. **Main API** (lines ~30-95) - `parse()` function and result handling
+//! 2. **Tag/Meta Helpers** (lines ~98-235) - pushtag/pushmeta application
+//! 3. **File Structure** (lines ~238-320) - file, entry, whitespace parsers
+//! 4. **Special Directives** (lines ~321-400) - option, include, plugin, push/pop
+//! 5. **Primitives** (lines ~400-600) - strings, dates, numbers, expressions
+//! 6. **Amounts & Costs** (lines ~600-850) - amount, cost spec, price annotation
+//! 7. **Metadata & Accounts** (lines ~850-940) - account, flag, tag, link, metadata
+//! 8. **Transactions** (lines ~940-1180) - transaction body, postings
+//! 9. **Directive Bodies** (lines ~1180-2054) - balance, open, close, etc.
 
 use chumsky::prelude::*;
 use rust_decimal::Decimal;
@@ -622,7 +636,7 @@ fn incomplete_amount<'a>(
     let number_only = number().map(IncompleteAmount::NumberOnly);
 
     // Currency only: just a currency, no number
-    let currency_only = currency().map(IncompleteAmount::CurrencyOnly);
+    let currency_only = currency().map(|c| IncompleteAmount::CurrencyOnly(c.into()));
 
     // Try complete first, then number-only, then currency-only
     choice((complete, number_only, currency_only))
@@ -741,14 +755,14 @@ fn build_cost_spec(components: Vec<CostComponent>, is_total_brace: bool) -> Cost
         match comp {
             CostComponent::Amount(num, curr) => {
                 spec.number_per = Some(num);
-                spec.currency = Some(curr);
+                spec.currency = Some(curr.into());
             }
             CostComponent::NumberOnly(num) => {
                 spec.number_per = Some(num);
             }
             CostComponent::CurrencyOnly(curr) => {
                 if spec.currency.is_none() {
-                    spec.currency = Some(curr);
+                    spec.currency = Some(curr.into());
                 }
             }
             CostComponent::Date(d) => {
@@ -769,14 +783,14 @@ fn build_cost_spec(components: Vec<CostComponent>, is_total_brace: bool) -> Cost
         match comp {
             CostComponent::Amount(num, curr) => {
                 spec.number_total = Some(num);
-                spec.currency = Some(curr);
+                spec.currency = Some(curr.into());
             }
             CostComponent::NumberOnly(num) => {
                 spec.number_total = Some(num);
             }
             CostComponent::CurrencyOnly(curr) => {
                 if spec.currency.is_none() {
-                    spec.currency = Some(curr);
+                    spec.currency = Some(curr.into());
                 }
             }
             CostComponent::Date(d) => {
@@ -1209,7 +1223,7 @@ fn balance_body<'a>(
             Box::new(move |date: NaiveDate| {
                 Directive::Balance(Balance {
                     date,
-                    account: acct.clone(),
+                    account: acct.clone().into(),
                     amount: amt.clone(),
                     tolerance: tol,
                     meta: meta.clone(),
@@ -1243,8 +1257,8 @@ fn open_body<'a>(
             Box::new(move |date: NaiveDate| {
                 Directive::Open(Open {
                     date,
-                    account: acct.clone(),
-                    currencies: currencies.clone(),
+                    account: acct.clone().into(),
+                    currencies: currencies.iter().map(|c| c.clone().into()).collect(),
                     booking: booking.clone(),
                     meta: meta.clone(),
                 })
@@ -1269,7 +1283,7 @@ fn close_body<'a>(
             Box::new(move |date: NaiveDate| {
                 Directive::Close(Close {
                     date,
-                    account: acct.clone(),
+                    account: acct.clone().into(),
                     meta: meta.clone(),
                 })
             }) as Box<dyn Fn(NaiveDate) -> Directive + 'a>
@@ -1293,7 +1307,7 @@ fn commodity_body<'a>(
                 }
                 Directive::Commodity(Commodity {
                     date,
-                    currency: curr.clone(),
+                    currency: curr.clone().into(),
                     meta,
                 })
             }) as Box<dyn Fn(NaiveDate) -> Directive + 'a>
@@ -1319,8 +1333,8 @@ fn pad_body<'a>(
             Box::new(move |date: NaiveDate| {
                 Directive::Pad(Pad {
                     date,
-                    account: acct.clone(),
-                    source_account: source.clone(),
+                    account: acct.clone().into(),
+                    source_account: source.clone().into(),
                     meta: meta.clone(),
                 })
             }) as Box<dyn Fn(NaiveDate) -> Directive + 'a>
@@ -1395,7 +1409,7 @@ fn note_body<'a>(
             Box::new(move |date: NaiveDate| {
                 Directive::Note(Note {
                     date,
-                    account: acct.clone(),
+                    account: acct.clone().into(),
                     comment: comment.clone(),
                     meta: meta.clone(),
                 })
@@ -1444,7 +1458,7 @@ fn document_body<'a>(
             Box::new(move |date: NaiveDate| {
                 Directive::Document(Document {
                     date,
-                    account: acct.clone(),
+                    account: acct.clone().into(),
                     path: filename.clone(),
                     tags: tags.clone(),
                     links: links.clone(),
@@ -1473,7 +1487,7 @@ fn price_body<'a>(
             Box::new(move |date: NaiveDate| {
                 Directive::Price(Price {
                     date,
-                    currency: curr.clone(),
+                    currency: curr.clone().into(),
                     amount: amt.clone(),
                     meta: meta.clone(),
                 })
@@ -1572,7 +1586,7 @@ mod tests {
             assert_eq!(txn.postings.len(), 2);
             let cost = txn.postings[0].cost.as_ref().expect("should have cost");
             assert_eq!(cost.number_per, Some(dec!(150.00)));
-            assert_eq!(cost.currency, Some("USD".to_string()));
+            assert_eq!(cost.currency, Some("USD".into()));
         } else {
             panic!("expected transaction");
         }
@@ -1589,7 +1603,7 @@ mod tests {
         if let Directive::Transaction(txn) = &result.directives[0].value {
             let cost = txn.postings[0].cost.as_ref().expect("should have cost");
             assert_eq!(cost.number_per, Some(dec!(150.00)));
-            assert_eq!(cost.currency, Some("USD".to_string()));
+            assert_eq!(cost.currency, Some("USD".into()));
             assert_eq!(
                 cost.date,
                 Some(NaiveDate::from_ymd_opt(2024, 1, 15).unwrap())
@@ -1611,7 +1625,7 @@ mod tests {
         if let Directive::Transaction(txn) = &result.directives[0].value {
             let cost = txn.postings[0].cost.as_ref().expect("should have cost");
             assert_eq!(cost.number_total, Some(dec!(1500.00)));
-            assert_eq!(cost.currency, Some("USD".to_string()));
+            assert_eq!(cost.currency, Some("USD".into()));
         } else {
             panic!("expected transaction");
         }

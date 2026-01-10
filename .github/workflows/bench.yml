@@ -1,0 +1,125 @@
+# Benchmark workflow for performance regression detection
+name: Benchmarks
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+env:
+  CARGO_TERM_COLOR: always
+permissions:
+  contents: read
+  pull-requests: write
+jobs:
+  benchmark:
+    name: Performance Benchmarks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - name: Install critcmp
+        run: cargo install critcmp
+      # For PRs: benchmark both base and PR, then compare
+      - name: Checkout base branch
+        if: github.event_name == 'pull_request'
+        run: git checkout ${{ github.base_ref }}
+      - name: Run base benchmarks
+        id: base_bench
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        run: |
+          cargo bench -p rustledger-core --bench inventory_bench -- --save-baseline base
+          cargo bench -p rustledger-parser --bench parser_bench -- --save-baseline base
+          cargo bench -p rustledger-query --bench query_bench -- --save-baseline base
+          cargo bench -p rustledger-validate --bench validate_bench -- --save-baseline base
+          cargo bench -p rustledger --bench pipeline_bench -- --save-baseline base
+      - name: Checkout PR branch
+        if: github.event_name == 'pull_request'
+        run: git checkout ${{ github.head_ref }}
+      - name: Run PR benchmarks
+        if: github.event_name == 'pull_request'
+        run: |
+          cargo bench -p rustledger-core --bench inventory_bench -- --save-baseline pr
+          cargo bench -p rustledger-parser --bench parser_bench -- --save-baseline pr
+          cargo bench -p rustledger-query --bench query_bench -- --save-baseline pr
+          cargo bench -p rustledger-validate --bench validate_bench -- --save-baseline pr
+          cargo bench -p rustledger --bench pipeline_bench -- --save-baseline pr
+      - name: Compare benchmarks
+        if: github.event_name == 'pull_request' && steps.base_bench.outcome == 'success'
+        id: compare
+        run: |
+          echo "## Benchmark Comparison" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Comparing \`${{ github.base_ref }}\` (base) vs \`${{ github.head_ref }}\` (pr)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          critcmp base pr >> $GITHUB_STEP_SUMMARY 2>&1 || true
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+
+          # Save comparison for PR comment
+          critcmp base pr > bench_comparison.txt 2>&1 || true
+      - name: Post benchmark comparison as PR comment
+        if: github.event_name == 'pull_request' && steps.base_bench.outcome == 'success'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const comparison = fs.readFileSync('bench_comparison.txt', 'utf8');
+
+            const body = `## Benchmark Results
+
+            Comparing \`${{ github.base_ref }}\` (base) vs \`${{ github.head_ref }}\` (pr)
+
+            \`\`\`
+            ${comparison}
+            \`\`\`
+
+            <details>
+            <summary>Legend</summary>
+
+            - **Ratio < 1.0**: PR is faster (improvement)
+            - **Ratio > 1.0**: PR is slower (regression)
+            - Differences within ~5% are typically noise
+
+            </details>`;
+
+            // Find existing comment
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const botComment = comments.find(c =>
+              c.user.type === 'Bot' && c.body.includes('## Benchmark Results')
+            );
+
+            if (botComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: body
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: body
+              });
+            }
+      # For main branch pushes: just run benchmarks to ensure they work
+      - name: Run benchmarks (main)
+        if: github.ref == 'refs/heads/main'
+        run: |
+          cargo bench -p rustledger-core --bench inventory_bench
+          cargo bench -p rustledger-parser --bench parser_bench
+          cargo bench -p rustledger-query --bench query_bench
+          cargo bench -p rustledger-validate --bench validate_bench
+          cargo bench -p rustledger --bench pipeline_bench

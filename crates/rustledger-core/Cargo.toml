@@ -12,6 +12,9 @@ categories.workspace = true
 authors.workspace = true
 readme = "../../README.md"
 
+[lib]
+bench = false
+
 [dependencies]
 rust_decimal = { workspace = true, features = ["serde", "maths"] }
 chrono.workspace = true

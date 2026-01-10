@@ -2,11 +2,15 @@
 //!
 //! Executes parsed BQL queries against a set of Beancount directives.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 
 use chrono::Datelike;
+use regex::Regex;
 use rust_decimal::Decimal;
-use rustledger_core::{Amount, Directive, Inventory, NaiveDate, Position, Transaction};
+use rustledger_core::{
+    Amount, Directive, InternedStr, Inventory, NaiveDate, Position, Transaction,
+};
 
 use crate::ast::{
     BalancesQuery, BinaryOp, BinaryOperator, Expr, FromClause, FunctionCall, JournalQuery, Literal,
@@ -92,11 +96,13 @@ pub struct Executor<'a> {
     /// All directives to query over.
     directives: &'a [Directive],
     /// Account balances (built up during query).
-    balances: HashMap<String, Inventory>,
+    balances: HashMap<InternedStr, Inventory>,
     /// Price database for `VALUE()` conversions.
     price_db: crate::price::PriceDatabase,
     /// Target currency for `VALUE()` conversions.
     target_currency: Option<String>,
+    /// Cache for compiled regex patterns.
+    regex_cache: RefCell<HashMap<String, Option<Regex>>>,
 }
 
 impl<'a> Executor<'a> {
@@ -108,7 +114,28 @@ impl<'a> Executor<'a> {
             balances: HashMap::new(),
             price_db,
             target_currency: None,
+            regex_cache: RefCell::new(HashMap::new()),
         }
+    }
+
+    /// Get or compile a regex pattern from the cache.
+    ///
+    /// Returns `Some(Regex)` if the pattern is valid, `None` if it's invalid.
+    /// Invalid patterns are cached as `None` to avoid repeated compilation attempts.
+    fn get_or_compile_regex(&self, pattern: &str) -> Option<Regex> {
+        let mut cache = self.regex_cache.borrow_mut();
+        if let Some(cached) = cache.get(pattern) {
+            return cached.clone();
+        }
+        let compiled = Regex::new(pattern).ok();
+        cache.insert(pattern.to_string(), compiled.clone());
+        compiled
+    }
+
+    /// Get or compile a regex pattern, returning an error if invalid.
+    fn require_regex(&self, pattern: &str) -> Result<Regex, QueryError> {
+        self.get_or_compile_regex(pattern)
+            .ok_or_else(|| QueryError::Type(format!("invalid regex: {pattern}")))
     }
 
     /// Set the target currency for `VALUE()` conversions.
@@ -120,7 +147,14 @@ impl<'a> Executor<'a> {
     ///
     /// # Errors
     ///
-    /// Returns `QueryError` if the query cannot be executed.
+    /// Returns [`QueryError`] in the following cases:
+    ///
+    /// - [`QueryError::UnknownColumn`] - A referenced column name doesn't exist
+    /// - [`QueryError::UnknownFunction`] - An unknown function is called
+    /// - [`QueryError::InvalidArguments`] - Function called with wrong arguments
+    /// - [`QueryError::Type`] - Type mismatch in expression (e.g., comparing string to number)
+    /// - [`QueryError::Aggregation`] - Error in aggregate function (SUM, COUNT, etc.)
+    /// - [`QueryError::Evaluation`] - General expression evaluation error
     pub fn execute(&mut self, query: &Query) -> Result<QueryResult, QueryError> {
         match query {
             Query::Select(select) => self.execute_select(select),
@@ -185,8 +219,8 @@ impl<'a> Executor<'a> {
         // JOURNAL is a shorthand for SELECT with specific columns
         let account_pattern = &query.account_pattern;
 
-        // Try to compile as regex
-        let account_regex = regex::Regex::new(account_pattern).ok();
+        // Try to compile as regex (using cache)
+        let account_regex = self.get_or_compile_regex(account_pattern);
 
         let columns = vec![
             "date".to_string(),
@@ -276,7 +310,7 @@ impl<'a> Executor<'a> {
                             Value::String(txn.flag.to_string()),
                             Value::String(txn.payee.clone().unwrap_or_default()),
                             Value::String(txn.narration.clone()),
-                            Value::String(posting.account.clone()),
+                            Value::String(posting.account.to_string()),
                             position_value,
                             Value::Inventory(balance.clone()),
                         ];
@@ -326,7 +360,7 @@ impl<'a> Executor<'a> {
                 Value::Inventory(balance.clone())
             };
 
-            let row = vec![Value::String(account.clone()), balance_value];
+            let row = vec![Value::String(account.to_string()), balance_value];
             result.add_row(row);
         }
 
@@ -482,8 +516,7 @@ impl<'a> Executor<'a> {
     ) -> Result<Vec<PostingContext<'a>>, QueryError> {
         let mut postings = Vec::new();
         // Track running balance per account
-        let mut running_balances: std::collections::HashMap<String, Inventory> =
-            std::collections::HashMap::new();
+        let mut running_balances: HashMap<InternedStr, Inventory> = HashMap::new();
 
         for directive in self.directives {
             if let Directive::Transaction(txn) = directive {
@@ -567,9 +600,8 @@ impl<'a> Executor<'a> {
                             ));
                         }
                     };
-                    // Check if any posting matches the account pattern
-                    let regex = regex::Regex::new(&pattern)
-                        .map_err(|e| QueryError::Type(format!("invalid regex: {e}")))?;
+                    // Check if any posting matches the account pattern (using cache)
+                    let regex = self.require_regex(&pattern)?;
                     for posting in &txn.postings {
                         if regex.is_match(&posting.account) {
                             return Ok(true);
@@ -679,7 +711,7 @@ impl<'a> Executor<'a> {
 
         match name {
             "date" => Ok(Value::Date(ctx.transaction.date)),
-            "account" => Ok(Value::String(posting.account.clone())),
+            "account" => Ok(Value::String(posting.account.to_string())),
             "narration" => Ok(Value::String(ctx.transaction.narration.clone())),
             "payee" => Ok(ctx
                 .transaction
@@ -1165,8 +1197,8 @@ impl<'a> Executor<'a> {
                 Self::require_args(name, func, 1)?;
                 let val = self.evaluate_expr(&func.args[0], ctx)?;
                 match val {
-                    Value::Amount(a) => Ok(Value::String(a.currency)),
-                    Value::Position(p) => Ok(Value::String(p.units.currency)),
+                    Value::Amount(a) => Ok(Value::String(a.currency.to_string())),
+                    Value::Position(p) => Ok(Value::String(p.units.currency.to_string())),
                     _ => Err(QueryError::Type(
                         "CURRENCY expects an amount or position".to_string(),
                     )),
@@ -1241,19 +1273,19 @@ impl<'a> Executor<'a> {
             Value::Amount(a) => Ok(Value::Amount(a)),
             Value::Inventory(inv) => {
                 let mut total = Decimal::ZERO;
-                let mut currency = String::new();
+                let mut currency: Option<InternedStr> = None;
                 for pos in inv.positions() {
                     if let Some(cost) = &pos.cost {
                         total += pos.units.number.abs() * cost.number;
-                        if currency.is_empty() {
-                            currency.clone_from(&cost.currency);
+                        if currency.is_none() {
+                            currency = Some(cost.currency.clone());
                         }
                     }
                 }
-                if currency.is_empty() {
-                    Ok(Value::Null)
+                if let Some(curr) = currency {
+                    Ok(Value::Amount(Amount::new(total, curr)))
                 } else {
-                    Ok(Value::Amount(Amount::new(total, currency)))
+                    Ok(Value::Null)
                 }
             }
             _ => Err(QueryError::Type(
@@ -1302,9 +1334,14 @@ impl<'a> Executor<'a> {
                 }
             }
         } else {
-            self.target_currency
-                .clone()
-                .unwrap_or_else(|| "USD".to_string())
+            self.target_currency.clone().ok_or_else(|| {
+                QueryError::InvalidArguments(
+                    "VALUE".to_string(),
+                    "no target currency set; either call set_target_currency() on the executor \
+                     or pass the currency as VALUE(amount, 'USD')"
+                        .to_string(),
+                )
+            })?
         };
 
         let val = self.evaluate_expr(&func.args[0], ctx)?;
@@ -1595,7 +1632,7 @@ impl<'a> Executor<'a> {
                 );
                 row.push(Value::String(ctx.transaction.narration.clone()));
                 let posting = &ctx.transaction.postings[ctx.posting_index];
-                row.push(Value::String(posting.account.clone()));
+                row.push(Value::String(posting.account.to_string()));
                 row.push(
                     posting
                         .amount()
@@ -1608,53 +1645,94 @@ impl<'a> Executor<'a> {
         Ok(row)
     }
 
+    /// Generate a hashable key from a vector of Values.
+    /// Used for O(1) grouping instead of O(n) linear search.
+    fn make_group_key(values: &[Value]) -> String {
+        use std::fmt::Write;
+        let mut key = String::new();
+        for (i, v) in values.iter().enumerate() {
+            if i > 0 {
+                key.push('\x00'); // Null separator between values
+            }
+            match v {
+                Value::String(s) => {
+                    key.push('S');
+                    key.push_str(s);
+                }
+                Value::Number(n) => {
+                    key.push('N');
+                    let _ = write!(key, "{n}");
+                }
+                Value::Integer(n) => {
+                    key.push('I');
+                    let _ = write!(key, "{n}");
+                }
+                Value::Date(d) => {
+                    key.push('D');
+                    let _ = write!(key, "{d}");
+                }
+                Value::Boolean(b) => {
+                    key.push(if *b { 'T' } else { 'F' });
+                }
+                Value::Amount(a) => {
+                    key.push('A');
+                    let _ = write!(key, "{} {}", a.number, a.currency);
+                }
+                Value::Position(p) => {
+                    key.push('P');
+                    let _ = write!(key, "{} {}", p.units.number, p.units.currency);
+                }
+                Value::Inventory(_) => {
+                    // Inventories are complex; use a placeholder
+                    // (unlikely to be used as GROUP BY key)
+                    key.push('V');
+                }
+                Value::StringSet(ss) => {
+                    key.push('Z');
+                    for s in ss {
+                        key.push_str(s);
+                        key.push(',');
+                    }
+                }
+                Value::Null => {
+                    key.push('0');
+                }
+            }
+        }
+        key
+    }
+
     /// Group postings by the GROUP BY expressions.
-    /// Returns a Vec of (key, group) pairs since Value doesn't implement Hash.
+    /// Uses `HashMap` for O(1) key lookup instead of O(n) linear search.
     fn group_postings<'b>(
         &self,
         postings: &'b [PostingContext<'a>],
         group_by: Option<&Vec<Expr>>,
     ) -> Result<Vec<(Vec<Value>, Vec<&'b PostingContext<'a>>)>, QueryError> {
-        let mut groups: Vec<(Vec<Value>, Vec<&PostingContext<'a>>)> = Vec::new();
-
         if let Some(group_exprs) = group_by {
+            // Use HashMap for O(1) grouping
+            let mut group_map: HashMap<String, (Vec<Value>, Vec<&PostingContext<'a>>)> =
+                HashMap::new();
+
             for ctx in postings {
-                let mut key = Vec::new();
+                let mut key_values = Vec::with_capacity(group_exprs.len());
                 for expr in group_exprs {
-                    key.push(self.evaluate_expr(expr, ctx)?);
+                    key_values.push(self.evaluate_expr(expr, ctx)?);
                 }
-                // Find existing group with same key
-                let mut found = false;
-                for (existing_key, group) in &mut groups {
-                    if self.keys_equal(existing_key, &key) {
-                        group.push(ctx);
-                        found = true;
-                        break;
-                    }
-                }
-                if !found {
-                    groups.push((key, vec![ctx]));
-                }
+                let hash_key = Self::make_group_key(&key_values);
+
+                group_map
+                    .entry(hash_key)
+                    .or_insert_with(|| (key_values, Vec::new()))
+                    .1
+                    .push(ctx);
             }
+
+            Ok(group_map.into_values().collect())
         } else {
             // No GROUP BY - all postings in one group
-            groups.push((Vec::new(), postings.iter().collect()));
+            Ok(vec![(Vec::new(), postings.iter().collect())])
         }
-
-        Ok(groups)
-    }
-
-    /// Check if two grouping keys are equal.
-    fn keys_equal(&self, a: &[Value], b: &[Value]) -> bool {
-        if a.len() != b.len() {
-            return false;
-        }
-        for (x, y) in a.iter().zip(b.iter()) {
-            if !self.values_equal(x, y) {
-                return false;
-            }
-        }
-        true
     }
 
     /// Evaluate a row of aggregate results.

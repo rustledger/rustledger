@@ -12,6 +12,9 @@ categories.workspace = true
 authors.workspace = true
 readme = "../../README.md"
 
+[lib]
+bench = false
+
 [dependencies]
 rustledger-core.workspace = true
 chumsky.workspace = true

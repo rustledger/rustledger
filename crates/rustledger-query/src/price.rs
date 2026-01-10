@@ -4,7 +4,7 @@
 //! and allows looking up prices for currency conversions.
 
 use rust_decimal::Decimal;
-use rustledger_core::{Amount, Directive, NaiveDate, Price as PriceDirective};
+use rustledger_core::{Amount, Directive, InternedStr, NaiveDate, Price as PriceDirective};
 use std::collections::HashMap;
 
 /// A price entry.
@@ -15,7 +15,7 @@ pub struct PriceEntry {
     /// Price amount.
     pub price: Decimal,
     /// Quote currency.
-    pub currency: String,
+    pub currency: InternedStr,
 }
 
 /// Database of currency prices.
@@ -26,7 +26,7 @@ pub struct PriceEntry {
 pub struct PriceDatabase {
     /// Prices indexed by base currency.
     /// Each base currency maps to a list of price entries sorted by date.
-    prices: HashMap<String, Vec<PriceEntry>>,
+    prices: HashMap<InternedStr, Vec<PriceEntry>>,
 }
 
 impl PriceDatabase {
@@ -111,7 +111,7 @@ impl PriceDatabase {
     /// For A→C, try to find A→B and B→C for some intermediate B.
     fn get_chained_price(&self, base: &str, quote: &str, date: NaiveDate) -> Option<Decimal> {
         // Collect all currencies that have prices from 'base'
-        let intermediates: Vec<String> = if let Some(entries) = self.prices.get(base) {
+        let intermediates: Vec<InternedStr> = if let Some(entries) = self.prices.get(base) {
             entries
                 .iter()
                 .filter(|e| e.date <= date)
@@ -212,7 +212,7 @@ impl PriceDatabase {
 
     /// Get all currencies that have prices defined.
     pub fn currencies(&self) -> impl Iterator<Item = &str> {
-        self.prices.keys().map(String::as_str)
+        self.prices.keys().map(InternedStr::as_str)
     }
 
     /// Check if a currency has any prices defined.
@@ -247,14 +247,14 @@ mod tests {
         // Add some prices
         db.add_price(&PriceDirective {
             date: date(2024, 1, 1),
-            currency: "AAPL".to_string(),
+            currency: "AAPL".into(),
             amount: Amount::new(dec!(150.00), "USD"),
             meta: Default::default(),
         });
 
         db.add_price(&PriceDirective {
             date: date(2024, 6, 1),
-            currency: "AAPL".to_string(),
+            currency: "AAPL".into(),
             amount: Amount::new(dec!(180.00), "USD"),
             meta: Default::default(),
         });
@@ -293,7 +293,7 @@ mod tests {
         // Add USD in terms of EUR
         db.add_price(&PriceDirective {
             date: date(2024, 1, 1),
-            currency: "USD".to_string(),
+            currency: "USD".into(),
             amount: Amount::new(dec!(0.92), "EUR"),
             meta: Default::default(),
         });
@@ -321,7 +321,7 @@ mod tests {
 
         db.add_price(&PriceDirective {
             date: date(2024, 1, 1),
-            currency: "AAPL".to_string(),
+            currency: "AAPL".into(),
             amount: Amount::new(dec!(150.00), "USD"),
             meta: Default::default(),
         });
@@ -352,13 +352,13 @@ mod tests {
         let directives = vec![
             Directive::Price(PriceDirective {
                 date: date(2024, 1, 1),
-                currency: "AAPL".to_string(),
+                currency: "AAPL".into(),
                 amount: Amount::new(dec!(150.00), "USD"),
                 meta: Default::default(),
             }),
             Directive::Price(PriceDirective {
                 date: date(2024, 1, 1),
-                currency: "EUR".to_string(),
+                currency: "EUR".into(),
                 amount: Amount::new(dec!(1.10), "USD"),
                 meta: Default::default(),
             }),
@@ -378,7 +378,7 @@ mod tests {
         // Add AAPL -> USD price
         db.add_price(&PriceDirective {
             date: date(2024, 1, 1),
-            currency: "AAPL".to_string(),
+            currency: "AAPL".into(),
             amount: Amount::new(dec!(150.00), "USD"),
             meta: Default::default(),
         });
@@ -386,7 +386,7 @@ mod tests {
         // Add USD -> EUR price
         db.add_price(&PriceDirective {
             date: date(2024, 1, 1),
-            currency: "USD".to_string(),
+            currency: "USD".into(),
             amount: Amount::new(dec!(0.92), "EUR"),
             meta: Default::default(),
         });
@@ -421,7 +421,7 @@ mod tests {
         // Add BTC -> USD price
         db.add_price(&PriceDirective {
             date: date(2024, 1, 1),
-            currency: "BTC".to_string(),
+            currency: "BTC".into(),
             amount: Amount::new(dec!(40000.00), "USD"),
             meta: Default::default(),
         });
@@ -429,7 +429,7 @@ mod tests {
         // Add EUR -> USD price (inverse of what we need for USD -> EUR)
         db.add_price(&PriceDirective {
             date: date(2024, 1, 1),
-            currency: "EUR".to_string(),
+            currency: "EUR".into(),
             amount: Amount::new(dec!(1.10), "USD"),
             meta: Default::default(),
         });
@@ -455,7 +455,7 @@ mod tests {
         // Add AAPL -> USD price
         db.add_price(&PriceDirective {
             date: date(2024, 1, 1),
-            currency: "AAPL".to_string(),
+            currency: "AAPL".into(),
             amount: Amount::new(dec!(150.00), "USD"),
             meta: Default::default(),
         });
@@ -463,7 +463,7 @@ mod tests {
         // Add GBP -> EUR price (disconnected from USD)
         db.add_price(&PriceDirective {
             date: date(2024, 1, 1),
-            currency: "GBP".to_string(),
+            currency: "GBP".into(),
             amount: Amount::new(dec!(1.17), "EUR"),
             meta: Default::default(),
         });

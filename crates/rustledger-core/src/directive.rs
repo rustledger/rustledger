@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
 
+use crate::intern::InternedStr;
 use crate::{Amount, CostSpec, IncompleteAmount};
 
 /// Metadata value types.
@@ -80,7 +81,7 @@ pub type Metadata = HashMap<String, MetaValue>;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Posting {
     /// The account for this posting
-    pub account: String,
+    pub account: InternedStr,
     /// The units (may be incomplete or None for auto-calculated postings)
     pub units: Option<IncompleteAmount>,
     /// Cost specification for the position
@@ -96,7 +97,7 @@ pub struct Posting {
 impl Posting {
     /// Create a new posting with the given account and complete units.
     #[must_use]
-    pub fn new(account: impl Into<String>, units: Amount) -> Self {
+    pub fn new(account: impl Into<InternedStr>, units: Amount) -> Self {
         Self {
             account: account.into(),
             units: Some(IncompleteAmount::Complete(units)),
@@ -109,7 +110,7 @@ impl Posting {
 
     /// Create a new posting with an incomplete amount.
     #[must_use]
-    pub fn with_incomplete(account: impl Into<String>, units: IncompleteAmount) -> Self {
+    pub fn with_incomplete(account: impl Into<InternedStr>, units: IncompleteAmount) -> Self {
         Self {
             account: account.into(),
             units: Some(units),
@@ -122,7 +123,7 @@ impl Posting {
 
     /// Create a posting without any amount (to be fully interpolated).
     #[must_use]
-    pub fn auto(account: impl Into<String>) -> Self {
+    pub fn auto(account: impl Into<InternedStr>) -> Self {
         Self {
             account: account.into(),
             units: None,
@@ -527,7 +528,7 @@ pub struct Balance {
     /// Assertion date
     pub date: NaiveDate,
     /// Account to check
-    pub account: String,
+    pub account: InternedStr,
     /// Expected amount
     pub amount: Amount,
     /// Tolerance (if explicitly specified)
@@ -539,7 +540,7 @@ pub struct Balance {
 impl Balance {
     /// Create a new balance assertion.
     #[must_use]
-    pub fn new(date: NaiveDate, account: impl Into<String>, amount: Amount) -> Self {
+    pub fn new(date: NaiveDate, account: impl Into<InternedStr>, amount: Amount) -> Self {
         Self {
             date,
             account: account.into(),
@@ -553,6 +554,13 @@ impl Balance {
     #[must_use]
     pub const fn with_tolerance(mut self, tolerance: Decimal) -> Self {
         self.tolerance = Some(tolerance);
+        self
+    }
+
+    /// Set metadata.
+    #[must_use]
+    pub fn with_meta(mut self, meta: Metadata) -> Self {
+        self.meta = meta;
         self
     }
 }
@@ -575,9 +583,9 @@ pub struct Open {
     /// Date account was opened
     pub date: NaiveDate,
     /// Account name (e.g., "Assets:Bank:Checking")
-    pub account: String,
+    pub account: InternedStr,
     /// Allowed currencies (empty = any currency allowed)
-    pub currencies: Vec<String>,
+    pub currencies: Vec<InternedStr>,
     /// Booking method for this account
     pub booking: Option<String>,
     /// Metadata
@@ -587,7 +595,7 @@ pub struct Open {
 impl Open {
     /// Create a new open directive.
     #[must_use]
-    pub fn new(date: NaiveDate, account: impl Into<String>) -> Self {
+    pub fn new(date: NaiveDate, account: impl Into<InternedStr>) -> Self {
         Self {
             date,
             account: account.into(),
@@ -599,7 +607,7 @@ impl Open {
 
     /// Set allowed currencies.
     #[must_use]
-    pub fn with_currencies(mut self, currencies: Vec<String>) -> Self {
+    pub fn with_currencies(mut self, currencies: Vec<InternedStr>) -> Self {
         self.currencies = currencies;
         self
     }
@@ -610,13 +618,21 @@ impl Open {
         self.booking = Some(booking.into());
         self
     }
+
+    /// Set metadata.
+    #[must_use]
+    pub fn with_meta(mut self, meta: Metadata) -> Self {
+        self.meta = meta;
+        self
+    }
 }
 
 impl fmt::Display for Open {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{} open {}", self.date, self.account)?;
         if !self.currencies.is_empty() {
-            write!(f, " {}", self.currencies.join(","))?;
+            let currencies: Vec<&str> = self.currencies.iter().map(InternedStr::as_str).collect();
+            write!(f, " {}", currencies.join(","))?;
         }
         if let Some(booking) = &self.booking {
             write!(f, " \"{booking}\"")?;
@@ -633,7 +649,7 @@ pub struct Close {
     /// Date account was closed
     pub date: NaiveDate,
     /// Account name
-    pub account: String,
+    pub account: InternedStr,
     /// Metadata
     pub meta: Metadata,
 }
@@ -641,12 +657,19 @@ pub struct Close {
 impl Close {
     /// Create a new close directive.
     #[must_use]
-    pub fn new(date: NaiveDate, account: impl Into<String>) -> Self {
+    pub fn new(date: NaiveDate, account: impl Into<InternedStr>) -> Self {
         Self {
             date,
             account: account.into(),
             meta: Metadata::new(),
         }
+    }
+
+    /// Set metadata.
+    #[must_use]
+    pub fn with_meta(mut self, meta: Metadata) -> Self {
+        self.meta = meta;
+        self
     }
 }
 
@@ -664,7 +687,7 @@ pub struct Commodity {
     /// Declaration date
     pub date: NaiveDate,
     /// Currency/commodity code (e.g., "USD", "AAPL")
-    pub currency: String,
+    pub currency: InternedStr,
     /// Metadata
     pub meta: Metadata,
 }
@@ -672,12 +695,19 @@ pub struct Commodity {
 impl Commodity {
     /// Create a new commodity declaration.
     #[must_use]
-    pub fn new(date: NaiveDate, currency: impl Into<String>) -> Self {
+    pub fn new(date: NaiveDate, currency: impl Into<InternedStr>) -> Self {
         Self {
             date,
             currency: currency.into(),
             meta: Metadata::new(),
         }
+    }
+
+    /// Set metadata.
+    #[must_use]
+    pub fn with_meta(mut self, meta: Metadata) -> Self {
+        self.meta = meta;
+        self
     }
 }
 
@@ -696,9 +726,9 @@ pub struct Pad {
     /// Pad date
     pub date: NaiveDate,
     /// Account to pad
-    pub account: String,
+    pub account: InternedStr,
     /// Source account for padding (e.g., Equity:Opening-Balances)
-    pub source_account: String,
+    pub source_account: InternedStr,
     /// Metadata
     pub meta: Metadata,
 }
@@ -708,8 +738,8 @@ impl Pad {
     #[must_use]
     pub fn new(
         date: NaiveDate,
-        account: impl Into<String>,
-        source_account: impl Into<String>,
+        account: impl Into<InternedStr>,
+        source_account: impl Into<InternedStr>,
     ) -> Self {
         Self {
             date,
@@ -717,6 +747,13 @@ impl Pad {
             source_account: source_account.into(),
             meta: Metadata::new(),
         }
+    }
+
+    /// Set metadata.
+    #[must_use]
+    pub fn with_meta(mut self, meta: Metadata) -> Self {
+        self.meta = meta;
+        self
     }
 }
 
@@ -756,6 +793,13 @@ impl Event {
             meta: Metadata::new(),
         }
     }
+
+    /// Set metadata.
+    #[must_use]
+    pub fn with_meta(mut self, meta: Metadata) -> Self {
+        self.meta = meta;
+        self
+    }
 }
 
 impl fmt::Display for Event {
@@ -794,6 +838,13 @@ impl Query {
             meta: Metadata::new(),
         }
     }
+
+    /// Set metadata.
+    #[must_use]
+    pub fn with_meta(mut self, meta: Metadata) -> Self {
+        self.meta = meta;
+        self
+    }
 }
 
 impl fmt::Display for Query {
@@ -814,7 +865,7 @@ pub struct Note {
     /// Note date
     pub date: NaiveDate,
     /// Account
-    pub account: String,
+    pub account: InternedStr,
     /// Note text
     pub comment: String,
     /// Metadata
@@ -824,13 +875,24 @@ pub struct Note {
 impl Note {
     /// Create a new note directive.
     #[must_use]
-    pub fn new(date: NaiveDate, account: impl Into<String>, comment: impl Into<String>) -> Self {
+    pub fn new(
+        date: NaiveDate,
+        account: impl Into<InternedStr>,
+        comment: impl Into<String>,
+    ) -> Self {
         Self {
             date,
             account: account.into(),
             comment: comment.into(),
             meta: Metadata::new(),
         }
+    }
+
+    /// Set metadata.
+    #[must_use]
+    pub fn with_meta(mut self, meta: Metadata) -> Self {
+        self.meta = meta;
+        self
     }
 }
 
@@ -852,7 +914,7 @@ pub struct Document {
     /// Document date
     pub date: NaiveDate,
     /// Account
-    pub account: String,
+    pub account: InternedStr,
     /// File path to the document
     pub path: String,
     /// Tags
@@ -866,7 +928,7 @@ pub struct Document {
 impl Document {
     /// Create a new document directive.
     #[must_use]
-    pub fn new(date: NaiveDate, account: impl Into<String>, path: impl Into<String>) -> Self {
+    pub fn new(date: NaiveDate, account: impl Into<InternedStr>, path: impl Into<String>) -> Self {
         Self {
             date,
             account: account.into(),
@@ -875,6 +937,27 @@ impl Document {
             links: Vec::new(),
             meta: Metadata::new(),
         }
+    }
+
+    /// Add a tag.
+    #[must_use]
+    pub fn with_tag(mut self, tag: impl Into<String>) -> Self {
+        self.tags.push(tag.into());
+        self
+    }
+
+    /// Add a link.
+    #[must_use]
+    pub fn with_link(mut self, link: impl Into<String>) -> Self {
+        self.links.push(link.into());
+        self
+    }
+
+    /// Set metadata.
+    #[must_use]
+    pub fn with_meta(mut self, meta: Metadata) -> Self {
+        self.meta = meta;
+        self
     }
 }
 
@@ -896,7 +979,7 @@ pub struct Price {
     /// Price date
     pub date: NaiveDate,
     /// Currency being priced
-    pub currency: String,
+    pub currency: InternedStr,
     /// Price amount (in another currency)
     pub amount: Amount,
     /// Metadata
@@ -906,13 +989,20 @@ pub struct Price {
 impl Price {
     /// Create a new price directive.
     #[must_use]
-    pub fn new(date: NaiveDate, currency: impl Into<String>, amount: Amount) -> Self {
+    pub fn new(date: NaiveDate, currency: impl Into<InternedStr>, amount: Amount) -> Self {
         Self {
             date,
             currency: currency.into(),
             amount,
             meta: Metadata::new(),
         }
+    }
+
+    /// Set metadata.
+    #[must_use]
+    pub fn with_meta(mut self, meta: Metadata) -> Self {
+        self.meta = meta;
+        self
     }
 }
 
@@ -953,6 +1043,13 @@ impl Custom {
     #[must_use]
     pub fn with_value(mut self, value: MetaValue) -> Self {
         self.values.push(value);
+        self
+    }
+
+    /// Set metadata.
+    #[must_use]
+    pub fn with_meta(mut self, meta: Metadata) -> Self {
+        self.meta = meta;
         self
     }
 }
@@ -1009,10 +1106,10 @@ mod tests {
     #[test]
     fn test_open() {
         let open = Open::new(date(2024, 1, 1), "Assets:Bank:Checking")
-            .with_currencies(vec!["USD".to_string()])
+            .with_currencies(vec!["USD".into()])
             .with_booking("FIFO");
 
-        assert_eq!(open.currencies, vec!["USD"]);
+        assert_eq!(open.currencies, vec![InternedStr::from("USD")]);
         assert_eq!(open.booking, Some("FIFO".to_string()));
     }
 

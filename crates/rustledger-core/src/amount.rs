@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::ops::{Add, AddAssign, Neg, Sub, SubAssign};
 
+use crate::intern::InternedStr;
+
 /// An amount is a quantity paired with a currency.
 ///
 /// # Examples
@@ -31,13 +33,13 @@ pub struct Amount {
     /// The decimal quantity
     pub number: Decimal,
     /// The currency code (e.g., "USD", "EUR", "AAPL")
-    pub currency: String,
+    pub currency: InternedStr,
 }
 
 impl Amount {
     /// Create a new amount.
     #[must_use]
-    pub fn new(number: Decimal, currency: impl Into<String>) -> Self {
+    pub fn new(number: Decimal, currency: impl Into<InternedStr>) -> Self {
         Self {
             number,
             currency: currency.into(),
@@ -46,7 +48,7 @@ impl Amount {
 
     /// Create a zero amount with the given currency.
     #[must_use]
-    pub fn zero(currency: impl Into<String>) -> Self {
+    pub fn zero(currency: impl Into<InternedStr>) -> Self {
         Self {
             number: Decimal::ZERO,
             currency: currency.into(),
@@ -286,13 +288,13 @@ pub enum IncompleteAmount {
     /// Only number specified, currency to be inferred from context (cost, price, or other postings)
     NumberOnly(Decimal),
     /// Only currency specified, number to be interpolated to balance the transaction
-    CurrencyOnly(String),
+    CurrencyOnly(InternedStr),
 }
 
 impl IncompleteAmount {
     /// Create a complete amount.
     #[must_use]
-    pub fn complete(number: Decimal, currency: impl Into<String>) -> Self {
+    pub fn complete(number: Decimal, currency: impl Into<InternedStr>) -> Self {
         Self::Complete(Amount::new(number, currency))
     }
 
@@ -304,7 +306,7 @@ impl IncompleteAmount {
 
     /// Create a currency-only incomplete amount.
     #[must_use]
-    pub fn currency_only(currency: impl Into<String>) -> Self {
+    pub fn currency_only(currency: impl Into<InternedStr>) -> Self {
         Self::CurrencyOnly(currency.into())
     }
 

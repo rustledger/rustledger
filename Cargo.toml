@@ -67,6 +67,7 @@ tempfile = "3"
 
 # Data formats
 csv = "1"
+ofxy = "0.2"
 
 # Async (if needed)
 tokio = { version = "1", features = ["full"] }

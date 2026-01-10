@@ -4,7 +4,7 @@
 
 use rust_decimal::prelude::Signed;
 use rust_decimal::Decimal;
-use rustledger_core::{Amount, IncompleteAmount, Transaction};
+use rustledger_core::{Amount, IncompleteAmount, InternedStr, Transaction};
 use std::collections::HashMap;
 use thiserror::Error;
 
@@ -15,7 +15,7 @@ pub enum InterpolationError {
     #[error("multiple postings missing amounts for currency {currency}")]
     MultipleMissing {
         /// The currency with multiple missing amounts.
-        currency: String,
+        currency: InternedStr,
         /// Number of postings missing this currency.
         count: usize,
     },
@@ -24,14 +24,14 @@ pub enum InterpolationError {
     #[error("cannot infer currency for posting to account {account}")]
     CannotInferCurrency {
         /// The account of the posting.
-        account: String,
+        account: InternedStr,
     },
 
     /// Transaction does not balance after interpolation.
     #[error("transaction does not balance: residual {residual} {currency}")]
     DoesNotBalance {
         /// The unbalanced currency.
-        currency: String,
+        currency: InternedStr,
         /// The residual amount.
         residual: Decimal,
     },
@@ -45,7 +45,7 @@ pub struct InterpolationResult {
     /// Which posting indices were filled in.
     pub filled_indices: Vec<usize>,
     /// Residuals after interpolation (should all be near zero).
-    pub residuals: HashMap<String, Decimal>,
+    pub residuals: HashMap<InternedStr, Decimal>,
 }
 
 /// Interpolate missing amounts in a transaction.
@@ -77,8 +77,8 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
     let mut filled_indices = Vec::new();
 
     // Calculate initial residuals from postings with amounts
-    let mut residuals: HashMap<String, Decimal> = HashMap::new();
-    let mut missing_by_currency: HashMap<String, Vec<usize>> = HashMap::new();
+    let mut residuals: HashMap<InternedStr, Decimal> = HashMap::new();
+    let mut missing_by_currency: HashMap<InternedStr, Vec<usize>> = HashMap::new();
     let mut unassigned_missing: Vec<usize> = Vec::new();
 
     for (i, posting) in transaction.postings.iter().enumerate() {
@@ -213,7 +213,7 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
     // Each one absorbs one currency's residual
     if !unassigned_missing.is_empty() {
         // Get currencies with non-zero residuals
-        let non_zero_residuals: Vec<(String, Decimal)> = residuals
+        let non_zero_residuals: Vec<(InternedStr, Decimal)> = residuals
             .iter()
             .filter(|(_, &v)| !v.is_zero())
             .map(|(k, &v)| (k.clone(), v))

@@ -173,7 +173,7 @@ fn format_incomplete_amount(amount: &IncompleteAmount) -> String {
     match amount {
         IncompleteAmount::Complete(a) => format!("{} {}", a.number, a.currency),
         IncompleteAmount::NumberOnly(n) => n.to_string(),
-        IncompleteAmount::CurrencyOnly(c) => c.clone(),
+        IncompleteAmount::CurrencyOnly(c) => c.to_string(),
     }
 }
 
@@ -447,8 +447,8 @@ mod tests {
     fn test_format_open() {
         let open = Open {
             date: date(2024, 1, 1),
-            account: "Assets:Bank:Checking".to_string(),
-            currencies: vec!["USD".to_string(), "EUR".to_string()],
+            account: "Assets:Bank:Checking".into(),
+            currencies: vec!["USD".into(), "EUR".into()],
             booking: None,
             meta: Default::default(),
         };

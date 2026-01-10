@@ -96,7 +96,7 @@ fn transaction_to_data(txn: &Transaction) -> TransactionData {
 
 fn posting_to_data(posting: &Posting) -> PostingData {
     PostingData {
-        account: posting.account.clone(),
+        account: posting.account.to_string(),
         units: posting.units.as_ref().and_then(incomplete_amount_to_data),
         cost: posting.cost.as_ref().map(cost_to_data),
         price: posting.price.as_ref().map(price_annotation_to_data),
@@ -114,7 +114,7 @@ fn incomplete_amount_to_data(incomplete: &IncompleteAmount) -> Option<AmountData
         IncompleteAmount::Complete(amount) => Some(amount_to_data(amount)),
         IncompleteAmount::CurrencyOnly(currency) => Some(AmountData {
             number: String::new(), // Empty number indicates interpolation needed
-            currency: currency.clone(),
+            currency: currency.to_string(),
         }),
         IncompleteAmount::NumberOnly(number) => Some(AmountData {
             number: number.to_string(),
@@ -126,7 +126,7 @@ fn incomplete_amount_to_data(incomplete: &IncompleteAmount) -> Option<AmountData
 fn amount_to_data(amount: &Amount) -> AmountData {
     AmountData {
         number: amount.number.to_string(),
-        currency: amount.currency.clone(),
+        currency: amount.currency.to_string(),
     }
 }
 
@@ -134,7 +134,7 @@ fn cost_to_data(cost: &CostSpec) -> CostData {
     CostData {
         number_per: cost.number_per.map(|n| n.to_string()),
         number_total: cost.number_total.map(|n| n.to_string()),
-        currency: cost.currency.clone(),
+        currency: cost.currency.as_ref().map(ToString::to_string),
         date: cost.date.map(|d| d.to_string()),
         label: cost.label.clone(),
         merge: cost.merge,
@@ -199,7 +199,7 @@ fn meta_value_to_data(value: &MetaValue) -> MetaValueData {
 
 fn balance_to_data(bal: &Balance) -> BalanceData {
     BalanceData {
-        account: bal.account.clone(),
+        account: bal.account.to_string(),
         amount: amount_to_data(&bal.amount),
         tolerance: bal.tolerance.map(|t| t.to_string()),
     }
@@ -207,28 +207,28 @@ fn balance_to_data(bal: &Balance) -> BalanceData {
 
 fn open_to_data(open: &Open) -> OpenData {
     OpenData {
-        account: open.account.clone(),
-        currencies: open.currencies.clone(),
+        account: open.account.to_string(),
+        currencies: open.currencies.iter().map(ToString::to_string).collect(),
         booking: open.booking.clone(),
     }
 }
 
 fn close_to_data(close: &Close) -> CloseData {
     CloseData {
-        account: close.account.clone(),
+        account: close.account.to_string(),
     }
 }
 
 fn commodity_to_data(comm: &Commodity) -> CommodityData {
     CommodityData {
-        currency: comm.currency.clone(),
+        currency: comm.currency.to_string(),
     }
 }
 
 fn pad_to_data(pad: &Pad) -> PadData {
     PadData {
-        account: pad.account.clone(),
-        source_account: pad.source_account.clone(),
+        account: pad.account.to_string(),
+        source_account: pad.source_account.to_string(),
     }
 }
 
@@ -241,21 +241,21 @@ fn event_to_data(event: &Event) -> EventData {
 
 fn note_to_data(note: &Note) -> NoteData {
     NoteData {
-        account: note.account.clone(),
+        account: note.account.to_string(),
         comment: note.comment.clone(),
     }
 }
 
 fn document_to_data(doc: &Document) -> DocumentData {
     DocumentData {
-        account: doc.account.clone(),
+        account: doc.account.to_string(),
         path: doc.path.clone(),
     }
 }
 
 fn price_to_data(price: &Price) -> PriceData {
     PriceData {
-        currency: price.currency.clone(),
+        currency: price.currency.to_string(),
         amount: amount_to_data(&price.amount),
     }
 }
@@ -381,7 +381,7 @@ fn data_to_posting(data: &PostingData) -> Result<Posting, ConversionError> {
         .collect();
 
     Ok(Posting {
-        account: data.account.clone(),
+        account: data.account.clone().into(),
         units,
         cost,
         price,
@@ -392,7 +392,7 @@ fn data_to_posting(data: &PostingData) -> Result<Posting, ConversionError> {
 
 fn data_to_incomplete_amount(data: &AmountData) -> Result<IncompleteAmount, ConversionError> {
     if data.number.is_empty() && !data.currency.is_empty() {
-        Ok(IncompleteAmount::CurrencyOnly(data.currency.clone()))
+        Ok(IncompleteAmount::CurrencyOnly(data.currency.clone().into()))
     } else if !data.number.is_empty() && data.currency.is_empty() {
         let number = Decimal::from_str_exact(&data.number)
             .map_err(|_| ConversionError::InvalidNumber(data.number.clone()))?;
@@ -436,7 +436,7 @@ fn data_to_cost(data: &CostData) -> Result<CostSpec, ConversionError> {
     Ok(CostSpec {
         number_per,
         number_total,
-        currency: data.currency.clone(),
+        currency: data.currency.as_ref().map(|c| c.clone().into()),
         date,
         label: data.label.clone(),
         merge: data.merge,
@@ -464,7 +464,7 @@ fn data_to_price_annotation(
                 .map_err(|_| ConversionError::InvalidNumber(num_str.clone()))?;
             IncompleteAmount::NumberOnly(number)
         } else if let Some(cur) = &data.currency {
-            IncompleteAmount::CurrencyOnly(cur.clone())
+            IncompleteAmount::CurrencyOnly(cur.clone().into())
         } else {
             unreachable!()
         };
@@ -526,7 +526,7 @@ fn data_to_balance(data: &BalanceData, date: NaiveDate) -> Result<Balance, Conve
 
     Ok(Balance {
         date,
-        account: data.account.clone(),
+        account: data.account.clone().into(),
         amount,
         tolerance,
         meta: Default::default(),
@@ -536,8 +536,8 @@ fn data_to_balance(data: &BalanceData, date: NaiveDate) -> Result<Balance, Conve
 fn data_to_open(data: &OpenData, date: NaiveDate) -> Open {
     Open {
         date,
-        account: data.account.clone(),
-        currencies: data.currencies.clone(),
+        account: data.account.clone().into(),
+        currencies: data.currencies.iter().map(|c| c.clone().into()).collect(),
         booking: data.booking.clone(),
         meta: Default::default(),
     }
@@ -546,7 +546,7 @@ fn data_to_open(data: &OpenData, date: NaiveDate) -> Open {
 fn data_to_close(data: &CloseData, date: NaiveDate) -> Close {
     Close {
         date,
-        account: data.account.clone(),
+        account: data.account.clone().into(),
         meta: Default::default(),
     }
 }
@@ -554,7 +554,7 @@ fn data_to_close(data: &CloseData, date: NaiveDate) -> Close {
 fn data_to_commodity(data: &CommodityData, date: NaiveDate) -> Commodity {
     Commodity {
         date,
-        currency: data.currency.clone(),
+        currency: data.currency.clone().into(),
         meta: Default::default(),
     }
 }
@@ -562,8 +562,8 @@ fn data_to_commodity(data: &CommodityData, date: NaiveDate) -> Commodity {
 fn data_to_pad(data: &PadData, date: NaiveDate) -> Pad {
     Pad {
         date,
-        account: data.account.clone(),
-        source_account: data.source_account.clone(),
+        account: data.account.clone().into(),
+        source_account: data.source_account.clone().into(),
         meta: Default::default(),
     }
 }
@@ -580,7 +580,7 @@ fn data_to_event(data: &EventData, date: NaiveDate) -> Event {
 fn data_to_note(data: &NoteData, date: NaiveDate) -> Note {
     Note {
         date,
-        account: data.account.clone(),
+        account: data.account.clone().into(),
         comment: data.comment.clone(),
         meta: Default::default(),
     }
@@ -589,7 +589,7 @@ fn data_to_note(data: &NoteData, date: NaiveDate) -> Note {
 fn data_to_document(data: &DocumentData, date: NaiveDate) -> Document {
     Document {
         date,
-        account: data.account.clone(),
+        account: data.account.clone().into(),
         path: data.path.clone(),
         tags: Vec::new(),
         links: Vec::new(),
@@ -601,7 +601,7 @@ fn data_to_price(data: &PriceData, date: NaiveDate) -> Result<Price, ConversionE
     let amount = data_to_amount(&data.amount)?;
     Ok(Price {
         date,
-        currency: data.currency.clone(),
+        currency: data.currency.clone().into(),
         amount,
         meta: Default::default(),
     })
@@ -659,7 +659,7 @@ mod tests {
             meta: HashMap::new(),
             postings: vec![
                 Posting {
-                    account: "Expenses:Food".to_string(),
+                    account: "Expenses:Food".into(),
                     units: Some(IncompleteAmount::Complete(Amount::new(dec("50.00"), "USD"))),
                     cost: None,
                     price: None,
@@ -667,7 +667,7 @@ mod tests {
                     meta: HashMap::new(),
                 },
                 Posting {
-                    account: "Assets:Checking".to_string(),
+                    account: "Assets:Checking".into(),
                     units: None,
                     cost: None,
                     price: None,
@@ -700,7 +700,7 @@ mod tests {
         let date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
         let balance = Balance {
             date,
-            account: "Assets:Checking".to_string(),
+            account: "Assets:Checking".into(),
             amount: Amount::new(dec("1000.00"), "USD"),
             tolerance: Some(dec("0.01")),
             meta: HashMap::new(),
@@ -725,8 +725,8 @@ mod tests {
         let date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
         let open = Open {
             date,
-            account: "Assets:Checking".to_string(),
-            currencies: vec!["USD".to_string(), "EUR".to_string()],
+            account: "Assets:Checking".into(),
+            currencies: vec!["USD".into(), "EUR".into()],
             booking: Some("FIFO".to_string()),
             meta: HashMap::new(),
         };
@@ -750,7 +750,7 @@ mod tests {
         let date = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
         let price = Price {
             date,
-            currency: "AAPL".to_string(),
+            currency: "AAPL".into(),
             amount: Amount::new(dec("185.50"), "USD"),
             meta: HashMap::new(),
         };
@@ -775,25 +775,25 @@ mod tests {
         let directives = vec![
             Directive::Open(Open {
                 date,
-                account: "Assets:Test".to_string(),
+                account: "Assets:Test".into(),
                 currencies: vec![],
                 booking: None,
                 meta: HashMap::new(),
             }),
             Directive::Close(Close {
                 date,
-                account: "Assets:Test".to_string(),
+                account: "Assets:Test".into(),
                 meta: HashMap::new(),
             }),
             Directive::Commodity(Commodity {
                 date,
-                currency: "TEST".to_string(),
+                currency: "TEST".into(),
                 meta: HashMap::new(),
             }),
             Directive::Pad(Pad {
                 date,
-                account: "Assets:Checking".to_string(),
-                source_account: "Equity:Opening".to_string(),
+                account: "Assets:Checking".into(),
+                source_account: "Equity:Opening".into(),
                 meta: HashMap::new(),
             }),
             Directive::Event(Event {
@@ -804,13 +804,13 @@ mod tests {
             }),
             Directive::Note(Note {
                 date,
-                account: "Assets:Test".to_string(),
+                account: "Assets:Test".into(),
                 comment: "Test note".to_string(),
                 meta: HashMap::new(),
             }),
             Directive::Document(Document {
                 date,
-                account: "Assets:Test".to_string(),
+                account: "Assets:Test".into(),
                 path: "/path/to/doc.pdf".to_string(),
                 tags: vec![],
                 links: vec![],

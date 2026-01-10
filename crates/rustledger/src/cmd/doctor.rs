@@ -16,7 +16,7 @@ use crate::cmd::completions::ShellType;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use rust_decimal;
-use rustledger_core::{Directive, NaiveDate};
+use rustledger_core::{Directive, InternedStr, NaiveDate};
 use rustledger_loader::Loader;
 use rustledger_parser;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -406,10 +406,10 @@ fn cmd_missing_open<W: Write>(file: &PathBuf, writer: &mut W) -> Result<()> {
         .with_context(|| format!("failed to load {}", file.display()))?;
 
     // Collect all accounts that are opened
-    let mut opened_accounts: HashSet<String> = HashSet::new();
+    let mut opened_accounts: HashSet<InternedStr> = HashSet::new();
 
     // Collect all accounts that are used and their first use date
-    let mut used_accounts: BTreeMap<String, NaiveDate> = BTreeMap::new();
+    let mut used_accounts: BTreeMap<InternedStr, NaiveDate> = BTreeMap::new();
 
     for spanned in &load_result.directives {
         match &spanned.value {
@@ -633,7 +633,7 @@ fn cmd_stats<W: Write>(file: &PathBuf, writer: &mut W) -> Result<()> {
     let mut transactions = 0;
     let mut postings = 0;
     let mut accounts = 0;
-    let mut commodities_set: BTreeSet<String> = BTreeSet::new();
+    let mut commodities_set: BTreeSet<InternedStr> = BTreeSet::new();
     let mut balance_assertions = 0;
     let mut prices = 0;
     let mut first_date: Option<NaiveDate> = None;
@@ -706,7 +706,7 @@ fn cmd_display_context<W: Write>(file: &PathBuf, writer: &mut W) -> Result<()> {
         .with_context(|| format!("failed to load {}", file.display()))?;
 
     // Collect decimal precision from numbers in the file
-    let mut currency_scales: BTreeMap<String, i32> = BTreeMap::new();
+    let mut currency_scales: BTreeMap<InternedStr, i32> = BTreeMap::new();
 
     for spanned in &load_result.directives {
         match &spanned.value {
@@ -836,7 +836,7 @@ fn cmd_directories<W: Write>(file: &PathBuf, dirs: &[PathBuf], writer: &mut W) -
         .with_context(|| format!("failed to load {}", file.display()))?;
 
     // Collect all account names
-    let mut accounts: BTreeSet<String> = BTreeSet::new();
+    let mut accounts: BTreeSet<InternedStr> = BTreeSet::new();
     for spanned in &load_result.directives {
         match &spanned.value {
             Directive::Open(open) => {

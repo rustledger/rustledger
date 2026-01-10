@@ -68,8 +68,8 @@ proptest! {
         let directives = vec![
             Directive::Open(Open {
                 date: open_date,
-                account: account.clone(),
-                currencies: vec!["USD".to_string()],
+                account: account.clone().into(),
+                currencies: vec!["USD".into()],
                 booking: None,
                 meta: Default::default(),
             }),
@@ -83,7 +83,7 @@ proptest! {
                 links: vec![],
                 postings: vec![
                     Posting {
-                        account: account.clone(),
+                        account: account.clone().into(),
                         units: complete(Decimal::from(actual_balance), "USD"),
                         cost: None,
                         price: None,
@@ -91,7 +91,7 @@ proptest! {
                         meta: Default::default(),
                     },
                     Posting {
-                        account: "Equity:Opening".to_string(),
+                        account: "Equity:Opening".into(),
                         units: complete(Decimal::from(-actual_balance), "USD"),
                         cost: None,
                         price: None,
@@ -104,7 +104,7 @@ proptest! {
             // Balance assertion with wrong expected
             Directive::Balance(Balance {
                 date: balance_date,
-                account,
+                account: account.into(),
                 amount: Amount::new(Decimal::from(wrong_expected), "USD"),
                 tolerance: None,
                 meta: Default::default(),
@@ -144,8 +144,8 @@ proptest! {
         let directives = vec![
             Directive::Open(Open {
                 date: open_date,
-                account: account.clone(),
-                currencies: vec!["USD".to_string()],
+                account: account.clone().into(),
+                currencies: vec!["USD".into()],
                 booking: None,
                 meta: Default::default(),
             }),
@@ -159,7 +159,7 @@ proptest! {
                 links: vec![],
                 postings: vec![
                     Posting {
-                        account: account.clone(),
+                        account: account.clone().into(),
                         units: complete(Decimal::from(balance_amount), "USD"),
                         cost: None,
                         price: None,
@@ -167,7 +167,7 @@ proptest! {
                         meta: Default::default(),
                     },
                     Posting {
-                        account: "Equity:Opening".to_string(),
+                        account: "Equity:Opening".into(),
                         units: complete(Decimal::from(-balance_amount), "USD"),
                         cost: None,
                         price: None,
@@ -180,7 +180,7 @@ proptest! {
             // Balance assertion with correct expected
             Directive::Balance(Balance {
                 date: balance_date,
-                account,
+                account: account.into(),
                 amount: Amount::new(Decimal::from(balance_amount), "USD"),
                 tolerance: None,
                 meta: Default::default(),
@@ -210,8 +210,8 @@ proptest! {
         let mut directives = vec![
             Directive::Open(Open {
                 date: open_date,
-                account: account.clone(),
-                currencies: vec!["USD".to_string()],
+                account: account.clone().into(),
+                currencies: vec!["USD".into()],
                 booking: None,
                 meta: Default::default(),
             }),
@@ -231,7 +231,7 @@ proptest! {
                 links: vec![],
                 postings: vec![
                     Posting {
-                        account: account.clone(),
+                        account: account.clone().into(),
                         units: complete(Decimal::from(*deposit), "USD"),
                         cost: None,
                         price: None,
@@ -239,7 +239,7 @@ proptest! {
                         meta: Default::default(),
                     },
                     Posting {
-                        account: "Income:Salary".to_string(),
+                        account: "Income:Salary".into(),
                         units: complete(Decimal::from(-*deposit), "USD"),
                         cost: None,
                         price: None,
@@ -255,7 +255,7 @@ proptest! {
         let balance_date = open_date + chrono::Duration::days(deposits.len() as i64 + 2);
         directives.push(Directive::Balance(Balance {
             date: balance_date,
-            account,
+            account: account.into(),
             amount: Amount::new(Decimal::from(total), "USD"),
             tolerance: None,
             meta: Default::default(),
@@ -298,7 +298,7 @@ proptest! {
                 links: vec![],
                 postings: vec![
                     Posting {
-                        account: account.clone(),
+                        account: account.clone().into(),
                         units: complete(Decimal::from(100), "USD"),
                         cost: None,
                         price: None,
@@ -306,7 +306,7 @@ proptest! {
                         meta: Default::default(),
                     },
                     Posting {
-                        account: "Equity:Opening".to_string(),
+                        account: "Equity:Opening".into(),
                         units: complete(Decimal::from(-100), "USD"),
                         cost: None,
                         price: None,
@@ -341,14 +341,14 @@ proptest! {
         let directives = vec![
             Directive::Open(Open {
                 date: date1,
-                account: account.clone(),
+                account: account.clone().into(),
                 currencies: vec![],
                 booking: None,
                 meta: Default::default(),
             }),
             Directive::Open(Open {
                 date: date2,
-                account: account.clone(),
+                account: account.clone().into(),
                 currencies: vec![],
                 booking: None,
                 meta: Default::default(),

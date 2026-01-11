@@ -110,7 +110,7 @@ impl PriceSource for YahooFinance {
             .and_then(|r| r.get(0))
             .and_then(|r| r.get("meta"))
             .and_then(|m| m.get("regularMarketPrice"))
-            .and_then(|p| p.as_f64());
+            .and_then(serde_json::Value::as_f64);
 
         match price {
             Some(p) => {

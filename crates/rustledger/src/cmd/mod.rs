@@ -11,4 +11,3 @@ pub mod format;
 pub mod price_cmd;
 pub mod query;
 pub mod report_cmd;
-pub mod web_cmd;

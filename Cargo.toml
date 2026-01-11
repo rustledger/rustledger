@@ -72,11 +72,7 @@ ofxy = "0.2"
 # HTTP
 ureq = { version = "2", features = ["json"] }
 
-# Web API
-axum = { version = "0.7", features = ["json"] }
-tower-http = { version = "0.5", features = ["cors", "fs"] }
-
-# Async
+# Async (if needed)
 tokio = { version = "1", features = ["full"] }
 
 # Internal crates

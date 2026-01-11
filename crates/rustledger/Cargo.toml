@@ -50,10 +50,6 @@ path = "src/bin/rledger_extract.rs"
 name = "rledger-price"
 path = "src/bin/rledger_price.rs"
 
-[[bin]]
-name = "rledger-web"
-path = "src/bin/rledger_web.rs"
-
 # Compatibility binaries (installed by default, opt-out with --no-default-features)
 [[bin]]
 name = "bean-check"
@@ -111,10 +107,6 @@ tracing-subscriber.workspace = true
 rust_decimal.workspace = true
 chrono.workspace = true
 ureq.workspace = true
-axum.workspace = true
-tower-http.workspace = true
-tokio.workspace = true
-serde.workspace = true
 
 [dev-dependencies]
 rust_decimal_macros.workspace = true

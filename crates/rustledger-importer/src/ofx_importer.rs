@@ -45,7 +45,7 @@ impl OfxImporter {
                 for txn in &txn_list.transactions {
                     match self.parse_transaction(txn, currency) {
                         Ok(t) => directives.push(Directive::Transaction(t)),
-                        Err(e) => warnings.push(format!("Skipped transaction: {}", e)),
+                        Err(e) => warnings.push(format!("Skipped transaction: {e}")),
                     }
                 }
             }
@@ -60,7 +60,7 @@ impl OfxImporter {
                 for txn in &txn_list.transactions {
                     match self.parse_transaction(txn, currency) {
                         Ok(t) => directives.push(Directive::Transaction(t)),
-                        Err(e) => warnings.push(format!("Skipped transaction: {}", e)),
+                        Err(e) => warnings.push(format!("Skipped transaction: {e}")),
                     }
                 }
             }
@@ -80,7 +80,7 @@ impl OfxImporter {
     ) -> Result<Transaction> {
         // Get date from the DateTime<Utc>
         let date = NaiveDate::from_ymd_opt(
-            txn.date_posted.year() as i32,
+            txn.date_posted.year(),
             txn.date_posted.month(),
             txn.date_posted.day(),
         )
@@ -97,7 +97,7 @@ impl OfxImporter {
         } else if name.is_empty() {
             memo.to_string()
         } else {
-            format!("{} - {}", name, memo)
+            format!("{name} - {memo}")
         };
 
         // Use currency from transaction if available, otherwise from statement
@@ -141,7 +141,7 @@ impl OfxImporter {
 }
 
 impl Importer for OfxImporter {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "OFX/QFX"
     }
 
@@ -156,7 +156,7 @@ impl Importer for OfxImporter {
         self.extract_from_string(&content)
     }
 
-    fn description(&self) -> &str {
+    fn description(&self) -> &'static str {
         "Open Financial Exchange (OFX/QFX) file importer"
     }
 }

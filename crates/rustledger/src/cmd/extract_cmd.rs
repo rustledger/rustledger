@@ -151,7 +151,7 @@ fn run(args: &Args, file: &PathBuf) -> Result<()> {
 
     // Print warnings
     for warning in &result.warnings {
-        eprintln!("warning: {}", warning);
+        eprintln!("warning: {warning}");
     }
 
     // Print extracted directives in beancount format

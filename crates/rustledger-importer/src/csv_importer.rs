@@ -22,7 +22,7 @@ pub struct CsvImporter {
 
 impl CsvImporter {
     /// Create a new CSV importer with the given configuration.
-    pub fn new(config: ImporterConfig) -> Self {
+    pub const fn new(config: ImporterConfig) -> Self {
         Self { config }
     }
 
@@ -64,7 +64,7 @@ impl CsvImporter {
             let record = match result {
                 Ok(r) => r,
                 Err(e) => {
-                    warnings.push(format!("Row {}: parse error: {}", row_num, e));
+                    warnings.push(format!("Row {row_num}: parse error: {e}"));
                     continue;
                 }
             };
@@ -73,7 +73,7 @@ impl CsvImporter {
                 Ok(Some(txn)) => directives.push(Directive::Transaction(txn)),
                 Ok(None) => {} // Skip empty rows
                 Err(e) => {
-                    warnings.push(format!("Row {}: {}", row_num, e));
+                    warnings.push(format!("Row {row_num}: {e}"));
                 }
             }
         }
@@ -95,7 +95,7 @@ impl CsvImporter {
         // Get date
         let date_str = self
             .get_column(record, &csv_config.date_column, header_map)
-            .with_context(|| format!("Row {}: missing date column", row_num))?;
+            .with_context(|| format!("Row {row_num}: missing date column"))?;
 
         if date_str.trim().is_empty() {
             return Ok(None); // Skip empty rows
@@ -180,12 +180,12 @@ impl CsvImporter {
             ColumnSpec::Index(i) => *i,
             ColumnSpec::Name(name) => *header_map
                 .get(name)
-                .with_context(|| format!("Column '{}' not found in header", name))?,
+                .with_context(|| format!("Column '{name}' not found in header"))?,
         };
 
         record
             .get(index)
-            .with_context(|| format!("Column index {} out of bounds", index))
+            .with_context(|| format!("Column index {index} out of bounds"))
     }
 
     fn parse_amount(

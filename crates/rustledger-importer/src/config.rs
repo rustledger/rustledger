@@ -200,25 +200,25 @@ impl CsvConfigBuilder {
     }
 
     /// Set whether the CSV has a header row.
-    pub fn has_header(mut self, has_header: bool) -> Self {
+    pub const fn has_header(mut self, has_header: bool) -> Self {
         self.config.has_header = has_header;
         self
     }
 
     /// Set the field delimiter.
-    pub fn delimiter(mut self, delimiter: char) -> Self {
+    pub const fn delimiter(mut self, delimiter: char) -> Self {
         self.config.delimiter = delimiter;
         self
     }
 
     /// Set the number of rows to skip.
-    pub fn skip_rows(mut self, count: usize) -> Self {
+    pub const fn skip_rows(mut self, count: usize) -> Self {
         self.config.skip_rows = count;
         self
     }
 
     /// Set whether to invert the sign of amounts.
-    pub fn invert_sign(mut self, invert: bool) -> Self {
+    pub const fn invert_sign(mut self, invert: bool) -> Self {
         self.config.invert_sign = invert;
         self
     }

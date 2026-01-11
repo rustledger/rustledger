@@ -54,7 +54,7 @@ pub struct ImportResult {
 
 impl ImportResult {
     /// Create a new import result.
-    pub fn new(directives: Vec<Directive>) -> Self {
+    pub const fn new(directives: Vec<Directive>) -> Self {
         Self {
             directives,
             warnings: Vec::new(),
@@ -62,7 +62,7 @@ impl ImportResult {
     }
 
     /// Create an empty import result.
-    pub fn empty() -> Self {
+    pub const fn empty() -> Self {
         Self {
             directives: Vec::new(),
             warnings: Vec::new(),

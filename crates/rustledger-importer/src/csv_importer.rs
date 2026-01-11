@@ -1,7 +1,7 @@
 //! CSV file importer.
 
-use crate::ImportResult;
 use crate::config::{ColumnSpec, CsvConfig, ImporterConfig};
+use crate::ImportResult;
 use anyhow::{Context, Result};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
@@ -290,11 +290,11 @@ mod tests {
             .date_format("%m/%d/%Y")
             .build();
 
-        let csv_content = r#"Date,Description,Amount
+        let csv_content = r"Date,Description,Amount
 01/15/2024,Coffee Shop,-4.50
 01/16/2024,Salary Deposit,2500.00
 01/17/2024,Grocery Store,-85.23
-"#;
+";
 
         let result = config.extract_from_string(csv_content).unwrap();
         assert_eq!(result.directives.len(), 3);
@@ -313,10 +313,10 @@ mod tests {
             .date_format("%Y-%m-%d")
             .build();
 
-        let csv_content = r#"Date,Description,Debit,Credit
+        let csv_content = r"Date,Description,Debit,Credit
 2024-01-15,Coffee Shop,4.50,
 2024-01-16,Salary Deposit,,2500.00
-"#;
+";
 
         let result = config.extract_from_string(csv_content).unwrap();
         assert_eq!(result.directives.len(), 2);

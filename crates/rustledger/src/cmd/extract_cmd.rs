@@ -13,7 +13,7 @@
 use crate::cmd::completions::ShellType;
 use anyhow::Result;
 use clap::Parser;
-use rustledger_core::{FormatConfig, format_directive};
+use rustledger_core::{format_directive, FormatConfig};
 use rustledger_importer::ImporterConfig;
 use std::io::{self, Write};
 use std::path::PathBuf;

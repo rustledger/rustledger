@@ -1,7 +1,7 @@
 //! Configuration for importers.
 
-use crate::ImportResult;
 use crate::csv_importer::CsvImporter;
+use crate::ImportResult;
 use anyhow::Result;
 use std::path::Path;
 

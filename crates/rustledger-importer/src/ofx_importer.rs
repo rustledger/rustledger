@@ -101,17 +101,16 @@ impl OfxImporter {
         };
 
         // Use currency from transaction if available, otherwise from statement
-        let curr = txn
-            .currency
-            .as_ref()
-            .map(|c| c.symbol.clone())
-            .unwrap_or_else(|| {
+        let curr = txn.currency.as_ref().map_or_else(
+            || {
                 if currency.is_empty() {
                     self.default_currency.clone()
                 } else {
                     currency.to_string()
                 }
-            });
+            },
+            |c| c.symbol.clone(),
+        );
 
         // Create posting
         let units = Amount::new(amount, &curr);
@@ -178,7 +177,7 @@ mod tests {
     #[test]
     fn test_ofx_importer_extract() {
         // Sample OFX content (minimal valid structure)
-        let ofx_content = r#"OFXHEADER:100
+        let ofx_content = r"OFXHEADER:100
 DATA:OFXSGML
 VERSION:102
 SECURITY:NONE
@@ -240,7 +239,7 @@ NEWFILEUID:NONE
 </STMTRS>
 </STMTTRNRS>
 </BANKMSGSRSV1>
-</OFX>"#;
+</OFX>";
 
         let importer = OfxImporter::new("Assets:Bank:Checking", "USD");
         let result = importer.extract_from_string(ofx_content);
@@ -253,7 +252,7 @@ NEWFILEUID:NONE
             Err(e) => {
                 // Some OFX parsers may be strict about format
                 // Just verify we handled the error gracefully
-                println!("OFX parse error (expected with minimal test data): {}", e);
+                println!("OFX parse error (expected with minimal test data): {e}");
             }
         }
     }

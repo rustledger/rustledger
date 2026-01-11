@@ -94,7 +94,7 @@ mod tests {
             Ok(ImportResult::empty())
         }
 
-        fn description(&self) -> &str {
+        fn description(&self) -> &'static str {
             "Mock importer for testing"
         }
     }

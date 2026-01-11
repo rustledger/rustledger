@@ -1,0 +1,32 @@
+[package]
+name = "rustledger-importer"
+description = "Import framework for rustledger - extract transactions from bank files"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+authors.workspace = true
+readme = "../../README.md"
+
+[lib]
+bench = false
+
+[dependencies]
+rustledger-core.workspace = true
+chrono.workspace = true
+rust_decimal.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+csv.workspace = true
+ofxy.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

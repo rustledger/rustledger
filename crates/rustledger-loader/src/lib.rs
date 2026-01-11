@@ -11,6 +11,7 @@
 //! - Plugin directive collection
 //! - Source map for error reporting
 //! - Push/pop tag and metadata handling
+//! - Automatic GPG decryption for encrypted files (`.gpg`, `.asc`)
 //!
 //! # Example
 //!
@@ -38,6 +39,7 @@ use rustledger_parser::{ParseError, Span, Spanned};
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use thiserror::Error;
 
 /// Errors that can occur during loading.
@@ -77,6 +79,15 @@ pub enum LoadError {
         /// The base directory.
         base_dir: PathBuf,
     },
+
+    /// GPG decryption failed.
+    #[error("failed to decrypt {path}: {message}")]
+    Decryption {
+        /// The encrypted file path.
+        path: PathBuf,
+        /// Error message from GPG.
+        message: String,
+    },
 }
 
 /// Result of loading a beancount file.
@@ -105,6 +116,54 @@ pub struct Plugin {
     pub span: Span,
     /// File this plugin was declared in.
     pub file_id: usize,
+}
+
+/// Check if a file is GPG-encrypted based on extension or content.
+///
+/// Returns `true` for:
+/// - Files with `.gpg` extension
+/// - Files with `.asc` extension containing a PGP message header
+fn is_encrypted_file(path: &Path) -> bool {
+    match path.extension().and_then(|e| e.to_str()) {
+        Some("gpg") => true,
+        Some("asc") => {
+            // Check for PGP header in first 1024 bytes
+            if let Ok(content) = fs::read_to_string(path) {
+                let check_len = 1024.min(content.len());
+                content[..check_len].contains("-----BEGIN PGP MESSAGE-----")
+            } else {
+                false
+            }
+        }
+        _ => false,
+    }
+}
+
+/// Decrypt a GPG-encrypted file using the system `gpg` command.
+///
+/// This uses `gpg --batch --decrypt` which will use the user's
+/// GPG keyring and gpg-agent for passphrase handling.
+fn decrypt_gpg_file(path: &Path) -> Result<String, LoadError> {
+    let output = Command::new("gpg")
+        .args(["--batch", "--decrypt"])
+        .arg(path)
+        .output()
+        .map_err(|e| LoadError::Decryption {
+            path: path.to_path_buf(),
+            message: format!("failed to run gpg: {e}"),
+        })?;
+
+    if !output.status.success() {
+        return Err(LoadError::Decryption {
+            path: path.to_path_buf(),
+            message: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        });
+    }
+
+    String::from_utf8(output.stdout).map_err(|e| LoadError::Decryption {
+        path: path.to_path_buf(),
+        message: format!("decrypted content is not valid UTF-8: {e}"),
+    })
 }
 
 /// Beancount file loader.
@@ -235,11 +294,15 @@ impl Loader {
             return Ok(());
         }
 
-        // Read file
-        let source = fs::read_to_string(path).map_err(|e| LoadError::Io {
-            path: path.to_path_buf(),
-            source: e,
-        })?;
+        // Read file (decrypting if necessary)
+        let source = if is_encrypted_file(path) {
+            decrypt_gpg_file(path)?
+        } else {
+            fs::read_to_string(path).map_err(|e| LoadError::Io {
+                path: path.to_path_buf(),
+                source: e,
+            })?
+        };
 
         // Add to source map
         let file_id = source_map.add_file(path.to_path_buf(), source.clone());
@@ -324,4 +387,64 @@ impl Loader {
 /// This is a convenience function that creates a loader and loads a single file.
 pub fn load(path: &Path) -> Result<LoadResult, LoadError> {
     Loader::new().load(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    #[test]
+    fn test_is_encrypted_file_gpg_extension() {
+        let path = Path::new("test.beancount.gpg");
+        assert!(is_encrypted_file(path));
+    }
+
+    #[test]
+    fn test_is_encrypted_file_plain_beancount() {
+        let path = Path::new("test.beancount");
+        assert!(!is_encrypted_file(path));
+    }
+
+    #[test]
+    fn test_is_encrypted_file_asc_with_pgp_header() {
+        let mut file = NamedTempFile::with_suffix(".asc").unwrap();
+        writeln!(file, "-----BEGIN PGP MESSAGE-----").unwrap();
+        writeln!(file, "some encrypted content").unwrap();
+        writeln!(file, "-----END PGP MESSAGE-----").unwrap();
+        file.flush().unwrap();
+
+        assert!(is_encrypted_file(file.path()));
+    }
+
+    #[test]
+    fn test_is_encrypted_file_asc_without_pgp_header() {
+        let mut file = NamedTempFile::with_suffix(".asc").unwrap();
+        writeln!(file, "This is just a plain text file").unwrap();
+        writeln!(file, "with .asc extension but no PGP content").unwrap();
+        file.flush().unwrap();
+
+        assert!(!is_encrypted_file(file.path()));
+    }
+
+    #[test]
+    fn test_decrypt_gpg_file_missing_gpg() {
+        // Create a fake .gpg file
+        let mut file = NamedTempFile::with_suffix(".gpg").unwrap();
+        writeln!(file, "fake encrypted content").unwrap();
+        file.flush().unwrap();
+
+        // This will fail because the content isn't actually GPG-encrypted
+        // (or gpg isn't installed, or there's no matching key)
+        let result = decrypt_gpg_file(file.path());
+        assert!(result.is_err());
+
+        if let Err(LoadError::Decryption { path, message }) = result {
+            assert_eq!(path, file.path().to_path_buf());
+            assert!(!message.is_empty());
+        } else {
+            panic!("Expected Decryption error");
+        }
+    }
 }

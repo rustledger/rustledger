@@ -141,6 +141,17 @@ fn run(args: &Args) -> Result<ExitCode> {
                 }
                 error_count += 1;
             }
+            LoadError::Decryption { path, message } => {
+                if !args.quiet {
+                    writeln!(
+                        stdout,
+                        "error: failed to decrypt {}: {}",
+                        path.display(),
+                        message
+                    )?;
+                }
+                error_count += 1;
+            }
         }
     }
 

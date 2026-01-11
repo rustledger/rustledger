@@ -8,7 +8,7 @@ use rustledger_booking::interpolate;
 use rustledger_core::Directive;
 use rustledger_loader::{LoadError, Loader};
 use rustledger_plugin::{
-    wrappers_to_directives, NativePluginRegistry, PluginInput, PluginManager, PluginOptions,
+    NativePluginRegistry, PluginInput, PluginManager, PluginOptions, wrappers_to_directives,
 };
 use rustledger_validate::validate;
 use std::io::{self, Write};
@@ -137,6 +137,17 @@ fn run(args: &Args) -> Result<ExitCode> {
                         "error: path traversal not allowed: {} escapes {}",
                         include_path,
                         base_dir.display()
+                    )?;
+                }
+                error_count += 1;
+            }
+            LoadError::Decryption { path, message } => {
+                if !args.quiet {
+                    writeln!(
+                        stdout,
+                        "error: failed to decrypt {}: {}",
+                        path.display(),
+                        message
                     )?;
                 }
                 error_count += 1;

@@ -7,6 +7,8 @@ on:
     branches: [main]
 env:
   CARGO_TERM_COLOR: always
+  # Limit parallel compilation to reduce memory usage on GitHub runners
+  CARGO_BUILD_JOBS: 2
 permissions:
   contents: read
   pull-requests: write
@@ -30,11 +32,11 @@ jobs:
         id: base_bench
         continue-on-error: true
         run: |
+          # Skip pipeline_bench - requires full rustledger with wasmtime, exceeds runner memory
           cargo bench -p rustledger-core --bench inventory_bench -- --save-baseline base
           cargo bench -p rustledger-parser --bench parser_bench -- --save-baseline base
           cargo bench -p rustledger-query --bench query_bench -- --save-baseline base
           cargo bench -p rustledger-validate --bench validate_bench -- --save-baseline base
-          cargo bench -p rustledger --bench pipeline_bench -- --save-baseline base
       - name: Upload base baseline
         if: steps.base_bench.outcome == 'success'
         uses: actions/upload-artifact@v4
@@ -57,11 +59,11 @@ jobs:
           prefix-key: bench-pr
       - name: Run PR benchmarks
         run: |
+          # Skip pipeline_bench - requires full rustledger with wasmtime, exceeds runner memory
           cargo bench -p rustledger-core --bench inventory_bench -- --save-baseline pr
           cargo bench -p rustledger-parser --bench parser_bench -- --save-baseline pr
           cargo bench -p rustledger-query --bench query_bench -- --save-baseline pr
           cargo bench -p rustledger-validate --bench validate_bench -- --save-baseline pr
-          cargo bench -p rustledger --bench pipeline_bench -- --save-baseline pr
       - name: Upload PR baseline
         uses: actions/upload-artifact@v4
         with:
@@ -181,8 +183,8 @@ jobs:
           prefix-key: bench-main
       - name: Run benchmarks
         run: |
+          # Skip pipeline_bench - requires full rustledger with wasmtime, exceeds runner memory
           cargo bench -p rustledger-core --bench inventory_bench
           cargo bench -p rustledger-parser --bench parser_bench
           cargo bench -p rustledger-query --bench query_bench
           cargo bench -p rustledger-validate --bench validate_bench
-          cargo bench -p rustledger --bench pipeline_bench

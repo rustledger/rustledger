@@ -209,6 +209,10 @@
                 enable = true;
                 packageOverrides.cargo = rustToolchainWithWasm;
                 packageOverrides.clippy = rustToolchainWithWasm;
+                settings = {
+                  allFeatures = true;
+                  denyWarnings = true;
+                };
               };
 
               # Nix

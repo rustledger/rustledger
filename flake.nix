@@ -223,6 +223,45 @@
 
               # Commit message
               commitizen.enable = true;
+
+              # Branch name validation (runs on pre-push)
+              branch-name = {
+                enable = true;
+                name = "branch-name";
+                entry = "${pkgs.writeShellScript "check-branch-name" ''
+                  BRANCH=$(git rev-parse --abbrev-ref HEAD)
+
+                  # Skip for main branch
+                  if [ "$BRANCH" = "main" ] || [ "$BRANCH" = "HEAD" ]; then
+                    exit 0
+                  fi
+
+                  PATTERN="^(feature|fix|docs|chore|refactor|claude)/[a-zA-Z0-9][a-zA-Z0-9-]*$"
+
+                  if [[ "$BRANCH" =~ $PATTERN ]]; then
+                    echo "✅ Branch name '$BRANCH' is valid"
+                    exit 0
+                  else
+                    echo "❌ Branch name '$BRANCH' does not match pattern"
+                    echo ""
+                    echo "Branch names must follow: <type>/<description>"
+                    echo "  Types: feature, fix, docs, chore, refactor, claude"
+                    echo "  Description: letters, numbers, hyphens (must start with letter/number)"
+                    echo ""
+                    echo "Examples:"
+                    echo "  feature/add-csv-export"
+                    echo "  fix/balance-calculation"
+                    echo "  claude/repo-improvements"
+                    echo ""
+                    echo "Note: 'feat/' is NOT valid, use 'feature/' instead"
+                    exit 1
+                  fi
+                ''}";
+                language = "system";
+                stages = [ "pre-push" ];
+                pass_filenames = false;
+                always_run = true;
+              };
             };
           };
 

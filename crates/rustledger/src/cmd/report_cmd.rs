@@ -19,6 +19,9 @@
 //! - `prices` - Show price history
 //! - `stats` - Show ledger statistics
 
+// Allow inner helper functions after statements for cleaner report code organization
+#![allow(clippy::items_after_statements)]
+
 use crate::cmd::completions::ShellType;
 use anyhow::{Context, Result};
 use chrono::Datelike;

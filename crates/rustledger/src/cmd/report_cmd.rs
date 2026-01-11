@@ -685,7 +685,7 @@ fn report_balsheet<W: Write>(
             }
             // Add net worth rows
             for (currency, total) in &net_worth {
-                writeln!(writer, "Net Worth,TOTAL,{},{}", total, currency)?;
+                writeln!(writer, "Net Worth,TOTAL,{total},{currency}")?;
             }
         }
         OutputFormat::Json => {
@@ -708,7 +708,7 @@ fn report_balsheet<W: Write>(
             let nw_vec: Vec<_> = net_worth.iter().collect();
             for (i, (currency, total)) in nw_vec.iter().enumerate() {
                 let comma = if i < nw_vec.len() - 1 { "," } else { "" };
-                writeln!(writer, r#"    "{}": "{}"{}"#, currency, total, comma)?;
+                writeln!(writer, r#"    "{currency}": "{total}"{comma}"#)?;
             }
             writeln!(writer, "  }}")?;
             writeln!(writer, "}}")?;
@@ -742,7 +742,7 @@ fn report_balsheet<W: Write>(
                 }
                 writeln!(writer)?;
                 for (currency, total) in &totals {
-                    writeln!(writer, "  {:>12} {:>4}  Total {title}", total, currency)?;
+                    writeln!(writer, "  {total:>12} {currency:>4}  Total {title}")?;
                 }
                 writeln!(writer)?;
                 Ok(totals)
@@ -759,7 +759,7 @@ fn report_balsheet<W: Write>(
             writeln!(writer, "Net Worth")?;
             writeln!(writer, "{}", "-".repeat(60))?;
             for (currency, total) in &net_worth {
-                writeln!(writer, "  {:>12} {:>4}", total, currency)?;
+                writeln!(writer, "  {total:>12} {currency:>4}")?;
             }
         }
     }
@@ -857,7 +857,7 @@ fn report_income<W: Write>(
                 )?;
             }
             for (currency, total) in &net_income {
-                writeln!(writer, "Net Income,TOTAL,{},{}", total, currency)?;
+                writeln!(writer, "Net Income,TOTAL,{total},{currency}")?;
             }
         }
         OutputFormat::Json => {
@@ -880,7 +880,7 @@ fn report_income<W: Write>(
             let ni_vec: Vec<_> = net_income.iter().collect();
             for (i, (currency, total)) in ni_vec.iter().enumerate() {
                 let comma = if i < ni_vec.len() - 1 { "," } else { "" };
-                writeln!(writer, r#"    "{}": "{}"{}"#, currency, total, comma)?;
+                writeln!(writer, r#"    "{currency}": "{total}"{comma}"#)?;
             }
             writeln!(writer, "  }}")?;
             writeln!(writer, "}}")?;
@@ -914,7 +914,7 @@ fn report_income<W: Write>(
                 }
                 writeln!(writer)?;
                 for (currency, total) in &totals {
-                    writeln!(writer, "  {:>12} {:>4}  Total {title}", total, currency)?;
+                    writeln!(writer, "  {total:>12} {currency:>4}  Total {title}")?;
                 }
                 writeln!(writer)?;
                 Ok(totals)
@@ -930,7 +930,7 @@ fn report_income<W: Write>(
             writeln!(writer, "Net Income")?;
             writeln!(writer, "{}", "-".repeat(60))?;
             for (currency, total) in &net_income {
-                writeln!(writer, "  {:>12} {:>4}", total, currency)?;
+                writeln!(writer, "  {total:>12} {currency:>4}")?;
             }
         }
     }
@@ -1031,7 +1031,7 @@ fn report_journal<W: Write>(
                     )?;
                 }
                 writeln!(writer, "    ]")?;
-                writeln!(writer, "  }}{}", comma)?;
+                writeln!(writer, "  }}{comma}")?;
             }
             writeln!(writer, "]")?;
         }
@@ -1044,9 +1044,9 @@ fn report_journal<W: Write>(
                 let payee = txn.payee.as_deref().unwrap_or("");
                 let narration = &txn.narration;
                 let desc = if payee.is_empty() {
-                    narration.to_string()
+                    narration.clone()
                 } else {
-                    format!("{} | {}", payee, narration)
+                    format!("{payee} | {narration}")
                 };
                 writeln!(writer, "{} {} {}", txn.date, txn.flag, desc)?;
 
@@ -1185,8 +1185,7 @@ fn report_holdings<W: Write>(
             for (account, units, currency, cost_basis, cost_currency) in &rows {
                 writeln!(
                     writer,
-                    "{:50} {:>12} {:>6} {:>12} {:>6}",
-                    account, units, currency, cost_basis, cost_currency
+                    "{account:50} {units:>12} {currency:>6} {cost_basis:>12} {cost_currency:>6}"
                 )?;
             }
         }
@@ -1280,7 +1279,7 @@ fn report_networth<W: Write>(
             writeln!(writer, "period,currency,amount")?;
             for (period_label, net_worth) in &period_results {
                 for (currency, amount) in net_worth {
-                    writeln!(writer, "{},{},{}", period_label, currency, amount)?;
+                    writeln!(writer, "{period_label},{currency},{amount}")?;
                 }
             }
         }
@@ -1294,22 +1293,21 @@ fn report_networth<W: Write>(
                     let comma = if entry_idx < total_entries { "," } else { "" };
                     writeln!(
                         writer,
-                        r#"  {{"period": "{}", "currency": "{}", "amount": "{}"}}{}"#,
-                        period_label, currency, amount, comma
+                        r#"  {{"period": "{period_label}", "currency": "{currency}", "amount": "{amount}"}}{comma}"#
                     )?;
                 }
             }
             writeln!(writer, "]")?;
         }
         OutputFormat::Text => {
-            writeln!(writer, "Net Worth Over Time ({})", period)?;
+            writeln!(writer, "Net Worth Over Time ({period})")?;
             writeln!(writer, "{}", "=".repeat(60))?;
             writeln!(writer)?;
 
             for (period_label, net_worth) in &period_results {
-                write!(writer, "{:12}", period_label)?;
+                write!(writer, "{period_label:12}")?;
                 for (currency, amount) in net_worth {
-                    write!(writer, "  {:>12} {}", amount, currency)?;
+                    write!(writer, "  {amount:>12} {currency}")?;
                 }
                 writeln!(writer)?;
             }

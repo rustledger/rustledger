@@ -46,6 +46,10 @@ path = "src/bin/rledger_doctor.rs"
 name = "rledger-extract"
 path = "src/bin/rledger_extract.rs"
 
+[[bin]]
+name = "rledger-price"
+path = "src/bin/rledger_price.rs"
+
 # Compatibility binaries (installed by default, opt-out with --no-default-features)
 [[bin]]
 name = "bean-check"
@@ -77,6 +81,11 @@ name = "bean-extract"
 path = "src/bin/bean_extract.rs"
 required-features = ["bean-compat"]
 
+[[bin]]
+name = "bean-price"
+path = "src/bin/bean_price.rs"
+required-features = ["bean-compat"]
+
 [dependencies]
 rustledger-core.workspace = true
 rustledger-parser.workspace = true
@@ -97,6 +106,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 rust_decimal.workspace = true
 chrono.workspace = true
+ureq.workspace = true
 
 [dev-dependencies]
 rust_decimal_macros.workspace = true

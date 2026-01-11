@@ -69,6 +69,9 @@ tempfile = "3"
 csv = "1"
 ofxy = "0.2"
 
+# HTTP
+ureq = { version = "2", features = ["json"] }
+
 # Async (if needed)
 tokio = { version = "1", features = ["full"] }
 

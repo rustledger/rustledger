@@ -307,7 +307,7 @@ fn report_balances<W: Write>(
                     writeln!(writer, "{account}")?;
                     current_account = account;
                 }
-                writeln!(writer, "  {:>15} {}", amount, currency)?;
+                writeln!(writer, "  {amount:>15} {currency}")?;
             }
         }
     }
@@ -421,7 +421,7 @@ fn report_commodities<W: Write>(
             writeln!(writer, "[")?;
             for (i, commodity) in commodities.iter().enumerate() {
                 let comma = if i < commodities.len() - 1 { "," } else { "" };
-                writeln!(writer, r#"  "{}"{}"#, commodity, comma)?;
+                writeln!(writer, r#"  "{commodity}"{comma}"#)?;
             }
             writeln!(writer, "]")?;
         }
@@ -665,7 +665,7 @@ fn report_balsheet<W: Write>(
     // Net worth = Assets - Liabilities
     let asset_totals = sum_by_currency(&assets);
     let liability_totals = sum_by_currency(&liabilities);
-    let mut net_worth: BTreeMap<String, Decimal> = asset_totals.clone();
+    let mut net_worth: BTreeMap<String, Decimal> = asset_totals;
     for (currency, amount) in &liability_totals {
         *net_worth.entry(currency.clone()).or_default() -= amount;
     }

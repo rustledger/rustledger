@@ -8,7 +8,7 @@ use rustledger_booking::interpolate;
 use rustledger_core::Directive;
 use rustledger_loader::{LoadError, Loader};
 use rustledger_plugin::{
-    NativePluginRegistry, PluginInput, PluginManager, PluginOptions, wrappers_to_directives,
+    wrappers_to_directives, NativePluginRegistry, PluginInput, PluginManager, PluginOptions,
 };
 use rustledger_validate::validate;
 use std::io::{self, Write};

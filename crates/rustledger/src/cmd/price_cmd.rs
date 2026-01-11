@@ -67,7 +67,7 @@ pub trait PriceSource {
     fn fetch_prices(&self, symbols: &[String]) -> HashMap<String, Result<Decimal>>;
 
     /// Source name.
-    fn name(&self) -> &str;
+    fn name(&self) -> &'static str;
 }
 
 /// Yahoo Finance price source.
@@ -86,10 +86,7 @@ impl YahooFinance {
 
     /// Build the Yahoo Finance API URL.
     fn build_url(&self, symbol: &str) -> String {
-        format!(
-            "https://query1.finance.yahoo.com/v8/finance/chart/{}?interval=1d&range=1d",
-            symbol
-        )
+        format!("https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1d&range=1d")
     }
 }
 
@@ -100,11 +97,11 @@ impl PriceSource for YahooFinance {
         let response = ureq::get(&url)
             .set("User-Agent", "Mozilla/5.0 (compatible; rustledger/1.0)")
             .call()
-            .with_context(|| format!("Failed to fetch price for {}", symbol))?;
+            .with_context(|| format!("Failed to fetch price for {symbol}"))?;
 
         let json: serde_json::Value = response
             .into_json()
-            .with_context(|| format!("Failed to parse response for {}", symbol))?;
+            .with_context(|| format!("Failed to parse response for {symbol}"))?;
 
         // Navigate to the price in the response
         let price = json
@@ -117,8 +114,8 @@ impl PriceSource for YahooFinance {
 
         match price {
             Some(p) => {
-                let decimal = Decimal::from_str(&format!("{:.4}", p))
-                    .with_context(|| format!("Failed to convert price {} to decimal", p))?;
+                let decimal = Decimal::from_str(&format!("{p:.4}"))
+                    .with_context(|| format!("Failed to convert price {p} to decimal"))?;
                 Ok(Some(decimal))
             }
             None => Ok(None),
@@ -129,16 +126,16 @@ impl PriceSource for YahooFinance {
         let mut results = HashMap::new();
 
         for symbol in symbols {
-            let result = self.fetch_price(symbol).and_then(|opt| {
-                opt.ok_or_else(|| anyhow::anyhow!("No price found for {}", symbol))
-            });
+            let result = self
+                .fetch_price(symbol)
+                .and_then(|opt| opt.ok_or_else(|| anyhow::anyhow!("No price found for {symbol}")));
             results.insert(symbol.clone(), result);
         }
 
         results
     }
 
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "yahoo"
     }
 }
@@ -158,7 +155,7 @@ pub fn main_with_name(bin_name: &str) -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    match run(args.price_args) {
+    match run(&args.price_args) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("error: {e:#}");
@@ -168,7 +165,7 @@ pub fn main_with_name(bin_name: &str) -> ExitCode {
 }
 
 /// Run the price command.
-pub fn run(args: PriceArgs) -> Result<()> {
+pub fn run(args: &PriceArgs) -> Result<()> {
     let mut symbols_to_fetch: Vec<String> = args.symbols.clone();
 
     // Build symbol mapping
@@ -193,10 +190,9 @@ pub fn run(args: PriceArgs) -> Result<()> {
                     .chars()
                     .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '-')
                     && symbol.len() <= 10
+                    && !symbols_to_fetch.contains(&symbol.to_string())
                 {
-                    if !symbols_to_fetch.contains(&symbol.to_string()) {
-                        symbols_to_fetch.push(symbol.to_string());
-                    }
+                    symbols_to_fetch.push(symbol.to_string());
                 }
             }
         }
@@ -216,7 +212,7 @@ pub fn run(args: PriceArgs) -> Result<()> {
         .collect();
 
     if args.verbose {
-        eprintln!("Fetching prices for: {:?}", yahoo_symbols);
+        eprintln!("Fetching prices for: {yahoo_symbols:?}");
     }
 
     // Create price source and fetch
@@ -225,7 +221,7 @@ pub fn run(args: PriceArgs) -> Result<()> {
 
     // Parse target date
     let date = if let Some(ref d) = args.date {
-        NaiveDate::parse_from_str(d, "%Y-%m-%d").with_context(|| format!("Invalid date: {}", d))?
+        NaiveDate::parse_from_str(d, "%Y-%m-%d").with_context(|| format!("Invalid date: {d}"))?
     } else {
         Utc::now().date_naive()
     };
@@ -241,27 +237,26 @@ pub fn run(args: PriceArgs) -> Result<()> {
             Some(Ok(price)) => {
                 if args.beancount {
                     // Output as beancount price directive
+                    let date_str = date.format("%Y-%m-%d");
+                    let currency = &args.currency;
                     writeln!(
                         handle,
-                        "{} price {} {} {}",
-                        date.format("%Y-%m-%d"),
-                        original_symbol,
-                        price,
-                        args.currency
+                        "{date_str} price {original_symbol} {price} {currency}"
                     )?;
                 } else {
-                    writeln!(handle, "{}: {} {}", original_symbol, price, args.currency)?;
+                    let currency = &args.currency;
+                    writeln!(handle, "{original_symbol}: {price} {currency}")?;
                 }
             }
             Some(Err(e)) => {
                 if args.verbose {
-                    eprintln!("Error fetching {}: {}", original_symbol, e);
+                    eprintln!("Error fetching {original_symbol}: {e}");
                 } else {
-                    eprintln!("; Failed to fetch {}: {}", original_symbol, e);
+                    eprintln!("; Failed to fetch {original_symbol}: {e}");
                 }
             }
             None => {
-                eprintln!("; No result for {}", original_symbol);
+                eprintln!("; No result for {original_symbol}");
             }
         }
     }

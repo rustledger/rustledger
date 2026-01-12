@@ -23,10 +23,40 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Get diff of the pull request
+        id: get_diff
+        shell: bash
+        env:
+          PULL_REQUEST_HEAD_REF: "${{ github.event.pull_request.head.ref }}"
+          PULL_REQUEST_BASE_REF: "${{ github.event.pull_request.base.ref }}"
+        run: |-
+          git fetch origin "${{ env.PULL_REQUEST_HEAD_REF }}"
+          git fetch origin "${{ env.PULL_REQUEST_BASE_REF }}"
+          git checkout "${{ env.PULL_REQUEST_HEAD_REF }}"
+          git diff "origin/${{ env.PULL_REQUEST_BASE_REF }}" > "diff.txt"
+          {
+            echo "pull_request_diff<<EOF";
+            cat "diff.txt";
+            echo 'EOF';
+          } >> $GITHUB_OUTPUT
       - name: Gemini Code Review
-        uses: truongnh1992/gemini-ai-code-reviewer@v9.2.1
+        uses: rubensflinco/gemini-code-review-action@1.0.5
         with:
           gemini_api_key: ${{ secrets.GEMINI_API_KEY }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          gemini_model: gemini-2.5-flash
-          exclude: "*.md,*.yml,*.yaml,*.json,*.lock"
+          github_repository: ${{ github.repository }}
+          github_pull_request_number: ${{ github.event.pull_request.number }}
+          git_commit_hash: ${{ github.event.pull_request.head.sha }}
+          model: "gemini-2.5-flash"
+          pull_request_diff: |-
+            ${{ steps.get_diff.outputs.pull_request_diff }}
+          pull_request_chunk_size: "3500"
+          extra_prompt: |-
+            Review this pull request. Focus on:
+            - Code correctness and potential bugs
+            - Rust idioms and best practices
+            - Performance implications
+            - Test coverage for changes
+            - Documentation completeness
+            Be constructive and specific. If changes look good, say so briefly.
+          log_level: "INFO"

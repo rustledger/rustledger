@@ -551,3 +551,45 @@ fn test_payee_analysis() {
 
     assert!(!result.is_empty());
 }
+
+// ============================================================================
+// Subquery Tests
+// ============================================================================
+
+#[test]
+fn test_subquery_basic() {
+    let directives = make_test_directives();
+    let result = execute_query(
+        "SELECT * FROM (SELECT account, position WHERE account ~ \"Expenses:\")",
+        &directives,
+    );
+
+    // Should return expenses postings from subquery
+    assert!(!result.is_empty());
+    assert_eq!(result.columns.len(), 2); // account, position
+}
+
+#[test]
+fn test_subquery_with_aggregation() {
+    let directives = make_test_directives();
+    let result = execute_query(
+        "SELECT account, total FROM (SELECT account, SUM(position) AS total GROUP BY account)",
+        &directives,
+    );
+
+    // Should have aggregated results from subquery
+    assert!(!result.is_empty());
+    assert_eq!(result.columns.len(), 2);
+}
+
+#[test]
+fn test_subquery_with_inner_filter() {
+    let directives = make_test_directives();
+    // Get expense totals with filtering inside subquery
+    let result = execute_query(
+        "SELECT * FROM (SELECT account, SUM(position) AS total WHERE account ~ \"Expenses:\" GROUP BY account)",
+        &directives,
+    );
+
+    assert!(!result.is_empty());
+}

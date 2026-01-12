@@ -32,6 +32,10 @@ pub struct SelectQuery {
     pub where_clause: Option<Expr>,
     /// GROUP BY clause.
     pub group_by: Option<Vec<Expr>>,
+    /// HAVING clause (filter on aggregated results).
+    pub having: Option<Expr>,
+    /// PIVOT BY clause (pivot table transformation).
+    pub pivot_by: Option<Vec<Expr>>,
     /// ORDER BY clause.
     pub order_by: Option<Vec<OrderSpec>>,
     /// LIMIT clause.
@@ -58,6 +62,8 @@ pub struct FromClause {
     pub clear: bool,
     /// Filter expression.
     pub filter: Option<Expr>,
+    /// Subquery (derived table).
+    pub subquery: Option<Box<SelectQuery>>,
 }
 
 /// ORDER BY specification.
@@ -117,6 +123,8 @@ pub enum Expr {
     Literal(Literal),
     /// Function call.
     Function(FunctionCall),
+    /// Window function call (with OVER clause).
+    Window(WindowFunction),
     /// Binary operation.
     BinaryOp(Box<BinaryOp>),
     /// Unary operation.
@@ -149,6 +157,26 @@ pub struct FunctionCall {
     pub name: String,
     /// Arguments.
     pub args: Vec<Expr>,
+}
+
+/// A window function call (function with OVER clause).
+#[derive(Debug, Clone, PartialEq)]
+pub struct WindowFunction {
+    /// Function name (ROW_NUMBER, RANK, SUM, etc.).
+    pub name: String,
+    /// Function arguments.
+    pub args: Vec<Expr>,
+    /// Window specification.
+    pub over: WindowSpec,
+}
+
+/// Window specification for OVER clause.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct WindowSpec {
+    /// PARTITION BY expressions.
+    pub partition_by: Option<Vec<Expr>>,
+    /// ORDER BY specifications.
+    pub order_by: Option<Vec<OrderSpec>>,
 }
 
 /// A binary operation.
@@ -227,6 +255,8 @@ impl SelectQuery {
             from: None,
             where_clause: None,
             group_by: None,
+            having: None,
+            pivot_by: None,
             order_by: None,
             limit: None,
         }
@@ -253,6 +283,18 @@ impl SelectQuery {
     /// Set the GROUP BY clause.
     pub fn group_by(mut self, exprs: Vec<Expr>) -> Self {
         self.group_by = Some(exprs);
+        self
+    }
+
+    /// Set the HAVING clause.
+    pub fn having(mut self, expr: Expr) -> Self {
+        self.having = Some(expr);
+        self
+    }
+
+    /// Set the PIVOT BY clause.
+    pub fn pivot_by(mut self, exprs: Vec<Expr>) -> Self {
+        self.pivot_by = Some(exprs);
         self
     }
 
@@ -292,6 +334,18 @@ impl FromClause {
             close_on: None,
             clear: false,
             filter: None,
+            subquery: None,
+        }
+    }
+
+    /// Create a FROM clause from a subquery.
+    pub fn from_subquery(query: SelectQuery) -> Self {
+        Self {
+            open_on: None,
+            close_on: None,
+            clear: false,
+            filter: None,
+            subquery: Some(Box::new(query)),
         }
     }
 
@@ -316,6 +370,12 @@ impl FromClause {
     /// Set the filter expression.
     pub fn filter(mut self, expr: Expr) -> Self {
         self.filter = Some(expr);
+        self
+    }
+
+    /// Set the subquery.
+    pub fn subquery(mut self, query: SelectQuery) -> Self {
+        self.subquery = Some(Box::new(query));
         self
     }
 }

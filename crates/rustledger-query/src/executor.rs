@@ -15,6 +15,7 @@ use rustledger_core::{
 use crate::ast::{
     BalancesQuery, BinaryOp, BinaryOperator, Expr, FromClause, FunctionCall, JournalQuery, Literal,
     OrderSpec, PrintQuery, Query, SelectQuery, SortDirection, Target, UnaryOp, UnaryOperator,
+    WindowFunction,
 };
 use crate::error::QueryError;
 
@@ -89,6 +90,17 @@ pub struct PostingContext<'a> {
     pub posting_index: usize,
     /// Running balance after this posting (optional).
     pub balance: Option<Inventory>,
+}
+
+/// Context for window function evaluation.
+#[derive(Debug, Clone)]
+pub struct WindowContext {
+    /// Row number within the partition (1-based).
+    pub row_number: usize,
+    /// Rank within the partition (1-based, ties get same rank).
+    pub rank: usize,
+    /// Dense rank within the partition (1-based, no gaps after ties).
+    pub dense_rank: usize,
 }
 
 /// Query executor.
@@ -166,9 +178,16 @@ impl<'a> Executor<'a> {
 
     /// Execute a SELECT query.
     fn execute_select(&self, query: &SelectQuery) -> Result<QueryResult, QueryError> {
+        // Check if we have a subquery
+        if let Some(from) = &query.from {
+            if let Some(subquery) = &from.subquery {
+                return self.execute_select_from_subquery(query, subquery);
+            }
+        }
+
         // Determine column names
         let column_names = self.resolve_column_names(&query.targets)?;
-        let mut result = QueryResult::new(column_names);
+        let mut result = QueryResult::new(column_names.clone());
 
         // Collect matching postings
         let postings = self.collect_postings(query.from.as_ref(), query.where_clause.as_ref())?;
@@ -184,12 +203,36 @@ impl<'a> Executor<'a> {
             let grouped = self.group_postings(&postings, query.group_by.as_ref())?;
             for (_, group) in grouped {
                 let row = self.evaluate_aggregate_row(&query.targets, &group)?;
+
+                // Apply HAVING filter on aggregated row
+                if let Some(having_expr) = &query.having {
+                    if !self.evaluate_having_filter(having_expr, &row, &column_names, &query.targets, &group)? {
+                        continue;
+                    }
+                }
+
                 result.add_row(row);
             }
         } else {
+            // Check if query has window functions
+            let has_windows = Self::has_window_functions(&query.targets);
+            let window_contexts = if has_windows {
+                if let Some(wf) = Self::find_window_function(&query.targets) {
+                    Some(self.compute_window_contexts(&postings, wf)?)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
             // Simple query - one row per posting
-            for ctx in &postings {
-                let row = self.evaluate_row(&query.targets, ctx)?;
+            for (i, ctx) in postings.iter().enumerate() {
+                let row = if let Some(ref wctxs) = window_contexts {
+                    self.evaluate_row_with_window(&query.targets, ctx, Some(&wctxs[i]))?
+                } else {
+                    self.evaluate_row(&query.targets, ctx)?
+                };
                 if query.distinct {
                     // Check for duplicates
                     if !result.rows.contains(&row) {
@@ -199,6 +242,11 @@ impl<'a> Executor<'a> {
                     result.add_row(row);
                 }
             }
+        }
+
+        // Apply PIVOT BY transformation
+        if let Some(pivot_exprs) = &query.pivot_by {
+            result = self.apply_pivot(&result, pivot_exprs, &query.targets)?;
         }
 
         // Apply ORDER BY
@@ -212,6 +260,159 @@ impl<'a> Executor<'a> {
         }
 
         Ok(result)
+    }
+
+    /// Execute a SELECT query that sources from a subquery.
+    fn execute_select_from_subquery(
+        &self,
+        outer_query: &SelectQuery,
+        inner_query: &SelectQuery,
+    ) -> Result<QueryResult, QueryError> {
+        // Execute the inner query first
+        let inner_result = self.execute_select(inner_query)?;
+
+        // Build a column name -> index mapping for the inner result
+        let inner_column_map: HashMap<String, usize> = inner_result
+            .columns
+            .iter()
+            .enumerate()
+            .map(|(i, name)| (name.to_lowercase(), i))
+            .collect();
+
+        // Determine outer column names
+        let outer_column_names = self.resolve_subquery_column_names(&outer_query.targets, &inner_result.columns)?;
+        let mut result = QueryResult::new(outer_column_names);
+
+        // Process each row from the inner result
+        for inner_row in &inner_result.rows {
+            // Apply outer WHERE clause if present
+            if let Some(where_expr) = &outer_query.where_clause {
+                if !self.evaluate_subquery_filter(where_expr, inner_row, &inner_column_map)? {
+                    continue;
+                }
+            }
+
+            // Evaluate outer targets
+            let outer_row = self.evaluate_subquery_row(&outer_query.targets, inner_row, &inner_column_map)?;
+
+            if outer_query.distinct {
+                if !result.rows.contains(&outer_row) {
+                    result.add_row(outer_row);
+                }
+            } else {
+                result.add_row(outer_row);
+            }
+        }
+
+        // Apply ORDER BY
+        if let Some(order_by) = &outer_query.order_by {
+            self.sort_results(&mut result, order_by)?;
+        }
+
+        // Apply LIMIT
+        if let Some(limit) = outer_query.limit {
+            result.rows.truncate(limit as usize);
+        }
+
+        Ok(result)
+    }
+
+    /// Resolve column names for a query from a subquery.
+    fn resolve_subquery_column_names(
+        &self,
+        targets: &[Target],
+        inner_columns: &[String],
+    ) -> Result<Vec<String>, QueryError> {
+        let mut names = Vec::new();
+        for (i, target) in targets.iter().enumerate() {
+            if let Some(alias) = &target.alias {
+                names.push(alias.clone());
+            } else if matches!(target.expr, Expr::Wildcard) {
+                // Expand wildcard to all inner columns
+                names.extend(inner_columns.iter().cloned());
+            } else {
+                names.push(self.expr_to_name(&target.expr, i));
+            }
+        }
+        Ok(names)
+    }
+
+    /// Evaluate a filter expression against a subquery row.
+    fn evaluate_subquery_filter(
+        &self,
+        expr: &Expr,
+        row: &[Value],
+        column_map: &HashMap<String, usize>,
+    ) -> Result<bool, QueryError> {
+        let val = self.evaluate_subquery_expr(expr, row, column_map)?;
+        self.to_bool(&val)
+    }
+
+    /// Evaluate an expression against a subquery row.
+    fn evaluate_subquery_expr(
+        &self,
+        expr: &Expr,
+        row: &[Value],
+        column_map: &HashMap<String, usize>,
+    ) -> Result<Value, QueryError> {
+        match expr {
+            Expr::Wildcard => Err(QueryError::Evaluation(
+                "Wildcard not allowed in expression context".to_string(),
+            )),
+            Expr::Column(name) => {
+                let lower = name.to_lowercase();
+                if let Some(&idx) = column_map.get(&lower) {
+                    Ok(row.get(idx).cloned().unwrap_or(Value::Null))
+                } else {
+                    Err(QueryError::Evaluation(format!(
+                        "Unknown column '{}' in subquery result",
+                        name
+                    )))
+                }
+            }
+            Expr::Literal(lit) => self.evaluate_literal(lit),
+            Expr::Function(func) => {
+                // Evaluate function arguments
+                let args: Vec<Value> = func
+                    .args
+                    .iter()
+                    .map(|a| self.evaluate_subquery_expr(a, row, column_map))
+                    .collect::<Result<Vec<_>, _>>()?;
+                self.evaluate_function_on_values(&func.name, &args)
+            }
+            Expr::BinaryOp(op) => {
+                let left = self.evaluate_subquery_expr(&op.left, row, column_map)?;
+                let right = self.evaluate_subquery_expr(&op.right, row, column_map)?;
+                self.binary_op_on_values(op.op, &left, &right)
+            }
+            Expr::UnaryOp(op) => {
+                let val = self.evaluate_subquery_expr(&op.operand, row, column_map)?;
+                self.unary_op_on_value(op.op, &val)
+            }
+            Expr::Paren(inner) => self.evaluate_subquery_expr(inner, row, column_map),
+            Expr::Window(_) => Err(QueryError::Evaluation(
+                "Window functions not supported in subquery expressions".to_string(),
+            )),
+        }
+    }
+
+    /// Evaluate a row of targets against a subquery row.
+    fn evaluate_subquery_row(
+        &self,
+        targets: &[Target],
+        inner_row: &[Value],
+        column_map: &HashMap<String, usize>,
+    ) -> Result<Row, QueryError> {
+        let mut row = Vec::new();
+        for target in targets {
+            if matches!(target.expr, Expr::Wildcard) {
+                // Expand wildcard to all values from inner row
+                row.extend(inner_row.iter().cloned());
+            } else {
+                row.push(self.evaluate_subquery_expr(&target.expr, inner_row, column_map)?);
+            }
+        }
+        Ok(row)
     }
 
     /// Execute a JOURNAL query.
@@ -699,6 +900,13 @@ impl<'a> Executor<'a> {
             Expr::Column(name) => self.evaluate_column(name, ctx),
             Expr::Literal(lit) => self.evaluate_literal(lit),
             Expr::Function(func) => self.evaluate_function(func, ctx),
+            Expr::Window(_) => {
+                // Window functions are evaluated at the query level, not per-posting
+                // This case should not be reached; window values are pre-computed
+                Err(QueryError::Evaluation(
+                    "Window function cannot be evaluated in posting context".to_string(),
+                ))
+            }
             Expr::BinaryOp(op) => self.evaluate_binary_op(op, ctx),
             Expr::UnaryOp(op) => self.evaluate_unary_op(op, ctx),
             Expr::Paren(inner) => self.evaluate_expr(inner, ctx),
@@ -1402,6 +1610,124 @@ impl<'a> Executor<'a> {
         Ok(Value::Null)
     }
 
+    /// Evaluate a function with pre-evaluated arguments (for subquery context).
+    fn evaluate_function_on_values(
+        &self,
+        name: &str,
+        args: &[Value],
+    ) -> Result<Value, QueryError> {
+        let name_upper = name.to_uppercase();
+        match name_upper.as_str() {
+            // Date functions
+            "TODAY" => Ok(Value::Date(chrono::Local::now().date_naive())),
+            "YEAR" => {
+                Self::require_args_count(&name_upper, args, 1)?;
+                match &args[0] {
+                    Value::Date(d) => Ok(Value::Integer(d.year().into())),
+                    _ => Err(QueryError::Type("YEAR expects a date".to_string())),
+                }
+            }
+            "MONTH" => {
+                Self::require_args_count(&name_upper, args, 1)?;
+                match &args[0] {
+                    Value::Date(d) => Ok(Value::Integer(d.month().into())),
+                    _ => Err(QueryError::Type("MONTH expects a date".to_string())),
+                }
+            }
+            "DAY" => {
+                Self::require_args_count(&name_upper, args, 1)?;
+                match &args[0] {
+                    Value::Date(d) => Ok(Value::Integer(d.day().into())),
+                    _ => Err(QueryError::Type("DAY expects a date".to_string())),
+                }
+            }
+            // String functions
+            "LENGTH" => {
+                Self::require_args_count(&name_upper, args, 1)?;
+                match &args[0] {
+                    Value::String(s) => Ok(Value::Integer(s.len() as i64)),
+                    _ => Err(QueryError::Type("LENGTH expects a string".to_string())),
+                }
+            }
+            "UPPER" => {
+                Self::require_args_count(&name_upper, args, 1)?;
+                match &args[0] {
+                    Value::String(s) => Ok(Value::String(s.to_uppercase())),
+                    _ => Err(QueryError::Type("UPPER expects a string".to_string())),
+                }
+            }
+            "LOWER" => {
+                Self::require_args_count(&name_upper, args, 1)?;
+                match &args[0] {
+                    Value::String(s) => Ok(Value::String(s.to_lowercase())),
+                    _ => Err(QueryError::Type("LOWER expects a string".to_string())),
+                }
+            }
+            "TRIM" => {
+                Self::require_args_count(&name_upper, args, 1)?;
+                match &args[0] {
+                    Value::String(s) => Ok(Value::String(s.trim().to_string())),
+                    _ => Err(QueryError::Type("TRIM expects a string".to_string())),
+                }
+            }
+            // Math functions
+            "ABS" => {
+                Self::require_args_count(&name_upper, args, 1)?;
+                match &args[0] {
+                    Value::Number(n) => Ok(Value::Number(n.abs())),
+                    Value::Integer(i) => Ok(Value::Integer(i.abs())),
+                    _ => Err(QueryError::Type("ABS expects a number".to_string())),
+                }
+            }
+            "ROUND" => {
+                if args.is_empty() || args.len() > 2 {
+                    return Err(QueryError::InvalidArguments(
+                        "ROUND".to_string(),
+                        "expected 1 or 2 arguments".to_string(),
+                    ));
+                }
+                match &args[0] {
+                    Value::Number(n) => {
+                        let scale = if args.len() == 2 {
+                            match &args[1] {
+                                Value::Integer(i) => *i as u32,
+                                _ => 0,
+                            }
+                        } else {
+                            0
+                        };
+                        Ok(Value::Number(n.round_dp(scale)))
+                    }
+                    Value::Integer(i) => Ok(Value::Integer(*i)),
+                    _ => Err(QueryError::Type("ROUND expects a number".to_string())),
+                }
+            }
+            // Utility functions
+            "COALESCE" => {
+                for arg in args {
+                    if !matches!(arg, Value::Null) {
+                        return Ok(arg.clone());
+                    }
+                }
+                Ok(Value::Null)
+            }
+            // Aggregate functions return Null when evaluated on a single row
+            "SUM" | "COUNT" | "MIN" | "MAX" | "FIRST" | "LAST" | "AVG" => Ok(Value::Null),
+            _ => Err(QueryError::UnknownFunction(name.to_string())),
+        }
+    }
+
+    /// Helper to require a specific number of arguments (for pre-evaluated args).
+    fn require_args_count(name: &str, args: &[Value], expected: usize) -> Result<(), QueryError> {
+        if args.len() != expected {
+            return Err(QueryError::InvalidArguments(
+                name.to_string(),
+                format!("expected {} argument(s), got {}", expected, args.len()),
+            ));
+        }
+        Ok(())
+    }
+
     /// Helper to require a specific number of arguments.
     fn require_args(name: &str, func: &FunctionCall, expected: usize) -> Result<(), QueryError> {
         if func.args.len() != expected {
@@ -1485,14 +1811,19 @@ impl<'a> Executor<'a> {
     /// Evaluate a unary operation.
     fn evaluate_unary_op(&self, op: &UnaryOp, ctx: &PostingContext) -> Result<Value, QueryError> {
         let val = self.evaluate_expr(&op.operand, ctx)?;
-        match op.op {
+        self.unary_op_on_value(op.op, &val)
+    }
+
+    /// Apply a unary operator to a value.
+    fn unary_op_on_value(&self, op: UnaryOperator, val: &Value) -> Result<Value, QueryError> {
+        match op {
             UnaryOperator::Not => {
-                let b = self.to_bool(&val)?;
+                let b = self.to_bool(val)?;
                 Ok(Value::Boolean(!b))
             }
             UnaryOperator::Neg => match val {
-                Value::Number(n) => Ok(Value::Number(-n)),
-                Value::Integer(i) => Ok(Value::Integer(-i)),
+                Value::Number(n) => Ok(Value::Number(-*n)),
+                Value::Integer(i) => Ok(Value::Integer(-*i)),
                 _ => Err(QueryError::Type(
                     "negation requires numeric value".to_string(),
                 )),
@@ -1593,6 +1924,16 @@ impl<'a> Executor<'a> {
         }
     }
 
+    /// Check if an expression is a window function.
+    fn is_window_expr(expr: &Expr) -> bool {
+        matches!(expr, Expr::Window(_))
+    }
+
+    /// Check if any target contains a window function.
+    fn has_window_functions(targets: &[Target]) -> bool {
+        targets.iter().any(|t| Self::is_window_expr(&t.expr))
+    }
+
     /// Resolve column names from targets.
     fn resolve_column_names(&self, targets: &[Target]) -> Result<Vec<String>, QueryError> {
         let mut names = Vec::new();
@@ -1612,12 +1953,23 @@ impl<'a> Executor<'a> {
             Expr::Wildcard => "*".to_string(),
             Expr::Column(name) => name.clone(),
             Expr::Function(func) => func.name.clone(),
+            Expr::Window(wf) => wf.name.clone(),
             _ => format!("col{index}"),
         }
     }
 
     /// Evaluate a row of results for non-aggregate query.
     fn evaluate_row(&self, targets: &[Target], ctx: &PostingContext) -> Result<Row, QueryError> {
+        self.evaluate_row_with_window(targets, ctx, None)
+    }
+
+    /// Evaluate a row with optional window context.
+    fn evaluate_row_with_window(
+        &self,
+        targets: &[Target],
+        ctx: &PostingContext,
+        window_ctx: Option<&WindowContext>,
+    ) -> Result<Row, QueryError> {
         let mut row = Vec::new();
         for target in targets {
             if matches!(target.expr, Expr::Wildcard) {
@@ -1638,11 +1990,167 @@ impl<'a> Executor<'a> {
                         .amount()
                         .map_or(Value::Null, |u| Value::Amount(u.clone())),
                 );
+            } else if let Expr::Window(wf) = &target.expr {
+                // Handle window function
+                row.push(self.evaluate_window_function(wf, window_ctx)?);
             } else {
                 row.push(self.evaluate_expr(&target.expr, ctx)?);
             }
         }
         Ok(row)
+    }
+
+    /// Evaluate a window function.
+    fn evaluate_window_function(
+        &self,
+        wf: &WindowFunction,
+        window_ctx: Option<&WindowContext>,
+    ) -> Result<Value, QueryError> {
+        let ctx = window_ctx.ok_or_else(|| {
+            QueryError::Evaluation("Window function requires window context".to_string())
+        })?;
+
+        match wf.name.to_uppercase().as_str() {
+            "ROW_NUMBER" => Ok(Value::Integer(ctx.row_number as i64)),
+            "RANK" => Ok(Value::Integer(ctx.rank as i64)),
+            "DENSE_RANK" => Ok(Value::Integer(ctx.dense_rank as i64)),
+            _ => Err(QueryError::Evaluation(format!(
+                "Window function '{}' not yet implemented",
+                wf.name
+            ))),
+        }
+    }
+
+    /// Compute window contexts for all postings based on the window spec.
+    fn compute_window_contexts(
+        &self,
+        postings: &[PostingContext],
+        wf: &WindowFunction,
+    ) -> Result<Vec<WindowContext>, QueryError> {
+        let spec = &wf.over;
+
+        // Compute partition keys for each posting
+        let mut partition_keys: Vec<String> = Vec::with_capacity(postings.len());
+        for ctx in postings {
+            if let Some(partition_exprs) = &spec.partition_by {
+                let mut key_values = Vec::new();
+                for expr in partition_exprs {
+                    key_values.push(self.evaluate_expr(expr, ctx)?);
+                }
+                partition_keys.push(Self::make_group_key(&key_values));
+            } else {
+                // No partition - all rows in one partition
+                partition_keys.push(String::new());
+            }
+        }
+
+        // Group posting indices by partition key
+        let mut partitions: HashMap<String, Vec<usize>> = HashMap::new();
+        for (idx, key) in partition_keys.iter().enumerate() {
+            partitions.entry(key.clone()).or_default().push(idx);
+        }
+
+        // Compute order values for sorting within partitions
+        let mut order_values: Vec<Vec<Value>> = Vec::with_capacity(postings.len());
+        for ctx in postings {
+            if let Some(order_specs) = &spec.order_by {
+                let mut values = Vec::new();
+                for order_spec in order_specs {
+                    values.push(self.evaluate_expr(&order_spec.expr, ctx)?);
+                }
+                order_values.push(values);
+            } else {
+                order_values.push(Vec::new());
+            }
+        }
+
+        // Initialize window contexts
+        let mut window_contexts: Vec<WindowContext> = vec![
+            WindowContext {
+                row_number: 0,
+                rank: 0,
+                dense_rank: 0,
+            };
+            postings.len()
+        ];
+
+        // Process each partition
+        for indices in partitions.values() {
+            // Sort indices within partition by order values
+            let mut sorted_indices: Vec<usize> = indices.clone();
+            if spec.order_by.is_some() {
+                let order_specs = spec.order_by.as_ref().unwrap();
+                sorted_indices.sort_by(|&a, &b| {
+                    let vals_a = &order_values[a];
+                    let vals_b = &order_values[b];
+                    for (i, (va, vb)) in vals_a.iter().zip(vals_b.iter()).enumerate() {
+                        let cmp = self.compare_values_for_sort(va, vb);
+                        if cmp != std::cmp::Ordering::Equal {
+                            return if order_specs.get(i).map_or(false, |s| {
+                                s.direction == SortDirection::Desc
+                            }) {
+                                cmp.reverse()
+                            } else {
+                                cmp
+                            };
+                        }
+                    }
+                    std::cmp::Ordering::Equal
+                });
+            }
+
+            // Assign ranks within the partition
+            let mut row_num = 1;
+            let mut rank = 1;
+            let mut dense_rank = 1;
+            let mut prev_values: Option<&Vec<Value>> = None;
+
+            for (position, &original_idx) in sorted_indices.iter().enumerate() {
+                let current_values = &order_values[original_idx];
+
+                // Check if this row has the same order values as the previous row
+                let is_tie = if let Some(prev) = prev_values {
+                    current_values == prev
+                } else {
+                    false
+                };
+
+                if is_tie {
+                    // Same values as previous - keep same rank, but increment row_number
+                    window_contexts[original_idx] = WindowContext {
+                        row_number: row_num,
+                        rank,
+                        dense_rank,
+                    };
+                } else {
+                    // New value - update ranks
+                    if position > 0 {
+                        rank = position + 1;
+                        dense_rank += 1;
+                    }
+                    window_contexts[original_idx] = WindowContext {
+                        row_number: row_num,
+                        rank,
+                        dense_rank,
+                    };
+                }
+
+                row_num += 1;
+                prev_values = Some(current_values);
+            }
+        }
+
+        Ok(window_contexts)
+    }
+
+    /// Extract the first window function from targets (for getting the window spec).
+    fn find_window_function(targets: &[Target]) -> Option<&WindowFunction> {
+        for target in targets {
+            if let Expr::Window(wf) = &target.expr {
+                return Some(wf);
+            }
+        }
+        None
     }
 
     /// Generate a hashable key from a vector of Values.
@@ -1966,11 +2474,56 @@ impl<'a> Executor<'a> {
                 let r = self.to_bool(right)?;
                 Ok(Value::Boolean(l || r))
             }
+            BinaryOperator::Regex => {
+                // ~ operator: string matches regex pattern (simple contains check)
+                let s = match left {
+                    Value::String(s) => s,
+                    _ => {
+                        return Err(QueryError::Type(
+                            "regex requires string left operand".to_string(),
+                        ));
+                    }
+                };
+                let pattern = match right {
+                    Value::String(p) => p,
+                    _ => {
+                        return Err(QueryError::Type(
+                            "regex requires string pattern".to_string(),
+                        ));
+                    }
+                };
+                // Use regex cache for pattern matching
+                let regex_result = self.get_or_compile_regex(pattern);
+                let matches = if let Some(regex) = regex_result {
+                    regex.is_match(s)
+                } else {
+                    s.contains(pattern)
+                };
+                Ok(Value::Boolean(matches))
+            }
+            BinaryOperator::In => {
+                // Check if left value is in right set
+                match right {
+                    Value::StringSet(set) => {
+                        let needle = match left {
+                            Value::String(s) => s,
+                            _ => {
+                                return Err(QueryError::Type(
+                                    "IN requires string left operand".to_string(),
+                                ));
+                            }
+                        };
+                        Ok(Value::Boolean(set.contains(needle)))
+                    }
+                    _ => Err(QueryError::Type(
+                        "IN requires set right operand".to_string(),
+                    )),
+                }
+            }
             BinaryOperator::Add => self.arithmetic_op(left, right, |a, b| a + b),
             BinaryOperator::Sub => self.arithmetic_op(left, right, |a, b| a - b),
             BinaryOperator::Mul => self.arithmetic_op(left, right, |a, b| a * b),
             BinaryOperator::Div => self.arithmetic_op(left, right, |a, b| a / b),
-            _ => Err(QueryError::Type("unsupported operation".to_string())),
         }
     }
 
@@ -2053,7 +2606,282 @@ impl<'a> Executor<'a> {
             (Value::String(a), Value::String(b)) => a.cmp(b),
             (Value::Date(a), Value::Date(b)) => a.cmp(b),
             (Value::Boolean(a), Value::Boolean(b)) => a.cmp(b),
+            // Compare amounts by their numeric value (same currency assumed)
+            (Value::Amount(a), Value::Amount(b)) => a.number.cmp(&b.number),
+            // Compare positions by their units' numeric value
+            (Value::Position(a), Value::Position(b)) => a.units.number.cmp(&b.units.number),
+            // Compare inventories by first position's value (for single-currency)
+            (Value::Inventory(a), Value::Inventory(b)) => {
+                let a_val = a.positions().first().map(|p| &p.units.number);
+                let b_val = b.positions().first().map(|p| &p.units.number);
+                match (a_val, b_val) {
+                    (Some(av), Some(bv)) => av.cmp(bv),
+                    (Some(_), None) => std::cmp::Ordering::Less,
+                    (None, Some(_)) => std::cmp::Ordering::Greater,
+                    (None, None) => std::cmp::Ordering::Equal,
+                }
+            }
             _ => std::cmp::Ordering::Equal, // Can't compare other types
+        }
+    }
+
+    /// Evaluate a HAVING clause filter on an aggregated row.
+    ///
+    /// The HAVING clause can reference:
+    /// - Column names/aliases from the SELECT clause
+    /// - Aggregate functions (evaluated on the group)
+    fn evaluate_having_filter(
+        &self,
+        having_expr: &Expr,
+        row: &[Value],
+        column_names: &[String],
+        targets: &[Target],
+        group: &[&PostingContext],
+    ) -> Result<bool, QueryError> {
+        // Build a map of column name -> index for quick lookup
+        let col_map: HashMap<String, usize> = column_names
+            .iter()
+            .enumerate()
+            .map(|(i, name)| (name.to_uppercase(), i))
+            .collect();
+
+        // Also map aliases
+        let alias_map: HashMap<String, usize> = targets
+            .iter()
+            .enumerate()
+            .filter_map(|(i, t)| t.alias.as_ref().map(|a| (a.to_uppercase(), i)))
+            .collect();
+
+        let val = self.evaluate_having_expr(having_expr, row, &col_map, &alias_map, group)?;
+
+        match val {
+            Value::Boolean(b) => Ok(b),
+            Value::Null => Ok(false), // NULL is treated as false in HAVING
+            _ => Err(QueryError::Type(
+                "HAVING clause must evaluate to boolean".to_string(),
+            )),
+        }
+    }
+
+    /// Evaluate an expression in HAVING context (can reference aggregated values).
+    fn evaluate_having_expr(
+        &self,
+        expr: &Expr,
+        row: &[Value],
+        col_map: &HashMap<String, usize>,
+        alias_map: &HashMap<String, usize>,
+        group: &[&PostingContext],
+    ) -> Result<Value, QueryError> {
+        match expr {
+            Expr::Column(name) => {
+                let upper_name = name.to_uppercase();
+                // Try alias first, then column name
+                if let Some(&idx) = alias_map.get(&upper_name) {
+                    Ok(row.get(idx).cloned().unwrap_or(Value::Null))
+                } else if let Some(&idx) = col_map.get(&upper_name) {
+                    Ok(row.get(idx).cloned().unwrap_or(Value::Null))
+                } else {
+                    Err(QueryError::Evaluation(format!(
+                        "Column '{}' not found in SELECT clause for HAVING",
+                        name
+                    )))
+                }
+            }
+            Expr::Literal(lit) => self.evaluate_literal(lit),
+            Expr::Function(_) => {
+                // Re-evaluate aggregate function on group
+                self.evaluate_aggregate_expr(expr, group)
+            }
+            Expr::BinaryOp(op) => {
+                let left = self.evaluate_having_expr(&op.left, row, col_map, alias_map, group)?;
+                let right = self.evaluate_having_expr(&op.right, row, col_map, alias_map, group)?;
+                self.binary_op_on_values(op.op, &left, &right)
+            }
+            Expr::UnaryOp(op) => {
+                let val = self.evaluate_having_expr(&op.operand, row, col_map, alias_map, group)?;
+                match op.op {
+                    UnaryOperator::Not => {
+                        let b = self.to_bool(&val)?;
+                        Ok(Value::Boolean(!b))
+                    }
+                    UnaryOperator::Neg => match val {
+                        Value::Number(n) => Ok(Value::Number(-n)),
+                        Value::Integer(i) => Ok(Value::Integer(-i)),
+                        _ => Err(QueryError::Type("Cannot negate non-numeric value".to_string())),
+                    },
+                }
+            }
+            Expr::Paren(inner) => self.evaluate_having_expr(inner, row, col_map, alias_map, group),
+            Expr::Wildcard => Err(QueryError::Evaluation(
+                "Wildcard not allowed in HAVING clause".to_string(),
+            )),
+            Expr::Window(_) => Err(QueryError::Evaluation(
+                "Window functions not allowed in HAVING clause".to_string(),
+            )),
+        }
+    }
+
+    /// Apply PIVOT BY transformation to results.
+    ///
+    /// PIVOT BY transforms rows into columns based on pivot column values.
+    /// For example: `SELECT account, YEAR(date), SUM(amount) GROUP BY 1, 2 PIVOT BY YEAR(date)`
+    /// would create columns for each year.
+    fn apply_pivot(
+        &self,
+        result: &QueryResult,
+        pivot_exprs: &[Expr],
+        _targets: &[Target],
+    ) -> Result<QueryResult, QueryError> {
+        if pivot_exprs.is_empty() {
+            return Ok(result.clone());
+        }
+
+        // For simplicity, we'll pivot on the first expression only
+        // A full implementation would support multiple pivot columns
+        let pivot_expr = &pivot_exprs[0];
+
+        // Find which column in the result matches the pivot expression
+        let pivot_col_idx = self.find_pivot_column(result, pivot_expr)?;
+
+        // Collect unique pivot values
+        let mut pivot_values: Vec<Value> = result
+            .rows
+            .iter()
+            .map(|row| row.get(pivot_col_idx).cloned().unwrap_or(Value::Null))
+            .collect();
+        pivot_values.sort_by(|a, b| self.compare_values_for_sort(a, b));
+        pivot_values.dedup();
+
+        // Build new column names: original columns (except pivot) + pivot values
+        let mut new_columns: Vec<String> = result
+            .columns
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != pivot_col_idx)
+            .map(|(_, c)| c.clone())
+            .collect();
+
+        // Identify the "value" column (usually the last one, or the one with aggregate)
+        let value_col_idx = result.columns.len() - 1;
+
+        // Add pivot value columns
+        for pv in &pivot_values {
+            new_columns.push(self.value_to_string(pv));
+        }
+
+        let mut new_result = QueryResult::new(new_columns);
+
+        // Group rows by non-pivot, non-value columns
+        let group_cols: Vec<usize> = (0..result.columns.len())
+            .filter(|i| *i != pivot_col_idx && *i != value_col_idx)
+            .collect();
+
+        let mut groups: HashMap<String, Vec<&Row>> = HashMap::new();
+        for row in &result.rows {
+            let key: String = group_cols
+                .iter()
+                .map(|&i| self.value_to_string(&row[i]))
+                .collect::<Vec<_>>()
+                .join("|");
+            groups.entry(key).or_default().push(row);
+        }
+
+        // Build pivoted rows
+        for (_key, group_rows) in groups {
+            let mut new_row: Vec<Value> = group_cols
+                .iter()
+                .map(|&i| group_rows[0][i].clone())
+                .collect();
+
+            // Add pivot values
+            for pv in &pivot_values {
+                let matching_row = group_rows.iter().find(|row| {
+                    row.get(pivot_col_idx)
+                        .map(|v| v == pv)
+                        .unwrap_or(false)
+                });
+                if let Some(row) = matching_row {
+                    new_row.push(row.get(value_col_idx).cloned().unwrap_or(Value::Null));
+                } else {
+                    new_row.push(Value::Null);
+                }
+            }
+
+            new_result.add_row(new_row);
+        }
+
+        Ok(new_result)
+    }
+
+    /// Find the column index matching the pivot expression.
+    fn find_pivot_column(&self, result: &QueryResult, pivot_expr: &Expr) -> Result<usize, QueryError> {
+        match pivot_expr {
+            Expr::Column(name) => {
+                let upper_name = name.to_uppercase();
+                result
+                    .columns
+                    .iter()
+                    .position(|c| c.to_uppercase() == upper_name)
+                    .ok_or_else(|| {
+                        QueryError::Evaluation(format!(
+                            "PIVOT BY column '{}' not found in SELECT",
+                            name
+                        ))
+                    })
+            }
+            Expr::Literal(Literal::Integer(n)) => {
+                let idx = (*n as usize).saturating_sub(1);
+                if idx < result.columns.len() {
+                    Ok(idx)
+                } else {
+                    Err(QueryError::Evaluation(format!(
+                        "PIVOT BY column index {} out of range",
+                        n
+                    )))
+                }
+            }
+            Expr::Literal(Literal::Number(n)) => {
+                // Numbers are parsed as Decimal - convert to integer index
+                use rust_decimal::prelude::ToPrimitive;
+                let idx = n.to_usize().unwrap_or(0).saturating_sub(1);
+                if idx < result.columns.len() {
+                    Ok(idx)
+                } else {
+                    Err(QueryError::Evaluation(format!(
+                        "PIVOT BY column index {} out of range",
+                        n
+                    )))
+                }
+            }
+            _ => {
+                // For complex expressions, try to find a matching column by string representation
+                // This is a simplified approach
+                Err(QueryError::Evaluation(
+                    "PIVOT BY must reference a column name or index".to_string(),
+                ))
+            }
+        }
+    }
+
+    /// Convert a value to string for display/grouping.
+    fn value_to_string(&self, val: &Value) -> String {
+        match val {
+            Value::String(s) => s.clone(),
+            Value::Number(n) => n.to_string(),
+            Value::Integer(i) => i.to_string(),
+            Value::Date(d) => d.to_string(),
+            Value::Boolean(b) => b.to_string(),
+            Value::Amount(a) => format!("{} {}", a.number, a.currency),
+            Value::Position(p) => format!("{}", p.units),
+            Value::Inventory(inv) => {
+                inv.positions()
+                    .iter()
+                    .map(|p| format!("{}", p.units))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            }
+            Value::StringSet(ss) => ss.iter().cloned().collect::<Vec<_>>().join(", "),
+            Value::Null => "NULL".to_string(),
         }
     }
 }

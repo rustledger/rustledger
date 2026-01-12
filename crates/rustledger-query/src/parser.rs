@@ -9,6 +9,7 @@ use std::str::FromStr;
 use crate::ast::{
     BalancesQuery, BinaryOperator, Expr, FromClause, FunctionCall, JournalQuery, Literal,
     OrderSpec, PrintQuery, Query, SelectQuery, SortDirection, Target, UnaryOperator,
+    WindowFunction, WindowSpec,
 };
 use crate::error::{ParseError, ParseErrorKind};
 use rustledger_core::NaiveDate;
@@ -75,39 +76,67 @@ fn query_parser<'a>() -> impl Parser<'a, ParserInput<'a>, Query, ParserExtra<'a>
     .then_ignore(just(';').or_not())
 }
 
-/// Parse a SELECT query.
+/// Parse a SELECT query with optional subquery support.
 fn select_query<'a>() -> impl Parser<'a, ParserInput<'a>, SelectQuery, ParserExtra<'a>> {
-    kw("SELECT")
+    recursive(|select_parser| {
+        // Subquery in FROM clause: FROM (SELECT ...)
+        let subquery_from = ws1()
+            .ignore_then(kw("FROM"))
+            .ignore_then(ws1())
+            .ignore_then(just('('))
+            .ignore_then(ws())
+            .ignore_then(select_parser)
+            .then_ignore(ws())
+            .then_ignore(just(')'))
+            .map(|sq| Some(FromClause::from_subquery(sq)));
+
+        // Regular FROM clause
+        let regular_from = from_clause().map(Some);
+
+        kw("SELECT")
+            .ignore_then(ws1())
+            .ignore_then(
+                kw("DISTINCT")
+                    .then_ignore(ws1())
+                    .or_not()
+                    .map(|d| d.is_some()),
+            )
+            .then(targets())
+            .then(subquery_from.or(regular_from).or_not().map(|opt| opt.flatten()))
+            .then(where_clause().or_not())
+            .then(group_by_clause().or_not())
+            .then(having_clause().or_not())
+            .then(pivot_by_clause().or_not())
+            .then(order_by_clause().or_not())
+            .then(limit_clause().or_not())
+            .map(
+                |((((((((distinct, targets), from), where_clause), group_by), having), pivot_by), order_by), limit)| {
+                    SelectQuery {
+                        distinct,
+                        targets,
+                        from,
+                        where_clause,
+                        group_by,
+                        having,
+                        pivot_by,
+                        order_by,
+                        limit,
+                    }
+                },
+            )
+    })
+}
+
+/// Parse FROM clause.
+fn from_clause<'a>() -> impl Parser<'a, ParserInput<'a>, FromClause, ParserExtra<'a>> + Clone {
+    ws1()
+        .ignore_then(kw("FROM"))
         .ignore_then(ws1())
-        .ignore_then(
-            kw("DISTINCT")
-                .then_ignore(ws1())
-                .or_not()
-                .map(|d| d.is_some()),
-        )
-        .then(targets())
-        .then(from_clause().or_not())
-        .then(where_clause().or_not())
-        .then(group_by_clause().or_not())
-        .then(order_by_clause().or_not())
-        .then(limit_clause().or_not())
-        .map(
-            |((((((distinct, targets), from), where_clause), group_by), order_by), limit)| {
-                SelectQuery {
-                    distinct,
-                    targets,
-                    from,
-                    where_clause,
-                    group_by,
-                    order_by,
-                    limit,
-                }
-            },
-        )
+        .ignore_then(from_modifiers())
 }
 
 /// Parse target expressions.
-fn targets<'a>() -> impl Parser<'a, ParserInput<'a>, Vec<Target>, ParserExtra<'a>> {
+fn targets<'a>() -> impl Parser<'a, ParserInput<'a>, Vec<Target>, ParserExtra<'a>> + Clone {
     target()
         .separated_by(ws().then(just(',')).then(ws()))
         .at_least(1)
@@ -115,7 +144,7 @@ fn targets<'a>() -> impl Parser<'a, ParserInput<'a>, Vec<Target>, ParserExtra<'a
 }
 
 /// Parse a single target.
-fn target<'a>() -> impl Parser<'a, ParserInput<'a>, Target, ParserExtra<'a>> {
+fn target<'a>() -> impl Parser<'a, ParserInput<'a>, Target, ParserExtra<'a>> + Clone {
     expr()
         .then(
             ws1()
@@ -127,16 +156,8 @@ fn target<'a>() -> impl Parser<'a, ParserInput<'a>, Target, ParserExtra<'a>> {
         .map(|(expr, alias)| Target { expr, alias })
 }
 
-/// Parse FROM clause.
-fn from_clause<'a>() -> impl Parser<'a, ParserInput<'a>, FromClause, ParserExtra<'a>> {
-    ws1()
-        .ignore_then(kw("FROM"))
-        .ignore_then(ws1())
-        .ignore_then(from_modifiers())
-}
-
 /// Parse FROM modifiers (OPEN ON, CLOSE ON, CLEAR, filter).
-fn from_modifiers<'a>() -> impl Parser<'a, ParserInput<'a>, FromClause, ParserExtra<'a>> {
+fn from_modifiers<'a>() -> impl Parser<'a, ParserInput<'a>, FromClause, ParserExtra<'a>> + Clone {
     let open_on = kw("OPEN")
         .ignore_then(ws1())
         .ignore_then(kw("ON"))
@@ -162,16 +183,17 @@ fn from_modifiers<'a>() -> impl Parser<'a, ParserInput<'a>, FromClause, ParserEx
             close_on,
             clear,
             filter,
+            subquery: None,
         })
 }
 
 /// Parse FROM filter expression (predicates).
-fn from_filter<'a>() -> impl Parser<'a, ParserInput<'a>, Expr, ParserExtra<'a>> {
+fn from_filter<'a>() -> impl Parser<'a, ParserInput<'a>, Expr, ParserExtra<'a>> + Clone {
     expr()
 }
 
 /// Parse WHERE clause.
-fn where_clause<'a>() -> impl Parser<'a, ParserInput<'a>, Expr, ParserExtra<'a>> {
+fn where_clause<'a>() -> impl Parser<'a, ParserInput<'a>, Expr, ParserExtra<'a>> + Clone {
     ws1()
         .ignore_then(kw("WHERE"))
         .ignore_then(ws1())
@@ -179,7 +201,7 @@ fn where_clause<'a>() -> impl Parser<'a, ParserInput<'a>, Expr, ParserExtra<'a>>
 }
 
 /// Parse GROUP BY clause.
-fn group_by_clause<'a>() -> impl Parser<'a, ParserInput<'a>, Vec<Expr>, ParserExtra<'a>> {
+fn group_by_clause<'a>() -> impl Parser<'a, ParserInput<'a>, Vec<Expr>, ParserExtra<'a>> + Clone {
     ws1()
         .ignore_then(kw("GROUP"))
         .ignore_then(ws1())
@@ -193,8 +215,31 @@ fn group_by_clause<'a>() -> impl Parser<'a, ParserInput<'a>, Vec<Expr>, ParserEx
         )
 }
 
+/// Parse HAVING clause (filter on aggregated results).
+fn having_clause<'a>() -> impl Parser<'a, ParserInput<'a>, Expr, ParserExtra<'a>> + Clone {
+    ws1()
+        .ignore_then(kw("HAVING"))
+        .ignore_then(ws1())
+        .ignore_then(expr())
+}
+
+/// Parse PIVOT BY clause (pivot table transformation).
+fn pivot_by_clause<'a>() -> impl Parser<'a, ParserInput<'a>, Vec<Expr>, ParserExtra<'a>> + Clone {
+    ws1()
+        .ignore_then(kw("PIVOT"))
+        .ignore_then(ws1())
+        .ignore_then(kw("BY"))
+        .ignore_then(ws1())
+        .ignore_then(
+            expr()
+                .separated_by(ws().then(just(',')).then(ws()))
+                .at_least(1)
+                .collect(),
+        )
+}
+
 /// Parse ORDER BY clause.
-fn order_by_clause<'a>() -> impl Parser<'a, ParserInput<'a>, Vec<OrderSpec>, ParserExtra<'a>> {
+fn order_by_clause<'a>() -> impl Parser<'a, ParserInput<'a>, Vec<OrderSpec>, ParserExtra<'a>> + Clone {
     ws1()
         .ignore_then(kw("ORDER"))
         .ignore_then(ws1())
@@ -209,7 +254,7 @@ fn order_by_clause<'a>() -> impl Parser<'a, ParserInput<'a>, Vec<OrderSpec>, Par
 }
 
 /// Parse a single ORDER BY spec.
-fn order_spec<'a>() -> impl Parser<'a, ParserInput<'a>, OrderSpec, ParserExtra<'a>> {
+fn order_spec<'a>() -> impl Parser<'a, ParserInput<'a>, OrderSpec, ParserExtra<'a>> + Clone {
     expr()
         .then(
             ws1()
@@ -226,7 +271,7 @@ fn order_spec<'a>() -> impl Parser<'a, ParserInput<'a>, OrderSpec, ParserExtra<'
 }
 
 /// Parse LIMIT clause.
-fn limit_clause<'a>() -> impl Parser<'a, ParserInput<'a>, u64, ParserExtra<'a>> {
+fn limit_clause<'a>() -> impl Parser<'a, ParserInput<'a>, u64, ParserExtra<'a>> + Clone {
     ws1()
         .ignore_then(kw("LIMIT"))
         .ignore_then(ws1())
@@ -235,7 +280,7 @@ fn limit_clause<'a>() -> impl Parser<'a, ParserInput<'a>, u64, ParserExtra<'a>> 
 }
 
 /// Parse JOURNAL query.
-fn journal_query<'a>() -> impl Parser<'a, ParserInput<'a>, JournalQuery, ParserExtra<'a>> {
+fn journal_query<'a>() -> impl Parser<'a, ParserInput<'a>, JournalQuery, ParserExtra<'a>> + Clone {
     kw("JOURNAL")
         .ignore_then(ws1())
         .ignore_then(string_literal())
@@ -255,7 +300,7 @@ fn journal_query<'a>() -> impl Parser<'a, ParserInput<'a>, JournalQuery, ParserE
 }
 
 /// Parse BALANCES query.
-fn balances_query<'a>() -> impl Parser<'a, ParserInput<'a>, BalancesQuery, ParserExtra<'a>> {
+fn balances_query<'a>() -> impl Parser<'a, ParserInput<'a>, BalancesQuery, ParserExtra<'a>> + Clone {
     kw("BALANCES")
         .ignore_then(at_function().or_not())
         .then(
@@ -269,7 +314,7 @@ fn balances_query<'a>() -> impl Parser<'a, ParserInput<'a>, BalancesQuery, Parse
 }
 
 /// Parse PRINT query.
-fn print_query<'a>() -> impl Parser<'a, ParserInput<'a>, PrintQuery, ParserExtra<'a>> {
+fn print_query<'a>() -> impl Parser<'a, ParserInput<'a>, PrintQuery, ParserExtra<'a>> + Clone {
     kw("PRINT")
         .ignore_then(
             ws1()
@@ -282,7 +327,7 @@ fn print_query<'a>() -> impl Parser<'a, ParserInput<'a>, PrintQuery, ParserExtra
 }
 
 /// Parse AT function (e.g., AT cost, AT units).
-fn at_function<'a>() -> impl Parser<'a, ParserInput<'a>, String, ParserExtra<'a>> {
+fn at_function<'a>() -> impl Parser<'a, ParserInput<'a>, String, ParserExtra<'a>> + Clone {
     ws1()
         .ignore_then(kw("AT"))
         .ignore_then(ws1())
@@ -291,7 +336,7 @@ fn at_function<'a>() -> impl Parser<'a, ParserInput<'a>, String, ParserExtra<'a>
 
 /// Parse an expression (with precedence climbing).
 #[allow(clippy::large_stack_frames)]
-fn expr<'a>() -> impl Parser<'a, ParserInput<'a>, Expr, ParserExtra<'a>> {
+fn expr<'a>() -> impl Parser<'a, ParserInput<'a>, Expr, ParserExtra<'a>> + Clone {
     recursive(|expr| {
         let primary = primary_expr(expr.clone());
 
@@ -418,7 +463,7 @@ fn primary_expr<'a>(
     ))
 }
 
-/// Parse function call or column reference.
+/// Parse function call, window function, or column reference.
 fn function_call_or_column<'a>() -> impl Parser<'a, ParserInput<'a>, Expr, ParserExtra<'a>> + Clone
 {
     identifier()
@@ -430,12 +475,85 @@ fn function_call_or_column<'a>() -> impl Parser<'a, ParserInput<'a>, Expr, Parse
                 .then_ignore(just(')'))
                 .or_not(),
         )
-        .map(|(name, args)| {
+        .then(
+            // Optional OVER clause for window functions
+            ws1()
+                .ignore_then(kw("OVER"))
+                .ignore_then(ws())
+                .ignore_then(just('('))
+                .ignore_then(ws())
+                .ignore_then(window_spec())
+                .then_ignore(ws())
+                .then_ignore(just(')'))
+                .or_not(),
+        )
+        .map(|((name, args), over)| {
             if let Some(args) = args {
-                Expr::Function(FunctionCall { name, args })
+                if let Some(window_spec) = over {
+                    // Window function
+                    Expr::Window(WindowFunction {
+                        name,
+                        args,
+                        over: window_spec,
+                    })
+                } else {
+                    // Regular function
+                    Expr::Function(FunctionCall { name, args })
+                }
             } else {
                 Expr::Column(name)
             }
+        })
+}
+
+/// Parse window specification (PARTITION BY and ORDER BY).
+fn window_spec<'a>() -> impl Parser<'a, ParserInput<'a>, WindowSpec, ParserExtra<'a>> + Clone {
+    let partition_by = kw("PARTITION")
+        .ignore_then(ws1())
+        .ignore_then(kw("BY"))
+        .ignore_then(ws1())
+        .ignore_then(
+            simple_arg()
+                .separated_by(ws().then(just(',')).then(ws()))
+                .at_least(1)
+                .collect::<Vec<_>>(),
+        )
+        .then_ignore(ws());
+
+    let window_order_by = kw("ORDER")
+        .ignore_then(ws1())
+        .ignore_then(kw("BY"))
+        .ignore_then(ws1())
+        .ignore_then(
+            window_order_spec()
+                .separated_by(ws().then(just(',')).then(ws()))
+                .at_least(1)
+                .collect::<Vec<_>>(),
+        );
+
+    partition_by
+        .or_not()
+        .then(window_order_by.or_not())
+        .map(|(partition_by, order_by)| WindowSpec {
+            partition_by,
+            order_by,
+        })
+}
+
+/// Parse ORDER BY spec within window (simple version).
+fn window_order_spec<'a>() -> impl Parser<'a, ParserInput<'a>, OrderSpec, ParserExtra<'a>> + Clone {
+    simple_arg()
+        .then(
+            ws1()
+                .ignore_then(choice((
+                    kw("ASC").to(SortDirection::Asc),
+                    kw("DESC").to(SortDirection::Desc),
+                )))
+                .or_not(),
+        )
+        .map(|(expr, dir)| OrderSpec {
+            expr,
+            direction: dir.unwrap_or_default(),
         })
 }
 
@@ -744,5 +862,66 @@ mod tests {
     fn test_semicolon_optional() {
         assert!(parse("SELECT *").is_ok());
         assert!(parse("SELECT *;").is_ok());
+    }
+
+    #[test]
+    fn test_subquery_basic() {
+        let query = parse("SELECT * FROM (SELECT account, position)").unwrap();
+        match query {
+            Query::Select(sel) => {
+                assert!(sel.from.is_some());
+                let from = sel.from.unwrap();
+                assert!(from.subquery.is_some());
+                let subquery = from.subquery.unwrap();
+                assert_eq!(subquery.targets.len(), 2);
+            }
+            _ => panic!("Expected SELECT query"),
+        }
+    }
+
+    #[test]
+    fn test_subquery_with_groupby() {
+        let query = parse("SELECT account, total FROM (SELECT account, SUM(position) AS total GROUP BY account)").unwrap();
+        match query {
+            Query::Select(sel) => {
+                assert_eq!(sel.targets.len(), 2);
+                let from = sel.from.unwrap();
+                assert!(from.subquery.is_some());
+                let subquery = from.subquery.unwrap();
+                assert!(subquery.group_by.is_some());
+            }
+            _ => panic!("Expected SELECT query"),
+        }
+    }
+
+    #[test]
+    fn test_subquery_with_outer_where() {
+        let query = parse("SELECT * FROM (SELECT * WHERE year = 2024) WHERE account ~ \"Expenses:\"").unwrap();
+        match query {
+            Query::Select(sel) => {
+                // Outer WHERE
+                assert!(sel.where_clause.is_some());
+                // Subquery with its own WHERE
+                let from = sel.from.unwrap();
+                let subquery = from.subquery.unwrap();
+                assert!(subquery.where_clause.is_some());
+            }
+            _ => panic!("Expected SELECT query"),
+        }
+    }
+
+    #[test]
+    fn test_nested_subquery() {
+        // Two levels of nesting
+        let query = parse("SELECT * FROM (SELECT * FROM (SELECT account))").unwrap();
+        match query {
+            Query::Select(sel) => {
+                let from = sel.from.unwrap();
+                let subquery1 = from.subquery.unwrap();
+                let from2 = subquery1.from.unwrap();
+                assert!(from2.subquery.is_some());
+            }
+            _ => panic!("Expected SELECT query"),
+        }
     }
 }

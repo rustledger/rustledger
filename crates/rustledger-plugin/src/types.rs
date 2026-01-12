@@ -31,8 +31,8 @@ pub struct PluginOutput {
 /// special serialization handling (like `Decimal` and `NaiveDate`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DirectiveWrapper {
-    /// The type of directive.
-    #[serde(rename = "type")]
+    /// The type of directive (derived from data, not serialized to avoid duplicate keys).
+    #[serde(skip_serializing, default)]
     pub directive_type: String,
     /// The directive date (YYYY-MM-DD).
     pub date: String,

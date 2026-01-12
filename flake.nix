@@ -201,13 +201,16 @@
           pre-commit = {
             check.enable = true;
             settings.hooks = {
-              # Formatting (auto-fix, CI will catch issues if something slips through)
-              treefmt = {
+              # Rust formatting - matches CI (cargo fmt --all -- --check)
+              # Using cargo fmt instead of treefmt because treefmt requires
+              # additional formatters (shfmt, yamlfmt, mdformat) that may not
+              # be available outside the nix shell
+              rustfmt = {
                 enable = true;
-                entry = lib.mkForce "${pkgs.treefmt}/bin/treefmt --no-cache";
+                entry = lib.mkForce "cargo fmt --all --";
               };
 
-              # Rust
+              # Rust linting
               clippy = {
                 enable = true;
                 packageOverrides.cargo = rustToolchainWithWasm;

@@ -48,11 +48,14 @@
 //! let output = manager.execute_all(input)?;
 //! ```
 
-#![forbid(unsafe_code)]
+// Note: unsafe is needed for wasmtime Module::deserialize (caching compiled modules)
+#![deny(unsafe_code)]
 #![warn(missing_docs)]
 
 pub mod convert;
 pub mod native;
+#[cfg(feature = "python-plugins")]
+pub mod python;
 #[cfg(feature = "wasm-runtime")]
 pub mod runtime;
 pub mod types;

@@ -40,6 +40,7 @@ jobs:
             echo 'EOF';
           } >> $GITHUB_OUTPUT
       - name: Gemini Code Review
+        continue-on-error: true  # Don't block merges if quota exceeded
         uses: rubensflinco/gemini-code-review-action@1.0.5
         with:
           gemini_api_key: ${{ secrets.GEMINI_API_KEY }}

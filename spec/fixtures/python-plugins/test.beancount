@@ -1,0 +1,27 @@
+option "title" "Python Plugin Test"
+option "operating_currency" "USD"
+
+2020-01-01 commodity USD
+
+2020-01-01 open Assets:Cash USD
+2020-01-01 open Expenses:Food USD
+2020-01-01 open Expenses:Transport USD
+2020-01-01 open Income:Salary USD
+
+2020-01-15 * "Grocery Store" "Weekly groceries"
+  Assets:Cash  -75.00 USD
+  Expenses:Food  75.00 USD
+
+2020-01-16 * "Gas Station" "Fuel"
+  Assets:Cash  -45.00 USD
+  Expenses:Transport  45.00 USD
+
+2020-01-20 * "Restaurant"
+  Assets:Cash  -25.00 USD
+  Expenses:Food  25.00 USD
+
+2020-01-31 * "Employer" "January salary"
+  Assets:Cash  3000.00 USD
+  Income:Salary  -3000.00 USD
+
+2020-02-01 balance Assets:Cash  2855.00 USD

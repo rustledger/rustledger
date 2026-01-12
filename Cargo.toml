@@ -56,6 +56,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 wasm-bindgen = "0.2"
 serde-wasm-bindgen = "0.6"
 wasmtime = "40"
+wasmtime-wasi = "40"
 wat = "1"
 
 # Testing
@@ -71,6 +72,11 @@ ofxy = "0.2"
 
 # HTTP
 ureq = { version = "2", features = ["json"] }
+
+# Compression/Archive (for Python WASI download)
+flate2 = "1"
+zip = "2"
+sha2 = "0.10"
 
 # Async (if needed)
 tokio = { version = "1", features = ["full"] }

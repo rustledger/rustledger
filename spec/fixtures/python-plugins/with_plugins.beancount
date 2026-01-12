@@ -1,0 +1,28 @@
+; Test file with plugin directives for automatic loading
+option "title" "Plugin Auto-Load Test"
+option "operating_currency" "USD"
+
+; Native plugin - should use Rust implementation (fast)
+plugin "beancount.plugins.leafonly"
+
+; Native plugin - should use Rust implementation
+plugin "check_commodity"
+
+; Python file plugin - relative path
+plugin "./error_plugin.py"
+
+2020-01-01 commodity USD
+
+2020-01-01 open Assets:Cash USD
+2020-01-01 open Expenses:Food USD
+2020-01-01 open Expenses:Food:Groceries USD
+
+; This transaction has no payee - error_plugin.py should catch it
+2020-01-15 * "Weekly groceries"
+  Assets:Cash  -75.00 USD
+  Expenses:Food:Groceries  75.00 USD
+
+; This posts to non-leaf account - leafonly should catch it
+2020-01-20 * "Restaurant" "Lunch"
+  Assets:Cash  -25.00 USD
+  Expenses:Food  25.00 USD

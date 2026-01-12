@@ -15,15 +15,25 @@ readme = "../../README.md"
 [features]
 default = ["wasm-runtime"]
 wasm-runtime = ["wasmtime"]
+python-plugins = ["wasm-runtime", "wasmtime-wasi", "ureq", "zip", "sha2", "dirs", "tempfile"]
 
 [dependencies]
 rustledger-core.workspace = true
 wasmtime = { workspace = true, optional = true }
+wasmtime-wasi = { workspace = true, optional = true }
 serde.workspace = true
+serde_json.workspace = true
 rmp-serde.workspace = true
 thiserror.workspace = true
 anyhow.workspace = true
 rust_decimal.workspace = true
+
+# Python plugin support (optional)
+ureq = { workspace = true, optional = true }
+zip = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
+dirs = { workspace = true, optional = true }
+tempfile = { workspace = true, optional = true }
 
 [dev-dependencies]
 rust_decimal_macros.workspace = true

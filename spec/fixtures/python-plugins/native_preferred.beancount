@@ -1,0 +1,17 @@
+; Test that native plugins are preferred over Python
+option "title" "Native Plugin Priority Test"
+option "operating_currency" "USD"
+
+; These should all use native Rust implementations (fast)
+plugin "beancount.plugins.leafonly"
+plugin "beancount.plugins.check_commodity"
+plugin "implicit_prices"
+
+2020-01-01 commodity USD
+
+2020-01-01 open Assets:Cash USD
+2020-01-01 open Expenses:Food USD
+
+2020-01-15 * "Store" "Groceries"
+  Assets:Cash  -75.00 USD
+  Expenses:Food  75.00 USD

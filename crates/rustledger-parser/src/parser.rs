@@ -874,11 +874,27 @@ fn account<'a>() -> impl Parser<'a, ParserInput<'a>, String, ParserExtra<'a>> + 
         .map(|s: &str| s.to_string())
 }
 
-/// Parse a flag (* or ! or txn keyword).
+/// Parse a transaction flag.
+///
+/// Supports:
+/// - `*` - Completed (cleared)
+/// - `!` - Pending (needs review)
+/// - `txn` - Equivalent to `*`
+/// - `P` - Pad-generated (system use)
+/// - `S` - Summarization
+/// - `T` - Transfer
+/// - `C` - Conversion
+/// - `U` - Unrealized gains
+/// - `R` - Return (dividend/interest)
+/// - `M` - Merge
+/// - `#` - Bookmarked
+/// - `?` - Needs investigation
+/// - `%` - Partial
+/// - `&` - Reference
 fn flag<'a>() -> impl Parser<'a, ParserInput<'a>, char, ParserExtra<'a>> + Clone {
     choice((
-        one_of("*!"),
-        just("txn").to('*'), // 'txn' is equivalent to '*'
+        one_of("*!PSTCURM#?%&"),
+        just("txn").to('*'), // 'txn' keyword is equivalent to '*'
     ))
 }
 
@@ -914,11 +930,25 @@ fn metadata_key<'a>() -> impl Parser<'a, ParserInput<'a>, String, ParserExtra<'a
         .map(|s: &str| s.to_string())
 }
 
+/// Parse a boolean value (TRUE/FALSE, case-insensitive).
+fn boolean<'a>() -> impl Parser<'a, ParserInput<'a>, bool, ParserExtra<'a>> + Clone {
+    choice((
+        just("TRUE").to(true),
+        just("True").to(true),
+        just("true").to(true),
+        just("FALSE").to(false),
+        just("False").to(false),
+        just("false").to(false),
+    ))
+}
+
 /// Parse a metadata value.
 fn metadata_value<'a>() -> impl Parser<'a, ParserInput<'a>, MetaValue, ParserExtra<'a>> + Clone {
     choice((
         // String
         string_literal().map(MetaValue::String),
+        // Boolean (must be before account/currency to avoid matching as identifier)
+        boolean().map(MetaValue::Bool),
         // Account (must be before currency since currency is a prefix match)
         account().map(MetaValue::Account),
         // Tag

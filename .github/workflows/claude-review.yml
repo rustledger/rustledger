@@ -1,9 +1,12 @@
 # Automated PR code review using Claude Code
+# DISABLED: API credits exhausted - keeping for future use
 name: Claude Code Review
 on:
-  pull_request:
-    types: [opened, synchronize]
-    branches: [main]
+  # Disabled - uncomment to re-enable
+  # pull_request:
+  #   types: [opened, synchronize]
+  #   branches: [main]
+  workflow_dispatch:  # Allow manual trigger only
 # Prevent concurrent reviews on the same PR
 concurrency:
   group: claude-review-${{ github.event.pull_request.number }}

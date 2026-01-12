@@ -1,0 +1,32 @@
+# Automated PR code review using Gemini Flash
+name: Gemini Code Review
+on:
+  pull_request:
+    types: [opened, synchronize]
+    branches: [main]
+# Prevent concurrent reviews on the same PR
+concurrency:
+  group: gemini-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+jobs:
+  review:
+    name: Code Review
+    runs-on: ubuntu-latest
+    # Don't run on draft PRs or dependabot
+    if: |
+      github.event.pull_request.draft == false &&
+      github.actor != 'dependabot[bot]'
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Gemini Code Review
+        uses: truongnh1992/gemini-ai-code-reviewer@v9
+        with:
+          gemini_api_key: ${{ secrets.GEMINI_API_KEY }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          gemini_model: gemini-2.5-flash
+          exclude: "*.md,*.yml,*.yaml,*.json,*.lock"

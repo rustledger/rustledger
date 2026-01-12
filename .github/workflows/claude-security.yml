@@ -1,15 +1,18 @@
 # Security-focused code review using Claude Code
+# DISABLED: API credits exhausted - keeping for future use
 name: Claude Security Review
 on:
-  pull_request:
-    types: [opened, synchronize]
-    branches: [main]
-    paths:
-      # Focus on code that could have security implications
-      - 'crates/**/*.rs'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'deny.toml'
+  # Disabled - uncomment to re-enable
+  # pull_request:
+  #   types: [opened, synchronize]
+  #   branches: [main]
+  #   paths:
+  #     # Focus on code that could have security implications
+  #     - 'crates/**/*.rs'
+  #     - 'Cargo.toml'
+  #     - 'Cargo.lock'
+  #     - 'deny.toml'
+  workflow_dispatch:  # Allow manual trigger only
 # Prevent concurrent reviews on the same PR
 concurrency:
   group: claude-security-${{ github.event.pull_request.number }}

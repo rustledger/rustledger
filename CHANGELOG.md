@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Python plugin support** - Run existing Python beancount plugins via CPython-WASI sandbox
+  - Enable with `--features python-plugins` (downloads ~14MB runtime on first use)
+  - Plugins declared in beancount files (`plugin "..."`) are loaded automatically
+  - Native Rust plugins are preferred when available (14 built-in plugins)
+  - Python plugins run in WASM sandbox with no filesystem/network access
+  - Supports plugin config strings: `plugin "mymodule" "config"`
+
+- **Automatic plugin loading** - Plugins declared in beancount files now run automatically
+  - No need for `--native-plugin` or `--python-plugin` CLI flags
+  - Plugin resolution: Native Rust → Python file → Python module → WASM
+  - Relative paths resolved relative to the beancount file directory
+
 - **String interning for core types** - Account names and currency codes are now interned using `Arc<str>`, reducing memory allocations and improving comparison performance
   - New `InternedStr` type in `rustledger-core` wrapping `Arc<str>`
   - Implements `Serialize`, `Deserialize`, `Hash`, `Eq`, `Ord`, `Borrow<str>` for seamless integration

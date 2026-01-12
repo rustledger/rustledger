@@ -18,7 +18,7 @@ The project is a Cargo workspace with 9 crates:
 | `rustledger-booking` | Interpolation and booking engine (7 methods) |
 | `rustledger-validate` | Validation with 30 error codes |
 | `rustledger-query` | BQL query engine |
-| `rustledger-plugin` | Native and WASM plugin system (14 plugins) |
+| `rustledger-plugin` | Native, WASM, and Python plugin system (14 native plugins) |
 | `rustledger` | CLI tools (rledger-check, rledger-query, etc.) |
 | `rustledger-wasm` | WebAssembly library target |
 
@@ -69,16 +69,25 @@ When reviewing PRs, consider:
 
 - **Parser**: Must handle malformed input gracefully (no panics)
 - **Loader**: Must prevent path traversal in `include` directives
-- **WASM**: Must be sandboxed, no file system access
+- **WASM plugins**: Must be sandboxed, no file system access
+- **Python plugins**: Run in WASI sandbox with limited preopens (stdlib read-only, work dir read-write)
 - **Dependencies**: Check for known vulnerabilities with `cargo deny`
 
 ## Common Patterns
 
-### Adding a new plugin
+### Adding a new native plugin
 
-1. Create struct implementing `NativePlugin` trait in `rustledger-plugin/src/native/`
+1. Create struct implementing `NativePlugin` trait in `rustledger-plugin/src/native.rs`
 1. Register in `NativePluginRegistry::new()`
 1. Add tests in `tests/native_plugins_test.rs`
+
+### Python plugin architecture
+
+Python plugins run via CPython compiled to WASI:
+- `rustledger-plugin/src/python/mod.rs` - Module entry, error types
+- `rustledger-plugin/src/python/download.rs` - Runtime download/caching
+- `rustledger-plugin/src/python/runtime.rs` - WASI execution, module caching
+- `rustledger-plugin/src/python/compat.rs` - Beancount compatibility layer (namedtuples)
 
 ### Adding a BQL function
 

@@ -20,6 +20,8 @@ default = ["bean-compat"]
 # Include bean-* binaries for backwards compatibility with Python beancount.
 # Disable with: cargo install rustledger --no-default-features
 bean-compat = []
+# Enable Python plugin support via CPython-WASI (downloads ~14MB runtime on first use)
+python-plugins = ["rustledger-plugin/python-plugins"]
 
 # Primary binaries (always installed)
 [[bin]]

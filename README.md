@@ -13,6 +13,7 @@ A pure Rust implementation of [Beancount](https://beancount.github.io/), the dou
 - **Drop-in Replacement** - Compatible CLI commands for Python beancount users
 - **7 Booking Methods** - STRICT, FIFO, LIFO, HIFO, AVERAGE, and more
 - **14 Built-in Plugins** - implicit_prices, auto_accounts, pedantic, etc.
+- **Python Plugin Compatibility** - Run existing Python beancount plugins via WASM sandbox
 - **BQL Query Engine** - SQL-like queries on your ledger
 - **Fast** - 10x faster than Python beancount
 
@@ -23,6 +24,9 @@ A pure Rust implementation of [Beancount](https://beancount.github.io/), the dou
 ```bash
 # Install with bean-* compatibility aliases (default)
 cargo install rustledger
+
+# Install with Python plugin support (downloads ~14MB runtime on first use)
+cargo install rustledger --features python-plugins
 
 # Install only rledger-* commands (no bean-* aliases)
 cargo install rustledger --no-default-features
@@ -59,10 +63,41 @@ rledger-doctor ledger.beancount linked ^link-name # Find linked transactions
 rledger-doctor ledger.beancount missing           # Find missing Open directives
 rledger-doctor ledger.beancount stats             # Ledger statistics
 
-# Use plugins
+# Use plugins (via CLI)
 rledger-check --native-plugin auto_accounts ledger.beancount
 rledger-check --native-plugin pedantic ledger.beancount
 ```
+
+### Plugins
+
+Plugins declared in your beancount file are loaded automatically:
+
+```beancount
+; Native plugins run at full speed
+plugin "beancount.plugins.leafonly"
+plugin "check_commodity"
+
+; Python plugins work with --features python-plugins
+plugin "./my_plugin.py"
+plugin "beancount.plugins.forecast"
+```
+
+```bash
+# Plugins in the file run automatically
+rledger-check ledger.beancount
+
+# Or specify plugins via CLI
+rledger-check --native-plugin pedantic ledger.beancount
+rledger-check --python-plugin-path ./my_plugin.py ledger.beancount
+```
+
+**Plugin resolution order:**
+1. Native Rust plugins (fastest) - used when available
+2. Python file plugins (`./plugin.py`, `/path/to/plugin.py`)
+3. Python modules (`beancount.plugins.xxx`, `mymodule.plugin`)
+4. WASM plugins (`plugin.wasm`)
+
+Use `--force-python` to skip native implementations and run all plugins via Python (for testing/compatibility).
 
 ### Python Beancount Compatibility
 
@@ -134,11 +169,14 @@ fn main() -> anyhow::Result<()> {
 
 ### Built-in Plugins
 
+These native Rust plugins run at full speed (no Python required):
+
 | Plugin | Description |
 |--------|-------------|
 | `implicit_prices` | Generate price entries from costs |
 | `check_commodity` | Validate commodity declarations |
 | `auto_accounts` | Auto-generate Open directives |
+| `auto_tag` | Auto-tag transactions by account patterns |
 | `leafonly` | Error on non-leaf postings |
 | `noduplicates` | Hash-based duplicate detection |
 | `onecommodity` | Single commodity per account |
@@ -149,6 +187,29 @@ fn main() -> anyhow::Result<()> {
 | `sellgains` | Cross-check gains against sales |
 | `pedantic` | Enable all strict validations |
 | `unrealized` | Calculate unrealized gains |
+
+### Python Plugin Support
+
+With `--features python-plugins`, rustledger can run existing Python beancount plugins:
+
+```bash
+# Install with Python support
+cargo install rustledger --features python-plugins
+
+# Python plugins run in a WASM sandbox (CPython compiled to WASI)
+rledger-check ledger.beancount  # Plugins in file run automatically
+```
+
+**How it works:**
+- Downloads CPython-WASI runtime (~14MB) on first use
+- Runs Python plugins in a sandboxed WASM environment
+- No native Python installation required
+- 10-100x slower than native Rust plugins (use `--quiet-python-warning` to suppress warning)
+
+**Compatibility:**
+- Pure Python plugins work (most beancount plugins)
+- Plugins requiring C extensions do not work (e.g., scikit-learn)
+- Plugins requiring filesystem/network access do not work
 
 ### Options (28 supported)
 

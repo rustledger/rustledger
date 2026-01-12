@@ -56,6 +56,26 @@ pub struct Args {
     /// Run built-in native plugins (e.g., `implicit_prices`, `check_commodity`)
     #[arg(long = "native-plugin", value_name = "NAME")]
     pub native_plugins: Vec<String>,
+
+    /// Run a Python beancount plugin (slower, downloads runtime on first use)
+    #[cfg(feature = "python-plugins")]
+    #[arg(long = "python-plugin", value_name = "MODULE")]
+    pub python_plugins: Vec<String>,
+
+    /// Load a Python plugin from file path
+    #[cfg(feature = "python-plugins")]
+    #[arg(long = "python-plugin-path", value_name = "PATH")]
+    pub python_plugin_paths: Vec<PathBuf>,
+
+    /// Force Python execution for plugins (skip native Rust implementations)
+    #[cfg(feature = "python-plugins")]
+    #[arg(long = "force-python")]
+    pub force_python: bool,
+
+    /// Suppress Python plugin performance warning
+    #[cfg(feature = "python-plugins")]
+    #[arg(long = "quiet-python-warning")]
+    pub quiet_python_warning: bool,
 }
 
 fn run(args: &Args) -> Result<ExitCode> {
@@ -169,22 +189,145 @@ fn run(args: &Args) -> Result<ExitCode> {
         .map(|s| s.value.clone())
         .collect();
 
-    // Build list of native plugins to run
-    let mut native_plugins_to_run = args.native_plugins.clone();
+    // Collect plugins to run from multiple sources:
+    // 1. Plugins declared in the ledger file (load_result.plugins)
+    // 2. CLI arguments (--native-plugin, --python-plugin, --python-plugin-path, --plugin)
+    // 3. Auto-plugins if --auto is set
 
-    // If --auto is set, add auto-plugins
-    if args.auto && !native_plugins_to_run.contains(&"auto_accounts".to_string()) {
-        native_plugins_to_run.insert(0, "auto_accounts".to_string());
+    #[derive(Debug, Clone)]
+    #[allow(dead_code)] // Variants are conditionally used based on feature flags
+    #[allow(clippy::items_after_statements)] // Enum is local to this function
+    enum PluginSource {
+        Native {
+            name: String,
+            config: Option<String>,
+        },
+        PythonModule {
+            name: String,
+            config: Option<String>,
+        },
+        PythonFile {
+            path: PathBuf,
+            config: Option<String>,
+        },
+        WasmFile {
+            path: PathBuf,
+        },
     }
 
-    // Run plugins if specified
-    if !native_plugins_to_run.is_empty() || !args.plugins.is_empty() {
+    let mut plugins_to_run: Vec<PluginSource> = Vec::new();
+    let native_registry = NativePluginRegistry::new();
+
+    // If --auto is set, add auto_accounts first
+    if args.auto {
+        plugins_to_run.push(PluginSource::Native {
+            name: "auto_accounts".to_string(),
+            config: None,
+        });
+    }
+
+    // Get the directory of the main beancount file for resolving relative paths
+    let base_dir = file.parent().unwrap_or(std::path::Path::new("."));
+
+    // Check if --force-python is set
+    #[cfg(feature = "python-plugins")]
+    let force_python = args.force_python;
+    #[cfg(not(feature = "python-plugins"))]
+    let force_python = false;
+
+    // Process plugins declared in the ledger file
+    for plugin in &load_result.plugins {
+        let name = &plugin.name;
+        let config = plugin.config.clone();
+
+        // Check if this is a native Rust plugin (fastest path)
+        // Skip native if --force-python is set
+        if !force_python && native_registry.find(name).is_some() {
+            plugins_to_run.push(PluginSource::Native {
+                name: name.clone(),
+                config,
+            });
+        } else if std::path::Path::new(name)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("py"))
+            || name.starts_with('/')
+            || name.starts_with("./")
+            || name.starts_with("../")
+        {
+            // File path to Python plugin - resolve relative to beancount file
+            let path = if name.starts_with('/') {
+                PathBuf::from(name)
+            } else {
+                base_dir.join(name)
+            };
+            plugins_to_run.push(PluginSource::PythonFile { path, config });
+        } else if std::path::Path::new(name)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("wasm"))
+        {
+            // WASM plugin - resolve relative to beancount file
+            let path = if name.starts_with('/') {
+                PathBuf::from(name)
+            } else {
+                base_dir.join(name)
+            };
+            plugins_to_run.push(PluginSource::WasmFile { path });
+        } else {
+            // Python module (e.g., "beancount.plugins.xxx" or "mymodule.plugin")
+            #[cfg(feature = "python-plugins")]
+            plugins_to_run.push(PluginSource::PythonModule {
+                name: name.clone(),
+                config,
+            });
+            #[cfg(not(feature = "python-plugins"))]
+            {
+                if !args.quiet {
+                    writeln!(
+                        stdout,
+                        "warning: plugin '{}' requires python-plugins feature",
+                        name
+                    )?;
+                }
+            }
+        }
+    }
+
+    // Add CLI-specified plugins (these run after file-declared plugins)
+    for name in &args.native_plugins {
+        plugins_to_run.push(PluginSource::Native {
+            name: name.clone(),
+            config: None,
+        });
+    }
+
+    for path in &args.plugins {
+        plugins_to_run.push(PluginSource::WasmFile { path: path.clone() });
+    }
+
+    #[cfg(feature = "python-plugins")]
+    {
+        for name in &args.python_plugins {
+            plugins_to_run.push(PluginSource::PythonModule {
+                name: name.clone(),
+                config: None,
+            });
+        }
+        for path in &args.python_plugin_paths {
+            plugins_to_run.push(PluginSource::PythonFile {
+                path: path.clone(),
+                config: None,
+            });
+        }
+    }
+
+    // Run plugins if any are specified
+    if !plugins_to_run.is_empty() {
         if args.verbose && !args.quiet {
-            eprintln!("Running plugins...");
+            eprintln!("Running {} plugin(s)...", plugins_to_run.len());
         }
 
         let wrappers = rustledger_plugin::directives_to_wrappers(&directives);
-        let plugin_input = PluginInput {
+        let mut current_input = PluginInput {
             directives: wrappers,
             options: PluginOptions {
                 operating_currencies: load_result.options.operating_currency.clone(),
@@ -193,60 +336,30 @@ fn run(args: &Args) -> Result<ExitCode> {
             config: None,
         };
 
-        let native_registry = NativePluginRegistry::new();
-        let mut current_input = plugin_input;
+        // Lazy-initialize Python runtime only if needed
+        #[cfg(feature = "python-plugins")]
+        let mut python_runtime: Option<rustledger_plugin::python::PythonRuntime> = None;
 
-        for plugin_name in &native_plugins_to_run {
-            if let Some(plugin) = native_registry.find(plugin_name) {
-                if args.verbose && !args.quiet {
-                    eprintln!("  Running native plugin: {}", plugin.name());
-                }
-                let output = plugin.process(current_input.clone());
+        // Lazy-initialize WASM manager only if needed
+        let mut wasm_manager: Option<PluginManager> = None;
 
-                for err in &output.errors {
-                    if !args.quiet {
-                        writeln!(stdout, "{:?}: {}", err.severity, err.message)?;
-                    }
-                    error_count += 1;
-                }
+        // Run plugins in declaration order
+        for plugin_source in &plugins_to_run {
+            match plugin_source {
+                PluginSource::Native { name, config } => {
+                    if let Some(plugin) = native_registry.find(name) {
+                        if args.verbose && !args.quiet {
+                            eprintln!("  Running native plugin: {}", plugin.name());
+                        }
 
-                current_input = PluginInput {
-                    directives: output.directives,
-                    options: current_input.options.clone(),
-                    config: None,
-                };
-            } else if !args.quiet {
-                writeln!(stdout, "warning: unknown native plugin: {plugin_name}")?;
-            }
-        }
+                        let input_with_config = PluginInput {
+                            directives: current_input.directives.clone(),
+                            options: current_input.options.clone(),
+                            config: config.clone(),
+                        };
 
-        if !args.plugins.is_empty() {
-            let mut wasm_manager = PluginManager::new();
+                        let output = plugin.process(input_with_config);
 
-            for plugin_path in &args.plugins {
-                if args.verbose && !args.quiet {
-                    eprintln!("  Loading WASM plugin: {}", plugin_path.display());
-                }
-                if let Err(e) = wasm_manager.load(plugin_path) {
-                    if !args.quiet {
-                        writeln!(
-                            stdout,
-                            "error: failed to load WASM plugin {}: {}",
-                            plugin_path.display(),
-                            e
-                        )?;
-                    }
-                    error_count += 1;
-                }
-            }
-
-            if !wasm_manager.is_empty() {
-                if args.verbose && !args.quiet {
-                    eprintln!("  Executing {} WASM plugin(s)...", wasm_manager.len());
-                }
-
-                match wasm_manager.execute_all(current_input.clone()) {
-                    Ok(output) => {
                         for err in &output.errors {
                             if !args.quiet {
                                 writeln!(stdout, "{:?}: {}", err.severity, err.message)?;
@@ -254,17 +367,198 @@ fn run(args: &Args) -> Result<ExitCode> {
                             error_count += 1;
                         }
 
-                        current_input = PluginInput {
-                            directives: output.directives,
-                            options: current_input.options.clone(),
-                            config: None,
-                        };
+                        current_input.directives = output.directives;
+                    } else if !args.quiet {
+                        writeln!(stdout, "warning: unknown native plugin: {name}")?;
                     }
-                    Err(e) => {
+                }
+
+                PluginSource::WasmFile { path } => {
+                    if args.verbose && !args.quiet {
+                        eprintln!("  Loading WASM plugin: {}", path.display());
+                    }
+
+                    let manager = wasm_manager.get_or_insert_with(PluginManager::new);
+
+                    if let Err(e) = manager.load(path) {
                         if !args.quiet {
-                            writeln!(stdout, "error: WASM plugin execution failed: {e}")?;
+                            writeln!(
+                                stdout,
+                                "error: failed to load WASM plugin {}: {}",
+                                path.display(),
+                                e
+                            )?;
                         }
                         error_count += 1;
+                        continue;
+                    }
+
+                    // Execute immediately to maintain order
+                    match manager.execute_all(current_input.clone()) {
+                        Ok(output) => {
+                            for err in &output.errors {
+                                if !args.quiet {
+                                    writeln!(stdout, "{:?}: {}", err.severity, err.message)?;
+                                }
+                                error_count += 1;
+                            }
+                            current_input.directives = output.directives;
+                        }
+                        Err(e) => {
+                            if !args.quiet {
+                                writeln!(stdout, "error: WASM plugin execution failed: {e}")?;
+                            }
+                            error_count += 1;
+                        }
+                    }
+                    // Clear manager for next WASM plugin
+                    wasm_manager = None;
+                }
+
+                #[cfg(feature = "python-plugins")]
+                PluginSource::PythonModule { name, config } => {
+                    // Initialize Python runtime on first use
+                    if python_runtime.is_none() {
+                        match rustledger_plugin::python::PythonRuntime::with_options(
+                            args.quiet_python_warning,
+                        ) {
+                            Ok(runtime) => python_runtime = Some(runtime),
+                            Err(e) => {
+                                if !args.quiet {
+                                    writeln!(
+                                        stdout,
+                                        "error: failed to initialize Python runtime: {e}"
+                                    )?;
+                                }
+                                error_count += 1;
+                                continue;
+                            }
+                        }
+                    }
+
+                    if let Some(ref runtime) = python_runtime {
+                        if args.verbose && !args.quiet {
+                            eprintln!("  Running Python plugin: {name}");
+                        }
+
+                        let input_with_config = PluginInput {
+                            directives: current_input.directives.clone(),
+                            options: current_input.options.clone(),
+                            config: config.clone(),
+                        };
+
+                        match runtime.execute_builtin(name, &input_with_config) {
+                            Ok(output) => {
+                                for err in &output.errors {
+                                    if !args.quiet {
+                                        writeln!(stdout, "{:?}: {}", err.severity, err.message)?;
+                                    }
+                                    error_count += 1;
+                                }
+                                current_input.directives = output.directives;
+                            }
+                            Err(e) => {
+                                if !args.quiet {
+                                    writeln!(stdout, "error: Python plugin '{name}' failed: {e}")?;
+                                }
+                                error_count += 1;
+                            }
+                        }
+                    }
+                }
+
+                #[cfg(feature = "python-plugins")]
+                PluginSource::PythonFile { path, config } => {
+                    // Initialize Python runtime on first use
+                    if python_runtime.is_none() {
+                        match rustledger_plugin::python::PythonRuntime::with_options(
+                            args.quiet_python_warning,
+                        ) {
+                            Ok(runtime) => python_runtime = Some(runtime),
+                            Err(e) => {
+                                if !args.quiet {
+                                    writeln!(
+                                        stdout,
+                                        "error: failed to initialize Python runtime: {e}"
+                                    )?;
+                                }
+                                error_count += 1;
+                                continue;
+                            }
+                        }
+                    }
+
+                    if let Some(ref runtime) = python_runtime {
+                        if args.verbose && !args.quiet {
+                            eprintln!("  Loading Python plugin: {}", path.display());
+                        }
+
+                        let plugin_code = match std::fs::read_to_string(path) {
+                            Ok(code) => code,
+                            Err(e) => {
+                                if !args.quiet {
+                                    writeln!(
+                                        stdout,
+                                        "error: failed to read Python plugin {}: {}",
+                                        path.display(),
+                                        e
+                                    )?;
+                                }
+                                error_count += 1;
+                                continue;
+                            }
+                        };
+
+                        let input_with_config = PluginInput {
+                            directives: current_input.directives.clone(),
+                            options: current_input.options.clone(),
+                            config: config.clone(),
+                        };
+
+                        match runtime.execute_plugin(&plugin_code, "plugin", &input_with_config) {
+                            Ok(output) => {
+                                for err in &output.errors {
+                                    if !args.quiet {
+                                        writeln!(stdout, "{:?}: {}", err.severity, err.message)?;
+                                    }
+                                    error_count += 1;
+                                }
+                                current_input.directives = output.directives;
+                            }
+                            Err(e) => {
+                                if !args.quiet {
+                                    writeln!(
+                                        stdout,
+                                        "error: Python plugin '{}' failed: {}",
+                                        path.display(),
+                                        e
+                                    )?;
+                                }
+                                error_count += 1;
+                            }
+                        }
+                    }
+                }
+
+                #[cfg(not(feature = "python-plugins"))]
+                PluginSource::PythonModule { name, .. } => {
+                    if !args.quiet {
+                        writeln!(
+                            stdout,
+                            "warning: plugin '{}' requires python-plugins feature",
+                            name
+                        )?;
+                    }
+                }
+
+                #[cfg(not(feature = "python-plugins"))]
+                PluginSource::PythonFile { path, .. } => {
+                    if !args.quiet {
+                        writeln!(
+                            stdout,
+                            "warning: plugin '{}' requires python-plugins feature",
+                            path.display()
+                        )?;
                     }
                 }
             }

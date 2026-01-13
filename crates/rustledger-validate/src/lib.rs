@@ -990,7 +990,7 @@ fn validate_balance(state: &mut LedgerState, bal: &Balance, errors: &mut Vec<Val
 
             errors.push(
                 ValidationError::new(error_code, message, bal.date)
-                    .with_context(format!("difference: {}, tolerance: {}", difference, tolerance)),
+                    .with_context(format!("difference: {difference}, tolerance: {tolerance}")),
             );
         }
     }

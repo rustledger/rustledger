@@ -717,3 +717,27 @@ fn test_other_accounts_column() {
         }
     }
 }
+
+#[test]
+fn test_flatten_keyword_parsed() {
+    // Test that FLATTEN is parsed correctly
+    let query = parse("SELECT * FLATTEN").expect("should parse");
+    match query {
+        rustledger_query::Query::Select(sel) => {
+            assert!(sel.flatten, "FLATTEN flag should be set");
+        }
+        _ => panic!("Expected SELECT query"),
+    }
+}
+
+#[test]
+fn test_flatten_without_keyword() {
+    // Test that queries without FLATTEN have flatten=false
+    let query = parse("SELECT *").expect("should parse");
+    match query {
+        rustledger_query::Query::Select(sel) => {
+            assert!(!sel.flatten, "FLATTEN flag should not be set");
+        }
+        _ => panic!("Expected SELECT query"),
+    }
+}

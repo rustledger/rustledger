@@ -91,8 +91,12 @@ fn select_query<'a>() -> impl Parser<'a, ParserInput<'a>, SelectQuery, ParserExt
         .then(group_by_clause().or_not())
         .then(order_by_clause().or_not())
         .then(limit_clause().or_not())
+        .then(flatten_clause().or_not().map(|f| f.is_some()))
         .map(
-            |((((((distinct, targets), from), where_clause), group_by), order_by), limit)| {
+            |(
+                ((((((distinct, targets), from), where_clause), group_by), order_by), limit),
+                flatten,
+            )| {
                 SelectQuery {
                     distinct,
                     targets,
@@ -101,9 +105,15 @@ fn select_query<'a>() -> impl Parser<'a, ParserInput<'a>, SelectQuery, ParserExt
                     group_by,
                     order_by,
                     limit,
+                    flatten,
                 }
             },
         )
+}
+
+/// Parse FLATTEN clause.
+fn flatten_clause<'a>() -> impl Parser<'a, ParserInput<'a>, (), ParserExtra<'a>> {
+    ws1().ignore_then(kw("FLATTEN")).ignored()
 }
 
 /// Parse target expressions.

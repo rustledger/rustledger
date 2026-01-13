@@ -211,7 +211,49 @@ impl<'a> Executor<'a> {
             result.rows.truncate(limit as usize);
         }
 
+        // Apply FLATTEN - expand inventory values into separate rows
+        if query.flatten {
+            result = self.flatten_results(result);
+        }
+
         Ok(result)
+    }
+
+    /// Flatten inventory values in results into separate rows.
+    ///
+    /// When a row contains Inventory values, each position in the inventory
+    /// becomes a separate row with the same non-inventory values.
+    fn flatten_results(&self, result: QueryResult) -> QueryResult {
+        let mut flattened = QueryResult::new(result.columns.clone());
+
+        for row in result.rows {
+            // Find inventory columns
+            let inventory_indices: Vec<(usize, &Inventory)> = row
+                .iter()
+                .enumerate()
+                .filter_map(|(i, v)| match v {
+                    Value::Inventory(inv) if !inv.is_empty() => Some((i, inv)),
+                    _ => None,
+                })
+                .collect();
+
+            if inventory_indices.is_empty() {
+                // No inventories to flatten, keep row as-is
+                flattened.add_row(row);
+            } else {
+                // Expand inventories - currently only handles single inventory column
+                // For multiple inventory columns, we'd need cartesian product
+                if let Some((inv_idx, inv)) = inventory_indices.first() {
+                    for pos in inv.positions() {
+                        let mut new_row = row.clone();
+                        new_row[*inv_idx] = Value::Position(pos.clone());
+                        flattened.add_row(new_row);
+                    }
+                }
+            }
+        }
+
+        flattened
     }
 
     /// Execute a JOURNAL query.

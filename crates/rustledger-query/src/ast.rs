@@ -36,6 +36,8 @@ pub struct SelectQuery {
     pub order_by: Option<Vec<OrderSpec>>,
     /// LIMIT clause.
     pub limit: Option<u64>,
+    /// Whether FLATTEN was specified (expand inventories to rows).
+    pub flatten: bool,
 }
 
 /// A target in the SELECT clause.
@@ -241,12 +243,19 @@ impl SelectQuery {
             group_by: None,
             order_by: None,
             limit: None,
+            flatten: false,
         }
     }
 
     /// Set the DISTINCT flag.
     pub const fn distinct(mut self) -> Self {
         self.distinct = true;
+        self
+    }
+
+    /// Set the FLATTEN flag.
+    pub const fn flatten(mut self) -> Self {
+        self.flatten = true;
         self
     }
 

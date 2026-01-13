@@ -551,3 +551,79 @@ fn test_payee_analysis() {
 
     assert!(!result.is_empty());
 }
+
+// ============================================================================
+// New Operator Tests (BQL parity)
+// ============================================================================
+
+#[test]
+fn test_not_regex_operator() {
+    let directives = make_test_directives();
+    // Select accounts that don't match "Expenses"
+    let result = execute_query(
+        r#"SELECT DISTINCT account WHERE account !~ "Expenses""#,
+        &directives,
+    );
+
+    // Should return Assets and Income accounts
+    for row in &result.rows {
+        if let Value::String(account) = &row[0] {
+            assert!(
+                !account.contains("Expenses"),
+                "Account {account} should not contain 'Expenses'"
+            );
+        }
+    }
+}
+
+#[test]
+fn test_modulo_operator() {
+    let directives = make_test_directives();
+    // Test modulo operator: year % 4 = 0 (2024 is divisible by 4)
+    let result = execute_query(
+        "SELECT DISTINCT YEAR(date) WHERE YEAR(date) % 4 = 0",
+        &directives,
+    );
+
+    // All our test data is from 2024, which is divisible by 4
+    assert!(
+        !result.is_empty(),
+        "Should have results for year 2024 (divisible by 4)"
+    );
+    for row in &result.rows {
+        if let Value::Integer(year) = &row[0] {
+            assert_eq!(*year % 4, 0, "Year {year} should be divisible by 4");
+        }
+    }
+}
+
+#[test]
+fn test_is_null_operator() {
+    let directives = make_test_directives();
+    // Select transactions where payee is null (the transfer transaction)
+    let result = execute_query("SELECT DISTINCT narration WHERE payee IS NULL", &directives);
+
+    // The "Transfer to savings" transaction has no payee
+    assert!(!result.is_empty());
+    let has_transfer = result
+        .rows
+        .iter()
+        .any(|row| matches!(&row[0], Value::String(s) if s.contains("Transfer")));
+    assert!(
+        has_transfer,
+        "Should find the Transfer transaction with no payee"
+    );
+}
+
+#[test]
+fn test_is_not_null_operator() {
+    let directives = make_test_directives();
+    // Select transactions where payee is not null
+    let result = execute_query("SELECT DISTINCT payee WHERE payee IS NOT NULL", &directives);
+
+    // Should include Employer, Grocery Store, Gas Station
+    assert!(!result.is_empty());
+    for row in &result.rows {
+        assert!(!matches!(&row[0], Value::Null), "Payee should not be null");
+    }
+}

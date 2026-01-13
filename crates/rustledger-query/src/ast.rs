@@ -178,10 +178,16 @@ pub enum BinaryOperator {
     Gt,
     /// Greater than or equal (>=).
     Ge,
-    /// Regular expression match (~).
+    /// Regular expression match (~) - case insensitive.
     Regex,
+    /// Negative regex match (!~) - case insensitive.
+    NotRegex,
+    /// Matches operator (?~) - pattern on LEFT, string on RIGHT, case sensitive.
+    Matches,
     /// IN operator.
     In,
+    /// NOT IN operator.
+    NotIn,
 
     // Logical
     /// Logical AND.
@@ -198,6 +204,8 @@ pub enum BinaryOperator {
     Mul,
     /// Division (/).
     Div,
+    /// Modulo (%).
+    Mod,
 }
 
 /// A unary operation.
@@ -216,6 +224,10 @@ pub enum UnaryOperator {
     Not,
     /// Negation (-).
     Neg,
+    /// IS NULL check.
+    IsNull,
+    /// IS NOT NULL check.
+    IsNotNull,
 }
 
 impl SelectQuery {

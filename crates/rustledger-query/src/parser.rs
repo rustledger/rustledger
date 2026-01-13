@@ -308,11 +308,12 @@ fn expr<'a>() -> impl Parser<'a, ParserInput<'a>, Expr, ParserExtra<'a>> {
                 }
             });
 
-        // Multiplicative: * /
+        // Multiplicative: * / %
         let multiplicative = unary.clone().foldl(
             ws().ignore_then(choice((
                 just('*').to(BinaryOperator::Mul),
                 just('/').to(BinaryOperator::Div),
+                just('%').to(BinaryOperator::Mod),
             )))
             .then_ignore(ws())
             .then(unary)
@@ -332,7 +333,19 @@ fn expr<'a>() -> impl Parser<'a, ParserInput<'a>, Expr, ParserExtra<'a>> {
             |left, (op, right)| Expr::binary(left, op, right),
         );
 
-        // Comparison: = != < <= > >= ~ IN
+        // IS NULL / IS NOT NULL suffix
+        let is_null_suffix = ws()
+            .ignore_then(kw("IS"))
+            .ignore_then(ws1())
+            .ignore_then(choice((
+                kw("NOT")
+                    .ignore_then(ws1())
+                    .ignore_then(kw("NULL"))
+                    .to(UnaryOperator::IsNotNull),
+                kw("NULL").to(UnaryOperator::IsNull),
+            )));
+
+        // Comparison: = != < <= > >= ~ IN NOT IN !~ ?~
         let comparison = additive
             .clone()
             .then(
@@ -346,6 +359,14 @@ fn expr<'a>() -> impl Parser<'a, ParserInput<'a>, Expr, ParserExtra<'a>> {
                     Expr::binary(left, op, right)
                 } else {
                     left
+                }
+            })
+            .then(is_null_suffix.or_not())
+            .map(|(expr, is_null_op)| {
+                if let Some(op) = is_null_op {
+                    Expr::unary(op, expr)
+                } else {
+                    expr
                 }
             });
 
@@ -387,12 +408,18 @@ fn comparison_op<'a>() -> impl Parser<'a, ParserInput<'a>, BinaryOperator, Parse
 {
     choice((
         just("!=").to(BinaryOperator::Ne),
+        just("!~").to(BinaryOperator::NotRegex),
+        just("?~").to(BinaryOperator::Matches),
         just("<=").to(BinaryOperator::Le),
         just(">=").to(BinaryOperator::Ge),
         just('=').to(BinaryOperator::Eq),
         just('<').to(BinaryOperator::Lt),
         just('>').to(BinaryOperator::Gt),
         just('~').to(BinaryOperator::Regex),
+        kw("NOT")
+            .ignore_then(ws1())
+            .ignore_then(kw("IN"))
+            .to(BinaryOperator::NotIn),
         kw("IN").to(BinaryOperator::In),
     ))
 }
@@ -744,5 +771,89 @@ mod tests {
     fn test_semicolon_optional() {
         assert!(parse("SELECT *").is_ok());
         assert!(parse("SELECT *;").is_ok());
+    }
+
+    #[test]
+    fn test_not_regex_operator() {
+        let query = parse("SELECT * WHERE account !~ \"Expenses:\"").unwrap();
+        match query {
+            Query::Select(sel) => match sel.where_clause.unwrap() {
+                Expr::BinaryOp(op) => {
+                    assert_eq!(op.op, BinaryOperator::NotRegex);
+                }
+                _ => panic!("Expected binary op"),
+            },
+            _ => panic!("Expected SELECT query"),
+        }
+    }
+
+    #[test]
+    fn test_matches_operator() {
+        let query = parse("SELECT * WHERE \"pattern\" ?~ account").unwrap();
+        match query {
+            Query::Select(sel) => match sel.where_clause.unwrap() {
+                Expr::BinaryOp(op) => {
+                    assert_eq!(op.op, BinaryOperator::Matches);
+                }
+                _ => panic!("Expected binary op"),
+            },
+            _ => panic!("Expected SELECT query"),
+        }
+    }
+
+    #[test]
+    fn test_not_in_operator() {
+        let query = parse("SELECT * WHERE currency NOT IN currencies").unwrap();
+        match query {
+            Query::Select(sel) => match sel.where_clause.unwrap() {
+                Expr::BinaryOp(op) => {
+                    assert_eq!(op.op, BinaryOperator::NotIn);
+                }
+                _ => panic!("Expected binary op"),
+            },
+            _ => panic!("Expected SELECT query"),
+        }
+    }
+
+    #[test]
+    fn test_modulo_operator() {
+        let query = parse("SELECT year % 4 AS leap_year_check").unwrap();
+        match query {
+            Query::Select(sel) => match &sel.targets[0].expr {
+                Expr::BinaryOp(op) => {
+                    assert_eq!(op.op, BinaryOperator::Mod);
+                }
+                _ => panic!("Expected binary op"),
+            },
+            _ => panic!("Expected SELECT query"),
+        }
+    }
+
+    #[test]
+    fn test_is_null_operator() {
+        let query = parse("SELECT * WHERE payee IS NULL").unwrap();
+        match query {
+            Query::Select(sel) => match sel.where_clause.unwrap() {
+                Expr::UnaryOp(op) => {
+                    assert_eq!(op.op, UnaryOperator::IsNull);
+                }
+                _ => panic!("Expected unary op"),
+            },
+            _ => panic!("Expected SELECT query"),
+        }
+    }
+
+    #[test]
+    fn test_is_not_null_operator() {
+        let query = parse("SELECT * WHERE payee IS NOT NULL").unwrap();
+        match query {
+            Query::Select(sel) => match sel.where_clause.unwrap() {
+                Expr::UnaryOp(op) => {
+                    assert_eq!(op.op, UnaryOperator::IsNotNull);
+                }
+                _ => panic!("Expected unary op"),
+            },
+            _ => panic!("Expected SELECT query"),
+        }
     }
 }

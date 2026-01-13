@@ -1479,6 +1479,86 @@ impl<'a> Executor<'a> {
             BinaryOperator::Sub => self.arithmetic_op(&left, &right, |a, b| a - b),
             BinaryOperator::Mul => self.arithmetic_op(&left, &right, |a, b| a * b),
             BinaryOperator::Div => self.arithmetic_op(&left, &right, |a, b| a / b),
+            BinaryOperator::Mod => {
+                // Modulo with zero guard - handle all numeric combinations
+                let (a, b) = match (&left, &right) {
+                    (Value::Number(a), Value::Number(b)) => (*a, *b),
+                    (Value::Integer(a), Value::Integer(b)) => {
+                        (Decimal::from(*a), Decimal::from(*b))
+                    }
+                    (Value::Number(a), Value::Integer(b)) => (*a, Decimal::from(*b)),
+                    (Value::Integer(a), Value::Number(b)) => (Decimal::from(*a), *b),
+                    _ => {
+                        return Err(QueryError::Type(
+                            "modulo requires numeric operands".to_string(),
+                        ))
+                    }
+                };
+                if b.is_zero() {
+                    Err(QueryError::Evaluation("modulo by zero".to_string()))
+                } else {
+                    Ok(Value::Number(a % b))
+                }
+            }
+            BinaryOperator::NotRegex => {
+                // !~ : NOT regex match (case-insensitive)
+                let s = match &left {
+                    Value::String(s) => s.to_lowercase(),
+                    _ => {
+                        return Err(QueryError::Type(
+                            "regex requires string left operand".to_string(),
+                        ))
+                    }
+                };
+                let pattern = match &right {
+                    Value::String(p) => p.to_lowercase(),
+                    _ => {
+                        return Err(QueryError::Type(
+                            "regex requires string pattern".to_string(),
+                        ))
+                    }
+                };
+                Ok(Value::Boolean(!s.contains(&pattern)))
+            }
+            BinaryOperator::Matches => {
+                // ?~ : pattern on LEFT, string on RIGHT (case-sensitive)
+                let pattern = match &left {
+                    Value::String(p) => p.clone(),
+                    _ => {
+                        return Err(QueryError::Type(
+                            "matches requires string pattern".to_string(),
+                        ))
+                    }
+                };
+                let s = match &right {
+                    Value::String(s) => s.clone(),
+                    _ => {
+                        return Err(QueryError::Type(
+                            "matches requires string right operand".to_string(),
+                        ))
+                    }
+                };
+                Ok(Value::Boolean(s.contains(&pattern)))
+            }
+            BinaryOperator::NotIn => {
+                // NOT IN: negation of IN
+                match &right {
+                    Value::StringSet(set) => {
+                        let needle = match &left {
+                            Value::String(s) => s.clone(),
+                            _ => {
+                                return Err(QueryError::Type(
+                                    "NOT IN requires string left operand".to_string(),
+                                ))
+                            }
+                        };
+                        Ok(Value::Boolean(!set.contains(&needle)))
+                    }
+                    _ => Err(QueryError::Type(
+                        "NOT IN requires set right operand".to_string(),
+                    )),
+                }
+            }
         }
     }
 
@@ -1497,6 +1577,8 @@ impl<'a> Executor<'a> {
                     "negation requires numeric value".to_string(),
                 )),
             },
+            UnaryOperator::IsNull => Ok(Value::Boolean(matches!(val, Value::Null))),
+            UnaryOperator::IsNotNull => Ok(Value::Boolean(!matches!(val, Value::Null))),
         }
     }
 

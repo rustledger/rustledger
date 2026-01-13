@@ -356,6 +356,63 @@ fn test_parse_transaction_with_metadata() {
     }
 }
 
+#[test]
+fn test_parse_boolean_metadata() {
+    let source = r#"
+2024-01-15 * "Test"
+  recurring: TRUE
+  active: FALSE
+  enabled: True
+  disabled: False
+  Expenses:Test  100.00 USD
+  Assets:Cash
+"#;
+    let result = parse_ok(source);
+
+    if let Directive::Transaction(txn) = &result.directives[0].value {
+        use rustledger_core::MetaValue;
+        assert_eq!(txn.meta.get("recurring"), Some(&MetaValue::Bool(true)));
+        assert_eq!(txn.meta.get("active"), Some(&MetaValue::Bool(false)));
+        assert_eq!(txn.meta.get("enabled"), Some(&MetaValue::Bool(true)));
+        assert_eq!(txn.meta.get("disabled"), Some(&MetaValue::Bool(false)));
+    } else {
+        panic!("expected transaction");
+    }
+}
+
+#[test]
+fn test_parse_extended_transaction_flags() {
+    // Test all extended flags parse correctly
+    for (flag, expected) in [
+        ("P", 'P'), // Pad-generated
+        ("S", 'S'), // Summarization
+        ("T", 'T'), // Transfer
+        ("C", 'C'), // Conversion
+        ("U", 'U'), // Unrealized
+        ("R", 'R'), // Return
+        ("M", 'M'), // Merge
+        ("#", '#'), // Bookmarked
+        ("?", '?'), // Needs investigation
+    ] {
+        let source = format!(
+            r#"
+2024-01-15 {flag} "Test transaction"
+  Expenses:Test  100 USD
+  Assets:Cash
+"#
+        );
+        let result = parse_ok(&source);
+        if let Directive::Transaction(txn) = &result.directives[0].value {
+            assert_eq!(
+                txn.flag, expected,
+                "Flag {flag} should parse as '{expected}'"
+            );
+        } else {
+            panic!("expected transaction for flag {flag}");
+        }
+    }
+}
+
 // ============================================================================
 // Error Recovery
 // ============================================================================

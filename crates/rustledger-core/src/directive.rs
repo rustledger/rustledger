@@ -1285,4 +1285,51 @@ mod tests {
         assert_eq!(directives[0].type_name(), "pad");
         assert_eq!(directives[1].type_name(), "balance");
     }
+
+    #[test]
+    fn test_transaction_flags() {
+        let make_txn = |flag: char| Transaction::new(date(2024, 1, 15), "Test").with_flag(flag);
+
+        // Standard flags
+        assert!(make_txn('*').is_complete());
+        assert!(make_txn('!').is_incomplete());
+        assert!(make_txn('!').is_pending());
+
+        // Extended flags
+        assert!(make_txn('P').is_pad_generated());
+        assert!(make_txn('S').is_summarization());
+        assert!(make_txn('T').is_transfer());
+        assert!(make_txn('C').is_conversion());
+        assert!(make_txn('U').is_unrealized());
+        assert!(make_txn('R').is_return());
+        assert!(make_txn('M').is_merge());
+        assert!(make_txn('#').is_bookmarked());
+        assert!(make_txn('?').needs_investigation());
+
+        // Negative cases
+        assert!(!make_txn('*').is_pending());
+        assert!(!make_txn('!').is_complete());
+        assert!(!make_txn('*').is_pad_generated());
+    }
+
+    #[test]
+    fn test_is_valid_flag() {
+        // Valid flags
+        for flag in [
+            '*', '!', 'P', 'S', 'T', 'C', 'U', 'R', 'M', '#', '?', '%', '&',
+        ] {
+            assert!(
+                Transaction::is_valid_flag(flag),
+                "Flag '{flag}' should be valid"
+            );
+        }
+
+        // Invalid flags
+        for flag in ['x', 'X', '0', ' ', 'a', 'Z'] {
+            assert!(
+                !Transaction::is_valid_flag(flag),
+                "Flag '{flag}' should be invalid"
+            );
+        }
+    }
 }

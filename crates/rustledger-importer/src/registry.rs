@@ -141,4 +141,71 @@ mod tests {
 
         assert!(registry.identify(unknown_path).is_none());
     }
+
+    #[test]
+    fn test_registry_default() {
+        let registry = ImporterRegistry::default();
+        assert!(registry.is_empty());
+        assert_eq!(registry.len(), 0);
+    }
+
+    #[test]
+    fn test_registry_list_importers() {
+        let mut registry = ImporterRegistry::new();
+        registry.register(MockImporter {
+            name: "CSV",
+            extension: "csv",
+        });
+        registry.register(MockImporter {
+            name: "OFX",
+            extension: "ofx",
+        });
+
+        let list = registry.list_importers();
+        assert_eq!(list.len(), 2);
+        assert!(list.iter().any(|(name, _)| *name == "CSV"));
+        assert!(list.iter().any(|(name, _)| *name == "OFX"));
+        // Check descriptions are present
+        for (_, desc) in &list {
+            assert_eq!(*desc, "Mock importer for testing");
+        }
+    }
+
+    #[test]
+    fn test_registry_extract_unknown_file() {
+        let registry = ImporterRegistry::new();
+        let unknown_path = Path::new("document.pdf");
+        let result = registry.extract(unknown_path);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("No importer found"));
+    }
+
+    #[test]
+    fn test_registry_identify_returns_first_match() {
+        let mut registry = ImporterRegistry::new();
+        // Register two importers that match the same extension
+        registry.register(MockImporter {
+            name: "CSV1",
+            extension: "csv",
+        });
+        registry.register(MockImporter {
+            name: "CSV2",
+            extension: "csv",
+        });
+
+        let csv_path = Path::new("transactions.csv");
+        let importer = registry.identify(csv_path).unwrap();
+        // Should return the first matching importer
+        assert_eq!(importer.name(), "CSV1");
+    }
+
+    #[test]
+    fn test_registry_empty_list_importers() {
+        let registry = ImporterRegistry::new();
+        let list = registry.list_importers();
+        assert!(list.is_empty());
+    }
 }

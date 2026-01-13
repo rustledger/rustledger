@@ -333,4 +333,219 @@ mod tests {
             assert_eq!(amount.number, Decimal::from_str("2500.00").unwrap());
         }
     }
+
+    #[test]
+    fn test_csv_import_skip_rows() {
+        let config = ImporterConfig::csv()
+            .account("Assets:Bank")
+            .currency("USD")
+            .date_column("Date")
+            .narration_column("Description")
+            .amount_column("Amount")
+            .skip_rows(2)
+            .build();
+
+        let csv_content = r"Date,Description,Amount
+Some header info
+More info
+2024-01-15,Coffee,-5.00
+2024-01-16,Lunch,-10.00
+";
+
+        let result = config.extract_from_string(csv_content).unwrap();
+        assert_eq!(result.directives.len(), 2);
+    }
+
+    #[test]
+    fn test_csv_import_invert_sign() {
+        let config = ImporterConfig::csv()
+            .account("Liabilities:CreditCard")
+            .currency("USD")
+            .date_column("Date")
+            .narration_column("Description")
+            .amount_column("Amount")
+            .invert_sign(true)
+            .build();
+
+        let csv_content = r"Date,Description,Amount
+2024-01-15,Purchase,50.00
+";
+
+        let result = config.extract_from_string(csv_content).unwrap();
+        assert_eq!(result.directives.len(), 1);
+
+        if let Directive::Transaction(txn) = &result.directives[0] {
+            let amount = txn.postings[0].amount().unwrap();
+            assert_eq!(amount.number, Decimal::from_str("-50.00").unwrap());
+        }
+    }
+
+    #[test]
+    fn test_csv_import_semicolon_delimiter() {
+        let config = ImporterConfig::csv()
+            .account("Assets:Bank")
+            .currency("EUR")
+            .date_column("Date")
+            .narration_column("Description")
+            .amount_column("Amount")
+            .delimiter(';')
+            .build();
+
+        let csv_content = r"Date;Description;Amount
+2024-01-15;Coffee;-5.00
+";
+
+        let result = config.extract_from_string(csv_content).unwrap();
+        assert_eq!(result.directives.len(), 1);
+    }
+
+    #[test]
+    fn test_csv_import_column_by_index() {
+        let config = ImporterConfig::csv()
+            .account("Assets:Bank")
+            .currency("USD")
+            .date_column_index(0)
+            .narration_column_index(1)
+            .amount_column_index(2)
+            .has_header(false)
+            .build();
+
+        let csv_content = r"2024-01-15,Coffee,-5.00
+2024-01-16,Lunch,-10.00
+";
+
+        let result = config.extract_from_string(csv_content).unwrap();
+        assert_eq!(result.directives.len(), 2);
+    }
+
+    #[test]
+    fn test_csv_import_with_payee() {
+        let config = ImporterConfig::csv()
+            .account("Assets:Bank")
+            .currency("USD")
+            .date_column("Date")
+            .payee_column("Payee")
+            .narration_column("Description")
+            .amount_column("Amount")
+            .build();
+
+        let csv_content = r"Date,Payee,Description,Amount
+2024-01-15,Coffee Shop,Morning coffee,-5.00
+";
+
+        let result = config.extract_from_string(csv_content).unwrap();
+        assert_eq!(result.directives.len(), 1);
+
+        if let Directive::Transaction(txn) = &result.directives[0] {
+            assert_eq!(txn.payee.as_deref(), Some("Coffee Shop"));
+            assert_eq!(txn.narration.as_str(), "Morning coffee");
+        }
+    }
+
+    #[test]
+    fn test_csv_import_empty_csv() {
+        let config = ImporterConfig::csv()
+            .account("Assets:Bank")
+            .currency("USD")
+            .date_column("Date")
+            .narration_column("Description")
+            .amount_column("Amount")
+            .build();
+
+        let csv_content = "Date,Description,Amount\n";
+
+        let result = config.extract_from_string(csv_content).unwrap();
+        assert!(result.directives.is_empty());
+    }
+
+    #[test]
+    fn test_csv_import_with_currency_symbol() {
+        let config = ImporterConfig::csv()
+            .account("Assets:Bank")
+            .currency("USD")
+            .date_column("Date")
+            .narration_column("Description")
+            .amount_column("Amount")
+            .build();
+
+        let csv_content = r"Date,Description,Amount
+2024-01-15,Purchase,$100.00
+2024-01-16,Refund,-$25.00
+";
+
+        let result = config.extract_from_string(csv_content).unwrap();
+        assert_eq!(result.directives.len(), 2);
+
+        if let Directive::Transaction(txn) = &result.directives[0] {
+            let amount = txn.postings[0].amount().unwrap();
+            assert_eq!(amount.number, Decimal::from(100));
+        }
+    }
+
+    #[test]
+    fn test_csv_import_parentheses_negative() {
+        let config = ImporterConfig::csv()
+            .account("Assets:Bank")
+            .currency("USD")
+            .date_column("Date")
+            .narration_column("Description")
+            .amount_column("Amount")
+            .build();
+
+        let csv_content = r"Date,Description,Amount
+2024-01-15,Withdrawal,(50.00)
+";
+
+        let result = config.extract_from_string(csv_content).unwrap();
+        assert_eq!(result.directives.len(), 1);
+
+        if let Directive::Transaction(txn) = &result.directives[0] {
+            let amount = txn.postings[0].amount().unwrap();
+            assert_eq!(amount.number, Decimal::from(-50));
+        }
+    }
+
+    #[test]
+    fn test_csv_import_comma_thousands() {
+        let config = ImporterConfig::csv()
+            .account("Assets:Bank")
+            .currency("USD")
+            .date_column("Date")
+            .narration_column("Description")
+            .amount_column("Amount")
+            .build();
+
+        let csv_content = r#"Date,Description,Amount
+2024-01-15,Large deposit,"1,234.56"
+"#;
+
+        let result = config.extract_from_string(csv_content).unwrap();
+        assert_eq!(result.directives.len(), 1);
+
+        if let Directive::Transaction(txn) = &result.directives[0] {
+            let amount = txn.postings[0].amount().unwrap();
+            assert_eq!(amount.number, Decimal::from_str("1234.56").unwrap());
+        }
+    }
+
+    #[test]
+    fn test_csv_importer_new() {
+        let config = ImporterConfig::csv().account("Assets:Bank").build();
+        let importer = CsvImporter::new(config);
+        // Just verify construction works
+        assert!(true);
+        let _ = importer;
+    }
+
+    #[test]
+    fn test_parse_money_string_edge_cases() {
+        // Whitespace
+        assert_eq!(parse_money_string("  100.00  "), Some(Decimal::from(100)));
+        // Empty after strip
+        assert_eq!(parse_money_string("   "), None);
+        // Just currency symbol
+        assert_eq!(parse_money_string("$"), None);
+        // Negative with currency
+        assert_eq!(parse_money_string("-$100.00"), Some(Decimal::from(-100)));
+    }
 }

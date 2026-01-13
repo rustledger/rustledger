@@ -602,7 +602,7 @@ fn test_subquery_with_inner_filter() {
 fn test_having_basic() {
     let directives = make_test_directives();
     let result = execute_query(
-        r#"SELECT account, COUNT(*) AS cnt GROUP BY account HAVING cnt >= 2"#,
+        r"SELECT account, COUNT(*) AS cnt GROUP BY account HAVING cnt >= 2",
         &directives,
     );
 
@@ -619,7 +619,7 @@ fn test_having_basic() {
 fn test_having_with_count() {
     let directives = make_test_directives();
     let result = execute_query(
-        r#"SELECT account, COUNT(*) AS cnt GROUP BY account HAVING cnt > 1"#,
+        r"SELECT account, COUNT(*) AS cnt GROUP BY account HAVING cnt > 1",
         &directives,
     );
 
@@ -636,7 +636,7 @@ fn test_having_filters_all() {
     let directives = make_test_directives();
     // Very high threshold that no account should meet
     let result = execute_query(
-        r#"SELECT account, COUNT(*) AS cnt GROUP BY account HAVING cnt > 999999"#,
+        r"SELECT account, COUNT(*) AS cnt GROUP BY account HAVING cnt > 999999",
         &directives,
     );
 
@@ -736,7 +736,7 @@ fn test_execute_window_dense_rank() {
 fn test_execute_window_with_partition_by() {
     let directives = make_test_directives();
     let result = execute_query(
-        r#"SELECT account, date, ROW_NUMBER() OVER (PARTITION BY account ORDER BY date) AS rn"#,
+        r"SELECT account, date, ROW_NUMBER() OVER (PARTITION BY account ORDER BY date) AS rn",
         &directives,
     );
 

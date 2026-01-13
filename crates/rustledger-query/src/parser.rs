@@ -53,9 +53,19 @@ fn ws1<'a>() -> impl Parser<'a, ParserInput<'a>, (), ParserExtra<'a>> + Clone {
     one_of(" \t\r\n").repeated().at_least(1).ignored()
 }
 
-/// Case-insensitive keyword parser.
+/// Case-insensitive keyword parser that treats underscore as part of identifiers.
+///
+/// Unlike chumsky's `text::keyword`, this considers underscore as a valid identifier
+/// character, so `OPEN_DATE` won't be parsed as keyword `OPEN` followed by `_DATE`.
 fn kw<'a>(keyword: &'static str) -> impl Parser<'a, ParserInput<'a>, (), ParserExtra<'a>> + Clone {
-    text::keyword(keyword).ignored()
+    // Match identifier with underscore support, then check if it equals the keyword
+    identifier().try_map(move |s: String, span| {
+        if s.eq_ignore_ascii_case(keyword) {
+            Ok(())
+        } else {
+            Err(Rich::custom(span, format!("expected keyword '{keyword}'")))
+        }
+    })
 }
 
 /// Parse digits.
@@ -512,20 +522,41 @@ fn literal<'a>() -> impl Parser<'a, ParserInput<'a>, Literal, ParserExtra<'a>> +
 
 /// Parse an identifier (column name, function name).
 fn identifier<'a>() -> impl Parser<'a, ParserInput<'a>, String, ParserExtra<'a>> + Clone {
-    text::ident().map(|s: &str| s.to_string())
+    // Identifiers start with a letter and can contain letters, digits, and underscores
+    any()
+        .filter(|c: &char| c.is_ascii_alphabetic() || *c == '_')
+        .then(
+            any()
+                .filter(|c: &char| c.is_ascii_alphanumeric() || *c == '_')
+                .repeated()
+                .collect::<String>(),
+        )
+        .map(|(first, rest): (char, String)| format!("{first}{rest}"))
 }
 
-/// Parse a string literal.
+/// Parse a string literal (double or single quoted).
 fn string_literal<'a>() -> impl Parser<'a, ParserInput<'a>, String, ParserExtra<'a>> + Clone {
     // Double-quoted string
-    just('"')
+    let double_quoted = just('"')
         .ignore_then(
             none_of("\"\\")
                 .or(just('\\').ignore_then(any()))
                 .repeated()
                 .collect::<String>(),
         )
-        .then_ignore(just('"'))
+        .then_ignore(just('"'));
+
+    // Single-quoted string (SQL-style)
+    let single_quoted = just('\'')
+        .ignore_then(
+            none_of("'\\")
+                .or(just('\\').ignore_then(any()))
+                .repeated()
+                .collect::<String>(),
+        )
+        .then_ignore(just('\''));
+
+    double_quoted.or(single_quoted)
 }
 
 /// Parse a date literal (YYYY-MM-DD).
@@ -862,6 +893,35 @@ mod tests {
                     assert_eq!(op.op, UnaryOperator::IsNotNull);
                 }
                 _ => panic!("Expected unary op"),
+            },
+            _ => panic!("Expected SELECT query"),
+        }
+    }
+
+    #[test]
+    fn test_underscore_function_name() {
+        let query = parse("SELECT OPEN_DATE('Assets:Bank')").unwrap();
+        match query {
+            Query::Select(sel) => match &sel.targets[0].expr {
+                Expr::Function(func) => {
+                    assert_eq!(func.name, "OPEN_DATE");
+                    assert_eq!(func.args.len(), 1);
+                }
+                _ => panic!("Expected function call, got {:?}", sel.targets[0].expr),
+            },
+            _ => panic!("Expected SELECT query"),
+        }
+    }
+
+    #[test]
+    fn test_identifier_with_underscore() {
+        let query = parse("SELECT my_column").unwrap();
+        match query {
+            Query::Select(sel) => match &sel.targets[0].expr {
+                Expr::Column(name) => {
+                    assert_eq!(name, "my_column");
+                }
+                _ => panic!("Expected column, got {:?}", sel.targets[0].expr),
             },
             _ => panic!("Expected SELECT query"),
         }

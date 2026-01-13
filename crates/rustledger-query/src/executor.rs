@@ -10,7 +10,8 @@ use regex::Regex;
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use rustledger_core::{
-    Amount, Directive, InternedStr, Inventory, NaiveDate, Position, Transaction,
+    Amount, Close, Commodity, Directive, InternedStr, Inventory, MetaValue, Metadata, NaiveDate,
+    Open, Position, Transaction,
 };
 
 use crate::ast::{
@@ -104,18 +105,53 @@ pub struct Executor<'a> {
     target_currency: Option<String>,
     /// Cache for compiled regex patterns.
     regex_cache: RefCell<HashMap<String, Option<Regex>>>,
+    /// Index of Open directives by account name.
+    open_directives: HashMap<String, &'a Open>,
+    /// Index of Close directives by account name.
+    close_directives: HashMap<String, &'a Close>,
+    /// Index of Commodity directives by currency code.
+    commodity_directives: HashMap<String, &'a Commodity>,
 }
 
 impl<'a> Executor<'a> {
     /// Create a new executor with the given directives.
     pub fn new(directives: &'a [Directive]) -> Self {
         let price_db = crate::price::PriceDatabase::from_directives(directives);
+
+        // Build directive indexes
+        let open_directives: HashMap<String, &Open> = directives
+            .iter()
+            .filter_map(|d| match d {
+                Directive::Open(o) => Some((o.account.to_string(), o)),
+                _ => None,
+            })
+            .collect();
+
+        let close_directives: HashMap<String, &Close> = directives
+            .iter()
+            .filter_map(|d| match d {
+                Directive::Close(c) => Some((c.account.to_string(), c)),
+                _ => None,
+            })
+            .collect();
+
+        let commodity_directives: HashMap<String, &Commodity> = directives
+            .iter()
+            .filter_map(|d| match d {
+                Directive::Commodity(c) => Some((c.currency.to_string(), c)),
+                _ => None,
+            })
+            .collect();
+
         Self {
             directives,
             balances: HashMap::new(),
             price_db,
             target_currency: None,
             regex_cache: RefCell::new(HashMap::new()),
+            open_directives,
+            close_directives,
+            commodity_directives,
         }
     }
 
@@ -941,10 +977,15 @@ impl<'a> Executor<'a> {
             "PARENT" | "LEAF" | "ROOT" | "ACCOUNT_DEPTH" | "ACCOUNT_SORTKEY" => {
                 self.eval_account_function(&name, func, ctx)
             }
+            // Account/metadata functions (require directive indexes)
+            "OPEN_DATE" | "CLOSE_DATE" | "OPEN_META" | "COMMODITY_META" => {
+                self.eval_metadata_function(&name, func, ctx)
+            }
             // Math functions
             "ABS" | "NEG" | "ROUND" | "SAFEDIV" => self.eval_math_function(&name, func, ctx),
             // Amount/Position functions
-            "NUMBER" | "CURRENCY" | "GETITEM" | "GET" | "UNITS" | "COST" | "WEIGHT" | "VALUE" => {
+            "NUMBER" | "CURRENCY" | "GETITEM" | "GET" | "UNITS" | "COST" | "WEIGHT" | "VALUE"
+            | "ONLY" | "EMPTY" | "FILTER_CURRENCY" | "POSSIGN" | "GETPRICE" => {
                 self.eval_position_function(&name, func, ctx)
             }
             // Utility functions
@@ -1632,6 +1673,11 @@ impl<'a> Executor<'a> {
             "COST" => self.eval_cost(func, ctx),
             "WEIGHT" => self.eval_weight(func, ctx),
             "VALUE" => self.eval_value(func, ctx),
+            "ONLY" => self.eval_only(func, ctx),
+            "EMPTY" => self.eval_empty(func, ctx),
+            "FILTER_CURRENCY" => self.eval_filter_currency(func, ctx),
+            "POSSIGN" => self.eval_possign(func, ctx),
+            "GETPRICE" => self.eval_getprice(func, ctx),
             _ => unreachable!(),
         }
     }
@@ -1808,6 +1854,342 @@ impl<'a> Executor<'a> {
                 "VALUE expects a position or inventory".to_string(),
             )),
         }
+    }
+
+    /// Evaluate ONLY function: get single currency from inventory.
+    fn eval_only(&self, func: &FunctionCall, ctx: &PostingContext) -> Result<Value, QueryError> {
+        Self::require_args("ONLY", func, 2)?;
+        let currency = match self.evaluate_expr(&func.args[0], ctx)? {
+            Value::String(s) => s,
+            _ => {
+                return Err(QueryError::Type(
+                    "ONLY expects currency string as first argument".to_string(),
+                ))
+            }
+        };
+        let val = self.evaluate_expr(&func.args[1], ctx)?;
+
+        match val {
+            Value::Inventory(inv) => {
+                let total = inv.units(&currency);
+                if total.is_zero() {
+                    Ok(Value::Null)
+                } else {
+                    Ok(Value::Amount(Amount::new(total, currency)))
+                }
+            }
+            _ => Err(QueryError::Type(
+                "ONLY expects an inventory as second argument".to_string(),
+            )),
+        }
+    }
+
+    /// Evaluate EMPTY function: check if inventory is empty.
+    fn eval_empty(&self, func: &FunctionCall, ctx: &PostingContext) -> Result<Value, QueryError> {
+        Self::require_args("EMPTY", func, 1)?;
+        let val = self.evaluate_expr(&func.args[0], ctx)?;
+
+        match val {
+            Value::Inventory(inv) => Ok(Value::Boolean(inv.is_empty())),
+            Value::Null => Ok(Value::Boolean(true)),
+            _ => Err(QueryError::Type("EMPTY expects an inventory".to_string())),
+        }
+    }
+
+    /// Evaluate `FILTER_CURRENCY` function: filter inventory by currency.
+    fn eval_filter_currency(
+        &self,
+        func: &FunctionCall,
+        ctx: &PostingContext,
+    ) -> Result<Value, QueryError> {
+        Self::require_args("FILTER_CURRENCY", func, 2)?;
+        let val = self.evaluate_expr(&func.args[0], ctx)?;
+        let currency = match self.evaluate_expr(&func.args[1], ctx)? {
+            Value::String(s) => s,
+            _ => {
+                return Err(QueryError::Type(
+                    "FILTER_CURRENCY expects currency string as second argument".to_string(),
+                ))
+            }
+        };
+
+        match val {
+            Value::Position(p) => {
+                if p.units.currency == currency {
+                    Ok(Value::Position(p))
+                } else {
+                    Ok(Value::Null)
+                }
+            }
+            Value::Inventory(inv) => {
+                let mut filtered = Inventory::new();
+                for pos in inv.positions() {
+                    if pos.units.currency == currency {
+                        filtered.add(pos.clone());
+                    }
+                }
+                Ok(Value::Inventory(filtered))
+            }
+            _ => Err(QueryError::Type(
+                "FILTER_CURRENCY expects position or inventory".to_string(),
+            )),
+        }
+    }
+
+    /// Evaluate POSSIGN function: correct sign based on account type.
+    /// Assets/Expenses are normally positive, Liabilities/Income/Equity are normally negative.
+    fn eval_possign(&self, func: &FunctionCall, ctx: &PostingContext) -> Result<Value, QueryError> {
+        Self::require_args("POSSIGN", func, 2)?;
+        let val = self.evaluate_expr(&func.args[0], ctx)?;
+        let account = match self.evaluate_expr(&func.args[1], ctx)? {
+            Value::String(s) => s,
+            _ => {
+                return Err(QueryError::Type(
+                    "POSSIGN expects account string as second argument".to_string(),
+                ))
+            }
+        };
+
+        // Determine sign based on account type
+        let sign = if account.starts_with("Assets") || account.starts_with("Expenses") {
+            Decimal::ONE
+        } else {
+            Decimal::NEGATIVE_ONE
+        };
+
+        match val {
+            Value::Number(n) => Ok(Value::Number(n * sign)),
+            Value::Integer(i) => Ok(Value::Number(Decimal::from(i) * sign)),
+            Value::Amount(a) => Ok(Value::Amount(Amount::new(a.number * sign, a.currency))),
+            Value::Position(mut p) => {
+                p.units = Amount::new(p.units.number * sign, p.units.currency.clone());
+                Ok(Value::Position(p))
+            }
+            Value::Inventory(inv) => {
+                let mut result = Inventory::new();
+                for pos in inv.positions() {
+                    let mut new_pos = pos.clone();
+                    new_pos.units =
+                        Amount::new(new_pos.units.number * sign, new_pos.units.currency.clone());
+                    result.add(new_pos);
+                }
+                Ok(Value::Inventory(result))
+            }
+            _ => Err(QueryError::Type(
+                "POSSIGN expects numeric value".to_string(),
+            )),
+        }
+    }
+
+    /// Evaluate GETPRICE function: get price between two currencies at a date.
+    fn eval_getprice(
+        &self,
+        func: &FunctionCall,
+        ctx: &PostingContext,
+    ) -> Result<Value, QueryError> {
+        if func.args.len() < 2 || func.args.len() > 3 {
+            return Err(QueryError::InvalidArguments(
+                "GETPRICE".to_string(),
+                "expected 2-3 arguments".to_string(),
+            ));
+        }
+
+        let base = match self.evaluate_expr(&func.args[0], ctx)? {
+            Value::String(s) => s,
+            _ => {
+                return Err(QueryError::Type(
+                    "GETPRICE expects base currency string".to_string(),
+                ))
+            }
+        };
+
+        let quote = match self.evaluate_expr(&func.args[1], ctx)? {
+            Value::String(s) => s,
+            _ => {
+                return Err(QueryError::Type(
+                    "GETPRICE expects quote currency string".to_string(),
+                ))
+            }
+        };
+
+        let date = if func.args.len() == 3 {
+            match self.evaluate_expr(&func.args[2], ctx)? {
+                Value::Date(d) => d,
+                _ => return Err(QueryError::Type("GETPRICE date must be a date".to_string())),
+            }
+        } else {
+            ctx.transaction.date
+        };
+
+        // Get the price from the price database
+        let amount = Amount::new(Decimal::ONE, base);
+        match self.price_db.convert(&amount, &quote, date) {
+            Some(converted) => Ok(Value::Number(converted.number)),
+            None => Ok(Value::Null),
+        }
+    }
+
+    /// Evaluate account/metadata functions: `OPEN_DATE`, `CLOSE_DATE`, `OPEN_META`, `COMMODITY_META`.
+    fn eval_metadata_function(
+        &self,
+        name: &str,
+        func: &FunctionCall,
+        ctx: &PostingContext,
+    ) -> Result<Value, QueryError> {
+        match name {
+            "OPEN_DATE" => {
+                Self::require_args(name, func, 1)?;
+                let account = match self.evaluate_expr(&func.args[0], ctx)? {
+                    Value::String(s) => s,
+                    _ => {
+                        return Err(QueryError::Type(
+                            "OPEN_DATE expects account string".to_string(),
+                        ))
+                    }
+                };
+                Ok(self
+                    .open_directives
+                    .get(&account)
+                    .map_or(Value::Null, |o| Value::Date(o.date)))
+            }
+
+            "CLOSE_DATE" => {
+                Self::require_args(name, func, 1)?;
+                let account = match self.evaluate_expr(&func.args[0], ctx)? {
+                    Value::String(s) => s,
+                    _ => {
+                        return Err(QueryError::Type(
+                            "CLOSE_DATE expects account string".to_string(),
+                        ))
+                    }
+                };
+                Ok(self
+                    .close_directives
+                    .get(&account)
+                    .map_or(Value::Null, |c| Value::Date(c.date)))
+            }
+
+            "OPEN_META" => {
+                if func.args.is_empty() || func.args.len() > 2 {
+                    return Err(QueryError::InvalidArguments(
+                        name.to_string(),
+                        "expected 1-2 arguments".to_string(),
+                    ));
+                }
+
+                let account = match self.evaluate_expr(&func.args[0], ctx)? {
+                    Value::String(s) => s,
+                    _ => {
+                        return Err(QueryError::Type(
+                            "OPEN_META expects account string".to_string(),
+                        ))
+                    }
+                };
+
+                let key = if func.args.len() == 2 {
+                    Some(match self.evaluate_expr(&func.args[1], ctx)? {
+                        Value::String(s) => s,
+                        _ => {
+                            return Err(QueryError::Type(
+                                "OPEN_META key must be a string".to_string(),
+                            ))
+                        }
+                    })
+                } else {
+                    None
+                };
+
+                if let Some(open) = self.open_directives.get(&account) {
+                    match key {
+                        None => {
+                            // Return the whole metadata as a string representation
+                            let meta_str = self.format_metadata(&open.meta);
+                            Ok(Value::String(meta_str))
+                        }
+                        Some(k) => Ok(open
+                            .meta
+                            .get(&k)
+                            .map_or(Value::Null, |v| self.meta_value_to_value(v))),
+                    }
+                } else {
+                    Ok(Value::Null)
+                }
+            }
+
+            "COMMODITY_META" => {
+                if func.args.is_empty() || func.args.len() > 2 {
+                    return Err(QueryError::InvalidArguments(
+                        name.to_string(),
+                        "expected 1-2 arguments".to_string(),
+                    ));
+                }
+
+                let currency = match self.evaluate_expr(&func.args[0], ctx)? {
+                    Value::String(s) => s,
+                    _ => {
+                        return Err(QueryError::Type(
+                            "COMMODITY_META expects currency string".to_string(),
+                        ))
+                    }
+                };
+
+                let key = if func.args.len() == 2 {
+                    Some(match self.evaluate_expr(&func.args[1], ctx)? {
+                        Value::String(s) => s,
+                        _ => {
+                            return Err(QueryError::Type(
+                                "COMMODITY_META key must be a string".to_string(),
+                            ))
+                        }
+                    })
+                } else {
+                    None
+                };
+
+                if let Some(commodity) = self.commodity_directives.get(&currency) {
+                    match key {
+                        None => {
+                            // Return the whole metadata as a string representation
+                            let meta_str = self.format_metadata(&commodity.meta);
+                            Ok(Value::String(meta_str))
+                        }
+                        Some(k) => Ok(commodity
+                            .meta
+                            .get(&k)
+                            .map_or(Value::Null, |v| self.meta_value_to_value(v))),
+                    }
+                } else {
+                    Ok(Value::Null)
+                }
+            }
+
+            _ => unreachable!(),
+        }
+    }
+
+    /// Convert a [`MetaValue`] to a [`Value`].
+    fn meta_value_to_value(&self, meta: &MetaValue) -> Value {
+        match meta {
+            MetaValue::String(s) => Value::String(s.clone()),
+            MetaValue::Account(s) => Value::String(s.clone()),
+            MetaValue::Currency(s) => Value::String(s.clone()),
+            MetaValue::Tag(s) => Value::String(s.clone()),
+            MetaValue::Link(s) => Value::String(s.clone()),
+            MetaValue::Date(d) => Value::Date(*d),
+            MetaValue::Number(n) => Value::Number(*n),
+            MetaValue::Bool(b) => Value::Boolean(*b),
+            MetaValue::Amount(a) => Value::Amount(a.clone()),
+            MetaValue::None => Value::Null,
+        }
+    }
+
+    /// Format metadata as a string.
+    fn format_metadata(&self, meta: &Metadata) -> String {
+        if meta.is_empty() {
+            return String::new();
+        }
+        let pairs: Vec<String> = meta.iter().map(|(k, v)| format!("{k}: {v:?}")).collect();
+        pairs.join(", ")
     }
 
     /// Evaluate COALESCE function.

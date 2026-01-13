@@ -3,7 +3,9 @@
 //! Tests cover parsing, execution, aggregation, filtering, and real-world query scenarios.
 
 use rust_decimal_macros::dec;
-use rustledger_core::{Amount, Directive, NaiveDate, Open, Posting, Transaction};
+use rustledger_core::{
+    Amount, Close, Commodity, Directive, MetaValue, NaiveDate, Open, Posting, Price, Transaction,
+};
 use rustledger_query::{parse, Executor, QueryResult, Value};
 
 // ============================================================================
@@ -820,5 +822,173 @@ fn test_joinstr_function() {
     // JOINSTR returns a comma-separated string
     for row in &result.rows {
         assert!(matches!(&row[0], Value::String(_)));
+    }
+}
+
+// ============================================================================
+// Account/Metadata Functions Tests
+// ============================================================================
+
+fn make_directives_with_metadata() -> Vec<Directive> {
+    let mut open = Open::new(date(2024, 1, 1), "Assets:Bank:Checking");
+    open.meta.insert(
+        "institution".to_string(),
+        MetaValue::String("Bank Corp".to_string()),
+    );
+    open.meta.insert(
+        "account_number".to_string(),
+        MetaValue::String("12345".to_string()),
+    );
+
+    let mut commodity = Commodity::new(date(2024, 1, 1), "USD");
+    commodity.meta.insert(
+        "name".to_string(),
+        MetaValue::String("US Dollar".to_string()),
+    );
+    commodity
+        .meta
+        .insert("export".to_string(), MetaValue::String("CASH".to_string()));
+
+    vec![
+        Directive::Open(open),
+        Directive::Open(Open::new(date(2024, 1, 1), "Expenses:Food")),
+        Directive::Close(Close::new(date(2024, 12, 31), "Expenses:Food")),
+        Directive::Commodity(commodity),
+        Directive::Price(Price::new(
+            date(2024, 1, 15),
+            "EUR",
+            Amount::new(dec!(1.10), "USD"),
+        )),
+        Directive::Transaction(
+            Transaction::new(date(2024, 1, 15), "Test")
+                .with_posting(Posting::new(
+                    "Assets:Bank:Checking",
+                    Amount::new(dec!(100), "USD"),
+                ))
+                .with_posting(Posting::new(
+                    "Expenses:Food",
+                    Amount::new(dec!(-100), "USD"),
+                )),
+        ),
+    ]
+}
+
+#[test]
+fn test_open_date_function() {
+    let directives = make_directives_with_metadata();
+    let result = execute_query("SELECT OPEN_DATE('Assets:Bank:Checking')", &directives);
+    assert!(!result.is_empty());
+    assert_eq!(result.rows[0][0], Value::Date(date(2024, 1, 1)));
+}
+
+#[test]
+fn test_close_date_function() {
+    let directives = make_directives_with_metadata();
+    let result = execute_query("SELECT CLOSE_DATE('Expenses:Food')", &directives);
+    assert!(!result.is_empty());
+    assert_eq!(result.rows[0][0], Value::Date(date(2024, 12, 31)));
+}
+
+#[test]
+fn test_open_date_not_found() {
+    let directives = make_directives_with_metadata();
+    let result = execute_query("SELECT OPEN_DATE('Assets:NonExistent')", &directives);
+    assert!(!result.is_empty());
+    assert_eq!(result.rows[0][0], Value::Null);
+}
+
+#[test]
+fn test_open_meta_function() {
+    let directives = make_directives_with_metadata();
+    let result = execute_query(
+        "SELECT OPEN_META('Assets:Bank:Checking', 'institution')",
+        &directives,
+    );
+    assert!(!result.is_empty());
+    assert_eq!(result.rows[0][0], Value::String("Bank Corp".to_string()));
+}
+
+#[test]
+fn test_open_meta_key_not_found() {
+    let directives = make_directives_with_metadata();
+    let result = execute_query(
+        "SELECT OPEN_META('Assets:Bank:Checking', 'nonexistent')",
+        &directives,
+    );
+    assert!(!result.is_empty());
+    assert_eq!(result.rows[0][0], Value::Null);
+}
+
+#[test]
+fn test_commodity_meta_function() {
+    let directives = make_directives_with_metadata();
+    let result = execute_query("SELECT COMMODITY_META('USD', 'name')", &directives);
+    assert!(!result.is_empty());
+    assert_eq!(result.rows[0][0], Value::String("US Dollar".to_string()));
+}
+
+// ============================================================================
+// Position/Amount Functions Tests
+// ============================================================================
+
+#[test]
+fn test_empty_function() {
+    let directives = make_test_directives();
+    // balance is an inventory, we can check if it's empty
+    let result = execute_query(
+        "SELECT DISTINCT account, EMPTY(balance) WHERE account ~ 'Checking'",
+        &directives,
+    );
+    assert!(!result.is_empty());
+    // Non-empty balance returns false
+    for row in &result.rows {
+        assert!(matches!(&row[1], Value::Boolean(_)));
+    }
+}
+
+#[test]
+fn test_possign_function() {
+    let directives = make_test_directives();
+    // POSSIGN normalizes the sign based on account type
+    let result = execute_query("SELECT number, POSSIGN(number, account)", &directives);
+    assert!(!result.is_empty());
+    for row in &result.rows {
+        assert!(matches!(&row[1], Value::Number(_)));
+    }
+}
+
+#[test]
+fn test_getprice_function() {
+    let directives = make_directives_with_metadata();
+    // With price data, GETPRICE should return conversion rate
+    let result = execute_query("SELECT GETPRICE('EUR', 'USD', 2024-01-15)", &directives);
+    assert!(!result.is_empty());
+    // Either Null (no price) or a Number
+    for row in &result.rows {
+        assert!(matches!(&row[0], Value::Null | Value::Number(_)));
+    }
+}
+
+#[test]
+fn test_filter_currency_function() {
+    let directives = make_test_directives();
+    // FILTER_CURRENCY filters inventory positions by currency
+    let result = execute_query("SELECT FILTER_CURRENCY(balance, 'USD')", &directives);
+    assert!(!result.is_empty());
+    // Should return Inventory or Null
+    for row in &result.rows {
+        assert!(matches!(&row[0], Value::Inventory(_) | Value::Null));
+    }
+}
+
+#[test]
+fn test_only_function() {
+    let directives = make_test_directives();
+    // ONLY gets single currency from inventory
+    let result = execute_query("SELECT ONLY('USD', balance)", &directives);
+    assert!(!result.is_empty());
+    // Should return Amount or Null
+    for row in &result.rows {
+        assert!(matches!(&row[0], Value::Amount(_) | Value::Null));
     }
 }

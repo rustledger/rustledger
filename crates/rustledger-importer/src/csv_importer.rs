@@ -532,9 +532,8 @@ More info
     fn test_csv_importer_new() {
         let config = ImporterConfig::csv().account("Assets:Bank").build();
         let importer = CsvImporter::new(config);
-        // Just verify construction works
-        assert!(true);
-        let _ = importer;
+        // Verify the importer has the expected name
+        assert_eq!(importer.name(), "CSV");
     }
 
     #[test]

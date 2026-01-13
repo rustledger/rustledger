@@ -202,7 +202,7 @@ mod tests {
     #[test]
     fn test_import_result_debug() {
         let result = ImportResult::empty();
-        let debug_str = format!("{:?}", result);
+        let debug_str = format!("{result:?}");
         assert!(debug_str.contains("ImportResult"));
     }
 
@@ -210,6 +210,8 @@ mod tests {
     fn test_import_result_clone() {
         let result = ImportResult::empty().with_warning("Test");
         let cloned = result.clone();
+        // Verify both original and clone have the warning
+        assert_eq!(result.warnings.len(), 1);
         assert_eq!(cloned.warnings.len(), 1);
     }
 }

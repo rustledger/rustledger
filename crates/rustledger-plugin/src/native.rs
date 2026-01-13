@@ -1942,7 +1942,7 @@ pub struct CommodityAttrPlugin {
 
 impl CommodityAttrPlugin {
     /// Create with default configuration (no required attributes).
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             required_attrs: Vec::new(),
         }
@@ -2140,7 +2140,10 @@ mod commodity_attr_tests {
                 date: "2024-01-01".to_string(),
                 data: DirectiveData::Commodity(CommodityData {
                     currency: "AAPL".to_string(),
-                    metadata: vec![("name".to_string(), MetaValueData::String("Apple Inc".to_string()))],
+                    metadata: vec![(
+                        "name".to_string(),
+                        MetaValueData::String("Apple Inc".to_string()),
+                    )],
                 }),
             }],
             options: PluginOptions {
@@ -2193,7 +2196,10 @@ mod commodity_attr_tests {
                 date: "2024-01-01".to_string(),
                 data: DirectiveData::Commodity(CommodityData {
                     currency: "AAPL".to_string(),
-                    metadata: vec![("sector".to_string(), MetaValueData::String("Tech".to_string()))],
+                    metadata: vec![(
+                        "sector".to_string(),
+                        MetaValueData::String("Tech".to_string()),
+                    )],
                 }),
             }],
             options: PluginOptions {
@@ -2303,7 +2309,9 @@ impl NativePlugin for CheckAverageCostPlugin {
                             .and_then(|s| Decimal::from_str(s).ok())
                             .unwrap_or_default();
 
-                        let entry = inventory.entry(key).or_insert((Decimal::ZERO, Decimal::ZERO));
+                        let entry = inventory
+                            .entry(key)
+                            .or_insert((Decimal::ZERO, Decimal::ZERO));
                         entry.0 += units_num; // total units
                         entry.1 += units_num * cost_per; // total cost
                     } else if units_num < Decimal::ZERO {
@@ -2323,10 +2331,10 @@ impl NativePlugin for CheckAverageCostPlugin {
 
                                 // Calculate relative difference
                                 let diff = (used_cost - avg_cost).abs();
-                                let relative_diff = if avg_cost != Decimal::ZERO {
-                                    diff / avg_cost
-                                } else {
+                                let relative_diff = if avg_cost == Decimal::ZERO {
                                     diff
+                                } else {
+                                    diff / avg_cost
                                 };
 
                                 if relative_diff > tolerance {
@@ -2715,7 +2723,7 @@ impl NativePlugin for CurrencyAccountsPlugin {
                     for (currency, &total) in &non_zero_currencies {
                         // Add posting to currency account to neutralize
                         modified_txn.postings.push(PostingData {
-                            account: format!("{}:{}", base_account, currency),
+                            account: format!("{base_account}:{currency}"),
                             units: Some(AmountData {
                                 number: (-total).to_string(),
                                 currency: (*currency).clone(),
@@ -2817,10 +2825,7 @@ mod currency_accounts_tests {
             assert!(usd_posting.is_some());
             let usd_posting = usd_posting.unwrap();
             // Should neutralize the -100 USD
-            assert_eq!(
-                usd_posting.units.as_ref().unwrap().number,
-                "100"
-            );
+            assert_eq!(usd_posting.units.as_ref().unwrap().number, "100");
 
             let eur_posting = txn
                 .postings
@@ -2829,10 +2834,7 @@ mod currency_accounts_tests {
             assert!(eur_posting.is_some());
             let eur_posting = eur_posting.unwrap();
             // Should neutralize the 85 EUR
-            assert_eq!(
-                eur_posting.units.as_ref().unwrap().number,
-                "-85"
-            );
+            assert_eq!(eur_posting.units.as_ref().unwrap().number, "-85");
         } else {
             panic!("Expected Transaction directive");
         }

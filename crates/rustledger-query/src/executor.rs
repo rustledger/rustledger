@@ -7,6 +7,7 @@ use std::collections::HashMap;
 
 use chrono::Datelike;
 use regex::Regex;
+use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use rustledger_core::{
     Amount, Directive, InternedStr, Inventory, NaiveDate, Position, Transaction,
@@ -924,13 +925,18 @@ impl<'a> Executor<'a> {
     ) -> Result<Value, QueryError> {
         let name = func.name.to_uppercase();
         match name.as_str() {
-            // Date functions
-            "YEAR" | "MONTH" | "DAY" | "WEEKDAY" | "QUARTER" | "YMONTH" | "TODAY" => {
-                self.eval_date_function(&name, func, ctx)
+            // Type casting functions
+            "BOOL" | "INT" | "DECIMAL" | "STR" | "DATE" => {
+                self.eval_cast_function(&name, func, ctx)
             }
+            // Date functions
+            "YEAR" | "MONTH" | "DAY" | "WEEKDAY" | "QUARTER" | "YMONTH" | "TODAY" | "DATE_DIFF"
+            | "DATE_ADD" | "DATE_TRUNC" | "DATE_PART" => self.eval_date_function(&name, func, ctx),
             // String functions
             "LENGTH" | "UPPER" | "LOWER" | "SUBSTR" | "SUBSTRING" | "TRIM" | "STARTSWITH"
-            | "ENDSWITH" => self.eval_string_function(&name, func, ctx),
+            | "ENDSWITH" | "GREP" | "GREPN" | "SUBST" | "MAXWIDTH" | "SPLITCOMP" | "JOINSTR" => {
+                self.eval_string_function(&name, func, ctx)
+            }
             // Account functions
             "PARENT" | "LEAF" | "ROOT" | "ACCOUNT_DEPTH" | "ACCOUNT_SORTKEY" => {
                 self.eval_account_function(&name, func, ctx)
@@ -950,52 +956,202 @@ impl<'a> Executor<'a> {
         }
     }
 
-    /// Evaluate date functions: `YEAR`, `MONTH`, `DAY`, `WEEKDAY`, `QUARTER`, `YMONTH`, `TODAY`.
+    /// Evaluate type casting functions: `BOOL`, `INT`, `DECIMAL`, `STR`, `DATE`.
+    fn eval_cast_function(
+        &self,
+        name: &str,
+        func: &FunctionCall,
+        ctx: &PostingContext,
+    ) -> Result<Value, QueryError> {
+        Self::require_args(name, func, 1)?;
+        let val = self.evaluate_expr(&func.args[0], ctx)?;
+
+        match name {
+            "BOOL" => Ok(Value::Boolean(self.to_bool(&val).unwrap_or(false))),
+
+            "INT" => match val {
+                Value::Integer(i) => Ok(Value::Integer(i)),
+                Value::Number(d) => Ok(Value::Integer(d.to_i64().unwrap_or(0))),
+                Value::Boolean(b) => Ok(Value::Integer(i64::from(b))),
+                Value::String(s) => Ok(s.parse::<i64>().map_or(Value::Null, Value::Integer)),
+                Value::Null => Ok(Value::Null),
+                _ => Ok(Value::Null),
+            },
+
+            "DECIMAL" => match val {
+                Value::Number(d) => Ok(Value::Number(d)),
+                Value::Integer(i) => Ok(Value::Number(Decimal::from(i))),
+                Value::Boolean(b) => {
+                    Ok(Value::Number(if b { Decimal::ONE } else { Decimal::ZERO }))
+                }
+                Value::String(s) => Ok(s
+                    .parse::<Decimal>()
+                    .map(Value::Number)
+                    .unwrap_or(Value::Null)),
+                Value::Null => Ok(Value::Null),
+                _ => Ok(Value::Null),
+            },
+
+            "STR" => match val {
+                Value::Boolean(true) => Ok(Value::String("TRUE".to_string())),
+                Value::Boolean(false) => Ok(Value::String("FALSE".to_string())),
+                Value::String(s) => Ok(Value::String(s)),
+                Value::Number(n) => Ok(Value::String(n.to_string())),
+                Value::Integer(i) => Ok(Value::String(i.to_string())),
+                Value::Date(d) => Ok(Value::String(d.to_string())),
+                Value::Null => Ok(Value::Null),
+                _ => Ok(Value::String(format!("{val:?}"))),
+            },
+
+            "DATE" => match val {
+                Value::Date(d) => Ok(Value::Date(d)),
+                Value::String(s) => Ok(NaiveDate::parse_from_str(&s, "%Y-%m-%d")
+                    .map(Value::Date)
+                    .unwrap_or(Value::Null)),
+                Value::Null => Ok(Value::Null),
+                _ => Ok(Value::Null),
+            },
+
+            _ => unreachable!(),
+        }
+    }
+
+    /// Evaluate date functions.
     fn eval_date_function(
         &self,
         name: &str,
         func: &FunctionCall,
         ctx: &PostingContext,
     ) -> Result<Value, QueryError> {
-        if name == "TODAY" {
-            if !func.args.is_empty() {
-                return Err(QueryError::InvalidArguments(
-                    "TODAY".to_string(),
-                    "expected 0 arguments".to_string(),
-                ));
-            }
-            return Ok(Value::Date(chrono::Local::now().date_naive()));
-        }
-
-        // All other date functions expect exactly 1 argument
-        if func.args.len() != 1 {
-            return Err(QueryError::InvalidArguments(
-                name.to_string(),
-                "expected 1 argument".to_string(),
-            ));
-        }
-
-        let val = self.evaluate_expr(&func.args[0], ctx)?;
-        let date = match val {
-            Value::Date(d) => d,
-            _ => return Err(QueryError::Type(format!("{name} expects a date"))),
-        };
-
         match name {
-            "YEAR" => Ok(Value::Integer(date.year().into())),
-            "MONTH" => Ok(Value::Integer(date.month().into())),
-            "DAY" => Ok(Value::Integer(date.day().into())),
-            "WEEKDAY" => Ok(Value::Integer(date.weekday().num_days_from_monday().into())),
-            "QUARTER" => {
-                let quarter = (date.month() - 1) / 3 + 1;
-                Ok(Value::Integer(quarter.into()))
+            "TODAY" => {
+                if !func.args.is_empty() {
+                    return Err(QueryError::InvalidArguments(
+                        "TODAY".to_string(),
+                        "expected 0 arguments".to_string(),
+                    ));
+                }
+                Ok(Value::Date(chrono::Local::now().date_naive()))
             }
-            "YMONTH" => Ok(Value::String(format!(
-                "{:04}-{:02}",
-                date.year(),
-                date.month()
-            ))),
-            _ => unreachable!(),
+
+            // DATE_DIFF(date1, date2) -> days between dates (date1 - date2)
+            "DATE_DIFF" => {
+                Self::require_args(name, func, 2)?;
+                let date1 = match self.evaluate_expr(&func.args[0], ctx)? {
+                    Value::Date(d) => d,
+                    _ => return Err(QueryError::Type("DATE_DIFF expects dates".to_string())),
+                };
+                let date2 = match self.evaluate_expr(&func.args[1], ctx)? {
+                    Value::Date(d) => d,
+                    _ => return Err(QueryError::Type("DATE_DIFF expects dates".to_string())),
+                };
+                Ok(Value::Integer((date1 - date2).num_days()))
+            }
+
+            // DATE_ADD(date, days) -> date + days
+            "DATE_ADD" => {
+                Self::require_args(name, func, 2)?;
+                let date = match self.evaluate_expr(&func.args[0], ctx)? {
+                    Value::Date(d) => d,
+                    _ => return Err(QueryError::Type("DATE_ADD expects a date".to_string())),
+                };
+                let days = match self.evaluate_expr(&func.args[1], ctx)? {
+                    Value::Integer(i) => i,
+                    Value::Number(d) => d.to_i64().unwrap_or(0),
+                    _ => {
+                        return Err(QueryError::Type(
+                            "DATE_ADD expects days as number".to_string(),
+                        ))
+                    }
+                };
+                Ok(Value::Date(date + chrono::Duration::days(days)))
+            }
+
+            // DATE_TRUNC(field, date) -> truncate date to field precision
+            "DATE_TRUNC" => {
+                Self::require_args(name, func, 2)?;
+                let field = match self.evaluate_expr(&func.args[0], ctx)? {
+                    Value::String(s) => s.to_lowercase(),
+                    _ => {
+                        return Err(QueryError::Type(
+                            "DATE_TRUNC expects field name".to_string(),
+                        ))
+                    }
+                };
+                let date = match self.evaluate_expr(&func.args[1], ctx)? {
+                    Value::Date(d) => d,
+                    _ => return Err(QueryError::Type("DATE_TRUNC expects a date".to_string())),
+                };
+
+                let result = match field.as_str() {
+                    "week" => {
+                        date - chrono::Duration::days(i64::from(
+                            date.weekday().num_days_from_monday(),
+                        ))
+                    }
+                    "month" => {
+                        NaiveDate::from_ymd_opt(date.year(), date.month(), 1).unwrap_or(date)
+                    }
+                    "quarter" => {
+                        let q = (date.month() - 1) / 3;
+                        NaiveDate::from_ymd_opt(date.year(), q * 3 + 1, 1).unwrap_or(date)
+                    }
+                    "year" => NaiveDate::from_ymd_opt(date.year(), 1, 1).unwrap_or(date),
+                    _ => return Ok(Value::Null),
+                };
+                Ok(Value::Date(result))
+            }
+
+            // DATE_PART(field, date) -> extract field from date
+            "DATE_PART" => {
+                Self::require_args(name, func, 2)?;
+                let field = match self.evaluate_expr(&func.args[0], ctx)? {
+                    Value::String(s) => s.to_lowercase(),
+                    _ => return Err(QueryError::Type("DATE_PART expects field name".to_string())),
+                };
+                let date = match self.evaluate_expr(&func.args[1], ctx)? {
+                    Value::Date(d) => d,
+                    _ => return Err(QueryError::Type("DATE_PART expects a date".to_string())),
+                };
+
+                let result = match field.as_str() {
+                    "day" => i64::from(date.day()),
+                    "weekday" => i64::from(date.weekday().num_days_from_monday()),
+                    "week" => i64::from(date.iso_week().week()),
+                    "month" => i64::from(date.month()),
+                    "quarter" => i64::from((date.month() - 1) / 3 + 1),
+                    "year" => i64::from(date.year()),
+                    _ => return Ok(Value::Null),
+                };
+                Ok(Value::Integer(result))
+            }
+
+            // Single-argument date functions
+            _ => {
+                Self::require_args(name, func, 1)?;
+                let val = self.evaluate_expr(&func.args[0], ctx)?;
+                let date = match val {
+                    Value::Date(d) => d,
+                    _ => return Err(QueryError::Type(format!("{name} expects a date"))),
+                };
+
+                match name {
+                    "YEAR" => Ok(Value::Integer(date.year().into())),
+                    "MONTH" => Ok(Value::Integer(date.month().into())),
+                    "DAY" => Ok(Value::Integer(date.day().into())),
+                    "WEEKDAY" => Ok(Value::Integer(date.weekday().num_days_from_monday().into())),
+                    "QUARTER" => {
+                        let quarter = (date.month() - 1) / 3 + 1;
+                        Ok(Value::Integer(quarter.into()))
+                    }
+                    "YMONTH" => Ok(Value::String(format!(
+                        "{:04}-{:02}",
+                        date.year(),
+                        date.month()
+                    ))),
+                    _ => unreachable!(),
+                }
+            }
         }
     }
 
@@ -1063,6 +1219,143 @@ impl<'a> Executor<'a> {
                     _ => Err(QueryError::Type("ENDSWITH expects two strings".to_string())),
                 }
             }
+
+            // GREP(pattern, text) -> return matched portion or null
+            "GREP" => {
+                Self::require_args(name, func, 2)?;
+                let pattern = match self.evaluate_expr(&func.args[0], ctx)? {
+                    Value::String(s) => s,
+                    _ => return Err(QueryError::Type("GREP expects string pattern".to_string())),
+                };
+                let text = match self.evaluate_expr(&func.args[1], ctx)? {
+                    Value::String(s) => s,
+                    _ => return Err(QueryError::Type("GREP expects string text".to_string())),
+                };
+                let re = Regex::new(&pattern)
+                    .map_err(|e| QueryError::Evaluation(format!("invalid regex: {e}")))?;
+                Ok(re
+                    .find(&text)
+                    .map_or(Value::Null, |m| Value::String(m.as_str().to_string())))
+            }
+
+            // GREPN(pattern, text, n) -> return nth capture group
+            "GREPN" => {
+                Self::require_args(name, func, 3)?;
+                let pattern = match self.evaluate_expr(&func.args[0], ctx)? {
+                    Value::String(s) => s,
+                    _ => return Err(QueryError::Type("GREPN expects string pattern".to_string())),
+                };
+                let text = match self.evaluate_expr(&func.args[1], ctx)? {
+                    Value::String(s) => s,
+                    _ => return Err(QueryError::Type("GREPN expects string text".to_string())),
+                };
+                let n = match self.evaluate_expr(&func.args[2], ctx)? {
+                    Value::Integer(i) => i as usize,
+                    Value::Number(d) => d.to_i64().unwrap_or(0) as usize,
+                    _ => return Err(QueryError::Type("GREPN expects integer index".to_string())),
+                };
+                let re = Regex::new(&pattern)
+                    .map_err(|e| QueryError::Evaluation(format!("invalid regex: {e}")))?;
+                Ok(re
+                    .captures(&text)
+                    .and_then(|c| c.get(n))
+                    .map_or(Value::Null, |m| Value::String(m.as_str().to_string())))
+            }
+
+            // SUBST(pattern, replacement, text) -> regex substitution
+            "SUBST" => {
+                Self::require_args(name, func, 3)?;
+                let pattern = match self.evaluate_expr(&func.args[0], ctx)? {
+                    Value::String(s) => s,
+                    _ => return Err(QueryError::Type("SUBST expects string pattern".to_string())),
+                };
+                let replacement = match self.evaluate_expr(&func.args[1], ctx)? {
+                    Value::String(s) => s,
+                    _ => {
+                        return Err(QueryError::Type(
+                            "SUBST expects string replacement".to_string(),
+                        ))
+                    }
+                };
+                let text = match self.evaluate_expr(&func.args[2], ctx)? {
+                    Value::String(s) => s,
+                    _ => return Err(QueryError::Type("SUBST expects string text".to_string())),
+                };
+                let re = Regex::new(&pattern)
+                    .map_err(|e| QueryError::Evaluation(format!("invalid regex: {e}")))?;
+                Ok(Value::String(
+                    re.replace_all(&text, replacement.as_str()).to_string(),
+                ))
+            }
+
+            // MAXWIDTH(text, width) -> truncate with ellipsis
+            "MAXWIDTH" => {
+                Self::require_args(name, func, 2)?;
+                let text = match self.evaluate_expr(&func.args[0], ctx)? {
+                    Value::String(s) => s,
+                    _ => return Err(QueryError::Type("MAXWIDTH expects string".to_string())),
+                };
+                let width = match self.evaluate_expr(&func.args[1], ctx)? {
+                    Value::Integer(i) => i as usize,
+                    Value::Number(d) => d.to_i64().unwrap_or(0) as usize,
+                    _ => {
+                        return Err(QueryError::Type(
+                            "MAXWIDTH expects integer width".to_string(),
+                        ))
+                    }
+                };
+                if text.len() <= width {
+                    Ok(Value::String(text))
+                } else if width <= 3 {
+                    Ok(Value::String("...".to_string()))
+                } else {
+                    Ok(Value::String(format!("{}...", &text[..width - 3])))
+                }
+            }
+
+            // SPLITCOMP(text, delimiter, index) -> split and return component
+            "SPLITCOMP" => {
+                Self::require_args(name, func, 3)?;
+                let text = match self.evaluate_expr(&func.args[0], ctx)? {
+                    Value::String(s) => s,
+                    _ => return Err(QueryError::Type("SPLITCOMP expects string".to_string())),
+                };
+                let delim = match self.evaluate_expr(&func.args[1], ctx)? {
+                    Value::String(s) => s,
+                    _ => {
+                        return Err(QueryError::Type(
+                            "SPLITCOMP expects string delimiter".to_string(),
+                        ))
+                    }
+                };
+                let idx = match self.evaluate_expr(&func.args[2], ctx)? {
+                    Value::Integer(i) => i as usize,
+                    Value::Number(d) => d.to_i64().unwrap_or(0) as usize,
+                    _ => {
+                        return Err(QueryError::Type(
+                            "SPLITCOMP expects integer index".to_string(),
+                        ))
+                    }
+                };
+                Ok(text
+                    .split(&delim)
+                    .nth(idx)
+                    .map_or(Value::Null, |s| Value::String(s.to_string())))
+            }
+
+            // JOINSTR(set) -> join set to comma-separated string
+            "JOINSTR" => {
+                Self::require_args(name, func, 1)?;
+                let val = self.evaluate_expr(&func.args[0], ctx)?;
+                match val {
+                    Value::StringSet(mut set) => {
+                        set.sort();
+                        Ok(Value::String(set.join(", ")))
+                    }
+                    _ => Err(QueryError::Type("JOINSTR expects a string set".to_string())),
+                }
+            }
+
             _ => unreachable!(),
         }
     }

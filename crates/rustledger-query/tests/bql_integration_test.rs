@@ -741,3 +741,84 @@ fn test_flatten_without_keyword() {
         _ => panic!("Expected SELECT query"),
     }
 }
+
+// ============================================================================
+// New Function Tests (BQL parity)
+// ============================================================================
+
+#[test]
+fn test_int_function() {
+    let directives = make_test_directives();
+    let result = execute_query(
+        "SELECT INT(number) WHERE account ~ \"Expenses:Food\"",
+        &directives,
+    );
+    assert!(!result.is_empty());
+    for row in &result.rows {
+        assert!(matches!(&row[0], Value::Integer(_) | Value::Null));
+    }
+}
+
+#[test]
+fn test_str_function() {
+    let directives = make_test_directives();
+    // STR converts a number to string
+    let result = execute_query(
+        "SELECT STR(number) WHERE account ~ \"Expenses:Food\"",
+        &directives,
+    );
+    assert!(!result.is_empty());
+    for row in &result.rows {
+        // STR should return strings or null
+        assert!(matches!(&row[0], Value::String(_) | Value::Null));
+    }
+}
+
+#[test]
+fn test_date_diff_function() {
+    let directives = make_test_directives();
+    // DATE_DIFF returns days between dates
+    let result = execute_query(
+        "SELECT DISTINCT DATE_DIFF(date, 2024-01-01) WHERE YEAR(date) = 2024",
+        &directives,
+    );
+    assert!(!result.is_empty());
+    for row in &result.rows {
+        if let Value::Integer(days) = &row[0] {
+            assert!(*days >= 0, "Days should be non-negative");
+        }
+    }
+}
+
+#[test]
+fn test_date_add_function() {
+    let directives = make_test_directives();
+    let result = execute_query("SELECT DATE_ADD(date, 7)", &directives);
+    assert!(!result.is_empty());
+    for row in &result.rows {
+        assert!(matches!(&row[0], Value::Date(_)));
+    }
+}
+
+#[test]
+fn test_maxwidth_function() {
+    let directives = make_test_directives();
+    let result = execute_query("SELECT MAXWIDTH(narration, 10)", &directives);
+    assert!(!result.is_empty());
+    for row in &result.rows {
+        if let Value::String(s) = &row[0] {
+            assert!(s.len() <= 10, "String should be truncated to 10 chars: {s}");
+        }
+    }
+}
+
+#[test]
+fn test_joinstr_function() {
+    let directives = make_test_directives();
+    let result = execute_query("SELECT JOINSTR(tags)", &directives);
+    assert!(!result.is_empty());
+    // JOINSTR returns a comma-separated string
+    for row in &result.rows {
+        assert!(matches!(&row[0], Value::String(_)));
+    }
+}

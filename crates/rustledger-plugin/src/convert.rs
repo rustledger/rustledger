@@ -222,6 +222,11 @@ fn close_to_data(close: &Close) -> CloseData {
 fn commodity_to_data(comm: &Commodity) -> CommodityData {
     CommodityData {
         currency: comm.currency.to_string(),
+        metadata: comm
+            .meta
+            .iter()
+            .map(|(k, v)| (k.clone(), meta_value_to_data(v)))
+            .collect(),
     }
 }
 
@@ -555,7 +560,11 @@ fn data_to_commodity(data: &CommodityData, date: NaiveDate) -> Commodity {
     Commodity {
         date,
         currency: data.currency.clone().into(),
-        meta: Default::default(),
+        meta: data
+            .metadata
+            .iter()
+            .map(|(k, v)| (k.clone(), data_to_meta_value(v)))
+            .collect(),
     }
 }
 

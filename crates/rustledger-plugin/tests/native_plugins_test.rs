@@ -138,6 +138,7 @@ fn make_commodity(date: &str, currency: &str) -> DirectiveWrapper {
         date: date.to_string(),
         data: DirectiveData::Commodity(CommodityData {
             currency: currency.to_string(),
+            metadata: vec![],
         }),
     }
 }

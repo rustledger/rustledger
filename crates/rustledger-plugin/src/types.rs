@@ -225,6 +225,9 @@ pub struct CloseData {
 pub struct CommodityData {
     /// Currency code.
     pub currency: String,
+    /// Metadata key-value pairs.
+    #[serde(default)]
+    pub metadata: Vec<(String, MetaValueData)>,
 }
 
 /// Pad directive data.

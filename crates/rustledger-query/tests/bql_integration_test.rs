@@ -593,3 +593,153 @@ fn test_subquery_with_inner_filter() {
 
     assert!(!result.is_empty());
 }
+
+// ============================================================================
+// HAVING Clause Tests
+// ============================================================================
+
+#[test]
+fn test_having_basic() {
+    let directives = make_test_directives();
+    let result = execute_query(
+        r#"SELECT account, COUNT(*) AS cnt GROUP BY account HAVING cnt >= 2"#,
+        &directives,
+    );
+
+    // Should only return accounts with count >= 2
+    assert!(!result.is_empty());
+    for row in &result.rows {
+        if let Value::Integer(cnt) = &row[1] {
+            assert!(*cnt >= 2, "expected count >= 2, got {cnt}");
+        }
+    }
+}
+
+#[test]
+fn test_having_with_count() {
+    let directives = make_test_directives();
+    let result = execute_query(
+        r#"SELECT account, COUNT(*) AS cnt GROUP BY account HAVING cnt > 1"#,
+        &directives,
+    );
+
+    // Should only return accounts with more than 1 posting
+    for row in &result.rows {
+        if let Value::Integer(cnt) = &row[1] {
+            assert!(*cnt > 1, "expected count > 1, got {cnt}");
+        }
+    }
+}
+
+#[test]
+fn test_having_filters_all() {
+    let directives = make_test_directives();
+    // Very high threshold that no account should meet
+    let result = execute_query(
+        r#"SELECT account, COUNT(*) AS cnt GROUP BY account HAVING cnt > 999999"#,
+        &directives,
+    );
+
+    assert!(
+        result.is_empty(),
+        "expected no results with very high threshold"
+    );
+}
+
+// ============================================================================
+// PIVOT BY Tests
+// ============================================================================
+
+#[test]
+fn test_parse_pivot_by() {
+    let query =
+        parse("SELECT account, YEAR(date), SUM(position) GROUP BY 1, 2 PIVOT BY YEAR(date)")
+            .expect("should parse");
+    assert!(matches!(query, rustledger_query::Query::Select(_)));
+}
+
+// ============================================================================
+// Window Function Tests
+// ============================================================================
+
+#[test]
+fn test_parse_window_function_row_number() {
+    let query = parse("SELECT account, ROW_NUMBER() OVER (ORDER BY date)").expect("should parse");
+    assert!(matches!(query, rustledger_query::Query::Select(_)));
+}
+
+#[test]
+fn test_parse_window_function_with_partition() {
+    let query = parse("SELECT account, ROW_NUMBER() OVER (PARTITION BY account ORDER BY date)")
+        .expect("should parse");
+    assert!(matches!(query, rustledger_query::Query::Select(_)));
+}
+
+#[test]
+fn test_execute_window_row_number() {
+    let directives = make_test_directives();
+    let result = execute_query(
+        "SELECT date, narration, ROW_NUMBER() OVER (ORDER BY date) AS rn",
+        &directives,
+    );
+
+    assert!(!result.is_empty());
+
+    // Row numbers should be sequential
+    let row_nums: Vec<i64> = result
+        .rows
+        .iter()
+        .filter_map(|row| {
+            if let Value::Integer(n) = &row[2] {
+                Some(*n)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    for (i, &rn) in row_nums.iter().enumerate() {
+        assert_eq!(
+            rn,
+            (i + 1) as i64,
+            "expected row_number {}, got {rn}",
+            i + 1
+        );
+    }
+}
+
+#[test]
+fn test_execute_window_rank() {
+    let directives = make_test_directives();
+    let result = execute_query(
+        "SELECT account, RANK() OVER (ORDER BY account)",
+        &directives,
+    );
+
+    assert!(!result.is_empty());
+    assert_eq!(result.columns.len(), 2);
+}
+
+#[test]
+fn test_execute_window_dense_rank() {
+    let directives = make_test_directives();
+    let result = execute_query(
+        "SELECT account, DENSE_RANK() OVER (ORDER BY account)",
+        &directives,
+    );
+
+    assert!(!result.is_empty());
+    assert_eq!(result.columns.len(), 2);
+}
+
+#[test]
+fn test_execute_window_with_partition_by() {
+    let directives = make_test_directives();
+    let result = execute_query(
+        r#"SELECT account, date, ROW_NUMBER() OVER (PARTITION BY account ORDER BY date) AS rn"#,
+        &directives,
+    );
+
+    assert!(!result.is_empty());
+    // Each partition should have its own row numbering starting from 1
+}

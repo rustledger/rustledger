@@ -10,13 +10,14 @@ use regex::Regex;
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use rustledger_core::{
-    Amount, Close, Commodity, Directive, InternedStr, Inventory, MetaValue, Metadata, NaiveDate,
-    Open, Position, Transaction,
+    Amount, Close, Commodity, Directive, Document, Event, InternedStr, Inventory, MetaValue,
+    Metadata, NaiveDate, Note, Open, Position, Price, Transaction,
 };
 
 use crate::ast::{
-    BalancesQuery, BinaryOp, BinaryOperator, Expr, FromClause, FunctionCall, JournalQuery, Literal,
-    OrderSpec, PrintQuery, Query, SelectQuery, SortDirection, Target, UnaryOp, UnaryOperator,
+    BalancesQuery, BinaryOp, BinaryOperator, Expr, FromClause, FromTable, FunctionCall,
+    JournalQuery, Literal, OrderSpec, PrintQuery, Query, SelectQuery, SortDirection, Target,
+    UnaryOp, UnaryOperator,
 };
 use crate::error::QueryError;
 
@@ -91,6 +92,23 @@ pub struct PostingContext<'a> {
     pub posting_index: usize,
     /// Running balance after this posting (optional).
     pub balance: Option<Inventory>,
+}
+
+/// Context for a directive row from alternative FROM tables.
+#[derive(Debug)]
+pub enum DirectiveContext<'a> {
+    /// An Open directive (account).
+    Account(&'a Open),
+    /// A Commodity directive.
+    Commodity(&'a Commodity),
+    /// A Price directive.
+    Price(&'a Price),
+    /// A Note directive.
+    Note(&'a Note),
+    /// An Event directive.
+    Event(&'a Event),
+    /// A Document directive.
+    Document(&'a Document),
 }
 
 /// Query executor.
@@ -203,6 +221,24 @@ impl<'a> Executor<'a> {
 
     /// Execute a SELECT query.
     fn execute_select(&self, query: &SelectQuery) -> Result<QueryResult, QueryError> {
+        // Determine the table type
+        let table = query.from.as_ref().map_or(FromTable::Postings, |f| f.table);
+
+        // Dispatch based on table type
+        match table {
+            FromTable::Postings => self.execute_select_postings(query),
+            FromTable::Entries => self.execute_select_entries(query),
+            FromTable::Accounts => self.execute_select_accounts(query),
+            FromTable::Commodities => self.execute_select_commodities(query),
+            FromTable::Prices => self.execute_select_prices(query),
+            FromTable::Notes => self.execute_select_notes(query),
+            FromTable::Events => self.execute_select_events(query),
+            FromTable::Documents => self.execute_select_documents(query),
+        }
+    }
+
+    /// Execute SELECT query over postings (default).
+    fn execute_select_postings(&self, query: &SelectQuery) -> Result<QueryResult, QueryError> {
         // Determine column names
         let column_names = self.resolve_column_names(&query.targets)?;
         let mut result = QueryResult::new(column_names);
@@ -238,6 +274,15 @@ impl<'a> Executor<'a> {
             }
         }
 
+        self.apply_post_processing(query, result)
+    }
+
+    /// Apply ORDER BY, LIMIT, and FLATTEN to results.
+    fn apply_post_processing(
+        &self,
+        query: &SelectQuery,
+        mut result: QueryResult,
+    ) -> Result<QueryResult, QueryError> {
         // Apply ORDER BY
         if let Some(order_by) = &query.order_by {
             self.sort_results(&mut result, order_by)?;
@@ -254,6 +299,205 @@ impl<'a> Executor<'a> {
         }
 
         Ok(result)
+    }
+
+    /// Execute SELECT query over all entries (directives).
+    fn execute_select_entries(&self, query: &SelectQuery) -> Result<QueryResult, QueryError> {
+        let column_names = self.resolve_column_names(&query.targets)?;
+        let mut result = QueryResult::new(column_names);
+
+        for directive in self.directives {
+            let row = self.evaluate_directive_row(&query.targets, directive)?;
+            if query.distinct {
+                if !result.rows.contains(&row) {
+                    result.add_row(row);
+                }
+            } else {
+                result.add_row(row);
+            }
+        }
+
+        self.apply_post_processing(query, result)
+    }
+
+    /// Execute SELECT query over accounts (Open directives).
+    fn execute_select_accounts(&self, query: &SelectQuery) -> Result<QueryResult, QueryError> {
+        let column_names = self.resolve_column_names(&query.targets)?;
+        let mut result = QueryResult::new(column_names);
+
+        for directive in self.directives {
+            if let Directive::Open(open) = directive {
+                let ctx = DirectiveContext::Account(open);
+                let row = self.evaluate_directive_context_row(&query.targets, &ctx)?;
+
+                // Apply WHERE filter
+                if let Some(where_expr) = &query.where_clause {
+                    if !self.evaluate_directive_predicate(where_expr, &ctx)? {
+                        continue;
+                    }
+                }
+
+                if query.distinct {
+                    if !result.rows.contains(&row) {
+                        result.add_row(row);
+                    }
+                } else {
+                    result.add_row(row);
+                }
+            }
+        }
+
+        self.apply_post_processing(query, result)
+    }
+
+    /// Execute SELECT query over commodities.
+    fn execute_select_commodities(&self, query: &SelectQuery) -> Result<QueryResult, QueryError> {
+        let column_names = self.resolve_column_names(&query.targets)?;
+        let mut result = QueryResult::new(column_names);
+
+        for directive in self.directives {
+            if let Directive::Commodity(commodity) = directive {
+                let ctx = DirectiveContext::Commodity(commodity);
+                let row = self.evaluate_directive_context_row(&query.targets, &ctx)?;
+
+                // Apply WHERE filter
+                if let Some(where_expr) = &query.where_clause {
+                    if !self.evaluate_directive_predicate(where_expr, &ctx)? {
+                        continue;
+                    }
+                }
+
+                if query.distinct {
+                    if !result.rows.contains(&row) {
+                        result.add_row(row);
+                    }
+                } else {
+                    result.add_row(row);
+                }
+            }
+        }
+
+        self.apply_post_processing(query, result)
+    }
+
+    /// Execute SELECT query over prices.
+    fn execute_select_prices(&self, query: &SelectQuery) -> Result<QueryResult, QueryError> {
+        let column_names = self.resolve_column_names(&query.targets)?;
+        let mut result = QueryResult::new(column_names);
+
+        for directive in self.directives {
+            if let Directive::Price(price) = directive {
+                let ctx = DirectiveContext::Price(price);
+                let row = self.evaluate_directive_context_row(&query.targets, &ctx)?;
+
+                // Apply WHERE filter
+                if let Some(where_expr) = &query.where_clause {
+                    if !self.evaluate_directive_predicate(where_expr, &ctx)? {
+                        continue;
+                    }
+                }
+
+                if query.distinct {
+                    if !result.rows.contains(&row) {
+                        result.add_row(row);
+                    }
+                } else {
+                    result.add_row(row);
+                }
+            }
+        }
+
+        self.apply_post_processing(query, result)
+    }
+
+    /// Execute SELECT query over notes.
+    fn execute_select_notes(&self, query: &SelectQuery) -> Result<QueryResult, QueryError> {
+        let column_names = self.resolve_column_names(&query.targets)?;
+        let mut result = QueryResult::new(column_names);
+
+        for directive in self.directives {
+            if let Directive::Note(note) = directive {
+                let ctx = DirectiveContext::Note(note);
+                let row = self.evaluate_directive_context_row(&query.targets, &ctx)?;
+
+                // Apply WHERE filter
+                if let Some(where_expr) = &query.where_clause {
+                    if !self.evaluate_directive_predicate(where_expr, &ctx)? {
+                        continue;
+                    }
+                }
+
+                if query.distinct {
+                    if !result.rows.contains(&row) {
+                        result.add_row(row);
+                    }
+                } else {
+                    result.add_row(row);
+                }
+            }
+        }
+
+        self.apply_post_processing(query, result)
+    }
+
+    /// Execute SELECT query over events.
+    fn execute_select_events(&self, query: &SelectQuery) -> Result<QueryResult, QueryError> {
+        let column_names = self.resolve_column_names(&query.targets)?;
+        let mut result = QueryResult::new(column_names);
+
+        for directive in self.directives {
+            if let Directive::Event(event) = directive {
+                let ctx = DirectiveContext::Event(event);
+                let row = self.evaluate_directive_context_row(&query.targets, &ctx)?;
+
+                // Apply WHERE filter
+                if let Some(where_expr) = &query.where_clause {
+                    if !self.evaluate_directive_predicate(where_expr, &ctx)? {
+                        continue;
+                    }
+                }
+
+                if query.distinct {
+                    if !result.rows.contains(&row) {
+                        result.add_row(row);
+                    }
+                } else {
+                    result.add_row(row);
+                }
+            }
+        }
+
+        self.apply_post_processing(query, result)
+    }
+
+    /// Execute SELECT query over documents.
+    fn execute_select_documents(&self, query: &SelectQuery) -> Result<QueryResult, QueryError> {
+        let column_names = self.resolve_column_names(&query.targets)?;
+        let mut result = QueryResult::new(column_names);
+
+        for directive in self.directives {
+            if let Directive::Document(doc) = directive {
+                let ctx = DirectiveContext::Document(doc);
+                let row = self.evaluate_directive_context_row(&query.targets, &ctx)?;
+
+                // Apply WHERE filter
+                if let Some(where_expr) = &query.where_clause {
+                    if !self.evaluate_directive_predicate(where_expr, &ctx)? {
+                        continue;
+                    }
+                }
+
+                if query.distinct {
+                    if !result.rows.contains(&row) {
+                        result.add_row(row);
+                    }
+                } else {
+                    result.add_row(row);
+                }
+            }
+        }
+
+        self.apply_post_processing(query, result)
     }
 
     /// Flatten inventory values in results into separate rows.
@@ -2943,6 +3187,284 @@ impl<'a> Executor<'a> {
             _ => std::cmp::Ordering::Equal, // Can't compare other types
         }
     }
+
+    // =========================================================================
+    // Directive context evaluation methods (for FROM alternative tables)
+    // =========================================================================
+
+    /// Evaluate a row for a generic directive.
+    fn evaluate_directive_row(
+        &self,
+        targets: &[Target],
+        directive: &Directive,
+    ) -> Result<Vec<Value>, QueryError> {
+        let mut row = Vec::with_capacity(targets.len());
+        for target in targets {
+            let value = self.evaluate_directive_expr(&target.expr, directive)?;
+            row.push(value);
+        }
+        Ok(row)
+    }
+
+    /// Evaluate a row for a directive context (specific directive type).
+    fn evaluate_directive_context_row(
+        &self,
+        targets: &[Target],
+        ctx: &DirectiveContext,
+    ) -> Result<Vec<Value>, QueryError> {
+        let mut row = Vec::with_capacity(targets.len());
+        for target in targets {
+            let value = self.evaluate_directive_context_expr(&target.expr, ctx)?;
+            row.push(value);
+        }
+        Ok(row)
+    }
+
+    /// Evaluate an expression on a generic directive.
+    fn evaluate_directive_expr(
+        &self,
+        expr: &Expr,
+        directive: &Directive,
+    ) -> Result<Value, QueryError> {
+        match expr {
+            Expr::Wildcard => Ok(Value::String("*".to_string())),
+            Expr::Column(name) => self.evaluate_directive_column(name, directive),
+            Expr::Literal(lit) => Ok(match lit {
+                Literal::String(s) => Value::String(s.clone()),
+                Literal::Number(n) => Value::Number(*n),
+                Literal::Integer(i) => Value::Integer(*i),
+                Literal::Date(d) => Value::Date(*d),
+                Literal::Boolean(b) => Value::Boolean(*b),
+                Literal::Null => Value::Null,
+            }),
+            _ => Ok(Value::Null), // Other expressions not supported for entries table
+        }
+    }
+
+    /// Evaluate a column reference on a generic directive.
+    fn evaluate_directive_column(
+        &self,
+        name: &str,
+        directive: &Directive,
+    ) -> Result<Value, QueryError> {
+        match name.to_lowercase().as_str() {
+            "type" => {
+                let type_name = match directive {
+                    Directive::Transaction(_) => "transaction",
+                    Directive::Balance(_) => "balance",
+                    Directive::Open(_) => "open",
+                    Directive::Close(_) => "close",
+                    Directive::Commodity(_) => "commodity",
+                    Directive::Pad(_) => "pad",
+                    Directive::Event(_) => "event",
+                    Directive::Query(_) => "query",
+                    Directive::Note(_) => "note",
+                    Directive::Document(_) => "document",
+                    Directive::Price(_) => "price",
+                    Directive::Custom(_) => "custom",
+                };
+                Ok(Value::String(type_name.to_string()))
+            }
+            "date" => Ok(Value::Date(directive.date())),
+            _ => Ok(Value::Null),
+        }
+    }
+
+    /// Evaluate an expression on a directive context.
+    fn evaluate_directive_context_expr(
+        &self,
+        expr: &Expr,
+        ctx: &DirectiveContext,
+    ) -> Result<Value, QueryError> {
+        match expr {
+            Expr::Wildcard => Ok(Value::String("*".to_string())),
+            Expr::Column(name) => self.evaluate_directive_context_column(name, ctx),
+            Expr::Literal(lit) => Ok(match lit {
+                Literal::String(s) => Value::String(s.clone()),
+                Literal::Number(n) => Value::Number(*n),
+                Literal::Integer(i) => Value::Integer(*i),
+                Literal::Date(d) => Value::Date(*d),
+                Literal::Boolean(b) => Value::Boolean(*b),
+                Literal::Null => Value::Null,
+            }),
+            Expr::Function(func) => self.evaluate_directive_context_function(func, ctx),
+            Expr::BinaryOp(op) => self.evaluate_directive_context_binary_op(op, ctx),
+            Expr::UnaryOp(op) => self.evaluate_directive_context_unary_op(op, ctx),
+            Expr::Paren(inner) => self.evaluate_directive_context_expr(inner, ctx),
+        }
+    }
+
+    /// Evaluate a column reference on a directive context.
+    fn evaluate_directive_context_column(
+        &self,
+        name: &str,
+        ctx: &DirectiveContext,
+    ) -> Result<Value, QueryError> {
+        match ctx {
+            DirectiveContext::Account(open) => match name.to_lowercase().as_str() {
+                "account" => Ok(Value::String(open.account.to_string())),
+                "date" | "open_date" => Ok(Value::Date(open.date)),
+                "currencies" => {
+                    let currencies: Vec<String> =
+                        open.currencies.iter().map(ToString::to_string).collect();
+                    Ok(Value::String(currencies.join(", ")))
+                }
+                "booking" => Ok(open
+                    .booking
+                    .as_ref()
+                    .map_or(Value::Null, |b| Value::String(format!("{b:?}")))),
+                "type" => Ok(Value::String("open".to_string())),
+                _ => Ok(Value::Null),
+            },
+            DirectiveContext::Commodity(commodity) => match name.to_lowercase().as_str() {
+                "currency" | "commodity" => Ok(Value::String(commodity.currency.to_string())),
+                "date" => Ok(Value::Date(commodity.date)),
+                "type" => Ok(Value::String("commodity".to_string())),
+                _ => Ok(Value::Null),
+            },
+            DirectiveContext::Price(price) => match name.to_lowercase().as_str() {
+                "date" => Ok(Value::Date(price.date)),
+                "currency" | "base" => Ok(Value::String(price.currency.to_string())),
+                "amount" | "price" => Ok(Value::Amount(price.amount.clone())),
+                "quote" => Ok(Value::String(price.amount.currency.to_string())),
+                "number" => Ok(Value::Number(price.amount.number)),
+                "type" => Ok(Value::String("price".to_string())),
+                _ => Ok(Value::Null),
+            },
+            DirectiveContext::Note(note) => match name.to_lowercase().as_str() {
+                "date" => Ok(Value::Date(note.date)),
+                "account" => Ok(Value::String(note.account.to_string())),
+                "comment" | "note" => Ok(Value::String(note.comment.clone())),
+                "type" => Ok(Value::String("note".to_string())),
+                _ => Ok(Value::Null),
+            },
+            DirectiveContext::Event(event) => match name.to_lowercase().as_str() {
+                "date" => Ok(Value::Date(event.date)),
+                "name" | "event_type" => Ok(Value::String(event.event_type.clone())),
+                "value" | "description" => Ok(Value::String(event.value.clone())),
+                "type" => Ok(Value::String("event".to_string())),
+                _ => Ok(Value::Null),
+            },
+            DirectiveContext::Document(doc) => match name.to_lowercase().as_str() {
+                "date" => Ok(Value::Date(doc.date)),
+                "account" => Ok(Value::String(doc.account.to_string())),
+                "filename" | "path" => Ok(Value::String(doc.path.clone())),
+                "type" => Ok(Value::String("document".to_string())),
+                _ => Ok(Value::Null),
+            },
+        }
+    }
+
+    /// Evaluate a function call on a directive context.
+    fn evaluate_directive_context_function(
+        &self,
+        func: &FunctionCall,
+        ctx: &DirectiveContext,
+    ) -> Result<Value, QueryError> {
+        let name = func.name.to_uppercase();
+        match name.as_str() {
+            // Date functions
+            "YEAR" => {
+                let date = self.get_directive_context_date(ctx)?;
+                Ok(Value::Integer(i64::from(date.year())))
+            }
+            "MONTH" => {
+                let date = self.get_directive_context_date(ctx)?;
+                Ok(Value::Integer(i64::from(date.month())))
+            }
+            "DAY" => {
+                let date = self.get_directive_context_date(ctx)?;
+                Ok(Value::Integer(i64::from(date.day())))
+            }
+            _ => Ok(Value::Null), // Unsupported function for directive context
+        }
+    }
+
+    /// Get the date from a directive context.
+    #[allow(clippy::missing_const_for_fn)] // const fn with match on references is complex
+    fn get_directive_context_date(&self, ctx: &DirectiveContext) -> Result<NaiveDate, QueryError> {
+        match ctx {
+            DirectiveContext::Account(open) => Ok(open.date),
+            DirectiveContext::Commodity(commodity) => Ok(commodity.date),
+            DirectiveContext::Price(price) => Ok(price.date),
+            DirectiveContext::Note(note) => Ok(note.date),
+            DirectiveContext::Event(event) => Ok(event.date),
+            DirectiveContext::Document(doc) => Ok(doc.date),
+        }
+    }
+
+    /// Evaluate a binary operation on a directive context.
+    fn evaluate_directive_context_binary_op(
+        &self,
+        op: &BinaryOp,
+        ctx: &DirectiveContext,
+    ) -> Result<Value, QueryError> {
+        let left = self.evaluate_directive_context_expr(&op.left, ctx)?;
+        let right = self.evaluate_directive_context_expr(&op.right, ctx)?;
+
+        match op.op {
+            BinaryOperator::Eq => Ok(Value::Boolean(self.values_equal(&left, &right))),
+            BinaryOperator::Ne => Ok(Value::Boolean(!self.values_equal(&left, &right))),
+            BinaryOperator::Lt => self.compare_values(&left, &right, std::cmp::Ordering::is_lt),
+            BinaryOperator::Le => self.compare_values(&left, &right, std::cmp::Ordering::is_le),
+            BinaryOperator::Gt => self.compare_values(&left, &right, std::cmp::Ordering::is_gt),
+            BinaryOperator::Ge => self.compare_values(&left, &right, std::cmp::Ordering::is_ge),
+            BinaryOperator::And => {
+                let l = self.to_bool(&left)?;
+                let r = self.to_bool(&right)?;
+                Ok(Value::Boolean(l && r))
+            }
+            BinaryOperator::Or => {
+                let l = self.to_bool(&left)?;
+                let r = self.to_bool(&right)?;
+                Ok(Value::Boolean(l || r))
+            }
+            BinaryOperator::Regex => {
+                let s = match left {
+                    Value::String(s) => s,
+                    _ => return Ok(Value::Boolean(false)),
+                };
+                let pattern = match right {
+                    Value::String(p) => p,
+                    _ => return Ok(Value::Boolean(false)),
+                };
+                let re = self.require_regex(&pattern)?;
+                Ok(Value::Boolean(re.is_match(&s)))
+            }
+            _ => Ok(Value::Null), // Other operators not fully supported
+        }
+    }
+
+    /// Evaluate a unary operation on a directive context.
+    fn evaluate_directive_context_unary_op(
+        &self,
+        op: &UnaryOp,
+        ctx: &DirectiveContext,
+    ) -> Result<Value, QueryError> {
+        let val = self.evaluate_directive_context_expr(&op.operand, ctx)?;
+        match op.op {
+            UnaryOperator::Not => Ok(Value::Boolean(!self.to_bool(&val)?)),
+            UnaryOperator::Neg => match val {
+                Value::Number(n) => Ok(Value::Number(-n)),
+                Value::Integer(i) => Ok(Value::Integer(-i)),
+                _ => Err(QueryError::Type(
+                    "negation requires numeric value".to_string(),
+                )),
+            },
+            UnaryOperator::IsNull => Ok(Value::Boolean(matches!(val, Value::Null))),
+            UnaryOperator::IsNotNull => Ok(Value::Boolean(!matches!(val, Value::Null))),
+        }
+    }
+
+    /// Evaluate a WHERE predicate on a directive context.
+    fn evaluate_directive_predicate(
+        &self,
+        expr: &Expr,
+        ctx: &DirectiveContext,
+    ) -> Result<bool, QueryError> {
+        let value = self.evaluate_directive_context_expr(expr, ctx)?;
+        self.to_bool(&value)
+    }
 }
 
 #[cfg(test)]
@@ -3073,5 +3595,138 @@ mod tests {
         assert_eq!(result.len(), 4);
         // First row should be from 2024-01-16 (later date)
         assert_eq!(result.rows[0][0], Value::Date(date(2024, 1, 16)));
+    }
+
+    fn sample_directives_extended() -> Vec<Directive> {
+        vec![
+            Directive::Open(Open::new(date(2024, 1, 1), "Assets:Bank:Checking")),
+            Directive::Open(Open::new(date(2024, 1, 1), "Expenses:Food:Coffee")),
+            Directive::Commodity(rustledger_core::Commodity::new(date(2024, 1, 1), "USD")),
+            Directive::Price(Price::new(
+                date(2024, 1, 15),
+                "EUR",
+                Amount::new(dec!(1.10), "USD"),
+            )),
+            Directive::Event(Event::new(date(2024, 1, 15), "location", "New York")),
+            Directive::Note(rustledger_core::Note::new(
+                date(2024, 1, 15),
+                "Assets:Bank:Checking",
+                "Account verified",
+            )),
+            Directive::Document(rustledger_core::Document::new(
+                date(2024, 1, 15),
+                "Assets:Bank:Checking",
+                "/path/to/statement.pdf",
+            )),
+            Directive::Transaction(
+                Transaction::new(date(2024, 1, 15), "Coffee")
+                    .with_flag('*')
+                    .with_posting(Posting::new(
+                        "Expenses:Food:Coffee",
+                        Amount::new(dec!(5.00), "USD"),
+                    ))
+                    .with_posting(Posting::new(
+                        "Assets:Bank:Checking",
+                        Amount::new(dec!(-5.00), "USD"),
+                    )),
+            ),
+        ]
+    }
+
+    #[test]
+    fn test_from_accounts() {
+        let directives = sample_directives_extended();
+        let mut executor = Executor::new(&directives);
+
+        let query = parse("SELECT account, date FROM accounts").unwrap();
+        let result = executor.execute(&query).unwrap();
+
+        assert_eq!(result.columns, vec!["account", "date"]);
+        assert_eq!(result.len(), 2); // Two Open directives
+    }
+
+    #[test]
+    fn test_from_prices() {
+        let directives = sample_directives_extended();
+        let mut executor = Executor::new(&directives);
+
+        let query = parse("SELECT currency, amount, date FROM prices").unwrap();
+        let result = executor.execute(&query).unwrap();
+
+        assert_eq!(result.columns, vec!["currency", "amount", "date"]);
+        assert_eq!(result.len(), 1); // One Price directive
+        assert_eq!(result.rows[0][0], Value::String("EUR".to_string()));
+    }
+
+    #[test]
+    fn test_from_events() {
+        let directives = sample_directives_extended();
+        let mut executor = Executor::new(&directives);
+
+        let query = parse("SELECT name, value FROM events").unwrap();
+        let result = executor.execute(&query).unwrap();
+
+        assert_eq!(result.columns, vec!["name", "value"]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result.rows[0][0], Value::String("location".to_string()));
+        assert_eq!(result.rows[0][1], Value::String("New York".to_string()));
+    }
+
+    #[test]
+    fn test_from_notes() {
+        let directives = sample_directives_extended();
+        let mut executor = Executor::new(&directives);
+
+        let query = parse("SELECT account, comment FROM notes").unwrap();
+        let result = executor.execute(&query).unwrap();
+
+        assert_eq!(result.columns, vec!["account", "comment"]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(
+            result.rows[0][1],
+            Value::String("Account verified".to_string())
+        );
+    }
+
+    #[test]
+    fn test_from_documents() {
+        let directives = sample_directives_extended();
+        let mut executor = Executor::new(&directives);
+
+        let query = parse("SELECT account, filename FROM documents").unwrap();
+        let result = executor.execute(&query).unwrap();
+
+        assert_eq!(result.columns, vec!["account", "filename"]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(
+            result.rows[0][1],
+            Value::String("/path/to/statement.pdf".to_string())
+        );
+    }
+
+    #[test]
+    fn test_from_commodities() {
+        let directives = sample_directives_extended();
+        let mut executor = Executor::new(&directives);
+
+        let query = parse("SELECT currency, date FROM commodities").unwrap();
+        let result = executor.execute(&query).unwrap();
+
+        assert_eq!(result.columns, vec!["currency", "date"]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result.rows[0][0], Value::String("USD".to_string()));
+    }
+
+    #[test]
+    fn test_from_entries() {
+        let directives = sample_directives_extended();
+        let mut executor = Executor::new(&directives);
+
+        let query = parse("SELECT type, date FROM entries").unwrap();
+        let result = executor.execute(&query).unwrap();
+
+        assert_eq!(result.columns, vec!["type", "date"]);
+        // All directives are entries
+        assert_eq!(result.len(), 8);
     }
 }

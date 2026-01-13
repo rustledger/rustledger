@@ -49,9 +49,66 @@ pub struct Target {
     pub alias: Option<String>,
 }
 
+/// The table/data source for a FROM clause.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FromTable {
+    /// Default: iterate over postings from transactions.
+    #[default]
+    Postings,
+    /// Iterate over all directive entries.
+    Entries,
+    /// Iterate over Open directives (accounts).
+    Accounts,
+    /// Iterate over Commodity directives.
+    Commodities,
+    /// Iterate over Price directives.
+    Prices,
+    /// Iterate over Note directives.
+    Notes,
+    /// Iterate over Event directives.
+    Events,
+    /// Iterate over Document directives.
+    Documents,
+}
+
+impl FromTable {
+    /// Parse a table name from a string.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "postings" => Some(Self::Postings),
+            "entries" => Some(Self::Entries),
+            // Note: "open" is not an alias to avoid conflict with "OPEN ON date" syntax
+            "accounts" => Some(Self::Accounts),
+            "commodities" | "commodity" => Some(Self::Commodities),
+            "prices" | "price" => Some(Self::Prices),
+            "notes" | "note" => Some(Self::Notes),
+            "events" | "event" => Some(Self::Events),
+            "documents" | "document" => Some(Self::Documents),
+            _ => None,
+        }
+    }
+
+    /// Get the canonical name for this table.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Postings => "postings",
+            Self::Entries => "entries",
+            Self::Accounts => "accounts",
+            Self::Commodities => "commodities",
+            Self::Prices => "prices",
+            Self::Notes => "notes",
+            Self::Events => "events",
+            Self::Documents => "documents",
+        }
+    }
+}
+
 /// FROM clause with transaction-level modifiers.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FromClause {
+    /// The table/data source to query from.
+    pub table: FromTable,
     /// OPEN ON date - summarize entries before this date.
     pub open_on: Option<NaiveDate>,
     /// CLOSE ON date - truncate entries after this date.
@@ -306,14 +363,32 @@ impl Target {
 }
 
 impl FromClause {
-    /// Create a new empty FROM clause.
+    /// Create a new empty FROM clause with the default table (postings).
     pub const fn new() -> Self {
         Self {
+            table: FromTable::Postings,
             open_on: None,
             close_on: None,
             clear: false,
             filter: None,
         }
+    }
+
+    /// Create a FROM clause for a specific table.
+    pub const fn from_table(table: FromTable) -> Self {
+        Self {
+            table,
+            open_on: None,
+            close_on: None,
+            clear: false,
+            filter: None,
+        }
+    }
+
+    /// Set the table.
+    pub const fn table(mut self, table: FromTable) -> Self {
+        self.table = table;
+        self
     }
 
     /// Set the OPEN ON date.

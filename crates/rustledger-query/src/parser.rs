@@ -7,8 +7,8 @@ use rust_decimal::Decimal;
 use std::str::FromStr;
 
 use crate::ast::{
-    BalancesQuery, BinaryOperator, Expr, FromClause, FunctionCall, JournalQuery, Literal,
-    OrderSpec, PrintQuery, Query, SelectQuery, SortDirection, Target, UnaryOperator,
+    BalancesQuery, BinaryOperator, Expr, FromClause, FromTable, FunctionCall, JournalQuery,
+    Literal, OrderSpec, PrintQuery, Query, SelectQuery, SortDirection, Target, UnaryOperator,
 };
 use crate::error::{ParseError, ParseErrorKind};
 use rustledger_core::NaiveDate;
@@ -155,8 +155,16 @@ fn from_clause<'a>() -> impl Parser<'a, ParserInput<'a>, FromClause, ParserExtra
         .ignore_then(from_modifiers())
 }
 
-/// Parse FROM modifiers (OPEN ON, CLOSE ON, CLEAR, filter).
+/// Parse FROM modifiers (table name, OPEN ON, CLOSE ON, CLEAR, filter).
 fn from_modifiers<'a>() -> impl Parser<'a, ParserInput<'a>, FromClause, ParserExtra<'a>> {
+    // Try to parse a table name first (e.g., FROM accounts, FROM prices)
+    let table_name = identifier()
+        .try_map(|name: String, span| {
+            FromTable::parse(&name)
+                .ok_or_else(|| Rich::custom(span, format!("unknown table '{name}'")))
+        })
+        .then_ignore(ws());
+
     let open_on = kw("OPEN")
         .ignore_then(ws1())
         .ignore_then(kw("ON"))
@@ -171,18 +179,22 @@ fn from_modifiers<'a>() -> impl Parser<'a, ParserInput<'a>, FromClause, ParserEx
 
     let clear = kw("CLEAR").then_ignore(ws());
 
-    // Parse modifiers in order: OPEN ON, CLOSE ON, CLEAR, filter
-    open_on
+    // Parse: [table] [OPEN ON date] [CLOSE ON date] [CLEAR] [filter]
+    table_name
         .or_not()
+        .then(open_on.or_not())
         .then(close_on.or_not())
         .then(clear.or_not().map(|c| c.is_some()))
         .then(from_filter().or_not())
-        .map(|(((open_on, close_on), clear), filter)| FromClause {
-            open_on,
-            close_on,
-            clear,
-            filter,
-        })
+        .map(
+            |((((table, open_on), close_on), clear), filter)| FromClause {
+                table: table.unwrap_or_default(),
+                open_on,
+                close_on,
+                clear,
+                filter,
+            },
+        )
 }
 
 /// Parse FROM filter expression (predicates).

@@ -1211,7 +1211,9 @@ impl<'a> Executor<'a> {
             }
             // Date functions
             "YEAR" | "MONTH" | "DAY" | "WEEKDAY" | "QUARTER" | "YMONTH" | "TODAY" | "DATE_DIFF"
-            | "DATE_ADD" | "DATE_TRUNC" | "DATE_PART" => self.eval_date_function(&name, func, ctx),
+            | "DATE_ADD" | "DATE_TRUNC" | "DATE_PART" | "DATE_FROM_YMD" | "PARSE_DATE" => {
+                self.eval_date_function(&name, func, ctx)
+            }
             // String functions
             "LENGTH" | "UPPER" | "LOWER" | "SUBSTR" | "SUBSTRING" | "TRIM" | "STARTSWITH"
             | "ENDSWITH" | "GREP" | "GREPN" | "SUBST" | "MAXWIDTH" | "SPLITCOMP" | "JOINSTR" => {
@@ -1222,18 +1224,19 @@ impl<'a> Executor<'a> {
                 self.eval_account_function(&name, func, ctx)
             }
             // Account/metadata functions (require directive indexes)
-            "OPEN_DATE" | "CLOSE_DATE" | "OPEN_META" | "COMMODITY_META" => {
-                self.eval_metadata_function(&name, func, ctx)
-            }
+            "OPEN_DATE" | "CLOSE_DATE" | "OPEN_META" | "COMMODITY_META" | "META" | "ENTRY_META"
+            | "ANY_META" => self.eval_metadata_function(&name, func, ctx),
             // Math functions
             "ABS" | "NEG" | "ROUND" | "SAFEDIV" => self.eval_math_function(&name, func, ctx),
             // Amount/Position functions
             "NUMBER" | "CURRENCY" | "GETITEM" | "GET" | "UNITS" | "COST" | "WEIGHT" | "VALUE"
-            | "ONLY" | "EMPTY" | "FILTER_CURRENCY" | "POSSIGN" | "GETPRICE" => {
+            | "ONLY" | "EMPTY" | "FILTER_CURRENCY" | "POSSIGN" | "GETPRICE" | "CONVERT" => {
                 self.eval_position_function(&name, func, ctx)
             }
             // Utility functions
-            "COALESCE" => self.eval_coalesce(func, ctx),
+            "COALESCE" | "HAS_ACCOUNT" | "FINDFIRST" | "REPR" => {
+                self.eval_utility_function(&name, func, ctx)
+            }
             // Aggregate functions return Null when evaluated on a single row
             // They're handled specially in aggregate evaluation
             "SUM" | "COUNT" | "MIN" | "MAX" | "FIRST" | "LAST" | "AVG" => Ok(Value::Null),
@@ -1409,6 +1412,68 @@ impl<'a> Executor<'a> {
                     _ => return Ok(Value::Null),
                 };
                 Ok(Value::Integer(result))
+            }
+
+            // DATE_FROM_YMD(year, month, day) -> construct date from components
+            "DATE_FROM_YMD" => {
+                Self::require_args(name, func, 3)?;
+                let year = match self.evaluate_expr(&func.args[0], ctx)? {
+                    Value::Integer(i) => i as i32,
+                    Value::Number(d) => d.to_i64().unwrap_or(0) as i32,
+                    _ => {
+                        return Err(QueryError::Type(
+                            "DATE_FROM_YMD expects integer year".to_string(),
+                        ))
+                    }
+                };
+                let month = match self.evaluate_expr(&func.args[1], ctx)? {
+                    Value::Integer(i) => i as u32,
+                    Value::Number(d) => d.to_i64().unwrap_or(0) as u32,
+                    _ => {
+                        return Err(QueryError::Type(
+                            "DATE_FROM_YMD expects integer month".to_string(),
+                        ))
+                    }
+                };
+                let day = match self.evaluate_expr(&func.args[2], ctx)? {
+                    Value::Integer(i) => i as u32,
+                    Value::Number(d) => d.to_i64().unwrap_or(0) as u32,
+                    _ => {
+                        return Err(QueryError::Type(
+                            "DATE_FROM_YMD expects integer day".to_string(),
+                        ))
+                    }
+                };
+                Ok(NaiveDate::from_ymd_opt(year, month, day).map_or(Value::Null, Value::Date))
+            }
+
+            // PARSE_DATE(string, format?) -> parse date from string
+            "PARSE_DATE" => {
+                if func.args.is_empty() || func.args.len() > 2 {
+                    return Err(QueryError::InvalidArguments(
+                        "PARSE_DATE".to_string(),
+                        "expected 1 or 2 arguments".to_string(),
+                    ));
+                }
+                let s = match self.evaluate_expr(&func.args[0], ctx)? {
+                    Value::String(s) => s,
+                    _ => return Err(QueryError::Type("PARSE_DATE expects string".to_string())),
+                };
+                let format = if func.args.len() == 2 {
+                    match self.evaluate_expr(&func.args[1], ctx)? {
+                        Value::String(f) => f,
+                        _ => {
+                            return Err(QueryError::Type(
+                                "PARSE_DATE format must be string".to_string(),
+                            ))
+                        }
+                    }
+                } else {
+                    "%Y-%m-%d".to_string()
+                };
+                Ok(NaiveDate::parse_from_str(&s, &format)
+                    .map(Value::Date)
+                    .unwrap_or(Value::Null))
             }
 
             // Single-argument date functions
@@ -1922,7 +1987,82 @@ impl<'a> Executor<'a> {
             "FILTER_CURRENCY" => self.eval_filter_currency(func, ctx),
             "POSSIGN" => self.eval_possign(func, ctx),
             "GETPRICE" => self.eval_getprice(func, ctx),
+            "CONVERT" => self.eval_convert(func, ctx),
             _ => unreachable!(),
+        }
+    }
+
+    /// Evaluate CONVERT function: convert amount to target currency.
+    fn eval_convert(&self, func: &FunctionCall, ctx: &PostingContext) -> Result<Value, QueryError> {
+        if func.args.len() < 2 || func.args.len() > 3 {
+            return Err(QueryError::InvalidArguments(
+                "CONVERT".to_string(),
+                "expected 2-3 arguments".to_string(),
+            ));
+        }
+
+        let amount = match self.evaluate_expr(&func.args[0], ctx)? {
+            Value::Amount(a) => a,
+            Value::Position(p) => p.units,
+            Value::Inventory(inv) => {
+                // For inventory, convert each position and sum
+                let currency = match self.evaluate_expr(&func.args[1], ctx)? {
+                    Value::String(s) => s,
+                    _ => {
+                        return Err(QueryError::Type(
+                            "CONVERT expects target currency string".to_string(),
+                        ))
+                    }
+                };
+                let date = if func.args.len() == 3 {
+                    match self.evaluate_expr(&func.args[2], ctx)? {
+                        Value::Date(d) => d,
+                        _ => {
+                            return Err(QueryError::Type("CONVERT date must be a date".to_string()))
+                        }
+                    }
+                } else {
+                    ctx.transaction.date
+                };
+
+                let mut total = Decimal::ZERO;
+                for pos in inv.positions() {
+                    if let Some(converted) = self.price_db.convert(&pos.units, &currency, date) {
+                        total += converted.number;
+                    } else {
+                        return Ok(Value::Null); // Can't convert
+                    }
+                }
+                return Ok(Value::Amount(Amount::new(total, currency)));
+            }
+            _ => {
+                return Err(QueryError::Type(
+                    "CONVERT expects amount or position".to_string(),
+                ))
+            }
+        };
+
+        let currency = match self.evaluate_expr(&func.args[1], ctx)? {
+            Value::String(s) => s,
+            _ => {
+                return Err(QueryError::Type(
+                    "CONVERT expects target currency string".to_string(),
+                ))
+            }
+        };
+
+        let date = if func.args.len() == 3 {
+            match self.evaluate_expr(&func.args[2], ctx)? {
+                Value::Date(d) => d,
+                _ => return Err(QueryError::Type("CONVERT date must be a date".to_string())),
+            }
+        } else {
+            ctx.transaction.date
+        };
+
+        match self.price_db.convert(&amount, &currency, date) {
+            Some(converted) => Ok(Value::Amount(converted)),
+            None => Ok(Value::Null),
         }
     }
 
@@ -2407,6 +2547,58 @@ impl<'a> Executor<'a> {
                 }
             }
 
+            // META(key) -> get posting metadata value
+            "META" => {
+                Self::require_args(name, func, 1)?;
+                let key = match self.evaluate_expr(&func.args[0], ctx)? {
+                    Value::String(s) => s,
+                    _ => return Err(QueryError::Type("META expects string key".to_string())),
+                };
+                let posting = &ctx.transaction.postings[ctx.posting_index];
+                Ok(posting
+                    .meta
+                    .get(&key)
+                    .map_or(Value::Null, |v| self.meta_value_to_value(v)))
+            }
+
+            // ENTRY_META(key) -> get transaction metadata value
+            "ENTRY_META" => {
+                Self::require_args(name, func, 1)?;
+                let key = match self.evaluate_expr(&func.args[0], ctx)? {
+                    Value::String(s) => s,
+                    _ => {
+                        return Err(QueryError::Type(
+                            "ENTRY_META expects string key".to_string(),
+                        ))
+                    }
+                };
+                Ok(ctx
+                    .transaction
+                    .meta
+                    .get(&key)
+                    .map_or(Value::Null, |v| self.meta_value_to_value(v)))
+            }
+
+            // ANY_META(key) -> get metadata, trying posting first then transaction
+            "ANY_META" => {
+                Self::require_args(name, func, 1)?;
+                let key = match self.evaluate_expr(&func.args[0], ctx)? {
+                    Value::String(s) => s,
+                    _ => return Err(QueryError::Type("ANY_META expects string key".to_string())),
+                };
+                let posting = &ctx.transaction.postings[ctx.posting_index];
+                // Try posting metadata first
+                if let Some(v) = posting.meta.get(&key) {
+                    return Ok(self.meta_value_to_value(v));
+                }
+                // Fall back to transaction metadata
+                Ok(ctx
+                    .transaction
+                    .meta
+                    .get(&key)
+                    .map_or(Value::Null, |v| self.meta_value_to_value(v)))
+            }
+
             _ => unreachable!(),
         }
     }
@@ -2436,19 +2628,74 @@ impl<'a> Executor<'a> {
         pairs.join(", ")
     }
 
-    /// Evaluate COALESCE function.
-    fn eval_coalesce(
+    /// Evaluate utility functions: `COALESCE`, `HAS_ACCOUNT`, `FINDFIRST`, `REPR`.
+    fn eval_utility_function(
         &self,
+        name: &str,
         func: &FunctionCall,
         ctx: &PostingContext,
     ) -> Result<Value, QueryError> {
-        for arg in &func.args {
-            let val = self.evaluate_expr(arg, ctx)?;
-            if !matches!(val, Value::Null) {
-                return Ok(val);
+        match name {
+            // COALESCE(val1, val2, ...) -> first non-null value
+            "COALESCE" => {
+                for arg in &func.args {
+                    let val = self.evaluate_expr(arg, ctx)?;
+                    if !matches!(val, Value::Null) {
+                        return Ok(val);
+                    }
+                }
+                Ok(Value::Null)
             }
+
+            // HAS_ACCOUNT(pattern) -> check if transaction has account matching pattern
+            "HAS_ACCOUNT" => {
+                Self::require_args(name, func, 1)?;
+                let pattern = match self.evaluate_expr(&func.args[0], ctx)? {
+                    Value::String(s) => s,
+                    _ => {
+                        return Err(QueryError::Type(
+                            "HAS_ACCOUNT expects string pattern".to_string(),
+                        ))
+                    }
+                };
+                let has_match = ctx
+                    .transaction
+                    .postings
+                    .iter()
+                    .any(|p| p.account.to_string().contains(&pattern));
+                Ok(Value::Boolean(has_match))
+            }
+
+            // FINDFIRST(set, pattern) -> first element matching pattern
+            "FINDFIRST" => {
+                Self::require_args(name, func, 2)?;
+                let set = match self.evaluate_expr(&func.args[0], ctx)? {
+                    Value::StringSet(s) => s,
+                    _ => return Err(QueryError::Type("FINDFIRST expects string set".to_string())),
+                };
+                let pattern = match self.evaluate_expr(&func.args[1], ctx)? {
+                    Value::String(s) => s,
+                    _ => {
+                        return Err(QueryError::Type(
+                            "FINDFIRST expects string pattern".to_string(),
+                        ))
+                    }
+                };
+                Ok(set
+                    .into_iter()
+                    .find(|s| s.contains(&pattern))
+                    .map_or(Value::Null, Value::String))
+            }
+
+            // REPR(value) -> debug representation of value
+            "REPR" => {
+                Self::require_args(name, func, 1)?;
+                let val = self.evaluate_expr(&func.args[0], ctx)?;
+                Ok(Value::String(format!("{val:?}")))
+            }
+
+            _ => unreachable!(),
         }
-        Ok(Value::Null)
     }
 
     /// Helper to require a specific number of arguments.

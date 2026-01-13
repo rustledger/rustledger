@@ -549,6 +549,8 @@ fn function_completions() -> Vec<Completion> {
         function("DATE_ADD(", "Add days to date"),
         function("DATE_TRUNC(", "Truncate to precision"),
         function("DATE_PART(", "Extract date component"),
+        function("DATE_FROM_YMD(", "Construct date from y/m/d"),
+        function("PARSE_DATE(", "Parse date from string"),
         // String functions
         function("LENGTH(", "String length"),
         function("UPPER(", "Uppercase"),
@@ -574,6 +576,13 @@ fn function_completions() -> Vec<Completion> {
         function("CLOSE_DATE(", "Account close date"),
         function("OPEN_META(", "Open directive metadata"),
         function("COMMODITY_META(", "Commodity metadata"),
+        function("META(", "Posting metadata value"),
+        function("ENTRY_META(", "Transaction metadata value"),
+        function("ANY_META(", "Posting or transaction metadata"),
+        // Utility functions
+        function("HAS_ACCOUNT(", "Check if txn has account"),
+        function("FINDFIRST(", "First matching element"),
+        function("REPR(", "Debug representation"),
         // Amount/Position functions
         function("NUMBER(", "Extract number"),
         function("CURRENCY(", "Extract currency"),
@@ -591,6 +600,7 @@ fn function_completions() -> Vec<Completion> {
         function("FILTER_CURRENCY(", "Filter by currency"),
         function("POSSIGN(", "Sign by account type"),
         function("GETPRICE(", "Get price between currencies"),
+        function("CONVERT(", "Convert amount to currency"),
     ]
 }
 

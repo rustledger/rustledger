@@ -768,6 +768,94 @@ impl<'a> Executor<'a> {
             "year" => Ok(Value::Integer(ctx.transaction.date.year().into())),
             "month" => Ok(Value::Integer(ctx.transaction.date.month().into())),
             "day" => Ok(Value::Integer(ctx.transaction.date.day().into())),
+
+            // Type column - always "txn" for transactions
+            "type" => Ok(Value::String("txn".to_string())),
+
+            // Description: payee | narration combination
+            "description" => {
+                let desc = match &ctx.transaction.payee {
+                    Some(payee) => format!("{} | {}", payee, ctx.transaction.narration),
+                    None => ctx.transaction.narration.clone(),
+                };
+                Ok(Value::String(desc))
+            }
+
+            // Number: numeric part of the posting amount
+            "number" => Ok(posting
+                .amount()
+                .map_or(Value::Null, |a| Value::Number(a.number))),
+
+            // Currency: currency of the posting amount
+            "currency" => Ok(posting
+                .amount()
+                .map_or(Value::Null, |a| Value::String(a.currency.to_string()))),
+
+            // Cost components
+            "cost_number" => Ok(posting
+                .cost
+                .as_ref()
+                .and_then(|c| c.number_per)
+                .map_or(Value::Null, Value::Number)),
+
+            "cost_currency" => Ok(posting
+                .cost
+                .as_ref()
+                .and_then(|c| c.currency.as_ref())
+                .map_or(Value::Null, |c| Value::String(c.to_string()))),
+
+            "cost_date" => Ok(posting
+                .cost
+                .as_ref()
+                .and_then(|c| c.date)
+                .map_or(Value::Null, Value::Date)),
+
+            "cost_label" => Ok(posting
+                .cost
+                .as_ref()
+                .and_then(|c| c.label.as_ref())
+                .map_or(Value::String(String::new()), |l| Value::String(l.clone()))),
+
+            // Price annotation - extract the amount from the price annotation
+            "price" => {
+                use rustledger_core::PriceAnnotation;
+                Ok(posting.price.as_ref().map_or(Value::Null, |p| match p {
+                    PriceAnnotation::Unit(a) | PriceAnnotation::Total(a) => {
+                        Value::Amount(a.clone())
+                    }
+                    _ => Value::Null, // Incomplete or empty prices
+                }))
+            }
+
+            // Posting-level flag (distinct from transaction flag)
+            "posting_flag" => Ok(posting
+                .flag
+                .map_or(Value::Null, |f| Value::String(f.to_string()))),
+
+            // All accounts in this transaction
+            "accounts" => {
+                let accounts: Vec<String> = ctx
+                    .transaction
+                    .postings
+                    .iter()
+                    .map(|p| p.account.to_string())
+                    .collect();
+                Ok(Value::StringSet(accounts))
+            }
+
+            // Other accounts (excluding current posting's account)
+            "other_accounts" => {
+                let others: Vec<String> = ctx
+                    .transaction
+                    .postings
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| *i != ctx.posting_index)
+                    .map(|(_, p)| p.account.to_string())
+                    .collect();
+                Ok(Value::StringSet(others))
+            }
+
             _ => Err(QueryError::UnknownColumn(name.to_string())),
         }
     }

@@ -627,3 +627,93 @@ fn test_is_not_null_operator() {
         assert!(!matches!(&row[0], Value::Null), "Payee should not be null");
     }
 }
+
+// ============================================================================
+// New Column Tests (BQL parity)
+// ============================================================================
+
+#[test]
+fn test_type_column() {
+    let directives = make_test_directives();
+    let result = execute_query("SELECT DISTINCT type", &directives);
+
+    assert!(!result.is_empty());
+    // All rows should be "txn" for transactions
+    for row in &result.rows {
+        assert_eq!(row[0], Value::String("txn".to_string()));
+    }
+}
+
+#[test]
+fn test_description_column() {
+    let directives = make_test_directives();
+    let result = execute_query(
+        r#"SELECT description WHERE narration = "Monthly salary""#,
+        &directives,
+    );
+
+    assert!(!result.is_empty());
+    // Should be "Employer | Monthly salary"
+    let has_correct_desc = result
+        .rows
+        .iter()
+        .any(|row| matches!(&row[0], Value::String(s) if s == "Employer | Monthly salary"));
+    assert!(
+        has_correct_desc,
+        "Description should combine payee and narration"
+    );
+}
+
+#[test]
+fn test_number_currency_columns() {
+    let directives = make_test_directives();
+    let result = execute_query(
+        "SELECT number, currency WHERE account ~ \"Expenses:Food\"",
+        &directives,
+    );
+
+    assert!(!result.is_empty());
+    for row in &result.rows {
+        // Number should be a decimal
+        assert!(matches!(&row[0], Value::Number(_)));
+        // Currency should be USD
+        assert_eq!(row[1], Value::String("USD".to_string()));
+    }
+}
+
+#[test]
+fn test_accounts_column() {
+    let directives = make_test_directives();
+    let result = execute_query(
+        r#"SELECT DISTINCT accounts WHERE narration = "Monthly salary""#,
+        &directives,
+    );
+
+    assert!(!result.is_empty());
+    // The salary transaction has Income:Salary and Assets:Bank:Checking
+    for row in &result.rows {
+        if let Value::StringSet(accounts) = &row[0] {
+            assert!(accounts.len() >= 2, "Should have at least 2 accounts");
+        }
+    }
+}
+
+#[test]
+fn test_other_accounts_column() {
+    let directives = make_test_directives();
+    let result = execute_query(
+        "SELECT account, other_accounts WHERE account ~ \"Expenses:\"",
+        &directives,
+    );
+
+    assert!(!result.is_empty());
+    for row in &result.rows {
+        if let (Value::String(account), Value::StringSet(others)) = (&row[0], &row[1]) {
+            // Other accounts should not contain the current account
+            assert!(
+                !others.contains(account),
+                "other_accounts should not contain current account"
+            );
+        }
+    }
+}

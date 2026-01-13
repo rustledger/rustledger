@@ -347,6 +347,7 @@ fn get_completions_for_context(context: &BqlContext) -> Vec<Completion> {
             keyword("GROUP BY", Some("Group results")),
             keyword("ORDER BY", Some("Sort results")),
             keyword("LIMIT", Some("Limit result count")),
+            keyword("FLATTEN", Some("Expand inventory rows")),
             keyword("AS", Some("Alias column")),
             operator(",", Some("Add another column")),
         ],
@@ -365,6 +366,7 @@ fn get_completions_for_context(context: &BqlContext) -> Vec<Completion> {
             keyword("GROUP BY", Some("Group results")),
             keyword("ORDER BY", Some("Sort results")),
             keyword("LIMIT", Some("Limit result count")),
+            keyword("FLATTEN", Some("Expand inventory rows")),
         ],
 
         BqlContext::AfterWhere | BqlContext::AfterOperator => {
@@ -385,15 +387,22 @@ fn get_completions_for_context(context: &BqlContext) -> Vec<Completion> {
                 keyword("OR", Some("Logical OR")),
                 operator("=", Some("Equals")),
                 operator("!=", Some("Not equals")),
-                operator("~", Some("Regex match")),
+                operator("~", Some("Regex match (case-insensitive)")),
+                operator("!~", Some("Negative regex match")),
+                operator("?~", Some("Pattern matches string")),
                 operator("<", Some("Less than")),
                 operator(">", Some("Greater than")),
                 operator("<=", Some("Less or equal")),
                 operator(">=", Some("Greater or equal")),
+                operator("%", Some("Modulo")),
                 keyword("IN", Some("Set membership")),
+                keyword("NOT IN", Some("Not in set")),
+                keyword("IS NULL", Some("Check for null")),
+                keyword("IS NOT NULL", Some("Check for non-null")),
                 keyword("GROUP BY", Some("Group results")),
                 keyword("ORDER BY", Some("Sort results")),
                 keyword("LIMIT", Some("Limit result count")),
+                keyword("FLATTEN", Some("Expand inventory rows")),
             ]
         }
 
@@ -478,6 +487,7 @@ fn function(text: &str, description: &str) -> Completion {
 /// Get column completions.
 fn column_completions() -> Vec<Completion> {
     vec![
+        // Core columns
         column("account", "Account name"),
         column("date", "Transaction date"),
         column("narration", "Transaction description"),
@@ -493,6 +503,20 @@ fn column_completions() -> Vec<Completion> {
         column("year", "Transaction year"),
         column("month", "Transaction month"),
         column("day", "Transaction day"),
+        // Transaction-level columns
+        column("type", "Directive type (txn)"),
+        column("description", "Payee | narration"),
+        column("accounts", "All accounts in transaction"),
+        // Posting-level columns
+        column("number", "Numeric part of amount"),
+        column("currency", "Currency of amount"),
+        column("cost_number", "Cost per unit"),
+        column("cost_currency", "Cost currency"),
+        column("cost_date", "Cost acquisition date"),
+        column("cost_label", "Cost lot label"),
+        column("price", "Price annotation"),
+        column("posting_flag", "Posting-level flag"),
+        column("other_accounts", "Other accounts in txn"),
     ]
 }
 
@@ -507,6 +531,12 @@ fn function_completions() -> Vec<Completion> {
         function("AVG(", "Average value"),
         function("FIRST(", "First value"),
         function("LAST(", "Last value"),
+        // Type casting
+        function("BOOL(", "Convert to boolean"),
+        function("INT(", "Convert to integer"),
+        function("DECIMAL(", "Convert to decimal"),
+        function("STR(", "Convert to string"),
+        function("DATE(", "Convert to date"),
         // Date functions
         function("YEAR(", "Extract year"),
         function("MONTH(", "Extract month"),
@@ -515,22 +545,52 @@ fn function_completions() -> Vec<Completion> {
         function("WEEKDAY(", "Day of week (0=Mon)"),
         function("YMONTH(", "Year-month format"),
         function("TODAY()", "Current date"),
+        function("DATE_DIFF(", "Days between dates"),
+        function("DATE_ADD(", "Add days to date"),
+        function("DATE_TRUNC(", "Truncate to precision"),
+        function("DATE_PART(", "Extract date component"),
         // String functions
         function("LENGTH(", "String length"),
         function("UPPER(", "Uppercase"),
         function("LOWER(", "Lowercase"),
         function("TRIM(", "Trim whitespace"),
         function("SUBSTR(", "Substring"),
+        function("STARTSWITH(", "Check prefix"),
+        function("ENDSWITH(", "Check suffix"),
+        function("GREP(", "Regex match portion"),
+        function("GREPN(", "Regex capture group"),
+        function("SUBST(", "Regex substitution"),
+        function("MAXWIDTH(", "Truncate with ellipsis"),
+        function("SPLITCOMP(", "Split and get component"),
+        function("JOINSTR(", "Join set to string"),
         function("COALESCE(", "First non-null"),
         // Account functions
         function("PARENT(", "Parent account"),
         function("LEAF(", "Leaf component"),
         function("ROOT(", "Root components"),
-        // Amount functions
+        function("ACCOUNT_DEPTH(", "Account depth"),
+        function("ACCOUNT_SORTKEY(", "Sort key for account"),
+        function("OPEN_DATE(", "Account open date"),
+        function("CLOSE_DATE(", "Account close date"),
+        function("OPEN_META(", "Open directive metadata"),
+        function("COMMODITY_META(", "Commodity metadata"),
+        // Amount/Position functions
         function("NUMBER(", "Extract number"),
         function("CURRENCY(", "Extract currency"),
         function("ABS(", "Absolute value"),
+        function("NEG(", "Negate value"),
         function("ROUND(", "Round number"),
+        function("SAFEDIV(", "Safe division"),
+        function("UNITS(", "Position units"),
+        function("COST(", "Cost basis"),
+        function("WEIGHT(", "Balancing weight"),
+        function("VALUE(", "Market value"),
+        function("GETITEM(", "Get from inventory"),
+        function("ONLY(", "Single currency from inventory"),
+        function("EMPTY(", "Check if inventory empty"),
+        function("FILTER_CURRENCY(", "Filter by currency"),
+        function("POSSIGN(", "Sign by account type"),
+        function("GETPRICE(", "Get price between currencies"),
     ]
 }
 

@@ -74,6 +74,8 @@ pub enum ErrorCode {
     // === Balance Errors (E2xxx) ===
     /// E2001: Balance assertion failed.
     BalanceAssertionFailed,
+    /// E2002: Balance exceeds explicit tolerance.
+    BalanceToleranceExceeded,
     /// E2003: Pad without subsequent balance assertion.
     PadWithoutBalance,
     /// E2004: Multiple pads for same balance assertion.
@@ -143,6 +145,7 @@ impl ErrorCode {
             Self::InvalidAccountName => "E1005",
             // Balance errors
             Self::BalanceAssertionFailed => "E2001",
+            Self::BalanceToleranceExceeded => "E2002",
             Self::PadWithoutBalance => "E2003",
             Self::MultiplePadForBalance => "E2004",
             // Transaction errors
@@ -956,19 +959,38 @@ fn validate_balance(state: &mut LedgerState, bal: &Balance, errors: &mut Vec<Val
     if let Some(inv) = state.inventories.get(&bal.account) {
         let actual = inv.units(&bal.amount.currency);
         let expected = bal.amount.number;
-        let tolerance = bal.tolerance.unwrap_or(bal.amount.inferred_tolerance());
+        let difference = (actual - expected).abs();
 
-        if (actual - expected).abs() > tolerance {
-            errors.push(
-                ValidationError::new(
-                    ErrorCode::BalanceAssertionFailed,
-                    format!(
-                        "Balance assertion failed for {}: expected {} {}, got {} {}",
-                        bal.account, expected, bal.amount.currency, actual, bal.amount.currency
-                    ),
-                    bal.date,
+        // Determine tolerance and whether it was explicitly specified
+        let (tolerance, is_explicit) = if let Some(t) = bal.tolerance {
+            (t, true)
+        } else {
+            (bal.amount.inferred_tolerance(), false)
+        };
+
+        if difference > tolerance {
+            // Use E2002 for explicit tolerance, E2001 for inferred
+            let error_code = if is_explicit {
+                ErrorCode::BalanceToleranceExceeded
+            } else {
+                ErrorCode::BalanceAssertionFailed
+            };
+
+            let message = if is_explicit {
+                format!(
+                    "Balance exceeds explicit tolerance for {}: expected {} {} ~ {}, got {} {} (difference: {})",
+                    bal.account, expected, bal.amount.currency, tolerance, actual, bal.amount.currency, difference
                 )
-                .with_context(format!("difference: {}", actual - expected)),
+            } else {
+                format!(
+                    "Balance assertion failed for {}: expected {} {}, got {} {}",
+                    bal.account, expected, bal.amount.currency, actual, bal.amount.currency
+                )
+            };
+
+            errors.push(
+                ValidationError::new(error_code, message, bal.date)
+                    .with_context(format!("difference: {difference}, tolerance: {tolerance}")),
             );
         }
     }

@@ -67,7 +67,7 @@ fn digits<'a>() -> impl Parser<'a, ParserInput<'a>, &'a str, ParserExtra<'a>> + 
 /// Parse the main query.
 fn query_parser<'a>() -> impl Parser<'a, ParserInput<'a>, Query, ParserExtra<'a>> {
     ws().ignore_then(choice((
-        select_query().map(Query::Select),
+        select_query().map(|sq| Query::Select(Box::new(sq))),
         journal_query().map(Query::Journal),
         balances_query().map(Query::Balances),
         print_query().map(Query::Print),
@@ -102,7 +102,12 @@ fn select_query<'a>() -> impl Parser<'a, ParserInput<'a>, SelectQuery, ParserExt
                     .map(|d| d.is_some()),
             )
             .then(targets())
-            .then(subquery_from.or(regular_from).or_not().map(|opt| opt.flatten()))
+            .then(
+                subquery_from
+                    .or(regular_from)
+                    .or_not()
+                    .map(std::option::Option::flatten),
+            )
             .then(where_clause().or_not())
             .then(group_by_clause().or_not())
             .then(having_clause().or_not())
@@ -110,7 +115,16 @@ fn select_query<'a>() -> impl Parser<'a, ParserInput<'a>, SelectQuery, ParserExt
             .then(order_by_clause().or_not())
             .then(limit_clause().or_not())
             .map(
-                |((((((((distinct, targets), from), where_clause), group_by), having), pivot_by), order_by), limit)| {
+                |(
+                    (
+                        (
+                            (((((distinct, targets), from), where_clause), group_by), having),
+                            pivot_by,
+                        ),
+                        order_by,
+                    ),
+                    limit,
+                )| {
                     SelectQuery {
                         distinct,
                         targets,
@@ -239,7 +253,8 @@ fn pivot_by_clause<'a>() -> impl Parser<'a, ParserInput<'a>, Vec<Expr>, ParserEx
 }
 
 /// Parse ORDER BY clause.
-fn order_by_clause<'a>() -> impl Parser<'a, ParserInput<'a>, Vec<OrderSpec>, ParserExtra<'a>> + Clone {
+fn order_by_clause<'a>() -> impl Parser<'a, ParserInput<'a>, Vec<OrderSpec>, ParserExtra<'a>> + Clone
+{
     ws1()
         .ignore_then(kw("ORDER"))
         .ignore_then(ws1())
@@ -300,7 +315,8 @@ fn journal_query<'a>() -> impl Parser<'a, ParserInput<'a>, JournalQuery, ParserE
 }
 
 /// Parse BALANCES query.
-fn balances_query<'a>() -> impl Parser<'a, ParserInput<'a>, BalancesQuery, ParserExtra<'a>> + Clone {
+fn balances_query<'a>() -> impl Parser<'a, ParserInput<'a>, BalancesQuery, ParserExtra<'a>> + Clone
+{
     kw("BALANCES")
         .ignore_then(at_function().or_not())
         .then(
@@ -881,7 +897,10 @@ mod tests {
 
     #[test]
     fn test_subquery_with_groupby() {
-        let query = parse("SELECT account, total FROM (SELECT account, SUM(position) AS total GROUP BY account)").unwrap();
+        let query = parse(
+            "SELECT account, total FROM (SELECT account, SUM(position) AS total GROUP BY account)",
+        )
+        .unwrap();
         match query {
             Query::Select(sel) => {
                 assert_eq!(sel.targets.len(), 2);
@@ -896,7 +915,9 @@ mod tests {
 
     #[test]
     fn test_subquery_with_outer_where() {
-        let query = parse("SELECT * FROM (SELECT * WHERE year = 2024) WHERE account ~ \"Expenses:\"").unwrap();
+        let query =
+            parse("SELECT * FROM (SELECT * WHERE year = 2024) WHERE account ~ \"Expenses:\"")
+                .unwrap();
         match query {
             Query::Select(sel) => {
                 // Outer WHERE

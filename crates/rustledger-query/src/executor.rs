@@ -206,7 +206,13 @@ impl<'a> Executor<'a> {
 
                 // Apply HAVING filter on aggregated row
                 if let Some(having_expr) = &query.having {
-                    if !self.evaluate_having_filter(having_expr, &row, &column_names, &query.targets, &group)? {
+                    if !self.evaluate_having_filter(
+                        having_expr,
+                        &row,
+                        &column_names,
+                        &query.targets,
+                        &group,
+                    )? {
                         continue;
                     }
                 }
@@ -280,7 +286,8 @@ impl<'a> Executor<'a> {
             .collect();
 
         // Determine outer column names
-        let outer_column_names = self.resolve_subquery_column_names(&outer_query.targets, &inner_result.columns)?;
+        let outer_column_names =
+            self.resolve_subquery_column_names(&outer_query.targets, &inner_result.columns)?;
         let mut result = QueryResult::new(outer_column_names);
 
         // Process each row from the inner result
@@ -293,7 +300,8 @@ impl<'a> Executor<'a> {
             }
 
             // Evaluate outer targets
-            let outer_row = self.evaluate_subquery_row(&outer_query.targets, inner_row, &inner_column_map)?;
+            let outer_row =
+                self.evaluate_subquery_row(&outer_query.targets, inner_row, &inner_column_map)?;
 
             if outer_query.distinct {
                 if !result.rows.contains(&outer_row) {
@@ -365,8 +373,7 @@ impl<'a> Executor<'a> {
                     Ok(row.get(idx).cloned().unwrap_or(Value::Null))
                 } else {
                     Err(QueryError::Evaluation(format!(
-                        "Unknown column '{}' in subquery result",
-                        name
+                        "Unknown column '{name}' in subquery result"
                     )))
                 }
             }
@@ -1611,11 +1618,7 @@ impl<'a> Executor<'a> {
     }
 
     /// Evaluate a function with pre-evaluated arguments (for subquery context).
-    fn evaluate_function_on_values(
-        &self,
-        name: &str,
-        args: &[Value],
-    ) -> Result<Value, QueryError> {
+    fn evaluate_function_on_values(&self, name: &str, args: &[Value]) -> Result<Value, QueryError> {
         let name_upper = name.to_uppercase();
         match name_upper.as_str() {
             // Date functions
@@ -1925,7 +1928,7 @@ impl<'a> Executor<'a> {
     }
 
     /// Check if an expression is a window function.
-    fn is_window_expr(expr: &Expr) -> bool {
+    const fn is_window_expr(expr: &Expr) -> bool {
         matches!(expr, Expr::Window(_))
     }
 
@@ -2086,9 +2089,10 @@ impl<'a> Executor<'a> {
                     for (i, (va, vb)) in vals_a.iter().zip(vals_b.iter()).enumerate() {
                         let cmp = self.compare_values_for_sort(va, vb);
                         if cmp != std::cmp::Ordering::Equal {
-                            return if order_specs.get(i).map_or(false, |s| {
-                                s.direction == SortDirection::Desc
-                            }) {
+                            return if order_specs
+                                .get(i)
+                                .is_some_and(|s| s.direction == SortDirection::Desc)
+                            {
                                 cmp.reverse()
                             } else {
                                 cmp
@@ -2115,25 +2119,16 @@ impl<'a> Executor<'a> {
                     false
                 };
 
-                if is_tie {
-                    // Same values as previous - keep same rank, but increment row_number
-                    window_contexts[original_idx] = WindowContext {
-                        row_number: row_num,
-                        rank,
-                        dense_rank,
-                    };
-                } else {
+                if !is_tie && position > 0 {
                     // New value - update ranks
-                    if position > 0 {
-                        rank = position + 1;
-                        dense_rank += 1;
-                    }
-                    window_contexts[original_idx] = WindowContext {
-                        row_number: row_num,
-                        rank,
-                        dense_rank,
-                    };
+                    rank = position + 1;
+                    dense_rank += 1;
                 }
+                window_contexts[original_idx] = WindowContext {
+                    row_number: row_num,
+                    rank,
+                    dense_rank,
+                };
 
                 row_num += 1;
                 prev_values = Some(current_values);
@@ -2682,8 +2677,7 @@ impl<'a> Executor<'a> {
                     Ok(row.get(idx).cloned().unwrap_or(Value::Null))
                 } else {
                     Err(QueryError::Evaluation(format!(
-                        "Column '{}' not found in SELECT clause for HAVING",
-                        name
+                        "Column '{name}' not found in SELECT clause for HAVING"
                     )))
                 }
             }
@@ -2707,7 +2701,9 @@ impl<'a> Executor<'a> {
                     UnaryOperator::Neg => match val {
                         Value::Number(n) => Ok(Value::Number(-n)),
                         Value::Integer(i) => Ok(Value::Integer(-i)),
-                        _ => Err(QueryError::Type("Cannot negate non-numeric value".to_string())),
+                        _ => Err(QueryError::Type(
+                            "Cannot negate non-numeric value".to_string(),
+                        )),
                     },
                 }
             }
@@ -2795,11 +2791,9 @@ impl<'a> Executor<'a> {
 
             // Add pivot values
             for pv in &pivot_values {
-                let matching_row = group_rows.iter().find(|row| {
-                    row.get(pivot_col_idx)
-                        .map(|v| v == pv)
-                        .unwrap_or(false)
-                });
+                let matching_row = group_rows
+                    .iter()
+                    .find(|row| row.get(pivot_col_idx).is_some_and(|v| v == pv));
                 if let Some(row) = matching_row {
                     new_row.push(row.get(value_col_idx).cloned().unwrap_or(Value::Null));
                 } else {
@@ -2814,7 +2808,11 @@ impl<'a> Executor<'a> {
     }
 
     /// Find the column index matching the pivot expression.
-    fn find_pivot_column(&self, result: &QueryResult, pivot_expr: &Expr) -> Result<usize, QueryError> {
+    fn find_pivot_column(
+        &self,
+        result: &QueryResult,
+        pivot_expr: &Expr,
+    ) -> Result<usize, QueryError> {
         match pivot_expr {
             Expr::Column(name) => {
                 let upper_name = name.to_uppercase();
@@ -2824,8 +2822,7 @@ impl<'a> Executor<'a> {
                     .position(|c| c.to_uppercase() == upper_name)
                     .ok_or_else(|| {
                         QueryError::Evaluation(format!(
-                            "PIVOT BY column '{}' not found in SELECT",
-                            name
+                            "PIVOT BY column '{name}' not found in SELECT"
                         ))
                     })
             }
@@ -2835,8 +2832,7 @@ impl<'a> Executor<'a> {
                     Ok(idx)
                 } else {
                     Err(QueryError::Evaluation(format!(
-                        "PIVOT BY column index {} out of range",
-                        n
+                        "PIVOT BY column index {n} out of range"
                     )))
                 }
             }
@@ -2848,8 +2844,7 @@ impl<'a> Executor<'a> {
                     Ok(idx)
                 } else {
                     Err(QueryError::Evaluation(format!(
-                        "PIVOT BY column index {} out of range",
-                        n
+                        "PIVOT BY column index {n} out of range"
                     )))
                 }
             }
@@ -2873,14 +2868,13 @@ impl<'a> Executor<'a> {
             Value::Boolean(b) => b.to_string(),
             Value::Amount(a) => format!("{} {}", a.number, a.currency),
             Value::Position(p) => format!("{}", p.units),
-            Value::Inventory(inv) => {
-                inv.positions()
-                    .iter()
-                    .map(|p| format!("{}", p.units))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            }
-            Value::StringSet(ss) => ss.iter().cloned().collect::<Vec<_>>().join(", "),
+            Value::Inventory(inv) => inv
+                .positions()
+                .iter()
+                .map(|p| format!("{}", p.units))
+                .collect::<Vec<_>>()
+                .join(", "),
+            Value::StringSet(ss) => ss.join(", "),
             Value::Null => "NULL".to_string(),
         }
     }

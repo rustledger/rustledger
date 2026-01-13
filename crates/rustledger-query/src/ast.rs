@@ -9,8 +9,8 @@ use rustledger_core::NaiveDate;
 /// A complete BQL query.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Query {
-    /// SELECT query.
-    Select(SelectQuery),
+    /// SELECT query (boxed to reduce enum size).
+    Select(Box<SelectQuery>),
     /// JOURNAL shorthand query.
     Journal(JournalQuery),
     /// BALANCES shorthand query.
@@ -162,7 +162,7 @@ pub struct FunctionCall {
 /// A window function call (function with OVER clause).
 #[derive(Debug, Clone, PartialEq)]
 pub struct WindowFunction {
-    /// Function name (ROW_NUMBER, RANK, SUM, etc.).
+    /// Function name (`ROW_NUMBER`, RANK, SUM, etc.).
     pub name: String,
     /// Function arguments.
     pub args: Vec<Expr>,

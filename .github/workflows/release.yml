@@ -52,6 +52,11 @@ jobs:
       - name: Build
         shell: bash
         run: |
+          # Disable LTO on macOS - Apple's linker crashes on long symbol names from wasmtime
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            export CARGO_PROFILE_RELEASE_LTO=false
+          fi
+
           if [ "${{ matrix.cross }}" = "true" ]; then
             cross build --release --target ${{ matrix.target }}
           else

@@ -108,3 +108,110 @@ pub fn extract_from_file(path: &Path, config: &ImporterConfig) -> Result<ImportR
 pub fn extract_from_string(content: &str, config: &ImporterConfig) -> Result<ImportResult> {
     config.extract_from_string(content)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rust_decimal::Decimal;
+    use rustledger_core::{Amount, Posting, Transaction};
+    use std::str::FromStr;
+
+    // ========== ImportResult Tests ==========
+
+    #[test]
+    fn test_import_result_new() {
+        let directives = vec![];
+        let result = ImportResult::new(directives);
+        assert!(result.directives.is_empty());
+        assert!(result.warnings.is_empty());
+    }
+
+    #[test]
+    fn test_import_result_empty() {
+        let result = ImportResult::empty();
+        assert!(result.directives.is_empty());
+        assert!(result.warnings.is_empty());
+    }
+
+    #[test]
+    fn test_import_result_with_warning() {
+        let result = ImportResult::empty().with_warning("Test warning");
+        assert_eq!(result.warnings.len(), 1);
+        assert_eq!(result.warnings[0], "Test warning");
+    }
+
+    #[test]
+    fn test_import_result_multiple_warnings() {
+        let result = ImportResult::empty()
+            .with_warning("Warning 1")
+            .with_warning("Warning 2");
+        assert_eq!(result.warnings.len(), 2);
+        assert_eq!(result.warnings[0], "Warning 1");
+        assert_eq!(result.warnings[1], "Warning 2");
+    }
+
+    #[test]
+    fn test_import_result_with_directives() {
+        let date = chrono::NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
+        let txn = Transaction::new(date, "Test transaction")
+            .with_posting(Posting::new(
+                "Assets:Bank",
+                Amount::new(Decimal::from_str("100").unwrap(), "USD"),
+            ))
+            .with_posting(Posting::new(
+                "Expenses:Food",
+                Amount::new(Decimal::from_str("-100").unwrap(), "USD"),
+            ));
+        let directives = vec![Directive::Transaction(txn)];
+        let result = ImportResult::new(directives);
+        assert_eq!(result.directives.len(), 1);
+    }
+
+    // ========== extract_from_string Tests ==========
+
+    #[test]
+    fn test_extract_from_string_csv() {
+        let config = ImporterConfig::csv()
+            .account("Assets:Bank:Checking")
+            .currency("USD")
+            .date_column("Date")
+            .narration_column("Description")
+            .amount_column("Amount")
+            .build();
+
+        let csv_content = "Date,Description,Amount\n2024-01-15,Coffee,-5.00\n";
+        let result = extract_from_string(csv_content, &config).unwrap();
+        assert_eq!(result.directives.len(), 1);
+    }
+
+    #[test]
+    fn test_extract_from_string_empty_csv() {
+        let config = ImporterConfig::csv()
+            .account("Assets:Bank:Checking")
+            .currency("USD")
+            .date_column("Date")
+            .narration_column("Description")
+            .amount_column("Amount")
+            .build();
+
+        let csv_content = "Date,Description,Amount\n";
+        let result = extract_from_string(csv_content, &config).unwrap();
+        assert!(result.directives.is_empty());
+    }
+
+    #[test]
+    fn test_import_result_debug() {
+        let result = ImportResult::empty();
+        let debug_str = format!("{result:?}");
+        assert!(debug_str.contains("ImportResult"));
+    }
+
+    #[test]
+    fn test_import_result_clone() {
+        let result = ImportResult::empty().with_warning("Test");
+        let cloned = result.clone();
+        // Verify both original and clone have the warning
+        assert_eq!(result.warnings.len(), 1);
+        assert_eq!(cloned.warnings.len(), 1);
+    }
+}

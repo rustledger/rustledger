@@ -240,3 +240,247 @@ impl Default for CsvConfigBuilder {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ========== CsvConfig Default Tests ==========
+
+    #[test]
+    fn test_csv_config_default() {
+        let config = CsvConfig::default();
+        assert!(matches!(config.date_column, ColumnSpec::Name(ref s) if s == "Date"));
+        assert_eq!(config.date_format, "%Y-%m-%d");
+        assert!(config.narration_column.is_some());
+        assert!(config.payee_column.is_none());
+        assert!(config.amount_column.is_some());
+        assert!(config.has_header);
+        assert_eq!(config.delimiter, ',');
+        assert_eq!(config.skip_rows, 0);
+        assert!(!config.invert_sign);
+    }
+
+    // ========== CsvConfigBuilder Tests ==========
+
+    #[test]
+    fn test_csv_config_builder_new() {
+        let builder = CsvConfigBuilder::new();
+        assert!(builder.account.is_none());
+        assert!(builder.currency.is_none());
+    }
+
+    #[test]
+    fn test_csv_config_builder_default() {
+        let builder = CsvConfigBuilder::default();
+        assert!(builder.account.is_none());
+    }
+
+    #[test]
+    fn test_csv_config_builder_account() {
+        let config = CsvConfigBuilder::new()
+            .account("Assets:Bank:Checking")
+            .build();
+        assert_eq!(config.account, "Assets:Bank:Checking");
+    }
+
+    #[test]
+    fn test_csv_config_builder_default_account() {
+        let config = CsvConfigBuilder::new().build();
+        assert_eq!(config.account, "Expenses:Unknown");
+    }
+
+    #[test]
+    fn test_csv_config_builder_currency() {
+        let config = CsvConfigBuilder::new().currency("EUR").build();
+        assert_eq!(config.currency, Some("EUR".to_string()));
+    }
+
+    #[test]
+    fn test_csv_config_builder_date_column() {
+        let config = CsvConfigBuilder::new()
+            .date_column("TransactionDate")
+            .build();
+        let ImporterType::Csv(csv_config) = &config.importer_type;
+        assert!(
+            matches!(csv_config.date_column, ColumnSpec::Name(ref s) if s == "TransactionDate")
+        );
+    }
+
+    #[test]
+    fn test_csv_config_builder_date_column_index() {
+        let config = CsvConfigBuilder::new().date_column_index(0).build();
+        let ImporterType::Csv(csv_config) = &config.importer_type;
+        assert!(matches!(csv_config.date_column, ColumnSpec::Index(0)));
+    }
+
+    #[test]
+    fn test_csv_config_builder_date_format() {
+        let config = CsvConfigBuilder::new().date_format("%m/%d/%Y").build();
+        let ImporterType::Csv(csv_config) = &config.importer_type;
+        assert_eq!(csv_config.date_format, "%m/%d/%Y");
+    }
+
+    #[test]
+    fn test_csv_config_builder_narration_column() {
+        let config = CsvConfigBuilder::new().narration_column("Memo").build();
+        let ImporterType::Csv(csv_config) = &config.importer_type;
+        assert!(
+            matches!(csv_config.narration_column, Some(ColumnSpec::Name(ref s)) if s == "Memo")
+        );
+    }
+
+    #[test]
+    fn test_csv_config_builder_narration_column_index() {
+        let config = CsvConfigBuilder::new().narration_column_index(2).build();
+        let ImporterType::Csv(csv_config) = &config.importer_type;
+        assert!(matches!(
+            csv_config.narration_column,
+            Some(ColumnSpec::Index(2))
+        ));
+    }
+
+    #[test]
+    fn test_csv_config_builder_payee_column() {
+        let config = CsvConfigBuilder::new().payee_column("Merchant").build();
+        let ImporterType::Csv(csv_config) = &config.importer_type;
+        assert!(
+            matches!(csv_config.payee_column, Some(ColumnSpec::Name(ref s)) if s == "Merchant")
+        );
+    }
+
+    #[test]
+    fn test_csv_config_builder_payee_column_index() {
+        let config = CsvConfigBuilder::new().payee_column_index(3).build();
+        let ImporterType::Csv(csv_config) = &config.importer_type;
+        assert!(matches!(
+            csv_config.payee_column,
+            Some(ColumnSpec::Index(3))
+        ));
+    }
+
+    #[test]
+    fn test_csv_config_builder_amount_column() {
+        let config = CsvConfigBuilder::new().amount_column("Value").build();
+        let ImporterType::Csv(csv_config) = &config.importer_type;
+        assert!(matches!(csv_config.amount_column, Some(ColumnSpec::Name(ref s)) if s == "Value"));
+    }
+
+    #[test]
+    fn test_csv_config_builder_amount_column_index() {
+        let config = CsvConfigBuilder::new().amount_column_index(4).build();
+        let ImporterType::Csv(csv_config) = &config.importer_type;
+        assert!(matches!(
+            csv_config.amount_column,
+            Some(ColumnSpec::Index(4))
+        ));
+    }
+
+    #[test]
+    fn test_csv_config_builder_debit_credit_columns() {
+        let config = CsvConfigBuilder::new()
+            .debit_column("Debit")
+            .credit_column("Credit")
+            .build();
+        let ImporterType::Csv(csv_config) = &config.importer_type;
+        assert!(matches!(csv_config.debit_column, Some(ColumnSpec::Name(ref s)) if s == "Debit"));
+        assert!(matches!(csv_config.credit_column, Some(ColumnSpec::Name(ref s)) if s == "Credit"));
+    }
+
+    #[test]
+    fn test_csv_config_builder_has_header() {
+        let config = CsvConfigBuilder::new().has_header(false).build();
+        let ImporterType::Csv(csv_config) = &config.importer_type;
+        assert!(!csv_config.has_header);
+    }
+
+    #[test]
+    fn test_csv_config_builder_delimiter() {
+        let config = CsvConfigBuilder::new().delimiter(';').build();
+        let ImporterType::Csv(csv_config) = &config.importer_type;
+        assert_eq!(csv_config.delimiter, ';');
+    }
+
+    #[test]
+    fn test_csv_config_builder_skip_rows() {
+        let config = CsvConfigBuilder::new().skip_rows(3).build();
+        let ImporterType::Csv(csv_config) = &config.importer_type;
+        assert_eq!(csv_config.skip_rows, 3);
+    }
+
+    #[test]
+    fn test_csv_config_builder_invert_sign() {
+        let config = CsvConfigBuilder::new().invert_sign(true).build();
+        let ImporterType::Csv(csv_config) = &config.importer_type;
+        assert!(csv_config.invert_sign);
+    }
+
+    #[test]
+    fn test_csv_config_builder_full_chain() {
+        let config = CsvConfigBuilder::new()
+            .account("Assets:Bank:Checking")
+            .currency("USD")
+            .date_column("Date")
+            .date_format("%Y/%m/%d")
+            .narration_column("Description")
+            .payee_column("Payee")
+            .amount_column("Amount")
+            .has_header(true)
+            .delimiter(',')
+            .skip_rows(1)
+            .invert_sign(false)
+            .build();
+
+        assert_eq!(config.account, "Assets:Bank:Checking");
+        assert_eq!(config.currency, Some("USD".to_string()));
+
+        let ImporterType::Csv(csv_config) = &config.importer_type;
+        assert!(matches!(csv_config.date_column, ColumnSpec::Name(ref s) if s == "Date"));
+        assert_eq!(csv_config.date_format, "%Y/%m/%d");
+        assert!(csv_config.narration_column.is_some());
+        assert!(csv_config.payee_column.is_some());
+        assert!(csv_config.amount_column.is_some());
+        assert!(csv_config.has_header);
+        assert_eq!(csv_config.delimiter, ',');
+        assert_eq!(csv_config.skip_rows, 1);
+        assert!(!csv_config.invert_sign);
+    }
+
+    // ========== ImporterConfig Tests ==========
+
+    #[test]
+    fn test_importer_config_csv() {
+        let builder = ImporterConfig::csv();
+        let config = builder.build();
+        assert!(matches!(config.importer_type, ImporterType::Csv(_)));
+    }
+
+    #[test]
+    fn test_importer_config_extract_from_string() {
+        let config = ImporterConfig::csv()
+            .account("Assets:Bank")
+            .currency("USD")
+            .date_column("Date")
+            .narration_column("Description")
+            .amount_column("Amount")
+            .build();
+
+        let csv = "Date,Description,Amount\n2024-01-15,Test,-10.00\n";
+        let result = config.extract_from_string(csv).unwrap();
+        assert_eq!(result.directives.len(), 1);
+    }
+
+    // ========== ColumnSpec Tests ==========
+
+    #[test]
+    fn test_column_spec_name() {
+        let spec = ColumnSpec::Name("Amount".to_string());
+        assert!(matches!(spec, ColumnSpec::Name(ref s) if s == "Amount"));
+    }
+
+    #[test]
+    fn test_column_spec_index() {
+        let spec = ColumnSpec::Index(5);
+        assert!(matches!(spec, ColumnSpec::Index(5)));
+    }
+}

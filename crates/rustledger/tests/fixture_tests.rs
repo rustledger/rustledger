@@ -285,21 +285,17 @@ fn example_files() -> Vec<PathBuf> {
         .collect()
 }
 
-/// Files that use org-mode or other non-standard beancount syntax
-fn example_file_uses_nonstandard_syntax(path: &Path) -> bool {
-    let file_name = path.file_name().unwrap().to_string_lossy();
-    // These files use org-mode style syntax (*, #+, #!) that beancount-python
-    // supports via emacs integration but isn't standard beancount syntax
-    file_name == "starter.beancount" || file_name == "basic.beancount"
-}
-
 /// Files known to have unbalanced transactions or other issues in Python beancount too
 fn example_file_has_known_issues(path: &Path) -> bool {
     let path_str = path.to_string_lossy();
+    let file_name = path.file_name().unwrap().to_string_lossy();
     // These files have issues even in Python beancount or use plugins we don't support
     path_str.contains("forecast") // Uses Python plugins for forecasting
         || path_str.contains("vesting") // Uses complex Python plugins
         || path_str.contains("ingest") // Importer framework files
+        // These files parse correctly but have validation issues (unbalanced transactions, etc.)
+        || file_name == "starter.beancount"
+        || file_name == "basic.beancount"
 }
 
 /// Simple recursive directory walker
@@ -327,14 +323,8 @@ fn test_example_files_parse() {
     }
 
     let mut failures = Vec::new();
-    let mut skipped = 0;
 
     for path in &files {
-        if example_file_uses_nonstandard_syntax(path) {
-            skipped += 1;
-            continue;
-        }
-
         let (parse_success, error_count) = parse_file(path);
         if !parse_success {
             failures.push(format!(
@@ -343,10 +333,6 @@ fn test_example_files_parse() {
                 error_count
             ));
         }
-    }
-
-    if skipped > 0 {
-        eprintln!("Skipped {skipped} files with non-standard syntax");
     }
 
     assert!(
@@ -370,8 +356,8 @@ fn test_example_files_validate() {
     let mut skipped = 0;
 
     for path in &files {
-        // Skip files with non-standard syntax or known issues
-        if example_file_uses_nonstandard_syntax(path) || example_file_has_known_issues(path) {
+        // Skip files with known validation issues
+        if example_file_has_known_issues(path) {
             skipped += 1;
             continue;
         }
@@ -391,7 +377,7 @@ fn test_example_files_validate() {
     }
 
     if skipped > 0 {
-        eprintln!("Skipped {skipped} files with non-standard syntax or known issues");
+        eprintln!("Skipped {skipped} files with known validation issues");
     }
 
     assert!(

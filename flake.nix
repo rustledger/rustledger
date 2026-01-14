@@ -366,6 +366,7 @@
             # Environment variables
             RUST_BACKTRACE = "1";
             RUST_LOG = "info";
+            RUST_MIN_STACK = "8388608"; # 8MB stack for debug builds
 
             # For rust-analyzer
             RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";

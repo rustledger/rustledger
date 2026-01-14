@@ -43,7 +43,7 @@ fn rledger_check(path: &Path) -> (bool, String) {
     (success, combined)
 }
 
-/// Run rledger-check with auto_accounts plugin (permissive mode like Python beancount).
+/// Run rledger-check with `auto_accounts` plugin (permissive mode like Python beancount).
 fn rledger_check_permissive(path: &Path) -> (bool, String) {
     let output = Command::new(rust_bean_check_binary())
         .arg("--native-plugin")
@@ -61,7 +61,7 @@ fn rledger_check_permissive(path: &Path) -> (bool, String) {
     (success, combined)
 }
 
-/// Parse a file with the parser and return (success, error_count).
+/// Parse a file with the parser and return (success, `error_count`).
 fn parse_file(path: &Path) -> (bool, usize) {
     let source = std::fs::read_to_string(path).expect("Failed to read file");
     let result = rustledger_parser::parse(&source);
@@ -85,14 +85,12 @@ fn test_syntax_edge_cases_parses() {
     // (e.g., balance tolerance with ~). Track parse error count for regression.
     if !success {
         eprintln!(
-            "syntax-edge-cases.beancount has {} parse errors (tracking for future fixes)",
-            error_count
+            "syntax-edge-cases.beancount has {error_count} parse errors (tracking for future fixes)"
         );
         // Allow up to 1 known parse error for now (balance tolerance ~)
         assert!(
             error_count <= 1,
-            "syntax-edge-cases.beancount should have at most 1 parse error, got {}",
-            error_count
+            "syntax-edge-cases.beancount should have at most 1 parse error, got {error_count}"
         );
     }
 }
@@ -112,8 +110,7 @@ fn test_booking_scenarios_parses() {
     let (success, error_count) = parse_file(&path);
     assert!(
         success,
-        "booking-scenarios.beancount should parse without errors, but got {} errors",
-        error_count
+        "booking-scenarios.beancount should parse without errors, but got {error_count} errors"
     );
 }
 
@@ -136,12 +133,10 @@ fn test_booking_scenarios_validates() {
         let has_unexpected_errors = output.lines().any(|line| {
             line.contains("error[E") && !line.contains("E3001") && !line.contains("E1001")
         });
-        if has_unexpected_errors {
-            panic!(
-                "booking-scenarios.beancount has unexpected errors: {}",
-                output
-            );
-        }
+        assert!(
+            !has_unexpected_errors,
+            "booking-scenarios.beancount has unexpected errors: {output}"
+        );
         eprintln!("booking-scenarios.beancount has expected booking-related errors (E3001/E1001)");
     }
 }
@@ -161,8 +156,7 @@ fn test_validation_errors_parses() {
     let (success, error_count) = parse_file(&path);
     assert!(
         success,
-        "validation-errors.beancount should parse without errors, but got {} errors",
-        error_count
+        "validation-errors.beancount should parse without errors, but got {error_count} errors"
     );
 }
 
@@ -185,8 +179,7 @@ fn test_validation_errors_produces_expected_errors() {
     // Check for expected error codes
     assert!(
         output.contains("E1001") || output.contains("Account") && output.contains("not open"),
-        "Should contain E1001 (account not opened): {}",
-        output
+        "Should contain E1001 (account not opened): {output}"
     );
 }
 
@@ -203,9 +196,9 @@ fn lima_test_files() -> Vec<PathBuf> {
 
     std::fs::read_dir(&lima_dir)
         .expect("Failed to read lima-tests directory")
-        .filter_map(|entry| entry.ok())
+        .filter_map(std::result::Result::ok)
         .map(|entry| entry.path())
-        .filter(|path| path.extension().map_or(false, |ext| ext == "beancount"))
+        .filter(|path| path.extension().is_some_and(|ext| ext == "beancount"))
         .collect()
 }
 
@@ -288,7 +281,7 @@ fn example_files() -> Vec<PathBuf> {
 
     walkdir(&examples_dir)
         .into_iter()
-        .filter(|path| path.extension().map_or(false, |ext| ext == "beancount"))
+        .filter(|path| path.extension().is_some_and(|ext| ext == "beancount"))
         .collect()
 }
 
@@ -353,7 +346,7 @@ fn test_example_files_parse() {
     }
 
     if skipped > 0 {
-        eprintln!("Skipped {} files with non-standard syntax", skipped);
+        eprintln!("Skipped {skipped} files with non-standard syntax");
     }
 
     assert!(
@@ -398,10 +391,7 @@ fn test_example_files_validate() {
     }
 
     if skipped > 0 {
-        eprintln!(
-            "Skipped {} files with non-standard syntax or known issues",
-            skipped
-        );
+        eprintln!("Skipped {skipped} files with non-standard syntax or known issues");
     }
 
     assert!(

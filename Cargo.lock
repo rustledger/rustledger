@@ -2462,7 +2462,7 @@ dependencies = [
 
 [[package]]
 name = "rustledger"
-version = "1.0.0-rc.17"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "ariadne",
@@ -2490,7 +2490,7 @@ dependencies = [
 
 [[package]]
 name = "rustledger-booking"
-version = "1.0.0-rc.17"
+version = "0.1.0"
 dependencies = [
  "rust_decimal",
  "rust_decimal_macros",
@@ -2500,7 +2500,7 @@ dependencies = [
 
 [[package]]
 name = "rustledger-core"
-version = "1.0.0-rc.17"
+version = "0.1.0"
 dependencies = [
  "chrono",
  "criterion",
@@ -2513,7 +2513,7 @@ dependencies = [
 
 [[package]]
 name = "rustledger-importer"
-version = "1.0.0-rc.17"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2528,7 +2528,7 @@ dependencies = [
 
 [[package]]
 name = "rustledger-loader"
-version = "1.0.0-rc.17"
+version = "0.1.0"
 dependencies = [
  "rust_decimal",
  "rustledger-core",
@@ -2539,7 +2539,7 @@ dependencies = [
 
 [[package]]
 name = "rustledger-parser"
-version = "1.0.0-rc.17"
+version = "0.1.0"
 dependencies = [
  "ariadne",
  "chrono",
@@ -2555,7 +2555,7 @@ dependencies = [
 
 [[package]]
 name = "rustledger-plugin"
-version = "1.0.0-rc.17"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "dirs",
@@ -2577,7 +2577,7 @@ dependencies = [
 
 [[package]]
 name = "rustledger-query"
-version = "1.0.0-rc.17"
+version = "0.1.0"
 dependencies = [
  "ariadne",
  "chrono",
@@ -2593,7 +2593,7 @@ dependencies = [
 
 [[package]]
 name = "rustledger-validate"
-version = "1.0.0-rc.17"
+version = "0.1.0"
 dependencies = [
  "chrono",
  "criterion",
@@ -2607,7 +2607,7 @@ dependencies = [
 
 [[package]]
 name = "rustledger-wasm"
-version = "1.0.0-rc.17"
+version = "0.1.0"
 dependencies = [
  "console_error_panic_hook",
  "js-sys",

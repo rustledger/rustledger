@@ -378,9 +378,14 @@ pub fn validate_with_options(
 
     let today = Local::now().date_naive();
 
-    // Sort directives by date
+    // Sort directives by date, then by type priority
+    // (e.g., balance assertions before transactions on the same day)
     let mut sorted: Vec<&Directive> = directives.iter().collect();
-    sorted.sort_by_key(|d| d.date());
+    sorted.sort_by(|a, b| {
+        a.date()
+            .cmp(&b.date())
+            .then_with(|| a.priority().cmp(&b.priority()))
+    });
 
     for directive in sorted {
         let date = directive.date();

@@ -632,3 +632,54 @@ option "title" "Note Test"
 
     std::fs::remove_file(&temp_file).ok();
 }
+
+/// Path to beancount's canonical example.beancount file.
+fn beancount_example_file() -> PathBuf {
+    project_root().join("spec/fixtures/examples/example.beancount")
+}
+
+#[test]
+fn test_beancount_canonical_example() {
+    // This is beancount's official example.beancount file.
+    // It should parse and validate without errors in rustledger.
+    let path = beancount_example_file();
+
+    if !path.exists() {
+        eprintln!("Skipping: spec/fixtures/examples/example.beancount not found");
+        return;
+    }
+
+    let (rs_success, rs_output) = rust_bean_check(&path);
+
+    assert!(
+        rs_success,
+        "Rust should validate beancount's canonical example.beancount without errors: {rs_output}"
+    );
+}
+
+#[test]
+fn test_beancount_canonical_example_matches_python() {
+    if !python_beancount_available() {
+        eprintln!("Skipping: Python beancount not available");
+        return;
+    }
+
+    let path = beancount_example_file();
+
+    if !path.exists() {
+        eprintln!("Skipping: spec/fixtures/examples/example.beancount not found");
+        return;
+    }
+
+    let (py_success, py_output) = python_bean_check(&path);
+    let (rs_success, rs_output) = rust_bean_check(&path);
+
+    assert!(
+        py_success,
+        "Python beancount should pass on its own example.beancount: {py_output}"
+    );
+    assert!(
+        rs_success,
+        "Rust should match Python on example.beancount: {rs_output}"
+    );
+}

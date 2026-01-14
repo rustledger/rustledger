@@ -1,4 +1,4 @@
-# Justfile for beancount-rs
+# Justfile for rustledger
 # https://github.com/casey/just
 
 # Default recipe - show help
@@ -485,5 +485,5 @@ release-prep version:
 # Create release build
 release-build:
     cargo build --release
-    @echo "Binary at: target/release/beancount-rs"
-    @ls -lh target/release/beancount-rs
+    @echo "Binaries at: target/release/rledger-*"
+    @ls -lh target/release/rledger-*

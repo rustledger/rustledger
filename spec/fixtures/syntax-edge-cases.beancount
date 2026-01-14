@@ -280,8 +280,8 @@ poptag #vacation-2020
 
 2020-09-03 balance Assets:Bank:Checking  1000 USD
 
-; Balance with tolerance
-2020-09-04 balance Assets:Bank:Checking  1000.00 USD ~ 0.01
+; Balance with tolerance (format: NUMBER ~ TOLERANCE CURRENCY)
+2020-09-04 balance Assets:Bank:Checking  1000.00 ~ 0.01 USD
 
 ; Pad directive
 2020-01-01 pad Assets:Bank:Savings Equity:Opening-Balances

@@ -1,6 +1,6 @@
 ; Valid beancount file for integration testing
 ; This file should parse and validate successfully with both
-; Python beancount and beancount-rs
+; Python beancount and rustledger
 
 option "title" "Integration Test Ledger"
 option "operating_currency" "USD"

@@ -264,6 +264,7 @@ fn parse_money_string(s: &str) -> Option<Decimal> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ImporterType;
 
     #[test]
     fn test_parse_money_string() {
@@ -547,5 +548,325 @@ More info
         assert_eq!(parse_money_string("$"), None);
         // Negative with currency
         assert_eq!(parse_money_string("-$100.00"), Some(Decimal::from(-100)));
+    }
+
+    #[test]
+    fn test_csv_import_invalid_date_generates_warning() {
+        let config = ImporterConfig::csv()
+            .account("Assets:Bank")
+            .currency("USD")
+            .date_column("Date")
+            .narration_column("Description")
+            .amount_column("Amount")
+            .build();
+
+        let csv_content = r"Date,Description,Amount
+not-a-date,Coffee,-5.00
+2024-01-15,Valid,-10.00
+";
+
+        let result = config.extract_from_string(csv_content).unwrap();
+        // Only the valid row should be imported
+        assert_eq!(result.directives.len(), 1);
+        // Should have a warning about the invalid date
+        assert_eq!(result.warnings.len(), 1);
+        assert!(result.warnings[0].contains("failed to parse date"));
+    }
+
+    #[test]
+    fn test_csv_import_empty_date_skips_row() {
+        let config = ImporterConfig::csv()
+            .account("Assets:Bank")
+            .currency("USD")
+            .date_column("Date")
+            .narration_column("Description")
+            .amount_column("Amount")
+            .build();
+
+        let csv_content = r"Date,Description,Amount
+,Empty date row,-5.00
+2024-01-15,Valid,-10.00
+";
+
+        let result = config.extract_from_string(csv_content).unwrap();
+        // Empty date row should be silently skipped
+        assert_eq!(result.directives.len(), 1);
+        assert!(result.warnings.is_empty());
+    }
+
+    #[test]
+    fn test_csv_import_zero_amount_skips_row() {
+        let config = ImporterConfig::csv()
+            .account("Assets:Bank")
+            .currency("USD")
+            .date_column("Date")
+            .narration_column("Description")
+            .amount_column("Amount")
+            .build();
+
+        let csv_content = r"Date,Description,Amount
+2024-01-15,Zero amount,0.00
+2024-01-16,Valid,-10.00
+";
+
+        let result = config.extract_from_string(csv_content).unwrap();
+        // Zero amount row should be skipped
+        assert_eq!(result.directives.len(), 1);
+        if let Directive::Transaction(txn) = &result.directives[0] {
+            assert_eq!(txn.narration.as_str(), "Valid");
+        }
+    }
+
+    #[test]
+    fn test_csv_import_default_currency() {
+        // No currency specified - should default to USD
+        let config = ImporterConfig::csv()
+            .account("Assets:Bank")
+            .date_column("Date")
+            .narration_column("Description")
+            .amount_column("Amount")
+            .build();
+
+        let csv_content = r"Date,Description,Amount
+2024-01-15,Coffee,-5.00
+";
+
+        let result = config.extract_from_string(csv_content).unwrap();
+        assert_eq!(result.directives.len(), 1);
+
+        if let Directive::Transaction(txn) = &result.directives[0] {
+            let amount = txn.postings[0].amount().unwrap();
+            assert_eq!(amount.currency.as_str(), "USD");
+        }
+    }
+
+    #[test]
+    fn test_csv_import_income_contra_account() {
+        // Negative final amount should use Income:Unknown as contra
+        let config = ImporterConfig::csv()
+            .account("Assets:Bank")
+            .currency("USD")
+            .date_column("Date")
+            .narration_column("Description")
+            .amount_column("Amount")
+            .build();
+
+        let csv_content = r"Date,Description,Amount
+2024-01-15,Salary,2500.00
+2024-01-16,Coffee,-5.00
+";
+
+        let result = config.extract_from_string(csv_content).unwrap();
+        assert_eq!(result.directives.len(), 2);
+
+        // Positive amount -> Expenses:Unknown contra
+        if let Directive::Transaction(txn) = &result.directives[0] {
+            assert_eq!(txn.postings[1].account.as_str(), "Expenses:Unknown");
+        }
+
+        // Negative amount -> Income:Unknown contra
+        if let Directive::Transaction(txn) = &result.directives[1] {
+            assert_eq!(txn.postings[1].account.as_str(), "Income:Unknown");
+        }
+    }
+
+    #[test]
+    fn test_csv_import_empty_payee_filtered() {
+        let config = ImporterConfig::csv()
+            .account("Assets:Bank")
+            .currency("USD")
+            .date_column("Date")
+            .payee_column("Payee")
+            .narration_column("Description")
+            .amount_column("Amount")
+            .build();
+
+        let csv_content = r"Date,Payee,Description,Amount
+2024-01-15,,Empty payee,-5.00
+2024-01-16,  ,Whitespace payee,-10.00
+";
+
+        let result = config.extract_from_string(csv_content).unwrap();
+        assert_eq!(result.directives.len(), 2);
+
+        // Empty payee should be None
+        if let Directive::Transaction(txn) = &result.directives[0] {
+            assert!(txn.payee.is_none());
+        }
+
+        // Whitespace-only payee should also be None after trim
+        if let Directive::Transaction(txn) = &result.directives[1] {
+            assert!(txn.payee.is_none());
+        }
+    }
+
+    #[test]
+    fn test_csv_import_missing_column_error() {
+        let config = ImporterConfig::csv()
+            .account("Assets:Bank")
+            .currency("USD")
+            .date_column("NonExistentColumn")
+            .narration_column("Description")
+            .amount_column("Amount")
+            .build();
+
+        let csv_content = r"Date,Description,Amount
+2024-01-15,Coffee,-5.00
+";
+
+        let result = config.extract_from_string(csv_content).unwrap();
+        // Row should fail with a warning
+        assert!(result.directives.is_empty());
+        assert_eq!(result.warnings.len(), 1);
+        // The error propagates the "missing date column" context
+        assert!(result.warnings[0].contains("missing date column"));
+    }
+
+    #[test]
+    fn test_csv_import_column_index_out_of_bounds() {
+        let config = ImporterConfig::csv()
+            .account("Assets:Bank")
+            .currency("USD")
+            .date_column_index(0)
+            .narration_column_index(1)
+            .amount_column_index(99) // Out of bounds
+            .has_header(false)
+            .build();
+
+        let csv_content = r"2024-01-15,Coffee,-5.00
+";
+
+        let result = config.extract_from_string(csv_content).unwrap();
+        // Row should fail with a warning
+        assert!(result.directives.is_empty());
+        assert_eq!(result.warnings.len(), 1);
+        assert!(result.warnings[0].contains("out of bounds"));
+    }
+
+    #[test]
+    fn test_csv_import_no_amount_column_error() {
+        // Build manually to avoid default amount_column
+        let csv_config = CsvConfig {
+            date_column: ColumnSpec::Name("Date".to_string()),
+            date_format: "%Y-%m-%d".to_string(),
+            narration_column: Some(ColumnSpec::Name("Description".to_string())),
+            payee_column: None,
+            amount_column: None,
+            debit_column: None,
+            credit_column: None,
+            has_header: true,
+            delimiter: ',',
+            skip_rows: 0,
+            invert_sign: false,
+        };
+
+        let importer = CsvImporter::new(ImporterConfig {
+            account: "Assets:Bank".to_string(),
+            currency: Some("USD".to_string()),
+            importer_type: ImporterType::Csv(csv_config.clone()),
+        });
+
+        let csv_content = r"Date,Description
+2024-01-15,Coffee
+";
+
+        let result = importer.extract_string(csv_content, &csv_config).unwrap();
+        // Should have warning about no amount column
+        assert!(result.directives.is_empty());
+        assert_eq!(result.warnings.len(), 1);
+        assert!(result.warnings[0].contains("No amount column"));
+    }
+
+    #[test]
+    fn test_csv_import_debit_only_column() {
+        let config = ImporterConfig::csv()
+            .account("Assets:Bank")
+            .currency("USD")
+            .date_column("Date")
+            .narration_column("Description")
+            .debit_column("Debit")
+            // No credit column
+            .build();
+
+        let csv_content = r"Date,Description,Debit
+2024-01-15,Withdrawal,100.00
+";
+
+        let result = config.extract_from_string(csv_content).unwrap();
+        assert_eq!(result.directives.len(), 1);
+
+        if let Directive::Transaction(txn) = &result.directives[0] {
+            let amount = txn.postings[0].amount().unwrap();
+            // Debit should be negative
+            assert_eq!(amount.number, Decimal::from_str("-100.00").unwrap());
+        }
+    }
+
+    #[test]
+    fn test_csv_import_credit_only_column() {
+        let config = ImporterConfig::csv()
+            .account("Assets:Bank")
+            .currency("USD")
+            .date_column("Date")
+            .narration_column("Description")
+            .credit_column("Credit")
+            // No debit column
+            .build();
+
+        let csv_content = r"Date,Description,Credit
+2024-01-15,Deposit,100.00
+";
+
+        let result = config.extract_from_string(csv_content).unwrap();
+        assert_eq!(result.directives.len(), 1);
+
+        if let Directive::Transaction(txn) = &result.directives[0] {
+            let amount = txn.postings[0].amount().unwrap();
+            // Credit should be positive
+            assert_eq!(amount.number, Decimal::from_str("100.00").unwrap());
+        }
+    }
+
+    #[test]
+    fn test_csv_import_empty_debit_credit() {
+        let config = ImporterConfig::csv()
+            .account("Assets:Bank")
+            .currency("USD")
+            .date_column("Date")
+            .narration_column("Description")
+            .debit_column("Debit")
+            .credit_column("Credit")
+            .build();
+
+        let csv_content = r"Date,Description,Debit,Credit
+2024-01-15,Empty both,,
+";
+
+        let result = config.extract_from_string(csv_content).unwrap();
+        // Zero amount should be skipped
+        assert!(result.directives.is_empty());
+    }
+
+    #[test]
+    fn test_csv_import_with_positive_amount_sign() {
+        let config = ImporterConfig::csv()
+            .account("Assets:Bank")
+            .currency("USD")
+            .date_column("Date")
+            .narration_column("Description")
+            .amount_column("Amount")
+            .build();
+
+        let csv_content = r"Date,Description,Amount
+2024-01-15,Deposit,+100.00
+";
+
+        let result = config.extract_from_string(csv_content).unwrap();
+        assert_eq!(result.directives.len(), 1);
+
+        if let Directive::Transaction(txn) = &result.directives[0] {
+            let amount = txn.postings[0].amount().unwrap();
+            assert_eq!(amount.number, Decimal::from(100));
+        }
     }
 }

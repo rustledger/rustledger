@@ -405,7 +405,7 @@ mod tests {
         assert_eq!(residual.get("USD"), Some(&dec!(0)));
     }
 
-    /// Test UnitIncomplete price annotation with complete amount.
+    /// Test `UnitIncomplete` price annotation with complete amount.
     #[test]
     fn test_calculate_residual_unit_incomplete_with_amount() {
         let txn = Transaction::new(date(2024, 1, 15), "Exchange")
@@ -423,7 +423,7 @@ mod tests {
         assert_eq!(residual.get("EUR"), Some(&dec!(0)));
     }
 
-    /// Test TotalIncomplete price annotation with complete amount.
+    /// Test `TotalIncomplete` price annotation with complete amount.
     #[test]
     fn test_calculate_residual_total_incomplete_with_amount() {
         let txn = Transaction::new(date(2024, 1, 15), "Exchange")
@@ -441,7 +441,7 @@ mod tests {
         assert_eq!(residual.get("EUR"), Some(&dec!(0)));
     }
 
-    /// Test UnitIncomplete without amount falls back to units.
+    /// Test `UnitIncomplete` without amount falls back to units.
     #[test]
     fn test_calculate_residual_unit_incomplete_no_amount_fallback() {
         let txn = Transaction::new(date(2024, 1, 15), "Test")
@@ -460,7 +460,7 @@ mod tests {
         assert_eq!(residual.get("USD"), Some(&dec!(0)));
     }
 
-    /// Test TotalIncomplete without amount falls back to units.
+    /// Test `TotalIncomplete` without amount falls back to units.
     #[test]
     fn test_calculate_residual_total_incomplete_no_amount_fallback() {
         let txn = Transaction::new(date(2024, 1, 15), "Test")
@@ -478,7 +478,7 @@ mod tests {
         assert_eq!(residual.get("USD"), Some(&dec!(0)));
     }
 
-    /// Test UnitEmpty price annotation falls back to units.
+    /// Test `UnitEmpty` price annotation falls back to units.
     #[test]
     fn test_calculate_residual_unit_empty_fallback() {
         let txn = Transaction::new(date(2024, 1, 15), "Test")
@@ -496,7 +496,7 @@ mod tests {
         assert_eq!(residual.get("USD"), Some(&dec!(0)));
     }
 
-    /// Test TotalEmpty price annotation falls back to units.
+    /// Test `TotalEmpty` price annotation falls back to units.
     #[test]
     fn test_calculate_residual_total_empty_fallback() {
         let txn = Transaction::new(date(2024, 1, 15), "Test")

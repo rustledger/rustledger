@@ -210,7 +210,7 @@
                 entry = lib.mkForce "cargo fmt --all --";
               };
 
-              # Rust linting
+              # Rust linting - always run on every commit to catch all warnings
               clippy = {
                 enable = true;
                 packageOverrides.cargo = rustToolchainWithWasm;
@@ -218,7 +218,11 @@
                 settings = {
                   allFeatures = true;
                   denyWarnings = true;
+                  extraArgs = "--all-targets";
                 };
+                # Always run clippy, not just when .rs files are staged
+                # This catches warnings in unchanged files (e.g., from new clippy lints)
+                always_run = true;
               };
 
               # Nix

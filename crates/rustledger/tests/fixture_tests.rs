@@ -212,6 +212,7 @@ fn lima_test_expects_parse_error(name: &str) -> bool {
         || name.contains("BlankLineNotAllowed")
         || name.contains("BlankLineWithSpacesNotAllowed")
         || name.contains("IndentEOF")
+        || name.starts_with("SyntaxErrors")
 }
 
 #[test]

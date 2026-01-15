@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "label": "speedup",
+  "message": "5.4x faster",
+  "color": "brightgreen",
+  "python_ms": 863,
+  "rust_ms": 160,
+  "speedup": 5.4,
+  "transactions": 10000,
+  "updated": "2026-01-15T04:39:06Z"
+}

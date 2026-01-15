@@ -292,6 +292,8 @@ struct PendingPad {
     source_account: InternedStr,
     /// Date of the pad directive.
     date: NaiveDate,
+    /// Whether this pad has been used (has at least one balance assertion).
+    used: bool,
 }
 
 /// Ledger state for validation.
@@ -440,14 +442,16 @@ pub fn validate_with_options(
     // Check for unused pads (E2003)
     for (account, pads) in &state.pending_pads {
         for pad in pads {
-            errors.push(
-                ValidationError::new(
-                    ErrorCode::PadWithoutBalance,
-                    format!("Pad directive for {account} has no subsequent balance assertion"),
-                    pad.date,
-                )
-                .with_context(format!("source account: {}", pad.source_account)),
-            );
+            if !pad.used {
+                errors.push(
+                    ValidationError::new(
+                        ErrorCode::PadWithoutBalance,
+                        format!("Pad directive for {account} has no subsequent balance assertion"),
+                        pad.date,
+                    )
+                    .with_context(format!("source account: {}", pad.source_account)),
+                );
+            }
         }
     }
 
@@ -885,6 +889,7 @@ fn validate_pad(state: &mut LedgerState, pad: &Pad, errors: &mut Vec<ValidationE
     let pending_pad = PendingPad {
         source_account: pad.source_account.clone(),
         date: pad.date,
+        used: false,
     };
     state
         .pending_pads
@@ -905,9 +910,10 @@ fn validate_balance(state: &mut LedgerState, bal: &Balance, errors: &mut Vec<Val
     }
 
     // Check if there are pending pads for this account
-    if let Some(pending_pads) = state.pending_pads.remove(&bal.account) {
-        // Check for multiple pads (E2004)
-        if pending_pads.len() > 1 {
+    // Use get_mut instead of remove - a pad can apply to multiple currencies
+    if let Some(pending_pads) = state.pending_pads.get_mut(&bal.account) {
+        // Check for multiple pads (E2004) - only warn if none have been used yet
+        if pending_pads.len() > 1 && !pending_pads.iter().any(|p| p.used) {
             errors.push(
                 ValidationError::new(
                     ErrorCode::MultiplePadForBalance,
@@ -929,7 +935,7 @@ fn validate_balance(state: &mut LedgerState, bal: &Balance, errors: &mut Vec<Val
         }
 
         // Use the most recent pad
-        if let Some(pending_pad) = pending_pads.last() {
+        if let Some(pending_pad) = pending_pads.last_mut() {
             // Apply padding: calculate difference and add to both accounts
             if let Some(inv) = state.inventories.get(&bal.account) {
                 let actual = inv.units(&bal.amount.currency);
@@ -955,6 +961,8 @@ fn validate_balance(state: &mut LedgerState, bal: &Balance, errors: &mut Vec<Val
                     }
                 }
             }
+            // Mark pad as used
+            pending_pad.used = true;
         }
         // After padding, the balance should match (no error needed)
         return;

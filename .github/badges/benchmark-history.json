@@ -1,9 +1,9 @@
 [
   {
     "date": "2026-01-15",
-    "timestamp": "2026-01-15T04:39:06Z",
-    "python_ms": 863,
-    "rust_ms": 160,
-    "speedup": 5.4
+    "timestamp": "2026-01-15T20:52:34Z",
+    "python_ms": 889,
+    "rust_ms": 34,
+    "speedup": 26.1
   }
 ]

@@ -4,7 +4,7 @@
 //! - spec/fixtures/syntax-edge-cases.beancount - Parser edge cases
 //! - spec/fixtures/booking-scenarios.beancount - Booking algorithm scenarios
 //! - spec/fixtures/validation-errors.beancount - Expected validation errors
-//! - spec/fixtures/lima-tests/*.beancount - 214 parser conformance tests
+//! - spec/fixtures/lima-tests/*.beancount - 218 parser conformance tests
 //! - spec/fixtures/examples/*.beancount - Official beancount examples
 
 use std::path::{Path, PathBuf};
@@ -212,6 +212,7 @@ fn lima_test_expects_parse_error(name: &str) -> bool {
         || name.contains("BlankLineNotAllowed")
         || name.contains("BlankLineWithSpacesNotAllowed")
         || name.contains("IndentEOF")
+        || name.starts_with("SyntaxErrors")
 }
 
 #[test]
@@ -635,5 +636,27 @@ lima_test!(
 lima_test!(
     lima_indent_error_1,
     "Whitespace.IndentError1.beancount",
+    expect_error
+);
+
+// Syntax error tests
+lima_test!(
+    lima_syntax_error_in_posting,
+    "SyntaxErrors.ErrorInPosting.beancount",
+    expect_error
+);
+lima_test!(
+    lima_syntax_error_in_transaction_line,
+    "SyntaxErrors.ErrorInTransactionLine.beancount",
+    expect_error
+);
+lima_test!(
+    lima_syntax_no_final_newline,
+    "SyntaxErrors.NoFinalNewline.beancount",
+    expect_error
+);
+lima_test!(
+    lima_syntax_single_error_token,
+    "SyntaxErrors.SingleErrorTokenAtTopLevel.beancount",
     expect_error
 );

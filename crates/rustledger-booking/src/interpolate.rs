@@ -84,53 +84,73 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
     for (i, posting) in transaction.postings.iter().enumerate() {
         match &posting.units {
             Some(IncompleteAmount::Complete(amount)) => {
-                // Complete amount - add to residual
-                *residuals.entry(amount.currency.clone()).or_default() += amount.number;
+                // Determine the "weight" of this posting for balance purposes.
+                // This must match the logic in calculate_residual().
+                //
+                // Rules:
+                // - If there's a cost spec, weight is in cost currency (not units)
+                // - If there's a price annotation (no cost), weight is in price currency
+                // - Otherwise, weight is the units themselves
 
-                // Handle cost
                 if let Some(cost_spec) = &posting.cost {
+                    // Cost-based posting: weight is in the cost currency
                     if let (Some(per_unit), Some(cost_curr)) =
                         (&cost_spec.number_per, &cost_spec.currency)
                     {
-                        *residuals.entry(cost_curr.clone()).or_default() -=
-                            amount.number * per_unit;
+                        let cost_amount = amount.number * per_unit;
+                        *residuals.entry(cost_curr.clone()).or_default() += cost_amount;
                     } else if let (Some(total), Some(cost_curr)) =
                         (&cost_spec.number_total, &cost_spec.currency)
                     {
-                        *residuals.entry(cost_curr.clone()).or_default() -= *total;
+                        // For total cost, sign depends on units sign
+                        *residuals.entry(cost_curr.clone()).or_default() +=
+                            *total * amount.number.signum();
+                    } else {
+                        // Cost spec without amount/currency - fall back to units
+                        *residuals.entry(amount.currency.clone()).or_default() += amount.number;
                     }
-                }
-
-                // Handle price
-                if let Some(price) = &posting.price {
+                } else if let Some(price) = &posting.price {
+                    // Price annotation: converts units to price currency
                     match price {
                         rustledger_core::PriceAnnotation::Unit(price_amt) => {
                             let converted = amount.number.abs() * price_amt.number;
-                            *residuals.entry(price_amt.currency.clone()).or_default() -=
+                            *residuals.entry(price_amt.currency.clone()).or_default() +=
                                 converted * amount.number.signum();
                         }
                         rustledger_core::PriceAnnotation::Total(price_amt) => {
-                            *residuals.entry(price_amt.currency.clone()).or_default() -=
+                            *residuals.entry(price_amt.currency.clone()).or_default() +=
                                 price_amt.number * amount.number.signum();
                         }
-                        // Incomplete price annotations - extract what we can
                         rustledger_core::PriceAnnotation::UnitIncomplete(inc) => {
                             if let Some(price_amt) = inc.as_amount() {
                                 let converted = amount.number.abs() * price_amt.number;
-                                *residuals.entry(price_amt.currency.clone()).or_default() -=
+                                *residuals.entry(price_amt.currency.clone()).or_default() +=
                                     converted * amount.number.signum();
+                            } else {
+                                // Can't calculate, fall back to units
+                                *residuals.entry(amount.currency.clone()).or_default() +=
+                                    amount.number;
                             }
                         }
                         rustledger_core::PriceAnnotation::TotalIncomplete(inc) => {
                             if let Some(price_amt) = inc.as_amount() {
-                                *residuals.entry(price_amt.currency.clone()).or_default() -=
+                                *residuals.entry(price_amt.currency.clone()).or_default() +=
                                     price_amt.number * amount.number.signum();
+                            } else {
+                                // Can't calculate, fall back to units
+                                *residuals.entry(amount.currency.clone()).or_default() +=
+                                    amount.number;
                             }
                         }
-                        // Empty price annotations - nothing to contribute to residual
+                        // Empty price annotations - fall back to units
                         rustledger_core::PriceAnnotation::UnitEmpty
-                        | rustledger_core::PriceAnnotation::TotalEmpty => {}
+                        | rustledger_core::PriceAnnotation::TotalEmpty => {
+                            *residuals.entry(amount.currency.clone()).or_default() += amount.number;
+                        }
                     }
+                } else {
+                    // Simple posting: weight is just the units
+                    *residuals.entry(amount.currency.clone()).or_default() += amount.number;
                 }
             }
             Some(IncompleteAmount::CurrencyOnly(currency)) => {
@@ -370,5 +390,219 @@ mod tests {
         let result = interpolate(&txn);
         // The current implementation handles this by assigning them sequentially
         assert!(result.is_ok());
+    }
+
+    // =========================================================================
+    // Cost-based interpolation tests
+    // These tests are based on beancount's booking_full_test.py
+    // =========================================================================
+
+    #[test]
+    fn test_interpolate_with_per_unit_cost() {
+        // 2015-10-02 *
+        //   Assets:Stock   10 HOOL {100.00 USD}
+        //   Assets:Cash
+        //
+        // Expected: Assets:Cash should be interpolated to -1000.00 USD
+        let txn = Transaction::new(date(2015, 10, 2), "Buy stock")
+            .with_posting(
+                Posting::new("Assets:Stock", Amount::new(dec!(10), "HOOL")).with_cost(
+                    rustledger_core::CostSpec::empty()
+                        .with_number_per(dec!(100.00))
+                        .with_currency("USD"),
+                ),
+            )
+            .with_posting(Posting::auto("Assets:Cash"));
+
+        let result = interpolate(&txn).expect("interpolation should succeed");
+
+        // Check that the cash posting was filled
+        assert_eq!(result.filled_indices, vec![1]);
+
+        // Check the interpolated amount
+        let filled = &result.transaction.postings[1];
+        let amount = get_amount(filled).expect("should have amount");
+        assert_eq!(
+            amount.currency, "USD",
+            "should be USD (cost currency), not HOOL"
+        );
+        assert_eq!(
+            amount.number,
+            dec!(-1000.00),
+            "should be -1000 USD (10 * 100)"
+        );
+
+        // Verify the transaction balances
+        let residual = result
+            .residuals
+            .get("USD")
+            .copied()
+            .unwrap_or(Decimal::ZERO);
+        assert!(
+            residual.abs() < dec!(0.01),
+            "USD residual should be ~0, got {}",
+            residual
+        );
+        // There should be NO HOOL residual
+        assert!(
+            !result.residuals.contains_key("HOOL"),
+            "should not have HOOL residual"
+        );
+    }
+
+    #[test]
+    fn test_interpolate_with_total_cost() {
+        // 2015-10-02 *
+        //   Assets:Stock   10 HOOL {{1000.00 USD}}
+        //   Assets:Cash
+        //
+        // Expected: Assets:Cash should be interpolated to -1000.00 USD
+        let txn = Transaction::new(date(2015, 10, 2), "Buy stock")
+            .with_posting(
+                Posting::new("Assets:Stock", Amount::new(dec!(10), "HOOL")).with_cost(
+                    rustledger_core::CostSpec::empty()
+                        .with_number_total(dec!(1000.00))
+                        .with_currency("USD"),
+                ),
+            )
+            .with_posting(Posting::auto("Assets:Cash"));
+
+        let result = interpolate(&txn).expect("interpolation should succeed");
+
+        let filled = &result.transaction.postings[1];
+        let amount = get_amount(filled).expect("should have amount");
+        assert_eq!(amount.currency, "USD");
+        assert_eq!(amount.number, dec!(-1000.00));
+    }
+
+    #[test]
+    fn test_interpolate_stock_purchase_with_commission() {
+        // From beancount starter.beancount:
+        // 2013-02-03 * "Bought some stock"
+        //   Assets:Stock         8 HOOL {701.20 USD}
+        //   Expenses:Commission  7.95 USD
+        //   Assets:Cash
+        //
+        // Expected: Cash = -(8 * 701.20 + 7.95) = -5617.55 USD
+        let txn = Transaction::new(date(2013, 2, 3), "Bought some stock")
+            .with_posting(
+                Posting::new("Assets:Stock", Amount::new(dec!(8), "HOOL")).with_cost(
+                    rustledger_core::CostSpec::empty()
+                        .with_number_per(dec!(701.20))
+                        .with_currency("USD"),
+                ),
+            )
+            .with_posting(Posting::new(
+                "Expenses:Commission",
+                Amount::new(dec!(7.95), "USD"),
+            ))
+            .with_posting(Posting::auto("Assets:Cash"));
+
+        let result = interpolate(&txn).expect("interpolation should succeed");
+
+        let filled = &result.transaction.postings[2];
+        let amount = get_amount(filled).expect("should have amount");
+        assert_eq!(amount.currency, "USD");
+        // 8 * 701.20 = 5609.60, plus 7.95 commission = 5617.55
+        assert_eq!(amount.number, dec!(-5617.55));
+    }
+
+    #[test]
+    fn test_interpolate_stock_sale_with_cost_and_price() {
+        // Selling stock at a different price than cost basis
+        // 2015-10-02 *
+        //   Assets:Stock   -10 HOOL {100.00 USD} @ 120.00 USD
+        //   Assets:Cash
+        //   Income:Gains
+        //
+        // The sale is at cost (for booking), but price is 120 USD
+        // Weight: -10 * 100 = -1000 USD (at cost)
+        // Cash should receive: 10 * 120 = 1200 USD (at price)
+        // Gains: -200 USD
+        let txn = Transaction::new(date(2015, 10, 2), "Sell stock")
+            .with_posting(
+                Posting::new("Assets:Stock", Amount::new(dec!(-10), "HOOL"))
+                    .with_cost(
+                        rustledger_core::CostSpec::empty()
+                            .with_number_per(dec!(100.00))
+                            .with_currency("USD"),
+                    )
+                    .with_price(rustledger_core::PriceAnnotation::Unit(Amount::new(
+                        dec!(120.00),
+                        "USD",
+                    ))),
+            )
+            .with_posting(Posting::new(
+                "Assets:Cash",
+                Amount::new(dec!(1200.00), "USD"),
+            ))
+            .with_posting(Posting::auto("Income:Gains"));
+
+        let result = interpolate(&txn).expect("interpolation should succeed");
+
+        let filled = &result.transaction.postings[2];
+        let amount = get_amount(filled).expect("should have amount");
+        assert_eq!(amount.currency, "USD");
+        // Gains = cost - proceeds = 1000 - 1200 = -200 (income is negative)
+        assert_eq!(amount.number, dec!(-200.00));
+    }
+
+    #[test]
+    fn test_interpolate_balanced_with_cost_no_interpolation_needed() {
+        // When all amounts are provided, no interpolation needed
+        // 2015-10-02 *
+        //   Assets:Stock   10 HOOL {100.00 USD}
+        //   Assets:Cash   -1000.00 USD
+        let txn = Transaction::new(date(2015, 10, 2), "Buy stock")
+            .with_posting(
+                Posting::new("Assets:Stock", Amount::new(dec!(10), "HOOL")).with_cost(
+                    rustledger_core::CostSpec::empty()
+                        .with_number_per(dec!(100.00))
+                        .with_currency("USD"),
+                ),
+            )
+            .with_posting(Posting::new(
+                "Assets:Cash",
+                Amount::new(dec!(-1000.00), "USD"),
+            ));
+
+        let result = interpolate(&txn).expect("interpolation should succeed");
+
+        // No postings should be filled
+        assert!(result.filled_indices.is_empty());
+
+        // Transaction should balance
+        let residual = result
+            .residuals
+            .get("USD")
+            .copied()
+            .unwrap_or(Decimal::ZERO);
+        assert!(residual.abs() < dec!(0.01));
+    }
+
+    #[test]
+    fn test_interpolate_negative_cost_units_sale() {
+        // Selling stock (negative units) with cost
+        // 2015-10-02 *
+        //   Assets:Stock   -5 HOOL {100.00 USD}
+        //   Assets:Cash
+        //
+        // Expected: Cash = 500.00 USD (proceeds from sale at cost)
+        let txn = Transaction::new(date(2015, 10, 2), "Sell stock")
+            .with_posting(
+                Posting::new("Assets:Stock", Amount::new(dec!(-5), "HOOL")).with_cost(
+                    rustledger_core::CostSpec::empty()
+                        .with_number_per(dec!(100.00))
+                        .with_currency("USD"),
+                ),
+            )
+            .with_posting(Posting::auto("Assets:Cash"));
+
+        let result = interpolate(&txn).expect("interpolation should succeed");
+
+        let filled = &result.transaction.postings[1];
+        let amount = get_amount(filled).expect("should have amount");
+        assert_eq!(amount.currency, "USD");
+        assert_eq!(amount.number, dec!(500.00)); // Positive (receiving cash)
     }
 }

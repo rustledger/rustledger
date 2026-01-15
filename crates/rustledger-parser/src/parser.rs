@@ -285,6 +285,18 @@ fn skip_blank_lines<'a>() -> impl Parser<'a, ParserInput<'a>, (), ParserExtra<'a
             .then(none_of("\r\n").repeated())
             .then_ignore(newline())
             .ignored(),
+        // Shebang line: #!/usr/bin/env bean-web
+        // Used to make beancount files directly executable
+        just("#!")
+            .then(none_of("\r\n").repeated())
+            .then_ignore(newline())
+            .ignored(),
+        // Org-mode directive: #+STARTUP: showall
+        // Emacs org-mode configuration, ignored by beancount
+        just("#+")
+            .then(none_of("\r\n").repeated())
+            .then_ignore(newline())
+            .ignored(),
     ))
     .repeated()
     .ignored()

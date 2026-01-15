@@ -73,6 +73,8 @@ impl PadError {
 struct PendingPad {
     /// The pad directive.
     pad: Pad,
+    /// Whether this pad has been used (has at least one balance assertion).
+    used: bool,
 }
 
 /// Process pad directives and generate synthetic transactions.
@@ -131,13 +133,20 @@ pub fn process_pads(directives: &[Directive]) -> PadResult {
             }
 
             Directive::Pad(pad) => {
-                // Store pending pad
-                pending_pads.insert(pad.account.clone(), PendingPad { pad: pad.clone() });
+                // Store pending pad (replaces any existing pad for this account)
+                pending_pads.insert(
+                    pad.account.clone(),
+                    PendingPad {
+                        pad: pad.clone(),
+                        used: false,
+                    },
+                );
             }
 
             Directive::Balance(bal) => {
                 // Check if there's a pending pad for this account
-                if let Some(pending) = pending_pads.remove(&bal.account) {
+                // Use get_mut instead of remove - a pad can apply to multiple currencies
+                if let Some(pending) = pending_pads.get_mut(&bal.account) {
                     // Calculate padding amount
                     let current = inventories
                         .get(&bal.account)
@@ -170,10 +179,11 @@ pub fn process_pads(directives: &[Directive]) -> PadResult {
 
                         padding_transactions.push(pad_txn);
                     }
-                } else {
-                    // No padding - just update inventory from existing transactions
-                    // (already done in transaction processing)
+
+                    // Mark the pad as used
+                    pending.used = true;
                 }
+                // If no pending pad, nothing to do (balance will be checked normally)
             }
 
             _ => {}
@@ -182,15 +192,17 @@ pub fn process_pads(directives: &[Directive]) -> PadResult {
 
     // Check for unused pads (pad without corresponding balance)
     for (account, pending) in pending_pads {
-        errors.push(
-            PadError::new(
-                pending.pad.date,
-                format!(
-                    "Pad directive for account {account} has no corresponding balance assertion"
-                ),
-            )
-            .with_account(account),
-        );
+        if !pending.used {
+            errors.push(
+                PadError::new(
+                    pending.pad.date,
+                    format!(
+                        "Pad directive for account {account} has no corresponding balance assertion"
+                    ),
+                )
+                .with_account(account),
+            );
+        }
     }
 
     PadResult {
@@ -539,5 +551,97 @@ mod tests {
 
         assert_eq!(result.padding_transactions.len(), 1);
         assert_eq!(result.padding_transactions[0].flag, 'P');
+    }
+
+    #[test]
+    fn test_process_pads_multiple_currencies() {
+        // From basic.beancount:
+        // 2007-12-30 pad  Assets:Cash  Equity:Opening-Balances
+        // 2007-12-31 balance  Assets:Cash  200 CAD
+        // 2007-12-31 balance  Assets:Cash  300 USD
+        //
+        // A single pad should generate padding for BOTH currencies
+        let directives = vec![
+            Directive::Open(Open::new(date(2007, 1, 1), "Assets:Cash")),
+            Directive::Open(Open::new(date(2007, 1, 1), "Equity:Opening")),
+            Directive::Pad(Pad::new(
+                date(2007, 12, 30),
+                "Assets:Cash",
+                "Equity:Opening",
+            )),
+            Directive::Balance(Balance::new(
+                date(2007, 12, 31),
+                "Assets:Cash",
+                Amount::new(dec!(200), "CAD"),
+            )),
+            Directive::Balance(Balance::new(
+                date(2007, 12, 31),
+                "Assets:Cash",
+                Amount::new(dec!(300), "USD"),
+            )),
+        ];
+
+        let result = process_pads(&directives);
+
+        assert!(result.errors.is_empty(), "Should have no errors");
+        assert_eq!(
+            result.padding_transactions.len(),
+            2,
+            "Should generate TWO padding transactions (one per currency)"
+        );
+
+        // Check that we have both currencies padded
+        let currencies: Vec<_> = result
+            .padding_transactions
+            .iter()
+            .filter_map(|txn| txn.postings.first())
+            .filter_map(|p| p.amount())
+            .map(|a| a.currency.as_str())
+            .collect();
+
+        assert!(currencies.contains(&"CAD"), "Should pad CAD");
+        assert!(currencies.contains(&"USD"), "Should pad USD");
+    }
+
+    #[test]
+    fn test_process_pads_transaction_after_balance_ends_pad() {
+        // Once a transaction affects the account after the balance assertions,
+        // the pad should no longer apply to later balance assertions
+        let directives = vec![
+            Directive::Open(Open::new(date(2024, 1, 1), "Assets:Bank")),
+            Directive::Open(Open::new(date(2024, 1, 1), "Equity:Opening")),
+            Directive::Open(Open::new(date(2024, 1, 1), "Expenses:Food")),
+            Directive::Pad(Pad::new(date(2024, 1, 1), "Assets:Bank", "Equity:Opening")),
+            Directive::Balance(Balance::new(
+                date(2024, 1, 2),
+                "Assets:Bank",
+                Amount::new(dec!(1000), "USD"),
+            )),
+            // Transaction after balance - this "consumes" the pad
+            Directive::Transaction(
+                Transaction::new(date(2024, 1, 3), "Spending")
+                    .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(-100), "USD")))
+                    .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(100), "USD"))),
+            ),
+            // This balance should NOT use the pad (too late)
+            Directive::Balance(Balance::new(
+                date(2024, 1, 5),
+                "Assets:Bank",
+                Amount::new(dec!(900), "USD"),
+            )),
+        ];
+
+        let result = process_pads(&directives);
+
+        // Should only generate one padding transaction (for the first balance)
+        assert_eq!(result.padding_transactions.len(), 1);
+        assert_eq!(
+            result.padding_transactions[0]
+                .postings
+                .first()
+                .and_then(|p| p.amount())
+                .map(|a| a.number),
+            Some(dec!(1000))
+        );
     }
 }

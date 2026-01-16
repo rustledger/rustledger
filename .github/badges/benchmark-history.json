@@ -12,5 +12,16 @@
     "python_ms": 897,
     "rust_ms": 35,
     "speedup": 25.6
+  },
+  {
+    "date": "2026-01-16",
+    "timestamp": "2026-01-16T06:53:10Z",
+    "rustledger_ms": 37.1,
+    "beancount_ms": 930.8,
+    "ledger_ms": 75.0,
+    "hledger_ms": 637.4,
+    "python_ms": 930.8,
+    "rust_ms": 37.1,
+    "speedup": 25.1
   }
 ]

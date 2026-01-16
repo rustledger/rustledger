@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "label": "speedup",
-  "message": "25.6x faster",
+  "label": "vs beancount",
+  "message": "25.1x faster",
   "color": "brightgreen"
 }

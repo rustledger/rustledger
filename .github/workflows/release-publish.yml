@@ -15,14 +15,12 @@
 # | Docker       | ghcr.io/rustledger/rustledger          |
 # | Homebrew     | rustledger/homebrew-rustledger         |
 # | Scoop        | rustledger/scoop-rustledger            |
-# | AUR          | aur.archlinux.org/rustledger{,-bin}    |
 # | COPR         | copr.fedorainfracloud.org/rustledger   |
 # | PPA          | ppa:rustledger/rustledger              |
 #
 # SECRETS REQUIRED
 # ----------------
 # - WEBSITE_DISPATCH_TOKEN: Homebrew/Scoop automation
-# - AUR_SSH_PRIVATE_KEY: AUR push access
 # - COPR_LOGIN / COPR_TOKEN: COPR build trigger
 # - LAUNCHPAD_SSH_PRIVATE_KEY: Launchpad upload access
 # - LAUNCHPAD_GPG_PRIVATE_KEY: PPA package signing
@@ -226,87 +224,6 @@ jobs:
           repository: rustledger/scoop-rustledger
           event-type: release
           client-payload: '{"version": "${{ env.RELEASE_TAG }}"}'
-
-  # Update AUR packages
-  update-aur:
-    name: Update AUR packages
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ env.RELEASE_TAG }}
-      - name: Setup SSH
-        run: |
-          mkdir -p ~/.ssh
-          # Write key preserving newlines (use printf to handle multi-line secrets)
-          printf '%s\n' "${{ secrets.AUR_SSH_PRIVATE_KEY }}" > ~/.ssh/aur
-          chmod 600 ~/.ssh/aur
-          # Validate key format
-          if ! ssh-keygen -y -f ~/.ssh/aur > /dev/null 2>&1; then
-            echo "::error::AUR SSH key is invalid. Ensure it's in PEM format with proper newlines."
-            exit 1
-          fi
-          echo "Host aur.archlinux.org" >> ~/.ssh/config
-          echo "  IdentityFile ~/.ssh/aur" >> ~/.ssh/config
-          echo "  User aur" >> ~/.ssh/config
-          ssh-keyscan aur.archlinux.org >> ~/.ssh/known_hosts
-      - name: Get checksums
-        id: checksums
-        run: |
-          VERSION=${RELEASE_TAG#v}
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "pkgver=${VERSION//-/_}" >> $GITHUB_OUTPUT
-
-          SHA_X86=$(curl -sL "https://github.com/rustledger/rustledger/releases/download/v${VERSION}/rustledger-v${VERSION}-x86_64-unknown-linux-gnu.tar.gz" | sha256sum | cut -d' ' -f1)
-          SHA_ARM=$(curl -sL "https://github.com/rustledger/rustledger/releases/download/v${VERSION}/rustledger-v${VERSION}-aarch64-unknown-linux-gnu.tar.gz" | sha256sum | cut -d' ' -f1)
-          SHA_SRC=$(curl -sL "https://github.com/rustledger/rustledger/archive/refs/tags/v${VERSION}.tar.gz" | sha256sum | cut -d' ' -f1)
-
-          echo "sha_x86=$SHA_X86" >> $GITHUB_OUTPUT
-          echo "sha_arm=$SHA_ARM" >> $GITHUB_OUTPUT
-          echo "sha_src=$SHA_SRC" >> $GITHUB_OUTPUT
-      - name: Update rustledger-bin
-        run: |
-          git clone ssh://aur@aur.archlinux.org/rustledger-bin.git /tmp/aur-bin
-          cd /tmp/aur-bin
-
-          # Update PKGBUILD
-          cp $GITHUB_WORKSPACE/packaging/aur/rustledger-bin/PKGBUILD .
-          sed -i "s/^pkgver=.*/pkgver=${{ steps.checksums.outputs.pkgver }}/" PKGBUILD
-          sed -i "s/^sha256sums_x86_64=.*/sha256sums_x86_64=('${{ steps.checksums.outputs.sha_x86 }}')/" PKGBUILD
-          sed -i "s/^sha256sums_aarch64=.*/sha256sums_aarch64=('${{ steps.checksums.outputs.sha_arm }}')/" PKGBUILD
-
-          # Generate .SRCINFO using Docker
-          docker run --rm -v "$PWD:/pkg" archlinux:latest sh -c \
-            "useradd -m builder && chown -R builder:builder /pkg && su builder -c 'cd /pkg && makepkg --printsrcinfo'" > .SRCINFO
-
-          # Commit and push (exit 0 if nothing to commit - skips push)
-          git config user.name "rustledger-ci"
-          git config user.email "rustledger-ci@users.noreply.github.com"
-          git add PKGBUILD .SRCINFO
-          git diff --cached --quiet && echo "No changes to commit" && exit 0
-          git commit -m "Update to ${{ steps.checksums.outputs.version }}"
-          git push
-      - name: Update rustledger
-        run: |
-          git clone ssh://aur@aur.archlinux.org/rustledger.git /tmp/aur-src
-          cd /tmp/aur-src
-
-          # Update PKGBUILD
-          cp $GITHUB_WORKSPACE/packaging/aur/rustledger/PKGBUILD .
-          sed -i "s/^pkgver=.*/pkgver=${{ steps.checksums.outputs.pkgver }}/" PKGBUILD
-          sed -i "s/^sha256sums=.*/sha256sums=('${{ steps.checksums.outputs.sha_src }}')/" PKGBUILD
-
-          # Generate .SRCINFO using Docker
-          docker run --rm -v "$PWD:/pkg" archlinux:latest sh -c \
-            "useradd -m builder && chown -R builder:builder /pkg && su builder -c 'cd /pkg && makepkg --printsrcinfo'" > .SRCINFO
-
-          # Commit and push (exit 0 if nothing to commit - skips push)
-          git config user.name "rustledger-ci"
-          git config user.email "rustledger-ci@users.noreply.github.com"
-          git add PKGBUILD .SRCINFO
-          git diff --cached --quiet && echo "No changes to commit" && exit 0
-          git commit -m "Update to ${{ steps.checksums.outputs.version }}"
-          git push
 
   # Trigger COPR build (Fedora/RHEL)
   update-copr:

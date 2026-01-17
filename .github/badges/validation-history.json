@@ -1,0 +1,10 @@
+[
+  {
+    "date": "2026-01-17",
+    "timestamp": "2026-01-17T02:25:21Z",
+    "rustledger_ms": 31.6,
+    "beancount_ms": 883.3,
+    "ledger_ms": 113.8,
+    "hledger_ms": 541.8
+  }
+]

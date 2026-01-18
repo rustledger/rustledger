@@ -29,7 +29,7 @@ rkyv = { workspace = true, optional = true }
 
 [dev-dependencies]
 proptest.workspace = true
-rust_decimal_macros = "1.36"
+rust_decimal_macros = "1.40"
 criterion.workspace = true
 
 [[bench]]

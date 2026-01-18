@@ -31,15 +31,15 @@ name = "rustledger"
 
 [workspace.dependencies]
 # Core
-rust_decimal = { version = "1.39", features = ["serde"] }
+rust_decimal = { version = "1.40", features = ["serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 thiserror = "2"
 anyhow = "1"
 
 # Parsing
 chumsky = "1.0.0-alpha.7"
-ariadne = "0.4"
-logos = "0.14"
+ariadne = "0.6"
+logos = "0.15"
 logosky = "0.2"
 
 # Serialization
@@ -50,8 +50,8 @@ rmp-serde = "1"
 # CLI
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
-rustyline = { version = "14", features = ["derive"] }
-dirs = "5"
+rustyline = { version = "17", features = ["derive"] }
+dirs = "6"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
@@ -67,9 +67,9 @@ rayon = "1.10"
 
 # Testing
 proptest = "1"
-criterion = "0.5"
+criterion = "0.8"
 insta = { version = "1", features = ["yaml"] }
-rust_decimal_macros = "1.39"
+rust_decimal_macros = "1.40"
 tempfile = "3"
 
 # Data formats
@@ -77,11 +77,11 @@ csv = "1"
 ofxy = "0.2"
 
 # HTTP
-ureq = { version = "2", features = ["json"] }
+ureq = { version = "3", features = ["json"] }
 
 # Compression/Archive (for Python WASI download)
 flate2 = "1"
-zip = "2"
+zip = "7"
 sha2 = "0.10"
 
 # Serialization (for cache)

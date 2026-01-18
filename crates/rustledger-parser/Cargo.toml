@@ -33,7 +33,7 @@ serde.workspace = true
 rkyv = { workspace = true, optional = true }
 
 [dev-dependencies]
-rust_decimal_macros = "1.36"
+rust_decimal_macros = "1.40"
 insta.workspace = true
 criterion.workspace = true
 

@@ -18,7 +18,7 @@ rust_decimal.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
-rust_decimal_macros = "1.36"
+rust_decimal_macros = "1.40"
 
 [lints]
 workspace = true

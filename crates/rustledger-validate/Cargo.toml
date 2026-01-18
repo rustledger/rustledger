@@ -24,7 +24,7 @@ chrono.workspace = true
 rayon.workspace = true
 
 [dev-dependencies]
-rust_decimal_macros = "1.36"
+rust_decimal_macros = "1.40"
 criterion.workspace = true
 proptest.workspace = true
 

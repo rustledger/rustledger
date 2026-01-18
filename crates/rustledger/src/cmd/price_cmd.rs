@@ -105,18 +105,25 @@ impl PriceSource for YahooFinance {
             .with_context(|| format!("Failed to parse response for {symbol}"))?;
 
         // Navigate to the price in the response
-        let price = json
+        let price_value = json
             .get("chart")
             .and_then(|c: &serde_json::Value| c.get("result"))
             .and_then(|r: &serde_json::Value| r.get(0))
             .and_then(|r: &serde_json::Value| r.get("meta"))
-            .and_then(|m: &serde_json::Value| m.get("regularMarketPrice"))
-            .and_then(serde_json::Value::as_f64);
+            .and_then(|m: &serde_json::Value| m.get("regularMarketPrice"));
 
-        match price {
-            Some(p) => {
-                let decimal = Decimal::from_str(&format!("{p:.4}"))
-                    .with_context(|| format!("Failed to convert price {p} to decimal"))?;
+        match price_value {
+            Some(v) => {
+                // Parse directly from JSON number string to avoid f64 precision loss
+                let price_str = if let Some(n) = v.as_number() {
+                    n.to_string()
+                } else if let Some(s) = v.as_str() {
+                    s.to_string()
+                } else {
+                    return Ok(None);
+                };
+                let decimal = Decimal::from_str(&price_str)
+                    .with_context(|| format!("Failed to convert price {price_str} to decimal"))?;
                 Ok(Some(decimal))
             }
             None => Ok(None),

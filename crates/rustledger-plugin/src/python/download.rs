@@ -5,7 +5,7 @@
 use super::PythonError;
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
-use std::io::{self, Cursor, Read};
+use std::io::{self, BufReader, Read};
 use std::path::PathBuf;
 
 /// `CPython` WASI build version.
@@ -79,21 +79,42 @@ fn download_and_extract() -> Result<(), PythonError> {
     let cache = cache_dir()?;
     fs::create_dir_all(&cache)?;
 
-    // Download the zip file
+    // Download the zip file to a temp file to avoid memory exhaustion
+    let zip_path = cache.join("download.zip.tmp");
     let mut response = ureq::get(DOWNLOAD_URL)
         .call()
         .map_err(|e| PythonError::Download(format!("HTTP request failed: {e}")))?;
 
-    let mut data = Vec::new();
-    response
-        .body_mut()
-        .as_reader()
-        .read_to_end(&mut data)
-        .map_err(|e| PythonError::Download(format!("failed to read response: {e}")))?;
+    // Stream directly to file
+    {
+        let mut zip_file = File::create(&zip_path)
+            .map_err(|e| PythonError::Download(format!("failed to create temp file: {e}")))?;
+        let mut reader = response.body_mut().as_reader();
+        io::copy(&mut reader, &mut zip_file)
+            .map_err(|e| PythonError::Download(format!("failed to download: {e}")))?;
+    }
 
-    // Verify checksum
-    let actual_hash = hex::encode(Sha256::digest(&data));
+    // Verify checksum from file
+    let actual_hash = {
+        let file = File::open(&zip_path)
+            .map_err(|e| PythonError::Download(format!("failed to open temp file: {e}")))?;
+        let mut reader = BufReader::new(file);
+        let mut hasher = Sha256::new();
+        let mut buffer = [0u8; 8192];
+        loop {
+            let bytes_read = reader
+                .read(&mut buffer)
+                .map_err(|e| PythonError::Download(format!("failed to read temp file: {e}")))?;
+            if bytes_read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..bytes_read]);
+        }
+        hex::encode(hasher.finalize())
+    };
+
     if actual_hash != EXPECTED_SHA256 {
+        let _ = fs::remove_file(&zip_path); // Clean up on failure
         return Err(PythonError::ChecksumMismatch {
             expected: EXPECTED_SHA256.to_string(),
             actual: actual_hash,
@@ -103,8 +124,9 @@ fn download_and_extract() -> Result<(), PythonError> {
     eprintln!("  ✓ Checksum verified");
 
     // Extract the zip file
-    let cursor = Cursor::new(data);
-    let mut archive = zip::ZipArchive::new(cursor)
+    let zip_file = File::open(&zip_path)
+        .map_err(|e| PythonError::Download(format!("failed to open zip: {e}")))?;
+    let mut archive = zip::ZipArchive::new(zip_file)
         .map_err(|e| PythonError::Download(format!("failed to open zip: {e}")))?;
 
     for i in 0..archive.len() {
@@ -129,6 +151,9 @@ fn download_and_extract() -> Result<(), PythonError> {
     }
 
     eprintln!("  ✓ Extracted to {}", cache.display());
+
+    // Clean up temp file
+    let _ = fs::remove_file(&zip_path);
 
     Ok(())
 }

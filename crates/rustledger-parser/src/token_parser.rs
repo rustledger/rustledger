@@ -12,9 +12,6 @@
 //! The key benefit is that tokenization is ~54x faster with Logos (SIMD-accelerated),
 //! and token-level parsing is simpler than character-level parsing.
 
-// Some helper functions are defined for future use
-#![allow(dead_code)]
-
 use chrono::NaiveDate;
 use chumsky::prelude::*;
 use rust_decimal::Decimal;
@@ -397,14 +394,6 @@ fn tok_star<'src>() -> impl Parser<'src, &'src [SpannedToken<'src>], (), TokExtr
         .to(())
 }
 
-/// Match a pending token (!).
-fn tok_pending<'src>() -> impl Parser<'src, &'src [SpannedToken<'src>], (), TokExtra<'src>> + Clone
-{
-    any()
-        .filter(|t: &SpannedToken<'_>| matches!(t.token, Token::Pending))
-        .to(())
-}
-
 /// Match any transaction flag and return the flag character.
 fn tok_flag<'src>() -> impl Parser<'src, &'src [SpannedToken<'src>], char, TokExtra<'src>> + Clone {
     any()
@@ -443,7 +432,6 @@ tok_punct!(tok_tilde, Tilde);
 tok_punct!(tok_plus, Plus);
 tok_punct!(tok_minus, Minus);
 tok_punct!(tok_slash, Slash);
-tok_punct!(tok_colon, Colon);
 
 // ============================================================================
 // Compound Parsers
@@ -926,49 +914,6 @@ fn tok_posting_with_meta<'src>(
             // Add posting-level metadata
             for (key, value) in metadata {
                 posting.meta.insert(key, value);
-            }
-            posting
-        })
-}
-
-/// Parse a posting line (without consuming metadata, for use in `tok_posting_or_meta`).
-fn tok_posting<'src>(
-) -> impl Parser<'src, &'src [SpannedToken<'src>], Posting, TokExtra<'src>> + Clone {
-    // Optional flag
-    let flag = tok_flag().or_not();
-
-    // Account is required
-    let account = tok_account();
-
-    // Amount is optional
-    let amount = tok_incomplete_amount().or_not();
-
-    // Cost spec is optional
-    let cost = tok_cost_spec().or_not();
-
-    // Price annotation is optional
-    let price = tok_price_annotation().or_not();
-
-    flag.then(account)
-        .then(amount)
-        .then(cost)
-        .then(price)
-        .then_ignore(tok_comment().or_not())
-        .map(|((((flag, account), amount), cost), price)| {
-            // Create posting based on whether we have an amount
-            let mut posting = if let Some(a) = amount {
-                Posting::with_incomplete(account, a)
-            } else {
-                Posting::auto(account)
-            };
-            if let Some(f) = flag {
-                posting = posting.with_flag(f);
-            }
-            if let Some(c) = cost {
-                posting = posting.with_cost(c);
-            }
-            if let Some(p) = price {
-                posting = posting.with_price(p);
             }
             posting
         })

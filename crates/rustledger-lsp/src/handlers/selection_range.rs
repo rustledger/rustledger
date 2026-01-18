@@ -8,7 +8,7 @@ use lsp_types::{Position, Range, SelectionRange, SelectionRangeParams};
 use rustledger_core::Directive;
 use rustledger_parser::ParseResult;
 
-use super::utils::LineIndex;
+use super::utils::{is_word_char, LineIndex};
 
 /// Handle a selection range request.
 pub fn handle_selection_range(
@@ -237,11 +237,6 @@ fn find_account_range(line: &str, account: &str, line_num: u32) -> Option<Range>
         start: Position::new(line_num, pos as u32),
         end: Position::new(line_num, (pos + account.len()) as u32),
     })
-}
-
-/// Check if a character is part of a word.
-fn is_word_char(c: char) -> bool {
-    c.is_alphanumeric() || c == ':' || c == '-' || c == '_' || c == '.'
 }
 
 #[cfg(test)]

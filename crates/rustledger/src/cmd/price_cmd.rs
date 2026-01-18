@@ -94,22 +94,23 @@ impl PriceSource for YahooFinance {
     fn fetch_price(&self, symbol: &str) -> Result<Option<Decimal>> {
         let url = self.build_url(symbol);
 
-        let response = ureq::get(&url)
-            .set("User-Agent", "Mozilla/5.0 (compatible; rustledger/1.0)")
+        let mut response = ureq::get(&url)
+            .header("User-Agent", "Mozilla/5.0 (compatible; rustledger/1.0)")
             .call()
             .with_context(|| format!("Failed to fetch price for {symbol}"))?;
 
         let json: serde_json::Value = response
-            .into_json()
+            .body_mut()
+            .read_json()
             .with_context(|| format!("Failed to parse response for {symbol}"))?;
 
         // Navigate to the price in the response
         let price = json
             .get("chart")
-            .and_then(|c| c.get("result"))
-            .and_then(|r| r.get(0))
-            .and_then(|r| r.get("meta"))
-            .and_then(|m| m.get("regularMarketPrice"))
+            .and_then(|c: &serde_json::Value| c.get("result"))
+            .and_then(|r: &serde_json::Value| r.get(0))
+            .and_then(|r: &serde_json::Value| r.get("meta"))
+            .and_then(|m: &serde_json::Value| m.get("regularMarketPrice"))
             .and_then(serde_json::Value::as_f64);
 
         match price {

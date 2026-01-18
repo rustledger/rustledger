@@ -7,7 +7,7 @@
 
 #![allow(missing_docs)]
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
 use rustledger_booking::interpolate;
 use rustledger_core::Directive;
@@ -99,7 +99,7 @@ fn bench_parse_only(c: &mut Criterion) {
             BenchmarkId::from_parameter(format!("{size}_txns")),
             &ledger,
             |b, ledger| {
-                b.iter(|| parse(black_box(ledger)));
+                b.iter(|| parse(std::hint::black_box(ledger)));
             },
         );
     }
@@ -123,7 +123,7 @@ fn bench_parse_and_validate(c: &mut Criterion) {
                     let directives: Vec<_> =
                         result.directives.into_iter().map(|s| s.value).collect();
                     let errors = validate(&directives);
-                    black_box((directives, errors))
+                    std::hint::black_box((directives, errors))
                 });
             },
         );
@@ -161,7 +161,7 @@ fn bench_full_pipeline(c: &mut Criterion) {
                     // Validate
                     let errors = validate(&directives);
 
-                    black_box((directives, errors))
+                    std::hint::black_box((directives, errors))
                 });
             },
         );
@@ -179,8 +179,8 @@ fn bench_transaction_throughput(c: &mut Criterion) {
 
     group.bench_function("10k_transactions", |b| {
         b.iter(|| {
-            let result = parse(black_box(&ledger));
-            black_box(result.directives.len())
+            let result = parse(std::hint::black_box(&ledger));
+            std::hint::black_box(result.directives.len())
         });
     });
 

@@ -4,7 +4,7 @@
 
 #![allow(missing_docs)]
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
@@ -45,7 +45,7 @@ fn bench_inventory_add(c: &mut Criterion) {
                     let cost = Cost::new(dec!(100.00) + Decimal::from(i), "USD");
                     inv.add(Position::with_cost(Amount::new(dec!(10), "STOCK"), cost));
                 }
-                black_box(inv)
+                std::hint::black_box(inv)
             });
         });
     }
@@ -60,7 +60,7 @@ fn bench_inventory_units(c: &mut Criterion) {
         let inv = generate_inventory(size);
 
         group.bench_with_input(BenchmarkId::from_parameter(size), &inv, |b, inv| {
-            b.iter(|| black_box(inv.units("STOCK")));
+            b.iter(|| std::hint::black_box(inv.units("STOCK")));
         });
     }
 
@@ -74,7 +74,7 @@ fn bench_inventory_book_value(c: &mut Criterion) {
         let inv = generate_inventory(size);
 
         group.bench_with_input(BenchmarkId::from_parameter(size), &inv, |b, inv| {
-            b.iter(|| black_box(inv.book_value("STOCK")));
+            b.iter(|| std::hint::black_box(inv.book_value("STOCK")));
         });
     }
 
@@ -88,7 +88,7 @@ fn bench_inventory_at_cost(c: &mut Criterion) {
         let inv = generate_inventory(size);
 
         group.bench_with_input(BenchmarkId::from_parameter(size), &inv, |b, inv| {
-            b.iter(|| black_box(inv.at_cost()));
+            b.iter(|| std::hint::black_box(inv.at_cost()));
         });
     }
 
@@ -108,7 +108,7 @@ fn bench_reduce_fifo(c: &mut Criterion) {
                         let _ =
                             inv.reduce(&Amount::new(dec!(-10), "STOCK"), None, BookingMethod::Fifo);
                     }
-                    black_box(inv)
+                    std::hint::black_box(inv)
                 },
                 criterion::BatchSize::SmallInput,
             );
@@ -131,7 +131,7 @@ fn bench_reduce_lifo(c: &mut Criterion) {
                         let _ =
                             inv.reduce(&Amount::new(dec!(-10), "STOCK"), None, BookingMethod::Lifo);
                     }
-                    black_box(inv)
+                    std::hint::black_box(inv)
                 },
                 criterion::BatchSize::SmallInput,
             );
@@ -156,7 +156,7 @@ fn bench_reduce_strict(c: &mut Criterion) {
                         Some(&spec),
                         BookingMethod::Strict,
                     );
-                    black_box(inv)
+                    std::hint::black_box(inv)
                 },
                 criterion::BatchSize::SmallInput,
             );
@@ -181,7 +181,7 @@ fn bench_inventory_merge(c: &mut Criterion) {
                     || inv1.clone(),
                     |mut inv| {
                         inv.merge(inv2);
-                        black_box(inv)
+                        std::hint::black_box(inv)
                     },
                     criterion::BatchSize::SmallInput,
                 );

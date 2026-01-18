@@ -4,7 +4,7 @@
 
 #![allow(missing_docs)]
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
 use chrono::NaiveDate;
 use rust_decimal_macros::dec;
@@ -109,7 +109,7 @@ fn bench_validate_valid(c: &mut Criterion) {
             BenchmarkId::from_parameter(size),
             &directives,
             |b, directives| {
-                b.iter(|| black_box(validate(black_box(directives))));
+                b.iter(|| std::hint::black_box(validate(std::hint::black_box(directives))));
             },
         );
     }
@@ -128,7 +128,7 @@ fn bench_validate_with_errors(c: &mut Criterion) {
             BenchmarkId::from_parameter(size),
             &directives,
             |b, directives| {
-                b.iter(|| black_box(validate(black_box(directives))));
+                b.iter(|| std::hint::black_box(validate(std::hint::black_box(directives))));
             },
         );
     }
@@ -184,7 +184,7 @@ fn bench_validate_balance_assertions(c: &mut Criterion) {
             BenchmarkId::from_parameter(size),
             &directives,
             |b, directives| {
-                b.iter(|| black_box(validate(black_box(directives))));
+                b.iter(|| std::hint::black_box(validate(std::hint::black_box(directives))));
             },
         );
     }

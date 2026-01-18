@@ -4,7 +4,7 @@
 
 #![allow(missing_docs)]
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
 use chrono::NaiveDate;
 use rust_decimal_macros::dec;
@@ -67,8 +67,8 @@ fn bench_simple_select(c: &mut Criterion) {
     group.bench_function("select_all_columns", |b| {
         let query = parse_query("SELECT date, account, position").unwrap();
         b.iter(|| {
-            let mut executor = Executor::new(black_box(&directives));
-            executor.execute(black_box(&query))
+            let mut executor = Executor::new(std::hint::black_box(&directives));
+            executor.execute(std::hint::black_box(&query))
         });
     });
 
@@ -84,8 +84,8 @@ fn bench_where_clause(c: &mut Criterion) {
     group.bench_function("where_account_contains", |b| {
         let query = parse_query("SELECT account WHERE account ~ \"Expenses:\"").unwrap();
         b.iter(|| {
-            let mut executor = Executor::new(black_box(&directives));
-            executor.execute(black_box(&query))
+            let mut executor = Executor::new(std::hint::black_box(&directives));
+            executor.execute(std::hint::black_box(&query))
         });
     });
 
@@ -101,8 +101,8 @@ fn bench_group_by(c: &mut Criterion) {
     group.bench_function("group_by_account_sum", |b| {
         let query = parse_query("SELECT account, SUM(position) GROUP BY account").unwrap();
         b.iter(|| {
-            let mut executor = Executor::new(black_box(&directives));
-            executor.execute(black_box(&query))
+            let mut executor = Executor::new(std::hint::black_box(&directives));
+            executor.execute(std::hint::black_box(&query))
         });
     });
 
@@ -118,8 +118,8 @@ fn bench_balances(c: &mut Criterion) {
     group.bench_function("balances", |b| {
         let query = parse_query("BALANCES").unwrap();
         b.iter(|| {
-            let mut executor = Executor::new(black_box(&directives));
-            executor.execute(black_box(&query))
+            let mut executor = Executor::new(std::hint::black_box(&directives));
+            executor.execute(std::hint::black_box(&query))
         });
     });
 
@@ -139,8 +139,8 @@ fn bench_query_scaling(c: &mut Criterion) {
             &directives,
             |b, directives| {
                 b.iter(|| {
-                    let mut executor = Executor::new(black_box(directives));
-                    executor.execute(black_box(&query))
+                    let mut executor = Executor::new(std::hint::black_box(directives));
+                    executor.execute(std::hint::black_box(&query))
                 });
             },
         );

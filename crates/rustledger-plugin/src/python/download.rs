@@ -80,13 +80,14 @@ fn download_and_extract() -> Result<(), PythonError> {
     fs::create_dir_all(&cache)?;
 
     // Download the zip file
-    let response = ureq::get(DOWNLOAD_URL)
+    let mut response = ureq::get(DOWNLOAD_URL)
         .call()
         .map_err(|e| PythonError::Download(format!("HTTP request failed: {e}")))?;
 
     let mut data = Vec::new();
     response
-        .into_reader()
+        .body_mut()
+        .as_reader()
         .read_to_end(&mut data)
         .map_err(|e| PythonError::Download(format!("failed to read response: {e}")))?;
 

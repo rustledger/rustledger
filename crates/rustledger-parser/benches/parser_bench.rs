@@ -4,7 +4,7 @@
 
 #![allow(missing_docs)]
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
 use rustledger_parser::logos_lexer::tokenize;
 use rustledger_parser::parse;
@@ -64,7 +64,7 @@ fn bench_parse_small(c: &mut Criterion) {
     group.throughput(Throughput::Bytes(bytes as u64));
 
     group.bench_function("10_transactions", |b| {
-        b.iter(|| parse(black_box(&ledger)));
+        b.iter(|| parse(std::hint::black_box(&ledger)));
     });
 
     group.finish();
@@ -78,7 +78,7 @@ fn bench_parse_medium(c: &mut Criterion) {
     group.throughput(Throughput::Bytes(bytes as u64));
 
     group.bench_function("100_transactions", |b| {
-        b.iter(|| parse(black_box(&ledger)));
+        b.iter(|| parse(std::hint::black_box(&ledger)));
     });
 
     group.finish();
@@ -92,7 +92,7 @@ fn bench_parse_large(c: &mut Criterion) {
     group.throughput(Throughput::Bytes(bytes as u64));
 
     group.bench_function("1000_transactions", |b| {
-        b.iter(|| parse(black_box(&ledger)));
+        b.iter(|| parse(std::hint::black_box(&ledger)));
     });
 
     group.finish();
@@ -106,7 +106,7 @@ fn bench_parse_scaling(c: &mut Criterion) {
         group.throughput(Throughput::Bytes(ledger.len() as u64));
 
         group.bench_with_input(BenchmarkId::from_parameter(size), &ledger, |b, ledger| {
-            b.iter(|| parse(black_box(ledger)));
+            b.iter(|| parse(std::hint::black_box(ledger)));
         });
     }
 
@@ -123,7 +123,7 @@ fn bench_tokenize_small(c: &mut Criterion) {
     group.throughput(Throughput::Bytes(bytes as u64));
 
     group.bench_function("10_transactions", |b| {
-        b.iter(|| tokenize(black_box(&ledger)));
+        b.iter(|| tokenize(std::hint::black_box(&ledger)));
     });
 
     group.finish();
@@ -137,7 +137,7 @@ fn bench_tokenize_large(c: &mut Criterion) {
     group.throughput(Throughput::Bytes(bytes as u64));
 
     group.bench_function("1000_transactions", |b| {
-        b.iter(|| tokenize(black_box(&ledger)));
+        b.iter(|| tokenize(std::hint::black_box(&ledger)));
     });
 
     group.finish();
@@ -151,7 +151,7 @@ fn bench_tokenize_scaling(c: &mut Criterion) {
         group.throughput(Throughput::Bytes(ledger.len() as u64));
 
         group.bench_with_input(BenchmarkId::from_parameter(size), &ledger, |b, ledger| {
-            b.iter(|| tokenize(black_box(ledger)));
+            b.iter(|| tokenize(std::hint::black_box(ledger)));
         });
     }
 
@@ -166,11 +166,11 @@ fn bench_tokenize_vs_parse(c: &mut Criterion) {
     group.throughput(Throughput::Bytes(bytes as u64));
 
     group.bench_function("tokenize_only", |b| {
-        b.iter(|| tokenize(black_box(&ledger)));
+        b.iter(|| tokenize(std::hint::black_box(&ledger)));
     });
 
     group.bench_function("full_parse", |b| {
-        b.iter(|| parse(black_box(&ledger)));
+        b.iter(|| parse(std::hint::black_box(&ledger)));
     });
 
     group.finish();

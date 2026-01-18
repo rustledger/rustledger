@@ -15,7 +15,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 rust-version = "1.75"
 license = "GPL-3.0-only"
@@ -98,14 +98,14 @@ crossbeam-channel = "0.5"
 parking_lot = "0.12"
 
 # Internal crates
-rustledger-core = { version = "0.3.0", path = "crates/rustledger-core" }
-rustledger-parser = { version = "0.3.0", path = "crates/rustledger-parser" }
-rustledger-loader = { version = "0.3.0", path = "crates/rustledger-loader" }
-rustledger-booking = { version = "0.3.0", path = "crates/rustledger-booking" }
-rustledger-validate = { version = "0.3.0", path = "crates/rustledger-validate" }
-rustledger-query = { version = "0.3.0", path = "crates/rustledger-query" }
-rustledger-plugin = { version = "0.3.0", path = "crates/rustledger-plugin", default-features = false }
-rustledger-importer = { version = "0.3.0", path = "crates/rustledger-importer" }
+rustledger-core = { version = "0.4.0", path = "crates/rustledger-core" }
+rustledger-parser = { version = "0.4.0", path = "crates/rustledger-parser" }
+rustledger-loader = { version = "0.4.0", path = "crates/rustledger-loader" }
+rustledger-booking = { version = "0.4.0", path = "crates/rustledger-booking" }
+rustledger-validate = { version = "0.4.0", path = "crates/rustledger-validate" }
+rustledger-query = { version = "0.4.0", path = "crates/rustledger-query" }
+rustledger-plugin = { version = "0.4.0", path = "crates/rustledger-plugin", default-features = false }
+rustledger-importer = { version = "0.4.0", path = "crates/rustledger-importer" }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

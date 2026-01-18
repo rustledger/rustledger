@@ -156,8 +156,11 @@
             # Documentation
             mdbook
 
-            # LSP and editor support
-            rust-analyzer
+            # LSP and editor support (for Claude Code plugins)
+            rust-analyzer          # Rust LSP
+            pyright                # Python LSP
+            nodePackages.typescript-language-server  # TypeScript LSP
+            nodePackages.typescript                  # Required by typescript-language-server
 
             # Nix tools
             nil # Nix LSP

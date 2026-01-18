@@ -3231,4 +3231,209 @@ mod tests {
         let result = executor.execute(&query).unwrap();
         assert_eq!(result.len(), 1); // Deduplicated to 1 (all '*')
     }
+
+    #[test]
+    fn test_limit_clause() {
+        let directives = sample_directives();
+        let mut executor = Executor::new(&directives);
+
+        // Test LIMIT restricts result count
+        let query = parse("SELECT date, account LIMIT 2").unwrap();
+        let result = executor.execute(&query).unwrap();
+        assert_eq!(result.len(), 2);
+
+        // Test LIMIT 0 returns empty
+        let query = parse("SELECT date LIMIT 0").unwrap();
+        let result = executor.execute(&query).unwrap();
+        assert_eq!(result.len(), 0);
+
+        // Test LIMIT larger than result set returns all
+        let query = parse("SELECT date LIMIT 100").unwrap();
+        let result = executor.execute(&query).unwrap();
+        assert_eq!(result.len(), 4);
+    }
+
+    #[test]
+    fn test_group_by_with_count() {
+        let directives = sample_directives();
+        let mut executor = Executor::new(&directives);
+
+        // Group by account root and count postings
+        let query = parse("SELECT ROOT(account), COUNT(account) GROUP BY ROOT(account)").unwrap();
+        let result = executor.execute(&query).unwrap();
+
+        assert_eq!(result.columns.len(), 2);
+        // Should have 2 groups: Assets and Expenses
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn test_count_aggregate() {
+        let directives = sample_directives();
+        let mut executor = Executor::new(&directives);
+
+        // Count all postings
+        let query = parse("SELECT COUNT(account)").unwrap();
+        let result = executor.execute(&query).unwrap();
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result.rows[0][0], Value::Integer(4));
+
+        // Count with GROUP BY
+        let query = parse("SELECT ROOT(account), COUNT(account) GROUP BY ROOT(account)").unwrap();
+        let result = executor.execute(&query).unwrap();
+        assert_eq!(result.len(), 2); // Assets, Expenses
+    }
+
+    #[test]
+    fn test_journal_query() {
+        let directives = sample_directives();
+        let mut executor = Executor::new(&directives);
+
+        // JOURNAL for Expenses account
+        let query = parse("JOURNAL \"Expenses\"").unwrap();
+        let result = executor.execute(&query).unwrap();
+
+        // Should have columns for journal output
+        assert!(result.columns.contains(&"account".to_string()));
+        // Should only show expense account entries
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn test_print_query() {
+        let directives = sample_directives();
+        let mut executor = Executor::new(&directives);
+
+        // PRINT outputs formatted directives
+        let query = parse("PRINT").unwrap();
+        let result = executor.execute(&query).unwrap();
+
+        // PRINT returns single column "directive" with formatted output
+        assert_eq!(result.columns.len(), 1);
+        assert_eq!(result.columns[0], "directive");
+        // Should have one row per directive (2 transactions)
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn test_empty_directives() {
+        let directives: Vec<Directive> = vec![];
+        let mut executor = Executor::new(&directives);
+
+        // SELECT on empty directives
+        let query = parse("SELECT date, account").unwrap();
+        let result = executor.execute(&query).unwrap();
+        assert!(result.is_empty());
+
+        // BALANCES on empty directives
+        let query = parse("BALANCES").unwrap();
+        let result = executor.execute(&query).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_comparison_operators() {
+        let directives = sample_directives();
+        let mut executor = Executor::new(&directives);
+
+        // Less than comparison on dates
+        let query = parse("SELECT date WHERE date < 2024-01-16").unwrap();
+        let result = executor.execute(&query).unwrap();
+        assert_eq!(result.len(), 2); // First transaction postings
+
+        // Greater than comparison on year
+        let query = parse("SELECT date WHERE year > 2023").unwrap();
+        let result = executor.execute(&query).unwrap();
+        assert_eq!(result.len(), 4); // All 2024 postings
+
+        // Equality comparison on day
+        let query = parse("SELECT account WHERE day = 15").unwrap();
+        let result = executor.execute(&query).unwrap();
+        assert_eq!(result.len(), 2); // First transaction postings (Jan 15)
+    }
+
+    #[test]
+    fn test_logical_operators() {
+        let directives = sample_directives();
+        let mut executor = Executor::new(&directives);
+
+        // AND operator
+        let query = parse("SELECT account WHERE account ~ \"Expenses\" AND day > 14").unwrap();
+        let result = executor.execute(&query).unwrap();
+        assert_eq!(result.len(), 2); // Expense postings on Jan 15 and 16
+
+        // OR operator
+        let query = parse("SELECT account WHERE day = 15 OR day = 16").unwrap();
+        let result = executor.execute(&query).unwrap();
+        assert_eq!(result.len(), 4); // All postings (both days)
+    }
+
+    #[test]
+    fn test_arithmetic_expressions() {
+        let directives = sample_directives();
+        let mut executor = Executor::new(&directives);
+
+        // Negation on integer
+        let query = parse("SELECT -day WHERE day = 15").unwrap();
+        let result = executor.execute(&query).unwrap();
+        assert_eq!(result.len(), 2);
+        // Day 15 negated should be -15
+        for row in &result.rows {
+            if let Value::Integer(n) = &row[0] {
+                assert_eq!(*n, -15);
+            }
+        }
+    }
+
+    #[test]
+    fn test_first_last_aggregates() {
+        let directives = sample_directives();
+        let mut executor = Executor::new(&directives);
+
+        // FIRST aggregate
+        let query = parse("SELECT FIRST(date)").unwrap();
+        let result = executor.execute(&query).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result.rows[0][0], Value::Date(date(2024, 1, 15)));
+
+        // LAST aggregate
+        let query = parse("SELECT LAST(date)").unwrap();
+        let result = executor.execute(&query).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result.rows[0][0], Value::Date(date(2024, 1, 16)));
+    }
+
+    #[test]
+    fn test_wildcard_select() {
+        let directives = sample_directives();
+        let mut executor = Executor::new(&directives);
+
+        // SELECT * returns all postings with wildcard column name
+        let query = parse("SELECT *").unwrap();
+        let result = executor.execute(&query).unwrap();
+
+        // Wildcard produces column name "*"
+        assert_eq!(result.columns, vec!["*"]);
+        // But each row has expanded values (date, flag, payee, narration, account, position)
+        assert_eq!(result.len(), 4);
+        assert_eq!(result.rows[0].len(), 6); // 6 expanded values
+    }
+
+    #[test]
+    fn test_query_result_methods() {
+        let mut result = QueryResult::new(vec!["col1".to_string(), "col2".to_string()]);
+
+        // Initially empty
+        assert!(result.is_empty());
+        assert_eq!(result.len(), 0);
+
+        // Add rows
+        result.add_row(vec![Value::Integer(1), Value::String("a".to_string())]);
+        assert!(!result.is_empty());
+        assert_eq!(result.len(), 1);
+
+        result.add_row(vec![Value::Integer(2), Value::String("b".to_string())]);
+        assert_eq!(result.len(), 2);
+    }
 }

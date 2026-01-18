@@ -182,7 +182,40 @@ mod tests {
     }
 
     #[test]
+    fn test_python_wasm_path() {
+        let path = python_wasm_path().unwrap();
+        assert!(path.to_string_lossy().ends_with("python.wasm"));
+    }
+
+    #[test]
+    fn test_python_stdlib_path() {
+        let path = python_stdlib_path().unwrap();
+        assert!(path.to_string_lossy().ends_with("lib"));
+    }
+
+    #[test]
     fn test_hex_encode() {
         assert_eq!(hex::encode([0xde, 0xad, 0xbe, 0xef]), "deadbeef");
+    }
+
+    #[test]
+    fn test_hex_encode_empty() {
+        assert_eq!(hex::encode([]), "");
+    }
+
+    #[test]
+    fn test_hex_encode_single_byte() {
+        assert_eq!(hex::encode([0x00]), "00");
+        assert_eq!(hex::encode([0xff]), "ff");
+        assert_eq!(hex::encode([0x0a]), "0a");
+    }
+
+    #[test]
+    fn test_constants() {
+        // Verify constants are sensible
+        assert!(PYTHON_VERSION.starts_with("3."));
+        assert!(DOWNLOAD_URL.contains("cpython-wasi"));
+        assert_eq!(EXPECTED_SHA256.len(), 64); // SHA256 hex = 64 chars
+                                               // DOWNLOAD_SIZE_MB is a compile-time constant; clippy catches assertions on constants
     }
 }

@@ -631,4 +631,65 @@ mod tests {
         assert_eq!(config.max_memory, 256 * 1024 * 1024); // 256MB
         assert_eq!(config.max_time_secs, 30);
     }
+
+    /// Test that a module missing memory export is rejected.
+    #[test]
+    fn test_missing_memory_rejected() {
+        let wasm = wat::parse_str(
+            r#"
+            (module
+                (func (export "alloc") (param i32) (result i32)
+                    i32.const 0
+                )
+                (func (export "process") (param i32 i32) (result i64)
+                    i64.const 0
+                )
+            )
+            "#,
+        )
+        .expect("valid wat");
+
+        let result = validate_plugin_module(&wasm);
+        assert!(result.is_err(), "module missing memory should be rejected");
+        assert!(result.unwrap_err().to_string().contains("memory"));
+    }
+
+    /// Test that a module missing process export is rejected.
+    #[test]
+    fn test_missing_process_rejected() {
+        let wasm = wat::parse_str(
+            r#"
+            (module
+                (memory (export "memory") 1)
+                (func (export "alloc") (param i32) (result i32)
+                    i32.const 0
+                )
+            )
+            "#,
+        )
+        .expect("valid wat");
+
+        let result = validate_plugin_module(&wasm);
+        assert!(result.is_err(), "module missing process should be rejected");
+        assert!(result.unwrap_err().to_string().contains("process"));
+    }
+
+    /// Test that invalid WASM bytes are rejected.
+    #[test]
+    fn test_invalid_wasm_rejected() {
+        let invalid = b"not valid wasm bytes";
+        let result = validate_plugin_module(invalid);
+        assert!(result.is_err(), "invalid WASM should be rejected");
+    }
+
+    /// Test that runtime config can be customized.
+    #[test]
+    fn test_runtime_config_custom() {
+        let config = RuntimeConfig {
+            max_memory: 512 * 1024 * 1024, // 512MB
+            max_time_secs: 60,
+        };
+        assert_eq!(config.max_memory, 512 * 1024 * 1024);
+        assert_eq!(config.max_time_secs, 60);
+    }
 }

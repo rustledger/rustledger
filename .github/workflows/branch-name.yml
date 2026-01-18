@@ -17,7 +17,13 @@ jobs:
       - name: Check branch name
         run: |
           BRANCH="${{ github.head_ref }}"
-          PATTERN="^(release-plz-[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}-[0-9]{2}-[0-9]{2}Z|(feature|fix|docs|chore|refactor|release|hotfix|claude|dependabot)/[a-zA-Z0-9][a-zA-Z0-9/_.-]*)$"
+          
+          # Pattern accepts two formats:
+          # 1. release-plz-<timestamp>: Automated release branches (e.g., release-plz-2026-01-18T16-29-30Z)
+          # 2. <type>/<description>: Manual branches (e.g., feature/add-csv-export)
+          RELEASE_PLZ_PATTERN="release-plz-[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}-[0-9]{2}-[0-9]{2}Z"
+          MANUAL_PATTERN="(feature|fix|docs|chore|refactor|release|hotfix|claude|dependabot)/[a-zA-Z0-9][a-zA-Z0-9/_.-]*"
+          PATTERN="^($RELEASE_PLZ_PATTERN|$MANUAL_PATTERN)$"
 
           if [[ "$BRANCH" =~ $PATTERN ]]; then
             echo "✅ Branch name '$BRANCH' is valid"

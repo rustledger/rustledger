@@ -17,20 +17,21 @@ jobs:
       - name: Check branch name
         run: |
           BRANCH="${{ github.head_ref }}"
-          PATTERN="^(feature|fix|docs|chore|refactor|release|hotfix|claude|dependabot)/[a-zA-Z0-9][a-zA-Z0-9/_-]*$"
+          PATTERN="^(release-plz-[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}-[0-9]{2}-[0-9]{2}Z|(feature|fix|docs|chore|refactor|release|hotfix|claude|dependabot)/[a-zA-Z0-9][a-zA-Z0-9/_.-]*)$"
 
           if [[ "$BRANCH" =~ $PATTERN ]]; then
             echo "✅ Branch name '$BRANCH' is valid"
           else
             echo "❌ Branch name '$BRANCH' does not match pattern"
             echo ""
-            echo "Branch names must follow: <type>/<description>"
+            echo "Branch names must follow: <type>/<description> or release-plz-<timestamp>"
             echo "  Types: feature, fix, docs, chore, refactor, release, hotfix, claude, dependabot"
-            echo "  Description: letters, numbers, hyphens, underscores, slashes"
+            echo "  Description: letters, numbers, hyphens, underscores, slashes, dots"
             echo ""
             echo "Examples:"
             echo "  feature/add-csv-export"
             echo "  fix/balance-calculation"
             echo "  claude/repo-improvements-T04lB"
+            echo "  release-plz-2026-01-18T16-29-30Z"
             exit 1
           fi

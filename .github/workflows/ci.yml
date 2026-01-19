@@ -78,6 +78,8 @@ jobs:
   semver:
     name: Semver Check
     runs-on: ubuntu-latest
+    env:
+      RUSTC_WRAPPER: ""  # Disable sccache - action manages its own toolchain
     # Only run on PRs to catch breaking changes before merge
     if: github.event_name == 'pull_request'
     steps:

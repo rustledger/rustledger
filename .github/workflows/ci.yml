@@ -31,7 +31,7 @@ jobs:
     name: Format
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -61,7 +61,7 @@ jobs:
             components: ""
             env: RUSTDOCFLAGS=-Dwarnings
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: ${{ matrix.components }}
@@ -83,7 +83,7 @@ jobs:
     # Only run on PRs to catch breaking changes before merge
     if: github.event_name == 'pull_request'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Check for Rust changes
         id: changes
         uses: dorny/paths-filter@v3
@@ -110,7 +110,7 @@ jobs:
     env:
       RUSTC_WRAPPER: ""  # Disable sccache for MSRV check
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@1.85
       - uses: Swatinem/rust-cache@v2
       - name: Check MSRV compatibility
@@ -123,7 +123,7 @@ jobs:
     env:
       RUSTC_WRAPPER: ""  # Disable sccache for deny check
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: taiki-e/install-action@cargo-deny
       - name: Check advisories, licenses, and bans
         run: cargo deny check
@@ -136,7 +136,7 @@ jobs:
       RUST_MIN_STACK: 8388608
       RUSTC_WRAPPER: ""  # Disable sccache for coverage
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools-preview

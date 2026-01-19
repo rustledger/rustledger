@@ -35,7 +35,7 @@ jobs:
     if: github.repository == 'rustledger/rustledger'
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
           # Use PAT for checkout so PR triggers CI workflows
@@ -106,7 +106,7 @@ jobs:
       contains(github.event.head_commit.message, 'chore: release')
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
 

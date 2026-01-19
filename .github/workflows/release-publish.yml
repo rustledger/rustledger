@@ -47,7 +47,7 @@ jobs:
     name: Publish to npm (@rustledger/wasm)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: ${{ env.RELEASE_TAG }}
       - name: Install Rust toolchain
@@ -85,7 +85,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Trigger website rebuild
-        uses: peter-evans/repository-dispatch@v3
+        uses: peter-evans/repository-dispatch@v4
         with:
           token: ${{ secrets.WEBSITE_DISPATCH_TOKEN }}
           repository: rustledger/rustledger.github.io
@@ -97,7 +97,7 @@ jobs:
     needs: publish-npm-wasm
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: ${{ env.RELEASE_TAG }}
       - name: Setup Node.js
@@ -139,7 +139,7 @@ jobs:
     name: Build Docker images
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: ${{ env.RELEASE_TAG }}
       - name: Download musl binaries from release
@@ -197,7 +197,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Trigger Homebrew tap update
-        uses: peter-evans/repository-dispatch@v3
+        uses: peter-evans/repository-dispatch@v4
         with:
           token: ${{ secrets.WEBSITE_DISPATCH_TOKEN }}
           repository: rustledger/homebrew-rustledger
@@ -210,7 +210,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Trigger Scoop bucket update
-        uses: peter-evans/repository-dispatch@v3
+        uses: peter-evans/repository-dispatch@v4
         with:
           token: ${{ secrets.WEBSITE_DISPATCH_TOKEN }}
           repository: rustledger/scoop-rustledger

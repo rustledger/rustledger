@@ -11,31 +11,31 @@ url = "https://raw.githubusercontent.com/bytecodealliance/wasmtime/main/supply-c
 url = "https://raw.githubusercontent.com/mozilla/supply-chain/main/audits.toml"
 
 [policy.rustledger]
-audit-as-crates-io = true
+audit-as-crates-io = false
 
 [policy.rustledger-booking]
-audit-as-crates-io = true
+audit-as-crates-io = false
 
 [policy.rustledger-core]
-audit-as-crates-io = true
+audit-as-crates-io = false
 
 [policy.rustledger-importer]
-audit-as-crates-io = true
+audit-as-crates-io = false
 
 [policy.rustledger-loader]
-audit-as-crates-io = true
+audit-as-crates-io = false
 
 [policy.rustledger-parser]
-audit-as-crates-io = true
+audit-as-crates-io = false
 
 [policy.rustledger-plugin]
-audit-as-crates-io = true
+audit-as-crates-io = false
 
 [policy.rustledger-query]
-audit-as-crates-io = true
+audit-as-crates-io = false
 
 [policy.rustledger-validate]
-audit-as-crates-io = true
+audit-as-crates-io = false
 
 [[exemptions.addr2line]]
 version = "0.25.1"
@@ -959,42 +959,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.rustix]]
 version = "1.1.3"
-criteria = "safe-to-deploy"
-
-[[exemptions.rustledger]]
-version = "0.4.0"
-criteria = "safe-to-deploy"
-
-[[exemptions.rustledger-booking]]
-version = "0.4.0"
-criteria = "safe-to-deploy"
-
-[[exemptions.rustledger-core]]
-version = "0.4.0"
-criteria = "safe-to-deploy"
-
-[[exemptions.rustledger-importer]]
-version = "0.4.0"
-criteria = "safe-to-deploy"
-
-[[exemptions.rustledger-loader]]
-version = "0.4.0"
-criteria = "safe-to-deploy"
-
-[[exemptions.rustledger-parser]]
-version = "0.4.0"
-criteria = "safe-to-deploy"
-
-[[exemptions.rustledger-plugin]]
-version = "0.4.0"
-criteria = "safe-to-deploy"
-
-[[exemptions.rustledger-query]]
-version = "0.4.0"
-criteria = "safe-to-deploy"
-
-[[exemptions.rustledger-validate]]
-version = "0.4.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.rustls]]

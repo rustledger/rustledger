@@ -233,10 +233,11 @@
               detect-private-keys.enable = true;
 
               # Comprehensive secret scanning with gitleaks
+              # Uses --staged to only scan staged changes (fast)
               gitleaks = {
                 enable = true;
                 name = "gitleaks";
-                entry = "${pkgs.gitleaks}/bin/gitleaks detect --source . --redact --no-git --config .gitleaks.toml";
+                entry = "${pkgs.gitleaks}/bin/gitleaks protect --staged --redact --config .gitleaks.toml";
                 language = "system";
                 pass_filenames = false;
               };

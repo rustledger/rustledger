@@ -59,24 +59,52 @@ Out of scope:
 
 ## Security Measures
 
-### Pre-commit Hooks
+### Supply Chain Security
+
+We use multiple layers of protection for our dependency supply chain:
+
+#### cargo-vet
+All dependencies are audited using [cargo-vet](https://mozilla.github.io/cargo-vet/). We import trusted audits from:
+- Mozilla
+- Bytecode Alliance
+
+Run `cargo vet` locally to verify all dependencies are audited.
+
+#### cargo-deny
+Dependencies are checked against:
+- RustSec advisory database (known vulnerabilities)
+- License compliance (allowed licenses only)
+- Banned crates list
+
+#### Dependency Review
+Pull requests automatically check for:
+- New vulnerable dependencies
+- License violations
+- Dependency confusion attacks
+
+#### SBOM Generation
+Software Bill of Materials (CycloneDX format) is generated for each release.
+
+### Code Security
+
+#### Pre-commit Hooks
 - `detect-private-keys` - Blocks commits containing private keys
 - `gitleaks` - Comprehensive secret scanning with pattern matching
 
-### CI/CD Security
-- `cargo-deny` - RustSec advisory database, license compliance, dependency bans
-- `gitleaks-action` - Backup secret scanning in CI
-- `dependency-review` - Checks PRs for vulnerable dependencies
-- SBOM generation - CycloneDX format for supply chain transparency
+#### Static Analysis
+- `clippy` - Strict linting with security-relevant warnings
+- `cargo-deny` - Dependency security checks
 
-### Code Quality
-- `clippy` - Strict linting with `-D warnings`
-- `rustfmt` - Consistent code formatting
-- Required code review for all changes
+#### CI/CD
+- All PRs require passing security checks
+- Main branch is protected
+- Automated dependency updates via Dependabot
 
 ### GitHub Security Features
+
 - Secret scanning enabled
-- Dependabot alerts and updates
+- Push protection enabled
+- Dependabot alerts enabled
 - Branch protection on `main`
 
 ## Safe Harbor

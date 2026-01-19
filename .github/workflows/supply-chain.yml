@@ -1,0 +1,82 @@
+# Supply Chain Security
+# Audits dependencies using cargo-vet and generates SBOM
+name: Supply Chain
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '**/Cargo.toml'
+      - '**/Cargo.lock'
+      - 'supply-chain/**'
+  pull_request:
+    branches: [main]
+    paths:
+      - '**/Cargo.toml'
+      - '**/Cargo.lock'
+      - 'supply-chain/**'
+  schedule:
+    # Weekly on Mondays at 00:00 UTC
+    - cron: '0 0 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # Audit dependencies with cargo-vet
+  cargo-vet:
+    name: Cargo Vet
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-vet
+        run: cargo install cargo-vet
+
+      - name: Run cargo vet
+        run: cargo vet --locked
+
+  # Generate SBOM on push to main
+  sbom:
+    name: Generate SBOM
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-cyclonedx
+        run: cargo install cargo-cyclonedx
+
+      - name: Generate SBOM (CycloneDX)
+        run: cargo cyclonedx --format json > sbom.cdx.json
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-cyclonedx
+          path: sbom.cdx.json
+          retention-days: 90
+
+  # Dependency review for PRs (catches new vulnerable deps)
+  dependency-review:
+    name: Dependency Review
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Dependency Review
+        uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high
+          allow-licenses: >-
+            MIT, Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC,
+            GPL-3.0-only, MPL-2.0, Zlib, 0BSD, Unicode-3.0,
+            CDLA-Permissive-2.0

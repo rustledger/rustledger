@@ -446,17 +446,14 @@
               echo ""
 
               # OpenCode container alias (requires sops-nix secrets)
-              # Uses overlayfs to combine container's nix store with host's store
-              # Writes go to ephemeral tmpfs (secure - no persistence between runs)
+              # Uses nixos/nix image with nix profile persisted for fast startup
               if [[ -f /run/secrets/api/together-ai && \
                     -f /run/secrets/user/email && \
                     -f /run/secrets/user/realName ]]; then
                 alias opencode-container='podman run \
                     -v $(pwd):/data:Z \
-                    -v ~/.opencode:/home/nixuser/.opencode \
-                    -v /nix/store:/host-nix-store:ro \
-                    --cap-add=SYS_ADMIN \
-                    --userns=keep-id \
+                    -v ~/.opencode:/root/.opencode:Z \
+                    -v opencode-nix-profile:/nix \
                     --rm -ti \
                     -w /data \
                     -e TOGETHER_API_KEY="$(cat /run/secrets/api/together-ai)" \
@@ -464,8 +461,8 @@
                     -e GIT_AUTHOR_EMAIL="$(cat /run/secrets/user/email)" \
                     -e GIT_COMMITTER_NAME="$(cat /run/secrets/user/realName)" \
                     -e GIT_COMMITTER_EMAIL="$(cat /run/secrets/user/email)" \
-                    ghcr.io/grigio/docker-nixuser:latest \
-                    sh -c "mkdir -p /tmp/nix-upper /tmp/nix-work && mount -t overlay overlay -o lowerdir=/nix/store:/host-nix-store,upperdir=/tmp/nix-upper,workdir=/tmp/nix-work /nix/store && opencode"'
+                    nixos/nix:latest \
+                    sh -c "if ! command -v opencode >/dev/null 2>&1; then echo Installing opencode...; nix-channel --update && nix-env -iA nixpkgs.opencode nixpkgs.git; fi && opencode"'
               else
                 alias opencode-container='echo "Missing sops-nix secrets. Required: api/together-ai, user/email, user/realName"'
               fi

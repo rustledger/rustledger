@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "label": "speedup",
+  "message": "pending",
+  "color": "yellow",
+  "python_ms": 0,
+  "rust_ms": 0,
+  "speedup": 0,
+  "transactions": 10000,
+  "updated": "pending first run"
+}

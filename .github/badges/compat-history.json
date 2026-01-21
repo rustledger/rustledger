@@ -1,0 +1,13 @@
+[
+  {
+    "date": "2026-01-21",
+    "timestamp": "2026-01-21T23:23:55Z",
+    "check_match_pct": 100,
+    "accounts_pct": 65,
+    "posting_pct": 97,
+    "error_pct": 100,
+    "full_pct": 64,
+    "bql_pct": 97,
+    "regression_count": 0
+  }
+]

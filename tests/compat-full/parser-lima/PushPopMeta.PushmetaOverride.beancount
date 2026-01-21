@@ -1,0 +1,14 @@
+pushmeta location: "Lausanne, Switzerland"
+
+2015-06-01 * "Something"
+  Assets:Something   1 USD
+  Assets:Something  -1 USD
+
+pushmeta location: "Paris, France"
+
+2015-06-02 * "Something"
+  Assets:Something   1 USD
+  Assets:Something  -1 USD
+
+popmeta location:
+popmeta location:

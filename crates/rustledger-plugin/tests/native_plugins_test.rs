@@ -581,3 +581,234 @@ fn test_registry_list_all() {
     // Should have at least 13 plugins (14 minus auto_tag which might be different)
     assert!(plugins.len() >= 13, "should have at least 13 plugins");
 }
+
+#[test]
+fn test_auto_accounts_generates_opens() {
+    use rustledger_plugin::types::*;
+    use rustledger_plugin::*;
+
+    let registry = NativePluginRegistry::new();
+    let plugin = registry.find("auto_accounts").unwrap();
+
+    // Create test input with transaction using unopened accounts
+    let input = PluginInput {
+        directives: vec![DirectiveWrapper {
+            directive_type: "transaction".to_string(),
+            date: "2020-01-01".to_string(),
+            data: DirectiveData::Transaction(TransactionData {
+                flag: "*".to_string(),
+                payee: None,
+                narration: "Test".to_string(),
+                tags: vec![],
+                links: vec![],
+                postings: vec![
+                    PostingData {
+                        account: "Expenses:Food".to_string(),
+                        units: Some(AmountData {
+                            number: "100".to_string(),
+                            currency: "USD".to_string(),
+                        }),
+                        cost: None,
+                        price: None,
+                        metadata: vec![],
+                        flag: None,
+                    },
+                    PostingData {
+                        account: "Assets:Cash".to_string(),
+                        units: Some(AmountData {
+                            number: "-100".to_string(),
+                            currency: "USD".to_string(),
+                        }),
+                        cost: None,
+                        price: None,
+                        metadata: vec![],
+                        flag: None,
+                    },
+                ],
+                metadata: vec![],
+            }),
+        }],
+        options: PluginOptions::default(),
+        config: None,
+    };
+
+    let output = plugin.process(input);
+
+    eprintln!("Output directives: {}", output.directives.len());
+    for d in &output.directives {
+        eprintln!("  {}: {}", d.directive_type, d.date);
+    }
+
+    // Should have 3 directives: 2 Open + 1 Transaction
+    assert_eq!(
+        output.directives.len(),
+        3,
+        "expected 2 opens + 1 transaction"
+    );
+
+    // First two should be Open directives
+    let open_count = output
+        .directives
+        .iter()
+        .filter(|d| d.directive_type == "open")
+        .count();
+    assert_eq!(open_count, 2, "expected 2 open directives");
+
+    // Now test the full round-trip: convert back to Directive and validate
+    let directives = wrappers_to_directives(&output.directives).unwrap();
+    eprintln!("Converted directives: {}", directives.len());
+    for d in &directives {
+        match d {
+            rustledger_core::Directive::Open(o) => {
+                eprintln!("  Open: {}", o.account);
+            }
+            rustledger_core::Directive::Transaction(t) => {
+                eprintln!("  Transaction: {}", t.narration);
+            }
+            _ => eprintln!("  Other"),
+        }
+    }
+
+    // Should have 2 Open + 1 Transaction
+    let open_count = directives
+        .iter()
+        .filter(|d| matches!(d, rustledger_core::Directive::Open(_)))
+        .count();
+    assert_eq!(open_count, 2, "expected 2 Open directives after conversion");
+}
+
+#[test]
+fn test_auto_accounts_same_date_ordering() {
+    // Test case: Open directive should come before Transaction on same date
+    use rustledger_plugin::types::*;
+    use rustledger_plugin::*;
+
+    let registry = NativePluginRegistry::new();
+    let plugin = registry.find("auto_accounts").unwrap();
+
+    // Input: existing open + transaction that uses new account on same date as first use
+    let input = PluginInput {
+        directives: vec![
+            DirectiveWrapper {
+                directive_type: "open".to_string(),
+                date: "1900-01-01".to_string(),
+                data: DirectiveData::Open(OpenData {
+                    account: "Liabilities:Credit-Card".to_string(),
+                    currencies: vec![],
+                    booking: None,
+                }),
+            },
+            DirectiveWrapper {
+                directive_type: "transaction".to_string(),
+                date: "2016-08-30".to_string(),
+                data: DirectiveData::Transaction(TransactionData {
+                    flag: "*".to_string(),
+                    payee: Some("Amazon".to_string()),
+                    narration: "Order".to_string(),
+                    tags: vec![],
+                    links: vec![],
+                    postings: vec![
+                        PostingData {
+                            account: "Expenses:FIXME:A".to_string(),
+                            units: Some(AmountData {
+                                number: "14.99".to_string(),
+                                currency: "USD".to_string(),
+                            }),
+                            cost: None,
+                            price: None,
+                            metadata: vec![],
+                            flag: None,
+                        },
+                        PostingData {
+                            account: "Liabilities:Credit-Card".to_string(),
+                            units: Some(AmountData {
+                                number: "-14.99".to_string(),
+                                currency: "USD".to_string(),
+                            }),
+                            cost: None,
+                            price: None,
+                            metadata: vec![],
+                            flag: None,
+                        },
+                    ],
+                    metadata: vec![],
+                }),
+            },
+        ],
+        options: PluginOptions::default(),
+        config: None,
+    };
+
+    let output = plugin.process(input);
+
+    eprintln!("\n=== Output directives (ordered) ===");
+    for (i, d) in output.directives.iter().enumerate() {
+        eprintln!("  [{}] {}: {}", i, d.directive_type, d.date);
+        if let DirectiveData::Open(open) = &d.data {
+            eprintln!("       account: {}", open.account);
+        }
+    }
+
+    // Should have 3 directives total: 2 Open + 1 Transaction
+    assert_eq!(output.directives.len(), 3);
+
+    // The Open for Expenses:FIXME:A should come BEFORE the Transaction on 2016-08-30
+    let idx_open_fixme = output
+        .directives
+        .iter()
+        .position(|d| {
+            d.directive_type == "open"
+                && matches!(&d.data, DirectiveData::Open(o) if o.account == "Expenses:FIXME:A")
+        })
+        .expect("should have Open for Expenses:FIXME:A");
+
+    let idx_txn = output
+        .directives
+        .iter()
+        .position(|d| d.directive_type == "transaction" && d.date == "2016-08-30")
+        .expect("should have Transaction on 2016-08-30");
+
+    eprintln!("\nOpen Expenses:FIXME:A at index {idx_open_fixme}, Transaction at index {idx_txn}");
+
+    assert!(
+        idx_open_fixme < idx_txn,
+        "Open for Expenses:FIXME:A should come before Transaction on same date"
+    );
+
+    // Now convert back to Directive and check order is preserved
+    let directives = wrappers_to_directives(&output.directives).unwrap();
+    eprintln!("\n=== Converted directives ===");
+    for (i, d) in directives.iter().enumerate() {
+        match d {
+            rustledger_core::Directive::Open(o) => {
+                eprintln!("  [{}] Open: {} on {}", i, o.account, o.date);
+            }
+            rustledger_core::Directive::Transaction(t) => {
+                eprintln!("  [{}] Transaction on {}", i, t.date);
+            }
+            _ => {}
+        }
+    }
+
+    // Check order is preserved: Open for Expenses:FIXME:A before Transaction
+    let converted_idx_open = directives
+        .iter()
+        .position(|d| {
+            matches!(d, rustledger_core::Directive::Open(o) if o.account.as_str() == "Expenses:FIXME:A")
+        })
+        .expect("should have Open after conversion");
+
+    let converted_idx_txn = directives
+        .iter()
+        .position(|d| matches!(d, rustledger_core::Directive::Transaction(_)))
+        .expect("should have Transaction after conversion");
+
+    eprintln!(
+        "\nAfter conversion: Open at {converted_idx_open}, Transaction at {converted_idx_txn}"
+    );
+
+    assert!(
+        converted_idx_open < converted_idx_txn,
+        "Open should still come before Transaction after conversion"
+    );
+}

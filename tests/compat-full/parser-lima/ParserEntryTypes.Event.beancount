@@ -1,0 +1,4 @@
+2013-05-18 event "location" "New York, USA"
+
+;; Test empty event.
+2013-05-18 event "location" ""

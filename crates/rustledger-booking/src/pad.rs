@@ -15,9 +15,9 @@
 //! 2024-01-02 balance Assets:Bank 1000.00 USD
 //! ```
 //!
-//! This generates a synthetic transaction:
+//! This generates a synthetic transaction (matching Python beancount's format):
 //! ```beancount
-//! 2024-01-01 P "(Padding inserted for balance assertion)"
+//! 2024-01-01 P "(Padding inserted for Balance of 1000.00 USD for difference 1000.00 USD)"
 //!   Assets:Bank             1000.00 USD
 //!   Equity:Opening-Balances -1000.00 USD
 //! ```
@@ -75,6 +75,8 @@ struct PendingPad {
     pad: Pad,
     /// Whether this pad has been used (has at least one balance assertion).
     used: bool,
+    /// Currencies that have already been padded (each currency can only be padded once per pad).
+    padded_currencies: std::collections::HashSet<InternedStr>,
 }
 
 /// Process pad directives and generate synthetic transactions.
@@ -134,11 +136,13 @@ pub fn process_pads(directives: &[Directive]) -> PadResult {
 
             Directive::Pad(pad) => {
                 // Store pending pad (replaces any existing pad for this account)
+                // Reset padded_currencies when a new pad is encountered
                 pending_pads.insert(
                     pad.account.clone(),
                     PendingPad {
                         pad: pad.clone(),
                         used: false,
+                        padded_currencies: std::collections::HashSet::new(),
                     },
                 );
             }
@@ -147,6 +151,12 @@ pub fn process_pads(directives: &[Directive]) -> PadResult {
                 // Check if there's a pending pad for this account
                 // Use get_mut instead of remove - a pad can apply to multiple currencies
                 if let Some(pending) = pending_pads.get_mut(&bal.account) {
+                    // Only pad if this currency hasn't been padded yet for this pad directive
+                    // (each currency can only be padded once per pad)
+                    if pending.padded_currencies.contains(&bal.amount.currency) {
+                        continue;
+                    }
+
                     // Calculate padding amount
                     let current = inventories
                         .get(&bal.account)
@@ -161,6 +171,7 @@ pub fn process_pads(directives: &[Directive]) -> PadResult {
                             &pending.pad.account,
                             &pending.pad.source_account,
                             Amount::new(difference, &bal.amount.currency),
+                            &bal.amount, // target balance for narration
                         );
 
                         // Apply to inventories
@@ -180,8 +191,11 @@ pub fn process_pads(directives: &[Directive]) -> PadResult {
                         padding_transactions.push(pad_txn);
                     }
 
-                    // Mark the pad as used
+                    // Mark the pad as used and track that this currency has been padded
                     pending.used = true;
+                    pending
+                        .padded_currencies
+                        .insert(bal.amount.currency.clone());
                 }
                 // If no pending pad, nothing to do (balance will be checked normally)
             }
@@ -213,16 +227,24 @@ pub fn process_pads(directives: &[Directive]) -> PadResult {
 }
 
 /// Create a synthetic padding transaction.
+///
+/// The narration format matches Python beancount:
+/// `(Padding inserted for Balance of {balance} for difference {difference})`
 fn create_padding_transaction(
     date: NaiveDate,
     target_account: &str,
     source_account: &str,
-    amount: Amount,
+    difference: Amount,
+    balance: &Amount,
 ) -> Transaction {
-    Transaction::new(date, "(Padding inserted for balance assertion)")
+    let narration = format!(
+        "(Padding inserted for Balance of {} {} for difference {} {})",
+        balance.number, balance.currency, difference.number, difference.currency
+    );
+    Transaction::new(date, &narration)
         .with_flag('P')
-        .with_posting(Posting::new(target_account, amount.clone()))
-        .with_posting(Posting::new(source_account, amount.neg()))
+        .with_posting(Posting::new(target_account, difference.clone()))
+        .with_posting(Posting::new(source_account, difference.neg()))
 }
 
 /// Expand a ledger by replacing pad directives with synthetic transactions.
@@ -251,24 +273,17 @@ pub fn expand_pads(directives: &[Directive]) -> Vec<Directive> {
         pad_txns_by_date.entry(txn.date).or_default().push(txn);
     }
 
-    // Track which pad transactions we've inserted
-    let mut inserted_pads: HashMap<NaiveDate, usize> = HashMap::new();
-
     for directive in sorted_originals {
         match directive {
             Directive::Pad(pad) => {
-                // Replace pad with synthetic transaction if one was generated
+                // Replace pad with synthetic transactions if any were generated
+                // A single pad can generate multiple transactions (one per currency)
                 if let Some(txns) = pad_txns_by_date.get(&pad.date) {
-                    let idx = inserted_pads.entry(pad.date).or_insert(0);
-                    if *idx < txns.len() {
-                        // Find the matching transaction for this pad
-                        for txn in txns {
-                            if txn.postings.iter().any(|p| p.account == pad.account) {
-                                expanded.push(Directive::Transaction((*txn).clone()));
-                                break;
-                            }
+                    // Find ALL matching transactions for this pad (multiple currencies)
+                    for txn in txns {
+                        if txn.postings.iter().any(|p| p.account == pad.account) {
+                            expanded.push(Directive::Transaction((*txn).clone()));
                         }
-                        *idx += 1;
                     }
                 }
                 // If no transaction was generated (difference was zero), omit the pad

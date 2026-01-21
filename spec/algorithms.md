@@ -437,7 +437,9 @@ fn process_pad(
         date: pad.date,
         flag: 'P',
         payee: None,
-        narration: "(Padding inserted for balance assertion)".to_string(),
+        narration: format!("(Padding inserted for Balance of {} {} for difference {} {})",
+            balance_assertion.amount.number, balance_assertion.amount.currency,
+            difference, balance_assertion.amount.currency),
         postings: vec![
             Posting {
                 account: pad.account.clone(),

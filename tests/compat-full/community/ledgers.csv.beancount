@@ -1,0 +1,24 @@
+;; Account: kraken
+;; Date: 
+;; Name: 
+
+2000-01-01 * 
+  time: "08:57:47"
+  Assets:Kraken:Spot  1000.00000000 USDC
+
+2000-01-01 * 
+  time: "09:00:22"
+  Assets:Kraken:Spot  -1000.00000000 USDC
+
+2000-01-01 * 
+  time: "09:00:32"
+  Assets:Kraken:Staking  1000.00000000 USDC.M
+
+2000-01-02 balance Assets:Kraken:Spot                              0.00000000 USDC
+
+2000-01-02 * 
+  time: "14:33:28"
+  Assets:Kraken:Staking  1.12345678 USDC.M
+  Income:Staking:Kraken
+
+2000-01-03 balance Assets:Kraken:Staking                           1001.12345678 USDC.M

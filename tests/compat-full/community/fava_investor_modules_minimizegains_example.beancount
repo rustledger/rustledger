@@ -1,0 +1,20 @@
+option "title" "Test"
+option "operating_currency" "USD"
+option "render_commas" "True"
+
+2010-01-01 open Assets:Investments:Taxable:Brokerage
+2010-01-01 open Assets:Bank
+
+2010-01-01 commodity BNCT
+2010-01-01 commodity COFE
+
+2015-01-01 * "Buy stock"
+   Assets:Investments:Taxable:Brokerage 100 BNCT {100 USD}
+   Assets:Bank
+
+2016-01-01 * "Buy stock"
+   Assets:Investments:Taxable:Brokerage 100 COFE {200 USD}
+   Assets:Bank
+
+2018-01-01 price BNCT 150 USD
+2018-01-01 price COFE 201 USD

@@ -22,6 +22,7 @@ rkyv = ["dep:rkyv"]
 
 [dependencies]
 rust_decimal = { workspace = true, features = ["serde", "maths"] }
+rust_decimal_macros = "1.40"
 chrono.workspace = true
 thiserror.workspace = true
 serde.workspace = true
@@ -29,7 +30,6 @@ rkyv = { workspace = true, optional = true }
 
 [dev-dependencies]
 proptest.workspace = true
-rust_decimal_macros = "1.40"
 criterion.workspace = true
 
 [[bench]]

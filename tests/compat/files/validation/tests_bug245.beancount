@@ -1,0 +1,16 @@
+;----------------------------------------------------------------------
+; ledger2beancount conversion notes:
+;
+;   - Amount without commodity found; set default_commodity in config
+;----------------------------------------------------------------------
+
+
+1970-01-01 open Assets:A
+1970-01-01 open Assets:B
+
+1970-01-01 commodity XXX
+
+2021-02-17 * "Test"
+  Assets:A                  15.00 XXX
+  Assets:B
+

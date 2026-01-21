@@ -1,0 +1,7 @@
+option "name_assets" "Mine-All-Mine"
+
+; this is an error, as we already used this name for Assets
+option "name_income" "Mine-All-Mine"
+
+; this is also an error
+option "name_expenses" "Liabilities"

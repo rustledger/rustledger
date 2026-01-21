@@ -1,0 +1,18 @@
+; SPDX-FileCopyrightText: © 2018 Martin Michlmayr <tbm@cyrius.com>
+;
+; SPDX-License-Identifier: GPL-3.0-or-later
+
+1970-01-01 open Assets:Test
+
+1970-01-01 commodity EUR
+1970-01-01 commodity GBP
+1970-01-01 commodity USD
+
+2018-09-27 * "Test conversion of built-in commodity codes"
+  Assets:Test                        10.00 EUR
+  Assets:Test                       -10.00 EUR
+  Assets:Test                        10.00 GBP
+  Assets:Test                       -10.00 GBP
+  Assets:Test                        10.00 USD
+  Assets:Test                       -10.00 USD
+

@@ -1,0 +1,10 @@
+2019-01-01 open Assets:Checking
+2019-01-01 open Expenses:Whatever
+
+2019-01-01 * "payee" "narration 1"
+  Assets:Checking     300.00 EUR
+  Expenses:Whatever
+
+2019-01-02 * "payee" "narration 2"
+  Assets:Checking     100.00 EUR
+  Expenses:Whatever

@@ -1,0 +1,23 @@
+option "operating_currency" "USD"
+
+2000-01-01 open Assets:Investments:RothIRA
+2000-01-01 open Assets:Investments:TradIRA
+2000-01-01 open Assets:Banks:Checking
+2000-01-01 open Assets:Zero-Sum-Accounts:Transfers:Bank-Account
+2000-01-01 open Equity:Rounding-Errors:Imports
+2000-01-01 open Expenses:Brokerage-Fees:RothIRA
+2000-01-01 open Expenses:Brokerage-Fees:TradIRA
+2000-01-01 open Expenses:Rent
+2000-01-01 open Income:Capital-Gains:RothIRA
+2000-01-01 open Income:Capital-Gains:TradIRA
+2000-01-01 open Income:Dividends:RothIRA
+2000-01-01 open Income:Dividends:TradIRA
+
+2010-01-01 * "Transfer"
+   Assets:Banks:Checking 100 USD
+   Assets:Zero-Sum-Accounts:Transfers:Bank-Account
+
+2010-01-01 * "Rent"
+   Assets:Banks:Checking -1000 USD
+   Expenses:Rent
+

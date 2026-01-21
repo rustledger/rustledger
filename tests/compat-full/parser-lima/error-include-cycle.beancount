@@ -1,0 +1,26 @@
+; an example Beancount file
+
+1970-01-01 commodity NZD
+;   ; New Zealand Dollar
+
+2016-03-01 open Assets:Bank:Current
+;   check commodity == "NZD"
+
+2016-03-01 open Expenses:Groceries
+;   check commodity == "NZD"
+
+2016-03-01 open Expenses:Entertainment:Drinks-and-snacks
+;   check commodity == "NZD"
+
+2023-05-29 * "New World Gardens North East Va ;"
+  Assets:Bank:Current                           -39.65X NZD
+  ofxid: "0.12-3456-1234567-01.29May2023.1"  ; from ledger-autosync
+  Expenses:Groceries
+
+include "error-include-cycle/included.beancount"
+
+2023-05-31 * "EMERSON S TAPROOM DUNEDIN ;"
+  ; indented comment
+  Assets:Bank:Current                           -25.00 NZD
+  ofxid: "0.12-3456-1234567-01.31May2023.3"
+  Expenses:Entertainment:Drinks-and-snacks

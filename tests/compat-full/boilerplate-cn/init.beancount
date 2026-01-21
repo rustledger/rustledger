@@ -1,0 +1,48 @@
+; 从当日起使用 beancount 记账，为了做平帐，初始化的资金
+; 从 Equity:Openings-Balance CNY,USD,HKD,BTC 中来
+
+
+2019-01-01 * "Opening Balances"
+	Equity:Openings-Balance
+	; 应收房租押金
+	Assets:Receivables:HomeRental 5000 CNY
+	; 公积金账户余额（含补充公积金）
+	; 公司和个人缴纳的公积金都会进这个账户
+	Assets:CN:YourCity:HousingProvidentFund 20000 CNY
+	; 现钞
+	Assets:Cash 1000 CNY
+	Assets:Cash 1000 USD
+	Assets:Cash 0 JPY
+	Assets:CN:Saving:Wechat 123.50 CNY
+	Assets:CN:Saving:Alipay 1233.0 CNY
+	Assets:CN:Saving:CMB 50000 CNY
+	Assets:HK:Saving:CMB 1000 USD
+	Assets:HK:Saving:CMB 10000 HKD
+	Assets:CN:Saving:CCB 10000 CNY
+	; 应收报销
+	Assets:Receivables:YourEmployer 0 CNY
+	; FT=富途证券
+	Assets:Securities:FT:Cash 100000 HKD
+	Assets:Securities:FT:Cash 20000 USD
+	Assets:Securities:FT:Cash 1000 CNH
+	; 已有 10 股 AAPL, 持仓成本价 153.39 USD
+	Assets:Securities:FT:Positions 10 AAPL {153.39 USD}
+	Assets:Securities:FT:Positions 10 SPY {243.315 USD}
+	Assets:Securities:FT:Positions 100 HK_0700 {314 HKD}
+	Assets:Securities:FT:Positions 100 HK_2800 {25.8 HKD}
+	; XZ=东方财富证券(西藏证券)
+	; 股票账户中的现金余额
+	Assets:Securities:XZ:Cash 10000 CNY
+	Assets:Securities:XZ:Positions 100 CN_510300 {3.011 CNY}
+	Assets:Securities:XZ:Positions 100 CN_000001 {9.25 CNY}
+	Assets:Securities:XZ:Positions 100 CN_128047 {100 CNY}
+	; TT=天天基金
+	Assets:Fund:TT:Positions 10000 CN_F110011 {3.2376 CNY}
+	Assets:Fund:TT:Positions 100 CN_F000187 {1.2088 CNY}
+	; AF=AntFund=蚂蚁基金
+	Assets:Fund:AF:Positions 4900 CN_F000187 {1.2088 CNY}
+    ; 基金账户中的货币基金当现金(CNY)处理
+	Assets:Fund:AF:Positions 5000 CNY
+	Assets:CryptoCoins:Positions 1 BTC {4102 USD}
+	; 信用卡欠款
+	Liabilities:CN:CreditCard:SPDB -1230 CNY

@@ -313,10 +313,12 @@ proptest! {
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(50))]
 
-    /// TLA+ STRICTCorrect:
-    /// STRICT booking fails when multiple lots match (ambiguous)
+    /// TLA+ STRICTCorrect (Python-compatible):
+    /// STRICT booking falls back to FIFO when multiple lots match.
+    /// This matches Python beancount's behavior where ambiguous matches
+    /// use FIFO order rather than erroring.
     #[test]
-    fn prop_strict_fails_on_ambiguous(
+    fn prop_strict_uses_fifo_on_ambiguous(
         cost in 100i64..200,
     ) {
         let mut inv = Inventory::new();
@@ -332,18 +334,30 @@ proptest! {
             Cost::new(Decimal::from(cost + 10), "USD").with_date(date),
         ));
 
-        // STRICT should fail - ambiguous match
+        // STRICT falls back to FIFO when multiple lots match
         let result = inv.reduce(
             &Amount::new(dec!(-5), "AAPL"),
             None,
             BookingMethod::Strict,
         );
 
+        // Should succeed with FIFO behavior
         prop_assert!(
-            result.is_err(),
-            "STRICT should fail with multiple matching lots, but got: {:?}",
-            result
+            result.is_ok(),
+            "STRICT should fall back to FIFO with multiple matching lots, but got error: {:?}",
+            result.unwrap_err()
         );
+
+        // Should have reduced from the first lot (cost)
+        let booking_result = result.unwrap();
+        if let Some(cost_basis) = booking_result.cost_basis {
+            // 5 units at cost price = 5 * cost
+            prop_assert_eq!(
+                cost_basis.number,
+                Decimal::from(5 * cost),
+                "Cost basis should be from first lot"
+            );
+        }
     }
 
     /// TLA+ STRICTCorrect:

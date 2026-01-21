@@ -1,0 +1,9 @@
+2019-05-31 * "2019-05工资"
+	Income:YourEmployer:BaseSalary -12345.00 CNY
+	Income:YourEmployer:HousingProvidentFund -1481.4 CNY
+	Expenses:CN:YourCity:PensionInsurance 987.60 CNY
+	Expenses:CN:YourCity:MedicalInsurance 246.90 CNY
+	Expenses:CN:YourCity:UnemploymentInsurance 61.73 CNY
+	Expenses:CN:YourCity:Tax 246.74 CNY
+	Assets:CN:YourCity:HousingProvidentFund 2962.8 CNY
+	Assets:CN:Saving:CMB 9320.6 CNY

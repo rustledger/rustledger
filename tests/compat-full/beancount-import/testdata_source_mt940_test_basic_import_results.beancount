@@ -1,0 +1,156 @@
+;; date: 2020-01-01
+;; info: {"filename": "<testdata>/0708271685_09022020_164516.940", "line": 1, "type": "text/plain"}
+
+; features: [
+;             {
+;               "amount": "-65.00 EUR",
+;               "date": "2020-01-01",
+;               "key_value_pairs": {
+;                 "desc": "hr gjlm paulissen (NL47INGB9999999999), Betaling sieraden"
+;               },
+;               "source_account": "Liabilities:Credit-Card"
+;             }
+;           ]
+2020-01-01 * "hr gjlm paulissen (NL47INGB9999999999)" "Betaling sieraden"
+  Liabilities:Credit-Card  -65.00 EUR
+    date: 2020-01-01
+    source_desc: "hr gjlm paulissen (NL47INGB9999999999), Betaling sieraden"
+  Expenses:FIXME            65.00 EUR
+
+;; date: 2020-01-05
+;; info: {"filename": "<testdata>/0708271685_09022020_164516.940", "line": 2, "type": "text/plain"}
+
+; features: [
+;             {
+;               "amount": "1000.00 EUR",
+;               "date": "2020-01-05",
+;               "key_value_pairs": {
+;                 "desc": "paulissen g j l m (NL56ASNB9999999999), INTERNE OVERBOEKING VIA MOBIEL"
+;               },
+;               "source_account": "Liabilities:Credit-Card"
+;             }
+;           ]
+2020-01-05 * "paulissen g j l m (NL56ASNB9999999999)" "INTERNE OVERBOEKING VIA MOBIEL"
+  Liabilities:Credit-Card   1000.00 EUR
+    date: 2020-01-05
+    source_desc: "paulissen g j l m (NL56ASNB9999999999), INTERNE OVERBOEKING VIA MOBIEL"
+  Expenses:FIXME           -1000.00 EUR
+
+;; date: 2020-01-05
+;; info: {"filename": "<testdata>/0708271685_09022020_164516.940", "line": 3, "type": "text/plain"}
+
+; features: [
+;             {
+;               "amount": "-801.55 EUR",
+;               "date": "2020-01-05",
+;               "key_value_pairs": {
+;                 "desc": "international card services (NL08ABNA9999999999), 000000000000000000000000000000000 0000000000000000 Betaling aan ICS 99999999999 ICS Referentie: 2020-01-05 19:47 000000000000000"
+;               },
+;               "source_account": "Liabilities:Credit-Card"
+;             }
+;           ]
+2020-01-05 * "international card services (NL08ABNA9999999999)" "000000000000000000000000000000000 0000000000000000 Betaling aan ICS 99999999999 ICS Referentie: 2020-01-05 19:47 000000000000000"
+  Liabilities:Credit-Card  -801.55 EUR
+    date: 2020-01-05
+    source_desc: "international card services (NL08ABNA9999999999), 000000000000000000000000000000000 0000000000000000 Betaling aan ICS 99999999999 ICS Referentie: 2020-01-05 19:47 000000000000000"
+  Expenses:FIXME            801.55 EUR
+
+;; date: 2020-01-25
+;; info: {"filename": "<testdata>/0708271685_09022020_164516.940", "line": 4, "type": "text/plain"}
+
+; features: [
+;             {
+;               "amount": "-1.65 EUR",
+;               "date": "2020-01-25",
+;               "key_value_pairs": {
+;                 "desc": "Kosten gebruik betaalrekening inclusief 1 betaalpas"
+;               },
+;               "source_account": "Liabilities:Credit-Card"
+;             }
+;           ]
+2020-01-25 * "Kosten gebruik betaalrekening inclusief 1 betaalpas"
+  Liabilities:Credit-Card  -1.65 EUR
+    date: 2020-01-25
+    source_desc: "Kosten gebruik betaalrekening inclusief 1 betaalpas"
+  Expenses:FIXME            1.65 EUR
+
+;; date: 2020-01-29
+;; info: {"filename": "<testdata>/0708271685_09022020_164516.940", "line": 5, "type": "text/plain"}
+
+; features: [
+;             {
+;               "amount": "828.72 EUR",
+;               "date": "2020-01-29",
+;               "key_value_pairs": {
+;                 "desc": "transfer solutions bv (NL25INGB9999999999), 2020-01-28T14:32:46-000000000000089-NL25INGB9999999999-Transfer Solutions BV-DIVIDEND 28/01/2020"
+;               },
+;               "source_account": "Liabilities:Credit-Card"
+;             }
+;           ]
+2020-01-29 * "transfer solutions bv (NL25INGB9999999999)" "2020-01-28T14:32:46-000000000000089-NL25INGB9999999999-Transfer Solutions BV-DIVIDEND 28/01/2020"
+  Liabilities:Credit-Card   828.72 EUR
+    date: 2020-01-29
+    source_desc: "transfer solutions bv (NL25INGB9999999999), 2020-01-28T14:32:46-000000000000089-NL25INGB9999999999-Transfer Solutions BV-DIVIDEND 28/01/2020"
+  Expenses:FIXME           -828.72 EUR
+
+;; date: 2020-01-29
+;; info: {"filename": "<testdata>/0708271685_09022020_164516.940", "line": 6, "type": "text/plain"}
+
+; features: [
+;             {
+;               "amount": "-1000.00 EUR",
+;               "date": "2020-01-29",
+;               "key_value_pairs": {
+;                 "desc": "international card services (NL08ABNA9999999999), 000000000000000000000000000000000 0000000000000000 Betaling aan ICS 99999999999 ICS Referentie: 2020-01-29 18:36 000000000000000"
+;               },
+;               "source_account": "Liabilities:Credit-Card"
+;             }
+;           ]
+2020-01-29 * "international card services (NL08ABNA9999999999)" "000000000000000000000000000000000 0000000000000000 Betaling aan ICS 99999999999 ICS Referentie: 2020-01-29 18:36 000000000000000"
+  Liabilities:Credit-Card  -1000.00 EUR
+    date: 2020-01-29
+    source_desc: "international card services (NL08ABNA9999999999), 000000000000000000000000000000000 0000000000000000 Betaling aan ICS 99999999999 ICS Referentie: 2020-01-29 18:36 000000000000000"
+  Expenses:FIXME            1000.00 EUR
+
+;; date: 2020-01-31
+;; info: {"filename": "<testdata>/0708271685_09022020_164516.940", "line": 7, "type": "text/plain"}
+
+; features: [
+;             {
+;               "amount": "1000.18 EUR",
+;               "date": "2020-01-31",
+;               "key_value_pairs": {
+;                 "desc": "paulissen g j l m (NL56ASNB9999999999), INTERNE OVERBOEKING VIA MOBIEL"
+;               },
+;               "source_account": "Liabilities:Credit-Card"
+;             }
+;           ]
+2020-01-31 * "paulissen g j l m (NL56ASNB9999999999)" "INTERNE OVERBOEKING VIA MOBIEL"
+  Liabilities:Credit-Card   1000.18 EUR
+    date: 2020-01-31
+    source_desc: "paulissen g j l m (NL56ASNB9999999999), INTERNE OVERBOEKING VIA MOBIEL"
+  Expenses:FIXME           -1000.18 EUR
+
+;; date: 2020-01-31
+;; info: {"filename": "<testdata>/0708271685_09022020_164516.940", "line": 8, "type": "text/plain"}
+
+; features: [
+;             {
+;               "amount": "-903.76 EUR",
+;               "date": "2020-01-31",
+;               "key_value_pairs": {
+;                 "desc": "international card services (NL08ABNA9999999999), 000000000000000000000000000000000 0000000000000000 Betaling aan ICS 99999999999 ICS Referentie: 2020-01-31 21:27 000000000000000"
+;               },
+;               "source_account": "Liabilities:Credit-Card"
+;             }
+;           ]
+2020-01-31 * "international card services (NL08ABNA9999999999)" "000000000000000000000000000000000 0000000000000000 Betaling aan ICS 99999999999 ICS Referentie: 2020-01-31 21:27 000000000000000"
+  Liabilities:Credit-Card  -903.76 EUR
+    date: 2020-01-31
+    source_desc: "international card services (NL08ABNA9999999999), 000000000000000000000000000000000 0000000000000000 Betaling aan ICS 99999999999 ICS Referentie: 2020-01-31 21:27 000000000000000"
+  Expenses:FIXME            903.76 EUR
+
+;; date: 2020-02-01
+;; info: {"filename": "<testdata>/0708271685_09022020_164516.940", "line": 0, "type": "text/plain"}
+
+2020-02-01 balance Liabilities:Credit-Card                         501.23 EUR

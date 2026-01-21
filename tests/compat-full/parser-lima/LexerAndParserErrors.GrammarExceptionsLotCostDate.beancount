@@ -1,0 +1,5 @@
+2000-01-01 open Assets:Before
+2001-02-02 *
+  Assets:Before   10.00 HOOL {100.00 USD}
+  Assets:After   -100.00 USD
+2010-01-01 close Assets:Before

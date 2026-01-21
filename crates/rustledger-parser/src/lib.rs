@@ -52,6 +52,27 @@ pub struct ParseResult {
     pub plugins: Vec<(String, Option<String>, Span)>,
     /// Parse errors encountered.
     pub errors: Vec<ParseError>,
+    /// Deprecation warnings.
+    pub warnings: Vec<ParseWarning>,
+}
+
+/// A warning from the parser (non-fatal).
+#[derive(Debug, Clone)]
+pub struct ParseWarning {
+    /// The warning message.
+    pub message: String,
+    /// Location in source.
+    pub span: Span,
+}
+
+impl ParseWarning {
+    /// Create a new warning.
+    pub fn new(message: impl Into<String>, span: Span) -> Self {
+        Self {
+            message: message.into(),
+            span,
+        }
+    }
 }
 
 /// Parse beancount source code.

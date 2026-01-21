@@ -1,0 +1,78 @@
+;----------------------------------------------------------------------
+; ledger2beancount conversion notes:
+;
+;   - Virtual posting in parentheses ignored
+;----------------------------------------------------------------------
+
+; SPDX-FileCopyrightText: © 2018 Martin Michlmayr <tbm@cyrius.com>
+;
+; SPDX-License-Identifier: GPL-3.0-or-later
+
+1970-01-01 open Assets:Cash
+1970-01-01 open Assets:Test
+1970-01-01 open Assets:Wallet
+1970-01-01 open Equity:Opening-Balance
+1970-01-01 open Expenses:Food
+1970-01-01 open Expenses:Virtual
+
+1970-01-01 commodity EUR
+
+2018-03-17 * "Virtual posting with parentheses"
+  Assets:Test                        10.00 EUR
+  Equity:Opening-Balance            -10.00 EUR
+
+2018-03-17 * "Virtual posting with brackets"
+  Assets:Test                        10.00 EUR
+  Equity:Opening-Balance            -10.00 EUR
+  Assets:Wallet                       7.00 EUR
+  Equity:Opening-Balance             -7.00 EUR
+
+2020-05-29 * "Metadata on virtual posting"
+  Assets:Cash                       -10.00 EUR
+  Expenses:Food
+    foo: "bar"
+  Expenses:Virtual                    2.00 EUR
+    foo: "baz"
+
+2020-05-29 * "Metadata on virtual posting"
+  Assets:Cash                       -10.00 EUR
+  Expenses:Food
+    foo: "bar"
+  Expenses:Virtual                     2.00 EUR
+    ; Some comment
+    foo: "baz"
+
+2020-05-29 * "Metadata on virtual posting"
+  Assets:Cash                       -10.00 EUR
+  Expenses:Food
+    foo: "bar"
+  Expenses:Virtual                     2.00 EUR
+    foo: "baz"
+    ; Some comment
+
+2020-05-30 * "Metadata on virtual posting"
+  Expenses:Virtual                    2.00 EUR
+    foo: "baz"
+  Expenses:Food
+    foo: "bar"
+  Assets:Cash                       -10.00 EUR
+    xyz: "abc"
+
+2020-05-30 * "Metadata on virtual posting"
+  Expenses:Virtual                     2.00 EUR
+    ; Some comment
+    foo: "baz"
+  Expenses:Food
+    foo: "bar"
+  Assets:Cash                       -10.00 EUR
+    xyz: "abc"
+
+2020-05-30 * "Metadata on virtual posting"
+  Expenses:Virtual                     2.00 EUR
+    foo: "baz"
+    ; Some comment
+  Expenses:Food
+    foo: "bar"
+  Assets:Cash                       -10.00 EUR
+    xyz: "abc"
+

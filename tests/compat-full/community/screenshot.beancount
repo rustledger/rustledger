@@ -1,0 +1,51 @@
+; Airline miles
+; ----------------------------------------------------------------------------------------------------------------------------------------------------
+
+option "title" "Miles and Rewards"
+option "operating_currency" "USD"
+option "render_commas" "True"
+plugin "beancount.plugins.auto_accounts"
+
+2010-01-01 custom "fava-extension" "plugins.fava.miler.fava_miler" "{
+  'accounts_pattern' : '^Assets.*'
+}"
+
+
+; Airline miles
+; ----------------------------------------------------------------------------------------------------------------------------------------------------
+
+1990-01-01 commodity MILESAIRALDAR
+    expiry-months: 18
+    points-value: 0.016 USD
+
+1990-01-01 commodity MILESAIRBAT
+    expiry-months: 24
+    points-value: 0.015 USD
+
+1990-01-01 commodity MILESAIRCATALU
+    expiry-months: 18
+    points-value: 0.007 USD
+
+
+2020-01-01 * "Credit card bill"
+   Assets:Airline-Miles:AirAldarra:JohnDoe 200 MILESAIRALDAR
+   Income:Misc
+
+
+2019-01-01 * "Shopping"
+   Assets:Airline-Miles:AirBat:JohnDoe 200 MILESAIRBAT
+   Income:Misc
+
+
+2019-12-01 * "Shopping"
+   Assets:Airline-Miles:AirBat:JaneDoe 1700 MILESAIRBAT
+   Income:Misc
+
+
+2019-08-15 * "Shopping"
+   Assets:Airline-Miles:AirCatalu:JaneDoe 500 MILESAIRCATALU
+   Income:Misc
+
+2019-08-15 * "Shopping"
+   Assets:Airline-Miles:AirCatalu:JaneDoe 500 MILESAIRCATALU
+   Income:Misc

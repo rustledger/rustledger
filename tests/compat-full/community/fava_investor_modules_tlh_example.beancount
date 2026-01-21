@@ -1,0 +1,59 @@
+option "title" "Test"
+option "operating_currency" "USD"
+option "render_commas" "True"
+
+2010-01-01 open Assets:Investments:Taxable:XTrade
+2010-01-01 open Assets:Investments:Tax-Deferred:YTrade
+2010-01-01 open Assets:Bank
+
+2010-01-01 custom "fava-extension" "fava_investor" "{
+  'tlh' : {
+     'account_field': 'account',
+     'accounts_pattern': 'Assets:Investments:Taxable',
+     'loss_threshold': 50,
+     'wash_pattern': 'Assets:Investments',
+  }
+}"
+
+2005-01-01 commodity BNCT
+  tlh_alternates: "LEDG"
+
+2005-01-01 commodity COFE
+  tlh_alternates: "TEA"
+
+2005-01-01 commodity DNRCNT
+  tlh_alternates: "ORNG"
+
+2021-04-01 * "Buy stock"
+ Assets:Investments:Taxable:XTrade 700 BNCT {200 USD}
+ Assets:Bank
+
+2022-04-02 * "Buy stock"
+ Assets:Investments:Taxable:XTrade 20 COFE {100 USD}
+ Assets:Bank
+
+2022-04-03 * "Buy stock"
+ Assets:Investments:Taxable:XTrade 20 UPUP {10 USD}
+ Assets:Bank
+
+2022-04-10 * "Buy stock"
+ Assets:Investments:Taxable:XTrade 20 DNRCNT {10 USD}
+ Assets:Bank
+
+2022-04-20 * "Buy stock"
+ Assets:Investments:Tax-Deferred:YTrade 20 DNRCNT {10 USD}
+ Assets:Bank
+
+2022-04-20 * "Buy stock"
+ Assets:Investments:Taxable:XTrade 1 BNCT {195 USD}
+ Assets:Bank
+
+; 2022-04-21 * "Sell stock"
+;  Assets:Investments:Taxable:XTrade -2 BNCT {200 USD}
+;  Assets:Bank
+
+2022-03-08 price BNCT   150   USD
+2022-03-08 price COFE    95   USD
+2022-03-08 price UPUP    25   USD
+2022-03-08 price DNRCNT   5   USD
+

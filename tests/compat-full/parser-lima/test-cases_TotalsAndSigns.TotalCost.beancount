@@ -1,0 +1,14 @@
+; ANOMALY: we use newstyle # for total, since
+; {{ }} is unsupported in Lima parser
+
+2013-05-18 * ""
+  Assets:Investments:MSFT      10 MSFT {# 2,000 USD}
+  Assets:Investments:Cash  -20000 USD
+
+2013-05-18 * ""
+  Assets:Investments:MSFT      10 MSFT {# 2000 USD, 2014-02-25}
+  Assets:Investments:Cash  -20000 USD
+
+2013-06-01 * ""
+  Assets:Investments:MSFT      -10 MSFT {# 2,000 USD}
+  Assets:Investments:Cash    20000 USD

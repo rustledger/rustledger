@@ -1,0 +1,64 @@
+; SPDX-FileCopyrightText: © 2021 Martin Michlmayr <tbm@cyrius.com>
+;
+; SPDX-License-Identifier: GPL-3.0-or-later
+
+; This is an .hledger file because the +amount syntax is currently
+; not supported by ledger (https://github.com/ledger/ledger/issues/1990)
+
+1970-01-01 open Assets:Test
+
+1970-01-01 commodity AUD
+1970-01-01 commodity USD
+
+2021-08-29 * "Amount with plus sign"
+  Assets:Test                          +10.00 USD
+  Assets:Test                          -10.00 USD
+
+2021-08-29 * "Amount with plus sign"
+  Assets:Test                          +10.00 USD
+  Assets:Test                          -10.00 USD
+
+2021-08-29 * "Amount with plus sign"
+  Assets:Test                       +10.00 AUD
+  Assets:Test                       -10.00 AUD
+
+2021-08-29 * "Amount with plus sign"
+  Assets:Test                        +10.00 USD
+  Assets:Test                        -10.00 USD
+
+2021-08-29 * "Amount with plus sign"
+  Assets:Test                         +10.00 USD
+  Assets:Test                         -10.00 USD
+
+2021-08-29 * "Amount with plus sign"
+  Assets:Test                         +10.00 USD
+  Assets:Test                          -10.00 USD
+
+2021-08-29 * "Amount with plus sign"
+  Assets:Test                        +10.00 USD
+  Assets:Test                        -10.00 USD
+
+2021-08-29 * "Amount with plus sign"
+  Assets:Test                      +10.00 AUD
+  Assets:Test                      -10.00 AUD
+
+2021-08-29 * "Amount with plus sign"
+  Assets:Test                           +1.00 USD
+  Assets:Test                           -1.00 USD
+
+2021-08-29 * "Amount with plus sign"
+  Assets:Test                           +1.00 USD
+  Assets:Test                           -1.00 USD
+
+2021-08-29 * "Amount with plus sign"
+  Assets:Test                       +1.00 AUD
+  Assets:Test                       -1.00 AUD
+
+2021-08-29 * "Amount with plus sign"
+  Assets:Test                           +0.10 USD
+  Assets:Test                           -0.10 USD
+
+2021-08-29 * "Amount with plus sign"
+  Assets:Test                           +0.10 USD
+  Assets:Test                           -0.10 USD
+

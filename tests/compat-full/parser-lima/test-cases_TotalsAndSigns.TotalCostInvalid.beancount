@@ -1,0 +1,4 @@
+; ANOMALY: {{ }} is unsupported in Lima parser
+2013-05-18 * ""
+  Assets:Investments:MSFT      10 MSFT {100 # 2,000 USD}
+  Assets:Investments:Cash  -20000 USD

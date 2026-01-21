@@ -1,0 +1,9 @@
+2023-05-30 * "The Craic Irish Tavern ;"
+  Assets:Bank:Current                           -22.50Y NZD
+  Expenses:Entertainment:Drinks-and-snacks
+
+include "../error-include-cycle.beancount"
+
+2023-05-30 * "New World ;"
+  Assets:Bank:Current                           -4.90 NZD
+  Expenses:Groceries

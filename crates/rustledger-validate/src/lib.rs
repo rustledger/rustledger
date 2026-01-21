@@ -49,8 +49,8 @@ use chrono::{Local, NaiveDate};
 use rayon::prelude::*;
 use rust_decimal::Decimal;
 use rustledger_core::{
-    Amount, Balance, BookingMethod, Close, Directive, Document, InternedStr, Inventory, Open, Pad,
-    Position, Posting, Transaction,
+    Amount, Balance, BookingMethod, Close, Directive, Document, InternedStr, Inventory, Note, Open,
+    Pad, Position, Posting, Transaction,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -275,7 +275,7 @@ struct AccountState {
 }
 
 /// Validation options.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ValidationOptions {
     /// Whether to require commodity declarations.
     pub require_commodities: bool,
@@ -285,6 +285,36 @@ pub struct ValidationOptions {
     pub warn_future_dates: bool,
     /// Base directory for resolving relative document paths.
     pub document_base: Option<std::path::PathBuf>,
+    /// Valid account type prefixes (from options like `name_assets`, `name_liabilities`, etc.).
+    /// Defaults to `["Assets", "Liabilities", "Equity", "Income", "Expenses"]`.
+    pub account_types: Vec<String>,
+    /// Whether to infer tolerance from cost (matches Python beancount's `infer_tolerance_from_cost`).
+    /// When true, tolerance for cost-based postings is calculated as: `units_quantum * cost_per_unit`.
+    pub infer_tolerance_from_cost: bool,
+    /// Tolerance multiplier (matches Python beancount's `inferred_tolerance_multiplier`).
+    /// Default is 0.5.
+    pub tolerance_multiplier: Decimal,
+}
+
+impl Default for ValidationOptions {
+    fn default() -> Self {
+        Self {
+            require_commodities: false,
+            check_documents: true, // Python beancount validates document files by default
+            warn_future_dates: false,
+            document_base: None,
+            account_types: vec![
+                "Assets".to_string(),
+                "Liabilities".to_string(),
+                "Equity".to_string(),
+                "Income".to_string(),
+                "Expenses".to_string(),
+            ],
+            // Match Python beancount defaults
+            infer_tolerance_from_cost: true,
+            tolerance_multiplier: Decimal::new(5, 1), // 0.5
+        }
+    }
 }
 
 /// Pending pad directive info.
@@ -332,17 +362,17 @@ impl LedgerState {
     }
 
     /// Set whether to require commodity declarations.
-    pub fn set_require_commodities(&mut self, require: bool) {
+    pub const fn set_require_commodities(&mut self, require: bool) {
         self.options.require_commodities = require;
     }
 
     /// Set whether to check document files.
-    pub fn set_check_documents(&mut self, check: bool) {
+    pub const fn set_check_documents(&mut self, check: bool) {
         self.options.check_documents = check;
     }
 
     /// Set whether to warn about future dates.
-    pub fn set_warn_future_dates(&mut self, warn: bool) {
+    pub const fn set_warn_future_dates(&mut self, warn: bool) {
         self.options.warn_future_dates = warn;
     }
 
@@ -437,21 +467,27 @@ pub fn validate_with_options(
             Directive::Document(doc) => {
                 validate_document(&state, doc, &mut errors);
             }
+            Directive::Note(note) => {
+                validate_note(&state, note, &mut errors);
+            }
             _ => {}
         }
     }
 
     // Check for unused pads (E2003)
-    for (account, pads) in &state.pending_pads {
+    for (target_account, pads) in &state.pending_pads {
         for pad in pads {
             if !pad.used {
                 errors.push(
                     ValidationError::new(
                         ErrorCode::PadWithoutBalance,
-                        format!("Pad directive for {account} has no subsequent balance assertion"),
+                        "Unused Pad entry".to_string(),
                         pad.date,
                     )
-                    .with_context(format!("source account: {}", pad.source_account)),
+                    .with_context(format!(
+                        "   {} pad {} {}",
+                        pad.date, target_account, pad.source_account
+                    )),
                 );
             }
         }
@@ -460,12 +496,13 @@ pub fn validate_with_options(
     errors
 }
 
-/// Valid account root types in beancount.
-const VALID_ACCOUNT_ROOTS: &[&str] = &["Assets", "Liabilities", "Equity", "Income", "Expenses"];
-
 /// Validate an account name according to beancount rules.
 /// Returns None if valid, or Some(reason) if invalid.
-fn validate_account_name(account: &str) -> Option<String> {
+///
+/// The `account_types` parameter specifies valid account type prefixes (from options
+/// like `name_assets`, `name_liabilities`, etc.). Defaults are: Assets, Liabilities,
+/// Equity, Income, Expenses.
+fn validate_account_name(account: &str, account_types: &[String]) -> Option<String> {
     if account.is_empty() {
         return Some("account name is empty".to_string());
     }
@@ -477,10 +514,10 @@ fn validate_account_name(account: &str) -> Option<String> {
 
     // Check root account type
     let root = parts[0];
-    if !VALID_ACCOUNT_ROOTS.contains(&root) {
+    if !account_types.iter().any(|t| t == root) {
         return Some(format!(
             "account must start with one of: {}",
-            VALID_ACCOUNT_ROOTS.join(", ")
+            account_types.join(", ")
         ));
     }
 
@@ -490,22 +527,27 @@ fn validate_account_name(account: &str) -> Option<String> {
             return Some(format!("component {} is empty", i + 1));
         }
 
-        // First character must be uppercase letter or digit
+        // First character must be uppercase letter, non-ASCII letter (like CJK), or digit
+        // CJK characters don't have case but are valid in account names.
         // Safety: we just checked part.is_empty() above, so this is guaranteed to succeed
         let Some(first_char) = part.chars().next() else {
             // This branch is unreachable due to the is_empty check above,
             // but we handle it defensively to avoid unwrap
             return Some(format!("component {} is empty", i + 1));
         };
-        if !first_char.is_ascii_uppercase() && !first_char.is_ascii_digit() {
+        // Accept: uppercase letters, non-ASCII alphabetic (CJK, etc.), or digits
+        let is_valid_start = first_char.is_uppercase()
+            || first_char.is_ascii_digit()
+            || (first_char.is_alphabetic() && !first_char.is_ascii());
+        if !is_valid_start {
             return Some(format!(
                 "component '{part}' must start with uppercase letter or digit"
             ));
         }
 
-        // Remaining characters: letters, numbers, dashes
+        // Remaining characters: letters (including Unicode), numbers, dashes
         for c in part.chars().skip(1) {
-            if !c.is_ascii_alphanumeric() && c != '-' {
+            if !c.is_alphanumeric() && c != '-' {
                 return Some(format!(
                     "component '{part}' contains invalid character '{c}'"
                 ));
@@ -518,7 +560,7 @@ fn validate_account_name(account: &str) -> Option<String> {
 
 fn validate_open(state: &mut LedgerState, open: &Open, errors: &mut Vec<ValidationError>) {
     // Validate account name format
-    if let Some(reason) = validate_account_name(&open.account) {
+    if let Some(reason) = validate_account_name(&open.account, &state.options.account_types) {
         errors.push(
             ValidationError::new(
                 ErrorCode::InvalidAccountName,
@@ -622,31 +664,31 @@ fn validate_transaction(
     validate_posting_accounts(state, txn, errors);
 
     // Check transaction balance
-    validate_transaction_balance(txn, errors);
+    validate_transaction_balance(txn, &state.options, errors);
 
     // Update inventories with booking validation
     update_inventories(state, txn, errors);
 }
 
-/// Validate transaction structure (must have postings).
-/// Returns false if validation should stop (no postings).
+/// Validate transaction structure.
+/// Returns false if validation should stop (no postings to validate).
+///
+/// Note: Python beancount allows transactions with zero postings (metadata-only transactions).
+/// Single-posting transactions are allowed structurally but will fail balance checking.
 fn validate_transaction_structure(txn: &Transaction, errors: &mut Vec<ValidationError>) -> bool {
     if txn.postings.is_empty() {
-        errors.push(ValidationError::new(
-            ErrorCode::NoPostings,
-            "Transaction must have at least one posting".to_string(),
-            txn.date,
-        ));
+        // Python beancount allows transactions with no postings (metadata-only).
+        // No error, but skip further validation since there's nothing to validate.
         return false;
     }
 
+    // Warn about single posting (structurally valid but will fail balance check)
     if txn.postings.len() == 1 {
         errors.push(ValidationError::new(
             ErrorCode::SinglePosting,
             "Transaction has only one posting".to_string(),
             txn.date,
         ));
-        // Continue validation - this is just a warning
     }
 
     true
@@ -742,11 +784,45 @@ fn validate_posting_currency(
 }
 
 /// Validate that the transaction balances within tolerance.
-fn validate_transaction_balance(txn: &Transaction, errors: &mut Vec<ValidationError>) {
+///
+/// Tolerance is calculated per-currency based on:
+/// 1. The quantum (precision) of amounts in postings
+/// 2. Cost-based tolerance when `infer_tolerance_from_cost` is enabled:
+///    `tolerance = units_quantum * cost_per_unit * tolerance_multiplier`
+fn validate_transaction_balance(
+    txn: &Transaction,
+    options: &ValidationOptions,
+    errors: &mut Vec<ValidationError>,
+) {
+    // Skip balance checking if there are any empty cost specs (e.g., `{}`).
+    // Empty cost specs will have their cost filled in by lot matching during booking,
+    // and if there's no matching lot, that error will be reported separately.
+    // This matches Python beancount behavior where booking runs before balance checking.
+    let has_empty_cost_spec = txn.postings.iter().any(|p| {
+        if let Some(cost) = &p.cost {
+            // Empty cost spec: no per-unit cost, no total cost
+            cost.number_per.is_none() && cost.number_total.is_none()
+        } else {
+            false
+        }
+    });
+    if has_empty_cost_spec {
+        return; // Lot matching will validate this transaction
+    }
+
     let residuals = rustledger_booking::calculate_residual(txn);
+
+    // Calculate per-currency tolerance based on postings
+    let tolerances = calculate_tolerances(txn, options);
+
     for (currency, residual) in residuals {
-        // Use a default tolerance of 0.005 for now
-        if residual.abs() > Decimal::new(5, 3) {
+        // Get the tolerance for this currency, defaulting to 0.005
+        let tolerance = tolerances
+            .get(currency.as_str())
+            .copied()
+            .unwrap_or_else(|| Decimal::new(5, 3));
+
+        if residual.abs() > tolerance {
             errors.push(ValidationError::new(
                 ErrorCode::TransactionUnbalanced,
                 format!("Transaction does not balance: residual {residual} {currency}"),
@@ -754,6 +830,71 @@ fn validate_transaction_balance(txn: &Transaction, errors: &mut Vec<ValidationEr
             ));
         }
     }
+}
+
+/// Calculate the quantum (smallest unit) of a decimal number based on its precision.
+/// For example: 10.436 has quantum 0.001, 100.00 has quantum 0.01
+fn decimal_quantum(value: Decimal) -> Decimal {
+    let scale = value.scale();
+    if scale == 0 {
+        Decimal::ONE
+    } else {
+        Decimal::new(1, scale)
+    }
+}
+
+/// Calculate per-currency tolerances for a transaction.
+///
+/// When `infer_tolerance_from_cost` is enabled, for each posting with a cost:
+///   `tolerance = units_quantum * cost_per_unit * tolerance_multiplier`
+///
+/// The tolerance for each cost currency is the maximum of all such values
+/// computed from postings with costs in that currency.
+fn calculate_tolerances(
+    txn: &Transaction,
+    options: &ValidationOptions,
+) -> HashMap<String, Decimal> {
+    let mut tolerances: HashMap<String, Decimal> = HashMap::new();
+
+    // Default tolerance based on quantum of amounts in postings
+    for posting in &txn.postings {
+        if let Some(units) = posting.amount() {
+            let quantum = decimal_quantum(units.number);
+            // Use half the quantum as base tolerance (like Python beancount)
+            let base_tolerance = quantum * options.tolerance_multiplier;
+
+            tolerances
+                .entry(units.currency.to_string())
+                .and_modify(|t| *t = (*t).max(base_tolerance))
+                .or_insert(base_tolerance);
+        }
+    }
+
+    // Calculate cost-inferred tolerance if enabled
+    if options.infer_tolerance_from_cost {
+        for posting in &txn.postings {
+            if let (Some(units), Some(cost_spec)) = (posting.amount(), &posting.cost) {
+                // Get the cost per unit
+                if let Some(cost_per_unit) = cost_spec.number_per {
+                    // Get the cost currency
+                    if let Some(cost_currency) = &cost_spec.currency {
+                        // Calculate: units_quantum * cost_per_unit * multiplier
+                        let units_quantum = decimal_quantum(units.number);
+                        let cost_tolerance =
+                            units_quantum * cost_per_unit * options.tolerance_multiplier;
+
+                        // Update tolerance for the cost currency (take max)
+                        tolerances
+                            .entry(cost_currency.to_string())
+                            .and_modify(|t| *t = (*t).max(cost_tolerance))
+                            .or_insert(cost_tolerance);
+                    }
+                }
+            }
+        }
+    }
+
+    tolerances
 }
 
 /// Update inventories with booking validation for each posting.
@@ -815,6 +956,57 @@ fn process_inventory_reduction(
             );
         }
         Err(rustledger_core::BookingError::NoMatchingLot { currency, .. }) => {
+            // In STRICT mode, when no lot matches AND the inventory has no POSITIVE
+            // positions for this commodity, Python beancount allows "sell to open"
+            // by creating a new lot with negative units. This is common in options trading.
+            // However, if there ARE positive lots that just don't match the cost spec,
+            // that's an error (you're trying to sell from a lot that doesn't exist).
+            // We only check for positive lots because negative lots are short positions
+            // from previous sell-to-open operations.
+            let has_positive_lots = inv
+                .positions()
+                .iter()
+                .any(|p| p.units.currency == units.currency && p.units.number > Decimal::ZERO);
+
+            if booking_method == BookingMethod::Strict && !has_positive_lots {
+                if let Some(cost_spec) = &posting.cost {
+                    // Need cost per unit (or total) and currency to create a new lot
+                    let cost_number = cost_spec
+                        .number_per
+                        .or_else(|| cost_spec.number_total.map(|t| t / units.number.abs()));
+
+                    // Infer currency from cost spec, price annotation, or fall back
+                    let cost_currency = cost_spec.currency.clone().or_else(|| {
+                        // Try to get currency from price annotation
+                        posting.price.as_ref().and_then(|p| match p {
+                            rustledger_core::PriceAnnotation::Unit(a)
+                            | rustledger_core::PriceAnnotation::Total(a) => {
+                                Some(a.currency.clone())
+                            }
+                            rustledger_core::PriceAnnotation::UnitIncomplete(inc)
+                            | rustledger_core::PriceAnnotation::TotalIncomplete(inc) => {
+                                inc.as_amount().map(|a| a.currency.clone())
+                            }
+                            _ => None,
+                        })
+                    });
+
+                    if let (Some(number), Some(curr)) = (cost_number, cost_currency) {
+                        // Create a new position with negative units (sell to open)
+                        let cost = rustledger_core::Cost::new(number, curr)
+                            .with_date(cost_spec.date.unwrap_or(txn.date));
+                        let cost = if let Some(label) = &cost_spec.label {
+                            cost.with_label(label.clone())
+                        } else {
+                            cost
+                        };
+                        let position = rustledger_core::Position::with_cost(units.clone(), cost);
+                        inv.add(position);
+                        return; // Successfully created sell-to-open position
+                    }
+                }
+            }
+            // Couldn't create sell-to-open (or has existing lots that don't match), report error
             errors.push(
                 ValidationError::new(
                     ErrorCode::NoMatchingLot,
@@ -939,8 +1131,15 @@ fn validate_balance(state: &mut LedgerState, bal: &Balance, errors: &mut Vec<Val
         // Use the most recent pad
         if let Some(pending_pad) = pending_pads.last_mut() {
             // Apply padding: calculate difference and add to both accounts
-            if let Some(inv) = state.inventories.get(&bal.account) {
-                let actual = inv.units(&bal.amount.currency);
+            // Balance assertions include sub-accounts, so sum them all up
+            let mut actual = Decimal::ZERO;
+            let account_prefix = format!("{}:", bal.account);
+            for (account, inv) in &state.inventories {
+                if account == &bal.account || account.starts_with(&account_prefix) {
+                    actual += inv.units(&bal.amount.currency);
+                }
+            }
+            {
                 let expected = bal.amount.number;
                 let difference = expected - actual;
 
@@ -961,18 +1160,29 @@ fn validate_balance(state: &mut LedgerState, bal: &Balance, errors: &mut Vec<Val
                             &bal.amount.currency,
                         )));
                     }
+
+                    // Mark pad as used only if padding was actually needed
+                    pending_pad.used = true;
                 }
             }
-            // Mark pad as used
-            pending_pad.used = true;
         }
         // After padding, the balance should match (no error needed)
         return;
     }
 
     // Get inventory and check balance (no padding case)
-    if let Some(inv) = state.inventories.get(&bal.account) {
-        let actual = inv.units(&bal.amount.currency);
+    // In beancount, balance assertions include sub-accounts
+    // e.g., balance Assets:Checking includes Assets:Checking:Sub1, Assets:Checking:Sub2, etc.
+    let mut actual = Decimal::ZERO;
+    let account_prefix = format!("{}:", bal.account);
+    for (account, inv) in &state.inventories {
+        // Include exact match or sub-accounts (account:*)
+        if account == &bal.account || account.starts_with(&account_prefix) {
+            actual += inv.units(&bal.amount.currency);
+        }
+    }
+
+    if actual != Decimal::ZERO || state.inventories.contains_key(&bal.account) {
         let expected = bal.amount.number;
         let difference = (actual - expected).abs();
 
@@ -1017,12 +1227,26 @@ fn validate_balance(state: &mut LedgerState, bal: &Balance, errors: &mut Vec<Val
     }
 }
 
+/// Validate a Note directive.
+///
+/// Checks that the referenced account has been opened.
+fn validate_note(state: &LedgerState, note: &Note, errors: &mut Vec<ValidationError>) {
+    // Check account exists
+    if !state.accounts.contains_key(&note.account) {
+        errors.push(ValidationError::new(
+            ErrorCode::AccountNotOpen,
+            format!("Invalid reference to unknown account '{}'", note.account),
+            note.date,
+        ));
+    }
+}
+
 fn validate_document(state: &LedgerState, doc: &Document, errors: &mut Vec<ValidationError>) {
     // Check account exists
     if !state.accounts.contains_key(&doc.account) {
         errors.push(ValidationError::new(
             ErrorCode::AccountNotOpen,
-            format!("Account {} was never opened", doc.account),
+            format!("Invalid reference to unknown account '{}'", doc.account),
             doc.date,
         ));
     }
@@ -1276,22 +1500,22 @@ mod tests {
             }),
         ];
 
-        // Without check_documents option, no error
+        // With default options (check_documents: true), should error
         let errors = validate(&directives);
         assert!(
-            !errors.iter().any(|e| e.code == ErrorCode::DocumentNotFound),
-            "Should not check documents by default"
+            errors.iter().any(|e| e.code == ErrorCode::DocumentNotFound),
+            "Should check documents by default"
         );
 
-        // With check_documents option, should error
+        // With check_documents disabled, should not error
         let options = ValidationOptions {
-            check_documents: true,
+            check_documents: false,
             ..Default::default()
         };
         let errors = validate_with_options(&directives, options);
         assert!(
-            errors.iter().any(|e| e.code == ErrorCode::DocumentNotFound),
-            "Should report missing document when enabled"
+            !errors.iter().any(|e| e.code == ErrorCode::DocumentNotFound),
+            "Should not report missing document when disabled"
         );
     }
 
@@ -1527,7 +1751,9 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_ambiguous_lot_match() {
+    fn test_validate_multiple_lot_match_uses_fifo() {
+        // In Python beancount, when multiple lots match the same cost spec,
+        // STRICT mode falls back to FIFO order rather than erroring.
         use rustledger_core::CostSpec;
 
         let cost_spec = CostSpec::empty()
@@ -1557,9 +1783,9 @@ mod tests {
                     )
                     .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(-1500), "USD"))),
             ),
-            // Try to sell with ambiguous cost (matches both lots - price only, no date)
+            // Sell with cost spec that matches both lots - STRICT falls back to FIFO
             Directive::Transaction(
-                Transaction::new(date(2024, 6, 1), "Sell ambiguous")
+                Transaction::new(date(2024, 6, 1), "Sell using FIFO fallback")
                     .with_posting(
                         Posting::new("Assets:Stock", Amount::new(dec!(-5), "AAPL"))
                             .with_cost(cost_spec),
@@ -1569,11 +1795,21 @@ mod tests {
         ];
 
         let errors = validate(&directives);
+        // Filter out only booking errors - balance may or may not match
+        let booking_errors: Vec<_> = errors
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e.code,
+                    ErrorCode::InsufficientUnits
+                        | ErrorCode::NoMatchingLot
+                        | ErrorCode::AmbiguousLotMatch
+                )
+            })
+            .collect();
         assert!(
-            errors
-                .iter()
-                .any(|e| e.code == ErrorCode::AmbiguousLotMatch),
-            "Should error for ambiguous lot match: {errors:?}"
+            booking_errors.is_empty(),
+            "Should not have booking errors when multiple lots match (FIFO fallback): {booking_errors:?}"
         );
     }
 
@@ -1674,7 +1910,9 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_no_postings() {
+    fn test_validate_no_postings_allowed() {
+        // Python beancount allows transactions with no postings (metadata-only).
+        // We match this behavior.
         let directives = vec![
             Directive::Open(Open::new(date(2024, 1, 1), "Assets:Bank")),
             Directive::Transaction(Transaction::new(date(2024, 1, 15), "Empty")),
@@ -1682,8 +1920,8 @@ mod tests {
 
         let errors = validate(&directives);
         assert!(
-            errors.iter().any(|e| e.code == ErrorCode::NoPostings),
-            "Should error for transaction with no postings: {errors:?}"
+            !errors.iter().any(|e| e.code == ErrorCode::NoPostings),
+            "Should NOT error for transaction with no postings: {errors:?}"
         );
     }
 

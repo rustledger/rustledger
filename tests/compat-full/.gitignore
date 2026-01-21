@@ -1,0 +1,5 @@
+# Full compatibility test suite - downloaded on demand
+# Use ./scripts/fetch-compat-test-files.sh to populate
+*
+!.gitignore
+!README.md

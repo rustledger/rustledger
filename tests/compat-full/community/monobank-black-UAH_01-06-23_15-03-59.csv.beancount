@@ -1,0 +1,29 @@
+;; Account: monobank
+;; Date: 
+;; Name: 
+
+2022-04-01 * "Відсотки за березень"
+  time: "05:27:35"
+  Income:Monobank:Interest   -19.32 UAH
+  Assets:Monobank:Black:UAH   19.32 UAH
+
+2022-04-01 * "Google" ""
+  category: "Applications"
+  converted: "-10.4 EUR"
+  time: "15:46:23"
+  Assets:Monobank:Black:UAH  -431.09 UAH @ 0.024125 EUR
+
+2022-05-11 * "Виведення кешбеку 464.40₴"
+  time: "17:07:45"
+  Assets:Monobank:Receivable:Cashback  -464.40 UAH
+  Expenses:Taxes
+  Assets:Monobank:Black:UAH             373.83 UAH
+
+2023-05-12 * "Uklon" ""
+  category: "Taxi"
+  time: "17:30:36"
+  Assets:Monobank:Black:UAH            -180 UAH
+  Income:Cashback:Monobank               -9 UAH
+  Assets:Monobank:Receivable:Cashback     9 UAH
+
+2023-05-13 balance Assets:Monobank:Black:UAH                       100000 UAH

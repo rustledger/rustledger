@@ -1,0 +1,36 @@
+option "operating_currency" "USD"
+
+plugin "beancount_reds_plugins.effective_date.effective_date" "{
+ 'Expenses': {'earlier': 'Liabilities:Hold:Expenses', 'later': 'Assets:Hold:Expenses'},
+ 'Income':   {'earlier': 'Assets:Hold:Income', 'later': 'Liabilities:Hold:Income'},
+ }"
+
+2012-01-01 open Assets:Bank
+2012-01-01 open Liabilities:Mastercard
+
+2012-01-01 open Income:Employment
+2012-01-01 open Expenses:Car:Insurance
+2012-01-01 open Expenses:Taxes:Federal
+
+# realizing expenses earlier
+2014-02-01 * "Estimated taxes for 2013"
+ Liabilities:Mastercard    -2000 USD
+ Expenses:Taxes:Federal  2000 USD
+   effective_date: 2013-12-31
+
+
+# realizing expenses later, split across multiple dates
+2015-02-01 * "Car insurance: 3 months"
+ Liabilities:Mastercard    -600 USD
+ Expenses:Car:Insurance     200 USD
+   effective_date: 2015-03-01
+ Expenses:Car:Insurance     200 USD
+   effective_date: 2015-04-01
+ Expenses:Car:Insurance     200 USD
+   effective_date: 2015-05-01
+
+# realizing income earlier (eg: for tax accounting)
+2017-01-02 * "Paycheck deposit"
+   Income:Employment    -2000 USD
+   effective_date: 2016-12-31
+   Assets:Bank  2000 USD

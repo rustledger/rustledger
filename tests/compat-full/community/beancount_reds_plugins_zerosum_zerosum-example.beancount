@@ -1,0 +1,62 @@
+option "operating_currency" "USD"
+plugin "beancount_reds_plugins.zerosum.zerosum" "{
+ 'zerosum_accounts' : {
+    'Assets:Reimbursements:Workplace' : ('Assets:Reimbursements-Received:Workplace',   40),
+    'Assets:Rebates'                  : ('Assets:ZeroSum-Matched:Rebates',            180),
+    'Assets:ZeroSum:Bank-Transfers'   : ('',                                            3),
+  },
+  'account_name_replace' : ('ZeroSum', 'ZeroSum-Matched'),
+  'match_metadata': True,
+ }"
+
+2000-01-01 open Liabilities:Credit-Card         USD
+2000-01-01 open Assets:Reimbursements:Workplace USD
+2000-01-01 open Assets:Bank:Checking            USD
+2000-01-01 open Assets:Bank:Savings             USD
+2000-01-01 open Expenses:Electronics            USD
+2000-01-01 open Assets:Rebates                  USD
+2000-01-01 open Assets:ZeroSum:Bank-Transfers   USD
+
+
+
+2010-01-01 * "Office Store" "Pens and pencils"
+     Liabilities:Credit-Card            -25 USD
+     Assets:Reimbursements:Workplace
+
+
+2010-01-01 * "Office Store" "Writing pad"
+     Liabilities:Credit-Card            -7 USD
+     Assets:Reimbursements:Workplace
+
+
+2010-02-03 * "Reimbursement"
+     Assets:Bank:Checking                25 USD
+     Assets:Reimbursements:Workplace
+
+
+
+2010-01-01 * "Smartphone"
+     Liabilities:Credit-Card           -250 USD
+     Assets:Rebates                     100 USD
+     Expenses:Electronics
+
+
+2010-05-04 * "Rebate check"
+     Assets:Bank:Checking               100 USD
+     Assets:Rebates
+
+
+2010-01-01 * "Camera"
+     Liabilities:Credit-Card           -300 USD
+     Assets:Rebates                      50 USD
+     Expenses:Electronics
+
+
+2010-06-07 * "Transfer to savings"
+   Assets:Bank:Checking    -111 USD
+   Assets:ZeroSum:Bank-Transfers
+
+2010-06-07 * "Transfer from checking"
+   Assets:Bank:Savings    111 USD
+   Assets:ZeroSum:Bank-Transfers
+

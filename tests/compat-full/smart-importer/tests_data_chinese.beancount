@@ -1,0 +1,85 @@
+# INPUT
+2017-01-06 * "家乐福" "买百货"
+    Assets:US:BofA:Checking  -2.50 USD
+
+2017-01-07 * "家乐福" "百货"
+    Assets:US:BofA:Checking  -10.20 USD
+
+2017-01-10 * "北京饭店" "和兄弟外出吃饭"
+    Assets:US:BofA:Checking  -38.36 USD
+
+2017-01-10 * "北京饭店" "和马丁吃晚饭"
+    Assets:US:BofA:Checking  -35.00 USD
+
+2017-01-10 * "沃尔玛" "百货"
+    Assets:US:BofA:Checking  -53.70 USD
+
+2017-01-20 balance Assets:Foo:Bar 30 USD
+
+2017-01-10 * "Wagon 咖啡" "咖啡"
+    Assets:US:BofA:Checking  -5.00 USD
+
+# TRAINING
+2016-01-01 open Assets:US:BofA:Checking USD
+2016-01-01 open Expenses:Food:Coffee USD
+2016-01-01 open Expenses:Food:Groceries USD
+2016-01-01 open Expenses:Food:Restaurant USD
+
+2016-01-06 * "家乐福" "买杂货"
+    Assets:US:BofA:Checking  -2.50 USD
+    Expenses:Food:Groceries
+
+2016-01-07 * "星巴克" "咖啡"
+    Assets:US:BofA:Checking  -4.00 USD
+    Expenses:Food:Coffee
+
+2016-01-07 * "家乐福" "杂货"
+    Assets:US:BofA:Checking  -10.20 USD
+    Expenses:Food:Groceries
+
+2016-01-07 * "Wagon 咖啡" "咖啡"
+    Assets:US:BofA:Checking  -3.50 USD
+    Expenses:Food:Coffee
+
+2016-01-08 * "北京饭店" "和兄弟外出吃饭"
+    Assets:US:BofA:Checking  -38.36 USD
+    Expenses:Food:Restaurant
+
+2016-01-10 * "沃尔玛" "杂货"
+    Assets:US:BofA:Checking  -53.70 USD
+    Expenses:Food:Groceries
+
+2016-01-10 * "Wagon 咖啡" "咖啡"
+    Assets:US:BofA:Checking  -6.19 USD
+    Expenses:Food:Coffee
+
+2016-01-10 * "北京饭店" "和玛丽吃晚饭"
+    Assets:US:BofA:Checking  -35.00 USD
+    Expenses:Food:Restaurant
+
+# EXPECTED
+2017-01-06 * "家乐福" "买百货"
+  Assets:US:BofA:Checking  -2.50 USD
+  Expenses:Food:Groceries
+
+2017-01-07 * "家乐福" "百货"
+  Assets:US:BofA:Checking  -10.20 USD
+  Expenses:Food:Groceries
+
+2017-01-10 * "北京饭店" "和兄弟外出吃饭"
+  Assets:US:BofA:Checking   -38.36 USD
+  Expenses:Food:Restaurant
+
+2017-01-10 * "北京饭店" "和马丁吃晚饭"
+  Assets:US:BofA:Checking   -35.00 USD
+  Expenses:Food:Restaurant
+
+2017-01-10 * "沃尔玛" "百货"
+  Assets:US:BofA:Checking  -53.70 USD
+  Expenses:Food:Groceries
+
+2017-01-10 * "Wagon 咖啡" "咖啡"
+  Assets:US:BofA:Checking  -5.00 USD
+  Expenses:Food:Coffee
+
+2017-01-20 balance Assets:Foo:Bar                                  30 USD

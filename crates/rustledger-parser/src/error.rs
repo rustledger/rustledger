@@ -71,6 +71,11 @@ impl ParseError {
             ParseErrorKind::MissingCurrency => 17,
             ParseErrorKind::InvalidAccountFormat(_) => 18,
             ParseErrorKind::MissingDirective => 19,
+            ParseErrorKind::InvalidPoptag(_) => 20,
+            ParseErrorKind::UnclosedPushtag(_) => 21,
+            ParseErrorKind::InvalidPopmeta(_) => 22,
+            ParseErrorKind::UnclosedPushmeta(_) => 23,
+            ParseErrorKind::DeprecatedPipeSymbol => 24,
         }
     }
 
@@ -103,6 +108,11 @@ impl ParseError {
             ParseErrorKind::MissingCurrency => "expected currency",
             ParseErrorKind::InvalidAccountFormat(_) => "invalid account format",
             ParseErrorKind::MissingDirective => "expected directive",
+            ParseErrorKind::InvalidPoptag(_) => "invalid poptag",
+            ParseErrorKind::UnclosedPushtag(_) => "unclosed pushtag",
+            ParseErrorKind::InvalidPopmeta(_) => "invalid popmeta",
+            ParseErrorKind::UnclosedPushmeta(_) => "unclosed pushmeta",
+            ParseErrorKind::DeprecatedPipeSymbol => "deprecated pipe symbol",
         }
     }
 }
@@ -160,6 +170,16 @@ pub enum ParseErrorKind {
     InvalidAccountFormat(String),
     /// Missing directive after date.
     MissingDirective,
+    /// Poptag for a tag that was never pushed.
+    InvalidPoptag(String),
+    /// Pushtag that was never popped (unclosed).
+    UnclosedPushtag(String),
+    /// Popmeta for a key that was never pushed.
+    InvalidPopmeta(String),
+    /// Pushmeta that was never popped (unclosed).
+    UnclosedPushmeta(String),
+    /// Deprecated pipe symbol in transaction.
+    DeprecatedPipeSymbol,
 }
 
 impl fmt::Display for ParseErrorKind {
@@ -186,6 +206,21 @@ impl fmt::Display for ParseErrorKind {
                 write!(f, "invalid account '{s}': must contain ':'")
             }
             Self::MissingDirective => write!(f, "expected directive after date"),
+            Self::InvalidPoptag(tag) => {
+                write!(f, "poptag attempted on tag '{tag}' which was never pushed")
+            }
+            Self::UnclosedPushtag(tag) => {
+                write!(f, "pushtag '{tag}' was never popped")
+            }
+            Self::InvalidPopmeta(key) => {
+                write!(f, "popmeta attempted on key '{key}' which was never pushed")
+            }
+            Self::UnclosedPushmeta(key) => {
+                write!(f, "pushmeta '{key}' was never popped")
+            }
+            Self::DeprecatedPipeSymbol => {
+                write!(f, "Pipe symbol is deprecated")
+            }
         }
     }
 }

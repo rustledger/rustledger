@@ -86,6 +86,8 @@ pub enum Token {
     Comma,
     /// Tilde ~
     Tilde,
+    /// Pipe | (deprecated separator between payee and narration)
+    Pipe,
 
     // Structural
     /// Newline (significant in beancount)
@@ -141,6 +143,7 @@ impl std::fmt::Display for Token {
             Self::Colon => write!(f, ":"),
             Self::Comma => write!(f, ","),
             Self::Tilde => write!(f, "~"),
+            Self::Pipe => write!(f, "|"),
             Self::Newline => write!(f, "\\n"),
             Self::Indent => write!(f, "<indent>"),
             Self::Comment(s) => write!(f, ";{s}"),
@@ -159,12 +162,14 @@ pub fn lexer<'a>() -> impl Parser<'a, &'a str, Vec<(Token, SimpleSpan)>, extra::
         .to_slice()
         .map(|s: &str| Token::Date(s.to_string()));
 
+    // Numbers: 123, -456, 1,234.56, 1234.5678, .50, -.50, 1. (trailing decimal)
+    // Python beancount accepts trailing decimal (e.g., "1." meaning "1.0")
     let number = just('-')
         .or_not()
         .then(
             text::digits(10)
                 .then(just(',').then(text::digits(10)).repeated())
-                .then(just('.').then(text::digits(10)).or_not()),
+                .then(just('.').then(text::digits(10).or_not()).or_not()),
         )
         .to_slice()
         .map(|s: &str| Token::Number(s.replace(',', "")));
@@ -195,13 +200,14 @@ pub fn lexer<'a>() -> impl Parser<'a, &'a str, Vec<(Token, SimpleSpan)>, extra::
     // Try multiline first, then single-line
     let string = multiline_string.or(single_string);
 
-    let account_type = choice((
-        just("Assets"),
-        just("Liabilities"),
-        just("Equity"),
-        just("Income"),
-        just("Expenses"),
-    ));
+    // Accept any capitalized word as account type prefix (e.g., Assets, Aktiva, Ciste-jmeni).
+    // Account type can contain hyphens between letter groups (e.g., Ciste-jmeni for Czech).
+    // The actual account type is validated later against options (name_assets, etc.).
+    let account_type_hyphen_part = just('-')
+        .then(one_of("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz").repeated().at_least(1));
+    let account_type = one_of("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+        .then(one_of("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz").repeated())
+        .then(account_type_hyphen_part.repeated());
 
     let account_component = one_of("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
         .then(
@@ -237,8 +243,9 @@ pub fn lexer<'a>() -> impl Parser<'a, &'a str, Vec<(Token, SimpleSpan)>, extra::
         )
         .map(|s: &str| Token::Link(s.to_string()));
 
-    let meta_key = one_of("abcdefghijklmnopqrstuvwxyz")
-        .then(one_of("abcdefghijklmnopqrstuvwxyz0123456789-_").repeated())
+    // Metadata keys can start with upper or lowercase letter (e.g., filename:, nameOnCard:, asset_allocation_equity:)
+    let meta_key = one_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
+        .then(one_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_").repeated())
         .to_slice()
         .then_ignore(just(':'))
         .map(|s: &str| Token::MetaKey(s.to_string()));
@@ -289,6 +296,7 @@ pub fn lexer<'a>() -> impl Parser<'a, &'a str, Vec<(Token, SimpleSpan)>, extra::
         just(":").to(Token::Colon),
         just(",").to(Token::Comma),
         just("~").to(Token::Tilde),
+        just("|").to(Token::Pipe),
         flag,
     ));
 
@@ -300,9 +308,10 @@ pub fn lexer<'a>() -> impl Parser<'a, &'a str, Vec<(Token, SimpleSpan)>, extra::
         .or(just("\r\n").to('\n'))
         .to(Token::Newline);
 
+    // Python beancount accepts 1+ space for metadata indentation
     let indent = just(' ')
         .repeated()
-        .at_least(2)
+        .at_least(1)
         .to(Token::Indent);
 
     let whitespace = just(' ').or(just('\t')).repeated().at_least(1);

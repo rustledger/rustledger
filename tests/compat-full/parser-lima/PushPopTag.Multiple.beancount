@@ -1,0 +1,9 @@
+pushtag #stack-em-up
+pushtag #stack-em-up
+
+2015-06-07 * "Something"
+  Assets:Something   1 USD
+  Assets:Something  -1 USD
+
+poptag #stack-em-up
+poptag #stack-em-up

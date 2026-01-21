@@ -1,0 +1,27 @@
+; an example Beancount file
+
+1970-01-01 commodity NZD
+
+2016-03-01 open Assets:Bank:Current NZD
+
+2016-03-01 open Expenses:Fun NZD
+
+2016-03-01 open Expenses:Entertainment:Drinks-and-snacks
+
+2017-01-01 close Assets:Bank:Savings
+
+2017-01-01 close Assets:Bank:Current
+
+2017-03-01 open Assets:Bank:Current NZD
+
+2017-04-01 close Assets:Bank:Current
+
+2023-05-31 * "EMERSON S TAPROOM DUNEDIN ;"
+  ; indented comment
+  Assets:Bank:Current                           -75.00 NZD
+  Expenses:Fun                              50.00 NZD
+  Expenses:Entertainment:Drinks-and-snacks       23.50 NZD ; oops
+
+2022-01-30 * "Z Energy ;"
+  Assets:Bank:Current                           -125.00 NZD
+  Expenses:Car:Fuel                              125.00 NZD

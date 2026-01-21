@@ -1,0 +1,3 @@
+option "documents" "/path/docs/a"
+option "documents" "/path/docs/b"
+option "documents" "/path/docs/c"

@@ -1,0 +1,8 @@
+;; -*- mode: beancount -*-
+**** /Users/lidongchao/git/BeancountSample/Csv/2018-01-3-utf8.csv
+
+2018-01-02 * "狗子" "转账备注:微信转账(微信)"
+  Assets:VirtualCard:Wechat  100.00 CNY
+  Income:MoneyFund                     
+
+

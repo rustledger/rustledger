@@ -1,0 +1,38 @@
+; 货币基金当现金处理，这和其他场外基金(如CN_F000187)处理方式不一样
+; 原因是货币基金没有净值的概念，没办法自动计算收益
+2019-05-20 * "在天天基金中购买了10000元某货币基金"  #money-fund
+  Assets:Fund:TT:Positions 10000 CNY
+  Assets:CN:Saving:CMB
+
+2019-05-31 * "Buy 5 SPY@291.46"
+  Assets:Securities:FT:Cash -1459.3 USD
+  Assets:Securities:FT:Positions 5 SPY {291.46 USD}
+  Expenses:Trade:Fee 2 USD
+
+2019-05-31 * "富途证券 USD换HKD, 手续费 2 USD"
+  Assets:Securities:FT:Cash -1000 USD
+  Assets:Securities:FT:Cash 7850 HKD @ USD 
+  Expenses:Trade:Fee 2 USD
+
+2019-05-31 * "富途证券 卖出 50 HK_0700"
+  ; 成本价 314 HKD
+  ; 买入金额 314 HKD * 50 = 15700 HKD
+  ; 卖出金额 326 HKD * 50 = 16300 HKD
+  ; 卖出手续费 38 HKD
+  ; 金额入帐 16300 - 38 HKD = 16262
+  ; 投资收益(不计手续费)  16300 - 15700 = 600 HKD
+  ; 投资收益(考虑手续费) 600 - 38 = 562 HKD
+  Assets:Securities:FT:Cash 16262 HKD
+  Assets:Securities:FT:Positions -50 HK_0700 {}
+  Expenses:Trade:Fee 38 HKD
+  Income:Trade:PnL; 此处 值位 -600 HKD 但一般不需要写会自动计算
+
+; CN_F000187 的价格通过 bean-price 自动获取自动计算收益
+2019-05-31 * "购买债券基金 CN_F000187 (手续费千分之一)"
+  Assets:Fund:TT:Positions 1000 CN_F000187 {1.209 CNY}
+  Assets:CN:Saving:CMB -1210 CNY
+  Expenses:Trade:Fee 1 CNY
+
+2019-05-30 * "货币基金自买入之日起收益" #money-fund
+  Assets:Fund:TT:Positions 7 CNY
+  Income:Trade:PnL

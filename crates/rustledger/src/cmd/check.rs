@@ -15,13 +15,52 @@ use rustledger_loader::{
 #[cfg(feature = "python-plugin-wasm")]
 use rustledger_plugin::PluginManager;
 use rustledger_plugin::{NativePluginRegistry, PluginInput, PluginOptions, wrappers_to_directives};
-use rustledger_validate::validate;
+use rustledger_validate::{ValidationOptions, validate_with_options};
 use serde::Serialize;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use tracing::Level;
 use tracing_subscriber::fmt::format::FmtSpan;
+
+/// Check if a Python plugin can be imported.
+///
+/// This function attempts to verify if a plugin module exists in the Python environment
+/// by running `python3 -c "import <module>"`. For file-based plugins (paths ending in .py
+/// or containing path separators), it checks if the file exists.
+///
+/// Returns `true` if the plugin appears to be available, `false` otherwise.
+fn check_python_plugin_exists(plugin_name: &str) -> bool {
+    // For file-based plugins (relative/absolute paths), check filesystem
+    let is_py_file = std::path::Path::new(plugin_name)
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("py"));
+    if is_py_file || plugin_name.contains(std::path::MAIN_SEPARATOR) {
+        // For relative paths, we can't easily resolve them without knowing the
+        // beancount file's directory, so we'll be conservative and assume they exist
+        // if they look like file paths. Python beancount will validate them properly.
+        return true;
+    }
+
+    // For module-style plugins, try to import with Python
+    // Use sys.argv to safely pass the plugin name without shell interpolation
+    let output = std::process::Command::new("python3")
+        .args([
+            "-c",
+            "import importlib, sys; importlib.import_module(sys.argv[1])",
+            plugin_name,
+        ])
+        .output();
+
+    match output {
+        Ok(result) => result.status.success(),
+        Err(_) => {
+            // Python not available - be conservative and assume plugin exists
+            // This avoids false positives when Python isn't installed
+            true
+        }
+    }
+}
 
 /// Output format for diagnostics.
 #[derive(Debug, Clone, Copy, Default, ValueEnum)]
@@ -253,13 +292,17 @@ fn run(args: &Args) -> Result<ExitCode> {
     // Build source cache for error reporting
     let mut cache = SourceCache::new();
     for source_file in load_result.source_map.files() {
-        let content = std::fs::read_to_string(&source_file.path).unwrap_or_else(|_| String::new());
+        // Use lossy UTF-8 decoding to handle non-UTF-8 files gracefully
+        let content = std::fs::read(&source_file.path)
+            .map(|b| String::from_utf8_lossy(&b).into_owned())
+            .unwrap_or_default();
         let path_str = source_file.path.display().to_string();
         cache.add(&path_str, content);
     }
 
-    // Also add the main file
-    let main_content = std::fs::read_to_string(file)
+    // Also add the main file (use lossy decoding for non-UTF-8 files)
+    let main_content = std::fs::read(file)
+        .map(|b| String::from_utf8_lossy(&b).into_owned())
         .with_context(|| format!("failed to read {}", file.display()))?;
     cache.add(&file.display().to_string(), main_content);
 
@@ -400,9 +443,10 @@ fn run(args: &Args) -> Result<ExitCode> {
         }
     }
 
-    // Report option warnings (E7001, E7002, E7003)
+    // Report option errors (E7001, E7002, E7003)
+    // In Python beancount, invalid options are errors, not warnings
     let main_file_str = file.display().to_string();
-    let option_warning_count = load_result.options.warnings.len();
+    let option_error_count = load_result.options.warnings.len();
     for warning in &load_result.options.warnings {
         if json_mode {
             diagnostics.push(JsonDiagnostic {
@@ -411,14 +455,109 @@ fn run(args: &Args) -> Result<ExitCode> {
                 column: 1,
                 end_line: 1,
                 end_column: 1,
-                severity: "warning".to_string(),
+                severity: "error".to_string(),
                 code: warning.code.to_string(),
                 message: warning.message.clone(),
                 hint: None,
                 context: None,
             });
         } else if !args.quiet {
-            writeln!(stdout, "warning[{}]: {}", warning.code, warning.message)?;
+            writeln!(stdout, "error[{}]: {}", warning.code, warning.message)?;
+        }
+    }
+    error_count += option_error_count;
+
+    // Validate plugins declared in the beancount file
+    // Like Python beancount, report an error if a plugin is not found
+    let native_registry = NativePluginRegistry::new();
+    let mut plugin_warning_count = 0usize;
+    for plugin in &load_result.plugins {
+        // Check if it's a known native plugin
+        let is_native = native_registry.find(&plugin.name).is_some();
+        // Check for common beancount.plugins.* that we support as native
+        let is_supported_beancount_plugin = plugin.name.starts_with("beancount.plugins.")
+            && native_registry
+                .find(
+                    plugin
+                        .name
+                        .strip_prefix("beancount.plugins.")
+                        .unwrap_or(&plugin.name),
+                )
+                .is_some();
+
+        if !is_native && !is_supported_beancount_plugin {
+            // Get source location for error reporting
+            let (line, column, file_path) =
+                if let Some(source_file) = load_result.source_map.get(plugin.file_id) {
+                    let (l, c) = source_file.line_col(plugin.span.start);
+                    (l, c, source_file.path.clone())
+                } else {
+                    (1, 1, file.clone())
+                };
+
+            // Check if Python can import this plugin
+            let python_can_import = check_python_plugin_exists(&plugin.name);
+
+            if python_can_import {
+                // Plugin exists in Python but we can't run it - warn but don't fail
+                if json_mode {
+                    diagnostics.push(JsonDiagnostic {
+                        file: file_path.display().to_string(),
+                        line,
+                        column,
+                        end_line: line,
+                        end_column: column + plugin.name.len(),
+                        severity: "warning".to_string(),
+                        code: "W8002".to_string(),
+                        message: format!(
+                            "Python plugin \"{}\" found but cannot be executed by rustledger",
+                            plugin.name
+                        ),
+                        hint: Some(
+                            "Plugin validation skipped. Use Python beancount for full plugin support."
+                                .to_string(),
+                        ),
+                        context: None,
+                    });
+                } else if !args.quiet {
+                    writeln!(
+                        stdout,
+                        "{}:{}: warning[W8002]: Python plugin \"{}\" found but cannot be executed",
+                        file_path.display(),
+                        line,
+                        plugin.name
+                    )?;
+                }
+                plugin_warning_count += 1;
+            } else {
+                // Plugin doesn't exist - error (matches Python beancount behavior)
+                if json_mode {
+                    diagnostics.push(JsonDiagnostic {
+                        file: file_path.display().to_string(),
+                        line,
+                        column,
+                        end_line: line,
+                        end_column: column + plugin.name.len(),
+                        severity: "error".to_string(),
+                        code: "E8001".to_string(),
+                        message: format!("Plugin not found: \"{}\"", plugin.name),
+                        hint: Some(
+                            "Plugin could not be found by Python. Check the plugin name and installation."
+                                .to_string(),
+                        ),
+                        context: None,
+                    });
+                } else if !args.quiet {
+                    writeln!(
+                        stdout,
+                        "{}:{}: error[E8001]: Plugin not found: \"{}\"",
+                        file_path.display(),
+                        line,
+                        plugin.name
+                    )?;
+                }
+                error_count += 1;
+            }
         }
     }
 
@@ -426,14 +565,42 @@ fn run(args: &Args) -> Result<ExitCode> {
     let LoadResult {
         directives: spanned_directives,
         options,
+        plugins: file_plugins,
         ..
     } = load_result;
 
     // Extract directives (move, not clone)
     let mut directives: Vec<_> = spanned_directives.into_iter().map(|s| s.value).collect();
 
-    // Build list of native plugins to run
+    // Save account types before options are partially moved
+    let account_types: Vec<String> = options
+        .account_types()
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+
+    // Build list of native plugins to run from CLI args
     let mut native_plugins_to_run = args.native_plugins.clone();
+
+    // Also run plugins declared in the beancount file (if they're native)
+    for plugin in &file_plugins {
+        // Try with full name first, then without beancount.plugins. prefix
+        let plugin_name = if native_registry.find(&plugin.name).is_some() {
+            plugin.name.clone()
+        } else if let Some(short_name) = plugin.name.strip_prefix("beancount.plugins.") {
+            if native_registry.find(short_name).is_some() {
+                short_name.to_string()
+            } else {
+                continue; // Unknown plugin, already reported error above
+            }
+        } else {
+            continue; // Unknown plugin, already reported error above
+        };
+
+        if !native_plugins_to_run.contains(&plugin_name) {
+            native_plugins_to_run.push(plugin_name);
+        }
+    }
 
     // If --auto is set, add auto-plugins
     if args.auto && !native_plugins_to_run.contains(&"auto_accounts".to_string()) {
@@ -461,7 +628,7 @@ fn run(args: &Args) -> Result<ExitCode> {
             config: None,
         };
 
-        let native_registry = NativePluginRegistry::new();
+        // native_registry already created above for plugin validation
         let mut current_input = plugin_input;
 
         for plugin_name in &native_plugins_to_run {
@@ -566,7 +733,25 @@ fn run(args: &Args) -> Result<ExitCode> {
                         *txn = result.transaction;
                         None
                     }
-                    Err(e) => Some((txn.date, txn.narration.to_string(), e)),
+                    Err(e) => {
+                        // Skip CannotInferCurrency errors when transaction has empty cost specs
+                        // because the cost will be filled by lot matching during validation.
+                        // This matches Python beancount behavior where booking runs before interpolation.
+                        let has_empty_cost_spec = txn.postings.iter().any(|p| {
+                            if let Some(cost) = &p.cost {
+                                cost.number_per.is_none() && cost.number_total.is_none()
+                            } else {
+                                false
+                            }
+                        });
+                        if has_empty_cost_spec
+                            && matches!(e, InterpolationError::CannotInferCurrency { .. })
+                        {
+                            None // Skip error - lot matching will handle this
+                        } else {
+                            Some((txn.date, txn.narration.to_string(), e))
+                        }
+                    }
                 }
             } else {
                 None
@@ -604,7 +789,15 @@ fn run(args: &Args) -> Result<ExitCode> {
         eprintln!("Validating {} directives...", directives.len());
     }
 
-    let validation_errors = validate(&directives);
+    // Build validation options with account types from loader options
+    // Set document_base to the file's directory for relative path resolution
+    let document_base = file.parent().map(std::path::Path::to_path_buf);
+    let validation_options = ValidationOptions {
+        account_types,
+        document_base,
+        ..Default::default()
+    };
+    let validation_errors = validate_with_options(&directives, validation_options);
     let validation_error_count = validation_errors
         .iter()
         .filter(|e| !e.code.is_warning())
@@ -643,7 +836,7 @@ fn run(args: &Args) -> Result<ExitCode> {
 
     // Print summary / output
     let elapsed = start.elapsed();
-    let warning_count = option_warning_count + validation_warning_count;
+    let warning_count = validation_warning_count + plugin_warning_count;
 
     if json_mode {
         let output = JsonOutput {

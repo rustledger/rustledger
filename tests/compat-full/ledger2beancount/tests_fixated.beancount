@@ -1,0 +1,95 @@
+; SPDX-FileCopyrightText: © 2019 Martin Michlmayr <tbm@cyrius.com>
+;
+; SPDX-License-Identifier: GPL-3.0-or-later
+
+1970-01-01 open Assets:Brokerage
+1970-01-01 open Assets:Brokerage:Cash
+1970-01-01 open Assets:Test
+1970-01-01 open Assets:Wallet
+1970-01-01 open Expenses:Food
+
+1970-01-01 commodity AA
+1970-01-01 commodity AAPL
+1970-01-01 commodity CAD
+1970-01-01 commodity EUR
+1970-01-01 commodity PHP
+1970-01-01 commodity USD
+
+2012-04-10 txn "My Broker"
+  Assets:Brokerage            10 AAPL {50.00 USD}
+  Assets:Brokerage:Cash       -500.00 USD
+
+2012-04-11 txn "My Broker"
+  Assets:Brokerage            10 AAPL {50.00 USD}
+  Assets:Brokerage:Cash       -500.00 USD
+
+; Only apply fixated to CAD, not to EUR
+
+
+2012-04-10 txn "Lunch in Canada"
+  Assets:Wallet           -15.50 CAD {0.20 USD}
+  Expenses:Food            15.50 CAD {0.20 USD}
+
+2012-04-10 txn "Lunch in Canada"
+  Assets:Wallet           -15.50 CAD {0.90 USD}
+  Expenses:Food            15.50 CAD {0.90 USD}
+
+2012-04-11 txn "Second day Dinner in Canada"
+  Assets:Wallet           -25.75 CAD {0.90 USD}
+  Expenses:Food            25.75 CAD {0.90 USD}
+
+2012-04-11 txn "Paid in EUR"
+  Assets:Wallet           -25.75 EUR
+  Expenses:Food            25.75 EUR
+
+2012-04-11 txn "Paid in EUR"
+  Assets:Wallet           -25.75 EUR
+  Expenses:Food
+
+
+; Apply fixated to CAD and EUR
+
+
+2012-04-10 txn "Lunch in Canada"
+  Assets:Wallet           -15.50 CAD {0.20 USD}
+  Expenses:Food            15.50 CAD {0.20 USD}
+
+2012-04-10 txn "Lunch in Canada"
+  Assets:Wallet           -15.50 CAD {0.90 USD}
+  Expenses:Food            15.50 CAD {0.90 USD}
+
+2012-04-11 txn "Second day Dinner in Canada"
+  Assets:Wallet           -25.75 CAD {0.90 USD}
+  Expenses:Food            25.75 CAD {0.90 USD}
+
+2012-04-11 txn "Second day Dinner in Canada"
+  Assets:Wallet           -25.75 CAD {0.90 USD}
+  Expenses:Food
+
+2012-04-11 txn "Paid in EUR"
+  Assets:Wallet           -25.75 EUR {0.40 CAD}
+  Expenses:Food            25.75 EUR {0.40 CAD}
+
+2012-04-11 txn "Paid in EUR"
+  Assets:Wallet           -25.75 EUR {0.40 CAD}
+  Expenses:Food
+
+
+
+2012-04-10 txn "Lunch in Canada"
+  Assets:Wallet           -15.50 CAD {0.20 USD}
+  Expenses:Food            15.50 CAD {0.20 USD}
+
+2012-04-10 txn "Lunch in Canada"
+  Assets:Wallet           -15.50 CAD {0.85 USD}
+  Expenses:Food            15.50 CAD {0.85 USD}
+
+
+2020-10-02 * "Fixated price should become a cost in beancount"
+  Expenses:Food          100.00 PHP {1.76 EUR}
+  Assets:Wallet
+
+2020-10-02 * "Fixated price should become a cost in beancount (despite commodity_is_currency)"
+  Assets:Test               1000 AA {5.00 EUR}
+  Assets:Test
+

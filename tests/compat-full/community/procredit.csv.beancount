@@ -1,0 +1,31 @@
+;; Account: procreditbank-business
+;; Date: 2000-01-15
+;; Name: 
+
+2000-01-01 * "Correspondent1" ""
+  src_doc_n: "T_M 451336120"
+  src_purpose: "REDACTED"
+  time: "00:00:00"
+  Assets:ProcreditBank:Business:Cash:GBP  18475.00 GBP
+
+2000-01-01 * "Correspondent1" ""
+  src_doc_n: "T_M 451336120"
+  src_purpose: "REDACTED"
+  time: "00:00:00"
+  Assets:Procreditbank:Business:Transit   18475.00 GBP
+  Assets:Procreditbank:Business:Transit  -18475.00 GBP
+
+2000-01-04 * "Correspondent1" ""
+  other_src_doc_n: "T_F 1"
+  src_doc_n: "T_F 1"
+  src_purpose: "Кошти від продажу валюти в сумі 2475,00 GBP на МВРУ згідно заявки № .За курсом 47,29000.Банк. коміс. грн.- 0,00."
+  time: "01:14:00"
+  Assets:ProcreditBank:Business:Cash:GBP   -2475.00 GBP @ 47.29000 UAH
+  Assets:ProcreditBank:Business:Cash:UAH  117042.75 UAH
+
+2000-01-15 * "Correspondent1" ""
+  src_doc_n: "T_A 452607519"
+  src_purpose: "Сплата комісії за обслуговування рахунків та/чи інших зобов'язань"
+  time: "09:08:00"
+  Assets:ProcreditBank:Business:Cash:UAH  -100.00 UAH
+  Expenses:Fees:Banking:ProcreditBank      100.00 UAH

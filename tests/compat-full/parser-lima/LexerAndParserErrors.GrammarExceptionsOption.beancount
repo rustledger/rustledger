@@ -1,0 +1,3 @@
+2000-01-01 open Assets:Before
+option "operating_currency" "CAD"
+2010-01-01 close Assets:Before

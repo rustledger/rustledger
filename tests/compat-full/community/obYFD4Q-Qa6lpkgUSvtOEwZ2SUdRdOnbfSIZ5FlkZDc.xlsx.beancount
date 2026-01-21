@@ -1,0 +1,23 @@
+;; Account: privatbank_xlsx
+;; Date: 
+;; Name: 
+
+2025-07-23 * "THE HOME DEPOT #7079, NEPEAN"
+  time: "00:37:19"
+  category: "Дім та ремонт"
+  converted: "6.76 CAD"
+  Assets:Unknown  -207.56 UAH
+
+2025-07-23 * "DOLLARAMA # 380, NEPEAN"
+  time: "00:23:11"
+  category: "Дім та ремонт"
+  converted: "1.48 CAD"
+  Assets:Unknown  -45.38 UAH
+
+2025-07-24 * "Namecheap"
+  time: "04:49:39"
+  category: "Цифрові товари"
+  converted: "19.18 USD"
+  Assets:Privatbank:Test  -805.88 UAH
+
+2025-07-25 balance Assets:Privatbank:Test                          8414.78 UAH

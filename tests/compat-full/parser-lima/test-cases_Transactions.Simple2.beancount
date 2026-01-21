@@ -1,0 +1,7 @@
+2013-05-18 * "Nice dinner at Mermaid Inn"
+  Expenses:Restaurant         100 USD
+  Assets:US:Cash             -100 USD
+
+2013-05-20 * "Duane Reade" "Toothbrush"
+  Expenses:BathroomSupplies         4 USD
+  Assets:US:BestBank:Checking      -4 USD

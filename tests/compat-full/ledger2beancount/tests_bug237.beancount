@@ -1,0 +1,10 @@
+
+1970-01-01 open Expenses:Transport:Zug
+1970-01-01 open Assets:Giro
+
+1970-01-01 commodity EUR
+
+2020-03-06 * "Deutsche Bahn" "7B6E33"
+  Expenses:Transport:Zug                    3.85 EUR
+  Assets:Giro
+

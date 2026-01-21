@@ -1,0 +1,4 @@
+# Compatibility test results - generated on demand
+*.jsonl
+*.md
+!.gitignore

@@ -1,0 +1,33 @@
+option "operating_currency" "USD"
+option "inferred_tolerance_default" "USD:0.01"
+
+1970-01-01 open Equity:Opening-Balance
+
+1970-01-01 open Assets:Pension
+  portfolio: "pension"
+
+1970-01-01 open Assets:Pension:NEST
+  portfolio: "pension"
+
+1970-01-01 commodity AAPL
+  asset-class: "equity"
+  asset-subclass: "usa"
+
+1970-01-01 commodity NESTHIGHER
+  asset-class: "equity"
+  asset-subclass: "uk"
+
+1970-01-01 commodity USD
+  asset-class: "cash"
+  asset-subclass: "cash"
+
+2017-12-29 price NESTHIGHER 2.2016 GBP
+2018-03-29 price NESTHIGHER 2.0856 GBP
+
+2018-01-01 * "Opening balance"
+    Assets:Pension            100 AAPL {1000 USD}
+    Equity:Opening-Balance
+
+2018-01-01 * "Opening balance: NEST Higher Risk Fund" #opening-balance
+    Assets:Pension                   11.7230 NESTHIGHER {{25.61 GBP, 2017-12-14}}
+    Equity:Opening-Balance

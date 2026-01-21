@@ -1,0 +1,126 @@
+; SPDX-FileCopyrightText: © 2018 Martin Michlmayr <tbm@cyrius.com>
+;
+; SPDX-License-Identifier: GPL-3.0-or-later
+
+1970-01-01 open Assets:Bank
+1970-01-01 open Assets:Cash
+1970-01-01 open Assets:Test
+1970-01-01 open Assets:Voucher
+1970-01-01 open Equity:Opening-Balance
+
+1970-01-01 commodity ETH
+1970-01-01 commodity EUR
+1970-01-01 commodity GBP
+
+1970-01-01 commodity JPY
+1970-01-01 commodity MILESMORE4
+1970-01-01 commodity UR
+1970-01-01 commodity USD
+
+2018-03-21 price EUR 0.87 GBP
+2018-03-21 price UR 0.015 USD
+2018-03-21 price MILESMORE4 0.01 USD
+2019-04-28 price EUR 124.56 JPY
+2020-06-26 price GBP 1.11 EUR ;comment
+2020-06-26 price GBP 1.11 EUR ;comment
+
+2018-03-21 * "Virtual cost (@)"
+  Assets:Test                  10.00 EUR @ 0.90 GBP
+  Equity:Opening-Balance                  -9.00 GBP
+
+2018-03-21 * "Virtual cost (@@)"
+  Assets:Test                  10.00 EUR @@ 9.00 GBP
+  Equity:Opening-Balance                   -9.00 GBP
+
+2018-03-21 * "Virtual cost (@) becoming a cost"
+  Assets:Test                 1.00 ETH {6500.00 EUR}
+  Equity:Opening-Balance                -6500.00 EUR
+
+2018-03-21 * "Virtual cost (@) becoming a cost"
+  Assets:Test                 1.00 ETH {{6500.00 EUR}}
+  Equity:Opening-Balance                 -6500.00 EUR
+
+2020-06-22 * "Lot and virtual price"
+  Assets:Test                 10.00 EUR {1.23 USD} @ 1.30 USD
+  Equity:Opening-Balance
+
+2020-06-22 * "Lot date and virtual price"
+  Assets:Test                 10.00 EUR {1.23 USD, 2020-06-21} @ 1.30 USD
+  Equity:Opening-Balance
+
+2020-06-22 * "Lot and virtual price"
+  Assets:Test                 10.00 EUR {1.23 USD} @@ 1.30 USD
+  Equity:Opening-Balance
+
+2020-06-22 * "Lot date and virtual price"
+  Assets:Test                 10.00 EUR {1.23 USD, 2020-06-21} @@ 1.30 USD
+  Equity:Opening-Balance
+
+2020-06-22 * "Lot note followed by virtual price"
+  Assets:Test                 10.00 EUR {1.23 USD, "this is a note"} @ 1.30 USD
+  Assets:Bank
+
+2020-06-22 * "Lot note followed by virtual price"
+  Assets:Test                 10.00 EUR {1.23 USD, "this is a note"} @@ 1.30 USD
+  Assets:Bank
+
+2020-06-23 * "Price with cost"
+  Assets:Voucher    10.00 EUR @@ 10.00 EUR
+  Assets:Cash
+
+2020-06-23 * "Price with cost and date"
+  Assets:Voucher    10.00 EUR @@ 10.00 EUR
+  Assets:Cash
+
+2020-06-23 * "Price with cost, date and note"
+  Assets:Voucher    10.00 EUR @@ 10.00 EUR
+  Assets:Cash
+
+2020-06-23 * "Price with cost, date, note and value expression"
+  Assets:Voucher    10.00 EUR @@ 10.00 EUR
+  Assets:Cash
+
+2020-06-23 * "Price with cost, date and value expression"
+  Assets:Voucher    10.00 EUR @@ 10.00 EUR
+  Assets:Cash
+
+2020-06-23 * "Price with cost and note"
+  Assets:Voucher    10.00 EUR @@ 10.00 EUR
+  Assets:Cash
+
+2020-06-23 * "Price with cost, note and value expression"
+  Assets:Voucher    10.00 EUR @@ 10.00 EUR
+  Assets:Cash
+
+2020-06-23 * "Price with cost and value expression"
+  Assets:Voucher    10.00 EUR @@ 10.00 EUR
+  Assets:Cash
+
+2020-06-23 * "Price with date"
+  Assets:Voucher    10.00 EUR @@ 10.00 EUR
+  Assets:Cash
+
+2020-06-23 * "Price with date and note"
+  Assets:Voucher    10.00 EUR @@ 10.00 EUR
+  Assets:Cash
+
+2020-06-23 * "Price with date, note and value expression"
+  Assets:Voucher    10.00 EUR @@ 10.00 EUR
+  Assets:Cash
+
+2020-06-23 * "Price with date and value expression"
+  Assets:Voucher    10.00 EUR @@ 10.00 EUR
+  Assets:Cash
+
+2020-06-23 * "Price with note"
+  Assets:Voucher    10.00 EUR @@ 10.00 EUR
+  Assets:Cash
+
+2020-06-23 * "Price with note and value expression"
+  Assets:Voucher    10.00 EUR @@ 10.00 EUR
+  Assets:Cash
+
+2020-06-23 * "Price with value expression"
+  Assets:Voucher    10.00 EUR @@ 10.00 EUR
+  Assets:Cash
+

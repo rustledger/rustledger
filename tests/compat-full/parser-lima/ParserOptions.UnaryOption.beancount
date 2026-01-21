@@ -1,0 +1,5 @@
+options "inferred_tolerance_default { key: 'USD' value: '0.00001' }"
+options "account_types {
+  assets: 'Actifs'
+  liabilities: 'Passifs'
+}"

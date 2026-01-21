@@ -41,8 +41,9 @@ pub enum Token<'src> {
     Date(&'src str),
 
     /// A number with optional sign, thousands separators, and decimals.
-    /// Examples: 123, -456, 1,234.56, 1234.5678, .50, -.50
-    #[regex(r"-?(\.\d+|(\d{1,3}(,\d{3})*|\d+)(\.\d+)?)")]
+    /// Examples: 123, -456, 1,234.56, 1234.5678, .50, -.50, 1. (trailing decimal)
+    /// Python beancount accepts trailing decimal (e.g., "1." meaning "1.0").
+    #[regex(r"-?(\.\d+|(\d{1,3}(,\d{3})*|\d+)(\.\d*)?)")]
     Number(&'src str),
 
     /// A double-quoted string (handles escape sequences).
@@ -50,18 +51,23 @@ pub enum Token<'src> {
     #[regex(r#""([^"\\]|\\.)*""#)]
     String(&'src str),
 
-    /// An account name like Assets:Bank:Checking or Assets:401k:Fidelity.
-    /// Must start with one of the 5 account types and have at least one sub-account.
-    /// Sub-accounts can start with uppercase letter or digit.
-    #[regex(r"(Assets|Liabilities|Equity|Income|Expenses)(:[A-Za-z0-9][a-zA-Z0-9-]*)+")]
+    /// An account name like Assets:Bank:Checking, Aktiva:Bank:Girokonto, or Ciste-jmeni:Stav.
+    /// Must start with a capitalized word (account type prefix) and have at least one sub-account.
+    /// Account type prefix can contain hyphens (e.g., Ciste-jmeni for Czech "Čisté jmění").
+    /// Sub-accounts must start with uppercase letter, digit, or CJK character (matching Python beancount).
+    /// Supports Unicode letters (e.g., Expenses:École-républicaine, Assets:沪深300).
+    /// `\p{Lo}` matches CJK characters and other scripts without case distinction.
+    /// The account type prefix is validated later against options (`name_assets`, etc.).
+    #[regex(r"\p{Lu}\p{L}*(-\p{L}+)*(:[\p{Lu}\p{Lo}0-9][\p{L}0-9-]*)+")]
     Account(&'src str),
 
     /// A currency/commodity code like USD, EUR, AAPL, BTC.
     /// Uppercase letters, can contain digits, apostrophes, dots, underscores, hyphens.
     /// Note: This pattern is lower priority than Account, Keywords, and Flags.
     /// Currency must have at least 2 characters to avoid conflict with single-letter flags.
-    /// Also supports `/` prefix for options/futures contracts (e.g., `/LOX21_211204_P100.25`).
-    #[regex(r"/[A-Z0-9'._-]+|[A-Z][A-Z0-9'._-]+")]
+    /// Also supports `/` prefix for options/futures contracts (e.g., `/ESM24`, `/LOX21_211204_P100.25`).
+    /// The `/` prefix requires an uppercase letter first to avoid matching `/1.14` as currency.
+    #[regex(r"/[A-Z][A-Z0-9'._-]*|[A-Z][A-Z0-9'._-]+")]
     Currency(&'src str),
 
     /// A tag like #tag-name.
@@ -183,6 +189,9 @@ pub enum Token<'src> {
     /// Tilde `~` for tolerance.
     #[token("~")]
     Tilde,
+    /// Pipe `|` for deprecated payee/narration separator.
+    #[token("|")]
+    Pipe,
     /// Plus `+` operator.
     #[token("+")]
     Plus,
@@ -201,9 +210,9 @@ pub enum Token<'src> {
     #[token("!")]
     Pending,
 
-    /// Other transaction flags: P S T C U R M # ? % &
-    /// Note: # is only a flag when NOT followed by tag characters
-    #[regex(r"[PSTCURM#?%&]")]
+    /// Other transaction flags: P S T C U R M ? &
+    /// Note: # and % are handled as comments when followed by space
+    #[regex(r"[PSTCURM?&]")]
     Flag(&'src str),
 
     // ===== Structural =====
@@ -215,6 +224,18 @@ pub enum Token<'src> {
     /// The slice includes the semicolon.
     #[regex(r";[^\n\r]*", allow_greedy = true)]
     Comment(&'src str),
+
+    /// Hash token `#` used as separator in cost specs: `{per_unit # total currency}`
+    /// Note: In Python beancount, `#` is only a comment at the START of a line.
+    /// Mid-line `# text` is NOT a comment - it's either a cost separator or syntax error.
+    /// Start-of-line hash comments are handled in post-processing (tokenize function).
+    #[token("#")]
+    Hash,
+
+    /// A percent comment (ledger-style).
+    /// Python beancount accepts % as a comment character for ledger compatibility.
+    #[regex(r"%[^\n\r]*", allow_greedy = true)]
+    PercentComment(&'src str),
 
     /// Shebang line at start of file (e.g., #!/usr/bin/env bean-web).
     /// Treated as a comment-like directive to skip.
@@ -248,7 +269,10 @@ pub enum Token<'src> {
 impl Token<'_> {
     /// Returns true if this is a transaction flag (* or !).
     pub const fn is_txn_flag(&self) -> bool {
-        matches!(self, Self::Star | Self::Pending | Self::Flag(_))
+        matches!(
+            self,
+            Self::Star | Self::Pending | Self::Flag(_) | Self::Hash
+        )
     }
 
     /// Returns true if this is a keyword that starts a directive.
@@ -322,6 +346,7 @@ impl fmt::Display for Token<'_> {
             Self::Colon => write!(f, ":"),
             Self::Comma => write!(f, ","),
             Self::Tilde => write!(f, "~"),
+            Self::Pipe => write!(f, "|"),
             Self::Plus => write!(f, "+"),
             Self::Minus => write!(f, "-"),
             Self::Star => write!(f, "*"),
@@ -330,6 +355,8 @@ impl fmt::Display for Token<'_> {
             Self::Flag(s) => write!(f, "{s}"),
             Self::Newline => write!(f, "\\n"),
             Self::Comment(s) => write!(f, "{s}"),
+            Self::Hash => write!(f, "#"),
+            Self::PercentComment(s) => write!(f, "{s}"),
             Self::Shebang(s) => write!(f, "{s}"),
             Self::EmacsDirective(s) => write!(f, "{s}"),
             Self::MetaKey(s) => write!(f, "{s}"),
@@ -361,6 +388,34 @@ pub fn tokenize(source: &str) -> Vec<(Token<'_>, Span)> {
                 at_line_start = true;
                 last_newline_end = span.end;
             }
+            Ok(Token::Hash) if at_line_start && span.start == last_newline_end => {
+                // Hash at very start of line (no indentation) is a comment
+                // Find end of line and create a comment token for the whole line
+                let comment_start = span.start;
+                let line_end = source[span.end..]
+                    .find('\n')
+                    .map_or(source.len(), |i| span.end + i);
+                let comment_text = &source[comment_start..line_end];
+                tokens.push((
+                    Token::Comment(comment_text),
+                    Span {
+                        start: comment_start,
+                        end: line_end,
+                    },
+                ));
+                // Skip lexer tokens until we reach the newline
+                while let Some(peek_result) = lexer.next() {
+                    let peek_span = lexer.span();
+                    let peek_end = peek_span.end;
+                    if peek_result == Ok(Token::Newline) {
+                        tokens.push((Token::Newline, peek_span.into()));
+                        at_line_start = true;
+                        last_newline_end = peek_end;
+                        break;
+                    }
+                    // Skip other tokens on the comment line
+                }
+            }
             Ok(token) => {
                 // Check for indentation at line start
                 if at_line_start && span.start > last_newline_end {
@@ -382,7 +437,8 @@ pub fn tokenize(source: &str) -> Vec<(Token<'_>, Span)> {
                             _ => break,
                         }
                     }
-                    if space_count >= 2 {
+                    // Python beancount accepts 1+ space for metadata indentation
+                    if space_count >= 1 {
                         let indent_start = last_newline_end;
                         let indent_end = last_newline_end + char_count;
                         // Use DeepIndent for 4+ spaces (posting metadata level)

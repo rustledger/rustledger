@@ -1,0 +1,8 @@
+include "./comments.beancount"
+include "./simple.beancount"
+include "./official.beancount"
+include "./includes.beancount"
+include "./cycle.beancount"
+
+2024-04-01 open Foo:Bar:Baz CHF
+

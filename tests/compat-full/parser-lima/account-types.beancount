@@ -1,0 +1,43 @@
+1970-01-01 commodity NZD
+
+2016-03-01 open Assets:Bank:Current NZD
+
+2016-03-01 open Liabilities:Bank:Credit-Card NZD
+
+2016-03-01 open Equity:Opening-Balances NZD
+
+2016-03-01 open Income:Employment NZD
+
+2016-03-01 open Expenses:Groceries NZD
+
+option "name_assets" "Mine-All-Mine"
+; in classic Beancount this makes the previous current account unaccessible,
+; but really it ought to be available under its new name, which is what
+; this parser does
+
+option "name_liabilities" "Watch-Out"
+
+option "name_equity" "Became-Mine"
+
+option "name_income" "Well-Deserved"
+
+option "name_expenses" "Painful"
+
+; error in this parser, required in classic Beancount
+2016-03-02 open Mine-All-Mine:Bank:Current NZD
+
+2016-03-01 open Mine-All-Mine:Bank:Savings NZD
+
+2017-01-01 pad Mine-All-Mine:Bank:Current Became-Mine:Opening-Balances
+
+2023-05-29 * "Bank transfer"
+  Mine-All-Mine:Bank:Current                           -10.00 NZD
+  Watch-Out:Bank:Credit-Card                            10.00 NZD
+
+2023-05-29 * "Income"
+  Mine-All-Mine:Bank:Current                          2000.00 NZD
+  Well-Deserved:Employment                           -2000.00 NZD
+
+2023-05-29 * "New World"
+  Mine-All-Mine:Bank:Current                           -35.00 NZD
+  Painful:Groceries                                     35.00 NZD

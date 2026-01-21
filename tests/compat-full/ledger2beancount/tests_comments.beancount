@@ -1,0 +1,131 @@
+; Beancount: 2.1.0
+; SPDX-FileCopyrightText: © 2018 Martin Michlmayr <tbm@cyrius.com>
+;
+; SPDX-License-Identifier: GPL-3.0-or-later
+
+; -*- mode: beancount -*-
+;; -*- mode: beancount -*-
+
+* -*- mode: beancount -*-
+
+1970-01-01 open Assets:Test
+1970-01-01 open Equity:Opening-Balance
+1970-01-01 open Assets:Commodity-Test123
+
+1970-01-01 commodity EUR
+
+; This is a block comment
+; Second line
+
+; Comment without indentation
+; Second line
+
+; Another comment
+
+; test can be ended with end comment
+
+; comment can be ended with end test
+
+; This is another block comment
+
+; No indentation, followed by
+;     indentation.
+
+; Indentation, followed by
+; no indentation.
+
+; This is a single line comment,
+#  and this,
+%   and this,
+;    and this,
+*     and this.
+
+; This is a comment
+; Test: not a tag
+; :not:a:tag:
+; Another comment
+
+2018-03-17 * "Test"
+  ; Another comment
+  Assets:Test                        10.00 EUR ; What an "interesting" account name
+  ; full line posting comment
+  Equity:Opening-Balance            -10.00 EUR ; Opening balance?
+    ; posting-level comment
+
+2018-03-17 * "Tag and comment on same line"
+  #tag
+  ; comment
+  Assets:Test                        10.00 EUR
+  Equity:Opening-Balance            -10.00 EUR
+
+2018-03-17 * "Multi-line comment"
+  ; comment1
+  ; comment2
+  Assets:Test                        10.00 EUR
+  Equity:Opening-Balance            -10.00 EUR
+
+2018-03-27 * "Account name could be mistaken for commodity"
+  Assets:Test                        10.00 EUR
+  Assets:Commodity-Test123       ; comment
+
+2018-03-27 * "Account name could be mistaken for commodity"
+  Assets:Test                        10.00 EUR
+  Assets:Commodity-Test123  ; comment
+
+2019-01-25 * "A payee can contain ; without problems"
+  Assets:Test                        10.00 EUR
+  Equity:Opening-Balance            -10.00 EUR
+
+2019-01-25 * "You can put a comment on the same line as the payee" ; comment
+  Assets:Test                        10.00 EUR
+  Equity:Opening-Balance            -10.00 EUR
+
+2019-01-25 * "You can put a comment on the same line as the payee" ; this is a comment
+  Assets:Test                        10.00 EUR
+  Equity:Opening-Balance            -10.00 EUR
+
+;No space
+2020-10-01 * "Comment spacing"
+  ;No space
+  Assets:Test                        10.00 EUR;No space
+  Equity:Opening-Balance            -10.00 EUR
+
+;  Two space
+2020-10-01 * "Comment spacing"
+  ;  Two space
+  Assets:Test                        10.00 EUR;  Two space
+  Equity:Opening-Balance            -10.00 EUR
+
+2020-10-01 * "Empty comment, with trailing whitespace"
+  Assets:Test                        10.00 EUR   ;   
+  Assets:Test                       -10.00 EUR
+
+2020-10-23 * "Payee" ;  comment which starts with two spaces
+  Assets:Test                        10.00 EUR
+  Assets:Test                       -10.00 EUR
+
+2020-10-23 * "Payee" ;	comment which starts with tab
+  Assets:Test                        10.00 EUR
+  Assets:Test                       -10.00 EUR
+
+2020-10-23 * "Empty comment"
+  Assets:Test                        10.00 EUR ;
+  Assets:Test                       -10.00 EUR
+
+2020-10-23 * "Comment spacing"
+  ;	Tab
+  Assets:Test                        10.00 EUR ;	Tab
+  Equity:Opening-Balance            -10.00 EUR
+
+2020-10-23 * "Empty comments"
+  Assets:Test                        10.00 EUR ;
+  Assets:Test                        10.00 EUR ; 
+  Assets:Test                        10.00 EUR ;  
+  Assets:Test                        10.00 EUR ;	
+  ;
+  ;             
+  ;	
+  ; 	
+  ;	 
+  Equity:Opening-Balance
+

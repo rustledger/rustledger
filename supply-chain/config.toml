@@ -955,7 +955,7 @@ criteria = "safe-to-deploy"
 
 [[exemptions.rust_decimal_macros]]
 version = "1.40.0"
-criteria = "safe-to-run"
+criteria = "safe-to-deploy"
 
 [[exemptions.rustc-demangle]]
 version = "0.1.26"

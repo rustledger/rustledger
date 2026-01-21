@@ -1,0 +1,23 @@
+;; Account: Assets:US:CSVBank
+;; Date: 2016-03-18
+;; Name: csvbank.statement.csv
+
+2016-03-04 * "BOOGLE           WALLET     US000NEI9T      WEB ID: C234567890"
+  Assets:US:CSVBank  -1300.00 USD
+
+2016-03-05 * "CA STATE         NYSTTAXRFD                 PPD ID: 1111111111"
+  Assets:US:CSVBank  110.00 USD
+
+2016-03-06 * "ATM WITHDRAWAL                       001234  03/8888 DELANC"
+  Assets:US:CSVBank  -60.00 USD
+
+2016-03-14 * "INVESTMENT SEC   TRANSFER   A5144608        WEB ID: 1234456789"
+  Assets:US:CSVBank  -150.00 USD
+
+2016-03-15 * "EMPLOYER INC    DIRECT DEP                 PPD ID: 1111111111"
+  Assets:US:CSVBank  2590.73 USD
+
+2016-03-18 * "Payment to Chafe card ending in 1234 03/18"
+  Assets:US:CSVBank  -2680.89 USD
+
+2016-03-19 balance Assets:US:CSVBank                               3409.86 USD

@@ -92,23 +92,41 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
                 // - If there's a price annotation (no cost), weight is in price currency
                 // - Otherwise, weight is the units themselves
 
-                if let Some(cost_spec) = &posting.cost {
-                    // Cost-based posting: weight is in the cost currency
+                // Check if cost spec has determinable values.
+                // If cost has number but no currency, try to infer currency from price annotation.
+                let cost_contribution = posting.cost.as_ref().and_then(|cost_spec| {
+                    // Helper to get currency from price annotation
+                    let price_currency = posting.price.as_ref().and_then(|p| match p {
+                        rustledger_core::PriceAnnotation::Unit(a)
+                        | rustledger_core::PriceAnnotation::Total(a) => Some(a.currency.clone()),
+                        rustledger_core::PriceAnnotation::UnitIncomplete(inc)
+                        | rustledger_core::PriceAnnotation::TotalIncomplete(inc) => {
+                            inc.as_amount().map(|a| a.currency.clone())
+                        }
+                        _ => None,
+                    });
+
+                    // Try to get cost currency, falling back to price currency
+                    let inferred_currency = cost_spec.currency.clone().or(price_currency);
+
                     if let (Some(per_unit), Some(cost_curr)) =
-                        (&cost_spec.number_per, &cost_spec.currency)
+                        (&cost_spec.number_per, &inferred_currency)
                     {
                         let cost_amount = amount.number * per_unit;
-                        *residuals.entry(cost_curr.clone()).or_default() += cost_amount;
+                        Some((cost_curr.clone(), cost_amount))
                     } else if let (Some(total), Some(cost_curr)) =
-                        (&cost_spec.number_total, &cost_spec.currency)
+                        (&cost_spec.number_total, &inferred_currency)
                     {
                         // For total cost, sign depends on units sign
-                        *residuals.entry(cost_curr.clone()).or_default() +=
-                            *total * amount.number.signum();
+                        Some((cost_curr.clone(), *total * amount.number.signum()))
                     } else {
-                        // Cost spec without amount/currency - fall back to units
-                        *residuals.entry(amount.currency.clone()).or_default() += amount.number;
+                        None // Cost spec without determinable amount (e.g., empty `{}`)
                     }
+                });
+
+                if let Some((currency, cost_amount)) = cost_contribution {
+                    // Cost-based posting: weight is in the cost currency
+                    *residuals.entry(currency).or_default() += cost_amount;
                 } else if let Some(price) = &posting.price {
                     // Price annotation: converts units to price currency
                     match price {
@@ -148,6 +166,9 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
                             *residuals.entry(amount.currency.clone()).or_default() += amount.number;
                         }
                     }
+                } else if posting.cost.is_some() {
+                    // Cost spec exists but is empty (e.g., `{}`), and no price annotation
+                    // Don't contribute to residual - cost will be filled by lot matching
                 } else {
                     // Simple posting: weight is just the units
                     *residuals.entry(amount.currency.clone()).or_default() += amount.number;
@@ -219,6 +240,8 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
     for (currency, indices) in missing_by_currency {
         let idx = indices[0];
         let residual = residuals.get(&currency).copied().unwrap_or(Decimal::ZERO);
+        // Keep full precision - Python beancount preserves precision during interpolation
+        // Rounding happens only at display time
 
         result.postings[idx].units = Some(IncompleteAmount::Complete(Amount::new(
             -residual, &currency,
@@ -230,7 +253,7 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
     }
 
     // Handle unassigned missing postings
-    // Each one absorbs one currency's residual
+    // Each one absorbs one or more currencies' residuals
     if !unassigned_missing.is_empty() {
         // Get currencies with non-zero residuals
         let non_zero_residuals: Vec<(InternedStr, Decimal)> = residuals
@@ -239,32 +262,55 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
             .map(|(k, v)| (k.clone(), *v))
             .collect();
 
-        if unassigned_missing.len() > 1 && non_zero_residuals.len() > 1 {
-            // Ambiguous - can't determine which currency goes where
-            // For now, just take the first one
-            // A more sophisticated approach would be needed for multi-currency
-        }
+        // Special case: single missing posting with multiple currencies
+        // This is multi-currency interpolation - split into multiple postings
+        if unassigned_missing.len() == 1 && non_zero_residuals.len() > 1 {
+            let idx = unassigned_missing[0];
+            let original_posting = &transaction.postings[idx];
 
-        for (i, idx) in unassigned_missing.iter().enumerate() {
-            if i < non_zero_residuals.len() {
-                let (currency, residual) = &non_zero_residuals[i];
-                result.postings[*idx].units = Some(IncompleteAmount::Complete(Amount::new(
-                    -*residual, currency,
-                )));
-                filled_indices.push(*idx);
+            // Fill the first currency into the original posting
+            // Keep full precision - rounding happens only at display time
+            let (first_currency, first_residual) = &non_zero_residuals[0];
+            result.postings[idx].units = Some(IncompleteAmount::Complete(Amount::new(
+                -first_residual,
+                first_currency,
+            )));
+            filled_indices.push(idx);
+            residuals.insert(first_currency.clone(), Decimal::ZERO);
+
+            // Add new postings for remaining currencies
+            for (currency, residual) in non_zero_residuals.iter().skip(1) {
+                let mut new_posting = original_posting.clone();
+                // Keep full precision - rounding happens only at display time
+                new_posting.units =
+                    Some(IncompleteAmount::Complete(Amount::new(-residual, currency)));
+                result.postings.push(new_posting);
+                filled_indices.push(result.postings.len() - 1);
                 residuals.insert(currency.clone(), Decimal::ZERO);
-            } else if !non_zero_residuals.is_empty() {
-                // Use the first currency
-                let (currency, _) = &non_zero_residuals[0];
-                result.postings[*idx].units =
-                    Some(IncompleteAmount::Complete(Amount::zero(currency)));
-                filled_indices.push(*idx);
-            } else {
-                // No residuals - posting stays without amount
-                // This is an error condition
-                return Err(InterpolationError::CannotInferCurrency {
-                    account: transaction.postings[*idx].account.clone(),
-                });
+            }
+        } else {
+            // Standard case: assign one currency per missing posting
+            for (i, idx) in unassigned_missing.iter().enumerate() {
+                if i < non_zero_residuals.len() {
+                    let (currency, residual) = &non_zero_residuals[i];
+                    // Keep full precision - rounding happens only at display time
+                    result.postings[*idx].units =
+                        Some(IncompleteAmount::Complete(Amount::new(-residual, currency)));
+                    filled_indices.push(*idx);
+                    residuals.insert(currency.clone(), Decimal::ZERO);
+                } else if !non_zero_residuals.is_empty() {
+                    // Use the first currency
+                    let (currency, _) = &non_zero_residuals[0];
+                    result.postings[*idx].units =
+                        Some(IncompleteAmount::Complete(Amount::zero(currency)));
+                    filled_indices.push(*idx);
+                } else {
+                    // No residuals - posting stays without amount
+                    // This is an error condition
+                    return Err(InterpolationError::CannotInferCurrency {
+                        account: transaction.postings[*idx].account.clone(),
+                    });
+                }
             }
         }
     }
@@ -603,5 +649,89 @@ mod tests {
         let amount = get_amount(filled).expect("should have amount");
         assert_eq!(amount.currency, "USD");
         assert_eq!(amount.number, dec!(500.00)); // Positive (receiving cash)
+    }
+
+    // =========================================================================
+    // Multi-currency interpolation tests
+    // =========================================================================
+
+    #[test]
+    fn test_interpolate_multi_currency_single_elided() {
+        // Test case from basic.beancount:
+        // 2008-04-02 * "Gilbert paid back for iPhone"
+        //   Assets:Cash                            440.00 CAD
+        //   Assets:AccountsReceivable             -431.92 USD
+        //   Assets:Cash
+        //
+        // Expected: The elided Assets:Cash becomes TWO postings:
+        //   Assets:Cash: -440.00 CAD
+        //   Assets:Cash: 431.92 USD
+        let txn = Transaction::new(date(2008, 4, 2), "Gilbert paid back for iPhone")
+            .with_posting(Posting::new(
+                "Assets:Cash",
+                Amount::new(dec!(440.00), "CAD"),
+            ))
+            .with_posting(Posting::new(
+                "Assets:AccountsReceivable",
+                Amount::new(dec!(-431.92), "USD"),
+            ))
+            .with_posting(Posting::auto("Assets:Cash"));
+
+        let result = interpolate(&txn).expect("interpolation should succeed");
+
+        // Should now have 4 postings (original 3 + 1 added for second currency)
+        assert_eq!(
+            result.transaction.postings.len(),
+            4,
+            "should split elided posting into 2"
+        );
+
+        // Check that all residuals are zero
+        for (currency, residual) in &result.residuals {
+            assert!(
+                residual.abs() < dec!(0.01),
+                "{currency} residual should be ~0, got {residual}"
+            );
+        }
+
+        // Verify the amounts (order may vary based on HashMap iteration)
+        let mut found_cad = false;
+        let mut found_usd = false;
+        for posting in &result.transaction.postings {
+            if let Some(amount) = get_amount(posting) {
+                if posting.account.as_str() == "Assets:Cash" {
+                    if amount.currency == "CAD" && amount.number == dec!(-440.00) {
+                        found_cad = true;
+                    } else if amount.currency == "USD" && amount.number == dec!(431.92) {
+                        found_usd = true;
+                    }
+                }
+            }
+        }
+        assert!(found_cad, "should have -440.00 CAD posting");
+        assert!(found_usd, "should have 431.92 USD posting");
+    }
+
+    #[test]
+    fn test_interpolate_multi_currency_three_currencies() {
+        // Three currencies with one elided posting
+        let txn = Transaction::new(date(2024, 1, 15), "Multi-currency test")
+            .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(100), "USD")))
+            .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(200), "EUR")))
+            .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(300), "GBP")))
+            .with_posting(Posting::auto("Equity:Opening"));
+
+        let result = interpolate(&txn).expect("interpolation should succeed");
+
+        // Should now have 6 postings (original 4 + 2 added)
+        assert_eq!(result.transaction.postings.len(), 6);
+
+        // All residuals should be zero
+        for (currency, residual) in &result.residuals {
+            assert!(
+                residual.abs() < dec!(0.01),
+                "{currency} residual should be ~0, got {residual}"
+            );
+        }
     }
 }

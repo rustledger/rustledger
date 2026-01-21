@@ -1,0 +1,24 @@
+option "title" "YourLedger"
+
+; 记账时千分之一的偏差忽略不计
+option "inferred_tolerance_default" "*:0.001"
+; 汇总时你希望以什么货币单位结算
+option "operating_currency" "CNY"
+option "operating_currency" "USD"
+option "operating_currency" "HKD"
+
+include "account.beancount"
+include "init.beancount"
+
+;; 工资流水
+include "salary.beancount"
+
+;; 工资流水
+include "daily/2019.beancount"
+
+;; 标的
+include "commodity.beancount"
+
+include "invest.beancount"
+include "prices.beancount"
+include "cryptocoin.beancount"

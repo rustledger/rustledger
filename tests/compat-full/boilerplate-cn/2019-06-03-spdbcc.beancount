@@ -1,0 +1,80 @@
+;; -*- mode: beancount -*-
+; 使用如下命令
+; bean-extract importers/spdccc_importer.py raw-data/spdbcc/2019-05-spdbcc.csv > ledger/daily/2019/2019-06-03-spdbcc.beancount
+; 生成本文件后人工修改错误的内容
+
+2019-05-02 * "信用卡还款"
+  card: "9999"
+  Liabilities:CN:CreditCard:SPDB       1230 CNY
+  Assets:CN:Saving:CMB                -1230 CNY
+
+2019-05-03 * "支付宝 餐厅"
+  card: "9999"
+  Liabilities:CN:CreditCard:SPDB      -44.00 CNY
+  Expenses:Food:Meals                  44.00 CNY
+
+2019-05-03 * "京东买了个包"
+  card: "9999"
+  Liabilities:CN:CreditCard:SPDB      -320.00 CNY
+  Expenses:Home:Groceries              320.00 CNY
+
+2019-05-03 * "不想要了京东退款"
+  card: "9999"
+  Liabilities:CN:CreditCard:SPDB       320.00 CNY
+  Expenses:Home:Groceries             -320.00 CNY
+
+2019-05-03 * "支付宝 XX小吃"
+  card: "9999"
+  ; 和同事一起吃了一份人均23元的盒饭，帮同事代付，
+  ; 同事立刻转了钱到我的微信
+  Liabilities:CN:CreditCard:SPDB      -46.00 CNY
+  Expenses:Food:Meals                  23.00 CNY
+  Assets:CN:Saving:Wechat              23.00 CNY
+
+2019-05-04 * "支付宝 XX餐饮"
+  card: "9999"
+  Liabilities:CN:CreditCard:SPDB      -152.00 CNY
+  Expenses:Food:Meals                  152.00 CNY
+
+2019-05-04 * "支付宝 刘能"
+  card: "9999"
+  Liabilities:CN:CreditCard:SPDB      -13.00 CNY
+  Expenses:Food:Meals                  13.00 CNY
+
+2019-05-05 * "支付宝 中国联合网络通信有限公司"
+  card: "9999"
+  Liabilities:CN:CreditCard:SPDB      -99.50 CNY
+  Expenses:Comm:PhonePlan              99.50 CNY
+
+2019-05-05 * "支付宝 XX电力公司"
+  card: "9999"
+  Liabilities:CN:CreditCard:SPDB      -56.49 CNY
+  Expenses:Home:Utilities              56.49 CNY
+
+2019-05-05 * "支付宝 XX果品"
+  card: "9999"
+  Liabilities:CN:CreditCard:SPDB      -30.00 CNY
+  Expenses:Food:FruitSnacks            18.00 CNY
+  	note: "西瓜"
+  Expenses:Food:FruitSnacks            12.00 CNY
+  	note: "苹果"
+
+2019-05-06 * "支付宝 上海赵四餐饮服务有限公司"
+  card: "9999"
+  Liabilities:CN:CreditCard:SPDB      -20.00 CNY
+  Expenses:Food:Meals                  20.00 CNY
+
+2019-05-06 * "支付宝 谢广坤"
+  card: "9999"
+  Liabilities:CN:CreditCard:SPDB      -22.00 CNY
+  Expenses:Food:Meals                  22.00 CNY
+
+2019-05-06 * "支付宝 上海福满家便利有限公司"
+  card: "9999"
+  Liabilities:CN:CreditCard:SPDB      -13.80 CNY
+  Expenses:Food:FruitSnacks            13.80 CNY
+
+2019-05-07 * "支付宝 北京嘀嘀无限科技发展有…"
+  card: "9999"
+  Liabilities:CN:CreditCard:SPDB      -11.00 CNY
+  Expenses:Transport:Taxi              11.00 CNY

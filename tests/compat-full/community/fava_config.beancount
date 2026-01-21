@@ -1,0 +1,42 @@
+2010-01-01 custom "fava-extension" "fava_investor" "{
+  'tlh' : { 'accounts_pattern': 'Assets:US',
+            'loss_threshold': 0,
+            'wash_pattern': 'Assets:US',
+            'account_field': 2,
+   },
+
+   'asset_alloc_by_account': [
+     { 'title':            'Allocation by Taxability',
+       'pattern_type':     'account_name',
+       'pattern':          'Assets:US:[^:]*$',
+       'include_children': True,
+     },
+   ],
+   
+  'asset_alloc_by_class' : {
+      'accounts_patterns': ['Assets:US'],
+  },
+
+  'cashdrag': {
+      'accounts_pattern':         '^Assets:.*',
+      'accounts_exclude_pattern': '^Assets:(Cash-In-Wallet.*|Zero-Sum)', 
+      'metadata_label_cash'     : 'asset_allocation_cash'
+  },
+  'summarizer': [
+    { 'title' : 'Commodities Summary',
+      'directive_type'  : 'commodities',
+      'active_only': True,
+      'meta_skip' : 'commodity_skip',
+      'col_labels': [ 'Ticker', 'Type', 'Equi', 'Description', 'TLH_to', 'ER', 'Market'],
+      'columns' : [ 'ticker', 'a__quoteType', 'a__equivalents', 'name', 'tlh_alternates', 'a__annualReportExpenseRatio', 'market_value'],
+      'sort_by' : 1,
+    },
+ ],
+   'minimizegains' : {
+       'accounts_pattern': 'Assets:US',
+       'account_field': 2,
+       'st_tax_rate': 0.35,
+       'lt_tax_rate': 0.21
+   }
+}"
+

@@ -1,0 +1,163 @@
+; 1949-10-01 commodity CNY
+;   name: "China Yuan"
+;   asset-class: "cash"
+
+option "operating_currency" "CNY"
+
+;-------------------------START OPEN ACCOUNTS-------------------------
+;-------------------------OPEN INCOME ACCOUNTS------------------------
+2017-12-31 open Income:Alimony CNY
+2017-12-31 note Income:Alimony "收入-生活费"
+
+2017-12-31 open Income:MoneyFund CNY
+2017-12-31 note Income:MoneyFund "收入-货币基金"
+
+2017-12-31 open Income:Bonus CNY
+2017-12-31 note Income:Bonus "收入-红包|奖励金"
+
+2017-12-31 open Income:Salary CNY
+2017-12-31 note Income:Salary "收入-工资"
+
+;-------------------------OPEN EXPENSES ACCOUNTS----------------------
+2017-12-31 open Expenses:Dressup:Clothing CNY
+2017-12-31 note Expenses:Dressup:Clothing "花费-衣"
+
+2017-12-31 open Expenses:Dressup:Maintain CNY
+2017-12-31 note Expenses:Dressup:Maintain "花费-打扮"
+
+2017-12-31 open Expenses:Daily:Food CNY
+2017-12-31 note Expenses:Daily:Food "花费-食"
+
+2017-12-31 open Expenses:Daily:Commodity CNY
+2017-12-31 note Expenses:Daily:Commodity "花费-日用|超市"
+
+2017-12-31 open Expenses:Daily:PhoneCharge CNY
+2017-12-31 note Expenses:Daily:PhoneCharge "花费-电话费"
+
+2017-12-31 open Expenses:Daily:LivingExpense CNY
+2017-12-31 note Expenses:Daily:LivingExpense "花费-水电气物业费"
+
+2017-12-31 open Expenses:House:Hotel CNY
+2017-12-31 note Expenses:House:Hotel "花费-宾馆"
+
+2017-12-31 open Expenses:House:Rent CNY
+2017-12-31 note Expenses:House:Rent "花费-房租"
+
+2017-12-31 open Expenses:Travelling CNY
+2017-12-31 note Expenses:Travelling "花费-行"
+
+2017-12-31 open Expenses:Travelling:TransportCard CNY
+2017-12-31 note Expenses:Travelling:TransportCard "花费-公交卡"
+
+2017-12-31 open Expenses:Tech:Subscription CNY
+2017-12-31 note Expenses:Tech:Subscription "花费-订阅：腾讯云|阿里云|银行卡短信费|iCloud"
+
+2017-12-31 open Expenses:Tech:Books CNY
+2017-12-31 note Expenses:Tech:Books "花费-阅读"
+
+2017-12-31 open Expenses:Fun:SoftwareAndGame CNY
+2017-12-31 note Expenses:Fun:SoftwareAndGame "花费-软件和游戏"
+
+2017-12-31 open Expenses:Fun:Amusement CNY
+2017-12-31 note Expenses:Fun:Amusement "花费-娱乐活动：电影|KTV"
+
+2017-12-31 open Expenses:Fun:Luxury CNY
+2017-12-31 note Expenses:Fun:Luxury "花费-所有贵的东西"
+
+2017-12-31 open Expenses:Social:Love CNY
+2017-12-31 note Expenses:Social:Love "花费-给妹子的红包和礼物"
+
+2017-12-31 open Expenses:Social:WhipRound CNY
+2017-12-31 note Expenses:Social:WhipRound "花费-份子钱"
+
+2017-12-31 open Expenses:PublicWelfare CNY
+2017-12-31 note Expenses:PublicWelfare "花费-公益"
+
+2017-12-31 open Expenses:Health:Hospital CNY
+2017-12-31 note Expenses:Health:Hospital "花费-看病吃药"
+
+2017-12-31 open Expenses:Others CNY
+2017-12-31 note Expenses:Others "花费-其他"
+
+;-------------------------OPEN LIABILITIES ACCOUNTS-------------------
+2017-12-31 open Liabilities:VirtualCard:Huabei CNY
+2017-12-31 note Liabilities:VirtualCard:Huabei "负债-花呗"
+
+2017-12-31 open Liabilities:VirtualCard:JDbaitiao CNY
+2017-12-31 note Liabilities:VirtualCard:JDbaitiao "负债-京东白条"
+
+2017-12-31 open Liabilities:CreditCard:CMB CNY
+2017-12-31 note Liabilities:CreditCard:CMB "负债-招行信用卡"
+
+;-------------------------OPEN ASSETS ACCOUNTS------------------------
+2017-12-31 open Assets:Cash CNY
+2017-12-31 note Assets:Cash "资产-现金"
+
+2017-12-31 open Assets:VirtualCard:Alipay CNY
+2017-12-31 note Assets:VirtualCard:Alipay "资产-支付宝"
+
+2017-12-31 open Assets:VirtualCard:Wechat CNY
+2017-12-31 note Assets:VirtualCard:Wechat "资产-微信"
+
+2017-12-31 open Assets:DepositCard:CCB CNY
+2017-12-31 note Assets:DepositCard:CCB "资产-建行储蓄卡"
+
+2017-12-31 open Assets:DepositCard:CMB CNY
+2017-12-31 note Assets:DepositCard:CMB "资产-招行储蓄卡"
+
+2017-12-31 open Assets:Receivables CNY
+2017-12-31 note Assets:Receivables "资产-借款"
+
+;-------------------------OPEN MONEY FOUND ACCOUNTS------------------------
+
+2017-12-31 open Assets:MoneyFound:Yuebao CNY
+2017-12-31 note Assets:MoneyFound:Yuebao "资产-阿里余额宝"
+
+2017-12-31 open Assets:MoneyFound:ChangeTong CNY
+2017-12-31 note Assets:MoneyFound:ChangeTong "资产-腾讯零钱通"
+
+
+;-------------------------OPEN EQUITY ACCOUNTS------------------------
+2017-12-31 open Equity:Opening-Balances CNY
+;-------------------------END OPEN ACCOUNTS---------------------------
+
+
+;-------------------------START INITIALIZE ACCOUNTS-------------------
+;-------------------------PADDING ACCOUNTS----------------------------
+2017-12-31 pad Liabilities:VirtualCard:Huabei Equity:Opening-Balances
+2017-12-31 pad Liabilities:VirtualCard:JDbaitiao Equity:Opening-Balances
+2017-12-31 pad Liabilities:CreditCard:CMB Equity:Opening-Balances
+
+2017-12-31 pad Assets:Cash Equity:Opening-Balances
+2017-12-31 pad Assets:VirtualCard:Alipay Equity:Opening-Balances
+2017-12-31 pad Assets:VirtualCard:Wechat Equity:Opening-Balances
+2017-12-31 pad Assets:DepositCard:CCB Equity:Opening-Balances
+2017-12-31 pad Assets:DepositCard:CMB Equity:Opening-Balances
+2017-12-31 pad Assets:Receivables Equity:Opening-Balances
+
+2017-12-31 pad Assets:MoneyFound:Yuebao Equity:Opening-Balances
+2017-12-31 pad Assets:MoneyFound:ChangeTong Equity:Opening-Balances
+
+;-------------------------BALANCE ACCOUNTS----------------------------
+2018-01-01 balance Liabilities:VirtualCard:Huabei -500.00 CNY
+2018-01-01 balance Liabilities:VirtualCard:JDbaitiao -10.00 CNY
+2018-01-01 balance Liabilities:CreditCard:CMB -300.00 CNY
+
+2018-01-01 balance Assets:Cash 0.10 CNY
+2018-01-01 balance Assets:VirtualCard:Alipay 100000.00 CNY
+2018-01-01 balance Assets:VirtualCard:Wechat 100000.00 CNY
+2018-01-01 balance Assets:DepositCard:CCB 5000000.00 CNY
+2018-01-01 balance Assets:DepositCard:CMB 3500000.00 CNY
+2018-01-01 balance Assets:Receivables 9500000.00 CNY
+
+2018-01-01 balance Assets:MoneyFound:Yuebao 510000.00 CNY
+2018-01-01 balance Assets:MoneyFound:ChangeTong 50000.00 CNY
+
+;-------------------------END INITIALIZE ACCOUNTS---------------------
+
+
+
+
+
+
+

@@ -1,0 +1,17 @@
+plugin "long_short" "{
+   'Income.*Capital-Gains': [':Capital-Gains', ':Capital-Gains:Short', ':Capital-Gains:Long']
+   }"
+
+2014-01-01 open Assets:Brokerage
+2014-01-01 open Assets:Bank
+2014-01-01 open Income:Capital-Gains
+
+2014-02-01 * "Buy"
+  Assets:Brokerage    100 ORNG {1 USD}
+  Assets:Bank        -100 USD
+
+2016-03-01 * "Sell"
+  Assets:Brokerage   -100 ORNG {1 USD} @ 1.50 USD
+  Assets:Bank         150 USD
+  Income:Capital-Gains
+

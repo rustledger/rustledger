@@ -1,0 +1,3 @@
+option "inferred_tolerance_default" "*:0"
+option "inferred_tolerance_default" "USD:0.05"
+option "inferred_tolerance_default" "JPY:0.5"

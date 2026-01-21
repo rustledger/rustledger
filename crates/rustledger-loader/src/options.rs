@@ -34,10 +34,19 @@ const KNOWN_OPTIONS: &[&str] = &[
     "documents",
     "insert_pythonpath",
     "plugin_processing_mode",
+    "plugin", // Deprecated, but still known
 ];
 
 /// Options that can be specified multiple times.
-const REPEATABLE_OPTIONS: &[&str] = &["operating_currency", "insert_pythonpath", "documents"];
+const REPEATABLE_OPTIONS: &[&str] = &[
+    "operating_currency",
+    "insert_pythonpath",
+    "documents",
+    "inferred_tolerance_default",
+];
+
+/// Options that are read-only and cannot be set by users.
+const READONLY_OPTIONS: &[&str] = &["filename"];
 
 /// Option validation warning.
 #[derive(Debug, Clone)]
@@ -55,7 +64,7 @@ pub struct OptionWarning {
 /// Beancount file options.
 ///
 /// These correspond to the `option` directives in beancount files.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct Options {
     /// Title for the ledger.
     pub title: Option<String>,
@@ -135,6 +144,9 @@ pub struct Options {
     /// Directories to scan for document files.
     pub documents: Vec<String>,
 
+    /// Plugin processing mode: "default" or "raw".
+    pub plugin_processing_mode: String,
+
     /// Any other custom options.
     pub custom: HashMap<String, String>,
 
@@ -144,6 +156,12 @@ pub struct Options {
 
     /// Validation warnings collected during parsing.
     pub warnings: Vec<OptionWarning>,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Options {
@@ -177,6 +195,7 @@ impl Options {
             allow_pipe_separator: false,
             long_string_maxlines: 64,
             documents: Vec::new(),
+            plugin_processing_mode: "default".to_string(),
             custom: HashMap::new(),
             set_options: HashSet::new(),
             warnings: Vec::new(),
@@ -196,6 +215,17 @@ impl Options {
                 option: key.to_string(),
                 value: value.to_string(),
             });
+        }
+
+        // Check for read-only options (E7005)
+        if READONLY_OPTIONS.contains(&key) {
+            self.warnings.push(OptionWarning {
+                code: "E7005",
+                message: format!("Option '{key}' may not be set"),
+                option: key.to_string(),
+                value: value.to_string(),
+            });
+            return; // Don't apply the value
         }
 
         // Check for duplicate non-repeatable options (E7003)
@@ -221,11 +251,37 @@ impl Options {
             "name_equity" => self.name_equity = value.to_string(),
             "name_income" => self.name_income = value.to_string(),
             "name_expenses" => self.name_expenses = value.to_string(),
-            "account_rounding" => self.account_rounding = Some(value.to_string()),
+            "account_rounding" => {
+                if !Self::is_valid_account(value) {
+                    self.warnings.push(OptionWarning {
+                        code: "E7002",
+                        message: format!("Invalid leaf account name: '{value}'"),
+                        option: key.to_string(),
+                        value: value.to_string(),
+                    });
+                }
+                self.account_rounding = Some(value.to_string());
+            }
             "account_current_conversions" => {
+                if !Self::is_valid_account(value) {
+                    self.warnings.push(OptionWarning {
+                        code: "E7002",
+                        message: format!("Invalid leaf account name: '{value}'"),
+                        option: key.to_string(),
+                        value: value.to_string(),
+                    });
+                }
                 self.account_current_conversions = Some(value.to_string());
             }
             "account_unrealized_gains" => {
+                if !Self::is_valid_account(value) {
+                    self.warnings.push(OptionWarning {
+                        code: "E7002",
+                        message: format!("Invalid leaf account name: '{value}'"),
+                        option: key.to_string(),
+                        value: value.to_string(),
+                    });
+                }
                 self.account_unrealized_gains = Some(value.to_string());
             }
             "inferred_tolerance_multiplier" => {
@@ -282,7 +338,10 @@ impl Options {
                 self.booking_method = value.to_string();
             }
             "render_commas" => {
-                if !value.eq_ignore_ascii_case("true") && !value.eq_ignore_ascii_case("false") {
+                // Accept TRUE/FALSE, true/false, 1/0 (Python beancount compatibility)
+                let is_true = value.eq_ignore_ascii_case("true") || value == "1";
+                let is_false = value.eq_ignore_ascii_case("false") || value == "0";
+                if !is_true && !is_false {
                     self.warnings.push(OptionWarning {
                         code: "E7002",
                         message: format!(
@@ -292,13 +351,53 @@ impl Options {
                         value: value.to_string(),
                     });
                 }
-                self.render_commas = value.eq_ignore_ascii_case("true");
+                self.render_commas = is_true;
             }
             "filename" => self.filename = Some(value.to_string()),
-            "account_previous_balances" => self.account_previous_balances = value.to_string(),
-            "account_previous_earnings" => self.account_previous_earnings = value.to_string(),
-            "account_previous_conversions" => self.account_previous_conversions = value.to_string(),
-            "account_current_earnings" => self.account_current_earnings = value.to_string(),
+            "account_previous_balances" => {
+                if !Self::is_valid_account(value) {
+                    self.warnings.push(OptionWarning {
+                        code: "E7002",
+                        message: format!("Invalid leaf account name: '{value}'"),
+                        option: key.to_string(),
+                        value: value.to_string(),
+                    });
+                }
+                self.account_previous_balances = value.to_string();
+            }
+            "account_previous_earnings" => {
+                if !Self::is_valid_account(value) {
+                    self.warnings.push(OptionWarning {
+                        code: "E7002",
+                        message: format!("Invalid leaf account name: '{value}'"),
+                        option: key.to_string(),
+                        value: value.to_string(),
+                    });
+                }
+                self.account_previous_earnings = value.to_string();
+            }
+            "account_previous_conversions" => {
+                if !Self::is_valid_account(value) {
+                    self.warnings.push(OptionWarning {
+                        code: "E7002",
+                        message: format!("Invalid leaf account name: '{value}'"),
+                        option: key.to_string(),
+                        value: value.to_string(),
+                    });
+                }
+                self.account_previous_conversions = value.to_string();
+            }
+            "account_current_earnings" => {
+                if !Self::is_valid_account(value) {
+                    self.warnings.push(OptionWarning {
+                        code: "E7002",
+                        message: format!("Invalid leaf account name: '{value}'"),
+                        option: key.to_string(),
+                        value: value.to_string(),
+                    });
+                }
+                self.account_current_earnings = value.to_string();
+            }
             "conversion_currency" => self.conversion_currency = Some(value.to_string()),
             "inferred_tolerance_default" => {
                 // Parse "CURRENCY:TOLERANCE" or "*:TOLERANCE"
@@ -333,6 +432,13 @@ impl Options {
                 self.experiment_explicit_tolerances = value.eq_ignore_ascii_case("true");
             }
             "allow_pipe_separator" => {
+                // This option is deprecated in Python beancount
+                self.warnings.push(OptionWarning {
+                    code: "E7004",
+                    message: "Option 'allow_pipe_separator' is deprecated".to_string(),
+                    option: key.to_string(),
+                    value: value.to_string(),
+                });
                 self.allow_pipe_separator = value.eq_ignore_ascii_case("true");
             }
             "long_string_maxlines" => {
@@ -349,7 +455,40 @@ impl Options {
                     });
                 }
             }
-            "documents" => self.documents.push(value.to_string()),
+            "documents" => {
+                // Validate that document root exists
+                if !std::path::Path::new(value).exists() {
+                    self.warnings.push(OptionWarning {
+                        code: "E7006",
+                        message: format!("Document root '{value}' does not exist"),
+                        option: key.to_string(),
+                        value: value.to_string(),
+                    });
+                }
+                self.documents.push(value.to_string());
+            }
+            "plugin_processing_mode" => {
+                // Valid values are "default" and "raw" (case-sensitive, like Python)
+                if value != "default" && value != "raw" {
+                    self.warnings.push(OptionWarning {
+                        code: "E7002",
+                        message: format!("Invalid value '{value}'"),
+                        option: key.to_string(),
+                        value: value.to_string(),
+                    });
+                }
+                self.plugin_processing_mode = value.to_string();
+            }
+            "plugin" => {
+                // Deprecated: should use `plugin` directive instead of `option "plugin"`
+                self.warnings.push(OptionWarning {
+                    code: "E7004",
+                    message: "Option 'plugin' is deprecated; use the 'plugin' directive instead"
+                        .to_string(),
+                    option: key.to_string(),
+                    value: value.to_string(),
+                });
+            }
             _ => {
                 // Unknown options go to custom map
                 self.custom.insert(key.to_string(), value.to_string());
@@ -373,6 +512,32 @@ impl Options {
             &self.name_income,
             &self.name_expenses,
         ]
+    }
+
+    /// Check if a value looks like a valid account name.
+    ///
+    /// Valid accounts have format "Type:Subaccount:..." where Type starts with
+    /// uppercase letter and subaccounts are colon-separated.
+    fn is_valid_account(value: &str) -> bool {
+        // Must contain at least one colon
+        if !value.contains(':') {
+            return false;
+        }
+
+        // Check each component
+        for part in value.split(':') {
+            // First char of each component should be uppercase letter
+            if let Some(first) = part.chars().next() {
+                if !first.is_ascii_uppercase() {
+                    return false;
+                }
+            } else {
+                // Empty component
+                return false;
+            }
+        }
+
+        true
     }
 }
 
@@ -486,5 +651,157 @@ mod tests {
                 "Should accept {method} as valid booking method"
             );
         }
+    }
+
+    #[test]
+    fn test_readonly_option_warning() {
+        let mut opts = Options::new();
+        opts.set("filename", "/some/path.beancount");
+
+        assert_eq!(opts.warnings.len(), 1);
+        assert_eq!(opts.warnings[0].code, "E7005");
+        assert!(opts.warnings[0].message.contains("may not be set"));
+    }
+
+    #[test]
+    fn test_invalid_account_name_validation() {
+        // Test account_rounding with invalid value
+        let mut opts = Options::new();
+        opts.set("account_rounding", "invalid");
+
+        assert_eq!(opts.warnings.len(), 1);
+        assert_eq!(opts.warnings[0].code, "E7002");
+        assert!(opts.warnings[0].message.contains("Invalid leaf account"));
+    }
+
+    #[test]
+    fn test_valid_account_name() {
+        let mut opts = Options::new();
+        opts.set("account_rounding", "Equity:Rounding");
+
+        assert!(
+            opts.warnings.is_empty(),
+            "Valid account name should not produce warnings: {:?}",
+            opts.warnings
+        );
+        assert_eq!(opts.account_rounding, Some("Equity:Rounding".to_string()));
+    }
+
+    #[test]
+    fn test_render_commas_with_numeric_values() {
+        let mut opts = Options::new();
+        opts.set("render_commas", "1");
+        assert!(opts.render_commas);
+        assert!(opts.warnings.is_empty());
+
+        let mut opts2 = Options::new();
+        opts2.set("render_commas", "0");
+        assert!(!opts2.render_commas);
+        assert!(opts2.warnings.is_empty());
+    }
+
+    #[test]
+    fn test_plugin_processing_mode_validation() {
+        // Valid values
+        let mut opts = Options::new();
+        opts.set("plugin_processing_mode", "default");
+        assert!(opts.warnings.is_empty());
+        assert_eq!(opts.plugin_processing_mode, "default");
+
+        let mut opts2 = Options::new();
+        opts2.set("plugin_processing_mode", "raw");
+        assert!(opts2.warnings.is_empty());
+        assert_eq!(opts2.plugin_processing_mode, "raw");
+
+        // Invalid value
+        let mut opts3 = Options::new();
+        opts3.set("plugin_processing_mode", "invalid");
+        assert_eq!(opts3.warnings.len(), 1);
+        assert_eq!(opts3.warnings[0].code, "E7002");
+    }
+
+    #[test]
+    fn test_deprecated_plugin_option() {
+        let mut opts = Options::new();
+        opts.set("plugin", "some.plugin");
+
+        assert_eq!(opts.warnings.len(), 1);
+        assert_eq!(opts.warnings[0].code, "E7004");
+        assert!(opts.warnings[0].message.contains("deprecated"));
+    }
+
+    #[test]
+    fn test_deprecated_allow_pipe_separator() {
+        let mut opts = Options::new();
+        opts.set("allow_pipe_separator", "true");
+
+        assert_eq!(opts.warnings.len(), 1);
+        assert_eq!(opts.warnings[0].code, "E7004");
+        assert!(opts.warnings[0].message.contains("deprecated"));
+    }
+
+    #[test]
+    fn test_is_valid_account() {
+        // Valid accounts
+        assert!(Options::is_valid_account("Assets:Bank"));
+        assert!(Options::is_valid_account("Equity:Rounding:Precision"));
+
+        // Invalid accounts
+        assert!(!Options::is_valid_account("invalid")); // No colon
+        assert!(!Options::is_valid_account("assets:bank")); // Lowercase
+        assert!(!Options::is_valid_account("Assets:")); // Empty component
+        assert!(!Options::is_valid_account(":Bank")); // Empty first component
+    }
+
+    #[test]
+    fn test_account_validation_options() {
+        // Test all account options that require validation
+        let account_options = [
+            "account_rounding",
+            "account_current_conversions",
+            "account_unrealized_gains",
+            "account_previous_balances",
+            "account_previous_earnings",
+            "account_previous_conversions",
+            "account_current_earnings",
+        ];
+
+        for opt in account_options {
+            let mut opts = Options::new();
+            opts.set(opt, "lowercase:invalid");
+
+            assert!(
+                !opts.warnings.is_empty(),
+                "Option '{opt}' should warn on invalid account name"
+            );
+            assert_eq!(opts.warnings[0].code, "E7002");
+        }
+    }
+
+    #[test]
+    fn test_inferred_tolerance_default() {
+        let mut opts = Options::new();
+        opts.set("inferred_tolerance_default", "USD:0.005");
+
+        assert!(opts.warnings.is_empty());
+        assert_eq!(
+            opts.inferred_tolerance_default.get("USD"),
+            Some(&rust_decimal_macros::dec!(0.005))
+        );
+
+        // Test wildcard
+        let mut opts2 = Options::new();
+        opts2.set("inferred_tolerance_default", "*:0.01");
+        assert!(opts2.warnings.is_empty());
+        assert_eq!(
+            opts2.inferred_tolerance_default.get("*"),
+            Some(&rust_decimal_macros::dec!(0.01))
+        );
+
+        // Test invalid format
+        let mut opts3 = Options::new();
+        opts3.set("inferred_tolerance_default", "INVALID");
+        assert_eq!(opts3.warnings.len(), 1);
+        assert_eq!(opts3.warnings[0].code, "E7002");
     }
 }

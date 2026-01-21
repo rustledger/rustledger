@@ -1,0 +1,27 @@
+;; Account: wise_csv
+;; Date: 2024-01-18
+;; Name: wise-personal-old-format-EUR.csv
+
+2024-01-15 * "Coffee Shop London" ""
+  converted: "100.00 PLN (4.25000)"
+  src_id: "CARD-1001"
+  Assets:Wise:EUR     -19.72 EUR
+  Expenses:Fees:Wise    0.07 EUR
+
+2024-01-16 * "Online Store" ""
+  src_id: "CARD-1002"
+  Assets:Wise:EUR  -50.00 EUR
+
+2024-01-17 * "Jane Doe" "Sent money to Jane Doe"
+  converted: "2150.00 PLN (4.30000)"
+  src_desc: "Sent money to Jane Doe"
+  src_id: "TRANSFER-1001"
+  Assets:Wise:EUR     -500.00 EUR
+  Expenses:Fees:Wise     2.50 EUR
+
+2024-01-18 * "Grocery Store" ""
+  src_desc: "No information"
+  src_id: "CARD-1003"
+  Assets:Wise:EUR  -25.00 EUR
+
+2024-01-19 balance Assets:Wise:EUR                                 900.00 EUR

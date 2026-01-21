@@ -1,0 +1,227 @@
+# PR Benchmark workflow - quick benchmarks with PR comments
+#
+# Runs a lightweight benchmark on PRs and posts results as a comment.
+# Uses fewer iterations and a smaller dataset for speed.
+#
+name: PR Benchmarks
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'crates/**/*.rs'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+
+permissions:
+  contents: read
+  pull-requests: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  pr-benchmark:
+    name: PR Benchmark
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@4be9e76fd7c4901c61fb841f559994984270fce7 # stable
+
+      - uses: Swatinem/rust-cache@ad397744b0d591a723ab90405b7247fac0e6b8db # v2
+        with:
+          cache-on-failure: true
+          prefix-key: bench-pr
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install beancount
+
+          # Hyperfine
+          HYPERFINE_VERSION=$(curl -s https://api.github.com/repos/sharkdp/hyperfine/releases/latest | jq -r '.tag_name')
+          curl -sL "https://github.com/sharkdp/hyperfine/releases/download/${HYPERFINE_VERSION}/hyperfine-${HYPERFINE_VERSION}-x86_64-unknown-linux-gnu.tar.gz" | tar xz -C /tmp
+          sudo mv "/tmp/hyperfine-${HYPERFINE_VERSION}-x86_64-unknown-linux-gnu/hyperfine" /usr/local/bin/
+
+      - name: Build rustledger
+        run: cargo build --release -p rustledger --no-default-features
+
+      - name: Generate test ledger (1K transactions)
+        run: |
+          python3 << 'EOF'
+          import random
+          from datetime import date, timedelta
+
+          random.seed(42)
+
+          accounts = [
+              "Assets:Bank:Checking", "Assets:Bank:Savings",
+              "Expenses:Food", "Expenses:Transport",
+              "Income:Salary", "Equity:Opening",
+          ]
+
+          with open("benchmark.beancount", "w") as f:
+              f.write('option "operating_currency" "USD"\n\n')
+              for acc in accounts:
+                  f.write(f"2020-01-01 open {acc}\n")
+              f.write("\n")
+
+              start_date = date(2020, 1, 1)
+              for i in range(1000):
+                  d = start_date + timedelta(days=i // 5)
+                  amount = round(random.uniform(5, 500), 2)
+                  expense = random.choice([a for a in accounts if a.startswith("Expenses:")])
+                  f.write(f'{d} * "Payee {i % 50}" "Transaction {i}"\n')
+                  f.write(f"  {expense}  {amount} USD\n")
+                  f.write(f"  Assets:Bank:Checking\n\n")
+
+          print("Generated benchmark.beancount (1K transactions)")
+          EOF
+
+      - name: Run PR benchmark
+        id: benchmark
+        run: |
+          echo "=== PR Benchmark (1K transactions) ==="
+
+          # Quick benchmark: 5 runs, 2 warmup
+          hyperfine \
+            --warmup 2 \
+            --runs 5 \
+            --export-json bench-pr.json \
+            --command-name 'rustledger' './target/release/rledger-check benchmark.beancount' \
+            --command-name 'beancount' 'bean-check benchmark.beancount'
+
+          # Extract results
+          python3 << 'EOF'
+          import json
+          import os
+
+          with open('bench-pr.json') as f:
+              results = json.load(f)
+
+          times = {}
+          for r in results['results']:
+              name = r['command']
+              mean_ms = r['mean'] * 1000
+              stddev_ms = r['stddev'] * 1000
+              times[name] = {'mean': round(mean_ms, 1), 'stddev': round(stddev_ms, 1)}
+
+          rustledger = times.get('rustledger', {'mean': 0, 'stddev': 0})
+          beancount = times.get('beancount', {'mean': 0, 'stddev': 0})
+
+          speedup = beancount['mean'] / rustledger['mean'] if rustledger['mean'] > 0 else 0
+
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write(f"rustledger_ms={rustledger['mean']}\n")
+              f.write(f"rustledger_stddev={rustledger['stddev']}\n")
+              f.write(f"beancount_ms={beancount['mean']}\n")
+              f.write(f"beancount_stddev={beancount['stddev']}\n")
+              f.write(f"speedup={speedup:.1f}\n")
+
+          print(f"rustledger: {rustledger['mean']}ms ± {rustledger['stddev']}ms")
+          print(f"beancount:  {beancount['mean']}ms ± {beancount['stddev']}ms")
+          print(f"speedup:    {speedup:.1f}x")
+          EOF
+
+      - name: Measure memory usage
+        id: memory
+        run: |
+          # Measure peak RSS
+          rustledger_mem=$(/usr/bin/time -v ./target/release/rledger-check benchmark.beancount 2>&1 | grep "Maximum resident set size" | awk '{print $6}')
+          beancount_mem=$(/usr/bin/time -v bean-check benchmark.beancount 2>&1 | grep "Maximum resident set size" | awk '{print $6}')
+
+          rustledger_mb=$(echo "scale=1; $rustledger_mem / 1024" | bc)
+          beancount_mb=$(echo "scale=1; $beancount_mem / 1024" | bc)
+
+          echo "rustledger_mem_mb=$rustledger_mb" >> $GITHUB_OUTPUT
+          echo "beancount_mem_mb=$beancount_mb" >> $GITHUB_OUTPUT
+
+          echo "rustledger: ${rustledger_mb}MB"
+          echo "beancount:  ${beancount_mb}MB"
+
+      - name: Run Criterion benchmarks
+        id: criterion
+        run: |
+          # Run key Criterion benchmarks and capture summary
+          cargo bench -p rustledger-core -- --noplot 2>&1 | tee criterion-output.txt || true
+          cargo bench -p rustledger-parser -- --noplot 2>&1 | tee -a criterion-output.txt || true
+
+          # Extract key metrics
+          echo "criterion_ran=true" >> $GITHUB_OUTPUT
+
+      - name: Fetch baseline from main branch
+        id: baseline
+        run: |
+          # Try to get baseline from benchmarks branch
+          baseline=$(curl -sSf "https://raw.githubusercontent.com/${{ github.repository }}/benchmarks/.github/badges/validation-history.json" 2>/dev/null | jq -r '.[-1].rustledger_ms // 0') || baseline=0
+          echo "baseline_ms=$baseline" >> $GITHUB_OUTPUT
+
+      - name: Post PR comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const rustledger_ms = '${{ steps.benchmark.outputs.rustledger_ms }}';
+            const beancount_ms = '${{ steps.benchmark.outputs.beancount_ms }}';
+            const speedup = '${{ steps.benchmark.outputs.speedup }}';
+            const rustledger_mem = '${{ steps.memory.outputs.rustledger_mem_mb }}';
+            const beancount_mem = '${{ steps.memory.outputs.beancount_mem_mb }}';
+            const baseline_ms = '${{ steps.baseline.outputs.baseline_ms }}';
+
+            // Calculate change vs baseline
+            let changeText = '';
+            if (baseline_ms && parseFloat(baseline_ms) > 0) {
+              const change = ((parseFloat(rustledger_ms) - parseFloat(baseline_ms)) / parseFloat(baseline_ms) * 100).toFixed(1);
+              const emoji = parseFloat(change) > 5 ? '⚠️' : parseFloat(change) < -5 ? '🚀' : '✅';
+              changeText = `\n\n**vs main:** ${change > 0 ? '+' : ''}${change}% ${emoji}`;
+            }
+
+            const body = `## 📊 Benchmark Results
+
+            | Metric | rustledger | beancount | Comparison |
+            |--------|------------|-----------|------------|
+            | **Time** | ${rustledger_ms}ms | ${beancount_ms}ms | **${speedup}x faster** |
+            | **Memory** | ${rustledger_mem}MB | ${beancount_mem}MB | - |
+
+            <sub>Measured on 1K transactions with hyperfine (5 runs, 2 warmup)</sub>${changeText}
+
+            <details>
+            <summary>What do these numbers mean?</summary>
+
+            - **Time**: Wall-clock time to parse and validate the ledger
+            - **Memory**: Peak resident set size (RSS)
+            - **vs main**: Change compared to the latest benchmark on main branch
+
+            </details>`;
+
+            // Find existing comment
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const botComment = comments.find(c =>
+              c.user.type === 'Bot' && c.body.includes('📊 Benchmark Results')
+            );
+
+            if (botComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: body
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: body
+              });
+            }

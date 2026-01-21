@@ -338,6 +338,16 @@ impl<'a> Executor<'a> {
         // Apply ORDER BY
         if let Some(order_by) = &query.order_by {
             self.sort_results(&mut result, order_by)?;
+        } else if query.group_by.is_some() && !result.rows.is_empty() && !result.columns.is_empty()
+        {
+            // When there's GROUP BY but no ORDER BY, sort by the first column
+            // for deterministic output (matches Python beancount behavior)
+            let first_col = result.columns[0].clone();
+            let default_order = vec![OrderSpec {
+                expr: Expr::Column(first_col),
+                direction: SortDirection::Asc,
+            }];
+            self.sort_results(&mut result, &default_order)?;
         }
 
         // Apply LIMIT
@@ -1041,7 +1051,26 @@ impl<'a> Executor<'a> {
                     .map(ToString::to_string)
                     .collect(),
             )),
-            "position" | "units" => Ok(posting
+            "position" => {
+                // Position includes both units and cost
+                if let Some(units) = posting.amount() {
+                    if let Some(cost_spec) = &posting.cost {
+                        if let (Some(number_per), Some(currency)) =
+                            (&cost_spec.number_per, &cost_spec.currency)
+                        {
+                            // Use Cost::new() to auto-quantize the cost number
+                            let cost = rustledger_core::Cost::new(*number_per, currency.clone())
+                                .with_date_opt(cost_spec.date)
+                                .with_label_opt(cost_spec.label.clone());
+                            return Ok(Value::Position(Position::with_cost(units.clone(), cost)));
+                        }
+                    }
+                    Ok(Value::Position(Position::simple(units.clone())))
+                } else {
+                    Ok(Value::Null)
+                }
+            }
+            "units" => Ok(posting
                 .amount()
                 .map_or(Value::Null, |u| Value::Amount(u.clone()))),
             "cost" => {
@@ -1088,6 +1117,12 @@ impl<'a> Executor<'a> {
             "year" => Ok(Value::Integer(ctx.transaction.date.year().into())),
             "month" => Ok(Value::Integer(ctx.transaction.date.month().into())),
             "day" => Ok(Value::Integer(ctx.transaction.date.day().into())),
+            "currency" => Ok(posting
+                .amount()
+                .map_or(Value::Null, |u| Value::String(u.currency.to_string()))),
+            "number" => Ok(posting
+                .amount()
+                .map_or(Value::Null, |u| Value::Number(u.number))),
             _ => Err(QueryError::UnknownColumn(name.to_string())),
         }
     }
@@ -2339,7 +2374,12 @@ impl<'a> Executor<'a> {
             Ok(group_map.into_values().collect())
         } else {
             // No GROUP BY - all postings in one group
-            Ok(vec![(Vec::new(), postings.iter().collect())])
+            // But if there are no postings, return no groups (matching Python beancount)
+            if postings.is_empty() {
+                Ok(vec![])
+            } else {
+                Ok(vec![(Vec::new(), postings.iter().collect())])
+            }
         }
     }
 
@@ -2410,7 +2450,8 @@ impl<'a> Executor<'a> {
                                 "expected 1 argument".to_string(),
                             ));
                         }
-                        if let Some(ctx) = group.first() {
+                        // Find chronologically first posting (by transaction date)
+                        if let Some(ctx) = group.iter().min_by_key(|c| c.transaction.date) {
                             self.evaluate_expr(&func.args[0], ctx)
                         } else {
                             Ok(Value::Null)
@@ -2423,7 +2464,8 @@ impl<'a> Executor<'a> {
                                 "expected 1 argument".to_string(),
                             ));
                         }
-                        if let Some(ctx) = group.last() {
+                        // Find chronologically last posting (by transaction date)
+                        if let Some(ctx) = group.iter().max_by_key(|c| c.transaction.date) {
                             self.evaluate_expr(&func.args[0], ctx)
                         } else {
                             Ok(Value::Null)
@@ -2984,14 +3026,9 @@ impl<'a> Executor<'a> {
             Value::Date(d) => d.to_string(),
             Value::Boolean(b) => b.to_string(),
             Value::Amount(a) => format!("{} {}", a.number, a.currency),
-            Value::Position(p) => format!("{}", p.units),
-            Value::Inventory(inv) => inv
-                .positions()
-                .iter()
-                .map(|p| format!("{}", p.units))
-                .collect::<Vec<_>>()
-                .join(", "),
-            Value::StringSet(ss) => ss.join(", "),
+            Value::Position(p) => p.to_string(),
+            Value::Inventory(inv) => inv.to_string(),
+            Value::StringSet(ss) => ss.join("   "),
             Value::Null => "NULL".to_string(),
         }
     }

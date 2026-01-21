@@ -1,0 +1,36 @@
+option "operating_currency" "USD"
+
+plugin "beancount.plugins.auto_accounts"
+
+plugin "beancount_reds_plugins.zerosum.zerosum" "{
+ 'zerosum_accounts' : {
+ 'Assets:Zero-Sum-Accounts:Returns-and-Temporary'              : ('', 90),
+  },
+  'account_name_replace' : ('Zero-Sum-Accounts', 'ZSA-Matched')
+ }"
+
+
+2015-06-15 * "Expensive furniture"
+  Liabilities:Credit-Cards:Green -2526.02 USD
+  Assets:Zero-Sum-Accounts:Returns-and-Temporary             1263.01 USD
+  Assets:Zero-Sum-Accounts:Returns-and-Temporary             1263.01 USD
+
+2015-06-23 * "Expensive furniture Refund"
+  Liabilities:Credit-Cards:Green  1263.01 USD
+  Assets:Zero-Sum-Accounts:Returns-and-Temporary
+
+2015-06-23 * "Expensive furniture Refund"
+  Liabilities:Credit-Cards:Green  1263.01 USD
+  Assets:Zero-Sum-Accounts:Returns-and-Temporary
+
+2020-01-01 * "Match both postings in one txn"
+  Assets:Zero-Sum-Accounts:Returns-and-Temporary -1.00 USD
+  Assets:Zero-Sum-Accounts:Returns-and-Temporary  1.00 USD
+
+2020-06-01 * "Match two lookalike postings in one txn" ; should not error
+  Assets:Zero-Sum-Accounts:Returns-and-Temporary  0.00 USD
+  Assets:Zero-Sum-Accounts:Returns-and-Temporary  0.00 USD
+
+2021-01-01 * "Unmatched" ; should not error
+  Liabilities:Credit-Cards:Green -0.00495 USD
+  Assets:Zero-Sum-Accounts:Returns-and-Temporary

@@ -1,0 +1,533 @@
+;----------------------------------------------------------------------
+; ledger2beancount conversion notes:
+;
+;   - Lot value expressions not supported in beancount: 2 EUR
+;   - Lot value expressions not supported in beancount: ten_dollars
+;   - Lot value expressions not supported in beancount: 0.90 EUR
+;   - Commodity AClub renamed to ACLUB
+;   - Commodity LeClub renamed to LECLUB
+;   - Commodity XXXx renamed to XXXX
+;   - Metadata key VALUE renamed to value
+;   - Collision for commodity EUR: EUR, €
+;   - Collision for commodity USD: $, USD
+;----------------------------------------------------------------------
+
+option "inferred_tolerance_default" "GBP:0.004"
+
+; SPDX-FileCopyrightText: © 2018 Martin Michlmayr <tbm@cyrius.com>
+;
+; SPDX-License-Identifier: GPL-3.0-or-later
+
+1970-01-01 open Assets:Test
+1970-01-01 open Assets:Brokerage
+1970-01-01 open Equity:Opening-Balance
+1970-01-01 open Income:Capital-Gain
+
+1970-01-01 commodity ETH
+1970-01-01 commodity EUR
+1970-01-01 commodity GBP
+1970-01-01 commodity LU0274208692
+1970-01-01 commodity MR
+1970-01-01 commodity USD
+1970-01-01 commodity AA
+1970-01-01 commodity XXXX
+
+1970-01-01 open Assets:A
+1970-01-01 open Assets:B
+1970-01-01 open Assets:Bank
+1970-01-01 open Assets:Cash
+1970-01-01 open Assets:Investments
+1970-01-01 open Assets:Rewards
+1970-01-01 open Assets:Voucher
+1970-01-01 open Assets:Voucher:Groupon
+1970-01-01 open Expenses:Currency
+1970-01-01 open Expenses:Dining
+1970-01-01 open Expenses:Fees
+1970-01-01 open Expenses:Food
+1970-01-01 open Expenses:Test
+1970-01-01 open Liabilities:Credit-Card
+
+1970-01-01 commodity AAPL
+1970-01-01 commodity ACLUB
+1970-01-01 commodity BRL
+1970-01-01 commodity FOO
+1970-01-01 commodity GB00BPN5P782
+1970-01-01 commodity LECLUB
+1970-01-01 commodity MADEUP
+
+2018-03-17 * "Opening balance"
+  Assets:Test              100.00 EUR {{90.00 GBP}}
+  Equity:Opening-Balance
+
+2018-03-17 * "Opening balance"
+  Assets:Test              100.00 EUR {0.90 GBP}
+  Equity:Opening-Balance
+
+2018-03-17 * "Test"
+  Assets:Test               10.00 EUR {0.90 GBP}
+  Equity:Opening-Balance    -9.00 GBP
+
+2018-03-17 * "Test"
+  Assets:Test               10.00 EUR {0.90 GBP}
+  Equity:Opening-Balance    -9.00 GBP
+
+2018-03-17 * "Test"
+  Assets:Test               10.00 EUR {0.90 GBP}
+  Equity:Opening-Balance    -9.00 GBP
+
+2018-03-17 * "Test"
+  Assets:Test               10.00 EUR {0.90 GBP}
+  Equity:Opening-Balance    -9.00 GBP
+
+2018-03-17 * "Test"
+  Assets:Test               10.00 EUR {0.90 GBP}
+  Equity:Opening-Balance    -9.00 GBP
+
+2018-03-17 * "Test"
+  Assets:Test               10.00 EUR {0.90 GBP}
+  Equity:Opening-Balance    -9.00 GBP
+
+2018-03-17 * "Test"
+  Assets:Test               10.00 EUR {{9 GBP}}
+  Equity:Opening-Balance    -9.00 GBP
+
+2018-03-17 * "Test"
+  Assets:Test               10.00 EUR {0.90 GBP}
+  Equity:Opening-Balance    -9.00 GBP
+
+2018-03-17 * "Test"
+  Assets:Test               10.00 EUR {0.90 GBP}
+  Equity:Opening-Balance    -9.00 GBP
+
+2018-03-17 * "Test"
+  Assets:Test               10.00 EUR {1.23 USD, 2018-03-16}
+  Equity:Opening-Balance   -12.30 USD
+
+2018-03-17 * "Test"
+  Assets:Test               10.00 EUR {1.23 USD, 2018-03-16}
+  Equity:Opening-Balance   -12.30 USD
+
+2018-03-20 * "Lot cost, no lot price"
+  Assets:Test                1.00 EUR {0.90 GBP, 2018-03-18}
+  Equity:Opening-Balance
+
+2018-03-17 * "Test"
+  Assets:Test               10.00 EUR {0.90 GBP}
+  Equity:Opening-Balance    -9.00 GBP
+
+2018-03-17 * "Test"
+  Assets:Test              -10.00 EUR {0.90 GBP} @ 0.95 GBP
+  Assets:Test                9.50 GBP
+  Income:Capital-Gain       -0.50 GBP
+
+2018-03-17 * "Test"
+  Assets:Test              -10.00 EUR {0.90 GBP} @ 0.95 GBP
+  Assets:Test                9.50 GBP
+  Income:Capital-Gain       -0.50 GBP
+
+2018-03-17 * "Test"
+  Assets:Test               10.00 EUR {{9 GBP}}
+  Equity:Opening-Balance    -9.00 GBP
+
+2018-03-17 * "Test"
+  Assets:Test               10.00 EUR {{9.00 GBP}}
+  Equity:Opening-Balance    -9.00 GBP
+
+2018-03-17 * "Test"
+  Assets:Test               10.00 EUR {{9.00 GBP}}
+  Equity:Opening-Balance    -9.00 GBP
+
+2018-03-17 * "Test"
+  Assets:Test               10.00 EUR {{9.00 GBP}}
+  Equity:Opening-Balance    -9.00 GBP
+
+2018-03-17 * "Test"
+  Assets:Test               10.00 EUR {{9.00 GBP}}
+  Equity:Opening-Balance    -9.00 GBP
+
+2018-03-20 * "Lot cost, no lot price"
+  Assets:Test                1.00 EUR {{0.90 GBP, 2018-03-18}}
+  Equity:Opening-Balance
+
+2018-03-17 * "Test"
+  Assets:Test               10.00 EUR {{12.30 USD, 2018-03-16}}
+  Equity:Opening-Balance   -12.30 USD
+
+2018-03-17 * "Test"
+  Assets:Test               10.00 EUR {{12.30 USD, 2018-03-16}}
+  Equity:Opening-Balance   -12.30 USD
+
+2018-03-17 * "Test"
+  Assets:Test               10.00 EUR {{9 GBP}}
+  Equity:Opening-Balance   -9.00 GBP
+
+2018-03-17 * "Test"
+  Assets:Test               10.00 EUR {{9 GBP}}
+  Equity:Opening-Balance   -9.00 GBP
+
+2018-03-17 * "Test"
+  Assets:Test              -10.00 EUR {{9.00 GBP}} @@ 9.50 GBP
+  Assets:Test                9.50 GBP
+  Income:Capital-Gain       -0.50 GBP
+
+2018-03-17 * "Test"
+  Assets:Test              -10.00 EUR {{9.00 GBP}} @ 0.95 GBP
+  Assets:Test                9.50 GBP
+  Income:Capital-Gain       -0.50 GBP
+
+2018-03-17 * "Test"
+  Assets:Test              -10.00 EUR {0.90 GBP} @@ 9.50 GBP
+  Assets:Test                9.50 GBP
+  Income:Capital-Gain       -0.50 GBP
+
+2018-03-17 * "Test"
+  Assets:Test               10.00 EUR @ 0.90 GBP
+  Equity:Opening-Balance    -9.00 GBP
+
+2018-03-17 * "Test"
+  Assets:Test               10.00 EUR @@ 9.00 GBP
+  Equity:Opening-Balance    -9.00 GBP
+
+2018-03-17 * "Test"
+  Assets:Test        1 LU0274208692 {48.67 EUR}
+  Equity:Opening-Balance   -48.67 EUR
+
+2018-03-17 * "Test"
+  Assets:Test        1 LU0274208692 {{48.67 EUR}}
+  Equity:Opening-Balance   -48.67 EUR
+
+2018-03-17 * "Test"
+  Assets:Test               1.00 ETH {6500.00 EUR}
+  Equity:Opening-Balance    -6500.00 EUR
+
+2018-03-17 * "Test"
+  Assets:Test               1.00 ETH {{6500.00 EUR}}
+  Equity:Opening-Balance    -6500.00 EUR
+
+2018-03-21 * "Lot note"
+  Assets:Test               10.00 EUR {1.23 USD, "this is a note"}
+  Equity:Opening-Balance   -12.30 USD
+
+2018-03-21 * "Lot note with lot date"
+  Assets:Test               10.00 EUR {1.23 USD, 2018-03-16, "note! oh my @ what"}
+  Equity:Opening-Balance   -12.30 USD
+
+2018-03-21 * "Lot note"
+  Assets:Test               10.00 EUR {{12.30 USD, "a note"}}
+  Equity:Opening-Balance   -12.30 USD
+
+2018-03-21 * "Lot note with date"
+  Assets:Test               10.00 EUR {{12.30 USD, 2018-03-16, "whatever"}}
+  Equity:Opening-Balance   -12.30 USD
+
+2018-03-21 * "Lot note with date and no space"
+  Assets:Test               10.00 EUR {{12.30 USD, 2018-03-16, "whatever"}}
+  Equity:Opening-Balance   -12.30 USD
+
+2018-03-20 * "Commodity treated as currency"
+  Assets:Test                42.30 USD @@ 5641 MR
+  Assets:Test                            -5641 MR
+
+2018-03-27 * "Commodity treated as currency, transformed"
+  Assets:Test              42.30 USD @@ 5641 XXXX
+  Assets:Test                          -5641 XXXX
+
+2018-03-27 * "Commodity treated as currency, mapped"
+  Assets:Test                42.30 USD @@ 5641 AA
+  Assets:Test                            -5641 AA
+
+2018-04-22 * "Lot with comment"
+  Assets:Test               10.00 EUR {0.90 GBP}   ; comment
+  Equity:Opening-Balance    -9.00 GBP
+
+2018-04-22 * "Lot with comment"
+  Assets:Test               10.00 EUR {0.90 GBP} ; comment
+  Equity:Opening-Balance    -9.00 GBP
+
+2018-04-22 * "Lot with comment"
+  Assets:Test               10.00 EUR {1.23 USD, 2018-03-16} ;comment
+  Equity:Opening-Balance   -12.30 USD
+
+2018-04-22 * "Lot with comment"
+  Assets:Test              -10.00 EUR {0.90 GBP, 2018-03-17} @ 0.95 GBP ; comment
+  Assets:Test                9.50 GBP
+  Income:Capital-Gain       -0.50 GBP
+
+2018-04-22 * "Lot with comment"
+  Assets:Test               10.00 EUR {{12.30 USD, 2018-03-16}} ; comment
+  Equity:Opening-Balance   -12.30 USD
+
+2018-04-22 * "Lot with comment"
+  Assets:Test               10.00 EUR {1.23 USD, "this is a note"} ; comment
+  Equity:Opening-Balance   -12.30 USD
+
+2018-04-22 * "Lot with comment, no space"
+  Assets:Test               10.00 EUR {1.23 USD, "this is a note"} @ 1.30 USD; comment
+  Assets:Bank
+
+2018-10-22 * "Commodity conversion of lot cost"
+  Expenses:Test              2361.00 EUR {1.3831 USD} @ 1.4056 USD
+  Expenses:Currency              53.12 USD
+  Assets:Bank                 -3318.62 USD
+
+2018-10-23 * "Lot information"
+  Expenses:Test         416.00 EUR {1.2937 USD, 2012-05-12} @ 1.30 USD
+  Assets:Bank
+
+2018-10-23 * "Lot information, no space"
+  Expenses:Test         416.00 EUR {1.2937 USD, 2012-05-12} @ 1.30 USD
+  Assets:Bank
+
+2018-10-23 * "Lot information"
+  Expenses:Test         416.00 EUR {1.2937 USD, 2012-05-12} @ 1.30 USD
+  Assets:Bank
+
+2018-10-23 * "Lot information, no space"
+  Expenses:Test         416.00 EUR {1.2937 USD, 2012-05-12} @ 1.30 USD
+  Assets:Bank
+
+2018-10-23 * "Lot information"
+  Expenses:Test         416.00 EUR {1.2937 USD, 2012-05-12}
+  Assets:Bank
+
+2018-10-23 * "Lot information"
+  Expenses:Test         416.00 EUR {1.2937 USD, 2012-05-12}
+  Assets:Bank
+
+2019-01-25 * "Lot information - with tag"
+  Expenses:Test         416.00 EUR {1.2937 USD, 2012-05-12}
+    tags: "foo, bar"
+  Assets:Bank
+
+2019-01-25 * "Cost - with tag"
+  Assets:Test               10.00 EUR {{9 GBP}}
+    tags: "foo, bar"
+  Equity:Opening-Balance    -9.00 GBP
+
+2019-01-25 * "Conversion - with tag"
+  Assets:Test        1 LU0274208692 {{48.67 EUR}}
+    tags: "foo, bar"
+  Equity:Opening-Balance   -48.67 EUR
+
+2019-01-28 * "Lot information - with metadata"
+  Expenses:Test         416.00 EUR {1.2937 USD, 2012-05-12}
+    foo: "bar"
+  Assets:Bank
+
+2019-01-28 * "Cost - with metadata"
+  Assets:Test               10.00 EUR {{9 GBP}}
+    foo: "bar"
+  Equity:Opening-Balance    -9.00 GBP
+
+2019-01-28 * "Conversion - with metadata"
+  Assets:Test        1 LU0274208692 {{48.67 EUR}}
+    foo: "bar"
+  Equity:Opening-Balance   -48.67 EUR
+
+2019-01-29 * "Implicit conversion"
+  Assets:A                  10.00 EUR @ 1.142 USD
+  Assets:B                 -11.42 USD
+
+2019-01-29 * "Implicit conversion"
+  #foo
+  Assets:A                   10.00 EUR @ 1.142 USD
+  Assets:B                  -11.42 USD
+
+2019-01-29 * "Implicit conversion"
+  Assets:A                  10.00 EUR @ 1.142 USD
+    tags: "foo"
+  Assets:B                 -11.42 USD
+
+2019-01-29 * "Implicit conversion"
+  #foo
+  Assets:A                     10 EUR @ 1.142 USD
+  Assets:B                 -11.42 USD
+    foo: "bar"
+
+2019-04-28 * "Don't parse the value: 30 DM as implicit conversion"
+  Expenses:Food             20.00 USD
+  value: 30 DM
+  Assets:Cash              -20.00 USD
+
+2020-06-24 * "Implicit conversion"
+  ; This is a comment with an amount that should not be substituted 10.00 EUR
+  Assets:A                  10.00 EUR @ 1.142 USD ; do not substitute: 10.00 EUR
+  Assets:B                 -11.42 USD ; do not substitute: 10.00 EUR
+
+2020-06-24 * "Implicit conversion"
+  #foo
+  Assets:A                 -10.00 EUR @ 1.142 USD
+  Assets:B                  11.42 USD
+
+2012-03-02 txn "KFC"
+  Expenses:Food      1 USD {{0.90 EUR}}
+  Assets:Cash
+
+2012-04-10 txn "My Broker"
+  Assets:Brokerage                     375.00 USD
+  Assets:Brokerage         -5 AAPL {50.00 USD} @@ 375.00 USD
+  Income:Capital-Gain                 -125.00 USD
+
+2012-04-10 txn "My Broker"
+  Assets:Brokerage                     375.00 USD
+  Assets:Brokerage        -5 AAPL {50.00 USD} @@ 375.00 USD
+  Income:Capital-Gain                 -125.00 USD
+
+2012-04-10 txn "My Broker"
+  Assets:Brokerage                     375.00 USD
+  Assets:Brokerage        -5 AAPL {50.00 USD} @@ 375.00 USD
+  Income:Capital-Gain                 -125.00 USD
+
+2020-06-20 txn "Lot value expression and virtual price"
+  Assets:Brokerage                     375.00 USD
+  Assets:Brokerage          -5 AAPL {50.00 USD} @ 75.00 USD
+  Income:Capital-Gain                 -125.00 USD
+
+2020-06-20 txn "Lot value expression and virtual price"
+  Assets:Brokerage                     375.00 USD
+  Assets:Brokerage          -5 AAPL {50.00 USD} @@ 375.00 USD
+  Income:Capital-Gain                 -125.00 USD
+
+2020-06-23 txn "Lot with only lot date"
+  Assets:Voucher       137.87 EUR {1.00 EUR, 2020-06-01}
+  Assets:Cash
+
+2020-06-23 txn "Lot with only lot note"
+  Assets:Voucher             137.87 GBP {1.00 GBP, "48H5"}
+  Assets:Cash               -137.87 GBP
+
+2020-06-23 txn "Lot with only lot note"
+  Assets:Voucher             137.87 GBP {1.00 GBP, "48H5"}
+  Assets:Cash
+
+2020-06-23 txn "Lot with only lot date and note"
+  Assets:Voucher  137.87 EUR {1.00 EUR, 2020-06-01, "48H5"}
+  Assets:Cash
+
+2020-06-23 txn "Lot with only lot value expression"
+  Expenses:Food                1 USD
+  Assets:Cash
+
+2020-07-31 * "Lot without cost, with negative number"
+  Expenses:Dining                    17.00 GBP
+  Assets:Voucher:Groupon             -6.00 GBP {1.00 GBP, "expiration: 2012-11-26"}
+  Liabilities:Credit-Card           -11.00 GBP
+
+2020-07-24 * "Conversion with price on second posting"
+  Assets:Test                         6.38 USD
+  Assets:Test           -24.00 BRL @@ 6.38 USD
+
+2020-07-31 * "Not an implicit conversion"
+  Expenses:Fees                       2.09 EUR
+  Assets:Cash                        30.00 GBP @ 1.205 EUR
+  Assets:Bank                       -38.24 EUR
+
+2020-07-31 * "Implicit conversion"
+  Assets:Cash                        30.00 GBP @ 1.205 EUR
+  Expenses:Fees                       2.09 EUR
+  Assets:Bank                       -38.24 EUR
+
+2020-07-31 * "Implicit conversion"
+  Assets:Cash                        30.00 GBP @ 1.205 EUR
+  Expenses:Fees                       1.09 EUR
+  Expenses:Fees                       1.00 EUR
+  Assets:Bank                       -38.24 EUR
+
+2020-07-31 * "Implicit conversion"
+  Assets:Cash                 3 * 3,000.00 GBP @ 1.205 EUR
+  Expenses:Fees                       1.00 EUR
+  Expenses:Fees                       6.00 EUR
+  Assets:Bank                   -10,852.00 EUR
+
+2020-07-31 * "Implicit conversion"
+  Assets:Cash                     3,000.00 GBP @ 1.00205 EUR
+  Expenses:Fees                       1.09 EUR
+  Expenses:Fees                       1.00 EUR
+  Assets:Bank                    -3,008.24 EUR
+
+2020-10-12 * "Cost==price, but use different number format"
+  Assets:Test     10,000.00 EUR {{9000 GBP}}
+  Assets:Test
+
+2020-10-12 * "Cost==price, but per-unit vs total"
+  Assets:Test      10.00 EUR {0.90 GBP}
+  Assets:Test
+
+2020-10-12 * "Cost==price, but total vs per-unit"
+  Assets:Test      10.00 EUR {{9.000 GBP}}
+  Assets:Test
+
+2020-10-12 * "Cost==price, both total"
+  Assets:Test      10.00 EUR {{9.00 GBP}}
+  Assets:Test
+
+2020-10-12 * "Cost==price, number contains non-digits"
+  Assets:Test      10,000.00 EUR {{9,000.00 GBP}}
+  Assets:Test
+
+2020-10-12 * "Cost==price"
+  Assets:Test      1,000.00 EUR {0.90 GBP}
+  Assets:Test
+
+2020-10-13 * "Implicit conversion, with a 0 posting"
+  Expenses:Food                       3.50 EUR @ 1.2 USD
+  Assets:Cash                        -4.20 USD
+  Assets:Test                            0 EUR
+
+2020-10-23 * "Implicit conversion: space between amount and comment"
+  ; This is a comment with an amount that should not be substituted 10.00 EUR
+  Assets:A                  10.00 EUR @ 1.142 USD    ; do not substitute: 10.00 EUR
+  Assets:B                 -11.42 USD    ; do not substitute: 10.00 EUR
+
+2020-10-23 * "Spacing"
+  Assets:Test           10.00 EUR @@ 9.00 GBP; foo
+  Assets:Test                        -9.00 GBP
+
+2020-10-23 * "Spacing"
+  Assets:Test           10.00 EUR @@ 9.00 GBP  ; foo
+  Assets:Test                        -9.00 GBP
+
+2020-10-23 * "Spacing"
+  Assets:Test           10.00 EUR {{9.00 GBP}}; foo
+  Assets:Test                        -9.00 GBP
+
+2020-10-23 * "Spacing"
+  Assets:Test           10.00 EUR {{9.00 GBP}}   ; foo
+  Assets:Test                        -9.00 GBP
+
+2020-10-23 * "Spacing: take from cost"
+  Assets:Test           10.00 EUR {{9.00 GBP}}; foo
+  Assets:Test                        -9.00 GBP
+
+2020-10-23 * "Spacing: take from cost"
+  Assets:Test           10.00 EUR {{9.00 GBP}}  ; foo
+  Assets:Test                        -9.00 GBP
+
+2020-11-09 * "Total cost and total price don't match due to rounding"
+  Assets:Investments  9 GB00BPN5P782 {100.251 GBP}
+  Assets:Investments                                   -902.26 GBP
+
+2020-11-09 * "Total cost and total price don't match due to rounding"
+  Assets:Investments  9 GB00BPN5P782 {{902.26 GBP}}
+  Assets:Investments                                    -902.26 GBP
+
+2020-11-09 * "Total cost and total price don't match due to rounding"
+  Assets:Investments  9 ETH {100.00000251 MADEUP}
+  Assets:Investments                                -900.0000226 MADEUP
+
+2020-11-09 * "Total cost and total price don't match due to rounding"
+  Assets:Investments  9 ETH {{900.0000226 MADEUP}}
+  Assets:Investments                                 -900.0000226 MADEUP
+
+2020-11-09 * "Total cost and total price don't match due to rounding"
+  Assets:Investments  11 FOO {90.909 GBP}
+  Assets:Investments                          -1000 GBP
+
+2020-11-09 * "Total cost and total price don't match due to rounding"
+  Assets:Investments  11 FOO {{1000 GBP}}
+  Assets:Investments                           -1000 GBP
+
+2022-12-18 * "Implicit conversion with rename of commodity"
+  Assets:Rewards                             1000 LECLUB @ 1 ACLUB
+  Assets:Rewards                            -1000 ACLUB
+

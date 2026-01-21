@@ -163,6 +163,47 @@ jobs:
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
+  # Criterion micro-benchmarks - track component-level performance
+  criterion:
+    name: Criterion Benchmarks
+    runs-on: ubuntu-latest
+    # Only run on main branch pushes to track trends
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    env:
+      RUSTC_WRAPPER: ""  # Disable sccache for benchmarks
+    steps:
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6
+      - uses: dtolnay/rust-toolchain@4be9e76fd7c4901c61fb841f559994984270fce7 # stable
+      - uses: Swatinem/rust-cache@ad397744b0d591a723ab90405b7247fac0e6b8db # v2
+        with:
+          cache-on-failure: true
+          prefix-key: criterion
+
+      - name: Run Criterion benchmarks
+        run: |
+          # Run benchmarks and save baseline
+          cargo bench --all-features -- --noplot --save-baseline main 2>&1 | tee criterion-output.txt
+
+      - name: Parse and summarize results
+        run: |
+          echo "## Criterion Benchmark Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Extract key benchmark results
+          echo "### Core Benchmarks" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          grep -E "^(inventory_|reduce_|pipeline_|parse_|query_|validate_)" criterion-output.txt | head -30 >> $GITHUB_STEP_SUMMARY || echo "No matching benchmarks found" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: criterion-results
+          path: |
+            target/criterion/
+            criterion-output.txt
+          retention-days: 30
+
   # All checks pass - required for branch protection
   build:
     name: build

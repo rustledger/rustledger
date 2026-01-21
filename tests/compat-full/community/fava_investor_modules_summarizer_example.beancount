@@ -1,0 +1,54 @@
+option "operating_currency" "USD"
+
+2012-01-01 open Assets:Investments:ETrade
+  customer_service_phone: "1-555-234-5678"
+
+2012-01-01 open Assets:Investments:Fanguard
+  customer_service_phone: "1-555-234-1223"
+
+2012-01-01 open Assets:Investments:Midelity
+  customer_service_phone: "1-555-234-1029"
+
+2000-01-01 commodity ABCD
+  name: "ABCD Inc."
+
+2012-01-01 open Assets:Investments:Midelity:ABCD
+
+2012-01-01 open Income:Dividends
+
+2015-01-01 close Assets:Investments:Midelity
+
+2014-01-01 * "Transfer"
+   Assets:Investments:ETrade
+   Assets:Investments:Midelity -1000 USD
+
+2014-01-02 * "Dividends"
+   Assets:Investments:ETrade
+   Income:Dividends -50 USD
+
+2010-01-01 custom "fava-extension" "plugins.fava.investor.fava_investor" "{
+  'summarizer': [
+    { 'title' : 'Customer Service Phone Number',
+      'directive_type'  : 'accounts',
+      'acc_pattern' : '^Assets:(Investments|Banks)',
+      'col_labels': [ 'Account', 'Phone_number'],
+      'columns' : [ 'account', 'customer_service_phone'],
+      'sort_by' : 0,
+    },
+    { 'title' : 'TLH: Substantially Identical Funds and TLH Partners',
+      'directive_type'  : 'commodities',
+      'active_only': True,
+      'col_labels': [ 'Ticker', 'Subst_Identicals', 'TLH_Partners'],
+      'columns' : [ 'ticker', 'a__substidenticals', 'a__tlh_partners'],
+      'sort_by' : 0,
+    },
+    { 'title' : 'Commodities Summary',
+      'directive_type'  : 'commodities',
+      'active_only': False,
+      'col_labels': [ 'Ticker', 'Type', 'Equi', 'Description', 'TLH_to', 'ER'],
+      'columns' : [ 'ticker', 'a__quoteType', 'a__equivalents', 'name', 'tlh_alternates', 'a__annualReportExpenseRatio'],
+      'sort_by' : 1,
+    },
+ ]
+}"
+

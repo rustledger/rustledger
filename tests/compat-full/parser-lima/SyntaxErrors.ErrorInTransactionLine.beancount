@@ -1,0 +1,7 @@
+2013-05-01 open Assets:US:Cash
+
+2013-05-02 * "Dinner" A:*:B
+  Expenses:Restaurant               100 USD
+  Assets:US:Cash                   -100 USD
+
+2013-05-03 balance Assets:US:Cash  -100 USD

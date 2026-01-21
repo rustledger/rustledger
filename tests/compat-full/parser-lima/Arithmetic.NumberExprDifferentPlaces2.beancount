@@ -1,0 +1,7 @@
+; ANOMALY: this is an additional Lima test to demonstrate how to force
+; the precision of evaluation of an expression
+2013-05-18 * "Test"
+  Assets:Something   -(3 * 4) HOOL {120.010 * 2.1 USD} @ 134.020 * 2.1 USD
+  Assets:Something   1000000 USD ;; No balance checks.
+2014-01-01 balance Assets:Something  3 * 4 * 120.010 * 2.1  USD
+  number: -(5662.23 + 22.3)

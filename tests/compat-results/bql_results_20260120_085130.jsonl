@@ -1,0 +1,200 @@
+{"file":"compat/beancount-import/examples_fresh_accounts.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true}
+{"file":"compat/beancount-import/examples_fresh_accounts.beancount","query":"SELECT COUNT(*) AS total_txns","match":false}
+{"file":"compat/beancount-import/examples_fresh_accounts.beancount","query":"SELECT currency, COUNT(*) AS count GROUP BY curren","match":true}
+{"file":"compat/beancount-import/examples_fresh_accounts.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS count GROUP","match":true}
+{"file":"compat/beancount-import/examples_fresh_ignored.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true}
+{"file":"compat/beancount-import/examples_fresh_ignored.beancount","query":"SELECT COUNT(*) AS total_txns","match":false}
+{"file":"compat/beancount-import/examples_fresh_ignored.beancount","query":"SELECT currency, COUNT(*) AS count GROUP BY curren","match":true}
+{"file":"compat/beancount-import/examples_fresh_ignored.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS count GROUP","match":true}
+{"file":"compat/beancount-import/examples_fresh_prices.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true}
+{"file":"compat/beancount-import/examples_fresh_prices.beancount","query":"SELECT COUNT(*) AS total_txns","match":false}
+{"file":"compat/beancount-import/examples_fresh_prices.beancount","query":"SELECT currency, COUNT(*) AS count GROUP BY curren","match":true}
+{"file":"compat/beancount-import/examples_fresh_prices.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS count GROUP","match":true}
+{"file":"compat/beancount-import/examples_fresh_transactions.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true}
+{"file":"compat/beancount-import/examples_fresh_transactions.beancount","query":"SELECT COUNT(*) AS total_txns","match":false}
+{"file":"compat/beancount-import/examples_fresh_transactions.beancount","query":"SELECT currency, COUNT(*) AS count GROUP BY curren","match":true}
+{"file":"compat/beancount-import/examples_fresh_transactions.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS count GROUP","match":true}
+{"file":"compat/beancount-import/examples_manually_entered_accounts.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true}
+{"file":"compat/beancount-import/examples_manually_entered_accounts.beancount","query":"SELECT COUNT(*) AS total_txns","match":false}
+{"file":"compat/beancount-import/examples_manually_entered_accounts.beancount","query":"SELECT currency, COUNT(*) AS count GROUP BY curren","match":true}
+{"file":"compat/beancount-import/examples_manually_entered_accounts.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS count GROUP","match":true}
+{"file":"compat/beancount-import/examples_manually_entered_ignored.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true}
+{"file":"compat/beancount-import/examples_manually_entered_ignored.beancount","query":"SELECT COUNT(*) AS total_txns","match":false}
+{"file":"compat/beancount-import/examples_manually_entered_ignored.beancount","query":"SELECT currency, COUNT(*) AS count GROUP BY curren","match":true}
+{"file":"compat/beancount-import/examples_manually_entered_ignored.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS count GROUP","match":true}
+{"file":"compat/beancount-import/examples_manually_entered_prices.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true}
+{"file":"compat/beancount-import/examples_manually_entered_prices.beancount","query":"SELECT COUNT(*) AS total_txns","match":false}
+{"file":"compat/beancount-import/examples_manually_entered_prices.beancount","query":"SELECT currency, COUNT(*) AS count GROUP BY curren","match":true}
+{"file":"compat/beancount-import/examples_manually_entered_prices.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS count GROUP","match":true}
+{"file":"compat/beancount-import/testdata_reconcile_test_amazon_large_0_ignore.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true}
+{"file":"compat/beancount-import/testdata_reconcile_test_amazon_large_0_ignore.beancount","query":"SELECT COUNT(*) AS total_txns","match":false}
+{"file":"compat/beancount-import/testdata_reconcile_test_amazon_large_0_ignore.beancount","query":"SELECT currency, COUNT(*) AS count GROUP BY curren","match":true}
+{"file":"compat/beancount-import/testdata_reconcile_test_amazon_large_0_ignore.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS count GROUP","match":true}
+{"file":"compat/beancount-import/testdata_reconcile_test_basic_0_ignore.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true}
+{"file":"compat/beancount-import/testdata_reconcile_test_basic_0_ignore.beancount","query":"SELECT COUNT(*) AS total_txns","match":false}
+{"file":"compat/beancount-import/testdata_reconcile_test_basic_0_ignore.beancount","query":"SELECT currency, COUNT(*) AS count GROUP BY curren","match":true}
+{"file":"compat/beancount-import/testdata_reconcile_test_basic_0_ignore.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS count GROUP","match":true}
+{"file":"compat/beancount-import/testdata_reconcile_test_basic_0_journal.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true}
+{"file":"compat/beancount-import/testdata_reconcile_test_basic_0_journal.beancount","query":"SELECT COUNT(*) AS total_txns","match":false}
+{"file":"compat/beancount-import/testdata_reconcile_test_basic_0_journal.beancount","query":"SELECT currency, COUNT(*) AS count GROUP BY curren","match":true}
+{"file":"compat/beancount-import/testdata_reconcile_test_basic_0_journal.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS count GROUP","match":true}
+{"file":"compat/beancount-import/testdata_reconcile_test_basic_1_ignore.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true}
+{"file":"compat/beancount-import/testdata_reconcile_test_basic_1_ignore.beancount","query":"SELECT COUNT(*) AS total_txns","match":false}
+{"file":"compat/beancount-import/testdata_reconcile_test_basic_1_ignore.beancount","query":"SELECT currency, COUNT(*) AS count GROUP BY curren","match":true}
+{"file":"compat/beancount-import/testdata_reconcile_test_basic_1_ignore.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS count GROUP","match":true}
+{"file":"compat/beancount-import/testdata_reconcile_test_basic_1_journal.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":false}
+{"file":"compat/beancount-import/testdata_reconcile_test_basic_1_journal.beancount","query":"SELECT COUNT(*) AS total_txns","match":false}
+{"file":"compat/beancount-import/testdata_reconcile_test_basic_1_journal.beancount","query":"SELECT currency, COUNT(*) AS count GROUP BY curren","match":false}
+{"file":"compat/beancount-import/testdata_reconcile_test_basic_1_journal.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS count GROUP","match":false}
+{"file":"compat/beancount-import/testdata_reconcile_test_basic_2_ignore.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true}
+{"file":"compat/beancount-import/testdata_reconcile_test_basic_2_ignore.beancount","query":"SELECT COUNT(*) AS total_txns","match":false}
+{"file":"compat/beancount-import/testdata_reconcile_test_basic_2_ignore.beancount","query":"SELECT currency, COUNT(*) AS count GROUP BY curren","match":true}
+{"file":"compat/beancount-import/testdata_reconcile_test_basic_2_ignore.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS count GROUP","match":true}
+{"file":"compat/beancount-import/testdata_reconcile_test_basic_2_journal.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":false}
+{"file":"compat/beancount-import/testdata_reconcile_test_basic_2_journal.beancount","query":"SELECT COUNT(*) AS total_txns","match":false}
+{"file":"compat/beancount-import/testdata_reconcile_test_basic_2_journal.beancount","query":"SELECT currency, COUNT(*) AS count GROUP BY curren","match":false}
+{"file":"compat/beancount-import/testdata_reconcile_test_basic_2_journal.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS count GROUP","match":false}
+{"file":"compat/beancount-import/testdata_reconcile_test_basic_2_pending.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true}
+{"file":"compat/beancount-import/testdata_reconcile_test_basic_2_pending.beancount","query":"SELECT COUNT(*) AS total_txns","match":false}
+{"file":"compat/beancount-import/testdata_reconcile_test_basic_2_pending.beancount","query":"SELECT currency, COUNT(*) AS count GROUP BY curren","match":true}
+{"file":"compat/beancount-import/testdata_reconcile_test_basic_2_pending.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS count GROUP","match":true}
+{"file":"compat/beancount-import/testdata_reconcile_test_ignore_0_ignore.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true}
+{"file":"compat/beancount-import/testdata_reconcile_test_ignore_0_ignore.beancount","query":"SELECT COUNT(*) AS total_txns","match":false}
+{"file":"compat/beancount-import/testdata_reconcile_test_ignore_0_ignore.beancount","query":"SELECT currency, COUNT(*) AS count GROUP BY curren","match":true}
+{"file":"compat/beancount-import/testdata_reconcile_test_ignore_0_ignore.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS count GROUP","match":true}
+{"file":"compat/beancount-import/testdata_reconcile_test_ignore_0_journal.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true}
+{"file":"compat/beancount-import/testdata_reconcile_test_ignore_0_journal.beancount","query":"SELECT COUNT(*) AS total_txns","match":false}
+{"file":"compat/beancount-import/testdata_reconcile_test_ignore_0_journal.beancount","query":"SELECT currency, COUNT(*) AS count GROUP BY curren","match":true}
+{"file":"compat/beancount-import/testdata_reconcile_test_ignore_0_journal.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS count GROUP","match":true}
+{"file":"compat/beancount-import/testdata_reconcile_test_ignore_1_journal.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true}
+{"file":"compat/beancount-import/testdata_reconcile_test_ignore_1_journal.beancount","query":"SELECT COUNT(*) AS total_txns","match":false}
+{"file":"compat/beancount-import/testdata_reconcile_test_ignore_1_journal.beancount","query":"SELECT currency, COUNT(*) AS count GROUP BY curren","match":true}
+{"file":"compat/beancount-import/testdata_reconcile_test_ignore_1_journal.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS count GROUP","match":true}
+{"file":"compat/beancount-import/testdata_reconcile_test_ignore_2_journal.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true}
+{"file":"compat/beancount-import/testdata_reconcile_test_ignore_2_journal.beancount","query":"SELECT COUNT(*) AS total_txns","match":false}
+{"file":"compat/beancount-import/testdata_reconcile_test_ignore_2_journal.beancount","query":"SELECT currency, COUNT(*) AS count GROUP BY curren","match":true}
+{"file":"compat/beancount-import/testdata_reconcile_test_ignore_2_journal.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS count GROUP","match":true}
+{"file":"compat/beancount-import/testdata_reconcile_test_ignore_3_journal.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true}
+{"file":"compat/beancount-import/testdata_reconcile_test_ignore_3_journal.beancount","query":"SELECT COUNT(*) AS total_txns","match":false}
+{"file":"compat/beancount-import/testdata_reconcile_test_ignore_3_journal.beancount","query":"SELECT currency, COUNT(*) AS count GROUP BY curren","match":true}
+{"file":"compat/beancount-import/testdata_reconcile_test_ignore_3_journal.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS count GROUP","match":true}
+{"file":"compat/beancount-import/testdata_reconcile_test_ignore_3_pending.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true}
+{"file":"compat/beancount-import/testdata_reconcile_test_ignore_3_pending.beancount","query":"SELECT COUNT(*) AS total_txns","match":false}
+{"file":"compat/beancount-import/testdata_reconcile_test_ignore_3_pending.beancount","query":"SELECT currency, COUNT(*) AS count GROUP BY curren","match":true}
+{"file":"compat/beancount-import/testdata_reconcile_test_ignore_3_pending.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS count GROUP","match":true}
+{"file":"compat/beancount-import/testdata_reconcile_test_ofx_basic_0_ignore.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true}
+{"file":"compat/beancount-import/testdata_reconcile_test_ofx_basic_0_ignore.beancount","query":"SELECT COUNT(*) AS total_txns","match":false}
+{"file":"compat/beancount-import/testdata_reconcile_test_ofx_basic_0_ignore.beancount","query":"SELECT currency, COUNT(*) AS count GROUP BY curren","match":true}
+{"file":"compat/beancount-import/testdata_reconcile_test_ofx_basic_0_ignore.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS count GROUP","match":true}
+{"file":"compat/beancount-import/testdata_reconcile_test_ofx_basic_0_journal.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true}
+{"file":"compat/beancount-import/testdata_reconcile_test_ofx_basic_0_journal.beancount","query":"SELECT COUNT(*) AS total_txns","match":false}
+{"file":"compat/beancount-import/testdata_reconcile_test_ofx_basic_0_journal.beancount","query":"SELECT currency, COUNT(*) AS count GROUP BY curren","match":true}
+{"file":"compat/beancount-import/testdata_reconcile_test_ofx_basic_0_journal.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS count GROUP","match":true}
+{"file":"compat/beancount-import/testdata_reconcile_test_ofx_cleared_0_ignore.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true}
+{"file":"compat/beancount-import/testdata_reconcile_test_ofx_cleared_0_ignore.beancount","query":"SELECT COUNT(*) AS total_txns","match":false}
+{"file":"compat/beancount-import/testdata_reconcile_test_ofx_cleared_0_ignore.beancount","query":"SELECT currency, COUNT(*) AS count GROUP BY curren","match":true}
+{"file":"compat/beancount-import/testdata_reconcile_test_ofx_cleared_0_ignore.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS count GROUP","match":true}
+{"file":"compat/beancount-import/testdata_reconcile_test_ofx_ignore_balance_0_journal.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true}
+{"file":"compat/beancount-import/testdata_reconcile_test_ofx_ignore_balance_0_journal.beancount","query":"SELECT COUNT(*) AS total_txns","match":false}
+{"file":"compat/beancount-import/testdata_reconcile_test_ofx_ignore_balance_0_journal.beancount","query":"SELECT currency, COUNT(*) AS count GROUP BY curren","match":true}
+{"file":"compat/beancount-import/testdata_reconcile_test_ofx_ignore_balance_0_journal.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS count GROUP","match":true}
+{"file":"compat/beancount-import/testdata_reconcile_test_ofx_ignore_price_0_ignore.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true}
+{"file":"compat/beancount-import/testdata_reconcile_test_ofx_ignore_price_0_ignore.beancount","query":"SELECT COUNT(*) AS total_txns","match":false}
+{"file":"compat/beancount-import/testdata_reconcile_test_ofx_ignore_price_0_ignore.beancount","query":"SELECT currency, COUNT(*) AS count GROUP BY curren","match":true}
+{"file":"compat/beancount-import/testdata_reconcile_test_ofx_ignore_price_0_ignore.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS count GROUP","match":true}
+{"file":"compat/beancount-import/testdata_reconcile_test_ofx_ignore_price_0_journal.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true}
+{"file":"compat/beancount-import/testdata_reconcile_test_ofx_ignore_price_0_journal.beancount","query":"SELECT COUNT(*) AS total_txns","match":false}
+{"file":"compat/beancount-import/testdata_reconcile_test_ofx_ignore_price_0_journal.beancount","query":"SELECT currency, COUNT(*) AS count GROUP BY curren","match":true}
+{"file":"compat/beancount-import/testdata_reconcile_test_ofx_ignore_price_0_journal.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS count GROUP","match":true}
+{"file":"compat/beancount-import/testdata_reconcile_test_ofx_matching_0_ignore.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true}
+{"file":"compat/beancount-import/testdata_reconcile_test_ofx_matching_0_ignore.beancount","query":"SELECT COUNT(*) AS total_txns","match":false}
+{"file":"compat/beancount-import/testdata_reconcile_test_ofx_matching_0_ignore.beancount","query":"SELECT currency, COUNT(*) AS count GROUP BY curren","match":true}
+{"file":"compat/beancount-import/testdata_reconcile_test_ofx_matching_0_ignore.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS count GROUP","match":true}
+{"file":"compat/beancount-import/testdata_reconcile_test_ofx_matching_0_pending.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true}
+{"file":"compat/beancount-import/testdata_reconcile_test_ofx_matching_0_pending.beancount","query":"SELECT COUNT(*) AS total_txns","match":false}
+{"file":"compat/beancount-import/testdata_reconcile_test_ofx_matching_0_pending.beancount","query":"SELECT currency, COUNT(*) AS count GROUP BY curren","match":true}
+{"file":"compat/beancount-import/testdata_reconcile_test_ofx_matching_0_pending.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS count GROUP","match":true}
+{"file":"compat/beancount-import/testdata_source_amazon_test_basic_journal.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true}
+{"file":"compat/beancount-import/testdata_source_amazon_test_basic_journal.beancount","query":"SELECT COUNT(*) AS total_txns","match":false}
+{"file":"compat/beancount-import/testdata_source_amazon_test_basic_journal.beancount","query":"SELECT currency, COUNT(*) AS count GROUP BY curren","match":true}
+{"file":"compat/beancount-import/testdata_source_amazon_test_basic_journal.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS count GROUP","match":true}
+{"file":"compat/beancount-import/testdata_source_amazon_test_credit_card_transactions_journal.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true}
+{"file":"compat/beancount-import/testdata_source_amazon_test_credit_card_transactions_journal.beancount","query":"SELECT COUNT(*) AS total_txns","match":false}
+{"file":"compat/beancount-import/testdata_source_amazon_test_credit_card_transactions_journal.beancount","query":"SELECT currency, COUNT(*) AS count GROUP BY curren","match":true}
+{"file":"compat/beancount-import/testdata_source_amazon_test_credit_card_transactions_journal.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS count GROUP","match":true}
+{"file":"compat/beancount-import/testdata_source_generic_importer_test_basic_journal.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true}
+{"file":"compat/beancount-import/testdata_source_generic_importer_test_basic_journal.beancount","query":"SELECT COUNT(*) AS total_txns","match":false}
+{"file":"compat/beancount-import/testdata_source_generic_importer_test_basic_journal.beancount","query":"SELECT currency, COUNT(*) AS count GROUP BY curren","match":true}
+{"file":"compat/beancount-import/testdata_source_generic_importer_test_basic_journal.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS count GROUP","match":true}
+{"file":"compat/beancount-import/testdata_source_generic_importer_test_cost_journal.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true}
+{"file":"compat/beancount-import/testdata_source_generic_importer_test_cost_journal.beancount","query":"SELECT COUNT(*) AS total_txns","match":false}
+{"file":"compat/beancount-import/testdata_source_generic_importer_test_cost_journal.beancount","query":"SELECT currency, COUNT(*) AS count GROUP BY curren","match":true}
+{"file":"compat/beancount-import/testdata_source_generic_importer_test_cost_journal.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS count GROUP","match":true}
+{"file":"compat/beancount-import/testdata_source_generic_importer_test_invalid_import_results.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true}
+{"file":"compat/beancount-import/testdata_source_generic_importer_test_invalid_import_results.beancount","query":"SELECT COUNT(*) AS total_txns","match":false}
+{"file":"compat/beancount-import/testdata_source_generic_importer_test_invalid_import_results.beancount","query":"SELECT currency, COUNT(*) AS count GROUP BY curren","match":true}
+{"file":"compat/beancount-import/testdata_source_generic_importer_test_invalid_import_results.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS count GROUP","match":true}
+{"file":"compat/beancount-import/testdata_source_generic_importer_test_invalid_journal.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":false}
+{"file":"compat/beancount-import/testdata_source_generic_importer_test_invalid_journal.beancount","query":"SELECT COUNT(*) AS total_txns","match":false}
+{"file":"compat/beancount-import/testdata_source_generic_importer_test_invalid_journal.beancount","query":"SELECT currency, COUNT(*) AS count GROUP BY curren","match":false}
+{"file":"compat/beancount-import/testdata_source_generic_importer_test_invalid_journal.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS count GROUP","match":false}
+{"file":"compat/beancount-import/testdata_source_generic_importer_test_training_examples_import_results.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true}
+{"file":"compat/beancount-import/testdata_source_generic_importer_test_training_examples_import_results.beancount","query":"SELECT COUNT(*) AS total_txns","match":false}
+{"file":"compat/beancount-import/testdata_source_generic_importer_test_training_examples_import_results.beancount","query":"SELECT currency, COUNT(*) AS count GROUP BY curren","match":true}
+{"file":"compat/beancount-import/testdata_source_generic_importer_test_training_examples_import_results.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS count GROUP","match":true}
+{"file":"compat/beancount-import/testdata_source_generic_importer_test_training_examples_journal.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":false}
+{"file":"compat/beancount-import/testdata_source_generic_importer_test_training_examples_journal.beancount","query":"SELECT COUNT(*) AS total_txns","match":false}
+{"file":"compat/beancount-import/testdata_source_generic_importer_test_training_examples_journal.beancount","query":"SELECT currency, COUNT(*) AS count GROUP BY curren","match":false}
+{"file":"compat/beancount-import/testdata_source_generic_importer_test_training_examples_journal.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS count GROUP","match":false}
+{"file":"compat/beancount-import/testdata_source_google_purchases_test_basic_journal.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true}
+{"file":"compat/beancount-import/testdata_source_google_purchases_test_basic_journal.beancount","query":"SELECT COUNT(*) AS total_txns","match":false}
+{"file":"compat/beancount-import/testdata_source_google_purchases_test_basic_journal.beancount","query":"SELECT currency, COUNT(*) AS count GROUP BY curren","match":true}
+{"file":"compat/beancount-import/testdata_source_google_purchases_test_basic_journal.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS count GROUP","match":true}
+{"file":"compat/beancount-import/testdata_source_google_purchases_test_invalid_import_results.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true}
+{"file":"compat/beancount-import/testdata_source_google_purchases_test_invalid_import_results.beancount","query":"SELECT COUNT(*) AS total_txns","match":false}
+{"file":"compat/beancount-import/testdata_source_google_purchases_test_invalid_import_results.beancount","query":"SELECT currency, COUNT(*) AS count GROUP BY curren","match":true}
+{"file":"compat/beancount-import/testdata_source_google_purchases_test_invalid_import_results.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS count GROUP","match":true}
+{"file":"compat/beancount-import/testdata_source_google_purchases_test_matching_import_results.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true}
+{"file":"compat/beancount-import/testdata_source_google_purchases_test_matching_import_results.beancount","query":"SELECT COUNT(*) AS total_txns","match":false}
+{"file":"compat/beancount-import/testdata_source_google_purchases_test_matching_import_results.beancount","query":"SELECT currency, COUNT(*) AS count GROUP BY curren","match":true}
+{"file":"compat/beancount-import/testdata_source_google_purchases_test_matching_import_results.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS count GROUP","match":true}
+{"file":"compat/beancount-import/testdata_source_healthequity_test_basic_journal.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true}
+{"file":"compat/beancount-import/testdata_source_healthequity_test_basic_journal.beancount","query":"SELECT COUNT(*) AS total_txns","match":false}
+{"file":"compat/beancount-import/testdata_source_healthequity_test_basic_journal.beancount","query":"SELECT currency, COUNT(*) AS count GROUP BY curren","match":true}
+{"file":"compat/beancount-import/testdata_source_healthequity_test_basic_journal.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS count GROUP","match":true}
+{"file":"compat/beancount-import/testdata_source_icscards_test_basic_journal.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true}
+{"file":"compat/beancount-import/testdata_source_icscards_test_basic_journal.beancount","query":"SELECT COUNT(*) AS total_txns","match":false}
+{"file":"compat/beancount-import/testdata_source_icscards_test_basic_journal.beancount","query":"SELECT currency, COUNT(*) AS count GROUP BY curren","match":true}
+{"file":"compat/beancount-import/testdata_source_icscards_test_basic_journal.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS count GROUP","match":true}
+{"file":"compat/beancount-import/testdata_source_icscards_test_big_journal.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true}
+{"file":"compat/beancount-import/testdata_source_icscards_test_big_journal.beancount","query":"SELECT COUNT(*) AS total_txns","match":false}
+{"file":"compat/beancount-import/testdata_source_icscards_test_big_journal.beancount","query":"SELECT currency, COUNT(*) AS count GROUP BY curren","match":true}
+{"file":"compat/beancount-import/testdata_source_icscards_test_big_journal.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS count GROUP","match":true}
+{"file":"compat/beancount-import/testdata_source_icscards_test_equal_transactions_journal.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true}
+{"file":"compat/beancount-import/testdata_source_icscards_test_equal_transactions_journal.beancount","query":"SELECT COUNT(*) AS total_txns","match":false}
+{"file":"compat/beancount-import/testdata_source_icscards_test_equal_transactions_journal.beancount","query":"SELECT currency, COUNT(*) AS count GROUP BY curren","match":true}
+{"file":"compat/beancount-import/testdata_source_icscards_test_equal_transactions_journal.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS count GROUP","match":true}
+{"file":"compat/beancount-import/testdata_source_icscards_test_error_journal.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true}
+{"file":"compat/beancount-import/testdata_source_icscards_test_error_journal.beancount","query":"SELECT COUNT(*) AS total_txns","match":false}
+{"file":"compat/beancount-import/testdata_source_icscards_test_error_journal.beancount","query":"SELECT currency, COUNT(*) AS count GROUP BY curren","match":true}
+{"file":"compat/beancount-import/testdata_source_icscards_test_error_journal.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS count GROUP","match":true}
+{"file":"compat/beancount-import/testdata_source_mint_test_basic_journal.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true}
+{"file":"compat/beancount-import/testdata_source_mint_test_basic_journal.beancount","query":"SELECT COUNT(*) AS total_txns","match":false}
+{"file":"compat/beancount-import/testdata_source_mint_test_basic_journal.beancount","query":"SELECT currency, COUNT(*) AS count GROUP BY curren","match":true}
+{"file":"compat/beancount-import/testdata_source_mint_test_basic_journal.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS count GROUP","match":true}
+{"file":"compat/beancount-import/testdata_source_mint_test_currency_journal.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true}
+{"file":"compat/beancount-import/testdata_source_mint_test_currency_journal.beancount","query":"SELECT COUNT(*) AS total_txns","match":false}
+{"file":"compat/beancount-import/testdata_source_mint_test_currency_journal.beancount","query":"SELECT currency, COUNT(*) AS count GROUP BY curren","match":true}
+{"file":"compat/beancount-import/testdata_source_mint_test_currency_journal.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS count GROUP","match":true}
+{"file":"compat/beancount-import/testdata_source_mint_test_invalid_import_results.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true}
+{"file":"compat/beancount-import/testdata_source_mint_test_invalid_import_results.beancount","query":"SELECT COUNT(*) AS total_txns","match":false}
+{"file":"compat/beancount-import/testdata_source_mint_test_invalid_import_results.beancount","query":"SELECT currency, COUNT(*) AS count GROUP BY curren","match":true}
+{"file":"compat/beancount-import/testdata_source_mint_test_invalid_import_results.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS count GROUP","match":true}
+{"file":"compat/beancount-import/testdata_source_mint_test_training_examples_import_results.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true}
+{"file":"compat/beancount-import/testdata_source_mint_test_training_examples_import_results.beancount","query":"SELECT COUNT(*) AS total_txns","match":false}
+{"file":"compat/beancount-import/testdata_source_mint_test_training_examples_import_results.beancount","query":"SELECT currency, COUNT(*) AS count GROUP BY curren","match":true}
+{"file":"compat/beancount-import/testdata_source_mint_test_training_examples_import_results.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS count GROUP","match":true}
+{"file":"compat/beancount-import/testdata_source_mt940_test_basic_journal.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true}
+{"file":"compat/beancount-import/testdata_source_mt940_test_basic_journal.beancount","query":"SELECT COUNT(*) AS total_txns","match":false}
+{"file":"compat/beancount-import/testdata_source_mt940_test_basic_journal.beancount","query":"SELECT currency, COUNT(*) AS count GROUP BY curren","match":true}
+{"file":"compat/beancount-import/testdata_source_mt940_test_basic_journal.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS count GROUP","match":true}

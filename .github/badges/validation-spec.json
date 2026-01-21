@@ -1,0 +1,205 @@
+{
+  "$schema": "https://vega.github.io/schema/vega/v6.json",
+  "width": 550,
+  "height": 200,
+  "padding": {"left": 150, "right": 20, "top": 50, "bottom": 25},
+  "background": "#0d1117",
+
+  "signals": [
+    {"name": "rustledger_ms", "value": 32},
+    {"name": "max_ms", "value": 880},
+    {"name": "bench_date", "value": "2026-01-20"},
+    {"name": "smallBarThreshold", "value": 200}
+  ],
+
+  "data": [
+    {
+      "name": "benchmarks",
+      "values": [
+        {"tool": "rustledger", "label": "rustledger", "time_ms": 32, "baseline_ms": 880, "color": "#00d4aa"},
+        {"tool": "ledger", "label": "ledger (C++)", "time_ms": 65, "baseline_ms": 880, "color": "#9b59b6"},
+        {"tool": "hledger", "label": "hledger (Haskell)", "time_ms": 540, "baseline_ms": 880, "color": "#e74c3c"},
+        {"tool": "beancount", "label": "beancount (Python)", "time_ms": 880, "baseline_ms": 880, "color": "#f4b942"}
+      ],
+      "transform": [
+        {"type": "formula", "as": "slower_factor", "expr": "datum.time_ms / rustledger_ms"},
+        {"type": "formula", "as": "faster_factor", "expr": "datum.baseline_ms / datum.time_ms"},
+        {"type": "formula", "as": "bar_px", "expr": "datum.time_ms / max_ms * width"},
+        {"type": "formula", "as": "is_small", "expr": "datum.bar_px < smallBarThreshold"}
+      ]
+    }
+  ],
+
+  "scales": [
+    {
+      "name": "y",
+      "type": "band",
+      "domain": {"data": "benchmarks", "field": "label"},
+      "range": "height",
+      "padding": 0.3
+    },
+    {
+      "name": "x",
+      "type": "linear",
+      "domain": [0, {"signal": "max_ms"}],
+      "range": [0, {"signal": "width"}]
+    }
+  ],
+
+  "marks": [
+    {
+      "type": "rect",
+      "from": {"data": "benchmarks"},
+      "encode": {
+        "enter": {
+          "y": {"scale": "y", "field": "label"},
+          "height": {"scale": "y", "band": 1},
+          "x": {"value": 0},
+          "x2": {"scale": "x", "field": "time_ms"},
+          "cornerRadiusTopRight": {"value": 5},
+          "cornerRadiusBottomRight": {"value": 5},
+          "fill": {"field": "color"},
+          "fillOpacity": {"signal": "datum.tool == 'rustledger' ? 1 : 0.85"}
+        }
+      }
+    },
+    {
+      "type": "rect",
+      "from": {"data": "benchmarks"},
+      "encode": {
+        "enter": {
+          "y": {"scale": "y", "field": "label", "offset": -2},
+          "height": {"scale": "y", "band": 1, "offset": 4},
+          "x": {"value": -2},
+          "x2": {"scale": "x", "field": "time_ms", "offset": 2},
+          "cornerRadius": {"value": 6},
+          "fill": {"signal": "datum.tool == 'rustledger' ? datum.color : 'transparent'"},
+          "fillOpacity": {"value": 0.12}
+        }
+      }
+    },
+    {
+      "type": "text",
+      "from": {"data": "benchmarks"},
+      "encode": {
+        "enter": {
+          "y": {"scale": "y", "field": "label", "band": 0.5},
+          "x": {"value": -14},
+          "text": {"signal": "datum.tool == 'rustledger' ? '' : datum.label"},
+          "fill": {"value": "#8b949e"},
+          "fontSize": {"value": 13},
+          "fontWeight": {"value": 400},
+          "baseline": {"value": "middle"},
+          "align": {"value": "right"}
+        }
+      }
+    },
+    {
+      "type": "text",
+      "from": {"data": "benchmarks"},
+      "encode": {
+        "enter": {
+          "y": {"scale": "y", "field": "label", "band": 0.5},
+          "x": {"value": -14},
+          "text": {"signal": "datum.tool == 'rustledger' ? 'ledger' : ''"},
+          "fill": {"value": "#e6edf3"},
+          "fontSize": {"value": 13},
+          "fontWeight": {"value": 600},
+          "baseline": {"value": "middle"},
+          "align": {"value": "right"}
+        }
+      }
+    },
+    {
+      "type": "text",
+      "from": {"data": "benchmarks"},
+      "encode": {
+        "enter": {
+          "y": {"scale": "y", "field": "label", "band": 0.5},
+          "x": {"value": -52},
+          "text": {"signal": "datum.tool == 'rustledger' ? 'rust' : ''"},
+          "fill": {"value": "#f74c00"},
+          "fontSize": {"value": 13},
+          "fontWeight": {"value": 600},
+          "baseline": {"value": "middle"},
+          "align": {"value": "right"}
+        }
+      }
+    },
+    {
+      "type": "rect",
+      "from": {"data": "benchmarks"},
+      "encode": {
+        "enter": {
+          "y": {"scale": "y", "field": "label", "band": 0.5, "offset": -9},
+          "x": {"signal": "datum.is_small ? scale('x', datum.time_ms) + 8 : 6"},
+          "width": {"signal": "datum.is_small ? (datum.tool == 'rustledger' ? 155 : 130) : (datum.tool == 'rustledger' ? 85 : 68)"},
+          "height": {"value": 18},
+          "cornerRadius": {"value": 9},
+          "fill": {"signal": "datum.is_small ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.35)'"}
+        }
+      }
+    },
+    {
+      "type": "text",
+      "from": {"data": "benchmarks"},
+      "encode": {
+        "enter": {
+          "y": {"scale": "y", "field": "label", "band": 0.5},
+          "x": {"signal": "datum.is_small ? scale('x', datum.time_ms) + 16 : (datum.tool == 'rustledger' ? 48 : 40)"},
+          "text": {"signal": "datum.is_small ? (datum.tool == 'rustledger' ? format(datum.faster_factor, '.0f') + 'x vs python · ' + format(datum.time_ms, '.0f') + ' ms' : format(datum.slower_factor, '.1f') + 'x slower · ' + format(datum.time_ms, '.0f') + ' ms') : (datum.tool == 'rustledger' ? format(datum.faster_factor, '.0f') + 'x vs python' : format(datum.slower_factor, '.1f') + 'x slower')"},
+          "fill": {"signal": "datum.is_small ? '#e6edf3' : '#ffffff'"},
+          "fontSize": {"value": 10},
+          "fontWeight": {"value": 600},
+          "baseline": {"value": "middle"},
+          "align": {"value": "left"}
+        }
+      }
+    },
+    {
+      "type": "text",
+      "from": {"data": "benchmarks"},
+      "encode": {
+        "enter": {
+          "y": {"scale": "y", "field": "label", "band": 0.5},
+          "x": {"signal": "scale('x', datum.time_ms) - 8"},
+          "text": {"signal": "datum.is_small ? '' : format(datum.time_ms, '.0f') + ' ms'"},
+          "fill": {"signal": "datum.tool == 'beancount' ? '#0d1117' : '#ffffff'"},
+          "fontSize": {"value": 11},
+          "font": {"value": "monospace"},
+          "fontWeight": {"value": 600},
+          "baseline": {"value": "middle"},
+          "align": {"value": "right"}
+        }
+      }
+    },
+    {
+      "type": "text",
+      "encode": {
+        "enter": {
+          "x": {"signal": "width"},
+          "y": {"signal": "height + 18"},
+          "text": {"signal": "'measured ' + bench_date + ' · hyperfine'"},
+          "fill": {"value": "#484f58"},
+          "fontSize": {"value": 9},
+          "baseline": {"value": "top"},
+          "align": {"value": "right"}
+        }
+      }
+    }
+  ],
+
+  "title": {
+    "text": "Validation: Parse + Check (10K transactions)",
+    "subtitle": "rustledger vs other plain-text accounting tools",
+    "color": "#e6edf3",
+    "subtitleColor": "#6e7681",
+    "fontSize": 16,
+    "subtitleFontSize": 11,
+    "fontWeight": 600,
+    "subtitleFontWeight": "normal",
+    "anchor": "start",
+    "offset": 20,
+    "subtitlePadding": 4
+  }
+}

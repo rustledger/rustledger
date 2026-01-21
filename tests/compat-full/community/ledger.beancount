@@ -1,0 +1,67 @@
+; Options
+option "name_assets" "Majetek"
+option "name_liabilities" "Zavazky"
+option "name_equity" "Ciste-jmeni"
+option "name_income" "Prijmy"
+option "name_expenses" "Vydaje"
+option "operating_currency" "CZK"
+
+; Ucty
+2025-01-01 open Majetek:Banky:Easy-Bank:BU     CZK
+2025-01-01 open Majetek:Banky:Easy-Bank:BU-EUR EUR
+2025-01-01 open Majetek:Hotovost:Penezenka     CZK
+2025-01-01 open Ciste-jmeni:Pocatecni-stav     CZK, EUR
+2025-01-01 open Prijmy:Zamestnani:ABConsult    CZK
+2025-01-01 open Vydaje:Bydleni                 CZK
+2025-01-01 open Vydaje:Zakladni-potreby        CZK
+  note: "jidlo, zakladni spotrebni zbozi a sluzby"
+
+; Transakce
+2025-01-01 * "Pocatecni stav"
+  Majetek:Banky:Easy-Bank:BU      50000 CZK
+  Majetek:Banky:Easy-Bank:BU-EUR   2000 EUR
+  Majetek:Hotovost:Penezenka        510 CZK
+  Ciste-jmeni:Pocatecni-stav
+
+2025-01-02 * "Restaurace Koruna" "Obed"
+  transaction_id: "123456789"
+  Majetek:Banky:Easy-Bank:BU       -200 CZK
+  Vydaje:Zakladni-potreby
+
+2025-01-15 * "ABConsult" "Vyplata mzdy"
+  transaction_id: "123456790"
+  Majetek:Banky:Easy-Bank:BU      50000 CZK
+  Prijmy:Zamestnani:ABConsult
+
+2025-01-19 * "Jan Novak" "Najem"
+  transaction_id: "123456791"
+  Majetek:Banky:Easy-Bank:BU     -15000 CZK
+  Vydaje:Bydleni
+
+2025-01-20 * "Easy Bank" "Vyber z bankomatu"
+  transaction_id: "123456792"
+  Majetek:Banky:Easy-Bank:BU     -10000 CZK
+  Majetek:Hotovost:Penezenka
+
+2025-01-31 * "Souhrn utraty za jidlo"
+  Majetek:Hotovost:Penezenka      -6000 CZK
+  Vydaje:Zakladni-potreby
+
+2025-02-15 * "ABConsult" "Vyplata mzdy"
+  transaction_id: "123456793"
+  Majetek:Banky:Easy-Bank:BU      45000 CZK
+  Prijmy:Zamestnani:ABConsult
+
+2025-02-19 * "Jan Novak" "Najem"
+  transaction_id: "123456794"
+  Majetek:Banky:Easy-Bank:BU     -15000 CZK
+  Vydaje:Bydleni
+
+2025-02-20 * "Easy Bank" "Vyber z bankomatu"
+  transaction_id: "123456795"
+  Majetek:Banky:Easy-Bank:BU      -5000 CZK
+  Majetek:Hotovost:Penezenka
+
+2025-02-28 * "Souhrn utraty za jidlo"
+  Majetek:Hotovost:Penezenka      -8500 CZK
+  Vydaje:Zakladni-potreby

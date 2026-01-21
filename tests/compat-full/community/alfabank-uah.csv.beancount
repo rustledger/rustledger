@@ -1,0 +1,36 @@
+;; Account: sensebank
+;; Date: 2000-01-31T00:00:00
+;; Name: 
+
+2000-01-05 * "Зняття готівки в банкоматі"
+  address: "Krakow, POL"
+  category: "Сashier's office"
+  time: "16:43"
+  Assets:Sensebank:Cash:UAH  -1585.82 UAH
+
+2000-01-05 * "Переказ з картки на картку (зарахування)"
+  category: "Money transfer"
+  time: "15:55"
+  Assets:Sensebank:Cash:UAH  1600.00 UAH
+
+2000-01-09 * "Щомісячна комісія за обслуговування пакета банківських послуг"
+  address: "Kyiv, UKR"
+  time: "00:58"
+  Assets:Sensebank:Cash:UAH  -150.00 UAH
+
+2000-01-15 * "WFP.OPENDATABOTM" ""
+  address: "DNIPRO, UKR"
+  category: "Advertising"
+  time: "09:02"
+  Assets:Sensebank:Cash:UAH  -270.00 UAH
+
+2000-01-24 * "Рахунок створений автоматично для поповнення балансу 380670000000"
+  address: "Kyiv, UKR"
+  category: "Utilities"
+  time: "11:49"
+  Assets:Sensebank:Cash:UAH  -140.00 UAH
+
+2000-01-25 * "Перерахування чистого підприємницького доходу, без ПДВ"
+  address: "Kyiv, UKR"
+  time: "12:12"
+  Assets:Sensebank:Cash:UAH  10000.13 UAH

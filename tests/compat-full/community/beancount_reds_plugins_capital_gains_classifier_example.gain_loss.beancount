@@ -1,0 +1,21 @@
+plugin "gain_loss" "{
+  'Income.*:Capital-Gains.*' : [':Capital-Gains',  ':Capital-Gains:Gains',  ':Capital-Gains:Losses'],
+}"
+
+2014-01-01 open Assets:Brokerage
+2014-01-01 open Assets:Bank
+2014-01-01 open Income:Capital-Gains
+
+2014-02-01 * "Buy"
+ Assets:Brokerage    200 ORNG {1 USD}
+ Assets:Bank        -200 USD
+
+2016-03-01 * "Sell"
+ Assets:Brokerage   -100 ORNG {1 USD} @ 1.50 USD
+ Assets:Bank         150 USD
+ Income:Capital-Gains
+
+2016-03-02 * "Sell"
+ Assets:Brokerage   -100 ORNG {1 USD} @ 0.50 USD
+ Assets:Bank          50 USD
+ Income:Capital-Gains

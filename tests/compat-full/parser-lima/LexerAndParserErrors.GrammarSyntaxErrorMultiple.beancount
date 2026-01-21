@@ -1,0 +1,5 @@
+2000-01-01 open Assets:Before
+2000-01-02 open open
+2000-01-03 open Assets:After
+2000-01-04 close close
+2000-01-05 close Assets:After

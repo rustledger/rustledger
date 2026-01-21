@@ -1,0 +1,163 @@
+# Beancount Compatibility Test Sources
+#
+# This file documents the sources of beancount files used for compatibility testing.
+# Each source includes the repository URL, the commit/tag used, and license information.
+#
+# Curated files in tests/compat/ are committed to the repository.
+# Full test suite in tests/compat-full/ is downloaded on-demand via fetch script.
+
+[meta]
+description = "Compatibility test files for rustledger vs Python beancount"
+last_updated = "2026-01-20"
+total_curated_files = 93
+total_full_files = 816
+
+# =============================================================================
+# Official Beancount Repositories
+# =============================================================================
+
+[sources.beancount-v2]
+name = "Beancount v2"
+url = "https://github.com/beancount/beancount"
+branch = "v2"
+license = "GPL-2.0"
+description = "Original Python beancount implementation"
+paths = ["beancount/parser/testdata/", "examples/"]
+file_count = 8
+
+[sources.beancount-v3]
+name = "Beancount v3"
+url = "https://github.com/beancount/beancount"
+branch = "v3"
+license = "GPL-2.0"
+description = "Current Python beancount implementation"
+paths = ["beancount/parser/testdata/", "examples/"]
+file_count = 4
+
+# =============================================================================
+# Parser Test Suites
+# =============================================================================
+
+[sources.parser-lima]
+name = "Beancount Parser Lima"
+url = "https://github.com/tesujimath/beancount-parser-lima"
+branch = "main"
+license = "MIT"
+description = "Language-independent beancount parser test suite"
+paths = ["test-cases/", "examples/"]
+file_count = 246
+notes = "Primary source for parser conformance tests"
+
+[sources.launchplatform]
+name = "LaunchPlatform Beancount Parser"
+url = "https://github.com/LaunchPlatform/beancount-parser"
+branch = "main"
+license = "MIT"
+description = "Standalone Lark-based beancount parser"
+paths = ["tests/"]
+file_count = 0
+
+# =============================================================================
+# Web Interfaces and Tools
+# =============================================================================
+
+[sources.fava]
+name = "Fava"
+url = "https://github.com/beancount/fava"
+branch = "main"
+license = "MIT"
+description = "Web interface for beancount"
+paths = ["tests/data/", "stubs/"]
+file_count = 12
+
+[sources.beangulp]
+name = "Beangulp"
+url = "https://github.com/beancount/beangulp"
+branch = "main"
+license = "GPL-2.0"
+description = "Official beancount importer framework"
+paths = ["examples/"]
+file_count = 7
+
+# =============================================================================
+# Importers and Converters
+# =============================================================================
+
+[sources.beancount-import]
+name = "Beancount Import"
+url = "https://github.com/jbms/beancount-import"
+branch = "master"
+license = "GPL-2.0"
+description = "Web UI for importing and reconciling transactions"
+paths = ["testdata/"]
+file_count = 198
+notes = "Large collection of real-world import test data"
+
+[sources.ledger2beancount]
+name = "Ledger2Beancount"
+url = "https://github.com/beancount/ledger2beancount"
+branch = "main"
+license = "GPL-3.0"
+description = "Converter from Ledger/hledger to beancount"
+paths = ["tests/"]
+file_count = 35
+
+[sources.smart-importer]
+name = "Smart Importer"
+url = "https://github.com/beancount/smart_importer"
+branch = "main"
+license = "MIT"
+description = "ML-augmented transaction importers"
+paths = ["tests/"]
+file_count = 4
+
+[sources.reds-importers]
+name = "Beancount Reds Importers"
+url = "https://github.com/redstreet/beancount_reds_importers"
+branch = "main"
+license = "GPL-3.0"
+description = "Multi-format importer collection"
+paths = ["testdata/"]
+file_count = 1
+
+# =============================================================================
+# Community Projects
+# =============================================================================
+
+[sources.community]
+name = "Community Projects"
+url = "various"
+license = "various"
+description = "Files collected from various community repositories"
+file_count = 64
+repositories = [
+    { name = "beancount-example", url = "https://github.com/wileykestner/beancount-example", license = "MIT" },
+    { name = "fava-investor", url = "https://github.com/redstreet/fava_investor", license = "GPL-3.0" },
+    { name = "fava-dashboards", url = "https://github.com/andreasgerstmayr/fava-dashboards", license = "MIT" },
+    { name = "tariochbctools", url = "https://github.com/tarioch/beancern", license = "MIT" },
+]
+
+# =============================================================================
+# Curated File Selection Criteria
+# =============================================================================
+
+[curation]
+description = """
+The curated subset in tests/compat/ is selected to provide comprehensive
+coverage while keeping the committed file count manageable (~100 files).
+
+Selection criteria:
+1. Representative of each source repository
+2. Cover different beancount features (transactions, balances, prices, etc.)
+3. Include edge cases that have caused compatibility issues
+4. Avoid duplicate or near-duplicate content
+5. Prefer smaller files when content is similar
+"""
+
+categories = [
+    { name = "parser", description = "Parser edge cases and syntax variations", count = 30 },
+    { name = "validation", description = "Validation scenarios (balancing, accounts)", count = 25 },
+    { name = "plugins", description = "Plugin usage and configuration", count = 15 },
+    { name = "real-world", description = "Real-world ledger examples", count = 20 },
+    { name = "edge-cases", description = "Known compatibility edge cases", count = 10 },
+]

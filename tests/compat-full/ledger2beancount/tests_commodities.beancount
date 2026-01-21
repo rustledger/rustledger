@@ -1,0 +1,188 @@
+;----------------------------------------------------------------------
+; ledger2beancount conversion notes:
+;
+;   - Skipped second commodity declaration for USD (old USD)
+;   - Commodity "A commodity" renamed to A-COMMODITY
+;   - Commodity "M&M3" renamed to M-M3
+;   - Commodity 'TEST' renamed to XTESTX
+;   - Commodity AnotherAnotherAnotherAnother renamed to ANOTHERANOTHERANOTHERANO
+;   - Commodity Aud renamed to AUD
+;   - Commodity Bär renamed to BAR
+;   - Commodity C renamed to CX
+;   - Commodity Crown♛ renamed to CROWNX
+;   - Commodity Föö renamed to FOO
+;   - Commodity Gandi renamed to GANDI
+;   - Commodity KrisFlyer renamed to KRISFLYER
+;   - Commodity T'EST renamed to T-EST
+;   - Commodity TE"ST renamed to TE-ST
+;   - Commodity TEST" renamed to TESTX
+;   - Commodity krw renamed to KRW
+;   - Collision for commodity COLLISION: COLLA, COLLB
+;   - Collision for commodity USD: $, USD
+;----------------------------------------------------------------------
+
+; SPDX-FileCopyrightText: © 2018 Martin Michlmayr <tbm@cyrius.com>
+;
+; SPDX-License-Identifier: GPL-3.0-or-later
+
+1970-01-01 open Assets:Test
+1970-01-01 open Assets:Test123
+1970-01-01 open Expenses:Gandi ; test comment
+1970-01-01 open Equity:Opening-Balance
+
+1970-01-01 commodity A-COMMODITY
+1970-01-01 commodity ANOTHER ; just a comment
+1970-01-01 commodity ANOTHERANOTHERANOTHERANO
+1970-01-01 commodity UR
+1970-01-01 commodity DE0002635307
+
+1970-01-01 commodity USD
+;   value 0.90 EUR
+
+
+1970-01-01 commodity EUR
+  name: "Euro"
+;   nomarket
+;   default
+
+1970-01-01 commodity GANDI
+  name: "Gandi points"
+1970-01-01 commodity KRISFLYER
+1970-01-01 commodity MILESMORE
+1970-01-01 commodity MILESMORE2
+1970-01-01 commodity M-M3
+1970-01-01 commodity MILESMORE4
+1970-01-01 commodity MR
+  name: "AMEX Membership Rewards"
+
+1970-01-01 commodity KRW
+1970-01-01 commodity AUD
+1970-01-01 commodity CROWNX
+1970-01-01 commodity BAR
+1970-01-01 commodity FOO
+
+1970-01-01 commodity MOETZ
+1970-01-01 commodity MOO
+
+1970-01-01 commodity TEST123 ; comment with "quote"
+
+1970-01-01 commodity AA
+1970-01-01 commodity COLLISION
+1970-01-01 commodity CX
+1970-01-01 commodity T-EST
+1970-01-01 commodity TE-ST
+1970-01-01 commodity TESTX
+1970-01-01 commodity XTESTX
+
+2018-03-17 * "Test quoted commodity"
+  Assets:Test                      1 DE0002635307
+  Equity:Opening-Balance          -1 DE0002635307
+
+2018-03-17 * "Test commodity mapping"
+  Assets:Test                      1 UR
+  Equity:Opening-Balance          -1 UR
+
+2018-03-18 * "Test quoted commodity with defined mapping"
+  Assets:Test                      1 MILESMORE
+  Equity:Opening-Balance          -1 MILESMORE
+
+2018-03-18 * "Test quoted commodity with defined mapping missing quotes"
+  Assets:Test                      1 MILESMORE2
+  Equity:Opening-Balance          -1 MILESMORE2
+
+2018-03-18 * "Test upper case"
+  Assets:Test                      1 GANDI
+  Equity:Opening-Balance          -1 GANDI
+
+2017-03-31 * "Test with account name containing same string as commodity"
+  Expenses:Gandi                                        140616 GANDI
+  Assets:Test                                          -140616 GANDI
+
+2018-03-20 * "Account name ending in digits - digits not part of amount"
+  Assets:Test123                     10.00 EUR
+  Equity:Opening-Balance
+
+2018-03-21 * "Test upper caser for lot price"
+  Assets:Test                  1 MR @ 1 KRISFLYER
+  Equity:Opening-Balance
+
+2018-03-21 * "Invalid character for beancount commodity names"
+  Assets:Test                          1 M-M3
+  Equity:Opening-Balance
+
+2018-03-21 * "Invalid character for beancount commodity names, with mapping"
+  Assets:Test                          1 MILESMORE4
+  Equity:Opening-Balance
+
+2018-03-21 * "Commodity with space"
+  Assets:Test                          1 A-COMMODITY
+  Equity:Opening-Balance
+
+2018-03-21 * "Commodity with space, with mapping"
+  Assets:Test                          1 ANOTHER
+  Equity:Opening-Balance
+
+2018-03-21 * "Commodity is too long for beancount"
+  Assets:Test                          1 ANOTHERANOTHERANOTHERANO
+  Equity:Opening-Balance
+
+2018-03-26 * "Lower case"
+  Assets:Test                          1 KRW
+  Equity:Opening-Balance
+
+2018-03-26 * "Lower case at end"
+  Assets:Test                          1 AUD
+  Equity:Opening-Balance
+
+2018-03-26 * "Non-letter at end"
+  Assets:Test                          1 CROWNX
+  Equity:Opening-Balance
+
+2018-03-26 * "Umlaut in middle"
+  Assets:Test                          1 BAR
+  Equity:Opening-Balance
+
+2018-03-26 * "Umlaut at end"
+  Assets:Test                          1 FOO
+  Equity:Opening-Balance
+
+2018-03-26 * "Mapped before transformation"
+  Assets:Test                          1 MOETZ
+  Equity:Opening-Balance
+
+2018-03-26 * "Mapped after transformation"
+  Assets:Test                          1 MOO
+  Equity:Opening-Balance
+
+2018-03-29 * "Mapping creating collision"
+  Assets:Test                          1 COLLISION
+  Equity:Opening-Balance
+
+2018-03-29 * "Mapping creating collision"
+  Assets:Test                          1 COLLISION
+  Equity:Opening-Balance
+
+2018-04-28 * "Commodity with only 1 letter"
+  Assets:Test                              1 CX
+  Equity:Opening-Balance
+
+2018-04-28 * "Commodity with only 1 letter"
+  Assets:Test                              1 AA
+  Equity:Opening-Balance
+
+2020-07-27 * "Unquoted commodities may contain single quote"
+  Assets:Test               1 XTESTX
+  Assets:Test
+
+2020-07-27 * "Unquoted commodities may contain single quote"
+  Assets:Test                1 T-EST
+  Assets:Test
+
+2020-07-27 * "Unquoted commodities may contain double quote"
+  Assets:Test                1 TE-ST
+  Assets:Test
+
+2020-07-27 * "Unquoted commodities may contain double quote"
+  Assets:Test                1 TESTX
+  Assets:Test
+

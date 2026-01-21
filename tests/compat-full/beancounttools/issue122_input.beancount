@@ -1,0 +1,4 @@
+plugin "tariochbctools.plugins.generate_base_ccy_prices" "EUR"
+
+2020-01-01 price USD 10 TUG
+2020-01-01 price EUR 100 TUG

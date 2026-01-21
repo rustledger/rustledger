@@ -1,0 +1,17 @@
+option "operating_currency" "USD"
+plugin "beancount.plugins.auto_accounts"
+
+plugin "beancount_reds_plugins.box_accrual.box_accrual" ""
+
+plugin "beancount_reds_plugins.effective_date.effective_date" "{
+ 'Expenses': {'earlier': 'Liabilities:Hold:Expenses', 'later': 'Assets:Hold:Expenses'},
+ 'Income':   {'earlier': 'Assets:Hold:Income', 'later': 'Liabilities:Hold:Income'},
+ 'Assets':   {'earlier': 'Assets:Hold:Assets', 'later': 'Liabilities:Hold:Assets'},
+ }"
+
+2025-09-25 * "SPX 18DEC26" "Box Borrow 100k"
+  synthetic_loan_expiry: 2026-12-18
+  Assets:Investments:Taxable:IBKR-Original-1572:USD                        95,000 USD
+  Expenses:Fees-and-Charges:Brokerage-Fees:Taxable:IBKR-Original-1572           6 USD
+  Liabilities:Loans:BoxSpreadLoans                           -100,000 USD
+  Income:Investments:Taxable:BoxTrades:Capital-Losses

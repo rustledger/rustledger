@@ -1,0 +1,39 @@
+
+1970-01-01 open Assets:Test
+1970-01-01 open Equity:Opening-Balance
+
+1970-01-01 commodity EUR
+
+2020-12-30 * "Posting-level tags"
+  #foo
+  #bar
+  #baz
+  Assets:Test                        10.00 EUR
+  Equity:Opening-Balance            -10.00 EUR
+
+2020-12-30 * "Posting-level tags"
+  #foo
+  #bar
+  #baz
+  Assets:Test                        10.00 EUR
+  Equity:Opening-Balance            -10.00 EUR
+
+2020-12-30 * "Posting-level tags"
+  #foo
+  #bar
+  #foobar
+  #baz
+  #foobaz
+  Assets:Test                        10.00 EUR
+  Equity:Opening-Balance            -10.00 EUR
+
+2020-12-30 * "Posting-level link"
+  ^2020-12-30-test
+  Assets:Test                        10.00 EUR
+  Equity:Opening-Balance            -10.00 EUR
+
+2020-12-30 * "Posting-level link"
+  ^2020-12-30-test
+  Assets:Test                        10.00 EUR
+  Equity:Opening-Balance            -10.00 EUR
+

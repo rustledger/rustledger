@@ -1,0 +1,2 @@
+plugin "tariochbctools.plugins.generate_base_ccy_prices" "CHF"
+2020-01-02 price FOO                               1 USD

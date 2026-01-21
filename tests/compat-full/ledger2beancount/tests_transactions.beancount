@@ -1,0 +1,21 @@
+; SPDX-FileCopyrightText: © 2020 Martin Michlmayr <tbm@cyrius.com>
+;
+; SPDX-License-Identifier: GPL-3.0-or-later
+
+1970-01-01 open Assets:Test
+
+1970-01-01 commodity EUR
+
+2019-02-15 note Assets:Test "A transaction with a single posting - only allowed when amount == 0"
+
+
+2019-02-15 note Assets:Test "A transaction with a single posting - only allowed when amount == 0"
+
+
+; Skipping transaction without header.
+
+; Skipping transaction without header.
+
+2020-09-29 note Assets:Test "A transaction with a single posting - no amount"
+
+

@@ -1,0 +1,6 @@
+2019-01-01 open Assets:Checking
+2019-01-01 open Expenses:Whatever
+
+2019-01-01 * "description" #FOO
+  Assets:Checking     300.00 EUR
+  Expenses:Whatever

@@ -1,0 +1,7 @@
+2013-01-01 commodity PLN
+	price: "EUR:yahoo/PLNEUR"
+	; GBP:yahoo/PLNGBP USD:yahoo/PLNUSD MUR:yahoo/PLNMUR CHF:yahoo/PLNCHF MXN:yahoo/PLNMXN"
+
+2020-01-01 commodity EUR
+	price: "PLN:yahoo/EURPLN"
+	; GBP:yahoo/EURGBP USD:yahoo/EURUSD MUR:yahoo/EURMUR CHF:yahoo/EURCHF MXN:yahoo/EURMXN"

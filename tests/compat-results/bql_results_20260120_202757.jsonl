@@ -1,0 +1,550 @@
+{"file":"beancount-import-extra/transactions.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS cnt GROUP B","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import-extra/transactions.beancount","query":"SELECT COUNT(*) AS total","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import-extra/transactions.beancount","query":"SELECT DISTINCT LEAF(account) AS leaf ORDER BY lea","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import-extra/transactions.beancount","query":"SELECT DISTINCT ROOT(account) AS root ORDER BY roo","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import-extra/transactions.beancount","query":"SELECT MIN(date) AS min_date, MAX(date) AS max_dat","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import-extra/ignore.beancount","query":"SELECT COUNT(*) AS total","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import-extra/transactions.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import-extra/transactions.beancount","query":"SELECT account, FIRST(date) AS first_date GROUP BY","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import-extra/transactions.beancount","query":"SELECT MONTH(date) AS month, COUNT(*) AS cnt GROUP","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import-extra/transactions.beancount","query":"SELECT account, SUM(position) GROUP BY account ORD","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import-extra/ignore.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import-extra/ignore.beancount","query":"SELECT DISTINCT ROOT(account) AS root ORDER BY roo","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import-extra/ignore.beancount","query":"SELECT currency, COUNT(*) AS cnt GROUP BY currency","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import-extra/transactions.beancount","query":"SELECT currency, COUNT(*) AS cnt GROUP BY currency","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import-extra/ignore.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS cnt GROUP B","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import-extra/transactions.beancount","query":"SELECT date, narration ORDER BY date, narration LI","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import-extra/ignore.beancount","query":"SELECT DISTINCT LEAF(account) AS leaf ORDER BY lea","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import-extra/ignore.beancount","query":"SELECT account, SUM(position) GROUP BY account ORD","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import-extra/ignore.beancount","query":"SELECT date, narration ORDER BY date, narration LI","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import-extra/ignore.beancount","query":"SELECT MIN(date) AS min_date, MAX(date) AS max_dat","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import-extra/prices.beancount","query":"SELECT COUNT(*) AS total","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import-extra/prices.beancount","query":"SELECT DISTINCT ROOT(account) AS root ORDER BY roo","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import-extra/ignore.beancount","query":"SELECT account, FIRST(date) AS first_date GROUP BY","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import-extra/prices.beancount","query":"SELECT DISTINCT LEAF(account) AS leaf ORDER BY lea","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import-extra/prices.beancount","query":"SELECT currency, COUNT(*) AS cnt GROUP BY currency","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import-extra/prices.beancount","query":"SELECT account, SUM(position) GROUP BY account ORD","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import-extra/prices.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import-extra/prices.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS cnt GROUP B","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import-extra/ignore.beancount","query":"SELECT MONTH(date) AS month, COUNT(*) AS cnt GROUP","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import-extra/prices.beancount","query":"SELECT account, FIRST(date) AS first_date GROUP BY","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import-extra/prices.beancount","query":"SELECT MONTH(date) AS month, COUNT(*) AS cnt GROUP","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import-extra/prices.beancount","query":"SELECT date, narration ORDER BY date, narration LI","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import-extra/prices.beancount","query":"SELECT MIN(date) AS min_date, MAX(date) AS max_dat","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/examples_manually_entered_accounts.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS cnt GROUP B","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/examples_manually_entered_accounts.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/examples_manually_entered_accounts.beancount","query":"SELECT DISTINCT LEAF(account) AS leaf ORDER BY lea","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/examples_manually_entered_accounts.beancount","query":"SELECT COUNT(*) AS total","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/examples_manually_entered_accounts.beancount","query":"SELECT account, SUM(position) GROUP BY account ORD","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/examples_manually_entered_accounts.beancount","query":"SELECT DISTINCT ROOT(account) AS root ORDER BY roo","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/examples_manually_entered_accounts.beancount","query":"SELECT currency, COUNT(*) AS cnt GROUP BY currency","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import-extra/journal.beancount","query":"SELECT COUNT(*) AS total","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/examples_manually_entered_accounts.beancount","query":"SELECT MONTH(date) AS month, COUNT(*) AS cnt GROUP","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import-extra/journal.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/examples_manually_entered_accounts.beancount","query":"SELECT date, narration ORDER BY date, narration LI","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/examples_manually_entered_accounts.beancount","query":"SELECT MIN(date) AS min_date, MAX(date) AS max_dat","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/examples_manually_entered_accounts.beancount","query":"SELECT account, FIRST(date) AS first_date GROUP BY","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import-extra/journal.beancount","query":"SELECT DISTINCT ROOT(account) AS root ORDER BY roo","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import-extra/journal.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS cnt GROUP B","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import-extra/journal.beancount","query":"SELECT currency, COUNT(*) AS cnt GROUP BY currency","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import-extra/journal.beancount","query":"SELECT account, SUM(position) GROUP BY account ORD","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import-extra/journal.beancount","query":"SELECT DISTINCT LEAF(account) AS leaf ORDER BY lea","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import-extra/journal.beancount","query":"SELECT MONTH(date) AS month, COUNT(*) AS cnt GROUP","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import-extra/journal.beancount","query":"SELECT date, narration ORDER BY date, narration LI","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import-extra/ignored.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import-extra/ignored.beancount","query":"SELECT COUNT(*) AS total","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import-extra/journal.beancount","query":"SELECT account, FIRST(date) AS first_date GROUP BY","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import-extra/journal.beancount","query":"SELECT MIN(date) AS min_date, MAX(date) AS max_dat","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import-extra/ignored.beancount","query":"SELECT DISTINCT ROOT(account) AS root ORDER BY roo","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import-extra/ignored.beancount","query":"SELECT DISTINCT LEAF(account) AS leaf ORDER BY lea","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import-extra/ignored.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS cnt GROUP B","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import-extra/ignored.beancount","query":"SELECT account, FIRST(date) AS first_date GROUP BY","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import-extra/ignored.beancount","query":"SELECT MONTH(date) AS month, COUNT(*) AS cnt GROUP","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import-extra/ignored.beancount","query":"SELECT currency, COUNT(*) AS cnt GROUP BY currency","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/examples_fresh_ignored.beancount","query":"SELECT currency, COUNT(*) AS cnt GROUP BY currency","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import-extra/ignored.beancount","query":"SELECT MIN(date) AS min_date, MAX(date) AS max_dat","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import-extra/ignored.beancount","query":"SELECT account, SUM(position) GROUP BY account ORD","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/examples_fresh_ignored.beancount","query":"SELECT COUNT(*) AS total","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/examples_fresh_ignored.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import-extra/ignored.beancount","query":"SELECT date, narration ORDER BY date, narration LI","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/examples_fresh_ignored.beancount","query":"SELECT DISTINCT LEAF(account) AS leaf ORDER BY lea","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/examples_fresh_ignored.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS cnt GROUP B","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/examples_fresh_ignored.beancount","query":"SELECT DISTINCT ROOT(account) AS root ORDER BY roo","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/examples_fresh_ignored.beancount","query":"SELECT account, SUM(position) GROUP BY account ORD","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/examples_fresh_ignored.beancount","query":"SELECT account, FIRST(date) AS first_date GROUP BY","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/examples_fresh_ignored.beancount","query":"SELECT MONTH(date) AS month, COUNT(*) AS cnt GROUP","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/examples_fresh_ignored.beancount","query":"SELECT date, narration ORDER BY date, narration LI","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/examples_fresh_ignored.beancount","query":"SELECT MIN(date) AS min_date, MAX(date) AS max_dat","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import-extra/accounts.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import-extra/accounts.beancount","query":"SELECT COUNT(*) AS total","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import-extra/accounts.beancount","query":"SELECT currency, COUNT(*) AS cnt GROUP BY currency","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import-extra/accounts.beancount","query":"SELECT DISTINCT LEAF(account) AS leaf ORDER BY lea","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import-extra/accounts.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS cnt GROUP B","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import-extra/accounts.beancount","query":"SELECT MONTH(date) AS month, COUNT(*) AS cnt GROUP","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import-extra/accounts.beancount","query":"SELECT DISTINCT ROOT(account) AS root ORDER BY roo","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import-extra/accounts.beancount","query":"SELECT date, narration ORDER BY date, narration LI","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import-extra/accounts.beancount","query":"SELECT account, SUM(position) GROUP BY account ORD","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import-extra/accounts.beancount","query":"SELECT MIN(date) AS min_date, MAX(date) AS max_dat","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/examples_fresh_accounts.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/examples_fresh_accounts.beancount","query":"SELECT COUNT(*) AS total","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import-extra/accounts.beancount","query":"SELECT account, FIRST(date) AS first_date GROUP BY","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/examples_fresh_accounts.beancount","query":"SELECT currency, COUNT(*) AS cnt GROUP BY currency","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/examples_fresh_accounts.beancount","query":"SELECT DISTINCT LEAF(account) AS leaf ORDER BY lea","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/examples_fresh_accounts.beancount","query":"SELECT DISTINCT ROOT(account) AS root ORDER BY roo","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/examples_fresh_accounts.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS cnt GROUP B","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/examples_fresh_accounts.beancount","query":"SELECT account, SUM(position) GROUP BY account ORD","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/examples_fresh_accounts.beancount","query":"SELECT MIN(date) AS min_date, MAX(date) AS max_dat","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/examples_fresh_accounts.beancount","query":"SELECT date, narration ORDER BY date, narration LI","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/examples_fresh_accounts.beancount","query":"SELECT account, FIRST(date) AS first_date GROUP BY","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_reconcile_test_amazon_large_0_journal.beancount","query":"SELECT currency, COUNT(*) AS cnt GROUP BY currency","match":true,"category":"match","py_rows":1,"rs_rows":1}
+{"file":"beancount-import/examples_fresh_accounts.beancount","query":"SELECT MONTH(date) AS month, COUNT(*) AS cnt GROUP","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_reconcile_test_amazon_large_0_journal.beancount","query":"SELECT DISTINCT LEAF(account) AS leaf ORDER BY lea","match":true,"category":"match","py_rows":3,"rs_rows":3}
+{"file":"beancount-import/testdata_reconcile_test_amazon_large_0_journal.beancount","query":"SELECT account, SUM(position) GROUP BY account ORD","match":true,"category":"match","py_rows":3,"rs_rows":3}
+{"file":"beancount-import/testdata_reconcile_test_amazon_large_0_journal.beancount","query":"SELECT COUNT(*) AS total","match":true,"category":"match","py_rows":1,"rs_rows":1}
+{"file":"beancount-import/testdata_reconcile_test_amazon_large_0_journal.beancount","query":"SELECT DISTINCT ROOT(account) AS root ORDER BY roo","match":true,"category":"match","py_rows":2,"rs_rows":2}
+{"file":"beancount-import/testdata_reconcile_test_amazon_large_0_journal.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true,"category":"match","py_rows":3,"rs_rows":3}
+{"file":"beancount-import/testdata_reconcile_test_amazon_large_0_journal.beancount","query":"SELECT date, narration ORDER BY date, narration LI","match":true,"category":"match","py_rows":8,"rs_rows":8}
+{"file":"beancount-import/testdata_reconcile_test_amazon_large_0_journal.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS cnt GROUP B","match":true,"category":"match","py_rows":1,"rs_rows":1}
+{"file":"beancount-import/testdata_reconcile_test_amazon_large_0_journal.beancount","query":"SELECT account, FIRST(date) AS first_date GROUP BY","match":true,"category":"match","py_rows":3,"rs_rows":3}
+{"file":"beancount-import/testdata_reconcile_test_basic_2_pending.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_reconcile_test_amazon_large_0_journal.beancount","query":"SELECT MONTH(date) AS month, COUNT(*) AS cnt GROUP","match":true,"category":"match","py_rows":2,"rs_rows":2}
+{"file":"beancount-import/testdata_reconcile_test_basic_2_pending.beancount","query":"SELECT COUNT(*) AS total","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_reconcile_test_amazon_large_0_journal.beancount","query":"SELECT MIN(date) AS min_date, MAX(date) AS max_dat","match":true,"category":"match","py_rows":1,"rs_rows":1}
+{"file":"beancount-import/testdata_reconcile_test_basic_2_pending.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS cnt GROUP B","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_reconcile_test_basic_2_pending.beancount","query":"SELECT account, SUM(position) GROUP BY account ORD","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_reconcile_test_basic_2_pending.beancount","query":"SELECT account, FIRST(date) AS first_date GROUP BY","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_reconcile_test_basic_2_pending.beancount","query":"SELECT date, narration ORDER BY date, narration LI","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_reconcile_test_basic_2_pending.beancount","query":"SELECT DISTINCT ROOT(account) AS root ORDER BY roo","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_reconcile_test_basic_2_pending.beancount","query":"SELECT DISTINCT LEAF(account) AS leaf ORDER BY lea","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_reconcile_test_basic_2_pending.beancount","query":"SELECT currency, COUNT(*) AS cnt GROUP BY currency","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_reconcile_test_basic_0_journal.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_reconcile_test_basic_2_pending.beancount","query":"SELECT MIN(date) AS min_date, MAX(date) AS max_dat","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_reconcile_test_basic_2_pending.beancount","query":"SELECT MONTH(date) AS month, COUNT(*) AS cnt GROUP","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_reconcile_test_basic_0_journal.beancount","query":"SELECT COUNT(*) AS total","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_reconcile_test_basic_0_journal.beancount","query":"SELECT DISTINCT ROOT(account) AS root ORDER BY roo","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_reconcile_test_basic_0_journal.beancount","query":"SELECT account, SUM(position) GROUP BY account ORD","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_reconcile_test_basic_0_journal.beancount","query":"SELECT currency, COUNT(*) AS cnt GROUP BY currency","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_reconcile_test_basic_0_journal.beancount","query":"SELECT MONTH(date) AS month, COUNT(*) AS cnt GROUP","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_reconcile_test_basic_0_journal.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS cnt GROUP B","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_reconcile_test_basic_0_journal.beancount","query":"SELECT DISTINCT LEAF(account) AS leaf ORDER BY lea","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_reconcile_test_basic_0_journal.beancount","query":"SELECT date, narration ORDER BY date, narration LI","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_reconcile_test_basic_0_journal.beancount","query":"SELECT MIN(date) AS min_date, MAX(date) AS max_dat","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_reconcile_test_basic_0_journal.beancount","query":"SELECT account, FIRST(date) AS first_date GROUP BY","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_reconcile_test_basic_1_journal.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true,"category":"match","py_rows":2,"rs_rows":2}
+{"file":"beancount-import/testdata_reconcile_test_basic_1_journal.beancount","query":"SELECT COUNT(*) AS total","match":true,"category":"match","py_rows":1,"rs_rows":1}
+{"file":"beancount-import/testdata_reconcile_test_basic_1_journal.beancount","query":"SELECT DISTINCT LEAF(account) AS leaf ORDER BY lea","match":true,"category":"match","py_rows":2,"rs_rows":2}
+{"file":"beancount-import/testdata_reconcile_test_basic_1_journal.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS cnt GROUP B","match":true,"category":"match","py_rows":1,"rs_rows":1}
+{"file":"beancount-import/testdata_reconcile_test_basic_1_journal.beancount","query":"SELECT MONTH(date) AS month, COUNT(*) AS cnt GROUP","match":true,"category":"match","py_rows":1,"rs_rows":1}
+{"file":"beancount-import/testdata_reconcile_test_basic_1_journal.beancount","query":"SELECT DISTINCT ROOT(account) AS root ORDER BY roo","match":true,"category":"match","py_rows":2,"rs_rows":2}
+{"file":"beancount-import/testdata_reconcile_test_basic_1_journal.beancount","query":"SELECT currency, COUNT(*) AS cnt GROUP BY currency","match":true,"category":"match","py_rows":1,"rs_rows":1}
+{"file":"beancount-import/testdata_reconcile_test_basic_1_journal.beancount","query":"SELECT account, SUM(position) GROUP BY account ORD","match":true,"category":"match","py_rows":2,"rs_rows":2}
+{"file":"beancount-import/testdata_reconcile_test_basic_1_journal.beancount","query":"SELECT account, FIRST(date) AS first_date GROUP BY","match":true,"category":"match","py_rows":2,"rs_rows":2}
+{"file":"beancount-import/testdata_reconcile_test_ofx_basic_0_journal.beancount","query":"SELECT COUNT(*) AS total","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_reconcile_test_ofx_basic_0_journal.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_reconcile_test_basic_1_journal.beancount","query":"SELECT MIN(date) AS min_date, MAX(date) AS max_dat","match":true,"category":"match","py_rows":1,"rs_rows":1}
+{"file":"beancount-import/testdata_reconcile_test_basic_1_journal.beancount","query":"SELECT date, narration ORDER BY date, narration LI","match":true,"category":"match","py_rows":2,"rs_rows":2}
+{"file":"beancount-import/testdata_reconcile_test_ofx_basic_0_journal.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS cnt GROUP B","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_reconcile_test_ofx_basic_0_journal.beancount","query":"SELECT DISTINCT ROOT(account) AS root ORDER BY roo","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_reconcile_test_ofx_basic_0_journal.beancount","query":"SELECT DISTINCT LEAF(account) AS leaf ORDER BY lea","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_reconcile_test_ofx_basic_0_journal.beancount","query":"SELECT currency, COUNT(*) AS cnt GROUP BY currency","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_reconcile_test_ofx_basic_0_journal.beancount","query":"SELECT MIN(date) AS min_date, MAX(date) AS max_dat","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_reconcile_test_ofx_basic_0_journal.beancount","query":"SELECT date, narration ORDER BY date, narration LI","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_reconcile_test_ofx_basic_0_journal.beancount","query":"SELECT account, SUM(position) GROUP BY account ORD","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_reconcile_test_basic_2_journal.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true,"category":"match","py_rows":3,"rs_rows":3}
+{"file":"beancount-import/testdata_reconcile_test_ofx_basic_0_journal.beancount","query":"SELECT MONTH(date) AS month, COUNT(*) AS cnt GROUP","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_reconcile_test_basic_2_journal.beancount","query":"SELECT COUNT(*) AS total","match":true,"category":"match","py_rows":1,"rs_rows":1}
+{"file":"beancount-import/testdata_reconcile_test_ofx_basic_0_journal.beancount","query":"SELECT account, FIRST(date) AS first_date GROUP BY","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_reconcile_test_basic_2_journal.beancount","query":"SELECT currency, COUNT(*) AS cnt GROUP BY currency","match":true,"category":"match","py_rows":1,"rs_rows":1}
+{"file":"beancount-import/testdata_reconcile_test_basic_2_journal.beancount","query":"SELECT account, SUM(position) GROUP BY account ORD","match":true,"category":"match","py_rows":3,"rs_rows":3}
+{"file":"beancount-import/testdata_reconcile_test_basic_2_journal.beancount","query":"SELECT DISTINCT ROOT(account) AS root ORDER BY roo","match":true,"category":"match","py_rows":3,"rs_rows":3}
+{"file":"beancount-import/testdata_reconcile_test_basic_2_journal.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS cnt GROUP B","match":true,"category":"match","py_rows":2,"rs_rows":2}
+{"file":"beancount-import/testdata_reconcile_test_basic_2_journal.beancount","query":"SELECT DISTINCT LEAF(account) AS leaf ORDER BY lea","match":true,"category":"match","py_rows":3,"rs_rows":3}
+{"file":"beancount-import/testdata_reconcile_test_basic_2_journal.beancount","query":"SELECT MIN(date) AS min_date, MAX(date) AS max_dat","match":true,"category":"match","py_rows":1,"rs_rows":1}
+{"file":"beancount-import/testdata_reconcile_test_basic_2_journal.beancount","query":"SELECT MONTH(date) AS month, COUNT(*) AS cnt GROUP","match":true,"category":"match","py_rows":2,"rs_rows":2}
+{"file":"beancount-import/testdata_reconcile_test_ofx_matching_0_pending.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_reconcile_test_ofx_matching_0_pending.beancount","query":"SELECT COUNT(*) AS total","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_reconcile_test_basic_2_journal.beancount","query":"SELECT account, FIRST(date) AS first_date GROUP BY","match":true,"category":"match","py_rows":3,"rs_rows":3}
+{"file":"beancount-import/testdata_reconcile_test_basic_2_journal.beancount","query":"SELECT date, narration ORDER BY date, narration LI","match":true,"category":"match","py_rows":4,"rs_rows":4}
+{"file":"beancount-import/testdata_reconcile_test_ofx_matching_0_pending.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS cnt GROUP B","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_reconcile_test_ofx_matching_0_pending.beancount","query":"SELECT currency, COUNT(*) AS cnt GROUP BY currency","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_reconcile_test_ofx_matching_0_pending.beancount","query":"SELECT DISTINCT LEAF(account) AS leaf ORDER BY lea","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_reconcile_test_ofx_matching_0_pending.beancount","query":"SELECT DISTINCT ROOT(account) AS root ORDER BY roo","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_reconcile_test_ofx_matching_0_pending.beancount","query":"SELECT account, SUM(position) GROUP BY account ORD","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_reconcile_test_ofx_matching_0_pending.beancount","query":"SELECT MIN(date) AS min_date, MAX(date) AS max_dat","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_reconcile_test_ofx_matching_0_pending.beancount","query":"SELECT date, narration ORDER BY date, narration LI","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_reconcile_test_ofx_matching_0_pending.beancount","query":"SELECT MONTH(date) AS month, COUNT(*) AS cnt GROUP","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_reconcile_test_ofx_cleared_0_journal.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true,"category":"match","py_rows":2,"rs_rows":2}
+{"file":"beancount-import/testdata_reconcile_test_ofx_cleared_0_journal.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS cnt GROUP B","match":true,"category":"match","py_rows":2,"rs_rows":2}
+{"file":"beancount-import/testdata_reconcile_test_ofx_cleared_0_journal.beancount","query":"SELECT currency, COUNT(*) AS cnt GROUP BY currency","match":true,"category":"match","py_rows":2,"rs_rows":2}
+{"file":"beancount-import/testdata_reconcile_test_ofx_cleared_0_journal.beancount","query":"SELECT account, SUM(position) GROUP BY account ORD","match":true,"category":"match","py_rows":2,"rs_rows":2}
+{"file":"beancount-import/testdata_reconcile_test_ofx_matching_0_pending.beancount","query":"SELECT account, FIRST(date) AS first_date GROUP BY","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_reconcile_test_ofx_cleared_0_journal.beancount","query":"SELECT DISTINCT LEAF(account) AS leaf ORDER BY lea","match":true,"category":"match","py_rows":2,"rs_rows":2}
+{"file":"beancount-import/testdata_reconcile_test_ofx_cleared_0_journal.beancount","query":"SELECT COUNT(*) AS total","match":true,"category":"match","py_rows":1,"rs_rows":1}
+{"file":"beancount-import/testdata_reconcile_test_ofx_cleared_0_journal.beancount","query":"SELECT DISTINCT ROOT(account) AS root ORDER BY roo","match":true,"category":"match","py_rows":2,"rs_rows":2}
+{"file":"beancount-import/testdata_reconcile_test_ofx_cleared_0_journal.beancount","query":"SELECT MONTH(date) AS month, COUNT(*) AS cnt GROUP","match":true,"category":"match","py_rows":2,"rs_rows":2}
+{"file":"beancount-import/testdata_reconcile_test_ofx_matching_0_journal.beancount","query":"SELECT COUNT(*) AS total","match":true,"category":"match","py_rows":1,"rs_rows":1}
+{"file":"beancount-import/testdata_reconcile_test_ofx_cleared_0_journal.beancount","query":"SELECT date, narration ORDER BY date, narration LI","match":true,"category":"match","py_rows":4,"rs_rows":4}
+{"file":"beancount-import/testdata_reconcile_test_ofx_cleared_0_journal.beancount","query":"SELECT account, FIRST(date) AS first_date GROUP BY","match":true,"category":"match","py_rows":2,"rs_rows":2}
+{"file":"beancount-import/testdata_reconcile_test_ofx_matching_0_journal.beancount","query":"SELECT currency, COUNT(*) AS cnt GROUP BY currency","match":true,"category":"match","py_rows":2,"rs_rows":2}
+{"file":"beancount-import/testdata_reconcile_test_ofx_matching_0_journal.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true,"category":"match","py_rows":2,"rs_rows":2}
+{"file":"beancount-import/testdata_reconcile_test_ofx_matching_0_journal.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS cnt GROUP B","match":true,"category":"match","py_rows":1,"rs_rows":1}
+{"file":"beancount-import/testdata_reconcile_test_ofx_cleared_0_journal.beancount","query":"SELECT MIN(date) AS min_date, MAX(date) AS max_dat","match":true,"category":"match","py_rows":1,"rs_rows":1}
+{"file":"beancount-import/testdata_reconcile_test_ofx_matching_0_journal.beancount","query":"SELECT account, SUM(position) GROUP BY account ORD","match":true,"category":"match","py_rows":2,"rs_rows":2}
+{"file":"beancount-import/testdata_reconcile_test_ofx_matching_0_journal.beancount","query":"SELECT DISTINCT ROOT(account) AS root ORDER BY roo","match":true,"category":"match","py_rows":2,"rs_rows":2}
+{"file":"beancount-import/testdata_reconcile_test_ofx_matching_0_journal.beancount","query":"SELECT DISTINCT LEAF(account) AS leaf ORDER BY lea","match":true,"category":"match","py_rows":1,"rs_rows":1}
+{"file":"beancount-import/testdata_reconcile_test_ofx_matching_0_journal.beancount","query":"SELECT MONTH(date) AS month, COUNT(*) AS cnt GROUP","match":true,"category":"match","py_rows":1,"rs_rows":1}
+{"file":"beancount-import/testdata_reconcile_test_ofx_matching_0_journal.beancount","query":"SELECT date, narration ORDER BY date, narration LI","match":true,"category":"match","py_rows":2,"rs_rows":2}
+{"file":"beancount-import/testdata_reconcile_test_ofx_matching_0_journal.beancount","query":"SELECT account, FIRST(date) AS first_date GROUP BY","match":true,"category":"match","py_rows":2,"rs_rows":2}
+{"file":"beancount-import/testdata_reconcile_test_ofx_ignore_price_0_ignore.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_reconcile_test_ofx_matching_0_journal.beancount","query":"SELECT MIN(date) AS min_date, MAX(date) AS max_dat","match":true,"category":"match","py_rows":1,"rs_rows":1}
+{"file":"beancount-import/testdata_reconcile_test_ofx_ignore_price_0_ignore.beancount","query":"SELECT COUNT(*) AS total","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_reconcile_test_ofx_ignore_price_0_ignore.beancount","query":"SELECT DISTINCT ROOT(account) AS root ORDER BY roo","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_reconcile_test_ofx_ignore_price_0_ignore.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS cnt GROUP B","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_reconcile_test_ofx_ignore_price_0_ignore.beancount","query":"SELECT DISTINCT LEAF(account) AS leaf ORDER BY lea","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_reconcile_test_ofx_ignore_price_0_ignore.beancount","query":"SELECT currency, COUNT(*) AS cnt GROUP BY currency","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_reconcile_test_ofx_ignore_price_0_ignore.beancount","query":"SELECT account, FIRST(date) AS first_date GROUP BY","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_reconcile_test_ofx_ignore_price_0_ignore.beancount","query":"SELECT account, SUM(position) GROUP BY account ORD","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_reconcile_test_ofx_ignore_price_0_ignore.beancount","query":"SELECT MIN(date) AS min_date, MAX(date) AS max_dat","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_amazon_test_credit_card_transactions_journal.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_reconcile_test_ofx_ignore_price_0_ignore.beancount","query":"SELECT date, narration ORDER BY date, narration LI","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_reconcile_test_ofx_ignore_price_0_ignore.beancount","query":"SELECT MONTH(date) AS month, COUNT(*) AS cnt GROUP","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_amazon_test_credit_card_transactions_journal.beancount","query":"SELECT COUNT(*) AS total","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_amazon_test_credit_card_transactions_journal.beancount","query":"SELECT DISTINCT ROOT(account) AS root ORDER BY roo","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_amazon_test_credit_card_transactions_journal.beancount","query":"SELECT currency, COUNT(*) AS cnt GROUP BY currency","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_amazon_test_credit_card_transactions_journal.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS cnt GROUP B","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_amazon_test_credit_card_transactions_journal.beancount","query":"SELECT account, SUM(position) GROUP BY account ORD","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_amazon_test_credit_card_transactions_journal.beancount","query":"SELECT DISTINCT LEAF(account) AS leaf ORDER BY lea","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_amazon_test_credit_card_transactions_journal.beancount","query":"SELECT date, narration ORDER BY date, narration LI","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_amazon_test_credit_card_transactions_journal.beancount","query":"SELECT MONTH(date) AS month, COUNT(*) AS cnt GROUP","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_amazon_test_credit_card_transactions_journal.beancount","query":"SELECT MIN(date) AS min_date, MAX(date) AS max_dat","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_amazon_test_cleared_and_invalid_journal.beancount","query":"SELECT currency, COUNT(*) AS cnt GROUP BY currency","match":true,"category":"match","py_rows":1,"rs_rows":1}
+{"file":"beancount-import/testdata_source_amazon_test_cleared_and_invalid_journal.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS cnt GROUP B","match":true,"category":"match","py_rows":2,"rs_rows":2}
+{"file":"beancount-import/testdata_source_amazon_test_cleared_and_invalid_journal.beancount","query":"SELECT COUNT(*) AS total","match":true,"category":"match","py_rows":1,"rs_rows":1}
+{"file":"beancount-import/testdata_source_amazon_test_cleared_and_invalid_journal.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true,"category":"match","py_rows":6,"rs_rows":6}
+{"file":"beancount-import/testdata_source_amazon_test_credit_card_transactions_journal.beancount","query":"SELECT account, FIRST(date) AS first_date GROUP BY","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_amazon_test_cleared_and_invalid_journal.beancount","query":"SELECT DISTINCT ROOT(account) AS root ORDER BY roo","match":true,"category":"match","py_rows":2,"rs_rows":2}
+{"file":"beancount-import/testdata_source_amazon_test_cleared_and_invalid_journal.beancount","query":"SELECT DISTINCT LEAF(account) AS leaf ORDER BY lea","match":true,"category":"match","py_rows":6,"rs_rows":6}
+{"file":"beancount-import/testdata_source_amazon_test_cleared_and_invalid_journal.beancount","query":"SELECT MONTH(date) AS month, COUNT(*) AS cnt GROUP","match":true,"category":"match","py_rows":2,"rs_rows":2}
+{"file":"beancount-import/testdata_source_amazon_test_cleared_and_invalid_journal.beancount","query":"SELECT MIN(date) AS min_date, MAX(date) AS max_dat","match":true,"category":"match","py_rows":1,"rs_rows":1}
+{"file":"beancount-import/testdata_source_amazon_test_cleared_and_invalid_journal.beancount","query":"SELECT date, narration ORDER BY date, narration LI","match":true,"category":"match","py_rows":10,"rs_rows":10}
+{"file":"beancount-import/testdata_source_amazon_test_cleared_and_invalid_journal.beancount","query":"SELECT account, SUM(position) GROUP BY account ORD","match":true,"category":"match","py_rows":6,"rs_rows":6}
+{"file":"beancount-import/testdata_source_amazon_test_prediction_journal.beancount","query":"SELECT COUNT(*) AS total","match":true,"category":"match","py_rows":1,"rs_rows":1}
+{"file":"beancount-import/testdata_source_amazon_test_prediction_journal.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true,"category":"match","py_rows":7,"rs_rows":7}
+{"file":"beancount-import/testdata_source_amazon_test_prediction_journal.beancount","query":"SELECT currency, COUNT(*) AS cnt GROUP BY currency","match":true,"category":"match","py_rows":1,"rs_rows":1}
+{"file":"beancount-import/testdata_source_amazon_test_cleared_and_invalid_journal.beancount","query":"SELECT account, FIRST(date) AS first_date GROUP BY","match":false,"category":"data_diff","py_rows":6,"rs_rows":6}
+{"file":"beancount-import/testdata_source_amazon_test_prediction_journal.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS cnt GROUP B","match":true,"category":"match","py_rows":2,"rs_rows":2}
+{"file":"beancount-import/testdata_source_amazon_test_prediction_journal.beancount","query":"SELECT DISTINCT ROOT(account) AS root ORDER BY roo","match":true,"category":"match","py_rows":2,"rs_rows":2}
+{"file":"beancount-import/testdata_source_amazon_test_prediction_journal.beancount","query":"SELECT date, narration ORDER BY date, narration LI","match":true,"category":"match","py_rows":10,"rs_rows":10}
+{"file":"beancount-import/testdata_source_amazon_test_prediction_journal.beancount","query":"SELECT account, SUM(position) GROUP BY account ORD","match":true,"category":"match","py_rows":7,"rs_rows":7}
+{"file":"beancount-import/testdata_source_amazon_test_prediction_journal.beancount","query":"SELECT DISTINCT LEAF(account) AS leaf ORDER BY lea","match":true,"category":"match","py_rows":7,"rs_rows":7}
+{"file":"beancount-import/testdata_source_amazon_test_prediction_journal.beancount","query":"SELECT MONTH(date) AS month, COUNT(*) AS cnt GROUP","match":true,"category":"match","py_rows":2,"rs_rows":2}
+{"file":"beancount-import/testdata_source_amazon_test_prediction_journal.beancount","query":"SELECT MIN(date) AS min_date, MAX(date) AS max_dat","match":true,"category":"match","py_rows":1,"rs_rows":1}
+{"file":"beancount-import/testdata_source_amazon_test_prediction_journal.beancount","query":"SELECT account, FIRST(date) AS first_date GROUP BY","match":false,"category":"data_diff","py_rows":7,"rs_rows":7}
+{"file":"beancount-import/testdata_source_generic_importer_test_basic_journal.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_generic_importer_test_basic_journal.beancount","query":"SELECT COUNT(*) AS total","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_generic_importer_test_basic_journal.beancount","query":"SELECT DISTINCT LEAF(account) AS leaf ORDER BY lea","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_generic_importer_test_basic_journal.beancount","query":"SELECT DISTINCT ROOT(account) AS root ORDER BY roo","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_generic_importer_test_basic_journal.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS cnt GROUP B","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_generic_importer_test_basic_journal.beancount","query":"SELECT date, narration ORDER BY date, narration LI","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_generic_importer_test_basic_journal.beancount","query":"SELECT currency, COUNT(*) AS cnt GROUP BY currency","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_generic_importer_test_basic_journal.beancount","query":"SELECT account, FIRST(date) AS first_date GROUP BY","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_generic_importer_test_basic_journal.beancount","query":"SELECT MONTH(date) AS month, COUNT(*) AS cnt GROUP","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_generic_importer_test_basic_journal.beancount","query":"SELECT account, SUM(position) GROUP BY account ORD","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_generic_importer_test_basic_journal.beancount","query":"SELECT MIN(date) AS min_date, MAX(date) AS max_dat","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_generic_importer_test_invalid_journal.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true,"category":"match","py_rows":4,"rs_rows":4}
+{"file":"beancount-import/testdata_source_generic_importer_test_invalid_journal.beancount","query":"SELECT COUNT(*) AS total","match":true,"category":"match","py_rows":1,"rs_rows":1}
+{"file":"beancount-import/testdata_source_generic_importer_test_invalid_journal.beancount","query":"SELECT DISTINCT ROOT(account) AS root ORDER BY roo","match":true,"category":"match","py_rows":3,"rs_rows":3}
+{"file":"beancount-import/testdata_source_generic_importer_test_invalid_journal.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS cnt GROUP B","match":true,"category":"match","py_rows":1,"rs_rows":1}
+{"file":"beancount-import/testdata_source_generic_importer_test_invalid_journal.beancount","query":"SELECT currency, COUNT(*) AS cnt GROUP BY currency","match":true,"category":"match","py_rows":1,"rs_rows":1}
+{"file":"beancount-import/testdata_source_generic_importer_test_invalid_journal.beancount","query":"SELECT account, SUM(position) GROUP BY account ORD","match":false,"category":"data_diff","py_rows":4,"rs_rows":4}
+{"file":"beancount-import/testdata_source_generic_importer_test_invalid_journal.beancount","query":"SELECT DISTINCT LEAF(account) AS leaf ORDER BY lea","match":true,"category":"match","py_rows":4,"rs_rows":4}
+{"file":"beancount-import/testdata_source_google_purchases_test_invalid_journal.beancount","query":"SELECT COUNT(*) AS total","match":true,"category":"match","py_rows":1,"rs_rows":1}
+{"file":"beancount-import/testdata_source_generic_importer_test_invalid_journal.beancount","query":"SELECT date, narration ORDER BY date, narration LI","match":true,"category":"match","py_rows":10,"rs_rows":10}
+{"file":"beancount-import/testdata_source_generic_importer_test_invalid_journal.beancount","query":"SELECT MIN(date) AS min_date, MAX(date) AS max_dat","match":true,"category":"match","py_rows":1,"rs_rows":1}
+{"file":"beancount-import/testdata_source_google_purchases_test_invalid_journal.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true,"category":"match","py_rows":3,"rs_rows":3}
+{"file":"beancount-import/testdata_source_generic_importer_test_invalid_journal.beancount","query":"SELECT account, FIRST(date) AS first_date GROUP BY","match":true,"category":"match","py_rows":4,"rs_rows":4}
+{"file":"beancount-import/testdata_source_generic_importer_test_invalid_journal.beancount","query":"SELECT MONTH(date) AS month, COUNT(*) AS cnt GROUP","match":true,"category":"match","py_rows":1,"rs_rows":1}
+{"file":"beancount-import/testdata_source_google_purchases_test_invalid_journal.beancount","query":"SELECT currency, COUNT(*) AS cnt GROUP BY currency","match":true,"category":"match","py_rows":1,"rs_rows":1}
+{"file":"beancount-import/testdata_source_google_purchases_test_invalid_journal.beancount","query":"SELECT DISTINCT LEAF(account) AS leaf ORDER BY lea","match":true,"category":"match","py_rows":3,"rs_rows":3}
+{"file":"beancount-import/testdata_source_google_purchases_test_invalid_journal.beancount","query":"SELECT account, SUM(position) GROUP BY account ORD","match":true,"category":"match","py_rows":3,"rs_rows":3}
+{"file":"beancount-import/testdata_source_google_purchases_test_invalid_journal.beancount","query":"SELECT MONTH(date) AS month, COUNT(*) AS cnt GROUP","match":true,"category":"match","py_rows":2,"rs_rows":2}
+{"file":"beancount-import/testdata_source_google_purchases_test_invalid_journal.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS cnt GROUP B","match":true,"category":"match","py_rows":2,"rs_rows":2}
+{"file":"beancount-import/testdata_source_google_purchases_test_invalid_journal.beancount","query":"SELECT DISTINCT ROOT(account) AS root ORDER BY roo","match":true,"category":"match","py_rows":2,"rs_rows":2}
+{"file":"beancount-import/testdata_source_google_purchases_test_invalid_journal.beancount","query":"SELECT account, FIRST(date) AS first_date GROUP BY","match":true,"category":"match","py_rows":3,"rs_rows":3}
+{"file":"beancount-import/testdata_source_google_purchases_test_invalid_journal.beancount","query":"SELECT MIN(date) AS min_date, MAX(date) AS max_dat","match":true,"category":"match","py_rows":1,"rs_rows":1}
+{"file":"beancount-import/testdata_source_google_purchases_test_invalid_journal.beancount","query":"SELECT date, narration ORDER BY date, narration LI","match":true,"category":"match","py_rows":6,"rs_rows":6}
+{"file":"beancount-import/testdata_source_generic_importer_test_training_examples_journal.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true,"category":"match","py_rows":4,"rs_rows":4}
+{"file":"beancount-import/testdata_source_generic_importer_test_training_examples_journal.beancount","query":"SELECT DISTINCT LEAF(account) AS leaf ORDER BY lea","match":true,"category":"match","py_rows":4,"rs_rows":4}
+{"file":"beancount-import/testdata_source_generic_importer_test_training_examples_journal.beancount","query":"SELECT account, SUM(position) GROUP BY account ORD","match":false,"category":"data_diff","py_rows":4,"rs_rows":4}
+{"file":"beancount-import/testdata_source_generic_importer_test_training_examples_journal.beancount","query":"SELECT COUNT(*) AS total","match":true,"category":"match","py_rows":1,"rs_rows":1}
+{"file":"beancount-import/testdata_source_generic_importer_test_training_examples_journal.beancount","query":"SELECT date, narration ORDER BY date, narration LI","match":true,"category":"match","py_rows":10,"rs_rows":10}
+{"file":"beancount-import/testdata_source_generic_importer_test_training_examples_journal.beancount","query":"SELECT currency, COUNT(*) AS cnt GROUP BY currency","match":true,"category":"match","py_rows":1,"rs_rows":1}
+{"file":"beancount-import/testdata_source_generic_importer_test_training_examples_journal.beancount","query":"SELECT account, FIRST(date) AS first_date GROUP BY","match":true,"category":"match","py_rows":4,"rs_rows":4}
+{"file":"beancount-import/testdata_source_generic_importer_test_training_examples_journal.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS cnt GROUP B","match":true,"category":"match","py_rows":1,"rs_rows":1}
+{"file":"beancount-import/testdata_source_generic_importer_test_training_examples_journal.beancount","query":"SELECT DISTINCT ROOT(account) AS root ORDER BY roo","match":true,"category":"match","py_rows":3,"rs_rows":3}
+{"file":"beancount-import/testdata_source_google_purchases_test_matching_journal.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true,"category":"match","py_rows":3,"rs_rows":3}
+{"file":"beancount-import/testdata_source_generic_importer_test_training_examples_journal.beancount","query":"SELECT MONTH(date) AS month, COUNT(*) AS cnt GROUP","match":true,"category":"match","py_rows":1,"rs_rows":1}
+{"file":"beancount-import/testdata_source_google_purchases_test_matching_journal.beancount","query":"SELECT COUNT(*) AS total","match":true,"category":"match","py_rows":1,"rs_rows":1}
+{"file":"beancount-import/testdata_source_generic_importer_test_training_examples_journal.beancount","query":"SELECT MIN(date) AS min_date, MAX(date) AS max_dat","match":true,"category":"match","py_rows":1,"rs_rows":1}
+{"file":"beancount-import/testdata_source_google_purchases_test_matching_journal.beancount","query":"SELECT currency, COUNT(*) AS cnt GROUP BY currency","match":true,"category":"match","py_rows":1,"rs_rows":1}
+{"file":"beancount-import/testdata_source_google_purchases_test_matching_journal.beancount","query":"SELECT DISTINCT ROOT(account) AS root ORDER BY roo","match":true,"category":"match","py_rows":2,"rs_rows":2}
+{"file":"beancount-import/testdata_source_google_purchases_test_matching_journal.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS cnt GROUP B","match":true,"category":"match","py_rows":2,"rs_rows":2}
+{"file":"beancount-import/testdata_source_google_purchases_test_matching_journal.beancount","query":"SELECT DISTINCT LEAF(account) AS leaf ORDER BY lea","match":true,"category":"match","py_rows":3,"rs_rows":3}
+{"file":"beancount-import/testdata_source_google_purchases_test_matching_journal.beancount","query":"SELECT account, SUM(position) GROUP BY account ORD","match":true,"category":"match","py_rows":3,"rs_rows":3}
+{"file":"beancount-import/testdata_source_google_purchases_test_matching_journal.beancount","query":"SELECT date, narration ORDER BY date, narration LI","match":true,"category":"match","py_rows":4,"rs_rows":4}
+{"file":"beancount-import/testdata_source_icscards_test_basic_journal.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_google_purchases_test_matching_journal.beancount","query":"SELECT account, FIRST(date) AS first_date GROUP BY","match":true,"category":"match","py_rows":3,"rs_rows":3}
+{"file":"beancount-import/testdata_source_icscards_test_basic_journal.beancount","query":"SELECT DISTINCT ROOT(account) AS root ORDER BY roo","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_icscards_test_basic_journal.beancount","query":"SELECT currency, COUNT(*) AS cnt GROUP BY currency","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_google_purchases_test_matching_journal.beancount","query":"SELECT MIN(date) AS min_date, MAX(date) AS max_dat","match":true,"category":"match","py_rows":1,"rs_rows":1}
+{"file":"beancount-import/testdata_source_google_purchases_test_matching_journal.beancount","query":"SELECT MONTH(date) AS month, COUNT(*) AS cnt GROUP","match":true,"category":"match","py_rows":2,"rs_rows":2}
+{"file":"beancount-import/testdata_source_icscards_test_basic_journal.beancount","query":"SELECT COUNT(*) AS total","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_icscards_test_basic_journal.beancount","query":"SELECT DISTINCT LEAF(account) AS leaf ORDER BY lea","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_icscards_test_basic_journal.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS cnt GROUP B","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_icscards_test_basic_journal.beancount","query":"SELECT account, SUM(position) GROUP BY account ORD","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_icscards_test_basic_journal.beancount","query":"SELECT MONTH(date) AS month, COUNT(*) AS cnt GROUP","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_icscards_test_basic_journal.beancount","query":"SELECT account, FIRST(date) AS first_date GROUP BY","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_icscards_test_basic_journal.beancount","query":"SELECT date, narration ORDER BY date, narration LI","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_icscards_test_basic_journal.beancount","query":"SELECT MIN(date) AS min_date, MAX(date) AS max_dat","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_healthequity_test_matching_journal.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true,"category":"match","py_rows":5,"rs_rows":5}
+{"file":"beancount-import/testdata_source_healthequity_test_matching_journal.beancount","query":"SELECT COUNT(*) AS total","match":true,"category":"match","py_rows":1,"rs_rows":1}
+{"file":"beancount-import/testdata_source_healthequity_test_matching_journal.beancount","query":"SELECT DISTINCT ROOT(account) AS root ORDER BY roo","match":true,"category":"match","py_rows":3,"rs_rows":3}
+{"file":"beancount-import/testdata_source_healthequity_test_matching_journal.beancount","query":"SELECT currency, COUNT(*) AS cnt GROUP BY currency","match":true,"category":"match","py_rows":2,"rs_rows":2}
+{"file":"beancount-import/testdata_source_healthequity_test_matching_journal.beancount","query":"SELECT MONTH(date) AS month, COUNT(*) AS cnt GROUP","match":true,"category":"match","py_rows":4,"rs_rows":4}
+{"file":"beancount-import/testdata_source_healthequity_test_matching_journal.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS cnt GROUP B","match":true,"category":"match","py_rows":1,"rs_rows":1}
+{"file":"beancount-import/testdata_source_healthequity_test_matching_journal.beancount","query":"SELECT date, narration ORDER BY date, narration LI","match":true,"category":"match","py_rows":10,"rs_rows":10}
+{"file":"beancount-import/testdata_source_healthequity_test_matching_journal.beancount","query":"SELECT DISTINCT LEAF(account) AS leaf ORDER BY lea","match":true,"category":"match","py_rows":3,"rs_rows":3}
+{"file":"beancount-import/testdata_source_healthequity_test_matching_journal.beancount","query":"SELECT MIN(date) AS min_date, MAX(date) AS max_dat","match":true,"category":"match","py_rows":1,"rs_rows":1}
+{"file":"beancount-import/testdata_source_healthequity_test_invalid_journal.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true,"category":"match","py_rows":5,"rs_rows":5}
+{"file":"beancount-import/testdata_source_healthequity_test_matching_journal.beancount","query":"SELECT account, FIRST(date) AS first_date GROUP BY","match":true,"category":"match","py_rows":5,"rs_rows":5}
+{"file":"beancount-import/testdata_source_healthequity_test_matching_journal.beancount","query":"SELECT account, SUM(position) GROUP BY account ORD","match":false,"category":"data_diff","py_rows":5,"rs_rows":5}
+{"file":"beancount-import/testdata_source_healthequity_test_invalid_journal.beancount","query":"SELECT COUNT(*) AS total","match":true,"category":"match","py_rows":1,"rs_rows":1}
+{"file":"beancount-import/testdata_source_healthequity_test_invalid_journal.beancount","query":"SELECT DISTINCT ROOT(account) AS root ORDER BY roo","match":true,"category":"match","py_rows":3,"rs_rows":3}
+{"file":"beancount-import/testdata_source_healthequity_test_invalid_journal.beancount","query":"SELECT currency, COUNT(*) AS cnt GROUP BY currency","match":true,"category":"match","py_rows":2,"rs_rows":2}
+{"file":"beancount-import/testdata_source_healthequity_test_invalid_journal.beancount","query":"SELECT DISTINCT LEAF(account) AS leaf ORDER BY lea","match":true,"category":"match","py_rows":3,"rs_rows":3}
+{"file":"beancount-import/testdata_source_healthequity_test_invalid_journal.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS cnt GROUP B","match":true,"category":"match","py_rows":1,"rs_rows":1}
+{"file":"beancount-import/testdata_source_healthequity_test_invalid_journal.beancount","query":"SELECT MONTH(date) AS month, COUNT(*) AS cnt GROUP","match":true,"category":"match","py_rows":4,"rs_rows":4}
+{"file":"beancount-import/testdata_source_healthequity_test_invalid_journal.beancount","query":"SELECT MIN(date) AS min_date, MAX(date) AS max_dat","match":true,"category":"match","py_rows":1,"rs_rows":1}
+{"file":"beancount-import/testdata_source_healthequity_test_invalid_journal.beancount","query":"SELECT date, narration ORDER BY date, narration LI","match":true,"category":"match","py_rows":10,"rs_rows":10}
+{"file":"beancount-import/testdata_source_healthequity_test_basic_journal.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_healthequity_test_invalid_journal.beancount","query":"SELECT account, SUM(position) GROUP BY account ORD","match":false,"category":"data_diff","py_rows":5,"rs_rows":5}
+{"file":"beancount-import/testdata_source_healthequity_test_basic_journal.beancount","query":"SELECT currency, COUNT(*) AS cnt GROUP BY currency","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_healthequity_test_invalid_journal.beancount","query":"SELECT account, FIRST(date) AS first_date GROUP BY","match":true,"category":"match","py_rows":5,"rs_rows":5}
+{"file":"beancount-import/testdata_source_healthequity_test_basic_journal.beancount","query":"SELECT DISTINCT LEAF(account) AS leaf ORDER BY lea","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_healthequity_test_basic_journal.beancount","query":"SELECT DISTINCT ROOT(account) AS root ORDER BY roo","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_healthequity_test_basic_journal.beancount","query":"SELECT COUNT(*) AS total","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_healthequity_test_basic_journal.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS cnt GROUP B","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_healthequity_test_basic_journal.beancount","query":"SELECT account, SUM(position) GROUP BY account ORD","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_healthequity_test_basic_journal.beancount","query":"SELECT MONTH(date) AS month, COUNT(*) AS cnt GROUP","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_healthequity_test_basic_journal.beancount","query":"SELECT date, narration ORDER BY date, narration LI","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_healthequity_test_basic_journal.beancount","query":"SELECT MIN(date) AS min_date, MAX(date) AS max_dat","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_healthequity_test_basic_journal.beancount","query":"SELECT account, FIRST(date) AS first_date GROUP BY","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_mint_test_invalid_journal.beancount","query":"SELECT DISTINCT ROOT(account) AS root ORDER BY roo","match":true,"category":"match","py_rows":3,"rs_rows":3}
+{"file":"beancount-import/testdata_source_mint_test_invalid_journal.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true,"category":"match","py_rows":4,"rs_rows":4}
+{"file":"beancount-import/testdata_source_mint_test_invalid_journal.beancount","query":"SELECT COUNT(*) AS total","match":true,"category":"match","py_rows":1,"rs_rows":1}
+{"file":"beancount-import/testdata_source_mint_test_invalid_journal.beancount","query":"SELECT account, SUM(position) GROUP BY account ORD","match":true,"category":"match","py_rows":4,"rs_rows":4}
+{"file":"beancount-import/testdata_source_mint_test_invalid_journal.beancount","query":"SELECT DISTINCT LEAF(account) AS leaf ORDER BY lea","match":true,"category":"match","py_rows":4,"rs_rows":4}
+{"file":"beancount-import/testdata_source_mint_test_invalid_journal.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS cnt GROUP B","match":true,"category":"match","py_rows":2,"rs_rows":2}
+{"file":"beancount-import/testdata_source_mint_test_invalid_journal.beancount","query":"SELECT currency, COUNT(*) AS cnt GROUP BY currency","match":true,"category":"match","py_rows":1,"rs_rows":1}
+{"file":"beancount-import/testdata_source_mint_test_invalid_journal.beancount","query":"SELECT MONTH(date) AS month, COUNT(*) AS cnt GROUP","match":true,"category":"match","py_rows":2,"rs_rows":2}
+{"file":"beancount-import/testdata_source_mint_test_invalid_journal.beancount","query":"SELECT MIN(date) AS min_date, MAX(date) AS max_dat","match":true,"category":"match","py_rows":1,"rs_rows":1}
+{"file":"beancount-import/testdata_source_mint_test_training_examples_journal.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true,"category":"match","py_rows":3,"rs_rows":3}
+{"file":"beancount-import/testdata_source_mint_test_invalid_journal.beancount","query":"SELECT account, FIRST(date) AS first_date GROUP BY","match":true,"category":"match","py_rows":4,"rs_rows":4}
+{"file":"beancount-import/testdata_source_mint_test_invalid_journal.beancount","query":"SELECT date, narration ORDER BY date, narration LI","match":true,"category":"match","py_rows":10,"rs_rows":10}
+{"file":"beancount-import/testdata_source_mint_test_training_examples_journal.beancount","query":"SELECT COUNT(*) AS total","match":true,"category":"match","py_rows":1,"rs_rows":1}
+{"file":"beancount-import/testdata_source_mint_test_training_examples_journal.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS cnt GROUP B","match":true,"category":"match","py_rows":2,"rs_rows":2}
+{"file":"beancount-import/testdata_source_mint_test_training_examples_journal.beancount","query":"SELECT currency, COUNT(*) AS cnt GROUP BY currency","match":true,"category":"match","py_rows":1,"rs_rows":1}
+{"file":"beancount-import/testdata_source_mint_test_training_examples_journal.beancount","query":"SELECT DISTINCT ROOT(account) AS root ORDER BY roo","match":true,"category":"match","py_rows":3,"rs_rows":3}
+{"file":"beancount-import/testdata_source_mint_test_training_examples_journal.beancount","query":"SELECT date, narration ORDER BY date, narration LI","match":true,"category":"match","py_rows":4,"rs_rows":4}
+{"file":"beancount-import/testdata_source_mint_test_training_examples_journal.beancount","query":"SELECT DISTINCT LEAF(account) AS leaf ORDER BY lea","match":true,"category":"match","py_rows":3,"rs_rows":3}
+{"file":"beancount-import/testdata_source_mint_test_training_examples_journal.beancount","query":"SELECT account, SUM(position) GROUP BY account ORD","match":true,"category":"match","py_rows":3,"rs_rows":3}
+{"file":"beancount-import/testdata_source_mint_test_training_examples_journal.beancount","query":"SELECT MIN(date) AS min_date, MAX(date) AS max_dat","match":true,"category":"match","py_rows":1,"rs_rows":1}
+{"file":"beancount-import/testdata_source_mint_test_training_examples_journal.beancount","query":"SELECT MONTH(date) AS month, COUNT(*) AS cnt GROUP","match":true,"category":"match","py_rows":2,"rs_rows":2}
+{"file":"beancount-import/testdata_source_mint_test_currency_journal.beancount","query":"SELECT currency, COUNT(*) AS cnt GROUP BY currency","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_mint_test_currency_journal.beancount","query":"SELECT DISTINCT ROOT(account) AS root ORDER BY roo","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_mint_test_training_examples_journal.beancount","query":"SELECT account, FIRST(date) AS first_date GROUP BY","match":true,"category":"match","py_rows":3,"rs_rows":3}
+{"file":"beancount-import/testdata_source_mint_test_currency_journal.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_mint_test_currency_journal.beancount","query":"SELECT COUNT(*) AS total","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_mint_test_currency_journal.beancount","query":"SELECT DISTINCT LEAF(account) AS leaf ORDER BY lea","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_mint_test_currency_journal.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS cnt GROUP B","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_mint_test_currency_journal.beancount","query":"SELECT account, SUM(position) GROUP BY account ORD","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_mint_test_currency_journal.beancount","query":"SELECT date, narration ORDER BY date, narration LI","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_mint_test_currency_journal.beancount","query":"SELECT MONTH(date) AS month, COUNT(*) AS cnt GROUP","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_mint_test_currency_journal.beancount","query":"SELECT account, FIRST(date) AS first_date GROUP BY","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_amex_journal.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_amex_journal.beancount","query":"SELECT currency, COUNT(*) AS cnt GROUP BY currency","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_mint_test_currency_journal.beancount","query":"SELECT MIN(date) AS min_date, MAX(date) AS max_dat","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_amex_journal.beancount","query":"SELECT DISTINCT LEAF(account) AS leaf ORDER BY lea","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_amex_journal.beancount","query":"SELECT COUNT(*) AS total","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_amex_journal.beancount","query":"SELECT DISTINCT ROOT(account) AS root ORDER BY roo","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_amex_journal.beancount","query":"SELECT account, FIRST(date) AS first_date GROUP BY","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_amex_journal.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS cnt GROUP B","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_amex_journal.beancount","query":"SELECT date, narration ORDER BY date, narration LI","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_amex_journal.beancount","query":"SELECT MONTH(date) AS month, COUNT(*) AS cnt GROUP","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_amex_journal.beancount","query":"SELECT account, SUM(position) GROUP BY account ORD","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_mt940_test_basic_journal.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_amex_journal.beancount","query":"SELECT MIN(date) AS min_date, MAX(date) AS max_dat","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_mt940_test_basic_journal.beancount","query":"SELECT COUNT(*) AS total","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_mt940_test_basic_journal.beancount","query":"SELECT DISTINCT ROOT(account) AS root ORDER BY roo","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_mt940_test_basic_journal.beancount","query":"SELECT currency, COUNT(*) AS cnt GROUP BY currency","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_mt940_test_basic_journal.beancount","query":"SELECT DISTINCT LEAF(account) AS leaf ORDER BY lea","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_mt940_test_basic_journal.beancount","query":"SELECT account, SUM(position) GROUP BY account ORD","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_mt940_test_basic_journal.beancount","query":"SELECT date, narration ORDER BY date, narration LI","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_mt940_test_basic_journal.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS cnt GROUP B","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_bank_medium_journal.beancount","query":"SELECT currency, COUNT(*) AS cnt GROUP BY currency","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_mt940_test_basic_journal.beancount","query":"SELECT MONTH(date) AS month, COUNT(*) AS cnt GROUP","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_bank_medium_journal.beancount","query":"SELECT COUNT(*) AS total","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_mt940_test_basic_journal.beancount","query":"SELECT MIN(date) AS min_date, MAX(date) AS max_dat","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_mt940_test_basic_journal.beancount","query":"SELECT account, FIRST(date) AS first_date GROUP BY","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_bank_medium_journal.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_bank_medium_journal.beancount","query":"SELECT DISTINCT LEAF(account) AS leaf ORDER BY lea","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_bank_medium_journal.beancount","query":"SELECT DISTINCT ROOT(account) AS root ORDER BY roo","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_bank_medium_journal.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS cnt GROUP B","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_bank_medium_journal.beancount","query":"SELECT account, SUM(position) GROUP BY account ORD","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_bank_medium_journal.beancount","query":"SELECT date, narration ORDER BY date, narration LI","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_bank_medium_journal.beancount","query":"SELECT account, FIRST(date) AS first_date GROUP BY","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_bank_medium_journal.beancount","query":"SELECT MONTH(date) AS month, COUNT(*) AS cnt GROUP","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_anzcc_journal.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_anzcc_journal.beancount","query":"SELECT COUNT(*) AS total","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_anzcc_journal.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS cnt GROUP B","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_bank_medium_journal.beancount","query":"SELECT MIN(date) AS min_date, MAX(date) AS max_dat","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_anzcc_journal.beancount","query":"SELECT DISTINCT ROOT(account) AS root ORDER BY roo","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_anzcc_journal.beancount","query":"SELECT account, SUM(position) GROUP BY account ORD","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_anzcc_journal.beancount","query":"SELECT DISTINCT LEAF(account) AS leaf ORDER BY lea","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_anzcc_journal.beancount","query":"SELECT MONTH(date) AS month, COUNT(*) AS cnt GROUP","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_anzcc_journal.beancount","query":"SELECT currency, COUNT(*) AS cnt GROUP BY currency","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_anzcc_journal.beancount","query":"SELECT date, narration ORDER BY date, narration LI","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_checking2_matching_journal.beancount","query":"SELECT COUNT(*) AS total","match":true,"category":"match","py_rows":1,"rs_rows":1}
+{"file":"beancount-import/testdata_source_ofx_test_anzcc_journal.beancount","query":"SELECT MIN(date) AS min_date, MAX(date) AS max_dat","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_anzcc_journal.beancount","query":"SELECT account, FIRST(date) AS first_date GROUP BY","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_checking2_matching_journal.beancount","query":"SELECT currency, COUNT(*) AS cnt GROUP BY currency","match":true,"category":"match","py_rows":1,"rs_rows":1}
+{"file":"beancount-import/testdata_source_ofx_test_checking2_matching_journal.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true,"category":"match","py_rows":2,"rs_rows":2}
+{"file":"beancount-import/testdata_source_ofx_test_checking2_matching_journal.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS cnt GROUP B","match":true,"category":"match","py_rows":1,"rs_rows":1}
+{"file":"beancount-import/testdata_source_ofx_test_checking2_matching_journal.beancount","query":"SELECT account, SUM(position) GROUP BY account ORD","match":true,"category":"match","py_rows":2,"rs_rows":2}
+{"file":"beancount-import/testdata_source_ofx_test_checking2_matching_journal.beancount","query":"SELECT DISTINCT LEAF(account) AS leaf ORDER BY lea","match":true,"category":"match","py_rows":2,"rs_rows":2}
+{"file":"beancount-import/testdata_source_ofx_test_checking2_matching_journal.beancount","query":"SELECT DISTINCT ROOT(account) AS root ORDER BY roo","match":true,"category":"match","py_rows":2,"rs_rows":2}
+{"file":"beancount-import/testdata_source_ofx_test_checking2_matching_journal.beancount","query":"SELECT date, narration ORDER BY date, narration LI","match":true,"category":"match","py_rows":2,"rs_rows":2}
+{"file":"beancount-import/testdata_source_ofx_test_checking2_matching_journal.beancount","query":"SELECT account, FIRST(date) AS first_date GROUP BY","match":true,"category":"match","py_rows":2,"rs_rows":2}
+{"file":"beancount-import/testdata_source_ofx_test_checking2_matching_journal.beancount","query":"SELECT MIN(date) AS min_date, MAX(date) AS max_dat","match":true,"category":"match","py_rows":1,"rs_rows":1}
+{"file":"beancount-import/testdata_source_ofx_test_checking2_journal.beancount","query":"SELECT COUNT(*) AS total","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_checking2_matching_journal.beancount","query":"SELECT MONTH(date) AS month, COUNT(*) AS cnt GROUP","match":true,"category":"match","py_rows":1,"rs_rows":1}
+{"file":"beancount-import/testdata_source_ofx_test_checking2_journal.beancount","query":"SELECT DISTINCT ROOT(account) AS root ORDER BY roo","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_checking2_journal.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_checking2_journal.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS cnt GROUP B","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_checking2_journal.beancount","query":"SELECT DISTINCT LEAF(account) AS leaf ORDER BY lea","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_checking2_journal.beancount","query":"SELECT currency, COUNT(*) AS cnt GROUP BY currency","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_checking2_journal.beancount","query":"SELECT account, SUM(position) GROUP BY account ORD","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_checking2_journal.beancount","query":"SELECT date, narration ORDER BY date, narration LI","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_checking_emptyledgerbal_journal.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_checking2_journal.beancount","query":"SELECT account, FIRST(date) AS first_date GROUP BY","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_checking_emptyledgerbal_journal.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS cnt GROUP B","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_checking2_journal.beancount","query":"SELECT MIN(date) AS min_date, MAX(date) AS max_dat","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_checking2_journal.beancount","query":"SELECT MONTH(date) AS month, COUNT(*) AS cnt GROUP","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_checking_emptyledgerbal_journal.beancount","query":"SELECT DISTINCT ROOT(account) AS root ORDER BY roo","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_checking_emptyledgerbal_journal.beancount","query":"SELECT COUNT(*) AS total","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_checking_emptyledgerbal_journal.beancount","query":"SELECT currency, COUNT(*) AS cnt GROUP BY currency","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_checking_emptyledgerbal_journal.beancount","query":"SELECT MONTH(date) AS month, COUNT(*) AS cnt GROUP","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_checking_emptyledgerbal_journal.beancount","query":"SELECT DISTINCT LEAF(account) AS leaf ORDER BY lea","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_checking_emptyledgerbal_journal.beancount","query":"SELECT date, narration ORDER BY date, narration LI","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_checking_emptyledgerbal_journal.beancount","query":"SELECT account, SUM(position) GROUP BY account ORD","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_checking_emptyledgerbal_journal.beancount","query":"SELECT account, FIRST(date) AS first_date GROUP BY","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_checking_emptyledgerbal_journal.beancount","query":"SELECT MIN(date) AS min_date, MAX(date) AS max_dat","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_fidelity_ira_journal.beancount","query":"SELECT COUNT(*) AS total","match":true,"category":"match","py_rows":1,"rs_rows":1}
+{"file":"beancount-import/testdata_source_ofx_test_fidelity_ira_journal.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true,"category":"match","py_rows":10,"rs_rows":10}
+{"file":"beancount-import/testdata_source_ofx_test_fidelity_ira_journal.beancount","query":"SELECT DISTINCT ROOT(account) AS root ORDER BY roo","match":true,"category":"match","py_rows":3,"rs_rows":3}
+{"file":"beancount-import/testdata_source_ofx_test_fidelity_ira_journal.beancount","query":"SELECT DISTINCT LEAF(account) AS leaf ORDER BY lea","match":true,"category":"match","py_rows":9,"rs_rows":9}
+{"file":"beancount-import/testdata_source_ofx_test_fidelity_ira_journal.beancount","query":"SELECT MONTH(date) AS month, COUNT(*) AS cnt GROUP","match":true,"category":"match","py_rows":3,"rs_rows":3}
+{"file":"beancount-import/testdata_source_ofx_test_fidelity_ira_journal.beancount","query":"SELECT currency, COUNT(*) AS cnt GROUP BY currency","match":false,"category":"data_diff","py_rows":6,"rs_rows":7}
+{"file":"beancount-import/testdata_source_ofx_test_fidelity_ira_journal.beancount","query":"SELECT date, narration ORDER BY date, narration LI","match":true,"category":"match","py_rows":10,"rs_rows":10}
+{"file":"beancount-import/testdata_source_ofx_test_fidelity_ira_journal.beancount","query":"SELECT account, FIRST(date) AS first_date GROUP BY","match":true,"category":"match","py_rows":10,"rs_rows":10}
+{"file":"beancount-import/testdata_source_ofx_test_fidelity_ira_journal.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS cnt GROUP B","match":true,"category":"match","py_rows":1,"rs_rows":1}
+{"file":"beancount-import/testdata_source_ofx_test_fidelity_ira_journal.beancount","query":"SELECT account, SUM(position) GROUP BY account ORD","match":false,"category":"data_diff","py_rows":10,"rs_rows":10}
+{"file":"beancount-import/testdata_source_ofx_test_fidelity_journal.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true,"category":"match","py_rows":7,"rs_rows":7}
+{"file":"beancount-import/testdata_source_ofx_test_fidelity_journal.beancount","query":"SELECT COUNT(*) AS total","match":true,"category":"match","py_rows":1,"rs_rows":1}
+{"file":"beancount-import/testdata_source_ofx_test_fidelity_journal.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS cnt GROUP B","match":true,"category":"match","py_rows":2,"rs_rows":2}
+{"file":"beancount-import/testdata_source_ofx_test_fidelity_ira_journal.beancount","query":"SELECT MIN(date) AS min_date, MAX(date) AS max_dat","match":true,"category":"match","py_rows":1,"rs_rows":1}
+{"file":"beancount-import/testdata_source_ofx_test_fidelity_journal.beancount","query":"SELECT currency, COUNT(*) AS cnt GROUP BY currency","match":true,"category":"match","py_rows":4,"rs_rows":4}
+{"file":"beancount-import/testdata_source_ofx_test_fidelity_journal.beancount","query":"SELECT DISTINCT LEAF(account) AS leaf ORDER BY lea","match":true,"category":"match","py_rows":6,"rs_rows":6}
+{"file":"beancount-import/testdata_source_ofx_test_fidelity_journal.beancount","query":"SELECT DISTINCT ROOT(account) AS root ORDER BY roo","match":true,"category":"match","py_rows":4,"rs_rows":4}
+{"file":"beancount-import/testdata_source_ofx_test_fidelity_journal.beancount","query":"SELECT account, SUM(position) GROUP BY account ORD","match":false,"category":"data_diff","py_rows":7,"rs_rows":7}
+{"file":"beancount-import/testdata_source_ofx_test_fidelity_journal.beancount","query":"SELECT date, narration ORDER BY date, narration LI","match":true,"category":"match","py_rows":10,"rs_rows":10}
+{"file":"beancount-import/testdata_source_ofx_test_fidelity_journal.beancount","query":"SELECT account, FIRST(date) AS first_date GROUP BY","match":true,"category":"match","py_rows":7,"rs_rows":7}
+{"file":"beancount-import/testdata_source_ofx_test_fidelity_journal.beancount","query":"SELECT MIN(date) AS min_date, MAX(date) AS max_dat","match":true,"category":"match","py_rows":1,"rs_rows":1}
+{"file":"beancount-import/testdata_source_ofx_test_fidelity_savings_journal.beancount","query":"SELECT COUNT(*) AS total","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_fidelity_journal.beancount","query":"SELECT MONTH(date) AS month, COUNT(*) AS cnt GROUP","match":true,"category":"match","py_rows":4,"rs_rows":4}
+{"file":"beancount-import/testdata_source_ofx_test_fidelity_savings_journal.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_fidelity_savings_journal.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS cnt GROUP B","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_fidelity_savings_journal.beancount","query":"SELECT currency, COUNT(*) AS cnt GROUP BY currency","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_fidelity_savings_journal.beancount","query":"SELECT account, SUM(position) GROUP BY account ORD","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_fidelity_savings_journal.beancount","query":"SELECT DISTINCT ROOT(account) AS root ORDER BY roo","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_fidelity_savings_journal.beancount","query":"SELECT DISTINCT LEAF(account) AS leaf ORDER BY lea","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_fidelity_savings_journal.beancount","query":"SELECT date, narration ORDER BY date, narration LI","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_fidelity_savings_journal.beancount","query":"SELECT MONTH(date) AS month, COUNT(*) AS cnt GROUP","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_fidelity_savings_journal.beancount","query":"SELECT account, FIRST(date) AS first_date GROUP BY","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_fidelity_treasury_journal.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_fidelity_treasury_journal.beancount","query":"SELECT COUNT(*) AS total","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_fidelity_savings_journal.beancount","query":"SELECT MIN(date) AS min_date, MAX(date) AS max_dat","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_fidelity_treasury_journal.beancount","query":"SELECT DISTINCT ROOT(account) AS root ORDER BY roo","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_fidelity_treasury_journal.beancount","query":"SELECT DISTINCT LEAF(account) AS leaf ORDER BY lea","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_fidelity_treasury_journal.beancount","query":"SELECT currency, COUNT(*) AS cnt GROUP BY currency","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_fidelity_treasury_journal.beancount","query":"SELECT MONTH(date) AS month, COUNT(*) AS cnt GROUP","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_fidelity_treasury_journal.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS cnt GROUP B","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_fidelity_treasury_journal.beancount","query":"SELECT account, SUM(position) GROUP BY account ORD","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_fidelity_treasury_journal.beancount","query":"SELECT account, FIRST(date) AS first_date GROUP BY","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_fidelity_treasury_journal.beancount","query":"SELECT MIN(date) AS min_date, MAX(date) AS max_dat","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_fidelity_treasury_journal.beancount","query":"SELECT date, narration ORDER BY date, narration LI","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_investment_buy_sell_income_journal.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_investment_buy_sell_income_journal.beancount","query":"SELECT DISTINCT ROOT(account) AS root ORDER BY roo","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_investment_buy_sell_income_journal.beancount","query":"SELECT COUNT(*) AS total","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_investment_buy_sell_income_journal.beancount","query":"SELECT currency, COUNT(*) AS cnt GROUP BY currency","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_investment_buy_sell_income_journal.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS cnt GROUP B","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_investment_buy_sell_income_journal.beancount","query":"SELECT account, SUM(position) GROUP BY account ORD","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_investment_buy_sell_income_journal.beancount","query":"SELECT DISTINCT LEAF(account) AS leaf ORDER BY lea","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_investment_buy_sell_income_journal.beancount","query":"SELECT MONTH(date) AS month, COUNT(*) AS cnt GROUP","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_investment_buy_sell_income_journal.beancount","query":"SELECT account, FIRST(date) AS first_date GROUP BY","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_investment_buy_sell_income_journal.beancount","query":"SELECT date, narration ORDER BY date, narration LI","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_investment_401k_journal.beancount","query":"SELECT DISTINCT ROOT(account) AS root ORDER BY roo","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_investment_401k_journal.beancount","query":"SELECT COUNT(*) AS total","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_investment_401k_journal.beancount","query":"SELECT currency, COUNT(*) AS cnt GROUP BY currency","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_investment_buy_sell_income_journal.beancount","query":"SELECT MIN(date) AS min_date, MAX(date) AS max_dat","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_investment_401k_journal.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_investment_401k_journal.beancount","query":"SELECT DISTINCT LEAF(account) AS leaf ORDER BY lea","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_investment_401k_journal.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS cnt GROUP B","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_investment_401k_journal.beancount","query":"SELECT account, SUM(position) GROUP BY account ORD","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_investment_401k_journal.beancount","query":"SELECT MONTH(date) AS month, COUNT(*) AS cnt GROUP","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_investment_401k_journal.beancount","query":"SELECT date, narration ORDER BY date, narration LI","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_investment_401k_journal.beancount","query":"SELECT account, FIRST(date) AS first_date GROUP BY","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_multiple_accounts_journal.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_investment_401k_journal.beancount","query":"SELECT MIN(date) AS min_date, MAX(date) AS max_dat","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_multiple_accounts_journal.beancount","query":"SELECT COUNT(*) AS total","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_multiple_accounts_journal.beancount","query":"SELECT DISTINCT LEAF(account) AS leaf ORDER BY lea","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_multiple_accounts_journal.beancount","query":"SELECT account, SUM(position) GROUP BY account ORD","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_multiple_accounts_journal.beancount","query":"SELECT DISTINCT ROOT(account) AS root ORDER BY roo","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_multiple_accounts_journal.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS cnt GROUP B","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_multiple_accounts_journal.beancount","query":"SELECT currency, COUNT(*) AS cnt GROUP BY currency","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_multiple_accounts_journal.beancount","query":"SELECT MONTH(date) AS month, COUNT(*) AS cnt GROUP","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_non_default_capital_gains_journal.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true,"category":"match","py_rows":4,"rs_rows":4}
+{"file":"beancount-import/testdata_source_ofx_test_multiple_accounts_journal.beancount","query":"SELECT account, FIRST(date) AS first_date GROUP BY","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_multiple_accounts_journal.beancount","query":"SELECT MIN(date) AS min_date, MAX(date) AS max_dat","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_non_default_capital_gains_journal.beancount","query":"SELECT COUNT(*) AS total","match":true,"category":"match","py_rows":1,"rs_rows":1}
+{"file":"beancount-import/testdata_source_ofx_test_multiple_accounts_journal.beancount","query":"SELECT date, narration ORDER BY date, narration LI","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_non_default_capital_gains_journal.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS cnt GROUP B","match":true,"category":"match","py_rows":1,"rs_rows":1}
+{"file":"beancount-import/testdata_source_ofx_test_non_default_capital_gains_journal.beancount","query":"SELECT DISTINCT LEAF(account) AS leaf ORDER BY lea","match":true,"category":"match","py_rows":3,"rs_rows":3}
+{"file":"beancount-import/testdata_source_ofx_test_non_default_capital_gains_journal.beancount","query":"SELECT currency, COUNT(*) AS cnt GROUP BY currency","match":true,"category":"match","py_rows":2,"rs_rows":2}
+{"file":"beancount-import/testdata_source_ofx_test_non_default_capital_gains_journal.beancount","query":"SELECT DISTINCT ROOT(account) AS root ORDER BY roo","match":true,"category":"match","py_rows":4,"rs_rows":4}
+{"file":"beancount-import/testdata_source_ofx_test_non_default_capital_gains_journal.beancount","query":"SELECT MONTH(date) AS month, COUNT(*) AS cnt GROUP","match":true,"category":"match","py_rows":1,"rs_rows":1}
+{"file":"beancount-import/testdata_source_ofx_test_non_default_capital_gains_journal.beancount","query":"SELECT account, FIRST(date) AS first_date GROUP BY","match":true,"category":"match","py_rows":4,"rs_rows":4}
+{"file":"beancount-import/testdata_source_ofx_test_suncorp_journal.beancount","query":"SELECT COUNT(*) AS total","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_non_default_capital_gains_journal.beancount","query":"SELECT date, narration ORDER BY date, narration LI","match":true,"category":"match","py_rows":5,"rs_rows":5}
+{"file":"beancount-import/testdata_source_ofx_test_suncorp_journal.beancount","query":"SELECT DISTINCT account ORDER BY account LIMIT 20","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_non_default_capital_gains_journal.beancount","query":"SELECT account, SUM(position) GROUP BY account ORD","match":false,"category":"data_diff","py_rows":4,"rs_rows":4}
+{"file":"beancount-import/testdata_source_ofx_test_suncorp_journal.beancount","query":"SELECT DISTINCT ROOT(account) AS root ORDER BY roo","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_non_default_capital_gains_journal.beancount","query":"SELECT MIN(date) AS min_date, MAX(date) AS max_dat","match":true,"category":"match","py_rows":1,"rs_rows":1}
+{"file":"beancount-import/testdata_source_ofx_test_suncorp_journal.beancount","query":"SELECT currency, COUNT(*) AS cnt GROUP BY currency","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_suncorp_journal.beancount","query":"SELECT account, SUM(position) GROUP BY account ORD","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_suncorp_journal.beancount","query":"SELECT MONTH(date) AS month, COUNT(*) AS cnt GROUP","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_suncorp_journal.beancount","query":"SELECT DISTINCT LEAF(account) AS leaf ORDER BY lea","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_suncorp_journal.beancount","query":"SELECT account, FIRST(date) AS first_date GROUP BY","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_suncorp_journal.beancount","query":"SELECT YEAR(date) AS year, COUNT(*) AS cnt GROUP B","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_suncorp_journal.beancount","query":"SELECT date, narration ORDER BY date, narration LI","match":true,"category":"match","py_rows":00,"rs_rows":00}
+{"file":"beancount-import/testdata_source_ofx_test_suncorp_journal.beancount","query":"SELECT MIN(date) AS min_date, MAX(date) AS max_dat","match":true,"category":"match","py_rows":00,"rs_rows":00}

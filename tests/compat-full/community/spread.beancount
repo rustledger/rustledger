@@ -1,0 +1,12 @@
+plugin "expense_spread" 
+
+2019-01-01 open Assets:US:Bank:Checking
+2019-01-01 open Expenses:Test
+2019-01-01 open Expenses:Test2
+
+2019-01-01 *
+    Assets:US:Bank:Checking     250 USD
+    Expenses:Test               -100 USD
+        spread: "2019-02-01, 2019-03-01, 2019-04-01"
+    Expenses:Test2             -150 USD
+        spread: "2019-01-01, 2019-02-01, 2019-03-01"

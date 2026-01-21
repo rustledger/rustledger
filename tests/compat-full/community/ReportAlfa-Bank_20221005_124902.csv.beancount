@@ -1,0 +1,38 @@
+;; Account: alfabank_business
+;; Date: 2021-04-02
+;; Name: 
+
+2021-03-02 * "CITIBANK NA (LONDON BRANCH)" ""
+  src_doc_n: "102068998"
+  src_purpose: "[redacted]"
+  time: "12:25:40"
+  Assets:Alfabank:Business:Transit  5018.23 GBP
+
+2021-03-03 * "JOHN DOE" ""
+  src_doc_n: "102069016"
+  src_purpose: "НП:[REDACTED] КИБ:GBP0,00 GBP0,00 Пл-к:/[REDACTED] [REDACTED] [REDACTED], BROMLEY KENT"
+  time: "09:47:52"
+  Assets:Alfabank:Business:Cash:GBP   5018.23 GBP
+  Assets:Alfabank:Business:Transit   -5018.23 GBP
+
+2021-03-03 * "XYZ BANK" ""
+  other_src_doc_n: "104285940"
+  src_doc_n: "104359325"
+  src_purpose: "Зарахування коштiв вiд вільного продажу 1018.23 GBP по курсу 38.78, (зг. заявки  вiд ). Комiсiя банку становить 39.49 грн."
+  time: "14:40:14"
+  Assets:Alfabank:Business:Cash:GBP  -1018.23 GBP @ 38.78 UAH
+  Assets:Alfabank:Business:Cash:UAH  39447.47 UAH
+  Expenses:Fees:Banking:Alfabank        39.49 UAH
+
+2021-04-02 * "XYZ BANK" ""
+  src_doc_n: "111111111"
+  src_purpose: "Погашення комісії за проведення розрах.зі списання та зарах.гр. коштів за поточними рахунками, за квітень 2021р. зг.Дог.№ [REDACTED] від 04.02.2021. Без ПДВ."
+  time: "01:54:29"
+  Assets:Alfabank:Business:Cash:UAH  -50.00 UAH
+  Expenses:Fees:Banking:Alfabank      50.00 UAH
+
+2021-04-02 * "JOHN DOE" ""
+  src_doc_n: "3"
+  src_purpose: "Перерахування чистого підприємницького доходу, без ПДВ"
+  time: "13:07:15"
+  Assets:Alfabank:Business:Cash:UAH  -18000.00 UAH

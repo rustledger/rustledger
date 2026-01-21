@@ -1,0 +1,44 @@
+;----------------------------------------------------------------------
+; ledger2beancount conversion notes:
+;
+;   - Non-standard root name Aktiva used; setting beancount option name_assets
+;   - Non-standard root name Eigenkapital used; setting beancount option name_equity
+;   - Non-standard root name Ausgaben used; setting beancount option name_expenses
+;   - Non-standard root name Ertrag used; setting beancount option name_income
+;   - Non-standard root name Passiva used; setting beancount option name_liabilities
+;----------------------------------------------------------------------
+
+
+option "name_assets" "Aktiva"
+option "name_expenses" "Ausgaben"
+option "name_equity" "Eigenkapital"
+option "name_income" "Ertrag"
+option "name_liabilities" "Passiva"
+
+; Test the automatic creation of config options for non-standard
+; account roots
+
+1970-01-01 open Aktiva:Bank
+1970-01-01 open Ausgaben:Essen
+1970-01-01 open Eigenkapital:Anfangsbestand
+1970-01-01 open Ertrag:Lohn
+1970-01-01 open Passiva:Darlehen
+
+1970-01-01 commodity EUR
+
+2020-01-01 * "Opening balance"
+  Aktiva:Bank                      1000.00 EUR
+  Eigenkapital:Anfangsbestand
+
+2020-09-28 * "Expenses"
+  Ausgaben:Essen                     20.00 EUR
+  Aktiva:Bank
+
+2020-09-28 * "Income"
+  Aktiva:Bank                      1000.00 EUR
+  Ertrag:Lohn
+
+2020-09-28 * "Liabilities"
+  Aktiva:Bank                     50000.00 EUR
+  Passiva:Darlehen
+

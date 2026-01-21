@@ -1,0 +1,14 @@
+2018-01-01 commodity CAD
+  asset-class: "cash"
+  asset-subclass: "cash"
+
+2018-01-01 open Equity:Opening-Balances
+
+2018-01-01 open Assets:CA:Employer:PensionPlan
+
+2018-01-01 open Assets:CA:Employer:PensionPlan:Cash CAD
+  portfolio: "pension"
+
+2018-01-02 * "Transfer money to pension"
+    Assets:CA:Employer:PensionPlan:Cash 1000 CAD
+    Equity:Opening-Balances

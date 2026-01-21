@@ -81,4 +81,4 @@ jobs:
         uses: actions/dependency-review-action@46a3c492319c890177366b6ef46d6b4f89743ed4 # v4
         with:
           fail-on-severity: high
-          allow-licenses: MIT, Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC, GPL-3.0-only, MPL-2.0, Zlib, 0BSD, Unicode-3.0
+          allow-licenses: MIT, Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC, GPL-3.0-only, MPL-2.0, Zlib, 0BSD, Unicode-3.0, LGPL-3.0

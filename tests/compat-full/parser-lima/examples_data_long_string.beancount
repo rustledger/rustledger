@@ -1,0 +1,24 @@
+option "long_string_maxlines" "3"
+
+1970-01-01 commodity NZD
+
+2016-03-01 open Assets:Bank:Current NZD
+
+2016-03-01 open Expenses:Groceries NZD
+
+2023-05-29 * "New World Gardens North East Va ;"
+  Assets:Bank:Current                        -35 NZD
+  Expenses:Groceries
+
+2023-05-30 * "New World Gardens North East Va
+with some extra commentary
+which is perfectly OK"
+  Assets:Bank:Current                        -40 NZD
+  Expenses:Groceries
+
+2023-05-31 * "New World Gardens North East Va
+with some extra commentary
+which would have been OK
+except for this fourth line"
+  Assets:Bank:Current                        -55 NZD
+  Expenses:Groceries

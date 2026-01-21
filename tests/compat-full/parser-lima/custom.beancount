@@ -1,0 +1,4 @@
+2025-01-01 custom "all-the-things" 10.50 USD "heya!" NZD Assets:Bank:Current #tag1 ^link1 1980-10-13 TRUE FALSE NULL 15.3 (1/3)
+  metakey1: "value1"
+  empty_metakey1:
+  ;; empty is formatted as NULL

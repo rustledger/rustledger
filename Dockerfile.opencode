@@ -1,0 +1,75 @@
+# OpenCode development container
+# Pre-built with LSPs, MCP servers, and browser automation
+#
+# Build: podman build -f Dockerfile.opencode -t opencode-dev .
+# Run:   see flake.nix opencode-container alias
+
+FROM debian:bookworm-slim
+
+# Avoid prompts during package installation
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install base dependencies
+RUN apt-get update && apt-get install -y \
+    curl \
+    git \
+    ca-certificates \
+    gnupg \
+    unzip \
+    xvfb \
+    # Python
+    python3 \
+    python3-pip \
+    python3-venv \
+    # Build tools (for native node modules)
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Node.js 22
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Bun (required by Oh My OpenCode)
+RUN curl -fsSL https://bun.sh/install | bash
+ENV PATH="/root/.bun/bin:${PATH}"
+
+# Install Rust and rust-analyzer
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \
+    && . /root/.cargo/env \
+    && rustup component add rust-analyzer
+
+# Add cargo to PATH
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+# Install Python LSP (pyright)
+RUN npm install -g pyright
+
+# Install TypeScript and TypeScript LSP
+RUN npm install -g typescript typescript-language-server
+
+# Install MCP servers
+RUN npm install -g @upstash/context7-mcp @playwright/mcp
+
+# Install OpenCode from GitHub releases (must be before Oh My OpenCode)
+ARG OPENCODE_VERSION=1.1.26
+RUN curl -fsSL "https://github.com/anomalyco/opencode/releases/download/v${OPENCODE_VERSION}/opencode-linux-x64.tar.gz" \
+    | tar -xz -C /usr/local/bin \
+    && chmod +x /usr/local/bin/opencode
+
+# Install Oh My OpenCode (enhanced orchestration, LSP tools, hooks)
+RUN npm install -g oh-my-opencode \
+    && npx oh-my-opencode install
+
+# Install Chromium and Playwright browsers
+RUN npx playwright install chromium --with-deps
+
+# Create working directory
+WORKDIR /data
+
+# Set up environment
+ENV HOME=/root
+ENV RUST_BACKTRACE=1
+
+# Default command
+CMD ["opencode"]

@@ -1,0 +1,5 @@
+1900-01-01 open Liabilities:Credit-Card  EUR
+  mt940_id: "NL81ASNB9999999999"
+
+1900-01-01 open Assets:Checking  EUR
+  mt940_id: "My Checking"

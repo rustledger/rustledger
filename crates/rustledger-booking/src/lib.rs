@@ -22,9 +22,11 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+mod book;
 mod interpolate;
 mod pad;
 
+pub use book::{BookedTransaction, BookingEngine, BookingError, CapitalGain, book_transactions};
 pub use interpolate::{InterpolationError, InterpolationResult, interpolate};
 pub use pad::{PadError, PadResult, expand_pads, merge_with_padding, process_pads};
 
@@ -67,23 +69,40 @@ pub fn calculate_residual(transaction: &Transaction) -> HashMap<InternedStr, Dec
             // - If there's a price annotation, the weight is in the price currency (not units currency)
             // - Otherwise, the weight is just the units
 
-            if let Some(cost_spec) = &posting.cost {
-                // Cost-based posting: weight is in the cost currency
+            // Check if cost spec has determinable values.
+            // If cost has number but no currency, try to infer currency from price annotation.
+            let cost_contribution = posting.cost.as_ref().and_then(|cost_spec| {
+                // Helper to get currency from price annotation
+                let price_currency = posting.price.as_ref().and_then(|p| match p {
+                    rustledger_core::PriceAnnotation::Unit(a)
+                    | rustledger_core::PriceAnnotation::Total(a) => Some(a.currency.clone()),
+                    rustledger_core::PriceAnnotation::UnitIncomplete(inc)
+                    | rustledger_core::PriceAnnotation::TotalIncomplete(inc) => {
+                        inc.as_amount().map(|a| a.currency.clone())
+                    }
+                    _ => None,
+                });
+
+                // Try to get cost currency, falling back to price currency
+                let inferred_currency = cost_spec.currency.clone().or(price_currency);
+
                 if let (Some(per_unit), Some(cost_curr)) =
-                    (&cost_spec.number_per, &cost_spec.currency)
+                    (&cost_spec.number_per, &inferred_currency)
                 {
                     let cost_amount = units.number * per_unit;
-                    *residuals.entry(cost_curr.clone()).or_default() += cost_amount;
+                    Some((cost_curr.clone(), cost_amount))
                 } else if let (Some(total), Some(cost_curr)) =
-                    (&cost_spec.number_total, &cost_spec.currency)
+                    (&cost_spec.number_total, &inferred_currency)
                 {
-                    // For total cost, the sign depends on the units sign
-                    *residuals.entry(cost_curr.clone()).or_default() +=
-                        *total * units.number.signum();
+                    Some((cost_curr.clone(), *total * units.number.signum()))
                 } else {
-                    // Cost spec without amount/currency - fall back to units
-                    *residuals.entry(units.currency.clone()).or_default() += units.number;
+                    None // Cost spec without determinable amount (e.g., empty `{}`)
                 }
+            });
+
+            if let Some((currency, amount)) = cost_contribution {
+                // Cost-based posting: weight is in the cost currency
+                *residuals.entry(currency).or_default() += amount;
             } else if let Some(price) = &posting.price {
                 // Price annotation: converts units to price currency for balance purposes.
                 // The weight is in the price currency, not the units currency.
@@ -123,6 +142,9 @@ pub fn calculate_residual(transaction: &Transaction) -> HashMap<InternedStr, Dec
                         *residuals.entry(units.currency.clone()).or_default() += units.number;
                     }
                 }
+            } else if posting.cost.is_some() {
+                // Cost spec exists but is empty (e.g., `{}`), and no price annotation
+                // Don't contribute to residual - cost will be filled by lot matching
             } else {
                 // Simple posting: weight is just the units
                 *residuals.entry(units.currency.clone()).or_default() += units.number;
@@ -333,17 +355,20 @@ mod tests {
 
     /// Test cost spec without amount/currency falls back to units.
     #[test]
-    fn test_calculate_residual_cost_without_amount_falls_back() {
+    fn test_calculate_residual_cost_without_amount_skips() {
+        // When a posting has an empty cost spec (e.g., `{}`) and no price annotation,
+        // it doesn't contribute to the residual because the cost will be determined
+        // by lot matching during booking. This matches Python beancount behavior.
         let txn = Transaction::new(date(2024, 1, 15), "Test")
             .with_posting(
                 Posting::new("Assets:Stock", Amount::new(dec!(10), "AAPL"))
-                    .with_cost(CostSpec::empty()), // Empty cost spec
+                    .with_cost(CostSpec::empty()), // Empty cost spec - doesn't contribute
             )
             .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(-10), "AAPL")));
 
         let residual = calculate_residual(&txn);
-        // Falls back to units: 10 AAPL + -10 AAPL = 0
-        assert_eq!(residual.get("AAPL"), Some(&dec!(0)));
+        // Empty cost spec posting doesn't contribute, only the second posting does
+        assert_eq!(residual.get("AAPL"), Some(&dec!(-10)));
     }
 
     // =========================================================================

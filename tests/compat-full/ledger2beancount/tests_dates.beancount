@@ -1,0 +1,54 @@
+;----------------------------------------------------------------------
+; ledger2beancount conversion notes:
+;
+;   - Metadata key Date renamed to date
+;----------------------------------------------------------------------
+
+; SPDX-FileCopyrightText: © 2018 Martin Michlmayr <tbm@cyrius.com>
+;
+; SPDX-License-Identifier: GPL-3.0-or-later
+
+1970-01-01 open Assets:Test
+1970-01-01 open Equity:Opening-Balance
+
+1970-01-01 commodity EUR
+1970-01-01 commodity USD
+
+2018-03-19 * "Non-ISO 8601 date"
+  Assets:Test                        10.00 EUR
+  Equity:Opening-Balance            -10.00 EUR
+
+2018-03-20 * "Typed meta data with non-ISO 8601 date"
+  date: 2017-12-31
+  Assets:Test                        10.00 EUR
+  Equity:Opening-Balance            -10.00 EUR
+
+2018-03-20 * "Lot date with non-ISO 8601 date"
+  Assets:Test               10.00 EUR {1.23 USD, 2018-03-16}
+  Equity:Opening-Balance   -12.30 USD
+
+2020-06-02 * "Date %Y/%m/%d"
+  Assets:Test                        10.00 EUR
+  Assets:Test
+
+2020-06-23 * "Date %Y/%m/%d"
+  Assets:Test                        10.00 EUR
+  Assets:Test
+
+2020-06-02 * "Date %Y-%m-%d"
+  Assets:Test                        10.00 EUR
+  Assets:Test
+
+2020-06-23 * "Date %Y-%m-%d"
+  Assets:Test                        10.00 EUR
+  Assets:Test
+
+
+2020-06-02 txn "Date %m/%d"
+  Assets:Test                        10.00 EUR
+  Assets:Test
+
+2020-06-23 txn "Date %m/%d"
+  Assets:Test                        10.00 EUR
+  Assets:Test
+

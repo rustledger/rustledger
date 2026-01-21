@@ -13,6 +13,15 @@ on:
   release:
     types: [published]
   workflow_dispatch:
+    inputs:
+      scaling:
+        description: 'Run scaling benchmarks (1K, 5K, 10K, 50K transactions)'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
 
 # Prevent concurrent benchmark runs from racing on the benchmarks branch
 concurrency:
@@ -45,10 +54,18 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
       - name: Install dependencies
         run: |
           # Python beancount + beanquery (for BQL)
-          pip install beancount beanquery matplotlib
+          pip install beancount beanquery
+
+          # Vega CLI for chart generation
+          npm install -g vega vega-lite vega-cli
 
           # Build dependencies for ledger (C++)
           sudo apt-get update
@@ -229,6 +246,36 @@ jobs:
           print(f"hledger:    {times.get('hledger')}ms")
           EOF
 
+      - name: Run memory profiling
+        id: bench_memory
+        run: |
+          echo "=== Memory Usage (Peak RSS in MB) ==="
+
+          # Function to extract peak RSS from /usr/bin/time output
+          measure_memory() {
+            local name=$1
+            local cmd=$2
+            # Run 3 times and take median
+            local measurements=()
+            for i in 1 2 3; do
+              # /usr/bin/time -v outputs to stderr, capture "Maximum resident set size"
+              local output=$(/usr/bin/time -v sh -c "$cmd" 2>&1 >/dev/null)
+              local rss_kb=$(echo "$output" | grep "Maximum resident set size" | awk '{print $6}')
+              measurements+=($rss_kb)
+            done
+            # Sort and take median
+            local sorted=($(printf '%s\n' "${measurements[@]}" | sort -n))
+            local median_kb=${sorted[1]}
+            local median_mb=$(echo "scale=1; $median_kb / 1024" | bc)
+            echo "$name: ${median_mb} MB (${median_kb} KB)"
+            echo "${name}_mem_mb=${median_mb}" >> $GITHUB_OUTPUT
+          }
+
+          measure_memory "rustledger" "./target/release/rledger-check benchmark.beancount"
+          measure_memory "beancount" "bean-check benchmark.beancount"
+          measure_memory "ledger" "ledger -f benchmark.ledger accounts"
+          measure_memory "hledger" "hledger check -f benchmark.ledger"
+
       - name: Fetch existing history from benchmarks branch
         run: |
           mkdir -p .github/badges
@@ -237,14 +284,12 @@ jobs:
           curl -sSf https://raw.githubusercontent.com/${{ github.repository }}/benchmarks/.github/badges/balance-history.json \
             -o .github/badges/balance-history.json 2>/dev/null || echo "[]" > .github/badges/balance-history.json
 
-      - name: Update results and generate charts
+      - name: Update results and generate Vega specs
         run: |
           python3 << 'EOF'
           import json
           import os
           from datetime import datetime
-          import matplotlib.pyplot as plt
-          import matplotlib.dates as mdates
           from pathlib import Path
 
           # Get validation results
@@ -290,78 +335,225 @@ jobs:
           bal_history = bal_history[-90:]
           bal_history_file.write_text(json.dumps(bal_history, indent=2))
 
-          # Common chart styling
-          plt.style.use('dark_background')
+          def generate_vega_bar_spec(title, subtitle, rustledger_ms, ledger_ms, hledger_ms, beancount_ms, bench_date):
+              """Generate a Vega bar chart spec for benchmark comparison."""
+              max_ms = max(rustledger_ms, ledger_ms, hledger_ms, beancount_ms)
 
-          def style_chart(ax, fig):
-              ax.grid(True, alpha=0.3, linestyle='--')
-              ax.set_facecolor('#1a1a2e')
-              fig.patch.set_facecolor('#1a1a2e')
-              ax.xaxis.set_major_formatter(mdates.DateFormatter('%b %d'))
-              ax.xaxis.set_major_locator(mdates.AutoDateLocator())
-              plt.xticks(rotation=45, ha='right')
+              return {
+                  "$schema": "https://vega.github.io/schema/vega/v5.json",
+                  "width": 550,
+                  "height": 150,
+                  "padding": {"left": 10, "right": 10, "top": 10, "bottom": 10},
+                  "background": "#0d1117",
+                  "config": {
+                      "text": {
+                          "font": "JetBrains Mono, Fira Code, SF Mono, Menlo, monospace"
+                      }
+                  },
+                  "signals": [
+                      {"name": "rustledger_ms", "value": rustledger_ms},
+                      {"name": "max_ms", "value": max_ms},
+                      {"name": "bench_date", "value": bench_date},
+                      {"name": "smallBarThreshold", "value": 200}
+                  ],
+                  "data": [
+                      {
+                          "name": "benchmarks",
+                          "values": [
+                              {"tool": "rustledger", "label": "rustledger", "time_ms": rustledger_ms, "baseline_ms": beancount_ms, "color": "#00d4aa"},
+                              {"tool": "ledger", "label": "ledger (C++)", "time_ms": ledger_ms, "baseline_ms": beancount_ms, "color": "#9b59b6"},
+                              {"tool": "hledger", "label": "hledger (Haskell)", "time_ms": hledger_ms, "baseline_ms": beancount_ms, "color": "#e74c3c"},
+                              {"tool": "beancount", "label": "beancount (Python)", "time_ms": beancount_ms, "baseline_ms": beancount_ms, "color": "#f4b942"}
+                          ],
+                          "transform": [
+                              {"type": "formula", "as": "slower_factor", "expr": "datum.time_ms / rustledger_ms"},
+                              {"type": "formula", "as": "faster_factor", "expr": "datum.baseline_ms / datum.time_ms"},
+                              {"type": "formula", "as": "bar_px", "expr": "datum.time_ms / max_ms * width"},
+                              {"type": "formula", "as": "is_small", "expr": "datum.bar_px < smallBarThreshold"}
+                          ]
+                      }
+                  ],
+                  "scales": [
+                      {
+                          "name": "y",
+                          "type": "band",
+                          "domain": {"data": "benchmarks", "field": "label"},
+                          "range": "height",
+                          "padding": 0.3
+                      },
+                      {
+                          "name": "x",
+                          "type": "linear",
+                          "domain": [0, {"signal": "max_ms"}],
+                          "range": [0, {"signal": "width"}]
+                      }
+                  ],
+                  "marks": [
+                      {
+                          "type": "rect",
+                          "from": {"data": "benchmarks"},
+                          "encode": {
+                              "enter": {
+                                  "y": {"scale": "y", "field": "label"},
+                                  "height": {"scale": "y", "band": 1},
+                                  "x": {"value": 0},
+                                  "x2": {"scale": "x", "field": "time_ms"},
+                                  "cornerRadiusTopRight": {"value": 5},
+                                  "cornerRadiusBottomRight": {"value": 5},
+                                  "fill": {"field": "color"},
+                                  "fillOpacity": {"signal": "datum.tool == 'rustledger' ? 1 : 0.85"}
+                              }
+                          }
+                      },
+                      {
+                          "type": "rect",
+                          "from": {"data": "benchmarks"},
+                          "encode": {
+                              "enter": {
+                                  "y": {"scale": "y", "field": "label", "offset": -2},
+                                  "height": {"scale": "y", "band": 1, "offset": 4},
+                                  "x": {"value": -2},
+                                  "x2": {"scale": "x", "field": "time_ms", "offset": 2},
+                                  "cornerRadius": {"value": 6},
+                                  "fill": {"signal": "datum.tool == 'rustledger' ? datum.color : 'transparent'"},
+                                  "fillOpacity": {"value": 0.12}
+                              }
+                          }
+                      },
+                      {
+                          "type": "text",
+                          "from": {"data": "benchmarks"},
+                          "encode": {
+                              "enter": {
+                                  "y": {"scale": "y", "field": "label", "band": 0.5},
+                                  "x": {"value": -14},
+                                  "text": {"signal": "datum.tool == 'rustledger' ? '' : datum.label"},
+                                  "fill": {"value": "#e6edf3"},
+                                  "fontSize": {"value": 14},
+                                  "fontWeight": {"value": 600},
+                                  "baseline": {"value": "middle"},
+                                  "align": {"value": "right"}
+                              }
+                          }
+                      },
+                      {
+                          "type": "text",
+                          "from": {"data": "benchmarks"},
+                          "encode": {
+                              "enter": {
+                                  "y": {"scale": "y", "field": "label", "band": 0.5},
+                                  "x": {"value": -18},
+                                  "text": {"signal": "datum.tool == 'rustledger' ? 'ledger' : ''"},
+                                  "fill": {"value": "#e6edf3"},
+                                  "fontSize": {"value": 14},
+                                  "fontWeight": {"value": 600},
+                                  "baseline": {"value": "middle"},
+                                  "align": {"value": "right"}
+                              }
+                          }
+                      },
+                      {
+                          "type": "text",
+                          "from": {"data": "benchmarks"},
+                          "encode": {
+                              "enter": {
+                                  "y": {"scale": "y", "field": "label", "band": 0.5},
+                                  "x": {"value": -72},
+                                  "text": {"signal": "datum.tool == 'rustledger' ? 'rust' : ''"},
+                                  "fill": {"value": "#f74c00"},
+                                  "fontSize": {"value": 14},
+                                  "fontWeight": {"value": 600},
+                                  "baseline": {"value": "middle"},
+                                  "align": {"value": "right"}
+                              }
+                          }
+                      },
+                      {
+                          "type": "text",
+                          "from": {"data": "benchmarks"},
+                          "encode": {
+                              "enter": {
+                                  "y": {"scale": "y", "field": "label", "band": 0.5},
+                                  "x": {"signal": "datum.is_small ? scale('x', datum.time_ms) + 10 : 8"},
+                                  "text": {"signal": "datum.is_small ? (datum.tool == 'rustledger' ? format(datum.faster_factor, '.0f') + 'x vs beancount · ' + format(datum.time_ms, '.0f') + ' ms' : format(datum.slower_factor, '.1f') + 'x slower · ' + format(datum.time_ms, '.0f') + ' ms') : (datum.tool == 'rustledger' ? format(datum.faster_factor, '.0f') + 'x vs beancount' : format(datum.slower_factor, '.1f') + 'x slower')"},
+                                  "fill": {"signal": "datum.is_small ? (datum.tool == 'rustledger' ? '#f74c00' : '#e6edf3') : '#000000'"},
+                                  "fontSize": {"value": 18},
+                                  "fontWeight": {"value": 700},
+                                  "baseline": {"value": "middle"},
+                                  "align": {"value": "left"}
+                              }
+                          }
+                      },
+                      {
+                          "type": "text",
+                          "from": {"data": "benchmarks"},
+                          "encode": {
+                              "enter": {
+                                  "y": {"scale": "y", "field": "label", "band": 0.5},
+                                  "x": {"signal": "scale('x', datum.time_ms) - 8"},
+                                  "text": {"signal": "datum.is_small ? '' : format(datum.time_ms, '.0f') + ' ms'"},
+                                  "fill": {"value": "#000000"},
+                                  "fontSize": {"value": 18},
+                                  "fontWeight": {"value": 700},
+                                  "baseline": {"value": "middle"},
+                                  "align": {"value": "right"}
+                              }
+                          }
+                      },
+                      {
+                          "type": "text",
+                          "encode": {
+                              "enter": {
+                                  "x": {"signal": "width"},
+                                  "y": {"signal": "height + 2"},
+                                  "text": {"signal": "'measured ' + bench_date + ' · hyperfine'"},
+                                  "fill": {"value": "#6e7681"},
+                                  "fontSize": {"value": 12},
+                                  "baseline": {"value": "top"},
+                                  "align": {"value": "right"}
+                              }
+                          }
+                      }
+                  ],
+                  "title": {
+                      "text": title,
+                      "subtitle": subtitle,
+                      "font": "JetBrains Mono, Fira Code, SF Mono, Menlo, monospace",
+                      "color": "#e6edf3",
+                      "subtitleColor": "#6e7681",
+                      "fontSize": 16,
+                      "subtitleFontSize": 16,
+                      "fontWeight": 600,
+                      "subtitleFontWeight": "normal",
+                      "subtitlePadding": 4
+                  }
+              }
 
-          # Generate validation chart (all 4 tools)
-          if len(val_history) >= 2:
-              dates = [datetime.strptime(h['date'], '%Y-%m-%d') for h in val_history]
-              rustledger_times = [h.get('rustledger_ms', 0) for h in val_history]
-              beancount_times = [h.get('beancount_ms', 0) for h in val_history]
-              ledger_times = [h.get('ledger_ms', 0) for h in val_history]
-              hledger_times = [h.get('hledger_ms', 0) for h in val_history]
+          # Generate validation chart spec
+          val_spec = generate_vega_bar_spec(
+              title="Validation: Parse + Check (10K transactions)",
+              subtitle="rustledger vs other plain-text accounting tools",
+              rustledger_ms=rustledger_val,
+              ledger_ms=ledger_val,
+              hledger_ms=hledger_val,
+              beancount_ms=beancount_val,
+              bench_date=date_short
+          )
+          Path('.github/badges/validation-chart.vega.json').write_text(json.dumps(val_spec, indent=2))
+          print(f"Generated validation Vega spec")
 
-              fig, ax = plt.subplots(figsize=(10, 4), dpi=100)
-              ax.plot(dates, beancount_times, 'o-', color='#f4b942', linewidth=2,
-                      markersize=5, label='beancount (Python)')
-              ax.plot(dates, hledger_times, 's-', color='#e74c3c', linewidth=2,
-                      markersize=5, label='hledger (Haskell)')
-              ax.plot(dates, ledger_times, '^-', color='#9b59b6', linewidth=2,
-                      markersize=5, label='ledger (C++)')
-              ax.plot(dates, rustledger_times, 'o-', color='#00d4aa', linewidth=2,
-                      markersize=5, label='rustledger')
-
-              ax.set_ylabel('Time (ms)', fontsize=12, color='white')
-              ax.legend(loc='upper right', framealpha=0.9)
-              ax.set_title('Validation: Parse + Check (10K transactions)', fontsize=13, color='white', pad=10)
-              style_chart(ax, fig)
-
-              plt.tight_layout()
-              plt.savefig('.github/badges/validation-chart.svg', format='svg',
-                          facecolor='#1a1a2e', edgecolor='none', bbox_inches='tight')
-              plt.savefig('.github/badges/validation-chart.png', format='png',
-                          facecolor='#1a1a2e', edgecolor='none', bbox_inches='tight')
-              plt.close()
-              print(f"Generated validation chart with {len(val_history)} data points")
-
-          # Generate balance chart (all 4 tools)
-          if len(bal_history) >= 2:
-              dates = [datetime.strptime(h['date'], '%Y-%m-%d') for h in bal_history]
-              rustledger_times = [h.get('rustledger_ms', 0) for h in bal_history]
-              beancount_times = [h.get('beancount_ms', 0) for h in bal_history]
-              ledger_times = [h.get('ledger_ms', 0) for h in bal_history]
-              hledger_times = [h.get('hledger_ms', 0) for h in bal_history]
-
-              fig, ax = plt.subplots(figsize=(10, 4), dpi=100)
-              ax.plot(dates, beancount_times, 'o-', color='#f4b942', linewidth=2,
-                      markersize=5, label='beancount (Python)')
-              ax.plot(dates, hledger_times, 's-', color='#e74c3c', linewidth=2,
-                      markersize=5, label='hledger (Haskell)')
-              ax.plot(dates, ledger_times, '^-', color='#9b59b6', linewidth=2,
-                      markersize=5, label='ledger (C++)')
-              ax.plot(dates, rustledger_times, 'o-', color='#00d4aa', linewidth=2,
-                      markersize=5, label='rustledger')
-
-              ax.set_ylabel('Time (ms)', fontsize=12, color='white')
-              ax.legend(loc='upper right', framealpha=0.9)
-              ax.set_title('Balance Report: Parse + Compute (10K transactions)', fontsize=13, color='white', pad=10)
-              style_chart(ax, fig)
-
-              plt.tight_layout()
-              plt.savefig('.github/badges/balance-chart.svg', format='svg',
-                          facecolor='#1a1a2e', edgecolor='none', bbox_inches='tight')
-              plt.savefig('.github/badges/balance-chart.png', format='png',
-                          facecolor='#1a1a2e', edgecolor='none', bbox_inches='tight')
-              plt.close()
-              print(f"Generated balance chart with {len(bal_history)} data points")
+          # Generate balance chart spec
+          bal_spec = generate_vega_bar_spec(
+              title="Balance Report: Parse + Compute (10K transactions)",
+              subtitle="rustledger vs other plain-text accounting tools",
+              rustledger_ms=rustledger_bal,
+              ledger_ms=ledger_bal,
+              hledger_ms=hledger_bal,
+              beancount_ms=beancount_bal,
+              bench_date=date_short
+          )
+          Path('.github/badges/balance-chart.vega.json').write_text(json.dumps(bal_spec, indent=2))
+          print(f"Generated balance Vega spec")
 
           # Summary
           print(f"\n## Benchmark Results (10K transactions)")
@@ -376,6 +568,7 @@ jobs:
           print(f"  hledger:    {hledger_bal}ms")
           print(f"  beancount:  {beancount_bal}ms")
           EOF
+
         env:
           RUSTLEDGER_VAL_MS: ${{ steps.bench_validation.outputs.rustledger_val_ms }}
           BEANCOUNT_VAL_MS: ${{ steps.bench_validation.outputs.beancount_val_ms }}
@@ -385,6 +578,87 @@ jobs:
           BEANCOUNT_BAL_MS: ${{ steps.bench_balance.outputs.beancount_bal_ms }}
           LEDGER_BAL_MS: ${{ steps.bench_balance.outputs.ledger_bal_ms }}
           HLEDGER_BAL_MS: ${{ steps.bench_balance.outputs.hledger_bal_ms }}
+
+      - name: Render Vega charts to SVG
+        run: |
+          cd .github/badges
+          vg2svg validation-chart.vega.json validation-chart.svg
+          vg2svg balance-chart.vega.json balance-chart.svg
+          echo "Rendered Vega specs to SVG"
+
+      - name: Check for performance regression
+        id: regression
+        run: |
+          python3 << 'EOF'
+          import json
+          import os
+          import sys
+          from pathlib import Path
+
+          # Regression threshold (fail if rustledger is this much slower than baseline)
+          REGRESSION_THRESHOLD_PERCENT = 15
+
+          # Get current results
+          current_val = float(os.environ.get('RUSTLEDGER_VAL_MS', 0))
+          current_bal = float(os.environ.get('RUSTLEDGER_BAL_MS', 0))
+
+          # Load validation history
+          val_history_file = Path('.github/badges/validation-history.json')
+          val_history = json.loads(val_history_file.read_text())
+
+          # Load balance history
+          bal_history_file = Path('.github/badges/balance-history.json')
+          bal_history = json.loads(bal_history_file.read_text())
+
+          warnings = []
+          regressions = []
+
+          # Check validation regression (compare against previous result)
+          if len(val_history) >= 2:
+              # Get previous result (second to last, since we just appended current)
+              prev_val = val_history[-2].get('rustledger_ms', 0)
+              if prev_val > 0 and current_val > 0:
+                  val_change = ((current_val - prev_val) / prev_val) * 100
+                  print(f"Validation: {prev_val}ms -> {current_val}ms ({val_change:+.1f}%)")
+
+                  if val_change > REGRESSION_THRESHOLD_PERCENT:
+                      regressions.append(f"Validation regression: {val_change:+.1f}% (threshold: {REGRESSION_THRESHOLD_PERCENT}%)")
+                  elif val_change > 5:
+                      warnings.append(f"Validation slowdown: {val_change:+.1f}%")
+
+          # Check balance regression (compare against previous result)
+          if len(bal_history) >= 2:
+              prev_bal = bal_history[-2].get('rustledger_ms', 0)
+              if prev_bal > 0 and current_bal > 0:
+                  bal_change = ((current_bal - prev_bal) / prev_bal) * 100
+                  print(f"Balance: {prev_bal}ms -> {current_bal}ms ({bal_change:+.1f}%)")
+
+                  if bal_change > REGRESSION_THRESHOLD_PERCENT:
+                      regressions.append(f"Balance regression: {bal_change:+.1f}% (threshold: {REGRESSION_THRESHOLD_PERCENT}%)")
+                  elif bal_change > 5:
+                      warnings.append(f"Balance slowdown: {bal_change:+.1f}%")
+
+          # Output warnings
+          for w in warnings:
+              print(f"::warning::{w}")
+
+          # Output to step summary
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write(f"has_regression={'true' if regressions else 'false'}\n")
+              f.write(f"regression_count={len(regressions)}\n")
+
+          # Fail on regression (but don't fail - just warn for now)
+          # Uncomment the sys.exit(1) line to make regressions fail the build
+          if regressions:
+              for r in regressions:
+                  print(f"::error::{r}")
+              # sys.exit(1)  # Uncomment to fail on regression
+
+          print("\nRegression check complete.")
+          EOF
+        env:
+          RUSTLEDGER_VAL_MS: ${{ steps.bench_validation.outputs.rustledger_val_ms }}
+          RUSTLEDGER_BAL_MS: ${{ steps.bench_balance.outputs.rustledger_bal_ms }}
 
       - name: Update summary
         run: |
@@ -407,9 +681,20 @@ jobs:
           | hledger (Haskell) | ${{ steps.bench_balance.outputs.hledger_bal_ms }}ms |
           | beancount (Python) | ${{ steps.bench_balance.outputs.beancount_bal_ms }}ms |
 
+          ### Memory Usage (Peak RSS)
+          | Tool | Memory |
+          |------|--------|
+          | **rustledger** | ${{ steps.bench_memory.outputs.rustledger_mem_mb }}MB |
+          | ledger (C++) | ${{ steps.bench_memory.outputs.ledger_mem_mb }}MB |
+          | hledger (Haskell) | ${{ steps.bench_memory.outputs.hledger_mem_mb }}MB |
+          | beancount (Python) | ${{ steps.bench_memory.outputs.beancount_mem_mb }}MB |
+
           *Measured with [hyperfine](https://github.com/sharkdp/hyperfine) (10 runs, 3 warmup)*
 
           Note: rustledger & beancount use .beancount format; ledger & hledger use .ledger format
+
+          ---
+          **Regression Check:** ${{ steps.regression.outputs.has_regression == 'true' && 'Regression detected' || 'No regression' }}
           EOF
 
       - name: Commit results to benchmarks branch
@@ -441,3 +726,150 @@ jobs:
           git add .github/badges/
           git diff --staged --quiet || git commit -m "chore: update benchmark results"
           git push origin benchmarks
+
+  # Scaling benchmark - test performance across different input sizes
+  # Only runs when manually triggered with scaling=true
+  scaling-benchmark:
+    name: Scaling Benchmarks (${{ matrix.size }} transactions)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    if: ${{ github.event.inputs.scaling == 'true' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        size: [1000, 5000, 10000, 50000]
+    steps:
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6
+
+      - uses: dtolnay/rust-toolchain@4be9e76fd7c4901c61fb841f559994984270fce7 # stable
+
+      - uses: Swatinem/rust-cache@ad397744b0d591a723ab90405b7247fac0e6b8db # v2
+        with:
+          cache-on-failure: true
+          prefix-key: bench-scaling
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install beancount beanquery
+
+          # hledger binary
+          curl -sL https://github.com/simonmichael/hledger/releases/latest/download/hledger-linux-x64.tar.gz | tar xz -C /tmp
+          sudo mv /tmp/hledger /usr/local/bin/
+
+          # Hyperfine
+          HYPERFINE_VERSION=$(curl -s https://api.github.com/repos/sharkdp/hyperfine/releases/latest | jq -r '.tag_name')
+          curl -sL "https://github.com/sharkdp/hyperfine/releases/download/${HYPERFINE_VERSION}/hyperfine-${HYPERFINE_VERSION}-x86_64-unknown-linux-gnu.tar.gz" | tar xz -C /tmp
+          sudo mv "/tmp/hyperfine-${HYPERFINE_VERSION}-x86_64-unknown-linux-gnu/hyperfine" /usr/local/bin/
+
+      - name: Build rustledger
+        run: cargo build --release -p rustledger --no-default-features
+
+      - name: Generate test ledger (${{ matrix.size }} transactions)
+        run: |
+          python3 << EOF
+          import random
+          from datetime import date, timedelta
+
+          random.seed(42)
+          SIZE = ${{ matrix.size }}
+
+          accounts = [
+              "Assets:Bank:Checking", "Assets:Bank:Savings",
+              "Expenses:Food:Groceries", "Expenses:Transport:Gas",
+              "Income:Salary", "Equity:Opening-Balances",
+          ]
+
+          transactions = []
+          start_date = date(2020, 1, 1)
+          for i in range(SIZE):
+              d = start_date + timedelta(days=i // 10)
+              amount = round(random.uniform(5, 500), 2)
+              expense = random.choice([a for a in accounts if a.startswith("Expenses:")])
+              transactions.append((d, f"Payee {i % 100}", expense, amount))
+
+          # Beancount format
+          with open("benchmark.beancount", "w") as f:
+              f.write('option "operating_currency" "USD"\n\n')
+              for acc in accounts:
+                  f.write(f"2020-01-01 open {acc}\n")
+              f.write("\n")
+              for d, payee, expense, amount in transactions:
+                  f.write(f'{d} * "{payee}" "Transaction"\n')
+                  f.write(f"  {expense}  {amount} USD\n")
+                  f.write(f"  Assets:Bank:Checking\n\n")
+
+          # Ledger format
+          with open("benchmark.ledger", "w") as f:
+              for d, payee, expense, amount in transactions:
+                  f.write(f"{d} {payee}\n")
+                  f.write(f"    {expense}  \${amount:.2f}\n")
+                  f.write(f"    Assets:Bank:Checking\n\n")
+
+          print(f"Generated {SIZE} transactions")
+          EOF
+
+      - name: Run scaling benchmark
+        run: |
+          echo "=== Scaling Benchmark: ${{ matrix.size }} transactions ==="
+          hyperfine \
+            --warmup 2 \
+            --runs 5 \
+            --export-json "bench-scaling-${{ matrix.size }}.json" \
+            --command-name 'rustledger' './target/release/rledger-check benchmark.beancount' \
+            --command-name 'beancount' 'bean-check benchmark.beancount' \
+            --command-name 'hledger' 'hledger check -f benchmark.ledger'
+
+      - name: Report results
+        run: |
+          python3 << 'EOF'
+          import json
+
+          with open('bench-scaling-${{ matrix.size }}.json') as f:
+              results = json.load(f)
+
+          print(f"\n## Scaling Results: ${{ matrix.size }} transactions\n")
+          print("| Tool | Mean (ms) | Min (ms) | Max (ms) |")
+          print("|------|-----------|----------|----------|")
+
+          for r in sorted(results['results'], key=lambda x: x['mean']):
+              name = r['command']
+              mean_ms = r['mean'] * 1000
+              min_ms = r['min'] * 1000
+              max_ms = r['max'] * 1000
+              print(f"| {name} | {mean_ms:.1f} | {min_ms:.1f} | {max_ms:.1f} |")
+          EOF
+
+      - name: Update summary
+        run: |
+          python3 << 'EOF'
+          import json
+          import os
+
+          with open('bench-scaling-${{ matrix.size }}.json') as f:
+              results = json.load(f)
+
+          summary = f"### Scaling: ${{ matrix.size }} transactions\n\n"
+          summary += "| Tool | Mean | Min | Max |\n"
+          summary += "|------|------|-----|-----|\n"
+
+          for r in sorted(results['results'], key=lambda x: x['mean']):
+              name = r['command']
+              mean = f"{r['mean'] * 1000:.1f}ms"
+              min_t = f"{r['min'] * 1000:.1f}ms"
+              max_t = f"{r['max'] * 1000:.1f}ms"
+              summary += f"| {name} | {mean} | {min_t} | {max_t} |\n"
+
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
+              f.write(summary)
+          EOF
+
+      - name: Upload results artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: scaling-${{ matrix.size }}
+          path: bench-scaling-${{ matrix.size }}.json

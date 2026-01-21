@@ -1,0 +1,2 @@
+option "name_assets" "Actifs"
+option "name_liabilities" "Passifs"

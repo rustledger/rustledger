@@ -7,8 +7,10 @@
 Parse and validate your ledger faster than Python beancount.
 
 [![CI](https://github.com/rustledger/rustledger/actions/workflows/ci.yml/badge.svg)](https://github.com/rustledger/rustledger/actions/workflows/ci.yml)
+[![Compatibility](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/rustledger/rustledger/compatibility/.github/badges/compat-badge.json)](https://github.com/rustledger/rustledger/actions/workflows/compat.yml)
 [![GitHub Release](https://img.shields.io/github/v/release/rustledger/rustledger)](https://github.com/rustledger/rustledger/releases)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
+[![Liberapay](https://img.shields.io/liberapay/gives/rustledger.svg?logo=liberapay)](https://liberapay.com/rustledger)
 
 </div>
 
@@ -18,26 +20,31 @@ Parse and validate your ledger faster than Python beancount.
 
 | | |
 |---|---|
-| **Much faster** | Parse and validate large ledgers in milliseconds ([see benchmarks](#performance)) |
-| **Single binary** | No Python, no dependencies, just download and run |
+| **10-30x faster** | Parse and validate large ledgers in milliseconds ([see benchmarks](#performance)) |
+| **No dependencies** | No Python runtime, no libraries to install |
 | **Drop-in replacement** | Compatible `bean-*` CLI commands for easy migration |
 | **Full compatibility** | Parses any valid beancount file |
+| **Editor support** | LSP server for VS Code, Neovim, Helix, and more |
+| **AI-ready** | MCP server for Claude, Cursor, and other AI assistants |
+| **Runs anywhere** | WebAssembly support for browser and Node.js |
+| **Better errors** | Detailed error messages with source locations |
+| **20 built-in plugins** | Plus Python plugin compatibility via WASI sandbox |
 
 ## Install
 
 | Platform | Command |
 |----------|---------|
-| **Script** | `curl -sSfL rustledger.github.io/i \| sh` |
 | **macOS** | `brew install rustledger/rustledger/rustledger` |
-| **Ubuntu/Debian** | `sudo add-apt-repository ppa:robcohen/rustledger && sudo apt install rustledger` |
-| **Fedora/RHEL** | `sudo dnf copr enable rustledger/rustledger && sudo dnf install rustledger` |
-| **Arch** | `yay -S rustledger-bin` |
 | **Windows** | `scoop bucket add rustledger https://github.com/rustledger/scoop-rustledger && scoop install rustledger` |
 | **Cargo** | `cargo binstall rustledger` or `cargo install rustledger` |
+| **Fedora/RHEL** | `sudo dnf copr enable robcohen/rustledger && sudo dnf install rustledger` |
 | **Nix** | `nix run github:rustledger/rustledger` |
 | **Docker** | `docker run --rm -v "$PWD:/data" ghcr.io/rustledger/rustledger /data/ledger.beancount` |
 | **Binaries** | [GitHub Releases](https://github.com/rustledger/rustledger/releases) |
-| **npm** | `npm install @rustledger/wasm` (WebAssembly) |
+| **npm (WASM)** | `npm install @rustledger/wasm` |
+| **npm (MCP)** | `npx @rustledger/mcp-server` ([Model Context Protocol](https://modelcontextprotocol.io) server) |
+
+<sub>Missing your platform? [Open an issue](https://github.com/rustledger/rustledger/issues/new) to request it.</sub>
 
 ## Quick Start
 
@@ -96,6 +103,7 @@ rledger-format --in-place ledger.beancount
 | `rustledger-query` | BQL query engine |
 | `rustledger-plugin` | 20 built-in plugins + Python plugin support |
 | `rustledger-importer` | CSV/OFX import framework |
+| `rustledger-lsp` | Language Server Protocol for editor integration |
 | `rustledger-wasm` | WebAssembly bindings for JavaScript/TypeScript |
 
 <details>
@@ -159,6 +167,31 @@ rledger-format --in-place ledger.beancount
 
 <sub>Benchmarks run nightly on 10K transaction ledgers. [View workflow →](https://github.com/rustledger/rustledger/actions/workflows/bench.yml)</sub>
 
+<details>
+<summary><strong>Benchmark details</strong></summary>
+
+**What's measured:**
+- **Validation**: Parse ledger + validate (balance assertions, account opens, etc.)
+- **Balance Report**: Parse + compute all account balances
+
+**Memory efficiency:**
+rustledger typically uses 3-5x less memory than Python beancount thanks to Rust's zero-cost abstractions and efficient data structures.
+
+**Run locally:**
+```bash
+# Quick comparison (requires nix)
+nix develop .#bench
+./scripts/bench.sh
+
+# Criterion micro-benchmarks
+cargo bench -p rustledger-core
+cargo bench -p rustledger-parser
+```
+
+See [BENCHMARKING.md](docs/BENCHMARKING.md) for detailed benchmark documentation.
+
+</details>
+
 ## Contributing
 
 See [CLAUDE.md](CLAUDE.md) for architecture and development setup.
@@ -170,3 +203,9 @@ By submitting a pull request, you agree to the [Contributor License Agreement](C
 [GPL-3.0](LICENSE)
 
 **Commercial licensing available** - [contact us](https://rustledger.github.io/#contact) for proprietary license options.
+
+## Funding
+
+rustledger is free and open source. If you find it useful, consider supporting development:
+
+[![Support on Liberapay](https://img.shields.io/badge/Support%20on-Liberapay-F6C915?logo=liberapay)](https://liberapay.com/rustledger)

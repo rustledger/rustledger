@@ -1,0 +1,128 @@
+; SPDX-FileCopyrightText: © 2018 Martin Michlmayr <tbm@cyrius.com>
+;
+; SPDX-License-Identifier: GPL-3.0-or-later
+
+1970-01-01 open Assets:Commodity-Test123
+1970-01-01 open Assets:Test
+1970-01-01 open Equity:Opening-Balance
+
+1970-01-01 commodity EUR
+
+2018-03-17 * "Test with transaction aux date"
+  aux-date: 2018-03-16
+  Assets:Test                        10.00 EUR
+  Equity:Opening-Balance            -10.00 EUR
+
+2018-03-18 * "Test with posting aux date"
+  Assets:Test                        10.00 EUR
+    aux-date: 2018-03-13
+  Equity:Opening-Balance
+
+2018-03-18 * "Test with transaction and posting aux date"
+  aux-date: 2018-03-17
+  Assets:Test                        10.00 EUR
+    aux-date: 2018-03-13
+  Equity:Opening-Balance
+
+2018-03-18 * "Test with posting aux date plus comment"
+  Assets:Test                        10.00 EUR ; foo
+    aux-date: 2018-03-13
+  Equity:Opening-Balance
+
+2018-03-18 * "Test with posting aux date after no amount"
+  Assets:Test                        10.00 EUR
+  Equity:Opening-Balance
+    aux-date: 2018-03-13
+
+2018-03-27 * "Account name could be mistaken for commodity"
+  Assets:Test                        10.00 EUR
+  Assets:Commodity-Test123
+    aux-date: 2018-03-13
+
+2019-01-16 * "Posting date using comment"
+  Assets:Test                        10.00 EUR
+    date: 2017-03-04
+  Equity:Opening-Balance            -10.00 EUR
+    date: 2017-07-08
+
+2019-01-16 * "Posting date and aux date using comment"
+  Assets:Test                        10.00 EUR
+    date: 2017-03-04
+    aux-date: 2017-03-05
+  Equity:Opening-Balance            -10.00 EUR
+    date: 2017-07-08
+    aux-date: 2017-07-09
+
+2020-03-09 * "Test with posting date and comment"
+  Assets:Test                        10.00 EUR ; Foo Bar
+    date: 2018-03-13
+  Equity:Opening-Balance
+
+2020-03-09 * "Test with posting date and comment, but no amount"
+  Assets:Test                                  ; Foo Bar
+    date: 2018-03-13
+  Equity:Opening-Balance            -10.00 EUR
+
+2020-03-09 * "Test with posting aux date and comment"
+  Assets:Test                        10.00 EUR ; Foo Bar
+    aux-date: 2018-03-13
+  Equity:Opening-Balance
+
+2020-03-09 * "Test with posting aux date and comment, but no amount"
+  Assets:Test                                  ; Foo Bar
+    aux-date: 2018-03-13
+  Equity:Opening-Balance            -10.00 EUR
+
+2020-10-01 * "Trailing whitespace"
+  Assets:Test                        10.00 EUR
+    date: 2020-09-30
+  Assets:Test                       -10.00 EUR
+
+2020-10-23 * "Posting date and tag"
+  Assets:Test                        10.00 EUR
+    date: 2020-09-30
+    tags: "foo"
+  Assets:Test                       -10.00 EUR
+
+2020-10-23 * "Posting date and metadata"
+  Assets:Test                        10.00 EUR
+    date: 2020-09-30
+    foo: "bar"
+  Assets:Test                       -10.00 EUR
+
+2020-10-23 * "Aux date and tag"
+  Assets:Test                        10.00 EUR
+    aux-date: 2020-09-30
+    tags: "foo"
+  Assets:Test                       -10.00 EUR
+
+2020-10-23 * "Aux date and metadata"
+  Assets:Test                        10.00 EUR
+    aux-date: 2020-09-30
+    foo: "bar"
+  Assets:Test                       -10.00 EUR
+
+2020-10-23 * "Posting date, aux date and tag"
+  Assets:Test                        10.00 EUR
+    date: 2020-10-20
+    aux-date: 2020-09-30
+    tags: "foo"
+  Assets:Test                       -10.00 EUR
+
+2020-10-23 * "Posting date, aux date and metadata"
+  Assets:Test                        10.00 EUR
+    date: 2020-10-20
+    aux-date: 2020-09-30
+    foo: "bar"
+  Assets:Test                       -10.00 EUR
+
+2020-10-23 * "Comment spacing for comment after date"
+  Assets:Test                        10.00 EUR ; foo
+    date: 2020-09-30
+  Equity:Opening-Balance            -10.00 EUR
+
+2020-10-23 * "Comment spacing for comment after date"
+  Assets:Test                        10.00 EUR ;foo
+    date: 2020-09-30
+  Equity:Opening-Balance            -10.00 EUR
+

@@ -1,0 +1,238 @@
+;----------------------------------------------------------------------
+; ledger2beancount conversion notes:
+;
+;   - Directive `define` not supported by beancount: replacing thousand with 1.000,00 EUR
+;   - Amount without commodity found; set default_commodity in config
+;   - Commodity Avios renamed to AVIOS
+;   - Collision for commodity EUR: EUR, €
+;   - Collision for commodity GBP: GBP, £
+;   - Collision for commodity USD: $, USD
+;----------------------------------------------------------------------
+
+; SPDX-FileCopyrightText: © 2018 Martin Michlmayr <tbm@cyrius.com>
+;
+; SPDX-License-Identifier: GPL-3.0-or-later
+
+
+1970-01-01 open Assets:99Test:Test99
+1970-01-01 open Assets:Test1
+1970-01-01 open Assets:Test2
+1970-01-01 open Equity:Opening-Balance
+
+1970-01-01 commodity EUR
+1970-01-01 commodity GBP
+1970-01-01 commodity USD
+
+1970-01-01 open Assets:Bank
+1970-01-01 open Assets:Current
+1970-01-01 open Assets:Investments
+1970-01-01 open Assets:Receivable
+1970-01-01 open Assets:Rewards
+1970-01-01 open Assets:Test
+1970-01-01 open Expenses:Housing:Rent
+1970-01-01 open Expenses:Travel:Airfare
+1970-01-01 open Income:401k:Match
+1970-01-01 open Income:Salary
+1970-01-01 open Liabilities:BA
+
+1970-01-01 commodity AVIOS
+1970-01-01 commodity FRF
+1970-01-01 commodity XXX
+
+2002-01-01 price EUR 6.55957 FRF
+
+2018-03-26 * "Decimal comma"
+  Assets:99Test:Test99               10.12 EUR
+  Equity:Opening-Balance
+
+2018-03-26 * "Decimal comma, with thousand separator"
+  Assets:99Test:Test99            1000.00 EUR
+  Equity:Opening-Balance
+
+2018-03-26 * "Decimal comma, with thousand separator"
+  Assets:99Test:Test99            1000.00 EUR
+  Equity:Opening-Balance
+
+2018-03-26 * "Commodity after amount"
+  Assets:99Test:Test99                   1 EUR
+  Equity:Opening-Balance
+
+2018-03-26 * "Commodity after amount, no space"
+  Assets:99Test:Test99                    1 EUR
+  Equity:Opening-Balance
+
+2018-03-26 * "Commodity before amount"
+  Assets:99Test:Test99                   1 EUR
+  Equity:Opening-Balance
+
+2018-03-26 * "Commodity before amount, no space"
+  Assets:99Test:Test99              1000.00 EUR
+  Equity:Opening-Balance
+
+2018-03-26 * "Commodity after amount, negative"
+  Assets:99Test:Test99                  -1 EUR
+  Equity:Opening-Balance
+
+2018-03-26 * "Commodity after amount, negative, no space"
+  Assets:99Test:Test99                   -1 EUR
+  Equity:Opening-Balance
+
+2018-03-26 * "Commodity before amount, negative"
+  Assets:99Test:Test99                  -3 EUR
+  Equity:Opening-Balance
+
+2018-03-26 * "Commodity before amount, negative"
+  Assets:99Test:Test99                  -2 EUR
+  Equity:Opening-Balance
+
+2018-03-26 * "Commodity symbol after amount"
+  Assets:99Test:Test99                    100 USD
+  Equity:Opening-Balance
+
+2018-03-26 * "Commodity symbol after amount, negative"
+  Assets:99Test:Test99                     -1 USD
+  Equity:Opening-Balance
+
+2018-03-26 * "Commodity symbol before amount"
+  Assets:99Test:Test99                      1 USD
+  Equity:Opening-Balance
+
+2018-03-26 * "Commodity symbol before amount, negative"
+  Assets:99Test:Test99                     -1 USD
+  Equity:Opening-Balance
+
+2018-03-26 * "Commodity symbol after amount, with space"
+  Assets:99Test:Test99                     1 USD
+  Equity:Opening-Balance
+
+2018-03-26 * "Commodity symbol before amount, with space"
+  Assets:99Test:Test99                     1 USD
+  Equity:Opening-Balance
+
+2018-03-26 * "Commodity symbol after amount, negative, with space"
+  Assets:99Test:Test99                    -1 USD
+  Equity:Opening-Balance
+
+2018-03-26 * "Commodity symbol before amount, negative"
+  Assets:99Test:Test99                    -1 USD
+  Equity:Opening-Balance
+
+2018-03-26 * "Commodity after amount, thousand"
+  Assets:99Test:Test99               1000 EUR
+  Equity:Opening-Balance
+
+2018-03-26 * "Commodity before amount, thousands"
+  Assets:99Test:Test99            1000.00 EUR
+  Equity:Opening-Balance
+
+2018-03-26 * "Commodity before amount, thousands, no space"
+  Assets:99Test:Test99             1000.00 EUR
+  Equity:Opening-Balance
+
+2018-03-26 * "Commodity before amount, one million"
+  Assets:99Test:Test99        1000000.00 EUR
+  Equity:Opening-Balance
+
+2018-03-26 * "Simple inline math"
+  Assets:Test1                        1*3 GBP
+  Assets:Test2                          -3 GBP
+
+2018-03-26 * "Simple inline math"
+  Assets:Test1            1 GBP @ 1/1.14 EUR
+  Assets:Test2                       -0.88 EUR
+
+2018-03-26 * "Simple inline math"
+  Assets:Test1       44.06 USD @ 1/1.362 GBP
+  Assets:Test2                      -32.35 GBP
+
+2018-03-26 * "Simple inline math"
+  Assets:Test1                      1 * 3 GBP
+  Assets:Test2                          -3 GBP
+
+2018-03-26 * "Simple inline math"
+  Assets:Test1          1 GBP @ 1 / 1.14 EUR
+  Assets:Test2                       -0.88 EUR
+
+2018-03-26 * "Simple inline math"
+  Assets:Test1     44.06 USD @ 1 / 1.362 GBP
+  Assets:Test2                      -32.35 GBP
+
+2018-04-10 * "Inline math: negative amounts"
+  Expenses:Travel:Airfare       2 * 15.00 GBP
+  Expenses:Travel:Airfare        2*4500 AVIOS
+  Assets:Rewards                2*-4500 AVIOS
+  Liabilities:BA               2 * -15.00 GBP
+
+2018-04-10 * "Inline math"
+  Expenses:Housing:Rent          550.00/2 GBP
+  Assets:Receivable              550.00/2 GBP
+  Assets:Current                   -550.00 GBP
+
+2018-09-27 * "Test amounts without digits before comma separator"
+  Assets:Test                       0.10 EUR
+  Assets:Test                      -0.10 EUR
+  Assets:Test                       0.10 GBP
+  Assets:Test                      -0.10 GBP
+  Assets:Test                       0.10 USD
+  Assets:Test                      -0.10 USD
+
+2020-06-22 txn "Paycheck"
+  Income:Salary                   -4000.00 USD
+  Assets:Bank                      4000.00 USD
+  Income:401k:Match       -4000.00 * 0.05 USD
+  Assets:Investments       4000.00 * 0.05 USD
+
+2020-06-22 txn "Paycheck"
+  Income:Salary                   -4000.00 USD
+  Assets:Bank                      4000.00 USD
+  Income:401k:Match        -4000.00* 0.05 USD
+  Assets:Investments        4000.00* 0.05 USD
+
+2020-06-22 txn "Inline math"
+  Assets:Test1             (4.00 *100.00) USD
+  Assets:Test2
+
+2020-06-22 txn "Inline math"
+  Assets:Test1             (4.00) *100.00 USD
+  Assets:Test2
+
+2020-06-22 txn "Inline math"
+  Assets:Test1        (4.00*2.00) *100.00 USD
+  Assets:Test2
+
+2020-06-22 txn "Inline math"
+  Assets:Test1       (4.00*2.00) * 100.00 USD
+  Assets:Test2
+
+2020-06-22 txn "Inline math"
+  Assets:Test1                2.00* -4.00 USD
+  Assets:Test2
+
+2020-06-27 txn "Define"
+  Assets:Test1              2.00+ 1000.00 EUR
+  Assets:Test2
+
+2020-08-01 * "Amount without commodity"
+  Assets:Test                               10 XXX
+  Assets:Test                              -10 XXX
+
+2020-08-01 * "Amount without commodity"
+  Assets:Test                            10.00 XXX
+  Assets:Test                           -10.00 XXX
+
+2020-08-01 * "Amount without commodity"
+  Assets:Test                             0.50 XXX
+  Assets:Test                            -0.50 XXX
+
+2020-08-01 * "Amount without commodity"
+  Assets:Test                             0.50 XXX
+  Assets:Test                            -0.50 XXX
+
+2020-08-01 * "Amount without commodity"
+  Assets:Test                              0.5 XXX
+  Assets:Test                             -0.5 XXX
+
+2020-08-01 * "Amount without commodity: space between minus and number"
+  Assets:Test                              0.5 XXX
+  Assets:Test                         -0.5 XXX
+

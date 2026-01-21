@@ -1,0 +1,1 @@
+2013-05-18 query "cash" "SELECT SUM(position) WHERE currency = 'USD'"

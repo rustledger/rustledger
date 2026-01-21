@@ -1,0 +1,140 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+
+  // Appearance
+  "theme": "opencode",
+  "tui": {
+    "scroll_speed": 3,
+    "diff_style": "auto"
+  },
+
+  // Models
+  "model": "together/deepseek-ai/DeepSeek-V3",
+  "small_model": "together/deepseek-ai/DeepSeek-V3",
+
+  // Provider settings
+  "provider": {
+    "anthropic": {
+      "options": {
+        "timeout": 600000
+      }
+    }
+  },
+
+  // Permissions - ask before destructive actions
+  "permission": {
+    "edit": "ask",
+    "bash": "ask"
+  },
+
+  // MCP Servers
+  "mcp": {
+    "context7": {
+      "type": "local",
+      "command": ["npx", "-y", "@upstash/context7-mcp@latest"],
+      "enabled": true
+    },
+    "playwright": {
+      "type": "local",
+      "command": ["npx", "-y", "@playwright/mcp@latest"],
+      "enabled": true
+    }
+  },
+
+  // Custom Commands (agents defined in .opencode/agents/)
+  "command": {
+    "check": {
+      "description": "Check all crates compile",
+      "template": "Run `cargo check --all-features --all-targets` and report any errors"
+    },
+    "test": {
+      "description": "Run test suite",
+      "template": "Run `cargo test --all-features` and report results. If tests fail, analyze the failures."
+    },
+    "lint": {
+      "description": "Run lints",
+      "template": "Run `cargo clippy --all-features --all-targets -- -D warnings` and fix any issues"
+    },
+    "fmt": {
+      "description": "Format code",
+      "template": "Run `treefmt` to format all files"
+    },
+    "bench": {
+      "description": "Run benchmarks",
+      "template": "Run `cargo bench` and summarize the results"
+    },
+    "coverage": {
+      "description": "Generate coverage report",
+      "template": "Run `cargo llvm-cov --html` and report coverage percentage"
+    },
+    "audit": {
+      "description": "Security audit",
+      "template": "Run `cargo audit` and `cargo deny check` to find vulnerabilities"
+    },
+    "review": {
+      "description": "Review recent changes",
+      "template": "Use @code-reviewer to review the changes in `git diff HEAD~1` for bugs and issues"
+    },
+    "typecheck": {
+      "description": "Run type checking with detailed errors",
+      "template": "Run `cargo check --all-features --all-targets 2>&1` and analyze any type errors. For each error, explain: 1) What the error means, 2) Why it occurred, 3) How to fix it. Use rust-analyzer diagnostics if available."
+    }
+  },
+
+  // File watcher ignore patterns
+  "watcher": {
+    "ignore": [
+      "target/**",
+      "result/**",
+      "result-*/**",
+      "pkg/**",
+      "states/**",
+      "coverage/**",
+      "traces/**",
+      ".git/**",
+      "node_modules/**"
+    ]
+  },
+
+  // Behavior
+  "share": "manual",
+  "autoupdate": "notify",
+
+  // LSP Servers - provides diagnostics, go-to-definition, type info to AI
+  "lsp": {
+    "rust": {
+      "command": ["rust-analyzer"],
+      "extensions": [".rs"],
+      "priority": 10,
+      "initialization": {
+        "cargo": {
+          "allFeatures": true,
+          "loadOutDirsFromCheck": true
+        },
+        "checkOnSave": {
+          "command": "clippy"
+        },
+        "procMacro": {
+          "enable": true
+        }
+      }
+    },
+    "python": {
+      "command": ["pyright", "--stdio"],
+      "extensions": [".py"],
+      "priority": 10
+    },
+    "typescript": {
+      "command": ["typescript-language-server", "--stdio"],
+      "extensions": [".ts", ".js", ".tsx", ".jsx"],
+      "priority": 10
+    }
+  },
+
+  // Plugins
+  "plugin": [
+    "cc-safety-net",
+    "@simonwjackson/opencode-direnv",
+    "@ramtinj95/opencode-tokenscope"
+  ]
+}

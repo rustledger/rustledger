@@ -14,6 +14,8 @@
 use crate::cmd::completions::ShellType;
 use anyhow::{Context, Result};
 use clap::Parser;
+use rustledger_booking::{BookingEngine, expand_pads};
+use rustledger_core::BookingMethod;
 use rustledger_core::Directive;
 use rustledger_loader::Loader;
 use rustledger_query::{Executor, Value, parse as parse_query};
@@ -133,12 +135,38 @@ fn run(args: &Args) -> Result<()> {
         anyhow::bail!("file has parse errors");
     }
 
-    // Get directives (move, not clone)
-    let directives: Vec<_> = load_result
+    // Get directives, book transactions, then expand pads
+    // This matches Python beancount behavior where:
+    // 1. Transactions are interpolated (fill in missing amounts)
+    // 2. Pad directives are expanded into synthetic transactions (using interpolated amounts)
+    // 3. Queries run on fully booked entries
+    let raw_directives: Vec<_> = load_result
         .directives
         .into_iter()
         .map(|s| s.value)
         .collect();
+
+    // Step 1: Book transactions (lot matching + interpolation)
+    // This fills in missing amounts BEFORE pad expansion
+    let mut booking_engine = BookingEngine::with_method(BookingMethod::Fifo);
+    let booked_directives: Vec<_> = raw_directives
+        .into_iter()
+        .map(|d| {
+            if let Directive::Transaction(txn) = &d {
+                // Book and interpolate: fills in empty cost specs and missing amounts
+                if let Ok(result) = booking_engine.book_and_interpolate(txn) {
+                    // Apply the booked transaction to update inventory
+                    booking_engine.apply(&result.transaction);
+                    return Directive::Transaction(result.transaction);
+                }
+            }
+            d
+        })
+        .collect();
+
+    // Step 2: Expand pad directives into synthetic transactions
+    // Now pad processing sees the interpolated amounts and calculates correct padding
+    let directives = expand_pads(&booked_directives);
 
     if args.verbose {
         eprintln!("Loaded {} directives", directives.len());
@@ -230,12 +258,26 @@ fn write_text<W: Write>(
         }
     }
 
-    // Print header
+    // Determine which columns are numeric (for right-alignment)
+    let is_numeric_col: Vec<bool> = (0..result.columns.len())
+        .map(|i| {
+            result.rows.first().is_some_and(|row| {
+                row.get(i)
+                    .is_some_and(|v| matches!(v, Value::Integer(_) | Value::Number(_)))
+            })
+        })
+        .collect();
+
+    // Print header (right-align numeric column headers to match Python)
     for (i, col) in result.columns.iter().enumerate() {
         if i > 0 {
             write!(writer, "  ")?;
         }
-        write!(writer, "{:width$}", col, width = widths[i])?;
+        if i < is_numeric_col.len() && is_numeric_col[i] {
+            write!(writer, "{:>width$}", col, width = widths[i])?;
+        } else {
+            write!(writer, "{:width$}", col, width = widths[i])?;
+        }
     }
     writeln!(writer)?;
 
@@ -256,7 +298,12 @@ fn write_text<W: Write>(
             }
             let formatted = format_value(value, numberify);
             if i < widths.len() {
-                write!(writer, "{:width$}", formatted, width = widths[i])?;
+                // Right-align numeric columns to match Python beancount
+                if i < is_numeric_col.len() && is_numeric_col[i] {
+                    write!(writer, "{:>width$}", formatted, width = widths[i])?;
+                } else {
+                    write!(writer, "{:width$}", formatted, width = widths[i])?;
+                }
             } else {
                 write!(writer, "{formatted}")?;
             }
@@ -325,44 +372,129 @@ fn write_beancount<W: Write>(result: &rustledger_query::QueryResult, writer: &mu
     Ok(())
 }
 
+/// Format a decimal for display, preserving the original precision.
+/// Python beancount preserves user-specified precision for all values,
+/// including share quantities like "11.784 RGAGX".
+fn format_decimal_for_display(n: rust_decimal::Decimal) -> String {
+    // Preserve original precision - don't round
+    n.to_string()
+}
+
 fn format_value(value: &Value, numberify: bool) -> String {
     match value {
         Value::String(s) => s.clone(),
-        Value::Number(n) => n.to_string(),
+        Value::Number(n) => format_decimal_for_display(*n),
         Value::Integer(i) => i.to_string(),
         Value::Date(d) => d.to_string(),
         Value::Boolean(b) => b.to_string(),
         Value::Amount(a) => {
             if numberify {
-                a.number.to_string()
+                format_decimal_for_display(a.number)
             } else {
-                format!("{} {}", a.number, a.currency)
+                format!("{} {}", format_decimal_for_display(a.number), a.currency)
             }
         }
         Value::Position(p) => {
             if numberify {
-                p.units.number.to_string()
+                format_decimal_for_display(p.units.number)
             } else {
-                let mut s = format!("{} {}", p.units.number, p.units.currency);
+                let mut s = format!(
+                    "{} {}",
+                    format_decimal_for_display(p.units.number),
+                    p.units.currency
+                );
                 if let Some(ref cost) = p.cost {
+                    // Cost preserves its original precision (already stored properly)
                     s.push_str(&format!(" {{{} {}}}", cost.number, cost.currency));
                 }
                 s
             }
         }
         Value::Inventory(inv) => {
-            let positions: Vec<String> = inv
-                .positions()
+            // First, aggregate positions with identical costs (matching Python beancount)
+            // This is done at display time to keep core inventory operations O(1)
+            use rustledger_core::Position;
+            use std::collections::HashMap;
+
+            let mut aggregated: HashMap<(String, Option<String>), Position> = HashMap::new();
+            for pos in inv.positions().iter().filter(|p| !p.is_empty()) {
+                // Key: (currency, cost_key) where cost_key uniquely identifies the cost
+                // Use normalize() on the cost number to ensure consistent key generation
+                // (e.g., 50 and 50.00 should produce the same key)
+                let cost_key = pos.cost.as_ref().map(|c| {
+                    format!(
+                        "{}|{}|{:?}|{:?}",
+                        c.number.normalize(),
+                        c.currency,
+                        c.date,
+                        c.label
+                    )
+                });
+                let key = (pos.units.currency.to_string(), cost_key);
+
+                aggregated
+                    .entry(key)
+                    .and_modify(|existing| {
+                        existing.units.number += pos.units.number;
+                    })
+                    .or_insert_with(|| pos.clone());
+            }
+
+            // Sort positions matching beanquery's positionsortkey():
+            // 1. Currency (alphabetically)
+            // 2. Quantity (descending - larger quantities first)
+            // 3. Cost currency, cost number, cost date
+            let mut sorted_positions: Vec<_> = aggregated.values().collect();
+            sorted_positions.sort_by(|a, b| {
+                // 1. Currency alphabetically
+                if a.units.currency != b.units.currency {
+                    return a.units.currency.cmp(&b.units.currency);
+                }
+
+                // 2. Quantity descending (larger first)
+                let qty_cmp = b.units.number.cmp(&a.units.number); // Note: b before a for descending
+                if qty_cmp != std::cmp::Ordering::Equal {
+                    return qty_cmp;
+                }
+
+                // 3. Cost details
+                match (&a.cost, &b.cost) {
+                    (Some(ca), Some(cb)) => {
+                        // Cost currency
+                        if ca.currency != cb.currency {
+                            return ca.currency.cmp(&cb.currency);
+                        }
+                        // Cost number (descending - larger cost first, matching Python)
+                        if ca.number != cb.number {
+                            return cb.number.cmp(&ca.number);
+                        }
+                        // Cost date
+                        ca.date.cmp(&cb.date)
+                    }
+                    (Some(_), None) => std::cmp::Ordering::Greater,
+                    (None, Some(_)) => std::cmp::Ordering::Less,
+                    (None, None) => std::cmp::Ordering::Equal,
+                }
+            });
+
+            let positions: Vec<String> = sorted_positions
                 .iter()
+                .filter(|p| !p.is_empty()) // Filter again in case aggregation resulted in zero
                 .map(|p| {
                     if numberify {
-                        p.units.number.to_string()
+                        format_decimal_for_display(p.units.number)
                     } else {
-                        format!("{} {}", p.units.number, p.units.currency)
+                        let mut s = format!("{} {}", format_decimal_for_display(p.units.number), p.units.currency);
+                        if let Some(ref cost) = p.cost {
+                            // Cost preserves its original precision (already stored properly)
+                            // Don't include date in display (matches Python beancount behavior)
+                            s.push_str(&format!(" {{{} {}}}", cost.number, cost.currency));
+                        }
+                        s
                     }
                 })
                 .collect();
-            positions.join(", ")
+            positions.join("   ")
         }
         Value::StringSet(set) => set.join(", "),
         Value::Null => String::new(),

@@ -1,0 +1,10 @@
+2013-05-18 * ""
+  string: "Something"
+  account: Assets:Investments:Cash
+  date: 2012-01-01
+  currency: HOOL
+  tag: #trip-florida
+  number: 345.67
+  amount: 345.67 USD
+  boolt: TRUE
+  boolf: FALSE

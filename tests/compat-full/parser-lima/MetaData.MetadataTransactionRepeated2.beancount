@@ -1,0 +1,8 @@
+2013-05-18 * ""
+  test: "Bananas"
+  test: "Apples"
+  test: "Oranges"
+  Assets:Investments   100 USD
+    test: "Mangos"
+    test: "Pineapple"
+  Income:Investments  -100 USD

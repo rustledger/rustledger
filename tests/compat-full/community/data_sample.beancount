@@ -1,0 +1,93 @@
+2016-11-01 open Assets:Account-Bank                             USD
+2016-11-01 open Assets:Account-Cash                             USD
+2016-11-01 open Assets:Account-Mutual-Fund                      MYSHARE
+2016-11-01 open Assets:Account-Receivable                       USD
+2016-11-01 open Assets:Account-Stock                            APPL
+2016-11-01 open Assets:Account-Trading                          CORP
+2016-11-01 open Assets:Current                                  USD
+  description: "Current"
+2016-11-01 open Assets:Current:Brazilian-Money                  BRL
+2016-11-01 open Assets:Current:Checking                         USD
+  description: "Checking"
+2016-11-01 open Assets:Current:Wallet                           USD
+  description: "Wallet"
+2016-11-01 open Assets:Receivables                              USD
+  description: "Receivables"
+2016-11-01 open Equity:Opening-Balances                         USD
+  description: "Opening Balances"
+2016-11-01 open Expenses:Food                                   USD
+2016-11-01 open Expenses:House                                  USD
+2016-11-01 open Expenses:Insurance                              USD
+2016-11-01 open Expenses:Tax                                    USD
+2016-11-01 open Income:Salary                                   USD
+  description: "Salary"
+2016-11-01 open Liabilities:Account-Credit-Card                 USD
+2016-11-01 open Liabilities:Account-Payable                     USD
+2016-11-01 open Liabilities:Credit-Card                         USD
+  description: "Credit Card"
+
+2016-11-01 commodity USD
+  fullname: "US Dollar"
+
+2016-11-01 commodity BRL
+  fullname: "Brazilian Real"
+
+2016-11-01 commodity APPL
+  fullname: "Apple"
+
+2016-11-01 commodity MYSHARE
+  fullname: "My Share"
+
+2016-11-01 commodity CORP
+  fullname: "Corporation"
+
+2016-11-10 price BRL                                   0.4 USD
+2016-11-01 price BRL                                  0.29 USD
+
+2016-11-01 * "Everything I have so far"
+  Assets:Current:Checking   100.0 USD
+  Equity:Opening-Balances  -100.0 USD
+
+2016-11-01 * "Bought BRL 100 @ USD 0.29"
+  Assets:Current:Brazilian-Money  100.0 BRL                                    
+  Assets:Current:Checking         -29.0 USD @ 3.448275862068965517241379310 BRL
+
+2016-11-02 * "Withdraw"
+  Assets:Current:Wallet     100.0 USD
+  Assets:Current:Checking  -100.0 USD
+
+2016-11-05 * "Salary"
+  Expenses:Tax               90.0 USD
+  Expenses:Insurance         10.0 USD
+  Assets:Current:Checking   800.0 USD
+  Income:Salary            -900.0 USD
+
+2016-11-10 * "Rent"
+  Expenses:House            100.0 USD
+  Assets:Current:Checking  -100.0 USD
+
+2016-11-10 * "Bought BRL 100 @ USD 0.40"
+  Assets:Current:Brazilian-Money  100.0 BRL          
+  Assets:Current:Checking         -40.0 USD @ 2.5 BRL
+
+2016-11-08 * "Dinner with Friend"
+  Expenses:Food             100.0 USD
+    memo: "My cut"
+  Assets:Receivables        100.0 USD
+    memo: "Friend will pay me on 12th"
+  Liabilities:Credit-Card  -180.0 USD
+    memo: "Paying for everyone"
+  Assets:Current:Wallet     -20.0 USD
+    memo: "Tip in Cash"
+
+2016-11-11 * "Lunch"
+  Expenses:Food           50.0 USD
+  Assets:Current:Wallet  -50.0 USD
+
+2016-11-12 * "Friend paid me for Dinner"
+  Assets:Current:Wallet   100.0 USD
+  Assets:Receivables     -100.0 USD
+
+2016-11-04 * "Dinner"
+  Expenses:Food             50.0 USD
+  Liabilities:Credit-Card  -50.0 USD

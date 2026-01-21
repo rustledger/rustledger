@@ -1,0 +1,28 @@
+;; Account: nexo
+;; Date: 
+;; Name: 
+
+2022-10-11 * 
+  src_details: "approved / 0xf644abcd1234c1c1f1176abc870a1a1234567890abcd1234567890abcde"
+  src_ts: "2022-10-11 20:40:40"
+  src_tx_id: "TRANS004"
+  Assets:Nexo  2050.10000000 BUSD
+
+2022-10-12 * 
+  src_details: "approved / Exchange Binance USD to USD Coin"
+  src_ts: "2022-10-12 20:50:11"
+  src_tx_id: "TRANS003"
+  Assets:Nexo  -2050.10000000 BUSD
+  Assets:Nexo   2042.50000000 USDC
+
+2022-10-25 * 
+  src_ts: "2022-10-25 08:05:12"
+  src_tx_id: "TRANS002"
+  Assets:Nexo            10.50000000 USDC
+  Income:Nexo:Interest  -10.50000000 USDC
+
+2022-11-05 * 
+  src_details: "approved / USDT withdrawal"
+  src_ts: "2022-11-05 19:32:15"
+  src_tx_id: "TRANS001"
+  Assets:Nexo  -10050.20000000 USDT

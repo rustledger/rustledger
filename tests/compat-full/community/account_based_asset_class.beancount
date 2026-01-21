@@ -1,0 +1,63 @@
+option "operating_currency" "CAD"
+
+2018-01-01 commodity CAD
+  asset-class: "cash"
+  asset-subclass: "cash"
+
+2018-01-01 commodity MSFT
+  asset-class: "equity"
+  asset-subclass: "us-stock"
+
+2018-01-01 commodity VAB
+  asset-class: "fixed"
+  asset-subclass: "ca-bond"
+
+2018-01-01 open Equity:Opening-Balances
+
+2018-01-01 open Assets:CA:Employer:PensionPlan
+
+2018-01-01 open Assets:CA:Employer:PensionPlan:Cash CAD
+  portfolio: "pension"
+
+2018-01-01 open Assets:CA:Employer:PensionPlan:CanadianStock CAD
+  portfolio: "pension"
+  asset-class: "equity"
+  asset-subclass: "ca-stock"
+
+2018-01-01 open Assets:CA:Questrade:RRSP
+
+2018-01-01 open Assets:CA:Questrade:RRSP:Cash CAD
+  portfolio: "pension"
+
+2018-01-01 open Assets:CA:Questrade:RRSP:MSFT MSFT
+  portfolio: "pension"
+
+2018-01-01 open Assets:CA:Questrade:RRSP:VAB VAB
+  portfolio: "pension"
+
+2018-01-01 custom "allocation" "pension" "ca-stock" 30
+2018-01-01 custom "allocation" "pension" "us-stock" 30
+2018-01-01 custom "allocation" "pension" "ca-bond" 40
+
+2018-01-02 * "Transfer money to pension"
+    Assets:CA:Employer:PensionPlan:Cash 1000 CAD
+    Equity:Opening-Balances
+
+2018-01-02 * "Transfer money to RRSP"
+    Assets:CA:Questrade:RRSP:Cash 1000 CAD
+    Equity:Opening-Balances
+
+2018-01-03 * "Buy canadian stock"
+    Assets:CA:Employer:PensionPlan:CanadianStock 700 CAD
+    Assets:CA:Employer:PensionPlan:Cash
+
+2018-01-03 * "Buy MSFT stock"
+    Assets:CA:Questrade:RRSP:MSFT 50 MSFT {12 CAD}
+    Assets:CA:Questrade:RRSP:Cash
+
+2018-01-03 * "Buy bond ETF"
+    Assets:CA:Questrade:RRSP:VAB 80 VAB {4 CAD}
+    Assets:CA:Questrade:RRSP:Cash
+
+2018-01-04 price MSFT 12 CAD
+2018-01-04 price VAB 4 CAD

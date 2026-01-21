@@ -1,0 +1,4 @@
+2014-04-20 * "Links and tags on subsequent lines" #basetag ^baselink
+  #tag1 #tag2 ^link1
+  Assets:Checking         100 USD
+  Assets:Checking         -99 USD

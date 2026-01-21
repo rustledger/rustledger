@@ -181,7 +181,8 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 /// Cache version - increment when format changes.
 /// v1: Initial release with string-based Decimal/NaiveDate
 /// v2: Binary Decimal (16 bytes) and `NaiveDate` (i32 days)
-const CACHE_VERSION: u32 = 2;
+/// v3: Fixed account type defaults in `CachedOptions`
+const CACHE_VERSION: u32 = 3;
 
 /// Cache header stored at the start of cache files.
 #[derive(Debug, Clone)]

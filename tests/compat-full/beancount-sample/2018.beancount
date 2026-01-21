@@ -1,0 +1,4 @@
+include "accounts.beancount"
+include "2018-01-1.beancount"
+include "2018-01-2.beancount"
+include "2018-01-3.beancount"

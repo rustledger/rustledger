@@ -302,15 +302,15 @@ impl Loader {
         }
 
         // Read file (decrypting if necessary)
+        // Use lossy UTF-8 decoding to handle non-UTF-8 files gracefully (like Python beancount)
         let source: std::sync::Arc<str> = if is_encrypted_file(path) {
             decrypt_gpg_file(path)?.into()
         } else {
-            fs::read_to_string(path)
-                .map_err(|e| LoadError::Io {
-                    path: path.to_path_buf(),
-                    source: e,
-                })?
-                .into()
+            let bytes = fs::read(path).map_err(|e| LoadError::Io {
+                path: path.to_path_buf(),
+                source: e,
+            })?;
+            String::from_utf8_lossy(&bytes).into_owned().into()
         };
 
         // Add to source map (Arc::clone is cheap - just increments refcount)

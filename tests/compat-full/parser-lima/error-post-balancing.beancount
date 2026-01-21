@@ -1,0 +1,28 @@
+; exploring post balancing
+
+1970-01-01 commodity NZD
+
+1970-01-01 commodity GBP
+
+2016-03-01 open Assets:Bank:Current NZD
+
+2016-03-01 open Assets:Bank:Uk GBP
+
+2016-03-01 open Expenses:Groceries NZD
+
+2016-03-01 open Expenses:Beer NZD
+
+2016-03-01 open Expenses:Luxuries NZD
+
+2023-05-29 * "Pak'n'Save"
+
+2023-05-29 * "Fresh Choice"
+  Assets:Bank:Current                        -100 NZD
+  Expenses:Groceries                           10 NZD
+  Expenses:Beer                                20 NZD
+
+2023-05-29 * "New World"
+  Assets:Bank:Current                        -100 NZD
+  Expenses:Groceries
+  Expenses:Beer
+  Expenses:Luxuries                            60 NZD

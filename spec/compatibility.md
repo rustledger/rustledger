@@ -50,6 +50,44 @@ Processing order and internal representation may differ as long as results match
 | Error ordering | Undefined | By source location | UX improvement |
 | Hash/ID generation | Python hash | Different algorithm | Cosmetic only |
 
+### Known Parse Differences
+
+These are syntax constructs where rustledger's parser behavior differs from Python beancount:
+
+| Syntax | Python | Rust | Planned Fix |
+|--------|--------|------|-------------|
+| Numbers with trailing decimal (`1.`) | Accepts as 1.0 | Parse error | Under consideration |
+| UTF-8 decode errors | May partially parse | Parse error | No (strict UTF-8 is safer) |
+| Org-mode style headers (`* Section`) | Accepted | Parse error | Under consideration |
+
+#### Non-English Account Types (Supported)
+
+rustledger supports non-English account type prefixes via options, matching Python beancount:
+
+```beancount
+option "name_assets" "Aktiva"
+option "name_expenses" "Ausgaben"
+option "name_liabilities" "Schulden"
+option "name_income" "Einnahmen"
+option "name_equity" "Eigenkapital"
+
+2000-01-01 open Aktiva:Bank USD
+2000-01-01 open Ausgaben:Food USD
+```
+
+The options must be placed at the beginning of the file before account usage.
+
+#### Trailing Decimal Numbers
+
+Some ledger2beancount conversions produce numbers like `1.` (integer with trailing decimal):
+```beancount
+2024-01-01 * "Test"
+  Assets:Test  1. USD   ; Python accepts, Rust rejects
+  Assets:Other
+```
+
+**Workaround**: Use `1.0` or `1` instead of `1.`
+
 ## Plugin Compatibility
 
 ### Python Plugins (NOT supported)
@@ -243,6 +281,63 @@ We track the beancount syntax changelog and update accordingly:
 | Change | Version | rustledger Status |
 |--------|---------|---------------------|
 | (none currently) | | |
+
+## Deprecated Syntax Policy
+
+### Philosophy
+
+rustledger follows Python beancount's approach to deprecated syntax:
+
+1. **Accept deprecated syntax** to maintain compatibility with existing files
+2. **Emit warnings** (not errors) for deprecated constructs
+3. **No firm removal timeline** - deprecated syntax may remain indefinitely
+4. **Document alternatives** in warning messages
+
+This ensures users can migrate to rustledger without modifying working ledger files.
+
+### Currently Supported Deprecated Syntax
+
+| Syntax | Status | Alternative | Notes |
+|--------|--------|-------------|-------|
+| Pipe separator `"payee" \| "narration"` | Deprecated | `"payee" "narration"` | Warn on use |
+
+### Pipe Separator (`|`)
+
+**Deprecated syntax**:
+```beancount
+2024-01-15 * "Coffee Shop" | "Morning coffee"
+  Expenses:Food  5.00 USD
+  Assets:Cash
+```
+
+**Preferred syntax**:
+```beancount
+2024-01-15 * "Coffee Shop" "Morning coffee"
+  Expenses:Food  5.00 USD
+  Assets:Cash
+```
+
+**Behavior**: rustledger parses both forms identically. The pipe symbol is simply ignored as a separator between payee and narration strings.
+
+**Warning**: When the pipe syntax is detected, a deprecation warning is emitted:
+```
+warning: deprecated pipe separator '|' between payee and narration
+  --> ledger.beancount:5:23
+   |
+ 5 | 2024-01-15 * "Coffee Shop" | "Morning coffee"
+   |                            ^ use space instead
+   |
+   = help: Remove the pipe symbol: "Coffee Shop" "Morning coffee"
+```
+
+### Future Deprecations
+
+When Python beancount deprecates additional syntax:
+
+1. Track the deprecation in beancount changelog
+2. Implement support with warning emission
+3. Document in this table
+4. Never remove support without major version bump
 
 ## Migration Guide
 

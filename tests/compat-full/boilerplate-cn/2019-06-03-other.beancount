@@ -1,0 +1,38 @@
+2019-05-04 * "吃饭同事同事付的钱, 转给他"
+  card: "9999"
+  Expenses:Food:Meals                  20.00 CNY
+  Assets:CN:Saving:Wechat             -20.00 CNY
+
+2019-05-31 * "支付房租"
+  Expenses:Home:Rental                 5000 CNY
+  Assets:CN:Saving:CMB
+
+2019-05-29 * "借给LiuNeng5000元"
+  Assets:Receivables:LiuNeng 5000 CNY
+  Assets:CN:Saving:CMB
+
+2019-05-31 * "LiuNeng还款5000元"
+  Assets:CN:Saving:CMB
+  Assets:Receivables:LiuNeng -5000 CNY
+
+2019-05-29 * "向ZhaoSi借款2000元"
+  Assets:CN:Saving:CMB 2000 CNY
+  Liabilities:Payables:ZhaoSi
+
+2019-05-29 * "还ZhaoSi 1999元"
+  Assets:CN:Saving:CMB -1999 CNY
+  Liabilities:Payables:ZhaoSi 1999 CNY
+
+2019-05-20 * "出差吃了一顿饭" #meals #xx-trip-2019-may
+  ; 出差吃饭花了 50 USD, 银行自动购汇
+  Liabilities:CN:CreditCard:SPDB -50 USD @ 6.86 CNY
+  Assets:Receivables:YourEmployer
+
+2019-05-20 * "出差打车" #transport #xx-trip-2019-may
+  Liabilities:CN:CreditCard:SPDB -30 USD @ 6.85 CNY
+  Assets:Receivables:YourEmployer
+
+2019-05-30 * "收到出差报销" #xx-trip-2019-may
+  Assets:Receivables:YourEmployer
+  Assets:CN:Saving:CMB                 548.50 CNY
+

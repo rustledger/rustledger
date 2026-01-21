@@ -1,0 +1,9 @@
+2013-05-01 open Assets:Cash   USD,CAD,EUR
+2013-05-02 close Assets:US:BestBank:Checking
+2013-05-03 pad Assets:US:BestBank:Checking  Equity:Opening-Balances
+2013-05-04 event "location" "New York, USA"
+2013-05-05 * "Payee" "Narration"
+  Assets:US:BestBank:Checking   100.00 USD
+  Assets:Cash                  -100.00 USD
+2013-05-06 note Assets:US:BestBank:Checking  "Blah, di blah."
+2013-05-07 price USD   1.0290 CAD

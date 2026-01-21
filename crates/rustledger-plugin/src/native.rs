@@ -445,9 +445,10 @@ impl NativePlugin for AutoAccountsPlugin {
         use std::collections::{HashMap, HashSet};
 
         let mut opened_accounts: HashSet<String> = HashSet::new();
-        let mut account_first_use: HashMap<String, String> = HashMap::new(); // account -> date
+        let mut account_first_use: HashMap<String, String> = HashMap::new(); // account -> earliest date
 
-        // First pass: find all open directives and first use of each account
+        // First pass: find all open directives and EARLIEST use of each account
+        // (directives may not be in date order in the input)
         for wrapper in &input.directives {
             match &wrapper.data {
                 DirectiveData::Open(data) => {
@@ -457,20 +458,40 @@ impl NativePlugin for AutoAccountsPlugin {
                     for posting in &txn.postings {
                         account_first_use
                             .entry(posting.account.clone())
+                            .and_modify(|existing| {
+                                if wrapper.date < *existing {
+                                    existing.clone_from(&wrapper.date);
+                                }
+                            })
                             .or_insert_with(|| wrapper.date.clone());
                     }
                 }
                 DirectiveData::Balance(data) => {
                     account_first_use
                         .entry(data.account.clone())
+                        .and_modify(|existing| {
+                            if wrapper.date < *existing {
+                                existing.clone_from(&wrapper.date);
+                            }
+                        })
                         .or_insert_with(|| wrapper.date.clone());
                 }
                 DirectiveData::Pad(data) => {
                     account_first_use
                         .entry(data.account.clone())
+                        .and_modify(|existing| {
+                            if wrapper.date < *existing {
+                                existing.clone_from(&wrapper.date);
+                            }
+                        })
                         .or_insert_with(|| wrapper.date.clone());
                     account_first_use
                         .entry(data.source_account.clone())
+                        .and_modify(|existing| {
+                            if wrapper.date < *existing {
+                                existing.clone_from(&wrapper.date);
+                            }
+                        })
                         .or_insert_with(|| wrapper.date.clone());
                 }
                 _ => {}
@@ -496,8 +517,19 @@ impl NativePlugin for AutoAccountsPlugin {
         // Add existing directives
         new_directives.extend(input.directives);
 
-        // Sort by date
-        new_directives.sort_by(|a, b| a.date.cmp(&b.date));
+        // Sort by date, with Open directives before other types on the same date.
+        // This ensures accounts are opened before they're used.
+        new_directives.sort_by(|a, b| {
+            match a.date.cmp(&b.date) {
+                std::cmp::Ordering::Equal => {
+                    // On same date, Open comes first
+                    let a_is_open = a.directive_type == "open";
+                    let b_is_open = b.directive_type == "open";
+                    b_is_open.cmp(&a_is_open) // true > false, so opens come first
+                }
+                other => other,
+            }
+        });
 
         PluginOutput {
             directives: new_directives,

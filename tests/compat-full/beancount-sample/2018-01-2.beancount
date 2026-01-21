@@ -1,0 +1,8 @@
+;; -*- mode: beancount -*-
+**** /Users/lidongchao/git/BeancountSample/Csv/2018-01-2-utf8.csv
+
+2018-01-01 * "App Store & Apple Music" "App Store & Apple Music: 于 01.01完成的购买(花呗)"
+  Liabilities:VirtualCard:Huabei  -6 CNY
+  Expenses:Fun:SoftwareAndGame          
+
+

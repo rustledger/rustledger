@@ -1,0 +1,31 @@
+# INPUT
+2016-01-06 * "Foo"
+  Assets:US:EUR  -2.50 USD
+
+# TRAINING
+2016-01-01 open Assets:US:CHF USD
+2016-01-01 open Assets:US:EUR USD
+2016-01-01 open Assets:US:USD USD
+2016-01-01 open Expenses:Food:Swiss USD
+2016-01-01 open Expenses:Food:Europe USD
+2016-01-01 open Expenses:Food:Usa USD
+2016-01-06 * "Foo"
+  Assets:US:CHF  -2.50 USD
+  Expenses:Food:Swiss
+2016-01-06 * "Foo"
+  Expenses:Food:Europe
+  Assets:US:EUR  -2.50 USD
+2016-01-06 * "Foo"
+  Expenses:Food:Europe
+  Assets:US:EUR  -2.50 USD
+2016-01-06 * "Foo"
+  Expenses:Food:Usa
+  Assets:US:EUR  -2.50 USD
+2016-01-06 * "Foo"
+  Assets:US:USD  -2.50 USD
+  Expenses:Food:Usa
+
+# EXPECTED
+2016-01-06 * "Foo"
+  Expenses:Food:Europe
+  Assets:US:EUR         -2.50 USD

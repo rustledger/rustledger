@@ -1,0 +1,5 @@
+2010-01-01 close Assets:Before
+2010-01-01 *
+  Assets:Before   100.00 USD
+  Assets:After   -100.00 USD
+2000-01-01 open Assets:Before

@@ -1,0 +1,6 @@
+2019-01-01 open Assets:Bank:Checking
+2019-01-01 open Expenses:Home
+
+2019-01-01 * "Payee" "A description" ^ER-some-id
+  Assets:Bank:Checking  300.00 EUR
+  Expenses:Home

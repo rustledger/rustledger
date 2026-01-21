@@ -1,0 +1,30 @@
+;; Account: wise_csv
+;; Date: 2024-01-23
+;; Name: wise-personal-new-format-EUR.csv
+
+2024-01-20 * "Restaurant New York" ""
+  time: "14:30:25"
+  converted: "150.00 PLN (4.22535)"
+  src_id: "CARD-2001"
+  Assets:Wise:EUR     -35.50 EUR
+  Expenses:Fees:Wise    0.10 EUR
+
+2024-01-21 * "Tech Store" ""
+  time: "09:15:00"
+  src_id: "CARD-2002"
+  Assets:Wise:EUR  -75.00 EUR
+
+2024-01-22 * "Refund Store" ""
+  time: "16:45:30"
+  src_id: "CARD-2003"
+  Assets:Wise:EUR  120.00 EUR
+
+2024-01-23 * "John Smith" "Sent money to John Smith"
+  time: "11:20:15"
+  converted: "255.00 GBP (0.85000)"
+  src_desc: "Sent money to John Smith"
+  src_id: "TRANSFER-2001"
+  Assets:Wise:EUR     -300.00 EUR
+  Expenses:Fees:Wise     1.50 EUR
+
+2024-01-24 balance Assets:Wise:EUR                                 2009.50 EUR

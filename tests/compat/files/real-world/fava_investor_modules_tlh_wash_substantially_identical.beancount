@@ -1,0 +1,32 @@
+option "title" "Test"
+option "operating_currency" "USD"
+option "render_commas" "True"
+
+2010-01-01 open Assets:Investments:Taxable:XTrade
+2010-01-01 open Assets:Investments:Tax-Deferred:YTrade
+2010-01-01 open Assets:Bank
+
+2010-01-01 custom "fava-extension" "fava_investor" "{
+  'tlh' : {
+     'account_field': 'account',
+     'accounts_pattern': 'Assets:Investments:Taxable',
+     'loss_threshold': 50,
+     'wash_pattern': 'Assets:Investments',
+  }
+}"
+
+2010-01-01 open Assets:Investments:Taxable:Brokerage
+2010-01-01 open Assets:Bank
+
+2010-01-01 commodity BNCT
+ a__substidenticals: "ORNG"
+
+2022-01-01 * "Buy stock"
+   Assets:Investments:Taxable:Brokerage 1 BNCT {{200 USD}}
+   Assets:Bank
+
+2022-10-15 * "Buy stock"
+   Assets:Investments:Taxable:Brokerage 1 ORNG {{1 USD}}
+   Assets:Bank
+
+2022-10-19 price BNCT 100 USD

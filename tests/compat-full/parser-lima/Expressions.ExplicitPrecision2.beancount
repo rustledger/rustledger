@@ -1,0 +1,4 @@
+2021-09-19 balance Assets:US:Checking   (1 + 5) / 2.1 USD
+; ANOMALY: this option is currently unsupported by Lima
+; see the discussion on precision in Arithmetic.NumberExprDifferentPlaces test
+; option "decimal_evaluation_precision" "5"

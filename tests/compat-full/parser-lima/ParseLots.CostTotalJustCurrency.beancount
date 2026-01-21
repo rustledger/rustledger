@@ -1,0 +1,4 @@
+2014-01-01 *
+  Assets:Invest:AAPL   20 AAPL {USD}
+  Assets:Invest:AAPL   20 AAPL { # USD}
+  Assets:Invest:Cash    0 USD

@@ -1,0 +1,90 @@
+option "title" "Portfolio Demo"
+
+option "operating_currency" "USD"
+
+; plugin "beancount_plugins_xentac.plugins.unrealized_periodic" "Unrealized"
+
+2010-01-01 custom "fava-extension" "fava_classy_portfolio" "[
+        ('account_open_metadata_pattern', ('portfolio', 'uninvested')),
+        ('account_open_metadata_pattern', ('portfolio', 'core')),
+    ]"
+
+
+include "portfolio-demo-prices.beancount"
+
+2010-01-01 open Assets:Cash
+    portfolio: "uninvested"
+2010-01-01 open Assets:Investments:SPY
+    portfolio: "core"
+2010-01-01 open Assets:Investments:SLYV
+    portfolio: "core"
+2010-01-01 open Assets:Investments:IAU
+    portfolio: "core"
+2010-01-01 open Assets:Investments:VLGSX
+    portfolio: "core"
+2010-01-01 open Assets:Investments:VSBSX
+    portfolio: "core"
+
+2010-01-01 open Income:Job
+
+2010-01-01 commodity USD
+
+2010-01-01 commodity SPY
+  name: "SPDR S&P 500 ETF (SPY)"
+  asset-class: "Stock"
+  asset-subclass: "US-Total Domestic Market"
+  price: "USD:yahoo/SPY"
+
+2010-01-01 commodity SLYV
+  name: "SPDR S&P 600 Small Cap Value ETF (SPY)"
+  asset-class: "Stock"
+  asset-subclass: "US-Small Cap Value"
+  price: "USD:yahoo/SLYV"
+
+2005-01-21 commodity IAU
+  name: "iShares Gold Trust"
+  asset-class: "Metals"
+  asset-subclass: "Gold"
+  price: "USD:yahoo/IAU"
+
+2010-01-01 commodity VLGSX
+  name: "Vanguard Long-Term Treasury Index - Admiral Shares"
+  asset-class: "USTBond - Long-Term"
+  asset-subclass: "Bonds - Long-Term UST Index"
+  price: "USD:yahoo/VLGSX"
+
+2010-01-01 commodity VSBSX
+  name: "Vanguard Short-Term Treasury Index - Admiral Shares"
+  asset-class: "USTBond - Short-Term"
+  asset-subclass: "Bonds - Short-Term UST Index"
+  price: "USD:yahoo/VSBSX"
+
+
+2019-08-01 * "init"
+  Assets:Cash          5500 USD
+  Income:Job
+
+2019-08-31 * ""
+  Assets:Investments:SPY  2 SPY {294.30 USD}
+  Assets:Cash
+
+2019-09-03 * ""
+  Assets:Investments:SPY  1 SPY {290.74 USD}
+  Assets:Cash
+
+2019-08-31 * ""
+  Assets:Investments:SLYV   17 SLYV {58.25 USD}
+  Assets:Cash  
+
+2019-08-31 * ""
+  Assets:Investments:IAU  8 IAU {14.56 USD}
+  Assets:Cash
+
+2019-08-31 * ""
+  Assets:Investments:VLGSX 30 VLGSX {30.27 USD}
+  Assets:Cash  
+
+2019-08-31 * ""
+  Assets:Investments:VSBSX 50 VSBSX {20.35 USD}
+  Assets:Cash  
+

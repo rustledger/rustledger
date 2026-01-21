@@ -1,0 +1,190 @@
+#!/usr/bin/env bash
+#
+# Worktree helper for parallel development sessions
+#
+# Usage:
+#   worktree new <branch>      Create worktree for a branch
+#   worktree list              List active worktrees
+#   worktree remove <branch>   Remove a worktree
+#   worktree clean             Remove all non-main worktrees
+#   worktree cd <branch>       Print the path (use with: cd $(worktree cd feature-x))
+
+set -euo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+REPO_NAME="$(basename "$REPO_ROOT")"
+WORKTREE_BASE="$(dirname "$REPO_ROOT")"
+
+# Detect the default branch (main, master, etc.)
+get_default_branch() {
+    # Try to get from remote HEAD
+    local default_branch
+    default_branch=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@')
+    if [[ -n "$default_branch" ]]; then
+        echo "$default_branch"
+        return
+    fi
+    # Fallback: check for common default branches
+    for branch in main master; do
+        if git show-ref --verify --quiet "refs/heads/$branch" 2>/dev/null; then
+            echo "$branch"
+            return
+        fi
+    done
+    # Last resort
+    echo "main"
+}
+
+DEFAULT_BRANCH="$(get_default_branch)"
+
+usage() {
+    cat <<EOF
+Worktree helper for parallel development sessions
+
+Allows working on multiple branches simultaneously in separate directories,
+useful when running multiple terminal sessions or AI coding assistants.
+
+Usage:
+    $(basename "$0") new <branch>        Create worktree for a branch
+    $(basename "$0") list                List active worktrees
+    $(basename "$0") remove <branch>     Remove a worktree
+    $(basename "$0") clean               Remove all worktrees except main
+    $(basename "$0") cd <branch>         Print worktree path
+
+Examples:
+    $(basename "$0") new feature/auth
+    cd \$($(basename "$0") cd feature/auth)
+    $(basename "$0") remove feature/auth
+EOF
+}
+
+worktree_path() {
+    local branch="$1"
+    # Replace / with - for directory name
+    local dir_name="${REPO_NAME}-${branch//\//-}"
+    echo "${WORKTREE_BASE}/${dir_name}"
+}
+
+cmd_new() {
+    local branch=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -*)
+                echo "Unknown option: $1" >&2
+                exit 1
+                ;;
+            *)
+                branch="$1"
+                shift
+                ;;
+        esac
+    done
+
+    if [[ -z "$branch" ]]; then
+        echo "Error: branch name required" >&2
+        usage
+        exit 1
+    fi
+
+    local wt_path
+    wt_path="$(worktree_path "$branch")"
+
+    # Check if branch exists
+    if git show-ref --verify --quiet "refs/heads/$branch" 2>/dev/null; then
+        echo "Creating worktree for existing branch: $branch"
+        git worktree add "$wt_path" "$branch"
+    else
+        echo "Creating worktree with new branch: $branch (from $DEFAULT_BRANCH)"
+        git worktree add -b "$branch" "$wt_path" "$DEFAULT_BRANCH"
+    fi
+
+    echo ""
+    echo "Worktree created at: $wt_path"
+    echo ""
+    echo "To use:"
+    echo "  cd $wt_path"
+}
+
+cmd_list() {
+    echo "Active worktrees:"
+    echo ""
+    git worktree list
+}
+
+cmd_remove() {
+    local branch="$1"
+
+    if [[ -z "$branch" ]]; then
+        echo "Error: branch name required" >&2
+        exit 1
+    fi
+
+    local wt_path
+    wt_path="$(worktree_path "$branch")"
+
+    if [[ ! -d "$wt_path" ]]; then
+        echo "Worktree not found: $wt_path" >&2
+        exit 1
+    fi
+
+    echo "Removing worktree: $wt_path"
+    git worktree remove "$wt_path"
+    echo "Done."
+}
+
+cmd_clean() {
+    echo "Removing all worktrees except $DEFAULT_BRANCH..."
+
+    # Use while read loop to properly handle paths with spaces
+    git worktree list --porcelain | grep "^worktree " | cut -d' ' -f2- | while IFS= read -r wt; do
+        if [[ -n "$wt" && "$wt" != "$REPO_ROOT" ]]; then
+            echo "Removing: $wt"
+            git worktree remove "$wt" --force 2>/dev/null || true
+        fi
+    done
+
+    git worktree prune
+    echo "Done."
+}
+
+cmd_cd() {
+    local branch="$1"
+
+    if [[ -z "$branch" ]]; then
+        echo "Error: branch name required" >&2
+        exit 1
+    fi
+
+    worktree_path "$branch"
+}
+
+# Main
+case "${1:-}" in
+    new)
+        shift
+        cmd_new "$@"
+        ;;
+    list|ls)
+        cmd_list
+        ;;
+    remove|rm)
+        shift
+        cmd_remove "${1:-}"
+        ;;
+    clean)
+        cmd_clean
+        ;;
+    cd|path)
+        shift
+        cmd_cd "${1:-}"
+        ;;
+    -h|--help|help|"")
+        usage
+        ;;
+    *)
+        echo "Unknown command: $1" >&2
+        usage
+        exit 1
+        ;;
+esac

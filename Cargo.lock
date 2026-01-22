@@ -3081,6 +3081,7 @@ dependencies = [
  "rust_decimal_macros",
  "rustledger-booking",
  "rustledger-core",
+ "rustledger-parser",
  "thiserror 2.0.17",
 ]
 

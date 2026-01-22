@@ -52,6 +52,7 @@ use rustledger_core::{
     Amount, Balance, BookingMethod, Close, Directive, Document, InternedStr, Inventory, Note, Open,
     Pad, Position, Posting, Transaction,
 };
+use rustledger_parser::{Span, Spanned};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use thiserror::Error;
@@ -238,10 +239,15 @@ pub struct ValidationError {
     pub date: NaiveDate,
     /// Additional context.
     pub context: Option<String>,
+    /// Source span (byte offsets within the file).
+    pub span: Option<Span>,
+    /// Source file ID (index into `SourceMap`).
+    /// Uses `u16` to minimize struct size (max 65,535 files).
+    pub file_id: Option<u16>,
 }
 
 impl ValidationError {
-    /// Create a new validation error.
+    /// Create a new validation error without source location.
     #[must_use]
     pub fn new(code: ErrorCode, message: impl Into<String>, date: NaiveDate) -> Self {
         Self {
@@ -249,6 +255,26 @@ impl ValidationError {
             message: message.into(),
             date,
             context: None,
+            span: None,
+            file_id: None,
+        }
+    }
+
+    /// Create a new validation error with source location from a spanned directive.
+    #[must_use]
+    pub fn with_location<T>(
+        code: ErrorCode,
+        message: impl Into<String>,
+        date: NaiveDate,
+        spanned: &Spanned<T>,
+    ) -> Self {
+        Self {
+            code,
+            message: message.into(),
+            date,
+            context: None,
+            span: Some(spanned.span),
+            file_id: Some(spanned.file_id),
         }
     }
 
@@ -256,6 +282,17 @@ impl ValidationError {
     #[must_use]
     pub fn with_context(mut self, context: impl Into<String>) -> Self {
         self.context = Some(context.into());
+        self
+    }
+
+    /// Set the source location for this error (builder pattern).
+    ///
+    /// Use this to add location info to an existing error. For creating
+    /// new errors with location, prefer [`Self::with_location`] instead.
+    #[must_use]
+    pub const fn at_location<T>(mut self, spanned: &Spanned<T>) -> Self {
+        self.span = Some(spanned.span);
+        self.file_id = Some(spanned.file_id);
         self
     }
 }
@@ -475,6 +512,122 @@ pub fn validate_with_options(
     }
 
     // Check for unused pads (E2003)
+    for (target_account, pads) in &state.pending_pads {
+        for pad in pads {
+            if !pad.used {
+                errors.push(
+                    ValidationError::new(
+                        ErrorCode::PadWithoutBalance,
+                        "Unused Pad entry".to_string(),
+                        pad.date,
+                    )
+                    .with_context(format!(
+                        "   {} pad {} {}",
+                        pad.date, target_account, pad.source_account
+                    )),
+                );
+            }
+        }
+    }
+
+    errors
+}
+
+/// Validate a stream of spanned directives with custom options.
+///
+/// This variant accepts `Spanned<Directive>` to preserve source location information,
+/// which is propagated to any validation errors. This enables IDE-friendly error
+/// messages with `file:line` information.
+///
+/// Returns a list of validation errors and warnings found, each with source location
+/// when available.
+pub fn validate_spanned_with_options(
+    directives: &[Spanned<Directive>],
+    options: ValidationOptions,
+) -> Vec<ValidationError> {
+    let mut state = LedgerState::with_options(options);
+    let mut errors = Vec::new();
+
+    let today = Local::now().date_naive();
+
+    // Sort directives by date, then by type priority (parallel)
+    let mut sorted: Vec<&Spanned<Directive>> = directives.iter().collect();
+    sorted.par_sort_by(|a, b| {
+        a.value
+            .date()
+            .cmp(&b.value.date())
+            .then_with(|| a.value.priority().cmp(&b.value.priority()))
+    });
+
+    for spanned in sorted {
+        let directive = &spanned.value;
+        let date = directive.date();
+
+        // Check for date ordering (info only - we sort anyway)
+        if let Some(last) = state.last_date {
+            if date < last {
+                errors.push(ValidationError::with_location(
+                    ErrorCode::DateOutOfOrder,
+                    format!("Directive date {date} is before previous directive {last}"),
+                    date,
+                    spanned,
+                ));
+            }
+        }
+        state.last_date = Some(date);
+
+        // Check for future dates if enabled
+        if state.options.warn_future_dates && date > today {
+            errors.push(ValidationError::with_location(
+                ErrorCode::FutureDate,
+                format!("Entry dated in the future: {date}"),
+                date,
+                spanned,
+            ));
+        }
+
+        // Track error count before helper function so we can patch new errors with location
+        let error_count_before = errors.len();
+
+        match directive {
+            Directive::Open(open) => {
+                validate_open(&mut state, open, &mut errors);
+            }
+            Directive::Close(close) => {
+                validate_close(&mut state, close, &mut errors);
+            }
+            Directive::Transaction(txn) => {
+                validate_transaction(&mut state, txn, &mut errors);
+            }
+            Directive::Balance(bal) => {
+                validate_balance(&mut state, bal, &mut errors);
+            }
+            Directive::Commodity(comm) => {
+                state.commodities.insert(comm.currency.clone());
+            }
+            Directive::Pad(pad) => {
+                validate_pad(&mut state, pad, &mut errors);
+            }
+            Directive::Document(doc) => {
+                validate_document(&state, doc, &mut errors);
+            }
+            Directive::Note(note) => {
+                validate_note(&state, note, &mut errors);
+            }
+            _ => {}
+        }
+
+        // Patch any new errors with location info from the current directive
+        for error in errors.iter_mut().skip(error_count_before) {
+            if error.span.is_none() {
+                error.span = Some(spanned.span);
+                error.file_id = Some(spanned.file_id);
+            }
+        }
+    }
+
+    // Check for unused pads (E2003)
+    // Note: These errors won't have location info since we don't store spans in PendingPad
     for (target_account, pads) in &state.pending_pads {
         for pad in pads {
             if !pad.used {

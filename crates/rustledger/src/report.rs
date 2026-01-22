@@ -4,6 +4,7 @@
 //! Respects TTY detection and `NO_COLOR` environment variable.
 
 use ariadne::{ColorGenerator, Config, Label, Report, ReportKind, Source};
+use rustledger_loader::SourceMap;
 use rustledger_parser::ParseError;
 use rustledger_validate::{ErrorCode, ValidationError};
 use std::collections::HashMap;
@@ -103,9 +104,13 @@ pub fn report_parse_errors<W: Write>(
 
 /// Report validation errors to the given writer.
 ///
+/// Output format matches Python beancount for compatibility:
+/// `file:line: error[CODE]: message (date)`
+///
 /// If `use_color` is false, ANSI color codes are disabled.
 pub fn report_validation_errors<W: Write>(
     errors: &[ValidationError],
+    source_map: &SourceMap,
     _cache: &SourceCache,
     writer: &mut W,
     _use_color: bool,
@@ -113,13 +118,39 @@ pub fn report_validation_errors<W: Write>(
     let error_count = errors.len();
 
     for error in errors {
-        writeln!(
-            writer,
-            "error[{}]: {} ({})",
-            format_error_code(error.code),
-            error.message,
-            error.date
-        )?;
+        // Format location if available
+        let location = if let (Some(span), Some(file_id)) = (error.span, error.file_id) {
+            if let Some(source_file) = source_map.get(file_id as usize) {
+                let (line, _col) = source_file.line_col(span.start);
+                format!("{}:{}", source_file.path.display(), line)
+            } else {
+                String::new()
+            }
+        } else {
+            String::new()
+        };
+
+        if location.is_empty() {
+            // No location info - use original format
+            writeln!(
+                writer,
+                "error[{}]: {} ({})",
+                format_error_code(error.code),
+                error.message,
+                error.date
+            )?;
+        } else {
+            // Python beancount compatible format: file:line: message
+            writeln!(
+                writer,
+                "{}: error[{}]: {} ({})",
+                location,
+                format_error_code(error.code),
+                error.message,
+                error.date
+            )?;
+        }
+
         if let Some(ctx) = &error.context {
             writeln!(writer, "  context: {ctx}")?;
         }

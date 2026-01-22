@@ -7,7 +7,8 @@ use rust_decimal_macros::dec;
 use rustledger_core::{
     Amount, Balance, Close, Directive, NaiveDate, Open, Pad, Posting, PriceAnnotation, Transaction,
 };
-use rustledger_validate::{ErrorCode, validate};
+use rustledger_parser::{Span, Spanned};
+use rustledger_validate::{ErrorCode, ValidationOptions, validate, validate_spanned_with_options};
 
 // ============================================================================
 // Helper Functions
@@ -21,6 +22,21 @@ fn date(year: i32, month: u32, day: u32) -> NaiveDate {
 fn validate_directives(directives: &[Directive]) -> Vec<ErrorCode> {
     let errors = validate(directives);
     errors.iter().map(|e| e.code).collect()
+}
+
+/// Helper to wrap a directive with span and `file_id` info for testing.
+#[allow(clippy::missing_const_for_fn)]
+fn spanned_directive(
+    directive: Directive,
+    start: usize,
+    end: usize,
+    file_id: u16,
+) -> Spanned<Directive> {
+    Spanned {
+        value: directive,
+        span: Span::new(start, end),
+        file_id,
+    }
 }
 
 // ============================================================================
@@ -421,4 +437,363 @@ fn test_basic_validation() {
             .iter()
             .any(|e| e.code == ErrorCode::TransactionUnbalanced)
     );
+}
+
+// ============================================================================
+// Spanned Validation Tests (validate_spanned_with_options)
+// ============================================================================
+
+#[test]
+fn test_spanned_validation_preserves_location_for_account_not_open() {
+    let directives = vec![
+        // Transaction uses an unopened account
+        spanned_directive(
+            Directive::Transaction(
+                Transaction::new(date(2024, 1, 15), "Test")
+                    .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(100), "USD")))
+                    .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(-100), "USD"))),
+            ),
+            100,
+            200, // span: bytes 100-200
+            1,   // file_id: 1
+        ),
+    ];
+
+    let errors = validate_spanned_with_options(&directives, ValidationOptions::default());
+
+    let account_error = errors
+        .iter()
+        .find(|e| e.code == ErrorCode::AccountNotOpen)
+        .expect("expected E1001 AccountNotOpen error");
+
+    // Verify that location info was propagated
+    assert_eq!(account_error.span, Some(Span::new(100, 200)));
+    assert_eq!(account_error.file_id, Some(1));
+}
+
+#[test]
+fn test_spanned_validation_preserves_location_for_unbalanced_transaction() {
+    let directives = vec![
+        spanned_directive(
+            Directive::Open(Open::new(date(2024, 1, 1), "Assets:Bank")),
+            0,
+            50,
+            0,
+        ),
+        spanned_directive(
+            Directive::Open(Open::new(date(2024, 1, 1), "Expenses:Food")),
+            50,
+            100,
+            0,
+        ),
+        spanned_directive(
+            Directive::Transaction(
+                Transaction::new(date(2024, 1, 15), "Unbalanced")
+                    .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(100), "USD")))
+                    .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(-50), "USD"))), // Missing 50
+            ),
+            100,
+            250, // span: bytes 100-250
+            2,   // file_id: 2 (different file)
+        ),
+    ];
+
+    let errors = validate_spanned_with_options(&directives, ValidationOptions::default());
+
+    let unbalanced_error = errors
+        .iter()
+        .find(|e| e.code == ErrorCode::TransactionUnbalanced)
+        .expect("expected E3001 TransactionUnbalanced error");
+
+    // Verify location from the transaction directive
+    assert_eq!(unbalanced_error.span, Some(Span::new(100, 250)));
+    assert_eq!(unbalanced_error.file_id, Some(2));
+}
+
+#[test]
+fn test_spanned_validation_preserves_location_for_balance_error() {
+    let directives = vec![
+        spanned_directive(
+            Directive::Open(Open::new(date(2024, 1, 1), "Assets:Bank")),
+            0,
+            50,
+            0,
+        ),
+        spanned_directive(
+            Directive::Open(Open::new(date(2024, 1, 1), "Expenses:Food")),
+            50,
+            100,
+            0,
+        ),
+        spanned_directive(
+            Directive::Transaction(
+                Transaction::new(date(2024, 1, 15), "Purchase")
+                    .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(50), "USD")))
+                    .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(-50), "USD"))),
+            ),
+            100,
+            200,
+            0,
+        ),
+        // Balance assertion with wrong amount
+        spanned_directive(
+            Directive::Balance(Balance::new(
+                date(2024, 1, 31),
+                "Assets:Bank",
+                Amount::new(dec!(1000), "USD"), // Wrong
+            )),
+            200,
+            280, // span: bytes 200-280
+            3,   // file_id: 3
+        ),
+    ];
+
+    let errors = validate_spanned_with_options(&directives, ValidationOptions::default());
+
+    let balance_error = errors
+        .iter()
+        .find(|e| e.code == ErrorCode::BalanceAssertionFailed)
+        .expect("expected E2001 BalanceAssertionFailed error");
+
+    assert_eq!(balance_error.span, Some(Span::new(200, 280)));
+    assert_eq!(balance_error.file_id, Some(3));
+}
+
+#[test]
+fn test_spanned_validation_preserves_location_for_duplicate_open() {
+    let directives = vec![
+        spanned_directive(
+            Directive::Open(Open::new(date(2024, 1, 1), "Assets:Bank")),
+            0,
+            50,
+            0,
+        ),
+        // Duplicate open
+        spanned_directive(
+            Directive::Open(Open::new(date(2024, 1, 2), "Assets:Bank")),
+            50,
+            100, // span: bytes 50-100
+            1,   // file_id: 1
+        ),
+    ];
+
+    let errors = validate_spanned_with_options(&directives, ValidationOptions::default());
+
+    let dup_error = errors
+        .iter()
+        .find(|e| e.code == ErrorCode::AccountAlreadyOpen)
+        .expect("expected E1002 AccountAlreadyOpen error");
+
+    assert_eq!(dup_error.span, Some(Span::new(50, 100)));
+    assert_eq!(dup_error.file_id, Some(1));
+}
+
+#[test]
+fn test_spanned_validation_preserves_location_for_account_closed() {
+    let directives = vec![
+        spanned_directive(
+            Directive::Open(Open::new(date(2024, 1, 1), "Assets:Bank")),
+            0,
+            50,
+            0,
+        ),
+        spanned_directive(
+            Directive::Open(Open::new(date(2024, 1, 1), "Income:Salary")),
+            50,
+            100,
+            0,
+        ),
+        spanned_directive(
+            Directive::Close(Close::new(date(2024, 6, 1), "Assets:Bank")),
+            100,
+            150,
+            0,
+        ),
+        // Transaction after close
+        spanned_directive(
+            Directive::Transaction(
+                Transaction::new(date(2024, 7, 1), "After close")
+                    .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(100), "USD")))
+                    .with_posting(Posting::new(
+                        "Income:Salary",
+                        Amount::new(dec!(-100), "USD"),
+                    )),
+            ),
+            150,
+            300, // span: bytes 150-300
+            4,   // file_id: 4
+        ),
+    ];
+
+    let errors = validate_spanned_with_options(&directives, ValidationOptions::default());
+
+    let closed_error = errors
+        .iter()
+        .find(|e| e.code == ErrorCode::AccountClosed)
+        .expect("expected E1003 AccountClosed error");
+
+    assert_eq!(closed_error.span, Some(Span::new(150, 300)));
+    assert_eq!(closed_error.file_id, Some(4));
+}
+
+#[test]
+fn test_spanned_validation_single_posting_warning_has_location() {
+    let directives = vec![
+        spanned_directive(
+            Directive::Open(Open::new(date(2024, 1, 1), "Assets:Bank")),
+            0,
+            50,
+            0,
+        ),
+        spanned_directive(
+            Directive::Transaction(
+                Transaction::new(date(2024, 1, 15), "Single posting")
+                    .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(100), "USD"))),
+            ),
+            50,
+            150, // span: bytes 50-150
+            5,   // file_id: 5
+        ),
+    ];
+
+    let errors = validate_spanned_with_options(&directives, ValidationOptions::default());
+
+    let single_post_error = errors
+        .iter()
+        .find(|e| e.code == ErrorCode::SinglePosting)
+        .expect("expected E3004 SinglePosting warning");
+
+    assert_eq!(single_post_error.span, Some(Span::new(50, 150)));
+    assert_eq!(single_post_error.file_id, Some(5));
+}
+
+#[test]
+fn test_spanned_validation_multiple_errors_have_correct_locations() {
+    // Test that multiple errors in the same file get their respective locations
+    let directives = vec![
+        // First error: unopened account
+        spanned_directive(
+            Directive::Transaction(
+                Transaction::new(date(2024, 1, 15), "First error")
+                    .with_posting(Posting::new("Expenses:A", Amount::new(dec!(100), "USD")))
+                    .with_posting(Posting::new("Assets:A", Amount::new(dec!(-100), "USD"))),
+            ),
+            0,
+            100, // First location
+            0,
+        ),
+        // Second error: different unopened accounts
+        spanned_directive(
+            Directive::Transaction(
+                Transaction::new(date(2024, 1, 16), "Second error")
+                    .with_posting(Posting::new("Expenses:B", Amount::new(dec!(50), "USD")))
+                    .with_posting(Posting::new("Assets:B", Amount::new(dec!(-50), "USD"))),
+            ),
+            100,
+            200, // Second location
+            0,
+        ),
+    ];
+
+    let errors = validate_spanned_with_options(&directives, ValidationOptions::default());
+
+    // Should have multiple AccountNotOpen errors with different locations
+    let account_errors: Vec<_> = errors
+        .iter()
+        .filter(|e| e.code == ErrorCode::AccountNotOpen)
+        .collect();
+
+    assert!(
+        account_errors.len() >= 2,
+        "expected at least 2 AccountNotOpen errors"
+    );
+
+    // Verify at least some have different spans
+    let spans: std::collections::HashSet<_> =
+        account_errors.iter().filter_map(|e| e.span).collect();
+    assert!(spans.len() >= 2, "expected errors to have different spans");
+}
+
+#[test]
+fn test_spanned_validation_valid_ledger_no_errors() {
+    let directives = vec![
+        spanned_directive(
+            Directive::Open(Open::new(date(2024, 1, 1), "Assets:Bank")),
+            0,
+            50,
+            0,
+        ),
+        spanned_directive(
+            Directive::Open(Open::new(date(2024, 1, 1), "Expenses:Food")),
+            50,
+            100,
+            0,
+        ),
+        spanned_directive(
+            Directive::Transaction(
+                Transaction::new(date(2024, 1, 15), "Valid")
+                    .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(100), "USD")))
+                    .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(-100), "USD"))),
+            ),
+            100,
+            250,
+            0,
+        ),
+    ];
+
+    let errors = validate_spanned_with_options(&directives, ValidationOptions::default());
+
+    // Filter out any info-level "date out of order" messages
+    let critical_errors: Vec<_> = errors
+        .iter()
+        .filter(|e| !matches!(e.code, ErrorCode::DateOutOfOrder | ErrorCode::FutureDate))
+        .collect();
+
+    assert!(
+        critical_errors.is_empty(),
+        "expected no validation errors, got {critical_errors:?}"
+    );
+}
+
+#[test]
+fn test_spanned_validation_out_of_order_dates_have_location() {
+    // Test that date ordering warnings include location info
+    let directives = vec![
+        spanned_directive(
+            Directive::Open(Open::new(date(2024, 1, 1), "Assets:Bank")),
+            0,
+            50,
+            0,
+        ),
+        // Later date first
+        spanned_directive(
+            Directive::Open(Open::new(date(2024, 1, 10), "Expenses:Food")),
+            50,
+            100,
+            0,
+        ),
+        // Earlier date second (out of order)
+        spanned_directive(
+            Directive::Open(Open::new(date(2024, 1, 5), "Expenses:Transport")),
+            100,
+            150, // span: bytes 100-150
+            6,   // file_id: 6
+        ),
+    ];
+
+    let errors = validate_spanned_with_options(&directives, ValidationOptions::default());
+
+    let date_error = errors.iter().find(|e| e.code == ErrorCode::DateOutOfOrder);
+
+    // DateOutOfOrder is detected when directives are sorted - the error should have location
+    if let Some(error) = date_error {
+        assert!(
+            error.span.is_some(),
+            "DateOutOfOrder error should have span"
+        );
+        assert!(
+            error.file_id.is_some(),
+            "DateOutOfOrder error should have file_id"
+        );
+    }
 }

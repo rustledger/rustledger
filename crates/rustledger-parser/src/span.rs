@@ -85,7 +85,7 @@ impl fmt::Display for Span {
     }
 }
 
-/// A value with an associated source span.
+/// A value with an associated source location (span and file).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(
     feature = "rkyv",
@@ -94,23 +94,52 @@ impl fmt::Display for Span {
 pub struct Spanned<T> {
     /// The value.
     pub value: T,
-    /// The source span.
+    /// The source span (byte offsets within the file).
     pub span: Span,
+    /// The source file ID (index into `SourceMap`).
+    /// Uses `u16` to minimize struct size (max 65,535 files).
+    pub file_id: u16,
 }
 
 impl<T> Spanned<T> {
-    /// Create a new spanned value.
+    /// Create a new spanned value with `file_id` defaulting to 0.
+    ///
+    /// Use `with_file_id` to set the correct file ID after creation.
     #[must_use]
     pub const fn new(value: T, span: Span) -> Self {
-        Self { value, span }
+        Self {
+            value,
+            span,
+            file_id: 0,
+        }
     }
 
-    /// Map the inner value.
+    /// Set the file ID for this spanned value.
+    ///
+    /// Accepts `usize` for API convenience but stores as `u16` internally.
+    ///
+    /// # Panics
+    ///
+    /// Debug builds will panic if `file_id` exceeds `u16::MAX` (65,535).
+    #[must_use]
+    pub fn with_file_id(mut self, file_id: usize) -> Self {
+        debug_assert!(
+            u16::try_from(file_id).is_ok(),
+            "file_id {} exceeds u16::MAX; at most {} files are supported",
+            file_id,
+            u16::MAX
+        );
+        self.file_id = file_id as u16;
+        self
+    }
+
+    /// Map the inner value, preserving span and `file_id`.
     #[must_use]
     pub fn map<U, F: FnOnce(T) -> U>(self, f: F) -> Spanned<U> {
         Spanned {
             value: f(self.value),
             span: self.span,
+            file_id: self.file_id,
         }
     }
 
@@ -120,7 +149,7 @@ impl<T> Spanned<T> {
         &self.value
     }
 
-    /// Unwrap the spanned value, discarding the span.
+    /// Unwrap the spanned value, discarding the span and `file_id`.
     #[must_use]
     pub fn into_inner(self) -> T {
         self.value
@@ -249,5 +278,13 @@ mod tests {
     fn test_spanned_display() {
         let spanned = Spanned::new(42, Span::new(0, 2));
         assert_eq!(format!("{spanned}"), "42");
+    }
+
+    #[test]
+    fn test_spanned_with_file_id() {
+        let spanned = Spanned::new("value", Span::new(0, 5)).with_file_id(3);
+        assert_eq!(spanned.value, "value");
+        assert_eq!(spanned.span, Span::new(0, 5));
+        assert_eq!(spanned.file_id, 3);
     }
 }

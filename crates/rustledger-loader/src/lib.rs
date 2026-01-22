@@ -387,8 +387,13 @@ impl Loader {
             }
         }
 
-        // Add directives from this file
-        directives.extend(result.directives);
+        // Add directives from this file, setting the file_id
+        directives.extend(
+            result
+                .directives
+                .into_iter()
+                .map(|d| d.with_file_id(file_id)),
+        );
 
         // Pop from stack
         self.include_stack.pop();

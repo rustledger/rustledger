@@ -15,7 +15,7 @@ use rustledger_loader::{
 #[cfg(feature = "python-plugin-wasm")]
 use rustledger_plugin::PluginManager;
 use rustledger_plugin::{NativePluginRegistry, PluginInput, PluginOptions, wrappers_to_directives};
-use rustledger_validate::{ValidationOptions, validate_with_options};
+use rustledger_validate::{ValidationOptions, validate_spanned_with_options};
 use serde::Serialize;
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -572,11 +572,17 @@ fn run(args: &Args) -> Result<ExitCode> {
         directives: spanned_directives,
         options,
         plugins: file_plugins,
+        source_map,
         ..
     } = load_result;
 
-    // Extract directives (move, not clone)
-    let mut directives: Vec<_> = spanned_directives.into_iter().map(|s| s.value).collect();
+    // Extract directives and spans in a single pass for efficiency
+    // We need the spans for validation error reporting
+    let (mut directives, directive_spans): (Vec<_>, Vec<(rustledger_parser::Span, u16)>) =
+        spanned_directives
+            .into_iter()
+            .map(|s| (s.value, (s.span, s.file_id)))
+            .unzip();
 
     // Save account types before options are partially moved
     let account_types: Vec<String> = options
@@ -803,7 +809,28 @@ fn run(args: &Args) -> Result<ExitCode> {
         document_base,
         ..Default::default()
     };
-    let validation_errors = validate_with_options(&directives, validation_options);
+
+    // Convert directives back to Spanned form for validation
+    // If directive count matches original, re-associate original spans
+    // Otherwise use default spans (plugins may have added/removed directives)
+    let spanned_for_validation: Vec<rustledger_parser::Spanned<Directive>> =
+        if directives.len() == directive_spans.len() {
+            directives
+                .into_iter()
+                .zip(directive_spans)
+                .map(|(d, (span, file_id))| {
+                    rustledger_parser::Spanned::new(d, span).with_file_id(file_id as usize)
+                })
+                .collect()
+        } else {
+            // Directive count changed (plugins modified list), use default spans
+            directives
+                .into_iter()
+                .map(|d| rustledger_parser::Spanned::new(d, rustledger_parser::Span::new(0, 0)))
+                .collect()
+        };
+    let validation_errors =
+        validate_spanned_with_options(&spanned_for_validation, validation_options);
     let validation_error_count = validation_errors
         .iter()
         .filter(|e| !e.code.is_warning())
@@ -836,7 +863,13 @@ fn run(args: &Args) -> Result<ExitCode> {
                 });
             }
         } else if !args.quiet {
-            report::report_validation_errors(&validation_errors, &cache, &mut stdout, use_color)?;
+            report::report_validation_errors(
+                &validation_errors,
+                &source_map,
+                &cache,
+                &mut stdout,
+                use_color,
+            )?;
         }
     }
 

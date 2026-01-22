@@ -793,12 +793,10 @@ fn run(args: &Args) -> Result<ExitCode> {
 
     // Build validation options with account types from loader options
     // Set document_base to the file's directory for relative path resolution
-    let document_base = file.parent().map(std::path::Path::to_path_buf);
-    let validation_options = ValidationOptions {
-        account_types,
-        document_base,
-        ..Default::default()
-    };
+    let mut validation_options = ValidationOptions::default().with_account_types(account_types);
+    if let Some(base) = file.parent() {
+        validation_options = validation_options.with_document_base(base);
+    }
     let validation_errors = validate_with_options(&directives, validation_options);
     let validation_error_count = validation_errors
         .iter()

@@ -275,7 +275,20 @@ struct AccountState {
 }
 
 /// Validation options.
+///
+/// This struct is marked `#[non_exhaustive]` to allow adding new options
+/// in future minor versions without breaking semver. Use the builder methods
+/// to construct:
+///
+/// ```
+/// use rustledger_validate::ValidationOptions;
+///
+/// let options = ValidationOptions::default()
+///     .with_check_documents(false)
+///     .with_warn_future_dates(true);
+/// ```
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct ValidationOptions {
     /// Whether to require commodity declarations.
     pub require_commodities: bool,
@@ -314,6 +327,63 @@ impl Default for ValidationOptions {
             infer_tolerance_from_cost: true,
             tolerance_multiplier: Decimal::new(5, 1), // 0.5
         }
+    }
+}
+
+impl ValidationOptions {
+    /// Create new validation options with defaults.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set whether to require commodity declarations.
+    #[must_use]
+    pub const fn with_require_commodities(mut self, require: bool) -> Self {
+        self.require_commodities = require;
+        self
+    }
+
+    /// Set whether to check if document files exist.
+    #[must_use]
+    pub const fn with_check_documents(mut self, check: bool) -> Self {
+        self.check_documents = check;
+        self
+    }
+
+    /// Set whether to warn about future-dated entries.
+    #[must_use]
+    pub const fn with_warn_future_dates(mut self, warn: bool) -> Self {
+        self.warn_future_dates = warn;
+        self
+    }
+
+    /// Set the base directory for resolving relative document paths.
+    #[must_use]
+    pub fn with_document_base(mut self, base: impl Into<std::path::PathBuf>) -> Self {
+        self.document_base = Some(base.into());
+        self
+    }
+
+    /// Set valid account type prefixes.
+    #[must_use]
+    pub fn with_account_types(mut self, types: Vec<String>) -> Self {
+        self.account_types = types;
+        self
+    }
+
+    /// Set whether to infer tolerance from cost.
+    #[must_use]
+    pub const fn with_infer_tolerance_from_cost(mut self, infer: bool) -> Self {
+        self.infer_tolerance_from_cost = infer;
+        self
+    }
+
+    /// Set the tolerance multiplier.
+    #[must_use]
+    pub const fn with_tolerance_multiplier(mut self, multiplier: Decimal) -> Self {
+        self.tolerance_multiplier = multiplier;
+        self
     }
 }
 

@@ -147,7 +147,7 @@
         "enter": {
           "y": {"scale": "y", "field": "label", "band": 0.5},
           "x": {"signal": "datum.is_small ? scale('x', datum.time_ms) + 16 : (datum.tool == 'rustledger' ? 48 : 40)"},
-          "text": {"signal": "datum.is_small ? (datum.tool == 'rustledger' ? format(datum.faster_factor, '.0f') + 'x vs python · ' + format(datum.time_ms, '.0f') + ' ms' : format(datum.slower_factor, '.1f') + 'x slower · ' + format(datum.time_ms, '.0f') + ' ms') : (datum.tool == 'rustledger' ? format(datum.faster_factor, '.0f') + 'x vs python' : format(datum.slower_factor, '.1f') + 'x slower')"},
+          "text": {"signal": "datum.is_small ? (datum.tool == 'rustledger' ? format(datum.faster_factor, '.0f') + 'x faster than beancount · ' + format(datum.time_ms, '.0f') + ' ms' : format(datum.slower_factor, '.1f') + 'x slower than rustledger · ' + format(datum.time_ms, '.0f') + ' ms') : (datum.tool == 'rustledger' ? format(datum.faster_factor, '.0f') + 'x faster than beancount' : format(datum.slower_factor, '.1f') + 'x slower than rustledger')"},
           "fill": {"signal": "datum.is_small ? '#e6edf3' : '#ffffff'"},
           "fontSize": {"value": 10},
           "fontWeight": {"value": 600},

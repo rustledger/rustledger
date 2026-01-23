@@ -20,9 +20,9 @@ use std::io::{self, Read};
 
 use rustledger_booking::interpolate;
 use rustledger_core::{Directive, MetaValue, Metadata};
-use rustledger_parser::parse as parse_beancount;
+use rustledger_parser::{Spanned, parse as parse_beancount};
 use rustledger_query::{Executor, parse as parse_query};
-use rustledger_validate::validate as validate_ledger;
+use rustledger_validate::{ValidationOptions, validate_spanned_with_options};
 use serde::Serialize;
 
 // =============================================================================
@@ -71,7 +71,7 @@ fn meta_value_to_json(value: &MetaValue) -> serde_json::Value {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct Error {
     message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -87,8 +87,12 @@ struct Amount {
 
 #[derive(Serialize)]
 struct PostingCost {
+    /// Per-unit cost (e.g., {100 USD})
     #[serde(skip_serializing_if = "Option::is_none")]
     number: Option<String>,
+    /// Total cost (e.g., {{1000 USD}})
+    #[serde(skip_serializing_if = "Option::is_none")]
+    number_total: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     currency: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -294,12 +298,20 @@ struct Plugin {
     config: Option<String>,
 }
 
+/// An include directive from the source file.
+#[derive(Serialize)]
+struct Include {
+    path: String,
+    lineno: u32,
+}
+
 #[derive(Serialize)]
 struct LoadOutput {
     entries: Vec<DirectiveJson>,
     errors: Vec<Error>,
     options: LedgerOptions,
     plugins: Vec<Plugin>,
+    includes: Vec<Include>,
 }
 
 #[derive(Serialize)]
@@ -324,6 +336,13 @@ struct QueryOutput {
 #[derive(Serialize)]
 struct VersionOutput {
     version: String,
+}
+
+/// Output for batch command: load + multiple queries in one parse.
+#[derive(Serialize)]
+struct BatchOutput {
+    load: LoadOutput,
+    queries: Vec<QueryOutput>,
 }
 
 // =============================================================================
@@ -389,10 +408,13 @@ impl PrecisionTracker {
 /// Internal load result with all parsed data.
 struct LoadResult {
     directives: Vec<Directive>,
+    spanned_directives: Vec<Spanned<Directive>>,
     directive_lines: Vec<u32>,
+    line_lookup: LineLookup,
     errors: Vec<Error>,
     options: LedgerOptions,
     plugins: Vec<Plugin>,
+    includes: Vec<Include>,
 }
 
 /// Parse and interpolate source, returning directives with line numbers.
@@ -513,12 +535,28 @@ fn load_source(source: &str) -> LoadResult {
         })
         .collect();
 
+    // Extract includes
+    let includes: Vec<Include> = parse_result
+        .includes
+        .iter()
+        .map(|(path, span)| Include {
+            path: path.clone(),
+            lineno: lookup.byte_to_line(span.start),
+        })
+        .collect();
+
+    // Clone spanned directives for validation
+    let spanned_directives: Vec<Spanned<Directive>> = parse_result.directives.to_vec();
+
     LoadResult {
         directives,
+        spanned_directives,
         directive_lines,
+        line_lookup: lookup,
         errors,
         options,
         plugins,
+        includes,
     }
 }
 
@@ -561,6 +599,10 @@ fn directive_to_json(directive: &Directive, line: u32, filename: &str) -> Direct
                         // Extract cost
                         let cost = p.cost.as_ref().map(|c| PostingCost {
                             number: c.number_per.as_ref().map(std::string::ToString::to_string),
+                            number_total: c
+                                .number_total
+                                .as_ref()
+                                .map(std::string::ToString::to_string),
                             currency: c.currency.as_ref().map(std::string::ToString::to_string),
                             date: c.date.map(|d| d.to_string()),
                             label: c.label.clone(),
@@ -780,6 +822,7 @@ fn cmd_load(source: &str, filename: &str) {
         errors: load.errors,
         options: load.options,
         plugins: load.plugins,
+        includes: load.includes,
     };
     println!("{}", serde_json::to_string(&output).unwrap());
 }
@@ -790,11 +833,14 @@ fn cmd_validate(source: &str) {
 
     // Run validation if parsing succeeded
     if errors.is_empty() {
-        let validation_errors = validate_ledger(&load.directives);
+        let validation_errors =
+            validate_spanned_with_options(&load.spanned_directives, ValidationOptions::default());
         for err in validation_errors {
+            // Convert span to line number if available
+            let line = err.span.map(|s| load.line_lookup.byte_to_line(s.start));
             errors.push(Error {
                 message: err.message,
-                line: None, // TODO: map date to line
+                line,
                 severity: "error".to_string(),
             });
         }
@@ -807,24 +853,13 @@ fn cmd_validate(source: &str) {
     println!("{}", serde_json::to_string(&output).unwrap());
 }
 
-fn cmd_query(source: &str, query_str: &str) {
-    let load = load_source(source);
-
-    if !load.errors.is_empty() {
-        let output = QueryOutput {
-            columns: vec![],
-            rows: vec![],
-            errors: load.errors,
-        };
-        println!("{}", serde_json::to_string(&output).unwrap());
-        return;
-    }
-
+/// Execute a single query on directives, returning `QueryOutput`.
+fn execute_query(directives: &[Directive], query_str: &str) -> QueryOutput {
     // Parse query
     let query = match parse_query(query_str) {
         Ok(q) => q,
         Err(e) => {
-            let output = QueryOutput {
+            return QueryOutput {
                 columns: vec![],
                 rows: vec![],
                 errors: vec![Error {
@@ -833,13 +868,11 @@ fn cmd_query(source: &str, query_str: &str) {
                     severity: "error".to_string(),
                 }],
             };
-            println!("{}", serde_json::to_string(&output).unwrap());
-            return;
         }
     };
 
     // Execute
-    let mut executor = Executor::new(&load.directives);
+    let mut executor = Executor::new(directives);
     match executor.execute(&query) {
         Ok(result) => {
             // Infer column types from first row
@@ -870,26 +903,89 @@ fn cmd_query(source: &str, query_str: &str) {
                 .map(|row| row.iter().map(value_to_json).collect())
                 .collect();
 
-            let output = QueryOutput {
+            QueryOutput {
                 columns,
                 rows,
                 errors: vec![],
-            };
-            println!("{}", serde_json::to_string(&output).unwrap());
+            }
         }
-        Err(e) => {
-            let output = QueryOutput {
+        Err(e) => QueryOutput {
+            columns: vec![],
+            rows: vec![],
+            errors: vec![Error {
+                message: format!("Query error: {e}"),
+                line: None,
+                severity: "error".to_string(),
+            }],
+        },
+    }
+}
+
+fn cmd_query(source: &str, query_str: &str) {
+    let load = load_source(source);
+
+    if !load.errors.is_empty() {
+        let output = QueryOutput {
+            columns: vec![],
+            rows: vec![],
+            errors: load.errors,
+        };
+        println!("{}", serde_json::to_string(&output).unwrap());
+        return;
+    }
+
+    let output = execute_query(&load.directives, query_str);
+    println!("{}", serde_json::to_string(&output).unwrap());
+}
+
+/// Batch command: load + multiple queries in one parse.
+/// Usage: batch [filename] query1 query2 ...
+fn cmd_batch(source: &str, filename: &str, queries: &[String]) {
+    let load = load_source(source);
+
+    // Build load output
+    let entries: Vec<DirectiveJson> = load
+        .directives
+        .iter()
+        .zip(load.directive_lines.iter())
+        .map(|(d, &line)| directive_to_json(d, line, filename))
+        .collect();
+
+    let load_output = LoadOutput {
+        entries,
+        errors: load.errors.clone(),
+        options: load.options,
+        plugins: load.plugins,
+        includes: load.includes,
+    };
+
+    // Execute queries (only if no parse errors)
+    let query_outputs: Vec<QueryOutput> = if load.errors.is_empty() {
+        queries
+            .iter()
+            .map(|q| execute_query(&load.directives, q))
+            .collect()
+    } else {
+        // Return error for each query
+        queries
+            .iter()
+            .map(|_| QueryOutput {
                 columns: vec![],
                 rows: vec![],
                 errors: vec![Error {
-                    message: format!("Query error: {e}"),
+                    message: "Cannot execute query: parse errors exist".to_string(),
                     line: None,
                     severity: "error".to_string(),
                 }],
-            };
-            println!("{}", serde_json::to_string(&output).unwrap());
-        }
-    }
+            })
+            .collect()
+    };
+
+    let output = BatchOutput {
+        load: load_output,
+        queries: query_outputs,
+    };
+    println!("{}", serde_json::to_string(&output).unwrap());
 }
 
 fn cmd_version() {
@@ -905,17 +1001,21 @@ fn cmd_help() {
     eprintln!("Usage: rustledger-ffi-py <command> [args...]");
     eprintln!();
     eprintln!("Commands:");
-    eprintln!("  load [filename]    Load source from stdin, output entries + options + errors");
-    eprintln!("  validate           Validate source from stdin");
-    eprintln!("  query <bql>        Run BQL query on source from stdin");
-    eprintln!("  version            Show version");
-    eprintln!("  help               Show this help");
+    eprintln!("  load [filename]      Load source from stdin, output entries + options + errors");
+    eprintln!("  validate             Validate source from stdin");
+    eprintln!("  query <bql>          Run BQL query on source from stdin");
+    eprintln!("  batch [file] <bql>.. Load + run multiple queries in one parse (efficient)");
+    eprintln!("  version              Show version");
+    eprintln!("  help                 Show this help");
     eprintln!();
     eprintln!("All output is JSON to stdout.");
     eprintln!();
     eprintln!("Examples:");
     eprintln!("  cat ledger.beancount | wasmtime rustledger-ffi-py.wasm load ledger.beancount");
     eprintln!("  cat ledger.beancount | wasmtime rustledger-ffi-py.wasm query \"BALANCES\"");
+    eprintln!(
+        "  cat ledger.beancount | wasmtime rustledger-ffi-py.wasm batch file.bc \"BALANCES\" \"SELECT account\""
+    );
 }
 
 // =============================================================================
@@ -935,7 +1035,7 @@ fn main() {
     match command.as_str() {
         "version" => cmd_version(),
         "help" | "--help" | "-h" => cmd_help(),
-        "load" | "validate" | "query" => {
+        "load" | "validate" | "query" | "batch" => {
             // Read source from stdin
             let mut source = String::new();
             if let Err(e) = io::stdin().read_to_string(&mut source) {
@@ -955,6 +1055,11 @@ fn main() {
                         std::process::exit(1);
                     }
                     cmd_query(&source, &args[2]);
+                }
+                "batch" => {
+                    let filename = args.get(2).map_or("<stdin>", std::string::String::as_str);
+                    let queries: Vec<String> = args.iter().skip(3).cloned().collect();
+                    cmd_batch(&source, filename, &queries);
                 }
                 _ => unreachable!(),
             }

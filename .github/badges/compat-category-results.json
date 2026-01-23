@@ -1,27 +1,7 @@
 {
-  "edge-cases": {
-    "total": 10,
-    "check_match": 10,
-    "full_match": 5
-  },
-  "parser": {
-    "total": 24,
-    "check_match": 24,
-    "full_match": 19
-  },
-  "plugins": {
-    "total": 4,
-    "check_match": 4,
-    "full_match": 3
-  },
-  "real-world": {
-    "total": 35,
-    "check_match": 35,
-    "full_match": 19
-  },
-  "validation": {
-    "total": 20,
-    "check_match": 20,
-    "full_match": 14
+  "other": {
+    "total": 694,
+    "check_match": 693,
+    "full_match": 473
   }
 }

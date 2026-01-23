@@ -82,13 +82,17 @@
             "rust-src"
           ];
 
-          # WASM target
+          # WASM target (for wasm-bindgen/browser)
           rustWasm = inputs'.fenix.packages.targets.wasm32-unknown-unknown.stable.rust-std;
 
-          # Combined toolchain with WASM
+          # WASI target (for wasmtime/Python)
+          rustWasi = inputs'.fenix.packages.targets.wasm32-wasip1.stable.rust-std;
+
+          # Combined toolchain with WASM + WASI
           rustToolchainWithWasm = inputs'.fenix.packages.combine [
             rustToolchain
             rustWasm
+            rustWasi
           ];
 
           # Crane lib with our toolchain
@@ -439,7 +443,8 @@
               echo ""
               echo "Tools available:"
               echo "  - Rust: $(rustc --version)"
-              echo "  - WASM: wasm32-unknown-unknown target"
+              echo "  - WASM: wasm32-unknown-unknown target (wasm-bindgen)"
+              echo "  - WASI: wasm32-wasip1 target (wasmtime)"
               echo "  - TLA+: $(tlc -help 2>/dev/null | head -1 || echo 'not available')"
               echo "  - Python: $(python --version) with beancount"
               echo "  - Podman: $(podman --version)"

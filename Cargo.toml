@@ -11,6 +11,7 @@ members = [
   "crates/rustledger-importer",
   "crates/rustledger",
   "crates/rustledger-wasm",
+  "crates/rustledger-ffi-py",
   "crates/rustledger-lsp",
 ]
 # Exclude wasm and lsp from default builds (they have special build requirements)

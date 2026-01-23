@@ -2962,6 +2962,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustledger-ffi-py"
+version = "0.6.0"
+dependencies = [
+ "rustledger-booking",
+ "rustledger-core",
+ "rustledger-parser",
+ "rustledger-query",
+ "rustledger-validate",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "rustledger-importer"
 version = "0.6.0"
 dependencies = [

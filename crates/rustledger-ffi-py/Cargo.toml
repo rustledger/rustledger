@@ -1,0 +1,29 @@
+[package]
+name = "rustledger-ffi-py"
+description = "Beancount FFI for Python via WASI/wasmtime (Fava integration)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+authors.workspace = true
+readme = "../../README.md"
+
+[[bin]]
+name = "rustledger-ffi-py"
+path = "src/main.rs"
+
+[dependencies]
+rustledger-core.workspace = true
+rustledger-parser.workspace = true
+rustledger-booking.workspace = true
+rustledger-validate.workspace = true
+rustledger-query.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

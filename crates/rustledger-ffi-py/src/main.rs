@@ -26,7 +26,7 @@ use rustledger_core::{Cost, Directive, MetaValue, Metadata, NaiveDate, format::F
 use rustledger_parser::{Spanned, parse as parse_beancount};
 use rustledger_query::{Executor, parse as parse_query};
 use rustledger_validate::{ValidationOptions, validate_spanned_with_options};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 // =============================================================================
 // Constants and Exit Codes
@@ -392,6 +392,452 @@ struct BatchOutput {
     api_version: &'static str,
     load: LoadOutput,
     queries: Vec<QueryOutput>,
+}
+
+// =============================================================================
+// Input Types (JSON-deserializable for create-entry/format-entry)
+// =============================================================================
+
+/// Input amount for entry creation.
+#[derive(Deserialize, Clone)]
+struct InputAmount {
+    number: String,
+    currency: String,
+}
+
+/// Input cost for entry creation.
+#[derive(Deserialize, Clone, Default)]
+struct InputCost {
+    #[serde(default)]
+    number: Option<String>,
+    #[serde(default)]
+    number_total: Option<String>,
+    #[serde(default)]
+    currency: Option<String>,
+    #[serde(default)]
+    date: Option<String>,
+    #[serde(default)]
+    label: Option<String>,
+}
+
+/// Input posting for entry creation.
+#[derive(Deserialize, Clone)]
+struct InputPosting {
+    account: String,
+    #[serde(default)]
+    units: Option<InputAmount>,
+    #[serde(default)]
+    cost: Option<InputCost>,
+    #[serde(default)]
+    price: Option<InputAmount>,
+    #[serde(default)]
+    meta: HashMap<String, serde_json::Value>,
+}
+
+/// Input entry for create-entry/format-entry commands.
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum InputEntry {
+    Transaction {
+        date: String,
+        #[serde(default = "default_flag")]
+        flag: String,
+        #[serde(default)]
+        payee: Option<String>,
+        #[serde(default)]
+        narration: Option<String>,
+        #[serde(default)]
+        tags: Vec<String>,
+        #[serde(default)]
+        links: Vec<String>,
+        #[serde(default)]
+        postings: Vec<InputPosting>,
+        #[serde(default)]
+        meta: HashMap<String, serde_json::Value>,
+    },
+    Open {
+        date: String,
+        account: String,
+        #[serde(default)]
+        currencies: Vec<String>,
+        #[serde(default)]
+        booking: Option<String>,
+        #[serde(default)]
+        meta: HashMap<String, serde_json::Value>,
+    },
+    Close {
+        date: String,
+        account: String,
+        #[serde(default)]
+        meta: HashMap<String, serde_json::Value>,
+    },
+    Balance {
+        date: String,
+        account: String,
+        amount: InputAmount,
+        #[serde(default)]
+        meta: HashMap<String, serde_json::Value>,
+    },
+    Pad {
+        date: String,
+        account: String,
+        source_account: String,
+        #[serde(default)]
+        meta: HashMap<String, serde_json::Value>,
+    },
+    Commodity {
+        date: String,
+        currency: String,
+        #[serde(default)]
+        meta: HashMap<String, serde_json::Value>,
+    },
+    Price {
+        date: String,
+        currency: String,
+        amount: InputAmount,
+        #[serde(default)]
+        meta: HashMap<String, serde_json::Value>,
+    },
+    Event {
+        date: String,
+        event_type: String,
+        value: String,
+        #[serde(default)]
+        meta: HashMap<String, serde_json::Value>,
+    },
+    Note {
+        date: String,
+        account: String,
+        comment: String,
+        #[serde(default)]
+        meta: HashMap<String, serde_json::Value>,
+    },
+    Document {
+        date: String,
+        account: String,
+        path: String,
+        #[serde(default)]
+        meta: HashMap<String, serde_json::Value>,
+    },
+    Query {
+        date: String,
+        name: String,
+        query_string: String,
+        #[serde(default)]
+        meta: HashMap<String, serde_json::Value>,
+    },
+    Custom {
+        date: String,
+        custom_type: String,
+        #[serde(default)]
+        values: Vec<serde_json::Value>,
+        #[serde(default)]
+        meta: HashMap<String, serde_json::Value>,
+    },
+}
+
+fn default_flag() -> String {
+    "*".to_string()
+}
+
+/// Convert JSON metadata value to core `MetaValue`.
+fn json_to_meta_value(value: &serde_json::Value) -> MetaValue {
+    match value {
+        serde_json::Value::String(s) => MetaValue::String(s.clone()),
+        serde_json::Value::Bool(b) => MetaValue::Bool(*b),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                MetaValue::Number(rustledger_core::Decimal::from(i))
+            } else if let Some(f) = n.as_f64() {
+                MetaValue::Number(
+                    rustledger_core::Decimal::from_str_exact(&f.to_string())
+                        .unwrap_or_else(|_| rustledger_core::Decimal::from(0)),
+                )
+            } else {
+                MetaValue::None
+            }
+        }
+        serde_json::Value::Null => MetaValue::None,
+        serde_json::Value::Object(obj) => {
+            // Handle Amount objects
+            if let (Some(number), Some(currency)) = (obj.get("number"), obj.get("currency")) {
+                if let (Some(n), Some(c)) = (number.as_str(), currency.as_str()) {
+                    return MetaValue::Amount(rustledger_core::Amount {
+                        number: rustledger_core::Decimal::from_str_exact(n)
+                            .unwrap_or_else(|_| rustledger_core::Decimal::from(0)),
+                        currency: c.into(),
+                    });
+                }
+            }
+            MetaValue::None
+        }
+        serde_json::Value::Array(_) => MetaValue::None,
+    }
+}
+
+/// Convert `HashMap<String, Value>` to core Metadata.
+fn json_map_to_metadata(map: &HashMap<String, serde_json::Value>) -> Metadata {
+    map.iter()
+        .map(|(k, v)| (k.clone(), json_to_meta_value(v)))
+        .collect()
+}
+
+/// Convert `InputEntry` to core Directive.
+fn input_entry_to_directive(entry: &InputEntry) -> Result<Directive, String> {
+    match entry {
+        InputEntry::Transaction {
+            date,
+            flag,
+            payee,
+            narration,
+            tags,
+            links,
+            postings,
+            meta,
+        } => {
+            let date = NaiveDate::parse_from_str(date, "%Y-%m-%d")
+                .map_err(|e| format!("Invalid date '{date}': {e}"))?;
+
+            let flag = match flag.as_str() {
+                "*" | "txn" => '*',
+                "!" => '!',
+                other => other.chars().next().unwrap_or('*'),
+            };
+
+            let postings: Vec<rustledger_core::Posting> = postings
+                .iter()
+                .map(|p| {
+                    let units = p.units.as_ref().map(|u| {
+                        rustledger_core::IncompleteAmount::Complete(rustledger_core::Amount {
+                            number: rustledger_core::Decimal::from_str_exact(&u.number)
+                                .unwrap_or_else(|_| rustledger_core::Decimal::from(0)),
+                            currency: u.currency.clone().into(),
+                        })
+                    });
+
+                    let cost = p.cost.as_ref().map(|c| rustledger_core::CostSpec {
+                        number_per: c
+                            .number
+                            .as_ref()
+                            .and_then(|n| rustledger_core::Decimal::from_str_exact(n).ok()),
+                        number_total: c
+                            .number_total
+                            .as_ref()
+                            .and_then(|n| rustledger_core::Decimal::from_str_exact(n).ok()),
+                        currency: c.currency.clone().map(Into::into),
+                        date: c
+                            .date
+                            .as_ref()
+                            .and_then(|d| NaiveDate::parse_from_str(d, "%Y-%m-%d").ok()),
+                        label: c.label.clone(),
+                        merge: false,
+                    });
+
+                    let price = p.price.as_ref().map(|pr| {
+                        rustledger_core::PriceAnnotation::Unit(rustledger_core::Amount {
+                            number: rustledger_core::Decimal::from_str_exact(&pr.number)
+                                .unwrap_or_else(|_| rustledger_core::Decimal::from(0)),
+                            currency: pr.currency.clone().into(),
+                        })
+                    });
+
+                    rustledger_core::Posting {
+                        account: p.account.clone().into(),
+                        units,
+                        cost,
+                        price,
+                        flag: None,
+                        meta: json_map_to_metadata(&p.meta),
+                    }
+                })
+                .collect();
+
+            Ok(Directive::Transaction(rustledger_core::Transaction {
+                date,
+                flag,
+                payee: payee.clone().map(Into::into),
+                narration: narration.clone().unwrap_or_default().into(),
+                tags: tags.iter().map(|t| t.clone().into()).collect(),
+                links: links.iter().map(|l| l.clone().into()).collect(),
+                postings,
+                meta: json_map_to_metadata(meta),
+            }))
+        }
+        InputEntry::Open {
+            date,
+            account,
+            currencies,
+            booking,
+            meta,
+        } => {
+            let date = NaiveDate::parse_from_str(date, "%Y-%m-%d")
+                .map_err(|e| format!("Invalid date '{date}': {e}"))?;
+            Ok(Directive::Open(rustledger_core::Open {
+                date,
+                account: account.clone().into(),
+                currencies: currencies.iter().map(|c| c.clone().into()).collect(),
+                booking: booking.clone(),
+                meta: json_map_to_metadata(meta),
+            }))
+        }
+        InputEntry::Close {
+            date,
+            account,
+            meta,
+        } => {
+            let date = NaiveDate::parse_from_str(date, "%Y-%m-%d")
+                .map_err(|e| format!("Invalid date '{date}': {e}"))?;
+            Ok(Directive::Close(rustledger_core::Close {
+                date,
+                account: account.clone().into(),
+                meta: json_map_to_metadata(meta),
+            }))
+        }
+        InputEntry::Balance {
+            date,
+            account,
+            amount,
+            meta,
+        } => {
+            let date = NaiveDate::parse_from_str(date, "%Y-%m-%d")
+                .map_err(|e| format!("Invalid date '{date}': {e}"))?;
+            Ok(Directive::Balance(rustledger_core::Balance {
+                date,
+                account: account.clone().into(),
+                amount: rustledger_core::Amount {
+                    number: rustledger_core::Decimal::from_str_exact(&amount.number)
+                        .unwrap_or_else(|_| rustledger_core::Decimal::from(0)),
+                    currency: amount.currency.clone().into(),
+                },
+                tolerance: None,
+                meta: json_map_to_metadata(meta),
+            }))
+        }
+        InputEntry::Pad {
+            date,
+            account,
+            source_account,
+            meta,
+        } => {
+            let date = NaiveDate::parse_from_str(date, "%Y-%m-%d")
+                .map_err(|e| format!("Invalid date '{date}': {e}"))?;
+            Ok(Directive::Pad(rustledger_core::Pad {
+                date,
+                account: account.clone().into(),
+                source_account: source_account.clone().into(),
+                meta: json_map_to_metadata(meta),
+            }))
+        }
+        InputEntry::Commodity {
+            date,
+            currency,
+            meta,
+        } => {
+            let date = NaiveDate::parse_from_str(date, "%Y-%m-%d")
+                .map_err(|e| format!("Invalid date '{date}': {e}"))?;
+            Ok(Directive::Commodity(rustledger_core::Commodity {
+                date,
+                currency: currency.clone().into(),
+                meta: json_map_to_metadata(meta),
+            }))
+        }
+        InputEntry::Price {
+            date,
+            currency,
+            amount,
+            meta,
+        } => {
+            let date = NaiveDate::parse_from_str(date, "%Y-%m-%d")
+                .map_err(|e| format!("Invalid date '{date}': {e}"))?;
+            Ok(Directive::Price(rustledger_core::Price {
+                date,
+                currency: currency.clone().into(),
+                amount: rustledger_core::Amount {
+                    number: rustledger_core::Decimal::from_str_exact(&amount.number)
+                        .unwrap_or_else(|_| rustledger_core::Decimal::from(0)),
+                    currency: amount.currency.clone().into(),
+                },
+                meta: json_map_to_metadata(meta),
+            }))
+        }
+        InputEntry::Event {
+            date,
+            event_type,
+            value,
+            meta,
+        } => {
+            let date = NaiveDate::parse_from_str(date, "%Y-%m-%d")
+                .map_err(|e| format!("Invalid date '{date}': {e}"))?;
+            Ok(Directive::Event(rustledger_core::Event {
+                date,
+                event_type: event_type.clone(),
+                value: value.clone(),
+                meta: json_map_to_metadata(meta),
+            }))
+        }
+        InputEntry::Note {
+            date,
+            account,
+            comment,
+            meta,
+        } => {
+            let date = NaiveDate::parse_from_str(date, "%Y-%m-%d")
+                .map_err(|e| format!("Invalid date '{date}': {e}"))?;
+            Ok(Directive::Note(rustledger_core::Note {
+                date,
+                account: account.clone().into(),
+                comment: comment.clone(),
+                meta: json_map_to_metadata(meta),
+            }))
+        }
+        InputEntry::Document {
+            date,
+            account,
+            path,
+            meta,
+        } => {
+            let date = NaiveDate::parse_from_str(date, "%Y-%m-%d")
+                .map_err(|e| format!("Invalid date '{date}': {e}"))?;
+            Ok(Directive::Document(rustledger_core::Document {
+                date,
+                account: account.clone().into(),
+                path: path.clone(),
+                tags: Vec::new(),
+                links: Vec::new(),
+                meta: json_map_to_metadata(meta),
+            }))
+        }
+        InputEntry::Query {
+            date,
+            name,
+            query_string,
+            meta,
+        } => {
+            let date = NaiveDate::parse_from_str(date, "%Y-%m-%d")
+                .map_err(|e| format!("Invalid date '{date}': {e}"))?;
+            Ok(Directive::Query(rustledger_core::Query {
+                date,
+                name: name.clone(),
+                query: query_string.clone(),
+                meta: json_map_to_metadata(meta),
+            }))
+        }
+        InputEntry::Custom {
+            date,
+            custom_type,
+            values,
+            meta,
+        } => {
+            let date = NaiveDate::parse_from_str(date, "%Y-%m-%d")
+                .map_err(|e| format!("Invalid date '{date}': {e}"))?;
+            Ok(Directive::Custom(rustledger_core::Custom {
+                date,
+                custom_type: custom_type.clone(),
+                values: values.iter().map(json_to_meta_value).collect(),
+                meta: json_map_to_metadata(meta),
+            }))
+        }
+    }
 }
 
 // =============================================================================
@@ -1370,6 +1816,229 @@ fn cmd_types() -> i32 {
 }
 
 // =============================================================================
+// Format Entry Command
+// =============================================================================
+
+/// Output for format-entry command.
+#[derive(Serialize)]
+struct FormatEntryOutput {
+    api_version: &'static str,
+    formatted: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    errors: Vec<Error>,
+}
+
+/// Format a single entry from JSON to beancount text.
+fn cmd_format_entry(json_str: &str) -> i32 {
+    // Parse JSON into InputEntry
+    let entry: InputEntry = match serde_json::from_str(json_str) {
+        Ok(e) => e,
+        Err(e) => {
+            let output = FormatEntryOutput {
+                api_version: API_VERSION,
+                formatted: String::new(),
+                errors: vec![Error {
+                    message: format!("Invalid entry JSON: {e}"),
+                    line: None,
+                    severity: "error".to_string(),
+                }],
+            };
+            return output_json(&output);
+        }
+    };
+
+    // Convert to Directive
+    let directive = match input_entry_to_directive(&entry) {
+        Ok(d) => d,
+        Err(e) => {
+            let output = FormatEntryOutput {
+                api_version: API_VERSION,
+                formatted: String::new(),
+                errors: vec![Error {
+                    message: e,
+                    line: None,
+                    severity: "error".to_string(),
+                }],
+            };
+            return output_json(&output);
+        }
+    };
+
+    // Format directive
+    let config = FormatConfig::default();
+    let formatted = rustledger_core::format::format_directive(&directive, &config);
+
+    let output = FormatEntryOutput {
+        api_version: API_VERSION,
+        formatted,
+        errors: vec![],
+    };
+    output_json(&output)
+}
+
+/// Format multiple entries from JSON array to beancount text.
+fn cmd_format_entries(json_str: &str) -> i32 {
+    // Parse JSON array of entries
+    let entries: Vec<InputEntry> = match serde_json::from_str(json_str) {
+        Ok(e) => e,
+        Err(e) => {
+            let output = FormatEntryOutput {
+                api_version: API_VERSION,
+                formatted: String::new(),
+                errors: vec![Error {
+                    message: format!("Invalid entries JSON: {e}"),
+                    line: None,
+                    severity: "error".to_string(),
+                }],
+            };
+            return output_json(&output);
+        }
+    };
+
+    let config = FormatConfig::default();
+    let mut formatted = String::new();
+    let mut errors = Vec::new();
+
+    for (i, entry) in entries.iter().enumerate() {
+        match input_entry_to_directive(entry) {
+            Ok(directive) => {
+                formatted.push_str(&rustledger_core::format::format_directive(
+                    &directive, &config,
+                ));
+            }
+            Err(e) => {
+                errors.push(Error {
+                    message: format!("Entry {i}: {e}"),
+                    line: None,
+                    severity: "error".to_string(),
+                });
+            }
+        }
+    }
+
+    let output = FormatEntryOutput {
+        api_version: API_VERSION,
+        formatted,
+        errors,
+    };
+    output_json(&output)
+}
+
+// =============================================================================
+// Create Entry Command
+// =============================================================================
+
+/// Output for create-entry command.
+#[derive(Serialize)]
+struct CreateEntryOutput {
+    api_version: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    entry: Option<DirectiveJson>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    errors: Vec<Error>,
+}
+
+/// Create a full entry with hash from minimal JSON input.
+fn cmd_create_entry(json_str: &str) -> i32 {
+    // Parse JSON into InputEntry
+    let input_entry: InputEntry = match serde_json::from_str(json_str) {
+        Ok(e) => e,
+        Err(e) => {
+            let output = CreateEntryOutput {
+                api_version: API_VERSION,
+                entry: None,
+                errors: vec![Error {
+                    message: format!("Invalid entry JSON: {e}"),
+                    line: None,
+                    severity: "error".to_string(),
+                }],
+            };
+            return output_json(&output);
+        }
+    };
+
+    // Convert to Directive
+    let directive = match input_entry_to_directive(&input_entry) {
+        Ok(d) => d,
+        Err(e) => {
+            let output = CreateEntryOutput {
+                api_version: API_VERSION,
+                entry: None,
+                errors: vec![Error {
+                    message: e,
+                    line: None,
+                    severity: "error".to_string(),
+                }],
+            };
+            return output_json(&output);
+        }
+    };
+
+    // Convert to full DirectiveJson with hash
+    let entry_json = directive_to_json(&directive, 0, "<created>");
+
+    let output = CreateEntryOutput {
+        api_version: API_VERSION,
+        entry: Some(entry_json),
+        errors: vec![],
+    };
+    output_json(&output)
+}
+
+/// Create multiple entries from JSON array.
+#[derive(Serialize)]
+struct CreateEntriesOutput {
+    api_version: &'static str,
+    entries: Vec<DirectiveJson>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    errors: Vec<Error>,
+}
+
+fn cmd_create_entries(json_str: &str) -> i32 {
+    // Parse JSON array of entries
+    let input_entries: Vec<InputEntry> = match serde_json::from_str(json_str) {
+        Ok(e) => e,
+        Err(e) => {
+            let output = CreateEntriesOutput {
+                api_version: API_VERSION,
+                entries: vec![],
+                errors: vec![Error {
+                    message: format!("Invalid entries JSON: {e}"),
+                    line: None,
+                    severity: "error".to_string(),
+                }],
+            };
+            return output_json(&output);
+        }
+    };
+
+    let mut entries = Vec::new();
+    let mut errors = Vec::new();
+
+    for (i, input_entry) in input_entries.iter().enumerate() {
+        match input_entry_to_directive(input_entry) {
+            Ok(directive) => {
+                entries.push(directive_to_json(&directive, i as u32, "<created>"));
+            }
+            Err(e) => {
+                errors.push(Error {
+                    message: format!("Entry {i}: {e}"),
+                    line: None,
+                    severity: "error".to_string(),
+                });
+            }
+        }
+    }
+
+    let output = CreateEntriesOutput {
+        api_version: API_VERSION,
+        entries,
+        errors,
+    };
+    output_json(&output)
+}
+
+// =============================================================================
 // Clamp Command (Date Range Filtering)
 // =============================================================================
 
@@ -1564,6 +2233,12 @@ fn cmd_help() {
     eprintln!("  format-file <path>        Format file back to beancount syntax");
     eprintln!("  clamp-file <path> [begin] [end]  Filter entries by date range");
     eprintln!();
+    eprintln!("Entry manipulation (stdin JSON):");
+    eprintln!("  format-entry             Format single entry JSON to beancount text");
+    eprintln!("  format-entries           Format array of entry JSON to beancount text");
+    eprintln!("  create-entry             Create full entry with hash from minimal JSON");
+    eprintln!("  create-entries           Create multiple entries from JSON array");
+    eprintln!();
     eprintln!("Utility commands:");
     eprintln!("  is-encrypted <path>       Check if file is GPG-encrypted");
     eprintln!("  get-account-type <acct>   Extract account type from account name");
@@ -1736,6 +2411,23 @@ fn main() {
             }
         }
         "types" => cmd_types(),
+        // Entry manipulation commands (read JSON from stdin)
+        "format-entry" | "format-entries" | "create-entry" | "create-entries" => {
+            let json_str = match read_source(None) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("{e}");
+                    std::process::exit(exit_codes::USER_ERROR);
+                }
+            };
+            match command.as_str() {
+                "format-entry" => cmd_format_entry(&json_str),
+                "format-entries" => cmd_format_entries(&json_str),
+                "create-entry" => cmd_create_entry(&json_str),
+                "create-entries" => cmd_create_entries(&json_str),
+                _ => unreachable!(),
+            }
+        }
         // Stdin-based commands (original behavior)
         "load" | "validate" | "query" | "batch" | "format" | "clamp" => {
             // Read source from stdin

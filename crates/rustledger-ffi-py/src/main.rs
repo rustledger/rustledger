@@ -286,11 +286,20 @@ impl Default for LedgerOptions {
     }
 }
 
+/// A plugin directive from the source file.
+#[derive(Serialize)]
+struct Plugin {
+    name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    config: Option<String>,
+}
+
 #[derive(Serialize)]
 struct LoadOutput {
     entries: Vec<DirectiveJson>,
     errors: Vec<Error>,
     options: LedgerOptions,
+    plugins: Vec<Plugin>,
 }
 
 #[derive(Serialize)]
@@ -383,6 +392,7 @@ struct LoadResult {
     directive_lines: Vec<u32>,
     errors: Vec<Error>,
     options: LedgerOptions,
+    plugins: Vec<Plugin>,
 }
 
 /// Parse and interpolate source, returning directives with line numbers.
@@ -493,11 +503,22 @@ fn load_source(source: &str) -> LoadResult {
     options.commodities = commodity_list;
     options.display_precision = precision_tracker.most_common_precision();
 
+    // Extract plugins
+    let plugins: Vec<Plugin> = parse_result
+        .plugins
+        .iter()
+        .map(|(name, config, _span)| Plugin {
+            name: name.clone(),
+            config: config.clone(),
+        })
+        .collect();
+
     LoadResult {
         directives,
         directive_lines,
         errors,
         options,
+        plugins,
     }
 }
 
@@ -758,6 +779,7 @@ fn cmd_load(source: &str, filename: &str) {
         entries,
         errors: load.errors,
         options: load.options,
+        plugins: load.plugins,
     };
     println!("{}", serde_json::to_string(&output).unwrap());
 }

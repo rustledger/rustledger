@@ -56,7 +56,13 @@ fn ws1<'a>() -> impl Parser<'a, ParserInput<'a>, (), ParserExtra<'a>> + Clone {
 
 /// Case-insensitive keyword parser.
 fn kw<'a>(keyword: &'static str) -> impl Parser<'a, ParserInput<'a>, (), ParserExtra<'a>> + Clone {
-    text::keyword(keyword).ignored()
+    text::ident().try_map(move |s: &str, span| {
+        if s.eq_ignore_ascii_case(keyword) {
+            Ok(())
+        } else {
+            Err(Rich::custom(span, format!("expected keyword '{keyword}'")))
+        }
+    })
 }
 
 /// Parse digits.
@@ -297,8 +303,10 @@ fn limit_clause<'a>() -> impl Parser<'a, ParserInput<'a>, u64, ParserExtra<'a>> 
 /// Parse JOURNAL query.
 fn journal_query<'a>() -> impl Parser<'a, ParserInput<'a>, JournalQuery, ParserExtra<'a>> + Clone {
     kw("JOURNAL")
-        .ignore_then(ws1())
-        .ignore_then(string_literal())
+        .ignore_then(
+            // Account pattern is optional - can be JOURNAL or JOURNAL "pattern"
+            ws1().ignore_then(string_literal()).or_not(),
+        )
         .then(at_function().or_not())
         .then(
             ws1()
@@ -308,7 +316,7 @@ fn journal_query<'a>() -> impl Parser<'a, ParserInput<'a>, JournalQuery, ParserE
                 .or_not(),
         )
         .map(|((account_pattern, at_function), from)| JournalQuery {
-            account_pattern,
+            account_pattern: account_pattern.unwrap_or_default(),
             at_function,
             from,
         })
@@ -808,6 +816,31 @@ mod tests {
                     Some(NaiveDate::from_ymd_opt(2024, 12, 31).unwrap())
                 );
                 assert!(from.clear);
+            }
+            _ => panic!("Expected SELECT query"),
+        }
+    }
+
+    #[test]
+    fn test_from_year_filter() {
+        let query = parse("SELECT date, account FROM year = 2024").unwrap();
+        match query {
+            Query::Select(sel) => {
+                let from = sel.from.unwrap();
+                assert!(from.filter.is_some(), "FROM filter should be present");
+                match from.filter.unwrap() {
+                    Expr::BinaryOp(op) => {
+                        assert_eq!(op.op, BinaryOperator::Eq);
+                        assert!(matches!(op.left, Expr::Column(ref c) if c == "year"));
+                        // Right side can be Integer or Number (parser produces Number)
+                        match op.right {
+                            Expr::Literal(Literal::Integer(n)) => assert_eq!(n, 2024),
+                            Expr::Literal(Literal::Number(n)) => assert_eq!(n, dec!(2024)),
+                            other => panic!("Expected numeric literal, got {other:?}"),
+                        }
+                    }
+                    other => panic!("Expected BinaryOp, got {other:?}"),
+                }
             }
             _ => panic!("Expected SELECT query"),
         }

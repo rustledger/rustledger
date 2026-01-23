@@ -503,6 +503,14 @@ fn format_value(value: &Value, numberify: bool, ctx: &DisplayContext) -> String 
             positions.join("   ")
         }
         Value::StringSet(set) => set.join(", "),
+        Value::Object(obj) => {
+            // Format object as {key: value, ...}
+            let pairs: Vec<String> = obj
+                .iter()
+                .map(|(k, v)| format!("{k}: {}", format_value(v, numberify, ctx)))
+                .collect();
+            format!("{{{}}}", pairs.join(", "))
+        }
         Value::Null => String::new(),
     }
 }
@@ -535,6 +543,13 @@ fn value_to_json(value: &Value) -> serde_json::Value {
             })).collect::<Vec<_>>(),
         }),
         Value::StringSet(set) => serde_json::json!(set),
+        Value::Object(obj) => {
+            let mut map = serde_json::Map::new();
+            for (k, v) in obj {
+                map.insert(k.clone(), value_to_json(v));
+            }
+            serde_json::Value::Object(map)
+        }
         Value::Null => serde_json::Value::Null,
     }
 }

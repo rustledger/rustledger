@@ -150,6 +150,13 @@ pub fn value_to_cell(value: &rustledger_query::Value) -> CellValue {
             }
         }
         Value::StringSet(set) => CellValue::StringSet(set.clone()),
+        Value::Object(map) => {
+            let converted: std::collections::HashMap<String, Box<CellValue>> = map
+                .iter()
+                .map(|(k, v)| (k.clone(), Box::new(value_to_cell(v))))
+                .collect();
+            CellValue::Object(converted)
+        }
         Value::Null => CellValue::Null,
     }
 }

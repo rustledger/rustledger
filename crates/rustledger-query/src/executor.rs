@@ -3,7 +3,7 @@
 //! Executes parsed BQL queries against a set of Beancount directives.
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 
 use chrono::Datelike;
@@ -41,6 +41,8 @@ pub enum Value {
     Inventory(Inventory),
     /// Set of strings (tags, links).
     StringSet(Vec<String>),
+    /// Structured object (for entry, meta columns).
+    Object(BTreeMap<String, Self>),
     /// NULL value.
     Null,
 }
@@ -91,6 +93,13 @@ impl Value {
                 sorted.sort();
                 for s in &sorted {
                     s.hash(state);
+                }
+            }
+            Self::Object(obj) => {
+                // BTreeMap is already sorted by key, so iteration order is deterministic
+                for (k, v) in obj {
+                    k.hash(state);
+                    v.hash_value(state);
                 }
             }
             Self::Null => {}
@@ -933,8 +942,14 @@ impl<'a> Executor<'a> {
                 // Handle YEAR = N, MONTH = N, etc.
                 match (&op.left, &op.right) {
                     (Expr::Column(col), Expr::Literal(lit)) if col.to_uppercase() == "YEAR" => {
-                        if let Literal::Integer(n) = lit {
-                            let matches = txn.date.year() == *n as i32;
+                        // Handle both Integer and Number for year comparison
+                        let year_val = match lit {
+                            Literal::Integer(n) => Some(*n as i32),
+                            Literal::Number(n) => n.to_string().parse::<i32>().ok(),
+                            _ => None,
+                        };
+                        if let Some(n) = year_val {
+                            let matches = txn.date.year() == n;
                             Ok(if op.op == BinaryOperator::Eq {
                                 matches
                             } else {
@@ -945,8 +960,14 @@ impl<'a> Executor<'a> {
                         }
                     }
                     (Expr::Column(col), Expr::Literal(lit)) if col.to_uppercase() == "MONTH" => {
-                        if let Literal::Integer(n) = lit {
-                            let matches = txn.date.month() == *n as u32;
+                        // Handle both Integer and Number for month comparison
+                        let month_val = match lit {
+                            Literal::Integer(n) => Some(*n as u32),
+                            Literal::Number(n) => n.to_string().parse::<u32>().ok(),
+                            _ => None,
+                        };
+                        if let Some(n) = month_val {
+                            let matches = txn.date.month() == n;
                             Ok(if op.op == BinaryOperator::Eq {
                                 matches
                             } else {
@@ -1123,7 +1144,103 @@ impl<'a> Executor<'a> {
             "number" => Ok(posting
                 .amount()
                 .map_or(Value::Null, |u| Value::Number(u.number))),
+            "cost_number" => {
+                // Per-unit cost number
+                if let Some(cost) = &posting.cost {
+                    if let Some(number_per) = &cost.number_per {
+                        return Ok(Value::Number(*number_per));
+                    }
+                }
+                Ok(Value::Null)
+            }
+            "cost_currency" => {
+                // Cost currency
+                if let Some(cost) = &posting.cost {
+                    if let Some(currency) = &cost.currency {
+                        return Ok(Value::String(currency.to_string()));
+                    }
+                }
+                Ok(Value::Null)
+            }
+            "cost_date" => {
+                // Cost lot date
+                if let Some(cost) = &posting.cost {
+                    if let Some(date) = cost.date {
+                        return Ok(Value::Date(date));
+                    }
+                }
+                Ok(Value::Null)
+            }
+            "cost_label" => {
+                // Cost lot label
+                if let Some(cost) = &posting.cost {
+                    if let Some(label) = &cost.label {
+                        return Ok(Value::String(label.clone()));
+                    }
+                }
+                Ok(Value::Null)
+            }
+            "has_cost" => Ok(Value::Boolean(posting.cost.is_some())),
+            "entry" => {
+                // Return the parent transaction as a structured object
+                let txn = ctx.transaction;
+                let mut obj = BTreeMap::new();
+                obj.insert("date".to_string(), Value::Date(txn.date));
+                obj.insert("flag".to_string(), Value::String(txn.flag.to_string()));
+                if let Some(ref payee) = txn.payee {
+                    obj.insert("payee".to_string(), Value::String(payee.to_string()));
+                }
+                obj.insert(
+                    "narration".to_string(),
+                    Value::String(txn.narration.to_string()),
+                );
+                obj.insert(
+                    "tags".to_string(),
+                    Value::StringSet(txn.tags.iter().map(ToString::to_string).collect()),
+                );
+                obj.insert(
+                    "links".to_string(),
+                    Value::StringSet(txn.links.iter().map(ToString::to_string).collect()),
+                );
+                // Include transaction metadata
+                let mut meta_obj = BTreeMap::new();
+                for (k, v) in &txn.meta {
+                    meta_obj.insert(k.clone(), Self::meta_value_to_value(v));
+                }
+                obj.insert("meta".to_string(), Value::Object(meta_obj));
+                Ok(Value::Object(obj))
+            }
+            "meta" => {
+                // Return posting meta merged with transaction meta (posting wins)
+                let mut obj = BTreeMap::new();
+                // First add transaction meta
+                for (k, v) in &ctx.transaction.meta {
+                    obj.insert(k.clone(), Self::meta_value_to_value(v));
+                }
+                // Then posting meta (overrides transaction)
+                for (k, v) in &posting.meta {
+                    obj.insert(k.clone(), Self::meta_value_to_value(v));
+                }
+                Ok(Value::Object(obj))
+            }
             _ => Err(QueryError::UnknownColumn(name.to_string())),
+        }
+    }
+
+    /// Convert a `MetaValue` to a `Value`.
+    fn meta_value_to_value(mv: &rustledger_core::MetaValue) -> Value {
+        use rustledger_core::MetaValue;
+        match mv {
+            MetaValue::String(s) => Value::String(s.clone()),
+            MetaValue::Number(n) => Value::Number(*n),
+            MetaValue::Bool(b) => Value::Boolean(*b),
+            MetaValue::Date(d) => Value::Date(*d),
+            MetaValue::Currency(c) => Value::String(c.clone()),
+            MetaValue::Amount(a) => Value::Amount(a.clone()),
+            MetaValue::Account(a) => Value::String(a.clone()),
+            MetaValue::Tag(t) => Value::String(t.clone()),
+            MetaValue::Link(l) => Value::String(l.clone()),
+            MetaValue::None => Value::Null,
         }
     }
 
@@ -1168,6 +1285,8 @@ impl<'a> Executor<'a> {
             }
             // Utility functions
             "COALESCE" => self.eval_coalesce(func, ctx),
+            // Metadata access
+            "META" | "ENTRY_META" | "POSTING_META" => self.eval_meta_function(&name, func, ctx),
             // Aggregate functions return Null when evaluated on a single row
             // They're handled specially in aggregate evaluation
             "SUM" | "COUNT" | "MIN" | "MAX" | "FIRST" | "LAST" | "AVG" => Ok(Value::Null),
@@ -1757,6 +1876,54 @@ impl<'a> Executor<'a> {
         Ok(Value::Null)
     }
 
+    /// Evaluate metadata access functions: `META`, `ENTRY_META`, `POSTING_META`.
+    fn eval_meta_function(
+        &self,
+        name: &str,
+        func: &FunctionCall,
+        ctx: &PostingContext,
+    ) -> Result<Value, QueryError> {
+        Self::require_args(name, func, 1)?;
+
+        // Get the key name from the argument
+        let key = match self.evaluate_expr(&func.args[0], ctx)? {
+            Value::String(s) => s,
+            _ => {
+                return Err(QueryError::Type(format!(
+                    "{name} expects a string key argument"
+                )));
+            }
+        };
+
+        let posting = &ctx.transaction.postings[ctx.posting_index];
+
+        // META: first check posting meta, then transaction meta
+        // POSTING_META: only check posting meta
+        // ENTRY_META: only check transaction meta
+        let meta_value = match name {
+            "META" => posting
+                .meta
+                .get(&key)
+                .or_else(|| ctx.transaction.meta.get(&key)),
+            "POSTING_META" => posting.meta.get(&key),
+            "ENTRY_META" => ctx.transaction.meta.get(&key),
+            _ => unreachable!(),
+        };
+
+        match meta_value {
+            Some(rustledger_core::MetaValue::String(s)) => Ok(Value::String(s.clone())),
+            Some(rustledger_core::MetaValue::Number(n)) => Ok(Value::Number(*n)),
+            Some(rustledger_core::MetaValue::Bool(b)) => Ok(Value::Boolean(*b)),
+            Some(rustledger_core::MetaValue::Date(d)) => Ok(Value::Date(*d)),
+            Some(rustledger_core::MetaValue::Currency(c)) => Ok(Value::String(c.clone())),
+            Some(rustledger_core::MetaValue::Amount(a)) => Ok(Value::Amount(a.clone())),
+            Some(rustledger_core::MetaValue::Account(a)) => Ok(Value::String(a.clone())),
+            Some(rustledger_core::MetaValue::Tag(t)) => Ok(Value::String(t.clone())),
+            Some(rustledger_core::MetaValue::Link(l)) => Ok(Value::String(l.clone())),
+            Some(rustledger_core::MetaValue::None) | None => Ok(Value::Null),
+        }
+    }
+
     /// Evaluate a function with pre-evaluated arguments (for subquery context).
     fn evaluate_function_on_values(&self, name: &str, args: &[Value]) -> Result<Value, QueryError> {
         let name_upper = name.to_uppercase();
@@ -2336,6 +2503,16 @@ impl<'a> Executor<'a> {
                         key.push(',');
                     }
                 }
+                Value::Object(obj) => {
+                    // Objects are complex; serialize keys/values
+                    key.push('O');
+                    for (k, v) in obj {
+                        key.push_str(k);
+                        key.push(':');
+                        let _ = write!(key, "{v:?}");
+                        key.push(';');
+                    }
+                }
                 Value::Null => {
                     key.push('0');
                 }
@@ -2908,7 +3085,7 @@ impl<'a> Executor<'a> {
 
         // Add pivot value columns
         for pv in &pivot_values {
-            new_columns.push(self.value_to_string(pv));
+            new_columns.push(Self::value_to_string(pv));
         }
 
         let mut new_result = QueryResult::new(new_columns);
@@ -2922,7 +3099,7 @@ impl<'a> Executor<'a> {
         for row in &result.rows {
             let key: String = group_cols
                 .iter()
-                .map(|&i| self.value_to_string(&row[i]))
+                .map(|&i| Self::value_to_string(&row[i]))
                 .collect::<Vec<_>>()
                 .join("|");
             groups.entry(key).or_default().push(row);
@@ -3017,7 +3194,7 @@ impl<'a> Executor<'a> {
     }
 
     /// Convert a value to string for display/grouping.
-    fn value_to_string(&self, val: &Value) -> String {
+    fn value_to_string(val: &Value) -> String {
         match val {
             Value::String(s) => s.clone(),
             Value::Number(n) => n.to_string(),
@@ -3027,7 +3204,15 @@ impl<'a> Executor<'a> {
             Value::Amount(a) => format!("{} {}", a.number, a.currency),
             Value::Position(p) => p.to_string(),
             Value::Inventory(inv) => inv.to_string(),
-            Value::StringSet(ss) => ss.join("   "),
+            Value::StringSet(ss) => ss.join(", "),
+            Value::Object(obj) => {
+                // Format object as {key: value, ...}
+                let pairs: Vec<String> = obj
+                    .iter()
+                    .map(|(k, v)| format!("{k}: {}", Self::value_to_string(v)))
+                    .collect();
+                format!("{{{}}}", pairs.join(", "))
+            }
             Value::Null => "NULL".to_string(),
         }
     }

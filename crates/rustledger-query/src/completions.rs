@@ -493,6 +493,15 @@ fn column_completions() -> Vec<Completion> {
         column("year", "Transaction year"),
         column("month", "Transaction month"),
         column("day", "Transaction day"),
+        column("currency", "Posting currency"),
+        column("number", "Posting amount number"),
+        column("cost_number", "Per-unit cost number"),
+        column("cost_currency", "Cost currency"),
+        column("cost_date", "Cost lot date"),
+        column("cost_label", "Cost lot label"),
+        column("has_cost", "Whether posting has cost"),
+        column("entry", "Parent transaction object"),
+        column("meta", "All metadata as object"),
     ]
 }
 
@@ -531,6 +540,10 @@ fn function_completions() -> Vec<Completion> {
         function("CURRENCY(", "Extract currency"),
         function("ABS(", "Absolute value"),
         function("ROUND(", "Round number"),
+        // Metadata functions
+        function("META(", "Get metadata value (posting or entry)"),
+        function("ENTRY_META(", "Get entry metadata value"),
+        function("POSTING_META(", "Get posting metadata value"),
     ]
 }
 

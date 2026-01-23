@@ -255,6 +255,8 @@ pub enum CellValue {
     Inventory { positions: Vec<PositionValue> },
     /// Set of strings.
     StringSet(Vec<String>),
+    /// Object with key-value pairs (for `entry` and `meta` columns).
+    Object(std::collections::HashMap<String, Box<CellValue>>),
 }
 
 /// Amount value for serialization.

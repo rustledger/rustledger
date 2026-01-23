@@ -192,9 +192,11 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@4be9e76fd7c4901c61fb841f559994984270fce7 # stable
 
+      # Use PAT (not GITHUB_TOKEN) so tag creation triggers release-build.yml
+      # GITHUB_TOKEN events don't trigger other workflows (GitHub security feature)
       - name: Run release-plz release
         uses: release-plz/action@99b33d83e322fcd1b1fa126f8c4a74744aae3c8d # v0.5
         with:
           command: release
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.WEBSITE_DISPATCH_TOKEN }}

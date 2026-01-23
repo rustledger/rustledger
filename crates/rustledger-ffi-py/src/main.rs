@@ -29,6 +29,44 @@ use rustledger_validate::{ValidationOptions, validate_spanned_with_options};
 use serde::Serialize;
 
 // =============================================================================
+// Constants and Exit Codes
+// =============================================================================
+
+/// API version for compatibility detection.
+/// Increment minor version for backwards-compatible changes.
+/// Increment major version for breaking changes.
+const API_VERSION: &str = "1.0";
+
+/// Exit codes for standardized error handling.
+mod exit_codes {
+    /// Success.
+    pub const SUCCESS: i32 = 0;
+    /// User error (invalid input, missing arguments, parse errors).
+    pub const USER_ERROR: i32 = 1;
+    /// Internal error (unexpected failures).
+    pub const INTERNAL_ERROR: i32 = 2;
+}
+
+/// Write JSON to stdout, handling broken pipe gracefully.
+/// Returns the exit code to use.
+fn output_json<T: Serialize>(value: &T) -> i32 {
+    match serde_json::to_string(value) {
+        Ok(json) => {
+            // Use write! instead of println! to handle broken pipe
+            if writeln!(io::stdout(), "{json}").is_err() {
+                // Broken pipe is not an error - consumer closed early
+                return exit_codes::SUCCESS;
+            }
+            exit_codes::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("Error serializing JSON: {e}");
+            exit_codes::INTERNAL_ERROR
+        }
+    }
+}
+
+// =============================================================================
 // Output Types (JSON-serializable)
 // =============================================================================
 
@@ -313,6 +351,7 @@ struct Include {
 
 #[derive(Serialize)]
 struct LoadOutput {
+    api_version: &'static str,
     entries: Vec<DirectiveJson>,
     errors: Vec<Error>,
     options: LedgerOptions,
@@ -322,6 +361,7 @@ struct LoadOutput {
 
 #[derive(Serialize)]
 struct ValidateOutput {
+    api_version: &'static str,
     valid: bool,
     errors: Vec<Error>,
 }
@@ -334,6 +374,7 @@ struct ColumnInfo {
 
 #[derive(Serialize)]
 struct QueryOutput {
+    api_version: &'static str,
     columns: Vec<ColumnInfo>,
     rows: Vec<Vec<serde_json::Value>>,
     errors: Vec<Error>,
@@ -341,12 +382,14 @@ struct QueryOutput {
 
 #[derive(Serialize)]
 struct VersionOutput {
+    api_version: &'static str,
     version: String,
 }
 
 /// Output for batch command: load + multiple queries in one parse.
 #[derive(Serialize)]
 struct BatchOutput {
+    api_version: &'static str,
     load: LoadOutput,
     queries: Vec<QueryOutput>,
 }
@@ -552,7 +595,7 @@ fn load_source(source: &str) -> LoadResult {
         .collect();
 
     // Clone spanned directives for validation
-    let spanned_directives: Vec<Spanned<Directive>> = parse_result.directives.to_vec();
+    let spanned_directives: Vec<Spanned<Directive>> = parse_result.directives.clone();
 
     LoadResult {
         directives,
@@ -907,7 +950,7 @@ fn value_to_json(value: &rustledger_query::Value) -> serde_json::Value {
 }
 
 /// Get datatype string for a Value.
-fn value_datatype(value: &rustledger_query::Value) -> &'static str {
+const fn value_datatype(value: &rustledger_query::Value) -> &'static str {
     use rustledger_query::Value;
     match value {
         Value::Null => "null",
@@ -928,7 +971,7 @@ fn value_datatype(value: &rustledger_query::Value) -> &'static str {
 // Commands
 // =============================================================================
 
-fn cmd_load(source: &str, filename: &str) {
+fn cmd_load(source: &str, filename: &str) -> i32 {
     let load = load_source(source);
 
     let entries: Vec<DirectiveJson> = load
@@ -939,16 +982,17 @@ fn cmd_load(source: &str, filename: &str) {
         .collect();
 
     let output = LoadOutput {
+        api_version: API_VERSION,
         entries,
         errors: load.errors,
         options: load.options,
         plugins: load.plugins,
         includes: load.includes,
     };
-    println!("{}", serde_json::to_string(&output).unwrap());
+    output_json(&output)
 }
 
-fn cmd_validate(source: &str) {
+fn cmd_validate(source: &str) -> i32 {
     let load = load_source(source);
     let mut errors = load.errors;
 
@@ -968,10 +1012,11 @@ fn cmd_validate(source: &str) {
     }
 
     let output = ValidateOutput {
+        api_version: API_VERSION,
         valid: errors.is_empty(),
         errors,
     };
-    println!("{}", serde_json::to_string(&output).unwrap());
+    output_json(&output)
 }
 
 /// Execute a single query on directives, returning `QueryOutput`.
@@ -981,6 +1026,7 @@ fn execute_query(directives: &[Directive], query_str: &str) -> QueryOutput {
         Ok(q) => q,
         Err(e) => {
             return QueryOutput {
+                api_version: API_VERSION,
                 columns: vec![],
                 rows: vec![],
                 errors: vec![Error {
@@ -1025,12 +1071,14 @@ fn execute_query(directives: &[Directive], query_str: &str) -> QueryOutput {
                 .collect();
 
             QueryOutput {
+                api_version: API_VERSION,
                 columns,
                 rows,
                 errors: vec![],
             }
         }
         Err(e) => QueryOutput {
+            api_version: API_VERSION,
             columns: vec![],
             rows: vec![],
             errors: vec![Error {
@@ -1042,26 +1090,26 @@ fn execute_query(directives: &[Directive], query_str: &str) -> QueryOutput {
     }
 }
 
-fn cmd_query(source: &str, query_str: &str) {
+fn cmd_query(source: &str, query_str: &str) -> i32 {
     let load = load_source(source);
 
     if !load.errors.is_empty() {
         let output = QueryOutput {
+            api_version: API_VERSION,
             columns: vec![],
             rows: vec![],
             errors: load.errors,
         };
-        println!("{}", serde_json::to_string(&output).unwrap());
-        return;
+        return output_json(&output);
     }
 
     let output = execute_query(&load.directives, query_str);
-    println!("{}", serde_json::to_string(&output).unwrap());
+    output_json(&output)
 }
 
 /// Batch command: load + multiple queries in one parse.
 /// Usage: batch [filename] query1 query2 ...
-fn cmd_batch(source: &str, filename: &str, queries: &[String]) {
+fn cmd_batch(source: &str, filename: &str, queries: &[String]) -> i32 {
     let load = load_source(source);
 
     // Build load output
@@ -1073,6 +1121,7 @@ fn cmd_batch(source: &str, filename: &str, queries: &[String]) {
         .collect();
 
     let load_output = LoadOutput {
+        api_version: API_VERSION,
         entries,
         errors: load.errors.clone(),
         options: load.options,
@@ -1091,6 +1140,7 @@ fn cmd_batch(source: &str, filename: &str, queries: &[String]) {
         queries
             .iter()
             .map(|_| QueryOutput {
+                api_version: API_VERSION,
                 columns: vec![],
                 rows: vec![],
                 errors: vec![Error {
@@ -1103,10 +1153,11 @@ fn cmd_batch(source: &str, filename: &str, queries: &[String]) {
     };
 
     let output = BatchOutput {
+        api_version: API_VERSION,
         load: load_output,
         queries: query_outputs,
     };
-    println!("{}", serde_json::to_string(&output).unwrap());
+    output_json(&output)
 }
 
 // =============================================================================
@@ -1116,13 +1167,14 @@ fn cmd_batch(source: &str, filename: &str, queries: &[String]) {
 /// Output for format command.
 #[derive(Serialize)]
 struct FormatOutput {
+    api_version: &'static str,
     /// Formatted beancount source text.
     formatted: String,
     /// Any errors encountered.
     errors: Vec<Error>,
 }
 
-fn cmd_format(source: &str) {
+fn cmd_format(source: &str) -> i32 {
     let parse_result = parse_beancount(source);
     let lookup = LineLookup::new(source);
 
@@ -1168,8 +1220,12 @@ fn cmd_format(source: &str) {
         ));
     }
 
-    let output = FormatOutput { formatted, errors };
-    println!("{}", serde_json::to_string(&output).unwrap());
+    let output = FormatOutput {
+        api_version: API_VERSION,
+        formatted,
+        errors,
+    };
+    output_json(&output)
 }
 
 // =============================================================================
@@ -1179,19 +1235,21 @@ fn cmd_format(source: &str) {
 /// Output for is-encrypted command.
 #[derive(Serialize)]
 struct IsEncryptedOutput {
+    api_version: &'static str,
     encrypted: bool,
     reason: Option<String>,
 }
 
 /// Check if a file is GPG-encrypted.
-fn cmd_is_encrypted(path: &str) {
-    let encrypted;
-    let mut reason = None;
+fn cmd_is_encrypted(path: &str) -> i32 {
+    // Check extension first (case-insensitive)
+    let path_obj = std::path::Path::new(path);
+    let has_gpg_ext = path_obj
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("gpg") || ext.eq_ignore_ascii_case("asc"));
 
-    // Check extension first
-    if path.ends_with(".gpg") || path.ends_with(".asc") {
-        encrypted = true;
-        reason = Some("file extension".to_string());
+    let (encrypted, reason) = if has_gpg_ext {
+        (true, Some("file extension".to_string()))
     } else {
         // Check for GPG header by reading first few bytes
         match fs::read(path) {
@@ -1201,8 +1259,7 @@ fn cmd_is_encrypted(path: &str) {
                 if bytes.len() >= 15 {
                     let ascii_header = String::from_utf8_lossy(&bytes[..15]);
                     if ascii_header.starts_with("-----BEGIN PGP") {
-                        encrypted = true;
-                        reason = Some("ASCII armor header".to_string());
+                        (true, Some("ASCII armor header".to_string()))
                     } else if !bytes.is_empty() {
                         let first_byte = bytes[0];
                         // Check for GPG packet tags
@@ -1210,50 +1267,56 @@ fn cmd_is_encrypted(path: &str) {
                             || first_byte == 0x84
                             || (0xC0..=0xCF).contains(&first_byte)
                         {
-                            encrypted = true;
-                            reason = Some("GPG binary header".to_string());
+                            (true, Some("GPG binary header".to_string()))
                         } else {
-                            encrypted = false;
+                            (false, None)
                         }
                     } else {
-                        encrypted = false;
+                        (false, None)
                     }
                 } else {
-                    encrypted = false;
+                    (false, None)
                 }
             }
             Err(e) => {
                 // If we can't read the file, report error
                 eprintln!("Error reading file: {e}");
-                std::process::exit(1);
+                return exit_codes::USER_ERROR;
             }
         }
-    }
+    };
 
-    let output = IsEncryptedOutput { encrypted, reason };
-    println!("{}", serde_json::to_string(&output).unwrap());
+    let output = IsEncryptedOutput {
+        api_version: API_VERSION,
+        encrypted,
+        reason,
+    };
+    output_json(&output)
 }
 
 /// Output for get-account-type command.
 #[derive(Serialize)]
 struct AccountTypeOutput {
+    api_version: &'static str,
     account: String,
     account_type: Option<String>,
 }
 
 /// Extract account type (first component) from an account name.
-fn cmd_get_account_type(account: &str) {
+fn cmd_get_account_type(account: &str) -> i32 {
     let account_type = account.split(':').next().map(String::from);
     let output = AccountTypeOutput {
+        api_version: API_VERSION,
         account: account.to_string(),
         account_type,
     };
-    println!("{}", serde_json::to_string(&output).unwrap());
+    output_json(&output)
 }
 
 /// Output for types command - exposes type constants.
 #[derive(Serialize)]
 struct TypesOutput {
+    api_version: &'static str,
     /// All directive type names.
     all_directives: Vec<&'static str>,
     /// Booking method names.
@@ -1267,12 +1330,13 @@ struct TypesOutput {
 #[derive(Serialize)]
 struct MissingSentinel {
     description: &'static str,
-    /// In JSON output, missing amounts appear as null or with currency_only field.
+    /// In JSON output, missing amounts appear as null or with `currency_only` field.
     json_representation: &'static str,
 }
 
-fn cmd_types() {
+fn cmd_types() -> i32 {
     let output = TypesOutput {
+        api_version: API_VERSION,
         all_directives: vec![
             "transaction",
             "balance",
@@ -1302,7 +1366,7 @@ fn cmd_types() {
         },
         account_types: vec!["Assets", "Liabilities", "Equity", "Income", "Expenses"],
     };
-    println!("{}", serde_json::to_string(&output).unwrap());
+    output_json(&output)
 }
 
 // =============================================================================
@@ -1312,6 +1376,7 @@ fn cmd_types() {
 /// Output for clamp command.
 #[derive(Serialize)]
 struct ClampOutput {
+    api_version: &'static str,
     entries: Vec<DirectiveJson>,
     /// Opening balances synthesized for the begin date.
     opening_balances: Vec<OpeningBalance>,
@@ -1347,7 +1412,12 @@ struct CostJson {
     label: Option<String>,
 }
 
-fn cmd_clamp(source: &str, filename: &str, begin_date: Option<&str>, end_date: Option<&str>) {
+fn cmd_clamp(
+    source: &str,
+    filename: &str,
+    begin_date: Option<&str>,
+    end_date: Option<&str>,
+) -> i32 {
     let load = load_source(source);
 
     // Parse date arguments
@@ -1372,28 +1442,28 @@ fn cmd_clamp(source: &str, filename: &str, begin_date: Option<&str>, end_date: O
                 // Accumulate transaction postings for opening balances
                 if let Directive::Transaction(txn) = directive {
                     for posting in &txn.postings {
-                        if let Some(units) = &posting.units {
-                            if let rustledger_core::IncompleteAmount::Complete(amount) = units {
-                                let inv = account_balances
-                                    .entry(posting.account.to_string())
-                                    .or_insert_with(rustledger_core::Inventory::new);
-                                let position = if let Some(cost_spec) = &posting.cost {
-                                    // Create position with cost from cost spec
-                                    let cost = Cost {
-                                        number: cost_spec.number_per.unwrap_or(amount.number),
-                                        currency: cost_spec
-                                            .currency
-                                            .clone()
-                                            .unwrap_or_else(|| amount.currency.clone()),
-                                        date: cost_spec.date.or(Some(txn.date)),
-                                        label: cost_spec.label.clone(),
-                                    };
-                                    rustledger_core::Position::with_cost(amount.clone(), cost)
-                                } else {
-                                    rustledger_core::Position::simple(amount.clone())
+                        if let Some(rustledger_core::IncompleteAmount::Complete(amount)) =
+                            &posting.units
+                        {
+                            let inv = account_balances
+                                .entry(posting.account.to_string())
+                                .or_default();
+                            let position = if let Some(cost_spec) = &posting.cost {
+                                // Create position with cost from cost spec
+                                let cost = Cost {
+                                    number: cost_spec.number_per.unwrap_or(amount.number),
+                                    currency: cost_spec
+                                        .currency
+                                        .clone()
+                                        .unwrap_or_else(|| amount.currency.clone()),
+                                    date: cost_spec.date.or(Some(txn.date)),
+                                    label: cost_spec.label.clone(),
                                 };
-                                inv.add(position);
-                            }
+                                rustledger_core::Position::with_cost(amount.clone(), cost)
+                            } else {
+                                rustledger_core::Position::simple(amount.clone())
+                            };
+                            inv.add(position);
                         }
                     }
                 }
@@ -1457,18 +1527,20 @@ fn cmd_clamp(source: &str, filename: &str, begin_date: Option<&str>, end_date: O
         .collect();
 
     let output = ClampOutput {
+        api_version: API_VERSION,
         entries,
         opening_balances,
         errors: load.errors,
     };
-    println!("{}", serde_json::to_string(&output).unwrap());
+    output_json(&output)
 }
 
-fn cmd_version() {
+fn cmd_version() -> i32 {
     let output = VersionOutput {
+        api_version: API_VERSION,
         version: env!("CARGO_PKG_VERSION").to_string(),
     };
-    println!("{}", serde_json::to_string(&output).unwrap());
+    output_json(&output)
 }
 
 fn cmd_help() {
@@ -1526,19 +1598,16 @@ fn cmd_help() {
 // =============================================================================
 
 /// Read source from stdin or file.
-/// If file_path is Some, read from file; otherwise read from stdin.
+/// If `file_path` is Some, read from file; otherwise read from stdin.
 fn read_source(file_path: Option<&str>) -> Result<String, String> {
-    match file_path {
-        Some(path) => {
-            fs::read_to_string(path).map_err(|e| format!("Error reading file '{path}': {e}"))
-        }
-        None => {
-            let mut source = String::new();
-            io::stdin()
-                .read_to_string(&mut source)
-                .map_err(|e| format!("Error reading stdin: {e}"))?;
-            Ok(source)
-        }
+    if let Some(path) = file_path {
+        fs::read_to_string(path).map_err(|e| format!("Error reading file '{path}': {e}"))
+    } else {
+        let mut source = String::new();
+        io::stdin()
+            .read_to_string(&mut source)
+            .map_err(|e| format!("Error reading stdin: {e}"))?;
+        Ok(source)
     }
 }
 
@@ -1547,96 +1616,105 @@ fn main() {
 
     if args.len() < 2 {
         cmd_help();
-        std::process::exit(1);
+        std::process::exit(exit_codes::USER_ERROR);
     }
 
     let command = &args[1];
 
-    match command.as_str() {
+    let exit_code = match command.as_str() {
         "version" => cmd_version(),
-        "help" | "--help" | "-h" => cmd_help(),
+        "help" | "--help" | "-h" => {
+            cmd_help();
+            exit_codes::SUCCESS
+        }
         // File-based commands (for WASI environments where stdin doesn't work)
         "load-file" => {
             if args.len() < 3 {
                 eprintln!("Error: load-file command requires file path argument");
-                std::process::exit(1);
-            }
-            let filename = &args[2];
-            match read_source(Some(filename)) {
-                Ok(source) => cmd_load(&source, filename),
-                Err(e) => {
-                    eprintln!("{e}");
-                    std::process::exit(1);
+                exit_codes::USER_ERROR
+            } else {
+                let filename = &args[2];
+                match read_source(Some(filename)) {
+                    Ok(source) => cmd_load(&source, filename),
+                    Err(e) => {
+                        eprintln!("{e}");
+                        exit_codes::USER_ERROR
+                    }
                 }
             }
         }
         "validate-file" => {
             if args.len() < 3 {
                 eprintln!("Error: validate-file command requires file path argument");
-                std::process::exit(1);
-            }
-            match read_source(Some(&args[2])) {
-                Ok(source) => cmd_validate(&source),
-                Err(e) => {
-                    eprintln!("{e}");
-                    std::process::exit(1);
+                exit_codes::USER_ERROR
+            } else {
+                match read_source(Some(&args[2])) {
+                    Ok(source) => cmd_validate(&source),
+                    Err(e) => {
+                        eprintln!("{e}");
+                        exit_codes::USER_ERROR
+                    }
                 }
             }
         }
         "query-file" => {
             if args.len() < 4 {
                 eprintln!("Error: query-file command requires file path and BQL arguments");
-                std::process::exit(1);
-            }
-            match read_source(Some(&args[2])) {
-                Ok(source) => cmd_query(&source, &args[3]),
-                Err(e) => {
-                    eprintln!("{e}");
-                    std::process::exit(1);
+                exit_codes::USER_ERROR
+            } else {
+                match read_source(Some(&args[2])) {
+                    Ok(source) => cmd_query(&source, &args[3]),
+                    Err(e) => {
+                        eprintln!("{e}");
+                        exit_codes::USER_ERROR
+                    }
                 }
             }
         }
         "batch-file" => {
             if args.len() < 4 {
                 eprintln!("Error: batch-file command requires file path and at least one query");
-                std::process::exit(1);
-            }
-            let filename = &args[2];
-            let queries: Vec<String> = args.iter().skip(3).cloned().collect();
-            match read_source(Some(filename)) {
-                Ok(source) => cmd_batch(&source, filename, &queries),
-                Err(e) => {
-                    eprintln!("{e}");
-                    std::process::exit(1);
+                exit_codes::USER_ERROR
+            } else {
+                let filename = &args[2];
+                let queries: Vec<String> = args.iter().skip(3).cloned().collect();
+                match read_source(Some(filename)) {
+                    Ok(source) => cmd_batch(&source, filename, &queries),
+                    Err(e) => {
+                        eprintln!("{e}");
+                        exit_codes::USER_ERROR
+                    }
                 }
             }
         }
         "format-file" => {
             if args.len() < 3 {
                 eprintln!("Error: format-file command requires file path argument");
-                std::process::exit(1);
-            }
-            match read_source(Some(&args[2])) {
-                Ok(source) => cmd_format(&source),
-                Err(e) => {
-                    eprintln!("{e}");
-                    std::process::exit(1);
+                exit_codes::USER_ERROR
+            } else {
+                match read_source(Some(&args[2])) {
+                    Ok(source) => cmd_format(&source),
+                    Err(e) => {
+                        eprintln!("{e}");
+                        exit_codes::USER_ERROR
+                    }
                 }
             }
         }
         "clamp-file" => {
             if args.len() < 3 {
                 eprintln!("Error: clamp-file command requires file path argument");
-                std::process::exit(1);
-            }
-            let filename = &args[2];
-            let begin_date = args.get(3).map(String::as_str);
-            let end_date = args.get(4).map(String::as_str);
-            match read_source(Some(filename)) {
-                Ok(source) => cmd_clamp(&source, filename, begin_date, end_date),
-                Err(e) => {
-                    eprintln!("{e}");
-                    std::process::exit(1);
+                exit_codes::USER_ERROR
+            } else {
+                let filename = &args[2];
+                let begin_date = args.get(3).map(String::as_str);
+                let end_date = args.get(4).map(String::as_str);
+                match read_source(Some(filename)) {
+                    Ok(source) => cmd_clamp(&source, filename, begin_date, end_date),
+                    Err(e) => {
+                        eprintln!("{e}");
+                        exit_codes::USER_ERROR
+                    }
                 }
             }
         }
@@ -1644,20 +1722,20 @@ fn main() {
         "is-encrypted" => {
             if args.len() < 3 {
                 eprintln!("Error: is-encrypted command requires file path argument");
-                std::process::exit(1);
+                exit_codes::USER_ERROR
+            } else {
+                cmd_is_encrypted(&args[2])
             }
-            cmd_is_encrypted(&args[2]);
         }
         "get-account-type" => {
             if args.len() < 3 {
                 eprintln!("Error: get-account-type command requires account name argument");
-                std::process::exit(1);
+                exit_codes::USER_ERROR
+            } else {
+                cmd_get_account_type(&args[2])
             }
-            cmd_get_account_type(&args[2]);
         }
-        "types" => {
-            cmd_types();
-        }
+        "types" => cmd_types(),
         // Stdin-based commands (original behavior)
         "load" | "validate" | "query" | "batch" | "format" | "clamp" => {
             // Read source from stdin
@@ -1665,34 +1743,35 @@ fn main() {
                 Ok(s) => s,
                 Err(e) => {
                     eprintln!("{e}");
-                    std::process::exit(1);
+                    std::process::exit(exit_codes::USER_ERROR);
                 }
             };
 
             match command.as_str() {
                 "load" => {
                     let filename = args.get(2).map_or("<stdin>", std::string::String::as_str);
-                    cmd_load(&source, filename);
+                    cmd_load(&source, filename)
                 }
                 "validate" => cmd_validate(&source),
                 "query" => {
                     if args.len() < 3 {
                         eprintln!("Error: query command requires BQL argument");
-                        std::process::exit(1);
+                        exit_codes::USER_ERROR
+                    } else {
+                        cmd_query(&source, &args[2])
                     }
-                    cmd_query(&source, &args[2]);
                 }
                 "batch" => {
                     let filename = args.get(2).map_or("<stdin>", std::string::String::as_str);
                     let queries: Vec<String> = args.iter().skip(3).cloned().collect();
-                    cmd_batch(&source, filename, &queries);
+                    cmd_batch(&source, filename, &queries)
                 }
                 "format" => cmd_format(&source),
                 "clamp" => {
                     let filename = args.get(2).map_or("<stdin>", std::string::String::as_str);
                     let begin_date = args.get(3).map(String::as_str);
                     let end_date = args.get(4).map(String::as_str);
-                    cmd_clamp(&source, filename, begin_date, end_date);
+                    cmd_clamp(&source, filename, begin_date, end_date)
                 }
                 _ => unreachable!(),
             }
@@ -1700,7 +1779,9 @@ fn main() {
         _ => {
             eprintln!("Unknown command: {command}");
             cmd_help();
-            std::process::exit(1);
+            exit_codes::USER_ERROR
         }
-    }
+    };
+
+    std::process::exit(exit_code);
 }

@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
+## [0.7.0](https://github.com/rustledger/rustledger/releases/tag/v0.7.0) - 2026-01-24
+
+### Features
+
+- *(test)* add synthetic beancount file generation for compat testing
+
+### Refactoring
+
+- address PR review comments
+
 ## [0.6.0](https://github.com/rustledger/rustledger/releases/tag/v0.6.0) - 2026-01-23
 
 ### Bug Fixes

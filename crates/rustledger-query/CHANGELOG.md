@@ -6,6 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
+## [0.7.0](https://github.com/rustledger/rustledger/releases/tag/v0.7.0) - 2026-01-24
+
+### Bug Fixes
+
+- *(ffi,wasm)* remove duplicate "Query parse error" prefix
+- *(query)* SUM now works on integer columns (day, month, year)
+- *(bql)* improve robustness and add comprehensive tests
+
+### Features
+
+- *(ffi-py)* add Fava integration APIs and BQL improvements
+- *(bql)* add CREATE TABLE, INSERT, interval(), and SELECT FROM table
+- *(bql)* add nested function calls, getprice(), and only() functions
+
+### Testing
+
+- *(query)* add comprehensive BQL executor coverage tests
+
 ## [0.6.0](https://github.com/rustledger/rustledger/releases/tag/v0.6.0) - 2026-01-23
 
 ### Bug Fixes

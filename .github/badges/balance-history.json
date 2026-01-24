@@ -150,5 +150,13 @@
     "beancount_ms": 1172.8,
     "ledger_ms": 68.7,
     "hledger_ms": 599.3
+  },
+  {
+    "date": "2026-01-24",
+    "timestamp": "2026-01-24T03:25:17Z",
+    "rustledger_ms": 57.5,
+    "beancount_ms": 1188.2,
+    "ledger_ms": 68.8,
+    "hledger_ms": 627.0
   }
 ]

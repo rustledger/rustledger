@@ -6,6 +6,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
+## [0.7.0](https://github.com/rustledger/rustledger/releases/tag/v0.7.0) - 2026-01-24
+
+### Bug Fixes
+
+- *(test)* handle broken pipe gracefully in stdin test
+- *(booking)* run booking before interpolation in check command
+
+### Features
+
+- *(synthetic)* add rledger-doctor generate-synthetic subcommand
+- *(ffi-py)* add Fava integration APIs and BQL improvements
+- *(bql)* add CREATE TABLE, INSERT, interval(), and SELECT FROM table
+
+### Refactoring
+
+- *(cli)* split doctor.rs into command modules
+- *(cli)* split report_cmd into focused modules
+
+### Testing
+
+- *(cli)* add comprehensive CLI command integration tests
+
+### Style
+
+- apply cargo fmt
+- apply cargo fmt
+
 ## [0.6.0](https://github.com/rustledger/rustledger/releases/tag/v0.6.0) - 2026-01-23
 
 ### Bug Fixes

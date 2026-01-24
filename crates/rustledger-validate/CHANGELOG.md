@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
+## [0.7.0](https://github.com/rustledger/rustledger/releases/tag/v0.7.0) - 2026-01-24
+
+### Bug Fixes
+
+- add missing imports for tests after refactor
+
+### Refactoring
+
+- *(validate)* split validators into focused modules
+- *(validate)* extract error types to error.rs
+
+### Style
+
+- apply cargo fmt
+
 ## [0.6.0](https://github.com/rustledger/rustledger/releases/tag/v0.6.0) - 2026-01-23
 
 ### Bug Fixes

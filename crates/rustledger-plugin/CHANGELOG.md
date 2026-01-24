@@ -6,6 +6,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
+## [0.7.0](https://github.com/rustledger/rustledger/releases/tag/v0.7.0) - 2026-01-24
+
+### Bug Fixes
+
+- add missing imports for tests after refactor
+- *(plugin)* deterministic ordering for auto_accounts plugin
+- *(plugin)* preserve typed values in custom directives
+- *(plugin)* serialize custom directive values without debug format
+- *(plugin)* preserve user-defined metadata through plugin processing
+- *(plugin)* preserve source locations through plugin processing
+
+### Features
+
+- *(plugin)* implement beancount-compatible entry sorting
+
+### Refactoring
+
+- *(plugin)* split convert.rs into to_wrapper and from_wrapper modules
+- *(plugin)* split native plugins into individual files
+- *(wasm)* split editor.rs into modular structure
+- *(plugin)* split native.rs into native/ module
+
+### Testing
+
+- *(plugin)* add comprehensive plugin manager coverage tests
+
+### Style
+
+- apply cargo fmt
+
 ## [0.6.0](https://github.com/rustledger/rustledger/releases/tag/v0.6.0) - 2026-01-23
 
 ### Bug Fixes

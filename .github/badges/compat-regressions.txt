@@ -1,0 +1,12 @@
+examples_data_error-duplicate-options.beancount
+examples_data_error-options.beancount
+examples_data_options.beancount
+test-cases_DeprecatedOptions.DeprecatedOption.beancount
+test-cases_DeprecatedOptions.DeprecatedPlugin.beancount
+test-cases_MiscOptions.PluginProcessingModeDefault.beancount
+test-cases_MiscOptions.PluginProcessingModeInvalid.beancount
+test-cases_MiscOptions.PluginProcessingModeRaw.beancount
+test-cases_ParserOptions.InvalidOption.beancount
+test-cases_ParserOptions.OptionListValue.beancount
+test-cases_ParserOptions.ReadonlyOption.beancount
+test-cases_ParserPlugin.PluginAsOption.beancount

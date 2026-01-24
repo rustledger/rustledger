@@ -1,18 +1,18 @@
 # Rustledger Compatibility Results
-# Generated: 2026-01-23T04:10:21Z
+# Generated: 2026-01-24T04:02:31Z
 
 summary:
   total_files: 694
-  check_exit_match_pct: 99
-  full_match_pct: 68
+  check_exit_match_pct: 98
+  full_match_pct: 66
   bql_match_pct: 100
-  regressions: 0
+  regressions: 12
 
 check_compatibility:
   total_files: 694
-  exit_code_match: 693
-  exit_code_match_pct: 99
-  rust_only_pass: 1
+  exit_code_match: 681
+  exit_code_match_pct: 98
+  rust_only_pass: 13
   python_only_pass: 0
 
 ast_compatibility:
@@ -20,10 +20,10 @@ ast_compatibility:
   accounts_match_pct: 68
   posting_count_match: 648
   posting_count_match_pct: 93
-  error_presence_match: 693
-  error_presence_match_pct: 99
-  full_match: 473
-  full_match_pct: 68
+  error_presence_match: 681
+  error_presence_match_pct: 98
+  full_match: 461
+  full_match_pct: 66
 
 bql_compatibility:
   queries_tested: 90
@@ -31,4 +31,4 @@ bql_compatibility:
   match_pct: 100
 
 regressions:
-  count: 0
+  count: 12

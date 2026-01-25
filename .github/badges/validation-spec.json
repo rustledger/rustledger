@@ -127,29 +127,15 @@
       }
     },
     {
-      "type": "rect",
-      "from": {"data": "benchmarks"},
-      "encode": {
-        "enter": {
-          "y": {"scale": "y", "field": "label", "band": 0.5, "offset": -9},
-          "x": {"signal": "datum.is_small ? scale('x', datum.time_ms) + 8 : 6"},
-          "width": {"signal": "datum.is_small ? (datum.tool == 'beancount' ? 80 : 155) : (datum.tool == 'beancount' ? 50 : 115)"},
-          "height": {"value": 18},
-          "cornerRadius": {"value": 9},
-          "fill": {"signal": "datum.is_small ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.35)'"}
-        }
-      }
-    },
-    {
       "type": "text",
       "from": {"data": "benchmarks"},
       "encode": {
         "enter": {
           "y": {"scale": "y", "field": "label", "band": 0.5},
-          "x": {"signal": "datum.is_small ? scale('x', datum.time_ms) + 16 : (datum.tool == 'rustledger' ? 48 : 40)"},
+          "x": {"signal": "datum.is_small ? scale('x', datum.time_ms) + 8 : 8"},
           "text": {"signal": "datum.is_small ? (datum.tool == 'beancount' ? 'baseline · ' + format(datum.time_ms, '.0f') + ' ms' : format(datum.faster_factor, '.1f') + 'x faster · ' + format(datum.time_ms, '.0f') + ' ms') : (datum.tool == 'beancount' ? 'baseline' : format(datum.faster_factor, '.1f') + 'x faster')"},
           "fill": {"signal": "datum.is_small ? '#e6edf3' : '#ffffff'"},
-          "fontSize": {"value": 10},
+          "fontSize": {"value": 11},
           "fontWeight": {"value": 600},
           "baseline": {"value": "middle"},
           "align": {"value": "left"}

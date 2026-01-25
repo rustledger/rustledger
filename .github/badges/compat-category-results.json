@@ -3,5 +3,20 @@
     "total": 694,
     "check_match": 681,
     "full_match": 461
+  },
+  "synthetic-edge-cases": {
+    "total": 7,
+    "check_match": 7,
+    "full_match": 4
+  },
+  "synthetic-bean-example": {
+    "total": 3,
+    "check_match": 3,
+    "full_match": 0
+  },
+  "synthetic-proptest": {
+    "total": 50,
+    "check_match": 50,
+    "full_match": 0
   }
 }

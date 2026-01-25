@@ -1,17 +1,20 @@
 {
-  "$schema": "https://vega.github.io/schema/vega/v6.json",
+  "$schema": "https://vega.github.io/schema/vega/v5.json",
   "width": 550,
-  "height": 200,
-  "padding": {"left": 150, "right": 20, "top": 50, "bottom": 25},
+  "height": 150,
+  "padding": {"left": 10, "right": 10, "top": 10, "bottom": 10},
   "background": "#0d1117",
-
+  "config": {
+    "text": {
+      "font": "JetBrains Mono, Fira Code, SF Mono, Menlo, monospace"
+    }
+  },
   "signals": [
     {"name": "rustledger_ms", "value": 32},
     {"name": "max_ms", "value": 880},
     {"name": "bench_date", "value": "2026-01-20"},
     {"name": "smallBarThreshold", "value": 200}
   ],
-
   "data": [
     {
       "name": "benchmarks",
@@ -29,7 +32,6 @@
       ]
     }
   ],
-
   "scales": [
     {
       "name": "y",
@@ -45,7 +47,6 @@
       "range": [0, {"signal": "width"}]
     }
   ],
-
   "marks": [
     {
       "type": "rect",
@@ -86,9 +87,9 @@
           "y": {"scale": "y", "field": "label", "band": 0.5},
           "x": {"value": -14},
           "text": {"signal": "datum.tool == 'rustledger' ? '' : datum.label"},
-          "fill": {"value": "#8b949e"},
-          "fontSize": {"value": 13},
-          "fontWeight": {"value": 400},
+          "fill": {"value": "#e6edf3"},
+          "fontSize": {"value": 14},
+          "fontWeight": {"value": 600},
           "baseline": {"value": "middle"},
           "align": {"value": "right"}
         }
@@ -100,10 +101,10 @@
       "encode": {
         "enter": {
           "y": {"scale": "y", "field": "label", "band": 0.5},
-          "x": {"value": -14},
+          "x": {"value": -18},
           "text": {"signal": "datum.tool == 'rustledger' ? 'ledger' : ''"},
           "fill": {"value": "#e6edf3"},
-          "fontSize": {"value": 13},
+          "fontSize": {"value": 14},
           "fontWeight": {"value": 600},
           "baseline": {"value": "middle"},
           "align": {"value": "right"}
@@ -116,10 +117,10 @@
       "encode": {
         "enter": {
           "y": {"scale": "y", "field": "label", "band": 0.5},
-          "x": {"value": -52},
+          "x": {"value": -72},
           "text": {"signal": "datum.tool == 'rustledger' ? 'rust' : ''"},
           "fill": {"value": "#f74c00"},
-          "fontSize": {"value": 13},
+          "fontSize": {"value": 14},
           "fontWeight": {"value": 600},
           "baseline": {"value": "middle"},
           "align": {"value": "right"}
@@ -132,11 +133,11 @@
       "encode": {
         "enter": {
           "y": {"scale": "y", "field": "label", "band": 0.5},
-          "x": {"signal": "datum.is_small ? scale('x', datum.time_ms) + 8 : 8"},
+          "x": {"signal": "datum.is_small ? scale('x', datum.time_ms) + 10 : 8"},
           "text": {"signal": "datum.is_small ? (datum.tool == 'beancount' ? 'baseline · ' + format(datum.time_ms, '.0f') + ' ms' : format(datum.faster_factor, '.1f') + 'x faster · ' + format(datum.time_ms, '.0f') + ' ms') : (datum.tool == 'beancount' ? 'baseline' : format(datum.faster_factor, '.1f') + 'x faster')"},
-          "fill": {"signal": "datum.is_small ? '#e6edf3' : '#ffffff'"},
-          "fontSize": {"value": 11},
-          "fontWeight": {"value": 600},
+          "fill": {"signal": "datum.is_small ? (datum.tool == 'rustledger' ? '#f74c00' : '#e6edf3') : '#000000'"},
+          "fontSize": {"value": 18},
+          "fontWeight": {"value": 700},
           "baseline": {"value": "middle"},
           "align": {"value": "left"}
         }
@@ -150,10 +151,9 @@
           "y": {"scale": "y", "field": "label", "band": 0.5},
           "x": {"signal": "scale('x', datum.time_ms) - 8"},
           "text": {"signal": "datum.is_small ? '' : format(datum.time_ms, '.0f') + ' ms'"},
-          "fill": {"signal": "datum.tool == 'beancount' ? '#0d1117' : '#ffffff'"},
-          "fontSize": {"value": 11},
-          "font": {"value": "monospace"},
-          "fontWeight": {"value": 600},
+          "fill": {"value": "#000000"},
+          "fontSize": {"value": 18},
+          "fontWeight": {"value": 700},
           "baseline": {"value": "middle"},
           "align": {"value": "right"}
         }
@@ -164,28 +164,26 @@
       "encode": {
         "enter": {
           "x": {"signal": "width"},
-          "y": {"signal": "height + 18"},
+          "y": {"signal": "height + 2"},
           "text": {"signal": "'measured ' + bench_date + ' · hyperfine'"},
-          "fill": {"value": "#484f58"},
-          "fontSize": {"value": 9},
+          "fill": {"value": "#6e7681"},
+          "fontSize": {"value": 12},
           "baseline": {"value": "top"},
           "align": {"value": "right"}
         }
       }
     }
   ],
-
   "title": {
     "text": "Validation: Parse + Check (10K transactions)",
     "subtitle": "rustledger vs other plain-text accounting tools",
+    "font": "JetBrains Mono, Fira Code, SF Mono, Menlo, monospace",
     "color": "#e6edf3",
     "subtitleColor": "#6e7681",
     "fontSize": 16,
-    "subtitleFontSize": 11,
+    "subtitleFontSize": 16,
     "fontWeight": 600,
     "subtitleFontWeight": "normal",
-    "anchor": "start",
-    "offset": 20,
     "subtitlePadding": 4
   }
 }

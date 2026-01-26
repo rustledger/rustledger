@@ -1150,7 +1150,7 @@ version = "1.0.69"
 criteria = "safe-to-deploy"
 
 [[exemptions.thiserror]]
-version = "2.0.17"
+version = "2.0.18"
 criteria = "safe-to-deploy"
 
 [[exemptions.thiserror-impl]]
@@ -1158,7 +1158,7 @@ version = "1.0.69"
 criteria = "safe-to-deploy"
 
 [[exemptions.thiserror-impl]]
-version = "2.0.17"
+version = "2.0.18"
 criteria = "safe-to-deploy"
 
 [[exemptions.thread_local]]
@@ -1231,6 +1231,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.tracing-subscriber]]
 version = "0.3.22"
+criteria = "safe-to-deploy"
+
+[[exemptions.typed-path]]
+version = "0.12.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.typenum]]
@@ -1526,7 +1530,7 @@ version = "0.11.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.zip]]
-version = "7.1.0"
+version = "7.2.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.zlib-rs]]

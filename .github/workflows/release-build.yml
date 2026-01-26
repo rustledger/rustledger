@@ -107,7 +107,7 @@ jobs:
           components: llvm-tools-preview
       - name: Install cross
         if: matrix.cross
-        uses: taiki-e/install-action@db5fe14d0f31ad3d2c6c8dbee23472867de1cc54 # cross
+        uses: taiki-e/install-action@710817a1645ef40daad5bcde7431ceccf6cc3528 # cross
       - name: Install cargo-pgo
         if: matrix.pgo
         run: cargo install cargo-pgo

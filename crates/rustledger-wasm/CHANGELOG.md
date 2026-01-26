@@ -6,6 +6,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
+## [0.7.4](https://github.com/rustledger/rustledger/compare/v0.7.3...v0.7.4) - 2026-01-26
+
+### Bug Fixes
+
+- *(ffi,wasm)* remove duplicate "Query parse error" prefix
+
+### Features
+
+- *(ffi-py)* add Fava integration APIs and BQL improvements
+- *(bql)* add CREATE TABLE, INSERT, interval(), and SELECT FROM table
+
+### Refactoring
+
+- consolidate rledger-* binaries into single rledger binary
+- *(wasm)* split lib.rs into focused modules
+- *(wasm)* split editor.rs into modular structure
+
+### Testing
+
+- *(wasm)* add comprehensive editor coverage tests
+
+### Style
+
+- apply cargo fmt
+
 ## [0.7.0](https://github.com/rustledger/rustledger/releases/tag/v0.7.0) - 2026-01-25
 
 ### Bug Fixes

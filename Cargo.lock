@@ -2909,7 +2909,7 @@ dependencies = [
 
 [[package]]
 name = "rustledger"
-version = "0.7.3"
+version = "0.7.4"
 dependencies = [
  "anyhow",
  "ariadne",
@@ -2940,7 +2940,7 @@ dependencies = [
 
 [[package]]
 name = "rustledger-booking"
-version = "0.7.3"
+version = "0.7.4"
 dependencies = [
  "rust_decimal",
  "rust_decimal_macros",
@@ -2950,7 +2950,7 @@ dependencies = [
 
 [[package]]
 name = "rustledger-core"
-version = "0.7.3"
+version = "0.7.4"
 dependencies = [
  "chrono",
  "criterion",
@@ -2966,7 +2966,7 @@ dependencies = [
 
 [[package]]
 name = "rustledger-ffi-wasi"
-version = "0.7.3"
+version = "0.7.4"
 dependencies = [
  "rustledger-booking",
  "rustledger-core",
@@ -2982,7 +2982,7 @@ dependencies = [
 
 [[package]]
 name = "rustledger-importer"
-version = "0.7.3"
+version = "0.7.4"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2997,7 +2997,7 @@ dependencies = [
 
 [[package]]
 name = "rustledger-loader"
-version = "0.7.3"
+version = "0.7.4"
 dependencies = [
  "chrono",
  "rkyv 0.8.14",
@@ -3012,7 +3012,7 @@ dependencies = [
 
 [[package]]
 name = "rustledger-lsp"
-version = "0.7.3"
+version = "0.7.4"
 dependencies = [
  "chrono",
  "crossbeam-channel",
@@ -3033,7 +3033,7 @@ dependencies = [
 
 [[package]]
 name = "rustledger-parser"
-version = "0.7.3"
+version = "0.7.4"
 dependencies = [
  "ariadne",
  "chrono",
@@ -3052,7 +3052,7 @@ dependencies = [
 
 [[package]]
 name = "rustledger-plugin"
-version = "0.7.3"
+version = "0.7.4"
 dependencies = [
  "anyhow",
  "dirs",
@@ -3074,7 +3074,7 @@ dependencies = [
 
 [[package]]
 name = "rustledger-query"
-version = "0.7.3"
+version = "0.7.4"
 dependencies = [
  "ariadne",
  "chrono",
@@ -3092,7 +3092,7 @@ dependencies = [
 
 [[package]]
 name = "rustledger-validate"
-version = "0.7.3"
+version = "0.7.4"
 dependencies = [
  "chrono",
  "criterion",
@@ -3108,7 +3108,7 @@ dependencies = [
 
 [[package]]
 name = "rustledger-wasm"
-version = "0.7.3"
+version = "0.7.4"
 dependencies = [
  "chrono",
  "console_error_panic_hook",

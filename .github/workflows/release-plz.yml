@@ -178,12 +178,32 @@ jobs:
           if git diff --quiet packages/ packaging/; then
             echo "No package version changes needed"
           else
-            git config user.name "github-actions[bot]"
-            git config user.email "github-actions[bot]@users.noreply.github.com"
+            echo "Creating signed commit via GitHub API..."
+
+            # Get the current commit SHA (parent for new commit)
+            PARENT_SHA=$(git rev-parse HEAD)
+
+            # Create a tree with the updated files
             git add packages/ packaging/
-            git commit -m "chore: sync package versions to $VERSION"
-            git push origin "$PR_BRANCH"
-            echo "Package versions synced to PR branch"
+            TREE_SHA=$(git write-tree)
+
+            # Create commit via GitHub API (automatically signed)
+            COMMIT_SHA=$(gh api repos/${{ github.repository }}/git/commits \
+              --method POST \
+              --field "message=chore: sync package versions to $VERSION" \
+              --field "tree=$TREE_SHA" \
+              --field "parents[]=$PARENT_SHA" \
+              --jq '.sha')
+
+            echo "Created signed commit: $COMMIT_SHA"
+
+            # Update the branch ref to point to new commit
+            gh api repos/${{ github.repository }}/git/refs/heads/$PR_BRANCH \
+              --method PATCH \
+              --field "sha=$COMMIT_SHA" \
+              --field "force=false"
+
+            echo "Package versions synced to PR branch (signed commit)"
           fi
 
   # Create release when PR is merged

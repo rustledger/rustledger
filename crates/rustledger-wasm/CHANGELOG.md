@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
+## [0.7.6](https://github.com/rustledger/rustledger/compare/v0.7.5...v0.7.6) - 2026-01-28
+
+### Miscellaneous
+
+- reorganize test fixtures and cleanup
+
+### Style
+
+- fix clippy warnings after MSRV alignment
+
 ## [0.7.4](https://github.com/rustledger/rustledger/compare/v0.7.3...v0.7.4) - 2026-01-26
 
 ### Bug Fixes

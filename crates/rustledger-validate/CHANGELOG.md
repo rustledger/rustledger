@@ -6,6 +6,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
+## [0.7.6](https://github.com/rustledger/rustledger/compare/v0.7.5...v0.7.6) - 2026-01-28
+
+### Bug Fixes
+
+- *(balance)* propagate tolerance options and preserve total costs/prices
+- *(balance)* use BigDecimal for precise residual checking and fix tolerance defaults
+- derive balance tolerance from assertion amount precision
+
+### Documentation
+
+- fix outdated comment about tolerance derivation
+
+### Features
+
+- *(testing)* add comprehensive TLA+ verification infrastructure
+
+### Style
+
+- rustfmt
+- fix clippy warnings after MSRV alignment
+- fix clippy warnings in TLA+ proptests
+
 ## [0.7.2](https://github.com/rustledger/rustledger/compare/v0.7.1...v0.7.2) - 2026-01-25
 
 ### Bug Fixes

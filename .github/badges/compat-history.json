@@ -86,5 +86,16 @@
     "full_pct": 63,
     "bql_pct": 100,
     "regression_count": 0
+  },
+  {
+    "date": "2026-01-28",
+    "timestamp": "2026-01-28T16:54:19Z",
+    "check_match_pct": 100,
+    "accounts_pct": 64,
+    "posting_pct": 100,
+    "error_pct": 100,
+    "full_pct": 100,
+    "bql_pct": 100,
+    "regression_count": 0
   }
 ]

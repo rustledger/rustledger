@@ -1,22 +1,27 @@
 {
   "other": {
-    "total": 694,
+    "total": 693,
     "check_match": 693,
-    "full_match": 473
+    "full_match": 693
   },
   "synthetic-edge-cases": {
     "total": 7,
     "check_match": 7,
-    "full_match": 4
+    "full_match": 7
   },
   "synthetic-bean-example": {
     "total": 3,
     "check_match": 3,
-    "full_match": 0
+    "full_match": 3
   },
   "synthetic-proptest": {
     "total": 50,
     "check_match": 50,
-    "full_match": 0
+    "full_match": 50
+  },
+  "regressions": {
+    "total": 6,
+    "check_match": 6,
+    "full_match": 6
   }
 }

@@ -1,5 +1,5 @@
 # Rustledger Compatibility Results
-# Generated: 2026-01-28T16:54:18Z
+# Generated: 2026-01-28T21:04:57Z
 
 summary:
   total_files: 759
@@ -18,8 +18,8 @@ check_compatibility:
   python_only_pass: 0
 
 ast_compatibility:
-  accounts_match: 487
-  accounts_match_pct: 64
+  accounts_match: 759
+  accounts_match_pct: 100
   posting_count_match: 759
   posting_count_match_pct: 100
   error_presence_match: 759

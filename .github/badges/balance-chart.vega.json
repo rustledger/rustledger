@@ -17,11 +17,11 @@
   "signals": [
     {
       "name": "rustledger_ms",
-      "value": 54.5
+      "value": 54.4
     },
     {
       "name": "max_ms",
-      "value": 1151.8
+      "value": 1147.3
     },
     {
       "name": "bench_date",
@@ -39,29 +39,29 @@
         {
           "tool": "rustledger",
           "label": "rustledger",
-          "time_ms": 54.5,
-          "baseline_ms": 1151.8,
+          "time_ms": 54.4,
+          "baseline_ms": 1147.3,
           "color": "#00d4aa"
         },
         {
           "tool": "ledger",
           "label": "ledger (C++)",
           "time_ms": 64.7,
-          "baseline_ms": 1151.8,
+          "baseline_ms": 1147.3,
           "color": "#9b59b6"
         },
         {
           "tool": "hledger",
           "label": "hledger (Haskell)",
-          "time_ms": 596.4,
-          "baseline_ms": 1151.8,
+          "time_ms": 592.8,
+          "baseline_ms": 1147.3,
           "color": "#e74c3c"
         },
         {
           "tool": "beancount",
           "label": "beancount (Python)",
-          "time_ms": 1151.8,
-          "baseline_ms": 1151.8,
+          "time_ms": 1147.3,
+          "baseline_ms": 1147.3,
           "color": "#f4b942"
         }
       ],

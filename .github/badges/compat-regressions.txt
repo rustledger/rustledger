@@ -1,12 +1,4 @@
-examples_data_error-duplicate-options.beancount
-examples_data_error-options.beancount
-examples_data_options.beancount
-test-cases_DeprecatedOptions.DeprecatedOption.beancount
-test-cases_DeprecatedOptions.DeprecatedPlugin.beancount
-test-cases_MiscOptions.PluginProcessingModeDefault.beancount
-test-cases_MiscOptions.PluginProcessingModeInvalid.beancount
-test-cases_MiscOptions.PluginProcessingModeRaw.beancount
-test-cases_ParserOptions.InvalidOption.beancount
-test-cases_ParserOptions.OptionListValue.beancount
-test-cases_ParserOptions.ReadonlyOption.beancount
-test-cases_ParserPlugin.PluginAsOption.beancount
+examples_forecast_forecast.beancount
+examples_sharing_cozumel2015.beancount
+examples_sharing_duxbury2015.beancount
+beancount_reds_plugins_box_accrual_test.beancount

@@ -1,8 +1,8 @@
 {
   "other": {
-    "total": 693,
-    "check_match": 693,
-    "full_match": 693
+    "total": 692,
+    "check_match": 688,
+    "full_match": 679
   },
   "synthetic-edge-cases": {
     "total": 7,
@@ -20,8 +20,8 @@
     "full_match": 50
   },
   "regressions": {
-    "total": 6,
-    "check_match": 6,
-    "full_match": 6
+    "total": 10,
+    "check_match": 10,
+    "full_match": 10
   }
 }

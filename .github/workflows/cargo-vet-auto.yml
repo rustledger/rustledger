@@ -49,7 +49,7 @@ jobs:
         uses: dtolnay/rust-toolchain@4be9e76fd7c4901c61fb841f559994984270fce7 # stable
 
       - name: Install cargo-vet
-        uses: taiki-e/install-action@30791125b88ed3200de59e9b5edbf78d1949e41f # v2
+        uses: taiki-e/install-action@650c5ca14212efbbf3e580844b04bdccf68dac31 # v2
         with:
           tool: cargo-vet
 

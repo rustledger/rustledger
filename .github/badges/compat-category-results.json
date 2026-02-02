@@ -2,7 +2,7 @@
   "other": {
     "total": 692,
     "check_match": 688,
-    "full_match": 679
+    "full_match": 681
   },
   "synthetic-edge-cases": {
     "total": 7,
@@ -20,8 +20,8 @@
     "full_match": 50
   },
   "regressions": {
-    "total": 10,
-    "check_match": 10,
-    "full_match": 10
+    "total": 12,
+    "check_match": 12,
+    "full_match": 12
   }
 }

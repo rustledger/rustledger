@@ -55,7 +55,7 @@ regex = "1"
 # Parsing
 chumsky = "1.0.0-alpha.7"
 ariadne = "0.6"
-logos = "0.16"
+logos = "=0.16.0"
 logosky = "0.2"
 
 # Serialization

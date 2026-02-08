@@ -105,6 +105,7 @@ rledger format --in-place ledger.beancount
 | `rustledger-importer` | CSV/OFX import framework |
 | `rustledger-lsp` | Language Server Protocol for editor integration |
 | `rustledger-wasm` | WebAssembly bindings for JavaScript/TypeScript |
+| `rustledger-ffi-wasi` | JSON API for embedding in any language |
 
 <details>
 <summary><strong>Booking methods (7)</strong></summary>

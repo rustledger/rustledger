@@ -65,7 +65,7 @@ jobs:
       - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
       - name: Install nextest
         if: matrix.install == 'nextest'
-        uses: taiki-e/install-action@735e5933943122c5ac182670a935f54a949265c1 # v2
+        uses: taiki-e/install-action@1e67dedb5e3c590e1c9d9272ace46ef689da250d # v2
         with:
           tool: cargo-nextest
         continue-on-error: true

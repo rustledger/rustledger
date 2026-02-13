@@ -4,12 +4,26 @@ This directory contains developer documentation for rustledger.
 
 ## Contents
 
+### User Guides
 | Document | Description |
 |----------|-------------|
+| [MIGRATION.md](MIGRATION.md) | Guide for migrating from Python beancount |
+| [IMPORTING.md](IMPORTING.md) | CSV/OFX bank statement import tutorial |
+| [BQL_REFERENCE.md](BQL_REFERENCE.md) | BQL query language quick reference |
+| [VALIDATION_ERRORS.md](VALIDATION_ERRORS.md) | Reference for all validation error codes (E0001-E0702) |
+
+### Developer Guides
+| Document | Description |
+|----------|-------------|
+| [ARCHITECTURE.md](ARCHITECTURE.md) | Crate structure and data flow diagrams |
 | [BENCHMARKING.md](BENCHMARKING.md) | How to run benchmarks and interpret results |
 | [COMPATIBILITY_REPORT.md](COMPATIBILITY_REPORT.md) | Test results comparing rustledger to Python beancount |
-| [PERFORMANCE_ROADMAP.md](PERFORMANCE_ROADMAP.md) | Performance optimization phases and measured results |
 | [TESTING.md](TESTING.md) | Testing guide and best practices |
+
+### Roadmaps
+| Document | Description |
+|----------|-------------|
+| [PERFORMANCE_ROADMAP.md](PERFORMANCE_ROADMAP.md) | Performance optimization phases and measured results |
 | [TESTING_ROADMAP.md](TESTING_ROADMAP.md) | Testing infrastructure improvement plan |
 
 ## Architecture Decision Records

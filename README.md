@@ -8,6 +8,7 @@ Parse and validate your ledger faster than Python beancount.
 
 [![CI](https://github.com/rustledger/rustledger/actions/workflows/ci.yml/badge.svg)](https://github.com/rustledger/rustledger/actions/workflows/ci.yml)
 [![Compatibility](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/rustledger/rustledger/compatibility/.github/badges/compat-badge.json)](https://github.com/rustledger/rustledger/actions/workflows/compat.yml)
+[![docs.rs](https://img.shields.io/docsrs/rustledger-core)](https://docs.rs/rustledger-core)
 [![GitHub Release](https://img.shields.io/github/v/release/rustledger/rustledger)](https://github.com/rustledger/rustledger/releases)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 [![Liberapay](https://img.shields.io/liberapay/gives/rustledger.svg?logo=liberapay)](https://liberapay.com/rustledger)
@@ -30,11 +31,42 @@ Parse and validate your ledger faster than Python beancount.
 | **Better errors** | Detailed error messages with source locations |
 | **20 built-in plugins** | Plus Python plugin compatibility via WASI sandbox |
 
+<details>
+<summary><strong>Comparison with other tools</strong></summary>
+
+| Feature | rustledger | Python beancount | hledger | ledger-cli |
+|---------|------------|------------------|---------|------------|
+| **Language** | Rust | Python | Haskell | C++ |
+| **Speed** | Very fast | Slow | Fast | Fast |
+| **Beancount syntax** | Native | Native | Via conversion | No |
+| **Query language** | BQL (100% compat) | BQL | Custom | Custom |
+| **LSP server** | Built-in | No | Via plugin | No |
+| **WASM support** | Yes | No | Partial | No |
+| **Plugin system** | Native + Python | Python | Haskell | Custom |
+| **Active development** | Yes | Maintenance | Yes | Limited |
+
+**When to use rustledger:**
+- You use Beancount syntax and want speed
+- You want a single binary with no runtime dependencies
+- You need LSP editor integration
+- You want to use existing Python plugins
+
+**When to use Python beancount:**
+- You need Fava web interface (until rustledger integration)
+- You have complex Python plugins with C extensions
+
+**When to use hledger:**
+- You prefer hledger's syntax and reports
+- You need time-tracking features
+
+</details>
+
 ## Install
 
 | Platform | Command |
 |----------|---------|
 | **macOS** | `brew install rustledger/rustledger/rustledger` |
+| **Arch Linux** | `yay -S rustledger-bin` or `yay -S rustledger` (from source) |
 | **Windows** | `scoop bucket add rustledger https://github.com/rustledger/scoop-rustledger && scoop install rustledger` |
 | **Cargo** | `cargo binstall rustledger` or `cargo install rustledger` |
 | **Fedora/RHEL** | `sudo dnf copr enable robcohen/rustledger && sudo dnf install rustledger` |
@@ -45,6 +77,8 @@ Parse and validate your ledger faster than Python beancount.
 | **npm (MCP)** | `npx @rustledger/mcp-server` ([Model Context Protocol](https://modelcontextprotocol.io) server) |
 
 <sub>Missing your platform? [Open an issue](https://github.com/rustledger/rustledger/issues/new) to request it.</sub>
+
+**Coming from Python beancount?** See the [Migration Guide](docs/MIGRATION.md) for command equivalents and plugin mapping.
 
 ## Quick Start
 
@@ -64,8 +98,63 @@ rledger query ledger.beancount "SELECT account, SUM(position) GROUP BY account"
 | `rledger doctor` | Debugging tools for ledger issues |
 | `rledger extract` | Import transactions from CSV/OFX bank statements |
 | `rledger price` | Fetch commodity prices from online sources |
+| `rledger-lsp` | Language Server Protocol for editor integration |
 
 Python beancount users can also use `bean-check`, `bean-query`, etc.
+
+<details>
+<summary><strong>Report subcommands</strong></summary>
+
+| Subcommand | Alias | Description |
+|------------|-------|-------------|
+| `balances` | | All account balances |
+| `balsheet` | `bal` | Balance sheet report |
+| `income` | `is` | Income statement |
+| `journal` | `register` | Transaction register |
+| `holdings` | | Investment holdings |
+| `networth` | | Net worth over time |
+| `accounts` | | List all accounts |
+| `commodities` | | List all commodities |
+| `prices` | | Price entries |
+| `stats` | | Ledger statistics |
+
+</details>
+
+<details>
+<summary><strong>Doctor subcommands</strong></summary>
+
+Debugging and diagnostic tools:
+
+| Subcommand | Description |
+|------------|-------------|
+| `lex` | Dump lexer tokens (alias: `dump-lexer`) |
+| `parse` | Parse and show directives |
+| `context` | Show transaction context at a line number |
+| `linked` | Find transactions by link (`^link`) or tag (`#tag`) |
+| `missing-open` | Generate missing Open directives |
+| `list-options` | List all available beancount options |
+| `print-options` | Print options parsed from a file |
+| `stats` | Display ledger statistics |
+| `display-context` | Show inferred decimal precision context |
+| `roundtrip` | Round-trip parse/format test |
+| `directories` | Validate directory hierarchy against accounts |
+| `region` | Print transactions in a line range with balances |
+| `generate-synthetic` | Generate synthetic test files |
+
+```bash
+# Debug a parsing issue at line 42
+rledger doctor context ledger.beancount 42
+
+# Find all transactions with a link
+rledger doctor linked ledger.beancount ^trip-2024
+
+# Generate Open directives for accounts missing them
+rledger doctor missing-open ledger.beancount >> ledger.beancount
+```
+
+</details>
+
+<sub>Run `rledger <command> --help` for all options.</sub>
 
 <details>
 <summary><strong>CLI examples</strong></summary>
@@ -151,6 +240,45 @@ rledger format --in-place ledger.beancount
 
 </details>
 
+<details>
+<summary><strong>Python plugin support</strong></summary>
+
+rustledger can execute your existing Python beancount plugins via a secure WebAssembly sandbox:
+
+```bash
+# Run with a Python plugin
+rledger check --plugin beancount.plugins.auto_accounts ledger.beancount
+
+# Multiple plugins
+rledger check --plugin my_plugin --plugin another_plugin ledger.beancount
+```
+
+**How it works:**
+- Plugins run in a sandboxed CPython interpreter compiled to WebAssembly (WASI)
+- No system Python installation required
+- Plugins cannot access the filesystem or network (sandbox isolation)
+- Compatible with most pure-Python beancount plugins
+
+**Limitations:**
+- Plugins with C extensions won't work (numpy, pandas, etc.)
+- No network access (price fetching plugins need alternatives)
+- First plugin load has ~1s startup overhead
+
+</details>
+
+## Editor Integration
+
+rustledger includes a full-featured Language Server (`rledger-lsp`) for IDE support:
+
+- Real-time diagnostics
+- Autocompletion (accounts, currencies, payees)
+- Go to definition / find references
+- Hover information with account balances
+- Rename refactoring
+- Document formatting
+
+See [LSP setup guide](crates/rustledger-lsp/README.md) for VS Code, Neovim, Helix, Zed, and Emacs.
+
 ## Performance
 
 <picture>
@@ -194,7 +322,14 @@ See [BENCHMARKING.md](docs/BENCHMARKING.md) for detailed benchmark documentation
 
 ## Contributing
 
-See [CLAUDE.md](CLAUDE.md) for architecture and development setup.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and guidelines.
+
+**Documentation:**
+- [Architecture](docs/ARCHITECTURE.md) - Crate structure and data flow
+- [BQL Reference](docs/BQL_REFERENCE.md) - Query language guide
+- [Importing](docs/IMPORTING.md) - CSV/OFX bank import tutorial
+- [Validation errors](docs/VALIDATION_ERRORS.md) - Error code reference
+- [API docs](https://docs.rs/rustledger-core) - Rust API documentation
 
 By submitting a pull request, you agree to the [Contributor License Agreement](CLA.md).
 

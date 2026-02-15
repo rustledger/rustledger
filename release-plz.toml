@@ -27,8 +27,8 @@ git_release_enable = false
 pr_draft = false
 pr_labels = ["release"]
 
-# Don't publish to crates.io from release-plz (handled by release-build.yml)
-publish = false
+# Publish to crates.io from release-plz (handles dependency ordering automatically)
+publish = true
 
 # Allow releasing from main
 allow_dirty = false

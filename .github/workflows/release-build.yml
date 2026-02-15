@@ -1,19 +1,21 @@
 # Release Build Workflow
 # ======================
-# Triggered on version tags (v*). Builds binaries and creates GitHub Release.
+# Triggered on version tags (v*). Builds binaries and uploads to GitHub Release.
 # Distribution to package managers is handled by release-publish.yml.
 #
 # WHAT THIS WORKFLOW DOES
 # -----------------------
 # 1. Build native binaries for all platforms (with PGO where possible)
 # 2. Build WASM package
-# 3. Create GitHub Release with all artifacts
-# 4. Publish to crates.io
+# 3. Build FFI-WASI package
+# 4. Upload artifacts to GitHub Release (created by release-plz)
+#
+# NOTE: crates.io publishing is handled by release-plz.yml, NOT this workflow.
+# This avoids race conditions between the two workflows.
 #
 # SECRETS REQUIRED
 # ----------------
 # - BOT_APP_ID / BOT_PRIVATE_KEY: GitHub App for creating release (triggers release-publish.yml)
-# - (crates.io uses OIDC trusted publishing, no token needed)
 #
 name: Release Build
 on:
@@ -28,7 +30,6 @@ on:
         type: string
 permissions:
   contents: write
-  id-token: write  # Required for crates.io trusted publishing (OIDC)
 env:
   CARGO_TERM_COLOR: always
   RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
@@ -410,45 +411,5 @@ jobs:
           # Use GitHub App token instead of GITHUB_TOKEN to trigger release-publish.yml workflow
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
 
-  publish-crates:
-    name: Publish to crates.io
-    needs: release
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@0c366fd6a839edf440554fa01a7085ccba70ac98 # v6
-        with:
-          ref: ${{ env.RELEASE_TAG }}
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@4be9e76fd7c4901c61fb841f559994984270fce7 # stable
-      - name: Authenticate with crates.io (trusted publishing)
-        id: crates-auth
-        uses: rust-lang/crates-io-auth-action@b7e9a28eded4986ec6b1fa40eeee8f8f165559ec # v1
-      - name: Publish crates to crates.io
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ steps.crates-auth.outputs.token }}
-        run: |
-          # Use cargo's native workspace publishing (Rust 1.90+)
-          # This automatically handles dependency ordering and waits for
-          # each crate to be indexed before publishing dependents.
-          # See: https://github.com/rust-lang/cargo/issues/10297
-          #
-          # Exclude rustledger-lsp: trusted publishing can't create new crates,
-          # so it must be published manually first with `cargo publish -p rustledger-lsp`
-          cargo publish --workspace --no-verify --exclude rustledger-lsp
-
-          # Try to publish rustledger-lsp (may fail if it's a new crate)
-          echo "Attempting to publish rustledger-lsp..."
-          if cargo publish -p rustledger-lsp --no-verify 2>&1 | tee /tmp/lsp-publish.log; then
-            echo "✓ rustledger-lsp published successfully"
-          elif grep -q "already been uploaded" /tmp/lsp-publish.log; then
-            echo "✓ rustledger-lsp already published (skipping)"
-          elif grep -q "Trusted Publishing tokens do not support creating new crates" /tmp/lsp-publish.log; then
-            echo "⚠ rustledger-lsp is a new crate - must be published manually first"
-            echo "::warning::rustledger-lsp requires manual first publish: cargo publish -p rustledger-lsp"
-          else
-            echo "✗ Failed to publish rustledger-lsp"
-            cat /tmp/lsp-publish.log
-            exit 1
-          fi
-
-          echo "All crates published successfully!"
+  # NOTE: crates.io publishing is handled by release-plz.yml, not this workflow.
+  # This avoids race conditions and ensures proper dependency ordering.

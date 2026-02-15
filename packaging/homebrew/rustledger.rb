@@ -15,7 +15,7 @@ class Rustledger < Formula
 
   def install
     # macOS: Use classic linker to avoid Xcode 15+ crashes on long symbol names
-    ENV["RUSTFLAGS"] = "-C link-arg=-Wl,-ld_classic" if OS.mac?
+    ENV.append "RUSTFLAGS", "-C link-arg=-Wl,-ld_classic" if OS.mac?
 
     # Build all binaries from the rustledger crate
     system "cargo", "install", *std_cargo_args(path: "crates/rustledger")

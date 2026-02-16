@@ -102,7 +102,7 @@ ureq = { version = "3", features = ["json"] }
 
 # Compression/Archive (for Python WASI download)
 flate2 = "1"
-zip = "7"
+zip = "8"
 sha2 = "0.10"
 
 # Serialization (for cache)

@@ -36,7 +36,7 @@ pub fn format_transaction(txn: &Transaction, config: &FormatConfig) -> String {
         writeln!(
             out,
             "{}{}: {}",
-            &config.indent,
+            &config.meta_indent,
             key,
             format_meta_value(value)
         )

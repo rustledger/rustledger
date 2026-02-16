@@ -1,0 +1,5 @@
+; February transactions for issue 365 test
+
+2024-02-15 * "Restaurant" "Dinner"
+  Expenses:Food  30 USD
+  Assets:Bank

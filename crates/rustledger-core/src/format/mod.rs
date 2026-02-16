@@ -13,7 +13,8 @@ pub(crate) use directives::{
     format_balance, format_close, format_commodity, format_custom, format_document, format_event,
     format_note, format_open, format_pad, format_price, format_query,
 };
-pub(crate) use helpers::{escape_string, format_meta_value};
+pub use helpers::escape_string;
+pub(crate) use helpers::format_meta_value;
 pub(crate) use transaction::{format_incomplete_amount, format_transaction};
 
 use crate::Directive;
@@ -78,17 +79,17 @@ impl FormatConfig {
 pub fn format_directive(directive: &Directive, config: &FormatConfig) -> String {
     match directive {
         Directive::Transaction(txn) => format_transaction(txn, config),
-        Directive::Balance(bal) => format_balance(bal),
-        Directive::Open(open) => format_open(open),
-        Directive::Close(close) => format_close(close),
-        Directive::Commodity(comm) => format_commodity(comm),
-        Directive::Pad(pad) => format_pad(pad),
-        Directive::Event(event) => format_event(event),
-        Directive::Query(query) => format_query(query),
-        Directive::Note(note) => format_note(note),
-        Directive::Document(doc) => format_document(doc),
-        Directive::Price(price) => format_price(price),
-        Directive::Custom(custom) => format_custom(custom),
+        Directive::Balance(bal) => format_balance(bal, config),
+        Directive::Open(open) => format_open(open, config),
+        Directive::Close(close) => format_close(close, config),
+        Directive::Commodity(comm) => format_commodity(comm, config),
+        Directive::Pad(pad) => format_pad(pad, config),
+        Directive::Event(event) => format_event(event, config),
+        Directive::Query(query) => format_query(query, config),
+        Directive::Note(note) => format_note(note, config),
+        Directive::Document(doc) => format_document(doc, config),
+        Directive::Price(price) => format_price(price, config),
+        Directive::Custom(custom) => format_custom(custom, config),
     }
 }
 
@@ -133,7 +134,8 @@ mod tests {
             "Assets:Bank",
             Amount::new(dec!(1000.00), "USD"),
         );
-        let formatted = format_balance(&bal);
+        let config = FormatConfig::default();
+        let formatted = format_balance(&bal, &config);
         assert_eq!(formatted, "2024-01-01 balance Assets:Bank 1000.00 USD\n");
     }
 
@@ -146,7 +148,8 @@ mod tests {
             booking: None,
             meta: Default::default(),
         };
-        let formatted = format_open(&open);
+        let config = FormatConfig::default();
+        let formatted = format_open(&open, &config);
         assert_eq!(formatted, "2024-01-01 open Assets:Bank:Checking USD,EUR\n");
     }
 
@@ -415,7 +418,8 @@ mod tests {
             account: "Assets:OldAccount".into(),
             meta: Default::default(),
         };
-        let formatted = format_close(&close);
+        let config = FormatConfig::default();
+        let formatted = format_close(&close, &config);
         assert_eq!(formatted, "2024-12-31 close Assets:OldAccount\n");
     }
 
@@ -426,7 +430,8 @@ mod tests {
             currency: "BTC".into(),
             meta: Default::default(),
         };
-        let formatted = format_commodity(&comm);
+        let config = FormatConfig::default();
+        let formatted = format_commodity(&comm, &config);
         assert_eq!(formatted, "2024-01-01 commodity BTC\n");
     }
 
@@ -438,7 +443,8 @@ mod tests {
             source_account: "Equity:Opening-Balances".into(),
             meta: Default::default(),
         };
-        let formatted = format_pad(&pad);
+        let config = FormatConfig::default();
+        let formatted = format_pad(&pad, &config);
         assert_eq!(
             formatted,
             "2024-01-15 pad Assets:Checking Equity:Opening-Balances\n"
@@ -453,7 +459,8 @@ mod tests {
             value: "New York".to_string(),
             meta: Default::default(),
         };
-        let formatted = format_event(&event);
+        let config = FormatConfig::default();
+        let formatted = format_event(&event, &config);
         assert_eq!(formatted, "2024-06-01 event \"location\" \"New York\"\n");
     }
 
@@ -465,7 +472,8 @@ mod tests {
             value: "He said \"hello\"".to_string(),
             meta: Default::default(),
         };
-        let formatted = format_event(&event);
+        let config = FormatConfig::default();
+        let formatted = format_event(&event, &config);
         assert_eq!(
             formatted,
             "2024-06-01 event \"quote\" \"He said \\\"hello\\\"\"\n"
@@ -480,7 +488,8 @@ mod tests {
             query: "SELECT account, sum(position) WHERE account ~ 'Expenses'".to_string(),
             meta: Default::default(),
         };
-        let formatted = format_query(&query);
+        let config = FormatConfig::default();
+        let formatted = format_query(&query, &config);
         assert!(formatted.contains("query \"monthly_expenses\""));
         assert!(formatted.contains("SELECT account"));
     }
@@ -493,7 +502,8 @@ mod tests {
             comment: "Called the bank about fee".to_string(),
             meta: Default::default(),
         };
-        let formatted = format_note(&note);
+        let config = FormatConfig::default();
+        let formatted = format_note(&note, &config);
         assert_eq!(
             formatted,
             "2024-03-15 note Assets:Bank \"Called the bank about fee\"\n"
@@ -510,7 +520,8 @@ mod tests {
             links: vec![],
             meta: Default::default(),
         };
-        let formatted = format_document(&doc);
+        let config = FormatConfig::default();
+        let formatted = format_document(&doc, &config);
         assert_eq!(
             formatted,
             "2024-02-10 document Assets:Bank \"/docs/statement-2024-02.pdf\"\n"
@@ -525,7 +536,8 @@ mod tests {
             amount: Amount::new(dec!(185.50), "USD"),
             meta: Default::default(),
         };
-        let formatted = format_price(&price);
+        let config = FormatConfig::default();
+        let formatted = format_price(&price, &config);
         assert_eq!(formatted, "2024-01-15 price AAPL 185.50 USD\n");
     }
 
@@ -537,7 +549,8 @@ mod tests {
             values: vec![],
             meta: Default::default(),
         };
-        let formatted = format_custom(&custom);
+        let config = FormatConfig::default();
+        let formatted = format_custom(&custom, &config);
         assert_eq!(formatted, "2024-01-01 custom \"budget\"\n");
     }
 
@@ -550,7 +563,8 @@ mod tests {
             booking: Some("FIFO".to_string()),
             meta: Default::default(),
         };
-        let formatted = format_open(&open);
+        let config = FormatConfig::default();
+        let formatted = format_open(&open, &config);
         assert_eq!(formatted, "2024-01-01 open Assets:Brokerage USD \"FIFO\"\n");
     }
 
@@ -563,7 +577,8 @@ mod tests {
             booking: None,
             meta: Default::default(),
         };
-        let formatted = format_open(&open);
+        let config = FormatConfig::default();
+        let formatted = format_open(&open, &config);
         assert_eq!(formatted, "2024-01-01 open Assets:Misc\n");
     }
 
@@ -576,7 +591,8 @@ mod tests {
             tolerance: Some(dec!(0.01)),
             meta: Default::default(),
         };
-        let formatted = format_balance(&bal);
+        let config = FormatConfig::default();
+        let formatted = format_balance(&bal, &config);
         assert_eq!(
             formatted,
             "2024-01-01 balance Assets:Bank 1000.00 USD ~ 0.01\n"

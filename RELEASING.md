@@ -109,7 +109,7 @@ The release takes ~30-45 minutes to build all platforms.
 | crates.io | `rustledger`, `rustledger-*` |
 | npm | `@rustledger/wasm`, `@rustledger/mcp-server` |
 | Docker | `ghcr.io/rustledger/rustledger` |
-| Homebrew | `rustledger/homebrew-rustledger` |
+| Homebrew | `homebrew-core` (official) |
 | Scoop | `rustledger/scoop-rustledger` |
 | COPR | `copr.fedoraproject.org/rustledger` |
 

@@ -14,7 +14,7 @@
 # | npm (wasm)   | @rustledger/wasm                       |
 # | npm (mcp)    | @rustledger/mcp-server                 |
 # | Docker       | ghcr.io/rustledger/rustledger          |
-# | Homebrew     | rustledger/homebrew-rustledger         |
+# | Homebrew     | homebrew-core (official)               |
 # | Scoop        | rustledger/scoop-rustledger            |
 # | COPR         | copr.fedorainfracloud.org/rustledger   |
 # | AUR          | aur.archlinux.org (rustledger*)        |
@@ -22,7 +22,8 @@
 #
 # SECRETS REQUIRED
 # ----------------
-# - BOT_APP_ID / BOT_PRIVATE_KEY: GitHub App for cross-repo dispatches (Homebrew, Scoop, website)
+# - BOT_APP_ID / BOT_PRIVATE_KEY: GitHub App for cross-repo dispatches (Scoop, website)
+# - HOMEBREW_GITHUB_API_TOKEN: PAT with public_repo scope for homebrew-core PRs
 # - COPR_LOGIN / COPR_TOKEN: COPR build trigger
 # - AUR_SSH_PRIVATE_KEY: SSH key for pushing to AUR (aur.archlinux.org)
 # - (crates.io and npm use OIDC trusted publishing, no tokens needed)
@@ -247,27 +248,19 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
 
-  # Update Homebrew tap
+  # Submit PR to homebrew-core
   update-homebrew:
-    name: Update Homebrew formula
+    name: Bump Homebrew formula
     runs-on: ubuntu-latest
     steps:
-      - name: Generate GitHub App token
-        id: app-token
-        uses: actions/create-github-app-token@v1
+      - name: Bump rustledger formula in homebrew-core
+        uses: dawidd6/action-homebrew-bump-formula@8d494330bce4434918392df134ad3db1167904db # v4
         with:
-          app-id: ${{ secrets.BOT_APP_ID }}
-          private-key: ${{ secrets.BOT_PRIVATE_KEY }}
-          owner: rustledger
-          repositories: homebrew-rustledger
-
-      - name: Trigger Homebrew tap update
-        uses: peter-evans/repository-dispatch@28959ce8df70de7be546dd1250a005dd32156697 # v4
-        with:
-          token: ${{ steps.app-token.outputs.token }}
-          repository: rustledger/homebrew-rustledger
-          event-type: release
-          client-payload: '{"version": "${{ env.RELEASE_TAG }}"}'
+          token: ${{ secrets.HOMEBREW_GITHUB_API_TOKEN }}
+          formula: rustledger
+          tag: ${{ env.RELEASE_TAG }}
+          # Don't fail the workflow if homebrew-core PR fails (e.g., already exists)
+        continue-on-error: true
 
   # Update Scoop bucket
   update-scoop:

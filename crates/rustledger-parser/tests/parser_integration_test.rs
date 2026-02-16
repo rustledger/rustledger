@@ -476,6 +476,37 @@ fn test_parse_only_comments() {
 ";
     let result = parse_ok(source);
     assert!(result.directives.is_empty());
+    // Verify comments are captured
+    assert_eq!(result.comments.len(), 2);
+    assert!(result.comments[0].value.contains("This is a comment"));
+    assert!(result.comments[1].value.contains("Another comment"));
+}
+
+#[test]
+fn test_parse_comments_with_directives() {
+    let source = r#"
+; Header comment
+option "operating_currency" "USD"
+
+; Section comment
+2024-01-01 open Assets:Bank USD
+  description: "Main account"
+
+; Footer comment
+"#;
+    let result = parse_ok(source);
+
+    // Should have 1 directive (open)
+    assert_eq!(result.directives.len(), 1);
+
+    // Should have 1 option
+    assert_eq!(result.options.len(), 1);
+
+    // Should have 3 comments
+    assert_eq!(result.comments.len(), 3);
+    assert!(result.comments[0].value.contains("Header comment"));
+    assert!(result.comments[1].value.contains("Section comment"));
+    assert!(result.comments[2].value.contains("Footer comment"));
 }
 
 #[test]

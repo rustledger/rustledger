@@ -25,7 +25,7 @@ The LSP server is included with rustledger:
 
 ```bash
 # Via package manager (includes rledger-lsp)
-brew install rustledger/rustledger/rustledger
+brew install rustledger
 yay -S rustledger-bin
 
 # Via Cargo (LSP is a separate crate)

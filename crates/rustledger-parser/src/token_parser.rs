@@ -400,6 +400,20 @@ fn tok_comment<'src>() -> impl Parser<'src, &'src [SpannedToken<'src>], (), TokE
         .to(())
 }
 
+/// Match a standalone comment and capture its text.
+fn tok_standalone_comment<'src>()
+-> impl Parser<'src, &'src [SpannedToken<'src>], String, TokExtra<'src>> + Clone {
+    any()
+        .filter(|t: &SpannedToken<'_>| {
+            matches!(t.token, Token::Comment(_) | Token::PercentComment(_))
+        })
+        .map(|t: SpannedToken<'src>| match &t.token {
+            Token::Comment(s) => s.to_string(),
+            Token::PercentComment(s) => s.to_string(),
+            _ => String::new(),
+        })
+}
+
 /// Match a star token (*).
 fn tok_star<'src>() -> impl Parser<'src, &'src [SpannedToken<'src>], (), TokExtra<'src>> + Clone {
     any()
@@ -802,7 +816,8 @@ enum ParsedItem {
     Poptag(String),
     Pushmeta(String, MetaValue),
     Popmeta(String),
-    Comment,
+    /// A standalone comment line with its text (including the leading ; or #)
+    Comment(String),
 }
 
 // ============================================================================
@@ -1444,11 +1459,11 @@ fn tok_entry<'src>() -> impl Parser<'src, &'src [SpannedToken<'src>], ParsedItem
         tok_pushmeta_directive(),
         tok_popmeta_directive(),
         tok_dated_directive(),
-        tok_comment().to(ParsedItem::Comment),
+        tok_standalone_comment().map(ParsedItem::Comment),
         // Skip shebang, Emacs directives, and org-mode headers as comment-like entries
-        tok_shebang().to(ParsedItem::Comment),
-        tok_emacs_directive().to(ParsedItem::Comment),
-        tok_org_header_line().to(ParsedItem::Comment),
+        tok_shebang().to(ParsedItem::Comment(String::new())),
+        tok_emacs_directive().to(ParsedItem::Comment(String::new())),
+        tok_org_header_line().to(ParsedItem::Comment(String::new())),
     ))
     .labelled("directive")
 }
@@ -1504,6 +1519,7 @@ pub fn parse(source: &str) -> ParseResult {
     let mut options = Vec::new();
     let mut includes = Vec::new();
     let mut plugins = Vec::new();
+    let mut comments = Vec::new();
 
     // Tag stack for pushtag/poptag: (tag, span)
     let mut tag_stack: Vec<(InternedStr, Span)> = Vec::new();
@@ -1552,7 +1568,9 @@ pub fn parse(source: &str) -> ParseResult {
                         .push(ParseError::new(ParseErrorKind::InvalidPopmeta(key), span));
                 }
             }
-            ParsedItem::Comment => {}
+            ParsedItem::Comment(text) => {
+                comments.push(Spanned::new(text, span));
+            }
         }
     }
 
@@ -1885,6 +1903,7 @@ pub fn parse(source: &str) -> ParseResult {
         options,
         includes,
         plugins,
+        comments,
         errors: all_errors,
         warnings,
     }

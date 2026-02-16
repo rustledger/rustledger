@@ -21,8 +21,8 @@ pull_request_rules:
       - check-success=build
       - -draft
     actions:
-      merge:
-        method: squash
+      queue:
+        merge_method: squash
         commit_message_template: |
           {{ title }} (#{{ number }})
 
@@ -36,8 +36,8 @@ pull_request_rules:
       - check-success=build
       - -draft
     actions:
-      merge:
-        method: merge
+      queue:
+        merge_method: merge
         commit_message_template: |
           {{ title }} (#{{ number }})
 
@@ -46,9 +46,9 @@ pull_request_rules:
     conditions:
       - author=dependabot[bot]
       - or:
-        - title~=.*bump .* from .* to .*  # patch/minor (handles prefixes like "chore(deps):")
-        - title~=.*update .* requirement
-      - -title~=major  # exclude major updates
+        - title~=(?i).*bump .* from .* to .*  # patch/minor (case-insensitive)
+        - title~=(?i).*update .* requirement
+      - -title~=(?i)major  # exclude major updates
     actions:
       review:
         type: APPROVE
@@ -58,7 +58,7 @@ pull_request_rules:
   - name: Request review for major updates
     conditions:
       - author=dependabot[bot]
-      - title~=major
+      - title~=(?i)major
     actions:
       comment:
         message: |

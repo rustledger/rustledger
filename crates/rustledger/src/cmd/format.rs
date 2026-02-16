@@ -1,10 +1,15 @@
 //! Shared implementation for bean-format and rledger format commands.
+//!
+//! This formatter preserves comments, blank lines, and original file structure.
+//! It uses the parser directly (not the Loader) to capture all elements with their
+//! source spans, then outputs them in order, only reformatting directive content
+//! while preserving comments and other non-directive content.
 
 use crate::cmd::completions::ShellType;
-use crate::format::{FormatConfig, format_directive};
+use crate::format::{FormatConfig, escape_string, format_directive};
 use anyhow::{Context, Result};
 use clap::Parser;
-use rustledger_loader::Loader;
+use rustledger_parser::{Span, Spanned, parse};
 use std::fs;
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -87,6 +92,27 @@ pub fn run(args: &Args) -> Result<ExitCode> {
     }
 }
 
+/// A parsed item that can be formatted, with its source span.
+enum FormattableItem {
+    Directive(Spanned<rustledger_core::Directive>),
+    Option(String, String, Span),
+    Include(String, Span),
+    Plugin(String, Option<String>, Span),
+    Comment(Spanned<String>),
+}
+
+impl FormattableItem {
+    const fn span(&self) -> Span {
+        match self {
+            Self::Directive(d) => d.span,
+            Self::Option(_, _, span) => *span,
+            Self::Include(_, span) => *span,
+            Self::Plugin(_, _, span) => *span,
+            Self::Comment(c) => c.span,
+        }
+    }
+}
+
 fn format_file(file: &PathBuf, args: &Args) -> Result<ExitCode> {
     if !file.exists() {
         anyhow::bail!("file not found: {}", file.display());
@@ -95,47 +121,112 @@ fn format_file(file: &PathBuf, args: &Args) -> Result<ExitCode> {
     let original_content =
         fs::read_to_string(file).with_context(|| format!("failed to read {}", file.display()))?;
 
-    let mut loader = Loader::new();
-    let load_result = loader
-        .load(file)
-        .with_context(|| format!("failed to load {}", file.display()))?;
+    // Parse the file directly to get all items with their spans
+    let parse_result = parse(&original_content);
 
-    if !load_result.errors.is_empty() {
-        for err in &load_result.errors {
+    if !parse_result.errors.is_empty() {
+        for err in &parse_result.errors {
             eprintln!("error: {err}");
         }
         anyhow::bail!("file has parse errors, cannot format");
     }
 
+    // Collect all items into a unified list
+    let mut items: Vec<FormattableItem> = Vec::new();
+
+    for directive in parse_result.directives {
+        items.push(FormattableItem::Directive(directive));
+    }
+
+    for (key, value, span) in parse_result.options {
+        items.push(FormattableItem::Option(key, value, span));
+    }
+
+    for (path, span) in parse_result.includes {
+        items.push(FormattableItem::Include(path, span));
+    }
+
+    for (name, config, span) in parse_result.plugins {
+        items.push(FormattableItem::Plugin(name, config, span));
+    }
+
+    for comment in parse_result.comments {
+        items.push(FormattableItem::Comment(comment));
+    }
+
+    // Sort all items by their span start position to preserve original order
+    items.sort_by(|a, b| {
+        let a_start = a.span().start;
+        let b_start = b.span().start;
+        a_start.cmp(&b_start)
+    });
+
     let config = FormatConfig::new(args.column, args.indent);
     let mut formatted = String::new();
-    #[allow(clippy::useless_let_if_seq)]
-    let mut has_preamble = false;
+    let mut prev_end: usize = 0;
 
-    if let Some(title) = &load_result.options.title {
-        formatted.push_str(&format!("option \"title\" \"{title}\"\n"));
-        has_preamble = true;
-    }
-    for currency in &load_result.options.operating_currency {
-        formatted.push_str(&format!("option \"operating_currency\" \"{currency}\"\n"));
-        has_preamble = true;
-    }
+    for item in &items {
+        let item_start = item.span().start;
 
-    for plugin in &load_result.plugins {
-        if let Some(cfg) = &plugin.config {
-            formatted.push_str(&format!("plugin \"{}\" \"{}\"\n", plugin.name, cfg));
-        } else {
-            formatted.push_str(&format!("plugin \"{}\"\n", plugin.name));
+        // Preserve blank lines between items
+        // Count newlines in the gap between previous item and current item
+        if item_start > prev_end {
+            let between = &original_content[prev_end..item_start];
+            // Count actual newline characters (not logical lines)
+            let newline_count = between.chars().filter(|&c| c == '\n').count();
+            // Special case: at start of file (prev_end == 0), preserve all leading blank lines
+            // Otherwise, one newline ends the previous item, extras are blank lines
+            let blank_lines = if prev_end == 0 {
+                newline_count
+            } else {
+                newline_count.saturating_sub(1)
+            };
+            for _ in 0..blank_lines {
+                formatted.push('\n');
+            }
         }
-        has_preamble = true;
+
+        // Format the item
+        match item {
+            FormattableItem::Directive(d) => {
+                formatted.push_str(&format_directive(&d.value, &config));
+            }
+            FormattableItem::Option(key, value, _) => {
+                formatted.push_str(&format!(
+                    "option \"{}\" \"{}\"\n",
+                    escape_string(key),
+                    escape_string(value)
+                ));
+            }
+            FormattableItem::Include(path, _) => {
+                formatted.push_str(&format!("include \"{}\"\n", escape_string(path)));
+            }
+            FormattableItem::Plugin(name, config_str, _) => {
+                if let Some(cfg) = config_str {
+                    formatted.push_str(&format!(
+                        "plugin \"{}\" \"{}\"\n",
+                        escape_string(name),
+                        escape_string(cfg)
+                    ));
+                } else {
+                    formatted.push_str(&format!("plugin \"{}\"\n", escape_string(name)));
+                }
+            }
+            FormattableItem::Comment(c) => {
+                // Output comment as-is, ensuring it ends with newline
+                formatted.push_str(&c.value);
+                if !c.value.ends_with('\n') {
+                    formatted.push('\n');
+                }
+            }
+        }
+
+        prev_end = item.span().end;
     }
 
-    if has_preamble {
+    // Handle trailing newline
+    if !formatted.ends_with('\n') {
         formatted.push('\n');
-    }
-
-    for spanned in &load_result.directives {
-        formatted.push_str(&format_directive(&spanned.value, &config));
     }
 
     if args.check {

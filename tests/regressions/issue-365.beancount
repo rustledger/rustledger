@@ -1,0 +1,20 @@
+; Issue: https://github.com/rustledger/rustledger/issues/365
+; Description: Glob patterns in include directives not supported
+; Expected: Glob patterns like *.beancount should be expanded
+;
+; This test verifies that include directives with glob patterns work correctly.
+
+option "operating_currency" "USD"
+
+2024-01-01 open Assets:Bank USD
+2024-01-01 open Expenses:Food USD
+2024-01-01 open Equity:Opening-Balances USD
+
+2024-01-01 * "Opening balance"
+  Assets:Bank  1000 USD
+  Equity:Opening-Balances
+
+include "issue-365-includes/*.beancount"
+
+; After opening balance (1000) minus groceries (50) minus dinner (30) = 920
+2024-12-31 balance Assets:Bank 920 USD

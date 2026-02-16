@@ -65,7 +65,7 @@ Parse and validate your ledger faster than Python beancount.
 
 | Platform | Command |
 |----------|---------|
-| **macOS** | `brew install rustledger/rustledger/rustledger` |
+| **macOS/Linux** | `brew install rustledger` |
 | **Arch Linux** | `yay -S rustledger-bin` or `yay -S rustledger` (from source) |
 | **Windows** | `scoop bucket add rustledger https://github.com/rustledger/scoop-rustledger && scoop install rustledger` |
 | **Cargo** | `cargo binstall rustledger` or `cargo install rustledger` |

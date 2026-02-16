@@ -51,6 +51,8 @@ pub struct ParseResult {
     pub includes: Vec<(String, Span)>,
     /// Plugin directives found.
     pub plugins: Vec<(String, Option<String>, Span)>,
+    /// Standalone comments found in the file.
+    pub comments: Vec<Spanned<String>>,
     /// Parse errors encountered.
     pub errors: Vec<ParseError>,
     /// Deprecation warnings.

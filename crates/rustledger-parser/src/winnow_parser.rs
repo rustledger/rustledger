@@ -747,7 +747,8 @@ enum ParsedItem {
     Poptag(InternedStr, Span),
     Pushmeta(String, MetaValue, Span),
     Popmeta(String, Span),
-    Comment,
+    /// A standalone comment line with its text and span
+    Comment(String, Span),
 }
 
 fn parse_option_directive(stream: &mut TokenStream<'_>) -> ParseRes<ParsedItem> {
@@ -1351,18 +1352,26 @@ fn parse_entry(stream: &mut TokenStream<'_>) -> ParseRes<ParsedItem> {
         Token::Pushmeta => parse_pushmeta_directive(stream),
         Token::Popmeta => parse_popmeta_directive(stream),
         Token::Date(_) => parse_dated_directive(stream),
-        Token::Comment(_) | Token::PercentComment(_) => {
+        Token::Comment(text) | Token::PercentComment(text) => {
+            let start_pos = stream.pos;
+            let text = text.to_string();
             stream.advance();
-            Ok(ParsedItem::Comment)
+            let span = stream.span_from(start_pos);
+            Ok(ParsedItem::Comment(text, span))
         }
-        Token::Shebang(_) | Token::EmacsDirective(_) => {
+        Token::Shebang(text) | Token::EmacsDirective(text) => {
+            let start_pos = stream.pos;
+            let text = text.to_string();
             stream.advance();
-            Ok(ParsedItem::Comment)
+            let span = stream.span_from(start_pos);
+            Ok(ParsedItem::Comment(text, span))
         }
         Token::Star => {
-            // Org-mode header - skip the line
+            // Org-mode header - skip the line (no text to preserve)
+            let start_pos = stream.pos;
             stream.skip_to_newline();
-            Ok(ParsedItem::Comment)
+            let span = stream.span_from(start_pos);
+            Ok(ParsedItem::Comment(String::new(), span))
         }
         _ => Err(()),
     }
@@ -1431,6 +1440,7 @@ pub fn parse(source: &str) -> ParseResult {
     let mut options = Vec::new();
     let mut includes = Vec::new();
     let mut plugins = Vec::new();
+    let mut comments = Vec::new();
     let mut errors = Vec::new();
 
     let mut tag_stack: Vec<(InternedStr, Span)> = Vec::new();
@@ -1474,7 +1484,9 @@ pub fn parse(source: &str) -> ParseResult {
                         errors.push(ParseError::new(ParseErrorKind::InvalidPopmeta(key), span));
                     }
                 }
-                ParsedItem::Comment => {}
+                ParsedItem::Comment(text, span) => {
+                    comments.push(Spanned::new(text, span));
+                }
             }
         } else {
             // If stream is now empty, we just consumed trailing newlines - not an error
@@ -1512,6 +1524,7 @@ pub fn parse(source: &str) -> ParseResult {
         options,
         includes,
         plugins,
+        comments,
         errors,
         warnings: Vec::new(),
     }

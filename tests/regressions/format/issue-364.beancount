@@ -1,0 +1,28 @@
+; Issue: https://github.com/rustledger/rustledger/issues/364
+; Description: Formatter strips comments, metadata, and whitespace
+; Expected: All comments, metadata, and blank lines should be preserved
+;
+; This file tests that the formatter preserves:
+; 1. Standalone comments (like this one)
+; 2. Metadata on directives
+; 3. Blank lines between sections
+
+option "title" "Issue 364 Test"
+option "operating_currency" "USD"
+
+; === Account Setup ===
+
+2024-01-01 open Assets:Bank:Checking USD
+  description: "Primary checking account"
+  bank: "First National"
+
+2024-01-01 open Expenses:Food USD
+
+; === Transactions ===
+
+2024-01-15 * "Coffee Shop" "Morning coffee"
+  memo: "With colleagues"
+  Expenses:Food  5.00 USD
+  Assets:Bank:Checking
+
+; End of file comment

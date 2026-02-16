@@ -90,8 +90,12 @@ jobs:
           echo "$OUTPUT"
           echo "$OUTPUT" | grep -q "Assets:Bank"
 
+  # Note: This tests that rustledger can be installed via Homebrew, but does NOT
+  # validate that the just-released version is available. Homebrew-core updates
+  # require a PR to be submitted and merged, which happens asynchronously after
+  # the release workflow submits it via dawidd6/action-homebrew-bump-formula.
   test-homebrew:
-    name: Test Homebrew (Linux)
+    name: Test Homebrew install (Linux)
     needs: prepare
     runs-on: ubuntu-latest
     container: homebrew/brew:latest
@@ -99,36 +103,19 @@ jobs:
       - name: Update Homebrew
         run: brew update
 
-      - name: Tap rustledger
-        run: brew tap rustledger/rustledger
-
-      - name: Wait for tap update
-        run: |
-          VERSION="${{ needs.prepare.outputs.version }}"
-          echo "Checking for rustledger $VERSION in tap..."
-          for i in $(seq 1 15); do
-            brew tap rustledger/rustledger --force 2>/dev/null || true
-            TAP_VERSION=$(brew info rustledger/rustledger/rustledger 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo "not found")
-            echo "Tap version: $TAP_VERSION"
-            if [ "$TAP_VERSION" = "$VERSION" ]; then
-              echo "Tap is up to date"
-              exit 0
-            fi
-            echo "Attempt $i/15: Tap not updated, waiting 30s..."
-            sleep 30
-          done
-          echo "Warning: Tap may not be updated, proceeding anyway..."
-
       - name: Install rustledger
-        run: brew install rustledger/rustledger/rustledger
+        run: brew install rustledger
 
-      - name: Verify version
+      - name: Check installed version
         run: |
           INSTALLED=$(rledger --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?' | head -1)
           EXPECTED="${{ needs.prepare.outputs.version }}"
-          echo "Installed: $INSTALLED, Expected: $EXPECTED"
-          if [ "$INSTALLED" != "$EXPECTED" ]; then
-            echo "Warning: Version mismatch (tap may not be updated yet)"
+          echo "Installed from homebrew-core: $INSTALLED"
+          echo "Just released: $EXPECTED"
+          if [ "$INSTALLED" = "$EXPECTED" ]; then
+            echo "✓ Homebrew has the latest version"
+          else
+            echo "ℹ Homebrew has an older version (expected - homebrew-core PR may still be pending)"
           fi
 
       - name: Create test file

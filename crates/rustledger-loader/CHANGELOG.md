@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
+## [0.8.9](https://github.com/rustledger/rustledger/compare/v0.8.8...v0.8.9) - 2026-02-16
+
+### Bug Fixes
+
+- *(loader)* address Copilot review feedback on glob handling
+
+### Features
+
+- *(loader)* support glob patterns in include directives
+
 ## [0.8.8](https://github.com/rustledger/rustledger/compare/v0.8.7...v0.8.8) - 2026-02-14
 
 ### Bug Fixes

@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
+## [0.9.0](https://github.com/rustledger/rustledger/releases/tag/v0.9.0) - 2026-02-17
+
+### Documentation
+
+- update install instructions for homebrew-core
+
+### Performance
+
+- *(booking)* add fast path for transactions without cost specs
+
+### Testing
+
+- *(booking)* add test for no-cost-specs fast path
+
 ## [0.8.8](https://github.com/rustledger/rustledger/compare/v0.8.7...v0.8.8) - 2026-02-14
 
 ### Bug Fixes

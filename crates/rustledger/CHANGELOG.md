@@ -6,6 +6,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
+## [0.9.2](https://github.com/rustledger/rustledger/compare/v0.9.1...v0.9.2) - 2026-02-23
+
+### Bug Fixes
+
+- *(clippy)* add backticks to en_US in doc comment
+
+### Documentation
+
+- add rustledger-ffi-wasi to README crates table
+- add missing crates (importer, lsp, ffi-wasi)
+- add related crates section to rustledger docs
+
+### Features
+
+- *(importer)* support localization for custom number format
+
+### Miscellaneous
+
+- remove status badges from install table
+
 ## [0.9.1](https://github.com/rustledger/rustledger/compare/v0.9.0...v0.9.1) - 2026-02-18
 
 ### Bug Fixes

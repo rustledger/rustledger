@@ -36,7 +36,8 @@ fn main() -> ExitCode {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("rledger_lsp=info".parse().unwrap()),
+                .add_directive("rledger_lsp=info".parse().unwrap())
+                .add_directive("rustledger_lsp=info".parse().unwrap()),
         )
         .with_writer(std::io::stderr)
         .init();

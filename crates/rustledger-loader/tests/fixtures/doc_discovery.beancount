@@ -1,0 +1,9 @@
+option "title" "Document Discovery Test"
+option "documents" "documents"
+
+2024-01-01 open Assets:Bank:Checking USD
+2024-01-01 open Expenses:Food
+
+2024-01-20 * "Grocery Store" "Weekly shopping"
+  Expenses:Food           50.00 USD
+  Assets:Bank:Checking   -50.00 USD

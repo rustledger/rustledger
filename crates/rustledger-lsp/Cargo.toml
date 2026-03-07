@@ -1,6 +1,6 @@
 [package]
 name = "rustledger-lsp"
-version.workspace = true
+version = "0.10.0"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -28,6 +28,7 @@ parking_lot.workspace = true
 # Our crates
 rustledger-parser.workspace = true
 rustledger-core.workspace = true
+rustledger-loader.workspace = true
 
 # Utilities
 tracing.workspace = true

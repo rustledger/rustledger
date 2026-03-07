@@ -161,7 +161,7 @@ jobs:
           fi
 
       - name: Upload mutation results
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: mutation-results
           path: |

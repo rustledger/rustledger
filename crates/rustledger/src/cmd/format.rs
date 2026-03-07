@@ -190,6 +190,25 @@ fn format_file(file: &PathBuf, args: &Args) -> Result<ExitCode> {
         match item {
             FormattableItem::Directive(d) => {
                 formatted.push_str(&format_directive(&d.value, &config));
+
+                // Preserve trailing blank lines from the original directive span
+                // The directive span may include trailing newlines that we need to keep.
+                // Count trailing newline characters, handling both LF and CRLF line endings.
+                // We walk backwards, treating '\r' as part of the line ending but only
+                // incrementing the count for '\n'. This way, "\r\n\r\n" correctly yields 2.
+                let original_text = &original_content[d.span.start..d.span.end];
+                let mut trailing_newlines = 0usize;
+                for c in original_text.chars().rev() {
+                    match c {
+                        '\n' => trailing_newlines += 1,
+                        '\r' => {} // Part of a CRLF pair; continue scanning.
+                        _ => break,
+                    }
+                }
+                // format_directive already outputs one trailing newline, so add any extras
+                for _ in 1..trailing_newlines {
+                    formatted.push('\n');
+                }
             }
             FormattableItem::Option(key, value, _) => {
                 formatted.push_str(&format!(

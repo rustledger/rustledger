@@ -6,3 +6,20 @@ pnl = "pnl"
 HSA = "HSA"
 # Intentional typo in test (invalid SQL query)
 SELEKT = "SELEKT"
+# Crate name (deflate compression)
+flate = "flate"
+# Chumsky parser combinator method name (British spelling)
+labelled = "labelled"
+# Intentional typos in parser for typo-correction suggestions
+opne = "opne"
+clsoe = "clsoe"
+colse = "colse"
+closee = "closee"
+blanace = "blanace"
+documnet = "documnet"
+docuemnt = "docuemnt"
+evnet = "evnet"
+commoditiy = "commoditiy"
+qurey = "qurey"
+qeury = "qeury"
+cusotm = "cusotm"

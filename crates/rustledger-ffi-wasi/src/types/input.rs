@@ -255,6 +255,8 @@ pub fn input_entry_to_directive(entry: &InputEntry) -> Result<Directive, String>
                         price,
                         flag: None,
                         meta: json_map_to_metadata(&p.meta),
+                        comments: Vec::new(),
+                        trailing_comments: Vec::new(),
                     }
                 })
                 .collect();
@@ -268,6 +270,7 @@ pub fn input_entry_to_directive(entry: &InputEntry) -> Result<Directive, String>
                 links: links.iter().map(|l| l.clone().into()).collect(),
                 postings,
                 meta: json_map_to_metadata(meta),
+                trailing_comments: Vec::new(),
             }))
         }
         InputEntry::Open {

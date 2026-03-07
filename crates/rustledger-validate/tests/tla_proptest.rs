@@ -94,6 +94,8 @@ proptest! {
                         price: None,
                         flag: None,
                         meta: Default::default(),
+                        comments: Vec::new(),
+                        trailing_comments: Vec::new(),
                     },
                     Posting {
                         account: "Equity:Opening".into(),
@@ -102,9 +104,12 @@ proptest! {
                         price: None,
                         flag: None,
                         meta: Default::default(),
+                        comments: Vec::new(),
+                        trailing_comments: Vec::new(),
                     },
                 ],
                 meta: Default::default(),
+                trailing_comments: Vec::new(),
             }),
             // Balance assertion with wrong expected
             Directive::Balance(Balance {
@@ -170,6 +175,8 @@ proptest! {
                         price: None,
                         flag: None,
                         meta: Default::default(),
+                        comments: Vec::new(),
+                        trailing_comments: Vec::new(),
                     },
                     Posting {
                         account: "Equity:Opening".into(),
@@ -178,9 +185,12 @@ proptest! {
                         price: None,
                         flag: None,
                         meta: Default::default(),
+                        comments: Vec::new(),
+                        trailing_comments: Vec::new(),
                     },
                 ],
                 meta: Default::default(),
+                trailing_comments: Vec::new(),
             }),
             // Balance assertion with correct expected
             Directive::Balance(Balance {
@@ -242,6 +252,8 @@ proptest! {
                         price: None,
                         flag: None,
                         meta: Default::default(),
+                        comments: Vec::new(),
+                        trailing_comments: Vec::new(),
                     },
                     Posting {
                         account: "Income:Salary".into(),
@@ -250,9 +262,12 @@ proptest! {
                         price: None,
                         flag: None,
                         meta: Default::default(),
+                        comments: Vec::new(),
+                        trailing_comments: Vec::new(),
                     },
                 ],
                 meta: Default::default(),
+                trailing_comments: Vec::new(),
             }));
         }
 
@@ -309,6 +324,8 @@ proptest! {
                         price: None,
                         flag: None,
                         meta: Default::default(),
+                        comments: Vec::new(),
+                        trailing_comments: Vec::new(),
                     },
                     Posting {
                         account: "Equity:Opening".into(),
@@ -317,9 +334,12 @@ proptest! {
                         price: None,
                         flag: None,
                         meta: Default::default(),
+                        comments: Vec::new(),
+                        trailing_comments: Vec::new(),
                     },
                 ],
                 meta: Default::default(),
+                trailing_comments: Vec::new(),
             }),
         ];
 
@@ -414,6 +434,8 @@ proptest! {
                         price: None,
                         flag: None,
                         meta: Default::default(),
+                        comments: Vec::new(),
+                        trailing_comments: Vec::new(),
                     },
                     Posting {
                         account: "Equity:Opening".into(),
@@ -422,9 +444,12 @@ proptest! {
                         price: None,
                         flag: None,
                         meta: Default::default(),
+                        comments: Vec::new(),
+                        trailing_comments: Vec::new(),
                     },
                 ],
                 meta: Default::default(),
+                trailing_comments: Vec::new(),
             }),
         ];
 
@@ -489,6 +514,8 @@ proptest! {
                         price: None,
                         flag: None,
                         meta: Default::default(),
+                        comments: Vec::new(),
+                        trailing_comments: Vec::new(),
                     },
                     Posting {
                         account: "Equity:Opening".into(),
@@ -497,9 +524,12 @@ proptest! {
                         price: None,
                         flag: None,
                         meta: Default::default(),
+                        comments: Vec::new(),
+                        trailing_comments: Vec::new(),
                     },
                 ],
                 meta: Default::default(),
+                trailing_comments: Vec::new(),
             }),
             Directive::Balance(Balance {
                 date: balance_date,
@@ -543,6 +573,8 @@ proptest! {
                         price: None,
                         flag: None,
                         meta: Default::default(),
+                        comments: Vec::new(),
+                        trailing_comments: Vec::new(),
                     },
                     Posting {
                         account: "Equity:Opening".into(),
@@ -551,9 +583,12 @@ proptest! {
                         price: None,
                         flag: None,
                         meta: Default::default(),
+                        comments: Vec::new(),
+                        trailing_comments: Vec::new(),
                     },
                 ],
                 meta: Default::default(),
+                trailing_comments: Vec::new(),
             }),
             Directive::Balance(Balance {
                 date: balance_date,
@@ -621,6 +656,8 @@ proptest! {
                         price: None,
                         flag: None,
                         meta: Default::default(),
+                        comments: Vec::new(),
+                        trailing_comments: Vec::new(),
                     },
                     Posting {
                         account: account2.clone().into(),
@@ -629,6 +666,8 @@ proptest! {
                         price: None,
                         flag: None,
                         meta: Default::default(),
+                        comments: Vec::new(),
+                        trailing_comments: Vec::new(),
                     },
                     Posting {
                         account: "Equity:Opening".into(),
@@ -637,9 +676,12 @@ proptest! {
                         price: None,
                         flag: None,
                         meta: Default::default(),
+                        comments: Vec::new(),
+                        trailing_comments: Vec::new(),
                     },
                 ],
                 meta: Default::default(),
+                trailing_comments: Vec::new(),
             }),
             Directive::Balance(Balance {
                 date: balance_date,

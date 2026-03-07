@@ -584,3 +584,119 @@ fn test_process_preserves_display_context() {
     let _ctx = &ledger.display_context;
     // If we got here, display context was created successfully
 }
+
+// ============================================================================
+// Document Discovery Tests (Issue #466)
+// ============================================================================
+
+#[test]
+fn test_document_discovery_from_option() {
+    // Test that documents are auto-discovered from `option "documents"` directories.
+    // See: https://github.com/rustledger/rustledger/issues/466
+    let path = fixtures_path("doc_discovery.beancount");
+    let options = LoadOptions::default();
+
+    let ledger = load(&path, &options).expect("should load with document discovery");
+
+    // Count document directives
+    let documents: Vec<_> = ledger
+        .directives
+        .iter()
+        .filter_map(|d| {
+            if let rustledger_core::Directive::Document(doc) = &d.value {
+                Some(doc)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // Should have discovered 3 documents:
+    // - Assets/Bank/Checking/2024-01-15.statement.pdf
+    // - Assets/Bank/Checking/2024-02-15.statement.pdf
+    // - Expenses/Food/2024-03-10.receipt.jpg
+    assert_eq!(
+        documents.len(),
+        3,
+        "expected 3 discovered documents, got: {documents:?}"
+    );
+
+    // Check accounts are correctly constructed from directory paths
+    let accounts: Vec<&str> = documents.iter().map(|d| d.account.as_ref()).collect();
+    assert!(
+        accounts.contains(&"Assets:Bank:Checking"),
+        "should have Assets:Bank:Checking document"
+    );
+    assert!(
+        accounts.contains(&"Expenses:Food"),
+        "should have Expenses:Food document"
+    );
+
+    // Check dates are correctly parsed from filenames
+    let dates: Vec<_> = documents.iter().map(|d| d.date.to_string()).collect();
+    assert!(
+        dates.contains(&"2024-01-15".to_string()),
+        "should have document dated 2024-01-15"
+    );
+    assert!(
+        dates.contains(&"2024-02-15".to_string()),
+        "should have document dated 2024-02-15"
+    );
+    assert!(
+        dates.contains(&"2024-03-10".to_string()),
+        "should have document dated 2024-03-10"
+    );
+}
+
+#[test]
+fn test_document_discovery_no_option() {
+    // Test that document discovery doesn't happen when option "documents" is not set
+    let path = fixtures_path("simple.beancount");
+    let options = LoadOptions::default();
+
+    // simple.beancount doesn't have option "documents", so no discovery should happen
+    let ledger = load(&path, &options).expect("should load");
+
+    // Count document directives (should be 0)
+    let doc_count = ledger
+        .directives
+        .iter()
+        .filter(|d| matches!(d.value, rustledger_core::Directive::Document(_)))
+        .count();
+
+    assert_eq!(doc_count, 0, "should have no documents without option");
+}
+
+#[test]
+fn test_document_discovery_no_duplicates() {
+    // Test that document discovery doesn't create duplicates if a document directive
+    // already exists for one of the discoverable files.
+    //
+    // The `doc_discovery_with_explicit.beancount` fixture:
+    //   * Enables document discovery for `documents/` directory
+    //   * Contains an explicit `document` directive for one file that would also be discovered
+    //
+    // If de-duplication is working correctly, the explicitly referenced file must not
+    // be added again by discovery.
+    let path = fixtures_path("doc_discovery_with_explicit.beancount");
+    let options = LoadOptions::default();
+
+    let ledger = load(&path, &options).expect("should load");
+
+    let doc_count = ledger
+        .directives
+        .iter()
+        .filter(|d| matches!(d.value, rustledger_core::Directive::Document(_)))
+        .count();
+
+    // The fixture has 3 document files in the directory:
+    //   - documents/Assets/Bank/Checking/2024-01-15.statement.pdf
+    //   - documents/Assets/Bank/Checking/2024-02-15.statement.pdf
+    //   - documents/Expenses/Food/2024-03-10.receipt.jpg
+    // One of them (2024-01-15.statement.pdf) is explicitly declared in the file.
+    // If duplicates were being created, we'd see 4 documents instead of 3.
+    assert_eq!(
+        doc_count, 3,
+        "document discovery should not create duplicate Document directives"
+    );
+}

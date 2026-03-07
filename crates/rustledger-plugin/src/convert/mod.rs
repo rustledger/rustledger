@@ -196,6 +196,8 @@ mod tests {
                     price: None,
                     flag: None,
                     meta: Metadata::default(),
+                    comments: Vec::new(),
+                    trailing_comments: Vec::new(),
                 },
                 Posting {
                     account: "Assets:Checking".into(),
@@ -204,8 +206,11 @@ mod tests {
                     price: None,
                     flag: None,
                     meta: Metadata::default(),
+                    comments: Vec::new(),
+                    trailing_comments: Vec::new(),
                 },
             ],
+            trailing_comments: Vec::new(),
         };
 
         let directive = Directive::Transaction(txn);

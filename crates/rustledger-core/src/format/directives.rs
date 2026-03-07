@@ -7,14 +7,14 @@ use crate::{
 use std::fmt::Write;
 
 /// Format metadata entries in deterministic (sorted) order.
-fn format_metadata(meta: &Metadata, meta_indent: &str, out: &mut String) {
+fn format_metadata(meta: &Metadata, indent: &str, out: &mut String) {
     // Sort keys for deterministic output order
     let mut keys: Vec<_> = meta.keys().collect();
     keys.sort();
 
     for key in keys {
         let value = &meta[key];
-        writeln!(out, "{meta_indent}{}: {}", key, format_meta_value(value)).unwrap();
+        writeln!(out, "{indent}{}: {}", key, format_meta_value(value)).unwrap();
     }
 }
 
@@ -30,7 +30,7 @@ pub fn format_balance(bal: &Balance, config: &FormatConfig) -> String {
         write!(out, " ~ {tol}").unwrap();
     }
     out.push('\n');
-    format_metadata(&bal.meta, &config.meta_indent, &mut out);
+    format_metadata(&bal.meta, &config.indent, &mut out);
     out
 }
 
@@ -44,28 +44,28 @@ pub fn format_open(open: &Open, config: &FormatConfig) -> String {
         write!(out, " \"{booking}\"").unwrap();
     }
     out.push('\n');
-    format_metadata(&open.meta, &config.meta_indent, &mut out);
+    format_metadata(&open.meta, &config.indent, &mut out);
     out
 }
 
 /// Format a close directive.
 pub fn format_close(close: &Close, config: &FormatConfig) -> String {
     let mut out = format!("{} close {}\n", close.date, close.account);
-    format_metadata(&close.meta, &config.meta_indent, &mut out);
+    format_metadata(&close.meta, &config.indent, &mut out);
     out
 }
 
 /// Format a commodity directive.
 pub fn format_commodity(comm: &Commodity, config: &FormatConfig) -> String {
     let mut out = format!("{} commodity {}\n", comm.date, comm.currency);
-    format_metadata(&comm.meta, &config.meta_indent, &mut out);
+    format_metadata(&comm.meta, &config.indent, &mut out);
     out
 }
 
 /// Format a pad directive.
 pub fn format_pad(pad: &Pad, config: &FormatConfig) -> String {
     let mut out = format!("{} pad {} {}\n", pad.date, pad.account, pad.source_account);
-    format_metadata(&pad.meta, &config.meta_indent, &mut out);
+    format_metadata(&pad.meta, &config.indent, &mut out);
     out
 }
 
@@ -77,7 +77,7 @@ pub fn format_event(event: &Event, config: &FormatConfig) -> String {
         escape_string(&event.event_type),
         escape_string(&event.value)
     );
-    format_metadata(&event.meta, &config.meta_indent, &mut out);
+    format_metadata(&event.meta, &config.indent, &mut out);
     out
 }
 
@@ -89,7 +89,7 @@ pub fn format_query(query: &Query, config: &FormatConfig) -> String {
         escape_string(&query.name),
         escape_string(&query.query)
     );
-    format_metadata(&query.meta, &config.meta_indent, &mut out);
+    format_metadata(&query.meta, &config.indent, &mut out);
     out
 }
 
@@ -101,7 +101,7 @@ pub fn format_note(note: &Note, config: &FormatConfig) -> String {
         note.account,
         escape_string(&note.comment)
     );
-    format_metadata(&note.meta, &config.meta_indent, &mut out);
+    format_metadata(&note.meta, &config.indent, &mut out);
     out
 }
 
@@ -113,7 +113,7 @@ pub fn format_document(doc: &Document, config: &FormatConfig) -> String {
         doc.account,
         escape_string(&doc.path)
     );
-    format_metadata(&doc.meta, &config.meta_indent, &mut out);
+    format_metadata(&doc.meta, &config.indent, &mut out);
     out
 }
 
@@ -125,7 +125,7 @@ pub fn format_price(price: &Price, config: &FormatConfig) -> String {
         price.currency,
         format_amount(&price.amount)
     );
-    format_metadata(&price.meta, &config.meta_indent, &mut out);
+    format_metadata(&price.meta, &config.indent, &mut out);
     out
 }
 
@@ -136,6 +136,6 @@ pub fn format_custom(custom: &Custom, config: &FormatConfig) -> String {
         custom.date,
         escape_string(&custom.custom_type)
     );
-    format_metadata(&custom.meta, &config.meta_indent, &mut out);
+    format_metadata(&custom.meta, &config.indent, &mut out);
     out
 }

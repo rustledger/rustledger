@@ -1531,9 +1531,12 @@ mod tests {
                     price: None,
                     flag: None,
                     meta: posting_meta,
+                    comments: Vec::new(),
+                    trailing_comments: Vec::new(),
                 },
                 Posting::new("Assets:Cash", Amount::new(dec!(-5), "USD")),
             ],
+            trailing_comments: Vec::new(),
         };
 
         let directives = vec![Directive::Transaction(txn)];
@@ -1852,6 +1855,7 @@ mod tests {
                 Posting::new("Assets:Bank", Amount::new(dec!(100), "USD")),
                 Posting::new("Expenses:Food", Amount::new(dec!(-100), "USD")),
             ],
+            trailing_comments: Vec::new(),
         })];
 
         let mut executor = Executor::new(&directives);
@@ -1897,6 +1901,7 @@ mod tests {
                 Posting::new("Assets:Bank", Amount::new(dec!(100), "USD")),
                 Posting::new("Expenses:Food", Amount::new(dec!(-100), "USD")),
             ],
+            trailing_comments: Vec::new(),
         };
 
         let spanned_directives = vec![Spanned {

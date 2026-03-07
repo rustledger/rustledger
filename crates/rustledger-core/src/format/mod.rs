@@ -24,10 +24,8 @@ use crate::Directive;
 pub struct FormatConfig {
     /// Column to align amounts to (default: 60).
     pub amount_column: usize,
-    /// Indentation for postings.
+    /// Indentation for postings and metadata (default: 2 spaces).
     pub indent: String,
-    /// Indentation for metadata.
-    pub meta_indent: String,
 }
 
 impl Default for FormatConfig {
@@ -35,7 +33,6 @@ impl Default for FormatConfig {
         Self {
             amount_column: 60,
             indent: "  ".to_string(),
-            meta_indent: "    ".to_string(),
         }
     }
 }
@@ -54,10 +51,8 @@ impl FormatConfig {
     #[must_use]
     pub fn with_indent(indent_width: usize) -> Self {
         let indent = " ".repeat(indent_width);
-        let meta_indent = " ".repeat(indent_width * 2);
         Self {
             indent,
-            meta_indent,
             ..Default::default()
         }
     }
@@ -66,11 +61,9 @@ impl FormatConfig {
     #[must_use]
     pub fn new(column: usize, indent_width: usize) -> Self {
         let indent = " ".repeat(indent_width);
-        let meta_indent = " ".repeat(indent_width * 2);
         Self {
             amount_column: column,
             indent,
-            meta_indent,
         }
     }
 }
@@ -659,6 +652,7 @@ mod tests {
             links: vec![],
             postings: vec![],
             meta,
+            trailing_comments: Vec::new(),
         };
 
         let config = FormatConfig::default();
@@ -688,6 +682,8 @@ mod tests {
             cost: None,
             price: None,
             meta: Default::default(),
+            comments: Vec::new(),
+            trailing_comments: Vec::new(),
         };
 
         let config = FormatConfig::default();
@@ -709,7 +705,6 @@ mod tests {
     fn test_format_config_with_indent() {
         let config = FormatConfig::with_indent(4);
         assert_eq!(config.indent, "    ");
-        assert_eq!(config.meta_indent, "        ");
     }
 
     #[test]
@@ -717,7 +712,6 @@ mod tests {
         let config = FormatConfig::new(70, 3);
         assert_eq!(config.amount_column, 70);
         assert_eq!(config.indent, "   ");
-        assert_eq!(config.meta_indent, "      ");
     }
 
     #[test]
@@ -750,6 +744,8 @@ mod tests {
             }),
             price: Some(PriceAnnotation::Unit(Amount::new(dec!(155.00), "USD"))),
             meta: Default::default(),
+            comments: Vec::new(),
+            trailing_comments: Vec::new(),
         };
 
         let config = FormatConfig::default();
@@ -905,5 +901,112 @@ mod tests {
     fn test_format_amount_small_decimal() {
         let amount = Amount::new(dec!(0.00001), "BTC");
         assert_eq!(format_amount(&amount), "0.00001 BTC");
+    }
+
+    #[test]
+    fn test_format_transaction_with_inline_comment() {
+        let config = FormatConfig::default();
+
+        // Create a posting with an inline comment
+        let mut posting = Posting::new("Expenses:Food", Amount::new(dec!(50), "USD"));
+        posting.comments = vec!["; This is an inline comment".to_string()];
+
+        let txn = Transaction::new(date(2024, 1, 15), "Test transaction")
+            .with_flag('*')
+            .with_posting(posting)
+            .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(-50), "USD")));
+
+        let formatted = format_transaction(&txn, &config);
+
+        // The inline comment should appear before the first posting
+        assert!(
+            formatted.contains("; This is an inline comment"),
+            "Formatted transaction should contain inline comment: {formatted}"
+        );
+        // Comment should appear before Expenses:Food
+        let comment_pos = formatted.find("; This is an inline comment").unwrap();
+        let expenses_pos = formatted.find("Expenses:Food").unwrap();
+        assert!(
+            comment_pos < expenses_pos,
+            "Comment should appear before the posting"
+        );
+    }
+
+    // Issue #364: Comprehensive test for all comment positions in transactions
+    #[test]
+    fn test_issue_364_format_all_comment_types() {
+        let config = FormatConfig::default();
+
+        // Create first posting with pre-comments and trailing comment
+        let mut posting1 = Posting::new("Expenses:Food", Amount::new(dec!(50), "USD"));
+        posting1.comments = vec!["; Pre-comment 1".to_string(), "; Pre-comment 2".to_string()];
+        posting1.trailing_comments = vec!["; trailing on posting".to_string()];
+
+        // Create second posting with pre-comment
+        let mut posting2 = Posting::new("Assets:Bank", Amount::new(dec!(-50), "USD"));
+        posting2.comments = vec!["; Comment before second posting".to_string()];
+
+        // Create transaction with trailing comments
+        let mut txn = Transaction::new(date(2024, 1, 15), "Test transaction")
+            .with_flag('*')
+            .with_posting(posting1)
+            .with_posting(posting2);
+        txn.trailing_comments = vec![
+            "; Transaction trailing 1".to_string(),
+            "; Transaction trailing 2".to_string(),
+        ];
+
+        let formatted = format_transaction(&txn, &config);
+
+        // Verify all comments are present in correct order
+        let lines: Vec<&str> = formatted.lines().collect();
+
+        // Line 0: transaction header
+        assert!(lines[0].contains("2024-01-15 * \"Test transaction\""));
+
+        // Lines 1-2: pre-comments for first posting
+        assert_eq!(lines[1].trim(), "; Pre-comment 1");
+        assert_eq!(lines[2].trim(), "; Pre-comment 2");
+
+        // Line 3: first posting with trailing comment
+        assert!(lines[3].contains("Expenses:Food"));
+        assert!(lines[3].contains("; trailing on posting"));
+
+        // Line 4: pre-comment for second posting
+        assert_eq!(lines[4].trim(), "; Comment before second posting");
+
+        // Line 5: second posting
+        assert!(lines[5].contains("Assets:Bank"));
+
+        // Lines 6-7: transaction trailing comments
+        assert_eq!(lines[6].trim(), "; Transaction trailing 1");
+        assert_eq!(lines[7].trim(), "; Transaction trailing 2");
+    }
+
+    // Issue #364: Verify trailing comments on posting line are formatted correctly
+    #[test]
+    fn test_issue_364_trailing_comment_on_posting_line() {
+        let config = FormatConfig::default();
+
+        let mut posting = Posting::new("Expenses:Food", Amount::new(dec!(50), "USD"));
+        posting.trailing_comments = vec!["; This goes on same line".to_string()];
+
+        let txn = Transaction::new(date(2024, 1, 15), "Test")
+            .with_flag('*')
+            .with_posting(posting)
+            .with_posting(Posting::auto("Assets:Bank"));
+
+        let formatted = format_transaction(&txn, &config);
+
+        // The trailing comment should be on the same line as the posting
+        for line in formatted.lines() {
+            if line.contains("Expenses:Food") {
+                assert!(
+                    line.contains("; This goes on same line"),
+                    "Trailing comment should be on same line as posting: {line}"
+                );
+                break;
+            }
+        }
     }
 }

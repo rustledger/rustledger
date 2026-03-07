@@ -31,12 +31,12 @@ pub fn format_transaction(txn: &Transaction, config: &FormatConfig) -> String {
 
     out.push('\n');
 
-    // Transaction-level metadata
+    // Transaction-level metadata (same indentation as postings)
     for (key, value) in &txn.meta {
         writeln!(
             out,
             "{}{}: {}",
-            &config.meta_indent,
+            &config.indent,
             key,
             format_meta_value(value)
         )
@@ -45,8 +45,28 @@ pub fn format_transaction(txn: &Transaction, config: &FormatConfig) -> String {
 
     // Postings
     for posting in &txn.postings {
-        out.push_str(&format_posting(posting, config));
-        out.push('\n');
+        // Output comments that appear before this posting
+        for comment in &posting.comments {
+            writeln!(out, "{}{}", &config.indent, comment).unwrap();
+        }
+        // Output the posting line
+        let posting_line = format_posting(posting, config);
+        // Append trailing comment on same line if present (only first one)
+        if let Some(trailing) = posting.trailing_comments.first() {
+            writeln!(out, "{posting_line} {trailing}").unwrap();
+        } else {
+            out.push_str(&posting_line);
+            out.push('\n');
+        }
+        // Output any additional trailing comments on their own lines
+        for trailing in posting.trailing_comments.iter().skip(1) {
+            writeln!(out, "{}{}", &config.indent, trailing).unwrap();
+        }
+    }
+
+    // Output transaction trailing comments (comments after all postings)
+    for comment in &txn.trailing_comments {
+        writeln!(out, "{}{}", &config.indent, comment).unwrap();
     }
 
     out

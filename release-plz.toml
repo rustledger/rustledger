@@ -1,16 +1,15 @@
 # release-plz configuration
-# https://release-plz.ieni.dev/docs/config
+# https://release-plz.dev/docs/config
 #
-# release-plz automates:
-# 1. Version bumping based on conventional commits
-# 2. Changelog generation
-# 3. Release PR creation
-# 4. Publishing to crates.io
+# Based on working configs from:
+# - https://github.com/Quantinuum/hugr
+# - https://github.com/release-plz/release-plz
 
 [workspace]
-# Use conventional commits to determine version bumps
-# feat: -> minor, fix: -> patch, BREAKING CHANGE: -> major
-semver_check = true
+# Disable cargo-semver-checks - it doesn't detect all breaking changes
+# (e.g., adding required fields to structs). Rely on commit messages instead.
+# See: https://github.com/Blockstream/greenlight uses same approach
+semver_check = false
 
 # Create changelog entries from conventional commits
 changelog_update = true
@@ -30,11 +29,10 @@ pr_labels = ["release"]
 # Don't publish to crates.io from release-plz (handled by release-build.yml)
 publish = false
 
-# Allow releasing from main
+# Disallow releasing with uncommitted changes
 allow_dirty = false
 
 [changelog]
-# Changelog header
 header = """# Changelog
 
 All notable changes to this project will be documented in this file.
@@ -44,7 +42,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 """
 
-# Commit types to include in changelog
+# Sort commits oldest first (like hugr)
+sort_commits = "oldest"
+
+# Ensure breaking change commits are never filtered out
+protect_breaking_commits = true
+
+# Commit types to include in changelog (based on hugr)
 commit_parsers = [
   { message = "^feat", group = "Features" },
   { message = "^fix", group = "Bug Fixes" },
@@ -52,11 +56,6 @@ commit_parsers = [
   { message = "^refactor", group = "Refactoring" },
   { message = "^doc", group = "Documentation" },
   { message = "^test", group = "Testing" },
-  { message = "^chore\\(deps\\)", group = "Dependencies" },
-  { message = "^chore", group = "Miscellaneous" },
-]
-
-# Exclude these from changelog
-commit_preprocessors = [
-  { pattern = "^chore: release", replace = "" },
+  { message = "^chore", group = "Miscellaneous", skip = true },
+  { message = "^ci", group = "CI", skip = true },
 ]

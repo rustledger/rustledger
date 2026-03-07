@@ -52,6 +52,7 @@ pub(super) fn data_to_transaction(
         links: data.links.iter().map(|l| l.as_str().into()).collect(),
         meta,
         postings,
+        trailing_comments: Vec::new(),
     })
 }
 
@@ -82,6 +83,8 @@ pub(super) fn data_to_posting(data: &PostingData) -> Result<Posting, ConversionE
         price,
         flag,
         meta,
+        comments: Vec::new(),
+        trailing_comments: Vec::new(),
     })
 }
 

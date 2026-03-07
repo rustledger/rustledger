@@ -692,7 +692,7 @@ jobs:
           EOF
 
       - name: Upload results artifact
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: scaling-${{ matrix.size }}
           path: bench-scaling-${{ matrix.size }}.json

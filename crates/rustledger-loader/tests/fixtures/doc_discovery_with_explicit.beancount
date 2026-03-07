@@ -1,0 +1,13 @@
+option "title" "Document Discovery De-duplication Test"
+option "documents" "documents"
+
+2024-01-01 open Assets:Bank:Checking USD
+2024-01-01 open Expenses:Food
+
+; This document directive matches one of the files that would be discovered.
+; The discovery plugin should NOT create a duplicate for this file.
+2024-01-15 document Assets:Bank:Checking "documents/Assets/Bank/Checking/2024-01-15.statement.pdf"
+
+2024-01-20 * "Grocery Store" "Weekly shopping"
+  Expenses:Food           50.00 USD
+  Assets:Bank:Checking   -50.00 USD

@@ -66,7 +66,7 @@ jobs:
       # Cache downloaded test files to avoid re-cloning repos every run
       - name: Cache compatibility test files
         id: cache-compat-files
-        uses: actions/cache@v5
+        uses: actions/cache@v5.0.3
         with:
           path: tests/compatibility/files
           # Cache key includes hash of fetch script; v3 removes beancount v2 files with removed plugins

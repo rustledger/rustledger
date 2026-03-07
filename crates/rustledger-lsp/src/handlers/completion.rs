@@ -6,6 +6,7 @@
 //! - Directives (after dates)
 //! - Payees and narrations (in transaction headers)
 
+use crate::ledger_state::LedgerState;
 use lsp_types::{
     CompletionItem, CompletionItemKind, CompletionParams, CompletionResponse, Position,
 };
@@ -59,10 +60,14 @@ pub enum CompletionContext {
 }
 
 /// Handle a completion request.
+///
+/// If `ledger_state` is provided, completions will include data from the full ledger
+/// (all included files), not just the current file.
 pub fn handle_completion(
     params: &CompletionParams,
     source: &str,
     parse_result: &ParseResult,
+    ledger_state: Option<&LedgerState>,
 ) -> Option<CompletionResponse> {
     let position = params.text_document_position.position;
     let uri = &params.text_document_position.text_document.uri;
@@ -73,12 +78,12 @@ pub fn handle_completion(
     let mut items = match context {
         CompletionContext::LineStart => complete_line_start(),
         CompletionContext::AfterDate => complete_after_date(),
-        CompletionContext::ExpectingAccount => complete_account_start(parse_result),
+        CompletionContext::ExpectingAccount => complete_account_start(parse_result, ledger_state),
         CompletionContext::AccountSegment { prefix } => {
-            complete_account_segment(&prefix, parse_result)
+            complete_account_segment(&prefix, parse_result, ledger_state)
         }
-        CompletionContext::ExpectingCurrency => complete_currency(parse_result),
-        CompletionContext::InsideString => complete_payee(parse_result),
+        CompletionContext::ExpectingCurrency => complete_currency(parse_result, ledger_state),
+        CompletionContext::InsideString => complete_payee(parse_result, ledger_state),
         CompletionContext::Unknown => return None,
     };
 
@@ -260,7 +265,10 @@ fn complete_after_date() -> Vec<CompletionItem> {
 }
 
 /// Complete account name start (account types).
-fn complete_account_start(parse_result: &ParseResult) -> Vec<CompletionItem> {
+fn complete_account_start(
+    parse_result: &ParseResult,
+    ledger_state: Option<&LedgerState>,
+) -> Vec<CompletionItem> {
     // First, offer standard account types
     let mut items: Vec<CompletionItem> = ACCOUNT_TYPES
         .iter()
@@ -272,8 +280,8 @@ fn complete_account_start(parse_result: &ParseResult) -> Vec<CompletionItem> {
         })
         .collect();
 
-    // Also offer known accounts from the file
-    let known_accounts = extract_accounts(parse_result);
+    // Collect known accounts from the current file and ledger state
+    let known_accounts = get_all_accounts(parse_result, ledger_state);
     for account in known_accounts.iter().take(20) {
         items.push(CompletionItem {
             label: account.clone(),
@@ -287,8 +295,12 @@ fn complete_account_start(parse_result: &ParseResult) -> Vec<CompletionItem> {
 }
 
 /// Complete account segment after colon.
-fn complete_account_segment(prefix: &str, parse_result: &ParseResult) -> Vec<CompletionItem> {
-    let known_accounts = extract_accounts(parse_result);
+fn complete_account_segment(
+    prefix: &str,
+    parse_result: &ParseResult,
+    ledger_state: Option<&LedgerState>,
+) -> Vec<CompletionItem> {
+    let known_accounts = get_all_accounts(parse_result, ledger_state);
 
     // Find accounts that start with this prefix
     let matching: Vec<_> = known_accounts
@@ -341,8 +353,11 @@ fn complete_account_segment(prefix: &str, parse_result: &ParseResult) -> Vec<Com
 }
 
 /// Complete currency after amount.
-fn complete_currency(parse_result: &ParseResult) -> Vec<CompletionItem> {
-    let currencies = extract_currencies(parse_result);
+fn complete_currency(
+    parse_result: &ParseResult,
+    ledger_state: Option<&LedgerState>,
+) -> Vec<CompletionItem> {
+    let currencies = get_all_currencies(parse_result, ledger_state);
 
     currencies
         .into_iter()
@@ -356,8 +371,11 @@ fn complete_currency(parse_result: &ParseResult) -> Vec<CompletionItem> {
 }
 
 /// Complete payee/narration inside string.
-fn complete_payee(parse_result: &ParseResult) -> Vec<CompletionItem> {
-    let payees = extract_payees(parse_result);
+fn complete_payee(
+    parse_result: &ParseResult,
+    ledger_state: Option<&LedgerState>,
+) -> Vec<CompletionItem> {
+    let payees = get_all_payees(parse_result, ledger_state);
 
     payees
         .into_iter()
@@ -369,6 +387,51 @@ fn complete_payee(parse_result: &ParseResult) -> Vec<CompletionItem> {
             ..Default::default()
         })
         .collect()
+}
+
+/// Get all accounts from the current file and ledger state.
+fn get_all_accounts(parse_result: &ParseResult, ledger_state: Option<&LedgerState>) -> Vec<String> {
+    let mut accounts = extract_accounts(parse_result);
+
+    // Merge accounts from ledger state if available
+    if let Some(state) = ledger_state {
+        accounts.extend(state.accounts().iter().cloned());
+    }
+
+    accounts.sort();
+    accounts.dedup();
+    accounts
+}
+
+/// Get all currencies from the current file and ledger state.
+fn get_all_currencies(
+    parse_result: &ParseResult,
+    ledger_state: Option<&LedgerState>,
+) -> Vec<String> {
+    let mut currencies = extract_currencies(parse_result);
+
+    // Merge currencies from ledger state if available
+    if let Some(state) = ledger_state {
+        currencies.extend(state.currencies().iter().cloned());
+    }
+
+    currencies.sort();
+    currencies.dedup();
+    currencies
+}
+
+/// Get all payees from the current file and ledger state.
+fn get_all_payees(parse_result: &ParseResult, ledger_state: Option<&LedgerState>) -> Vec<String> {
+    let mut payees = extract_payees(parse_result);
+
+    // Merge payees from ledger state if available
+    if let Some(state) = ledger_state {
+        payees.extend(state.payees().iter().cloned());
+    }
+
+    payees.sort();
+    payees.dedup();
+    payees
 }
 
 /// Extract all account names from parse result.

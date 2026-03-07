@@ -900,12 +900,14 @@ enum TxnHeaderItem {
     Pipe,
 }
 
-/// Posting, metadata, or tag/link continuation.
+/// Posting, metadata, tag/link continuation, or inline comment.
 #[derive(Debug, Clone)]
 enum PostingOrMeta {
-    Posting(Posting),
+    Posting(Box<Posting>),
     Meta(String, MetaValue),
     TagsLinks(Vec<String>, Vec<String>),
+    /// Inline comment that appears before a posting
+    Comment(String),
 }
 
 /// Parse posting-level metadata (4+ spaces indent).
@@ -941,30 +943,36 @@ fn tok_posting_with_meta<'src>()
         .then(amount)
         .then(cost)
         .then(price)
-        .then_ignore(tok_comment().or_not())
+        .then(tok_standalone_comment().or_not())
         .then(tok_posting_meta().repeated().collect::<Vec<_>>())
-        .map(|(((((flag, account), amount), cost), price), metadata)| {
-            // Create posting based on whether we have an amount
-            let mut posting = if let Some(a) = amount {
-                Posting::with_incomplete(account, a)
-            } else {
-                Posting::auto(account)
-            };
-            if let Some(f) = flag {
-                posting = posting.with_flag(f);
-            }
-            if let Some(c) = cost {
-                posting = posting.with_cost(c);
-            }
-            if let Some(p) = price {
-                posting = posting.with_price(p);
-            }
-            // Add posting-level metadata
-            for (key, value) in metadata {
-                posting.meta.insert(key, value);
-            }
-            posting
-        })
+        .map(
+            |((((((flag, account), amount), cost), price), trailing_comment), metadata)| {
+                // Create posting based on whether we have an amount
+                let mut posting = if let Some(a) = amount {
+                    Posting::with_incomplete(account, a)
+                } else {
+                    Posting::auto(account)
+                };
+                if let Some(f) = flag {
+                    posting = posting.with_flag(f);
+                }
+                if let Some(c) = cost {
+                    posting = posting.with_cost(c);
+                }
+                if let Some(p) = price {
+                    posting = posting.with_price(p);
+                }
+                // Add posting-level metadata
+                for (key, value) in metadata {
+                    posting.meta.insert(key, value);
+                }
+                // Add trailing comment if present
+                if let Some(c) = trailing_comment {
+                    posting.trailing_comments.push(c);
+                }
+                posting
+            },
+        )
 }
 
 /// Parse a metadata line inside a directive, returning None for comment-only lines.
@@ -1038,15 +1046,16 @@ fn tok_posting_or_meta<'src>()
     let posting_line = tok_newline()
         .ignore_then(tok_indent())
         .ignore_then(tok_posting_with_meta())
-        .map(|p| Some(PostingOrMeta::Posting(p)));
+        .map(|p| Some(PostingOrMeta::Posting(Box::new(p))));
 
     // Comment with indentation (within posting block)
     // Note: Python beancount requires comments within transactions to be indented.
     // Unindented comments terminate the transaction.
+    // Capture the comment text so it can be attached to the next posting.
     let comment_line = tok_newline()
         .ignore_then(tok_indent())
-        .ignore_then(tok_comment())
-        .to(None);
+        .ignore_then(tok_standalone_comment())
+        .map(|c| Some(PostingOrMeta::Comment(c)));
 
     choice((meta_entry, tags_links_line, posting_line, comment_line))
 }
@@ -1124,10 +1133,16 @@ fn tok_transaction_directive<'src>()
                 for l in links {
                     txn = txn.with_link(&l);
                 }
+                // Track pending comments to attach to next posting
+                let mut pending_comments: Vec<String> = Vec::new();
                 for item in items.into_iter().flatten() {
                     match item {
-                        PostingOrMeta::Posting(p) => {
-                            txn = txn.with_posting(p);
+                        PostingOrMeta::Posting(mut p) => {
+                            // Attach any pending comments to this posting
+                            if !pending_comments.is_empty() {
+                                p.comments = std::mem::take(&mut pending_comments);
+                            }
+                            txn = txn.with_posting(*p);
                         }
                         PostingOrMeta::Meta(k, v) => {
                             txn.meta.insert(k, v);
@@ -1140,8 +1155,13 @@ fn tok_transaction_directive<'src>()
                                 txn = txn.with_link(&link);
                             }
                         }
+                        PostingOrMeta::Comment(c) => {
+                            pending_comments.push(c);
+                        }
                     }
                 }
+                // Any remaining pending comments become transaction trailing comments
+                txn.trailing_comments = pending_comments;
                 (date, Directive::Transaction(txn), has_pipe)
             },
         )

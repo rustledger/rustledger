@@ -93,7 +93,7 @@ pub(super) fn report_balsheet<W: Write>(
     let liability_totals = sum_by_currency(&liabilities);
     let mut net_worth: BTreeMap<InternedStr, Decimal> = asset_totals;
     for (currency, amount) in &liability_totals {
-        *net_worth.entry(currency.clone()).or_default() -= amount;
+        *net_worth.entry(currency.clone()).or_default() += amount;
     }
 
     match format {

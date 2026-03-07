@@ -4,7 +4,9 @@ use crate::handlers::execute_command::COMMANDS;
 use crate::handlers::on_type_formatting::{FIRST_TRIGGER_CHARACTER, MORE_TRIGGER_CHARACTERS};
 use crate::handlers::semantic_tokens::get_capabilities as get_semantic_tokens_capabilities;
 use crate::handlers::signature_help::TRIGGER_CHARACTERS as SIGNATURE_TRIGGER_CHARACTERS;
+use crate::ledger_state::{LspConfig, discover_journal_file};
 use crate::main_loop::run_main_loop;
+use crate::uri_to_path;
 use lsp_server::Connection;
 use lsp_types::InitializeParams;
 
@@ -14,14 +16,24 @@ pub struct Server {
     connection: Connection,
     /// Initialize parameters from client.
     init_params: InitializeParams,
+    /// LSP configuration parsed from init options.
+    config: LspConfig,
 }
 
 impl Server {
     /// Create a new LSP server from a connection.
     pub fn new(connection: Connection, init_params: InitializeParams) -> Self {
+        // Parse configuration from initialization options
+        let config = LspConfig::from_init_options(init_params.initialization_options.as_ref());
+
+        if let Some(ref journal) = config.journal_file {
+            tracing::info!("Journal file configured: {}", journal.display());
+        }
+
         Self {
             connection,
             init_params,
+            config,
         }
     }
 
@@ -29,17 +41,97 @@ impl Server {
     pub fn run(self) {
         tracing::info!("Starting Beancount Language Server v{}", crate::VERSION);
 
+        // Resolve journal file path relative to workspace root if needed
+        let journal_file = self.resolve_journal_path();
+
+        if let Some(ref path) = journal_file {
+            tracing::info!("Using journal file: {}", path.display());
+        }
+
         if let Some(folders) = &self.init_params.workspace_folders
             && let Some(folder) = folders.first()
         {
             tracing::info!("Workspace root: {}", folder.uri.as_str());
         }
 
-        // Run the main event loop
+        // Run the main event loop with the journal file configuration
         let (sender, receiver) = (self.connection.sender, self.connection.receiver);
-        run_main_loop(receiver, sender);
+        run_main_loop(receiver, sender, journal_file);
 
         tracing::info!("Server shutdown complete");
+    }
+
+    /// Resolve the journal file path, making it absolute if necessary.
+    /// If no explicit journal file is configured, attempts auto-discovery.
+    fn resolve_journal_path(&self) -> Option<std::path::PathBuf> {
+        // Get workspace root path for resolution and discovery
+        let workspace_root = self.get_workspace_root();
+
+        // If explicit config provided, resolve it
+        if let Some(journal) = &self.config.journal_file {
+            return self.resolve_explicit_journal(journal, workspace_root.as_deref());
+        }
+
+        // No explicit config - try auto-discovery in workspace root
+        if let Some(root) = workspace_root
+            && let Some(discovered) = discover_journal_file(&root)
+        {
+            return Some(discovered);
+        }
+
+        // Also try current directory as fallback for discovery
+        if let Ok(cwd) = std::env::current_dir()
+            && let Some(discovered) = discover_journal_file(&cwd)
+        {
+            return Some(discovered);
+        }
+
+        tracing::debug!("No journal file configured or discovered");
+        None
+    }
+
+    /// Get the workspace root path from init params.
+    fn get_workspace_root(&self) -> Option<std::path::PathBuf> {
+        self.init_params
+            .workspace_folders
+            .as_ref()
+            .and_then(|folders| folders.first())
+            .and_then(|folder| uri_to_path(&folder.uri))
+    }
+
+    /// Resolve an explicitly configured journal path.
+    fn resolve_explicit_journal(
+        &self,
+        journal: &std::path::Path,
+        workspace_root: Option<&std::path::Path>,
+    ) -> Option<std::path::PathBuf> {
+        // If already absolute, use as-is
+        if journal.is_absolute() {
+            return Some(journal.to_path_buf());
+        }
+
+        // Try to resolve relative to workspace root
+        if let Some(root) = workspace_root {
+            let resolved = root.join(journal);
+            if resolved.exists() {
+                return Some(resolved);
+            }
+        }
+
+        // Fall back to current directory
+        let resolved = std::env::current_dir()
+            .ok()
+            .map(|cwd| cwd.join(journal))
+            .filter(|p| p.exists());
+
+        if resolved.is_none() {
+            tracing::warn!(
+                "Journal file '{}' not found relative to workspace or current directory",
+                journal.display()
+            );
+        }
+
+        resolved
     }
 }
 

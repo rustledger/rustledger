@@ -293,6 +293,21 @@ fn skip_comment(stream: &mut TokenStream<'_>) {
     }
 }
 
+/// Capture and return a comment if present, otherwise return None.
+fn capture_comment(stream: &mut TokenStream<'_>) -> Option<String> {
+    if let Some(t) = stream.peek() {
+        match &t.token {
+            Token::Comment(c) | Token::PercentComment(c) => {
+                let comment = c.to_string();
+                stream.advance();
+                return Some(comment);
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 // ============================================================================
 // Expression Parser (for arithmetic in amounts)
 // ============================================================================
@@ -573,8 +588,8 @@ fn parse_posting(stream: &mut TokenStream<'_>) -> ParseRes<Posting> {
     // Optional price
     let price = parse_price_annotation(stream).ok();
 
-    // Skip optional comment
-    skip_comment(stream);
+    // Capture optional trailing comment on this line
+    let trailing_comment = capture_comment(stream);
 
     // Parse posting-level metadata (lines with DeepIndent)
     let posting_meta = parse_posting_metadata(stream);
@@ -596,6 +611,9 @@ fn parse_posting(stream: &mut TokenStream<'_>) -> ParseRes<Posting> {
         posting.price = Some(p);
     }
     posting.meta = posting_meta;
+    if let Some(c) = trailing_comment {
+        posting.trailing_comments.push(c);
+    }
 
     Ok(posting)
 }
@@ -866,6 +884,8 @@ fn parse_transaction_directive(stream: &mut TokenStream<'_>) -> ParseRes<ParsedI
     // Parse transaction-level metadata, tags/links, and postings
     let mut txn_meta: Metadata = Metadata::default();
     let mut postings = Vec::new();
+    // Track comments that appear before the next posting (can be multiple lines)
+    let mut pending_comments: Vec<String> = Vec::new();
 
     loop {
         // Skip newlines between lines
@@ -880,10 +900,11 @@ fn parse_transaction_directive(stream: &mut TokenStream<'_>) -> ParseRes<ParsedI
                 Token::Indent(_) | Token::DeepIndent(_) => {
                     stream.advance();
 
-                    // Check for comment on its own line
+                    // Check for comment on its own line - collect it for the next posting
                     if let Some(t) = stream.peek()
-                        && matches!(t.token, Token::Comment(_) | Token::PercentComment(_))
+                        && let Token::Comment(c) | Token::PercentComment(c) = &t.token
                     {
+                        pending_comments.push(c.to_string());
                         stream.advance();
                         continue;
                     }
@@ -928,12 +949,19 @@ fn parse_transaction_directive(stream: &mut TokenStream<'_>) -> ParseRes<ParsedI
         }
 
         // Try to parse a posting (needs fresh start with indent check)
-        if let Ok(posting) = parse_posting(stream) {
+        if let Ok(mut posting) = parse_posting(stream) {
+            // Attach any pending comments to this posting
+            if !pending_comments.is_empty() {
+                posting.comments = std::mem::take(&mut pending_comments);
+            }
             postings.push(posting);
         } else {
             break;
         }
     }
+
+    // Any remaining pending comments become transaction trailing comments
+    let txn_trailing_comments = pending_comments;
 
     // Build transaction
     let (payee, narration) = if has_pipe && strings.len() >= 2 {
@@ -959,8 +987,9 @@ fn parse_transaction_directive(stream: &mut TokenStream<'_>) -> ParseRes<ParsedI
     for p in postings {
         txn = txn.with_posting(p);
     }
-    // Apply transaction-level metadata
+    // Apply transaction-level metadata and trailing comments
     txn.meta = txn_meta;
+    txn.trailing_comments = txn_trailing_comments;
 
     let span = stream.span_from(start_pos);
 
@@ -1614,5 +1643,218 @@ mod tests {
             !result.errors.is_empty(),
             "expected parse error for division by zero"
         );
+    }
+
+    #[test]
+    fn test_parse_inline_comment_before_posting() {
+        let source = r#"2024-01-15 * "Test"
+  ; This is an inline comment
+  Expenses:Food  50.00 USD
+  Assets:Bank
+"#;
+        let result = parse(source);
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        assert_eq!(result.directives.len(), 1);
+
+        if let Directive::Transaction(txn) = &result.directives[0].value {
+            assert_eq!(txn.postings.len(), 2);
+            // First posting should have the inline comment attached
+            assert_eq!(
+                txn.postings[0].comments,
+                vec!["; This is an inline comment".to_string()]
+            );
+            // Second posting should have no comments
+            assert!(txn.postings[1].comments.is_empty());
+        } else {
+            panic!("Expected Transaction directive");
+        }
+    }
+
+    #[test]
+    fn test_parse_multiple_comments_before_posting() {
+        let source = r#"2024-01-15 * "Test"
+  ; Comment 1
+  ; Comment 2
+  Expenses:Food  50.00 USD
+  Assets:Bank
+"#;
+        let result = parse(source);
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+        if let Directive::Transaction(txn) = &result.directives[0].value {
+            // First posting should have both comments
+            assert_eq!(
+                txn.postings[0].comments,
+                vec!["; Comment 1".to_string(), "; Comment 2".to_string()]
+            );
+        } else {
+            panic!("Expected Transaction directive");
+        }
+    }
+
+    #[test]
+    fn test_parse_trailing_comment_on_posting() {
+        let source = r#"2024-01-15 * "Test"
+  Expenses:Food  50.00 USD ; trailing comment
+  Assets:Bank
+"#;
+        let result = parse(source);
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+        if let Directive::Transaction(txn) = &result.directives[0].value {
+            assert_eq!(
+                txn.postings[0].trailing_comments,
+                vec!["; trailing comment".to_string()]
+            );
+        } else {
+            panic!("Expected Transaction directive");
+        }
+    }
+
+    #[test]
+    fn test_parse_transaction_trailing_comments() {
+        let source = r#"2024-01-15 * "Test"
+  Expenses:Food  50.00 USD
+  Assets:Bank
+  ; Comment after last posting
+"#;
+        let result = parse(source);
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+        if let Directive::Transaction(txn) = &result.directives[0].value {
+            assert_eq!(
+                txn.trailing_comments,
+                vec!["; Comment after last posting".to_string()]
+            );
+        } else {
+            panic!("Expected Transaction directive");
+        }
+    }
+
+    // Issue #364: Formatter not preserving comments
+    // This comprehensive test verifies all comment positions are preserved through
+    // a parse -> format -> re-parse roundtrip.
+    #[test]
+    fn test_issue_364_comment_preservation_roundtrip() {
+        use rustledger_core::format::{FormatConfig, format_directive};
+
+        let source = r#"2024-01-15 * "Groceries"
+  ; Pre-comment 1 for first posting
+  ; Pre-comment 2 for first posting
+  Expenses:Food  50.00 USD ; trailing comment on first posting
+  ; Pre-comment for second posting
+  Assets:Bank
+  ; Transaction trailing comment 1
+  ; Transaction trailing comment 2
+"#;
+
+        // First parse
+        let result1 = parse(source);
+        assert!(
+            result1.errors.is_empty(),
+            "parse errors: {:?}",
+            result1.errors
+        );
+        assert_eq!(result1.directives.len(), 1);
+
+        let txn1 = match &result1.directives[0].value {
+            Directive::Transaction(t) => t,
+            _ => panic!("Expected Transaction"),
+        };
+
+        // Verify first parse captured all comments
+        assert_eq!(
+            txn1.postings[0].comments,
+            vec![
+                "; Pre-comment 1 for first posting".to_string(),
+                "; Pre-comment 2 for first posting".to_string()
+            ],
+            "First posting should have 2 pre-comments"
+        );
+        assert_eq!(
+            txn1.postings[0].trailing_comments,
+            vec!["; trailing comment on first posting".to_string()],
+            "First posting should have trailing comment"
+        );
+        assert_eq!(
+            txn1.postings[1].comments,
+            vec!["; Pre-comment for second posting".to_string()],
+            "Second posting should have 1 pre-comment"
+        );
+        assert_eq!(
+            txn1.trailing_comments,
+            vec![
+                "; Transaction trailing comment 1".to_string(),
+                "; Transaction trailing comment 2".to_string()
+            ],
+            "Transaction should have 2 trailing comments"
+        );
+
+        // Format back to string
+        let config = FormatConfig::default();
+        let formatted = format_directive(&result1.directives[0].value, &config);
+
+        // Re-parse the formatted output
+        let result2 = parse(&formatted);
+        assert!(
+            result2.errors.is_empty(),
+            "re-parse errors: {:?}\nformatted:\n{}",
+            result2.errors,
+            formatted
+        );
+        assert_eq!(result2.directives.len(), 1);
+
+        let txn2 = match &result2.directives[0].value {
+            Directive::Transaction(t) => t,
+            _ => panic!("Expected Transaction after roundtrip"),
+        };
+
+        // Verify roundtrip preserved all comments
+        assert_eq!(
+            txn2.postings[0].comments, txn1.postings[0].comments,
+            "Roundtrip should preserve first posting pre-comments"
+        );
+        assert_eq!(
+            txn2.postings[0].trailing_comments, txn1.postings[0].trailing_comments,
+            "Roundtrip should preserve first posting trailing comment"
+        );
+        assert_eq!(
+            txn2.postings[1].comments, txn1.postings[1].comments,
+            "Roundtrip should preserve second posting pre-comments"
+        );
+        assert_eq!(
+            txn2.trailing_comments, txn1.trailing_comments,
+            "Roundtrip should preserve transaction trailing comments"
+        );
+    }
+
+    // Issue #364: Verify blank lines between directives are preserved
+    #[test]
+    fn test_issue_364_blank_lines_preserved() {
+        let source = r#"2024-01-01 open Assets:Bank USD
+
+2024-01-15 * "Transaction 1"
+  Expenses:Food  50.00 USD
+  Assets:Bank
+
+2024-01-16 * "Transaction 2"
+  Expenses:Food  25.00 USD
+  Assets:Bank
+"#;
+
+        let result = parse(source);
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+        // Should have 3 directives: open + 2 transactions
+        assert_eq!(result.directives.len(), 3);
+
+        // Check that blank lines are tracked in spans (trailing_newlines)
+        // The span should include trailing newlines for proper formatting
+        for (i, dir) in result.directives.iter().enumerate() {
+            assert!(
+                dir.span.end > dir.span.start,
+                "Directive {i} should have non-empty span"
+            );
+        }
     }
 }

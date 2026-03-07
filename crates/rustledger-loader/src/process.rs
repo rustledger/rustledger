@@ -208,13 +208,16 @@ pub fn process(raw: LoadResult, options: &LoadOptions) -> Result<Ledger, Process
         run_booking(&mut directives, options, &mut errors);
     }
 
-    // 3. Run plugins
+    // 3. Run plugins (including document discovery when run_plugins is enabled)
+    // Note: Document discovery only runs when run_plugins is true to respect raw mode semantics.
+    // LoadOptions::raw() sets run_plugins=false to prevent any directive mutations.
     #[cfg(feature = "plugins")]
     if options.run_plugins || !options.extra_plugins.is_empty() || options.auto_accounts {
         run_plugins(
             &mut directives,
             &raw.plugins,
             &raw.options,
+            &raw.source_map,
             options,
             &mut errors,
         )?;
@@ -271,64 +274,64 @@ fn run_plugins(
     directives: &mut Vec<Spanned<Directive>>,
     file_plugins: &[Plugin],
     file_options: &Options,
+    source_map: &SourceMap,
     options: &LoadOptions,
     errors: &mut Vec<LedgerError>,
 ) -> Result<(), ProcessError> {
     use rustledger_plugin::{
-        NativePluginRegistry, PluginInput, PluginOptions, directives_to_wrappers,
-        wrappers_to_directives,
+        DocumentDiscoveryPlugin, NativePlugin, NativePluginRegistry, PluginInput, PluginOptions,
+        directives_to_wrappers, wrappers_to_directives,
     };
 
-    let registry = NativePluginRegistry::new();
+    // Resolve document directories relative to the main file's directory
+    // Document discovery only runs when run_plugins is true (respects raw mode)
+    let base_dir = source_map
+        .files()
+        .first()
+        .and_then(|f| f.path.parent())
+        .unwrap_or_else(|| std::path::Path::new("."));
 
-    // Build list of plugins to run
-    let mut plugins_to_run: Vec<(String, Option<String>)> = Vec::new();
+    let has_document_dirs = options.run_plugins && !file_options.documents.is_empty();
+    let resolved_documents: Vec<String> = if has_document_dirs {
+        file_options
+            .documents
+            .iter()
+            .map(|d| {
+                let path = std::path::Path::new(d);
+                if path.is_absolute() {
+                    d.clone()
+                } else {
+                    base_dir.join(path).to_string_lossy().to_string()
+                }
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    // Collect raw plugin names first (we'll resolve them with the registry later)
+    let mut raw_plugins: Vec<(String, Option<String>)> = Vec::new();
 
     // Add auto_accounts first if requested
     if options.auto_accounts {
-        plugins_to_run.push(("auto_accounts".to_string(), None));
+        raw_plugins.push(("auto_accounts".to_string(), None));
     }
 
     // Add plugins from the file
     if options.run_plugins {
         for plugin in file_plugins {
-            // Check if we have a native implementation
-            let plugin_name = if registry.find(&plugin.name).is_some() {
-                plugin.name.clone()
-            } else if let Some(short_name) = plugin.name.strip_prefix("beancount.plugins.") {
-                if registry.find(short_name).is_some() {
-                    short_name.to_string()
-                } else {
-                    // No native implementation - skip for now (TODO: Python execution)
-                    continue;
-                }
-            } else if let Some(short_name) = plugin.name.strip_prefix("beancount_reds_plugins.") {
-                if registry.find(short_name).is_some() {
-                    short_name.to_string()
-                } else {
-                    continue;
-                }
-            } else if let Some(short_name) = plugin.name.strip_prefix("beancount_lazy_plugins.") {
-                if registry.find(short_name).is_some() {
-                    short_name.to_string()
-                } else {
-                    continue;
-                }
-            } else {
-                continue;
-            };
-
-            plugins_to_run.push((plugin_name, plugin.config.clone()));
+            raw_plugins.push((plugin.name.clone(), plugin.config.clone()));
         }
     }
 
     // Add extra plugins from options
     for (i, plugin_name) in options.extra_plugins.iter().enumerate() {
         let config = options.extra_plugin_configs.get(i).cloned().flatten();
-        plugins_to_run.push((plugin_name.clone(), config));
+        raw_plugins.push((plugin_name.clone(), config));
     }
 
-    if plugins_to_run.is_empty() {
+    // Check if we have any work to do - early return before creating registry
+    if raw_plugins.is_empty() && !has_document_dirs {
         return Ok(());
     }
 
@@ -341,31 +344,76 @@ fn run_plugins(
         title: file_options.title.clone(),
     };
 
-    // Run each plugin
-    for (plugin_name, plugin_config) in &plugins_to_run {
-        if let Some(plugin) = registry.find(plugin_name) {
-            let input = PluginInput {
-                directives: wrappers.clone(),
-                options: plugin_options.clone(),
-                config: plugin_config.clone(),
+    // Run document discovery plugin if documents directories are configured
+    if has_document_dirs {
+        let doc_plugin = DocumentDiscoveryPlugin::new(resolved_documents, base_dir.to_path_buf());
+        let input = PluginInput {
+            directives: wrappers.clone(),
+            options: plugin_options.clone(),
+            config: None,
+        };
+        let output = doc_plugin.process(input);
+
+        // Collect plugin errors
+        for err in output.errors {
+            let ledger_err = match err.severity {
+                rustledger_plugin::PluginErrorSeverity::Error => {
+                    LedgerError::error("PLUGIN", err.message)
+                }
+                rustledger_plugin::PluginErrorSeverity::Warning => {
+                    LedgerError::warning("PLUGIN", err.message)
+                }
+            };
+            errors.push(ledger_err);
+        }
+
+        wrappers = output.directives;
+    }
+
+    // Run each plugin (only create registry if we have plugins to run)
+    if !raw_plugins.is_empty() {
+        let registry = NativePluginRegistry::new();
+
+        for (raw_name, plugin_config) in &raw_plugins {
+            // Resolve the plugin name - try direct match first, then prefixed variants
+            let resolved_name = if registry.find(raw_name).is_some() {
+                Some(raw_name.as_str())
+            } else if let Some(short_name) = raw_name.strip_prefix("beancount.plugins.") {
+                registry.find(short_name).is_some().then_some(short_name)
+            } else if let Some(short_name) = raw_name.strip_prefix("beancount_reds_plugins.") {
+                registry.find(short_name).is_some().then_some(short_name)
+            } else if let Some(short_name) = raw_name.strip_prefix("beancount_lazy_plugins.") {
+                registry.find(short_name).is_some().then_some(short_name)
+            } else {
+                None
             };
 
-            let output = plugin.process(input);
-
-            // Collect plugin errors
-            for err in output.errors {
-                let ledger_err = match err.severity {
-                    rustledger_plugin::PluginErrorSeverity::Error => {
-                        LedgerError::error("PLUGIN", err.message)
-                    }
-                    rustledger_plugin::PluginErrorSeverity::Warning => {
-                        LedgerError::warning("PLUGIN", err.message)
-                    }
+            if let Some(name) = resolved_name
+                && let Some(plugin) = registry.find(name)
+            {
+                let input = PluginInput {
+                    directives: wrappers.clone(),
+                    options: plugin_options.clone(),
+                    config: plugin_config.clone(),
                 };
-                errors.push(ledger_err);
-            }
 
-            wrappers = output.directives;
+                let output = plugin.process(input);
+
+                // Collect plugin errors
+                for err in output.errors {
+                    let ledger_err = match err.severity {
+                        rustledger_plugin::PluginErrorSeverity::Error => {
+                            LedgerError::error("PLUGIN", err.message)
+                        }
+                        rustledger_plugin::PluginErrorSeverity::Warning => {
+                            LedgerError::warning("PLUGIN", err.message)
+                        }
+                    };
+                    errors.push(ledger_err);
+                }
+
+                wrappers = output.directives;
+            }
         }
     }
 

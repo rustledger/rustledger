@@ -242,23 +242,68 @@ pub struct Config {
 }
 ```
 
-### Forgot to Mark a Breaking Change?
+### Manual Version Bumping with `release-plz set-version`
 
-If a breaking change was merged without the `!` marker, and release-plz proposed a minor version instead of major:
+release-plz may not always detect breaking changes from commit messages. This happens because:
+
+1. **Package comparison takes precedence**: release-plz compares the actual package contents between versions. If the package "looks the same" to cargo-semver-checks, it may not bump the version even with a `feat!:` commit.
+
+2. **cargo-semver-checks has limitations**: It doesn't catch all breaking changes (e.g., adding required fields to structs, behavioral changes).
+
+When the automatic release PR proposes the wrong version, use `release-plz set-version`:
 
 ```bash
-# 1. Create a branch with an empty commit using feat!:
+# Install release-plz locally
+cargo install release-plz
+
+# Bump all workspace packages to a specific version
+release-plz set-version \
+  rustledger-core@0.10.0 \
+  rustledger-parser@0.10.0 \
+  rustledger-booking@0.10.0 \
+  rustledger-plugin@0.10.0 \
+  rustledger-validate@0.10.0 \
+  rustledger-loader@0.10.0 \
+  rustledger-query@0.10.0 \
+  rustledger-importer@0.10.0 \
+  rustledger@0.10.0 \
+  rustledger-wasm@0.10.0 \
+  rustledger-ffi-wasi@0.10.0 \
+  rustledger-lsp@0.10.0
+
+# This updates both Cargo.toml and CHANGELOG.md files
+# Then commit and create a PR
+git add -A
+git commit -m "chore: release v0.10.0
+
+BREAKING CHANGE: <describe the breaking change>"
+git push -u origin chore/bump-v0.10.0
+gh pr create --title "chore: release v0.10.0"
+```
+
+### When to Use Manual Version Bumping
+
+Use `release-plz set-version` when:
+
+- The automatic release PR proposes a patch/minor but you made a breaking change
+- You added required fields to public structs (cargo-semver-checks misses this)
+- You made behavioral changes that break existing code
+- The `feat!:` or `BREAKING CHANGE:` marker wasn't detected
+
+### Forgot to Mark a Breaking Change?
+
+If a breaking change was merged without the `!` marker, the simplest fix is to use `release-plz set-version` as shown above.
+
+Alternatively, you can try adding an empty commit (though this doesn't always work):
+
+```bash
 git checkout main && git pull
 git checkout -b fix/mark-breaking-change
 git commit --allow-empty -m "feat(crate-name)!: description of breaking change
 
 BREAKING CHANGE: Describe what breaks and how to migrate."
-
-# 2. Create and merge a PR
 git push -u origin fix/mark-breaking-change
 gh pr create --title "feat(crate-name)!: mark as breaking change"
-
-# 3. After merge, release-plz will update the release PR with correct version
 ```
 
-**Important:** Use `feat!:` not `chore!:` - only `feat` and `fix` trigger releases.
+**Note:** Empty commits may not trigger version bumps because release-plz compares package contents. Use `set-version` for guaranteed results.

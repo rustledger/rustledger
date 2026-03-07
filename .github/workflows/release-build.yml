@@ -284,7 +284,7 @@ jobs:
           cd ../../..
           (Get-FileHash -Algorithm SHA256 $ARCHIVE).Hash.ToLower() + "  " + $ARCHIVE | Out-File -Encoding utf8 "${ARCHIVE}.sha256"
       - name: Upload artifacts
-        uses: actions/upload-artifact@47309c993abb98030a35d55ef7ff34b7fa1074b5 # v6
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v6
         with:
           name: rustledger-${{ matrix.target }}
           path: |
@@ -317,7 +317,7 @@ jobs:
           sed -i "s/\"version\": \".*\"/\"version\": \"${VERSION}\"/" package.json
           sed -i 's/"name": "rustledger-wasm"/"name": "@rustledger\/wasm"/' package.json
       - name: Upload WASM artifact
-        uses: actions/upload-artifact@47309c993abb98030a35d55ef7ff34b7fa1074b5 # v6
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v6
         with:
           name: wasm-package
           path: crates/rustledger-wasm/pkg/
@@ -342,7 +342,7 @@ jobs:
           cp target/wasm32-wasip1/release/rustledger-ffi-wasi.wasm "rustledger-ffi-wasi-${VERSION}.wasm"
           shasum -a 256 "rustledger-ffi-wasi-${VERSION}.wasm" > "rustledger-ffi-wasi-${VERSION}.wasm.sha256"
       - name: Upload FFI-WASI artifact
-        uses: actions/upload-artifact@47309c993abb98030a35d55ef7ff34b7fa1074b5 # v6
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v6
         with:
           name: ffi-wasi-package
           path: |
@@ -366,7 +366,7 @@ jobs:
           ref: ${{ env.RELEASE_TAG }}
           token: ${{ steps.app-token.outputs.token }}
       - name: Download all artifacts
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
         with:
           path: artifacts
           merge-multiple: true

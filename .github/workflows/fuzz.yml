@@ -72,7 +72,7 @@ jobs:
 
       - name: Restore corpus cache
         if: steps.check.outputs.should_run == 'true'
-        uses: actions/cache@v5
+        uses: actions/cache@v5.0.3
         with:
           path: crates/rustledger-parser/fuzz/corpus/${{ matrix.target }}
           key: fuzz-corpus-${{ matrix.target }}-${{ github.sha }}
@@ -119,14 +119,14 @@ jobs:
 
       - name: Upload crash artifacts
         if: failure()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: crashes-${{ matrix.target }}
           path: crates/rustledger-parser/fuzz/artifacts/${{ matrix.target }}/
 
       - name: Upload corpus
         if: steps.check.outputs.should_run == 'true' && github.event_name == 'schedule'
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: corpus-${{ matrix.target }}
           path: crates/rustledger-parser/fuzz/corpus/${{ matrix.target }}/
@@ -171,7 +171,7 @@ jobs:
 
       - name: Restore corpus cache
         if: steps.check.outputs.should_run == 'true'
-        uses: actions/cache@v5
+        uses: actions/cache@v5.0.3
         with:
           path: crates/rustledger-query/fuzz/corpus/fuzz_query_parse
           key: fuzz-corpus-query-${{ github.sha }}
@@ -218,14 +218,14 @@ jobs:
 
       - name: Upload crash artifacts
         if: failure()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: crashes-fuzz_query_parse
           path: crates/rustledger-query/fuzz/artifacts/fuzz_query_parse/
 
       - name: Upload corpus
         if: steps.check.outputs.should_run == 'true' && github.event_name == 'schedule'
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: corpus-fuzz_query_parse
           path: crates/rustledger-query/fuzz/corpus/fuzz_query_parse/

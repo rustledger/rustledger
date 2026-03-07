@@ -38,7 +38,9 @@ use crate::handlers::type_hierarchy::{
     handle_prepare_type_hierarchy, handle_subtypes, handle_supertypes,
 };
 use crate::handlers::workspace_symbols::handle_workspace_symbols;
+use crate::ledger_state::{SharedLedgerState, new_shared_ledger_state};
 use crate::snapshot::bump_revision;
+use crate::uri_to_path;
 use crate::vfs::Vfs;
 use crossbeam_channel::{Receiver, Sender};
 use lsp_types::notification::{
@@ -77,22 +79,6 @@ use rustledger_parser::{ParseResult, parse};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-
-/// Convert a URI to a file path.
-#[cfg(not(windows))]
-fn uri_to_path(uri: &Uri) -> Option<PathBuf> {
-    uri.as_str().strip_prefix("file://").map(PathBuf::from)
-}
-
-/// Convert a URI to a file path (Windows version).
-#[cfg(windows)]
-fn uri_to_path(uri: &Uri) -> Option<PathBuf> {
-    uri.as_str()
-        .strip_prefix("file://")
-        // Handle Windows paths like file:///C:/...
-        .map(|p| p.strip_prefix('/').unwrap_or(p))
-        .map(PathBuf::from)
-}
 
 /// Events processed by the main loop.
 #[derive(Debug)]
@@ -135,6 +121,10 @@ pub struct MainLoopState {
     pub diagnostics: HashMap<Uri, Vec<lsp_types::Diagnostic>>,
     /// Whether shutdown was requested.
     pub shutdown_requested: bool,
+    /// Full ledger state (loaded from journal file if configured).
+    pub ledger_state: SharedLedgerState,
+    /// Path to the journal file (if configured).
+    pub journal_file: Option<PathBuf>,
 }
 
 /// Default empty parse result for missing documents.
@@ -144,12 +134,34 @@ fn empty_parse_result() -> Arc<ParseResult> {
 
 impl MainLoopState {
     /// Create a new main loop state.
-    pub fn new(sender: Sender<lsp_server::Message>) -> Self {
+    pub fn new(sender: Sender<lsp_server::Message>, journal_file: Option<PathBuf>) -> Self {
+        let ledger_state = new_shared_ledger_state();
+
+        // Load journal file if configured
+        if let Some(ref path) = journal_file {
+            let mut state = ledger_state.write();
+            if let Err(e) = state.load(path) {
+                tracing::error!("Failed to load journal file: {e}");
+            }
+        }
+
         Self {
             vfs: Arc::new(RwLock::new(Vfs::new())),
             sender,
             diagnostics: HashMap::new(),
             shutdown_requested: false,
+            ledger_state,
+            journal_file,
+        }
+    }
+
+    /// Reload the journal file (e.g., after a file change).
+    pub fn reload_journal(&mut self) {
+        if let Some(ref path) = self.journal_file {
+            let mut state = self.ledger_state.write();
+            if let Err(e) = state.load(path) {
+                tracing::error!("Failed to reload journal file: {e}");
+            }
         }
     }
 
@@ -295,7 +307,15 @@ impl MainLoopState {
         let uri = &params.text_document_position.text_document.uri;
         let (text, parse_result) = self.get_document_data(uri);
 
-        let response = handle_completion(&params, &text, &parse_result);
+        // Get ledger state for multi-file completions
+        let ledger_guard = self.ledger_state.read();
+        let ledger_state = if ledger_guard.ledger().is_some() {
+            Some(&*ledger_guard)
+        } else {
+            None
+        };
+
+        let response = handle_completion(&params, &text, &parse_result, ledger_state);
 
         serde_json::to_value(response).map_err(|e| e.to_string())
     }
@@ -1078,15 +1098,36 @@ impl MainLoopState {
     fn on_did_change_watched_files(&mut self, params: lsp_types::DidChangeWatchedFilesParams) {
         tracing::info!("Watched files changed: {} files", params.changes.len());
 
+        let mut should_reload_journal = false;
+        let mut should_revalidate = false;
+
         for change in params.changes {
             tracing::debug!("File {:?}: {:?}", change.uri.as_str(), change.typ);
 
-            // If a .beancount file changed externally, re-validate open documents
-            // that might include this file
-            if change.uri.as_str().ends_with(".beancount") {
-                self.revalidate_open_documents();
-                break; // Only need to revalidate once
+            // Check if the changed file is part of our journal
+            if let Some(path) = uri_to_path(&change.uri) {
+                let ledger_guard = self.ledger_state.read();
+                if ledger_guard.contains_file(&path) {
+                    should_reload_journal = true;
+                }
             }
+
+            // If a .beancount or .bean file changed externally, mark for revalidation
+            if change.uri.as_str().ends_with(".beancount") || change.uri.as_str().ends_with(".bean")
+            {
+                should_revalidate = true;
+            }
+        }
+
+        // Reload the journal if any of its files changed
+        if should_reload_journal {
+            tracing::info!("Reloading journal due to external file changes");
+            self.reload_journal();
+        }
+
+        // Re-validate open documents once after processing all changes
+        if should_revalidate {
+            self.revalidate_open_documents();
         }
     }
 
@@ -1193,8 +1234,17 @@ impl MainLoopState {
 }
 
 /// Run the main event loop.
-pub fn run_main_loop(receiver: Receiver<lsp_server::Message>, sender: Sender<lsp_server::Message>) {
-    let mut state = MainLoopState::new(sender);
+///
+/// # Arguments
+/// * `receiver` - Channel to receive LSP messages from the client
+/// * `sender` - Channel to send LSP messages to the client
+/// * `journal_file` - Optional path to the root journal file for multi-file support
+pub fn run_main_loop(
+    receiver: Receiver<lsp_server::Message>,
+    sender: Sender<lsp_server::Message>,
+    journal_file: Option<PathBuf>,
+) {
+    let mut state = MainLoopState::new(sender, journal_file);
 
     tracing::info!("Main loop started");
 

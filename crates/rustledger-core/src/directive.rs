@@ -103,6 +103,12 @@ pub struct Posting {
     pub flag: Option<char>,
     /// Posting metadata
     pub meta: Metadata,
+    /// Comments that appear before this posting (one per line)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub comments: Vec<String>,
+    /// Trailing comment(s) on the same line as the posting
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trailing_comments: Vec<String>,
 }
 
 impl Posting {
@@ -116,6 +122,8 @@ impl Posting {
             price: None,
             flag: None,
             meta: Metadata::default(),
+            comments: Vec::new(),
+            trailing_comments: Vec::new(),
         }
     }
 
@@ -129,6 +137,8 @@ impl Posting {
             price: None,
             flag: None,
             meta: Metadata::default(),
+            comments: Vec::new(),
+            trailing_comments: Vec::new(),
         }
     }
 
@@ -142,6 +152,8 @@ impl Posting {
             price: None,
             flag: None,
             meta: Metadata::default(),
+            comments: Vec::new(),
+            trailing_comments: Vec::new(),
         }
     }
 
@@ -194,6 +206,10 @@ impl fmt::Display for Posting {
         }
         if let Some(price) = &self.price {
             write!(f, " {price}")?;
+        }
+        // Posting-level metadata
+        for (key, value) in &self.meta {
+            write!(f, "\n    {key}: {value}")?;
         }
         Ok(())
     }
@@ -462,6 +478,9 @@ pub struct Transaction {
     pub meta: Metadata,
     /// Postings (account entries)
     pub postings: Vec<Posting>,
+    /// Comments that appear after all postings
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trailing_comments: Vec<String>,
 }
 
 impl Transaction {
@@ -477,6 +496,7 @@ impl Transaction {
             links: Vec::new(),
             meta: Metadata::default(),
             postings: Vec::new(),
+            trailing_comments: Vec::new(),
         }
     }
 
@@ -610,6 +630,10 @@ impl fmt::Display for Transaction {
         }
         for link in &self.links {
             write!(f, " ^{link}")?;
+        }
+        // Transaction-level metadata
+        for (key, value) in &self.meta {
+            write!(f, "\n  {key}: {value}")?;
         }
         for posting in &self.postings {
             write!(f, "\n{posting}")?;
@@ -1230,6 +1254,25 @@ impl fmt::Display for Custom {
     }
 }
 
+impl fmt::Display for Directive {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Transaction(t) => write!(f, "{t}"),
+            Self::Balance(b) => write!(f, "{b}"),
+            Self::Open(o) => write!(f, "{o}"),
+            Self::Close(c) => write!(f, "{c}"),
+            Self::Commodity(c) => write!(f, "{c}"),
+            Self::Pad(p) => write!(f, "{p}"),
+            Self::Event(e) => write!(f, "{e}"),
+            Self::Query(q) => write!(f, "{q}"),
+            Self::Note(n) => write!(f, "{n}"),
+            Self::Document(d) => write!(f, "{d}"),
+            Self::Price(p) => write!(f, "{p}"),
+            Self::Custom(c) => write!(f, "{c}"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1427,5 +1470,88 @@ mod tests {
                 "Flag '{flag}' should be invalid"
             );
         }
+    }
+
+    #[test]
+    fn test_transaction_display_includes_metadata() {
+        let mut meta = Metadata::default();
+        meta.insert(
+            "document".to_string(),
+            MetaValue::String("myfile.pdf".to_string()),
+        );
+
+        let txn = Transaction {
+            date: date(2026, 2, 23),
+            flag: '*',
+            payee: None,
+            narration: "Example".into(),
+            tags: vec![],
+            links: vec![],
+            meta,
+            postings: vec![
+                Posting::new("Assets:Bank", Amount::new(dec!(-2), "USD")),
+                Posting::auto("Expenses:Example"),
+            ],
+            trailing_comments: Vec::new(),
+        };
+
+        let output = txn.to_string();
+        assert!(
+            output.contains("document: \"myfile.pdf\""),
+            "Transaction Display should include metadata: {output}"
+        );
+        assert!(
+            output.contains("Assets:Bank"),
+            "Transaction Display should include postings: {output}"
+        );
+    }
+
+    #[test]
+    fn test_posting_display_includes_metadata() {
+        let mut meta = Metadata::default();
+        meta.insert(
+            "category".to_string(),
+            MetaValue::String("groceries".to_string()),
+        );
+
+        let posting = Posting {
+            account: "Expenses:Food".into(),
+            units: Some(IncompleteAmount::Complete(Amount::new(dec!(50), "USD"))),
+            cost: None,
+            price: None,
+            flag: None,
+            meta,
+            comments: Vec::new(),
+            trailing_comments: Vec::new(),
+        };
+
+        let output = posting.to_string();
+        assert!(
+            output.contains("category: \"groceries\""),
+            "Posting Display should include metadata: {output}"
+        );
+    }
+
+    #[test]
+    fn test_directive_display() {
+        // Test that Directive enum delegates to inner type's Display
+        let txn = Transaction::new(date(2024, 1, 15), "Test transaction");
+        let dir = Directive::Transaction(txn.clone());
+
+        // Directive::Display should produce same output as Transaction::Display
+        assert_eq!(format!("{dir}"), format!("{txn}"));
+
+        // Test other directive types
+        let open = Open::new(date(2024, 1, 1), "Assets:Bank");
+        let dir_open = Directive::Open(open.clone());
+        assert_eq!(format!("{dir_open}"), format!("{open}"));
+
+        let balance = Balance::new(
+            date(2024, 1, 1),
+            "Assets:Bank",
+            Amount::new(dec!(100), "USD"),
+        );
+        let dir_balance = Directive::Balance(balance.clone());
+        assert_eq!(format!("{dir_balance}"), format!("{balance}"));
     }
 }

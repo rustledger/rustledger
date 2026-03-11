@@ -6,6 +6,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
+## [0.10.1](https://github.com/rustledger/rustledger/compare/v0.10.0...v0.10.1) - 2026-03-11
+
+### Bug Fixes
+
+- address review comments on config feature
+
+### Documentation
+
+- update README plugin count from 20 to 30
+
+### Features
+
+- add configuration file support
+- *(config)* add aliases and command-specific defaults
+
+### Testing
+
+- add comprehensive tests for config file feature
+
 ## [0.10.0](https://github.com/rustledger/rustledger/compare/v0.9.0...v0.10.0) - 2026-02-18
 
 ### Bug Fixes

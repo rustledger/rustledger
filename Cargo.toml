@@ -124,11 +124,11 @@ parking_lot = "0.12"
 # Internal crates
 rustledger-core = { version = "0.10.0", path = "crates/rustledger-core" }
 rustledger-parser = { version = "0.10.0", path = "crates/rustledger-parser" }
-rustledger-loader = { version = "0.10.0", path = "crates/rustledger-loader" }
-rustledger-booking = { version = "0.10.0", path = "crates/rustledger-booking" }
-rustledger-validate = { version = "0.10.0", path = "crates/rustledger-validate" }
-rustledger-query = { version = "0.10.0", path = "crates/rustledger-query" }
-rustledger-plugin = { version = "0.10.0", path = "crates/rustledger-plugin", default-features = false }
+rustledger-loader = { version = "0.10.1", path = "crates/rustledger-loader" }
+rustledger-booking = { version = "0.10.1", path = "crates/rustledger-booking" }
+rustledger-validate = { version = "0.10.1", path = "crates/rustledger-validate" }
+rustledger-query = { version = "0.10.1", path = "crates/rustledger-query" }
+rustledger-plugin = { version = "0.10.1", path = "crates/rustledger-plugin", default-features = false }
 rustledger-importer = { version = "0.10.0", path = "crates/rustledger-importer" }
 
 [workspace.lints.rust]

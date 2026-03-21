@@ -4,15 +4,15 @@
     "check_match": 701,
     "full_match": 694
   },
-  "synthetic-edge-cases": {
-    "total": 7,
-    "check_match": 7,
-    "full_match": 7
-  },
   "synthetic-bean-example": {
     "total": 3,
     "check_match": 3,
     "full_match": 3
+  },
+  "synthetic-edge-cases": {
+    "total": 7,
+    "check_match": 7,
+    "full_match": 7
   },
   "synthetic-proptest": {
     "total": 50,

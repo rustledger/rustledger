@@ -20,8 +20,8 @@
     "full_match": 50
   },
   "regressions": {
-    "total": 21,
-    "check_match": 21,
-    "full_match": 20
+    "total": 22,
+    "check_match": 22,
+    "full_match": 21
   }
 }

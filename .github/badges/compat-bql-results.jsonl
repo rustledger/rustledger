@@ -4,16 +4,16 @@
 {"file": "examples_defs_rx.beancount", "query": "SELECT currency, COUNT(*) AS count GROUP BY curren", "match": true}
 {"file": "examples_defs_x.beancount", "query": "SELECT COUNT(*) AS total", "match": true}
 {"file": "examples_defs_x.beancount", "query": "SELECT currency, COUNT(*) AS count GROUP BY curren", "match": true}
-{"file": "examples_new_empty_files_rx_def.beancount", "query": "SELECT COUNT(*) AS total", "match": true}
 {"file": "examples_new_empty_files_rx_def.beancount", "query": "SELECT DISTINCT account ORDER BY account LIMIT 20", "match": true}
+{"file": "examples_new_empty_files_rx_def.beancount", "query": "SELECT COUNT(*) AS total", "match": true}
 {"file": "examples_new_empty_files_rx_def.beancount", "query": "SELECT currency, COUNT(*) AS count GROUP BY curren", "match": true}
 {"file": "tests_resources_defs_rx_opts.beancount", "query": "SELECT DISTINCT account ORDER BY account LIMIT 20", "match": true}
 {"file": "tests_resources_defs_rx_opts.beancount", "query": "SELECT COUNT(*) AS total", "match": true}
 {"file": "tests_resources_defs_rx_opts.beancount", "query": "SELECT currency, COUNT(*) AS count GROUP BY curren", "match": true}
 {"file": "tests_resources_example_ledger.beancount", "query": "SELECT DISTINCT account ORDER BY account LIMIT 20", "match": true}
 {"file": "tests_resources_example_ledger.beancount", "query": "SELECT COUNT(*) AS total", "match": true}
-{"file": "tests_resources_example_ledger.beancount", "query": "SELECT currency, COUNT(*) AS count GROUP BY curren", "match": true}
 {"file": "accounts.beancount", "query": "SELECT DISTINCT account ORDER BY account LIMIT 20", "match": true}
+{"file": "tests_resources_example_ledger.beancount", "query": "SELECT currency, COUNT(*) AS count GROUP BY curren", "match": true}
 {"file": "accounts.beancount", "query": "SELECT COUNT(*) AS total", "match": true}
 {"file": "accounts.beancount", "query": "SELECT currency, COUNT(*) AS count GROUP BY curren", "match": true}
 {"file": "chapter-2_src_accounts.beancount", "query": "SELECT DISTINCT account ORDER BY account LIMIT 20", "match": true}
@@ -25,12 +25,12 @@
 {"file": "chapter-3_src_ignored.beancount", "query": "SELECT DISTINCT account ORDER BY account LIMIT 20", "match": true}
 {"file": "chapter-3_src_ignored.beancount", "query": "SELECT COUNT(*) AS total", "match": true}
 {"file": "chapter-3_src_ignored.beancount", "query": "SELECT currency, COUNT(*) AS count GROUP BY curren", "match": true}
-{"file": "chapter-4_src_accounts.beancount", "query": "SELECT DISTINCT account ORDER BY account LIMIT 20", "match": true}
-{"file": "chapter-4_src_accounts.beancount", "query": "SELECT COUNT(*) AS total", "match": true}
-{"file": "chapter-4_src_accounts.beancount", "query": "SELECT currency, COUNT(*) AS count GROUP BY curren", "match": true}
 {"file": "chapter-4_src_commodities.beancount", "query": "SELECT DISTINCT account ORDER BY account LIMIT 20", "match": true}
 {"file": "chapter-4_src_commodities.beancount", "query": "SELECT COUNT(*) AS total", "match": true}
+{"file": "chapter-4_src_accounts.beancount", "query": "SELECT DISTINCT account ORDER BY account LIMIT 20", "match": true}
 {"file": "chapter-4_src_commodities.beancount", "query": "SELECT currency, COUNT(*) AS count GROUP BY curren", "match": true}
+{"file": "chapter-4_src_accounts.beancount", "query": "SELECT COUNT(*) AS total", "match": true}
+{"file": "chapter-4_src_accounts.beancount", "query": "SELECT currency, COUNT(*) AS count GROUP BY curren", "match": true}
 {"file": "chapter-4_src_prices.beancount", "query": "SELECT DISTINCT account ORDER BY account LIMIT 20", "match": true}
 {"file": "chapter-4_src_prices.beancount", "query": "SELECT COUNT(*) AS total", "match": true}
 {"file": "chapter-4_src_prices.beancount", "query": "SELECT currency, COUNT(*) AS count GROUP BY curren", "match": true}
@@ -39,8 +39,8 @@
 {"file": "chapter-5_src_accounts.beancount", "query": "SELECT currency, COUNT(*) AS count GROUP BY curren", "match": true}
 {"file": "chapter-5_src_prices.beancount", "query": "SELECT DISTINCT account ORDER BY account LIMIT 20", "match": true}
 {"file": "chapter-5_src_prices.beancount", "query": "SELECT COUNT(*) AS total", "match": true}
-{"file": "chapter-5_src_prices.beancount", "query": "SELECT currency, COUNT(*) AS count GROUP BY curren", "match": true}
 {"file": "chapter-6_common_src_accounts.beancount", "query": "SELECT DISTINCT account ORDER BY account LIMIT 20", "match": true}
+{"file": "chapter-5_src_prices.beancount", "query": "SELECT currency, COUNT(*) AS count GROUP BY curren", "match": true}
 {"file": "chapter-6_common_src_accounts.beancount", "query": "SELECT COUNT(*) AS total", "match": true}
 {"file": "chapter-6_common_src_accounts.beancount", "query": "SELECT currency, COUNT(*) AS count GROUP BY curren", "match": true}
 {"file": "chapter-6_common_src_commodities.beancount", "query": "SELECT DISTINCT account ORDER BY account LIMIT 20", "match": true}

@@ -1,4 +1,4 @@
-//! Example WASM Plugin for Ironcount
+//! Example WASM Plugin for rustledger
 //!
 //! This plugin demonstrates how to create a WASM plugin that:
 //! 1. Receives directives from the host
@@ -18,7 +18,7 @@
 //! # target/wasm32-unknown-unknown/release/example_plugin.wasm
 //! ```
 //!
-//! # Using with ironcount
+//! # Using with rustledger
 //!
 //! ```beancount
 //! plugin "path/to/example_plugin.wasm"
@@ -30,7 +30,7 @@ use serde::{Deserialize, Serialize};
 
 // ============================================================================
 // Plugin Interface Types
-// These must match the types in beancount-plugin/src/types.rs
+// These must match the types in rustledger-plugin/src/types.rs
 // ============================================================================
 
 /// Input to the plugin from the host.
@@ -67,30 +67,30 @@ pub struct PluginOptions {
 pub struct PluginError {
     /// Error message.
     pub message: String,
+    /// Source file path (if any).
+    pub source_file: Option<String>,
+    /// Line number in source file (if any).
+    pub line_number: Option<u32>,
     /// Severity level.
     pub severity: String,
-    /// Associated date (if any).
-    pub date: Option<String>,
-    /// Associated account (if any).
-    pub account: Option<String>,
 }
 
 impl PluginError {
     pub fn error(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
+            source_file: None,
+            line_number: None,
             severity: "error".to_string(),
-            date: None,
-            account: None,
         }
     }
 
     pub fn warning(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
+            source_file: None,
+            line_number: None,
             severity: "warning".to_string(),
-            date: None,
-            account: None,
         }
     }
 }

@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
-// Plugin types (matching beancount-plugin/src/types.rs)
+// Plugin types (matching rustledger-plugin/src/types.rs)
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PluginInput {
     pub directives: Vec<DirectiveWrapper>,
@@ -31,29 +31,19 @@ pub struct PluginOptions {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PluginError {
     pub message: String,
+    pub source_file: Option<String>,
+    pub line_number: Option<u32>,
     pub severity: String,
-    pub date: Option<String>,
-    pub account: Option<String>,
 }
 
 impl PluginError {
     pub fn warning(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
+            source_file: None,
+            line_number: None,
             severity: "warning".to_string(),
-            date: None,
-            account: None,
         }
-    }
-
-    pub fn with_date(mut self, date: &str) -> Self {
-        self.date = Some(date.to_string());
-        self
-    }
-
-    pub fn with_account(mut self, account: &str) -> Self {
-        self.account = Some(account.to_string());
-        self
     }
 }
 
@@ -160,9 +150,9 @@ fn pack_error(message: &str) -> u64 {
         directives: Vec::new(),
         errors: vec![PluginError {
             message: message.to_string(),
+            source_file: None,
+            line_number: None,
             severity: "error".to_string(),
-            date: None,
-            account: None,
         }],
     };
     let bytes = rmp_serde::to_vec(&output).unwrap_or_default();
@@ -208,14 +198,10 @@ fn check_currencies(input: PluginInput) -> PluginOutput {
                     if !declared_currencies.is_empty()
                         && !declared_currencies.contains(&units.currency)
                     {
-                        errors.push(
-                            PluginError::warning(format!(
-                                "Currency '{}' used but not declared as commodity",
-                                units.currency
-                            ))
-                            .with_date(&wrapper.date)
-                            .with_account(&posting.account),
-                        );
+                        errors.push(PluginError::warning(format!(
+                            "Currency '{}' used but not declared as commodity (date: {}, account: {})",
+                            units.currency, wrapper.date, posting.account
+                        )));
                     }
                 }
 
@@ -225,14 +211,10 @@ fn check_currencies(input: PluginInput) -> PluginOutput {
                         if !declared_currencies.is_empty()
                             && !declared_currencies.contains(currency)
                         {
-                            errors.push(
-                                PluginError::warning(format!(
-                                    "Cost currency '{}' not declared as commodity",
-                                    currency
-                                ))
-                                .with_date(&wrapper.date)
-                                .with_account(&posting.account),
-                            );
+                            errors.push(PluginError::warning(format!(
+                                "Cost currency '{}' not declared as commodity (date: {}, account: {})",
+                                currency, wrapper.date, posting.account
+                            )));
                         }
                     }
                 }
@@ -245,15 +227,12 @@ fn check_currencies(input: PluginInput) -> PluginOutput {
         if currencies.len() > 1 {
             // Only warn for expense/income accounts
             if account.starts_with("Expenses:") || account.starts_with("Income:") {
-                let currency_list: Vec<_> = currencies.iter().collect();
-                errors.push(
-                    PluginError::warning(format!(
-                        "Account '{}' uses multiple currencies: {}",
-                        account,
-                        currency_list.join(", ")
-                    ))
-                    .with_account(account),
-                );
+                let currency_list: Vec<&str> = currencies.iter().map(|s| s.as_str()).collect();
+                errors.push(PluginError::warning(format!(
+                    "Account '{}' uses multiple currencies: {}",
+                    account,
+                    currency_list.join(", ")
+                )));
             }
         }
     }

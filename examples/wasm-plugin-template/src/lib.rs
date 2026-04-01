@@ -1,4 +1,4 @@
-//! Example WASM plugin for ironcount.
+//! Example WASM plugin for rustledger.
 //!
 //! This plugin adds a "processed" tag to all transactions.
 //!
@@ -12,7 +12,7 @@
 use serde::{Deserialize, Serialize};
 use std::alloc::Layout;
 
-// Plugin data types (must match beancount-plugin types)
+// Plugin data types (must match rustledger-plugin types)
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AmountData {

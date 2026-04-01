@@ -8,7 +8,6 @@
 //! Configure with: "days=N" to look for duplicates within N days (default 3)
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 // Plugin types
 #[derive(Debug, Serialize, Deserialize)]
@@ -33,24 +32,19 @@ pub struct PluginOptions {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PluginError {
     pub message: String,
+    pub source_file: Option<String>,
+    pub line_number: Option<u32>,
     pub severity: String,
-    pub date: Option<String>,
-    pub account: Option<String>,
 }
 
 impl PluginError {
     pub fn warning(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
+            source_file: None,
+            line_number: None,
             severity: "warning".to_string(),
-            date: None,
-            account: None,
         }
-    }
-
-    pub fn with_date(mut self, date: &str) -> Self {
-        self.date = Some(date.to_string());
-        self
     }
 }
 
@@ -133,9 +127,9 @@ fn pack_error(message: &str) -> u64 {
         directives: Vec::new(),
         errors: vec![PluginError {
             message: message.to_string(),
+            source_file: None,
+            line_number: None,
             severity: "error".to_string(),
-            date: None,
-            account: None,
         }],
     };
     let bytes = rmp_serde::to_vec(&output).unwrap_or_default();
@@ -236,14 +230,11 @@ fn detect_duplicates(input: PluginInput) -> PluginOutput {
                 let key = (i.min(j), i.max(j));
                 if !reported.contains(&key) {
                     reported.insert(key);
-                    errors.push(
-                        PluginError::warning(format!(
-                            "Potential duplicate: '{}' on {} and '{}' on {} \
-                             (same payee {:?}, amount {} {})",
-                            narr1, date1, narr2, date2, fp1.payee, fp1.amount, fp1.currency
-                        ))
-                        .with_date(date1),
-                    );
+                    errors.push(PluginError::warning(format!(
+                        "Potential duplicate: '{}' on {} and '{}' on {} \
+                         (same payee {:?}, amount {} {})",
+                        narr1, date1, narr2, date2, fp1.payee, fp1.amount, fp1.currency
+                    )));
                 }
             }
         }

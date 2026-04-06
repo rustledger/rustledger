@@ -1,6 +1,6 @@
 {"file": "examples_defs_x.beancount", "query": "SELECT DISTINCT account ORDER BY account LIMIT 20", "match": true}
-{"file": "examples_defs_rx.beancount", "query": "SELECT DISTINCT account ORDER BY account LIMIT 20", "match": true}
 {"file": "examples_defs_rx.beancount", "query": "SELECT COUNT(*) AS total", "match": true}
+{"file": "examples_defs_rx.beancount", "query": "SELECT DISTINCT account ORDER BY account LIMIT 20", "match": true}
 {"file": "examples_defs_rx.beancount", "query": "SELECT currency, COUNT(*) AS count GROUP BY curren", "match": true}
 {"file": "examples_defs_x.beancount", "query": "SELECT COUNT(*) AS total", "match": true}
 {"file": "examples_defs_x.beancount", "query": "SELECT currency, COUNT(*) AS count GROUP BY curren", "match": true}
@@ -15,8 +15,8 @@
 {"file": "tests_resources_example_ledger.beancount", "query": "SELECT currency, COUNT(*) AS count GROUP BY curren", "match": true}
 {"file": "accounts.beancount", "query": "SELECT DISTINCT account ORDER BY account LIMIT 20", "match": true}
 {"file": "accounts.beancount", "query": "SELECT COUNT(*) AS total", "match": true}
-{"file": "accounts.beancount", "query": "SELECT currency, COUNT(*) AS count GROUP BY curren", "match": true}
 {"file": "chapter-2_src_accounts.beancount", "query": "SELECT DISTINCT account ORDER BY account LIMIT 20", "match": true}
+{"file": "accounts.beancount", "query": "SELECT currency, COUNT(*) AS count GROUP BY curren", "match": true}
 {"file": "chapter-2_src_accounts.beancount", "query": "SELECT COUNT(*) AS total", "match": true}
 {"file": "chapter-2_src_accounts.beancount", "query": "SELECT currency, COUNT(*) AS count GROUP BY curren", "match": true}
 {"file": "chapter-3_src_accounts.beancount", "query": "SELECT DISTINCT account ORDER BY account LIMIT 20", "match": true}

@@ -2291,6 +2291,77 @@ mod tests {
     }
 
     #[test]
+    fn test_count_wildcard_direct() {
+        // count(*) in the direct postings path (no FROM tablename)
+        let directives = sample_directives();
+        let mut executor = Executor::new(&directives);
+
+        // Pure count(*) with no GROUP BY
+        let query = parse("SELECT count(*)").unwrap();
+        let result = executor.execute(&query).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result.rows[0][0], Value::Integer(4)); // 4 postings total
+
+        // count(*) with GROUP BY in direct mode
+        // Sample: Expenses:Food:Coffee (1), Assets:Bank:Checking (2), Expenses:Food:Groceries (1)
+        let query = parse("SELECT account, count(*) GROUP BY account").unwrap();
+        let result = executor.execute(&query).unwrap();
+        assert_eq!(result.len(), 3); // 3 distinct accounts
+    }
+
+    #[test]
+    fn test_count_wildcard_from_postings_table() {
+        // count(*) against the named postings table: FROM postings
+        let directives = sample_directives();
+        let mut executor = Executor::new(&directives);
+
+        // GROUP BY with count(*)
+        let query = parse("SELECT account, count(*) FROM postings GROUP BY account").unwrap();
+        let result = executor.execute(&query).unwrap();
+        // 3 distinct accounts: Expenses:Food:Coffee, Assets:Bank:Checking, Expenses:Food:Groceries
+        assert_eq!(result.len(), 3);
+    }
+
+    #[test]
+    fn test_count_wildcard_from_entries_table() {
+        // count(*) against the named entries table: FROM entries
+        let directives = sample_directives();
+        let mut executor = Executor::new(&directives);
+
+        let query = parse("SELECT type, count(*) FROM entries GROUP BY type").unwrap();
+        let result = executor.execute(&query).unwrap();
+        // Only transactions in the sample data
+        assert_eq!(result.len(), 1);
+        assert_eq!(result.rows[0][0], Value::String("Transaction".to_string()));
+        assert_eq!(result.rows[0][1], Value::Integer(2));
+    }
+
+    #[test]
+    fn test_count_wildcard_having() {
+        // count(*) in HAVING clause on postings table
+        let directives = sample_directives();
+        let mut executor = Executor::new(&directives);
+
+        // Accounts with more than 0 postings (all 3 distinct accounts)
+        let query = parse(
+            "SELECT account, count(*) AS cnt FROM postings GROUP BY account HAVING count(*) > 0",
+        )
+        .unwrap();
+        let result = executor.execute(&query).unwrap();
+        assert_eq!(result.len(), 3);
+
+        // Accounts with more than 1 posting (only Assets:Bank:Checking has 2)
+        let query = parse(
+            "SELECT account, count(*) AS cnt FROM postings GROUP BY account HAVING count(*) > 1",
+        )
+        .unwrap();
+        let result = executor.execute(&query).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result.rows[0][0], Value::String("Assets:Bank:Checking".to_string()));
+        assert_eq!(result.rows[0][1], Value::Integer(2));
+    }
+
+    #[test]
     fn test_journal_query() {
         let directives = sample_directives();
         let mut executor = Executor::new(&directives);

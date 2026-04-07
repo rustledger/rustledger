@@ -352,6 +352,16 @@ impl Executor<'_> {
             .map(|(i, name)| (name.to_lowercase(), i))
             .collect();
 
+        // Check if this is an aggregate query; if so, use the grouping path.
+        let is_aggregate = query
+            .targets
+            .iter()
+            .any(|t| Self::is_aggregate_expr(&t.expr));
+
+        if is_aggregate {
+            return self.execute_aggregate_from_table(query, table, &column_map);
+        }
+
         // Determine column names for the result
         let column_names = self.resolve_subquery_column_names(&query.targets, &table.columns)?;
         let mut result = QueryResult::new(column_names);
@@ -384,6 +394,127 @@ impl Executor<'_> {
             } else {
                 result.add_row(result_row);
             }
+        }
+
+        // Apply ORDER BY
+        if let Some(order_by) = &query.order_by {
+            self.sort_results(&mut result, order_by)?;
+        }
+
+        // Apply LIMIT
+        if let Some(limit) = query.limit {
+            result.rows.truncate(limit as usize);
+        }
+
+        Ok(result)
+    }
+
+    /// Execute an aggregate SELECT query (with GROUP BY / aggregate functions) against a table.
+    ///
+    /// Groups the table rows by the GROUP BY expressions, evaluates aggregate functions
+    /// per group, applies HAVING filtering, then ORDER BY and LIMIT.
+    fn execute_aggregate_from_table(
+        &self,
+        query: &SelectQuery,
+        table: &Table,
+        column_map: &FxHashMap<String, usize>,
+    ) -> Result<QueryResult, QueryError> {
+        use std::collections::HashMap;
+
+        // Determine column names for the result
+        let column_names = self.resolve_subquery_column_names(&query.targets, &table.columns)?;
+        let mut result = QueryResult::new(column_names.clone());
+
+        // Determine GROUP BY expressions.
+        // If no explicit GROUP BY, implicitly group by non-aggregate columns (beancount compat).
+        let group_by_exprs: Option<Vec<Expr>> = if query.group_by.is_some() {
+            query.group_by.clone()
+        } else {
+            let implicit = Self::extract_implicit_group_by_exprs(&query.targets);
+            if implicit.is_empty() {
+                None // Pure aggregate like SELECT count(*)
+            } else {
+                Some(implicit)
+            }
+        };
+
+        // Group table rows by GROUP BY key.
+        let mut group_map: HashMap<String, (Vec<Value>, Vec<&Row>)> = HashMap::new();
+
+        for row in &table.rows {
+            // Apply WHERE clause if present
+            if let Some(where_expr) = &query.where_clause
+                && !self.evaluate_subquery_filter(where_expr, row, column_map)?
+            {
+                continue;
+            }
+
+            let key_values: Vec<Value> = if let Some(ref exprs) = group_by_exprs {
+                exprs
+                    .iter()
+                    .map(|expr| self.evaluate_subquery_expr(expr, row, column_map))
+                    .collect::<Result<Vec<_>, _>>()?
+            } else {
+                vec![]
+            };
+
+            let key = Self::make_group_key(&key_values);
+            group_map
+                .entry(key)
+                .or_insert_with(|| (key_values, Vec::new()))
+                .1
+                .push(row);
+        }
+
+        // A pure aggregate with no matching rows produces no result rows.
+        if group_map.is_empty() {
+            return Ok(result);
+        }
+
+        // Build alias map once (used by HAVING evaluation).
+        let alias_map: HashMap<String, usize> = query
+            .targets
+            .iter()
+            .enumerate()
+            .filter_map(|(i, t)| t.alias.as_ref().map(|a| (a.to_uppercase(), i)))
+            .collect();
+        let col_map: HashMap<String, usize> = column_names
+            .iter()
+            .enumerate()
+            .map(|(i, name)| (name.to_uppercase(), i))
+            .collect();
+
+        // Evaluate aggregate expressions per group and apply HAVING.
+        for (_, (_key_values, group_rows)) in group_map {
+            let mut row = Vec::new();
+            for target in &query.targets {
+                let val =
+                    self.evaluate_aggregate_table_expr(&target.expr, &group_rows, column_map)?;
+                row.push(val);
+            }
+
+            // Apply HAVING filter if present
+            if let Some(having_expr) = &query.having {
+                let having_val = self.evaluate_having_table_expr(
+                    having_expr,
+                    &row,
+                    &col_map,
+                    &alias_map,
+                    &group_rows,
+                    column_map,
+                )?;
+                match having_val {
+                    Value::Boolean(true) => {}
+                    Value::Boolean(false) | Value::Null => continue,
+                    _ => {
+                        return Err(QueryError::Type(
+                            "HAVING clause must evaluate to boolean".to_string(),
+                        ))
+                    }
+                }
+            }
+
+            result.add_row(row);
         }
 
         // Apply ORDER BY
@@ -453,11 +584,21 @@ impl Executor<'_> {
             }
             Expr::Literal(lit) => self.evaluate_literal(lit),
             Expr::Function(func) => {
-                // Evaluate function arguments
+                // Evaluate function arguments.
+                // Wildcard in a function argument (e.g., count(*)) is treated as a no-value
+                // marker for aggregate functions evaluated in row-level context.
                 let args: Vec<Value> = func
                     .args
                     .iter()
-                    .map(|a| self.evaluate_subquery_expr(a, row, column_map))
+                    .map(|a| {
+                        if matches!(a, Expr::Wildcard) {
+                            // count(*) and similar: wildcard arg is meaningless at row level;
+                            // aggregate functions already return Null in row-level context.
+                            Ok(Value::Null)
+                        } else {
+                            self.evaluate_subquery_expr(a, row, column_map)
+                        }
+                    })
                     .collect::<Result<Vec<_>, _>>()?;
                 self.evaluate_function_on_values(&func.name, &args)
             }

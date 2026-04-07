@@ -36,8 +36,9 @@ impl From<Span> for Range<usize> {
 #[logos(skip r"[ \t]+")] // Skip horizontal whitespace (spaces and tabs)
 pub enum Token<'src> {
     // ===== Literals =====
-    /// A date in YYYY-MM-DD or YYYY/MM/DD format.
-    #[regex(r"\d{4}[-/]\d{2}[-/]\d{2}")]
+    /// A date in YYYY-MM-DD, YYYY-M-D, YYYY/MM/DD, or YYYY/M/D format.
+    /// Single-digit month and day are accepted (e.g., 2024-1-5).
+    #[regex(r"\d{4}[-/]\d{1,2}[-/]\d{1,2}")]
     Date(&'src str),
 
     /// A number with optional sign, thousands separators, and decimals.
@@ -489,6 +490,38 @@ mod tests {
         let tokens = tokenize("2024-01-15");
         assert_eq!(tokens.len(), 1);
         assert!(matches!(tokens[0].0, Token::Date("2024-01-15")));
+    }
+
+    #[test]
+    fn test_tokenize_date_single_digit_month() {
+        // Single-digit month should be tokenized as Date
+        let tokens = tokenize("2024-1-15");
+        assert_eq!(tokens.len(), 1);
+        assert!(matches!(tokens[0].0, Token::Date("2024-1-15")));
+    }
+
+    #[test]
+    fn test_tokenize_date_single_digit_day() {
+        // Single-digit day should be tokenized as Date
+        let tokens = tokenize("2024-01-5");
+        assert_eq!(tokens.len(), 1);
+        assert!(matches!(tokens[0].0, Token::Date("2024-01-5")));
+    }
+
+    #[test]
+    fn test_tokenize_date_single_digit_month_and_day() {
+        // Single-digit month and day should be tokenized as Date
+        let tokens = tokenize("2024-1-1");
+        assert_eq!(tokens.len(), 1);
+        assert!(matches!(tokens[0].0, Token::Date("2024-1-1")));
+    }
+
+    #[test]
+    fn test_tokenize_date_slash_separator_single_digit() {
+        // Slash separator with single-digit parts
+        let tokens = tokenize("2024/1/5");
+        assert_eq!(tokens.len(), 1);
+        assert!(matches!(tokens[0].0, Token::Date("2024/1/5")));
     }
 
     #[test]

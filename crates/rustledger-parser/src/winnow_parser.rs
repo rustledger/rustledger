@@ -42,11 +42,19 @@ struct SpannedToken<'src> {
 struct TokenStream<'src> {
     tokens: &'src [SpannedToken<'src>],
     pos: usize,
+    /// A deferred error set when a date token has valid format but invalid
+    /// calendar values (e.g., Feb 29 in a non-leap year). Used in place of
+    /// the generic "unexpected input" error during error recovery.
+    deferred_error: Option<ParseError>,
 }
 
 impl<'src> TokenStream<'src> {
     const fn new(tokens: &'src [SpannedToken<'src>]) -> Self {
-        Self { tokens, pos: 0 }
+        Self {
+            tokens,
+            pos: 0,
+            deferred_error: None,
+        }
     }
 
     const fn is_empty(&self) -> bool {
@@ -103,13 +111,55 @@ fn parse_date(stream: &mut TokenStream<'_>) -> ParseRes<NaiveDate> {
     if let Some(t) = stream.peek()
         && let Token::Date(s) = &t.token
     {
-        let normalized = s.replace('/', "-");
+        let span = Span::new(t.span.0, t.span.1);
+        // Normalize: replace '/' separators with '-' and zero-pad single-digit
+        // month/day so chrono can parse with "%Y-%m-%d".
+        let normalized = normalize_date_str(s);
         if let Ok(date) = NaiveDate::parse_from_str(&normalized, "%Y-%m-%d") {
             stream.advance();
             return Ok(date);
         }
+        // The token matched the date regex (valid format) but the calendar
+        // values are invalid (e.g., Feb 29 in a non-leap year, month 13).
+        // Build a descriptive error and defer it for the error-recovery path.
+        let msg = describe_invalid_date(s);
+        stream.deferred_error = Some(ParseError::new(
+            ParseErrorKind::InvalidDateValue(msg),
+            span,
+        ));
     }
     Err(())
+}
+
+/// Zero-pad single-digit month/day and normalise '/' separators to '-'.
+fn normalize_date_str(s: &str) -> String {
+    // Separator can be '-' or '/'; the regex guarantees three parts.
+    let s = s.replace('/', "-");
+    if let Some((year, rest)) = s.split_once('-')
+        && let Some((month, day)) = rest.split_once('-')
+    {
+        return format!("{year}-{month:0>2}-{day:0>2}");
+    }
+    s
+}
+
+/// Build a human-readable reason why a date string is invalid.
+fn describe_invalid_date(s: &str) -> String {
+    let parts: Vec<&str> = s.split(['-', '/']).collect();
+    if parts.len() == 3
+        && let (Ok(year), Ok(month), Ok(day)) = (
+            parts[0].parse::<i32>(),
+            parts[1].parse::<u32>(),
+            parts[2].parse::<u32>(),
+        )
+    {
+        if !(1..=12).contains(&month) {
+            return format!("month {month} out of range");
+        }
+        let year_month = format!("{year}-{month:02}");
+        return format!("day {day} out of range for {year_month}");
+    }
+    format!("invalid date '{s}'")
 }
 
 fn parse_number(stream: &mut TokenStream<'_>) -> ParseRes<Decimal> {
@@ -1494,6 +1544,10 @@ pub fn parse(source: &str) -> ParseResult {
         let error_start = stream.pos;
 
         if let Ok(item) = parse_entry(&mut stream) {
+            // Clear any deferred error from inner parsing attempts that
+            // ultimately resolved successfully (e.g., a date in metadata
+            // where the metadata was skipped but the directive was valid).
+            stream.deferred_error = None;
             match item {
                 ParsedItem::Directive(mut d, span) => {
                     apply_pushed_tags(&mut d, &tag_stack);
@@ -1540,10 +1594,16 @@ pub fn parse(source: &str) -> ParseResult {
             // Error recovery: skip to next newline
             stream.skip_to_newline();
             let span = stream.span_from(error_start);
-            errors.push(ParseError::new(
-                ParseErrorKind::SyntaxError("unexpected input".to_string()),
-                span,
-            ));
+            // Prefer a deferred error set by an inner parser (e.g., invalid
+            // date value) over the generic "unexpected input" fallback.
+            if let Some(err) = stream.deferred_error.take() {
+                errors.push(err);
+            } else {
+                errors.push(ParseError::new(
+                    ParseErrorKind::SyntaxError("unexpected input".to_string()),
+                    span,
+                ));
+            }
         }
     }
 

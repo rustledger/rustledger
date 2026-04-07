@@ -447,6 +447,89 @@ fn test_error_on_invalid_date() {
 }
 
 #[test]
+fn test_parse_single_digit_month() {
+    // Beancount accepts YYYY-M-DD (single-digit month)
+    let source = "2024-1-15 open Assets:Checking\n";
+    let result = parse(source);
+    assert!(
+        result.errors.is_empty(),
+        "unexpected errors for single-digit month: {:?}",
+        result.errors
+    );
+    assert_eq!(count_directive_type(&result, "open"), 1);
+    if let Directive::Open(open) = &result.directives[0].value {
+        use chrono::NaiveDate;
+        assert_eq!(open.date, NaiveDate::from_ymd_opt(2024, 1, 15).unwrap());
+    } else {
+        panic!("expected open directive");
+    }
+}
+
+#[test]
+fn test_parse_single_digit_day() {
+    // Beancount accepts YYYY-MM-D (single-digit day)
+    let source = "2024-01-5 open Assets:Cash USD\n";
+    let result = parse(source);
+    assert!(
+        result.errors.is_empty(),
+        "unexpected errors for single-digit day: {:?}",
+        result.errors
+    );
+    assert_eq!(count_directive_type(&result, "open"), 1);
+}
+
+#[test]
+fn test_parse_single_digit_month_and_day() {
+    // Beancount accepts YYYY-M-D (single-digit month and day)
+    let source = "2024-1-1 open Assets:Cash USD\n";
+    let result = parse(source);
+    assert!(
+        result.errors.is_empty(),
+        "unexpected errors for single-digit month/day: {:?}",
+        result.errors
+    );
+    assert_eq!(count_directive_type(&result, "open"), 1);
+    if let Directive::Open(open) = &result.directives[0].value {
+        use chrono::NaiveDate;
+        assert_eq!(open.date, NaiveDate::from_ymd_opt(2024, 1, 1).unwrap());
+    } else {
+        panic!("expected open directive");
+    }
+}
+
+#[test]
+fn test_error_invalid_leap_year_date() {
+    // Feb 29 in a non-leap year should produce a descriptive error
+    let source = "2023-02-29 open Assets:Cash USD\n";
+    let result = parse(source);
+    assert!(
+        !result.errors.is_empty(),
+        "expected error for invalid leap-year date"
+    );
+    let msg = result.errors[0].message();
+    assert!(
+        msg.contains("day") && msg.contains("out of range"),
+        "expected error mentioning 'day' and 'out of range', got: '{msg}'"
+    );
+}
+
+#[test]
+fn test_error_invalid_date_month_out_of_range() {
+    // Month 13 should produce a descriptive error
+    let source = "2024-13-01 open Assets:Cash USD\n";
+    let result = parse(source);
+    assert!(
+        !result.errors.is_empty(),
+        "expected error for month out of range"
+    );
+    let msg = result.errors[0].message();
+    assert!(
+        msg.contains("month") && msg.contains("out of range"),
+        "expected error mentioning 'month' and 'out of range', got: '{msg}'"
+    );
+}
+
+#[test]
 fn test_error_on_invalid_account() {
     let source = r"2024-01-01 open lowercase:invalid";
     let result = parse(source);

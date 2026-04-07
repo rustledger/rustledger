@@ -304,10 +304,6 @@ fn handle_validate(params: &serde_json::Value) -> Result<serde_json::Value, RpcE
         .filter(|e| e.phase == "parse")
         .count();
     let mut errors = load.errors;
-    let mut validate_error_count = errors
-        .iter()
-        .filter(|e| e.phase == "validate")
-        .count();
 
     // Only run semantic validation when there are no syntactic (parse) errors.
     // Booking errors are semantic and don't prevent validation from running.
@@ -320,9 +316,14 @@ fn handle_validate(params: &serde_json::Value) -> Result<serde_json::Value, RpcE
                 e = e.with_line(load.line_lookup.byte_to_line(span.start));
             }
             errors.push(e);
-            validate_error_count += 1;
         }
     }
+
+    // Count validate-phase errors after all errors have been collected.
+    let validate_error_count = errors
+        .iter()
+        .filter(|e| e.phase == "validate")
+        .count();
 
     let output = ValidateOutput {
         api_version: API_VERSION,

@@ -5262,9 +5262,85 @@ fn test_postings_table_price_column() {
     }
 }
 
-// ============================================================================
-// System Table Error Message Tests
-// ============================================================================
+#[test]
+fn test_postings_table_position_column_simple() {
+    // Test that position column is populated for postings without cost
+    let directives = vec![
+        Directive::Open(Open::new(date(2024, 1, 1), "Assets:Bank")),
+        Directive::Open(Open::new(date(2024, 1, 1), "Expenses:Food")),
+        Directive::Transaction(
+            Transaction::new(date(2024, 1, 15), "Groceries")
+                .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(50), "USD")))
+                .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(-50), "USD"))),
+        ),
+    ];
+
+    let result = execute_query(
+        "SELECT account, position FROM #postings WHERE account = 'Expenses:Food'",
+        &directives,
+    );
+
+    assert_eq!(result.len(), 1);
+    match &result.rows[0][1] {
+        Value::Position(pos) => {
+            assert_eq!(pos.units.number, dec!(50));
+            assert_eq!(pos.units.currency.as_ref(), "USD");
+            assert!(pos.cost.is_none(), "Expected no cost for simple position");
+        }
+        other => panic!("Expected Position for position column, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_postings_table_position_column_with_cost() {
+    // Test that position column includes cost basis when present
+    let directives = vec![
+        Directive::Open(Open::new(date(2024, 1, 1), "Assets:Brokerage")),
+        Directive::Open(Open::new(date(2024, 1, 1), "Assets:Cash")),
+        Directive::Transaction(
+            Transaction::new(date(2024, 1, 15), "Buy stock")
+                .with_posting(
+                    Posting::new("Assets:Brokerage", Amount::new(dec!(10), "AAPL")).with_cost(
+                        CostSpec::empty()
+                            .with_number_per(dec!(150))
+                            .with_currency("USD"),
+                    ),
+                )
+                .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(-1500), "USD"))),
+        ),
+    ];
+
+    let result = execute_query(
+        "SELECT account, position FROM #postings WHERE account = 'Assets:Brokerage'",
+        &directives,
+    );
+
+    assert_eq!(result.len(), 1);
+    match &result.rows[0][1] {
+        Value::Position(pos) => {
+            assert_eq!(pos.units.number, dec!(10));
+            assert_eq!(pos.units.currency.as_ref(), "AAPL");
+            let cost = pos.cost.as_ref().expect("Expected cost for position with cost spec");
+            assert_eq!(cost.number, dec!(150));
+            assert_eq!(cost.currency.as_ref(), "USD");
+        }
+        other => panic!("Expected Position for position column, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_postings_table_position_in_select_star() {
+    // Test that position column is included in SELECT *
+    let directives = make_postings_test_directives();
+    let result = execute_query("SELECT * FROM #postings", &directives);
+
+    assert!(
+        result.columns.contains(&"position".to_string()),
+        "position column should be present in SELECT * from #postings"
+    );
+}
+
+
 
 #[test]
 fn test_unknown_system_table_error_lists_all_tables() {

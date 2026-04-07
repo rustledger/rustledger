@@ -1888,6 +1888,7 @@ impl<'a> Executor<'a> {
             "payee".to_string(),
             "narration".to_string(),
             "account".to_string(),
+            "position".to_string(),
             "number".to_string(),
             "currency".to_string(),
             "cost_number".to_string(),
@@ -1967,6 +1968,20 @@ impl<'a> Executor<'a> {
                     (Value::Null, Value::Null, Value::Null, Value::Null)
                 };
 
+                let position_val = if let Some(units) = posting.amount() {
+                    if let Some(cost_spec) = &posting.cost {
+                        if let Some(cost) = cost_spec.resolve(units.number, txn.date) {
+                            Value::Position(Box::new(Position::with_cost(units.clone(), cost)))
+                        } else {
+                            Value::Position(Box::new(Position::simple(units.clone())))
+                        }
+                    } else {
+                        Value::Position(Box::new(Position::simple(units.clone())))
+                    }
+                } else {
+                    Value::Null
+                };
+
                 let price_val = posting
                     .price
                     .as_ref()
@@ -1985,6 +2000,7 @@ impl<'a> Executor<'a> {
                         .map_or(Value::Null, |p| Value::String(p.to_string())),
                     Value::String(txn.narration.to_string()),
                     Value::String(posting.account.to_string()),
+                    position_val,
                     number,
                     currency,
                     cost_number,

@@ -651,3 +651,95 @@ option "title" "Test"
     assert!(errors.is_empty());
     assert_eq!(directives.len(), 1);
 }
+
+// ============================================================================
+// Conformance: invalid inputs that must be rejected (pta-standards suite)
+// ============================================================================
+
+/// Case: invalid-leading-decimal
+/// Amounts must have an integer part before the decimal point (.50 is invalid).
+#[test]
+fn test_reject_leading_decimal() {
+    let source = "2024-01-15 * \"Test\"\n  Expenses:Food  .50 USD\n  Assets:Checking\n";
+    let result = parse(source);
+    assert!(
+        !result.errors.is_empty(),
+        "expected parse error for leading decimal amount '.50 USD'"
+    );
+}
+
+/// Case: invalid-booking-method-lowercase / booking-method-case-sensitive
+/// Booking methods must be uppercase (FIFO, STRICT, LIFO, HIFO, NONE, AVERAGE).
+/// Lowercase variants like "fifo" must be rejected.
+#[test]
+fn test_reject_lowercase_booking_method() {
+    let source = "2024-01-01 open Assets:Stock AAPL \"fifo\"\n";
+    let result = parse(source);
+    assert!(
+        !result.errors.is_empty(),
+        "expected parse error for lowercase booking method 'fifo'"
+    );
+}
+
+/// Counterpart: uppercase booking method must still be accepted.
+#[test]
+fn test_accept_uppercase_booking_method() {
+    let source = "2024-01-01 open Assets:Stock AAPL \"FIFO\"\n";
+    let result = parse(source);
+    assert!(
+        result.errors.is_empty(),
+        "uppercase booking method 'FIFO' should be valid, errors: {:?}",
+        result.errors
+    );
+}
+
+/// Case: invalid-metadata-uppercase-key
+/// Metadata keys must start with a lowercase ASCII letter.
+/// Keys starting with uppercase (e.g. "Category:") must be rejected.
+#[test]
+fn test_reject_uppercase_metadata_key() {
+    let source = "2024-01-15 * \"Test\"\n  Category: \"test\"\n  Expenses:Food  50 USD\n  Assets:Checking\n";
+    let result = parse(source);
+    assert!(
+        !result.errors.is_empty(),
+        "expected parse error for metadata key starting with uppercase 'Category:'"
+    );
+}
+
+/// Case: invalid-balance-no-amount
+/// Balance directives require both an account and an amount+currency.
+#[test]
+fn test_reject_balance_without_amount() {
+    let source = "2024-01-15 balance Assets:Checking\n";
+    let result = parse(source);
+    assert!(
+        !result.errors.is_empty(),
+        "expected parse error for balance directive without amount"
+    );
+}
+
+/// Case: invalid-pad-no-source
+/// Pad directives require both a target account and a source account.
+#[test]
+fn test_reject_pad_without_source_account() {
+    let source = "2024-01-15 pad Assets:Checking\n";
+    let result = parse(source);
+    assert!(
+        !result.errors.is_empty(),
+        "expected parse error for pad directive without source account"
+    );
+}
+
+/// Case: unicode-account-name
+/// Account name segments must use only ASCII letters, digits, and hyphens
+/// per the beancount v3 spec. Unicode characters are rejected.
+#[test]
+fn test_reject_unicode_account_name() {
+    let source = "2024-01-01 open Assets:銀行口座\n";
+    let result = parse(source);
+    assert!(
+        !result.errors.is_empty(),
+        "expected parse error for Unicode characters in account name"
+    );
+}
+

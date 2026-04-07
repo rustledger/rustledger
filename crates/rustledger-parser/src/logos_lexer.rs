@@ -41,9 +41,10 @@ pub enum Token<'src> {
     Date(&'src str),
 
     /// A number with optional sign, thousands separators, and decimals.
-    /// Examples: 123, -456, 1,234.56, 1234.5678, .50, -.50, 1. (trailing decimal)
-    /// Python beancount accepts trailing decimal (e.g., "1." meaning "1.0").
-    #[regex(r"-?(\.\d+|(\d{1,3}(,\d{3})*|\d+)(\.\d*)?)")]
+    /// Examples: 123, -456, 1,234.56, 1234.5678, 1. (trailing decimal)
+    /// Python beancount v3 requires an integer part before the decimal point.
+    /// Leading decimals like `.50` are rejected per the beancount v3 spec.
+    #[regex(r"-?(\d{1,3}(,\d{3})*|\d+)(\.\d*)?")]
     Number(&'src str),
 
     /// A double-quoted string (handles escape sequences).
@@ -53,13 +54,10 @@ pub enum Token<'src> {
 
     /// An account name like Assets:Bank:Checking, Aktiva:Bank:Girokonto, or Ciste-jmeni:Stav.
     /// Must start with a capitalized word (account type prefix) and have at least one sub-account.
-    /// Account type prefix can contain hyphens (e.g., Ciste-jmeni for Czech "Čisté jmění").
-    /// Sub-accounts must start with uppercase letter, digit, or non-ASCII character (matching Python beancount).
-    /// Supports Unicode letters, symbols, and emojis (e.g., Expenses:École, Assets:沪深300, Assets:CORP✨).
-    /// Pattern matches beancount's lexer.l: `([A-Z]|UTF-8-ONLY)([A-Za-z0-9-]|UTF-8-ONLY)*`.
-    /// `[^\x00-\x7F]` matches any non-ASCII UTF-8 character (equivalent to beancount's UTF-8-ONLY).
+    /// Per the beancount v3 spec, account name segments must use only ASCII letters, digits, and
+    /// hyphens. Unicode characters in account names are rejected.
     /// The account type prefix is validated later against options (`name_assets`, etc.).
-    #[regex(r"([A-Z]|[^\x00-\x7F])([A-Za-z0-9-]|[^\x00-\x7F])*(:([A-Z0-9]|[^\x00-\x7F])([A-Za-z0-9-]|[^\x00-\x7F])*)+")]
+    #[regex(r"[A-Z][A-Za-z0-9-]*(:([A-Z0-9][A-Za-z0-9-]*)+)+")]
     Account(&'src str),
 
     /// A currency/commodity code like USD, EUR, AAPL, BTC, or single-char tickers like T, V, F.
@@ -251,8 +249,9 @@ pub enum Token<'src> {
 
     /// A metadata key (identifier followed by colon).
     /// Examples: filename:, lineno:, custom-key:, nameOnCard:
-    /// The slice includes the trailing colon. Keys can use camelCase or `snake_case`.
-    #[regex(r"[a-zA-Z][a-zA-Z0-9_-]*:")]
+    /// The slice includes the trailing colon. Keys must start with a lowercase ASCII letter
+    /// per the beancount v3 spec. Keys starting with uppercase are rejected.
+    #[regex(r"[a-z][a-zA-Z0-9_-]*:")]
     MetaKey(&'src str),
 
     /// Indentation token (inserted by post-processing, not by Logos).
@@ -514,41 +513,30 @@ mod tests {
 
     #[test]
     fn test_tokenize_account_unicode() {
-        // Test various Unicode characters in account names
-        // Matching beancount's UTF-8-ONLY support (any non-ASCII character)
+        // Per the beancount v3 spec, account name segments must use only ASCII
+        // letters, digits, and hyphens. Unicode characters in account names are
+        // rejected and should NOT tokenize as Account tokens.
 
-        // Emoji (Unicode Symbol category So)
+        // Emoji after valid account prefix - tokenizes as Account("Assets") + error tokens
         let tokens = tokenize("Assets:CORP✨");
-        assert_eq!(tokens.len(), 1);
-        assert!(matches!(tokens[0].0, Token::Account("Assets:CORP✨")));
+        assert!(
+            !matches!(tokens[0].0, Token::Account("Assets:CORP✨")),
+            "Unicode emoji in account name should not tokenize as a valid Account"
+        );
 
-        // CJK characters (Unicode Letter category Lo)
+        // CJK characters - should not tokenize as Account
         let tokens = tokenize("Assets:沪深300");
-        assert_eq!(tokens.len(), 1);
-        assert!(matches!(tokens[0].0, Token::Account("Assets:沪深300")));
+        assert!(
+            !matches!(tokens[0].0, Token::Account("Assets:沪深300")),
+            "CJK characters in account name should not tokenize as a valid Account"
+        );
 
-        // Full CJK component
+        // Full CJK component - should not tokenize as Account
         let tokens = tokenize("Assets:日本銀行");
-        assert_eq!(tokens.len(), 1);
-        assert!(matches!(tokens[0].0, Token::Account("Assets:日本銀行")));
-
-        // Non-ASCII letters (accented)
-        let tokens = tokenize("Assets:Café");
-        assert_eq!(tokens.len(), 1);
-        assert!(matches!(tokens[0].0, Token::Account("Assets:Café")));
-
-        // Currency symbol (Unicode Symbol category Sc)
-        let tokens = tokenize("Assets:€uro");
-        assert_eq!(tokens.len(), 1);
-        assert!(matches!(tokens[0].0, Token::Account("Assets:€uro")));
-
-        // Emoji in middle of component
-        let tokens = tokenize("Assets:Test💰Account");
-        assert_eq!(tokens.len(), 1);
-        assert!(matches!(
-            tokens[0].0,
-            Token::Account("Assets:Test💰Account")
-        ));
+        assert!(
+            !matches!(tokens[0].0, Token::Account("Assets:日本銀行")),
+            "CJK account component should not tokenize as a valid Account"
+        );
     }
 
     #[test]

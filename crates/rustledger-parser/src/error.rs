@@ -76,6 +76,7 @@ impl ParseError {
             ParseErrorKind::InvalidPopmeta(_) => 22,
             ParseErrorKind::UnclosedPushmeta(_) => 23,
             ParseErrorKind::DeprecatedPipeSymbol => 24,
+            ParseErrorKind::InvalidBookingMethod(_) => 25,
         }
     }
 
@@ -113,6 +114,7 @@ impl ParseError {
             ParseErrorKind::InvalidPopmeta(_) => "invalid popmeta",
             ParseErrorKind::UnclosedPushmeta(_) => "unclosed pushmeta",
             ParseErrorKind::DeprecatedPipeSymbol => "deprecated pipe symbol",
+            ParseErrorKind::InvalidBookingMethod(_) => "invalid booking method",
         }
     }
 }
@@ -180,6 +182,8 @@ pub enum ParseErrorKind {
     UnclosedPushmeta(String),
     /// Deprecated pipe symbol in transaction.
     DeprecatedPipeSymbol,
+    /// Invalid booking method (must be uppercase: FIFO, STRICT, LIFO, HIFO, NONE, AVERAGE).
+    InvalidBookingMethod(String),
 }
 
 impl fmt::Display for ParseErrorKind {
@@ -220,6 +224,12 @@ impl fmt::Display for ParseErrorKind {
             }
             Self::DeprecatedPipeSymbol => {
                 write!(f, "Pipe symbol is deprecated")
+            }
+            Self::InvalidBookingMethod(m) => {
+                write!(
+                    f,
+                    "invalid booking method '{m}': must be one of FIFO, STRICT, LIFO, HIFO, NONE, AVERAGE"
+                )
             }
         }
     }

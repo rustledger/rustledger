@@ -585,11 +585,14 @@ mod tests {
     /// Regression test for issue #572: Unicode account names with `name_*` options.
     /// <https://github.com/rustledger/rustledger/issues/572>
     ///
-    /// When a file uses `option "name_equity" "Капитал"` (or other `name_*` options),
-    /// the LSP should accept accounts starting with those custom names.
+    /// Per the beancount v3 spec, account name segments must use only ASCII letters,
+    /// digits, and hyphens. Unicode characters in account names produce parse errors,
+    /// even when custom `name_*` options are set. This is a breaking change from the
+    /// previous behavior where Unicode was accepted.
     #[test]
     fn test_unicode_account_names_issue_572() {
-        // File with Russian account type names
+        // File with Russian account type names — these now produce parse errors
+        // because beancount v3 restricts account names to ASCII characters only.
         let source = r#"option "name_assets" "Активы"
 option "name_liabilities" "Обязательства"
 option "name_income" "Доходы"
@@ -603,40 +606,10 @@ option "name_equity" "Капитал"
 "#;
 
         let result = parse(source);
-        assert!(result.errors.is_empty(), "Should have no parse errors");
-
-        // Validate with file options
-        let diagnostics = all_diagnostics(&result, source, None, None);
-
-        // Helper to get code string from a diagnostic
-        fn get_code(d: &Diagnostic) -> String {
-            match d.code.as_ref().unwrap() {
-                lsp_types::NumberOrString::String(s) => s.clone(),
-                lsp_types::NumberOrString::Number(n) => panic!("Unexpected number code: {}", n),
-            }
-        }
-
-        // Filter to only ERROR severity diagnostics
-        let error_diagnostics: Vec<&Diagnostic> = diagnostics
-            .iter()
-            .filter(|d| matches!(d.severity, Some(DiagnosticSeverity::ERROR)))
-            .collect();
-
-        let error_codes: Vec<_> = error_diagnostics.iter().map(|d| get_code(d)).collect();
-
-        // There should be NO E0001 (invalid account name) errors
-        // because the custom name_* options should be respected
+        // Per beancount v3, Unicode account names are rejected at parse time.
         assert!(
-            !error_codes.iter().any(|c| c == "E0001"),
-            "Should NOT have E0001 (invalid account name) - custom name_* options should be respected. Got: {:?}",
-            error_codes
-        );
-
-        // The file should have no ERROR-severity diagnostics
-        assert!(
-            error_diagnostics.is_empty(),
-            "Valid file with custom account names should have no errors, but got: {:?}",
-            error_codes
+            !result.errors.is_empty(),
+            "Unicode account names should produce parse errors per the beancount v3 spec"
         );
     }
 }

@@ -1073,7 +1073,17 @@ fn parse_open_directive(stream: &mut TokenStream<'_>) -> ParseRes<ParsedItem> {
         }
     }
 
-    let booking = parse_string(stream).ok().and_then(|s| s.parse().ok());
+    let booking = if let Ok(s) = parse_string(stream) {
+        // Validate booking method: must be one of the valid uppercase methods
+        const VALID_BOOKING_METHODS: &[&str] =
+            &["FIFO", "STRICT", "LIFO", "HIFO", "NONE", "AVERAGE"];
+        if !VALID_BOOKING_METHODS.contains(&s.as_str()) {
+            return Err(());
+        }
+        Some(s)
+    } else {
+        None
+    };
 
     skip_comment(stream);
 

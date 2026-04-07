@@ -66,13 +66,16 @@ pub fn validate_transaction_structure(
     // Check for negative cost amounts
     for posting in &txn.postings {
         if let Some(cost) = &posting.cost {
+            let units_str = posting
+                .amount()
+                .map_or_else(|| "?".to_string(), |a| format!("{} {}", a.number, a.currency));
             if let Some(per) = cost.number_per
                 && per < Decimal::ZERO
             {
                 errors.push(ValidationError::new(
                     ErrorCode::NegativeCost,
                     format!(
-                        "Cost per unit is negative ({per}) in posting to {}; cost must be non-negative",
+                        "Cost per unit is negative ({per}) for {units_str} in posting to {}; cost must be non-negative",
                         posting.account
                     ),
                     txn.date,
@@ -84,7 +87,7 @@ pub fn validate_transaction_structure(
                 errors.push(ValidationError::new(
                     ErrorCode::NegativeCost,
                     format!(
-                        "Total cost is negative ({total}) in posting to {}; cost must be non-negative",
+                        "Total cost is negative ({total}) for {units_str} in posting to {}; cost must be non-negative",
                         posting.account
                     ),
                     txn.date,

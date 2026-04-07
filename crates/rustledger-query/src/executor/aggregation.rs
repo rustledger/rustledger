@@ -373,13 +373,23 @@ impl<'a> Executor<'a> {
                         }
                     }
                     _ => {
-                        // Non-aggregate function - but arguments may contain aggregates
-                        // First recursively evaluate all arguments in aggregate mode
+                        // Non-aggregate function — check if any argument contains
+                        // an aggregate (SUM, COUNT, etc.). If not, evaluate the whole
+                        // expression with the first posting context, which preserves
+                        // access to metadata, account info, etc.
+                        let has_aggregate_arg = func.args.iter().any(Self::is_aggregate_expr);
+                        if !has_aggregate_arg {
+                            if let Some(ctx) = group.first() {
+                                return self.evaluate_expr(expr, ctx);
+                            }
+                            return Ok(Value::Null);
+                        }
+                        // At least one arg contains an aggregate — evaluate all args
+                        // in aggregate mode, then apply function to pre-evaluated values.
                         let mut evaluated_args = Vec::with_capacity(func.args.len());
                         for arg in &func.args {
                             evaluated_args.push(self.evaluate_aggregate_expr(arg, group)?);
                         }
-                        // Then apply the function to pre-evaluated values
                         self.evaluate_function_on_values(&func.name, &evaluated_args)
                     }
                 }

@@ -1056,6 +1056,155 @@ impl<'a> Executor<'a> {
                 Self::require_args_count(&name_upper, args, 1)?;
                 Self::value_to_bool(&args[0])
             }
+            // Date functions for wrapping aggregates: QUARTER(MAX(date))
+            "QUARTER" => {
+                Self::require_args_count(&name_upper, args, 1)?;
+                match &args[0] {
+                    Value::Date(d) => Ok(Value::Integer(((d.month() - 1) / 3 + 1).into())),
+                    _ => Err(QueryError::Type("QUARTER expects a date".to_string())),
+                }
+            }
+            "WEEKDAY" => {
+                Self::require_args_count(&name_upper, args, 1)?;
+                match &args[0] {
+                    Value::Date(d) => Ok(Value::Integer(d.weekday().num_days_from_monday().into())),
+                    _ => Err(QueryError::Type("WEEKDAY expects a date".to_string())),
+                }
+            }
+            "YMONTH" => {
+                Self::require_args_count(&name_upper, args, 1)?;
+                match &args[0] {
+                    Value::Date(d) => {
+                        Ok(Value::String(format!("{:04}-{:02}", d.year(), d.month())))
+                    }
+                    _ => Err(QueryError::Type("YMONTH expects a date".to_string())),
+                }
+            }
+            // String functions for wrapping aggregates
+            "SUBSTR" | "SUBSTRING" => {
+                if args.len() < 2 || args.len() > 3 {
+                    return Err(QueryError::InvalidArguments(
+                        name_upper,
+                        "expected 2 or 3 arguments".to_string(),
+                    ));
+                }
+                match (&args[0], &args[1], args.get(2)) {
+                    (Value::String(s), Value::Integer(start), None) => {
+                        let start = (*start).max(0) as usize;
+                        let result: String = s.chars().skip(start).collect();
+                        Ok(Value::String(result))
+                    }
+                    (Value::String(s), Value::Integer(start), Some(Value::Integer(len))) => {
+                        let start = (*start).max(0) as usize;
+                        let len = (*len).max(0) as usize;
+                        let result: String = s.chars().skip(start).take(len).collect();
+                        Ok(Value::String(result))
+                    }
+                    _ => Err(QueryError::Type(
+                        "SUBSTR expects (string, int, [int])".to_string(),
+                    )),
+                }
+            }
+            "STARTSWITH" => {
+                Self::require_args_count(&name_upper, args, 2)?;
+                match (&args[0], &args[1]) {
+                    (Value::String(s), Value::String(prefix)) => {
+                        Ok(Value::Boolean(s.starts_with(prefix.as_str())))
+                    }
+                    _ => Err(QueryError::Type(
+                        "STARTSWITH expects two strings".to_string(),
+                    )),
+                }
+            }
+            "ENDSWITH" => {
+                Self::require_args_count(&name_upper, args, 2)?;
+                match (&args[0], &args[1]) {
+                    (Value::String(s), Value::String(suffix)) => {
+                        Ok(Value::Boolean(s.ends_with(suffix.as_str())))
+                    }
+                    _ => Err(QueryError::Type("ENDSWITH expects two strings".to_string())),
+                }
+            }
+            "MAXWIDTH" => {
+                Self::require_args_count(&name_upper, args, 2)?;
+                match (&args[0], &args[1]) {
+                    (Value::String(s), Value::Integer(max)) => {
+                        let n = *max as usize;
+                        if s.chars().count() <= n {
+                            Ok(Value::String(s.clone()))
+                        } else if n <= 3 {
+                            Ok(Value::String(s.chars().take(n).collect()))
+                        } else {
+                            let truncated: String = s.chars().take(n - 3).collect();
+                            Ok(Value::String(format!("{truncated}...")))
+                        }
+                    }
+                    _ => Err(QueryError::Type(
+                        "MAXWIDTH expects (string, integer)".to_string(),
+                    )),
+                }
+            }
+            // Account function used in GROUP BY
+            "ACCOUNT_DEPTH" => {
+                Self::require_args_count(&name_upper, args, 1)?;
+                match &args[0] {
+                    Value::String(s) => Ok(Value::Integer(s.matches(':').count() as i64 + 1)),
+                    _ => Err(QueryError::Type(
+                        "ACCOUNT_DEPTH expects an account string".to_string(),
+                    )),
+                }
+            }
+            // Position/amount getters
+            "GETITEM" | "GET" => {
+                Self::require_args_count(&name_upper, args, 2)?;
+                match (&args[0], &args[1]) {
+                    (Value::Inventory(inv), Value::String(currency)) => {
+                        let amount = inv.units(currency);
+                        if amount.is_zero() {
+                            Ok(Value::Null)
+                        } else {
+                            Ok(Value::Amount(Amount::new(amount, currency.as_str())))
+                        }
+                    }
+                    (Value::Null, _) => Ok(Value::Null),
+                    _ => Err(QueryError::Type(
+                        "GETITEM expects (inventory, string)".to_string(),
+                    )),
+                }
+            }
+            "WEIGHT" => {
+                Self::require_args_count(&name_upper, args, 1)?;
+                match &args[0] {
+                    Value::Position(p) => {
+                        if let Some(cost) = &p.cost {
+                            let total = p.units.number * cost.number;
+                            Ok(Value::Amount(Amount::new(total, cost.currency.clone())))
+                        } else {
+                            Ok(Value::Amount(p.units.clone()))
+                        }
+                    }
+                    Value::Amount(a) => Ok(Value::Amount(a.clone())),
+                    Value::Inventory(inv) => {
+                        let mut result = Inventory::new();
+                        for pos in inv.positions() {
+                            if let Some(cost) = &pos.cost {
+                                let total = pos.units.number * cost.number;
+                                result.add(Position::simple(Amount::new(
+                                    total,
+                                    cost.currency.clone(),
+                                )));
+                            } else {
+                                result.add(Position::simple(pos.units.clone()));
+                            }
+                        }
+                        Ok(Value::Inventory(Box::new(result)))
+                    }
+                    Value::Null => Ok(Value::Null),
+                    _ => Err(QueryError::Type(
+                        "WEIGHT expects a position, amount, or inventory".to_string(),
+                    )),
+                }
+            }
             // Aggregate functions return Null when evaluated on a single row
             "SUM" | "COUNT" | "MIN" | "MAX" | "FIRST" | "LAST" | "AVG" => Ok(Value::Null),
             _ => Err(QueryError::UnknownFunction(name.to_string())),

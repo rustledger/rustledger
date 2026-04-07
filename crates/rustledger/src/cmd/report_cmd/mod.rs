@@ -66,6 +66,10 @@ pub struct Args {
     /// Output format (text, csv, json)
     #[arg(short = 'f', long, global = true)]
     pub format: Option<OutputFormat>,
+
+    /// Disable pager for output
+    #[arg(long, global = true)]
+    pub no_pager: bool,
 }
 
 /// Output format for reports.
@@ -186,8 +190,9 @@ pub fn main_with_name(bin_name: &str) -> ExitCode {
     };
 
     let format = args.format.unwrap_or_default();
-    match run(&file, &report, args.verbose, &format) {
+    match run(&file, &report, args.verbose, &format, args.no_pager) {
         Ok(()) => ExitCode::SUCCESS,
+        Err(e) if crate::pager::is_broken_pipe(&e) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("error: {e:#}");
             ExitCode::from(1)
@@ -196,9 +201,13 @@ pub fn main_with_name(bin_name: &str) -> ExitCode {
 }
 
 /// Run the report command with the given arguments.
-pub fn run(file: &PathBuf, report: &Report, verbose: bool, format: &OutputFormat) -> Result<()> {
-    let mut stdout = io::stdout().lock();
-
+pub fn run(
+    file: &PathBuf,
+    report: &Report,
+    verbose: bool,
+    format: &OutputFormat,
+    no_pager: bool,
+) -> Result<()> {
     // Check if file exists
     if !file.exists() {
         anyhow::bail!("file not found: {}", file.display());
@@ -225,22 +234,37 @@ pub fn run(file: &PathBuf, report: &Report, verbose: bool, format: &OutputFormat
     // Extract directives (already booked and plugins applied)
     let directives: Vec<_> = ledger.directives.into_iter().map(|s| s.value).collect();
 
+    // Create pager AFTER loading (don't spawn pager if load fails)
+    let use_pager = !no_pager && matches!(format, OutputFormat::Text);
+    let pager_cmd = if use_pager {
+        crate::config::Config::load()
+            .ok()
+            .and_then(|l| l.config.output.pager)
+    } else {
+        None
+    };
+    let mut writer = if use_pager {
+        crate::pager::create_pager(pager_cmd.as_deref())
+    } else {
+        crate::pager::PagerWriter::Stdout(io::stdout().lock())
+    };
+
     // Generate the requested report
     match report {
         Report::Balances { account } => {
-            balances::report_balances(&directives, account.as_deref(), format, &mut stdout)?;
+            balances::report_balances(&directives, account.as_deref(), format, &mut writer)?;
         }
         Report::Balsheet => {
-            balsheet::report_balsheet(&directives, format, &mut stdout)?;
+            balsheet::report_balsheet(&directives, format, &mut writer)?;
         }
         Report::Income => {
-            income::report_income(&directives, format, &mut stdout)?;
+            income::report_income(&directives, format, &mut writer)?;
         }
         Report::Journal { account, limit } => {
-            journal::report_journal(&directives, account.as_deref(), *limit, format, &mut stdout)?;
+            journal::report_journal(&directives, account.as_deref(), *limit, format, &mut writer)?;
         }
         Report::Holdings { account } => {
-            holdings::report_holdings(&directives, account.as_deref(), format, &mut stdout)?;
+            holdings::report_holdings(&directives, account.as_deref(), format, &mut writer)?;
         }
         Report::Networth {
             period,
@@ -255,23 +279,24 @@ pub fn run(file: &PathBuf, report: &Report, verbose: bool, format: &OutputFormat
                 account.as_deref(),
                 *no_zero,
                 format,
-                &mut stdout,
+                &mut writer,
             )?;
         }
         Report::Accounts => {
-            accounts::report_accounts(&directives, format, &mut stdout)?;
+            accounts::report_accounts(&directives, format, &mut writer)?;
         }
         Report::Commodities => {
-            commodities::report_commodities(&directives, format, &mut stdout)?;
+            commodities::report_commodities(&directives, format, &mut writer)?;
         }
         Report::Stats => {
-            stats::report_stats(&directives, file, &mut stdout)?;
+            stats::report_stats(&directives, file, &mut writer)?;
         }
         Report::Prices { commodity } => {
-            prices::report_prices(&directives, commodity.as_deref(), format, &mut stdout)?;
+            prices::report_prices(&directives, commodity.as_deref(), format, &mut writer)?;
         }
     }
 
+    writer.finish();
     Ok(())
 }
 

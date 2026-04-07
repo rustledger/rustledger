@@ -189,7 +189,8 @@ pub fn run(args: &Args) -> Result<()> {
         return run_interactive(file, &directives, &display_context, args);
     };
 
-    // Execute the query
+    // Batch query: no pager (matching Python bean-query behavior).
+    // Pager is only used in interactive REPL mode.
     let settings = ShellSettings::from_args(args, display_context);
     execute_query(&query_str, &directives, &settings, &mut io::stdout())
 }

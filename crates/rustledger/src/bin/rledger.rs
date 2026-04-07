@@ -329,8 +329,15 @@ fn main() -> ExitCode {
                 args.format = rustledger::cmd::report_cmd::OutputFormat::from_str_config(fmt);
             }
             let format = args.format.unwrap_or_default();
-            match rustledger::cmd::report_cmd::run(&file, report, args.verbose, &format) {
+            match rustledger::cmd::report_cmd::run(
+                &file,
+                report,
+                args.verbose,
+                &format,
+                args.no_pager,
+            ) {
                 Ok(()) => ExitCode::SUCCESS,
+                Err(e) if rustledger::pager::is_broken_pipe(&e) => ExitCode::SUCCESS,
                 Err(e) => {
                     eprintln!("error: {e:#}");
                     ExitCode::from(1)

@@ -5341,6 +5341,125 @@ fn test_postings_table_position_in_select_star() {
 }
 
 // ============================================================================
+// Aggregate Function Dispatch Tests (short-circuit + evaluate_function_on_values)
+// ============================================================================
+
+#[test]
+fn test_aggregate_context_non_aggregate_function_short_circuit() {
+    // QUARTER(date) in GROUP BY — no aggregate args, should use evaluate_expr
+    let directives = vec![
+        Directive::Open(Open::new(date(2024, 1, 1), "Expenses:Food")),
+        Directive::Open(Open::new(date(2024, 1, 1), "Assets:Cash")),
+        Directive::Transaction(
+            Transaction::new(date(2024, 1, 15), "Q1")
+                .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(10), "USD")))
+                .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(-10), "USD"))),
+        ),
+        Directive::Transaction(
+            Transaction::new(date(2024, 4, 15), "Q2")
+                .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(20), "USD")))
+                .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(-20), "USD"))),
+        ),
+    ];
+
+    let result = execute_query(
+        "SELECT quarter(date) AS q, sum(number) FROM #postings WHERE account = 'Expenses:Food' GROUP BY q",
+        &directives,
+    );
+
+    assert_eq!(result.len(), 2, "should have 2 quarters");
+    // Verify quarter values are 1 and 2
+    let quarters: Vec<_> = result.rows.iter().map(|r| &r[0]).collect();
+    assert!(quarters.contains(&&Value::Integer(1)), "should contain Q1");
+    assert!(quarters.contains(&&Value::Integer(2)), "should contain Q2");
+}
+
+#[test]
+fn test_aggregate_context_function_wrapping_aggregate() {
+    // YMONTH(MAX(date)) — arg contains aggregate, uses evaluate_function_on_values
+    // Use the direct query path (not #postings table) since MAX on direct path
+    // returns Value::Date correctly
+    let directives = vec![
+        Directive::Open(Open::new(date(2024, 1, 1), "Expenses:Food")),
+        Directive::Open(Open::new(date(2024, 1, 1), "Assets:Cash")),
+        Directive::Transaction(
+            Transaction::new(date(2024, 1, 15), "Jan")
+                .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(10), "USD")))
+                .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(-10), "USD"))),
+        ),
+        Directive::Transaction(
+            Transaction::new(date(2024, 3, 20), "Mar")
+                .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(20), "USD")))
+                .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(-20), "USD"))),
+        ),
+    ];
+
+    let result = execute_query(
+        "SELECT ymonth(max(date)) WHERE account = 'Expenses:Food'",
+        &directives,
+    );
+
+    assert_eq!(result.len(), 1);
+    assert_eq!(result.rows[0][0], Value::String("2024-03".to_string()));
+}
+
+#[test]
+fn test_aggregate_context_account_depth() {
+    // ACCOUNT_DEPTH in GROUP BY — uses short-circuit (no aggregate args)
+    let directives = vec![
+        Directive::Open(Open::new(date(2024, 1, 1), "Expenses:Food:Restaurant")),
+        Directive::Open(Open::new(date(2024, 1, 1), "Expenses:Transport")),
+        Directive::Open(Open::new(date(2024, 1, 1), "Assets:Cash")),
+        Directive::Transaction(
+            Transaction::new(date(2024, 1, 15), "Lunch")
+                .with_posting(Posting::new(
+                    "Expenses:Food:Restaurant",
+                    Amount::new(dec!(25), "USD"),
+                ))
+                .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(-25), "USD"))),
+        ),
+    ];
+
+    let result = execute_query(
+        "SELECT account_depth(account), count(*) GROUP BY account_depth(account)",
+        &directives,
+    );
+
+    // Should work without UnknownFunction error
+    assert!(!result.rows.is_empty());
+}
+
+#[test]
+fn test_aggregate_context_weight_on_values() {
+    // WEIGHT(sum(position)) — wraps aggregate, needs evaluate_function_on_values
+    let directives = vec![
+        Directive::Open(Open::new(date(2024, 1, 1), "Assets:Stock")),
+        Directive::Open(Open::new(date(2024, 1, 1), "Assets:Cash")),
+        Directive::Transaction(
+            Transaction::new(date(2024, 1, 15), "Buy")
+                .with_posting(
+                    Posting::new("Assets:Stock", Amount::new(dec!(10), "AAPL")).with_cost(
+                        CostSpec::empty()
+                            .with_number_per(dec!(150))
+                            .with_currency("USD"),
+                    ),
+                )
+                .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(-1500), "USD"))),
+        ),
+    ];
+
+    // Use direct path (not #postings table) for aggregate context
+    let query =
+        parse("SELECT account, weight(sum(position)) GROUP BY account").expect("should parse");
+    let mut executor = Executor::new(&directives);
+    let result = executor.execute(&query);
+    assert!(
+        result.is_ok(),
+        "weight(sum(position)) should not error: {result:?}"
+    );
+}
+
+// ============================================================================
 // System Table Error Message Tests
 // ============================================================================
 

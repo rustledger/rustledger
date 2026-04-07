@@ -23,13 +23,123 @@ rledger price [OPTIONS] [SYMBOL]...
 
 | Option | Description |
 |--------|-------------|
-| `-P, --profile <PROFILE>` | Use a profile from config |
 | `-f, --file <FILE>` | Beancount file to read commodities from |
 | `-c, --currency <CURRENCY>` | Base currency for price quotes [default: USD] |
 | `-d, --date <DATE>` | Date for prices (YYYY-MM-DD, defaults to today) |
 | `-b, --beancount` | Output as beancount price directives |
-| `-m, --mapping <MAPPING>` | Yahoo Finance symbol mapping (e.g., `VTI:VTI,BTC:BTC-USD`) |
+| `-s, --source <SOURCE>` | Use specific source (overrides mapping) |
+| `--source-cmd <CMD>` | Use ad-hoc external command as source |
+| `-m, --mapping <MAPPING>` | Symbol mapping (e.g., `VTI:VTI,BTC:BTC-USD`) |
+| `--list-sources` | List configured sources and exit |
+| `--no-cache` | Disable the price cache for this run |
+| `--clear-cache` | Clear the price cache before fetching |
 | `-v, --verbose` | Show verbose output |
+
+## Price Caching
+
+Prices are cached to disk to reduce API calls. By default, cached prices expire after **30 minutes** (matching Python `bean-price` behavior).
+
+- **Latest prices** (no `--date`) expire after the configured TTL
+- **Historical prices** (with `--date`) don't expire via TTL, but are pruned after 7 days of inactivity
+- Cache file location: platform cache directory (e.g., `~/.cache/rledger/prices.json` on Linux)
+
+### Configuration
+
+```toml
+[price]
+cache_ttl = 1800  # 30 minutes (default)
+# cache_ttl = 0   # disable caching
+```
+
+### Cache Control
+
+```bash
+# Skip cache for this run (always fetch fresh)
+rledger price AAPL --no-cache
+
+# Clear all cached prices, then fetch fresh
+rledger price AAPL --clear-cache
+
+# Clear cache without fetching
+rledger price --clear-cache
+```
+
+## Price Sources
+
+Rustledger supports 11 built-in price sources and external commands.
+
+### Built-in Sources (No API Key)
+
+| Source | Description |
+|--------|-------------|
+| `yahoo` (default) | Yahoo Finance — stocks, ETFs, crypto, forex |
+| `coinbase` | Coinbase — cryptocurrency spot prices |
+| `coincap` | CoinCap — cryptocurrency market data |
+| `ecb` | European Central Bank — EUR exchange rates |
+| `ratesapi` | Rates API — forex rates |
+| `tsp` | US Thrift Savings Plan fund prices |
+| `eastmoneyfund` | East Money Fund — Chinese fund prices |
+
+### Built-in Sources (API Key Required)
+
+| Source | Environment Variable |
+|--------|---------------------|
+| `oanda` | `OANDA_API_KEY` |
+| `alphavantage` | `ALPHAVANTAGE_API_KEY` |
+| `coinmarketcap` | `CMC_API_KEY` |
+| `quandl` | `QUANDL_API_KEY` |
+
+### Using a Specific Source
+
+```bash
+# Fetch from Coinbase instead of default (Yahoo)
+rledger price BTC -s coinbase
+
+# List all available sources
+rledger price --list-sources
+```
+
+### External Command Source
+
+Use any external script or program as a price source:
+
+```bash
+rledger price AAPL --source-cmd "my-price-fetcher"
+```
+
+The command receives the ticker as the first argument, plus `--currency <CURRENCY>` and (when provided) `--date <YYYY-MM-DD>` flags. It should output in one of:
+- Simple format: `150.00 USD`
+- Beancount format: `2024-01-15 price AAPL 150.00 USD`
+- JSON format: `{"price": "150.00", "currency": "USD"}`
+
+### Source Configuration
+
+Configure sources, mappings, and fallback chains in config:
+
+```toml
+[price]
+default_source = "yahoo"
+timeout = 30
+cache_ttl = 1800
+
+[price.mapping]
+# Simple ticker mapping
+BTC = "BTC-USD"
+
+# Source-specific mapping
+[price.mapping.ETH]
+source = "coinbase"
+ticker = "ETH"
+
+# Fallback chain
+[price.mapping.VTI]
+source = ["yahoo", "alphavantage"]
+
+# Custom external command source
+[price.sources.mybank]
+type = "command"
+command = ["python3", "/path/to/mybank-prices.py"]
+```
 
 ## Examples
 
@@ -37,11 +147,6 @@ rledger price [OPTIONS] [SYMBOL]...
 
 ```bash
 rledger price AAPL
-```
-
-Output:
-```
-2024-03-15 price AAPL 172.50 USD
 ```
 
 ### Historical Price
@@ -59,70 +164,34 @@ rledger price EUR -c USD
 ### Cryptocurrency
 
 ```bash
-# Use mapping to specify Yahoo Finance symbol for crypto
+rledger price BTC -s coinbase
+# or with Yahoo mapping
 rledger price BTC -m "BTC:BTC-USD"
 ```
 
 ### All Commodities from Ledger
 
 ```bash
-rledger price -f ledger.beancount
-```
-
-### Output as Beancount Directives
-
-```bash
-rledger price AAPL -b
-```
-
-### Symbol Mapping for Yahoo Finance
-
-```bash
-# Map BTC to Yahoo's BTC-USD symbol
-rledger price BTC -m "BTC:BTC-USD"
+rledger price -f ledger.beancount -b
 ```
 
 ### Append to Price File
 
 ```bash
-rledger price AAPL >> prices.beancount
+rledger price -f ledger.beancount -b >> prices.beancount
 ```
 
-### Update Script
-
-Create a daily price update script:
+### Daily Price Update Script
 
 ```bash
 #!/bin/bash
-# update-prices.sh
-
-COMMODITIES="AAPL GOOGL MSFT BTC ETH"
-PRICE_FILE="prices.beancount"
-
-for symbol in $COMMODITIES; do
-  rledger price "$symbol" >> "$PRICE_FILE"
-done
+rledger price -f ledger.beancount -b >> prices.beancount
 ```
 
 Run with cron:
 
 ```cron
 0 18 * * 1-5 /path/to/update-prices.sh
-```
-
-## Price Sources
-
-Prices are fetched from Yahoo Finance. For commodities with non-standard symbols, use the `-m` mapping option:
-
-```bash
-# Standard stock symbols work directly
-rledger price AAPL GOOGL MSFT
-
-# Cryptocurrencies need mapping to Yahoo symbols
-rledger price BTC ETH -m "BTC:BTC-USD,ETH:ETH-USD"
-
-# Mutual funds and ETFs
-rledger price VTI VXUS
 ```
 
 ## See Also

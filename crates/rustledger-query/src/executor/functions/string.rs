@@ -361,21 +361,14 @@ impl Executor<'_> {
         match (val, start, len) {
             (Value::String(s), Value::Integer(start), None) => {
                 let start = start.max(0) as usize;
-                if start >= s.len() {
-                    Ok(Value::String(String::new()))
-                } else {
-                    Ok(Value::String(s[start..].to_string()))
-                }
+                let result: String = s.chars().skip(start).collect();
+                Ok(Value::String(result))
             }
             (Value::String(s), Value::Integer(start), Some(Value::Integer(len))) => {
                 let start = start.max(0) as usize;
                 let len = len.max(0) as usize;
-                if start >= s.len() {
-                    Ok(Value::String(String::new()))
-                } else {
-                    let end = (start + len).min(s.len());
-                    Ok(Value::String(s[start..end].to_string()))
-                }
+                let result: String = s.chars().skip(start).take(len).collect();
+                Ok(Value::String(result))
             }
             _ => Err(QueryError::Type(
                 "SUBSTR expects (string, int, [int])".to_string(),

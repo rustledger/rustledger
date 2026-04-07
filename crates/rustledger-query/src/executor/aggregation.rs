@@ -374,11 +374,14 @@ impl<'a> Executor<'a> {
                     }
                     _ => {
                         // Non-aggregate function - check whether any argument contains
-                        // an aggregate sub-expression. If none do, use the first posting
-                        // context to evaluate the whole function via evaluate_expr, which
-                        // preserves access to posting/transaction metadata (META, etc.).
+                        // an aggregate sub-expression (SUM, COUNT, MIN, MAX, FIRST, LAST,
+                        // AVG, or any expression recursively containing one of those).
+                        // If none do, use the first posting context to evaluate the whole
+                        // function via evaluate_expr, which preserves access to
+                        // posting/transaction metadata (META, ENTRY_META, etc.).
                         // If any arg has an aggregate, fall back to the two-step approach:
-                        // evaluate args first then apply function to pre-evaluated values.
+                        // evaluate args first (resolving aggregates) then apply function
+                        // to pre-evaluated values via evaluate_function_on_values.
                         let has_aggregate_arg = func.args.iter().any(Self::is_aggregate_expr);
                         if !has_aggregate_arg {
                             if let Some(ctx) = group.first() {

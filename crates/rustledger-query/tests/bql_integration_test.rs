@@ -6437,7 +6437,7 @@ fn make_date_function_directives() -> Vec<Directive> {
         Directive::Open(Open::new(date(2024, 1, 1), "Assets:Bank")),
         Directive::Open(Open::new(date(2024, 1, 1), "Expenses:Food")),
         Directive::Transaction(
-            Transaction::new(date(2024, 4, 15), "Q2 purchase") // April 15 = Q2, weekday=Mon(0)
+            Transaction::new(date(2024, 4, 15), "Q2 purchase") // April 15 = Q2, Monday (weekday=0 in ISO convention where Mon=0)
                 .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(50), "USD")))
                 .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(-50), "USD"))),
         ),

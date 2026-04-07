@@ -5340,7 +5340,9 @@ fn test_postings_table_position_in_select_star() {
     );
 }
 
-
+// ============================================================================
+// System Table Error Message Tests
+// ============================================================================
 
 #[test]
 fn test_unknown_system_table_error_lists_all_tables() {

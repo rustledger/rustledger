@@ -131,7 +131,7 @@ fn parse_date(stream: &mut TokenStream<'_>) -> ParseRes<NaiveDate> {
     Err(())
 }
 
-/// Zero-pad single-digit month/day and normalise '/' separators to '-'.
+/// Zero-pad single-digit month/day and normalize '/' separators to '-'.
 fn normalize_date_str(s: &str) -> String {
     // Separator can be '-' or '/'; the regex guarantees three parts.
     let s = s.replace('/', "-");

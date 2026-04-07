@@ -3,7 +3,7 @@
 //! Tests cover all directive types, error recovery, edge cases, and real-world scenarios.
 
 use rustledger_core::Directive;
-use rustledger_parser::{ParseResult, parse, parse_directives};
+use rustledger_parser::{ParseErrorKind, ParseResult, parse, parse_directives};
 
 // ============================================================================
 // Helper Functions
@@ -506,10 +506,20 @@ fn test_error_invalid_leap_year_date() {
         !result.errors.is_empty(),
         "expected error for invalid leap-year date"
     );
-    let msg = result.errors[0].message();
+    let err = &result.errors[0];
+    assert!(
+        matches!(err.kind, ParseErrorKind::InvalidDateValue(_)),
+        "expected InvalidDateValue error kind, got: {:?}",
+        err.kind
+    );
+    let msg = err.message();
     assert!(
         msg.contains("day") && msg.contains("out of range"),
         "expected error mentioning 'day' and 'out of range', got: '{msg}'"
+    );
+    assert!(
+        msg.contains("2023-02"),
+        "expected error mentioning '2023-02', got: '{msg}'"
     );
 }
 
@@ -522,7 +532,13 @@ fn test_error_invalid_date_month_out_of_range() {
         !result.errors.is_empty(),
         "expected error for month out of range"
     );
-    let msg = result.errors[0].message();
+    let err = &result.errors[0];
+    assert!(
+        matches!(err.kind, ParseErrorKind::InvalidDateValue(_)),
+        "expected InvalidDateValue error kind, got: {:?}",
+        err.kind
+    );
+    let msg = err.message();
     assert!(
         msg.contains("month") && msg.contains("out of range"),
         "expected error mentioning 'month' and 'out of range', got: '{msg}'"

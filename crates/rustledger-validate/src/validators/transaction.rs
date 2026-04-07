@@ -63,6 +63,36 @@ pub fn validate_transaction_structure(
         ));
     }
 
+    // Check for negative cost amounts
+    for posting in &txn.postings {
+        if let Some(cost) = &posting.cost {
+            if let Some(per) = cost.number_per
+                && per < Decimal::ZERO
+            {
+                errors.push(ValidationError::new(
+                    ErrorCode::NegativeCost,
+                    format!(
+                        "Cost per unit is negative ({per}) in posting to {}; cost must be non-negative",
+                        posting.account
+                    ),
+                    txn.date,
+                ));
+            }
+            if let Some(total) = cost.number_total
+                && total < Decimal::ZERO
+            {
+                errors.push(ValidationError::new(
+                    ErrorCode::NegativeCost,
+                    format!(
+                        "Total cost is negative ({total}) in posting to {}; cost must be non-negative",
+                        posting.account
+                    ),
+                    txn.date,
+                ));
+            }
+        }
+    }
+
     true
 }
 

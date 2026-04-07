@@ -398,6 +398,19 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
                 *residuals.entry(currency.clone()).or_default() += interpolated;
             }
         } else {
+            // Check for ambiguous elision: more unassigned missing postings than
+            // available residual currencies means multiple postings would all be
+            // assigned to the same currency, which is ambiguous and an error.
+            if unassigned_missing.len() > non_zero_residuals.len()
+                && !non_zero_residuals.is_empty()
+            {
+                let (currency, _) = &non_zero_residuals[0];
+                return Err(InterpolationError::MultipleMissing {
+                    currency: currency.clone(),
+                    count: unassigned_missing.len(),
+                });
+            }
+
             // Standard case: assign one currency per missing posting
             for (i, idx) in unassigned_missing.iter().enumerate() {
                 if i < non_zero_residuals.len() {
@@ -583,17 +596,35 @@ mod tests {
             .with_posting(Posting::auto("Assets:Cash"))
             .with_posting(Posting::auto("Assets:Bank"));
 
-        // This should work - both will try to absorb the same residual
-        // but only one can be assigned
+        // Multiple unassigned missing postings with a single residual currency
+        // is ambiguous and should return MultipleMissing error.
         let result = interpolate(&txn);
-        // The current implementation handles this by assigning them sequentially
-        assert!(result.is_ok());
+        assert!(
+            matches!(result, Err(InterpolationError::MultipleMissing { .. })),
+            "expected MultipleMissing error, got: {result:?}"
+        );
     }
 
-    // =========================================================================
-    // Cost-based interpolation tests
-    // These tests are based on beancount's booking_full_test.py
-    // =========================================================================
+    #[test]
+    fn test_interpolate_multiple_missing_different_currencies_ok() {
+        // Two elided postings but two residual currencies - each gets one
+        let txn = Transaction::new(date(2024, 1, 15), "Multi-currency")
+            .with_posting(Posting::new(
+                "Assets:USD",
+                Amount::new(dec!(100.00), "USD"),
+            ))
+            .with_posting(Posting::new(
+                "Assets:EUR",
+                Amount::new(dec!(85.00), "EUR"),
+            ))
+            .with_posting(Posting::auto("Liabilities:CreditCard"))
+            .with_posting(Posting::auto("Equity:Exchange"));
+
+        // Two unassigned missing, two non-zero residuals - this is unambiguous
+        let result = interpolate(&txn);
+        assert!(result.is_ok(), "expected success for different-currency elision, got: {result:?}");
+    }
+
 
     #[test]
     fn test_interpolate_with_per_unit_cost() {

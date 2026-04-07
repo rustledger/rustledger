@@ -50,6 +50,8 @@ pub enum ErrorCode {
     AmbiguousLotMatch,
     /// E4004: Reduction would create negative inventory.
     NegativeInventory,
+    /// E4005: Cost amount is negative (cost must be non-negative).
+    NegativeCost,
 
     // === Currency Errors (E5xxx) ===
     /// E5001: Currency not declared (when strict mode enabled).
@@ -108,6 +110,7 @@ impl ErrorCode {
             Self::InsufficientUnits => "E4002",
             Self::AmbiguousLotMatch => "E4003",
             Self::NegativeInventory => "E4004",
+            Self::NegativeCost => "E4005",
             // Currency errors
             Self::UndeclaredCurrency => "E5001",
             Self::CurrencyNotAllowed => "E5002",

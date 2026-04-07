@@ -245,6 +245,79 @@ fn test_e3004_single_posting() {
 }
 
 #[test]
+fn test_e4005_negative_cost_per_unit() {
+    let directives = vec![
+        Directive::Open(Open::new(date(2024, 1, 1), "Assets:Stock")),
+        Directive::Open(Open::new(date(2024, 1, 1), "Assets:Checking")),
+        Directive::Transaction(
+            Transaction::new(date(2024, 1, 15), "Buy with negative cost")
+                .with_posting(
+                    Posting::new("Assets:Stock", Amount::new(dec!(10), "AAPL")).with_cost(
+                        rustledger_core::CostSpec::empty().with_number_per(dec!(-150)),
+                    ),
+                )
+                .with_posting(Posting::auto("Assets:Checking")),
+        ),
+    ];
+
+    let errors = validate_directives(&directives);
+    assert!(
+        errors.contains(&ErrorCode::NegativeCost),
+        "expected E4005 NegativeCost error for negative per-unit cost"
+    );
+}
+
+#[test]
+fn test_e4005_negative_total_cost() {
+    let directives = vec![
+        Directive::Open(Open::new(date(2024, 1, 1), "Assets:Stock")),
+        Directive::Open(Open::new(date(2024, 1, 1), "Assets:Checking")),
+        Directive::Transaction(
+            Transaction::new(date(2024, 1, 15), "Buy with negative total cost")
+                .with_posting(
+                    Posting::new("Assets:Stock", Amount::new(dec!(10), "AAPL")).with_cost(
+                        rustledger_core::CostSpec::empty().with_number_total(dec!(-1500)),
+                    ),
+                )
+                .with_posting(Posting::auto("Assets:Checking")),
+        ),
+    ];
+
+    let errors = validate_directives(&directives);
+    assert!(
+        errors.contains(&ErrorCode::NegativeCost),
+        "expected E4005 NegativeCost error for negative total cost"
+    );
+}
+
+#[test]
+fn test_e4005_positive_cost_ok() {
+    let directives = vec![
+        Directive::Open(Open::new(date(2024, 1, 1), "Assets:Stock")),
+        Directive::Open(Open::new(date(2024, 1, 1), "Assets:Checking")),
+        Directive::Transaction(
+            Transaction::new(date(2024, 1, 15), "Buy with positive cost")
+                .with_posting(
+                    Posting::new("Assets:Stock", Amount::new(dec!(10), "AAPL")).with_cost(
+                        rustledger_core::CostSpec::empty().with_number_per(dec!(150)),
+                    ),
+                )
+                .with_posting(Posting::new(
+                    "Assets:Checking",
+                    Amount::new(dec!(-1500), "USD"),
+                )),
+        ),
+    ];
+
+    let errors = validate_directives(&directives);
+    assert!(
+        !errors.contains(&ErrorCode::NegativeCost),
+        "expected no NegativeCost error for positive cost"
+    );
+}
+
+
+#[test]
 fn test_valid_balanced_transaction() {
     let directives = vec![
         Directive::Open(Open::new(date(2024, 1, 1), "Assets:Bank")),

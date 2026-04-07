@@ -6425,3 +6425,294 @@ fn test_issue_632_user_table_takes_precedence_over_alias() {
         panic!("Expected String value for name column");
     }
 }
+
+// ============================================================================
+// Tests for evaluate_function_on_values completeness (issue: missing functions)
+// These tests exercise functions through the table path (FROM #postings) and
+// aggregate context which both use evaluate_function_on_values.
+// ============================================================================
+
+fn make_date_function_directives() -> Vec<Directive> {
+    vec![
+        Directive::Open(Open::new(date(2024, 1, 1), "Assets:Bank")),
+        Directive::Open(Open::new(date(2024, 1, 1), "Expenses:Food")),
+        Directive::Transaction(
+            Transaction::new(date(2024, 4, 15), "Q2 purchase") // April 15 = Q2, weekday=Mon(0)
+                .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(50), "USD")))
+                .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(-50), "USD"))),
+        ),
+    ]
+}
+
+#[test]
+fn test_quarter_via_table_path() {
+    // FROM #postings forces evaluate_function_on_values code path
+    let directives = make_date_function_directives();
+    let result = execute_query("SELECT quarter(date) FROM #postings LIMIT 1", &directives);
+
+    assert!(!result.is_empty());
+    assert_eq!(result.rows[0][0], Value::Integer(2)); // April is Q2
+}
+
+#[test]
+fn test_weekday_via_table_path() {
+    // April 15, 2024 is a Monday (weekday = 0 in beancount convention)
+    let directives = make_date_function_directives();
+    let result = execute_query("SELECT weekday(date) FROM #postings LIMIT 1", &directives);
+
+    assert!(!result.is_empty());
+    assert_eq!(result.rows[0][0], Value::Integer(0)); // Monday = 0
+}
+
+#[test]
+fn test_ymonth_via_table_path() {
+    let directives = make_date_function_directives();
+    let result = execute_query("SELECT ymonth(date) FROM #postings LIMIT 1", &directives);
+
+    assert!(!result.is_empty());
+    assert_eq!(
+        result.rows[0][0],
+        Value::String("2024-04".to_string())
+    );
+}
+
+#[test]
+fn test_date_diff_via_table_path() {
+    let directives = make_date_function_directives();
+    let result = execute_query(
+        "SELECT date_diff(date, date('2024-01-01')) FROM #postings LIMIT 1",
+        &directives,
+    );
+
+    assert!(!result.is_empty());
+    // April 15 - January 1 = 105 days
+    assert_eq!(result.rows[0][0], Value::Integer(105));
+}
+
+#[test]
+fn test_date_trunc_via_table_path() {
+    let directives = make_date_function_directives();
+    let result = execute_query(
+        "SELECT date_trunc('month', date) FROM #postings LIMIT 1",
+        &directives,
+    );
+
+    assert!(!result.is_empty());
+    assert_eq!(result.rows[0][0], Value::Date(date(2024, 4, 1)));
+}
+
+#[test]
+fn test_date_part_via_table_path() {
+    let directives = make_date_function_directives();
+    let result = execute_query(
+        "SELECT date_part('quarter', date) FROM #postings LIMIT 1",
+        &directives,
+    );
+
+    assert!(!result.is_empty());
+    assert_eq!(result.rows[0][0], Value::Integer(2));
+}
+
+#[test]
+fn test_grep_via_table_path() {
+    let directives = make_test_directives();
+    let result = execute_query(
+        r#"SELECT grep("Bank", account) FROM #postings WHERE account = 'Assets:Bank:Checking' LIMIT 1"#,
+        &directives,
+    );
+
+    assert!(!result.is_empty());
+    assert_eq!(result.rows[0][0], Value::String("Bank".to_string()));
+}
+
+#[test]
+fn test_endswith_via_table_path() {
+    let directives = make_test_directives();
+    let result = execute_query(
+        r#"SELECT endswith(account, "Checking") FROM #postings WHERE account = 'Assets:Bank:Checking' LIMIT 1"#,
+        &directives,
+    );
+
+    assert!(!result.is_empty());
+    assert_eq!(result.rows[0][0], Value::Boolean(true));
+}
+
+#[test]
+fn test_startswith_via_table_path() {
+    let directives = make_test_directives();
+    let result = execute_query(
+        r#"SELECT startswith(account, "Assets") FROM #postings WHERE account = 'Assets:Bank:Checking' LIMIT 1"#,
+        &directives,
+    );
+
+    assert!(!result.is_empty());
+    assert_eq!(result.rows[0][0], Value::Boolean(true));
+}
+
+#[test]
+fn test_account_depth_via_table_path() {
+    let directives = make_test_directives();
+    // Assets:Bank:Checking has depth 3
+    let result = execute_query(
+        "SELECT account_depth(account) FROM #postings WHERE account = 'Assets:Bank:Checking' LIMIT 1",
+        &directives,
+    );
+
+    assert!(!result.is_empty());
+    assert_eq!(result.rows[0][0], Value::Integer(3));
+}
+
+#[test]
+fn test_getitem_via_aggregate_path() {
+    // getitem wrapping aggregate: getitem(sum(position), "USD")
+    let directives = make_test_directives();
+    let result = execute_query(
+        r#"SELECT getitem(sum(position), "USD") as usd_total
+           WHERE account = 'Assets:Bank:Checking'
+           GROUP BY account"#,
+        &directives,
+    );
+
+    assert!(!result.is_empty());
+    if let Value::Amount(a) = &result.rows[0][0] {
+        assert_eq!(a.currency.as_str(), "USD");
+    } else {
+        panic!("Expected Amount, got {:?}", result.rows[0][0]);
+    }
+}
+
+#[test]
+fn test_weight_via_aggregate_path() {
+    // weight applied to a cost-basis position via the aggregate path
+    // first(position) gives us a single position from the group
+    let directives = vec![
+        Directive::Open(Open::new(date(2024, 1, 1), "Assets:Brokerage")),
+        Directive::Open(Open::new(date(2024, 1, 1), "Assets:Cash")),
+        Directive::Transaction(
+            Transaction::new(date(2024, 1, 15), "Buy AAPL")
+                .with_posting(
+                    Posting::new("Assets:Brokerage", Amount::new(dec!(10), "AAPL")).with_cost(
+                        CostSpec::empty()
+                            .with_number_per(dec!(150))
+                            .with_currency("USD"),
+                    ),
+                )
+                .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(-1500), "USD"))),
+        ),
+    ];
+    // weight(first(position)) - first() aggregates then weight applies to the Position
+    let result = execute_query(
+        r#"SELECT number(weight(first(position))) as w
+           WHERE account = 'Assets:Brokerage'
+           GROUP BY account"#,
+        &directives,
+    );
+
+    assert!(!result.is_empty());
+    if let Value::Number(n) = &result.rows[0][0] {
+        assert_eq!(*n, dec!(1500));
+    } else {
+        panic!("Expected Number 1500, got {:?}", result.rows[0][0]);
+    }
+}
+
+#[test]
+fn test_open_date_via_table_path() {
+    let directives = make_test_directives();
+    // Open directives are created at 2024-01-01
+    let result = execute_query(
+        "SELECT open_date(account) FROM #postings WHERE account = 'Assets:Bank:Checking' LIMIT 1",
+        &directives,
+    );
+
+    assert!(!result.is_empty());
+    assert_eq!(result.rows[0][0], Value::Date(date(2024, 1, 1)));
+}
+
+#[test]
+fn test_close_date_via_table_path() {
+    let directives = vec![
+        Directive::Open(Open::new(date(2024, 1, 1), "Assets:Bank")),
+        Directive::Close(Close::new(date(2024, 12, 31), "Assets:Bank")),
+        Directive::Open(Open::new(date(2024, 1, 1), "Expenses:Food")),
+        Directive::Transaction(
+            Transaction::new(date(2024, 6, 1), "Test")
+                .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(10), "USD")))
+                .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(-10), "USD"))),
+        ),
+    ];
+    let result = execute_query(
+        "SELECT close_date(account) FROM #postings WHERE account = 'Assets:Bank' LIMIT 1",
+        &directives,
+    );
+
+    assert!(!result.is_empty());
+    assert_eq!(result.rows[0][0], Value::Date(date(2024, 12, 31)));
+}
+
+#[test]
+fn test_quarter_via_aggregate_path() {
+    // quarter() wrapping aggregate: quarter(max(date))
+    let directives = make_date_function_directives();
+    let result = execute_query(
+        "SELECT quarter(max(date)) as q GROUP BY account",
+        &directives,
+    );
+
+    assert!(!result.is_empty());
+    assert_eq!(result.rows[0][0], Value::Integer(2));
+}
+
+#[test]
+fn test_grep_via_aggregate_path() {
+    // grep wrapping aggregate args
+    let directives = make_test_directives();
+    let result = execute_query(
+        r#"SELECT grep("Bank", first(account)) as matched
+           WHERE account = 'Assets:Bank:Checking'
+           GROUP BY account"#,
+        &directives,
+    );
+
+    assert!(!result.is_empty());
+    assert_eq!(result.rows[0][0], Value::String("Bank".to_string()));
+}
+
+#[test]
+fn test_subst_via_table_path() {
+    let directives = make_test_directives();
+    let result = execute_query(
+        r#"SELECT subst("Bank", "Financial", account) FROM #postings WHERE account = 'Assets:Bank:Checking' LIMIT 1"#,
+        &directives,
+    );
+
+    assert!(!result.is_empty());
+    assert_eq!(
+        result.rows[0][0],
+        Value::String("Assets:Financial:Checking".to_string())
+    );
+}
+
+#[test]
+fn test_splitcomp_via_table_path() {
+    let directives = make_test_directives();
+    let result = execute_query(
+        r#"SELECT splitcomp(account, ":", 0) FROM #postings WHERE account = 'Assets:Bank:Checking' LIMIT 1"#,
+        &directives,
+    );
+
+    assert!(!result.is_empty());
+    assert_eq!(result.rows[0][0], Value::String("Assets".to_string()));
+}
+
+#[test]
+fn test_maxwidth_via_table_path() {
+    let directives = make_test_directives();
+    let result = execute_query(
+        "SELECT maxwidth(account, 10) FROM #postings WHERE account = 'Assets:Bank:Checking' LIMIT 1",
+        &directives,
+    );
+
+    assert!(!result.is_empty());
+    assert_eq!(result.rows[0][0], Value::String("Assets:...".to_string()));
+}

@@ -1056,6 +1056,791 @@ impl<'a> Executor<'a> {
                 Self::require_args_count(&name_upper, args, 1)?;
                 Self::value_to_bool(&args[0])
             }
+            // Date functions missing from original evaluate_function_on_values
+            "QUARTER" => {
+                Self::require_args_count(&name_upper, args, 1)?;
+                match &args[0] {
+                    Value::Date(d) => {
+                        let quarter = (d.month() - 1) / 3 + 1;
+                        Ok(Value::Integer(quarter.into()))
+                    }
+                    _ => Err(QueryError::Type("QUARTER expects a date".to_string())),
+                }
+            }
+            "WEEKDAY" => {
+                Self::require_args_count(&name_upper, args, 1)?;
+                match &args[0] {
+                    Value::Date(d) => {
+                        Ok(Value::Integer(d.weekday().num_days_from_monday().into()))
+                    }
+                    _ => Err(QueryError::Type("WEEKDAY expects a date".to_string())),
+                }
+            }
+            "YMONTH" => {
+                Self::require_args_count(&name_upper, args, 1)?;
+                match &args[0] {
+                    Value::Date(d) => Ok(Value::String(format!(
+                        "{:04}-{:02}",
+                        d.year(),
+                        d.month()
+                    ))),
+                    _ => Err(QueryError::Type("YMONTH expects a date".to_string())),
+                }
+            }
+            // Extended date functions
+            "DATE" => {
+                match args.len() {
+                    1 => match &args[0] {
+                        Value::String(s) => {
+                            use rustledger_core::NaiveDate;
+                            NaiveDate::parse_from_str(s, "%Y-%m-%d")
+                                .map(Value::Date)
+                                .map_err(|_| {
+                                    QueryError::Type(format!(
+                                        "DATE: cannot parse '{s}' as date"
+                                    ))
+                                })
+                        }
+                        Value::Date(d) => Ok(Value::Date(*d)),
+                        _ => Err(QueryError::Type(
+                            "DATE: argument must be a string or date".to_string(),
+                        )),
+                    },
+                    3 => {
+                        let year = match &args[0] {
+                            Value::Integer(i) => *i as i32,
+                            Value::Number(n) => {
+                                use rust_decimal::prelude::ToPrimitive;
+                                n.to_i32().ok_or_else(|| {
+                                    QueryError::Type(
+                                        "DATE: year must be an integer".to_string(),
+                                    )
+                                })?
+                            }
+                            _ => {
+                                return Err(QueryError::Type(
+                                    "DATE: year must be an integer".to_string(),
+                                ))
+                            }
+                        };
+                        let month = match &args[1] {
+                            Value::Integer(i) => *i as u32,
+                            Value::Number(n) => {
+                                use rust_decimal::prelude::ToPrimitive;
+                                n.to_u32().ok_or_else(|| {
+                                    QueryError::Type(
+                                        "DATE: month must be an integer".to_string(),
+                                    )
+                                })?
+                            }
+                            _ => {
+                                return Err(QueryError::Type(
+                                    "DATE: month must be an integer".to_string(),
+                                ))
+                            }
+                        };
+                        let day = match &args[2] {
+                            Value::Integer(i) => *i as u32,
+                            Value::Number(n) => {
+                                use rust_decimal::prelude::ToPrimitive;
+                                n.to_u32().ok_or_else(|| {
+                                    QueryError::Type(
+                                        "DATE: day must be an integer".to_string(),
+                                    )
+                                })?
+                            }
+                            _ => {
+                                return Err(QueryError::Type(
+                                    "DATE: day must be an integer".to_string(),
+                                ))
+                            }
+                        };
+                        use rustledger_core::NaiveDate;
+                        NaiveDate::from_ymd_opt(year, month, day)
+                            .map(Value::Date)
+                            .ok_or_else(|| {
+                                QueryError::Type(format!(
+                                    "DATE: invalid date {year}-{month}-{day}"
+                                ))
+                            })
+                    }
+                    _ => Err(QueryError::InvalidArguments(
+                        "DATE".to_string(),
+                        "expected 1 or 3 arguments".to_string(),
+                    )),
+                }
+            }
+            "DATE_DIFF" => {
+                Self::require_args_count(&name_upper, args, 2)?;
+                let date1 = match &args[0] {
+                    Value::Date(d) => *d,
+                    _ => {
+                        return Err(QueryError::Type(
+                            "DATE_DIFF: first argument must be a date".to_string(),
+                        ))
+                    }
+                };
+                let date2 = match &args[1] {
+                    Value::Date(d) => *d,
+                    _ => {
+                        return Err(QueryError::Type(
+                            "DATE_DIFF: second argument must be a date".to_string(),
+                        ))
+                    }
+                };
+                let diff = date1.signed_duration_since(date2).num_days();
+                Ok(Value::Integer(diff))
+            }
+            "DATE_ADD" => {
+                Self::require_args_count(&name_upper, args, 2)?;
+                let date = match &args[0] {
+                    Value::Date(d) => *d,
+                    _ => {
+                        return Err(QueryError::Type(
+                            "DATE_ADD: first argument must be a date".to_string(),
+                        ))
+                    }
+                };
+                let result = match &args[1] {
+                    Value::Integer(days) => date + chrono::Duration::days(*days),
+                    Value::Number(n) => {
+                        use rust_decimal::prelude::ToPrimitive;
+                        let days = n.to_i64().ok_or_else(|| {
+                            QueryError::Type(
+                                "DATE_ADD: days must be an integer".to_string(),
+                            )
+                        })?;
+                        date + chrono::Duration::days(days)
+                    }
+                    Value::Interval(interval) => interval
+                        .add_to_date(date)
+                        .ok_or_else(|| {
+                            QueryError::Evaluation("DATE_ADD: interval overflow".to_string())
+                        })?,
+                    _ => {
+                        return Err(QueryError::Type(
+                            "DATE_ADD: second argument must be an integer or interval"
+                                .to_string(),
+                        ))
+                    }
+                };
+                Ok(Value::Date(result))
+            }
+            "DATE_TRUNC" => {
+                Self::require_args_count(&name_upper, args, 2)?;
+                let field = match &args[0] {
+                    Value::String(s) => s.to_uppercase(),
+                    _ => {
+                        return Err(QueryError::Type(
+                            "DATE_TRUNC: first argument must be a string".to_string(),
+                        ))
+                    }
+                };
+                let date = match &args[1] {
+                    Value::Date(d) => *d,
+                    _ => {
+                        return Err(QueryError::Type(
+                            "DATE_TRUNC: second argument must be a date".to_string(),
+                        ))
+                    }
+                };
+                use rustledger_core::NaiveDate;
+                let result = match field.as_str() {
+                    "YEAR" => NaiveDate::from_ymd_opt(date.year(), 1, 1),
+                    "QUARTER" => {
+                        let quarter = (date.month() - 1) / 3;
+                        NaiveDate::from_ymd_opt(date.year(), quarter * 3 + 1, 1)
+                    }
+                    "MONTH" => NaiveDate::from_ymd_opt(date.year(), date.month(), 1),
+                    "WEEK" => {
+                        let days_from_monday =
+                            i64::from(date.weekday().num_days_from_monday());
+                        Some(date - chrono::Duration::days(days_from_monday))
+                    }
+                    "DAY" => Some(date),
+                    _ => {
+                        return Err(QueryError::Type(format!(
+                            "DATE_TRUNC: unknown field '{field}', expected YEAR, QUARTER, MONTH, WEEK, or DAY"
+                        )))
+                    }
+                };
+                result
+                    .map(Value::Date)
+                    .ok_or_else(|| QueryError::Type("DATE_TRUNC: invalid date result".to_string()))
+            }
+            "DATE_PART" => {
+                Self::require_args_count(&name_upper, args, 2)?;
+                let field = match &args[0] {
+                    Value::String(s) => s.to_uppercase(),
+                    _ => {
+                        return Err(QueryError::Type(
+                            "DATE_PART: first argument must be a string".to_string(),
+                        ))
+                    }
+                };
+                let date = match &args[1] {
+                    Value::Date(d) => *d,
+                    _ => {
+                        return Err(QueryError::Type(
+                            "DATE_PART: second argument must be a date".to_string(),
+                        ))
+                    }
+                };
+                let result = match field.as_str() {
+                    "YEAR" => i64::from(date.year()),
+                    "MONTH" => i64::from(date.month()),
+                    "DAY" => i64::from(date.day()),
+                    "QUARTER" => i64::from((date.month() - 1) / 3 + 1),
+                    "WEEK" => i64::from(date.iso_week().week()),
+                    "WEEKDAY" | "DOW" => i64::from(date.weekday().num_days_from_monday()),
+                    "DOY" => i64::from(date.ordinal()),
+                    _ => {
+                        return Err(QueryError::Type(format!(
+                            "DATE_PART: unknown field '{field}', expected YEAR, MONTH, DAY, QUARTER, WEEK, WEEKDAY, DOW, or DOY"
+                        )))
+                    }
+                };
+                Ok(Value::Integer(result))
+            }
+            "PARSE_DATE" => {
+                Self::require_args_count(&name_upper, args, 2)?;
+                let string = match &args[0] {
+                    Value::String(s) => s.as_str(),
+                    _ => {
+                        return Err(QueryError::Type(
+                            "PARSE_DATE: first argument must be a string".to_string(),
+                        ))
+                    }
+                };
+                let format = match &args[1] {
+                    Value::String(s) => s.as_str(),
+                    _ => {
+                        return Err(QueryError::Type(
+                            "PARSE_DATE: second argument must be a format string".to_string(),
+                        ))
+                    }
+                };
+                use rustledger_core::NaiveDate;
+                NaiveDate::parse_from_str(string, format)
+                    .map(Value::Date)
+                    .map_err(|e| {
+                        QueryError::Type(format!(
+                            "PARSE_DATE: cannot parse '{string}' with format '{format}': {e}"
+                        ))
+                    })
+            }
+            "DATE_BIN" => {
+                if args.len() != 3 {
+                    return Err(QueryError::InvalidArguments(
+                        "DATE_BIN".to_string(),
+                        "expected 3 arguments".to_string(),
+                    ));
+                }
+                let stride = match &args[0] {
+                    Value::String(s) => s.clone(),
+                    Value::Integer(days) => format!("{days} days"),
+                    _ => {
+                        return Err(QueryError::Type(
+                            "DATE_BIN: first argument must be a stride string or integer days"
+                                .to_string(),
+                        ))
+                    }
+                };
+                let source = match &args[1] {
+                    Value::Date(d) => *d,
+                    _ => {
+                        return Err(QueryError::Type(
+                            "DATE_BIN: second argument must be a date".to_string(),
+                        ))
+                    }
+                };
+                let origin = match &args[2] {
+                    Value::Date(d) => *d,
+                    _ => {
+                        return Err(QueryError::Type(
+                            "DATE_BIN: third argument must be a date".to_string(),
+                        ))
+                    }
+                };
+                let stride_lower = stride.to_lowercase();
+                let parts: Vec<&str> = stride_lower.split_whitespace().collect();
+                let (amount, unit) = match parts.as_slice() {
+                    [num, unit] => {
+                        let n: i64 = num.parse().map_err(|_| {
+                            QueryError::Type(format!(
+                                "DATE_BIN: invalid stride number '{num}'"
+                            ))
+                        })?;
+                        (n, *unit)
+                    }
+                    [unit] => (1, *unit),
+                    _ => {
+                        return Err(QueryError::Type(format!(
+                            "DATE_BIN: invalid stride format '{stride}'"
+                        )))
+                    }
+                };
+                use rustledger_core::NaiveDate;
+                let days_diff = (source - origin).num_days();
+                let binned = match unit.trim_end_matches('s') {
+                    "day" => {
+                        let bucket = days_diff / amount;
+                        origin + chrono::Duration::days(bucket * amount)
+                    }
+                    "week" => {
+                        let days_per_stride = amount * 7;
+                        let bucket = days_diff / days_per_stride;
+                        origin + chrono::Duration::days(bucket * days_per_stride)
+                    }
+                    "month" => {
+                        let months_diff = (source.year() - origin.year()) * 12
+                            + (source.month() as i32)
+                            - (origin.month() as i32);
+                        let bucket = months_diff / (amount as i32);
+                        let total_months =
+                            (origin.month() as i32) - 1 + bucket * (amount as i32);
+                        let year = origin.year() + total_months / 12;
+                        let month = (total_months % 12 + 1) as u32;
+                        NaiveDate::from_ymd_opt(year, month, 1).unwrap_or(origin)
+                    }
+                    "quarter" => {
+                        let months_diff = (source.year() - origin.year()) * 12
+                            + (source.month() as i32)
+                            - (origin.month() as i32);
+                        let quarters = months_diff / (3 * amount as i32);
+                        let total_months = (origin.month() as i32) - 1
+                            + quarters * 3 * (amount as i32);
+                        let year = origin.year() + total_months / 12;
+                        let month = (total_months % 12 + 1) as u32;
+                        NaiveDate::from_ymd_opt(year, month, 1).unwrap_or(origin)
+                    }
+                    "year" => {
+                        let years_diff = source.year() - origin.year();
+                        let bucket = years_diff / (amount as i32);
+                        let year = origin.year() + bucket * (amount as i32);
+                        NaiveDate::from_ymd_opt(year, origin.month(), origin.day())
+                            .unwrap_or(origin)
+                    }
+                    _ => {
+                        return Err(QueryError::Type(format!(
+                            "DATE_BIN: unknown unit '{unit}', expected day(s), week(s), month(s), quarter(s), or year(s)"
+                        )))
+                    }
+                };
+                Ok(Value::Date(binned))
+            }
+            "INTERVAL" => match args.len() {
+                1 => {
+                    let unit_str = match &args[0] {
+                        Value::String(s) => s.as_str(),
+                        _ => {
+                            return Err(QueryError::Type(
+                                "INTERVAL: unit must be a string".to_string(),
+                            ))
+                        }
+                    };
+                    let unit = IntervalUnit::parse_unit(unit_str).ok_or_else(|| {
+                        QueryError::InvalidArguments(
+                            "INTERVAL".to_string(),
+                            format!("invalid interval unit: {unit_str}"),
+                        )
+                    })?;
+                    Ok(Value::Interval(Interval::new(1, unit)))
+                }
+                2 => {
+                    let count = match &args[0] {
+                        Value::Integer(n) => *n,
+                        Value::Number(d) => {
+                            use rust_decimal::prelude::ToPrimitive;
+                            if !d.fract().is_zero() {
+                                return Err(QueryError::Type(
+                                    "INTERVAL: count must be an integer".to_string(),
+                                ));
+                            }
+                            d.to_i64().ok_or_else(|| {
+                                QueryError::Type(
+                                    "INTERVAL: count must be an integer".to_string(),
+                                )
+                            })?
+                        }
+                        _ => {
+                            return Err(QueryError::Type(
+                                "INTERVAL: count must be a number".to_string(),
+                            ))
+                        }
+                    };
+                    let unit_str = match &args[1] {
+                        Value::String(s) => s.as_str(),
+                        _ => {
+                            return Err(QueryError::Type(
+                                "INTERVAL: unit must be a string".to_string(),
+                            ))
+                        }
+                    };
+                    let unit = IntervalUnit::parse_unit(unit_str).ok_or_else(|| {
+                        QueryError::InvalidArguments(
+                            "INTERVAL".to_string(),
+                            format!("invalid interval unit: {unit_str}"),
+                        )
+                    })?;
+                    Ok(Value::Interval(Interval::new(count, unit)))
+                }
+                _ => Err(QueryError::InvalidArguments(
+                    "INTERVAL".to_string(),
+                    "expected 1 or 2 arguments".to_string(),
+                )),
+            },
+            // String functions missing from original evaluate_function_on_values
+            "STARTSWITH" => {
+                Self::require_args_count(&name_upper, args, 2)?;
+                match (&args[0], &args[1]) {
+                    (Value::String(s), Value::String(p)) => Ok(Value::Boolean(s.starts_with(p.as_str()))),
+                    _ => Err(QueryError::Type(
+                        "STARTSWITH expects two strings".to_string(),
+                    )),
+                }
+            }
+            "ENDSWITH" => {
+                Self::require_args_count(&name_upper, args, 2)?;
+                match (&args[0], &args[1]) {
+                    (Value::String(s), Value::String(p)) => Ok(Value::Boolean(s.ends_with(p.as_str()))),
+                    _ => Err(QueryError::Type("ENDSWITH expects two strings".to_string())),
+                }
+            }
+            "SUBSTR" | "SUBSTRING" => {
+                if args.len() < 2 || args.len() > 3 {
+                    return Err(QueryError::InvalidArguments(
+                        "SUBSTR".to_string(),
+                        "expected 2 or 3 arguments".to_string(),
+                    ));
+                }
+                match (&args[0], &args[1]) {
+                    (Value::String(s), Value::Integer(start)) => {
+                        let start = (*start).max(0) as usize;
+                        if let Some(Value::Integer(len)) = args.get(2) {
+                            let len = (*len).max(0) as usize;
+                            if start >= s.len() {
+                                Ok(Value::String(String::new()))
+                            } else {
+                                let end = (start + len).min(s.len());
+                                Ok(Value::String(s[start..end].to_string()))
+                            }
+                        } else if args.len() == 2 {
+                            if start >= s.len() {
+                                Ok(Value::String(String::new()))
+                            } else {
+                                Ok(Value::String(s[start..].to_string()))
+                            }
+                        } else {
+                            Err(QueryError::Type(
+                                "SUBSTR expects (string, int, [int])".to_string(),
+                            ))
+                        }
+                    }
+                    _ => Err(QueryError::Type(
+                        "SUBSTR expects (string, int, [int])".to_string(),
+                    )),
+                }
+            }
+            "GREP" => {
+                Self::require_args_count(&name_upper, args, 2)?;
+                let pattern = match &args[0] {
+                    Value::String(s) => s.as_str(),
+                    _ => {
+                        return Err(QueryError::Type(
+                            "GREP: first argument must be a pattern string".to_string(),
+                        ))
+                    }
+                };
+                let string = match &args[1] {
+                    Value::String(s) => s.as_str(),
+                    _ => {
+                        return Err(QueryError::Type(
+                            "GREP: second argument must be a string".to_string(),
+                        ))
+                    }
+                };
+                let re = Regex::new(pattern).map_err(|e| {
+                    QueryError::Type(format!("GREP: invalid regex '{pattern}': {e}"))
+                })?;
+                match re.find(string) {
+                    Some(m) => Ok(Value::String(m.as_str().to_string())),
+                    None => Ok(Value::Null),
+                }
+            }
+            "GREPN" => {
+                Self::require_args_count(&name_upper, args, 3)?;
+                let pattern = match &args[0] {
+                    Value::String(s) => s.as_str(),
+                    _ => {
+                        return Err(QueryError::Type(
+                            "GREPN: first argument must be a pattern string".to_string(),
+                        ))
+                    }
+                };
+                let string = match &args[1] {
+                    Value::String(s) => s.as_str(),
+                    _ => {
+                        return Err(QueryError::Type(
+                            "GREPN: second argument must be a string".to_string(),
+                        ))
+                    }
+                };
+                let n = match &args[2] {
+                    Value::Integer(i) => *i as usize,
+                    Value::Number(n) => {
+                        use rust_decimal::prelude::ToPrimitive;
+                        n.to_usize().ok_or_else(|| {
+                            QueryError::Type(
+                                "GREPN: third argument must be a non-negative integer".into(),
+                            )
+                        })?
+                    }
+                    _ => {
+                        return Err(QueryError::Type(
+                            "GREPN: third argument must be an integer".to_string(),
+                        ))
+                    }
+                };
+                let re = Regex::new(pattern).map_err(|e| {
+                    QueryError::Type(format!("GREPN: invalid regex '{pattern}': {e}"))
+                })?;
+                match re.captures(string) {
+                    Some(caps) => match caps.get(n) {
+                        Some(m) => Ok(Value::String(m.as_str().to_string())),
+                        None => Ok(Value::Null),
+                    },
+                    None => Ok(Value::Null),
+                }
+            }
+            "SUBST" => {
+                Self::require_args_count(&name_upper, args, 3)?;
+                let pattern = match &args[0] {
+                    Value::String(s) => s.as_str(),
+                    _ => {
+                        return Err(QueryError::Type(
+                            "SUBST: first argument must be a pattern string".to_string(),
+                        ))
+                    }
+                };
+                let replacement = match &args[1] {
+                    Value::String(s) => s.as_str(),
+                    _ => {
+                        return Err(QueryError::Type(
+                            "SUBST: second argument must be a replacement string".to_string(),
+                        ))
+                    }
+                };
+                let string = match &args[2] {
+                    Value::String(s) => s.as_str(),
+                    _ => {
+                        return Err(QueryError::Type(
+                            "SUBST: third argument must be a string".to_string(),
+                        ))
+                    }
+                };
+                let re = Regex::new(pattern).map_err(|e| {
+                    QueryError::Type(format!("SUBST: invalid regex '{pattern}': {e}"))
+                })?;
+                Ok(Value::String(re.replace_all(string, replacement).to_string()))
+            }
+            "SPLITCOMP" => {
+                Self::require_args_count(&name_upper, args, 3)?;
+                let string = match &args[0] {
+                    Value::String(s) => s.as_str(),
+                    _ => {
+                        return Err(QueryError::Type(
+                            "SPLITCOMP: first argument must be a string".to_string(),
+                        ))
+                    }
+                };
+                let delimiter = match &args[1] {
+                    Value::String(s) => s.as_str(),
+                    _ => {
+                        return Err(QueryError::Type(
+                            "SPLITCOMP: second argument must be a delimiter string".to_string(),
+                        ))
+                    }
+                };
+                let n = match &args[2] {
+                    Value::Integer(i) => *i as usize,
+                    Value::Number(n) => {
+                        use rust_decimal::prelude::ToPrimitive;
+                        n.to_usize().ok_or_else(|| {
+                            QueryError::Type(
+                                "SPLITCOMP: third argument must be a non-negative integer".into(),
+                            )
+                        })?
+                    }
+                    _ => {
+                        return Err(QueryError::Type(
+                            "SPLITCOMP: third argument must be an integer".to_string(),
+                        ))
+                    }
+                };
+                let parts: Vec<&str> = string.split(delimiter).collect();
+                match parts.get(n) {
+                    Some(part) => Ok(Value::String((*part).to_string())),
+                    None => Ok(Value::Null),
+                }
+            }
+            "JOINSTR" => {
+                if args.is_empty() {
+                    return Err(QueryError::InvalidArguments(
+                        "JOINSTR".to_string(),
+                        "expected at least 1 argument".to_string(),
+                    ));
+                }
+                let mut parts = Vec::new();
+                for arg in args {
+                    match arg {
+                        Value::String(s) => parts.push(s.clone()),
+                        Value::StringSet(ss) => parts.extend(ss.iter().cloned()),
+                        Value::Null => {}
+                        other => parts.push(Self::value_to_string(other)),
+                    }
+                }
+                Ok(Value::String(parts.join(", ")))
+            }
+            "MAXWIDTH" => {
+                Self::require_args_count(&name_upper, args, 2)?;
+                let string = match &args[0] {
+                    Value::String(s) => s.as_str(),
+                    _ => {
+                        return Err(QueryError::Type(
+                            "MAXWIDTH: first argument must be a string".to_string(),
+                        ))
+                    }
+                };
+                let n = match &args[1] {
+                    Value::Integer(i) => *i as usize,
+                    Value::Number(n) => {
+                        use rust_decimal::prelude::ToPrimitive;
+                        n.to_usize().ok_or_else(|| {
+                            QueryError::Type(
+                                "MAXWIDTH: second argument must be a positive integer".into(),
+                            )
+                        })?
+                    }
+                    _ => {
+                        return Err(QueryError::Type(
+                            "MAXWIDTH: second argument must be an integer".to_string(),
+                        ))
+                    }
+                };
+                if string.chars().count() <= n {
+                    Ok(Value::String(string.to_string()))
+                } else if n <= 3 {
+                    Ok(Value::String(string.chars().take(n).collect()))
+                } else {
+                    let truncated: String = string.chars().take(n - 3).collect();
+                    Ok(Value::String(format!("{truncated}...")))
+                }
+            }
+            // Account functions missing from original evaluate_function_on_values
+            "ACCOUNT_DEPTH" => {
+                Self::require_args_count(&name_upper, args, 1)?;
+                match &args[0] {
+                    Value::String(s) => {
+                        let depth = s.chars().filter(|c| *c == ':').count() + 1;
+                        Ok(Value::Integer(depth as i64))
+                    }
+                    _ => Err(QueryError::Type(
+                        "ACCOUNT_DEPTH expects an account string".to_string(),
+                    )),
+                }
+            }
+            // Account metadata functions (require account_info lookup)
+            "OPEN_DATE" => {
+                Self::require_args_count(&name_upper, args, 1)?;
+                match &args[0] {
+                    Value::String(account) => {
+                        if let Some(info) = self.account_info.get(account.as_str()) {
+                            Ok(info.open_date.map_or(Value::Null, Value::Date))
+                        } else {
+                            Ok(Value::Null)
+                        }
+                    }
+                    _ => Err(QueryError::Type(
+                        "OPEN_DATE expects an account string".to_string(),
+                    )),
+                }
+            }
+            "CLOSE_DATE" => {
+                Self::require_args_count(&name_upper, args, 1)?;
+                match &args[0] {
+                    Value::String(account) => {
+                        if let Some(info) = self.account_info.get(account.as_str()) {
+                            Ok(info.close_date.map_or(Value::Null, Value::Date))
+                        } else {
+                            Ok(Value::Null)
+                        }
+                    }
+                    _ => Err(QueryError::Type(
+                        "CLOSE_DATE expects an account string".to_string(),
+                    )),
+                }
+            }
+            "OPEN_META" => {
+                if args.len() != 2 {
+                    return Err(QueryError::InvalidArguments(
+                        "OPEN_META".to_string(),
+                        "expected 2 arguments".to_string(),
+                    ));
+                }
+                match (&args[0], &args[1]) {
+                    (Value::String(account), Value::String(key)) => {
+                        if let Some(info) = self.account_info.get(account.as_str()) {
+                            let meta_value = info.open_meta.get(key.as_str());
+                            Ok(Self::meta_value_to_value(meta_value))
+                        } else {
+                            Ok(Value::Null)
+                        }
+                    }
+                    _ => Err(QueryError::Type(
+                        "OPEN_META expects (account_string, key_string)".to_string(),
+                    )),
+                }
+            }
+            // Position functions missing from original evaluate_function_on_values
+            "GETITEM" | "GET" => {
+                Self::require_args_count(&name_upper, args, 2)?;
+                match (&args[0], &args[1]) {
+                    (Value::Inventory(inv), Value::String(currency)) => {
+                        let total = inv.units(currency);
+                        if total.is_zero() {
+                            Ok(Value::Null)
+                        } else {
+                            Ok(Value::Amount(Amount::new(total, currency.clone())))
+                        }
+                    }
+                    _ => Err(QueryError::Type(
+                        "GETITEM expects (inventory, string)".to_string(),
+                    )),
+                }
+            }
+            "WEIGHT" => {
+                Self::require_args_count(&name_upper, args, 1)?;
+                match &args[0] {
+                    Value::Position(p) => {
+                        if let Some(cost) = &p.cost {
+                            let total = p.units.number * cost.number;
+                            Ok(Value::Amount(Amount::new(total, cost.currency.clone())))
+                        } else {
+                            Ok(Value::Amount(p.units.clone()))
+                        }
+                    }
+                    Value::Amount(a) => Ok(Value::Amount(a.clone())),
+                    _ => Err(QueryError::Type(
+                        "WEIGHT expects a position or amount".to_string(),
+                    )),
+                }
+            }
+            // Metadata functions: posting context is unavailable in table/subquery/aggregate paths.
+            // Return Null rather than an UnknownFunction error so queries don't fail outright.
+            // When posting context is available (direct posting evaluation), these are handled
+            // by evaluate_function() which calls eval_meta_function() with full context.
+            "META" | "ENTRY_META" | "ANY_META" | "POSTING_META" => Ok(Value::Null),
             // Aggregate functions return Null when evaluated on a single row
             "SUM" | "COUNT" | "MIN" | "MAX" | "FIRST" | "LAST" | "AVG" => Ok(Value::Null),
             _ => Err(QueryError::UnknownFunction(name.to_string())),

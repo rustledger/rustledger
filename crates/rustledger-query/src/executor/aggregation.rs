@@ -373,8 +373,21 @@ impl<'a> Executor<'a> {
                         }
                     }
                     _ => {
-                        // Non-aggregate function - but arguments may contain aggregates
-                        // First recursively evaluate all arguments in aggregate mode
+                        // Non-aggregate function - check whether any argument contains
+                        // an aggregate sub-expression. If none do, use the first posting
+                        // context to evaluate the whole function via evaluate_expr, which
+                        // preserves access to posting/transaction metadata (META, etc.).
+                        // If any arg has an aggregate, fall back to the two-step approach:
+                        // evaluate args first then apply function to pre-evaluated values.
+                        let has_aggregate_arg = func.args.iter().any(Self::is_aggregate_expr);
+                        if !has_aggregate_arg {
+                            if let Some(ctx) = group.first() {
+                                return self.evaluate_expr(expr, ctx);
+                            }
+                            return Ok(Value::Null);
+                        }
+                        // At least one arg contains an aggregate: evaluate all args in
+                        // aggregate mode and then apply the function to pre-evaluated values.
                         let mut evaluated_args = Vec::with_capacity(func.args.len());
                         for arg in &func.args {
                             evaluated_args.push(self.evaluate_aggregate_expr(arg, group)?);

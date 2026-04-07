@@ -769,6 +769,9 @@ fn parse_metadata_with_comments(stream: &mut TokenStream<'_>) -> Metadata {
 enum ParsedItem {
     Directive(Directive, Span),
     DirectiveWithPipe(Directive, Span),
+    /// A directive that encountered a recoverable error (e.g. invalid booking method).
+    /// The directive is NOT added to the output; only the error is emitted.
+    DirectiveError(ParseError, Span),
     Option(String, String, Span),
     Include(String, Span),
     Plugin(String, Option<String>, Span),
@@ -1074,11 +1077,16 @@ fn parse_open_directive(stream: &mut TokenStream<'_>) -> ParseRes<ParsedItem> {
     }
 
     let booking = if let Ok(s) = parse_string(stream) {
-        // Validate booking method: must be one of the valid uppercase methods
+        // Validate booking method: must be one of the valid uppercase methods per beancount v3.
         const VALID_BOOKING_METHODS: &[&str] =
             &["FIFO", "STRICT", "LIFO", "HIFO", "NONE", "AVERAGE"];
         if !VALID_BOOKING_METHODS.contains(&s.as_str()) {
-            return Err(());
+            skip_comment(stream);
+            let span = stream.span_from(start_pos);
+            let err =
+                ParseError::new(ParseErrorKind::InvalidBookingMethod(s), span);
+            stream.skip_to_newline();
+            return Ok(ParsedItem::DirectiveError(err, span));
         }
         Some(s)
     } else {
@@ -1515,6 +1523,11 @@ pub fn parse(source: &str) -> ParseResult {
                     apply_pushed_tags(&mut d, &tag_stack);
                     apply_pushed_meta(&mut d, &meta_stack);
                     directives.push(Spanned::new(d, span));
+                }
+                ParsedItem::DirectiveError(err, _span) => {
+                    // Directive failed with a specific recoverable error (e.g. invalid booking
+                    // method). The directive is dropped and the error is recorded.
+                    errors.push(err);
                 }
                 ParsedItem::Option(k, v, span) => options.push((k, v, span)),
                 ParsedItem::Include(p, span) => includes.push((p, span)),

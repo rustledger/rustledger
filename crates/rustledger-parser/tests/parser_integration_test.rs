@@ -658,6 +658,7 @@ option "title" "Test"
 
 /// Case: invalid-leading-decimal
 /// Amounts must have an integer part before the decimal point (.50 is invalid).
+/// Valid amounts like 0.50 must still be accepted.
 #[test]
 fn test_reject_leading_decimal() {
     let source = "2024-01-15 * \"Test\"\n  Expenses:Food  .50 USD\n  Assets:Checking\n";
@@ -665,6 +666,18 @@ fn test_reject_leading_decimal() {
     assert!(
         !result.errors.is_empty(),
         "expected parse error for leading decimal amount '.50 USD'"
+    );
+}
+
+/// Positive counterpart: amounts with an integer part must still be accepted.
+#[test]
+fn test_accept_decimal_with_integer_part() {
+    let source = "2024-01-15 * \"Test\"\n  Expenses:Food  0.50 USD\n  Assets:Checking\n";
+    let result = parse(source);
+    assert!(
+        result.errors.is_empty(),
+        "valid amount '0.50 USD' should parse without errors, errors: {:?}",
+        result.errors
     );
 }
 

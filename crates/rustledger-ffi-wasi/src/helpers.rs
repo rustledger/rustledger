@@ -213,7 +213,11 @@ pub fn load_source(source: &str) -> LoadResult {
                         rustledger_booking::normalize_prices(txn);
                     }
                     Err(e) => {
-                        errors.push(Error::new(e.to_string()).with_line(directive_lines[i]));
+                        errors.push(
+                            Error::new(e.to_string())
+                                .with_line(directive_lines[i])
+                                .validate_phase(),
+                        );
                     }
                 }
             }

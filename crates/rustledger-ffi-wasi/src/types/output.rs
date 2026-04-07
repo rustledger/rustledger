@@ -62,6 +62,8 @@ pub struct Error {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub entry_index: Option<usize>,
     pub severity: String,
+    /// Processing phase: "parse" or "validate"
+    pub phase: String,
 }
 
 impl Error {
@@ -73,6 +75,7 @@ impl Error {
             field: None,
             entry_index: None,
             severity: "error".to_string(),
+            phase: "parse".to_string(),
         }
     }
 
@@ -90,6 +93,11 @@ impl Error {
     #[allow(dead_code)]
     pub fn warning(mut self) -> Self {
         self.severity = "warning".to_string();
+        self
+    }
+
+    pub fn validate_phase(mut self) -> Self {
+        self.phase = "validate".to_string();
         self
     }
 }
@@ -382,6 +390,10 @@ pub struct ValidateOutput {
     pub api_version: &'static str,
     pub valid: bool,
     pub errors: Vec<Error>,
+    /// Number of parse-phase errors (syntactic)
+    pub parse_error_count: usize,
+    /// Number of validate-phase errors (semantic)
+    pub validate_error_count: usize,
 }
 
 #[derive(Serialize)]

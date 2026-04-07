@@ -49,6 +49,8 @@ pub struct JsonDiagnostic {
     pub end_column: usize,
     /// Severity: "error" or "warning"
     pub severity: String,
+    /// Processing phase: "parse" or "validate"
+    pub phase: String,
     /// Error code (e.g., "P0012", "E1001")
     pub code: String,
     /// Error message
@@ -70,6 +72,10 @@ pub struct JsonOutput {
     pub error_count: usize,
     /// Total warning count
     pub warning_count: usize,
+    /// Number of parse-phase errors
+    pub parse_error_count: usize,
+    /// Number of validate-phase errors
+    pub validate_error_count: usize,
 }
 
 /// Convert a byte offset to (line, column) in 1-based indexing.
@@ -281,8 +287,10 @@ pub fn run(args: &Args) -> Result<ExitCode> {
         .with_context(|| format!("failed to read {}", file.display()))?;
     cache.add(&file.display().to_string(), main_content);
 
-    // Count errors
+    // Count errors split by phase
     let mut error_count = 0;
+    let mut parse_error_count = 0;
+    let mut validate_error_count = 0;
 
     // Report load/parse errors
     for load_error in &load_result.errors {
@@ -303,6 +311,7 @@ pub fn run(args: &Args) -> Result<ExitCode> {
                             end_line,
                             end_column: end_col,
                             severity: "error".to_string(),
+                            phase: "parse".to_string(),
                             code: format!("P{:04}", error.kind_code()),
                             message: error.message(),
                             hint: error.hint.clone(),
@@ -310,6 +319,7 @@ pub fn run(args: &Args) -> Result<ExitCode> {
                         });
                     }
                     error_count += errors.len();
+                    parse_error_count += errors.len();
                 } else if args.quiet {
                     error_count += errors.len();
                 } else {
@@ -327,11 +337,13 @@ pub fn run(args: &Args) -> Result<ExitCode> {
                         end_line: 1,
                         end_column: 1,
                         severity: "error".to_string(),
+                        phase: "parse".to_string(),
                         code: "E0001".to_string(),
                         message: format!("failed to read file: {source}"),
                         hint: None,
                         context: None,
                     });
+                    parse_error_count += 1;
                 } else if !args.quiet {
                     writeln!(stdout, "error: failed to read {path_str}: {source}")?;
                 }
@@ -346,11 +358,13 @@ pub fn run(args: &Args) -> Result<ExitCode> {
                         end_line: 1,
                         end_column: 1,
                         severity: "error".to_string(),
+                        phase: "parse".to_string(),
                         code: "E0002".to_string(),
                         message: format!("include cycle detected: {}", cycle.join(" -> ")),
                         hint: Some("break the cycle by removing one of the includes".to_string()),
                         context: None,
                     });
+                    parse_error_count += 1;
                 } else if !args.quiet {
                     writeln!(
                         stdout,
@@ -372,6 +386,7 @@ pub fn run(args: &Args) -> Result<ExitCode> {
                         end_line: 1,
                         end_column: 1,
                         severity: "error".to_string(),
+                        phase: "parse".to_string(),
                         code: "E0003".to_string(),
                         message: format!(
                             "path traversal not allowed: {} escapes {}",
@@ -381,6 +396,7 @@ pub fn run(args: &Args) -> Result<ExitCode> {
                         hint: Some("use paths within the base directory".to_string()),
                         context: None,
                     });
+                    parse_error_count += 1;
                 } else if !args.quiet {
                     writeln!(
                         stdout,
@@ -401,11 +417,13 @@ pub fn run(args: &Args) -> Result<ExitCode> {
                         end_line: 1,
                         end_column: 1,
                         severity: "error".to_string(),
+                        phase: "parse".to_string(),
                         code: "E0004".to_string(),
                         message: format!("failed to decrypt: {message}"),
                         hint: None,
                         context: None,
                     });
+                    parse_error_count += 1;
                 } else if !args.quiet {
                     writeln!(
                         stdout,
@@ -425,6 +443,7 @@ pub fn run(args: &Args) -> Result<ExitCode> {
                         end_line: 1,
                         end_column: 1,
                         severity: "error".to_string(),
+                        phase: "parse".to_string(),
                         code: "E0005".to_string(),
                         message: format!("include pattern \"{pattern}\" does not match any files"),
                         hint: Some(
@@ -432,6 +451,7 @@ pub fn run(args: &Args) -> Result<ExitCode> {
                         ),
                         context: None,
                     });
+                    parse_error_count += 1;
                 } else if !args.quiet {
                     writeln!(
                         stdout,
@@ -449,6 +469,7 @@ pub fn run(args: &Args) -> Result<ExitCode> {
                         end_line: 1,
                         end_column: 1,
                         severity: "error".to_string(),
+                        phase: "parse".to_string(),
                         code: "E0006".to_string(),
                         message: format!(
                             "failed to expand include pattern \"{pattern}\": {message}"
@@ -456,6 +477,7 @@ pub fn run(args: &Args) -> Result<ExitCode> {
                         hint: None,
                         context: None,
                     });
+                    parse_error_count += 1;
                 } else if !args.quiet {
                     writeln!(
                         stdout,
@@ -480,11 +502,13 @@ pub fn run(args: &Args) -> Result<ExitCode> {
                 end_line: 1,
                 end_column: 1,
                 severity: "error".to_string(),
+                phase: "parse".to_string(),
                 code: warning.code.to_string(),
                 message: warning.message.clone(),
                 hint: None,
                 context: None,
             });
+            parse_error_count += 1;
         } else if !args.quiet {
             writeln!(stdout, "error[{}]: {}", warning.code, warning.message)?;
         }
@@ -1035,12 +1059,14 @@ pub fn run(args: &Args) -> Result<ExitCode> {
                     end_line: 1,
                     end_column: 1,
                     severity: "error".to_string(),
+                    phase: "validate".to_string(),
                     code: "INTERP".to_string(),
                     message: format!("{err}"),
                     hint: None,
                     context: Some(format!("{date}, \"{narration}\"")),
                 });
             }
+            validate_error_count += interpolation_errors.len();
         } else if !args.quiet {
             for (date, narration, err) in &interpolation_errors {
                 writeln!(stdout, "error[INTERP]: {err} ({date}, \"{narration}\")")?;
@@ -1078,7 +1104,7 @@ pub fn run(args: &Args) -> Result<ExitCode> {
         }
     }
 
-    let validation_error_count = validation_errors
+    let local_validation_error_count = validation_errors
         .iter()
         .filter(|e| !e.code.is_warning())
         .count();
@@ -1086,7 +1112,7 @@ pub fn run(args: &Args) -> Result<ExitCode> {
         .iter()
         .filter(|e| e.code.is_warning())
         .count();
-    error_count += validation_error_count;
+    error_count += local_validation_error_count;
 
     if !validation_errors.is_empty() {
         if json_mode {
@@ -1103,12 +1129,14 @@ pub fn run(args: &Args) -> Result<ExitCode> {
                     end_line: 1,
                     end_column: 1,
                     severity: severity.to_string(),
+                    phase: "validate".to_string(),
                     code: err.code.code().to_string(),
                     message: err.message.clone(),
                     hint: None,
                     context: Some(format!("{}", err.date)),
                 });
             }
+            validate_error_count += local_validation_error_count;
         } else if !args.quiet {
             report::report_validation_errors(
                 &validation_errors,
@@ -1129,6 +1157,8 @@ pub fn run(args: &Args) -> Result<ExitCode> {
             diagnostics,
             error_count,
             warning_count,
+            parse_error_count,
+            validate_error_count,
         };
         writeln!(stdout, "{}", serde_json::to_string_pretty(&output)?)?;
     } else if !args.quiet {

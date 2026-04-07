@@ -485,7 +485,7 @@ impl Executor<'_> {
             .collect();
 
         // Evaluate aggregate expressions per group and apply HAVING.
-        for (_, (_key_values, group_rows)) in group_map {
+        for (_, (_, group_rows)) in group_map {
             let mut row = Vec::new();
             for target in &query.targets {
                 let val =

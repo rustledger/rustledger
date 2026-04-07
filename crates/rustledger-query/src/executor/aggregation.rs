@@ -558,7 +558,10 @@ impl<'a> Executor<'a> {
             Expr::Function(func) => {
                 match func.name.to_uppercase().as_str() {
                     "COUNT" => {
-                        // COUNT(*) or COUNT(col) – count all rows in the group
+                        // COUNT(*) or COUNT(col) – count all rows in the group.
+                        // Note: like the existing evaluate_aggregate_expr, this counts all rows
+                        // regardless of whether the argument is null. This is consistent with
+                        // Python beancount's BQL behavior where COUNT always counts rows.
                         Ok(Value::Integer(group.len() as i64))
                     }
                     "SUM" => {
@@ -766,7 +769,10 @@ impl<'a> Executor<'a> {
                 }
             }
             _ => {
-                // For non-aggregate expressions, evaluate on the first row of the group
+                // For non-aggregate expressions (Column, Literal, Wildcard, etc.),
+                // evaluate on the first row of the group. This matches the behavior of
+                // evaluate_aggregate_expr: GROUP BY correctness ensures all rows in a group
+                // have the same value for the GROUP BY key columns.
                 if let Some(row) = group.first() {
                     self.evaluate_subquery_expr(expr, row, column_map)
                 } else {

@@ -3269,6 +3269,7 @@ dependencies = [
  "chrono",
  "console_error_panic_hook",
  "js-sys",
+ "rmp-serde",
  "rustledger-booking",
  "rustledger-core",
  "rustledger-loader",
@@ -3278,6 +3279,7 @@ dependencies = [
  "rustledger-validate",
  "serde",
  "serde-wasm-bindgen",
+ "sha2 0.11.0",
  "wasm-bindgen",
  "wasm-bindgen-test",
 ]

@@ -704,3 +704,37 @@ pub fn query_multi_file(
         }
     }
 }
+
+/// Compute a SHA-256 fingerprint of one or more source strings.
+///
+/// Returns the fingerprint as a lowercase hex string.  Store this value
+/// alongside serialized ledger bytes (see [`Ledger::serialize`] and
+/// [`ParsedLedger::serialize`]) and compare it on subsequent loads to detect
+/// whether the source has changed.  If the fingerprint differs from the stored
+/// value, discard the cached bytes and re-parse the ledger.
+///
+/// Each string in `sources` is separated by a `NUL` byte before hashing so
+/// that `["ab", "c"]` produces a different fingerprint from `["a", "bc"]`.
+///
+/// # Example (JavaScript)
+///
+/// ```javascript
+/// // Single-file
+/// const fp = hashSources([source]);
+///
+/// // Multi-file
+/// const fp = hashSources(Object.values(files));
+///
+/// const cached = await db.get(fp);
+/// if (cached) {
+///     return Ledger.fromCache(cached);
+/// }
+/// const ledger = Ledger.fromFiles(files, "main.beancount");
+/// await db.put(fp, ledger.serialize());
+/// ```
+#[wasm_bindgen(js_name = "hashSources")]
+#[allow(clippy::needless_pass_by_value)] // wasm-bindgen requires owned Vec<String>
+pub fn hash_sources(sources: Vec<String>) -> String {
+    let refs: Vec<&str> = sources.iter().map(String::as_str).collect();
+    crate::cache::hash_sources(&refs)
+}

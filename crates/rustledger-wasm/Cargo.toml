@@ -33,6 +33,8 @@ rustledger-plugin = { workspace = true, default-features = false, optional = tru
 wasm-bindgen.workspace = true
 serde-wasm-bindgen.workspace = true
 serde.workspace = true
+rmp-serde.workspace = true
+sha2.workspace = true
 chrono.workspace = true
 
 # Better panic messages in WASM

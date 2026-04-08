@@ -38,6 +38,7 @@
 #![allow(clippy::missing_const_for_fn)]
 
 // Internal modules
+mod cache;
 mod convert;
 mod editor;
 mod helpers;
@@ -52,7 +53,7 @@ mod parsed_ledger;
 
 // Re-export public API
 pub use api::{balances, format, parse, query, validate_source, version};
-pub use api::{parse_multi_file, query_multi_file, validate_multi_file};
+pub use api::{hash_sources, parse_multi_file, query_multi_file, validate_multi_file};
 
 #[cfg(feature = "completions")]
 pub use api::bql_completions;
@@ -371,6 +372,29 @@ export class ParsedLedger {
 
     /** Find all references to the symbol at the given position. */
     getReferences(line: number, character: number): EditorReferencesResult | null;
+
+    // =========================================================================
+    // Serialization / Caching
+    // =========================================================================
+
+    /**
+     * Serialize this ledger to a compact binary blob (MessagePack).
+     *
+     * Store the bytes in OPFS or IndexedDB alongside a source fingerprint
+     * (see {@link hashSources}) and restore later with {@link ParsedLedger.fromCache}.
+     */
+    serialize(): Uint8Array;
+
+    /**
+     * Restore a `ParsedLedger` from bytes produced by {@link ParsedLedger.serialize}.
+     *
+     * The `source` parameter must be the same source text that was used when
+     * the cache was created; it is re-parsed (but not re-booked or re-validated)
+     * so that editor features continue to work.
+     *
+     * Throws if the bytes are invalid or were produced by a different library version.
+     */
+    static fromCache(bytes: Uint8Array, source: string): ParsedLedger;
 }
 
 /**
@@ -413,6 +437,25 @@ export class Ledger {
 
     /** Get completions using cross-file data. Pass the source of the file being edited. */
     getCompletions(source: string, line: number, character: number): EditorCompletionResult;
+
+    // =========================================================================
+    // Serialization / Caching
+    // =========================================================================
+
+    /**
+     * Serialize this ledger to a compact binary blob (MessagePack).
+     *
+     * Store the bytes in OPFS or IndexedDB alongside a source fingerprint
+     * (see {@link hashSources}) and restore later with {@link Ledger.fromCache}.
+     */
+    serialize(): Uint8Array;
+
+    /**
+     * Restore a `Ledger` from bytes produced by {@link Ledger.serialize}.
+     *
+     * Throws if the bytes are invalid or were produced by a different library version.
+     */
+    static fromCache(bytes: Uint8Array): Ledger;
 }
 
 // =============================================================================
@@ -455,6 +498,34 @@ export function validateMultiFile(files: FileMap, entryPoint: string): Validatio
  * @returns QueryResult with columns, rows, and any errors
  */
 export function queryMultiFile(files: FileMap, entryPoint: string, query: string): QueryResult;
+
+/**
+ * Compute a SHA-256 fingerprint of one or more source strings.
+ *
+ * Returns a lowercase hex string.  Store this value alongside serialized
+ * ledger bytes and compare on the next load; if the fingerprint changed the
+ * source was modified and the cache should be discarded.
+ *
+ * @param sources - Array of source strings (e.g. the values of a FileMap)
+ * @returns Lowercase hex SHA-256 hash
+ *
+ * @example
+ * ```typescript
+ * // Single-file
+ * const fp = hashSources([source]);
+ *
+ * // Multi-file
+ * const fp = hashSources(Object.values(files));
+ *
+ * const cached = await db.get(fp);
+ * if (cached) {
+ *     return Ledger.fromCache(cached);
+ * }
+ * const ledger = Ledger.fromFiles(files, "main.beancount");
+ * await db.put(fp, ledger.serialize());
+ * ```
+ */
+export function hashSources(sources: string[]): string;
 "#;
 
 // =============================================================================
@@ -945,5 +1016,20 @@ include "accounts.beancount"
             wasm_expanded.len(),
             "expanded directive count differs"
         );
+    }
+
+    // =========================================================================
+    // Serialization / Caching tests
+    // =========================================================================
+
+    #[test]
+    fn test_hash_sources_deterministic_and_sensitive() {
+        let h1 = hash_sources(vec!["source v1".to_string()]);
+        let h2 = hash_sources(vec!["source v1".to_string()]);
+        let h3 = hash_sources(vec!["source v2".to_string()]);
+
+        assert_eq!(h1, h2, "same content → same hash");
+        assert_ne!(h1, h3, "different content → different hash");
+        assert_eq!(h1.len(), 64, "SHA-256 produces 64 hex chars");
     }
 }

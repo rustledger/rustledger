@@ -11,6 +11,7 @@ use wasm_bindgen::prelude::*;
 use rustledger_core::Directive;
 use rustledger_parser::ParseResult as ParserResult;
 
+use crate::cache;
 use crate::convert::directive_to_json;
 use crate::editor;
 use crate::helpers::{load_and_book, run_validation, to_js};
@@ -380,6 +381,90 @@ impl ParsedLedger {
         );
         to_js(&result)
     }
+
+    // =========================================================================
+    // Serialization / Caching
+    // =========================================================================
+
+    /// Serialize this ledger to a compact binary blob (`MessagePack`).
+    ///
+    /// The returned bytes can be stored in browser `OPFS` or `IndexedDB` and later
+    /// restored with [`ParsedLedger::from_cache`], skipping the expensive
+    /// booking and validation phases.
+    ///
+    /// Use [`hash_sources`] to compute a fingerprint of the source and store it
+    /// alongside the bytes so you can detect when the source has changed.
+    ///
+    /// # Example (JavaScript)
+    ///
+    /// ```javascript
+    /// const ledger = new ParsedLedger(source);
+    /// const bytes  = ledger.serialize();
+    /// await opfsFile.write(bytes);
+    /// ```
+    #[wasm_bindgen]
+    pub fn serialize(&self) -> Result<Vec<u8>, JsError> {
+        let payload = cache::ParsedLedgerCachePayload {
+            version: cache::CACHE_VERSION,
+            directives: self.directives.clone(),
+            options: self.options.clone(),
+            parse_errors: self.parse_errors.clone(),
+            validation_errors: self.validation_errors.clone(),
+        };
+        cache::to_bytes(&payload).map_err(|e| JsError::new(&e))
+    }
+
+    /// Restore a `ParsedLedger` from bytes produced by [`ParsedLedger::serialize`].
+    ///
+    /// The `source` parameter must be the **same** source text that was used
+    /// when the cache was created; it is re-parsed (but not re-booked or
+    /// re-validated) so that editor features such as hover and completions
+    /// continue to work.
+    ///
+    /// Returns an error if the bytes are invalid or were produced by a
+    /// different version of the library.
+    ///
+    /// # Example (JavaScript)
+    ///
+    /// ```javascript
+    /// const bytes  = await opfsFile.read();
+    /// const ledger = ParsedLedger.fromCache(bytes, source);
+    /// ```
+    #[wasm_bindgen(js_name = "fromCache")]
+    pub fn from_cache(bytes: &[u8], source: &str) -> Result<Self, JsError> {
+        let payload: cache::ParsedLedgerCachePayload =
+            cache::from_bytes(bytes).map_err(|e| JsError::new(&e))?;
+
+        if payload.version != cache::CACHE_VERSION {
+            return Err(JsError::new(&format!(
+                "Cache version mismatch: expected {}, got {}. Re-parse the ledger.",
+                cache::CACHE_VERSION,
+                payload.version
+            )));
+        }
+
+        // Re-parse the source so that editor features (hover, completions,
+        // go-to-definition) have accurate span information.  Parsing alone is
+        // fast; it is booking + validation that is expensive, and those results
+        // come from the cache.
+        //
+        // Note: callers MUST verify that the source fingerprint (see
+        // [`hash_sources`]) matches the one stored when the cache was created.
+        // If the source was modified since caching, the directives from the
+        // cache will be stale and the parse result will not match.
+        let parse_result = rustledger_parser::parse(source);
+        let editor_cache = editor::EditorCache::new(source, &parse_result);
+
+        Ok(Self {
+            source: source.to_string(),
+            parse_result,
+            directives: payload.directives,
+            options: payload.options,
+            parse_errors: payload.parse_errors,
+            validation_errors: payload.validation_errors,
+            editor_cache,
+        })
+    }
 }
 
 // =============================================================================
@@ -564,5 +649,70 @@ impl Ledger {
     ) -> Result<JsValue, JsError> {
         let result = editor::get_completions_cached(source, line, character, &self.editor_cache);
         to_js(&result)
+    }
+
+    // =========================================================================
+    // Serialization / Caching
+    // =========================================================================
+
+    /// Serialize this ledger to a compact binary blob (`MessagePack`).
+    ///
+    /// The returned bytes can be stored in browser `OPFS` or `IndexedDB` and later
+    /// restored with [`Ledger::from_cache`], skipping the expensive parsing,
+    /// booking, and validation phases entirely.
+    ///
+    /// Use [`hash_sources`] to compute a fingerprint of the source files and
+    /// store it alongside the bytes so you can detect when the sources change.
+    ///
+    /// # Example (JavaScript)
+    ///
+    /// ```javascript
+    /// const ledger = Ledger.fromFiles(files, "main.beancount");
+    /// const bytes  = ledger.serialize();
+    /// await opfsFile.write(bytes);
+    /// ```
+    #[wasm_bindgen]
+    pub fn serialize(&self) -> Result<Vec<u8>, JsError> {
+        let payload = cache::LedgerCachePayload {
+            version: cache::CACHE_VERSION,
+            directives: self.directives.clone(),
+            options: self.options.clone(),
+            errors: self.errors.clone(),
+        };
+        cache::to_bytes(&payload).map_err(|e| JsError::new(&e))
+    }
+
+    /// Restore a `Ledger` from bytes produced by [`Ledger::serialize`].
+    ///
+    /// Returns an error if the bytes are invalid or were produced by a
+    /// different version of the library.
+    ///
+    /// # Example (JavaScript)
+    ///
+    /// ```javascript
+    /// const bytes  = await opfsFile.read();
+    /// const ledger = Ledger.fromCache(bytes);
+    /// ```
+    #[wasm_bindgen(js_name = "fromCache")]
+    pub fn from_cache(bytes: &[u8]) -> Result<Self, JsError> {
+        let payload: cache::LedgerCachePayload =
+            cache::from_bytes(bytes).map_err(|e| JsError::new(&e))?;
+
+        if payload.version != cache::CACHE_VERSION {
+            return Err(JsError::new(&format!(
+                "Cache version mismatch: expected {}, got {}. Re-parse the ledger.",
+                cache::CACHE_VERSION,
+                payload.version
+            )));
+        }
+
+        let editor_cache = editor::EditorCache::from_directives(&payload.directives);
+
+        Ok(Self {
+            directives: payload.directives,
+            options: payload.options,
+            errors: payload.errors,
+            editor_cache,
+        })
     }
 }

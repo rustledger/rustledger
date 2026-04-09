@@ -1,6 +1,6 @@
 {"file": "accounts.beancount", "query": "SELECT DISTINCT account ORDER BY account LIMIT 20", "match": true}
-{"file": "tests_resources_example_ledger.beancount", "query": "SELECT currency, COUNT(*) AS count GROUP BY curren", "match": true}
 {"file": "tests_resources_example_ledger.beancount", "query": "SELECT DISTINCT account ORDER BY account LIMIT 20", "match": true}
+{"file": "tests_resources_example_ledger.beancount", "query": "SELECT currency, COUNT(*) AS count GROUP BY curren", "match": true}
 {"file": "tests_resources_example_ledger.beancount", "query": "SELECT account, SUM(position) GROUP BY account ORD", "match": true}
 {"file": "accounts.beancount", "query": "SELECT account, SUM(position) GROUP BY account ORD", "match": true}
 {"file": "testdata_reconcile_test_amazon_large_0_journal.beancount", "query": "SELECT DISTINCT account ORDER BY account LIMIT 20", "match": true}
@@ -39,11 +39,11 @@
 {"file": "testdata_source_google_purchases_test_matching_journal.beancount", "query": "SELECT currency, COUNT(*) AS count GROUP BY curren", "match": true}
 {"file": "testdata_source_healthequity_test_invalid_journal.beancount", "query": "SELECT DISTINCT account ORDER BY account LIMIT 20", "match": true}
 {"file": "testdata_source_healthequity_test_invalid_journal.beancount", "query": "SELECT account, SUM(position) GROUP BY account ORD", "match": true}
-{"file": "testdata_source_healthequity_test_invalid_journal.beancount", "query": "SELECT currency, COUNT(*) AS count GROUP BY curren", "match": true}
 {"file": "testdata_source_healthequity_test_matching_journal.beancount", "query": "SELECT DISTINCT account ORDER BY account LIMIT 20", "match": true}
+{"file": "testdata_source_healthequity_test_invalid_journal.beancount", "query": "SELECT currency, COUNT(*) AS count GROUP BY curren", "match": true}
 {"file": "testdata_source_healthequity_test_matching_journal.beancount", "query": "SELECT account, SUM(position) GROUP BY account ORD", "match": true}
-{"file": "testdata_source_mint_test_invalid_journal.beancount", "query": "SELECT DISTINCT account ORDER BY account LIMIT 20", "match": true}
 {"file": "testdata_source_healthequity_test_matching_journal.beancount", "query": "SELECT currency, COUNT(*) AS count GROUP BY curren", "match": true}
+{"file": "testdata_source_mint_test_invalid_journal.beancount", "query": "SELECT DISTINCT account ORDER BY account LIMIT 20", "match": true}
 {"file": "testdata_source_mint_test_invalid_journal.beancount", "query": "SELECT account, SUM(position) GROUP BY account ORD", "match": true}
 {"file": "testdata_source_mint_test_invalid_journal.beancount", "query": "SELECT currency, COUNT(*) AS count GROUP BY curren", "match": true}
 {"file": "testdata_source_mint_test_training_examples_journal.beancount", "query": "SELECT DISTINCT account ORDER BY account LIMIT 20", "match": true}
@@ -51,8 +51,8 @@
 {"file": "testdata_source_mint_test_training_examples_journal.beancount", "query": "SELECT currency, COUNT(*) AS count GROUP BY curren", "match": true}
 {"file": "testdata_source_ofx_test_checking2_matching_journal.beancount", "query": "SELECT DISTINCT account ORDER BY account LIMIT 20", "match": true}
 {"file": "testdata_source_ofx_test_checking2_matching_journal.beancount", "query": "SELECT account, SUM(position) GROUP BY account ORD", "match": true}
-{"file": "testdata_source_ofx_test_checking2_matching_journal.beancount", "query": "SELECT currency, COUNT(*) AS count GROUP BY curren", "match": true}
 {"file": "testdata_source_ofx_test_fidelity_ira_journal.beancount", "query": "SELECT DISTINCT account ORDER BY account LIMIT 20", "match": true}
+{"file": "testdata_source_ofx_test_checking2_matching_journal.beancount", "query": "SELECT currency, COUNT(*) AS count GROUP BY curren", "match": true}
 {"file": "testdata_source_ofx_test_fidelity_ira_journal.beancount", "query": "SELECT account, SUM(position) GROUP BY account ORD", "match": true}
 {"file": "testdata_source_ofx_test_fidelity_ira_journal.beancount", "query": "SELECT currency, COUNT(*) AS count GROUP BY curren", "match": true}
 {"file": "testdata_source_ofx_test_fidelity_journal.beancount", "query": "SELECT DISTINCT account ORDER BY account LIMIT 20", "match": true}
@@ -63,11 +63,11 @@
 {"file": "testdata_source_ofx_test_non_default_capital_gains_journal.beancount", "query": "SELECT currency, COUNT(*) AS count GROUP BY curren", "match": true}
 {"file": "testdata_source_ofx_test_vanguard_401k_matching_journal.beancount", "query": "SELECT DISTINCT account ORDER BY account LIMIT 20", "match": true}
 {"file": "testdata_source_ofx_test_vanguard_401k_matching_journal.beancount", "query": "SELECT account, SUM(position) GROUP BY account ORD", "match": true}
-{"file": "testdata_source_ofx_test_vanguard_401k_matching_journal.beancount", "query": "SELECT currency, COUNT(*) AS count GROUP BY curren", "match": true}
 {"file": "testdata_source_ofx_test_vanguard_invalid_journal.beancount", "query": "SELECT DISTINCT account ORDER BY account LIMIT 20", "match": true}
+{"file": "testdata_source_ofx_test_vanguard_401k_matching_journal.beancount", "query": "SELECT currency, COUNT(*) AS count GROUP BY curren", "match": true}
 {"file": "testdata_source_ofx_test_vanguard_invalid_journal.beancount", "query": "SELECT account, SUM(position) GROUP BY account ORD", "match": true}
-{"file": "testdata_source_ofx_test_vanguard_matching_journal.beancount", "query": "SELECT DISTINCT account ORDER BY account LIMIT 20", "match": true}
 {"file": "testdata_source_ofx_test_vanguard_invalid_journal.beancount", "query": "SELECT currency, COUNT(*) AS count GROUP BY curren", "match": true}
+{"file": "testdata_source_ofx_test_vanguard_matching_journal.beancount", "query": "SELECT DISTINCT account ORDER BY account LIMIT 20", "match": true}
 {"file": "testdata_source_ofx_test_vanguard_matching_journal.beancount", "query": "SELECT account, SUM(position) GROUP BY account ORD", "match": true}
 {"file": "testdata_source_ofx_test_vanguard_matching_journal.beancount", "query": "SELECT currency, COUNT(*) AS count GROUP BY curren", "match": true}
 {"file": "testdata_source_ofx_test_vanguard_roth_ira_matching_journal.beancount", "query": "SELECT DISTINCT account ORDER BY account LIMIT 20", "match": true}
@@ -75,11 +75,11 @@
 {"file": "testdata_source_ofx_test_vanguard_roth_ira_matching_journal.beancount", "query": "SELECT currency, COUNT(*) AS count GROUP BY curren", "match": true}
 {"file": "testdata_source_ofx_test_vanguard_with_cash_account_matching_missing_primary_journal.beancount", "query": "SELECT DISTINCT account ORDER BY account LIMIT 20", "match": true}
 {"file": "testdata_source_ofx_test_vanguard_with_cash_account_matching_missing_primary_journal.beancount", "query": "SELECT account, SUM(position) GROUP BY account ORD", "match": true}
-{"file": "testdata_source_ofx_test_vanguard_with_cash_account_matching_missing_primary_journal.beancount", "query": "SELECT currency, COUNT(*) AS count GROUP BY curren", "match": true}
 {"file": "testdata_source_ofx_test_vanguard_with_cash_account_matching_missing_transfer_journal.beancount", "query": "SELECT DISTINCT account ORDER BY account LIMIT 20", "match": true}
+{"file": "testdata_source_ofx_test_vanguard_with_cash_account_matching_missing_primary_journal.beancount", "query": "SELECT currency, COUNT(*) AS count GROUP BY curren", "match": true}
 {"file": "testdata_source_ofx_test_vanguard_with_cash_account_matching_missing_transfer_journal.beancount", "query": "SELECT account, SUM(position) GROUP BY account ORD", "match": true}
-{"file": "testdata_source_paypal_test_matching_journal.beancount", "query": "SELECT DISTINCT account ORDER BY account LIMIT 20", "match": true}
 {"file": "testdata_source_ofx_test_vanguard_with_cash_account_matching_missing_transfer_journal.beancount", "query": "SELECT currency, COUNT(*) AS count GROUP BY curren", "match": true}
+{"file": "testdata_source_paypal_test_matching_journal.beancount", "query": "SELECT DISTINCT account ORDER BY account LIMIT 20", "match": true}
 {"file": "testdata_source_paypal_test_matching_journal.beancount", "query": "SELECT account, SUM(position) GROUP BY account ORD", "match": true}
 {"file": "testdata_source_paypal_test_matching_journal.beancount", "query": "SELECT currency, COUNT(*) AS count GROUP BY curren", "match": true}
 {"file": "testdata_source_venmo_test_invalid_references_journal.beancount", "query": "SELECT DISTINCT account ORDER BY account LIMIT 20", "match": true}

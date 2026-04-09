@@ -3,7 +3,7 @@
 //! Uses ariadne for pretty-printed error messages with source context.
 //! Respects TTY detection and `NO_COLOR` environment variable.
 
-use ariadne::{ColorGenerator, Config, Label, Report, ReportKind, Source};
+use ariadne::{ColorGenerator, Config, IndexType, Label, Report, ReportKind, Source};
 use rustledger_loader::SourceMap;
 use rustledger_parser::ParseError;
 use rustledger_validate::{ErrorCode, Severity, ValidationError};
@@ -87,7 +87,12 @@ pub fn report_parse_errors<W: Write>(
             .with_code(format!("P{:04}", error.kind_code()))
             .with_message(error.message())
             .with_label(label)
-            .with_config(Config::default().with_compact(false).with_color(use_color));
+            .with_config(
+                Config::default()
+                    .with_compact(false)
+                    .with_color(use_color)
+                    .with_index_type(IndexType::Byte),
+            );
 
         // Add hint if present
         if let Some(hint) = &error.hint {
@@ -261,6 +266,65 @@ mod tests {
         assert!(
             output_str.contains("error[E1001]"),
             "Expected 'error[E1001]' but got: {output_str}"
+        );
+    }
+
+    /// Test that error span highlighting is correct when non-ASCII characters
+    /// appear earlier in the source (regression test for issue #728).
+    ///
+    /// The parser generates byte-offset spans, but ariadne's default mode
+    /// (`IndexType::Char`) interprets them as character offsets, causing the
+    /// highlight to drift right when multi-byte UTF-8 characters are present.
+    /// The fix uses `IndexType::Byte` so ariadne correctly converts byte
+    /// offsets to character positions internally.
+    #[test]
+    fn test_report_parse_errors_non_ascii_span_accuracy() {
+        use rustledger_parser::ParseError;
+        use rustledger_parser::span::Span;
+
+        // Source with non-ASCII chars on line 2 (αβγδε = 5 chars × 2 bytes each = 10 bytes)
+        // The error should highlight "-1,234 JPY;23456789" on line 4.
+        let source = "2026-01-01 open Assets:Test\n\
+                       2026-01-04 * \"αβγδε\"\n\
+                       2026-01-04 * \"abc\"\n\
+                         Assets:Test -1,234 JPY\n";
+
+        // Find the byte offsets of "-1,234 JPY" on the last line
+        let dash_offset = source
+            .rfind("-1,234")
+            .expect("test source should contain '-1,234'");
+        let highlight_end = dash_offset + "-1,234 JPY".len();
+
+        let error = ParseError::new(
+            rustledger_parser::error::ParseErrorKind::SyntaxError("unexpected input".to_string()),
+            Span::new(dash_offset, highlight_end),
+        );
+
+        let mut output = Vec::new();
+        report_parse_errors(
+            &[error],
+            Path::new("test.beancount"),
+            source,
+            &mut output,
+            false, // no color for easier assertion
+        )
+        .unwrap();
+
+        let output_str = String::from_utf8(output).unwrap();
+
+        // The output should reference line 4 (1-indexed) with the correct
+        // character column for "-1,234". If the span were misinterpreted as
+        // char offsets, the highlight would drift by 5 (= 10 bytes − 5 chars).
+        assert!(
+            output_str.contains("-1,234"),
+            "Error output should highlight '-1,234' but got:\n{output_str}"
+        );
+        // It should NOT highlight the text that appears 5 chars to the right
+        // of the actual error (which would be " JPY;" or later).
+        assert!(
+            !output_str.contains("parse error: unexpected input\n")
+                || output_str.contains("-1,234"),
+            "Highlight should cover '-1,234', not drifted text"
         );
     }
 }

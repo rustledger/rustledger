@@ -1,5 +1,5 @@
 # Rustledger Compatibility Results
-# Generated: 2026-04-09T23:52:15Z
+# Generated: 2026-04-10T02:42:15Z
 
 summary:
   total_files: 784
@@ -20,11 +20,11 @@ check_compatibility:
 ast_compatibility:
   accounts_match: 783
   accounts_match_pct: 99
-  posting_count_match: 783
+  posting_count_match: 782
   posting_count_match_pct: 99
   error_presence_match: 773
   error_presence_match_pct: 98
-  full_match: 772
+  full_match: 771
   full_match_pct: 98
 
 bql_compatibility:

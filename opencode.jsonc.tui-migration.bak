@@ -1,6 +1,13 @@
 {
   "$schema": "https://opencode.ai/config.json",
 
+  // Appearance
+  "theme": "opencode",
+  "tui": {
+    "scroll_speed": 3,
+    "diff_style": "auto"
+  },
+
   // Models
   "model": "together/deepseek-ai/DeepSeek-V3",
   "small_model": "together/deepseek-ai/DeepSeek-V3",

@@ -1,0 +1,6 @@
+{
+  "$schema": "https://opencode.ai/tui.json",
+  "theme": "opencode",
+  "scroll_speed": 3,
+  "diff_style": "auto"
+}

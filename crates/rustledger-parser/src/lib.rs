@@ -30,6 +30,7 @@
 #![warn(missing_docs)]
 
 mod error;
+pub mod incremental;
 pub mod logos_lexer;
 mod span;
 mod winnow_parser;

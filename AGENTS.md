@@ -222,3 +222,28 @@ cargo llvm-cov --html
 - Don't add unnecessary error handling for impossible cases
 - Don't create abstractions for one-time operations
 - Don't add backwards-compatibility shims - just change the code
+
+## AI Agent Guidelines
+
+### rust-skills Integration
+
+This project uses the [rust-skills](https://github.com/leonardomso/rust-skills) guidelines (179 rules across 14 categories).
+
+**Priority categories:**
+1. **CRITICAL**: Ownership & Borrowing, Error Handling, Memory Optimization
+2. **HIGH**: API Design, Async/Await, Compiler Optimization
+3. **MEDIUM**: Naming, Type Safety, Testing, Documentation, Performance
+4. **LOW**: Project Structure, Clippy & Linting
+5. **REFERENCE**: Anti-patterns
+
+### Commands
+
+- `/rust-check` - Run cargo check, clippy, tests, and rust-skills review
+- `/rust-review` - Deep code review against rust-skills rules
+- `/rust-memory` - Memory allocation audit
+- `/rust-async` - Async pattern review (if async code present)
+
+### Model Configuration
+
+Primary model: `bifrost/togetherai/Qwen/Qwen3.5-397B-A17B`
+Small model: `bifrost/togetherai/meta-llama/Llama-3.3-70B-Instruct-Turbo`

@@ -1,0 +1,1 @@
+/home/user/Documents/my-projects/rustledger/examples/wasm-plugin-template/target/wasm32-unknown-unknown/release/example_plugin.wasm: /home/user/Documents/my-projects/rustledger/examples/wasm-plugin-template/src/lib.rs

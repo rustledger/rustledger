@@ -41,6 +41,7 @@ glob.workspace = true
 rkyv = { workspace = true, optional = true }
 sha2 = { workspace = true, optional = true }
 rustc-hash.workspace = true
+simdutf8 = "0.1"
 
 # Optional processing dependencies
 rustledger-booking = { workspace = true, optional = true }

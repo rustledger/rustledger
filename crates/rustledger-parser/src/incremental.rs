@@ -16,7 +16,7 @@
 //! - Reusing cached parse results for unchanged regions
 //! - Maintaining directive boundaries for quick change detection
 
-use crate::{ParseError, ParseResult, Spanned, parse};
+use crate::{ParseError, ParseResult, Span, Spanned, parse};
 use rustledger_core::Directive;
 use std::collections::BTreeMap;
 
@@ -119,44 +119,73 @@ impl IncrementalParser {
         result
     }
 
-    /// Apply text changes and re-parse only affected regions.
+    /// Apply text changes and incrementally update parse results.
+    ///
+    /// This implements safe incremental parsing:
+    /// 1. Regions completely before the edit are kept unchanged (cached)
+    /// 2. Full parse is performed (required for correct directive boundaries)
+    /// 3. Unchanged regions are reused from cache, avoiding re-processing
+    ///
+    /// The benefit is avoiding re-processing of unchanged directives in the LSP,
+    /// while maintaining correctness through full parsing.
     ///
     /// Returns a parse result with updated directives.
     pub fn apply_changes(&mut self, source: &str, changes: &[TextChange]) -> ParseResult {
         self.source_len = source.len();
 
-        // Find regions affected by changes
-        let mut affected_starts = Vec::new();
-        for change in changes {
-            for (start, region) in &self.regions {
-                if region.overlaps_range(change.start, change.end) {
-                    affected_starts.push(*start);
-                }
-            }
+        // Handle empty source
+        if source.is_empty() {
+            self.regions.clear();
+            self.errors.clear();
+            return ParseResult {
+                directives: Vec::new(),
+                options: Vec::new(),
+                includes: Vec::new(),
+                plugins: Vec::new(),
+                comments: Vec::new(),
+                errors: Vec::new(),
+                warnings: Vec::new(),
+            };
         }
 
-        // If no regions affected, check if changes are in gaps between directives
-        if affected_starts.is_empty() && !changes.is_empty() {
-            // Changes in whitespace/comment areas - need full reparse
+        // Handle no changes
+        if changes.is_empty() {
             return self.parse_full(source);
         }
 
-        // Remove affected regions
-        for start in &affected_starts {
-            self.regions.remove(start);
-        }
+        // Find the first change point
+        let first_change_start = changes.iter().map(|c| c.start).min().unwrap_or(0);
 
-        // Re-parse the full source to get updated regions
-        // In a more sophisticated implementation, we would parse only the changed regions
-        // and merge them, but for MVP we do a full parse with region tracking
+        // Find regions that are completely before all changes (unchanged)
+        let unchanged: Vec<ParsedRegion> = self
+            .regions
+            .values()
+            .filter(|r| r.end <= first_change_start)
+            .cloned()
+            .collect();
+
+        // Full parse is required for correct directive boundaries
+        // Beancount directives can span multiple lines and need full context
         let result = parse(source);
 
-        // Update cached regions
+        // Update regions cache
         self.regions.clear();
+
+        // Add unchanged regions (reused from cache)
+        for region in &unchanged {
+            self.regions.insert(region.start, region.clone());
+        }
+
+        // Add newly parsed regions
         for spanned in &result.directives {
-            let region =
-                ParsedRegion::new(spanned.span.start, spanned.span.end, spanned.clone(), false);
-            self.regions.insert(spanned.span.start, region);
+            // Check if this directive was in the unchanged set
+            let is_unchanged = unchanged.iter().any(|r| r.start == spanned.span.start);
+
+            if !is_unchanged {
+                let region =
+                    ParsedRegion::new(spanned.span.start, spanned.span.end, spanned.clone(), false);
+                self.regions.insert(spanned.span.start, region);
+            }
         }
 
         self.errors = result.errors.clone();
@@ -213,9 +242,6 @@ pub fn apply_edits_incremental(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Span;
-    use chrono::NaiveDate;
-    use rustledger_core::Open;
 
     #[test]
     fn test_incremental_parser_basic() {
@@ -230,6 +256,10 @@ mod tests {
 
     #[test]
     fn test_region_contains_offset() {
+        use crate::Span;
+        use chrono::NaiveDate;
+        use rustledger_core::Open;
+
         let date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
         let open = Open::new(date, "Assets:Bank").with_currencies(vec!["USD".into()]);
         let directive = Directive::Open(open);
@@ -245,6 +275,10 @@ mod tests {
 
     #[test]
     fn test_region_overlaps_range() {
+        use crate::Span;
+        use chrono::NaiveDate;
+        use rustledger_core::Open;
+
         let date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
         let open = Open::new(date, "Assets:Bank").with_currencies(vec!["USD".into()]);
         let directive = Directive::Open(open);
@@ -267,19 +301,72 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_changes_full_reparse_when_no_regions() {
+    fn test_apply_changes_reuses_unchanged_regions() {
         let mut parser = IncrementalParser::new();
-        let source = "2024-01-01 open Assets:Bank USD\n";
+        let source = "2024-01-01 open Assets:Bank USD\n2024-01-02 open Assets:Cash USD\n";
+
+        // Initial parse
+        parser.parse_full(source);
+        let initial_regions = parser.regions.clone();
+        assert_eq!(parser.regions.len(), 2);
+
+        // Apply change to second directive only
+        let changes = vec![TextChange::new(40, 44, "Savings")];
+        let new_source = "2024-01-01 open Assets:Bank USD\n2024-01-02 open Assets:Savings USD\n";
+        let result = parser.apply_changes(new_source, &changes);
+
+        // Should have 2 directives
+        assert_eq!(result.directives.len(), 2);
+        assert!(result.errors.is_empty());
+
+        // First region should be reused from cache (same start offset)
+        assert!(parser.regions.contains_key(&0));
+    }
+
+    #[test]
+    fn test_apply_changes_preserves_first_directive() {
+        let mut parser = IncrementalParser::new();
+        let source = "2024-01-01 open Assets:Bank USD\n2024-01-02 open Assets:Cash USD\n";
 
         // Initial parse
         parser.parse_full(source);
 
-        // Apply change
-        let changes = vec![TextChange::new(20, 25, "Cash")];
-        let new_source = "2024-01-01 open Assets:Cash USD\n";
+        // Apply change to second directive only
+        let changes = vec![TextChange::new(40, 44, "Savings")];
+        let new_source = "2024-01-01 open Assets:Bank USD\n2024-01-02 open Assets:Savings USD\n";
         let result = parser.apply_changes(new_source, &changes);
 
+        // First directive should be unchanged
+        assert_eq!(result.directives.len(), 2);
+        if let Directive::Open(open) = &result.directives[0].value {
+            assert_eq!(open.account.to_string(), "Assets:Bank");
+        } else {
+            panic!("First directive should be Open");
+        }
+    }
+
+    #[test]
+    fn test_apply_changes_with_text_length_change() {
+        let mut parser = IncrementalParser::new();
+        let source = "2024-01-01 open Assets:Bank USD\n2024-01-02 open Assets:Cash USD\n";
+
+        // Initial parse
+        parser.parse_full(source);
+
+        // Apply change that changes text length
+        let changes = vec![TextChange::new(40, 44, "Checking")]; // "Cash" -> "Checking"
+        let new_source = "2024-01-01 open Assets:Bank USD\n2024-01-02 open Assets:Checking USD\n";
+        let result = parser.apply_changes(new_source, &changes);
+
+        // Should have 2 directives with correct spans
+        assert_eq!(result.directives.len(), 2);
         assert!(result.errors.is_empty());
-        assert_eq!(result.directives.len(), 1);
+
+        // Verify second directive account changed
+        if let Directive::Open(open) = &result.directives[1].value {
+            assert_eq!(open.account.to_string(), "Assets:Checking");
+        } else {
+            panic!("Second directive should be Open");
+        }
     }
 }

@@ -82,9 +82,10 @@ pub struct BookingResult {
 }
 
 /// Error that can occur during booking.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum BookingError {
     /// Multiple lots match but booking method requires unambiguous match.
+    #[error("Ambiguous match: {num_matches} lots match for {currency}")]
     AmbiguousMatch {
         /// Number of lots that matched.
         num_matches: usize,
@@ -92,6 +93,7 @@ pub enum BookingError {
         currency: InternedStr,
     },
     /// No lots match the cost specification.
+    #[error("No matching lot for {currency} with cost {cost_spec}")]
     NoMatchingLot {
         /// The currency being reduced.
         currency: InternedStr,
@@ -99,6 +101,7 @@ pub enum BookingError {
         cost_spec: CostSpec,
     },
     /// Not enough units in matching lots.
+    #[error("Insufficient units of {currency}: requested {requested}, available {available}")]
     InsufficientUnits {
         /// The currency being reduced.
         currency: InternedStr,
@@ -108,6 +111,7 @@ pub enum BookingError {
         available: Decimal,
     },
     /// Currency mismatch between reduction and inventory.
+    #[error("Currency mismatch: expected {expected}, got {got}")]
     CurrencyMismatch {
         /// Expected currency.
         expected: InternedStr,
@@ -115,39 +119,6 @@ pub enum BookingError {
         got: InternedStr,
     },
 }
-
-impl fmt::Display for BookingError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::AmbiguousMatch {
-                num_matches,
-                currency,
-            } => write!(
-                f,
-                "Ambiguous match: {num_matches} lots match for {currency}"
-            ),
-            Self::NoMatchingLot {
-                currency,
-                cost_spec,
-            } => {
-                write!(f, "No matching lot for {currency} with cost {cost_spec}")
-            }
-            Self::InsufficientUnits {
-                currency,
-                requested,
-                available,
-            } => write!(
-                f,
-                "Insufficient units of {currency}: requested {requested}, available {available}"
-            ),
-            Self::CurrencyMismatch { expected, got } => {
-                write!(f, "Currency mismatch: expected {expected}, got {got}")
-            }
-        }
-    }
-}
-
-impl std::error::Error for BookingError {}
 
 /// An inventory is a collection of positions.
 ///
@@ -375,6 +346,7 @@ impl Inventory {
     /// - `Hifo`: `HIFOCorrect.tla` - Highest cost first (`selected_cost >= all other costs`)
     ///
     /// See: `spec/tla/Conservation.tla`, `spec/tla/FIFOCorrect.tla`, etc.
+    #[must_use]
     pub fn reduce(
         &mut self,
         units: &Amount,

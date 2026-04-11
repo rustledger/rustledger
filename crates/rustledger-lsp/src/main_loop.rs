@@ -75,7 +75,8 @@ use lsp_types::{
     WorkspaceSymbolParams,
 };
 use parking_lot::RwLock;
-use rustledger_parser::{ParseResult, parse};
+use rustledger_core::Directive;
+use rustledger_parser::{ParseResult, Spanned, parse};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -1209,26 +1210,64 @@ impl MainLoopState {
     /// When a full ledger is loaded (multi-file mode), validation considers all
     /// files in the ledger, providing accurate diagnostics for balance assertions
     /// that depend on transactions in other files.
+    ///
+    /// To handle unsaved edits in multiple open buffers (#685 / #760), this
+    /// collects fresh parses from the VFS for every open document that is
+    /// part of the ledger and hands them to `all_diagnostics` as overlays.
+    /// The VFS caches parses per document and invalidates on update, so
+    /// this is usually a cache hit (O(1) per open buffer) except immediately
+    /// after an edit to that buffer.
     fn publish_diagnostics(&mut self, uri: &Uri, text: &str) {
-        // Parse the document
+        // Parse the current document.
         let result = parse(text);
 
-        // Get ledger state and file_id for multi-file validation
+        // Canonicalize the current URI's path so we can both skip it when
+        // collecting "other" buffer overlays and look up its file_id in
+        // the ledger source map.
+        let current_canonical_path = uri_to_path(uri).and_then(|p| p.canonicalize().ok());
+
+        // Collect fresh parses for every OTHER open buffer via the VFS.
+        // Done before grabbing the ledger-state read lock so the VFS
+        // write lock (needed by the cache-aware iterator) is released
+        // before we start the file_id lookups.
+        //
+        // We skip:
+        //   - the current file (its fresh parse is already in `result`)
+        //   - any buffer whose fresh parse has errors (keeping the stale
+        //     ledger directives is better than overlaying a partial parse)
+        //
+        // Each entry returns the canonicalized path + the cached Arc of
+        // the parse result, which owns the directives we hand into
+        // `all_diagnostics`. The Arc keeps them alive for the call.
+        let other_buffer_parses: Vec<(PathBuf, Arc<ParseResult>)> = {
+            let mut vfs = self.vfs.write();
+            vfs.iter_with_parse()
+                .filter_map(|(path, _text, parsed)| {
+                    let canonical = path.canonicalize().ok()?;
+                    if Some(&canonical) == current_canonical_path.as_ref() {
+                        return None;
+                    }
+                    if !parsed.errors.is_empty() {
+                        return None;
+                    }
+                    Some((canonical, parsed))
+                })
+                .collect()
+        };
+
+        // Get ledger state and the current file's file_id.
         let ledger_guard = self.ledger_state.read();
         let (ledger_state, current_file_id) = if ledger_guard.ledger().is_some() {
             // Find the file_id for this URI by matching against included files.
-            // We canonicalize the URI path to handle path normalization differences
-            // (e.g., /a/b/../c vs /a/c, or symlinks).
-            let file_id = uri_to_path(uri).and_then(|uri_path| {
-                // Canonicalize to resolve symlinks and normalize path components
-                let canonical_uri_path = uri_path.canonicalize().ok()?;
+            // Canonicalized comparison handles path normalization (e.g.,
+            // /a/b/../c vs /a/c, or symlinks).
+            let file_id = current_canonical_path.as_ref().and_then(|canonical| {
                 ledger_guard.ledger().and_then(|ledger| {
-                    // Search the source map for this file using canonical path comparison
                     ledger.source_map.files().iter().find_map(|f| {
                         f.path
                             .canonicalize()
                             .ok()
-                            .filter(|canonical_f| *canonical_f == canonical_uri_path)
+                            .filter(|canonical_f| canonical_f == canonical)
                             .map(|_| f.id as u16)
                     })
                 })
@@ -1238,8 +1277,37 @@ impl MainLoopState {
             (None, None)
         };
 
+        // Resolve each other buffer's file_id against the ledger source
+        // map. Buffers that aren't part of the ledger get dropped (they
+        // can't affect validation anyway).
+        let other_buffer_overlays: Vec<(u16, &[Spanned<Directive>])> =
+            if let Some(ls) = ledger_state {
+                let ledger = ls.ledger().expect("ledger_state.ledger() checked above");
+                other_buffer_parses
+                    .iter()
+                    .filter_map(|(canonical, parsed)| {
+                        let fid = ledger.source_map.files().iter().find_map(|f| {
+                            f.path
+                                .canonicalize()
+                                .ok()
+                                .filter(|canonical_f| canonical_f == canonical)
+                                .map(|_| f.id as u16)
+                        })?;
+                        Some((fid, parsed.directives.as_slice()))
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+
         // Convert parse errors and validation errors to LSP diagnostics
-        let diagnostics = all_diagnostics(&result, text, ledger_state, current_file_id);
+        let diagnostics = all_diagnostics(
+            &result,
+            text,
+            ledger_state,
+            current_file_id,
+            &other_buffer_overlays,
+        );
         drop(ledger_guard); // Release lock before sending
 
         tracing::debug!(

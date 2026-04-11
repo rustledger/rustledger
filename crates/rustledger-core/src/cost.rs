@@ -323,7 +323,8 @@ impl CostSpec {
 impl fmt::Display for CostSpec {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{{")?;
-        let mut parts = Vec::new();
+        // Max 6 elements: number_per, number_total, currency, date, label, merge
+        let mut parts = Vec::with_capacity(6);
 
         if let Some(n) = self.number_per {
             parts.push(format!("{n}"));

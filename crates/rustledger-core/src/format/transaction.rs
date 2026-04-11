@@ -7,7 +7,8 @@ use std::fmt::Write;
 
 /// Format a transaction.
 pub fn format_transaction(txn: &Transaction, config: &FormatConfig) -> String {
-    let mut out = String::new();
+    // Estimate: date(10) + flag(2) + payee(50) + narration(100) + postings(200) ≈ 362 bytes
+    let mut out = String::with_capacity(400);
 
     // Date and flag
     write!(out, "{} {}", txn.date, txn.flag).unwrap();

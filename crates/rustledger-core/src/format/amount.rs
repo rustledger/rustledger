@@ -10,7 +10,8 @@ pub fn format_amount(amount: &Amount) -> String {
 
 /// Format a cost specification.
 pub fn format_cost_spec(spec: &CostSpec) -> String {
-    let mut parts = Vec::new();
+    // Max 5 elements: amount, date, label, merge
+    let mut parts = Vec::with_capacity(5);
 
     // Amount (per-unit or total)
     if let (Some(num), Some(curr)) = (&spec.number_per, &spec.currency) {

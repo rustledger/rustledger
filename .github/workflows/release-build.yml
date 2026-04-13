@@ -299,7 +299,7 @@ jobs:
           cd ../../..
           (Get-FileHash -Algorithm SHA256 $ARCHIVE).Hash.ToLower() + "  " + $ARCHIVE | Out-File -Encoding utf8 "${ARCHIVE}.sha256"
       - name: Upload artifacts
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v6
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v6
         with:
           name: rustledger-${{ matrix.target }}
           path: |
@@ -333,7 +333,7 @@ jobs:
           sed -i "s/\"version\": \".*\"/\"version\": \"${VERSION}\"/" package.json
           sed -i 's/"name": "rustledger-wasm"/"name": "@rustledger\/wasm"/' package.json
       - name: Upload WASM artifact
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v6
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v6
         with:
           name: wasm-package
           path: crates/rustledger-wasm/pkg/
@@ -359,7 +359,7 @@ jobs:
           cp target/wasm32-wasip1/release/rustledger-ffi-wasi.wasm "rustledger-ffi-wasi-${VERSION}.wasm"
           shasum -a 256 "rustledger-ffi-wasi-${VERSION}.wasm" > "rustledger-ffi-wasi-${VERSION}.wasm.sha256"
       - name: Upload FFI-WASI artifact
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v6
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v6
         with:
           name: ffi-wasi-package
           path: |
@@ -392,7 +392,7 @@ jobs:
         working-directory: packages/vscode
         run: shasum -a 256 rustledger-vscode.vsix > rustledger-vscode.vsix.sha256
       - name: Upload VS Code extension artifact
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v6
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v6
         with:
           name: vscode-extension
           path: |

@@ -48,7 +48,7 @@ jobs:
           persist-credentials: false
 
       - name: Run opencode
-        uses: anomalyco/opencode/github@9f3c2bd861691e2415c027f87e23302b57026a6e # latest as of 2026-03-30
+        uses: anomalyco/opencode/github@21d7a85e76983026bdd131b045f197386ef4c7ab # latest as of 2026-03-30
         env:
           TOGETHER_API_KEY: ${{ secrets.TOGETHER_API_KEY }}
         with:
@@ -70,7 +70,7 @@ jobs:
           persist-credentials: false
 
       - name: Run opencode (review and fix)
-        uses: anomalyco/opencode/github@9f3c2bd861691e2415c027f87e23302b57026a6e
+        uses: anomalyco/opencode/github@21d7a85e76983026bdd131b045f197386ef4c7ab
         env:
           TOGETHER_API_KEY: ${{ secrets.TOGETHER_API_KEY }}
         with:
@@ -115,7 +115,7 @@ jobs:
           persist-credentials: false
 
       - name: Run opencode (review only)
-        uses: anomalyco/opencode/github@9f3c2bd861691e2415c027f87e23302b57026a6e
+        uses: anomalyco/opencode/github@21d7a85e76983026bdd131b045f197386ef4c7ab
         env:
           TOGETHER_API_KEY: ${{ secrets.TOGETHER_API_KEY }}
         with:
@@ -155,7 +155,7 @@ jobs:
 
       - name: Run opencode (review and fix)
         if: inputs.action == 'review-and-fix'
-        uses: anomalyco/opencode/github@9f3c2bd861691e2415c027f87e23302b57026a6e
+        uses: anomalyco/opencode/github@21d7a85e76983026bdd131b045f197386ef4c7ab
         env:
           TOGETHER_API_KEY: ${{ secrets.TOGETHER_API_KEY }}
         with:
@@ -180,7 +180,7 @@ jobs:
 
       - name: Run opencode (review only)
         if: inputs.action == 'review-only'
-        uses: anomalyco/opencode/github@9f3c2bd861691e2415c027f87e23302b57026a6e
+        uses: anomalyco/opencode/github@21d7a85e76983026bdd131b045f197386ef4c7ab
         env:
           TOGETHER_API_KEY: ${{ secrets.TOGETHER_API_KEY }}
         with:
@@ -236,7 +236,7 @@ jobs:
           persist-credentials: false
 
       - name: Run opencode on issue #${{ matrix.issue }}
-        uses: anomalyco/opencode/github@9f3c2bd861691e2415c027f87e23302b57026a6e
+        uses: anomalyco/opencode/github@21d7a85e76983026bdd131b045f197386ef4c7ab
         env:
           TOGETHER_API_KEY: ${{ secrets.TOGETHER_API_KEY }}
         with:

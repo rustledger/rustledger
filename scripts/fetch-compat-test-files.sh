@@ -10,13 +10,13 @@ set -e
 # Target: 800+ unique beancount files from 70+ diverse sources (after deduplication)
 
 DEST="tests/compatibility/files"
-TMPDIR="/tmp/beancount-fetch-$$"
+mkdir -p "$DEST"
+
+TMPDIR=$(mktemp -d /tmp/beancount-fetch-XXX)
 
 echo "=== Fetching Beancount Test Files ==="
 echo ""
 
-mkdir -p "$TMPDIR"
-mkdir -p "$DEST"
 
 cleanup() {
     rm -rf "$TMPDIR"
@@ -33,12 +33,12 @@ fetch_repo() {
     mkdir -p "$subdir"
     echo "Fetching $name..."
 
-    local clone_args=(-- --depth=1)
+    local clone_args="--depth 1"
     if [ -n "$branch" ]; then
-        clone_args+=(--branch="$branch")
+        clone_args+=" -b $branch"
     fi
 
-    gh repo clone "$repo" "$TMPDIR/$name" "${clone_args[@]}" 2>/dev/null || {
+    git clone ${clone_args} git@github.com:$repo.git $TMPDIR/$name 2>/dev/null || {
         echo "  Warning: Failed to clone $name"
         return 0
     }

@@ -109,6 +109,12 @@ SELECT date, account, narration WHERE narration ~ ".*" ORDER BY date LIMIT 10
 SELECT account, MIN(NUMBER(position)) AS min_amt, MAX(NUMBER(position)) AS max_amt GROUP BY account ORDER BY account LIMIT 10
 SELECT DISTINCT CURRENCY(position) AS curr ORDER BY curr
 SELECT account, CURRENCY(position) AS curr, SUM(NUMBER(position)) AS total GROUP BY account, curr ORDER BY account, curr LIMIT 20
+SELECT convert(sum(position),\'USD\') WHERE account \~\'^Income\'
+SELECT convert(sum(position),\'USD\') WHERE account \~\'^Assets\'
+SELECT convert(sum(position),\'USD\') WHERE account ~\'^Expenses\'
+SELECT convert(sum(position),\'USD\') WHERE account ~\'^Liabilities\'
+SELECT id, date, flag, payee, narration, tags, links, filename, lineno, account, number, currency, cost_number, cost_currency, cost_date, price, entry.meta as entry_meta FROM postings ORDER BY date DESC, id, account
+SELECT lineno, date FROM accounts
 BALANCES
 BALANCES AT cost
 BALANCES WHERE account ~ "Assets:"
@@ -133,12 +139,14 @@ full_path="$FIXTURES_DIR/$file"
 [ ! -f "$full_path" ] && exit 0
 
 # Run Python bean-query
-py_out=$(bean-query "$full_path" "$query" 2>/dev/null | head -50 || echo "ERROR")
+py_out=$(bean-query "$full_path" "$query" 2>/dev/null)
 py_exit=$?
+[[ $py_exit -ne 0 ]] && py_out="ERROR" || py_out=$(echo "$py_out" | head -50)
 
 # Run Rust rledger query
-rs_out=$("$RLEDGER" query "$full_path" "$query" 2>/dev/null | head -50 || echo "ERROR")
+rs_out=$("$RLEDGER" query "$full_path" "$query" 2>/dev/null) 
 rs_exit=$?
+[[ $rs_exit -ne 0 ]] && rs_out="ERROR" || rs_out=$(echo "$rs_out" | head -50)
 
 # Normalize function: extract just the data values
 # - Skip header row (first line)
@@ -183,9 +191,9 @@ normalize_numbers() {
 }
 
 # Categorize the result
-if [ "$py_data" = "$rs_data" ]; then
-    match="true"
-    category="match"
+if [ "$py_exit" -ne 0 ] || [ "$rs_exit" -ne 0 ]; then
+    match="false"
+    category="error"
 elif [ -z "$py_data" ] && [ -z "$rs_data" ]; then
     match="true"
     category="both_empty"
@@ -195,9 +203,9 @@ elif [ -z "$py_data" ]; then
 elif [ -z "$rs_data" ]; then
     match="false"
     category="rust_empty"
-elif [ "$py_exit" -ne 0 ] || [ "$rs_exit" -ne 0 ]; then
-    match="false"
-    category="error"
+elif [ "$py_data" = "$rs_data" ]; then
+    match="true"
+    category="match"
 else
     # Check if difference is only in decimal precision or zero values
     py_normalized=$(normalize_numbers "$py_data")
@@ -268,7 +276,7 @@ echo ""
 
 # Show breakdown by category (grep -c exits 1 when 0 matches, so use || true)
 cat_match=$(grep -c '"category":"match"' "$RESULTS_FILE" 2>/dev/null) || cat_match=0
-cat_both_empty=$(grep -c '"category":"both_empty"' "$RESULTS_FILE" 2>/dev/null) || cat_both_empty=0
+cat_both_empty=$(grep -c '"py_rows":00,"rs_rows":00' "$RESULTS_FILE" 2>/dev/null) || cat_both_empty=0
 cat_precision_diff=$(grep -c '"category":"precision_diff"' "$RESULTS_FILE" 2>/dev/null) || cat_precision_diff=0
 cat_python_empty=$(grep -c '"category":"python_empty"' "$RESULTS_FILE" 2>/dev/null) || cat_python_empty=0
 cat_rust_empty=$(grep -c '"category":"rust_empty"' "$RESULTS_FILE" 2>/dev/null) || cat_rust_empty=0

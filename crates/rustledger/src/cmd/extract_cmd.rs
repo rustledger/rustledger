@@ -330,7 +330,7 @@ fn build_config_from_entry(entry: &ImporterEntry) -> Result<ImporterConfig> {
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
-        mappings.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+        mappings.sort_by_key(|a| std::cmp::Reverse(a.0.len()));
         builder = builder.mappings(mappings);
     }
 
@@ -409,9 +409,7 @@ fn list_importers(args: &Args) -> Result<()> {
 /// Check if an importer matches the given filename using its glob pattern.
 fn importer_matches_filename(entry: &ImporterEntry, filename: &str) -> bool {
     if let Some(pattern) = &entry.filename_pattern {
-        glob::Pattern::new(pattern)
-            .map(|p| p.matches(filename))
-            .unwrap_or(false)
+        glob::Pattern::new(pattern).is_ok_and(|p| p.matches(filename))
     } else {
         false
     }

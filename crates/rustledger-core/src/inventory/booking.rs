@@ -223,7 +223,7 @@ impl Inventory {
         }
 
         // Sort by cost descending (highest first)
-        matching.sort_by(|a, b| b.1.cmp(&a.1));
+        matching.sort_by_key(|(_, cost)| std::cmp::Reverse(*cost));
 
         let indices: Vec<usize> = matching.into_iter().map(|(i, _)| i).collect();
 
@@ -555,7 +555,7 @@ impl Inventory {
         }
 
         // Sort by cost descending (highest first)
-        matching.sort_by(|a, b| b.1.cmp(&a.1));
+        matching.sort_by_key(|(_, cost)| std::cmp::Reverse(*cost));
 
         let indices: Vec<usize> = matching.into_iter().map(|(i, _)| i).collect();
 

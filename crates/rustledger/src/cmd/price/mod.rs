@@ -399,6 +399,6 @@ mod tests {
 
         let registry = PriceSourceRegistry::new(&config);
         assert_eq!(registry.default_source_name(), "coinbase");
-        assert_eq!(registry.timeout(), Duration::from_secs(60));
+        assert_eq!(registry.timeout(), Duration::from_mins(1));
     }
 }

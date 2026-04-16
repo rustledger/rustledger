@@ -280,10 +280,10 @@ fn account_exists(account: &str, parse_result: &ParseResult) -> bool {
             Directive::Open(open) if open.account.as_ref() == account => return true,
             Directive::Close(close) if close.account.as_ref() == account => return true,
             Directive::Balance(bal) if bal.account.as_ref() == account => return true,
-            Directive::Transaction(txn) => {
-                if txn.postings.iter().any(|p| p.account.as_ref() == account) {
-                    return true;
-                }
+            Directive::Transaction(txn)
+                if txn.postings.iter().any(|p| p.account.as_ref() == account) =>
+            {
+                return true;
             }
             _ => {}
         }

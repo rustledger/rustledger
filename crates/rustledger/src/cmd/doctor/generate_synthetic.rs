@@ -26,8 +26,7 @@ pub(super) fn cmd_generate_synthetic<W: Write>(
     let seed = seed.unwrap_or_else(|| {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(12345)
+            .map_or(12345, |d| d.as_secs())
     });
 
     writeln!(writer, "Output directory: {}", output.display())?;

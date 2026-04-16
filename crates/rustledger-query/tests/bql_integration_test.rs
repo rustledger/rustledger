@@ -2822,7 +2822,7 @@ fn test_safediv_with_two_aggregate_args() {
 
 #[test]
 fn test_null_propagation_in_nested_aggregates() {
-    // Test that NULL values propagate correctly through nested functions
+    // Test that cost() returns units when no cost basis (Python beancount compat)
     let directives = make_holdings_directives();
     let result = execute_query(
         r#"SELECT number(cost(sum(position))) as cost_num
@@ -2832,11 +2832,77 @@ fn test_null_propagation_in_nested_aggregates() {
     );
 
     assert_eq!(result.len(), 1);
-    // Cash positions have no cost, so should be NULL
-    assert!(
-        matches!(&result.rows[0][0], Value::Null),
-        "Expected Null for cash position cost"
+    // Cash positions have no cost basis, so cost() returns units: -1000 + -600 = -1600
+    if let Value::Number(n) = &result.rows[0][0] {
+        assert_eq!(*n, dec!(-1600));
+    } else {
+        panic!("Expected Number value, got {:?}", &result.rows[0][0]);
+    }
+}
+
+#[test]
+fn test_number_cost_position_without_cost() {
+    // Regression test for issue #819: number(cost(position)) should work for
+    // positions without an explicit cost basis, returning the units number.
+    let directives = vec![
+        Directive::Open(Open::new(date(2020, 1, 1), "Assets:Checking")),
+        Directive::Open(Open::new(date(2020, 1, 1), "Expenses:Food")),
+        Directive::Transaction(
+            Transaction::new(date(2020, 1, 2), "Grocery")
+                .with_posting(Posting::new(
+                    "Assets:Checking",
+                    Amount::new(dec!(-10), "USD"),
+                ))
+                .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(10), "USD"))),
+        ),
+    ];
+    let result = execute_query("SELECT number(cost(position))", &directives);
+    assert_eq!(result.len(), 2);
+    if let Value::Number(n) = &result.rows[0][0] {
+        assert_eq!(*n, dec!(-10));
+    } else {
+        panic!("Expected Number, got {:?}", &result.rows[0][0]);
+    }
+    if let Value::Number(n) = &result.rows[1][0] {
+        assert_eq!(*n, dec!(10));
+    } else {
+        panic!("Expected Number, got {:?}", &result.rows[1][0]);
+    }
+}
+
+#[test]
+fn test_cost_mixed_inventory_with_and_without_cost() {
+    // Regression test: cost() on an inventory with mixed positions
+    // (some with cost, some without) should sum cost for positions with cost
+    // and units for positions without cost.
+    let directives = vec![
+        Directive::Open(Open::new(date(2024, 1, 1), "Assets:Brokerage")),
+        Directive::Open(Open::new(date(2024, 1, 1), "Assets:Cash")),
+        Directive::Transaction(
+            Transaction::new(date(2024, 1, 15), "Buy AAPL")
+                .with_posting(
+                    Posting::new("Assets:Brokerage", Amount::new(dec!(10), "AAPL")).with_cost(
+                        CostSpec::empty()
+                            .with_number_per(dec!(100))
+                            .with_currency("USD"),
+                    ),
+                )
+                .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(-1000), "USD"))),
+        ),
+    ];
+    // cost(sum(position)) for Cash: no cost basis, returns units = -1000 USD
+    let result = execute_query(
+        r#"SELECT number(cost(sum(position))) as cost_num
+           WHERE account = "Assets:Cash"
+           GROUP BY account"#,
+        &directives,
     );
+    assert_eq!(result.len(), 1);
+    if let Value::Number(n) = &result.rows[0][0] {
+        assert_eq!(*n, dec!(-1000));
+    } else {
+        panic!("Expected Number, got {:?}", &result.rows[0][0]);
+    }
 }
 
 #[test]
@@ -2961,8 +3027,12 @@ fn test_safediv_with_null() {
     );
 
     assert_eq!(result.len(), 1);
-    // Cash has no cost, so NULL / anything = NULL
-    assert!(matches!(&result.rows[0][0], Value::Null));
+    // Cash has no cost basis, cost() returns units (-1600), safediv(-1600, -1600) = 1
+    if let Value::Number(n) = &result.rows[0][0] {
+        assert_eq!(*n, dec!(1));
+    } else {
+        panic!("Expected Number value, got {:?}", &result.rows[0][0]);
+    }
 }
 
 #[test]

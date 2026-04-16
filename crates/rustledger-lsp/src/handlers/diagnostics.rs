@@ -52,30 +52,20 @@ fn build_validation_options_from_file(
 
     for (key, value, _span) in file_options {
         match key.as_str() {
-            "name_assets" => {
-                if !account_types.is_empty() {
-                    account_types[0] = value.clone();
-                }
+            "name_assets" if !account_types.is_empty() => {
+                account_types[0] = value.clone();
             }
-            "name_liabilities" => {
-                if account_types.len() > 1 {
-                    account_types[1] = value.clone();
-                }
+            "name_liabilities" if account_types.len() > 1 => {
+                account_types[1] = value.clone();
             }
-            "name_equity" => {
-                if account_types.len() > 2 {
-                    account_types[2] = value.clone();
-                }
+            "name_equity" if account_types.len() > 2 => {
+                account_types[2] = value.clone();
             }
-            "name_income" => {
-                if account_types.len() > 3 {
-                    account_types[3] = value.clone();
-                }
+            "name_income" if account_types.len() > 3 => {
+                account_types[3] = value.clone();
             }
-            "name_expenses" => {
-                if account_types.len() > 4 {
-                    account_types[4] = value.clone();
-                }
+            "name_expenses" if account_types.len() > 4 => {
+                account_types[4] = value.clone();
             }
             _ => {}
         }

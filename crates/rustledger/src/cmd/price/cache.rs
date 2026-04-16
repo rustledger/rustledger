@@ -203,7 +203,7 @@ mod tests {
     fn test_insert_and_get() {
         let mut cache = PriceCache {
             path: PathBuf::from("/tmp/test-price-cache.json"),
-            ttl: Duration::from_secs(3600),
+            ttl: Duration::from_hours(1),
             entries: HashMap::new(),
             dirty: false,
         };
@@ -251,7 +251,7 @@ mod tests {
     fn test_get_missing_returns_none() {
         let cache = PriceCache {
             path: PathBuf::from("/tmp/test-price-cache.json"),
-            ttl: Duration::from_secs(3600),
+            ttl: Duration::from_hours(1),
             entries: HashMap::new(),
             dirty: false,
         };
@@ -275,7 +275,7 @@ mod tests {
         {
             let mut cache = PriceCache {
                 path: path.clone(),
-                ttl: Duration::from_secs(3600),
+                ttl: Duration::from_hours(1),
                 entries: HashMap::new(),
                 dirty: false,
             };
@@ -288,7 +288,7 @@ mod tests {
         {
             let cache = PriceCache {
                 path: path.clone(),
-                ttl: Duration::from_secs(3600),
+                ttl: Duration::from_hours(1),
                 entries: serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap(),
                 dirty: false,
             };
@@ -304,7 +304,7 @@ mod tests {
     fn test_clear() {
         let mut cache = PriceCache {
             path: PathBuf::from("/tmp/test-price-cache-clear.json"),
-            ttl: Duration::from_secs(3600),
+            ttl: Duration::from_hours(1),
             entries: HashMap::new(),
             dirty: false,
         };

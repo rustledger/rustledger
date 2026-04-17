@@ -109,7 +109,6 @@ impl Executor<'_> {
             }
 
             // Assign ranks within the partition
-            let mut row_num = 1;
             let mut rank = 1;
             let mut dense_rank = 1;
             let mut prev_values: Option<&Vec<Value>> = None;
@@ -117,7 +116,6 @@ impl Executor<'_> {
             for (position, &original_idx) in sorted_indices.iter().enumerate() {
                 let current_values = &order_values[original_idx];
 
-                // Check if this row has the same order values as the previous row
                 let is_tie = if let Some(prev) = prev_values {
                     current_values == prev
                 } else {
@@ -125,17 +123,15 @@ impl Executor<'_> {
                 };
 
                 if !is_tie && position > 0 {
-                    // New value - update ranks
                     rank = position + 1;
                     dense_rank += 1;
                 }
                 window_contexts[original_idx] = WindowContext {
-                    row_number: row_num,
+                    row_number: position + 1,
                     rank,
                     dense_rank,
                 };
 
-                row_num += 1;
                 prev_values = Some(current_values);
             }
         }

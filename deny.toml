@@ -16,6 +16,14 @@ db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "warn"
 
+# rand 0.8.x (via cap-rand/wasmtime-wasi) uses thread_rng which is
+# technically affected by RUSTSEC-2026-0097, but the unsound code path
+# requires a custom logger calling rand::thread_rng(), which rustledger
+# never does. Remove this ignore once wasmtime updates cap-rand to rand 0.9+.
+[[advisories.ignore]]
+id = "RUSTSEC-2026-0097"
+reason = "rand 0.8.x thread_rng unsoundness requires a custom logger calling rand::thread_rng(), which rustledger never does. Pinned by cap-rand via wasmtime-wasi 43.x"
+
 [licenses]
 version = 2
 allow = [

@@ -129,14 +129,12 @@ fn resolve_currency_documentation(currency: &str, parse_result: &ParseResult) ->
 
     for spanned in &parse_result.directives {
         match &spanned.value {
-            Directive::Price(price) => {
-                if price.currency.as_ref() == currency {
-                    prices.push((
-                        price.date,
-                        price.amount.number,
-                        price.amount.currency.to_string(),
-                    ));
-                }
+            Directive::Price(price) if price.currency.as_ref() == currency => {
+                prices.push((
+                    price.date,
+                    price.amount.number,
+                    price.amount.currency.to_string(),
+                ));
             }
             Directive::Transaction(txn) => {
                 for posting in &txn.postings {
@@ -157,7 +155,7 @@ fn resolve_currency_documentation(currency: &str, parse_result: &ParseResult) ->
 
     if !prices.is_empty() {
         // Sort by date descending
-        prices.sort_by(|a, b| b.0.cmp(&a.0));
+        prices.sort_by_key(|b| std::cmp::Reverse(b.0));
 
         doc.push_str("**Recent Prices:**\n");
         for (date, amount, quote_currency) in prices.iter().take(5) {
@@ -201,7 +199,7 @@ fn resolve_payee_documentation(payee: &str, parse_result: &ParseResult) -> Docum
 
     if !transactions.is_empty() {
         // Sort by date descending
-        transactions.sort_by(|a, b| b.0.cmp(&a.0));
+        transactions.sort_by_key(|b| std::cmp::Reverse(b.0));
 
         doc.push_str("**Recent:**\n");
         for (date, narration) in transactions.iter().take(3) {
@@ -221,7 +219,7 @@ fn resolve_payee_documentation(payee: &str, parse_result: &ParseResult) -> Docum
     if !accounts_used.is_empty() {
         doc.push_str("\n**Common accounts:**\n");
         let mut sorted: Vec<_> = accounts_used.into_iter().collect();
-        sorted.sort_by(|a, b| b.1.cmp(&a.1));
+        sorted.sort_by_key(|b| std::cmp::Reverse(b.1));
 
         for (account, count) in sorted.iter().take(3) {
             doc.push_str(&format!("- {} ({}x)\n", account, count));

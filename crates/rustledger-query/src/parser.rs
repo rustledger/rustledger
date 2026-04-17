@@ -374,16 +374,27 @@ fn journal_query<'a>() -> impl Parser<'a, ParserInput<'a>, JournalQuery, ParserE
 /// Parse BALANCES query.
 fn balances_query<'a>() -> impl Parser<'a, ParserInput<'a>, BalancesQuery, ParserExtra<'a>> + Clone
 {
+    // Use rewind-based lookahead so optional clauses don't consume whitespace
+    // that subsequent clauses need. Without this, `BALANCES WHERE ...` fails
+    // because at_function() consumes whitespace before failing on "WHERE" != "AT".
+    let at_fn = ws1().then(kw("AT")).rewind().ignore_then(at_function());
+
+    let from = ws1().then(kw("FROM")).rewind().ignore_then(
+        ws1()
+            .ignore_then(kw("FROM"))
+            .ignore_then(ws1())
+            .ignore_then(from_modifiers()),
+    );
+
     kw("BALANCES")
-        .ignore_then(at_function().or_not())
-        .then(
-            ws1()
-                .ignore_then(kw("FROM"))
-                .ignore_then(ws1())
-                .ignore_then(from_modifiers())
-                .or_not(),
-        )
-        .map(|(at_function, from)| BalancesQuery { at_function, from })
+        .ignore_then(at_fn.or_not())
+        .then(from.or_not())
+        .then(where_clause().or_not())
+        .map(|((at_function, from), where_clause)| BalancesQuery {
+            at_function,
+            from,
+            where_clause,
+        })
 }
 
 /// Parse PRINT query.

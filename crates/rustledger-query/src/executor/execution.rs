@@ -64,8 +64,8 @@ impl Executor<'_> {
             // - If explicit GROUP BY is provided, use it
             // - Otherwise, implicitly group by non-aggregate columns in SELECT
             //   (matches Python beancount behavior)
-            let group_by_exprs: Option<Vec<Expr>> = if query.group_by.is_some() {
-                query.group_by.clone()
+            let group_by_exprs: Option<Vec<Expr>> = if let Some(ref group_exprs) = query.group_by {
+                Some(Self::resolve_group_by_aliases(group_exprs, &query.targets))
             } else {
                 let implicit = Self::extract_implicit_group_by_exprs(&query.targets);
                 if implicit.is_empty() {
@@ -456,29 +456,8 @@ impl Executor<'_> {
 
         // Determine GROUP BY expressions.
         // If no explicit GROUP BY, implicitly group by non-aggregate columns (beancount compat).
-        // Build alias -> expression map so GROUP BY can reference SELECT aliases.
-        let alias_expr_map: std::collections::HashMap<String, Expr> = query
-            .targets
-            .iter()
-            .filter_map(|t| t.alias.as_ref().map(|a| (a.to_uppercase(), t.expr.clone())))
-            .collect();
-
         let group_by_exprs: Option<Vec<Expr>> = if let Some(ref exprs) = query.group_by {
-            // Resolve alias references: if a GROUP BY expr is a column name matching
-            // a SELECT alias, replace it with the aliased expression.
-            let resolved = exprs
-                .iter()
-                .map(|expr| {
-                    if let Expr::Column(name) = expr
-                        && let Some(target_expr) = alias_expr_map.get(&name.to_uppercase())
-                    {
-                        target_expr.clone()
-                    } else {
-                        expr.clone()
-                    }
-                })
-                .collect();
-            Some(resolved)
+            Some(Self::resolve_group_by_aliases(exprs, &query.targets))
         } else {
             let implicit = Self::extract_implicit_group_by_exprs(&query.targets);
             if implicit.is_empty() {
@@ -861,7 +840,15 @@ impl Executor<'_> {
         self.build_balances_with_filter(query.from.as_ref())?;
 
         let columns = vec!["account".to_string(), "balance".to_string()];
-        let mut result = QueryResult::new(columns);
+        let mut result = QueryResult::new(columns.clone());
+
+        // Build column map for WHERE clause evaluation (lowercase keys for
+        // consistent lookup with evaluate_subquery_filter)
+        let column_map: FxHashMap<String, usize> = columns
+            .iter()
+            .enumerate()
+            .map(|(i, c)| (c.to_lowercase(), i))
+            .collect();
 
         // Sort accounts for consistent output
         let mut accounts: Vec<_> = self.balances.keys().collect();
@@ -893,6 +880,14 @@ impl Executor<'_> {
             };
 
             let row = vec![Value::String(account.to_string()), balance_value];
+
+            // Apply WHERE clause filter if present
+            if let Some(where_expr) = &query.where_clause
+                && !self.evaluate_subquery_filter(where_expr, &row, &column_map)?
+            {
+                continue;
+            }
+
             result.add_row(row);
         }
 

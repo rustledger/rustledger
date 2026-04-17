@@ -135,6 +135,42 @@ fn test_parse_balances_query() {
 }
 
 #[test]
+fn test_parse_balances_where_query() {
+    let query = parse(r#"BALANCES WHERE account ~ "Assets:""#).expect("should parse");
+    if let rustledger_query::Query::Balances(b) = query {
+        assert!(b.where_clause.is_some());
+    } else {
+        panic!("Expected BALANCES query");
+    }
+}
+
+#[test]
+fn test_parse_balances_at_cost_where_query() {
+    let query = parse(r#"BALANCES AT cost WHERE account ~ "Assets:""#).expect("should parse");
+    if let rustledger_query::Query::Balances(b) = query {
+        assert_eq!(b.at_function, Some("cost".to_string()));
+        assert!(b.where_clause.is_some());
+    } else {
+        panic!("Expected BALANCES query");
+    }
+}
+
+#[test]
+fn test_execute_balances_where() {
+    let directives = make_test_directives();
+    let result = execute_query(r#"BALANCES WHERE account ~ "Expenses:""#, &directives);
+    assert!(!result.is_empty());
+    // All accounts should match the filter
+    for row in &result.rows {
+        if let Value::String(account) = &row[0] {
+            assert!(account.starts_with("Expenses:"), "got {account}");
+        } else {
+            panic!("expected Value::String, got {:?}", row[0]);
+        }
+    }
+}
+
+#[test]
 fn test_parse_print_query() {
     let query = parse("PRINT").expect("should parse");
     assert!(matches!(query, rustledger_query::Query::Print(_)));
@@ -270,6 +306,52 @@ fn test_execute_group_by_account() {
     // Each account should appear at most once
     let unique_accounts: std::collections::HashSet<_> = accounts.iter().collect();
     assert_eq!(accounts.len(), unique_accounts.len());
+}
+
+#[test]
+fn test_group_by_function_alias() {
+    // GROUP BY should resolve SELECT aliases to the original expression
+    let directives = make_test_directives();
+    let result = execute_query(
+        "SELECT year(date) AS y, COUNT(*) AS cnt GROUP BY y ORDER BY y",
+        &directives,
+    );
+    assert!(!result.is_empty());
+    assert_eq!(result.columns[0], "y");
+    assert_eq!(result.columns[1], "cnt");
+    // All rows should have integer year values
+    for row in &result.rows {
+        assert!(matches!(row[0], Value::Integer(_)));
+    }
+}
+
+#[test]
+fn test_group_by_month_alias() {
+    let directives = make_test_directives();
+    let result = execute_query(
+        "SELECT month(date) AS m, COUNT(*) AS cnt GROUP BY m ORDER BY m",
+        &directives,
+    );
+    assert!(!result.is_empty());
+    // Month values should be 1-12
+    for row in &result.rows {
+        if let Value::Integer(m) = &row[0] {
+            assert!((1..=12).contains(m));
+        } else {
+            panic!("Expected integer month");
+        }
+    }
+}
+
+#[test]
+fn test_group_by_parent_alias() {
+    let directives = make_test_directives();
+    let result = execute_query(
+        "SELECT PARENT(account) AS parent, COUNT(*) AS cnt GROUP BY parent ORDER BY parent",
+        &directives,
+    );
+    assert!(!result.is_empty());
+    assert_eq!(result.columns[0], "parent");
 }
 
 // ============================================================================
@@ -409,6 +491,27 @@ fn test_execute_balances_with_from() {
 
     // Should have balances
     assert!(!result.is_empty());
+}
+
+#[test]
+fn test_execute_balances_with_where() {
+    let directives = make_test_directives();
+    let query = parse("BALANCES WHERE account ~ 'Assets:'").expect("should parse");
+    let mut executor = Executor::new(&directives);
+    let result = executor.execute(&query).expect("should execute");
+
+    // Should only have Assets: accounts (Checking and Savings)
+    assert_eq!(result.len(), 2);
+    for row in &result.rows {
+        if let Value::String(acct) = &row[0] {
+            assert!(
+                acct.starts_with("Assets:"),
+                "Expected Assets: account, got {acct}"
+            );
+        } else {
+            panic!("Expected string account");
+        }
+    }
 }
 
 // ============================================================================
@@ -2822,7 +2925,7 @@ fn test_safediv_with_two_aggregate_args() {
 
 #[test]
 fn test_null_propagation_in_nested_aggregates() {
-    // Test that NULL values propagate correctly through nested functions
+    // Test that cost() returns units when no cost basis (Python beancount compat)
     let directives = make_holdings_directives();
     let result = execute_query(
         r#"SELECT number(cost(sum(position))) as cost_num
@@ -2832,11 +2935,77 @@ fn test_null_propagation_in_nested_aggregates() {
     );
 
     assert_eq!(result.len(), 1);
-    // Cash positions have no cost, so should be NULL
-    assert!(
-        matches!(&result.rows[0][0], Value::Null),
-        "Expected Null for cash position cost"
+    // Cash positions have no cost basis, so cost() returns units: -1000 + -600 = -1600
+    if let Value::Number(n) = &result.rows[0][0] {
+        assert_eq!(*n, dec!(-1600));
+    } else {
+        panic!("Expected Number value, got {:?}", &result.rows[0][0]);
+    }
+}
+
+#[test]
+fn test_number_cost_position_without_cost() {
+    // Regression test for issue #819: number(cost(position)) should work for
+    // positions without an explicit cost basis, returning the units number.
+    let directives = vec![
+        Directive::Open(Open::new(date(2020, 1, 1), "Assets:Checking")),
+        Directive::Open(Open::new(date(2020, 1, 1), "Expenses:Food")),
+        Directive::Transaction(
+            Transaction::new(date(2020, 1, 2), "Grocery")
+                .with_posting(Posting::new(
+                    "Assets:Checking",
+                    Amount::new(dec!(-10), "USD"),
+                ))
+                .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(10), "USD"))),
+        ),
+    ];
+    let result = execute_query("SELECT number(cost(position))", &directives);
+    assert_eq!(result.len(), 2);
+    if let Value::Number(n) = &result.rows[0][0] {
+        assert_eq!(*n, dec!(-10));
+    } else {
+        panic!("Expected Number, got {:?}", &result.rows[0][0]);
+    }
+    if let Value::Number(n) = &result.rows[1][0] {
+        assert_eq!(*n, dec!(10));
+    } else {
+        panic!("Expected Number, got {:?}", &result.rows[1][0]);
+    }
+}
+
+#[test]
+fn test_cost_mixed_inventory_with_and_without_cost() {
+    // Regression test: cost() on an inventory with mixed positions
+    // (some with cost, some without) should sum cost for positions with cost
+    // and units for positions without cost.
+    let directives = vec![
+        Directive::Open(Open::new(date(2024, 1, 1), "Assets:Brokerage")),
+        Directive::Open(Open::new(date(2024, 1, 1), "Assets:Cash")),
+        Directive::Transaction(
+            Transaction::new(date(2024, 1, 15), "Buy AAPL")
+                .with_posting(
+                    Posting::new("Assets:Brokerage", Amount::new(dec!(10), "AAPL")).with_cost(
+                        CostSpec::empty()
+                            .with_number_per(dec!(100))
+                            .with_currency("USD"),
+                    ),
+                )
+                .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(-1000), "USD"))),
+        ),
+    ];
+    // cost(sum(position)) for Cash: no cost basis, returns units = -1000 USD
+    let result = execute_query(
+        r#"SELECT number(cost(sum(position))) as cost_num
+           WHERE account = "Assets:Cash"
+           GROUP BY account"#,
+        &directives,
     );
+    assert_eq!(result.len(), 1);
+    if let Value::Number(n) = &result.rows[0][0] {
+        assert_eq!(*n, dec!(-1000));
+    } else {
+        panic!("Expected Number, got {:?}", &result.rows[0][0]);
+    }
 }
 
 #[test]
@@ -2961,8 +3130,12 @@ fn test_safediv_with_null() {
     );
 
     assert_eq!(result.len(), 1);
-    // Cash has no cost, so NULL / anything = NULL
-    assert!(matches!(&result.rows[0][0], Value::Null));
+    // Cash has no cost basis, cost() returns units (-1600), safediv(-1600, -1600) = 1
+    if let Value::Number(n) = &result.rows[0][0] {
+        assert_eq!(*n, dec!(1));
+    } else {
+        panic!("Expected Number value, got {:?}", &result.rows[0][0]);
+    }
 }
 
 #[test]

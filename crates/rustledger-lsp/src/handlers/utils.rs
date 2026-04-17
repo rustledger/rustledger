@@ -244,10 +244,8 @@ pub fn is_currency_like(s: &str, parse_result: &ParseResult) -> bool {
     // Then verify it's a known currency in the document
     for spanned in &parse_result.directives {
         match &spanned.value {
-            Directive::Commodity(comm) => {
-                if comm.currency.as_ref() == s {
-                    return true;
-                }
+            Directive::Commodity(comm) if comm.currency.as_ref() == s => {
+                return true;
             }
             Directive::Open(open) => {
                 for curr in &open.currencies {
@@ -256,10 +254,8 @@ pub fn is_currency_like(s: &str, parse_result: &ParseResult) -> bool {
                     }
                 }
             }
-            Directive::Balance(bal) => {
-                if bal.amount.currency.as_ref() == s {
-                    return true;
-                }
+            Directive::Balance(bal) if bal.amount.currency.as_ref() == s => {
+                return true;
             }
             Directive::Transaction(txn) => {
                 for posting in &txn.postings {
@@ -283,10 +279,10 @@ pub fn is_currency_like(s: &str, parse_result: &ParseResult) -> bool {
                     }
                 }
             }
-            Directive::Price(price) => {
-                if price.currency.as_ref() == s || price.amount.currency.as_ref() == s {
-                    return true;
-                }
+            Directive::Price(price)
+                if price.currency.as_ref() == s || price.amount.currency.as_ref() == s =>
+            {
+                return true;
             }
             _ => {}
         }

@@ -613,12 +613,11 @@ impl<'a> Executor<'a> {
                 match &args[0] {
                     Value::Position(p) => {
                         if let Some(cost) = &p.cost {
-                            // Preserve sign: buys (positive units) give positive cost,
-                            // sells (negative units) give negative cost
+                            // Preserve sign: buys give positive cost, sells give negative
                             let total = p.units.number * cost.number;
                             Ok(Value::Amount(Amount::new(total, cost.currency.clone())))
                         } else {
-                            Ok(Value::Null)
+                            Ok(Value::Amount(p.units.clone()))
                         }
                     }
                     Value::Amount(a) => Ok(Value::Amount(a.clone())),
@@ -627,10 +626,14 @@ impl<'a> Executor<'a> {
                         let mut currency: Option<InternedStr> = None;
                         for pos in inv.positions() {
                             if let Some(cost) = &pos.cost {
-                                // Preserve sign for each position
                                 total += pos.units.number * cost.number;
                                 if currency.is_none() {
                                     currency = Some(cost.currency.clone());
+                                }
+                            } else {
+                                total += pos.units.number;
+                                if currency.is_none() {
+                                    currency = Some(pos.units.currency.clone());
                                 }
                             }
                         }
@@ -1993,7 +1996,7 @@ impl<'a> Executor<'a> {
 
         // Sort accounts by name for consistent output
         let mut account_list: Vec<_> = accounts.into_iter().collect();
-        account_list.sort_by(|(a, _), (b, _)| a.cmp(b));
+        account_list.sort_by_key(|(a, _)| *a);
 
         for (account, (open_date, close_date, currencies, booking)) in account_list {
             let row = vec![

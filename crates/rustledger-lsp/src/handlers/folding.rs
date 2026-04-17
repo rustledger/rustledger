@@ -112,7 +112,7 @@ pub fn handle_folding_ranges(
     }
 
     // Sort and deduplicate
-    ranges.sort_by(|a, b| a.start_line.cmp(&b.start_line));
+    ranges.sort_by_key(|a| a.start_line);
     ranges.dedup_by(|a, b| a.start_line == b.start_line && a.end_line == b.end_line);
 
     if ranges.is_empty() {

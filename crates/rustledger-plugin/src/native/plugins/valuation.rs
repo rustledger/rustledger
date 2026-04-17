@@ -149,24 +149,25 @@ impl NativePlugin for ValuationPlugin {
                     errors.extend(new_errors);
                     output_directives.push(transformed);
                 }
-                DirectiveData::Custom(custom) => {
-                    if custom.custom_type == "valuation" && !custom.values.is_empty() {
-                        // Check if this is a config (pass through) or a valuation assertion
-                        if matches!(custom.values.first(), Some(MetaValueData::String(s)) if s == "config")
-                        {
-                            output_directives.push(directive);
-                            continue;
-                        }
-
-                        // This is a valuation assertion
-                        let (new_directives, new_errors) =
-                            process_valuation_assertion(&directive, custom, &mut account_states);
-
-                        output_directives.extend(new_directives);
-                        errors.extend(new_errors);
-                    } else {
+                DirectiveData::Custom(custom)
+                    if custom.custom_type == "valuation" && !custom.values.is_empty() =>
+                {
+                    // Check if this is a config (pass through) or a valuation assertion
+                    if matches!(custom.values.first(), Some(MetaValueData::String(s)) if s == "config")
+                    {
                         output_directives.push(directive);
+                        continue;
                     }
+
+                    // This is a valuation assertion
+                    let (new_directives, new_errors) =
+                        process_valuation_assertion(&directive, custom, &mut account_states);
+
+                    output_directives.extend(new_directives);
+                    errors.extend(new_errors);
+                }
+                DirectiveData::Custom(_) => {
+                    output_directives.push(directive);
                 }
                 DirectiveData::Commodity(commodity) => {
                     commodities_present.insert(commodity.currency.clone());

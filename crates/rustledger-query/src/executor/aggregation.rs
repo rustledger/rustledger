@@ -61,6 +61,32 @@ impl<'a> Executor<'a> {
         }
         non_aggregate_exprs
     }
+    /// Resolve GROUP BY expressions by substituting SELECT aliases.
+    ///
+    /// If a GROUP BY expression is a column name that matches a SELECT alias,
+    /// replace it with the aliased expression. For example, in:
+    ///   `SELECT month(date) AS m, COUNT(*) GROUP BY m`
+    /// the GROUP BY `m` is resolved to `month(date)`.
+    pub(super) fn resolve_group_by_aliases(group_exprs: &[Expr], targets: &[Target]) -> Vec<Expr> {
+        let alias_map: HashMap<String, Expr> = targets
+            .iter()
+            .filter_map(|t| t.alias.as_ref().map(|a| (a.to_uppercase(), t.expr.clone())))
+            .collect();
+
+        group_exprs
+            .iter()
+            .map(|expr| {
+                if let Expr::Column(name) = expr
+                    && let Some(target_expr) = alias_map.get(&name.to_uppercase())
+                {
+                    target_expr.clone()
+                } else {
+                    expr.clone()
+                }
+            })
+            .collect()
+    }
+
     pub(super) fn make_group_key(values: &[Value]) -> String {
         use std::fmt::Write;
         let mut key = String::new();

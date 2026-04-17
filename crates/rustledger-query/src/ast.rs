@@ -150,6 +150,8 @@ pub struct BalancesQuery {
     pub at_function: Option<String>,
     /// Optional FROM clause.
     pub from: Option<FromClause>,
+    /// Optional WHERE clause.
+    pub where_clause: Option<Expr>,
 }
 
 /// PRINT shorthand query.

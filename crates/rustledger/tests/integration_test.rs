@@ -37,8 +37,7 @@ fn python_beancount_available() -> bool {
     Command::new("bean-check")
         .arg("--version")
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+        .is_ok_and(|o| o.status.success())
 }
 
 /// Run Python bean-check on a file.

@@ -449,7 +449,7 @@ impl Executor<'_> {
             }
             // type - directive type (matches Python beancount's type column)
             // For SELECT FROM (default), this is always "Transaction"
-            "type" => Ok(Value::String("Transaction".to_string())),
+            "type" => Ok(Value::String("transaction".to_string())),
             _ => Err(QueryError::UnknownColumn(name.to_string())),
         }
     }

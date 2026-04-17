@@ -2128,18 +2128,18 @@ impl<'a> Executor<'a> {
         source_loc: Option<&SourceLocation>,
     ) -> Vec<Value> {
         let type_name = match directive {
-            Directive::Transaction(_) => "Transaction",
-            Directive::Balance(_) => "Balance",
-            Directive::Open(_) => "Open",
-            Directive::Close(_) => "Close",
-            Directive::Commodity(_) => "Commodity",
-            Directive::Pad(_) => "Pad",
-            Directive::Event(_) => "Event",
-            Directive::Query(_) => "Query",
-            Directive::Note(_) => "Note",
-            Directive::Document(_) => "Document",
-            Directive::Price(_) => "Price",
-            Directive::Custom(_) => "Custom",
+            Directive::Transaction(_) => "transaction",
+            Directive::Balance(_) => "balance",
+            Directive::Open(_) => "open",
+            Directive::Close(_) => "close",
+            Directive::Commodity(_) => "commodity",
+            Directive::Pad(_) => "pad",
+            Directive::Event(_) => "event",
+            Directive::Query(_) => "query",
+            Directive::Note(_) => "note",
+            Directive::Document(_) => "document",
+            Directive::Price(_) => "price",
+            Directive::Custom(_) => "custom",
         };
 
         let date = match directive {
@@ -2693,7 +2693,7 @@ mod tests {
         let result = executor.execute(&query).unwrap();
         // Only transactions in the sample data
         assert_eq!(result.len(), 1);
-        assert_eq!(result.rows[0][0], Value::String("Transaction".to_string()));
+        assert_eq!(result.rows[0][0], Value::String("transaction".to_string()));
         assert_eq!(result.rows[0][1], Value::Integer(2));
     }
 

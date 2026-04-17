@@ -4921,18 +4921,18 @@ fn test_entries_table_type_column() {
     let result = execute_query("SELECT type FROM #entries", &directives);
 
     let types: Vec<&Value> = result.rows.iter().map(|r| &r[0]).collect();
-    assert!(types.contains(&&Value::String("Open".to_string())));
-    assert!(types.contains(&&Value::String("Commodity".to_string())));
-    assert!(types.contains(&&Value::String("Transaction".to_string())));
-    assert!(types.contains(&&Value::String("Note".to_string())));
-    assert!(types.contains(&&Value::String("Event".to_string())));
+    assert!(types.contains(&&Value::String("open".to_string())));
+    assert!(types.contains(&&Value::String("commodity".to_string())));
+    assert!(types.contains(&&Value::String("transaction".to_string())));
+    assert!(types.contains(&&Value::String("note".to_string())));
+    assert!(types.contains(&&Value::String("event".to_string())));
 }
 
 #[test]
 fn test_entries_table_with_where_clause() {
     let directives = make_entries_test_directives();
     let result = execute_query(
-        "SELECT * FROM #entries WHERE type = 'Transaction'",
+        "SELECT * FROM #entries WHERE type = 'transaction'",
         &directives,
     );
 
@@ -4943,7 +4943,7 @@ fn test_entries_table_with_where_clause() {
 fn test_entries_table_transaction_fields() {
     let directives = make_entries_test_directives();
     let result = execute_query(
-        "SELECT flag, payee, narration, tags, accounts FROM #entries WHERE type = 'Transaction'",
+        "SELECT flag, payee, narration, tags, accounts FROM #entries WHERE type = 'transaction'",
         &directives,
     );
 
@@ -4963,7 +4963,7 @@ fn test_entries_table_transaction_fields() {
 fn test_entries_table_non_transaction_nulls() {
     let directives = make_entries_test_directives();
     let result = execute_query(
-        "SELECT flag, payee, narration FROM #entries WHERE type = 'Open'",
+        "SELECT flag, payee, narration FROM #entries WHERE type = 'open'",
         &directives,
     );
 
@@ -6916,7 +6916,7 @@ fn test_entry_meta_from_entries_table() {
     ];
 
     let result = execute_query(
-        "SELECT type, entry_meta('source') FROM #entries WHERE type = 'Transaction'",
+        "SELECT type, entry_meta('source') FROM #entries WHERE type = 'transaction'",
         &directives,
     );
 

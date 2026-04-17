@@ -1613,18 +1613,42 @@ impl<'a> Executor<'a> {
         ];
         let mut table = Table::new(columns);
 
-        // Collect all price entries from the price database
-        let mut entries: Vec<_> = self.price_db.iter_entries().collect();
-        // Sort by (date, base_currency) for consistent, deterministic output
-        entries.sort_by(|(currency_a, date_a, _, _), (currency_b, date_b, _, _)| {
+        // Only collect explicit price directives (not implicit prices from transactions).
+        // This matches Python beancount behavior where #prices only shows `price` directives.
+        let mut prices: Vec<_> = if let Some(spanned) = self.spanned_directives {
+            spanned
+                .iter()
+                .filter_map(|s| {
+                    if let Directive::Price(p) = &s.value {
+                        Some((p.date, p.currency.clone(), p.amount.clone()))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        } else {
+            self.directives
+                .iter()
+                .filter_map(|d| {
+                    if let Directive::Price(p) = d {
+                        Some((p.date, p.currency.clone(), p.amount.clone()))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+
+        // Sort by (date, currency) for consistent, deterministic output
+        prices.sort_by(|(date_a, currency_a, _), (date_b, currency_b, _)| {
             date_a.cmp(date_b).then_with(|| currency_a.cmp(currency_b))
         });
 
-        for (base_currency, date, price_number, quote_currency) in entries {
+        for (date, currency, amount) in prices {
             let row = vec![
                 Value::Date(date),
-                Value::String(base_currency.to_string()),
-                Value::Amount(Amount::new(price_number, quote_currency)),
+                Value::String(currency.to_string()),
+                Value::Amount(amount),
             ];
             table.add_row(row);
         }

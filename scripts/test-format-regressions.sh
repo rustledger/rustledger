@@ -24,6 +24,15 @@ echo "Binary: $RLEDGER"
 echo "Tests:  $TESTS_DIR"
 echo ""
 
+# Single trap for cleanup — collect all temp files
+TMPFILES=()
+cleanup() {
+    for f in "${TMPFILES[@]}"; do
+        rm -f "$f"
+    done
+}
+trap cleanup EXIT
+
 for f in "$TESTS_DIR"/issue-*.beancount; do
     if [ ! -f "$f" ]; then
         echo "No format regression tests found in $TESTS_DIR"
@@ -36,7 +45,7 @@ for f in "$TESTS_DIR"/issue-*.beancount; do
     # Create temp files for comparison
     FORMATTED1=$(mktemp)
     FORMATTED2=$(mktemp)
-    trap "rm -f $FORMATTED1 $FORMATTED2" EXIT
+    TMPFILES+=("$FORMATTED1" "$FORMATTED2")
 
     # Format once
     "$RLEDGER" format "$f" > "$FORMATTED1" 2>/dev/null

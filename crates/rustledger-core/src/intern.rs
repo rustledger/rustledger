@@ -581,13 +581,13 @@ mod rkyv_decimal {
     }
 }
 
-// rkyv wrapper for chrono::NaiveDate - serialize as i32 (days from CE)
+// rkyv wrapper for NaiveDate - serialize as i32 (days from CE)
 #[cfg(feature = "rkyv")]
 pub use rkyv_date::AsNaiveDate;
 
 #[cfg(feature = "rkyv")]
 mod rkyv_date {
-    use chrono::{Datelike, NaiveDate};
+    use crate::NaiveDate;
     use rkyv::Place;
     use rkyv::rancor::Fallible;
     use rkyv::with::{ArchiveWith, DeserializeWith, SerializeWith};
@@ -602,7 +602,6 @@ mod rkyv_date {
 
         fn resolve_with(field: &NaiveDate, _resolver: Self::Resolver, out: Place<Self::Archived>) {
             let days = field.num_days_from_ce();
-            // Use rkyv's Archive impl for i32 which handles endianness
             rkyv::Archive::resolve(&days, (), out);
         }
     }
@@ -615,7 +614,6 @@ mod rkyv_date {
             _field: &NaiveDate,
             _serializer: &mut S,
         ) -> Result<Self::Resolver, S::Error> {
-            // No extra serialization needed - data is inlined
             Ok(())
         }
     }

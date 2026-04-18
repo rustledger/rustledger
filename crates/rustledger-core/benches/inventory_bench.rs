@@ -6,9 +6,9 @@
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
-use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
+use rustledger_core::NaiveDate;
 use rustledger_core::{Amount, BookingMethod, Cost, CostSpec, Inventory, Position};
 
 #[allow(clippy::missing_const_for_fn)]

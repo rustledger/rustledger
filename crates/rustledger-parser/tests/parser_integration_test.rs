@@ -458,7 +458,7 @@ fn test_parse_single_digit_month() {
     );
     assert_eq!(count_directive_type(&result, "open"), 1);
     if let Directive::Open(open) = &result.directives[0].value {
-        use chrono::NaiveDate;
+        use rustledger_core::NaiveDate;
         assert_eq!(open.date, NaiveDate::from_ymd_opt(2024, 1, 15).unwrap());
     } else {
         panic!("expected open directive");
@@ -490,7 +490,7 @@ fn test_parse_single_digit_month_and_day() {
     );
     assert_eq!(count_directive_type(&result, "open"), 1);
     if let Directive::Open(open) = &result.directives[0].value {
-        use chrono::NaiveDate;
+        use rustledger_core::NaiveDate;
         assert_eq!(open.date, NaiveDate::from_ymd_opt(2024, 1, 1).unwrap());
     } else {
         panic!("expected open directive");

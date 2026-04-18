@@ -25,7 +25,7 @@ impl SyntheticManifest {
     /// Create a new empty manifest.
     pub fn new(seed: u64) -> Self {
         Self {
-            generated_at: chrono::Utc::now().to_rfc3339(),
+            generated_at: jiff::Zoned::now().to_string(),
             seed,
             generator_version: env!("CARGO_PKG_VERSION").to_string(),
             files: Vec::new(),

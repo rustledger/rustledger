@@ -23,7 +23,7 @@ rkyv = ["dep:rkyv"]
 [dependencies]
 rust_decimal = { workspace = true, features = ["serde", "maths"] }
 rust_decimal_macros = "1.40"
-chrono = { workspace = true, features = ["serde"] }
+jiff = { workspace = true, features = ["serde"] }
 thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true

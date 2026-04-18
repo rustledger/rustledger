@@ -36,7 +36,6 @@ rustledger-core.workspace = true
 rustledger-parser.workspace = true
 rust_decimal.workspace = true
 thiserror.workspace = true
-chrono.workspace = true
 glob.workspace = true
 rkyv = { workspace = true, optional = true }
 sha2 = { workspace = true, optional = true }
@@ -51,7 +50,6 @@ rustledger-validate = { workspace = true, optional = true }
 [dev-dependencies]
 tempfile.workspace = true
 rust_decimal_macros.workspace = true
-chrono.workspace = true
 
 [lints]
 workspace = true

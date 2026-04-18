@@ -1082,7 +1082,7 @@ default_expense = "Expenses:Uncategorized"
 
     #[test]
     fn test_is_duplicate_matching() {
-        let date = chrono::NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
+        let date = rustledger_core::NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
         let new_txn =
             Transaction::new(date, "GROCERY STORE").with_posting(rustledger_core::Posting::new(
                 "Assets:Bank",
@@ -1102,7 +1102,7 @@ default_expense = "Expenses:Uncategorized"
     #[test]
     fn test_is_duplicate_different_date() {
         let new_txn = Transaction::new(
-            chrono::NaiveDate::from_ymd_opt(2024, 1, 15).unwrap(),
+            rustledger_core::NaiveDate::from_ymd_opt(2024, 1, 15).unwrap(),
             "GROCERY STORE",
         )
         .with_posting(rustledger_core::Posting::new(
@@ -1112,7 +1112,7 @@ default_expense = "Expenses:Uncategorized"
 
         let existing = vec![
             Transaction::new(
-                chrono::NaiveDate::from_ymd_opt(2024, 1, 16).unwrap(),
+                rustledger_core::NaiveDate::from_ymd_opt(2024, 1, 16).unwrap(),
                 "GROCERY STORE",
             )
             .with_posting(rustledger_core::Posting::new(
@@ -1126,7 +1126,7 @@ default_expense = "Expenses:Uncategorized"
 
     #[test]
     fn test_is_duplicate_different_amount() {
-        let date = chrono::NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
+        let date = rustledger_core::NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
         let new_txn =
             Transaction::new(date, "GROCERY STORE").with_posting(rustledger_core::Posting::new(
                 "Assets:Bank",
@@ -1164,11 +1164,11 @@ default_expense = "Expenses:Uncategorized"
         assert_eq!(txns.len(), 2);
         assert_eq!(
             txns[0].date,
-            chrono::NaiveDate::from_ymd_opt(2024, 1, 15).unwrap()
+            rustledger_core::NaiveDate::from_ymd_opt(2024, 1, 15).unwrap()
         );
         assert_eq!(
             txns[1].date,
-            chrono::NaiveDate::from_ymd_opt(2024, 1, 16).unwrap()
+            rustledger_core::NaiveDate::from_ymd_opt(2024, 1, 16).unwrap()
         );
     }
 
@@ -1402,14 +1402,14 @@ amount_column = "Amount"
 
     #[test]
     fn test_first_posting_amount_no_postings() {
-        let date = chrono::NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
+        let date = rustledger_core::NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
         let txn = Transaction::new(date, "Test");
         assert_eq!(first_posting_amount(&txn), None);
     }
 
     #[test]
     fn test_first_posting_amount_auto_posting() {
-        let date = chrono::NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
+        let date = rustledger_core::NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
         let txn = Transaction::new(date, "Test")
             .with_posting(rustledger_core::Posting::auto("Expenses:Unknown"));
         assert_eq!(first_posting_amount(&txn), None);
@@ -1417,7 +1417,7 @@ amount_column = "Amount"
 
     #[test]
     fn test_txn_match_text_with_payee() {
-        let date = chrono::NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
+        let date = rustledger_core::NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
         let txn = Transaction::new(date, "Weekly groceries").with_payee("Whole Foods");
         let text = txn_match_text(&txn);
         assert!(text.contains("whole foods"));
@@ -1426,7 +1426,7 @@ amount_column = "Amount"
 
     #[test]
     fn test_txn_match_text_no_payee() {
-        let date = chrono::NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
+        let date = rustledger_core::NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
         let txn = Transaction::new(date, "Coffee Shop");
         let text = txn_match_text(&txn);
         assert_eq!(text, "coffee shop");
@@ -1434,7 +1434,7 @@ amount_column = "Amount"
 
     #[test]
     fn test_is_duplicate_no_existing() {
-        let date = chrono::NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
+        let date = rustledger_core::NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
         let txn = Transaction::new(date, "Coffee").with_posting(rustledger_core::Posting::new(
             "Assets:Bank",
             rustledger_core::Amount::new(rust_decimal::Decimal::new(-500, 2), "USD"),
@@ -1444,7 +1444,7 @@ amount_column = "Amount"
 
     #[test]
     fn test_is_duplicate_with_payee() {
-        let date = chrono::NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
+        let date = rustledger_core::NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
         let new_txn = Transaction::new(date, "Weekly groceries")
             .with_payee("WHOLE FOODS")
             .with_posting(rustledger_core::Posting::new(

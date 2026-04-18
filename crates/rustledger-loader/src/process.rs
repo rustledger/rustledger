@@ -72,7 +72,7 @@ pub enum ProcessError {
         /// Error message.
         message: String,
         /// Date of the transaction.
-        date: chrono::NaiveDate,
+        date: rustledger_core::NaiveDate,
         /// Narration of the transaction.
         narration: String,
     },

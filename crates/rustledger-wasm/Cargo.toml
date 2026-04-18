@@ -35,7 +35,6 @@ serde-wasm-bindgen.workspace = true
 serde.workspace = true
 rkyv.workspace = true
 sha2.workspace = true
-chrono.workspace = true
 
 # Better panic messages in WASM
 console_error_panic_hook = "0.1"

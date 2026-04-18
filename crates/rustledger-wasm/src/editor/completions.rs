@@ -169,7 +169,7 @@ pub fn detect_context(source: &str, line: u32, character: u32) -> CompletionCont
 
 /// Complete at line start (date template).
 pub fn complete_line_start() -> Vec<EditorCompletion> {
-    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let today = rustledger_core::NaiveDate::today().to_string();
     vec![EditorCompletion {
         label: today.clone(),
         kind: CompletionKind::Date,

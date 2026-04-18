@@ -49,6 +49,7 @@ name = "rustledger"
 # Core
 rust_decimal = { version = "1.41", features = ["serde"] }
 chrono = { version = "0.4", features = ["serde"] }
+jiff = { version = "0.2", features = ["serde"] }
 glob = "0.3"
 thiserror = "2"
 anyhow = "1"

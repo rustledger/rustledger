@@ -4,9 +4,9 @@
 //!
 //! Run with: cargo test -p beancount-core --test `property_tests`
 
-use chrono::NaiveDate;
 use proptest::prelude::*;
 use rust_decimal::Decimal;
+use rustledger_core::NaiveDate;
 use rustledger_core::{Amount, BookingMethod, Cost, CostSpec, InternedStr, Inventory, Position};
 
 // ============================================================================

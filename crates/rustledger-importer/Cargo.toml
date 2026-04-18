@@ -17,7 +17,6 @@ bench = false
 
 [dependencies]
 rustledger-core.workspace = true
-chrono.workspace = true
 rust_decimal.workspace = true
 anyhow.workspace = true
 format_num_pattern.workspace = true
@@ -25,6 +24,7 @@ serde.workspace = true
 serde_json.workspace = true
 csv.workspace = true
 ofxy.workspace = true
+chrono = "0.4"  # transitive dep of ofxy; needed for DateTime::format()
 
 [dev-dependencies]
 tempfile.workspace = true

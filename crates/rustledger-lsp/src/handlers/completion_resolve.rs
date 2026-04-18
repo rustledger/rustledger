@@ -68,8 +68,8 @@ pub fn handle_completion_resolve(
 fn resolve_account_documentation(account: &str, parse_result: &ParseResult) -> Documentation {
     let mut balances: HashMap<String, Decimal> = HashMap::new();
     let mut transaction_count = 0;
-    let mut first_date: Option<chrono::NaiveDate> = None;
-    let mut last_date: Option<chrono::NaiveDate> = None;
+    let mut first_date: Option<rustledger_core::NaiveDate> = None;
+    let mut last_date: Option<rustledger_core::NaiveDate> = None;
 
     for spanned in &parse_result.directives {
         if let Directive::Transaction(txn) = &spanned.value {
@@ -124,7 +124,7 @@ fn resolve_account_documentation(account: &str, parse_result: &ParseResult) -> D
 
 /// Resolve documentation for a currency completion.
 fn resolve_currency_documentation(currency: &str, parse_result: &ParseResult) -> Documentation {
-    let mut prices: Vec<(chrono::NaiveDate, Decimal, String)> = Vec::new();
+    let mut prices: Vec<(rustledger_core::NaiveDate, Decimal, String)> = Vec::new();
     let mut usage_count = 0;
 
     for spanned in &parse_result.directives {
@@ -175,7 +175,7 @@ fn resolve_currency_documentation(currency: &str, parse_result: &ParseResult) ->
 
 /// Resolve documentation for a payee completion.
 fn resolve_payee_documentation(payee: &str, parse_result: &ParseResult) -> Documentation {
-    let mut transactions: Vec<(chrono::NaiveDate, String)> = Vec::new();
+    let mut transactions: Vec<(rustledger_core::NaiveDate, String)> = Vec::new();
     let mut accounts_used: HashMap<String, usize> = HashMap::new();
 
     for spanned in &parse_result.directives {

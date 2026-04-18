@@ -5,7 +5,6 @@
 //! - rledger.sortTransactions: Sort transactions by date
 //! - rledger.alignAmounts: Align amounts in a region
 
-use chrono::Local;
 use lsp_types::{ExecuteCommandParams, TextEdit, Uri, WorkspaceEdit};
 use rustledger_core::Directive;
 use rustledger_parser::ParseResult;
@@ -44,7 +43,7 @@ pub fn handle_execute_command(
 
 /// Insert today's date at cursor.
 fn handle_insert_date() -> Option<serde_json::Value> {
-    let today = Local::now().format("%Y-%m-%d").to_string();
+    let today = rustledger_core::NaiveDate::today().to_string();
     Some(serde_json::json!({
         "text": today
     }))
@@ -57,7 +56,7 @@ fn handle_sort_transactions(
     uri: &Uri,
 ) -> Option<serde_json::Value> {
     // Collect transactions with their spans
-    let mut transactions: Vec<(chrono::NaiveDate, usize, usize, String)> = Vec::new();
+    let mut transactions: Vec<(rustledger_core::NaiveDate, usize, usize, String)> = Vec::new();
 
     for spanned in &parse_result.directives {
         if let Directive::Transaction(txn) = &spanned.value {

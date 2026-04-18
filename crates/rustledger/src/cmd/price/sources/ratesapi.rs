@@ -7,6 +7,7 @@ use crate::cmd::price::{PriceRequest, PriceResponse};
 use anyhow::{Context, Result};
 use chrono::Utc;
 use rust_decimal::Decimal;
+use rustledger_core::NaiveDate;
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -46,7 +47,7 @@ impl PriceSource for RatesApiSource {
     fn fetch_price(&self, request: &PriceRequest) -> Result<PriceResponse> {
         // If ticker and currency are the same, return 1.0
         if request.ticker.to_uppercase() == request.currency.to_uppercase() {
-            let date = request.date.unwrap_or_else(|| Utc::now().date_naive());
+            let date = request.date.unwrap_or_else(|| NaiveDate::today());
             return Ok(PriceResponse {
                 price: Decimal::ONE,
                 currency: request.currency.clone(),
@@ -105,7 +106,7 @@ impl PriceSource for RatesApiSource {
         let price = Decimal::from_str(&rate_str)
             .with_context(|| format!("Failed to parse rate: {rate_str}"))?;
 
-        let date = request.date.unwrap_or_else(|| Utc::now().date_naive());
+        let date = request.date.unwrap_or_else(|| NaiveDate::today());
 
         Ok(PriceResponse {
             price,

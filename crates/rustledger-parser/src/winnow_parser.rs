@@ -14,13 +14,12 @@
 
 use std::borrow::Cow;
 
-use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use std::str::FromStr;
 
 use rustledger_core::{
     Amount, Balance, Close, Commodity, CostSpec, Custom, Directive, Document, Event,
-    IncompleteAmount, InternedStr, MetaValue, Metadata, Note, Open, Pad, Posting, Price,
+    IncompleteAmount, InternedStr, MetaValue, Metadata, NaiveDate, Note, Open, Pad, Posting, Price,
     PriceAnnotation, Query, Transaction,
 };
 

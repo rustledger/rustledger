@@ -214,7 +214,7 @@ fn is_date_like(s: &str) -> bool {
 
 /// Complete at line start (date template).
 fn complete_line_start() -> Vec<CompletionItem> {
-    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let today = rustledger_core::NaiveDate::today().to_string();
     vec![CompletionItem {
         label: today.clone(),
         kind: Some(CompletionItemKind::VALUE),

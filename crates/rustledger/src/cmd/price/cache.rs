@@ -7,8 +7,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use chrono::NaiveDate;
 use rust_decimal::Decimal;
+use rustledger_core::NaiveDate;
 use serde::{Deserialize, Serialize};
 
 use super::PriceResponse;

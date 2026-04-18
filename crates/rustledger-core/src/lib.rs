@@ -15,7 +15,7 @@
 //! ```
 //! use rustledger_core::{Amount, Cost, Position, Inventory, BookingMethod};
 //! use rust_decimal_macros::dec;
-//! use chrono::NaiveDate;
+//! use rustledger_core::NaiveDate;
 //!
 //! // Create an inventory
 //! let mut inv = Inventory::new();
@@ -44,6 +44,7 @@
 
 pub mod amount;
 pub mod cost;
+pub mod date;
 pub mod directive;
 pub mod display_context;
 pub mod extract;
@@ -75,7 +76,7 @@ pub use inventory::{AccountedBookingError, BookingError, BookingMethod, BookingR
 pub use position::Position;
 
 // Re-export commonly used external types
-pub use chrono::NaiveDate;
+pub use date::{Duration, Months, NaiveDate, Weekday};
 pub use rust_decimal::Decimal;
 
 // Re-export rkyv wrappers when feature is enabled

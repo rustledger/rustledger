@@ -19,8 +19,8 @@
 //! - `[MONTHLY UNTIL 2020-12-31]` - Repeat until specified date
 //! - `[MONTHLY SKIP 1 TIME]` - Skip every other month
 
-use chrono::{Datelike, NaiveDate};
 use regex::Regex;
+use rustledger_core::NaiveDate;
 use std::sync::LazyLock;
 
 use crate::types::{DirectiveData, PluginInput, PluginOutput};
@@ -81,7 +81,7 @@ impl NativePlugin for ForecastPlugin {
         }
 
         // Get current year end as default until date
-        let today = chrono::Local::now().naive_local().date();
+        let today = rustledger_core::NaiveDate::today();
         let default_until = NaiveDate::from_ymd_opt(today.year(), 12, 31).unwrap();
 
         // Generate recurring transactions
@@ -181,8 +181,8 @@ fn generate_dates(
 
         // Advance to next date
         current = match interval {
-            Interval::Daily => current + chrono::Duration::days(step as i64),
-            Interval::Weekly => current + chrono::Duration::weeks(step as i64),
+            Interval::Daily => current + rustledger_core::Duration::days(step as i64),
+            Interval::Weekly => current + rustledger_core::Duration::weeks(step as i64),
             Interval::Monthly => add_months(current, step as i32),
             Interval::Yearly => add_months(current, (step * 12) as i32),
         };

@@ -27,7 +27,6 @@ winnow.workspace = true
 logos.workspace = true
 logosky.workspace = true
 rust_decimal.workspace = true
-chrono.workspace = true
 thiserror.workspace = true
 serde.workspace = true
 rkyv = { workspace = true, optional = true }

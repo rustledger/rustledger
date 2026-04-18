@@ -22,7 +22,7 @@ use crate::{Amount, Cost, CostSpec};
 /// ```
 /// use rustledger_core::{Amount, Cost, Position};
 /// use rust_decimal_macros::dec;
-/// use chrono::NaiveDate;
+/// use rustledger_core::NaiveDate;
 ///
 /// // Simple position (no cost)
 /// let cash = Position::simple(Amount::new(dec!(1000.00), "USD"));
@@ -184,7 +184,7 @@ impl fmt::Display for Position {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::NaiveDate;
+    use crate::NaiveDate;
     use rust_decimal_macros::dec;
 
     fn date(year: i32, month: u32, day: u32) -> NaiveDate {

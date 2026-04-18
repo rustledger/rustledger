@@ -5,8 +5,9 @@
 use super::{PriceSource, user_agent};
 use crate::cmd::price::{PriceRequest, PriceResponse};
 use anyhow::{Context, Result};
-use chrono::{NaiveDate, Utc};
+use chrono::Utc;
 use rust_decimal::Decimal;
+use rustledger_core::NaiveDate;
 use std::env;
 use std::str::FromStr;
 use std::time::Duration;
@@ -152,7 +153,7 @@ impl PriceSource for QuandlSource {
             .get(date_idx)
             .and_then(serde_json::Value::as_str)
             .and_then(|s| NaiveDate::parse_from_str(s, "%Y-%m-%d").ok())
-            .unwrap_or_else(|| request.date.unwrap_or_else(|| Utc::now().date_naive()));
+            .unwrap_or_else(|| request.date.unwrap_or_else(|| NaiveDate::today()));
 
         // Extract price
         let price_value = data.get(price_idx).with_context(|| "Missing price value")?;

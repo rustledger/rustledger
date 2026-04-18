@@ -5,9 +5,9 @@
 //!
 //! Reference: spec/tla/ValidationCorrect.tla
 
-use chrono::NaiveDate;
 use proptest::prelude::*;
 use rust_decimal::Decimal;
+use rustledger_core::NaiveDate;
 use rustledger_core::{Amount, Balance, Directive, IncompleteAmount, Open, Posting, Transaction};
 use rustledger_validate::{ErrorCode, validate};
 
@@ -57,7 +57,7 @@ proptest! {
     ) {
         // Ensure balance_date is after open_date
         let balance_date = if balance_date <= open_date {
-            open_date + chrono::Duration::days(1)
+            open_date + rustledger_core::Duration::days(1)
         } else {
             balance_date
         };
@@ -143,7 +143,7 @@ proptest! {
     ) {
         // Ensure balance_date is after open_date
         let balance_date = if balance_date <= open_date {
-            open_date + chrono::Duration::days(1)
+            open_date + rustledger_core::Duration::days(1)
         } else {
             balance_date
         };
@@ -235,7 +235,7 @@ proptest! {
         let mut total = 0i64;
         for (i, deposit) in deposits.iter().enumerate() {
             total += deposit;
-            let txn_date = open_date + chrono::Duration::days(i as i64 + 1);
+            let txn_date = open_date + rustledger_core::Duration::days(i as i64 + 1);
 
             directives.push(Directive::Transaction(Transaction {
                 date: txn_date,
@@ -272,7 +272,7 @@ proptest! {
         }
 
         // Add balance assertion at end
-        let balance_date = open_date + chrono::Duration::days(deposits.len() as i64 + 2);
+        let balance_date = open_date + rustledger_core::Duration::days(deposits.len() as i64 + 2);
         directives.push(Directive::Balance(Balance {
             date: balance_date,
             account: account.into(),
@@ -482,7 +482,7 @@ proptest! {
         open_date in date_strategy(),
         actual_balance in 100i64..1000,
     ) {
-        let balance_date = open_date + chrono::Duration::days(1);
+        let balance_date = open_date + rustledger_core::Duration::days(1);
         let account = "Assets:Bank:Checking".to_string();
 
         // Use decimal amounts to get smaller tolerance
@@ -620,7 +620,7 @@ proptest! {
     ) {
         let account1 = "Assets:Bank:Checking".to_string();
         let account2 = "Assets:Bank:Savings".to_string();
-        let balance_date = open_date + chrono::Duration::days(1);
+        let balance_date = open_date + rustledger_core::Duration::days(1);
 
         // Wrong expected values (differ by more than tolerance)
         let wrong_expected1 = actual_balance + 100;

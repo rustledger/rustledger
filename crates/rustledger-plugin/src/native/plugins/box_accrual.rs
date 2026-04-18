@@ -13,9 +13,9 @@
 //!   Income:Capital-Losses  -500 USD
 //! ```
 
-use chrono::{Datelike, NaiveDate};
 use rust_decimal::Decimal;
 use rust_decimal::prelude::*;
+use rustledger_core::NaiveDate;
 
 use crate::types::{
     AmountData, DirectiveData, DirectiveWrapper, MetaValueData, PluginInput, PluginOutput,

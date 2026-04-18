@@ -5,10 +5,10 @@
 //!
 //! Reference: spec/tla/*.tla
 
-use chrono::NaiveDate;
 use proptest::prelude::*;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
+use rustledger_core::NaiveDate;
 use rustledger_core::{Amount, BookingError, BookingMethod, Cost, CostSpec, Inventory, Position};
 
 // ============================================================================

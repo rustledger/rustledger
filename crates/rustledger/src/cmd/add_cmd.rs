@@ -30,9 +30,9 @@
 //! - `--no-completion`: Disable account tab completion in interactive mode
 
 use anyhow::{Context, Result, bail};
-use chrono::{Local, NaiveDate};
 use clap::Parser;
 use rust_decimal::Decimal;
+use rustledger_core::NaiveDate;
 use rustledger_core::format::{FormatConfig, format_directive};
 use rustledger_core::{Amount, Directive, Posting, Transaction};
 use rustledger_parser::parse;
@@ -191,7 +191,7 @@ impl Validator for AddHelper {}
 /// - "YYYY-MM-DD" → explicit date
 pub fn parse_date(input: &str) -> Result<NaiveDate> {
     let trimmed = input.trim().to_lowercase();
-    let today = Local::now().date_naive();
+    let today = rustledger_core::NaiveDate::today();
 
     if trimmed.is_empty() || trimmed == "today" {
         return Ok(today);
@@ -207,7 +207,7 @@ pub fn parse_date(input: &str) -> Result<NaiveDate> {
             .parse()
             .with_context(|| format!("Invalid relative date: {input}"))?;
         return today
-            .checked_add_signed(chrono::Duration::days(days))
+            .checked_add_signed(rustledger_core::Duration::days(days))
             .context("Date out of range");
     }
 
@@ -216,7 +216,7 @@ pub fn parse_date(input: &str) -> Result<NaiveDate> {
             .parse()
             .with_context(|| format!("Invalid relative date: {input}"))?;
         return today
-            .checked_sub_signed(chrono::Duration::days(days))
+            .checked_sub_signed(rustledger_core::Duration::days(days))
             .context("Date out of range");
     }
 
@@ -737,7 +737,7 @@ pub fn run(args: &Args, file: &PathBuf) -> Result<()> {
     let date = if let Some(ref d) = args.date {
         parse_date(d)?
     } else {
-        Local::now().date_naive()
+        rustledger_core::NaiveDate::today()
     };
 
     // Check if file exists, offer to create if not
@@ -777,7 +777,7 @@ mod tests {
 
     #[test]
     fn test_parse_date_today() {
-        let today = Local::now().date_naive();
+        let today = rustledger_core::NaiveDate::today();
         assert_eq!(parse_date("today").unwrap(), today);
         assert_eq!(parse_date("").unwrap(), today);
         assert_eq!(parse_date("TODAY").unwrap(), today);
@@ -785,14 +785,14 @@ mod tests {
 
     #[test]
     fn test_parse_date_yesterday() {
-        let yesterday = Local::now().date_naive().pred_opt().unwrap();
+        let yesterday = rustledger_core::NaiveDate::today().pred_opt().unwrap();
         assert_eq!(parse_date("yesterday").unwrap(), yesterday);
         assert_eq!(parse_date("YESTERDAY").unwrap(), yesterday);
     }
 
     #[test]
     fn test_parse_date_relative() {
-        let today = Local::now().date_naive();
+        let today = rustledger_core::NaiveDate::today();
         let tomorrow = today.succ_opt().unwrap();
         let yesterday = today.pred_opt().unwrap();
 
@@ -800,7 +800,9 @@ mod tests {
         assert_eq!(parse_date("-1").unwrap(), yesterday);
         assert_eq!(
             parse_date("+7").unwrap(),
-            today.checked_add_signed(chrono::Duration::days(7)).unwrap()
+            today
+                .checked_add_signed(rustledger_core::Duration::days(7))
+                .unwrap()
         );
     }
 

@@ -5,7 +5,7 @@
 
 use crate::{ImportResult, Importer};
 use anyhow::{Context, Result};
-use chrono::{Datelike, NaiveDate};
+use rustledger_core::NaiveDate;
 use rustledger_core::{Amount, Directive, Posting, Transaction};
 use std::fs;
 use std::path::Path;
@@ -78,13 +78,10 @@ impl OfxImporter {
         txn: &ofxy::body::Transaction,
         currency: &str,
     ) -> Result<Transaction> {
-        // Get date from the DateTime<Utc>
-        let date = NaiveDate::from_ymd_opt(
-            txn.date_posted.year(),
-            txn.date_posted.month(),
-            txn.date_posted.day(),
-        )
-        .with_context(|| "Invalid date")?;
+        // Get date from ofxy's DateTime<Utc> by formatting to ISO string
+        let date_str = txn.date_posted.format("%Y-%m-%d").to_string();
+        let date = NaiveDate::parse_from_str(&date_str, "%Y-%m-%d")
+            .with_context(|| format!("Invalid date: {date_str}"))?;
 
         // Get amount
         let amount = txn.amount;

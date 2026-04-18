@@ -6,8 +6,9 @@
 use super::sources::PriceSource;
 use super::{PriceRequest, PriceResponse};
 use anyhow::{Context, Result};
-use chrono::{NaiveDate, Utc};
+use chrono::Utc;
 use rust_decimal::Decimal;
+use rustledger_core::NaiveDate;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
@@ -242,7 +243,7 @@ impl PriceSource for ExternalCommandSource {
                     price,
                     currency,
                     date: date
-                        .unwrap_or_else(|| request.date.unwrap_or_else(|| Utc::now().date_naive())),
+                        .unwrap_or_else(|| request.date.unwrap_or_else(|| NaiveDate::today())),
                     source: self.source_name.clone(),
                 });
             }
@@ -263,7 +264,7 @@ impl PriceSource for ExternalCommandSource {
             return Ok(PriceResponse {
                 price,
                 currency,
-                date: request.date.unwrap_or_else(|| Utc::now().date_naive()),
+                date: request.date.unwrap_or_else(|| NaiveDate::today()),
                 source: self.source_name.clone(),
             });
         }

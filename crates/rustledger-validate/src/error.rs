@@ -1,6 +1,6 @@
 //! Validation error types.
 
-use chrono::NaiveDate;
+use rustledger_core::NaiveDate;
 use rustledger_parser::{Span, Spanned};
 use thiserror::Error;
 

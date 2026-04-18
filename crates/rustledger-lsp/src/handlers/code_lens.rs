@@ -162,7 +162,7 @@ pub fn handle_code_lens_resolve(
             .unwrap_or("");
 
         // Parse the date
-        let date = chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d").ok();
+        let date = rustledger_core::NaiveDate::parse_from_str(date_str, "%Y-%m-%d").ok();
 
         // Calculate actual balance up to this date.
         // Use full ledger directives if available (multi-file mode), otherwise fall back
@@ -221,7 +221,7 @@ pub fn handle_code_lens_resolve(
 fn calculate_balance_at_date(
     directives_in: &[Spanned<Directive>],
     account: &str,
-    date: Option<chrono::NaiveDate>,
+    date: Option<rustledger_core::NaiveDate>,
 ) -> HashMap<String, Decimal> {
     // Clone and sort directives by date (required for correct booking)
     let mut directives: Vec<Spanned<Directive>> = directives_in.to_vec();

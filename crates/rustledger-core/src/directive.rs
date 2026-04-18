@@ -15,7 +15,7 @@
 //! - [`Price`] - Record a price for a commodity
 //! - [`Custom`] - Custom directive type
 
-use chrono::NaiveDate;
+use crate::NaiveDate;
 use rust_decimal::Decimal;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};

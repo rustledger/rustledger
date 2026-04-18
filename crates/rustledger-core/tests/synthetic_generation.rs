@@ -5,9 +5,9 @@
 //!
 //! Run with: cargo test -p rustledger-core --test `synthetic_generation`
 
-use chrono::NaiveDate;
 use proptest::prelude::*;
 use rust_decimal::Decimal;
+use rustledger_core::NaiveDate;
 use rustledger_core::{
     Amount, Balance, Close, Commodity, Custom, Directive, Document, Event, FormatConfig, MetaValue,
     Note, Open, Pad, Posting, Price, Query, Transaction, format_directive,
@@ -414,7 +414,8 @@ fn arb_synthetic_ledger() -> impl Strategy<Value = SyntheticLedger> {
                 let to_account = &accounts[to_idx % accounts.len()];
 
                 if from_account != to_account {
-                    let txn_date = start_date + chrono::Duration::days(i64::from(day_offset));
+                    let txn_date =
+                        start_date + rustledger_core::Duration::days(i64::from(day_offset));
                     let amt = Amount::new(amount, &currency);
 
                     let txn = Transaction::new(txn_date, &narration)

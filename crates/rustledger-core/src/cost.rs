@@ -6,7 +6,7 @@
 //! A [`CostSpec`] is used for matching against existing costs or specifying
 //! new costs when all fields may not be known.
 
-use chrono::NaiveDate;
+use crate::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -36,7 +36,7 @@ use crate::intern::{AsDecimal, AsInternedStr, AsNaiveDate};
 /// ```
 /// use rustledger_core::Cost;
 /// use rust_decimal_macros::dec;
-/// use chrono::NaiveDate;
+/// use rustledger_core::NaiveDate;
 ///
 /// let cost = Cost::new(dec!(150.00), "USD")
 ///     .with_date(NaiveDate::from_ymd_opt(2024, 1, 15).unwrap());
@@ -161,7 +161,7 @@ impl fmt::Display for Cost {
 /// ```
 /// use rustledger_core::{Cost, CostSpec};
 /// use rust_decimal_macros::dec;
-/// use chrono::NaiveDate;
+/// use rustledger_core::NaiveDate;
 ///
 /// let cost = Cost::new(dec!(150.00), "USD")
 ///     .with_date(NaiveDate::from_ymd_opt(2024, 1, 15).unwrap());

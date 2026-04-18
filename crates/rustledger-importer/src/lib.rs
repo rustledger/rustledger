@@ -152,7 +152,7 @@ mod tests {
 
     #[test]
     fn test_import_result_with_directives() {
-        let date = chrono::NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
+        let date = rustledger_core::NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
         let txn = Transaction::new(date, "Test transaction")
             .with_posting(Posting::new(
                 "Assets:Bank",

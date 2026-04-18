@@ -1,6 +1,5 @@
 //! Date function implementations for the BQL executor.
 
-use chrono::Datelike;
 use rustledger_core::NaiveDate;
 
 use crate::ast::FunctionCall;
@@ -24,7 +23,7 @@ impl Executor<'_> {
                     "expected 0 arguments".to_string(),
                 ));
             }
-            return Ok(Value::Date(chrono::Local::now().date_naive()));
+            return Ok(Value::Date(rustledger_core::NaiveDate::today()));
         }
 
         // All other date functions expect exactly 1 argument
@@ -278,13 +277,13 @@ impl Executor<'_> {
 
         let second_arg = self.evaluate_expr(&func.args[1], ctx)?;
         let result = match second_arg {
-            Value::Integer(days) => date + chrono::Duration::days(days),
+            Value::Integer(days) => date + rustledger_core::Duration::days(days),
             Value::Number(n) => {
                 use rust_decimal::prelude::ToPrimitive;
                 let days = n.to_i64().ok_or_else(|| {
                     QueryError::Type("DATE_ADD: days must be an integer".to_string())
                 })?;
-                date + chrono::Duration::days(days)
+                date + rustledger_core::Duration::days(days)
             }
             Value::Interval(interval) => interval
                 .add_to_date(date)
@@ -336,7 +335,7 @@ impl Executor<'_> {
             "WEEK" => {
                 // Start of week (Monday)
                 let days_from_monday = i64::from(date.weekday().num_days_from_monday());
-                Some(date - chrono::Duration::days(days_from_monday))
+                Some(date - rustledger_core::Duration::days(days_from_monday))
             }
             "DAY" => Some(date),
             _ => {
@@ -499,12 +498,12 @@ impl Executor<'_> {
         let binned = match unit.trim_end_matches('s') {
             "day" => {
                 let bucket = days_diff / amount;
-                origin + chrono::Duration::days(bucket * amount)
+                origin + rustledger_core::Duration::days(bucket * amount)
             }
             "week" => {
                 let days_per_stride = amount * 7;
                 let bucket = days_diff / days_per_stride;
-                origin + chrono::Duration::days(bucket * days_per_stride)
+                origin + rustledger_core::Duration::days(bucket * days_per_stride)
             }
             "month" => {
                 // For months, we need to work with calendar months

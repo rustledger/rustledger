@@ -7,6 +7,7 @@ use crate::cmd::price::{PriceRequest, PriceResponse};
 use anyhow::{Context, Result};
 use chrono::Utc;
 use rust_decimal::Decimal;
+use rustledger_core::NaiveDate;
 use std::env;
 use std::str::FromStr;
 use std::time::Duration;
@@ -118,7 +119,7 @@ impl AlphaVantageSource {
         let price = Decimal::from_str(price_str)
             .with_context(|| format!("Failed to parse price: {price_str}"))?;
 
-        let date = Utc::now().date_naive();
+        let date = NaiveDate::today();
 
         Ok(PriceResponse {
             price,
@@ -153,7 +154,7 @@ impl AlphaVantageSource {
         let price = Decimal::from_str(price_str)
             .with_context(|| format!("Failed to parse rate: {price_str}"))?;
 
-        let date = Utc::now().date_naive();
+        let date = NaiveDate::today();
 
         Ok(PriceResponse {
             price,
@@ -188,7 +189,7 @@ impl AlphaVantageSource {
         let price = Decimal::from_str(price_str)
             .with_context(|| format!("Failed to parse price: {price_str}"))?;
 
-        let date = Utc::now().date_naive();
+        let date = NaiveDate::today();
 
         Ok(PriceResponse {
             price,

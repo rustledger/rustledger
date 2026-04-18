@@ -5,8 +5,9 @@
 use super::{PriceSource, user_agent};
 use crate::cmd::price::{PriceRequest, PriceResponse};
 use anyhow::{Context, Result};
-use chrono::{NaiveDate, Utc};
+use chrono::Utc;
 use rust_decimal::Decimal;
+use rustledger_core::NaiveDate;
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -111,7 +112,7 @@ impl PriceSource for EastMoneyFundSource {
                     })
                     .ok()
             })
-            .unwrap_or_else(|| request.date.unwrap_or_else(|| Utc::now().date_naive()));
+            .unwrap_or_else(|| request.date.unwrap_or_else(|| NaiveDate::today()));
 
         Ok(PriceResponse {
             price,

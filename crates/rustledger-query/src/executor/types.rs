@@ -3,7 +3,6 @@
 use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
 
-use chrono::Datelike;
 use rust_decimal::Decimal;
 use rustledger_core::{Amount, Inventory, Metadata, NaiveDate, Position, Transaction};
 
@@ -76,11 +75,15 @@ impl Interval {
     /// Add this interval to a date.
     #[allow(clippy::missing_const_for_fn)] // chrono methods aren't const
     pub fn add_to_date(&self, date: NaiveDate) -> Option<NaiveDate> {
-        use chrono::Months;
+        use rustledger_core::Months;
 
         match self.unit {
-            IntervalUnit::Day => date.checked_add_signed(chrono::Duration::days(self.count)),
-            IntervalUnit::Week => date.checked_add_signed(chrono::Duration::weeks(self.count)),
+            IntervalUnit::Day => {
+                date.checked_add_signed(rustledger_core::Duration::days(self.count))
+            }
+            IntervalUnit::Week => {
+                date.checked_add_signed(rustledger_core::Duration::weeks(self.count))
+            }
             IntervalUnit::Month => {
                 if self.count >= 0 {
                     date.checked_add_months(Months::new(self.count as u32))

@@ -205,7 +205,7 @@ pub fn print_summary<W: Write>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::NaiveDate;
+    use rustledger_core::NaiveDate;
 
     #[test]
     fn test_report_validation_errors_warning_label() {

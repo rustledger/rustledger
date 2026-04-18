@@ -111,8 +111,8 @@ pub fn extract_payees_iter<'a>(directives: impl Iterator<Item = &'a Directive>) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::NaiveDate;
     use crate::{Amount, Balance, Commodity, Open, Pad, Posting, Transaction};
-    use chrono::NaiveDate;
 
     fn date(y: i32, m: u32, d: u32) -> NaiveDate {
         NaiveDate::from_ymd_opt(y, m, d).unwrap()

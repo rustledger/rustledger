@@ -15,7 +15,6 @@ use std::sync::RwLock;
 
 use rustc_hash::FxHashMap;
 
-use chrono::Datelike;
 use regex::{Regex, RegexBuilder};
 use rust_decimal::Decimal;
 use rustledger_core::{Amount, Directive, InternedStr, Inventory, Metadata, Position};
@@ -40,7 +39,7 @@ pub struct Executor<'a> {
     /// Target currency for `VALUE()` conversions.
     target_currency: Option<String>,
     /// Query date for price lookups (defaults to today).
-    query_date: chrono::NaiveDate,
+    query_date: rustledger_core::NaiveDate,
     /// Cache for compiled regex patterns (`RwLock` for thread-safe parallel execution).
     regex_cache: RwLock<FxHashMap<String, Option<Regex>>>,
     /// Account info cache from Open/Close directives.
@@ -102,7 +101,7 @@ impl<'a> Executor<'a> {
             balances: FxHashMap::default(),
             price_db,
             target_currency: None,
-            query_date: chrono::Local::now().date_naive(),
+            query_date: rustledger_core::NaiveDate::today(),
             regex_cache: RwLock::new(FxHashMap::default()),
             account_info,
             source_locations: None,
@@ -180,7 +179,7 @@ impl<'a> Executor<'a> {
             balances: FxHashMap::default(),
             price_db,
             target_currency: None,
-            query_date: chrono::Local::now().date_naive(),
+            query_date: rustledger_core::NaiveDate::today(),
             regex_cache: RwLock::new(FxHashMap::default()),
             account_info,
             source_locations: Some(source_locations),
@@ -445,7 +444,7 @@ impl<'a> Executor<'a> {
         let name_upper = name.to_uppercase();
         match name_upper.as_str() {
             // Date functions
-            "TODAY" => Ok(Value::Date(chrono::Local::now().date_naive())),
+            "TODAY" => Ok(Value::Date(rustledger_core::NaiveDate::today())),
             "YEAR" => {
                 Self::require_args_count(&name_upper, args, 1)?;
                 match &args[0] {
@@ -962,7 +961,7 @@ impl<'a> Executor<'a> {
                 };
 
                 // Optional date argument
-                let date: Option<chrono::NaiveDate> = if args.len() == 3 {
+                let date: Option<rustledger_core::NaiveDate> = if args.len() == 3 {
                     match &args[2] {
                         Value::Date(d) => Some(*d),
                         Value::Null => None, // NULL date uses latest price
@@ -1953,8 +1952,8 @@ impl<'a> Executor<'a> {
         let mut accounts: FxHashMap<
             &str,
             (
-                Option<chrono::NaiveDate>,
-                Option<chrono::NaiveDate>,
+                Option<rustledger_core::NaiveDate>,
+                Option<rustledger_core::NaiveDate>,
                 Vec<String>,
                 Option<&str>,
             ),

@@ -21,7 +21,6 @@ rustledger-parser.workspace = true
 rustledger-loader.workspace = true
 chumsky.workspace = true
 rust_decimal.workspace = true
-chrono.workspace = true
 thiserror.workspace = true
 regex = "1"
 rustc-hash.workspace = true

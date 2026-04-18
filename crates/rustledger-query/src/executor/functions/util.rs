@@ -94,7 +94,7 @@ impl Executor<'_> {
         };
 
         // When no date is specified, use the latest price (matches Python beancount behavior)
-        let date: Option<chrono::NaiveDate> = if func.args.len() == 3 {
+        let date: Option<rustledger_core::NaiveDate> = if func.args.len() == 3 {
             match self.evaluate_expr(&func.args[2], ctx)? {
                 Value::Date(d) => Some(d),
                 _ => {

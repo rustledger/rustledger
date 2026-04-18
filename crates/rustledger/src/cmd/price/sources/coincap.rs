@@ -7,6 +7,7 @@ use crate::cmd::price::{PriceRequest, PriceResponse};
 use anyhow::{Context, Result};
 use chrono::Utc;
 use rust_decimal::Decimal;
+use rustledger_core::NaiveDate;
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -103,7 +104,7 @@ impl PriceSource for CoinCapSource {
         let price = Decimal::from_str(price_str)
             .with_context(|| format!("Failed to parse price: {price_str}"))?;
 
-        let date = request.date.unwrap_or_else(|| Utc::now().date_naive());
+        let date = request.date.unwrap_or_else(|| NaiveDate::today());
 
         // CoinCap only provides USD prices
         Ok(PriceResponse {

@@ -89,7 +89,7 @@ wasmtime-wasi = "43.0.1"
 wat = "1"
 
 # Parallelization
-rayon = "1.10"
+rayon = "1.12"
 
 # Fast hashing
 rustc-hash = "2"

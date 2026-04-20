@@ -85,7 +85,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 wasm-bindgen = "0.2"
 serde-wasm-bindgen = "0.6"
 wasmtime = "43.0.1"
-wasmtime-wasi = "43.0.1"
+wasmtime-wasi = "44.0.0"
 wat = "1"
 
 # Parallelization

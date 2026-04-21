@@ -22,6 +22,6 @@
   "regressions": {
     "total": 24,
     "check_match": 24,
-    "full_match": 24
+    "full_match": 22
   }
 }

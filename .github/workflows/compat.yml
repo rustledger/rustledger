@@ -54,8 +54,11 @@ jobs:
           # if any of these can't install; re-run on transient PyPI flakes.
           pip install beanahead tariochbctools
           pip install beancount_plugin_utils beancount-share
-          pip install git+https://github.com/redstreet/beancount_reds_plugins
-          pip install git+https://github.com/Evernight/beancount-lazy-plugins
+          # Pinned to immutable commits so compat CI is reproducible —
+          # tracking HEAD turns unrelated upstream commits into
+          # spurious red CI here. Bump deliberately when needed.
+          pip install git+https://github.com/redstreet/beancount_reds_plugins@41af12d13c6ba5b2949b2939dfa180f43a5cb307
+          pip install git+https://github.com/Evernight/beancount-lazy-plugins@1a685eddbd5e15e420fdf93604506eed6ca94c45
       # Cache downloaded test files to avoid re-cloning repos every run
       - name: Cache compatibility test files
         id: cache-compat-files

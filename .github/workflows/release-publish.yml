@@ -154,8 +154,29 @@ jobs:
         run: |
           cd crates/rustledger-wasm/pkg
           VERSION=$(node -p "require('./package.json').version")
-          if npm view "@rustledger/wasm@${VERSION}" version >/dev/null 2>&1; then
-            echo "@rustledger/wasm@${VERSION} already published, skipping."
+          PKG="@rustledger/wasm"
+
+          # Query the registry directly. `npm view` has historically returned
+          # spurious failures during concurrent publishes (the previous skip
+          # guard relied on it and ended up re-publishing v0.12.0 over
+          # v0.13.0's `latest` tag during the v0.13.0 release).
+          LATEST=$(curl -fsSL "https://registry.npmjs.org/-/package/${PKG}/dist-tags" \
+            | jq -r '.latest // "0.0.0"')
+          EXISTS=$(curl -sL -o /dev/null -w '%{http_code}' \
+            "https://registry.npmjs.org/${PKG}/${VERSION}")
+
+          # Refuse to publish anything older than the registry's latest.
+          # Prevents an accidental workflow_dispatch with a stale tag from
+          # clobbering `latest`. A trusted-publish token is publish-scoped
+          # only, so we cannot retag after the fact — refusal is the fix.
+          NEWEST=$(printf '%s\n%s\n' "$LATEST" "$VERSION" | sort -V | tail -1)
+          if [ "$NEWEST" != "$VERSION" ] && [ "$VERSION" != "$LATEST" ]; then
+            echo "::error::Refusing to publish ${PKG}@${VERSION}: older than registry latest ${LATEST}"
+            exit 1
+          fi
+
+          if [ "$EXISTS" = "200" ]; then
+            echo "${PKG}@${VERSION} already published, skipping."
           else
             npm publish --access public --provenance
           fi
@@ -218,10 +239,24 @@ jobs:
       - name: Publish to npm (trusted publishing)
         run: |
           cd packages/mcp-server
-          PACKAGE_NAME=$(node -p "require('./package.json').name")
-          PACKAGE_VERSION=$(node -p "require('./package.json').version")
-          if npm view "${PACKAGE_NAME}@${PACKAGE_VERSION}" version >/dev/null 2>&1; then
-            echo "${PACKAGE_NAME}@${PACKAGE_VERSION} already published, skipping."
+          PKG=$(node -p "require('./package.json').name")
+          VERSION=$(node -p "require('./package.json').version")
+
+          # Same monotonicity guard as publish-npm-wasm — see there for
+          # the full rationale.
+          LATEST=$(curl -fsSL "https://registry.npmjs.org/-/package/${PKG}/dist-tags" \
+            | jq -r '.latest // "0.0.0"')
+          EXISTS=$(curl -sL -o /dev/null -w '%{http_code}' \
+            "https://registry.npmjs.org/${PKG}/${VERSION}")
+
+          NEWEST=$(printf '%s\n%s\n' "$LATEST" "$VERSION" | sort -V | tail -1)
+          if [ "$NEWEST" != "$VERSION" ] && [ "$VERSION" != "$LATEST" ]; then
+            echo "::error::Refusing to publish ${PKG}@${VERSION}: older than registry latest ${LATEST}"
+            exit 1
+          fi
+
+          if [ "$EXISTS" = "200" ]; then
+            echo "${PKG}@${VERSION} already published, skipping."
           else
             npm publish --access public --provenance
           fi

@@ -66,8 +66,9 @@ jobs:
 
           if [ "$TAG_VERSION" != "$CARGO_VERSION" ]; then
             echo "::error::Version mismatch! Tag is $TAG_VERSION but rustledger crate has $CARGO_VERSION"
-            echo "::error::Please update all crate versions before tagging."
-            echo "::error::Use: release-plz set-version rustledger@$TAG_VERSION ..."
+            echo "::error::Bump the workspace + every crate Cargo.toml + packages/mcp-server/package.json"
+            echo "::error::to $TAG_VERSION on a release/v$TAG_VERSION branch, merge it, then re-create the tag."
+            echo "::error::See RELEASING.md for the full process."
             exit 1
           fi
 

@@ -4,7 +4,7 @@
 # This prevents pushing broken packages to AUR.
 #
 # Triggers:
-# - Release PRs (release-plz-* branches)
+# - Release PRs (release/* branches)
 # - Changes to packaging/arch/**
 # - Manual dispatch
 #
@@ -44,7 +44,7 @@ jobs:
           PACKAGING_CHANGED: ${{ steps.changes.outputs.packaging }}
         run: |
           # Always run on release PRs
-          if [[ "$HEAD_REF" == release-plz-* ]]; then
+          if [[ "$HEAD_REF" == release/* ]]; then
             echo "Release PR detected - will run AUR test"
             echo "run=true" >> $GITHUB_OUTPUT
             exit 0

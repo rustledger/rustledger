@@ -56,7 +56,7 @@ jobs:
           fi
 
           # Always build on release PRs
-          if [[ "$HEAD_REF" == release-plz-* ]]; then
+          if [[ "$HEAD_REF" == release/* ]]; then
             echo "Release PR detected - will build"
             echo "should_build=true" >> $GITHUB_OUTPUT
             exit 0

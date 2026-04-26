@@ -152,6 +152,7 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
       - name: Publish to npm (trusted publishing)
         run: |
+          set -euo pipefail
           cd crates/rustledger-wasm/pkg
           VERSION=$(node -p "require('./package.json').version")
           PKG="@rustledger/wasm"
@@ -160,10 +161,26 @@ jobs:
           # spurious failures during concurrent publishes (the previous skip
           # guard relied on it and ended up re-publishing v0.12.0 over
           # v0.13.0's `latest` tag during the v0.13.0 release).
-          LATEST=$(curl -fsSL "https://registry.npmjs.org/-/package/${PKG}/dist-tags" \
-            | jq -r '.latest // "0.0.0"')
-          EXISTS=$(curl -sL -o /dev/null -w '%{http_code}' \
-            "https://registry.npmjs.org/${PKG}/${VERSION}")
+          #
+          # Fail closed on any HTTP status other than 200 / 404 so a registry
+          # incident (5xx, 429, network blip) can't be misinterpreted as
+          # "package missing" and trigger an accidental publish.
+          # Note: the /-/package/<pkg>/dist-tags endpoint returns 401 (not 404)
+          # for scoped packages that don't exist, which is ambiguous with auth
+          # failures. The package-metadata endpoint returns clean 200/404 and
+          # carries dist-tags inline.
+          metadata=$(curl -sL -w '\n%{http_code}' \
+            "https://registry.npmjs.org/${PKG}")
+          metadata_status=$(printf '%s\n' "$metadata" | tail -1)
+          metadata_body=$(printf '%s\n' "$metadata" | sed '$d')
+          case "$metadata_status" in
+            200) LATEST=$(printf '%s' "$metadata_body" | jq -er '.["dist-tags"].latest // "0.0.0"') ;;
+            404) LATEST="0.0.0" ;; # first-time publish
+            *)
+              echo "::error::Failed to query metadata for ${PKG}: HTTP ${metadata_status}"
+              exit 1
+              ;;
+          esac
 
           # Refuse to publish anything older than the registry's latest.
           # Prevents an accidental workflow_dispatch with a stale tag from
@@ -175,11 +192,16 @@ jobs:
             exit 1
           fi
 
-          if [ "$EXISTS" = "200" ]; then
-            echo "${PKG}@${VERSION} already published, skipping."
-          else
-            npm publish --access public --provenance
-          fi
+          exists=$(curl -sL -o /dev/null -w '%{http_code}' \
+            "https://registry.npmjs.org/${PKG}/${VERSION}")
+          case "$exists" in
+            200) echo "${PKG}@${VERSION} already published, skipping." ;;
+            404) npm publish --access public --provenance ;;
+            *)
+              echo "::error::Failed to check ${PKG}@${VERSION} status: HTTP ${exists}"
+              exit 1
+              ;;
+          esac
   # Trigger website rebuild to use new WASM package
   trigger-website:
     name: Trigger website rebuild
@@ -238,16 +260,29 @@ jobs:
           npm run build
       - name: Publish to npm (trusted publishing)
         run: |
+          set -euo pipefail
           cd packages/mcp-server
           PKG=$(node -p "require('./package.json').name")
           VERSION=$(node -p "require('./package.json').version")
 
-          # Same monotonicity guard as publish-npm-wasm — see there for
-          # the full rationale.
-          LATEST=$(curl -fsSL "https://registry.npmjs.org/-/package/${PKG}/dist-tags" \
-            | jq -r '.latest // "0.0.0"')
-          EXISTS=$(curl -sL -o /dev/null -w '%{http_code}' \
-            "https://registry.npmjs.org/${PKG}/${VERSION}")
+          # Same fail-closed monotonicity guard as publish-npm-wasm — see
+          # there for the full rationale.
+          # Note: the /-/package/<pkg>/dist-tags endpoint returns 401 (not 404)
+          # for scoped packages that don't exist, which is ambiguous with auth
+          # failures. The package-metadata endpoint returns clean 200/404 and
+          # carries dist-tags inline.
+          metadata=$(curl -sL -w '\n%{http_code}' \
+            "https://registry.npmjs.org/${PKG}")
+          metadata_status=$(printf '%s\n' "$metadata" | tail -1)
+          metadata_body=$(printf '%s\n' "$metadata" | sed '$d')
+          case "$metadata_status" in
+            200) LATEST=$(printf '%s' "$metadata_body" | jq -er '.["dist-tags"].latest // "0.0.0"') ;;
+            404) LATEST="0.0.0" ;;
+            *)
+              echo "::error::Failed to query metadata for ${PKG}: HTTP ${metadata_status}"
+              exit 1
+              ;;
+          esac
 
           NEWEST=$(printf '%s\n%s\n' "$LATEST" "$VERSION" | sort -V | tail -1)
           if [ "$NEWEST" != "$VERSION" ] && [ "$VERSION" != "$LATEST" ]; then
@@ -255,11 +290,16 @@ jobs:
             exit 1
           fi
 
-          if [ "$EXISTS" = "200" ]; then
-            echo "${PKG}@${VERSION} already published, skipping."
-          else
-            npm publish --access public --provenance
-          fi
+          exists=$(curl -sL -o /dev/null -w '%{http_code}' \
+            "https://registry.npmjs.org/${PKG}/${VERSION}")
+          case "$exists" in
+            200) echo "${PKG}@${VERSION} already published, skipping." ;;
+            404) npm publish --access public --provenance ;;
+            *)
+              echo "::error::Failed to check ${PKG}@${VERSION} status: HTTP ${exists}"
+              exit 1
+              ;;
+          esac
   # Build and push Docker images
   publish-docker:
     name: Build Docker images

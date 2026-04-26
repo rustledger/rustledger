@@ -2,7 +2,39 @@
 source: crates/rustledger/tests/cli_snapshot_test.rs
 expression: normalized.trim()
 ---
-<fixtures>/validation-errors.beancount: error[E1001]: [E1001] Account Expenses:Food was never opened
-<fixtures>/validation-errors.beancount: error[E1001]: [E1001] Account Assets:Cash was never opened
-<fixtures>/validation-errors.beancount: error[E1001]: [E1001] Account Assets:Cash was never opened
+E1001
+
+  x Account Expenses:Food was never opened
+    ,-[<fixtures>/validation-errors.beancount:5:1]
+  4 |     ; Transaction referencing accounts that were never opened
+  5 | ,-> 2024-01-15 * "Lunch"
+  6 | |     Expenses:Food   10 USD
+  7 | |     Assets:Cash    -10 USD
+  8 | |-> 
+    : `---- here
+  9 |     ; Balance assertion that will fail (no opens, so balance is 0)
+ 10 |     2024-01-16 balance Assets:Cash 100 USD
+    `----
+E1001
+
+  x Account Assets:Cash was never opened
+    ,-[<fixtures>/validation-errors.beancount:5:1]
+  4 |     ; Transaction referencing accounts that were never opened
+  5 | ,-> 2024-01-15 * "Lunch"
+  6 | |     Expenses:Food   10 USD
+  7 | |     Assets:Cash    -10 USD
+  8 | |-> 
+    : `---- here
+  9 |     ; Balance assertion that will fail (no opens, so balance is 0)
+ 10 |     2024-01-16 balance Assets:Cash 100 USD
+    `----
+E1001
+
+  x Account Assets:Cash was never opened
+    ,-[<fixtures>/validation-errors.beancount:10:1]
+  9 | ; Balance assertion that will fail (no opens, so balance is 0)
+ 10 | 2024-01-16 balance Assets:Cash 100 USD
+    : ^^^^^^^^^^^^^^^^^^^|^^^^^^^^^^^^^^^^^^^
+    :                    `-- here
+    `----
 ✗ 3 errors

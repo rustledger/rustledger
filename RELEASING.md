@@ -200,10 +200,6 @@ Both crates.io and npm use OIDC trusted publishing - no API tokens required:
 - **crates.io**: Uses `rust-lang/crates-io-auth-action` for tokenless publishing
 - **npm**: Uses `--provenance` flag with OIDC
 
-### Mergify Auto-merge
-
-Release PRs from `release-plz` are automatically merged when CI passes (configured in `.github/mergify.yml`).
-
 ## Troubleshooting
 
 ### Release PR not created

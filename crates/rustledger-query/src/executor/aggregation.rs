@@ -470,9 +470,23 @@ impl<'a> Executor<'a> {
                 }
             }
             _ => {
-                // For other expressions (Column, Literal, Wildcard, Window), evaluate on first row
+                // For other expressions (Literal, Wildcard, Window), evaluate on first row.
+                // When the group is empty (e.g. the WHERE clause matched zero rows), we
+                // still evaluate bare literals so that queries of the form
+                // `CONVERT(SUM(position), 'USD')` don't silently replace the 'USD'
+                // argument with NULL and produce a misleading error downstream
+                // (issue #902).
+                //
+                // We deliberately match only `Expr::Literal` here rather than calling
+                // `evaluate_literal_expr` (which also handles `DATE(...)`, parenthesized,
+                // and negated literals). That wider helper can surface real evaluation
+                // errors (e.g. `DATE('bogus')`) that we would not want to swallow into
+                // `NULL`. A bare literal is the only case where emptiness must not
+                // mask the user's input, and it cannot fail to evaluate.
                 if let Some(ctx) = group.first() {
                     self.evaluate_expr(expr, ctx)
+                } else if let Expr::Literal(lit) = expr {
+                    self.evaluate_literal(lit)
                 } else {
                     Ok(Value::Null)
                 }

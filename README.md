@@ -15,7 +15,7 @@ Parse and validate your ledger faster than Python beancount.
 [![Compatibility](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/rustledger/rustledger/compatibility/.github/badges/compat-badge.json)](https://github.com/rustledger/rustledger/actions/workflows/compat.yml)
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
-[![Liberapay](https://img.shields.io/liberapay/gives/rustledger.svg?logo=liberapay)](https://liberapay.com/rustledger)
+[![Liberapay](https://img.shields.io/liberapay/receives/rustledger.svg?logo=liberapay)](https://liberapay.com/rustledger)
 
 </div>
 

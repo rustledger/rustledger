@@ -214,6 +214,14 @@
 
         in
         {
+          # Acknowledge the upstream x86_64-darwin deprecation (Nixpkgs 26.11+).
+          # Silences the evaluation warning while we continue to ship Intel macOS
+          # binaries; revisit when Nixpkgs fully drops the platform.
+          _module.args.pkgs = import inputs.nixpkgs {
+            inherit system;
+            config.allowDeprecatedx86_64Darwin = true;
+          };
+
           # Formatters
           treefmt = {
             projectRootFile = "flake.nix";

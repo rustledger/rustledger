@@ -28,28 +28,28 @@ fn build_validation_options_from_loader(
     loader_options: &LoaderOptions,
     base_dir: &std::path::Path,
 ) -> ValidationOptions {
-    let resolved_documents: Vec<String> = loader_options
+    let document_dirs: Vec<std::path::PathBuf> = loader_options
         .documents
         .iter()
         .map(|d| {
             let path = std::path::Path::new(d);
             if path.is_absolute() {
-                d.clone()
+                path.to_path_buf()
             } else {
-                base_dir.join(path).to_string_lossy().to_string()
+                base_dir.join(path)
             }
         })
         .collect();
 
-    ValidationOptions {
-        account_types: loader_options
-            .account_types()
-            .iter()
-            .map(|s| (*s).to_string())
-            .collect(),
-        document_dirs: resolved_documents,
-        ..Default::default()
-    }
+    ValidationOptions::default()
+        .with_account_types(
+            loader_options
+                .account_types()
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect(),
+        )
+        .with_document_dirs(document_dirs)
 }
 
 /// Build `ValidationOptions` with custom account type names from parsed file options.
@@ -64,18 +64,16 @@ fn build_validation_options_from_loader(
 ///
 /// Used when no ledger is loaded (single-file validation).
 ///
-/// Note on `document_dirs`: In single-file mode, `documents` paths are stored
-/// as raw strings from the parsed options. The validator handles resolution
-/// internally using the file's parent directory as the base when needed.
-/// We intentionally pass the raw strings here rather than resolving them
-/// ourselves, to avoid duplicating the validator's resolution logic.
+/// When `base_dir` is `Some`, relative document directory paths are resolved
+/// against it; when `None`, they are kept as-is (tests and single-file
+/// buffers without an on-disk path rely on this fallback).
 ///
 /// See issue #572: <https://github.com/rustledger/rustledger/issues/572>
 fn build_validation_options_from_file(
     file_options: &[(String, String, Span)],
     base_dir: Option<&std::path::Path>,
 ) -> ValidationOptions {
-    let mut opts = ValidationOptions::default();
+    let opts = ValidationOptions::default();
 
     // Start with validator defaults, override with file options.
     // This avoids duplicating the canonical default account type names.
@@ -102,20 +100,19 @@ fn build_validation_options_from_file(
             "documents" => {
                 let path = std::path::Path::new(value);
                 if path.is_absolute() {
-                    document_dirs.push(value.clone());
+                    document_dirs.push(path.to_path_buf());
                 } else if let Some(base) = base_dir {
-                    document_dirs.push(base.join(path).to_string_lossy().to_string());
+                    document_dirs.push(base.join(path));
                 } else {
-                    document_dirs.push(value.clone());
+                    document_dirs.push(path.to_path_buf());
                 }
             }
             _ => {}
         }
     }
 
-    opts.account_types = account_types;
-    opts.document_dirs = document_dirs;
-    opts
+    opts.with_account_types(account_types)
+        .with_document_dirs(document_dirs)
 }
 
 /// Convert parse errors to LSP diagnostics.

@@ -35,7 +35,7 @@ mod span;
 mod winnow_parser;
 
 pub use error::{ParseError, ParseErrorKind};
-pub use span::{Span, Spanned};
+pub use span::{SYNTHESIZED_FILE_ID, Span, Spanned};
 
 use rustledger_core::Directive;
 

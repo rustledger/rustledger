@@ -118,6 +118,7 @@ pub struct Ledger {
 /// This encompasses all error types that can occur during loading,
 /// booking, plugin execution, and validation.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct LedgerError {
     /// Error severity.
     pub severity: ErrorSeverity,
@@ -127,6 +128,15 @@ pub struct LedgerError {
     pub message: String,
     /// Source location, if available.
     pub location: Option<ErrorLocation>,
+    /// Byte span (inclusive start, exclusive end) in the source file,
+    /// used by rich renderers (e.g. miette) to draw a snippet around
+    /// the offending directive. Consumers that only need `file:line:col`
+    /// should use `location`; those that want to show the surrounding
+    /// source text want this.
+    pub source_span: Option<(usize, usize)>,
+    /// Source file ID — index into the ledger's [`SourceMap`]. Used
+    /// alongside `source_span` for snippet rendering.
+    pub file_id: Option<u16>,
     /// Processing phase that produced this error: "parse", "validate", or "plugin".
     pub phase: String,
 }
@@ -159,6 +169,8 @@ impl LedgerError {
             code: code.into(),
             message: message.into(),
             location: None,
+            source_span: None,
+            file_id: None,
             phase: "validate".to_string(),
         }
     }
@@ -170,8 +182,18 @@ impl LedgerError {
             code: code.into(),
             message: message.into(),
             location: None,
+            source_span: None,
+            file_id: None,
             phase: "validate".to_string(),
         }
+    }
+
+    /// Attach a source span and file ID so rich renderers can draw a snippet.
+    #[must_use]
+    pub const fn with_source_span(mut self, span: (usize, usize), file_id: u16) -> Self {
+        self.source_span = Some(span);
+        self.file_id = Some(file_id);
+        self
     }
 
     /// Set the processing phase for this error.
@@ -657,7 +679,9 @@ pub fn run_plugins(
         let directive = wrapper_to_directive(wrapper)
             .map_err(|e| ProcessError::PluginConversion(e.to_string()))?;
 
-        // Reconstruct span from filename/lineno if available
+        // Reconstruct span from filename/lineno if available, falling back to
+        // the plugin-synthesized sentinel when no source location is recoverable.
+        // See `rustledger_parser::SYNTHESIZED_FILE_ID` and issue #896.
         let (span, file_id) =
             if let (Some(filename), Some(lineno)) = (&wrapper.filename, wrapper.lineno) {
                 if let Some(&fid) = filename_to_file_id.get(filename) {
@@ -666,15 +690,24 @@ pub fn run_plugins(
                         let span_start = file.line_start(lineno as usize).unwrap_or(0);
                         (rustledger_parser::Span::new(span_start, span_start), fid)
                     } else {
-                        (rustledger_parser::Span::new(0, 0), 0)
+                        (
+                            rustledger_parser::Span::new(0, 0),
+                            rustledger_parser::SYNTHESIZED_FILE_ID,
+                        )
                     }
                 } else {
-                    // Unknown file (plugin-generated) - use zero span
-                    (rustledger_parser::Span::new(0, 0), 0)
+                    // Plugin-generated directive with an unknown/synthetic filename.
+                    (
+                        rustledger_parser::Span::new(0, 0),
+                        rustledger_parser::SYNTHESIZED_FILE_ID,
+                    )
                 }
             } else {
-                // No location info - use zero span
-                (rustledger_parser::Span::new(0, 0), 0)
+                // Plugin-generated directive with no source location at all.
+                (
+                    rustledger_parser::Span::new(0, 0),
+                    rustledger_parser::SYNTHESIZED_FILE_ID,
+                )
             };
 
         new_directives.push(Spanned::new(directive, span).with_file_id(file_id as usize));
@@ -694,41 +727,38 @@ fn run_validation(
 ) {
     use rustledger_validate::{ValidationOptions, validate_spanned_with_options};
 
-    let account_types: Vec<String> = file_options
-        .account_types()
-        .iter()
-        .map(|s| (*s).to_string())
-        .collect();
-
-    // Resolve document directories relative to the ledger's base directory
-    // so validation finds documents using the same path resolution as run_plugins.
+    // Resolve document directories relative to the main file's directory
     let base_dir = source_map
         .files()
         .first()
         .and_then(|f| f.path.parent())
         .unwrap_or_else(|| std::path::Path::new("."));
 
-    let resolved_document_dirs: Vec<String> = file_options
+    let resolved_document_dirs: Vec<std::path::PathBuf> = file_options
         .documents
         .iter()
         .map(|d| {
             let path = std::path::Path::new(d);
             if path.is_absolute() {
-                d.clone()
+                path.to_path_buf()
             } else {
-                base_dir.join(path).to_string_lossy().to_string()
+                base_dir.join(path)
             }
         })
         .collect();
 
-    let validation_options = ValidationOptions {
-        account_types,
-        document_dirs: resolved_document_dirs,
-        infer_tolerance_from_cost: file_options.infer_tolerance_from_cost,
-        tolerance_multiplier: file_options.inferred_tolerance_multiplier,
-        inferred_tolerance_default: file_options.inferred_tolerance_default.clone(),
-        ..Default::default()
-    };
+    let account_types: Vec<String> = file_options
+        .account_types()
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+
+    let validation_options = ValidationOptions::default()
+        .with_account_types(account_types)
+        .with_document_dirs(resolved_document_dirs)
+        .with_infer_tolerance_from_cost(file_options.infer_tolerance_from_cost)
+        .with_tolerance_multiplier(file_options.inferred_tolerance_multiplier)
+        .with_inferred_tolerance_default(file_options.inferred_tolerance_default.clone());
 
     let validation_errors = validate_spanned_with_options(directives, validation_options);
 
@@ -743,11 +773,33 @@ fn run_validation(
         } else {
             ErrorSeverity::Error
         };
+        // Fold the advisory note (if any) into the message so it propagates
+        // through every downstream format (LedgerError, JSON diagnostic, CLI
+        // report, LSP diagnostic) without each one needing a dedicated field.
+        let message = match &err.note {
+            Some(note) => format!("{err}\n  note: {note}"),
+            None => err.to_string(),
+        };
+        // Resolve span + file_id into a file/line/column triple so CLI and
+        // LSP consumers can render `file:line:col` headers without having
+        // to do the lookup themselves (issue #901).
+        let location = err.span.and_then(|span| {
+            let fid = err.file_id? as usize;
+            let file = source_map.get(fid)?;
+            let (line, column) = file.line_col(span.start);
+            Some(ErrorLocation {
+                file: file.path.clone(),
+                line,
+                column,
+            })
+        });
         errors.push(LedgerError {
             severity: severity_level,
             code: err.code.code().to_string(),
-            message: err.to_string(),
-            location: None,
+            message,
+            location,
+            source_span: err.span.map(|s| (s.start, s.end)),
+            file_id: err.file_id,
             phase: phase.to_string(),
         });
     }

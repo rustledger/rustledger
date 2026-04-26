@@ -2,5 +2,13 @@
 source: crates/rustledger/tests/cli_snapshot_test.rs
 expression: normalized.trim()
 ---
-<fixtures>/valid-ledger.beancount: error[E1004]: [E1004] Cannot close account Assets:Bank:Savings with non-zero balance
+E1004
+
+  ! Cannot close account Assets:Bank:Savings with non-zero balance
+    ,-[<fixtures>/valid-ledger.beancount:78:1]
+ 77 | ; Close an account
+ 78 | 2020-12-31 close Assets:Bank:Savings
+    : ^^^^^^^^^^^^^^^^^^|^^^^^^^^^^^^^^^^^^
+    :                   `-- here
+    `----
 ⚠ 1 warning

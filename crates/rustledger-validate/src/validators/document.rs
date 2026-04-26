@@ -60,7 +60,7 @@ pub fn validate_document(state: &LedgerState, doc: &Document, errors: &mut Vec<V
             // Try resolving relative path against each document directory
             let mut found = None;
             for dir in &state.options.document_dirs {
-                let candidate = Path::new(dir).join(doc_path);
+                let candidate = dir.join(doc_path);
                 if candidate.exists() {
                     found = Some(candidate);
                     break;
@@ -93,7 +93,7 @@ pub fn validate_document(state: &LedgerState, doc: &Document, errors: &mut Vec<V
                     .options
                     .document_dirs
                     .iter()
-                    .map(|d| Path::new(d).join(doc_path).display().to_string())
+                    .map(|d| d.join(doc_path).display().to_string())
                     .collect();
                 error = error.with_context(format!("searched: {}", searched.join(", ")));
             } else {

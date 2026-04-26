@@ -37,6 +37,15 @@ permissions:
   contents: read
 env:
   CARGO_TERM_COLOR: always
+# Use `bash` explicitly so GitHub runs every `run:` step with
+# `bash --noprofile --norc -eo pipefail`. The default `bash -e` only
+# sets errexit, not pipefail — which meant that a failing
+# `cargo fuzz run ... | tee fuzz-output.txt` returned tee's exit code
+# (0) and silently masked compile failures in the fuzz targets
+# (see #911).
+defaults:
+  run:
+    shell: bash
 jobs:
   fuzz-parser:
     name: Fuzz Parser (${{ matrix.target }})

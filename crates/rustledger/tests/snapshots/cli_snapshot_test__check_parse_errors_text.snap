@@ -13,5 +13,14 @@ P0012
  6 | 
  7 | 2024-01-15 * "Valid transaction"
    `----
-<fixtures>/parse-errors.beancount: error[E1001]: [E1001] Account Income:Salary was never opened
+E1001
+
+  x Account Income:Salary was never opened
+   ,-[<fixtures>/parse-errors.beancount:7:1]
+ 6 |     
+ 7 | ,-> 2024-01-15 * "Valid transaction"
+ 8 | |     Assets:Cash   100 USD
+ 9 | |->   Income:Salary
+   : `---- here
+   `----
 ✗ 2 errors

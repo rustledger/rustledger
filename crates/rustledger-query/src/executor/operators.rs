@@ -79,9 +79,9 @@ impl Executor<'_> {
                         let found = values.iter().any(|v| self.values_equal(&left, v));
                         Ok(Value::Boolean(found))
                     }
-                    _ => Err(QueryError::Type(
-                        "IN requires set right operand".to_string(),
-                    )),
+                    // Fall back to scalar equality so `x IN ('a')` ≡ `x = 'a'`,
+                    // matching SQL/bean-query semantics (issue #916).
+                    other => Ok(Value::Boolean(self.values_equal(&left, &other))),
                 }
             }
             BinaryOperator::NotRegex => {
@@ -125,9 +125,9 @@ impl Executor<'_> {
                         let found = values.iter().any(|v| self.values_equal(&left, v));
                         Ok(Value::Boolean(!found))
                     }
-                    _ => Err(QueryError::Type(
-                        "NOT IN requires set right operand".to_string(),
-                    )),
+                    // Fall back to scalar inequality so `x NOT IN ('a')` ≡ `x != 'a'`,
+                    // matching SQL/bean-query semantics (issue #916).
+                    other => Ok(Value::Boolean(!self.values_equal(&left, &other))),
                 }
             }
             BinaryOperator::Add => {
@@ -372,9 +372,9 @@ impl Executor<'_> {
                         let found = values.iter().any(|v| self.values_equal(left, v));
                         Ok(Value::Boolean(found))
                     }
-                    _ => Err(QueryError::Type(
-                        "IN requires set right operand".to_string(),
-                    )),
+                    // Fall back to scalar equality so `x IN ('a')` ≡ `x = 'a'`,
+                    // matching SQL/bean-query semantics (issue #916).
+                    _ => Ok(Value::Boolean(self.values_equal(left, right))),
                 }
             }
             BinaryOperator::NotRegex => {
@@ -418,9 +418,9 @@ impl Executor<'_> {
                         let found = values.iter().any(|v| self.values_equal(left, v));
                         Ok(Value::Boolean(!found))
                     }
-                    _ => Err(QueryError::Type(
-                        "NOT IN requires set right operand".to_string(),
-                    )),
+                    // Fall back to scalar inequality so `x NOT IN ('a')` ≡ `x != 'a'`,
+                    // matching SQL/bean-query semantics (issue #916).
+                    _ => Ok(Value::Boolean(!self.values_equal(left, right))),
                 }
             }
             BinaryOperator::Add => {

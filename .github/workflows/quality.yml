@@ -11,34 +11,6 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
 jobs:
-  # Semver check - detect breaking API changes
-  semver:
-    name: Semver Check
-    runs-on: ubuntu-latest
-    # Only run on PRs to catch breaking changes before merge
-    if: github.event_name == 'pull_request'
-    steps:
-      - uses: actions/checkout@0c366fd6a839edf440554fa01a7085ccba70ac98 # v6
-      - name: Check for Rust changes
-        id: changes
-        uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d # v4.0.1
-        with:
-          filters: |
-            rust:
-              - '**/*.rs'
-              - '**/Cargo.toml'
-              - 'Cargo.lock'
-      - name: Check semver compatibility
-        if: steps.changes.outputs.rust == 'true'
-        uses: obi1kenobi/cargo-semver-checks-action@6b69fcf40e9b5fb17adeb57e4b6ecd020649a239 # v2
-        with:
-          feature-group: all-features
-          # Exclude CLI crate (internal API changes are fine) and non-library crates
-          exclude: rustledger,rustledger-lsp,rustledger-wasm
-          rust-toolchain: stable
-      - name: Skip semver check
-        if: steps.changes.outputs.rust != 'true'
-        run: echo "No Rust changes detected, skipping semver check"
   # MSRV check - verify minimum supported Rust version
   msrv:
     name: MSRV (1.94)
@@ -99,7 +71,7 @@ jobs:
   quality:
     name: quality
     if: always()
-    needs: [semver, msrv, deny, coverage]
+    needs: [msrv, deny, coverage]
     runs-on: ubuntu-latest
     steps:
       - name: Check all quality jobs

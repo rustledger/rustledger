@@ -180,8 +180,14 @@ impl std::fmt::Display for ErrorCode {
 }
 
 /// A validation error.
+///
+/// The `Display` impl emits just the message text (no `[E1234]` prefix).
+/// CLI and IDE renderers are expected to prepend the error code themselves,
+/// which avoids the double-tagging seen in older output like
+/// `error[E3001]: [E3001] ...` (see issue #901).
 #[derive(Debug, Clone, Error)]
-#[error("[{code}] {message}")]
+#[error("{message}")]
+#[non_exhaustive]
 pub struct ValidationError {
     /// Error code.
     pub code: ErrorCode,
@@ -191,6 +197,11 @@ pub struct ValidationError {
     pub date: NaiveDate,
     /// Additional context.
     pub context: Option<String>,
+    /// Advisory note attached to the error — typically used to help users
+    /// diagnose the underlying cause (e.g. "this directive was synthesized
+    /// by a plugin"). Unlike [`Self::context`], which describes data tied
+    /// to the error, the note describes something about its *origin*.
+    pub note: Option<String>,
     /// Source span (byte offsets within the file).
     pub span: Option<Span>,
     /// Source file ID (index into `SourceMap`).
@@ -207,6 +218,7 @@ impl ValidationError {
             message: message.into(),
             date,
             context: None,
+            note: None,
             span: None,
             file_id: None,
         }
@@ -225,6 +237,7 @@ impl ValidationError {
             message: message.into(),
             date,
             context: None,
+            note: None,
             span: Some(spanned.span),
             file_id: Some(spanned.file_id),
         }
@@ -234,6 +247,13 @@ impl ValidationError {
     #[must_use]
     pub fn with_context(mut self, context: impl Into<String>) -> Self {
         self.context = Some(context.into());
+        self
+    }
+
+    /// Attach an advisory note to this error (builder pattern).
+    #[must_use]
+    pub fn with_note(mut self, note: impl Into<String>) -> Self {
+        self.note = Some(note.into());
         self
     }
 

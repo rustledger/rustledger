@@ -161,7 +161,12 @@ impl FuzzInput {
 
     /// Format a price amount with 2 decimal places in range 0.00-99.99
     fn format_price_amount(&self) -> f64 {
-        (self.price_amount.abs() % MAX_AMOUNT_CENTS) as f64 / CENTS_DIVISOR
+        // Widen to i64 *before* taking the absolute value so that
+        // `price_amount == i32::MIN` can't panic / wrap. `i32::MIN` widened
+        // to i64 is well within i64's range, so `.abs()` on it is safe.
+        // The result is then reduced mod MAX_AMOUNT_CENTS (also i64), and
+        // only reaches `f64` after the math is done.
+        (i64::from(self.price_amount).abs() % MAX_AMOUNT_CENTS) as f64 / CENTS_DIVISOR
     }
 
     fn format_account(&self, account_type: u8, sub: &str) -> String {
@@ -206,10 +211,11 @@ impl FuzzInput {
     fn format_amount(&self) -> String {
         let sign = if self.amount_negative { "-" } else { "" };
         let decimal = self.amount_decimal % 100;
+        // Widen before abs — see comment on format_price_amount for why.
         format!(
             "{}{}.{:02}",
             sign,
-            self.amount_integer.abs() % 1_000_000,
+            i64::from(self.amount_integer).abs() % 1_000_000,
             decimal
         )
     }
@@ -350,14 +356,20 @@ impl FuzzInput {
                 s.push_str(&self.format_metadata());
 
                 for i in 0..num {
-                    let acc =
-                        self.format_account((self.account_type + i) % 5, &format!("Sub{}", i));
+                    // `wrapping_add` because both operands are `u8` and the
+                    // fuzzer can legally produce `account_type` near 255 with
+                    // `i` up to 3; we only care about the value mod 5 anyway.
+                    let acc = self.format_account(
+                        self.account_type.wrapping_add(i) % 5,
+                        &format!("Sub{}", i),
+                    );
                     if i == num - 1 {
                         // Last posting auto-balanced
                         s.push_str(&format!("\n  {}", acc));
                     } else {
-                        let amt =
-                            (self.amount_integer.abs() as i64 / (num as i64)) % MAX_AMOUNT_CENTS;
+                        // Widen before abs — see comment on format_price_amount.
+                        let amt = (i64::from(self.amount_integer).abs() / i64::from(num))
+                            % MAX_AMOUNT_CENTS;
                         s.push_str(&format!("\n  {}  {}.00 {}", acc, amt, currency));
                     }
                 }

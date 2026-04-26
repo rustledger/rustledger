@@ -8,10 +8,10 @@ expression: pretty
       "code": "E1004",
       "column": 1,
       "end_column": 1,
-      "end_line": 1,
+      "end_line": 79,
       "file": "<fixtures>/valid-ledger.beancount",
-      "line": 1,
-      "message": "[E1004] Cannot close account Assets:Bank:Savings with non-zero balance",
+      "line": 78,
+      "message": "Cannot close account Assets:Bank:Savings with non-zero balance",
       "phase": "validate",
       "severity": "warning"
     }

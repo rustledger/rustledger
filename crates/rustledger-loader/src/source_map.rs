@@ -103,8 +103,21 @@ impl SourceMap {
     /// Add a file to the source map.
     ///
     /// Returns the file ID.
+    ///
+    /// # Panics
+    ///
+    /// Panics if adding this file would produce an ID that collides with
+    /// [`rustledger_parser::SYNTHESIZED_FILE_ID`] (i.e., with more than
+    /// `u16::MAX - 1` = 65,534 loaded files). Directives stored in
+    /// `Spanned<T>` use a `u16` for `file_id`, and the topmost value is
+    /// reserved as a sentinel for plugin-synthesized directives.
     pub fn add_file(&mut self, path: PathBuf, source: Arc<str>) -> usize {
         let id = self.files.len();
+        assert!(
+            id < rustledger_parser::SYNTHESIZED_FILE_ID as usize,
+            "SourceMap exceeded {} files; file_id {id} collides with SYNTHESIZED_FILE_ID sentinel",
+            rustledger_parser::SYNTHESIZED_FILE_ID,
+        );
         self.files.push(SourceFile::new(id, path, source));
         id
     }

@@ -94,7 +94,11 @@ jobs:
         run: |
           echo "Waiting for rustledger $VERSION on crates.io..."
           for i in $(seq 1 30); do
-            AVAILABLE=$(cargo search rustledger 2>/dev/null | grep "^rustledger = " | head -1 || true)
+            # `|| true` is redundant here — `head -1` always exits 0
+            # whether or not the upstream pipe matched. Stderr is muted
+            # because cargo search prints registry-update noise during
+            # normal polling.
+            AVAILABLE=$(cargo search rustledger 2>/dev/null | grep "^rustledger = " | head -1)
             if echo "$AVAILABLE" | grep -q "\"$VERSION\""; then
               echo "Found: $AVAILABLE"
               exit 0

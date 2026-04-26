@@ -62,18 +62,27 @@ jobs:
       - name: Run Kani on rustledger-core
         if: contains(steps.packages.outputs.packages, 'rustledger-core')
         run: |
+          set -o pipefail
           echo "::group::Verifying rustledger-core"
           cd crates/rustledger-core
-          cargo kani --all-features 2>&1 | tee kani-core-output.txt || true
+          # No `|| true`. A VERIFICATION FAILED line from Kani is a real
+          # finding and should turn the job red, not just a line in the
+          # summary that nobody reads.
+          cargo kani --all-features 2>&1 | tee kani-core-output.txt
           echo "::endgroup::"
       - name: Run Kani on rustledger-booking
         if: contains(steps.packages.outputs.packages, 'rustledger-booking')
         run: |
+          set -o pipefail
           echo "::group::Verifying rustledger-booking"
           cd crates/rustledger-booking
-          cargo kani --all-features 2>&1 | tee kani-booking-output.txt || true
+          cargo kani --all-features 2>&1 | tee kani-booking-output.txt
           echo "::endgroup::"
       - name: Summary
+        # Always run so a Kani failure still produces the summary that
+        # surfaces the VERIFICATION FAILURE line (the job will still be
+        # red, but reviewers can see why without digging through logs).
+        if: always()
         run: |
           echo "## Kani Verification Results" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY

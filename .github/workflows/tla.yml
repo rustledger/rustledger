@@ -216,12 +216,18 @@ jobs:
               spec_name=$(basename "$trace" .trace)
               echo "Processing trace for $spec_name..."
 
-              # Try to generate Rust test (script may not support all specs)
-              python3 scripts/trace_to_rust_test.py "$trace" > "generated_test_${spec_name}.rs" 2>/dev/null || true
-
-              if [ -s "generated_test_${spec_name}.rs" ]; then
-                echo "Generated test for $spec_name"
-                cat "generated_test_${spec_name}.rs"
+              # Try to generate Rust test (script may not support all specs).
+              # Capture exit status so a script bug surfaces in the log
+              # instead of being masked by `2>/dev/null || true`.
+              if python3 scripts/trace_to_rust_test.py "$trace" > "generated_test_${spec_name}.rs"; then
+                if [ -s "generated_test_${spec_name}.rs" ]; then
+                  echo "Generated test for $spec_name"
+                  cat "generated_test_${spec_name}.rs"
+                else
+                  echo "::warning::trace_to_rust_test.py produced no output for $spec_name"
+                fi
+              else
+                echo "::warning::trace_to_rust_test.py failed for $spec_name (spec may be unsupported)"
               fi
             done
           else

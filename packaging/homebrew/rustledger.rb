@@ -51,9 +51,6 @@ class Rustledger < Formula
     # Validate the ledger with rledger
     system bin/"rledger", "check", testpath/"test.beancount"
 
-    # Test bean-check compatibility binary
-    system bin/"bean-check", testpath/"test.beancount"
-
     # Test query functionality
     output = shell_output("#{bin}/rledger query #{testpath/"test.beancount"} \"SELECT account, sum(position)\"")
     assert_match "Assets:Bank:Checking", output

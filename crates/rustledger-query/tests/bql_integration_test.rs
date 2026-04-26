@@ -2519,7 +2519,7 @@ fn test_in_operator_single_element_set() {
         ),
     ];
 
-    // Single element set requires trailing comma to distinguish from parenthesized expression
+    // Single element set with trailing comma parses as Expr::Set([..])
     let result = execute_query(r"SELECT currency WHERE currency IN ('EUR',)", &directives);
 
     assert_eq!(result.rows.len(), 2, "Expected 2 EUR postings");
@@ -2530,6 +2530,67 @@ fn test_in_operator_single_element_set() {
         };
         assert_eq!(currency, "EUR");
     }
+}
+
+/// Regression test for issue #916: `IN ('one_value')` (no trailing comma)
+/// should match `'one_value'`, behaving like `= 'one_value'`. The parser
+/// resolves this to a parenthesized scalar; the executor falls back to
+/// scalar equality, matching SQL/Python bean-query semantics.
+#[test]
+fn test_in_operator_single_element_no_trailing_comma() {
+    let directives = vec![
+        Directive::Open(Open::new(date(2024, 1, 1), "Assets:Bank")),
+        Directive::Open(Open::new(date(2024, 1, 1), "Expenses:Food")),
+        Directive::Transaction(
+            Transaction::new(date(2024, 1, 15), "EUR expense")
+                .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(100), "EUR")))
+                .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(-100), "EUR"))),
+        ),
+        Directive::Transaction(
+            Transaction::new(date(2024, 1, 16), "USD expense")
+                .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(50), "USD")))
+                .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(-50), "USD"))),
+        ),
+    ];
+
+    let result = execute_query(r"SELECT currency WHERE currency IN ('EUR')", &directives);
+    assert_eq!(result.rows.len(), 2, "Expected 2 EUR postings");
+    for row in &result.rows {
+        let currency = match &row[0] {
+            Value::String(s) => s.as_str(),
+            other => panic!("Expected String for currency, got {other:?}"),
+        };
+        assert_eq!(currency, "EUR");
+    }
+
+    // NOT IN ('EUR') should select non-EUR rows
+    let result = execute_query(
+        r"SELECT currency WHERE currency NOT IN ('EUR')",
+        &directives,
+    );
+    assert_eq!(result.rows.len(), 2, "Expected 2 non-EUR postings");
+    for row in &result.rows {
+        let currency = match &row[0] {
+            Value::String(s) => s.as_str(),
+            other => panic!("Expected String for currency, got {other:?}"),
+        };
+        assert_eq!(currency, "USD");
+    }
+
+    // HAVING uses the borrowed `binary_op_on_values` path; exercise the same
+    // single-element fallback there so both code paths are covered.
+    let result = execute_query(
+        r"SELECT currency, sum(number) AS total
+          GROUP BY currency
+          HAVING currency IN ('EUR')",
+        &directives,
+    );
+    assert_eq!(result.rows.len(), 1, "Expected 1 EUR group");
+    let currency = match &result.rows[0][0] {
+        Value::String(s) => s.as_str(),
+        other => panic!("Expected String for currency, got {other:?}"),
+    };
+    assert_eq!(currency, "EUR");
 }
 
 /// Test IN with parenthesized column (not a set literal).
@@ -4011,6 +4072,181 @@ fn test_value_no_currency_aggregated_returns_as_is() {
             "Expected Inventory or Amount when VALUE() has no target currency, got {other:?}",
         ),
     }
+}
+
+// ============================================================================
+// VALUE(position, DATE) Python-beancount compat tests (issue #892)
+// ============================================================================
+
+/// Mirrors the fixture used to empirically validate Python bean-query behavior:
+/// one position of 4 SP purchased at 250 USD cost, with four price points
+/// spanning before and after the relevant dates (including a far-future price).
+fn make_issue_892_directives() -> Vec<Directive> {
+    vec![
+        Directive::Open(Open::new(date(2020, 1, 1), "Assets:Brokerage")),
+        Directive::Open(Open::new(date(2020, 1, 1), "Equity:Opening")),
+        Directive::Price(Price::new(
+            date(2020, 1, 1),
+            "SP",
+            Amount::new(dec!(250), "USD"),
+        )),
+        Directive::Price(Price::new(
+            date(2020, 6, 1),
+            "SP",
+            Amount::new(dec!(300), "USD"),
+        )),
+        Directive::Price(Price::new(
+            date(2021, 1, 1),
+            "SP",
+            Amount::new(dec!(500), "USD"),
+        )),
+        // Far-future price to prove that `value(pos)` with no date argument
+        // uses the latest price (which matches Python's date=None behavior)
+        // rather than today's date.
+        Directive::Price(Price::new(
+            date(2099, 1, 1),
+            "SP",
+            Amount::new(dec!(9999), "USD"),
+        )),
+        Directive::Transaction(
+            Transaction::new(date(2020, 1, 1), "Buy stock").with_posting(
+                Posting::new("Assets:Brokerage", Amount::new(dec!(4), "SP")).with_cost(
+                    CostSpec::empty()
+                        .with_number_per(dec!(250))
+                        .with_currency("USD")
+                        .with_date(date(2020, 1, 1)),
+                ),
+            ),
+        ),
+    ]
+}
+
+#[test]
+fn test_value_date_arg_returns_price_at_or_before() {
+    // value(position, 2020-06-01) should use the price on-or-before 2020-06-01.
+    // The fixture has a 300 USD price dated 2020-06-01, so 4 SP * 300 = 1200 USD.
+    let directives = make_issue_892_directives();
+    let result = execute_query(
+        r"SELECT number(value(position, 2020-06-01)) AS v
+          WHERE account ~ 'Brokerage'",
+        &directives,
+    );
+    assert_eq!(result.len(), 1);
+    assert_eq!(result.rows[0][0], Value::Number(dec!(1200)));
+}
+
+#[test]
+fn test_value_date_arg_uses_earlier_price_when_no_match_on_date() {
+    // value(position, 2020-02-15): no price directive on that exact date,
+    // so use the most recent price before it — the 250 USD price from 2020-01-01.
+    // 4 SP * 250 = 1000 USD (this matches the result the issue reporter got from
+    // Python bean-query with their own simpler fixture).
+    let directives = make_issue_892_directives();
+    let result = execute_query(
+        r"SELECT number(value(position, 2020-02-15)) AS v
+          WHERE account ~ 'Brokerage'",
+        &directives,
+    );
+    assert_eq!(result.len(), 1);
+    assert_eq!(result.rows[0][0], Value::Number(dec!(1000)));
+}
+
+#[test]
+fn test_value_date_arg_returns_raw_units_when_no_price_available() {
+    // value(position, 2019-01-01): no price exists on or before that date,
+    // so the position is returned as-is (raw units). Python beancount does
+    // the same — its convert.get_value() falls through to `return units`.
+    let directives = make_issue_892_directives();
+    let result = execute_query(
+        r"SELECT number(value(position, 2019-01-01)) AS v
+          WHERE account ~ 'Brokerage'",
+        &directives,
+    );
+    assert_eq!(result.len(), 1);
+    assert_eq!(result.rows[0][0], Value::Number(dec!(4)));
+}
+
+#[test]
+fn test_value_no_date_arg_still_uses_latest_price() {
+    // Regression: value(position) without a date continues to use the latest
+    // price (4 * 9999 = 39996), including future-dated prices. Matches Python.
+    let directives = make_issue_892_directives();
+    let result = execute_query(
+        r"SELECT number(value(position)) AS v
+          WHERE account ~ 'Brokerage'",
+        &directives,
+    );
+    assert_eq!(result.len(), 1);
+    assert_eq!(result.rows[0][0], Value::Number(dec!(39996)));
+}
+
+#[test]
+fn test_value_date_arg_in_aggregate_context() {
+    // Issue #892 fix must cover the aggregate-evaluation path too —
+    // see executor/mod.rs `evaluate_function_on_values` for "VALUE".
+    let directives = make_issue_892_directives();
+    let result = execute_query(
+        r"SELECT account, number(value(sum(position), 2020-06-01)) AS v
+          WHERE account ~ 'Brokerage'
+          GROUP BY account",
+        &directives,
+    );
+    assert_eq!(result.len(), 1);
+    assert_eq!(result.rows[0][1], Value::Number(dec!(1200)));
+}
+
+#[test]
+fn test_value_currency_string_is_rustledger_extension() {
+    // Regression: the existing `value(x, 'USD')` extension (not in Python
+    // beancount — Python uses CONVERT for this) continues to work and uses
+    // the latest price. A caller wanting an explicit currency AND a historical
+    // price should use CONVERT(x, 'USD', date).
+    let directives = make_issue_892_directives();
+    let result = execute_query(
+        r"SELECT number(value(position, 'USD')) AS v
+          WHERE account ~ 'Brokerage'",
+        &directives,
+    );
+    assert_eq!(result.len(), 1);
+    assert_eq!(result.rows[0][0], Value::Number(dec!(39996)));
+}
+
+#[test]
+fn test_value_rejects_invalid_second_argument_type() {
+    // The error message should mention both accepted types (date and currency).
+    let directives = make_issue_892_directives();
+    let query = parse(r"SELECT value(position, 42) AS v WHERE account ~ 'Brokerage'")
+        .expect("query should parse");
+    let mut executor = Executor::new(&directives);
+    let err = executor.execute(&query).expect_err("should reject integer");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("date") && msg.contains("currency"),
+        "error should mention both accepted types, got: {msg}"
+    );
+}
+
+#[test]
+fn test_value_rejects_invalid_second_argument_in_aggregate_context() {
+    // Parallel coverage to the non-aggregate test above: the aggregate-evaluation
+    // path (evaluate_function_on_values) has its own dispatch and should reject
+    // non-date/non-string second arguments with the same error message.
+    let directives = make_issue_892_directives();
+    let query = parse(
+        r"SELECT account, value(sum(position), 42) AS v
+          WHERE account ~ 'Brokerage'
+          GROUP BY account",
+    )
+    .expect("query should parse");
+    let mut executor = Executor::new(&directives);
+    let err = executor
+        .execute(&query)
+        .expect_err("aggregate-context should reject integer too");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("date") && msg.contains("currency"),
+        "aggregate error should mention both accepted types, got: {msg}"
+    );
 }
 
 // ============================================================================
@@ -7388,4 +7624,79 @@ fn test_entry_meta_from_entries_table() {
 
     assert_eq!(result.rows.len(), 1);
     assert_eq!(result.rows[0][1], Value::String("employer".to_string()));
+}
+
+// ============================================================================
+// Empty-group literal evaluation (issue #902)
+// ============================================================================
+
+#[test]
+fn test_convert_sum_with_literal_currency_on_empty_where() {
+    // Reporter's exact query. Before the fix, this errored with
+    // `CONVERT: second argument must be a currency string` — because the
+    // 'USD' literal was being replaced with Null when the group was empty.
+    let result = execute_query(
+        "SELECT convert(sum(position), 'USD') WHERE account ~ '^Income'",
+        &[],
+    );
+    assert_eq!(result.len(), 1);
+    // CONVERT on an empty/null sum returns zero in the target currency.
+    match &result.rows[0][0] {
+        Value::Amount(a) => {
+            assert_eq!(a.number, dec!(0));
+            assert_eq!(a.currency.as_ref(), "USD");
+        }
+        other => panic!("expected Amount(0 USD), got {other:?}"),
+    }
+}
+
+#[test]
+fn test_value_sum_with_literal_date_on_empty_where() {
+    // Parallel to the CONVERT test: `VALUE(sum(position), DATE)` on an
+    // empty group must not silently replace the DATE literal with Null.
+    // Before the fix, the same bug would make VALUE's dispatch reject the
+    // 2nd argument with a misleading error about "date or currency string".
+    let result = execute_query(
+        "SELECT value(sum(position), 2020-06-01) WHERE account ~ '^Nothing'",
+        &[],
+    );
+    assert_eq!(result.len(), 1);
+    // With no postings to sum, the result should be Null (inventory couldn't
+    // produce an amount) — NOT an error about the second argument.
+    assert!(
+        matches!(
+            &result.rows[0][0],
+            Value::Null | Value::Amount(_) | Value::Inventory(_)
+        ),
+        "expected Null or empty Amount/Inventory, got {:?}",
+        result.rows[0][0]
+    );
+}
+
+#[test]
+fn test_convert_with_null_second_arg_has_helpful_error_message() {
+    // Even with our aggregation fix, it is still possible to write a query
+    // where the second argument legitimately evaluates to Null at runtime
+    // (e.g. via a metadata lookup with no matching key). In that case the
+    // error message should mention NULL explicitly instead of claiming the
+    // user's input wasn't a string.
+    let directives = vec![
+        Directive::Open(Open::new(date(2024, 1, 1), "Assets:Bank")),
+        Directive::Open(Open::new(date(2024, 1, 1), "Expenses:Food")),
+        Directive::Transaction(
+            Transaction::new(date(2024, 1, 15), "Lunch")
+                .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(10), "USD")))
+                .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(-10), "USD"))),
+        ),
+    ];
+    let query = parse("SELECT convert(position, meta('nonexistent_key'))").expect("should parse");
+    let mut executor = Executor::new(&directives);
+    let err = executor
+        .execute(&query)
+        .expect_err("CONVERT with NULL second arg should error");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("NULL") && msg.contains("currency string"),
+        "error should explicitly mention NULL + what was expected, got: {msg}"
+    );
 }

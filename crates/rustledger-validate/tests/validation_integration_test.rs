@@ -875,3 +875,67 @@ fn test_spanned_validation_out_of_order_dates_have_location() {
         );
     }
 }
+
+// ============================================================================
+// Plugin-synthesized directive attribution (issue #896)
+// ============================================================================
+
+#[test]
+fn test_plugin_synthesized_directive_gets_attribution_note() {
+    // A validator error raised on a directive whose file_id is the synthesized
+    // sentinel must carry an advisory note telling the user a plugin generated
+    // the directive. Without this, errors from plugin-generated Opens look
+    // like they came from nowhere.
+    let directives = vec![spanned_directive(
+        Directive::Open(Open::new(date(2024, 1, 1), "Equity:Currency:FSS_AUSFIX")),
+        0,
+        0,
+        rustledger_parser::SYNTHESIZED_FILE_ID,
+    )];
+
+    let errors = validate_spanned_with_options(&directives, ValidationOptions::default());
+
+    let account_error = errors
+        .iter()
+        .find(|e| e.code == ErrorCode::InvalidAccountName)
+        .expect("expected E1005 for the '_'-containing account name");
+
+    let note = account_error
+        .note
+        .as_deref()
+        .expect("plugin-synthesized directive must have an attribution note");
+    assert!(
+        note.contains("synthesized by a plugin"),
+        "note should clearly identify the directive as plugin-generated, got: {note}",
+    );
+    assert!(
+        note.contains("plugin"),
+        "note should point users at their `plugin` declarations, got: {note}",
+    );
+}
+
+#[test]
+fn test_source_directive_does_not_get_attribution_note() {
+    // Complement to the test above: errors on directives with a real file_id
+    // (i.e. directly parsed from source) must NOT get the plugin attribution
+    // note, or we would confuse users whose accounts ARE in their files.
+    let directives = vec![spanned_directive(
+        Directive::Open(Open::new(date(2024, 1, 1), "Invalid:Root")),
+        10,
+        40,
+        0, // real source file_id
+    )];
+
+    let errors = validate_spanned_with_options(&directives, ValidationOptions::default());
+
+    let account_error = errors
+        .iter()
+        .find(|e| e.code == ErrorCode::InvalidAccountName)
+        .expect("expected E1005 for bad root account type");
+
+    assert!(
+        account_error.note.is_none(),
+        "source-parsed directive must not be tagged as plugin-synthesized, got note: {:?}",
+        account_error.note,
+    );
+}

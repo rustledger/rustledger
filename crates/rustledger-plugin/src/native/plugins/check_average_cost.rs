@@ -1,14 +1,22 @@
-//! Validate reducing postings use average cost for accounts with NONE booking.
+//! Validate that reducing postings use the average cost for accounts
+//! opened with the NONE booking method.
 
 use crate::types::{DirectiveData, PluginError, PluginInput, PluginOutput};
 
 use super::super::NativePlugin;
 
-/// Plugin that validates reducing postings use average cost for accounts with NONE booking.
+/// Plugin that validates reducing postings against the running average cost
+/// for accounts opened with the `NONE` booking method.
 ///
-/// For accounts with booking method NONE (average cost), when selling/reducing positions,
-/// this plugin verifies that the cost basis used matches the calculated average cost
-/// within a specified tolerance.
+/// When an account is opened with `NONE` booking, the ledger author is responsible
+/// for lot matching — there is no booker to enforce it. This plugin is a safety net
+/// for that case: it verifies that the cost basis used on any reducing leg is within
+/// tolerance of the running average cost basis in the account.
+///
+/// Accounts opened with any other booking method (`STRICT`, `STRICT_WITH_SIZE`,
+/// `FIFO`, `LIFO`, `HIFO`, `AVERAGE`, …) are skipped — their booker already validates
+/// lot matching, so re-checking here would produce false positives (see issue #907).
+/// This matches Python beancount's `beancount.plugins.check_average_cost` behavior.
 pub struct CheckAverageCostPlugin {
     /// Tolerance for cost comparison (default: 0.01 = 1%).
     tolerance: rust_decimal::Decimal,
@@ -45,7 +53,7 @@ impl NativePlugin for CheckAverageCostPlugin {
 
     fn process(&self, input: PluginInput) -> PluginOutput {
         use rust_decimal::Decimal;
-        use std::collections::HashMap;
+        use std::collections::{HashMap, HashSet};
         use std::str::FromStr;
 
         // Parse optional tolerance from config
@@ -54,6 +62,22 @@ impl NativePlugin for CheckAverageCostPlugin {
         } else {
             self.tolerance
         };
+
+        // First pass: collect accounts opened with the NONE booking method.
+        // Only these accounts are subject to the average-cost check — see the
+        // type-level docstring and issue #907 for rationale.
+        let none_booking_accounts: HashSet<&str> = input
+            .directives
+            .iter()
+            .filter_map(|w| match &w.data {
+                DirectiveData::Open(o) => o
+                    .booking
+                    .as_deref()
+                    .filter(|b| b.eq_ignore_ascii_case("NONE"))
+                    .map(|_| o.account.as_str()),
+                _ => None,
+            })
+            .collect();
 
         // Track average cost per account per commodity
         // Key: (account, commodity) -> (total_units, total_cost)
@@ -64,6 +88,11 @@ impl NativePlugin for CheckAverageCostPlugin {
         for wrapper in &input.directives {
             if let DirectiveData::Transaction(txn) = &wrapper.data {
                 for posting in &txn.postings {
+                    // Only process accounts opened with NONE booking (issue #907).
+                    if !none_booking_accounts.contains(posting.account.as_str()) {
+                        continue;
+                    }
+
                     // Only process postings with units and cost
                     let Some(units) = &posting.units else {
                         continue;
@@ -154,12 +183,28 @@ mod check_average_cost_tests {
     use super::*;
     use crate::types::*;
 
+    fn open_with_none_booking(account: &str) -> DirectiveWrapper {
+        DirectiveWrapper {
+            directive_type: "open".to_string(),
+            date: "2024-01-01".to_string(),
+            filename: None,
+            lineno: None,
+            data: DirectiveData::Open(OpenData {
+                account: account.to_string(),
+                currencies: vec![],
+                booking: Some("NONE".to_string()),
+                metadata: vec![],
+            }),
+        }
+    }
+
     #[test]
     fn test_check_average_cost_matching() {
         let plugin = CheckAverageCostPlugin::new();
 
         let input = PluginInput {
             directives: vec![
+                open_with_none_booking("Assets:Broker"),
                 DirectiveWrapper {
                     directive_type: "transaction".to_string(),
                     date: "2024-01-01".to_string(),
@@ -242,6 +287,7 @@ mod check_average_cost_tests {
 
         let input = PluginInput {
             directives: vec![
+                open_with_none_booking("Assets:Broker"),
                 DirectiveWrapper {
                     directive_type: "transaction".to_string(),
                     date: "2024-01-01".to_string(),
@@ -326,6 +372,7 @@ mod check_average_cost_tests {
         // Buy 10 at $100, then 10 at $120 -> avg = $110
         let input = PluginInput {
             directives: vec![
+                open_with_none_booking("Assets:Broker"),
                 DirectiveWrapper {
                     directive_type: "transaction".to_string(),
                     date: "2024-01-01".to_string(),
@@ -432,5 +479,115 @@ mod check_average_cost_tests {
 
         let output = plugin.process(input);
         assert_eq!(output.errors.len(), 0);
+    }
+
+    #[test]
+    fn test_non_none_booking_is_skipped() {
+        // Regression test for issue #907: accounts opened with any booking
+        // method other than NONE (including the default, an unspecified
+        // booking, or explicit STRICT/FIFO/etc.) must be skipped entirely.
+        // The booker is responsible for lot matching in those cases, so
+        // re-checking here produces false positives like the reporter's
+        // "500 USD vs. avg 566.67 USD" error.
+        let plugin = CheckAverageCostPlugin::new();
+
+        let input = PluginInput {
+            directives: vec![
+                // No booking specified (booking: None). Whatever the effective
+                // default is — STRICT unless overridden by `option
+                // "booking_method"` or a loader setting — it is NOT `NONE`,
+                // so the plugin MUST skip this account.
+                DirectiveWrapper {
+                    directive_type: "open".to_string(),
+                    date: "2024-01-01".to_string(),
+                    filename: None,
+                    lineno: None,
+                    data: DirectiveData::Open(OpenData {
+                        account: "Assets:Broker".to_string(),
+                        currencies: vec![],
+                        booking: None,
+                        metadata: vec![],
+                    }),
+                },
+                DirectiveWrapper {
+                    directive_type: "transaction".to_string(),
+                    date: "2024-01-01".to_string(),
+                    filename: None,
+                    lineno: None,
+                    data: DirectiveData::Transaction(TransactionData {
+                        flag: "*".to_string(),
+                        payee: None,
+                        narration: "Buy at 100".to_string(),
+                        tags: vec![],
+                        links: vec![],
+                        metadata: vec![],
+                        postings: vec![PostingData {
+                            account: "Assets:Broker".to_string(),
+                            units: Some(AmountData {
+                                number: "10".to_string(),
+                                currency: "AAPL".to_string(),
+                            }),
+                            cost: Some(CostData {
+                                number_per: Some("100.00".to_string()),
+                                number_total: None,
+                                currency: Some("USD".to_string()),
+                                date: None,
+                                label: None,
+                                merge: false,
+                            }),
+                            price: None,
+                            flag: None,
+                            metadata: vec![],
+                        }],
+                    }),
+                },
+                DirectiveWrapper {
+                    directive_type: "transaction".to_string(),
+                    date: "2024-02-01".to_string(),
+                    filename: None,
+                    lineno: None,
+                    data: DirectiveData::Transaction(TransactionData {
+                        flag: "*".to_string(),
+                        payee: None,
+                        narration: "Sell at way-off cost".to_string(),
+                        tags: vec![],
+                        links: vec![],
+                        metadata: vec![],
+                        postings: vec![PostingData {
+                            account: "Assets:Broker".to_string(),
+                            units: Some(AmountData {
+                                number: "-5".to_string(),
+                                currency: "AAPL".to_string(),
+                            }),
+                            cost: Some(CostData {
+                                // 50% off the average — would fire for NONE,
+                                // but must be silent for STRICT/default.
+                                number_per: Some("50.00".to_string()),
+                                number_total: None,
+                                currency: Some("USD".to_string()),
+                                date: None,
+                                label: None,
+                                merge: false,
+                            }),
+                            price: None,
+                            flag: None,
+                            metadata: vec![],
+                        }],
+                    }),
+                },
+            ],
+            options: PluginOptions {
+                operating_currencies: vec!["USD".to_string()],
+                title: None,
+            },
+            config: None,
+        };
+
+        let output = plugin.process(input);
+        assert!(
+            output.errors.is_empty(),
+            "non-NONE accounts must be skipped; got errors: {:?}",
+            output.errors
+        );
     }
 }

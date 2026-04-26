@@ -62,7 +62,7 @@ const PARALLEL_SORT_THRESHOLD: usize = 5000;
 use rust_decimal::Decimal;
 use rustc_hash::{FxHashMap, FxHashSet};
 use rustledger_core::{BookingMethod, Directive, InternedStr, Inventory};
-use rustledger_parser::Spanned;
+use rustledger_parser::{SYNTHESIZED_FILE_ID, Spanned};
 
 /// Account state for tracking lifecycle.
 #[derive(Debug, Clone)]
@@ -79,6 +79,7 @@ struct AccountState {
 }
 
 /// Validation options.
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct ValidationOptions {
     /// Whether to require commodity declarations.
@@ -91,7 +92,8 @@ pub struct ValidationOptions {
     pub document_base: Option<std::path::PathBuf>,
     /// Document directories from `option "documents"`.
     /// Relative document paths are resolved against these directories.
-    pub document_dirs: Vec<String>,
+    /// Paths are resolved against the ledger file's directory at load time.
+    pub document_dirs: Vec<std::path::PathBuf>,
     /// Valid account type prefixes (from options like `name_assets`, `name_liabilities`, etc.).
     /// Defaults to `["Assets", "Liabilities", "Equity", "Income", "Expenses"]`.
     pub account_types: Vec<String>,
@@ -126,6 +128,64 @@ impl Default for ValidationOptions {
             tolerance_multiplier: Decimal::new(5, 1), // 0.5
             inferred_tolerance_default: FxHashMap::default(),
         }
+    }
+}
+
+impl ValidationOptions {
+    /// Set account types.
+    #[must_use]
+    pub fn with_account_types(mut self, types: Vec<String>) -> Self {
+        self.account_types = types;
+        self
+    }
+
+    /// Set whether to require commodity declarations.
+    #[must_use]
+    pub const fn with_require_commodities(mut self, require: bool) -> Self {
+        self.require_commodities = require;
+        self
+    }
+
+    /// Set whether to check if document files exist.
+    #[must_use]
+    pub const fn with_check_documents(mut self, check: bool) -> Self {
+        self.check_documents = check;
+        self
+    }
+
+    /// Set whether to warn about future-dated entries.
+    #[must_use]
+    pub const fn with_warn_future_dates(mut self, warn: bool) -> Self {
+        self.warn_future_dates = warn;
+        self
+    }
+
+    /// Set document directories (resolved paths).
+    #[must_use]
+    pub fn with_document_dirs(mut self, dirs: Vec<std::path::PathBuf>) -> Self {
+        self.document_dirs = dirs;
+        self
+    }
+
+    /// Set whether to infer tolerance from cost.
+    #[must_use]
+    pub const fn with_infer_tolerance_from_cost(mut self, infer: bool) -> Self {
+        self.infer_tolerance_from_cost = infer;
+        self
+    }
+
+    /// Set tolerance multiplier.
+    #[must_use]
+    pub const fn with_tolerance_multiplier(mut self, multiplier: Decimal) -> Self {
+        self.tolerance_multiplier = multiplier;
+        self
+    }
+
+    /// Set per-currency default tolerances.
+    #[must_use]
+    pub fn with_inferred_tolerance_default(mut self, defaults: FxHashMap<String, Decimal>) -> Self {
+        self.inferred_tolerance_default = defaults;
+        self
     }
 }
 
@@ -389,6 +449,12 @@ pub fn validate_spanned_with_options(
         let directive = &spanned.value;
         let date = directive.date();
 
+        // Snapshot before ANY errors are pushed for this directive so the
+        // downstream patching loop can enrich every error tied to this
+        // directive — including the ordering / future-date checks below,
+        // not just the ones produced by the per-kind validators (issue #896).
+        let error_count_before = errors.len();
+
         // Check for date ordering (info only - we sort anyway)
         if let Some(last) = state.last_date
             && date < last
@@ -411,9 +477,6 @@ pub fn validate_spanned_with_options(
                 spanned,
             ));
         }
-
-        // Track error count before helper function so we can patch new errors with location
-        let error_count_before = errors.len();
 
         match directive {
             Directive::Open(open) => {
@@ -443,11 +506,21 @@ pub fn validate_spanned_with_options(
             _ => {}
         }
 
-        // Patch any new errors with location info from the current directive
+        // Patch any new errors with location info from the current directive,
+        // and tag plugin-synthesized directives with an advisory note so users
+        // can trace errors that don't correspond to anything in their source
+        // files back to a plugin (see issue #896).
         for error in errors.iter_mut().skip(error_count_before) {
             if error.span.is_none() {
                 error.span = Some(spanned.span);
                 error.file_id = Some(spanned.file_id);
+            }
+            if error.note.is_none() && spanned.file_id == SYNTHESIZED_FILE_ID {
+                error.note = Some(
+                    "directive was synthesized by a plugin (no source location); \
+                     check your `plugin \"…\"` declarations for the responsible plugin"
+                        .to_string(),
+                );
             }
         }
     }
@@ -759,10 +832,7 @@ mod tests {
         );
 
         // With warn_future_dates option, should warn
-        let options = ValidationOptions {
-            warn_future_dates: true,
-            ..Default::default()
-        };
+        let options = ValidationOptions::default().with_warn_future_dates(true);
         let errors = validate_with_options(&directives, options);
         assert!(
             errors.iter().any(|e| e.code == ErrorCode::FutureDate),
@@ -792,10 +862,7 @@ mod tests {
         );
 
         // With check_documents disabled, should not error
-        let options = ValidationOptions {
-            check_documents: false,
-            ..Default::default()
-        };
+        let options = ValidationOptions::default().with_check_documents(false);
         let errors = validate_with_options(&directives, options);
         assert!(
             !errors.iter().any(|e| e.code == ErrorCode::DocumentNotFound),
@@ -823,19 +890,21 @@ mod tests {
 
     #[test]
     fn test_validate_document_relative_path_in_document_dirs() {
+        // Use a unique filename so the CWD fallback (triggered when
+        // document_dirs is empty) doesn't pick up a same-named file that
+        // happens to exist in the test runner's working directory.
+        let filename = "rustledger_test_889_relative_receipt.pdf";
         let dir = tempfile::tempdir().unwrap();
         let doc_subdir = dir.path().join("documents");
         std::fs::create_dir_all(&doc_subdir).unwrap();
-        std::fs::write(doc_subdir.join("receipt.pdf"), "test").unwrap();
-
-        let doc_path = doc_subdir.to_string_lossy().to_string();
+        std::fs::write(doc_subdir.join(filename), "test").unwrap();
 
         let directives = vec![
             Directive::Open(Open::new(date(2024, 1, 1), "Assets:Bank")),
             Directive::Document(Document {
                 date: date(2024, 1, 15),
                 account: "Assets:Bank".into(),
-                path: "receipt.pdf".to_string(),
+                path: filename.to_string(),
                 tags: vec![],
                 links: vec![],
                 meta: Default::default(),
@@ -850,10 +919,7 @@ mod tests {
         );
 
         // With document_dirs pointing to the directory, should pass
-        let options = ValidationOptions {
-            document_dirs: vec![doc_path],
-            ..Default::default()
-        };
+        let options = ValidationOptions::default().with_document_dirs(vec![doc_subdir]);
         let errors = validate_with_options(&directives, options);
         assert!(
             !errors.iter().any(|e| e.code == ErrorCode::DocumentNotFound),
@@ -863,28 +929,25 @@ mod tests {
 
     #[test]
     fn test_validate_document_relative_path_not_found_in_dirs() {
+        // Use a unique filename — see comment in the sibling test above.
+        let filename = "rustledger_test_889_nonexistent.pdf";
         let dir = tempfile::tempdir().unwrap();
         let doc_subdir = dir.path().join("documents");
         std::fs::create_dir_all(&doc_subdir).unwrap();
-
-        let doc_path = doc_subdir.to_string_lossy().to_string();
 
         let directives = vec![
             Directive::Open(Open::new(date(2024, 1, 1), "Assets:Bank")),
             Directive::Document(Document {
                 date: date(2024, 1, 15),
                 account: "Assets:Bank".into(),
-                path: "nonexistent.pdf".to_string(),
+                path: filename.to_string(),
                 tags: vec![],
                 links: vec![],
                 meta: Default::default(),
             }),
         ];
 
-        let options = ValidationOptions {
-            document_dirs: vec![doc_path],
-            ..Default::default()
-        };
+        let options = ValidationOptions::default().with_document_dirs(vec![doc_subdir]);
         let errors = validate_with_options(&directives, options);
         assert!(
             errors.iter().any(|e| e.code == ErrorCode::DocumentNotFound),
@@ -894,19 +957,18 @@ mod tests {
 
     #[test]
     fn test_validate_document_absolute_path_ignores_document_dirs() {
+        let filename = "rustledger_test_889_absolute_receipt.pdf";
         let dir = tempfile::tempdir().unwrap();
         let doc_subdir = dir.path().join("documents");
         std::fs::create_dir_all(&doc_subdir).unwrap();
-        std::fs::write(doc_subdir.join("receipt.pdf"), "test").unwrap();
-
-        let doc_path_str = doc_subdir.to_string_lossy().to_string();
+        std::fs::write(doc_subdir.join(filename), "test").unwrap();
 
         let directives = vec![
             Directive::Open(Open::new(date(2024, 1, 1), "Assets:Bank")),
             Directive::Document(Document {
                 date: date(2024, 1, 15),
                 account: "Assets:Bank".into(),
-                path: format!("{doc_path_str}/receipt.pdf"),
+                path: doc_subdir.join(filename).display().to_string(),
                 tags: vec![],
                 links: vec![],
                 meta: Default::default(),
@@ -914,10 +976,8 @@ mod tests {
         ];
 
         // Absolute path should work regardless of document_dirs
-        let options = ValidationOptions {
-            document_dirs: vec!["/nonexistent/path".to_string()],
-            ..Default::default()
-        };
+        let options = ValidationOptions::default()
+            .with_document_dirs(vec![std::path::PathBuf::from("/nonexistent/path")]);
         let errors = validate_with_options(&directives, options);
         assert!(
             !errors.iter().any(|e| e.code == ErrorCode::DocumentNotFound),
@@ -1605,10 +1665,7 @@ mod tests {
             ),
         ];
 
-        let options = ValidationOptions {
-            require_commodities: true,
-            ..Default::default()
-        };
+        let options = ValidationOptions::default().with_require_commodities(true);
         let errors = validate_with_options(&directives, options);
 
         assert!(
@@ -1642,10 +1699,7 @@ mod tests {
             ),
         ];
 
-        let options = ValidationOptions {
-            require_commodities: true,
-            ..Default::default()
-        };
+        let options = ValidationOptions::default().with_require_commodities(true);
         let errors = validate_with_options(&directives, options);
 
         assert!(

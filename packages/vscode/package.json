@@ -100,5 +100,8 @@
     "@vscode/vsce": "^3.0.0",
     "esbuild": "^0.25.0",
     "typescript": "^5.5.0"
+  },
+  "overrides": {
+    "uuid": "^14.0.0"
   }
 }

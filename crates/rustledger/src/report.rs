@@ -4,9 +4,8 @@
 //! Respects TTY detection and `NO_COLOR` environment variable.
 
 use miette::{GraphicalReportHandler, GraphicalTheme, LabeledSpan, Severity};
-use rustledger_loader::SourceMap;
+use rustledger_loader::{LedgerError, SourceMap};
 use rustledger_parser::ParseError;
-use rustledger_validate::{ErrorCode, ValidationError};
 use std::collections::HashMap;
 use std::io::{IsTerminal, Write};
 use std::path::Path;
@@ -99,72 +98,116 @@ pub fn report_parse_errors<W: Write>(
     Ok(error_count)
 }
 
-/// Report validation errors to the given writer.
+/// Stateful renderer for a stream of [`LedgerError`]s (issue #901).
 ///
-/// Output format matches Python beancount for compatibility:
-/// `file:line: error[CODE]: message (date)`
+/// Builds the miette [`GraphicalReportHandler`] once and caches a
+/// [`miette::NamedSource`] per `file_id` so repeated errors against the same
+/// source file don't re-clone the file contents or re-initialize the handler
+/// on every call. Intended usage is: create one renderer per `rledger check`
+/// invocation and call [`LedgerErrorRenderer::render`] per error.
 ///
-/// If `use_color` is false, ANSI color codes are disabled.
-pub fn report_validation_errors<W: Write>(
-    errors: &[ValidationError],
-    source_map: &SourceMap,
-    _cache: &SourceCache,
-    writer: &mut W,
-    _use_color: bool,
-) -> std::io::Result<usize> {
-    let error_count = errors.len();
-
-    for error in errors {
-        let location = if let (Some(span), Some(file_id)) = (error.span, error.file_id) {
-            if let Some(source_file) = source_map.get(file_id as usize) {
-                let (line, _col) = source_file.line_col(span.start);
-                format!("{}:{}", source_file.path.display(), line)
-            } else {
-                String::new()
-            }
-        } else {
-            String::new()
-        };
-
-        let severity_label = match error.code.severity() {
-            rustledger_validate::Severity::Error => "error",
-            rustledger_validate::Severity::Warning => "warning",
-            rustledger_validate::Severity::Info => "info",
-        };
-
-        if location.is_empty() {
-            writeln!(
-                writer,
-                "{}[{}]: {} ({})",
-                severity_label,
-                format_error_code(error.code),
-                error.message,
-                error.date
-            )?;
-        } else {
-            writeln!(
-                writer,
-                "{}: {}[{}]: {} ({})",
-                location,
-                severity_label,
-                format_error_code(error.code),
-                error.message,
-                error.date
-            )?;
-        }
-
-        if let Some(ctx) = &error.context {
-            writeln!(writer, "  context: {ctx}")?;
-        }
-        writeln!(writer)?;
-    }
-
-    Ok(error_count)
+/// # Lifetime / caching
+///
+/// The source cache is never evicted. That's fine for a short-lived CLI
+/// process that renders a bounded stream of errors for a single ledger
+/// tree. Long-running consumers (e.g. an LSP server that wants to reuse
+/// one renderer across sessions) should instead create a fresh renderer
+/// per request to avoid unbounded growth.
+pub struct LedgerErrorRenderer {
+    handler: GraphicalReportHandler,
+    /// Per-`file_id` cache keyed by the u16 index into the source map.
+    /// Stored as `Arc` so that handing the source to miette's
+    /// `with_source_code()` (which takes ownership of an `impl SourceCode`)
+    /// is an `Arc::clone` rather than a full-source `memcpy`.
+    sources: HashMap<u16, std::sync::Arc<miette::NamedSource<String>>>,
 }
 
-/// Format an error code for display.
-fn format_error_code(code: ErrorCode) -> String {
-    code.code().to_string()
+impl LedgerErrorRenderer {
+    /// Create a renderer with the given color preference.
+    #[must_use]
+    pub fn new(use_color: bool) -> Self {
+        Self {
+            handler: build_handler(use_color),
+            sources: HashMap::new(),
+        }
+    }
+
+    /// Render a single [`LedgerError`], writing the result to `writer`.
+    ///
+    /// When `err.source_span` and `err.file_id` both resolve to a file in
+    /// `source_map`, the error is rendered with a miette source snippet
+    /// (line numbers + a caret under the offending span). Otherwise a
+    /// compact `file:line:col: error[CODE]: message` header is written
+    /// (or `<unknown>: error[CODE]: message` if no location is available
+    /// at all — which only happens for errors with no path through the
+    /// pipeline, e.g. some plugin errors).
+    pub fn render<W: Write>(
+        &mut self,
+        err: &LedgerError,
+        source_map: &SourceMap,
+        writer: &mut W,
+    ) -> std::io::Result<()> {
+        // Rich path: we have a span AND we can resolve the source file.
+        if let (Some((span_start, span_end)), Some(file_id)) = (err.source_span, err.file_id)
+            && let Some(source_file) = source_map.get(file_id as usize)
+        {
+            // Populate the cache lazily — the String clone from `Arc<str>`
+            // happens at most once per file_id per renderer lifetime.
+            let named_source = self.sources.entry(file_id).or_insert_with(|| {
+                std::sync::Arc::new(miette::NamedSource::new(
+                    source_file.path.display().to_string(),
+                    source_file.source.as_ref().to_string(),
+                ))
+            });
+            let miette_severity = match err.severity {
+                rustledger_loader::ErrorSeverity::Error => Severity::Error,
+                rustledger_loader::ErrorSeverity::Warning => Severity::Warning,
+            };
+
+            let diagnostic = miette::MietteDiagnostic {
+                message: err.message.clone(),
+                code: Some(err.code.clone()),
+                severity: Some(miette_severity),
+                help: None,
+                url: None,
+                labels: Some(vec![LabeledSpan::at(span_start..span_end, "here")]),
+            };
+            let report = miette::Report::new(diagnostic)
+                .with_source_code(std::sync::Arc::clone(named_source));
+
+            let mut rendered = String::new();
+            self.handler
+                .render_report(&mut rendered, report.as_ref())
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+            write!(writer, "{rendered}")?;
+            return Ok(());
+        }
+
+        // Fallback: compact header when no snippet can be rendered.
+        let severity_label = match err.severity {
+            rustledger_loader::ErrorSeverity::Error => "error",
+            rustledger_loader::ErrorSeverity::Warning => "warning",
+        };
+        if let Some(loc) = &err.location {
+            writeln!(
+                writer,
+                "{}:{}:{}: {}[{}]: {}",
+                loc.file.display(),
+                loc.line,
+                loc.column,
+                severity_label,
+                err.code,
+                err.message,
+            )?;
+        } else {
+            writeln!(
+                writer,
+                "<unknown>: {}[{}]: {}",
+                severity_label, err.code, err.message,
+            )?;
+        }
+        Ok(())
+    }
 }
 
 /// Print a summary of errors and warnings.
@@ -207,48 +250,56 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_report_validation_errors_warning_label() {
-        let warning = ValidationError::new(
-            ErrorCode::AccountCloseNotEmpty,
-            "Cannot close account with non-zero balance".to_string(),
-            rustledger_core::naive_date(2024, 1, 1).unwrap(),
-        );
+    fn test_ledger_error_renderer_fallback_no_location() {
+        // An error with neither `source_span`/`file_id` nor `location` must
+        // still render to a single line with `<unknown>` as the path so the
+        // user knows the diagnostic is tied to *something* but the origin
+        // couldn't be resolved.
+        let err = rustledger_loader::LedgerError::error("E0001", "something went wrong")
+            .with_phase("plugin");
 
         let mut output = Vec::new();
         let source_map = SourceMap::default();
-        let cache = SourceCache::new();
-
-        report_validation_errors(&[warning], &source_map, &cache, &mut output, false).unwrap();
+        let mut renderer = LedgerErrorRenderer::new(false);
+        renderer.render(&err, &source_map, &mut output).unwrap();
 
         let output_str = String::from_utf8(output).unwrap();
         assert!(
-            output_str.contains("warning[E1004]"),
-            "Expected 'warning[E1004]' but got: {output_str}"
+            output_str.starts_with("<unknown>: "),
+            "fallback header should start with '<unknown>: ', got: {output_str}",
         );
         assert!(
-            !output_str.contains("error[E1004]"),
-            "Should not contain 'error[E1004]': {output_str}"
+            output_str.contains("error[E0001]"),
+            "fallback header should include error code tag, got: {output_str}",
+        );
+        assert!(
+            output_str.contains("something went wrong"),
+            "fallback header should include message, got: {output_str}",
         );
     }
 
     #[test]
-    fn test_report_validation_errors_error_label() {
-        let error = ValidationError::new(
-            ErrorCode::AccountNotOpen,
-            "Account was never opened".to_string(),
-            rustledger_core::naive_date(2024, 1, 1).unwrap(),
-        );
+    fn test_ledger_error_renderer_fallback_with_location_no_span() {
+        // When a LedgerError has a `location` but no `source_span`, the
+        // renderer falls back to a `file:line:col: error[CODE]: message`
+        // header without a miette snippet.
+        let err = rustledger_loader::LedgerError::error("E0002", "imperfect info")
+            .with_location(rustledger_loader::ErrorLocation {
+                file: std::path::PathBuf::from("example.beancount"),
+                line: 7,
+                column: 3,
+            })
+            .with_phase("validate");
 
         let mut output = Vec::new();
         let source_map = SourceMap::default();
-        let cache = SourceCache::new();
-
-        report_validation_errors(&[error], &source_map, &cache, &mut output, false).unwrap();
+        let mut renderer = LedgerErrorRenderer::new(false);
+        renderer.render(&err, &source_map, &mut output).unwrap();
 
         let output_str = String::from_utf8(output).unwrap();
         assert!(
-            output_str.contains("error[E1001]"),
-            "Expected 'error[E1001]' but got: {output_str}"
+            output_str.contains("example.beancount:7:3: error[E0002]: imperfect info"),
+            "expected 'file:line:col: error[CODE]: message' single-line header, got: {output_str}",
         );
     }
 

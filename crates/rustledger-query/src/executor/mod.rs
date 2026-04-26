@@ -17,9 +17,9 @@ use rustc_hash::FxHashMap;
 
 use regex::{Regex, RegexBuilder};
 use rust_decimal::Decimal;
-use rustledger_core::{Amount, Directive, InternedStr, Inventory, Metadata, Position};
+use rustledger_core::{Amount, Directive, InternedStr, Inventory, Metadata, NaiveDate, Position};
 #[cfg(test)]
-use rustledger_core::{MetaValue, NaiveDate, Transaction};
+use rustledger_core::{MetaValue, Transaction};
 use rustledger_loader::SourceMap;
 use rustledger_parser::Spanned;
 
@@ -649,22 +649,41 @@ impl<'a> Executor<'a> {
                 }
             }
             "VALUE" => {
-                // Use shared VALUE implementation for consistent behavior
+                // Use shared VALUE implementation for consistent behavior.
+                // See `eval_value` on PositionFunctions for the full signature
+                // contract (DATE vs. currency-string dispatch).
                 if args.is_empty() || args.len() > 2 {
                     return Err(QueryError::InvalidArguments(
                         "VALUE".to_string(),
                         "expected 1-2 arguments".to_string(),
                     ));
                 }
-                let explicit_currency = if args.len() == 2 {
+                let (explicit_currency, at_date) = if args.len() == 2 {
                     match &args[1] {
-                        Value::String(s) => Some(s.as_str()),
-                        _ => None,
+                        Value::Date(d) => (None, Some(*d)),
+                        Value::String(s) => (Some(s.as_str()), None),
+                        Value::Null => {
+                            return Err(QueryError::Type(
+                                concat!(
+                                    "VALUE: second argument evaluated to NULL; ",
+                                    "expected a date or currency string ",
+                                    "(this often means an aggregate expression couldn't ",
+                                    "evaluate against an empty group — see issue #902)",
+                                )
+                                .to_string(),
+                            ));
+                        }
+                        _ => {
+                            return Err(QueryError::Type(
+                                "VALUE second argument must be a date or currency string"
+                                    .to_string(),
+                            ));
+                        }
                     }
                 } else {
-                    None
+                    (None, None)
                 };
-                self.convert_to_market_value(&args[0], explicit_currency)
+                self.convert_to_market_value(&args[0], explicit_currency, at_date)
             }
             // Math functions
             "SAFEDIV" => {
@@ -953,6 +972,17 @@ impl<'a> Executor<'a> {
 
                 let target_currency = match &args[1] {
                     Value::String(s) => s.clone(),
+                    Value::Null => {
+                        return Err(QueryError::Type(
+                            concat!(
+                                "CONVERT: second argument evaluated to NULL; ",
+                                "expected a currency string ",
+                                "(this often means an aggregate expression couldn't ",
+                                "evaluate against an empty group — see issue #902)",
+                            )
+                            .to_string(),
+                        ));
+                    }
                     _ => {
                         return Err(QueryError::Type(
                             "CONVERT: second argument must be a currency string".to_string(),
@@ -1422,30 +1452,45 @@ impl<'a> Executor<'a> {
         Ok(())
     }
 
-    /// Convert a value to its market value using the latest available price.
+    /// Convert a value to its market value.
     ///
-    /// This is the core `VALUE()` implementation shared by both expression evaluation
-    /// and aggregate/subquery contexts. It matches Python beancount's behavior:
-    /// - Uses the latest available price (not a specific date)
-    /// - Infers target currency from position's cost basis if not provided
+    /// Shared `VALUE()` implementation used by both expression evaluation and
+    /// the aggregate/subquery path in `evaluate_function_on_values`.
     ///
     /// # Arguments
-    /// * `val` - The value to convert (Position, Amount, or Inventory)
-    /// * `explicit_currency` - Optional explicit target currency
+    /// * `val` - The value to convert (`Position`, `Amount`, `Inventory`, or `Null`).
+    /// * `explicit_currency` - Optional explicit target currency. When `None`,
+    ///   the currency is inferred from the position's cost basis (Python
+    ///   beancount compatibility) or falls back to the executor's
+    ///   `target_currency` setting.
+    /// * `at_date` - Optional valuation date. When `Some`, prices are looked up
+    ///   with "on or before" semantics via [`price::PriceDatabase::convert`];
+    ///   when `None`, the latest available price is used via
+    ///   [`price::PriceDatabase::convert_latest`] (matches Python's
+    ///   `value(position)` with `date=None`, which may use a future-dated price).
     ///
     /// # Returns
-    /// - `Value::Amount` when conversion succeeds or the input is a single amount/position
-    /// - `Value::Inventory` when no target currency can be determined and the input is an inventory
-    /// - `Value::Null` when the input is null
+    /// - `Value::Amount` when conversion succeeds, or when the input is a
+    ///   single `Position`/`Amount` that can't be priced (raw units returned).
+    /// - `Value::Inventory` when no target currency can be determined and the
+    ///   input is an `Inventory`.
+    /// - `Value::Null` when the input is null.
     ///
-    /// When no explicit currency is provided and none can be inferred from the
-    /// cost basis or executor settings, the input value is returned as-is rather
-    /// than producing an error. This matches Python beancount behavior for
-    /// positions without cost.
+    /// # Inventory caveat
+    ///
+    /// For `Value::Inventory` inputs with a determined target currency, this
+    /// function returns a single `Value::Amount` summed in the target currency.
+    /// Positions within the inventory that cannot be priced at `at_date` (or
+    /// have no latest price) are silently dropped from the sum. This differs
+    /// from Python beancount's `inventory.reduce(get_value, ...)`, which
+    /// preserves unpriced positions as raw units in the resulting inventory.
+    /// Reconciling this is tracked as a separate follow-up and is out of scope
+    /// for #892.
     pub(crate) fn convert_to_market_value(
         &self,
         val: &Value,
         explicit_currency: Option<&str>,
+        at_date: Option<NaiveDate>,
     ) -> Result<Value, QueryError> {
         // Determine target currency:
         // 1. Explicit argument takes precedence
@@ -1468,7 +1513,9 @@ impl<'a> Executor<'a> {
                 Some(c) => c,
                 None => {
                     // No currency can be determined — return value as-is
-                    // (matches Python beancount behavior for positions without cost)
+                    // (matches Python beancount behavior for positions without cost).
+                    // Note: `at_date` is ignored here because there is nothing to
+                    // convert without a target currency.
                     return match val {
                         Value::Position(p) => Ok(Value::Amount(p.units.clone())),
                         Value::Amount(a) => Ok(Value::Amount(a.clone())),
@@ -1482,15 +1529,22 @@ impl<'a> Executor<'a> {
             }
         };
 
-        // Use latest available price for conversion (beancount compatibility).
-        // Python beancount's value() passes None as the date, which means "use latest price".
+        // Price lookup matches Python beancount's semantics:
+        // - When `at_date` is None, use the latest price (which may be future-dated).
+        // - When `at_date` is Some, use the most recent price on or before that date;
+        //   if no such price exists, the conversion silently returns the raw units.
+        let convert_one = |amount: &Amount| -> Option<Amount> {
+            match at_date {
+                Some(d) => self.price_db.convert(amount, &target_currency, d),
+                None => self.price_db.convert_latest(amount, &target_currency),
+            }
+        };
+
         match val {
             Value::Position(p) => {
                 if p.units.currency == target_currency {
                     Ok(Value::Amount(p.units.clone()))
-                } else if let Some(converted) =
-                    self.price_db.convert_latest(&p.units, &target_currency)
-                {
+                } else if let Some(converted) = convert_one(&p.units) {
                     Ok(Value::Amount(converted))
                 } else {
                     Ok(Value::Amount(p.units.clone()))
@@ -1499,7 +1553,7 @@ impl<'a> Executor<'a> {
             Value::Amount(a) => {
                 if a.currency == target_currency {
                     Ok(Value::Amount(a.clone()))
-                } else if let Some(converted) = self.price_db.convert_latest(a, &target_currency) {
+                } else if let Some(converted) = convert_one(a) {
                     Ok(Value::Amount(converted))
                 } else {
                     Ok(Value::Amount(a.clone()))
@@ -1510,9 +1564,7 @@ impl<'a> Executor<'a> {
                 for pos in inv.positions() {
                     if pos.units.currency == target_currency {
                         total += pos.units.number;
-                    } else if let Some(converted) =
-                        self.price_db.convert_latest(&pos.units, &target_currency)
-                    {
+                    } else if let Some(converted) = convert_one(&pos.units) {
                         total += converted.number;
                     }
                 }

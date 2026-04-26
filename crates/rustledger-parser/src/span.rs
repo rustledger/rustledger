@@ -85,6 +85,18 @@ impl fmt::Display for Span {
     }
 }
 
+/// Sentinel `file_id` indicating a directive was synthesized by a plugin
+/// rather than parsed from a source file.
+///
+/// Regular source files get sequential IDs starting at 0 (see
+/// `rustledger_loader::SourceMap::add_file`), so this sentinel is safely out
+/// of the normal range. Code that formats error locations or looks up files
+/// in a `SourceMap` should treat this as "no source location" and, where
+/// appropriate, hint to the user that a plugin generated the directive.
+///
+/// See issue #896.
+pub const SYNTHESIZED_FILE_ID: u16 = u16::MAX;
+
 /// A value with an associated source location (span and file).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(

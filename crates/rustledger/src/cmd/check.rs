@@ -547,7 +547,10 @@ pub fn run(args: &Args) -> Result<ExitCode> {
         }
     }
 
-    let _source_map = ledger.source_map;
+    let source_map = &ledger.source_map;
+    // One renderer per invocation: amortizes GraphicalReportHandler setup
+    // and caches NamedSource per file_id across all errors.
+    let mut ledger_error_renderer = report::LedgerErrorRenderer::new(use_color);
 
     // Convert process errors to diagnostics, using the phase field to
     // split into parse/validate/plugin categories.
@@ -558,6 +561,17 @@ pub fn run(args: &Args) -> Result<ExitCode> {
         };
 
         if json_mode {
+            // Compute end line/column from the error's byte span when
+            // available, so multi-line directives (e.g. an unbalanced
+            // transaction covering 3 lines) report a real end position
+            // instead of falling back to start==end (issue #901).
+            let loc = err.location.as_ref();
+            let fallback_end = (loc.map_or(1, |l| l.line), loc.map_or(1, |l| l.column));
+            let (end_line, end_column) = err
+                .source_span
+                .zip(err.file_id)
+                .and_then(|((_, end), fid)| source_map.get(fid as usize).map(|f| f.line_col(end)))
+                .unwrap_or(fallback_end);
             diagnostics.push(JsonDiagnostic {
                 file: err
                     .location
@@ -565,8 +579,8 @@ pub fn run(args: &Args) -> Result<ExitCode> {
                     .map_or_else(|| main_file_str.clone(), |l| l.file.display().to_string()),
                 line: err.location.as_ref().map_or(1, |l| l.line),
                 column: err.location.as_ref().map_or(1, |l| l.column),
-                end_line: err.location.as_ref().map_or(1, |l| l.line),
-                end_column: err.location.as_ref().map_or(1, |l| l.column),
+                end_line,
+                end_column,
                 severity: severity_str.to_string(),
                 phase: err.phase.clone(),
                 code: err.code.clone(),
@@ -585,24 +599,12 @@ pub fn run(args: &Args) -> Result<ExitCode> {
                 _ => {}
             }
         } else if !args.quiet {
-            if let Some(loc) = &err.location {
-                writeln!(
-                    stdout,
-                    "{}:{}: error[{}]: {}",
-                    loc.file.display(),
-                    loc.line,
-                    err.code,
-                    err.message
-                )?;
-            } else {
-                writeln!(
-                    stdout,
-                    "{}: error[{}]: {}",
-                    file.display(),
-                    err.code,
-                    err.message
-                )?;
-            }
+            // When the error carries span+file_id and we can resolve the
+            // source, render via miette so the user gets a snippet of the
+            // offending directive (issue #901). Fall back to a one-line
+            // `file:line:col: error[CODE]: message` for errors without
+            // span info (e.g. plugin errors, cross-file invariants).
+            ledger_error_renderer.render(err, source_map, &mut stdout)?;
         }
 
         if matches!(err.severity, rustledger_loader::ErrorSeverity::Error) {

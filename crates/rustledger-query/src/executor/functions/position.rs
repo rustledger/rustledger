@@ -261,13 +261,25 @@ impl Executor<'_> {
 
     /// Evaluate VALUE function (market value conversion).
     ///
-    /// Converts positions/amounts/inventories to their market value using the latest
-    /// available price. This matches Python beancount's behavior where `value(position)`
-    /// uses the most recent price, not the transaction date.
+    /// Python beancount-compatible signatures:
+    /// - `VALUE(position)` / `VALUE(inventory)`: convert to market value using
+    ///   the latest available price. The target currency is inferred from the
+    ///   position's cost currency (or the executor's `target_currency`). A
+    ///   future-dated price may be used — this matches Python's
+    ///   `value(position)` with `date=None`.
+    /// - `VALUE(position, DATE)` / `VALUE(inventory, DATE)`: convert using the
+    ///   most recent price on or before `DATE`. For a `position` with no such
+    ///   price, the raw units are returned (matches Python's
+    ///   `convert.get_value()` fallback). For an `inventory`, see the caveat
+    ///   in [`Executor::convert_to_market_value`] — unpriced positions are
+    ///   silently dropped from the target-currency sum, which is a known
+    ///   divergence from Python that is orthogonal to this fix.
     ///
-    /// If no target currency is specified, it is inferred from the position's cost
-    /// currency (for positions with cost basis) or falls back to the executor's
-    /// target currency setting.
+    /// Rustledger extension (not in Python beancount):
+    /// - `VALUE(x, 'CURRENCY')`: override the target currency, still using the
+    ///   latest price. For explicit-currency behavior in Python, use
+    ///   `CONVERT(x, 'USD', [date])` instead — that signature is also
+    ///   supported here.
     pub(crate) fn eval_value(
         &self,
         func: &FunctionCall,
@@ -283,22 +295,36 @@ impl Executor<'_> {
         // Evaluate the first argument (position/amount/inventory)
         let val = self.evaluate_expr(&func.args[0], ctx)?;
 
-        // Get explicit target currency if provided
-        let explicit_currency = if func.args.len() == 2 {
+        // Dispatch on the optional second argument:
+        //   DATE   -> price at-or-before DATE (Python beancount compatible)
+        //   STRING -> override target currency (rustledger extension; use CONVERT
+        //             for the Python-idiomatic spelling with a historical date)
+        let (explicit_currency, at_date) = if func.args.len() == 2 {
             match self.evaluate_expr(&func.args[1], ctx)? {
-                Value::String(s) => Some(s),
+                Value::Date(d) => (None, Some(d)),
+                Value::String(s) => (Some(s), None),
+                Value::Null => {
+                    return Err(QueryError::Type(
+                        concat!(
+                            "VALUE: second argument evaluated to NULL; ",
+                            "expected a date or currency string ",
+                            "(this often means an aggregate expression couldn't ",
+                            "evaluate against an empty group — see issue #902)",
+                        )
+                        .to_string(),
+                    ));
+                }
                 _ => {
                     return Err(QueryError::Type(
-                        "VALUE second argument must be a currency string".to_string(),
+                        "VALUE second argument must be a date or currency string".to_string(),
                     ));
                 }
             }
         } else {
-            None
+            (None, None)
         };
 
-        // Use shared implementation for consistent behavior
-        self.convert_to_market_value(&val, explicit_currency.as_deref())
+        self.convert_to_market_value(&val, explicit_currency.as_deref(), at_date)
     }
 
     /// Evaluate GETPRICE function.

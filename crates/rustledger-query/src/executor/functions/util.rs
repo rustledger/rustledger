@@ -86,6 +86,17 @@ impl Executor<'_> {
 
         let target_currency = match self.evaluate_expr(&func.args[1], ctx)? {
             Value::String(s) => s,
+            Value::Null => {
+                return Err(QueryError::Type(
+                    concat!(
+                        "CONVERT: second argument evaluated to NULL; ",
+                        "expected a currency string ",
+                        "(this often means an aggregate expression couldn't ",
+                        "evaluate against an empty group — see issue #902)",
+                    )
+                    .to_string(),
+                ));
+            }
             _ => {
                 return Err(QueryError::Type(
                     "CONVERT: second argument must be a currency string".to_string(),

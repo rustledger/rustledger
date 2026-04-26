@@ -358,7 +358,7 @@
               echo "  - Rust: $(rustc --version)"
               echo "  - WASM: wasm32-unknown-unknown target (wasm-bindgen)"
               echo "  - WASI: wasm32-wasip1 target (wasmtime)"
-              echo "  - TLA+: $(tlc -help 2>/dev/null | head -1 || echo 'not available')"
+              echo "  - TLA+: $(if command -v tlc >/dev/null; then tlc -help 2>&1 | grep -i version | head -1 | sed 's/^[[:space:]]*//'; else echo 'not available'; fi)"
               echo "  - Python: $(python --version) with beancount"
               echo "  - Podman: $(podman --version)"
               echo ""

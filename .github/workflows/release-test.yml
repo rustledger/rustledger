@@ -94,7 +94,16 @@ jobs:
         run: |
           echo "Waiting for rustledger $VERSION on crates.io..."
           for i in $(seq 1 30); do
-            AVAILABLE=$(cargo search rustledger 2>/dev/null | grep "^rustledger = " | head -1 || true)
+            # GHA's default bash runs with `pipefail`, so we cannot fold
+            # the cargo + grep + head into a single pipeline — a normal
+            # "not yet propagated" grep no-match would propagate as a
+            # pipe failure and `set -e` would kill the polling loop on
+            # the first iteration. Capture cargo search separately so
+            # only a real cargo failure is fatal; treat grep no-match
+            # as the polling-not-yet condition. Stderr muted on cargo
+            # search to silence registry-update noise during polling.
+            SEARCH=$(cargo search rustledger 2>/dev/null)
+            AVAILABLE=$(printf '%s\n' "$SEARCH" | grep "^rustledger = " | head -1 || true)
             if echo "$AVAILABLE" | grep -q "\"$VERSION\""; then
               echo "Found: $AVAILABLE"
               exit 0

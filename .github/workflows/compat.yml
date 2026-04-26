@@ -48,13 +48,17 @@ jobs:
       - name: Install dependencies
         run: |
           pip install beancount beanquery matplotlib pyyaml
-          # Third-party plugins used by test files
-          pip install beanahead tariochbctools || true
-          # beancount-share requires beancount_plugin_utils as a dependency
-          pip install beancount_plugin_utils beancount-share || true
-          # Install reds-plugins from GitHub to get unreleased plugins like box_accrual
-          pip install git+https://github.com/redstreet/beancount_reds_plugins || true
-          pip install git+https://github.com/Evernight/beancount-lazy-plugins || true
+          # Third-party plugins used by test files. Compat tests rely on
+          # them — a silent install failure means tests using these
+          # plugins get skipped and we get false-green CI. Fail loudly
+          # if any of these can't install; re-run on transient PyPI flakes.
+          pip install beanahead tariochbctools
+          pip install beancount_plugin_utils beancount-share
+          # Pinned to immutable commits so compat CI is reproducible —
+          # tracking HEAD turns unrelated upstream commits into
+          # spurious red CI here. Bump deliberately when needed.
+          pip install git+https://github.com/redstreet/beancount_reds_plugins@41af12d13c6ba5b2949b2939dfa180f43a5cb307
+          pip install git+https://github.com/Evernight/beancount-lazy-plugins@1a685eddbd5e15e420fdf93604506eed6ca94c45
       # Cache downloaded test files to avoid re-cloning repos every run
       - name: Cache compatibility test files
         id: cache-compat-files
@@ -94,7 +98,10 @@ jobs:
               end_date=$(date +%Y-%m-%d)
               start_date=$(date -d "$end_date - 1 year" +%Y-%m-%d 2>/dev/null || date -v-1y +%Y-%m-%d)
               output="tests/compatibility/synthetic/bean-example/example_seed${seed}.beancount"
-              bean-example --seed "$seed" --date-begin "$start_date" --date-end "$end_date" --output "$output" 2>/dev/null || true
+              # Fail loudly on bean-example errors. Previously we swallowed
+              # them, which silently shrank the synthetic test corpus and
+              # gave false confidence in compat metrics.
+              bean-example --seed "$seed" --date-begin "$start_date" --date-end "$end_date" --output "$output"
             done
             echo "Generated $(find tests/compatibility/synthetic/bean-example -name '*.beancount' 2>/dev/null | wc -l) bean-example files"
           fi
@@ -1139,13 +1146,16 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          # Save the generated files
+          # Save the generated files. Some are produced conditionally by
+          # earlier steps, so guard each cp with `[ -f ]` rather than
+          # swallowing cp errors — silent failures here have left badges
+          # stale before.
           cp -r .github/badges /tmp/badges
           cp compat-results.yaml /tmp/
-          cp compat-check-results.jsonl /tmp/ 2>/dev/null || true
-          cp compat-bql-results.jsonl /tmp/ 2>/dev/null || true
-          cp compat-category-results.json /tmp/ 2>/dev/null || true
-          cp compat-regressions.txt /tmp/ 2>/dev/null || true
+          for f in compat-check-results.jsonl compat-bql-results.jsonl \
+                   compat-category-results.json compat-regressions.txt; do
+            if [ -f "$f" ]; then cp "$f" /tmp/; fi
+          done
 
           # Discard local changes and untracked files before switching branches
           git checkout -- .
@@ -1162,13 +1172,15 @@ jobs:
             mkdir -p .github/badges
           fi
 
-          # Copy results and commit
+          # Copy results and commit. Same `[ -f ]` guard pattern as above —
+          # we don't fail if the optional files weren't produced, but we DO
+          # surface a real cp error.
           cp -r /tmp/badges/* .github/badges/
           cp /tmp/compat-results.yaml .github/badges/
-          cp /tmp/compat-check-results.jsonl .github/badges/ 2>/dev/null || true
-          cp /tmp/compat-bql-results.jsonl .github/badges/ 2>/dev/null || true
-          cp /tmp/compat-category-results.json .github/badges/ 2>/dev/null || true
-          cp /tmp/compat-regressions.txt .github/badges/ 2>/dev/null || true
+          for f in compat-check-results.jsonl compat-bql-results.jsonl \
+                   compat-category-results.json compat-regressions.txt; do
+            if [ -f "/tmp/$f" ]; then cp "/tmp/$f" .github/badges/; fi
+          done
 
           git add .github/badges/
           git diff --staged --quiet || git commit -m "chore: update compatibility results"

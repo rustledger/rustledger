@@ -201,33 +201,12 @@ jobs:
             -deadlock \
             spec/tla/QueryExecution.tla
           echo "::endgroup::"
-      # On failure, try to generate Rust tests from counterexample traces
-      - name: Generate Rust tests from traces
-        if: failure()
-        run: |
-          echo "::group::Looking for counterexample traces"
-          # TLC generates traces in the current directory
-          if ls *.trace 2>/dev/null; then
-            echo "Found trace files:"
-            ls -la *.trace
-
-            # Convert traces to JSON and generate Rust tests
-            for trace in *.trace; do
-              spec_name=$(basename "$trace" .trace)
-              echo "Processing trace for $spec_name..."
-
-              # Try to generate Rust test (script may not support all specs)
-              python3 scripts/trace_to_rust_test.py "$trace" > "generated_test_${spec_name}.rs" 2>/dev/null || true
-
-              if [ -s "generated_test_${spec_name}.rs" ]; then
-                echo "Generated test for $spec_name"
-                cat "generated_test_${spec_name}.rs"
-              fi
-            done
-          else
-            echo "No trace files found"
-          fi
-          echo "::endgroup::"
+      # Note: `trace_to_rust_test.py` expects JSON input produced by a
+      # `tla_trace_to_json.py` converter that does not exist in this
+      # repo, so the previous "Generate Rust tests from traces" step
+      # was always silently failing. Removed pending someone porting
+      # that converter — the raw `.trace` files are still uploaded as
+      # the artifact below for offline analysis.
       - name: Upload counterexample traces
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7

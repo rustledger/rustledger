@@ -367,8 +367,10 @@ jobs:
           token: ${{ secrets.HOMEBREW_GITHUB_API_TOKEN }}
           formula: rustledger
           tag: ${{ env.RELEASE_TAG }}
-          # Don't fail the workflow if homebrew-core PR fails (e.g., already exists)
-        continue-on-error: true
+          # If this fails with "PR already exists" on a re-run, re-run only
+          # the other jobs (`gh run rerun --failed --job <ids>`). We intentionally
+          # do NOT use continue-on-error — silently swallowing this step has
+          # masked credential and network failures in the past.
   # Update Scoop bucket
   update-scoop:
     name: Update Scoop bucket
@@ -411,11 +413,16 @@ jobs:
           EOF
       - name: Trigger SCM build
         run: |
-          # Trigger a build using COPR's SCM integration
-          # The project is configured to fetch from GitHub and use packaging/rpm/rustledger.spec
+          set -euo pipefail
+          # Trigger a build using COPR's SCM integration. The project is
+          # configured to fetch from GitHub and use
+          # packaging/rpm/rustledger.spec. We don't wait for the build
+          # to finish (--nowait) since COPR's queue can take 30+ min,
+          # but we DO need the trigger itself to succeed — otherwise
+          # COPR silently keeps building the previous version.
           copr-cli build-package robcohen/rustledger \
             --name rustledger \
-            --nowait || true
+            --nowait
   # Trigger Rustfava WASM update
   update-rustfava:
     name: Update Rustfava WASM version

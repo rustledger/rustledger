@@ -26,7 +26,7 @@ You are responsible for deciding what counts as breaking — there is no automat
 
 ```bash
 cargo install cargo-semver-checks
-cargo semver-checks --feature-group all-features
+cargo semver-checks check-release --feature-group all-features
 ```
 
 ### 2. Bump versions
@@ -36,9 +36,10 @@ The version surface is:
 - Workspace `Cargo.toml`: `[workspace.package].version`.
 - All 14 crate `Cargo.toml` files (each currently hardcodes `version = "X.Y.Z"` rather than inheriting from the workspace).
 - `packages/mcp-server/package.json`: both `version` and the `@rustledger/wasm` entry under `dependencies`.
+- `packaging/rpm/rustledger.spec`: `Version`, `Source0` URL, and the `%setup -n rustledger-X.Y.Z` directory all hardcode the version. COPR pulls this file from the release tag via SCM integration, so missing this means COPR keeps building the old version.
 - `Cargo.lock`: refreshed by `cargo check` after the Cargo.toml edits.
 
-`packages/vscode/package.json` is *not* bumped here — the VS Code extension version is synced from the release tag at build time.
+`packages/vscode/package.json` is *not* bumped here — the VS Code extension version is synced from the release tag at build time. The AUR `PKGBUILD`s under `packaging/arch/` also don't need manual edits — `release-publish.yml` `sed`-bumps them at release time.
 
 ### 3. Open a release PR
 
@@ -54,11 +55,15 @@ Wait for CI to go green, then merge.
 
 ### 4. Create the GitHub Release
 
-After the PR merges:
+After the PR merges, fast-forward your local `main` and create the release pinned to that exact commit so the tag can't drift onto something newer:
 
 ```bash
-gh release create v0.14.0 --generate-notes
+git switch main
+git pull --ff-only origin main
+gh release create v0.14.0 --target "$(git rev-parse HEAD)" --generate-notes
 ```
+
+`--target <sha>` is important — without it, `gh release create` tags whatever the default branch points to *at the moment the API request lands*, which races with any subsequent merges. Pinning to the SHA you just pulled guarantees the tag points at the version-bump commit.
 
 This creates the `v0.14.0` tag and triggers two workflows:
 

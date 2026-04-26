@@ -1,5 +1,5 @@
 # Rustledger Compatibility Results
-# Generated: 2026-04-26T20:07:18Z
+# Generated: 2026-04-26T21:37:59Z
 
 summary:
   total_files: 782
@@ -7,7 +7,7 @@ summary:
   check_exit_match_pct: 99
   full_match_pct: 99
   bql_match_pct: 100
-  regressions: 1
+  regressions: 0
 
 check_compatibility:
   total_files: 782
@@ -33,4 +33,4 @@ bql_compatibility:
   match_pct: 100
 
 regressions:
-  count: 1
+  count: 0

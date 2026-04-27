@@ -170,4 +170,7 @@ export interface ToolArguments {
   currency?: string;
   file_path?: string;
   write?: boolean;
+  // Used by handleImportCategorize (src/handlers.ts:107).
+  amount?: string;
+  date?: string;
 }

@@ -1,7 +1,7 @@
 [package]
 name = "rustledger-importer"
 description = "Import framework for rustledger - extract transactions from bank files"
-version = "0.14.0"
+version = "0.14.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

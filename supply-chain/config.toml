@@ -556,6 +556,10 @@ criteria = "safe-to-deploy"
 version = "0.16.1"
 criteria = "safe-to-deploy"
 
+[[exemptions.ndarray]]
+version = "0.17.2"
+criteria = "safe-to-deploy"
+
 [[exemptions.ndarray-stats]]
 version = "0.6.0"
 criteria = "safe-to-deploy"

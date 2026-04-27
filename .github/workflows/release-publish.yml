@@ -74,13 +74,18 @@ jobs:
           # To determine the correct order, run: cargo metadata --format-version=1 | jq -r '.packages[].name'
           # and arrange so that each crate's dependencies appear before it.
           # Current dependency tree (simplified):
-          #   core -> parser -> booking -> plugin-types -> plugin -> validate -> loader -> query -> importer -> rustledger
+          #   core -> parser -> booking -> plugin-types -> ops -> plugin -> validate -> loader -> query -> importer -> rustledger
           #   wasm and ffi-wasi depend on most crates; lsp depends on query
+          # rustledger-ops MUST come before rustledger-plugin: the plugin
+          # crate path-depends on ops, so cargo publish refuses to push
+          # a plugin version whose `ops` requirement isn't on crates.io
+          # yet.
           CRATES=(
             rustledger-core
             rustledger-parser
             rustledger-booking
             rustledger-plugin-types
+            rustledger-ops
             rustledger-plugin
             rustledger-validate
             rustledger-loader

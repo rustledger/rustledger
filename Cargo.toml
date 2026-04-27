@@ -50,7 +50,13 @@ name = "rustledger"
 [workspace.dependencies]
 # Core
 rust_decimal = { version = "1.41", features = ["serde"] }
-jiff = { version = "0.2", features = ["serde"] }
+# `js` feature is wasm32-only (cfg-gated inside jiff) and pulls in
+# js-sys so jiff::Zoned::now() / Timestamp::now() work in browsers
+# instead of panicking with "getting the current time in
+# wasm32-unknown-unknown is not possible with just the standard library".
+# No effect on native builds. Required by @rustledger/wasm consumers
+# (see #925).
+jiff = { version = "0.2", features = ["serde", "js"] }
 glob = "0.3"
 thiserror = "2"
 anyhow = "1"

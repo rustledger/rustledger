@@ -9,7 +9,10 @@ License:        GPL-3.0-only
 URL:            https://rustledger.github.io
 Source0:        https://github.com/rustledger/rustledger/archive/refs/tags/v0.14.1.tar.gz
 
-BuildRequires:  rust >= 1.75
+# Must match `workspace.package.rust-version` in Cargo.toml.
+# Edition 2024 stabilized in 1.85, so older toolchains fail at parse
+# time regardless of MSRV.
+BuildRequires:  rust >= 1.94
 BuildRequires:  cargo
 BuildRequires:  gcc
 

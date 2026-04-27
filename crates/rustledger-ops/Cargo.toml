@@ -23,7 +23,7 @@ blake3.workspace = true
 regex.workspace = true
 linfa = "0.8"
 linfa-bayes = "0.8"
-ndarray = "0.16"
+ndarray = "0.17"
 
 [dev-dependencies]
 proptest.workspace = true

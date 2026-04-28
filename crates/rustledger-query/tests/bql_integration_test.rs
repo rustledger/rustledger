@@ -511,11 +511,12 @@ fn test_close_on_is_exclusive() {
     );
     let boundary = date(2024, 1, 22);
     for row in &result.rows {
-        if let Value::Date(d) = &row[0] {
-            assert!(
+        match &row[0] {
+            Value::Date(d) => assert!(
                 *d < boundary,
                 "row at {d} violates exclusive close: should be < {boundary}"
-            );
+            ),
+            other => panic!("expected Value::Date in column 0, got {other:?}"),
         }
     }
 }

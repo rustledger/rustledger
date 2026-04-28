@@ -353,8 +353,14 @@ fn get_completions_for_context(context: &BqlContext) -> Vec<Completion> {
         ],
 
         BqlContext::AfterFrom => vec![
-            keyword("OPEN ON", Some("Summarize entries before date")),
-            keyword("CLOSE ON", Some("Truncate entries after date")),
+            keyword(
+                "OPEN ON",
+                Some("Inclusive lower bound: summarize entries before, include from"),
+            ),
+            keyword(
+                "CLOSE ON",
+                Some("Exclusive upper bound: include entries strictly before"),
+            ),
             keyword("CLEAR", Some("Transfer income/expense to equity")),
             keyword("WHERE", Some("Filter results")),
             keyword("GROUP BY", Some("Group results")),

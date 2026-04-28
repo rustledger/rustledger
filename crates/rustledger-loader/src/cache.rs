@@ -17,13 +17,16 @@
 //! dotfile: `ledger.beancount` → `.ledger.beancount.cache`. This matches Python
 //! beancount's `.{filename}.picklecache` convention.
 //!
-//! Two environment variables control the location, both compatible with Python
-//! beancount:
+//! Two environment variables control the location, both compatible with
+//! Python beancount and honored at the loader level (so any consumer of
+//! [`load_cache_entry`] / [`save_cache_entry`] gets the kill switch for free):
 //!
-//! - `BEANCOUNT_DISABLE_LOAD_CACHE`: when set, the cache is not read or written.
+//! - `BEANCOUNT_DISABLE_LOAD_CACHE`: when set to a non-empty value,
+//!   [`load_cache_entry`] returns `None` and [`save_cache_entry`] is a no-op.
 //! - `BEANCOUNT_LOAD_CACHE_FILENAME`: a path pattern that may contain
 //!   `{filename}` (replaced with the source basename). Relative paths resolve
-//!   against the source directory; absolute paths are used as-is.
+//!   against the source directory; absolute paths are used as-is. If the
+//!   target directory doesn't exist, [`save_cache_entry`] creates it.
 
 use crate::Options;
 use rust_decimal::Decimal;
@@ -290,20 +293,34 @@ pub const DISABLE_CACHE_ENV: &str = "BEANCOUNT_DISABLE_LOAD_CACHE";
 /// Resolution order:
 /// 1. If `BEANCOUNT_LOAD_CACHE_FILENAME` is set, substitute `{filename}` with
 ///    the source basename and resolve relative paths against the source dir.
-/// 2. Otherwise, default to a hidden dotfile alongside the source:
-///    `path/to/main.beancount` → `path/to/.main.beancount.cache`.
+/// 2. Otherwise, default to a hidden dotfile alongside the source via
+///    [`default_cache_path`]: `path/to/main.beancount` →
+///    `path/to/.main.beancount.cache`.
 ///
 /// The dotfile prefix matches Python beancount's `.{filename}.picklecache`
 /// convention, so the cache stays out of the way of `ls` and most file
 /// explorers without breaking from the established beancount ecosystem
 /// behavior. See issue #939.
+///
+/// This function reads process env. Tests that need a deterministic path
+/// regardless of the caller's environment should use [`default_cache_path`]
+/// directly.
 pub fn cache_path(source: &Path) -> PathBuf {
     if let Ok(pattern) = std::env::var(CACHE_FILENAME_ENV)
         && !pattern.is_empty()
     {
         return resolve_cache_pattern(source, &pattern);
     }
+    default_cache_path(source)
+}
 
+/// Returns the default cache file path (no env-var lookup).
+///
+/// Use this when you need a path that is independent of process env, e.g.
+/// in tests that mustn't be perturbed by a developer's
+/// `BEANCOUNT_LOAD_CACHE_FILENAME`.
+#[must_use]
+pub fn default_cache_path(source: &Path) -> PathBuf {
     let mut path = source.to_path_buf();
     let name = path.file_name().map_or_else(
         || ".ledger.cache".to_string(),
@@ -346,11 +363,20 @@ fn legacy_cache_path(source: &Path) -> PathBuf {
     path
 }
 
+/// Returns true if `BEANCOUNT_DISABLE_LOAD_CACHE` is set to a non-empty value.
+fn cache_disabled_by_env() -> bool {
+    std::env::var_os(DISABLE_CACHE_ENV).is_some_and(|v| !v.is_empty())
+}
+
 /// Try to load a cache entry from disk.
 ///
 /// Returns `Some(CacheEntry)` if cache is valid and file hashes match,
-/// `None` if cache is missing, invalid, or outdated.
+/// `None` if cache is missing, invalid, outdated, or
+/// `BEANCOUNT_DISABLE_LOAD_CACHE` is set.
 pub fn load_cache_entry(main_file: &Path) -> Option<CacheEntry> {
+    if cache_disabled_by_env() {
+        return None;
+    }
     let cache_file = cache_path(main_file);
     let mut file = fs::File::open(&cache_file).ok()?;
 
@@ -386,7 +412,12 @@ pub fn load_cache_entry(main_file: &Path) -> Option<CacheEntry> {
 }
 
 /// Save a cache entry to disk.
+///
+/// No-op (returns Ok) when `BEANCOUNT_DISABLE_LOAD_CACHE` is set.
 pub fn save_cache_entry(main_file: &Path, entry: &CacheEntry) -> Result<(), std::io::Error> {
+    if cache_disabled_by_env() {
+        return Ok(());
+    }
     let cache_file = cache_path(main_file);
 
     // Compute hash from the files in the entry
@@ -406,6 +437,15 @@ pub fn save_cache_entry(main_file: &Path, entry: &CacheEntry) -> Result<(), std:
         hash,
         data_len: data.len() as u64,
     };
+
+    // Custom BEANCOUNT_LOAD_CACHE_FILENAME patterns can point at a directory
+    // that doesn't exist yet (e.g. ~/.cache/rledger/foo.cache on a fresh
+    // install). Create the parent eagerly so caching isn't silently disabled.
+    if let Some(parent) = cache_file.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)?;
+    }
 
     let mut file = fs::File::create(&cache_file)?;
     file.write_all(&header.to_bytes())?;
@@ -724,6 +764,19 @@ mod tests {
     // tripping the crate's `forbid(unsafe_code)`. The tests below cover the
     // pure pattern-resolution logic and the legacy-path helper.
 
+    /// Fail fast if a developer has set the cache env vars locally — the
+    /// roundtrip tests in this module call `save_cache_entry`/`invalidate_cache`
+    /// which read process env, and a custom pattern would silently redirect
+    /// writes elsewhere (or fail in surprising ways). CI runs with a clean env.
+    fn assert_clean_cache_env() {
+        for var in [CACHE_FILENAME_ENV, DISABLE_CACHE_ENV] {
+            assert!(
+                std::env::var_os(var).is_none(),
+                "unset {var} before running this test"
+            );
+        }
+    }
+
     #[test]
     fn test_resolve_cache_pattern_relative_with_substitution() {
         let source = Path::new("/home/user/finances/main.beancount");
@@ -764,6 +817,8 @@ mod tests {
     #[test]
     fn test_save_load_cache_entry_roundtrip() {
         use std::io::Write;
+
+        assert_clean_cache_env();
 
         // Create a temp directory
         let temp_dir = std::env::temp_dir().join("rustledger_cache_test");
@@ -814,6 +869,8 @@ mod tests {
     fn test_invalidate_cache() {
         use std::io::Write;
 
+        assert_clean_cache_env();
+
         let temp_dir = std::env::temp_dir().join("rustledger_invalidate_test");
         let _ = fs::create_dir_all(&temp_dir);
 
@@ -854,6 +911,8 @@ mod tests {
     #[test]
     fn test_load_cache_invalid_magic() {
         use std::io::Write;
+
+        assert_clean_cache_env();
 
         let temp_dir = std::env::temp_dir().join("rustledger_magic_test");
         let _ = fs::create_dir_all(&temp_dir);

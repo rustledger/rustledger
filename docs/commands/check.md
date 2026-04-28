@@ -106,7 +106,7 @@ ledger.beancount         → .ledger.beancount.cache
 finances/main.beancount  → finances/.main.beancount.cache
 ```
 
-The cache is invalidated automatically when any source file (the main ledger or anything it `include`s) changes — invalidation is content-based, not timestamp-based.
+The cache is invalidated automatically when any source file (the main ledger or anything it `include`s) changes. Invalidation is based on each file's path, modification time, and size — if any of those differ from when the cache was written, the cache is rejected and the ledger is re-parsed.
 
 ### Controlling the cache
 

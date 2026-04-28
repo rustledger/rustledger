@@ -6,7 +6,10 @@
 #![cfg(feature = "cache")]
 #![allow(unsafe_code)]
 
-use rustledger_loader::{CACHE_FILENAME_ENV, cache_path};
+use rustledger_loader::{
+    CACHE_FILENAME_ENV, CacheEntry, CachedOptions, DISABLE_CACHE_ENV, Options, cache_path,
+    load_cache_entry, save_cache_entry,
+};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -94,4 +97,65 @@ fn cache_path_empty_env_pattern_falls_back_to_default() {
             PathBuf::from("/tmp/.ledger.beancount.cache")
         );
     });
+}
+
+fn empty_cache_entry(file: &Path) -> CacheEntry {
+    CacheEntry {
+        directives: vec![],
+        options: CachedOptions::from(&Options::new()),
+        plugins: vec![],
+        files: vec![file.to_string_lossy().into_owned()],
+    }
+}
+
+#[test]
+fn save_creates_missing_parent_directory() {
+    // Regression for Copilot review on PR #945: if BEANCOUNT_LOAD_CACHE_FILENAME
+    // points into a directory that doesn't exist yet, save_cache_entry should
+    // create it instead of silently failing.
+    let temp = std::env::temp_dir().join("rustledger_save_creates_parent");
+    let _ = std::fs::remove_dir_all(&temp);
+
+    let pattern = format!("{}/nested/dir/{{filename}}.cache", temp.display());
+    with_env(CACHE_FILENAME_ENV, Some(&pattern), || {
+        let source = std::env::temp_dir().join("save_parent_test.beancount");
+        save_cache_entry(&source, &empty_cache_entry(&source))
+            .expect("save should create the missing parent directory");
+
+        let expected = temp
+            .join("nested")
+            .join("dir")
+            .join("save_parent_test.beancount.cache");
+        assert!(expected.exists(), "cache should land at {expected:?}");
+    });
+
+    let _ = std::fs::remove_dir_all(&temp);
+}
+
+#[test]
+fn disable_env_makes_load_return_none_and_save_no_op() {
+    // Regression for Copilot review on PR #945: BEANCOUNT_DISABLE_LOAD_CACHE
+    // must be honored at the loader level, not only by the CLI.
+    let temp = std::env::temp_dir().join("rustledger_disable_env_test");
+    let _ = std::fs::create_dir_all(&temp);
+    let source = temp.join("disable.beancount");
+    std::fs::write(&source, "; placeholder").unwrap();
+
+    with_env(DISABLE_CACHE_ENV, Some("1"), || {
+        // save is a no-op, so cache file must not appear
+        save_cache_entry(&source, &empty_cache_entry(&source))
+            .expect("save should be a no-op when disabled");
+        assert!(
+            !cache_path(&source).exists(),
+            "no cache file should be written when disabled"
+        );
+
+        // load returns None even if a stale cache happens to be on disk
+        assert!(
+            load_cache_entry(&source).is_none(),
+            "load should return None when disabled"
+        );
+    });
+
+    let _ = std::fs::remove_dir_all(&temp);
 }

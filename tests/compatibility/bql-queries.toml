@@ -1,0 +1,121 @@
+# BQL compatibility query corpus.
+#
+# Each entry is a query that gets run against both bean-query and rledger
+# on every test file; results are diffed row-by-row. The corpus is
+# intentionally biased toward columns and functions where the two tools
+# have historically diverged in *semantics* (not just syntax) — those are
+# the bugs that ship undetected through parse-only checks. See issue #929
+# for the motivating example.
+#
+# When adding a new column or aggregation function to the query engine,
+# add a query here that exercises it. Real-world bean-query patterns are
+# preferred over synthetic ones.
+#
+# Schema:
+#   name      — short kebab-case identifier (used in mismatch reports)
+#   query     — the BQL query, run as-is against both tools (the query
+#               text already encodes whether it's SELECT / BALANCES /
+#               JOURNAL — both tools dispatch on the leading keyword).
+#   notes     — optional one-line rationale (issue link if applicable)
+#   preserve_order — set to true when the result MUST come back in a
+#                    specific order (i.e., the query has ORDER BY and the
+#                    ordering itself is part of the contract). Default
+#                    false sorts both sides, which is the right call when
+#                    the query doesn't pin order. Auto-detected from
+#                    `ORDER BY` in the query text if not set.
+
+# ----------------------------------------------------------------------
+# Baseline shape (existed pre-#941; all rledger releases pass)
+# ----------------------------------------------------------------------
+
+[[query]]
+name = "distinct-account"
+query = "SELECT DISTINCT account ORDER BY account LIMIT 20"
+preserve_order = true
+
+[[query]]
+name = "sum-position-by-account"
+query = "SELECT account, SUM(position) GROUP BY account ORDER BY account LIMIT 10"
+preserve_order = true
+
+[[query]]
+name = "count-by-currency"
+query = "SELECT currency, COUNT(*) AS count GROUP BY currency ORDER BY count DESC LIMIT 5"
+preserve_order = true
+
+# ----------------------------------------------------------------------
+# Date bucketing
+# ----------------------------------------------------------------------
+
+[[query]]
+name = "count-by-year-month"
+query = "SELECT year, month, COUNT(*) AS n GROUP BY year, month ORDER BY year, month LIMIT 12"
+preserve_order = true
+
+# ----------------------------------------------------------------------
+# `balance` — issue #929. The harness regressed on this for two releases
+# because no query touched the `balance` column.
+# ----------------------------------------------------------------------
+
+[[query]]
+name = "balance-running-assets"
+query = "SELECT date, account, balance WHERE account ~ '^Assets' ORDER BY date LIMIT 10"
+notes = "Cumulative running balance over WHERE-filtered postings (#929)"
+preserve_order = true
+
+[[query]]
+name = "last-balance-by-month"
+query = "SELECT year, month, LAST(balance) WHERE account ~ '^Assets' ORDER BY year, month LIMIT 12"
+notes = "Bruno's portfolio-over-time pattern from #929"
+preserve_order = true
+
+[[query]]
+name = "first-balance-by-month"
+query = "SELECT year, month, FIRST(balance) WHERE account ~ '^Assets' ORDER BY year, month LIMIT 12"
+preserve_order = true
+
+# ----------------------------------------------------------------------
+# Position / weight projection (cost basis-sensitive)
+# ----------------------------------------------------------------------
+
+[[query]]
+name = "position-by-date"
+query = "SELECT date, account, position WHERE account ~ '^Assets' ORDER BY date LIMIT 10"
+preserve_order = true
+
+[[query]]
+name = "weight-by-date"
+query = "SELECT date, account, weight WHERE account ~ '^Assets' ORDER BY date LIMIT 10"
+notes = "Weight = cost-basis-converted balancing amount; differs from position only on cost-bearing postings"
+preserve_order = true
+
+[[query]]
+name = "cost-basis-fields"
+query = "SELECT account, cost_number, cost_currency WHERE cost_number IS NOT NULL ORDER BY account LIMIT 10"
+notes = "Exposes the cost-bearing branch of position handling"
+preserve_order = true
+
+# ----------------------------------------------------------------------
+# Numeric aggregation
+# ----------------------------------------------------------------------
+
+[[query]]
+name = "sum-number-by-currency"
+query = "SELECT currency, SUM(number) AS total GROUP BY currency ORDER BY currency LIMIT 10"
+preserve_order = true
+
+# ----------------------------------------------------------------------
+# Other query forms (BALANCES / JOURNAL go through different code paths
+# than SELECT in both tools)
+# ----------------------------------------------------------------------
+
+[[query]]
+name = "balances-by-account"
+query = "BALANCES FROM has_account('Assets')"
+notes = "BALANCES form — different code path from SELECT"
+
+[[query]]
+name = "journal-assets"
+query = "JOURNAL 'Assets'"
+notes = "JOURNAL form — different code path from SELECT; order-sensitive"
+preserve_order = true

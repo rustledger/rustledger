@@ -509,6 +509,19 @@ pub fn run_plugins(
                     .unwrap_or("")
                     .to_lowercase();
 
+                // The closure is only invoked from inside the wasm-plugins /
+                // python-plugins cfg blocks below. The whole function is
+                // already `#[cfg(feature = "plugins")]`, so this only matters
+                // when `plugins` is enabled but neither child feature is
+                // (e.g. `--features native-plugins`). Allow `unused_variables`
+                // for exactly that configuration. Underscore-prefixing the
+                // binding would have been the wrong fix because we DO call
+                // the closure in builds with one of the features enabled,
+                // which would trip `no_effect_underscore_binding` instead.
+                #[cfg_attr(
+                    not(any(feature = "wasm-plugins", feature = "python-plugins")),
+                    allow(unused_variables)
+                )]
                 let resolve_path = |name: &str| -> Result<std::path::PathBuf, String> {
                     let p = std::path::Path::new(name);
                     let resolved = if p.is_absolute() {
@@ -567,8 +580,7 @@ pub fn run_plugins(
                             LedgerError::error(
                                 "PLUGIN",
                                 format!(
-                                    "WASM plugin '{}' requires the wasm-plugins feature",
-                                    raw_name
+                                    "WASM plugin '{raw_name}' requires the wasm-plugins feature",
                                 ),
                             )
                             .with_phase("plugin"),
@@ -614,8 +626,7 @@ pub fn run_plugins(
                             LedgerError::error(
                                 "E8005",
                                 format!(
-                                    "Python plugin \"{}\" requires python-plugin-wasm feature",
-                                    raw_name
+                                    "Python plugin \"{raw_name}\" requires the python-plugins feature",
                                 ),
                             )
                             .with_phase("plugin"),

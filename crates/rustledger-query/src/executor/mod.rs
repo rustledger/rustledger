@@ -331,10 +331,10 @@ impl<'a> Executor<'a> {
         // `account_balance` need to match so lot details aren't dropped.
         let resolve_position = |posting: &rustledger_core::Posting, txn_date: NaiveDate| {
             posting.amount().map(|units| {
-                if let Some(cost_spec) = &posting.cost {
-                    if let Some(cost) = cost_spec.resolve(units.number, txn_date) {
-                        return Position::with_cost(units.clone(), cost);
-                    }
+                if let Some(cost_spec) = &posting.cost
+                    && let Some(cost) = cost_spec.resolve(units.number, txn_date)
+                {
+                    return Position::with_cost(units.clone(), cost);
                 }
                 Position::simple(units.clone())
             })

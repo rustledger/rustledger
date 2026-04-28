@@ -1210,7 +1210,7 @@ mod tests {
     }
 
     #[test]
-    fn test_number_literal() {
+    fn test_integer_literal_parsing() {
         let query = parse("SELECT * WHERE year = 2024").unwrap();
         match query {
             Query::Select(sel) => match sel.where_clause.unwrap() {
@@ -1218,7 +1218,7 @@ mod tests {
                     Expr::Literal(Literal::Integer(n)) => {
                         assert_eq!(n, 2024);
                     }
-                    _ => panic!("Expected number literal"),
+                    _ => panic!("Expected integer literal"),
                 },
                 _ => panic!("Expected binary op"),
             },
@@ -1263,6 +1263,28 @@ mod tests {
             panic!("expected binary op");
         };
         assert!(matches!(op.right, Expr::Literal(Literal::Number(_))));
+    }
+
+    #[test]
+    fn test_negative_integer_literal() {
+        // Negative integer literals: the expression-level unary-minus rule
+        // strips the `-` before the literal parser runs, so `-42` becomes
+        // `Unary(Neg, Integer(42))` rather than `Integer(-42)`. Both forms
+        // evaluate to `Value::Integer(-42)`.
+        let q = parse("SELECT * WHERE x = -42").unwrap();
+        let Query::Select(sel) = q else {
+            panic!("expected SELECT");
+        };
+        let Expr::BinaryOp(op) = sel.where_clause.unwrap() else {
+            panic!("expected binary op");
+        };
+        match op.right {
+            Expr::UnaryOp(unary) => {
+                assert_eq!(unary.op, UnaryOperator::Neg);
+                assert!(matches!(unary.operand, Expr::Literal(Literal::Integer(42))));
+            }
+            other => panic!("expected Unary(Neg, Integer(42)), got {other:?}"),
+        }
     }
 
     #[test]

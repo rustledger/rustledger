@@ -208,7 +208,8 @@ impl Executor<'_> {
                 }
             }
             Expr::Literal(Literal::Number(n)) => {
-                // Numbers are parsed as Decimal - convert to integer index
+                // Defensive: literal whole numbers parse as Integer (issue #938),
+                // so this arm is only reachable for fractional literals like `1.0`.
                 use rust_decimal::prelude::ToPrimitive;
                 let idx = n.to_usize().unwrap_or(0).saturating_sub(1);
                 if idx < result.columns.len() {

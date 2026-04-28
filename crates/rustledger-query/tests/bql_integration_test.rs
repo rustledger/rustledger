@@ -480,6 +480,24 @@ fn test_root_with_segment_count() {
     assert!(roots.contains("Income:Salary"));
 }
 
+/// Regression test for POSSIGN with literal integer arguments. Before the
+/// #938 fix, `POSSIGN(100, 'Income:Salary')` reached only the `Value::Number`
+/// arm because literals were always parsed as Number. After the fix, the
+/// arg becomes `Value::Integer(100)` and would have failed without the
+/// matching arm added in `eval_possign`.
+#[test]
+fn test_possign_with_integer_literal_arg() {
+    let directives = make_test_directives();
+
+    // Income (credit-normal) → sign is negated
+    let result = execute_query("SELECT POSSIGN(100, 'Income:Salary')", &directives);
+    assert!(matches!(result.rows[0][0], Value::Number(n) if n == dec!(-100)));
+
+    // Assets (debit-normal) → sign preserved
+    let result = execute_query("SELECT POSSIGN(100, 'Assets:Bank:Checking')", &directives);
+    assert!(matches!(result.rows[0][0], Value::Number(n) if n == dec!(100)));
+}
+
 /// Side-effect of the #938 fix: SUBSTR previously could not be invoked with
 /// literal integer arguments because `(String, Integer, Integer)` arms in
 /// `eval_substr` were unreachable when literals only produced `Number`.

@@ -86,15 +86,15 @@ jobs:
             BASE_TREE=$(gh api "repos/$REPO/git/commits/$CURRENT_SHA" --jq '.tree.sha')
             echo "Base tree: $BASE_TREE"
 
-            # Create blobs for all changed files in supply-chain/
+            # Create blobs for all changed files in supply-chain/.
+            # Pipe the JSON body through stdin (`--input -`) instead of `-f content="$CONTENT"`
+            # so a large base64 blob can't blow past ARG_MAX and crash gh with E2BIG.
             TREE_ENTRIES="[]"
             for file in $(git diff --staged --name-only); do
               if [ -f "$file" ]; then
-                CONTENT=$(base64 -w 0 "$file")
-                BLOB_SHA=$(gh api "repos/$REPO/git/blobs" \
-                  -f encoding=base64 \
-                  -f content="$CONTENT" \
-                  --jq '.sha')
+                BLOB_SHA=$(jq -n --rawfile content "$file" \
+                  '{encoding: "base64", content: ($content | @base64)}' \
+                  | gh api "repos/$REPO/git/blobs" --input - --jq '.sha')
                 echo "Created blob for $file: $BLOB_SHA"
                 TREE_ENTRIES=$(echo "$TREE_ENTRIES" | jq --arg path "$file" --arg sha "$BLOB_SHA" \
                   '. + [{"path": $path, "mode": "100644", "type": "blob", "sha": $sha}]')

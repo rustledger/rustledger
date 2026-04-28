@@ -860,8 +860,8 @@ fn literal<'a>() -> impl Parser<'a, ParserInput<'a>, Literal, ParserExtra<'a>> +
         kw("NULL").to(Literal::Null),
         // Date literal (must be before number to avoid parsing year as number)
         date_literal().map(Literal::Date),
-        // Number
-        decimal().map(Literal::Number),
+        // Number — Integer if no decimal point, Number otherwise
+        number_literal(),
         // String
         string_literal().map(Literal::String),
     ))
@@ -930,8 +930,14 @@ fn date_literal<'a>() -> impl Parser<'a, ParserInput<'a>, NaiveDate, ParserExtra
         })
 }
 
-/// Parse a decimal number.
-fn decimal<'a>() -> impl Parser<'a, ParserInput<'a>, Decimal, ParserExtra<'a>> + Clone {
+/// Parse a numeric literal as either `Literal::Integer` (no decimal point) or
+/// `Literal::Number` (has a decimal point, or whole-number value exceeds i64).
+///
+/// Distinguishing integer from decimal at the parser level matches BQL/SQL
+/// semantics and lets functions that strictly require integer arguments
+/// (e.g. `ROOT(account, n)`, `SUBSTR(s, start, len)`) work with literal
+/// arguments. See issue #938.
+fn number_literal<'a>() -> impl Parser<'a, ParserInput<'a>, Literal, ParserExtra<'a>> + Clone {
     just('-')
         .or_not()
         .then(digits())
@@ -943,11 +949,22 @@ fn decimal<'a>() -> impl Parser<'a, ParserInput<'a>, Decimal, ParserExtra<'a>> +
                     s.push('-');
                 }
                 s.push_str(int_part);
-                if let Some((_, frac)) = frac_part {
-                    s.push('.');
-                    s.push_str(frac);
+                match frac_part {
+                    None => match s.parse::<i64>() {
+                        Ok(i) => Ok(Literal::Integer(i)),
+                        // Whole-number value out of i64 range — fall back to Decimal.
+                        Err(_) => Decimal::from_str(&s)
+                            .map(Literal::Number)
+                            .map_err(|_| Rich::custom(span, "invalid number")),
+                    },
+                    Some((_, frac)) => {
+                        s.push('.');
+                        s.push_str(frac);
+                        Decimal::from_str(&s)
+                            .map(Literal::Number)
+                            .map_err(|_| Rich::custom(span, "invalid number"))
+                    }
                 }
-                Decimal::from_str(&s).map_err(|_| Rich::custom(span, "invalid number"))
             },
         )
 }
@@ -1198,8 +1215,8 @@ mod tests {
         match query {
             Query::Select(sel) => match sel.where_clause.unwrap() {
                 Expr::BinaryOp(op) => match op.right {
-                    Expr::Literal(Literal::Number(n)) => {
-                        assert_eq!(n, dec!(2024));
+                    Expr::Literal(Literal::Integer(n)) => {
+                        assert_eq!(n, 2024);
                     }
                     _ => panic!("Expected number literal"),
                 },
@@ -1207,6 +1224,45 @@ mod tests {
             },
             _ => panic!("Expected SELECT query"),
         }
+    }
+
+    #[test]
+    fn test_integer_vs_decimal_literal() {
+        // Whole-number literal → Integer
+        let q = parse("SELECT * WHERE x = 42").unwrap();
+        let Query::Select(sel) = q else {
+            panic!("expected SELECT");
+        };
+        let Expr::BinaryOp(op) = sel.where_clause.unwrap() else {
+            panic!("expected binary op");
+        };
+        assert!(matches!(op.right, Expr::Literal(Literal::Integer(42))));
+
+        // Literal with decimal point → Number, even when whole-valued
+        let q = parse("SELECT * WHERE x = 42.0").unwrap();
+        let Query::Select(sel) = q else {
+            panic!("expected SELECT");
+        };
+        let Expr::BinaryOp(op) = sel.where_clause.unwrap() else {
+            panic!("expected binary op");
+        };
+        match op.right {
+            Expr::Literal(Literal::Number(n)) => assert_eq!(n, dec!(42.0)),
+            other => panic!("expected Number literal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_integer_overflow_falls_back_to_number() {
+        // i64::MAX is 9_223_372_036_854_775_807 — this exceeds it
+        let q = parse("SELECT * WHERE x = 99999999999999999999").unwrap();
+        let Query::Select(sel) = q else {
+            panic!("expected SELECT");
+        };
+        let Expr::BinaryOp(op) = sel.where_clause.unwrap() else {
+            panic!("expected binary op");
+        };
+        assert!(matches!(op.right, Expr::Literal(Literal::Number(_))));
     }
 
     #[test]
@@ -1422,8 +1478,8 @@ mod tests {
             Query::Select(sel) => match sel.where_clause.unwrap() {
                 Expr::Between { value, low, high } => {
                     assert!(matches!(*value, Expr::Column(c) if c == "year"));
-                    assert!(matches!(*low, Expr::Literal(Literal::Number(_))));
-                    assert!(matches!(*high, Expr::Literal(Literal::Number(_))));
+                    assert!(matches!(*low, Expr::Literal(Literal::Integer(_))));
+                    assert!(matches!(*high, Expr::Literal(Literal::Integer(_))));
                 }
                 _ => panic!("Expected BETWEEN"),
             },

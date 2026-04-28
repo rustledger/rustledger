@@ -126,6 +126,11 @@ impl Executor<'_> {
                         let adjusted = if is_credit_normal { -n } else { n };
                         Ok(Value::Number(adjusted))
                     }
+                    Value::Integer(i) => {
+                        let n = Decimal::from(i);
+                        let adjusted = if is_credit_normal { -n } else { n };
+                        Ok(Value::Number(adjusted))
+                    }
                     Value::Null => Ok(Value::Null),
                     _ => Err(QueryError::Type(
                         "POSSIGN expects (amount, account_string)".to_string(),

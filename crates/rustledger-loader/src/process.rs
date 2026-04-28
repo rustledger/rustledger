@@ -510,10 +510,14 @@ pub fn run_plugins(
                     .to_lowercase();
 
                 // The closure is only invoked from inside the wasm-plugins /
-                // python-plugins cfg blocks below. When neither feature is
-                // enabled, `cargo clippy --no-default-features` flags it as
-                // unused; allow that without underscore-prefixing (which would
-                // trip `no_effect_underscore_binding` since we DO call it).
+                // python-plugins cfg blocks below. The whole function is
+                // already `#[cfg(feature = "plugins")]`, so this only matters
+                // when `plugins` is enabled but neither child feature is
+                // (e.g. `--features native-plugins`). Allow `unused_variables`
+                // for exactly that configuration. Underscore-prefixing the
+                // binding would have been the wrong fix because we DO call
+                // the closure in builds with one of the features enabled,
+                // which would trip `no_effect_underscore_binding` instead.
                 #[cfg_attr(
                     not(any(feature = "wasm-plugins", feature = "python-plugins")),
                     allow(unused_variables)
@@ -622,7 +626,7 @@ pub fn run_plugins(
                             LedgerError::error(
                                 "E8005",
                                 format!(
-                                    "Python plugin \"{raw_name}\" requires python-plugin-wasm feature",
+                                    "Python plugin \"{raw_name}\" requires the python-plugins feature",
                                 ),
                             )
                             .with_phase("plugin"),

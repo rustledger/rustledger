@@ -221,7 +221,11 @@ Plugin execution order within the pipeline: after booking, before validation. Th
 
 ### 5. Binary Cache
 
-Parsed ledgers are cached to disk in a binary format. Subsequent runs skip parsing if the source hasn't changed. Cache invalidation is based on file modification times.
+Parsed ledgers are cached to disk in a binary format (rkyv) so subsequent runs can skip parsing entirely. The cache is stored as a hidden dotfile alongside the source — `ledger.beancount` → `.ledger.beancount.cache` — matching Python beancount's `.{filename}.picklecache` convention.
+
+Cache invalidation is content-based: the cache header stores a hash over every source file (the main ledger and all transitively-`include`d files), and the cache is rejected on any mismatch. Modification times are not used (they're unreliable across editor save patterns).
+
+Two environment variables, both compatible with Python beancount, control the cache: `BEANCOUNT_DISABLE_LOAD_CACHE` to opt out entirely, and `BEANCOUNT_LOAD_CACHE_FILENAME` to redirect to a custom path (with `{filename}` substitution). See [`rledger check`](../commands/check.md#cache-file) for usage details.
 
 ## Performance Characteristics
 

@@ -6,8 +6,8 @@ use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
 use rustledger_core::Directive;
 use rustledger_loader::{
-    CacheEntry, CachedOptions, CachedPlugin, LoadError, Loader, load_cache_entry,
-    reintern_directives, save_cache_entry,
+    CacheEntry, CachedOptions, CachedPlugin, DISABLE_CACHE_ENV, LoadError, Loader,
+    load_cache_entry, reintern_directives, save_cache_entry,
 };
 #[cfg(feature = "python-plugin-wasm")]
 use rustledger_plugin::PluginManager;
@@ -110,7 +110,11 @@ pub struct Args {
     #[arg(short, long)]
     pub quiet: bool,
 
-    /// Disable the binary cache for parsed directives
+    /// Disable the binary cache for parsed directives.
+    ///
+    /// Also honored: the `BEANCOUNT_DISABLE_LOAD_CACHE` environment variable
+    /// (matching Python beancount). Set the `BEANCOUNT_LOAD_CACHE_FILENAME`
+    /// env var to redirect the cache to a custom path.
     #[arg(short = 'C', long = "no-cache")]
     pub no_cache: bool,
 
@@ -158,8 +162,12 @@ pub fn run(args: &Args) -> Result<ExitCode> {
     // Determine if colors should be used (TTY detection + NO_COLOR)
     let use_color = !json_mode && report::should_use_color();
 
-    // Try loading from cache first (unless --no-cache)
-    let cache_entry = if args.no_cache {
+    // Cache is disabled by --no-cache or by setting BEANCOUNT_DISABLE_LOAD_CACHE
+    // (the latter mirrors Python beancount's opt-out env var, see issue #939).
+    let cache_disabled = args.no_cache || std::env::var_os(DISABLE_CACHE_ENV).is_some();
+
+    // Try loading from cache first (unless disabled)
+    let cache_entry = if cache_disabled {
         None
     } else {
         load_cache_entry(file)
@@ -218,11 +226,11 @@ pub fn run(args: &Args) -> Result<ExitCode> {
             .load(file)
             .with_context(|| format!("failed to load {}", file.display()))?;
 
-        // Save to cache (unless --no-cache, parse errors, or option warnings)
+        // Save to cache (unless disabled, parse errors, or option warnings).
         // Option warnings (E7001-E7006) are not stored in the cache, so we must
         // avoid caching files that have them — otherwise the warnings are silently
         // lost on subsequent loads.
-        if !args.no_cache && result.errors.is_empty() && result.options.warnings.is_empty() {
+        if !cache_disabled && result.errors.is_empty() && result.options.warnings.is_empty() {
             // Collect all loaded file paths for cache (as strings for serialization)
             let files: Vec<String> = result
                 .source_map

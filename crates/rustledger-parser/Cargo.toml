@@ -1,7 +1,7 @@
 [package]
 name = "rustledger-parser"
 description = "Beancount parser with error recovery and full syntax support"
-version = "0.14.0"
+version = "0.14.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

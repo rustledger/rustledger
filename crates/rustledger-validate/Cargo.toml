@@ -1,7 +1,7 @@
 [package]
 name = "rustledger-validate"
 description = "Beancount validation with 27 error codes for ledger correctness"
-version = "0.14.0"
+version = "0.14.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

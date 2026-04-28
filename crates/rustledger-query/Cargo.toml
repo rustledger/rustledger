@@ -1,7 +1,7 @@
 [package]
 name = "rustledger-query"
 description = "Beancount query engine (BQL) with SQL-like syntax for ledger queries"
-version = "0.14.0"
+version = "0.14.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

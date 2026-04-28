@@ -13,15 +13,16 @@
 #
 # Schema:
 #   name      — short kebab-case identifier (used in mismatch reports)
-#   query     — the BQL query, run as-is against both tools
+#   query     — the BQL query, run as-is against both tools (the query
+#               text already encodes whether it's SELECT / BALANCES /
+#               JOURNAL — both tools dispatch on the leading keyword).
 #   notes     — optional one-line rationale (issue link if applicable)
-#   form      — "select" (default), "balances", or "journal"
-#               Affects which BQL form generates the result.
 #   preserve_order — set to true when the result MUST come back in a
 #                    specific order (i.e., the query has ORDER BY and the
 #                    ordering itself is part of the contract). Default
 #                    false sorts both sides, which is the right call when
-#                    the query doesn't pin order.
+#                    the query doesn't pin order. Auto-detected from
+#                    `ORDER BY` in the query text if not set.
 
 # ----------------------------------------------------------------------
 # Baseline shape (existed pre-#941; all rledger releases pass)
@@ -111,12 +112,10 @@ preserve_order = true
 [[query]]
 name = "balances-by-account"
 query = "BALANCES FROM has_account('Assets')"
-form = "balances"
 notes = "BALANCES form — different code path from SELECT"
 
 [[query]]
 name = "journal-assets"
 query = "JOURNAL 'Assets'"
-form = "journal"
 notes = "JOURNAL form — different code path from SELECT; order-sensitive"
 preserve_order = true

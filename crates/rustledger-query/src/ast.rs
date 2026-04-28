@@ -99,9 +99,14 @@ pub struct Target {
 /// FROM clause with transaction-level modifiers.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FromClause {
-    /// OPEN ON date - summarize entries before this date.
+    /// OPEN ON date - inclusive lower bound. Entries before `date` are
+    /// summarized into the running balance and excluded from results;
+    /// entries on or after `date` are included.
     pub open_on: Option<NaiveDate>,
-    /// CLOSE ON date - truncate entries after this date.
+    /// CLOSE ON date - exclusive upper bound (matches bean-query). Entries
+    /// strictly before `date` are kept; entries on or after `date` are
+    /// excluded. Combined with `open_on`, the resulting period is
+    /// `[open_on, close_on)`.
     pub close_on: Option<NaiveDate>,
     /// CLEAR - transfer income/expense to equity.
     pub clear: bool,

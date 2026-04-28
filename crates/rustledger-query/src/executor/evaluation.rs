@@ -50,6 +50,7 @@ impl Executor<'_> {
                         transaction: txn,
                         posting_index: 0,
                         balance: None,
+                        account_balance: None,
                         directive_index: None,
                     };
                     self.evaluate_predicate(filter, &dummy_ctx)
@@ -115,6 +116,7 @@ impl Executor<'_> {
                             transaction: txn,
                             posting_index: 0,
                             balance: None,
+                            account_balance: None,
                             directive_index: None,
                         };
                         self.evaluate_predicate(filter, &dummy_ctx)
@@ -127,6 +129,7 @@ impl Executor<'_> {
                     transaction: txn,
                     posting_index: 0,
                     balance: None,
+                    account_balance: None,
                     directive_index: None,
                 };
                 self.evaluate_predicate(filter, &dummy_ctx)
@@ -296,8 +299,18 @@ impl Executor<'_> {
                 }
             }
             "balance" => {
-                // Running balance for this account
+                // Cumulative running balance across WHERE-filtered postings —
+                // matches bean-query semantics. See `PostingContext::balance`.
                 if let Some(ref balance) = ctx.balance {
+                    Ok(Value::Inventory(Box::new(balance.clone())))
+                } else {
+                    Ok(Value::Null)
+                }
+            }
+            "account_balance" => {
+                // Per-account running balance for this posting's account.
+                // Always reflects the true ledger balance, independent of WHERE.
+                if let Some(ref balance) = ctx.account_balance {
                     Ok(Value::Inventory(Box::new(balance.clone())))
                 } else {
                     Ok(Value::Null)

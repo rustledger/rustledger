@@ -490,7 +490,11 @@ fn column_completions() -> Vec<Completion> {
         column("units", "Posting units"),
         column("cost", "Cost basis"),
         column("weight", "Balancing weight"),
-        column("balance", "Running balance"),
+        column(
+            "balance",
+            "Cumulative running balance across WHERE-filtered postings",
+        ),
+        column("account_balance", "Per-account running balance"),
         column("year", "Transaction year"),
         column("month", "Transaction month"),
         column("day", "Transaction day"),

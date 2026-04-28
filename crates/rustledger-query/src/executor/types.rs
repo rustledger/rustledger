@@ -268,8 +268,16 @@ pub struct PostingContext<'a> {
     pub transaction: &'a Transaction,
     /// The posting index within the transaction.
     pub posting_index: usize,
-    /// Running balance after this posting (optional).
+    /// Cumulative running balance across all WHERE-filtered postings up to and
+    /// including this one, in iteration order. This is what bean-query exposes
+    /// as the `balance` column — a single Inventory that grows as the result
+    /// set is built, regardless of which account each posting belongs to.
     pub balance: Option<Inventory>,
+    /// Per-account running balance for this posting's account. Exposed as the
+    /// `account_balance` column. Updated for every posting, independent of the
+    /// WHERE filter, so it always reflects the true ledger balance for the
+    /// account at this point in time.
+    pub account_balance: Option<Inventory>,
     /// The directive index (for source location lookup).
     pub directive_index: Option<usize>,
 }

@@ -303,8 +303,14 @@ impl<'a> Executor<'a> {
         where_clause: Option<&Expr>,
     ) -> Result<Vec<PostingContext<'a>>, QueryError> {
         let mut postings = Vec::new();
-        // Track running balance per account
-        let mut running_balances: FxHashMap<InternedStr, Inventory> = FxHashMap::default();
+        // Per-account running balance — accumulates every posting regardless of
+        // FROM/WHERE filters, so `account_balance` always reflects the account's
+        // true ledger balance at the point of the posting.
+        let mut account_balances: FxHashMap<InternedStr, Inventory> = FxHashMap::default();
+        // Single cumulative running balance across WHERE-filtered postings in
+        // iteration order. This is the bean-query `balance` semantic: a snapshot
+        // of "everything selected so far" rather than a per-account view.
+        let mut cumulative_balance: Inventory = Inventory::default();
 
         // Create an iterator over (directive_index, directive) pairs
         // Handle both spanned and unspanned directives
@@ -327,12 +333,14 @@ impl<'a> Executor<'a> {
                     if let Some(open_date) = from.open_on
                         && txn.date < open_date
                     {
-                        // Update balances but don't include in results
+                        // Update per-account balances but don't include in results
+                        // and don't touch the cumulative balance — these postings
+                        // didn't make it past the FROM filter.
                         for posting in &txn.postings {
                             if let Some(units) = posting.amount() {
-                                let balance =
-                                    running_balances.entry(posting.account.clone()).or_default();
-                                balance.add(Position::simple(units.clone()));
+                                let bal =
+                                    account_balances.entry(posting.account.clone()).or_default();
+                                bal.add(Position::simple(units.clone()));
                             }
                         }
                         continue;
@@ -350,29 +358,43 @@ impl<'a> Executor<'a> {
                     }
                 }
 
-                // Add postings with running balance
                 for (i, posting) in txn.postings.iter().enumerate() {
-                    // Update running balance for this account
+                    // Update the account-level running balance regardless of
+                    // whether this posting passes WHERE — `account_balance`
+                    // should always reflect the underlying ledger truth.
                     if let Some(units) = posting.amount() {
-                        let balance = running_balances.entry(posting.account.clone()).or_default();
-                        balance.add(Position::simple(units.clone()));
+                        let bal = account_balances.entry(posting.account.clone()).or_default();
+                        bal.add(Position::simple(units.clone()));
                     }
 
-                    let ctx = PostingContext {
+                    // Build the context with both balance views. The cumulative
+                    // snapshot here is *pre-update* — it reflects the running
+                    // total of WHERE-filtered postings up to but not including
+                    // this one. We update it after WHERE passes (below) so that
+                    // postings rejected by WHERE don't pollute the cumulative.
+                    let mut ctx = PostingContext {
                         transaction: txn,
                         posting_index: i,
-                        balance: running_balances.get(&posting.account).cloned(),
+                        balance: Some(cumulative_balance.clone()),
+                        account_balance: account_balances.get(&posting.account).cloned(),
                         directive_index: Some(directive_index),
                     };
 
                     // Check WHERE clause (posting-level filter)
-                    if let Some(where_expr) = where_clause {
-                        if self.evaluate_predicate(where_expr, &ctx)? {
-                            postings.push(ctx);
-                        }
-                    } else {
-                        postings.push(ctx);
+                    if let Some(where_expr) = where_clause
+                        && !self.evaluate_predicate(where_expr, &ctx)?
+                    {
+                        continue;
                     }
+
+                    // WHERE passed: contribute this posting to the cumulative
+                    // balance and refresh the snapshot in ctx so SELECT sees
+                    // the post-update value.
+                    if let Some(units) = posting.amount() {
+                        cumulative_balance.add(Position::simple(units.clone()));
+                    }
+                    ctx.balance = Some(cumulative_balance.clone());
+                    postings.push(ctx);
                 }
             }
         }
@@ -2302,6 +2324,7 @@ impl<'a> Executor<'a> {
             "price".to_string(),
             "weight".to_string(),
             "balance".to_string(),
+            "account_balance".to_string(),
             // Metadata and collection columns
             "meta".to_string(),
             "accounts".to_string(),
@@ -2311,8 +2334,13 @@ impl<'a> Executor<'a> {
         ];
         let mut table = Table::new(columns);
 
-        // Track running balances per account
-        let mut running_balances: FxHashMap<InternedStr, Inventory> = FxHashMap::default();
+        // Per-account running balance — exposed as `account_balance`.
+        let mut account_balances: FxHashMap<InternedStr, Inventory> = FxHashMap::default();
+        // Cumulative running balance across all postings — exposed as `balance`,
+        // matching bean-query's "running sum of all postings rendered so far".
+        // The #postings table has no WHERE filter at this layer, so cumulative
+        // and account-aware accumulators get the same set of postings.
+        let mut cumulative_balance: Inventory = Inventory::default();
 
         // Collect transactions with their directive indices for source location lookup
         let mut transactions: Vec<(usize, &rustledger_core::Transaction)> =
@@ -2375,9 +2403,8 @@ impl<'a> Executor<'a> {
             let day = Value::Integer(i64::from(txn.date.day()));
 
             for posting in &txn.postings {
-                // Update running balance
+                // Update running balances (per-account and cumulative).
                 if let Some(units) = posting.amount() {
-                    let balance = running_balances.entry(posting.account.clone()).or_default();
                     let pos = if let Some(cost_spec) = &posting.cost {
                         if let Some(cost) = cost_spec.resolve(units.number, txn.date) {
                             Position::with_cost(units.clone(), cost)
@@ -2387,7 +2414,11 @@ impl<'a> Executor<'a> {
                     } else {
                         Position::simple(units.clone())
                     };
-                    balance.add(pos);
+                    account_balances
+                        .entry(posting.account.clone())
+                        .or_default()
+                        .add(pos.clone());
+                    cumulative_balance.add(pos);
                 }
 
                 // Extract posting data
@@ -2470,7 +2501,8 @@ impl<'a> Executor<'a> {
                     Value::Null
                 };
 
-                let balance_val = running_balances
+                let balance_val = Value::Inventory(Box::new(cumulative_balance.clone()));
+                let account_balance_val = account_balances
                     .get(&posting.account)
                     .map_or(Value::Null, |inv| Value::Inventory(Box::new(inv.clone())));
 
@@ -2519,6 +2551,7 @@ impl<'a> Executor<'a> {
                     price_val,
                     weight_val,
                     balance_val,
+                    account_balance_val,
                     // Metadata and collection
                     Value::Metadata(Box::new(posting.meta.clone())),
                     Value::StringSet(all_accounts.clone()),

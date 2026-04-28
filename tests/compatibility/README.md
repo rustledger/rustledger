@@ -41,6 +41,19 @@ This downloads ~800 beancount files from 10+ open source repositories.
 ./scripts/compat-bql-test.sh
 ```
 
+The query corpus is defined inline in the `Run BQL compatibility test`
+step of `.github/workflows/compat.yml` (the `QUERIES = [...]` list).
+It's biased toward columns and functions where the two tools have
+historically diverged in *semantics* — not just syntax — because those
+are the bugs that ship undetected through parse-only checks. See
+issue #929 for the motivating example: a `balance` column semantic
+mismatch that went unnoticed for two releases while CI reported 100%
+BQL match because the corpus was three queries that didn't touch
+`balance`.
+
+When adding a new column or aggregation function to the query engine,
+add a query to that list that exercises it.
+
 ### AST Comparison
 
 ```bash

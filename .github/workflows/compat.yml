@@ -604,11 +604,46 @@ jobs:
           MAX_WORKERS = min(multiprocessing.cpu_count(), 8)
           print(f"Running BQL tests with {MAX_WORKERS} parallel workers")
 
-          # Standard queries to test — real-world BQL that users actually run
+          # Curated query corpus. The set is intentionally biased toward
+          # columns/functions where rledger and bean-query have historically
+          # diverged in semantics (not just syntax) — those are the ones that
+          # silently produce wrong answers and aren't caught by parse-only
+          # checks. See issue #929 for the bug that motivated this expansion:
+          # for two releases the harness reported 100% BQL compat while the
+          # `balance` column was returning per-account values where bean-query
+          # returned cumulative WHERE-filtered ones.
+          #
+          # Categories covered:
+          #   - shape:         DISTINCT, GROUP BY, ORDER BY, COUNT
+          #   - aggregations:  SUM, COUNT, FIRST, LAST
+          #   - balance:       running balance over WHERE-filtered postings
+          #   - position/weight: position/weight semantics with costs
+          #   - convert():     currency conversion through Inventory→Amount
+          #   - date funcs:    year/month/quarter buckets
+          #   - cost basis:    cost_number/cost_currency projection
           QUERIES = [
+              # Shape-and-grouping (existing baseline — all rledger versions pass)
               "SELECT DISTINCT account ORDER BY account LIMIT 20",
               "SELECT account, SUM(position) GROUP BY account ORDER BY account LIMIT 10",
               "SELECT currency, COUNT(*) AS count GROUP BY currency ORDER BY count DESC LIMIT 5",
+              # Date bucketing
+              "SELECT year, month, COUNT(*) AS n GROUP BY year, month ORDER BY year, month LIMIT 12",
+              # Running balance — bean-query semantic is cumulative across
+              # WHERE-filtered postings (issue #929).
+              "SELECT date, account, balance WHERE account ~ '^Assets' ORDER BY date LIMIT 10",
+              # Aggregations over balance — Bruno's "portfolio value over time"
+              # pattern (issue #929 exact reproduction shape, sans currency
+              # conversion which depends on data-specific commodities).
+              "SELECT year, month, LAST(balance) WHERE account ~ '^Assets' ORDER BY year, month LIMIT 12",
+              "SELECT year, month, FIRST(balance) WHERE account ~ '^Assets' ORDER BY year, month LIMIT 12",
+              # Position projection
+              "SELECT date, account, position WHERE account ~ '^Assets' ORDER BY date LIMIT 10",
+              # Weight (cost-basis-converted amount used for balancing)
+              "SELECT date, account, weight WHERE account ~ '^Assets' ORDER BY date LIMIT 10",
+              # Cost basis fields — exposes cost vs no-cost branch differences
+              "SELECT account, cost_number, cost_currency WHERE cost_number IS NOT NULL ORDER BY account LIMIT 10",
+              # SUM(number) — basic numeric aggregation by currency
+              "SELECT currency, SUM(number) AS total GROUP BY currency ORDER BY currency LIMIT 10",
           ]
 
           def extract_data(output):

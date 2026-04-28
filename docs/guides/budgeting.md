@@ -197,10 +197,15 @@ Query by budget category:
 ```bash
 rledger query ledger.beancount "
   SELECT sum(cost(position))
-  WHERE meta('budget-category') = 'food'
+  WHERE entry_meta('budget-category') = 'food'
     AND month(date) = 1 AND year(date) = 2024
 "
 ```
+
+> **Note:** Use `entry_meta(...)` (or `any_meta(...)`) when the metadata is on the
+> transaction header. The `meta(...)` function only inspects metadata attached
+> directly to a posting — see [BQL → Metadata functions](../reference/bql.md#metadata-functions)
+> for the full distinction.
 
 ## Monthly Budget Review
 

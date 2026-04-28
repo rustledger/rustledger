@@ -189,6 +189,48 @@ SELECT min(date), max(date)
 | `leaf(account)` | Last account segment |
 | `parent(account)` | All but last segment |
 
+### Metadata Functions
+
+Beancount metadata can live on a **transaction** (the line under the header,
+before any postings) or on a **posting** (indented one level deeper than the
+posting itself). BQL exposes three lookup functions because the distinction
+matters at query time:
+
+| Function | Looks at | Use when |
+|----------|----------|----------|
+| `meta(key)` | Posting metadata only | The key is set per-posting (e.g. a `lot-id` on one leg of a transfer) |
+| `entry_meta(key)` | Transaction metadata only | The key is set on the transaction header (e.g. a `budget-category` shared by every posting) |
+| `any_meta(key)` | Posting first, then transaction | You don't know or don't care which level it's set on |
+
+All three return `NULL` when the key is absent at the relevant level — so a
+`WHERE meta('foo') = 'bar'` filter quietly drops every row when `foo` was
+actually set on the transaction.
+
+```beancount
+2024-01-15 * "Grocery Store"
+  budget-category: "food"          ; on the transaction
+  Expenses:Food:Groceries  85.00 USD
+    receipt-id: "R-12345"          ; on this posting only
+  Assets:Bank:Checking
+```
+
+```sql
+-- Doesn't match: budget-category is on the transaction, not the posting.
+SELECT account WHERE meta('budget-category') = 'food'
+
+-- Matches every posting in the transaction.
+SELECT account WHERE entry_meta('budget-category') = 'food'
+
+-- Matches whichever level happens to carry the key.
+SELECT account WHERE any_meta('budget-category') = 'food'
+
+-- Matches only the Expenses posting, since receipt-id is per-posting.
+SELECT account WHERE meta('receipt-id') = 'R-12345'
+```
+
+This mirrors Python `bean-query`'s `meta` / `entry_meta` / `any_meta`
+exactly, so queries are portable between the two engines.
+
 ### Examples
 
 ```sql

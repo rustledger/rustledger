@@ -337,8 +337,12 @@ impl<'a> Executor<'a> {
                         }
                         continue;
                     }
+                    // `close on D` is exclusive (matches bean-query): the books
+                    // are closed AT D, so a transaction stamped exactly on D is
+                    // not part of the closing period. Combined with `open on D`
+                    // being inclusive, the resulting range is `[open, close)`.
                     if let Some(close_date) = from.close_on
-                        && txn.date > close_date
+                        && txn.date >= close_date
                     {
                         continue;
                     }

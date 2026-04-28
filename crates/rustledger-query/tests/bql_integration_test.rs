@@ -494,6 +494,47 @@ fn test_execute_balances_with_from() {
 }
 
 #[test]
+fn test_close_on_is_exclusive() {
+    // `FROM CLOSE ON D` matches bean-query semantics: the books are closed AT D,
+    // so a transaction stamped exactly on D is NOT included. See issue #935.
+    //
+    // Test fixture txns: 2024-01-15, 2024-01-20, 2024-01-22, 2024-01-25, 2024-01-27.
+    // With CLOSE ON 2024-01-22, only the 2024-01-15 and 2024-01-20 txns remain
+    // (2 postings each = 4 rows). The 2024-01-22 txn must be excluded.
+    let directives = make_test_directives();
+    let result = execute_query("SELECT date FROM CLOSE ON 2024-01-22", &directives);
+    assert_eq!(
+        result.len(),
+        4,
+        "expected 4 rows (txns before 2024-01-22, 2 postings each); got {}",
+        result.len()
+    );
+    let boundary = date(2024, 1, 22);
+    for row in &result.rows {
+        match &row[0] {
+            Value::Date(d) => assert!(
+                *d < boundary,
+                "row at {d} violates exclusive close: should be < {boundary}"
+            ),
+            other => panic!("expected Value::Date in column 0, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn test_close_on_first_txn_date_yields_empty() {
+    // Boundary case from issue #935: CLOSE ON the very first transaction date
+    // should return zero rows (everything is >= the close date and thus excluded).
+    let directives = make_test_directives();
+    let result = execute_query("SELECT date FROM CLOSE ON 2024-01-15", &directives);
+    assert!(
+        result.is_empty(),
+        "expected no rows for CLOSE ON the earliest txn date; got {}",
+        result.len()
+    );
+}
+
+#[test]
 fn test_execute_balances_with_where() {
     let directives = make_test_directives();
     let query = parse("BALANCES WHERE account ~ 'Assets:'").expect("should parse");

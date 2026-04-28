@@ -930,8 +930,8 @@ fn date_literal<'a>() -> impl Parser<'a, ParserInput<'a>, NaiveDate, ParserExtra
         })
 }
 
-/// Parse a numeric literal as either `Literal::Integer` (no decimal point) or
-/// `Literal::Number` (has a decimal point, or whole-number value exceeds i64).
+/// Parse a numeric literal as either `Literal::Integer` (no fractional part) or
+/// `Literal::Number` (has a fractional part, or whole-number value exceeds i64).
 ///
 /// Distinguishing integer from decimal at the parser level matches BQL/SQL
 /// semantics and lets functions that strictly require integer arguments

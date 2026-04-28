@@ -161,14 +161,22 @@ impl Executor<'_> {
 
         let val = self.evaluate_expr(&func.args[0], ctx)?;
         let n = if func.args.len() == 2 {
-            match self.evaluate_expr(&func.args[1], ctx)? {
-                Value::Integer(i) => i as usize,
+            let raw = match self.evaluate_expr(&func.args[1], ctx)? {
+                Value::Integer(i) => i,
                 _ => {
                     return Err(QueryError::Type(
                         "ROOT second arg must be integer".to_string(),
                     ));
                 }
-            }
+            };
+            // Reject negatives explicitly — without this guard, `i as usize`
+            // would silently turn -1 into `usize::MAX` and the slice below
+            // would always return the whole account string.
+            usize::try_from(raw).map_err(|_| {
+                QueryError::Type(format!(
+                    "ROOT second arg must be a non-negative integer, got {raw}"
+                ))
+            })?
         } else {
             1
         };

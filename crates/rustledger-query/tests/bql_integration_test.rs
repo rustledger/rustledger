@@ -480,6 +480,25 @@ fn test_root_with_segment_count() {
     assert!(roots.contains("Income:Salary"));
 }
 
+/// Follow-up to #938: now that whole-number literals reach integer-only paths,
+/// `ROOT(account, -1)` would previously cast `-1i64 as usize` to `usize::MAX`
+/// and silently return the full account string. The fix in `eval_root` rejects
+/// negatives with a typed error.
+#[test]
+fn test_root_rejects_negative_segment_count() {
+    let directives = make_test_directives();
+    let query = parse("SELECT ROOT(account, -1)").expect("query should parse");
+    let mut executor = Executor::new(&directives);
+    let err = executor
+        .execute(&query)
+        .expect_err("ROOT with negative segment count should error");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("non-negative"),
+        "error should mention non-negative, got: {msg}"
+    );
+}
+
 /// Regression test for POSSIGN with literal integer arguments. Before the
 /// #938 fix, `POSSIGN(100, 'Income:Salary')` reached only the `Value::Number`
 /// arm because literals were always parsed as Number. After the fix, the

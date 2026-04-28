@@ -509,6 +509,15 @@ pub fn run_plugins(
                     .unwrap_or("")
                     .to_lowercase();
 
+                // The closure is only invoked from inside the wasm-plugins /
+                // python-plugins cfg blocks below. When neither feature is
+                // enabled, `cargo clippy --no-default-features` flags it as
+                // unused; allow that without underscore-prefixing (which would
+                // trip `no_effect_underscore_binding` since we DO call it).
+                #[cfg_attr(
+                    not(any(feature = "wasm-plugins", feature = "python-plugins")),
+                    allow(unused_variables)
+                )]
                 let resolve_path = |name: &str| -> Result<std::path::PathBuf, String> {
                     let p = std::path::Path::new(name);
                     let resolved = if p.is_absolute() {
@@ -567,8 +576,7 @@ pub fn run_plugins(
                             LedgerError::error(
                                 "PLUGIN",
                                 format!(
-                                    "WASM plugin '{}' requires the wasm-plugins feature",
-                                    raw_name
+                                    "WASM plugin '{raw_name}' requires the wasm-plugins feature",
                                 ),
                             )
                             .with_phase("plugin"),
@@ -614,8 +622,7 @@ pub fn run_plugins(
                             LedgerError::error(
                                 "E8005",
                                 format!(
-                                    "Python plugin \"{}\" requires python-plugin-wasm feature",
-                                    raw_name
+                                    "Python plugin \"{raw_name}\" requires python-plugin-wasm feature",
                                 ),
                             )
                             .with_phase("plugin"),

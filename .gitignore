@@ -44,7 +44,10 @@ tests/compatibility-results/
 # Benchmark results
 target/criterion/
 
-# Binary cache files (rustledger)
+# Binary cache files (rustledger). The default is `.<file>.beancount.cache`
+# (hidden dotfile, see issue #939); the legacy visible form is kept here so
+# stale caches from earlier versions don't accidentally get committed.
+.*.beancount.cache
 *.beancount.cache
 
 # Local development

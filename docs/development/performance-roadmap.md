@@ -198,7 +198,7 @@ ______________________________________________________________________
 - **File**: `crates/rustledger-loader/src/cache.rs`
 - **Format**: [rkyv](https://github.com/rkyv/rkyv) for zero-copy deserialization
 - **Cache key**: SHA256 hash of file mtime + size
-- **Location**: `ledger.beancount` → `ledger.beancount.cache`
+- **Location**: `ledger.beancount` → `.ledger.beancount.cache` (hidden dotfile, matches Python beancount; see issue #939). Override via `BEANCOUNT_LOAD_CACHE_FILENAME`.
 
 Custom rkyv wrappers for non-rkyv types:
 

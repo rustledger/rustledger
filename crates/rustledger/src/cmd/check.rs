@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
 use rustledger_core::Directive;
 use rustledger_loader::{
-    CacheEntry, CachedOptions, CachedPlugin, DISABLE_CACHE_ENV, LoadError, Loader,
+    CacheEntry, CachedOptions, CachedPlugin, LoadError, Loader, cache_disabled_by_env,
     load_cache_entry, reintern_directives, save_cache_entry,
 };
 #[cfg(feature = "python-plugin-wasm")]
@@ -164,7 +164,9 @@ pub fn run(args: &Args) -> Result<ExitCode> {
 
     // Cache is disabled by --no-cache or by setting BEANCOUNT_DISABLE_LOAD_CACHE
     // (the latter mirrors Python beancount's opt-out env var, see issue #939).
-    let cache_disabled = args.no_cache || std::env::var_os(DISABLE_CACHE_ENV).is_some();
+    // The loader honors the env var on its own; this CLI-level check is a
+    // perf optimization that lets us skip building the cache entry entirely.
+    let cache_disabled = args.no_cache || cache_disabled_by_env();
 
     // Try loading from cache first (unless disabled)
     let cache_entry = if cache_disabled {

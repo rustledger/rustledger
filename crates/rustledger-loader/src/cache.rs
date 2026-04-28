@@ -21,7 +21,7 @@
 //! Python beancount and honored at the loader level (so any consumer of
 //! [`load_cache_entry`] / [`save_cache_entry`] gets the kill switch for free):
 //!
-//! - `BEANCOUNT_DISABLE_LOAD_CACHE`: when set to a non-empty value,
+//! - `BEANCOUNT_DISABLE_LOAD_CACHE`: when set (even to an empty value),
 //!   [`load_cache_entry`] returns `None` and [`save_cache_entry`] is a no-op.
 //! - `BEANCOUNT_LOAD_CACHE_FILENAME`: a path pattern that may contain
 //!   `{filename}` (replaced with the source basename). Relative paths resolve
@@ -363,9 +363,14 @@ fn legacy_cache_path(source: &Path) -> PathBuf {
     path
 }
 
-/// Returns true if `BEANCOUNT_DISABLE_LOAD_CACHE` is set to a non-empty value.
-fn cache_disabled_by_env() -> bool {
-    std::env::var_os(DISABLE_CACHE_ENV).is_some_and(|v| !v.is_empty())
+/// Returns true if `BEANCOUNT_DISABLE_LOAD_CACHE` is set in the environment.
+///
+/// Mere presence disables — value is ignored, including empty string. Matches
+/// Python beancount's `os.getenv("BEANCOUNT_DISABLE_LOAD_CACHE") is None`
+/// check.
+#[must_use]
+pub fn cache_disabled_by_env() -> bool {
+    std::env::var_os(DISABLE_CACHE_ENV).is_some()
 }
 
 /// Try to load a cache entry from disk.
@@ -478,9 +483,17 @@ fn deserialize_directives(data: &[u8]) -> Option<Vec<Spanned<Directive>>> {
 }
 
 /// Invalidate the cache for a file.
+///
+/// Removes both the current cache file and any legacy pre-#939
+/// `<file>.cache` sidecar so a subsequent load can't pick up stale data.
 pub fn invalidate_cache(main_file: &Path) {
     let cache_file = cache_path(main_file);
-    let _ = fs::remove_file(cache_file);
+    let _ = fs::remove_file(&cache_file);
+
+    let legacy = legacy_cache_path(main_file);
+    if legacy != cache_file {
+        let _ = fs::remove_file(&legacy);
+    }
 }
 
 /// Re-intern all strings in directives to deduplicate memory.
@@ -899,6 +912,31 @@ mod tests {
 
         // Cleanup
         let _ = fs::remove_file(&beancount_file);
+        let _ = fs::remove_dir(&temp_dir);
+    }
+
+    #[test]
+    fn test_invalidate_cache_removes_legacy_sidecar() {
+        // invalidate_cache should remove both the new dotfile cache and any
+        // pre-#939 visible cache file alongside the source.
+        assert_clean_cache_env();
+
+        let temp_dir = std::env::temp_dir().join("rustledger_invalidate_legacy_test");
+        let _ = fs::create_dir_all(&temp_dir);
+
+        let beancount_file = temp_dir.join("legacy.beancount");
+        // Synthesize a leftover legacy cache file (no need to be valid — we're
+        // only testing that invalidate removes it).
+        let legacy = legacy_cache_path(&beancount_file);
+        fs::write(&legacy, b"stale").unwrap();
+        assert!(legacy.exists());
+
+        invalidate_cache(&beancount_file);
+        assert!(
+            !legacy.exists(),
+            "invalidate_cache should remove the legacy sidecar file"
+        );
+
         let _ = fs::remove_dir(&temp_dir);
     }
 

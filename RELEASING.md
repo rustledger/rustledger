@@ -7,8 +7,9 @@ How to cut a new release of rustledger.
 Releases are cut manually:
 
 1. Bump versions across the workspace and npm packages.
-2. Open a `chore: release vX.Y.Z` PR and merge it once CI is green.
-3. Create the GitHub Release for the new tag — this triggers the build and publish workflows.
+2. Run a pre-flight smoke check (`tsc`, `wasm-pack build`) — catches the surfaces CI doesn't exercise per-PR.
+3. Open a `chore: release vX.Y.Z` PR and merge it once CI is green.
+4. Create the GitHub Release for the new tag — this triggers the build and publish workflows.
 
 There is no automatic version-bump bot. We removed `release-plz` because it was creating more friction than it was saving.
 
@@ -187,7 +188,7 @@ The publish workflow is idempotent. Already-published artifacts are skipped (the
 
 ### Race between `Release Build` and `Release Publish`
 
-Both workflows fire on the same `release: published` event and run **in parallel**. `Build Docker images` and `Update AUR (rustledger-bin)` need binaries from the GitHub release; if they start before `Release Build` finishes uploading them, they fail at the extract step. Re-run them after `Release Build` is `success`:
+`Release Build` is triggered by the tag push (`on: push: tags: 'v*'`); `Release Publish` is triggered when the GitHub release is published (`on: release: types: [published]`). In the usual `gh release create` flow the tag push and the release-published event happen close together, so the workflows run **in parallel**. `Build Docker images` and `Update AUR (rustledger-bin)` need binaries from the GitHub release; if they start before `Release Build` finishes uploading them, they fail at the extract step. Re-run them after `Release Build` is `success`:
 
 ```bash
 gh run view <release-publish-run-id> --json jobs --jq '.jobs[] | select(.conclusion == "failure") | .databaseId'
@@ -199,7 +200,7 @@ gh run rerun --failed --job=<job-id>
 Misleading error from `dawidd6/action-homebrew-bump-formula` — it fires when the formula in `homebrew-core` master is **already** at the target version (typically because a prior re-run of release-publish merged the bump PR). Verify with:
 
 ```bash
-curl -s https://raw.githubusercontent.com/Homebrew/homebrew-core/master/Formula/r/rustledger.rb | grep '"url"'
+curl -s https://raw.githubusercontent.com/Homebrew/homebrew-core/master/Formula/r/rustledger.rb | grep -E '^\s*url\s+"'
 ```
 
 If the URL is at the target version, the failure is a no-op and can be ignored.

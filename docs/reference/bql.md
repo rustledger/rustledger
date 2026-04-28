@@ -34,6 +34,63 @@ SELECT account, sum(position) AS total
 SELECT year(date), month(date), sum(cost(position))
 ```
 
+#### Available Columns
+
+Each row in a default `SELECT` is one posting from one transaction. The columns below are evaluated against that pair. Posting-level columns vary across postings in the same transaction; transaction-level columns are identical for every posting in a given transaction. A `?` after a type means the column may be `NULL`. `StringSet` columns are queried with [`IN` / `NOT IN`](#in-operator), not `=` or `~`.
+
+**Transaction columns**
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `date` | Date | Transaction date |
+| `flag` | String | Transaction flag (`*`, `!`, etc.) |
+| `payee` | String? | Transaction payee, or `NULL` |
+| `narration` | String | Transaction narration |
+| `description` | String | `"payee \| narration"` if payee set, else `narration` |
+| `tags` | StringSet | All `#tag` values on the transaction |
+| `links` | StringSet | All `^link` values on the transaction |
+| `accounts` | StringSet | All accounts in the transaction (every posting) |
+| `year`, `month`, `day` | Integer | Date parts (shortcuts for `year(date)` etc.) |
+| `id` | Integer? | Stable directive index (matches Python beancount's `id`) |
+| `type` | String | Always `"Transaction"` for default `SELECT` |
+| `entry` | Object | Whole transaction as a structured object (`date`, `flag`, `payee`, `narration`, `tags`, `links`, `meta`) |
+
+**Posting columns**
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `account` | String | This posting's account |
+| `other_accounts` | StringSet | Every account in the transaction except `account` |
+| `position` | Position? | Units + cost (when present) |
+| `units` | Amount? | Just the units (number + currency) |
+| `number` | Number? | The numeric part of `units` |
+| `currency` | String? | The currency part of `units` |
+| `cost` | Amount? | Per-posting cost basis, total |
+| `cost_number` | Number? | Per-unit cost (`{}` syntax) |
+| `cost_currency` | String? | Cost currency |
+| `cost_date` | Date? | Cost lot date |
+| `cost_label` | String? | Cost label |
+| `has_cost` | Boolean | Whether this posting carries a cost |
+| `weight` | Amount? | Cost-converted amount used for balancing |
+| `price` | Amount? | Posting's `@`/`@@` price annotation |
+| `posting_flag` | String? | Per-posting flag, distinct from the transaction's `flag` |
+| `meta` | Metadata | This posting's metadata (see [Metadata Functions](#metadata-functions)) |
+
+**Cumulative / contextual columns**
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `balance` | Inventory? | Cumulative running total across `WHERE`-filtered postings (matches `bean-query`) |
+| `account_balance` | Inventory? | Per-account running balance, independent of `WHERE` |
+
+**Source location columns**
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `filename` | String? | Source file the directive came from |
+| `lineno` | Integer? | Line number in that file |
+| `location` | String? | `"filename:lineno"` shortcut |
+
 ### Column Aliases
 
 ```sql
@@ -82,10 +139,34 @@ WHERE payee IS NULL
 
 ### IN Operator
 
+`IN` does scalar membership against a literal list, and set membership against a `StringSet` column.
+
 ```sql
+-- Scalar in a literal set
 WHERE account IN ("Assets:Bank", "Assets:Cash")
+WHERE currency IN ("USD", "EUR")
+
+-- Scalar in a column-valued set
 WHERE "vacation" IN tags
+WHERE "Assets:Investments:Cash-USD" IN other_accounts
+
+-- Negated form
+WHERE "draft" NOT IN tags
+WHERE account NOT IN ("Equity:Opening", "Equity:Closing")
 ```
+
+#### Set columns
+
+`tags`, `links`, `accounts`, and `other_accounts` are `StringSet`-typed. Equality (`=`) and regex (`~`) don't apply to sets; the only operators that work are `IN` and `NOT IN`. To filter a transaction by which other accounts appear on its postings, put the account literal on the left:
+
+```sql
+-- All dividend postings whose other side(s) include Cash-USD
+SELECT date, narration, account, position
+WHERE account ~ '^Income:Investment:Dividend'
+  AND 'Assets:Investments:Cash-USD' IN other_accounts
+```
+
+`other_accounts` is the set of every account in the same transaction *except* the current posting's own account, which is what makes the "find rows where this posting was paired with X" query work.
 
 ## GROUP BY Clause
 

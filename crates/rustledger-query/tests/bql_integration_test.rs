@@ -4,8 +4,8 @@
 
 use rust_decimal_macros::dec;
 use rustledger_core::{
-    Amount, Close, Commodity, CostSpec, Directive, Document, Event, NaiveDate, Note, Open, Posting,
-    PriceAnnotation, Transaction,
+    Amount, Close, Commodity, CostSpec, Directive, Document, Event, Inventory, NaiveDate, Note,
+    Open, Posting, PriceAnnotation, Transaction,
 };
 use rustledger_query::{Executor, QueryResult, Value, parse};
 
@@ -532,53 +532,72 @@ fn test_balance_is_cumulative_across_accounts() {
     }
 }
 
+/// Find the first row whose `account` column equals the given name and
+/// return its `balance` column as an Inventory. Avoids depending on the
+/// executor's sort being stable for equal date keys (txn 4 has both
+/// Savings and Checking on 2024-01-25, so a positional lookup like
+/// `result.rows[3]` is flaky).
+fn find_balance_by_account<'a>(
+    result: &'a QueryResult,
+    account: &str,
+    balance_col_idx: usize,
+) -> &'a Inventory {
+    for row in &result.rows {
+        if let Value::String(a) = &row[1]
+            && a == account
+            && let Value::Inventory(inv) = &row[balance_col_idx]
+        {
+            return inv;
+        }
+    }
+    panic!("no row with account={account} and Inventory balance found")
+}
+
 #[test]
 fn test_balance_carries_across_different_accounts() {
-    // Row 4 (txn 4, 2024-01-25): adds Assets:Bank:Savings +1000 AND
-    // Assets:Bank:Checking -1000. Both Assets postings match the filter.
-    // After row 4 (Savings): cumulative = 4805 + 1000 = 5805.
-    // After row 5 (Checking): cumulative = 5805 - 1000 = 4805.
-    // Critically, the Savings row carries forward the Checking history —
-    // that's the bean-query semantic the per-account version got wrong.
+    // Txn 4 (2024-01-25) adds Assets:Bank:Savings +1000 AND
+    // Assets:Bank:Checking -1000. Cumulative after the Savings row should
+    // be 4805 + 1000 = 5805 USD — i.e., it carries forward the Checking
+    // history from earlier rows. The previous (per-account) implementation
+    // would have shown only 1000, since that's all Savings has seen.
     let directives = make_test_directives();
     let result = execute_query(
-        r#"SELECT date, account, balance WHERE account ~ "^Assets" ORDER BY date"#,
+        r#"SELECT date, account, balance WHERE account ~ "^Assets" ORDER BY date, account"#,
         &directives,
     );
-    assert!(result.len() >= 5, "expected ≥5 rows, got {}", result.len());
-    if let Value::Inventory(inv) = &result.rows[3][2] {
-        let positions = inv.positions();
-        assert_eq!(positions[0].units.number, dec!(5805));
-    } else {
-        panic!("expected Inventory at row 4, got {:?}", result.rows[3][2]);
-    }
+    let inv = find_balance_by_account(&result, "Assets:Bank:Savings", 2);
+    assert_eq!(inv.positions()[0].units.number, dec!(5805));
 }
 
 #[test]
 fn test_account_balance_is_per_account() {
     // `account_balance` keeps the per-account view we used to expose as
     // `balance`. For the same query, each row should show only that
-    // account's cumulative posting amounts.
+    // account's cumulative posting amounts — Savings shows 1000, NOT the
+    // cumulative 5805.
     let directives = make_test_directives();
     let result = execute_query(
-        r#"SELECT date, account, account_balance WHERE account ~ "^Assets" ORDER BY date"#,
+        r#"SELECT date, account, account_balance WHERE account ~ "^Assets" ORDER BY date, account"#,
         &directives,
     );
-    // The third row is Assets:Bank:Checking (gas, -45). At that point its
-    // own balance is 5000 - 150 - 45 = 4805 USD — happens to equal the
-    // cumulative because all prior postings were on Checking.
-    if let Value::Inventory(inv) = &result.rows[2][2] {
-        assert_eq!(inv.positions()[0].units.number, dec!(4805));
-    } else {
-        panic!("expected Inventory");
+    let savings = find_balance_by_account(&result, "Assets:Bank:Savings", 2);
+    assert_eq!(savings.positions()[0].units.number, dec!(1000));
+
+    // Pre-Savings, Checking has run 5000 - 150 - 45 = 4805 across the
+    // first three Assets postings. Find the gas row (2024-01-22) by
+    // account to verify its account_balance (date matching first row
+    // would otherwise be ambiguous if multiple Checking rows exist).
+    let mut last_checking_balance = None;
+    for row in &result.rows {
+        if let Value::String(a) = &row[1]
+            && a == "Assets:Bank:Checking"
+            && let Value::Inventory(inv) = &row[2]
+        {
+            last_checking_balance = Some(inv.positions()[0].units.number);
+        }
     }
-    // Row 4 is Savings (+1000) — per-account it's just 1000, NOT the
-    // cumulative 5805 from the previous test.
-    if let Value::Inventory(inv) = &result.rows[3][2] {
-        assert_eq!(inv.positions()[0].units.number, dec!(1000));
-    } else {
-        panic!("expected Inventory at row 4");
-    }
+    // After all 5 Checking postings (5000, -150, -45, -1000, -80): final = 3725.
+    assert_eq!(last_checking_balance, Some(dec!(3725)));
 }
 
 #[test]

@@ -325,6 +325,21 @@ impl<'a> Executor<'a> {
                 self.directives.iter().enumerate().collect()
             };
 
+        // Resolve a posting to a Position that preserves cost basis when present.
+        // Other balance accumulators in this crate (`build_balances_with_filter`,
+        // `build_postings_table`) use this same shape; running `balance` /
+        // `account_balance` need to match so lot details aren't dropped.
+        let resolve_position = |posting: &rustledger_core::Posting, txn_date: NaiveDate| {
+            posting.amount().map(|units| {
+                if let Some(cost_spec) = &posting.cost {
+                    if let Some(cost) = cost_spec.resolve(units.number, txn_date) {
+                        return Position::with_cost(units.clone(), cost);
+                    }
+                }
+                Position::simple(units.clone())
+            })
+        };
+
         for (directive_index, directive) in directive_iter {
             if let Directive::Transaction(txn) = directive {
                 // Check FROM clause (transaction-level filter)
@@ -337,10 +352,10 @@ impl<'a> Executor<'a> {
                         // and don't touch the cumulative balance — these postings
                         // didn't make it past the FROM filter.
                         for posting in &txn.postings {
-                            if let Some(units) = posting.amount() {
+                            if let Some(pos) = resolve_position(posting, txn.date) {
                                 let bal =
                                     account_balances.entry(posting.account.clone()).or_default();
-                                bal.add(Position::simple(units.clone()));
+                                bal.add(pos);
                             }
                         }
                         continue;
@@ -362,20 +377,22 @@ impl<'a> Executor<'a> {
                     // Update the account-level running balance regardless of
                     // whether this posting passes WHERE — `account_balance`
                     // should always reflect the underlying ledger truth.
-                    if let Some(units) = posting.amount() {
+                    let resolved = resolve_position(posting, txn.date);
+                    if let Some(pos) = resolved.clone() {
                         let bal = account_balances.entry(posting.account.clone()).or_default();
-                        bal.add(Position::simple(units.clone()));
+                        bal.add(pos);
                     }
 
                     // Build the context with both balance views. The cumulative
-                    // snapshot here is *pre-update* — it reflects the running
-                    // total of WHERE-filtered postings up to but not including
-                    // this one. We update it after WHERE passes (below) so that
-                    // postings rejected by WHERE don't pollute the cumulative.
+                    // snapshot is the running total *before* this posting; we
+                    // update it after WHERE passes so postings rejected by WHERE
+                    // don't pollute the cumulative. Skip the pre-update clone
+                    // when there's no WHERE clause — nothing reads ctx.balance
+                    // before the post-WHERE refresh in that case.
                     let mut ctx = PostingContext {
                         transaction: txn,
                         posting_index: i,
-                        balance: Some(cumulative_balance.clone()),
+                        balance: where_clause.map(|_| cumulative_balance.clone()),
                         account_balance: account_balances.get(&posting.account).cloned(),
                         directive_index: Some(directive_index),
                     };
@@ -390,8 +407,8 @@ impl<'a> Executor<'a> {
                     // WHERE passed: contribute this posting to the cumulative
                     // balance and refresh the snapshot in ctx so SELECT sees
                     // the post-update value.
-                    if let Some(units) = posting.amount() {
-                        cumulative_balance.add(Position::simple(units.clone()));
+                    if let Some(pos) = resolved {
+                        cumulative_balance.add(pos);
                     }
                     ctx.balance = Some(cumulative_balance.clone());
                     postings.push(ctx);

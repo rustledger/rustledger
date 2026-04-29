@@ -71,7 +71,7 @@ This sets the quote currency for `GOVT_EU` only, falling back to `--currency` fo
 
 ### 3. Active-only filtering
 
-By default, only commodities you currently **hold** are fetched. A commodity is considered active if at least one open account ends with a non-zero balance in that currency, computed by summing per-(account, currency) over every transaction posting and excluding accounts that have a `close` directive.
+By default, only commodities you currently **hold** are fetched. A commodity is considered active if at least one open *balance-sheet* account (Assets or Liabilities, using the configured `name_assets` / `name_liabilities` options for non-English ledgers) ends with a non-zero balance in that currency. Equity, Income, and Expenses accounts are excluded from the check; including them would mark every commodity that ever moved through `Equity:Opening-Balances` as active even after the position was fully closed. Closed accounts (those with a `close` directive) are also excluded.
 
 Pass `--all-commodities` to disable the filter and fetch prices for everything declared in the file (matching the pre-#948 behavior).
 

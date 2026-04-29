@@ -10,7 +10,7 @@ use crate::config::{CommodityMapping, PriceConfig};
 use anyhow::{Context, Result};
 use clap::Parser;
 use rustledger_core::NaiveDate;
-use rustledger_loader::Loader;
+use rustledger_loader::LoadOptions;
 use std::collections::HashMap;
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -132,8 +132,21 @@ pub fn run(args: &PriceArgs, price_config: &PriceConfig) -> Result<()> {
     // The discovery layer handles `price:` / `quote_currency:` metadata and
     // the active-commodity filter (issue #948).
     let discovered: HashMap<String, DiscoveredCommodity> = if let Some(ref file) = args.file {
-        let mut loader = Loader::new();
-        let ledger = loader.load(file)?;
+        // Load with booking so interpolated postings (units missing in source,
+        // filled in by the booking engine) get explicit amounts. Without this,
+        // the active-commodity check at `discovery::active_commodities` would
+        // miss the held side of any auto-balanced posting and could mark
+        // currently-held commodities as inactive.
+        let opts = LoadOptions {
+            // Skip plugins / validation here: discovery only cares about
+            // booked postings, and plugin/validation failures shouldn't
+            // block fetching prices on an otherwise-loadable file.
+            run_plugins: false,
+            validate: false,
+            ..LoadOptions::default()
+        };
+        let ledger = rustledger_loader::load(file, &opts)
+            .with_context(|| format!("failed to load {} for symbol discovery", file.display()))?;
         discover_symbols(
             &ledger.directives,
             &ledger.options,
@@ -183,13 +196,21 @@ pub fn run(args: &PriceArgs, price_config: &PriceConfig) -> Result<()> {
     // Handle --source-cmd (ad-hoc external command)
     // This is placed after symbol discovery so -f flag works with --source-cmd
     if let Some(cmd) = &args.source_cmd {
-        return run_with_external_command(args, cmd, &symbols_to_fetch, date, price_config);
+        return run_with_external_command(
+            args,
+            cmd,
+            &symbols_to_fetch,
+            date,
+            price_config,
+            &discovered,
+        );
     }
 
-    // Merge mappings (highest precedence first):
-    //   1. CLI --mapping
+    // Merge mappings in increasing precedence (later inserts override earlier
+    // ones via `HashMap::insert`). The effective high-to-low order is:
+    //   1. CLI --mapping (last to insert, wins)
     //   2. Discovered `price:` metadata from commodity directives (#948)
-    //   3. Config [price.mapping]
+    //   3. Config [price.mapping] (first to insert, lowest precedence)
     let mut combined_mapping = price_config.mapping.clone();
     for (symbol, info) in &discovered {
         if let Some(m) = &info.mapping {
@@ -316,6 +337,7 @@ fn run_with_external_command(
     symbols: &[String],
     date: Option<NaiveDate>,
     price_config: &PriceConfig,
+    discovered: &HashMap<String, DiscoveredCommodity>,
 ) -> Result<()> {
     use crate::cmd::price::external::ExternalCommandSource;
 
@@ -335,9 +357,15 @@ fn run_with_external_command(
     let mut handle = stdout.lock();
 
     for symbol in symbols {
+        // Honor per-commodity quote_currency / price: metadata for --source-cmd
+        // too, matching the network-fetch path.
+        let effective_currency = discovered
+            .get(symbol)
+            .and_then(|d| d.quote_currency.as_deref())
+            .unwrap_or(&args.currency);
         let request = PriceRequest {
             ticker: symbol.clone(),
-            currency: args.currency.clone(),
+            currency: effective_currency.to_string(),
             date,
         };
 

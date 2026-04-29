@@ -449,4 +449,31 @@ mod tests {
         assert!(info.mapping.is_none());
         assert!(info.quote_currency.is_none());
     }
+
+    #[test]
+    fn active_filter_handles_explicit_amounts_on_balance_sheet_side() {
+        // Simulates the post-booking shape: every posting has explicit units,
+        // including the asset side. Confirms the active filter sees the
+        // asset-side amount and includes the commodity. The actual
+        // interpolation happens in the booking engine before this function
+        // sees the directives — `price_cmd.rs` calls `process::load` with
+        // booking enabled to ensure that.
+        let dirs = directives(vec![
+            Directive::Open(Open::new(date(2024, 1, 1), "Assets:Brokerage")),
+            Directive::Open(Open::new(date(2024, 1, 1), "Equity:Opening")),
+            Directive::Transaction(
+                Transaction::new(date(2024, 2, 1), "Buy AAPL")
+                    .with_posting(Posting::new(
+                        "Assets:Brokerage",
+                        Amount::new(dec!(100), "AAPL"),
+                    ))
+                    .with_posting(Posting::new(
+                        "Equity:Opening",
+                        Amount::new(dec!(-100), "AAPL"),
+                    )),
+            ),
+        ]);
+        let active = active_commodities(&dirs, &Options::new());
+        assert!(active.contains("AAPL"));
+    }
 }

@@ -7,6 +7,7 @@
 //! - Fallback chains for reliability
 
 pub mod cache;
+pub mod discovery;
 pub mod external;
 pub mod sources;
 

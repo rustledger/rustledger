@@ -22,17 +22,76 @@ rledger price [OPTIONS] [SYMBOL]...
 
 | Option | Description |
 |--------|-------------|
-| `-f, --file <FILE>` | Beancount file to read commodities from |
+| `-f, --file <FILE>` | Beancount file to discover commodities from |
 | `-c, --currency <CURRENCY>` | Base currency for price quotes [default: USD] |
 | `-d, --date <DATE>` | Date for prices (YYYY-MM-DD, defaults to today) |
 | `-b, --beancount` | Output as beancount price directives |
 | `-s, --source <SOURCE>` | Use specific source (overrides mapping) |
 | `--source-cmd <CMD>` | Use ad-hoc external command as source |
 | `-m, --mapping <MAPPING>` | Symbol mapping (e.g., `VTI:VTI,BTC:BTC-USD`) |
+| `--all-commodities` | Include commodities not currently held (default: only active) |
 | `--list-sources` | List configured sources and exit |
 | `--no-cache` | Disable the price cache for this run |
 | `--clear-cache` | Clear the price cache before fetching |
 | `-v, --verbose` | Show verbose output |
+
+## Discovering Symbols from a Ledger
+
+`-f / --file` extracts the list of commodities to fetch from a beancount file, so you don't have to maintain a separate symbol list. Three things determine what gets discovered, all matching `bean-price` semantics (issue #948):
+
+### 1. `price:` metadata on `commodity` directives
+
+Annotate a commodity with how to fetch its price. The format is `<quote-currency>:<source>/<ticker>`, optionally chained with `,` for fallback:
+
+```beancount
+2024-01-01 commodity AAPL
+  price: "USD:yahoo/AAPL"
+
+2024-01-01 commodity Vanguard_VTI
+  price: "USD:yahoo/VTI,USD:google/NYSEARCA:VTI"
+
+2024-01-01 commodity AUD
+  price: "EUR:ecb/AUD-EUR"
+```
+
+The first source in the chain is tried first; subsequent ones act as fallbacks. The quote currency in the metadata overrides the global `--currency` for that one symbol, so you can mix USD-quoted stocks and EUR-quoted bonds in the same run.
+
+Commodities that don't have `price:` metadata fall back to a name heuristic: ticker-shaped names (uppercase letters, digits, dashes; ≤ 10 chars) are still picked up, preserving the previous behavior.
+
+### 2. `quote_currency:` metadata
+
+If you don't use `price:` but want a per-commodity quote currency:
+
+```beancount
+2024-01-01 commodity GOVT_EU
+  quote_currency: "EUR"
+```
+
+This sets the quote currency for `GOVT_EU` only, falling back to `--currency` for everything else.
+
+### 3. Active-only filtering
+
+By default, only commodities you currently **hold** are fetched. A commodity is considered active if at least one open account ends with a non-zero balance in that currency, computed by summing per-(account, currency) over every transaction posting and excluding accounts that have a `close` directive.
+
+Pass `--all-commodities` to disable the filter and fetch prices for everything declared in the file (matching the pre-#948 behavior).
+
+```bash
+# Default: only commodities you actually hold
+rledger price -f main.beancount
+
+# Include declared-but-unheld commodities
+rledger price -f main.beancount --all-commodities
+```
+
+### Precedence for source/ticker resolution
+
+When multiple configurations apply to the same symbol, the order from highest to lowest precedence is:
+
+1. CLI `--mapping` (per-symbol overrides on the command line)
+2. CLI `--source` (forces source for every symbol in the run)
+3. `price:` metadata on the commodity directive
+4. Config-file `[price.mapping]` entries
+5. Default source from `[price.default_source]` (or `yahoo`)
 
 ## Price Caching
 

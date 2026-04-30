@@ -803,6 +803,188 @@ fn test_journal_at_units_position_is_amount_not_position() {
     }
 }
 
+/// Regression test for issue #957: `JOURNAL ... AT cost` must collapse the
+/// balance column to cost-currency totals, matching `bean-query`'s
+/// `cost(balance)` translation. Previously the balance column showed the
+/// full lot detail regardless of AT mode.
+#[test]
+fn test_journal_at_cost_collapses_balance_to_cost_currency() {
+    let directives = vec![
+        Directive::Open(Open::new(date(2024, 1, 1), "Assets:Brokerage")),
+        Directive::Open(Open::new(date(2024, 1, 1), "Equity:Opening")),
+        Directive::Transaction(
+            Transaction::new(date(2024, 2, 1), "Buy AAPL")
+                .with_posting(
+                    Posting::new("Assets:Brokerage", Amount::new(dec!(10), "AAPL")).with_cost(
+                        CostSpec::empty()
+                            .with_number_per(dec!(150))
+                            .with_currency("USD"),
+                    ),
+                )
+                .with_posting(Posting::new(
+                    "Equity:Opening",
+                    Amount::new(dec!(-1500), "USD"),
+                )),
+        ),
+    ];
+    let query = parse(r#"JOURNAL "Assets:Brokerage" AT cost"#).expect("should parse");
+    let mut executor = Executor::new(&directives);
+    let result = executor.execute(&query).expect("should execute");
+
+    assert_eq!(result.rows.len(), 1);
+    let balance = match &result.rows[0][6] {
+        Value::Inventory(inv) => inv,
+        other => panic!("expected Inventory, got {other:?}"),
+    };
+    let positions = balance.positions();
+    assert_eq!(positions.len(), 1);
+    // 10 AAPL { 150 USD } collapsed to 1500 USD (cost-currency total).
+    assert_eq!(positions[0].units.number, dec!(1500));
+    assert_eq!(positions[0].units.currency.as_str(), "USD");
+    assert!(
+        positions[0].cost.is_none(),
+        "AT cost balance must drop the lot annotation; got {:?}",
+        positions[0].cost
+    );
+}
+
+/// Regression test for issue #957: `JOURNAL ... AT units` must strip cost
+/// annotations from every position in the balance column.
+#[test]
+fn test_journal_at_units_strips_cost_from_balance() {
+    let directives = vec![
+        Directive::Open(Open::new(date(2024, 1, 1), "Assets:Brokerage")),
+        Directive::Open(Open::new(date(2024, 1, 1), "Equity:Opening")),
+        Directive::Transaction(
+            Transaction::new(date(2024, 2, 1), "Buy AAPL")
+                .with_posting(
+                    Posting::new("Assets:Brokerage", Amount::new(dec!(10), "AAPL")).with_cost(
+                        CostSpec::empty()
+                            .with_number_per(dec!(150))
+                            .with_currency("USD"),
+                    ),
+                )
+                .with_posting(Posting::new(
+                    "Equity:Opening",
+                    Amount::new(dec!(-1500), "USD"),
+                )),
+        ),
+    ];
+    let query = parse(r#"JOURNAL "Assets:Brokerage" AT units"#).expect("should parse");
+    let mut executor = Executor::new(&directives);
+    let result = executor.execute(&query).expect("should execute");
+
+    let balance = match &result.rows[0][6] {
+        Value::Inventory(inv) => inv,
+        other => panic!("expected Inventory, got {other:?}"),
+    };
+    let positions = balance.positions();
+    assert_eq!(positions.len(), 1);
+    // AT units shows units only — same number / currency as the position.
+    assert_eq!(positions[0].units.number, dec!(10));
+    assert_eq!(positions[0].units.currency.as_str(), "AAPL");
+    assert!(
+        positions[0].cost.is_none(),
+        "AT units balance must drop the lot annotation; got {:?}",
+        positions[0].cost
+    );
+}
+
+/// Regression test for issue #957 edge case: positions without cost are kept
+/// as-is by `Inventory::at_cost()` (matches bean-query's `cost()` fallback).
+/// A `JOURNAL ... AT cost` over a USD-only ledger should pass USD through
+/// unchanged in the balance, not error or drop the position.
+#[test]
+fn test_journal_at_cost_balance_preserves_no_cost_positions() {
+    let directives = vec![
+        Directive::Open(Open::new(date(2024, 1, 1), "Assets:Cash")),
+        Directive::Open(Open::new(date(2024, 1, 1), "Equity:Opening")),
+        Directive::Transaction(
+            Transaction::new(date(2024, 2, 1), "Deposit")
+                .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(100), "USD")))
+                .with_posting(Posting::new(
+                    "Equity:Opening",
+                    Amount::new(dec!(-100), "USD"),
+                )),
+        ),
+    ];
+    let query = parse(r#"JOURNAL "Assets:Cash" AT cost"#).expect("should parse");
+    let mut executor = Executor::new(&directives);
+    let result = executor.execute(&query).expect("should execute");
+
+    let balance = match &result.rows[0][6] {
+        Value::Inventory(inv) => inv,
+        other => panic!("expected Inventory, got {other:?}"),
+    };
+    let positions = balance.positions();
+    assert_eq!(positions.len(), 1);
+    assert_eq!(positions[0].units.number, dec!(100));
+    assert_eq!(positions[0].units.currency.as_str(), "USD");
+}
+
+/// Regression test for issue #957 edge case: a balance with positions in
+/// multiple cost currencies stays multi-currency under `AT cost` (matches
+/// bean-query — `cost(balance)` does not unify across cost currencies).
+#[test]
+fn test_journal_at_cost_balance_keeps_mixed_cost_currencies() {
+    let directives = vec![
+        Directive::Open(Open::new(date(2024, 1, 1), "Assets:Brokerage")),
+        Directive::Open(Open::new(date(2024, 1, 1), "Equity:Opening")),
+        // Lot 1: 10 AAPL @ 150 USD = 1500 USD cost basis.
+        Directive::Transaction(
+            Transaction::new(date(2024, 2, 1), "Buy AAPL USD lot")
+                .with_posting(
+                    Posting::new("Assets:Brokerage", Amount::new(dec!(10), "AAPL")).with_cost(
+                        CostSpec::empty()
+                            .with_number_per(dec!(150))
+                            .with_currency("USD"),
+                    ),
+                )
+                .with_posting(Posting::new(
+                    "Equity:Opening",
+                    Amount::new(dec!(-1500), "USD"),
+                )),
+        ),
+        // Lot 2: 5 AAPL @ 130 EUR = 650 EUR cost basis. (Same commodity,
+        // different cost currency — atypical but legal.)
+        Directive::Transaction(
+            Transaction::new(date(2024, 3, 1), "Buy AAPL EUR lot")
+                .with_posting(
+                    Posting::new("Assets:Brokerage", Amount::new(dec!(5), "AAPL")).with_cost(
+                        CostSpec::empty()
+                            .with_number_per(dec!(130))
+                            .with_currency("EUR"),
+                    ),
+                )
+                .with_posting(Posting::new(
+                    "Equity:Opening",
+                    Amount::new(dec!(-650), "EUR"),
+                )),
+        ),
+    ];
+    let query = parse(r#"JOURNAL "Assets:Brokerage" AT cost"#).expect("should parse");
+    let mut executor = Executor::new(&directives);
+    let result = executor.execute(&query).expect("should execute");
+
+    // After both rows, the balance has both USD and EUR cost-currency totals.
+    let last_balance = match &result.rows[1][6] {
+        Value::Inventory(inv) => inv,
+        other => panic!("expected Inventory, got {other:?}"),
+    };
+    let mut by_currency: std::collections::HashMap<&str, rust_decimal::Decimal> =
+        std::collections::HashMap::new();
+    for p in last_balance.positions() {
+        by_currency.insert(p.units.currency.as_str(), p.units.number);
+    }
+    assert_eq!(by_currency.get("USD"), Some(&dec!(1500)));
+    assert_eq!(by_currency.get("EUR"), Some(&dec!(650)));
+    assert_eq!(
+        by_currency.len(),
+        2,
+        "AT cost must not collapse across cost currencies; got {by_currency:?}"
+    );
+}
+
 // ============================================================================
 // BALANCES Query Tests
 // ============================================================================

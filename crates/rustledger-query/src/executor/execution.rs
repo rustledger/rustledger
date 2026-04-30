@@ -825,6 +825,23 @@ impl Executor<'_> {
                                 .map_or(Value::Null, |p| Value::Position(Box::new(p.clone())))
                         };
 
+                        // Apply the same AT-mode transformation to the balance
+                        // column that bean-query's `summary_func(balance)`
+                        // applies. Issue #957: previously the balance always
+                        // showed the full cumulative inventory regardless of
+                        // AT mode; that diverged from bean-query, where AT
+                        // cost collapses the balance to cost-currency totals
+                        // and AT units strips lots from the balance.
+                        let balance_for_row = if let Some(at_func) = &query.at_function {
+                            match at_func.to_uppercase().as_str() {
+                                "COST" => cumulative_balance.at_cost(),
+                                "UNITS" => cumulative_balance.at_units(),
+                                _ => cumulative_balance.clone(),
+                            }
+                        } else {
+                            cumulative_balance.clone()
+                        };
+
                         let row = vec![
                             Value::Date(txn.date),
                             Value::String(txn.flag.to_string()),
@@ -836,7 +853,7 @@ impl Executor<'_> {
                             Value::String(txn.narration.to_string()),
                             Value::String(posting.account.to_string()),
                             position_value,
-                            Value::Inventory(Box::new(cumulative_balance.clone())),
+                            Value::Inventory(Box::new(balance_for_row)),
                         ];
                         result.add_row(row);
                     }

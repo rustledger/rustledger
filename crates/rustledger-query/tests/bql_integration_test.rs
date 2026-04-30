@@ -556,6 +556,80 @@ fn test_execute_journal_query() {
     assert!(!result.is_empty());
 }
 
+/// Regression test for issue #955 (Bug 2): the JOURNAL `balance` column was
+/// per-account, but Python `bean-query` translates JOURNAL to a SELECT where
+/// `balance` is the cumulative inventory across every WHERE-filtered posting
+/// (same semantic adopted for SELECT in PR #940). For a multi-account
+/// `JOURNAL "Assets"` query, each row should show the running combined
+/// inventory of all matched accounts up to that point — including currencies
+/// that this row's account doesn't directly carry.
+#[test]
+fn test_journal_balance_is_cumulative_across_matched_accounts() {
+    let directives = vec![
+        Directive::Open(Open::new(date(2024, 1, 1), "Assets:Cash")),
+        Directive::Open(Open::new(date(2024, 1, 1), "Assets:Brokerage")),
+        Directive::Open(Open::new(date(2024, 1, 1), "Equity:Opening")),
+        // Row 0: deposit USD into Assets:Cash.
+        Directive::Transaction(
+            Transaction::new(date(2024, 2, 1), "Deposit")
+                .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(1000), "USD")))
+                .with_posting(Posting::new(
+                    "Equity:Opening",
+                    Amount::new(dec!(-1000), "USD"),
+                )),
+        ),
+        // Row 1: buy AAPL in Assets:Brokerage. Different currency, different
+        // account from the matched set. The balance here should include both
+        // the USD held in Assets:Cash AND the new AAPL.
+        Directive::Transaction(
+            Transaction::new(date(2024, 3, 1), "Buy AAPL")
+                .with_posting(Posting::new(
+                    "Assets:Brokerage",
+                    Amount::new(dec!(10), "AAPL"),
+                ))
+                .with_posting(Posting::new(
+                    "Equity:Opening",
+                    Amount::new(dec!(-1500), "USD"),
+                )),
+        ),
+    ];
+    let query = parse(r#"JOURNAL "Assets""#).expect("should parse");
+    let mut executor = Executor::new(&directives);
+    let result = executor.execute(&query).expect("should execute");
+
+    assert_eq!(result.rows.len(), 2, "two assets postings, two rows");
+
+    // Columns: date, flag, payee, narration, account, position, balance.
+    // Row 0's balance: just the USD from Assets:Cash.
+    let balance_0 = match &result.rows[0][6] {
+        Value::Inventory(inv) => inv,
+        other => panic!("expected Inventory, got {other:?}"),
+    };
+    let positions_0 = balance_0.positions();
+    assert_eq!(positions_0.len(), 1);
+    assert_eq!(positions_0[0].units.currency.as_str(), "USD");
+    assert_eq!(positions_0[0].units.number, dec!(1000));
+
+    // Row 1's balance: the cumulative inventory now includes BOTH USD and
+    // AAPL — even though row 1's posting is on Assets:Brokerage and only
+    // adds AAPL. Per-account semantics would have lost the USD here.
+    let balance_1 = match &result.rows[1][6] {
+        Value::Inventory(inv) => inv,
+        other => panic!("expected Inventory, got {other:?}"),
+    };
+    let mut currencies: Vec<&str> = balance_1
+        .positions()
+        .iter()
+        .map(|p| p.units.currency.as_str())
+        .collect();
+    currencies.sort_unstable();
+    assert_eq!(
+        currencies,
+        vec!["AAPL", "USD"],
+        "JOURNAL balance must be cumulative across matched accounts"
+    );
+}
+
 /// Regression test for issue #955 (Bug 1): the JOURNAL position column was
 /// emitting `Value::Amount(units)` instead of `Value::Position(pos)`,
 /// silently dropping cost annotations. With cost-bearing postings, the

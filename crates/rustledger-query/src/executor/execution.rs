@@ -718,7 +718,7 @@ impl Executor<'_> {
 
     /// Execute a JOURNAL query.
     pub(super) fn execute_journal(
-        &mut self,
+        &self,
         query: &crate::ast::JournalQuery,
     ) -> Result<QueryResult, QueryError> {
         // JOURNAL is a shorthand for SELECT with specific columns
@@ -737,6 +737,14 @@ impl Executor<'_> {
             "balance".to_string(),
         ];
         let mut result = QueryResult::new(columns);
+
+        // Cumulative balance across every matched posting in this JOURNAL run.
+        // Matches Python `bean-query`'s JOURNAL → SELECT translation, where the
+        // `balance` column is `summary_func(balance)` over the running
+        // cumulative inventory of WHERE-filtered postings — not per-account.
+        // Aligns with the cumulative `balance` semantics introduced for SELECT
+        // in PR #940; the JOURNAL command was missed in that change. Issue #955.
+        let mut cumulative_balance = rustledger_core::Inventory::new();
 
         // Filter transactions that touch the account
         for directive in self.directives {
@@ -758,9 +766,6 @@ impl Executor<'_> {
                     };
 
                     if matches {
-                        // Build the row
-                        let balance = self.balances.entry(posting.account.clone()).or_default();
-
                         // Resolve the posting into a Position once. Used for
                         // both the running balance accumulator and the
                         // default-case position column. With cost when the
@@ -777,7 +782,7 @@ impl Executor<'_> {
                         });
 
                         if let Some(ref p) = pos {
-                            balance.add(p.clone());
+                            cumulative_balance.add(p.clone());
                         }
 
                         // Apply AT function if specified.
@@ -828,7 +833,7 @@ impl Executor<'_> {
                             Value::String(txn.narration.to_string()),
                             Value::String(posting.account.to_string()),
                             position_value,
-                            Value::Inventory(Box::new(balance.clone())),
+                            Value::Inventory(Box::new(cumulative_balance.clone())),
                         ];
                         result.add_row(row);
                     }

@@ -556,6 +556,52 @@ fn test_execute_journal_query() {
     assert!(!result.is_empty());
 }
 
+/// Regression test for issue #955 (Bug 1): the JOURNAL position column was
+/// emitting `Value::Amount(units)` instead of `Value::Position(pos)`,
+/// silently dropping cost annotations. With cost-bearing postings, the
+/// position column now preserves `{ cost }` so it matches `bean-query`.
+#[test]
+fn test_journal_position_column_preserves_cost() {
+    let directives = vec![
+        Directive::Open(Open::new(date(2024, 1, 1), "Assets:Brokerage")),
+        Directive::Open(Open::new(date(2024, 1, 1), "Equity:Opening")),
+        Directive::Transaction(
+            Transaction::new(date(2024, 2, 1), "Buy AAPL")
+                .with_posting(
+                    Posting::new("Assets:Brokerage", Amount::new(dec!(10), "AAPL")).with_cost(
+                        CostSpec::empty()
+                            .with_number_per(dec!(150))
+                            .with_currency("USD"),
+                    ),
+                )
+                .with_posting(Posting::new(
+                    "Equity:Opening",
+                    Amount::new(dec!(-1500), "USD"),
+                )),
+        ),
+    ];
+    let query = parse(r#"JOURNAL "Assets:Brokerage""#).expect("should parse");
+    let mut executor = Executor::new(&directives);
+    let result = executor.execute(&query).expect("should execute");
+
+    assert_eq!(result.rows.len(), 1, "expected one matching posting");
+
+    // Columns: date, flag, payee, narration, account, position, balance.
+    let position = &result.rows[0][5];
+    let position_with_cost = match position {
+        Value::Position(p) => p,
+        other => panic!("expected Value::Position, got {other:?}"),
+    };
+    assert_eq!(position_with_cost.units.number, dec!(10));
+    assert_eq!(position_with_cost.units.currency.as_str(), "AAPL");
+    let cost = position_with_cost
+        .cost
+        .as_ref()
+        .expect("position column must preserve cost annotation");
+    assert_eq!(cost.number, dec!(150));
+    assert_eq!(cost.currency.as_str(), "USD");
+}
+
 // ============================================================================
 // BALANCES Query Tests
 // ============================================================================

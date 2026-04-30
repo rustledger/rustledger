@@ -114,6 +114,22 @@ impl DisplayContext {
         self.precisions.get(currency).copied()
     }
 
+    /// Get the default precision used when formatting a Decimal that has no
+    /// associated currency (e.g. the result of `SUM(number)` in BQL).
+    ///
+    /// Matches Python `bean-query`'s `format_decimal` behavior: pick the
+    /// max precision across every currency known to the context. Returns 0
+    /// if no currencies have been recorded.
+    #[must_use]
+    pub fn default_precision(&self) -> u32 {
+        self.fixed_precisions
+            .values()
+            .chain(self.precisions.values())
+            .copied()
+            .max()
+            .unwrap_or(0)
+    }
+
     /// Quantize a number to the tracked precision for a currency.
     ///
     /// Rounds the number to the maximum decimal places seen for the currency.
@@ -164,6 +180,25 @@ impl DisplayContext {
     #[must_use]
     pub fn format_amount(&self, number: Decimal, currency: &str) -> String {
         format!("{} {}", self.format(number, currency), currency)
+    }
+
+    /// Format a Decimal that has no associated currency, using the
+    /// [`default_precision`](Self::default_precision).
+    ///
+    /// Used by the BQL query renderer for `Value::Number` results — bare
+    /// Decimals produced by aggregates like `SUM(number)`. Matches
+    /// `bean-query`'s rendering for unspecified-currency Decimal columns.
+    #[must_use]
+    pub fn format_default(&self, number: Decimal) -> String {
+        let dp = self.default_precision();
+        let rounded = number.round_dp(dp);
+        let formatted = format!("{rounded}");
+        let formatted = Self::ensure_decimal_places(&formatted, dp);
+        if self.render_commas {
+            Self::add_commas(&formatted)
+        } else {
+            formatted
+        }
     }
 
     /// Get the decimal precision (number of digits after decimal point) of a number.
@@ -331,5 +366,74 @@ mod tests {
         ctx.update(dec!(50.25), "USD");
 
         assert_eq!(ctx.format_amount(dec!(100), "USD"), "100.00 USD");
+    }
+
+    #[test]
+    fn test_default_precision_picks_max_across_currencies() {
+        // Issue #954: bare Decimals (e.g. SUM(number) result) need a default
+        // precision matching what bean-query uses — the max precision across
+        // every known currency.
+        let mut ctx = DisplayContext::new();
+        ctx.update(dec!(1.23), "USD"); // precision 2
+        ctx.update(dec!(1.2345), "EUR"); // precision 4
+        ctx.update(dec!(0.5), "GBP"); // precision 1
+
+        assert_eq!(ctx.default_precision(), 4);
+    }
+
+    #[test]
+    fn test_default_precision_includes_fixed_overrides() {
+        // Fixed precision (from `option "display_precision"`) should also
+        // contribute to the max.
+        let mut ctx = DisplayContext::new();
+        ctx.update(dec!(1.23), "USD");
+        ctx.set_fixed_precision("BTC", 8);
+
+        assert_eq!(ctx.default_precision(), 8);
+    }
+
+    #[test]
+    fn test_default_precision_empty_context_is_zero() {
+        let ctx = DisplayContext::new();
+        assert_eq!(ctx.default_precision(), 0);
+    }
+
+    #[test]
+    fn test_format_default_pads_to_max_precision() {
+        let mut ctx = DisplayContext::new();
+        ctx.update(dec!(1.23), "USD");
+        ctx.update(dec!(1.2345), "EUR");
+
+        // Default precision = 4 (EUR's), so even an integer-shaped value
+        // gets four trailing zeros.
+        assert_eq!(ctx.format_default(dec!(0)), "0.0000");
+        assert_eq!(ctx.format_default(dec!(100)), "100.0000");
+    }
+
+    #[test]
+    fn test_format_default_rounds_overprecise_values() {
+        let mut ctx = DisplayContext::new();
+        ctx.update(dec!(1.23), "USD");
+
+        // Default precision = 2, so 1.235 rounds half-away-from-zero to 1.24.
+        assert_eq!(ctx.format_default(dec!(1.235)), "1.24");
+    }
+
+    #[test]
+    fn test_format_default_empty_context_natural() {
+        let ctx = DisplayContext::new();
+        // No tracked precision → 0 → integer-like rendering.
+        assert_eq!(ctx.format_default(dec!(42)), "42");
+        // Fractional values with default precision 0 round to integer.
+        assert_eq!(ctx.format_default(dec!(1.5)), "2");
+    }
+
+    #[test]
+    fn test_format_default_renders_commas() {
+        let mut ctx = DisplayContext::new();
+        ctx.update(dec!(1.23), "USD");
+        ctx.set_render_commas(true);
+
+        assert_eq!(ctx.format_default(dec!(1234567.89)), "1,234,567.89");
     }
 }

@@ -849,11 +849,12 @@ impl Executor<'_> {
 
     /// Execute a BALANCES query.
     pub(super) fn execute_balances(
-        &mut self,
+        &self,
         query: &crate::ast::BalancesQuery,
     ) -> Result<QueryResult, QueryError> {
-        // Build up balances by processing all transactions (with FROM filtering)
-        self.build_balances_with_filter(query.from.as_ref())?;
+        // Build up balances by processing all transactions (with FROM filtering).
+        // Local map rather than struct state — see issue #958.
+        let balances = self.build_balances_with_filter(query.from.as_ref())?;
 
         let columns = vec!["account".to_string(), "balance".to_string()];
         let mut result = QueryResult::new(columns.clone());
@@ -867,12 +868,12 @@ impl Executor<'_> {
             .collect();
 
         // Sort accounts for consistent output
-        let mut accounts: Vec<_> = self.balances.keys().collect();
+        let mut accounts: Vec<_> = balances.keys().collect();
         accounts.sort();
 
         for account in accounts {
-            // Safety: account comes from self.balances.keys(), so it's guaranteed to exist
-            let Some(balance) = self.balances.get(account) else {
+            // Safety: account comes from balances.keys(), so it's guaranteed to exist
+            let Some(balance) = balances.get(account) else {
                 continue; // Defensive: skip if somehow the key disappeared
             };
 

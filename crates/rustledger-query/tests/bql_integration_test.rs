@@ -848,6 +848,70 @@ fn test_journal_at_cost_collapses_balance_to_cost_currency() {
     );
 }
 
+/// Lock-in test for #957 deep review: `JOURNAL ... AT cost FROM <filter>`
+/// must compose correctly. The FROM clause filters which transactions enter
+/// the cumulative balance, and AT cost then collapses what's there to cost
+/// currency totals. Both mechanisms exist (covered separately by
+/// `test_journal_from_clause_filters_cumulative_balance` and
+/// `test_journal_at_cost_collapses_balance_to_cost_currency`); this asserts
+/// they work together in the same row.
+#[test]
+fn test_journal_at_cost_with_from_clause_filters_then_collapses() {
+    let directives = vec![
+        Directive::Open(Open::new(date(2024, 1, 1), "Assets:Brokerage")),
+        Directive::Open(Open::new(date(2024, 1, 1), "Equity:Opening")),
+        // 2024 transaction — should pass `FROM year = 2024` filter.
+        Directive::Transaction(
+            Transaction::new(date(2024, 6, 1), "Buy AAPL")
+                .with_posting(
+                    Posting::new("Assets:Brokerage", Amount::new(dec!(10), "AAPL")).with_cost(
+                        CostSpec::empty()
+                            .with_number_per(dec!(150))
+                            .with_currency("USD"),
+                    ),
+                )
+                .with_posting(Posting::new(
+                    "Equity:Opening",
+                    Amount::new(dec!(-1500), "USD"),
+                )),
+        ),
+        // 2025 transaction — should be filtered out, not contribute to balance.
+        Directive::Transaction(
+            Transaction::new(date(2025, 6, 1), "Buy MSFT")
+                .with_posting(
+                    Posting::new("Assets:Brokerage", Amount::new(dec!(20), "MSFT")).with_cost(
+                        CostSpec::empty()
+                            .with_number_per(dec!(300))
+                            .with_currency("USD"),
+                    ),
+                )
+                .with_posting(Posting::new(
+                    "Equity:Opening",
+                    Amount::new(dec!(-6000), "USD"),
+                )),
+        ),
+    ];
+    let query =
+        parse(r#"JOURNAL "Assets:Brokerage" AT cost FROM year = 2024"#).expect("should parse");
+    let mut executor = Executor::new(&directives);
+    let result = executor.execute(&query).expect("should execute");
+
+    // Only the 2024 row passes FROM; AT cost collapses its balance to 1500 USD.
+    assert_eq!(result.rows.len(), 1);
+    let balance = match &result.rows[0][6] {
+        Value::Inventory(inv) => inv,
+        other => panic!("expected Inventory, got {other:?}"),
+    };
+    let positions = balance.positions();
+    assert_eq!(
+        positions.len(),
+        1,
+        "only 2024 transaction should contribute"
+    );
+    assert_eq!(positions[0].units.number, dec!(1500));
+    assert_eq!(positions[0].units.currency.as_str(), "USD");
+}
+
 /// Regression test for issue #957: `JOURNAL ... AT units` must strip cost
 /// annotations from every position in the balance column.
 #[test]

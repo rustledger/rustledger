@@ -829,6 +829,118 @@ fn test_execute_balances_with_from() {
     assert!(!result.is_empty());
 }
 
+/// Regression test for issue #958: sequential `BALANCES` queries on the same
+/// `Executor` must produce identical results. Before the fix,
+/// `build_balances_with_filter` accumulated into a struct field without
+/// clearing, so the second run returned doubled balances.
+#[test]
+fn test_balances_idempotent_across_sequential_runs() {
+    let directives = make_test_directives();
+    let query = parse("BALANCES").expect("should parse");
+    let mut executor = Executor::new(&directives);
+
+    let r1 = executor.execute(&query).expect("first run");
+    let r2 = executor.execute(&query).expect("second run");
+
+    assert_eq!(
+        r1.rows, r2.rows,
+        "BALANCES must return identical results when run twice on the same Executor"
+    );
+}
+
+/// Regression test for the Copilot-flagged sub-issue on PR #959: an
+/// `Executor` constructed via `new_with_sources` (used when source-location
+/// info is needed) put directives in `spanned_directives` and left
+/// `directives` empty. `build_balances_with_filter` previously iterated
+/// only `self.directives`, so BALANCES on a source-mapped Executor silently
+/// returned an empty result. The fix iterates whichever source is
+/// populated, mirroring `collect_postings` and the system-table builders.
+#[test]
+fn test_balances_works_with_spanned_directives_executor() {
+    use rustledger_loader::SourceMap;
+    use rustledger_parser::{Span, Spanned};
+
+    let dirs = make_test_directives();
+    let spanned: Vec<Spanned<rustledger_core::Directive>> = dirs
+        .iter()
+        .cloned()
+        .map(|d| Spanned {
+            value: d,
+            span: Span::new(0, 50),
+            file_id: 0,
+        })
+        .collect();
+    let source_map = SourceMap::new();
+
+    let mut executor = Executor::new_with_sources(&spanned, &source_map);
+    let result = executor
+        .execute(&parse("BALANCES").expect("should parse"))
+        .expect("BALANCES on source-mapped Executor should work");
+
+    assert!(
+        !result.is_empty(),
+        "source-mapped Executor must return non-empty BALANCES; previously returned empty"
+    );
+}
+
+/// Regression test for issue #958 (FROM-filter variant): sequential `BALANCES`
+/// with different FROM clauses must each return only their own filter's
+/// view. Before the fix, the second run accumulated its filter on top of
+/// the first run's residual state — a union, not a fresh view — producing
+/// output matching no single query.
+#[test]
+fn test_balances_with_different_from_filters_are_independent() {
+    let directives = vec![
+        Directive::Open(Open::new(date(2024, 1, 1), "Assets:Cash")),
+        Directive::Open(Open::new(date(2024, 1, 1), "Equity:Opening")),
+        Directive::Transaction(
+            Transaction::new(date(2024, 6, 1), "2024 deposit")
+                .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(100), "USD")))
+                .with_posting(Posting::new(
+                    "Equity:Opening",
+                    Amount::new(dec!(-100), "USD"),
+                )),
+        ),
+        Directive::Transaction(
+            Transaction::new(date(2025, 6, 1), "2025 deposit")
+                .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(500), "USD")))
+                .with_posting(Posting::new(
+                    "Equity:Opening",
+                    Amount::new(dec!(-500), "USD"),
+                )),
+        ),
+    ];
+
+    let mut executor = Executor::new(&directives);
+
+    // Run year=2024 first to populate any latent state.
+    let q_2024 = parse("BALANCES FROM year = 2024").expect("should parse");
+    let _ = executor.execute(&q_2024).expect("2024 run");
+
+    // Now run year=2025. Should reflect only 2025 transactions.
+    let q_2025 = parse("BALANCES FROM year = 2025").expect("should parse");
+    let r_2025 = executor.execute(&q_2025).expect("2025 run");
+
+    // Find the Assets:Cash row.
+    let cash_row = r_2025
+        .rows
+        .iter()
+        .find(|row| matches!(&row[0], Value::String(s) if s == "Assets:Cash"))
+        .expect("Assets:Cash should appear in 2025 results");
+
+    let inv = match &cash_row[1] {
+        Value::Inventory(i) => i,
+        other => panic!("expected Inventory, got {other:?}"),
+    };
+    let positions = inv.positions();
+    assert_eq!(positions.len(), 1);
+    assert_eq!(
+        positions[0].units.number,
+        dec!(500),
+        "year=2025 BALANCES must show 500 USD, not 600 USD (2024 + 2025 union)"
+    );
+}
+
 // ----------------------------------------------------------------------------
 // `balance` column — cumulative across WHERE-filtered postings (bean-query
 // semantics). See issue #929 and the surrounding discussion.

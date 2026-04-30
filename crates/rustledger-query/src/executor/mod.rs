@@ -32,8 +32,6 @@ pub struct Executor<'a> {
     directives: &'a [Directive],
     /// Spanned directives (optional, for source location support).
     spanned_directives: Option<&'a [Spanned<Directive>]>,
-    /// Account balances (built up during query).
-    balances: FxHashMap<InternedStr, Inventory>,
     /// Price database for `VALUE()` conversions.
     price_db: crate::price::PriceDatabase,
     /// Target currency for `VALUE()` conversions.
@@ -98,7 +96,6 @@ impl<'a> Executor<'a> {
         Self {
             directives,
             spanned_directives: None,
-            balances: FxHashMap::default(),
             price_db,
             target_currency: None,
             query_date: jiff::Zoned::now().date(),
@@ -176,7 +173,6 @@ impl<'a> Executor<'a> {
         Self {
             directives: &[], // Empty - we use spanned_directives instead
             spanned_directives: Some(spanned_directives),
-            balances: FxHashMap::default(),
             price_db,
             target_currency: None,
             query_date: jiff::Zoned::now().date(),
@@ -263,9 +259,34 @@ impl<'a> Executor<'a> {
         }
     }
 
-    /// Execute a SELECT query.
-    fn build_balances_with_filter(&mut self, from: Option<&FromClause>) -> Result<(), QueryError> {
-        for directive in self.directives {
+    /// Compute per-account inventories for a `BALANCES` query.
+    ///
+    /// Returns a fresh map rather than mutating shared state on `self` so that
+    /// sequential queries on the same `Executor` produce independent results.
+    /// See issue #958 for the bug that motivated this signature: a previous
+    /// implementation accumulated into `self.balances` without clearing,
+    /// causing a second `BALANCES` call to double-count and a `BALANCES FROM
+    /// year=2024` followed by `BALANCES FROM year=2025` to return a confused
+    /// union of both filters.
+    fn build_balances_with_filter(
+        &self,
+        from: Option<&FromClause>,
+    ) -> Result<FxHashMap<InternedStr, Inventory>, QueryError> {
+        let mut balances: FxHashMap<InternedStr, Inventory> = FxHashMap::default();
+
+        // Iterate over whichever directive source is populated. When the
+        // Executor is built via `new_with_sources`, `self.directives` is empty
+        // and the data lives in `spanned_directives` — same pattern as
+        // `collect_postings` and the system-table builders. Without this,
+        // BALANCES silently returned an empty result set for source-location-
+        // aware Executors (e.g. LSP / source-mapped queries).
+        let all_directives: Vec<&Directive> = if let Some(spanned) = self.spanned_directives {
+            spanned.iter().map(|s| &s.value).collect()
+        } else {
+            self.directives.iter().collect()
+        };
+
+        for directive in all_directives {
             if let Directive::Transaction(txn) = directive {
                 // Apply FROM filter if present
                 if let Some(from_clause) = from
@@ -277,7 +298,7 @@ impl<'a> Executor<'a> {
 
                 for posting in &txn.postings {
                     if let Some(units) = posting.amount() {
-                        let balance = self.balances.entry(posting.account.clone()).or_default();
+                        let balance = balances.entry(posting.account.clone()).or_default();
 
                         let pos = if let Some(cost_spec) = &posting.cost {
                             if let Some(cost) = cost_spec.resolve(units.number, txn.date) {
@@ -293,7 +314,8 @@ impl<'a> Executor<'a> {
                 }
             }
         }
-        Ok(())
+
+        Ok(balances)
     }
 
     /// Collect postings matching the FROM and WHERE clauses.

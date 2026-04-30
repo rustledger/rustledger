@@ -193,6 +193,11 @@ const fn metavalue_as_str(v: &MetaValue) -> Option<&str> {
 /// allowance handles common exchange-suffixed tickers like `VECP.AS`,
 /// `BRK.B`, or `7203.T` (issue #952). Beancount itself permits dots in
 /// commodity names; the heuristic was previously stricter than the parser.
+///
+/// Intentionally permissive about the leading character (`7203.T` legitimately
+/// starts with a digit). False positives like `..` are accepted because the
+/// downstream price fetch will fail loudly for nonsense names — there's no
+/// gain to encoding stricter validation here than the parser already does.
 fn looks_like_ticker(symbol: &str) -> bool {
     !symbol.is_empty()
         && symbol.len() <= 10

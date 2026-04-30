@@ -1557,10 +1557,16 @@ quote_currency = "EUR"
 source = "ecb"
 currency = "EUR"
 "#;
-        let result: Result<Config, _> = toml::from_str(content);
+        let err = toml::from_str::<Config>(content)
+            .expect_err("Detailed mapping should reject unknown 'currency' field")
+            .to_string();
+        // Lock in not just "rejects" but "rejects pointing at the bad block".
+        // The toml crate's untagged-enum error format varies; we check the
+        // failure references the AUD table where the typo lives, so a future
+        // loosening of deserialization won't silently mask the rejection.
         assert!(
-            result.is_err(),
-            "Detailed mapping should reject unknown 'currency' field, got {result:?}"
+            err.contains("AUD") || err.contains("currency") || err.contains("unknown field"),
+            "expected error pointing at AUD or mentioning the bad key, got: {err}"
         );
     }
 

@@ -380,6 +380,10 @@ fn run_with_external_command(
     let mut handle = stdout.lock();
 
     for symbol in symbols {
+        // CLI `--mapping` only ever creates `Simple` mappings (no
+        // quote_currency), so passing `&price_config.mapping` here is
+        // sufficient — the merged map used in the network path wouldn't
+        // surface anything extra for currency resolution.
         let effective_currency =
             resolve_quote_currency(symbol, discovered, &price_config.mapping, &args.currency);
         let request = PriceRequest {
@@ -603,6 +607,27 @@ mod tests {
         mapping.insert("VTI".to_string(), CommodityMapping::Simple("VTI".into()));
         assert_eq!(
             resolve_quote_currency("VTI", &discovered, &mapping, "USD"),
+            "USD"
+        );
+    }
+
+    #[test]
+    fn test_resolve_quote_currency_detailed_without_quote_currency_uses_default() {
+        // The common case: a config with `[price.mapping.X] source = "..."`
+        // and no `quote_currency` should fall through to the global default,
+        // not surface an empty string or panic.
+        let discovered = HashMap::new();
+        let mut mapping = HashMap::new();
+        mapping.insert(
+            "AAPL".to_string(),
+            CommodityMapping::Detailed(crate::config::DetailedMapping {
+                source: crate::config::SourceRef::Single("yahoo".into()),
+                ticker: None,
+                quote_currency: None,
+            }),
+        );
+        assert_eq!(
+            resolve_quote_currency("AAPL", &discovered, &mapping, "USD"),
             "USD"
         );
     }

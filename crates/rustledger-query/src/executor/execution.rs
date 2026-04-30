@@ -790,8 +790,11 @@ impl Executor<'_> {
                         // - default (no AT): show the full Position (units +
                         //   cost when present), matching bean-query's
                         //   JOURNAL column. Issue #955.
-                        // - AT COST: show the cost-currency total (units ×
-                        //   per-unit cost). Drops the position shape.
+                        // - AT COST: when a cost annotation is present and
+                        //   resolves, show the cost-currency total
+                        //   (units × per-unit cost). Otherwise fall back to
+                        //   the original units — so the output currency is
+                        //   not guaranteed to be the cost currency.
                         // - AT UNITS: show just the units, dropping cost.
                         let position_value = if let Some(at_func) = &query.at_function {
                             match at_func.to_uppercase().as_str() {

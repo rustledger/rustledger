@@ -93,6 +93,16 @@ When multiple configurations apply to the same symbol, the order from highest to
 4. Config-file `[price.mapping]` entries
 5. Default source from `[price.default_source]` (or `yahoo`)
 
+### Quote currency resolution
+
+The currency a price is quoted in is resolved separately, since a single source mapping can be queried in different currencies. From highest to lowest precedence:
+
+1. `quote_currency:` metadata on the commodity directive (or the first quote currency listed in a chained `price:` value)
+2. `quote_currency = "..."` in the `[price.mapping.X]` config-file block
+3. The global `--currency` flag (or its default, `USD`)
+
+Note that `[price.mapping.X]` blocks reject unknown keys: a typo like `currency = "EUR"` (vs the supported `quote_currency`) will fail config load with a clear error rather than being silently dropped.
+
 ## Price Caching
 
 Prices are cached to disk to reduce API calls. By default, cached prices expire after **30 minutes** (matching Python `bean-price` behavior).
@@ -189,6 +199,11 @@ BTC = "BTC-USD"
 [price.mapping.ETH]
 source = "coinbase"
 ticker = "ETH"
+
+# Per-commodity quote currency override (issue #952)
+[price.mapping.AUD]
+source = "ecb"
+quote_currency = "EUR"  # quote AUD in EUR even when --currency is USD
 
 # Fallback chain
 [price.mapping.VTI]

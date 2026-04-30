@@ -20,7 +20,7 @@
 //! behavior and avoids wasting API calls on commodities the user no longer
 //! holds. Pass `include_inactive: true` to skip the activity filter.
 
-use crate::config::{CommodityMapping, SourceRef};
+use crate::config::{CommodityMapping, DetailedMapping, SourceRef};
 use rust_decimal::Decimal;
 use rustledger_core::{Directive, MetaValue};
 use rustledger_loader::Options;
@@ -134,20 +134,22 @@ fn build_mapping(specs: &[PriceSpec]) -> Option<CommodityMapping> {
     }
     if specs.len() == 1 {
         let s = &specs[0];
-        return Some(CommodityMapping::Detailed {
+        return Some(CommodityMapping::Detailed(DetailedMapping {
             source: SourceRef::Single(s.source.clone()),
             ticker: Some(s.ticker.clone()),
-        });
+            quote_currency: None,
+        }));
     }
     // Multiple specs: build a fallback chain. The ticker is taken from the
     // first spec; it's the user's responsibility to ensure ticker symbols
     // are interchangeable across sources in their `price:` chain (matching
     // bean-price's contract).
     let sources: Vec<String> = specs.iter().map(|s| s.source.clone()).collect();
-    Some(CommodityMapping::Detailed {
+    Some(CommodityMapping::Detailed(DetailedMapping {
         source: SourceRef::Fallback(sources),
         ticker: Some(specs[0].ticker.clone()),
-    })
+        quote_currency: None,
+    }))
 }
 
 /// Parse a `price:` metadata value into one or more specs.
@@ -187,13 +189,16 @@ const fn metavalue_as_str(v: &MetaValue) -> Option<&str> {
 }
 
 /// Heuristic preserved for backward compat: a name is "ticker-shaped" if it's
-/// uppercase ASCII letters / digits / dashes, length ≤ 10.
+/// uppercase ASCII letters, digits, dashes, or dots, length ≤ 10. The dot
+/// allowance handles common exchange-suffixed tickers like `VECP.AS`,
+/// `BRK.B`, or `7203.T` (issue #952). Beancount itself permits dots in
+/// commodity names; the heuristic was previously stricter than the parser.
 fn looks_like_ticker(symbol: &str) -> bool {
     !symbol.is_empty()
         && symbol.len() <= 10
         && symbol
             .chars()
-            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '-')
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '-' || c == '.')
 }
 
 /// Compute the set of commodity codes that have a non-zero balance in at
@@ -301,6 +306,10 @@ mod tests {
         assert!(looks_like_ticker("AAPL"));
         assert!(looks_like_ticker("BTC-USD"));
         assert!(looks_like_ticker("VTI2025"));
+        // Issue #952: exchange-suffixed tickers (dots) used to be silently dropped.
+        assert!(looks_like_ticker("VECP.AS"));
+        assert!(looks_like_ticker("BRK.B"));
+        assert!(looks_like_ticker("7203.T"));
         assert!(!looks_like_ticker("usd"));
         assert!(!looks_like_ticker("Vanguard"));
         assert!(!looks_like_ticker("VERYLONGTICKER"));

@@ -256,9 +256,9 @@ impl PriceSourceRegistry {
                 CommodityMapping::Simple(ticker) => {
                     (vec![self.default_source.clone()], ticker.clone())
                 }
-                CommodityMapping::Detailed { source, ticker } => {
-                    let ticker = ticker.clone().unwrap_or_else(|| commodity.to_string());
-                    let sources = match source {
+                CommodityMapping::Detailed(d) => {
+                    let ticker = d.ticker.clone().unwrap_or_else(|| commodity.to_string());
+                    let sources = match &d.source {
                         SourceRef::Single(s) => vec![s.clone()],
                         SourceRef::Fallback(sources) => sources.clone(),
                     };
@@ -369,10 +369,11 @@ mod tests {
         let mut mapping = HashMap::new();
         mapping.insert(
             "EUR".to_string(),
-            CommodityMapping::Detailed {
+            CommodityMapping::Detailed(crate::config::DetailedMapping {
                 source: SourceRef::Fallback(vec!["ecb".to_string(), "ratesapi".to_string()]),
                 ticker: None,
-            },
+                quote_currency: None,
+            }),
         );
 
         let (sources, ticker) = registry.resolve_mapping("EUR", &mapping);

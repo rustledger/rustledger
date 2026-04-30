@@ -121,21 +121,39 @@ pub enum PriceSourceConfig {
 }
 
 /// Mapping configuration for a commodity.
+///
+/// `Detailed` lives in its own struct (rather than as an inline variant
+/// payload) so it can carry `#[serde(deny_unknown_fields)]` — issue #952
+/// reported a typo like `currency = "EUR"` (vs the supported
+/// `quote_currency = "EUR"`) being silently dropped because serde's
+/// permissive default kept the global currency. The dedicated struct
+/// makes typos error at config load instead.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum CommodityMapping {
     /// Simple ticker symbol (uses default source).
     Simple(String),
 
-    /// Detailed mapping with source and optional ticker.
-    Detailed {
-        /// Source reference (single or fallback chain).
-        source: SourceRef,
+    /// Detailed mapping with source and optional ticker / quote currency.
+    Detailed(DetailedMapping),
+}
 
-        /// Optional ticker symbol override.
-        #[serde(default)]
-        ticker: Option<String>,
-    },
+/// Detailed price mapping for a commodity.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DetailedMapping {
+    /// Source reference (single or fallback chain).
+    pub source: SourceRef,
+
+    /// Optional ticker symbol override.
+    #[serde(default)]
+    pub ticker: Option<String>,
+
+    /// Optional per-commodity quote currency. Overrides the global
+    /// `--currency` for this one symbol when set. Mirrors the
+    /// ledger-side `quote_currency:` metadata.
+    #[serde(default)]
+    pub quote_currency: Option<String>,
 }
 
 /// Reference to one or more price sources.
@@ -1491,25 +1509,59 @@ source = ["ecb", "ratesapi"]
 "#;
         let config: Config = toml::from_str(content).unwrap();
 
-        if let Some(CommodityMapping::Detailed { source, ticker }) = config.price.mapping.get("VTI")
-        {
-            assert!(matches!(source, SourceRef::Single(s) if s == "yahoo"));
-            assert_eq!(ticker.as_deref(), Some("VTI"));
+        if let Some(CommodityMapping::Detailed(d)) = config.price.mapping.get("VTI") {
+            assert!(matches!(&d.source, SourceRef::Single(s) if s == "yahoo"));
+            assert_eq!(d.ticker.as_deref(), Some("VTI"));
+            assert!(d.quote_currency.is_none());
         } else {
             panic!("Expected Detailed mapping for VTI");
         }
 
-        if let Some(CommodityMapping::Detailed { source, ticker }) = config.price.mapping.get("EUR")
-        {
-            if let SourceRef::Fallback(sources) = source {
+        if let Some(CommodityMapping::Detailed(d)) = config.price.mapping.get("EUR") {
+            if let SourceRef::Fallback(sources) = &d.source {
                 assert_eq!(sources, &["ecb", "ratesapi"]);
             } else {
                 panic!("Expected Fallback source");
             }
-            assert!(ticker.is_none());
+            assert!(d.ticker.is_none());
+            assert!(d.quote_currency.is_none());
         } else {
             panic!("Expected Detailed mapping for EUR");
         }
+    }
+
+    #[test]
+    fn test_parse_commodity_mapping_with_quote_currency() {
+        // Issue #952: a per-commodity quote currency in the config file
+        // should override the global --currency for that one symbol.
+        let content = r#"
+[price.mapping.AUD]
+source = "ecb"
+quote_currency = "EUR"
+"#;
+        let config: Config = toml::from_str(content).unwrap();
+        let CommodityMapping::Detailed(d) = config.price.mapping.get("AUD").expect("AUD mapping")
+        else {
+            panic!("expected Detailed mapping for AUD");
+        };
+        assert_eq!(d.quote_currency.as_deref(), Some("EUR"));
+    }
+
+    #[test]
+    fn test_parse_commodity_mapping_rejects_unknown_field() {
+        // Issue #952: the user wrote `currency = "EUR"` (vs the supported
+        // `quote_currency = "EUR"`) and rledger silently dropped the value.
+        // With deny_unknown_fields the typo now errors out at config load.
+        let content = r#"
+[price.mapping.AUD]
+source = "ecb"
+currency = "EUR"
+"#;
+        let result: Result<Config, _> = toml::from_str(content);
+        assert!(
+            result.is_err(),
+            "Detailed mapping should reject unknown 'currency' field, got {result:?}"
+        );
     }
 
     #[test]

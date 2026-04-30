@@ -231,8 +231,15 @@ pub fn run(args: &PriceArgs, price_config: &PriceConfig) -> Result<()> {
         .unwrap_or(price_config.effective_default_source());
 
     for symbol in &symbols_to_fetch {
+        // Resolve quote currency against `price_config.mapping`, not the
+        // merged `combined_mapping`. CLI `--mapping AUD:NEW-TICKER` creates
+        // a `Simple` entry that overwrites a config-file `Detailed` entry
+        // for the same symbol — using `combined_mapping` here would silently
+        // drop the config's `quote_currency` even though the user only
+        // intended to override the ticker. Source/ticker lookup still uses
+        // the merged map below; only currency resolution stays config-only.
         let effective_currency =
-            resolve_quote_currency(symbol, &discovered, &combined_mapping, &args.currency);
+            resolve_quote_currency(symbol, &discovered, &price_config.mapping, &args.currency);
 
         // Check cache first
         let key = cache_key(source_name_for_cache, symbol, &effective_currency, date);
@@ -380,10 +387,9 @@ fn run_with_external_command(
     let mut handle = stdout.lock();
 
     for symbol in symbols {
-        // CLI `--mapping` only ever creates `Simple` mappings (no
-        // quote_currency), so passing `&price_config.mapping` here is
-        // sufficient — the merged map used in the network path wouldn't
-        // surface anything extra for currency resolution.
+        // Same currency-resolution discipline as the network path: use the
+        // raw config mapping so a CLI `--mapping` Simple override can't
+        // silently wipe out a config-file `Detailed.quote_currency`.
         let effective_currency =
             resolve_quote_currency(symbol, discovered, &price_config.mapping, &args.currency);
         let request = PriceRequest {
@@ -608,6 +614,42 @@ mod tests {
         assert_eq!(
             resolve_quote_currency("VTI", &discovered, &mapping, "USD"),
             "USD"
+        );
+    }
+
+    #[test]
+    fn test_resolve_quote_currency_uses_raw_config_not_merged_mapping() {
+        // Regression for Copilot review on PR #953: a CLI `--mapping
+        // AUD:NEW-TICKER` overwrites the config-file `Detailed` entry with
+        // `Simple` in the merged map. If we resolved currency against the
+        // merged map, the config's `quote_currency` would be silently
+        // dropped. The fix is to resolve against the raw config map; the
+        // CLI override only affects ticker/source, not currency.
+        //
+        // This test simulates that exact precondition: `mapping` (the raw
+        // config) has the Detailed entry the user wrote; the merged
+        // combined_mapping (not passed to `resolve_quote_currency`) would
+        // have it overwritten with Simple. resolve_quote_currency must
+        // surface the config's "EUR".
+        let discovered = HashMap::new();
+        let mut mapping = HashMap::new();
+        mapping.insert(
+            "AUD".to_string(),
+            CommodityMapping::Detailed(crate::config::DetailedMapping {
+                source: crate::config::SourceRef::Single("ecb".into()),
+                ticker: None,
+                quote_currency: Some("EUR".into()),
+            }),
+        );
+        // Note: we deliberately do NOT pass a merged map that has
+        // CommodityMapping::Simple("AUD-EUR") for AUD here. `price_cmd::run`
+        // is responsible for passing `&price_config.mapping`, not the merged
+        // one. This unit test asserts the helper behaves correctly when
+        // given the raw config map; the call-site comment in `run`
+        // documents the contract.
+        assert_eq!(
+            resolve_quote_currency("AUD", &discovered, &mapping, "USD"),
+            "EUR"
         );
     }
 

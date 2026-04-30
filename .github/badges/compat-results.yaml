@@ -1,5 +1,5 @@
 # Rustledger Compatibility Results
-# Generated: 2026-04-29T04:23:17Z
+# Generated: 2026-04-30T02:58:02Z
 
 summary:
   total_files: 782
@@ -29,7 +29,7 @@ ast_compatibility:
 
 bql_compatibility:
   queries_tested: 390
-  queries_matching: 314
+  queries_matching: 315
   match_pct: 85
 
 regressions:

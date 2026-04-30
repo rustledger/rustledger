@@ -848,6 +848,41 @@ fn test_balances_idempotent_across_sequential_runs() {
     );
 }
 
+/// Regression test for the Copilot-flagged sub-issue on PR #959: an
+/// `Executor` constructed via `new_with_sources` (used when source-location
+/// info is needed) put directives in `spanned_directives` and left
+/// `directives` empty. `build_balances_with_filter` previously iterated
+/// only `self.directives`, so BALANCES on a source-mapped Executor silently
+/// returned an empty result. The fix iterates whichever source is
+/// populated, mirroring `collect_postings` and the system-table builders.
+#[test]
+fn test_balances_works_with_spanned_directives_executor() {
+    use rustledger_loader::SourceMap;
+    use rustledger_parser::{Span, Spanned};
+
+    let dirs = make_test_directives();
+    let spanned: Vec<Spanned<rustledger_core::Directive>> = dirs
+        .iter()
+        .cloned()
+        .map(|d| Spanned {
+            value: d,
+            span: Span::new(0, 50),
+            file_id: 0,
+        })
+        .collect();
+    let source_map = SourceMap::new();
+
+    let mut executor = Executor::new_with_sources(&spanned, &source_map);
+    let result = executor
+        .execute(&parse("BALANCES").expect("should parse"))
+        .expect("BALANCES on source-mapped Executor should work");
+
+    assert!(
+        !result.is_empty(),
+        "source-mapped Executor must return non-empty BALANCES; previously returned empty"
+    );
+}
+
 /// Regression test for issue #958 (FROM-filter variant): sequential `BALANCES`
 /// with different FROM clauses must each return only their own filter's
 /// view. Before the fix, the second run accumulated its filter on top of

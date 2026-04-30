@@ -274,7 +274,19 @@ impl<'a> Executor<'a> {
     ) -> Result<FxHashMap<InternedStr, Inventory>, QueryError> {
         let mut balances: FxHashMap<InternedStr, Inventory> = FxHashMap::default();
 
-        for directive in self.directives {
+        // Iterate over whichever directive source is populated. When the
+        // Executor is built via `new_with_sources`, `self.directives` is empty
+        // and the data lives in `spanned_directives` — same pattern as
+        // `collect_postings` and the system-table builders. Without this,
+        // BALANCES silently returned an empty result set for source-location-
+        // aware Executors (e.g. LSP / source-mapped queries).
+        let all_directives: Vec<&Directive> = if let Some(spanned) = self.spanned_directives {
+            spanned.iter().map(|s| &s.value).collect()
+        } else {
+            self.directives.iter().collect()
+        };
+
+        for directive in all_directives {
             if let Directive::Transaction(txn) = directive {
                 // Apply FROM filter if present
                 if let Some(from_clause) = from

@@ -57,7 +57,7 @@ Annotate a commodity with how to fetch its price. The format is `<quote-currency
 
 The first source in the chain is tried first; subsequent ones act as fallbacks. The quote currency in the metadata overrides the global `--currency` for that one symbol, so you can mix USD-quoted stocks and EUR-quoted bonds in the same run.
 
-`price: ""` (empty string) is an explicit **opt-out**: a commodity with this annotation is never fetched, even with `--undeclared`. Useful for currency codes that happen to collide with stock tickers (e.g. `BAM`, `UKW`) — see issue #962.
+`price: ""` (empty string, or whitespace-only) is an explicit **opt-out from `-f / --file` discovery**: the commodity is never picked up from the ledger, even with `--undeclared`. Useful for currency codes that happen to collide with stock tickers (e.g. `BAM`, `UKW`) — see issue #962. Note: a symbol passed *explicitly* on the command line (e.g. `rledger price BAM`) is always fetched regardless of the opt-out, since CLI args are explicit user intent.
 
 ### 2. `quote_currency:` metadata
 

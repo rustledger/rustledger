@@ -102,7 +102,21 @@ pub fn discover_symbols(
         };
         let symbol = comm.currency.as_str();
 
-        let info = match classify_commodity_meta(&comm.meta) {
+        let classification = classify_commodity_meta(&comm.meta);
+
+        // Warn on a non-empty `price:` value that didn't yield any usable
+        // specs — almost always a typo. Matches `bean-price`, which logs
+        // "Ignoring currency with invalid 'price' source" for the same
+        // case. We still skip the commodity (no source to fetch from);
+        // the warning surfaces the misconfiguration.
+        if classification.malformed_price {
+            eprintln!(
+                "warning: commodity {symbol} has malformed `price:` metadata; \
+                 expected `<quote>:<source>/<ticker>` (e.g. `USD:yahoo/AAPL`). Skipping."
+            );
+        }
+
+        let info = match classification.decision {
             // `price: ""` (or whitespace) is an explicit opt-out, honored
             // regardless of `undeclared` so users can suppress commodities
             // that would otherwise be picked up by the heuristic.
@@ -150,18 +164,33 @@ enum DiscoveryDecision {
     Inherit,
 }
 
+/// Result of classifying a commodity, plus a flag for whether the
+/// commodity had a non-empty `price:` value that didn't parse (typo /
+/// misconfig). The caller surfaces this as a warning.
+struct Classification {
+    decision: DiscoveryDecision,
+    malformed_price: bool,
+}
+
 /// Classify a commodity by its metadata in a single pass over the map.
-fn classify_commodity_meta(meta: &rustledger_core::Metadata) -> DiscoveryDecision {
+fn classify_commodity_meta(meta: &rustledger_core::Metadata) -> Classification {
     let price_raw = meta.get("price").and_then(metavalue_as_str);
 
     // Empty or whitespace-only `price:` is the explicit opt-out marker.
     if let Some(p) = price_raw
         && p.trim().is_empty()
     {
-        return DiscoveryDecision::OptOut;
+        return Classification {
+            decision: DiscoveryDecision::OptOut,
+            malformed_price: false,
+        };
     }
 
     let price_specs = price_raw.map(parse_price_metadata).unwrap_or_default();
+    // A non-empty `price:` that produces zero parsed specs is malformed.
+    // We still return `Inherit`/`Discovered` based on other signals; the
+    // caller logs a warning.
+    let malformed_price = price_raw.is_some_and(|s| !s.trim().is_empty()) && price_specs.is_empty();
     let mapping = build_mapping(&price_specs);
 
     let quote_currency_meta = meta.get("quote_currency").and_then(|v| match v {
@@ -178,10 +207,15 @@ fn classify_commodity_meta(meta: &rustledger_core::Metadata) -> DiscoveryDecisio
             .or(quote_currency_meta),
     };
 
-    if info.mapping.is_some() || info.quote_currency.is_some() {
+    let decision = if info.mapping.is_some() || info.quote_currency.is_some() {
         DiscoveryDecision::Discovered(info)
     } else {
         DiscoveryDecision::Inherit
+    };
+
+    Classification {
+        decision,
+        malformed_price,
     }
 }
 
@@ -637,6 +671,60 @@ mod tests {
         ))]);
         let discovered = discover_symbols(&dirs, &Options::new(), &[], true, true);
         assert!(discovered.contains_key("OLD"));
+    }
+
+    /// Malformed `price:` metadata (e.g. typo, wrong format) produces no
+    /// parsed specs. The commodity is skipped under the strict default
+    /// (no usable source), but the malformed flag is set so the caller
+    /// can log a warning. This matches `bean-price`, which logs
+    /// "Ignoring currency with invalid 'price' source" for the same case.
+    #[test]
+    fn classify_flags_malformed_price_metadata() {
+        let mut meta = rustledger_core::Metadata::default();
+        meta.insert(
+            "price".to_string(),
+            MetaValue::String("BOGUS_FORMAT".into()),
+        );
+        let classification = classify_commodity_meta(&meta);
+        assert!(classification.malformed_price);
+        assert!(matches!(
+            classification.decision,
+            DiscoveryDecision::Inherit
+        ));
+    }
+
+    /// A malformed `price:` paired with a valid `quote_currency:` should
+    /// still surface the malformed-price warning, even though the
+    /// commodity is included via `quote_currency:`. The caller can then
+    /// nudge the user to fix the typo.
+    #[test]
+    fn classify_flags_malformed_price_even_when_quote_currency_present() {
+        let mut meta = rustledger_core::Metadata::default();
+        meta.insert(
+            "price".to_string(),
+            MetaValue::String("BOGUS_FORMAT".into()),
+        );
+        meta.insert(
+            "quote_currency".to_string(),
+            MetaValue::String("EUR".into()),
+        );
+        let classification = classify_commodity_meta(&meta);
+        assert!(classification.malformed_price);
+        assert!(matches!(
+            classification.decision,
+            DiscoveryDecision::Discovered(_)
+        ));
+    }
+
+    /// `price: ""` is an opt-out, not malformed — ensure we don't emit a
+    /// false-positive warning for the explicit opt-out path.
+    #[test]
+    fn classify_does_not_flag_empty_price_as_malformed() {
+        let mut meta = rustledger_core::Metadata::default();
+        meta.insert("price".to_string(), MetaValue::String(String::new()));
+        let classification = classify_commodity_meta(&meta);
+        assert!(!classification.malformed_price);
+        assert!(matches!(classification.decision, DiscoveryDecision::OptOut));
     }
 
     /// Whitespace-only `price:` is treated the same as empty — explicit

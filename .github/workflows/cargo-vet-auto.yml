@@ -23,10 +23,17 @@ jobs:
     runs-on: ubuntu-latest
     # Run for Dependabot PRs and trusted-maintainer PRs (OWNER/MEMBER).
     # Use author_association so we don't have to maintain a username list.
+    # Skip when the actor is rustledger-bot itself — that would be this
+    # workflow's own push, and re-triggering on it can cause an infinite
+    # loop if the regen produces a no-op tree (see "Skip when nothing
+    # actually changed" below for the structural fix).
     if: |
-      github.actor == 'dependabot[bot]' ||
-      github.event.pull_request.author_association == 'OWNER' ||
-      github.event.pull_request.author_association == 'MEMBER'
+      github.actor != 'rustledger-bot[bot]' &&
+      (
+        github.actor == 'dependabot[bot]' ||
+        github.event.pull_request.author_association == 'OWNER' ||
+        github.event.pull_request.author_association == 'MEMBER'
+      )
     steps:
       - name: Generate GitHub App token
         id: app-token
@@ -117,6 +124,20 @@ jobs:
               '{tree: $tree, base_tree: $base}' | \
               gh api "repos/$REPO/git/trees" --input - --jq '.sha')
             echo "New tree: $NEW_TREE"
+
+            # Skip when nothing actually changed at the tree level.
+            # This workflow checks out the BASE branch and regenerates
+            # exemptions against the PR's Cargo.lock, which produces a
+            # deterministic tree for a given lockfile. If the PR branch
+            # already has that tree (because a previous run of this
+            # workflow pushed it), `git diff --staged` may still see
+            # local changes (working-tree-vs-base) but the resulting
+            # tree is identical to the PR's current tree — which would
+            # create an empty commit that loops via `pull_request_target`.
+            if [ "$NEW_TREE" = "$BASE_TREE" ]; then
+              echo "No effective changes (tree unchanged); skipping empty commit to avoid loop"
+              exit 0
+            fi
 
             # Create commit (GitHub will sign this)
             NEW_COMMIT=$(gh api "repos/$REPO/git/commits" \

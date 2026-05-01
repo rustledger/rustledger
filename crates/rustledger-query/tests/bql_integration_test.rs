@@ -556,6 +556,499 @@ fn test_execute_journal_query() {
     assert!(!result.is_empty());
 }
 
+/// Regression test for issue #955 (Bug 2): the JOURNAL `balance` column was
+/// per-account, but Python `bean-query` translates JOURNAL to a SELECT where
+/// `balance` is the cumulative inventory across every WHERE-filtered posting
+/// (same semantic adopted for SELECT in PR #940). For a multi-account
+/// `JOURNAL "Assets"` query, each row should show the running combined
+/// inventory of all matched accounts up to that point — including currencies
+/// that this row's account doesn't directly carry.
+#[test]
+fn test_journal_balance_is_cumulative_across_matched_accounts() {
+    let directives = vec![
+        Directive::Open(Open::new(date(2024, 1, 1), "Assets:Cash")),
+        Directive::Open(Open::new(date(2024, 1, 1), "Assets:Brokerage")),
+        Directive::Open(Open::new(date(2024, 1, 1), "Equity:Opening")),
+        // Row 0: deposit USD into Assets:Cash.
+        Directive::Transaction(
+            Transaction::new(date(2024, 2, 1), "Deposit")
+                .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(1000), "USD")))
+                .with_posting(Posting::new(
+                    "Equity:Opening",
+                    Amount::new(dec!(-1000), "USD"),
+                )),
+        ),
+        // Row 1: buy AAPL in Assets:Brokerage. Different currency, different
+        // account from the matched set. The balance here should include both
+        // the USD held in Assets:Cash AND the new AAPL.
+        Directive::Transaction(
+            Transaction::new(date(2024, 3, 1), "Buy AAPL")
+                .with_posting(Posting::new(
+                    "Assets:Brokerage",
+                    Amount::new(dec!(10), "AAPL"),
+                ))
+                .with_posting(Posting::new(
+                    "Equity:Opening",
+                    Amount::new(dec!(-1500), "USD"),
+                )),
+        ),
+    ];
+    let query = parse(r#"JOURNAL "Assets""#).expect("should parse");
+    let mut executor = Executor::new(&directives);
+    let result = executor.execute(&query).expect("should execute");
+
+    assert_eq!(result.rows.len(), 2, "two assets postings, two rows");
+
+    // Columns: date, flag, payee, narration, account, position, balance.
+    // Row 0's balance: just the USD from Assets:Cash.
+    let balance_0 = match &result.rows[0][6] {
+        Value::Inventory(inv) => inv,
+        other => panic!("expected Inventory, got {other:?}"),
+    };
+    let positions_0 = balance_0.positions();
+    assert_eq!(positions_0.len(), 1);
+    assert_eq!(positions_0[0].units.currency.as_str(), "USD");
+    assert_eq!(positions_0[0].units.number, dec!(1000));
+
+    // Row 1's balance: the cumulative inventory now includes BOTH USD and
+    // AAPL — even though row 1's posting is on Assets:Brokerage and only
+    // adds AAPL. Per-account semantics would have lost the USD here.
+    let balance_1 = match &result.rows[1][6] {
+        Value::Inventory(inv) => inv,
+        other => panic!("expected Inventory, got {other:?}"),
+    };
+    let mut currencies: Vec<&str> = balance_1
+        .positions()
+        .iter()
+        .map(|p| p.units.currency.as_str())
+        .collect();
+    currencies.sort_unstable();
+    assert_eq!(
+        currencies,
+        vec!["AAPL", "USD"],
+        "JOURNAL balance must be cumulative across matched accounts"
+    );
+}
+
+/// Regression test for issue #955 (Bug 1): the JOURNAL position column was
+/// emitting `Value::Amount(units)` instead of `Value::Position(pos)`,
+/// silently dropping cost annotations. With cost-bearing postings, the
+/// position column now preserves `{ cost }` so it matches `bean-query`.
+#[test]
+fn test_journal_position_column_preserves_cost() {
+    let directives = vec![
+        Directive::Open(Open::new(date(2024, 1, 1), "Assets:Brokerage")),
+        Directive::Open(Open::new(date(2024, 1, 1), "Equity:Opening")),
+        Directive::Transaction(
+            Transaction::new(date(2024, 2, 1), "Buy AAPL")
+                .with_posting(
+                    Posting::new("Assets:Brokerage", Amount::new(dec!(10), "AAPL")).with_cost(
+                        CostSpec::empty()
+                            .with_number_per(dec!(150))
+                            .with_currency("USD"),
+                    ),
+                )
+                .with_posting(Posting::new(
+                    "Equity:Opening",
+                    Amount::new(dec!(-1500), "USD"),
+                )),
+        ),
+    ];
+    let query = parse(r#"JOURNAL "Assets:Brokerage""#).expect("should parse");
+    let mut executor = Executor::new(&directives);
+    let result = executor.execute(&query).expect("should execute");
+
+    assert_eq!(result.rows.len(), 1, "expected one matching posting");
+
+    // Columns: date, flag, payee, narration, account, position, balance.
+    let position = &result.rows[0][5];
+    let position_with_cost = match position {
+        Value::Position(p) => p,
+        other => panic!("expected Value::Position, got {other:?}"),
+    };
+    assert_eq!(position_with_cost.units.number, dec!(10));
+    assert_eq!(position_with_cost.units.currency.as_str(), "AAPL");
+    let cost = position_with_cost
+        .cost
+        .as_ref()
+        .expect("position column must preserve cost annotation");
+    assert_eq!(cost.number, dec!(150));
+    assert_eq!(cost.currency.as_str(), "USD");
+}
+
+/// Regression test for #955 deep review: `JOURNAL ... FROM <filter>` should
+/// only count postings from transactions that pass the FROM filter into the
+/// cumulative balance. A wildcard `JOURNAL "Assets"` over a ledger with two
+/// transactions, one matching the FROM filter and one not, should show only
+/// one row whose balance reflects only the matched transaction.
+#[test]
+fn test_journal_from_clause_filters_cumulative_balance() {
+    let directives = vec![
+        Directive::Open(Open::new(date(2024, 1, 1), "Assets:Cash")),
+        Directive::Open(Open::new(date(2024, 1, 1), "Equity:Opening")),
+        // 2024 transaction — should pass `FROM year = 2024` filter.
+        Directive::Transaction(
+            Transaction::new(date(2024, 6, 1), "Deposit 2024")
+                .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(100), "USD")))
+                .with_posting(Posting::new(
+                    "Equity:Opening",
+                    Amount::new(dec!(-100), "USD"),
+                )),
+        ),
+        // 2025 transaction — should NOT pass the filter.
+        Directive::Transaction(
+            Transaction::new(date(2025, 6, 1), "Deposit 2025")
+                .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(500), "USD")))
+                .with_posting(Posting::new(
+                    "Equity:Opening",
+                    Amount::new(dec!(-500), "USD"),
+                )),
+        ),
+    ];
+    let query = parse(r#"JOURNAL "Assets" FROM year = 2024"#).expect("should parse");
+    let mut executor = Executor::new(&directives);
+    let result = executor.execute(&query).expect("should execute");
+
+    assert_eq!(result.rows.len(), 1, "FROM filter should drop the 2025 row");
+
+    let balance = match &result.rows[0][6] {
+        Value::Inventory(inv) => inv,
+        other => panic!("expected Inventory, got {other:?}"),
+    };
+    let positions = balance.positions();
+    assert_eq!(positions.len(), 1);
+    assert_eq!(
+        positions[0].units.number,
+        dec!(100),
+        "cumulative balance must only include FROM-matched postings"
+    );
+}
+
+/// Regression test for #955 deep review: `JOURNAL ... AT cost` and
+/// `JOURNAL ... AT units` are documented to project the position column away
+/// from the full Position shape. They should keep emitting `Value::Amount`,
+/// not the Position the default branch now uses.
+///
+/// (Note: AT cost / AT units balance-column behavior diverges from
+/// bean-query and is tracked separately in #957.)
+#[test]
+fn test_journal_at_cost_position_is_amount_not_position() {
+    let directives = vec![
+        Directive::Open(Open::new(date(2024, 1, 1), "Assets:Brokerage")),
+        Directive::Open(Open::new(date(2024, 1, 1), "Equity:Opening")),
+        Directive::Transaction(
+            Transaction::new(date(2024, 2, 1), "Buy AAPL")
+                .with_posting(
+                    Posting::new("Assets:Brokerage", Amount::new(dec!(10), "AAPL")).with_cost(
+                        CostSpec::empty()
+                            .with_number_per(dec!(150))
+                            .with_currency("USD"),
+                    ),
+                )
+                .with_posting(Posting::new(
+                    "Equity:Opening",
+                    Amount::new(dec!(-1500), "USD"),
+                )),
+        ),
+    ];
+    let query = parse(r#"JOURNAL "Assets:Brokerage" AT cost"#).expect("should parse");
+    let mut executor = Executor::new(&directives);
+    let result = executor.execute(&query).expect("should execute");
+
+    assert_eq!(result.rows.len(), 1);
+    let position = &result.rows[0][5];
+    match position {
+        Value::Amount(a) => {
+            // cost-currency total = 10 × 150 USD = 1500 USD
+            assert_eq!(a.number, dec!(1500));
+            assert_eq!(a.currency.as_str(), "USD");
+        }
+        other => panic!("AT cost should produce Value::Amount, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_journal_at_units_position_is_amount_not_position() {
+    let directives = vec![
+        Directive::Open(Open::new(date(2024, 1, 1), "Assets:Brokerage")),
+        Directive::Open(Open::new(date(2024, 1, 1), "Equity:Opening")),
+        Directive::Transaction(
+            Transaction::new(date(2024, 2, 1), "Buy AAPL")
+                .with_posting(
+                    Posting::new("Assets:Brokerage", Amount::new(dec!(10), "AAPL")).with_cost(
+                        CostSpec::empty()
+                            .with_number_per(dec!(150))
+                            .with_currency("USD"),
+                    ),
+                )
+                .with_posting(Posting::new(
+                    "Equity:Opening",
+                    Amount::new(dec!(-1500), "USD"),
+                )),
+        ),
+    ];
+    let query = parse(r#"JOURNAL "Assets:Brokerage" AT units"#).expect("should parse");
+    let mut executor = Executor::new(&directives);
+    let result = executor.execute(&query).expect("should execute");
+
+    assert_eq!(result.rows.len(), 1);
+    let position = &result.rows[0][5];
+    match position {
+        Value::Amount(a) => {
+            // units only — cost dropped by definition of AT units.
+            assert_eq!(a.number, dec!(10));
+            assert_eq!(a.currency.as_str(), "AAPL");
+        }
+        other => panic!("AT units should produce Value::Amount, got {other:?}"),
+    }
+}
+
+/// Regression test for issue #957: `JOURNAL ... AT cost` must collapse the
+/// balance column to cost-currency totals, matching `bean-query`'s
+/// `cost(balance)` translation. Previously the balance column showed the
+/// full lot detail regardless of AT mode.
+#[test]
+fn test_journal_at_cost_collapses_balance_to_cost_currency() {
+    let directives = vec![
+        Directive::Open(Open::new(date(2024, 1, 1), "Assets:Brokerage")),
+        Directive::Open(Open::new(date(2024, 1, 1), "Equity:Opening")),
+        Directive::Transaction(
+            Transaction::new(date(2024, 2, 1), "Buy AAPL")
+                .with_posting(
+                    Posting::new("Assets:Brokerage", Amount::new(dec!(10), "AAPL")).with_cost(
+                        CostSpec::empty()
+                            .with_number_per(dec!(150))
+                            .with_currency("USD"),
+                    ),
+                )
+                .with_posting(Posting::new(
+                    "Equity:Opening",
+                    Amount::new(dec!(-1500), "USD"),
+                )),
+        ),
+    ];
+    let query = parse(r#"JOURNAL "Assets:Brokerage" AT cost"#).expect("should parse");
+    let mut executor = Executor::new(&directives);
+    let result = executor.execute(&query).expect("should execute");
+
+    assert_eq!(result.rows.len(), 1);
+    let balance = match &result.rows[0][6] {
+        Value::Inventory(inv) => inv,
+        other => panic!("expected Inventory, got {other:?}"),
+    };
+    let positions = balance.positions();
+    assert_eq!(positions.len(), 1);
+    // 10 AAPL { 150 USD } collapsed to 1500 USD (cost-currency total).
+    assert_eq!(positions[0].units.number, dec!(1500));
+    assert_eq!(positions[0].units.currency.as_str(), "USD");
+    assert!(
+        positions[0].cost.is_none(),
+        "AT cost balance must drop the lot annotation; got {:?}",
+        positions[0].cost
+    );
+}
+
+/// Lock-in test for #957 deep review: `JOURNAL ... AT cost FROM <filter>`
+/// must compose correctly. The FROM clause filters which transactions enter
+/// the cumulative balance, and AT cost then collapses what's there to cost
+/// currency totals. Both mechanisms exist (covered separately by
+/// `test_journal_from_clause_filters_cumulative_balance` and
+/// `test_journal_at_cost_collapses_balance_to_cost_currency`); this asserts
+/// they work together in the same row.
+#[test]
+fn test_journal_at_cost_with_from_clause_filters_then_collapses() {
+    let directives = vec![
+        Directive::Open(Open::new(date(2024, 1, 1), "Assets:Brokerage")),
+        Directive::Open(Open::new(date(2024, 1, 1), "Equity:Opening")),
+        // 2024 transaction — should pass `FROM year = 2024` filter.
+        Directive::Transaction(
+            Transaction::new(date(2024, 6, 1), "Buy AAPL")
+                .with_posting(
+                    Posting::new("Assets:Brokerage", Amount::new(dec!(10), "AAPL")).with_cost(
+                        CostSpec::empty()
+                            .with_number_per(dec!(150))
+                            .with_currency("USD"),
+                    ),
+                )
+                .with_posting(Posting::new(
+                    "Equity:Opening",
+                    Amount::new(dec!(-1500), "USD"),
+                )),
+        ),
+        // 2025 transaction — should be filtered out, not contribute to balance.
+        Directive::Transaction(
+            Transaction::new(date(2025, 6, 1), "Buy MSFT")
+                .with_posting(
+                    Posting::new("Assets:Brokerage", Amount::new(dec!(20), "MSFT")).with_cost(
+                        CostSpec::empty()
+                            .with_number_per(dec!(300))
+                            .with_currency("USD"),
+                    ),
+                )
+                .with_posting(Posting::new(
+                    "Equity:Opening",
+                    Amount::new(dec!(-6000), "USD"),
+                )),
+        ),
+    ];
+    let query =
+        parse(r#"JOURNAL "Assets:Brokerage" AT cost FROM year = 2024"#).expect("should parse");
+    let mut executor = Executor::new(&directives);
+    let result = executor.execute(&query).expect("should execute");
+
+    // Only the 2024 row passes FROM; AT cost collapses its balance to 1500 USD.
+    assert_eq!(result.rows.len(), 1);
+    let balance = match &result.rows[0][6] {
+        Value::Inventory(inv) => inv,
+        other => panic!("expected Inventory, got {other:?}"),
+    };
+    let positions = balance.positions();
+    assert_eq!(
+        positions.len(),
+        1,
+        "only 2024 transaction should contribute"
+    );
+    assert_eq!(positions[0].units.number, dec!(1500));
+    assert_eq!(positions[0].units.currency.as_str(), "USD");
+}
+
+/// Regression test for issue #957: `JOURNAL ... AT units` must strip cost
+/// annotations from every position in the balance column.
+#[test]
+fn test_journal_at_units_strips_cost_from_balance() {
+    let directives = vec![
+        Directive::Open(Open::new(date(2024, 1, 1), "Assets:Brokerage")),
+        Directive::Open(Open::new(date(2024, 1, 1), "Equity:Opening")),
+        Directive::Transaction(
+            Transaction::new(date(2024, 2, 1), "Buy AAPL")
+                .with_posting(
+                    Posting::new("Assets:Brokerage", Amount::new(dec!(10), "AAPL")).with_cost(
+                        CostSpec::empty()
+                            .with_number_per(dec!(150))
+                            .with_currency("USD"),
+                    ),
+                )
+                .with_posting(Posting::new(
+                    "Equity:Opening",
+                    Amount::new(dec!(-1500), "USD"),
+                )),
+        ),
+    ];
+    let query = parse(r#"JOURNAL "Assets:Brokerage" AT units"#).expect("should parse");
+    let mut executor = Executor::new(&directives);
+    let result = executor.execute(&query).expect("should execute");
+
+    let balance = match &result.rows[0][6] {
+        Value::Inventory(inv) => inv,
+        other => panic!("expected Inventory, got {other:?}"),
+    };
+    let positions = balance.positions();
+    assert_eq!(positions.len(), 1);
+    // AT units shows units only — same number / currency as the position.
+    assert_eq!(positions[0].units.number, dec!(10));
+    assert_eq!(positions[0].units.currency.as_str(), "AAPL");
+    assert!(
+        positions[0].cost.is_none(),
+        "AT units balance must drop the lot annotation; got {:?}",
+        positions[0].cost
+    );
+}
+
+/// Regression test for issue #957 edge case: positions without cost are kept
+/// as-is by `Inventory::at_cost()` (matches bean-query's `cost()` fallback).
+/// A `JOURNAL ... AT cost` over a USD-only ledger should pass USD through
+/// unchanged in the balance, not error or drop the position.
+#[test]
+fn test_journal_at_cost_balance_preserves_no_cost_positions() {
+    let directives = vec![
+        Directive::Open(Open::new(date(2024, 1, 1), "Assets:Cash")),
+        Directive::Open(Open::new(date(2024, 1, 1), "Equity:Opening")),
+        Directive::Transaction(
+            Transaction::new(date(2024, 2, 1), "Deposit")
+                .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(100), "USD")))
+                .with_posting(Posting::new(
+                    "Equity:Opening",
+                    Amount::new(dec!(-100), "USD"),
+                )),
+        ),
+    ];
+    let query = parse(r#"JOURNAL "Assets:Cash" AT cost"#).expect("should parse");
+    let mut executor = Executor::new(&directives);
+    let result = executor.execute(&query).expect("should execute");
+
+    let balance = match &result.rows[0][6] {
+        Value::Inventory(inv) => inv,
+        other => panic!("expected Inventory, got {other:?}"),
+    };
+    let positions = balance.positions();
+    assert_eq!(positions.len(), 1);
+    assert_eq!(positions[0].units.number, dec!(100));
+    assert_eq!(positions[0].units.currency.as_str(), "USD");
+}
+
+/// Regression test for issue #957 edge case: a balance with positions in
+/// multiple cost currencies stays multi-currency under `AT cost` (matches
+/// bean-query — `cost(balance)` does not unify across cost currencies).
+#[test]
+fn test_journal_at_cost_balance_keeps_mixed_cost_currencies() {
+    let directives = vec![
+        Directive::Open(Open::new(date(2024, 1, 1), "Assets:Brokerage")),
+        Directive::Open(Open::new(date(2024, 1, 1), "Equity:Opening")),
+        // Lot 1: 10 AAPL @ 150 USD = 1500 USD cost basis.
+        Directive::Transaction(
+            Transaction::new(date(2024, 2, 1), "Buy AAPL USD lot")
+                .with_posting(
+                    Posting::new("Assets:Brokerage", Amount::new(dec!(10), "AAPL")).with_cost(
+                        CostSpec::empty()
+                            .with_number_per(dec!(150))
+                            .with_currency("USD"),
+                    ),
+                )
+                .with_posting(Posting::new(
+                    "Equity:Opening",
+                    Amount::new(dec!(-1500), "USD"),
+                )),
+        ),
+        // Lot 2: 5 AAPL @ 130 EUR = 650 EUR cost basis. (Same commodity,
+        // different cost currency — atypical but legal.)
+        Directive::Transaction(
+            Transaction::new(date(2024, 3, 1), "Buy AAPL EUR lot")
+                .with_posting(
+                    Posting::new("Assets:Brokerage", Amount::new(dec!(5), "AAPL")).with_cost(
+                        CostSpec::empty()
+                            .with_number_per(dec!(130))
+                            .with_currency("EUR"),
+                    ),
+                )
+                .with_posting(Posting::new(
+                    "Equity:Opening",
+                    Amount::new(dec!(-650), "EUR"),
+                )),
+        ),
+    ];
+    let query = parse(r#"JOURNAL "Assets:Brokerage" AT cost"#).expect("should parse");
+    let mut executor = Executor::new(&directives);
+    let result = executor.execute(&query).expect("should execute");
+
+    // After both rows, the balance has both USD and EUR cost-currency totals.
+    let last_balance = match &result.rows[1][6] {
+        Value::Inventory(inv) => inv,
+        other => panic!("expected Inventory, got {other:?}"),
+    };
+    let mut by_currency: std::collections::HashMap<&str, rust_decimal::Decimal> =
+        std::collections::HashMap::new();
+    for p in last_balance.positions() {
+        by_currency.insert(p.units.currency.as_str(), p.units.number);
+    }
+    assert_eq!(by_currency.get("USD"), Some(&dec!(1500)));
+    assert_eq!(by_currency.get("EUR"), Some(&dec!(650)));
+    assert_eq!(
+        by_currency.len(),
+        2,
+        "AT cost must not collapse across cost currencies; got {by_currency:?}"
+    );
+}
+
 // ============================================================================
 // BALANCES Query Tests
 // ============================================================================
@@ -580,6 +1073,118 @@ fn test_execute_balances_with_from() {
 
     // Should have balances
     assert!(!result.is_empty());
+}
+
+/// Regression test for issue #958: sequential `BALANCES` queries on the same
+/// `Executor` must produce identical results. Before the fix,
+/// `build_balances_with_filter` accumulated into a struct field without
+/// clearing, so the second run returned doubled balances.
+#[test]
+fn test_balances_idempotent_across_sequential_runs() {
+    let directives = make_test_directives();
+    let query = parse("BALANCES").expect("should parse");
+    let mut executor = Executor::new(&directives);
+
+    let r1 = executor.execute(&query).expect("first run");
+    let r2 = executor.execute(&query).expect("second run");
+
+    assert_eq!(
+        r1.rows, r2.rows,
+        "BALANCES must return identical results when run twice on the same Executor"
+    );
+}
+
+/// Regression test for the Copilot-flagged sub-issue on PR #959: an
+/// `Executor` constructed via `new_with_sources` (used when source-location
+/// info is needed) put directives in `spanned_directives` and left
+/// `directives` empty. `build_balances_with_filter` previously iterated
+/// only `self.directives`, so BALANCES on a source-mapped Executor silently
+/// returned an empty result. The fix iterates whichever source is
+/// populated, mirroring `collect_postings` and the system-table builders.
+#[test]
+fn test_balances_works_with_spanned_directives_executor() {
+    use rustledger_loader::SourceMap;
+    use rustledger_parser::{Span, Spanned};
+
+    let dirs = make_test_directives();
+    let spanned: Vec<Spanned<rustledger_core::Directive>> = dirs
+        .iter()
+        .cloned()
+        .map(|d| Spanned {
+            value: d,
+            span: Span::new(0, 50),
+            file_id: 0,
+        })
+        .collect();
+    let source_map = SourceMap::new();
+
+    let mut executor = Executor::new_with_sources(&spanned, &source_map);
+    let result = executor
+        .execute(&parse("BALANCES").expect("should parse"))
+        .expect("BALANCES on source-mapped Executor should work");
+
+    assert!(
+        !result.is_empty(),
+        "source-mapped Executor must return non-empty BALANCES; previously returned empty"
+    );
+}
+
+/// Regression test for issue #958 (FROM-filter variant): sequential `BALANCES`
+/// with different FROM clauses must each return only their own filter's
+/// view. Before the fix, the second run accumulated its filter on top of
+/// the first run's residual state — a union, not a fresh view — producing
+/// output matching no single query.
+#[test]
+fn test_balances_with_different_from_filters_are_independent() {
+    let directives = vec![
+        Directive::Open(Open::new(date(2024, 1, 1), "Assets:Cash")),
+        Directive::Open(Open::new(date(2024, 1, 1), "Equity:Opening")),
+        Directive::Transaction(
+            Transaction::new(date(2024, 6, 1), "2024 deposit")
+                .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(100), "USD")))
+                .with_posting(Posting::new(
+                    "Equity:Opening",
+                    Amount::new(dec!(-100), "USD"),
+                )),
+        ),
+        Directive::Transaction(
+            Transaction::new(date(2025, 6, 1), "2025 deposit")
+                .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(500), "USD")))
+                .with_posting(Posting::new(
+                    "Equity:Opening",
+                    Amount::new(dec!(-500), "USD"),
+                )),
+        ),
+    ];
+
+    let mut executor = Executor::new(&directives);
+
+    // Run year=2024 first to populate any latent state.
+    let q_2024 = parse("BALANCES FROM year = 2024").expect("should parse");
+    let _ = executor.execute(&q_2024).expect("2024 run");
+
+    // Now run year=2025. Should reflect only 2025 transactions.
+    let q_2025 = parse("BALANCES FROM year = 2025").expect("should parse");
+    let r_2025 = executor.execute(&q_2025).expect("2025 run");
+
+    // Find the Assets:Cash row.
+    let cash_row = r_2025
+        .rows
+        .iter()
+        .find(|row| matches!(&row[0], Value::String(s) if s == "Assets:Cash"))
+        .expect("Assets:Cash should appear in 2025 results");
+
+    let inv = match &cash_row[1] {
+        Value::Inventory(i) => i,
+        other => panic!("expected Inventory, got {other:?}"),
+    };
+    let positions = inv.positions();
+    assert_eq!(positions.len(), 1);
+    assert_eq!(
+        positions[0].units.number,
+        dec!(500),
+        "year=2025 BALANCES must show 500 USD, not 600 USD (2024 + 2025 union)"
+    );
 }
 
 // ----------------------------------------------------------------------------

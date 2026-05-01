@@ -213,6 +213,14 @@ fn update_column_context(col_ctx: &mut DisplayContext, value: &Value, ledger_ctx
                 }
             }
         }
+        // For naked Decimal columns (e.g. SUM(number)), the value carries no
+        // currency, so the column context can't infer one. Inherit the
+        // ledger's per-currency precision data so `format_default` has
+        // something to work with — otherwise a column of `Value::Number(0.00)`
+        // would render as "0" instead of "0.00". Issue #954.
+        Value::Number(_) => {
+            col_ctx.update_from(ledger_ctx);
+        }
         _ => {}
     }
 }
@@ -220,7 +228,13 @@ fn update_column_context(col_ctx: &mut DisplayContext, value: &Value, ledger_ctx
 pub(super) fn format_value(value: &Value, numberify: bool, ctx: &DisplayContext) -> String {
     match value {
         Value::String(s) => s.clone(),
-        Value::Number(n) => n.normalize().to_string(),
+        // Naked Decimals have no associated currency, so we route through
+        // `DisplayContext::format_default` to match bean-query's rendering of
+        // unspecified-currency aggregate columns. Previously this called
+        // `n.normalize().to_string()`, which stripped trailing zeros and
+        // diverged from bean-query for cases like `SUM(0.00)` returning "0"
+        // instead of "0.00". See issue #954.
+        Value::Number(n) => ctx.format_default(*n),
         Value::Integer(i) => i.to_string(),
         Value::Date(d) => d.to_string(),
         Value::Boolean(b) => b.to_string(),

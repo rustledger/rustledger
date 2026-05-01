@@ -29,7 +29,8 @@ rledger price [OPTIONS] [SYMBOL]...
 | `-s, --source <SOURCE>` | Use specific source (overrides mapping) |
 | `--source-cmd <CMD>` | Use ad-hoc external command as source |
 | `-m, --mapping <MAPPING>` | Symbol mapping (e.g., `VTI:VTI,BTC:BTC-USD`) |
-| `--all-commodities` | Include commodities not currently held (default: only active) |
+| `--inactive` | Include commodities not currently held (matches `bean-price --inactive`). Requires `-f`. |
+| `--undeclared` | Also discover ticker-shaped commodities lacking `price:`/`quote_currency:` metadata. Approximate analogue of `bean-price --undeclared` (see note below). Requires `-f`. |
 | `--list-sources` | List configured sources and exit |
 | `--no-cache` | Disable the price cache for this run |
 | `--clear-cache` | Clear the price cache before fetching |
@@ -37,7 +38,7 @@ rledger price [OPTIONS] [SYMBOL]...
 
 ## Discovering Symbols from a Ledger
 
-`-f / --file` extracts the list of commodities to fetch from a beancount file, so you don't have to maintain a separate symbol list. Three things determine what gets discovered, all matching `bean-price` semantics (issue #948):
+`-f / --file` extracts the list of commodities to fetch from a beancount file, so you don't have to maintain a separate symbol list. The default matches `bean-price`'s strict semantics: only commodities you've explicitly tagged with `price:` or `quote_currency:` metadata are discovered, and only if you currently hold them. The matching logic is verified against upstream `beanprice/price.py::find_currencies_declared`.
 
 ### 1. `price:` metadata on `commodity` directives
 
@@ -56,7 +57,7 @@ Annotate a commodity with how to fetch its price. The format is `<quote-currency
 
 The first source in the chain is tried first; subsequent ones act as fallbacks. The quote currency in the metadata overrides the global `--currency` for that one symbol, so you can mix USD-quoted stocks and EUR-quoted bonds in the same run.
 
-Commodities that don't have `price:` metadata fall back to a name heuristic: ticker-shaped names (uppercase letters, digits, dashes; ≤ 10 chars) are still picked up, preserving the previous behavior.
+`price: ""` (empty string, or whitespace-only) is an explicit **opt-out from `-f / --file` discovery**: the commodity is never picked up from the ledger, even with `--undeclared`. Useful for currency codes that happen to collide with stock tickers (e.g. `BAM`, `UKW`) — see issue #962. Note: a symbol passed *explicitly* on the command line (e.g. `rledger price BAM`) is always fetched regardless of the opt-out, since CLI args are explicit user intent.
 
 ### 2. `quote_currency:` metadata
 
@@ -67,20 +68,33 @@ If you don't use `price:` but want a per-commodity quote currency:
   quote_currency: "EUR"
 ```
 
-This sets the quote currency for `GOVT_EU` only, falling back to `--currency` for everything else.
+This sets the quote currency for `GOVT_EU` only, falling back to `--currency` for everything else. The presence of `quote_currency:` alone is enough to opt the commodity into discovery; the source comes from `[price.default_source]` or `--source`.
 
 ### 3. Active-only filtering
 
 By default, only commodities you currently **hold** are fetched. A commodity is considered active if at least one open *balance-sheet* account (Assets or Liabilities, using the configured `name_assets` / `name_liabilities` options for non-English ledgers) ends with a non-zero balance in that currency. Equity, Income, and Expenses accounts are excluded from the check; including them would mark every commodity that ever moved through `Equity:Opening-Balances` as active even after the position was fully closed. Closed accounts (those with a `close` directive) are also excluded.
 
-Pass `--all-commodities` to disable the filter and fetch prices for everything declared in the file (matching the pre-#948 behavior).
+Pass `--inactive` to disable the filter and fetch prices for every declared commodity, regardless of current balance.
+
+### 4. Discovering commodities without metadata (`--undeclared`)
+
+If you have a ledger without `price:` annotations and want rustledger to guess based on commodity name, pass `--undeclared`. This re-enables a name heuristic: ticker-shaped names (uppercase letters, digits, dashes, dots; ≤ 10 chars) are picked up using the configured `[price.default_source]`.
+
+> **Divergence note**: This is *not* a 1:1 match for `bean-price --undeclared`. The Python flag walks **transactions** and unions the at-cost, converted, and priced currencies — with no name filter. Our `--undeclared` walks `commodity` directives and applies a ticker-shape filter, deliberately keeping currency codes like `EUR` or `BAM` out of stock sources by default. Closer alignment with bean-price's transaction-walking semantics is tracked as a follow-up.
 
 ```bash
-# Default: only commodities you actually hold
+# Default: strict — only commodities with price:/quote_currency: metadata
+# that you currently hold
 rledger price -f main.beancount
 
 # Include declared-but-unheld commodities
-rledger price -f main.beancount --all-commodities
+rledger price -f main.beancount --inactive
+
+# Discover ticker-shaped commodities even without metadata
+rledger price -f main.beancount --undeclared
+
+# Legacy "fetch everything that looks fetchable" (pre-strict-default behavior)
+rledger price -f main.beancount --inactive --undeclared
 ```
 
 ### Precedence for source/ticker resolution

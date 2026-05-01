@@ -119,3 +119,15 @@ name = "journal-assets"
 query = "JOURNAL 'Assets'"
 notes = "JOURNAL form — different code path from SELECT; order-sensitive"
 preserve_order = true
+
+[[query]]
+name = "journal-assets-at-cost"
+query = "JOURNAL 'Assets' AT cost"
+notes = "JOURNAL AT cost — exercises summary_func(balance) collapsing per-row balance to cost-currency totals (issue #957)"
+preserve_order = true
+
+[[query]]
+name = "journal-assets-at-units"
+query = "JOURNAL 'Assets' AT units"
+notes = "JOURNAL AT units — exercises summary_func(balance) stripping cost annotations from balance (issue #957)"
+preserve_order = true

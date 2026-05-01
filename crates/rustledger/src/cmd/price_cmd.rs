@@ -84,16 +84,19 @@ pub struct PriceArgs {
 
     /// Include commodities that aren't currently held (zero balance across
     /// all open balance-sheet accounts). Matches `bean-price --inactive`.
-    #[arg(long)]
+    /// Only meaningful with `-f`; ignored otherwise.
+    #[arg(long, requires = "file")]
     inactive: bool,
 
     /// Also discover commodities that lack `price:`/`quote_currency:`
     /// metadata if their name looks like a ticker symbol (uppercase ASCII,
-    /// digits, dashes, dots; ≤ 10 chars). Matches
-    /// `bean-price --undeclared`. Off by default — the strict default
-    /// avoids spurious downloads for currency codes like `BAM` that
-    /// happen to collide with stock tickers (issue #962).
-    #[arg(long)]
+    /// digits, dashes, dots; ≤ 10 chars). Off by default — the strict
+    /// default avoids spurious downloads for currency codes like `BAM`
+    /// that happen to collide with stock tickers (issue #962). Note: not
+    /// a 1:1 match for `bean-price --undeclared`, which walks transactions
+    /// instead of `commodity` directives.
+    /// Only meaningful with `-f`; ignored otherwise.
+    #[arg(long, requires = "file")]
     undeclared: bool,
 }
 

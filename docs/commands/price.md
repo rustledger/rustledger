@@ -29,8 +29,8 @@ rledger price [OPTIONS] [SYMBOL]...
 | `-s, --source <SOURCE>` | Use specific source (overrides mapping) |
 | `--source-cmd <CMD>` | Use ad-hoc external command as source |
 | `-m, --mapping <MAPPING>` | Symbol mapping (e.g., `VTI:VTI,BTC:BTC-USD`) |
-| `--inactive` | Include commodities not currently held (matches `bean-price --inactive`) |
-| `--undeclared` | Also discover ticker-shaped commodities lacking `price:`/`quote_currency:` metadata (matches `bean-price --undeclared`) |
+| `--inactive` | Include commodities not currently held (matches `bean-price --inactive`). Requires `-f`. |
+| `--undeclared` | Also discover ticker-shaped commodities lacking `price:`/`quote_currency:` metadata. Approximate analogue of `bean-price --undeclared` (see note below). Requires `-f`. |
 | `--list-sources` | List configured sources and exit |
 | `--no-cache` | Disable the price cache for this run |
 | `--clear-cache` | Clear the price cache before fetching |
@@ -78,7 +78,9 @@ Pass `--inactive` to disable the filter and fetch prices for every declared comm
 
 ### 4. Discovering commodities without metadata (`--undeclared`)
 
-If you have a ledger without `price:` annotations and want rustledger to guess based on commodity name, pass `--undeclared`. This re-enables a name heuristic: ticker-shaped names (uppercase letters, digits, dashes, dots; ≤ 10 chars) are picked up using the configured `[price.default_source]`. This corresponds to `bean-price --undeclared`.
+If you have a ledger without `price:` annotations and want rustledger to guess based on commodity name, pass `--undeclared`. This re-enables a name heuristic: ticker-shaped names (uppercase letters, digits, dashes, dots; ≤ 10 chars) are picked up using the configured `[price.default_source]`.
+
+> **Divergence note**: This is *not* a 1:1 match for `bean-price --undeclared`. The Python flag walks **transactions** and unions the at-cost, converted, and priced currencies — with no name filter. Our `--undeclared` walks `commodity` directives and applies a ticker-shape filter, deliberately keeping currency codes like `EUR` or `BAM` out of stock sources by default. Closer alignment with bean-price's transaction-walking semantics is tracked as a follow-up.
 
 ```bash
 # Default: strict — only commodities with price:/quote_currency: metadata

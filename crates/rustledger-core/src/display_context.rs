@@ -32,7 +32,7 @@
 //! ```
 
 use rust_decimal::Decimal;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Display context for formatting numbers with consistent precision per currency.
 ///
@@ -74,11 +74,29 @@ impl DisplayContext {
 
     /// Update the display context from another display context.
     ///
-    /// Takes the maximum precision for each currency from both contexts.
+    /// - Inferred per-currency precisions: take the max of self and other.
+    /// - Fixed per-currency overrides (`option "display_precision"`):
+    ///   propagated from `other` only when `self` has no fixed override for
+    ///   that currency (so a per-context override stays authoritative).
+    /// - `render_commas`: enabled if either side has it on (treated as a
+    ///   one-way "sticky on" merge — same rationale as the inferred-max).
+    ///
+    /// The fixed-precision and `render_commas` merging matters when a column
+    /// context inherits from a ledger context for `Value::Number` rendering:
+    /// without it, the ledger's display options would silently fail to apply
+    /// to naked-decimal columns. See PR #961 follow-up.
     pub fn update_from(&mut self, other: &Self) {
         for (currency, precision) in &other.precisions {
             let entry = self.precisions.entry(currency.clone()).or_insert(0);
             *entry = (*entry).max(*precision);
+        }
+        for (currency, precision) in &other.fixed_precisions {
+            self.fixed_precisions
+                .entry(currency.clone())
+                .or_insert(*precision);
+        }
+        if other.render_commas {
+            self.render_commas = true;
         }
     }
 
@@ -112,6 +130,36 @@ impl DisplayContext {
             return Some(precision);
         }
         self.precisions.get(currency).copied()
+    }
+
+    /// Get the default precision used when formatting a Decimal that has no
+    /// associated currency (e.g. the result of `SUM(number)` in BQL).
+    ///
+    /// Matches Python `bean-query`'s `format_decimal` behavior: pick the
+    /// max effective precision across every currency known to the context.
+    /// "Effective" means per-currency `fixed` overrides `inferred` (same rule
+    /// as [`get_precision`](Self::get_precision)) — so a fixed `display_precision`
+    /// of 2 for USD won't be overridden by an inferred 4-digit value seen
+    /// somewhere in the file. Returns 0 if no currencies have been recorded.
+    #[must_use]
+    pub fn default_precision(&self) -> u32 {
+        // Union of all currency keys, then look up effective precision per
+        // currency. `get_precision` handles the fixed-vs-inferred priority.
+        let mut max_dp: u32 = 0;
+        let mut seen: HashSet<&str> = HashSet::new();
+        for currency in self
+            .fixed_precisions
+            .keys()
+            .chain(self.precisions.keys())
+            .map(String::as_str)
+        {
+            if seen.insert(currency)
+                && let Some(dp) = self.get_precision(currency)
+            {
+                max_dp = max_dp.max(dp);
+            }
+        }
+        max_dp
     }
 
     /// Quantize a number to the tracked precision for a currency.
@@ -164,6 +212,25 @@ impl DisplayContext {
     #[must_use]
     pub fn format_amount(&self, number: Decimal, currency: &str) -> String {
         format!("{} {}", self.format(number, currency), currency)
+    }
+
+    /// Format a Decimal that has no associated currency, using the
+    /// [`default_precision`](Self::default_precision).
+    ///
+    /// Used by the BQL query renderer for `Value::Number` results — bare
+    /// Decimals produced by aggregates like `SUM(number)`. Matches
+    /// `bean-query`'s rendering for unspecified-currency Decimal columns.
+    #[must_use]
+    pub fn format_default(&self, number: Decimal) -> String {
+        let dp = self.default_precision();
+        let rounded = number.round_dp(dp);
+        let formatted = format!("{rounded}");
+        let formatted = Self::ensure_decimal_places(&formatted, dp);
+        if self.render_commas {
+            Self::add_commas(&formatted)
+        } else {
+            formatted
+        }
     }
 
     /// Get the decimal precision (number of digits after decimal point) of a number.
@@ -326,10 +393,146 @@ mod tests {
     }
 
     #[test]
+    fn test_update_from_propagates_fixed_precisions_and_render_commas() {
+        // Copilot review on PR #961: previously update_from only merged
+        // inferred precisions, so naked-decimal columns inheriting from a
+        // ledger context with `option "display_precision"` would miss the
+        // fixed overrides.
+        let mut ledger = DisplayContext::new();
+        ledger.update(dec!(1.234), "USD"); // inferred precision 3
+        ledger.set_fixed_precision("USD", 2); // fixed override
+        ledger.set_fixed_precision("BTC", 8);
+        ledger.set_render_commas(true);
+
+        let mut col = DisplayContext::new();
+        col.update_from(&ledger);
+
+        // Inferred precision merged.
+        assert_eq!(col.precisions.get("USD"), Some(&3));
+        // Fixed overrides also propagated.
+        assert_eq!(col.fixed_precisions.get("USD"), Some(&2));
+        assert_eq!(col.fixed_precisions.get("BTC"), Some(&8));
+        // get_precision still respects the fixed override.
+        assert_eq!(col.get_precision("USD"), Some(2));
+        assert_eq!(col.get_precision("BTC"), Some(8));
+        // render_commas propagated.
+        assert!(col.render_commas);
+    }
+
+    #[test]
+    fn test_update_from_preserves_self_fixed_overrides() {
+        // If self already has a fixed override for a currency, update_from
+        // shouldn't clobber it with the other's value. Self wins.
+        let mut ledger = DisplayContext::new();
+        ledger.set_fixed_precision("USD", 2);
+
+        let mut col = DisplayContext::new();
+        col.set_fixed_precision("USD", 4); // self's override
+        col.update_from(&ledger);
+
+        assert_eq!(col.fixed_precisions.get("USD"), Some(&4));
+    }
+
+    #[test]
+    fn test_default_precision_respects_fixed_override_lower_than_inferred() {
+        // Copilot review on PR #961: if USD has inferred=4 but fixed=2,
+        // the user said "render USD with 2 decimals" — default_precision
+        // for naked Decimals must respect that, not fall back to the
+        // inferred max (4).
+        let mut ctx = DisplayContext::new();
+        ctx.update(dec!(1.2345), "USD"); // inferred 4
+        ctx.set_fixed_precision("USD", 2); // fixed override
+
+        // get_precision returns the effective precision (fixed wins).
+        assert_eq!(ctx.get_precision("USD"), Some(2));
+        // default_precision must use the same effective view, not raw max.
+        assert_eq!(ctx.default_precision(), 2);
+    }
+
+    #[test]
+    fn test_default_precision_takes_max_across_currencies_with_overrides() {
+        // EUR fixed=4 wins over USD fixed=2 → default = 4.
+        let mut ctx = DisplayContext::new();
+        ctx.set_fixed_precision("USD", 2);
+        ctx.set_fixed_precision("EUR", 4);
+
+        assert_eq!(ctx.default_precision(), 4);
+    }
+
+    #[test]
     fn test_format_amount() {
         let mut ctx = DisplayContext::new();
         ctx.update(dec!(50.25), "USD");
 
         assert_eq!(ctx.format_amount(dec!(100), "USD"), "100.00 USD");
+    }
+
+    #[test]
+    fn test_default_precision_picks_max_across_currencies() {
+        // Issue #954: bare Decimals (e.g. SUM(number) result) need a default
+        // precision matching what bean-query uses — the max precision across
+        // every known currency.
+        let mut ctx = DisplayContext::new();
+        ctx.update(dec!(1.23), "USD"); // precision 2
+        ctx.update(dec!(1.2345), "EUR"); // precision 4
+        ctx.update(dec!(0.5), "GBP"); // precision 1
+
+        assert_eq!(ctx.default_precision(), 4);
+    }
+
+    #[test]
+    fn test_default_precision_includes_fixed_overrides() {
+        // Fixed precision (from `option "display_precision"`) should also
+        // contribute to the max.
+        let mut ctx = DisplayContext::new();
+        ctx.update(dec!(1.23), "USD");
+        ctx.set_fixed_precision("BTC", 8);
+
+        assert_eq!(ctx.default_precision(), 8);
+    }
+
+    #[test]
+    fn test_default_precision_empty_context_is_zero() {
+        let ctx = DisplayContext::new();
+        assert_eq!(ctx.default_precision(), 0);
+    }
+
+    #[test]
+    fn test_format_default_pads_to_max_precision() {
+        let mut ctx = DisplayContext::new();
+        ctx.update(dec!(1.23), "USD");
+        ctx.update(dec!(1.2345), "EUR");
+
+        // Default precision = 4 (EUR's), so even an integer-shaped value
+        // gets four trailing zeros.
+        assert_eq!(ctx.format_default(dec!(0)), "0.0000");
+        assert_eq!(ctx.format_default(dec!(100)), "100.0000");
+    }
+
+    #[test]
+    fn test_format_default_rounds_overprecise_values() {
+        let mut ctx = DisplayContext::new();
+        ctx.update(dec!(1.23), "USD");
+
+        // Default precision = 2, so 1.235 rounds half-away-from-zero to 1.24.
+        assert_eq!(ctx.format_default(dec!(1.235)), "1.24");
+    }
+
+    #[test]
+    fn test_format_default_empty_context_natural() {
+        let ctx = DisplayContext::new();
+        // No tracked precision → 0 → integer-like rendering.
+        assert_eq!(ctx.format_default(dec!(42)), "42");
+        // Fractional values with default precision 0 round to integer.
+        assert_eq!(ctx.format_default(dec!(1.5)), "2");
+    }
+
+    #[test]
+    fn test_format_default_renders_commas() {
+        let mut ctx = DisplayContext::new();
+        ctx.update(dec!(1.23), "USD");
+        ctx.set_render_commas(true);
+
+        assert_eq!(ctx.format_default(dec!(1234567.89)), "1,234,567.89");
     }
 }

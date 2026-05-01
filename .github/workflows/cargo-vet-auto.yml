@@ -1,9 +1,16 @@
-# Auto-update cargo-vet exemptions for Dependabot PRs
-# This prevents cargo-deny check failures when Dependabot updates dependencies
+# Auto-update cargo-vet exemptions for Dependabot PRs and maintainer PRs
+# that touch Cargo.lock. This prevents cargo-vet check failures when a
+# dependency bump pulls in fresh transitive versions whose exemptions are
+# pinned to the prior version.
 name: Cargo Vet Auto
 # SECURITY: Using pull_request_target to avoid untrusted checkout vulnerability (CodeQL alert #82).
-# This workflow only runs for dependabot[bot] and only modifies supply-chain/ files.
-# The PR's Cargo.lock is fetched explicitly after checking out the base branch.
+# Trigger is gated to dependabot[bot] OR repo OWNER/MEMBER PRs. External
+# contributors can't trigger this (which would let a hostile Cargo.lock
+# add exemptions for a malicious crate). Repo maintainers already have
+# write access, so allowing them adds no new attack surface compared to
+# committing directly to the branch.
+# The workflow only modifies supply-chain/ files. The PR's Cargo.lock is
+# fetched explicitly after checking out the trusted base branch.
 on:
   pull_request_target:
     paths:
@@ -14,8 +21,12 @@ jobs:
   update-exemptions:
     name: Update Exemptions
     runs-on: ubuntu-latest
-    # Only run for Dependabot PRs
-    if: github.actor == 'dependabot[bot]'
+    # Run for Dependabot PRs and trusted-maintainer PRs (OWNER/MEMBER).
+    # Use author_association so we don't have to maintain a username list.
+    if: |
+      github.actor == 'dependabot[bot]' ||
+      github.event.pull_request.author_association == 'OWNER' ||
+      github.event.pull_request.author_association == 'MEMBER'
     steps:
       - name: Generate GitHub App token
         id: app-token

@@ -1,8 +1,8 @@
 //! Symbol discovery from beancount files.
 //!
 //! Walks a loaded ledger to identify which commodities to fetch prices for,
-//! matching the workflow `bean-price` exposes via the same metadata
-//! conventions:
+//! matching `bean-price`'s discovery semantics (verified against
+//! upstream `beanprice/price.py::find_currencies_declared`):
 //!
 //! - `commodity` directives carrying a `price:` metadata key drive
 //!   metadata-based discovery. Format: `"<quote>:<source>/<ticker>"`,
@@ -10,15 +10,16 @@
 //!   `"USD:yahoo/AAPL,USD:google/NASDAQ:AAPL"`.
 //! - `quote_currency:` metadata supplies a per-commodity quote currency,
 //!   used as the `--currency` default for that one symbol.
-//! - With no metadata, ticker-shaped commodity names (uppercase + digits +
-//!   dashes, ≤ 10 chars) are picked up via heuristic so existing users
-//!   aren't broken (issue #948).
+//! - `price: ""` (empty string) explicitly opts a commodity *out* of
+//!   fetching, even if it would otherwise be picked up. Mirrors
+//!   `bean-price`'s "Skipping ignored currency (with empty price)" rule.
+//! - With `undeclared = true`, commodities lacking metadata fall back to a
+//!   ticker-shape heuristic (uppercase letters/digits/dashes/dots, ≤ 10
+//!   chars). This corresponds to `bean-price --undeclared`. Off by default.
 //!
 //! By default, only "active" commodities are returned: those with a non-zero
-//! balance in any open account, computed by walking transaction postings and
-//! summing per-(account, currency). This matches `bean-price`'s default
-//! behavior and avoids wasting API calls on commodities the user no longer
-//! holds. Pass `include_inactive: true` to skip the activity filter.
+//! balance in at least one open balance-sheet account. Set `inactive: true`
+//! to skip the activity filter — corresponds to `bean-price --inactive`.
 
 use crate::config::{CommodityMapping, DetailedMapping, SourceRef};
 use rust_decimal::Decimal;
@@ -51,6 +52,16 @@ struct PriceSpec {
 /// CLI symbols are always included (with empty discovery info) so they
 /// override or augment file-based discovery.
 ///
+/// `inactive` corresponds to `bean-price --inactive`: when false (the
+/// default), only commodities with a non-zero balance on at least one open
+/// balance-sheet account are returned.
+///
+/// `undeclared` corresponds to `bean-price --undeclared`: when false (the
+/// default), only commodities with `price:` or `quote_currency:` metadata
+/// are returned. With `undeclared = true`, commodities whose name looks
+/// like a ticker symbol are also picked up using configured/default
+/// sources.
+///
 /// Takes the directive slice directly so it works with either `LoadResult`
 /// (raw load) or the post-processing `Ledger` type without coupling. Reads
 /// the configured account-type names from `options` so the
@@ -60,9 +71,10 @@ pub fn discover_symbols(
     directives: &[Spanned<Directive>],
     options: &Options,
     cli_symbols: &[String],
-    include_inactive: bool,
+    inactive: bool,
+    undeclared: bool,
 ) -> HashMap<String, DiscoveredCommodity> {
-    let active = if include_inactive {
+    let active = if inactive {
         None
     } else {
         Some(active_commodities(directives, options))
@@ -75,11 +87,21 @@ pub fn discover_symbols(
             continue;
         };
         let symbol = comm.currency.as_str();
-        let info = build_discovery_info(&comm.meta);
 
-        // Skip commodities with no metadata that don't look like a ticker —
-        // preserves backward-compat with the old name-heuristic filter.
-        if info.mapping.is_none() && info.quote_currency.is_none() && !looks_like_ticker(symbol) {
+        // `price: ""` is an explicit opt-out — bean-price-compatible.
+        // Honored regardless of `undeclared` so users can suppress
+        // commodities that would otherwise be picked up by the heuristic.
+        if comm.meta.get("price").and_then(metavalue_as_str) == Some("") {
+            continue;
+        }
+
+        let info = build_discovery_info(&comm.meta);
+        let has_metadata = info.mapping.is_some() || info.quote_currency.is_some();
+
+        // Strict default: require metadata. `--undeclared` re-enables the
+        // ticker-shape fallback so users running with raw commodity names
+        // can still discover symbols (issue #962).
+        if !(has_metadata || undeclared && looks_like_ticker(symbol)) {
             continue;
         }
 
@@ -426,7 +448,7 @@ mod tests {
                     )),
             ),
         ]);
-        let discovered = discover_symbols(&dirs, &Options::new(), &[], false);
+        let discovered = discover_symbols(&dirs, &Options::new(), &[], false, false);
 
         // Even though "Vanguard_VTI" doesn't pass the ticker heuristic,
         // it has price: metadata, so it's discovered.
@@ -447,21 +469,137 @@ mod tests {
         let dirs = directives(vec![Directive::Commodity(comm)]);
 
         // Default: no active postings means OLD is not discovered.
-        let discovered = discover_symbols(&dirs, &Options::new(), &[], false);
+        let discovered = discover_symbols(&dirs, &Options::new(), &[], false, false);
         assert!(!discovered.contains_key("OLD"));
 
-        // Opt-in: include_inactive=true brings it back.
-        let discovered_all = discover_symbols(&dirs, &Options::new(), &[], true);
+        // Opt-in: inactive=true brings it back.
+        let discovered_all = discover_symbols(&dirs, &Options::new(), &[], true, false);
         assert!(discovered_all.contains_key("OLD"));
     }
 
     #[test]
     fn cli_symbols_always_included_with_default_info() {
         let dirs: Vec<Spanned<Directive>> = vec![];
-        let discovered = discover_symbols(&dirs, &Options::new(), &["MANUAL".to_string()], false);
+        let discovered = discover_symbols(
+            &dirs,
+            &Options::new(),
+            &["MANUAL".to_string()],
+            false,
+            false,
+        );
         let info = discovered.get("MANUAL").unwrap();
         assert!(info.mapping.is_none());
         assert!(info.quote_currency.is_none());
+    }
+
+    /// Issue #962: a ticker-shaped commodity name without `price:`
+    /// metadata must NOT be discovered by default. `bean-price -f` only
+    /// fetches commodities with explicit `price:` metadata; the previous
+    /// rustledger fallback to the name heuristic produced unwanted
+    /// downloads (e.g., currency code `BAM` was treated as a stock).
+    #[test]
+    fn discover_skips_no_metadata_commodity_by_default() {
+        // `BAM` looks ticker-shaped (3 uppercase letters) and has an
+        // active balance, but has no `price:` metadata, so it must be
+        // skipped by default.
+        let dirs = directives(vec![
+            Directive::Open(Open::new(date(2024, 1, 1), "Assets:Cash")),
+            Directive::Open(Open::new(date(2024, 1, 1), "Equity:Opening")),
+            Directive::Commodity(Commodity::new(date(2024, 1, 1), "BAM")),
+            Directive::Transaction(
+                Transaction::new(date(2024, 2, 1), "Receive BAM")
+                    .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(100), "BAM")))
+                    .with_posting(Posting::new(
+                        "Equity:Opening",
+                        Amount::new(dec!(-100), "BAM"),
+                    )),
+            ),
+        ]);
+
+        let strict = discover_symbols(&dirs, &Options::new(), &[], false, false);
+        assert!(
+            !strict.contains_key("BAM"),
+            "BAM has no `price:` metadata, must not be discovered by default (#962)"
+        );
+
+        // `--undeclared` brings the heuristic back.
+        let with_undeclared = discover_symbols(&dirs, &Options::new(), &[], false, true);
+        assert!(with_undeclared.contains_key("BAM"));
+    }
+
+    /// `price: ""` is an explicit opt-out (bean-price-compatible). It
+    /// must suppress discovery even with `--undeclared`, so users can
+    /// override the heuristic on a per-commodity basis.
+    #[test]
+    fn discover_honors_empty_price_opt_out() {
+        let mut comm = Commodity::new(date(2024, 1, 1), "BAM");
+        comm.meta
+            .insert("price".to_string(), MetaValue::String(String::new()));
+        let dirs = directives(vec![
+            Directive::Open(Open::new(date(2024, 1, 1), "Assets:Cash")),
+            Directive::Open(Open::new(date(2024, 1, 1), "Equity:Opening")),
+            Directive::Commodity(comm),
+            Directive::Transaction(
+                Transaction::new(date(2024, 2, 1), "Receive BAM")
+                    .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(100), "BAM")))
+                    .with_posting(Posting::new(
+                        "Equity:Opening",
+                        Amount::new(dec!(-100), "BAM"),
+                    )),
+            ),
+        ]);
+
+        // Even with --undeclared, the empty price: opt-out wins.
+        let discovered = discover_symbols(&dirs, &Options::new(), &[], false, true);
+        assert!(!discovered.contains_key("BAM"));
+    }
+
+    /// `quote_currency:` alone (no `price:`) is an explicit user opt-in
+    /// for fetching with a configured/default source — it should be
+    /// discovered without needing `--undeclared`.
+    #[test]
+    fn discover_picks_up_quote_currency_only_commodity() {
+        let mut comm = Commodity::new(date(2024, 1, 1), "GOVT_EU");
+        comm.meta.insert(
+            "quote_currency".to_string(),
+            MetaValue::String("EUR".into()),
+        );
+        let dirs = directives(vec![
+            Directive::Open(Open::new(date(2024, 1, 1), "Assets:Brokerage")),
+            Directive::Open(Open::new(date(2024, 1, 1), "Equity:Opening")),
+            Directive::Commodity(comm),
+            Directive::Transaction(
+                Transaction::new(date(2024, 2, 1), "Buy GOVT_EU")
+                    .with_posting(Posting::new(
+                        "Assets:Brokerage",
+                        Amount::new(dec!(10), "GOVT_EU"),
+                    ))
+                    .with_posting(Posting::new(
+                        "Equity:Opening",
+                        Amount::new(dec!(-10), "GOVT_EU"),
+                    )),
+            ),
+        ]);
+
+        let discovered = discover_symbols(&dirs, &Options::new(), &[], false, false);
+        let info = discovered
+            .get("GOVT_EU")
+            .expect("quote_currency: alone should opt into discovery");
+        assert!(info.mapping.is_none());
+        assert_eq!(info.quote_currency.as_deref(), Some("EUR"));
+    }
+
+    #[test]
+    fn active_filter_handles_explicit_amounts_on_balance_sheet_side_signature_passthrough() {
+        // Sanity check that --inactive=true + --undeclared=true behaves
+        // like the old --all-commodities path: heuristic on, no active
+        // filter. Matches the legacy discovery surface.
+        let dirs = directives(vec![Directive::Commodity(Commodity::new(
+            date(2024, 1, 1),
+            "OLD",
+        ))]);
+        let discovered = discover_symbols(&dirs, &Options::new(), &[], true, true);
+        assert!(discovered.contains_key("OLD"));
     }
 
     #[test]

@@ -1607,7 +1607,7 @@ quote_currency = "EUR"
     }
 
     /// Mixed chain: bare names and `{source, ticker}` objects in the
-    /// same list both deserialize via `serde(untagged)` on FallbackEntry.
+    /// same list both deserialize via `serde(untagged)` on `FallbackEntry`.
     #[test]
     fn test_parse_commodity_mapping_fallback_mixed_entry_shapes() {
         let content = r#"

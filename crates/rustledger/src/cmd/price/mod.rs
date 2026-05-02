@@ -309,11 +309,15 @@ impl PriceSourceRegistry {
             return Ok(vec![(self.default_source.clone(), commodity.to_string())]);
         }
         Err(anyhow::anyhow!(
-            "no price source configured for {commodity}. Either pass `--source <name>`, \
-             add `[price.mapping.{commodity}]` to your config, annotate the commodity \
-             with `price: \"<quote>:<source>/<ticker>\"` metadata in your beancount file, \
-             or set `[price] use_default_source = true` to fall back to the default \
-             source ({default}) for unmapped symbols.",
+            "no price source configured for {commodity}. Pick one:\n  \
+             - pass `--source <name>` (e.g. `--source ecb`),\n  \
+             - pass `--mapping {commodity}:<TICKER>`,\n  \
+             - add `[price.mapping.{commodity}]` to your rledger config,\n  \
+             - annotate the commodity in your beancount file with \
+             `price: \"<quote>:<source>/<ticker>\"` or `quote_currency: \"<currency>\"` \
+             and load the file with `-f`,\n  \
+             - or set `[price] use_default_source = true` in your config to fall back \
+             to the default source ({default}) for unmapped symbols.",
             default = self.default_source,
         ))
     }
@@ -439,7 +443,8 @@ mod tests {
     /// Issue #966: by default, resolving a commodity that has no
     /// mapping (and no `--source` was provided at the call site) is an
     /// error rather than a silent dispatch to `default_source`. The
-    /// error message points the user at the three remediation paths.
+    /// error message points the user at every remediation path so they
+    /// don't have to guess which one applies to their workflow.
     #[test]
     fn test_resolve_mapping_no_mapping_errors_by_default() {
         let registry = PriceSourceRegistry::default();
@@ -452,23 +457,19 @@ mod tests {
             msg.contains("AAPL"),
             "error must name the offending symbol: {msg}"
         );
-        // Each remediation path must be discoverable from the error.
-        assert!(
-            msg.contains("--source"),
-            "error must mention --source: {msg}"
-        );
-        assert!(
-            msg.contains("[price.mapping.AAPL]"),
-            "error must mention the per-symbol config block: {msg}"
-        );
-        assert!(
-            msg.contains("price:"),
-            "error must mention the metadata path: {msg}"
-        );
-        assert!(
-            msg.contains("use_default_source"),
-            "error must mention the opt-in flag: {msg}"
-        );
+        // Every remediation path must be discoverable from the error so
+        // the user can pick whichever one fits their workflow.
+        for needle in [
+            "--source",
+            "--mapping",
+            "[price.mapping.AAPL]",
+            "price:",
+            "quote_currency:",
+            "-f",
+            "use_default_source",
+        ] {
+            assert!(msg.contains(needle), "error must mention `{needle}`: {msg}");
+        }
     }
 
     /// `[price] use_default_source = true` restores the previous

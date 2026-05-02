@@ -59,7 +59,9 @@ The first source in the chain is tried first; subsequent ones act as fallbacks. 
 
 The quote currency in the metadata overrides the global `--currency` for that one symbol, so you can mix USD-quoted stocks and EUR-quoted bonds in the same run.
 
-`price: ""` (empty string, or whitespace-only) is an explicit **opt-out from `-f / --file` discovery**: the commodity is never picked up from the ledger, even with `--undeclared`. Useful for currency codes that happen to collide with stock tickers (e.g. `BAM`, `UKW`) — see issue #962. Note: a symbol passed *explicitly* on the command line (e.g. `rledger price BAM`) is always fetched regardless of the opt-out, since CLI args are explicit user intent.
+`price: ""` (empty string, or whitespace-only) is an explicit **opt-out from `-f / --file` discovery**: the commodity is never picked up from the ledger, even with `--undeclared`. Useful for currency codes that happen to collide with stock tickers (e.g. `BAM`, `UKW`) — see issue #962.
+
+Note: the opt-out only affects file-based discovery. A symbol passed explicitly on the command line (e.g. `rledger price BAM`) is **not silently routed to `default_source`** — it goes through the same explicit-source-required check as any other CLI symbol (#966). To fetch a commodity that has a `price: ""` opt-out, you still need to give it an explicit source (`--source`, `--mapping`, a config block, or set `[price] use_default_source = true`).
 
 ### 2. `quote_currency:` metadata
 

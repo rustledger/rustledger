@@ -82,11 +82,26 @@ pub struct PriceArgs {
     #[arg(long)]
     clear_cache: bool,
 
-    /// When discovering symbols from `-f`, include commodities that aren't
-    /// currently held (zero balance across all open accounts). The default
-    /// matches `bean-price`: only fetch prices for commodities you actually
-    /// hold.
-    #[arg(long)]
+    /// Include commodities that aren't currently held (zero balance across
+    /// all open balance-sheet accounts). Matches `bean-price --inactive`.
+    /// Only meaningful with `-f`; ignored otherwise.
+    #[arg(long, requires = "file")]
+    inactive: bool,
+
+    /// Also discover commodities that lack `price:`/`quote_currency:`
+    /// metadata if their name looks like a ticker symbol (uppercase ASCII,
+    /// digits, dashes, dots; ≤ 10 chars). Off by default — the strict
+    /// default avoids spurious downloads for currency codes like `BAM`
+    /// that happen to collide with stock tickers (issue #962). Note: not
+    /// a 1:1 match for `bean-price --undeclared`, which walks transactions
+    /// instead of `commodity` directives.
+    /// Only meaningful with `-f`; ignored otherwise.
+    #[arg(long, requires = "file")]
+    undeclared: bool,
+
+    /// Deprecated alias for `--inactive --undeclared`. Will be removed in
+    /// a future release; prefer the granular flags. Hidden from help.
+    #[arg(long, requires = "file", hide = true)]
     all_commodities: bool,
 }
 
@@ -130,7 +145,16 @@ pub fn run(args: &PriceArgs, price_config: &PriceConfig) -> Result<()> {
 
     // Discover symbols from the ledger (if -f given) plus any CLI symbols.
     // The discovery layer handles `price:` / `quote_currency:` metadata and
-    // the active-commodity filter (issue #948).
+    // the active-commodity filter, matching `bean-price` semantics
+    // (issues #948, #962).
+    if args.all_commodities {
+        eprintln!(
+            "warning: `--all-commodities` is deprecated; use `--inactive --undeclared` instead. \
+             It will be removed in a future release."
+        );
+    }
+    let effective_inactive = args.inactive || args.all_commodities;
+    let effective_undeclared = args.undeclared || args.all_commodities;
     let discovered: HashMap<String, DiscoveredCommodity> = if let Some(ref file) = args.file {
         // Load with booking so interpolated postings (units missing in source,
         // filled in by the booking engine) get explicit amounts. Without this,
@@ -151,7 +175,8 @@ pub fn run(args: &PriceArgs, price_config: &PriceConfig) -> Result<()> {
             &ledger.directives,
             &ledger.options,
             &args.symbols,
-            args.all_commodities,
+            effective_inactive,
+            effective_undeclared,
         )
     } else {
         let mut out = HashMap::new();
@@ -170,11 +195,19 @@ pub fn run(args: &PriceArgs, price_config: &PriceConfig) -> Result<()> {
         eprintln!(
             "No symbols to fetch. Provide symbols as arguments or use -f with a beancount file."
         );
-        if !args.all_commodities && args.file.is_some() {
-            eprintln!(
-                "Hint: only commodities currently held are fetched by default. \
-                 Pass --all-commodities to include inactive ones."
-            );
+        if args.file.is_some() {
+            if !effective_undeclared {
+                eprintln!(
+                    "Hint: only commodities with `price:` or `quote_currency:` metadata are \
+                     fetched by default. Pass --undeclared to also include ticker-shaped names."
+                );
+            }
+            if !effective_inactive {
+                eprintln!(
+                    "Hint: only commodities currently held are fetched by default. \
+                     Pass --inactive to include those with zero balance."
+                );
+            }
         }
         return Ok(());
     }
@@ -534,15 +567,53 @@ mod tests {
     }
 
     #[test]
-    fn test_price_args_all_commodities_default_off() {
+    fn test_price_args_discovery_flags_default_off() {
         let args = Args::parse_from(["price", "AAPL"]);
-        assert!(!args.price_args.all_commodities);
+        assert!(!args.price_args.inactive);
+        assert!(!args.price_args.undeclared);
     }
 
     #[test]
-    fn test_price_args_all_commodities_flag() {
+    fn test_price_args_inactive_flag() {
+        let args = Args::parse_from(["price", "--inactive", "-f", "ledger.beancount"]);
+        assert!(args.price_args.inactive);
+        assert!(!args.price_args.undeclared);
+    }
+
+    #[test]
+    fn test_price_args_undeclared_flag() {
+        let args = Args::parse_from(["price", "--undeclared", "-f", "ledger.beancount"]);
+        assert!(args.price_args.undeclared);
+        assert!(!args.price_args.inactive);
+    }
+
+    #[test]
+    fn test_price_args_inactive_and_undeclared_combined() {
+        // The legacy `--all-commodities` semantics — both relaxations on.
+        let args = Args::parse_from([
+            "price",
+            "--inactive",
+            "--undeclared",
+            "-f",
+            "ledger.beancount",
+        ]);
+        assert!(args.price_args.inactive);
+        assert!(args.price_args.undeclared);
+    }
+
+    /// Issue #962 follow-up (Copilot review on PR #965): keep
+    /// `--all-commodities` accepted as a deprecated, hidden alias for
+    /// `--inactive --undeclared` so user scripts from 0.14.1 don't break.
+    #[test]
+    fn test_price_args_all_commodities_deprecated_alias_still_parses() {
         let args = Args::parse_from(["price", "--all-commodities", "-f", "ledger.beancount"]);
         assert!(args.price_args.all_commodities);
+        // The deprecated flag doesn't auto-set the new flags at parse
+        // time; the run function maps it to effective_inactive /
+        // effective_undeclared so the user still sees a deprecation
+        // warning printed exactly once at run time.
+        assert!(!args.price_args.inactive);
+        assert!(!args.price_args.undeclared);
     }
 
     #[test]

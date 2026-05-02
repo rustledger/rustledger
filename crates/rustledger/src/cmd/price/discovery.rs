@@ -20,7 +20,7 @@
 //! behavior and avoids wasting API calls on commodities the user no longer
 //! holds. Pass `include_inactive: true` to skip the activity filter.
 
-use crate::config::{CommodityMapping, DetailedMapping, SourceRef};
+use crate::config::{CommodityMapping, DetailedMapping, FallbackEntry, SourceRef};
 use rust_decimal::Decimal;
 use rustledger_core::{Directive, MetaValue};
 use rustledger_loader::Options;
@@ -140,13 +140,24 @@ fn build_mapping(specs: &[PriceSpec]) -> Option<CommodityMapping> {
             quote_currency: None,
         }));
     }
-    // Multiple specs: build a fallback chain. The ticker is taken from the
-    // first spec; it's the user's responsibility to ensure ticker symbols
-    // are interchangeable across sources in their `price:` chain (matching
-    // bean-price's contract).
-    let sources: Vec<String> = specs.iter().map(|s| s.source.clone()).collect();
+    // Multiple specs: build a fallback chain that PRESERVES each spec's
+    // ticker. Issue #963: previously we collapsed all sources onto the
+    // first spec's ticker, which broke metadata like
+    // `price: "EUR:ecbrates/GBP-EUR,EUR:ecb/GBP"` — the ECB source got
+    // queried with `GBP-EUR` (ecbrates' shape) instead of `GBP`.
+    let entries: Vec<FallbackEntry> = specs
+        .iter()
+        .map(|s| FallbackEntry::Detailed {
+            source: s.source.clone(),
+            ticker: Some(s.ticker.clone()),
+        })
+        .collect();
     Some(CommodityMapping::Detailed(DetailedMapping {
-        source: SourceRef::Fallback(sources),
+        source: SourceRef::Fallback(entries),
+        // The parent ticker is no longer load-bearing for fallback chains
+        // (each entry carries its own), but keep the first spec's ticker
+        // here as a sensible fallback if a future change ever consults
+        // `parent.ticker` directly.
         ticker: Some(specs[0].ticker.clone()),
         quote_currency: None,
     }))

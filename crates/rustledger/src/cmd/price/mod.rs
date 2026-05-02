@@ -187,8 +187,10 @@ impl PriceSourceRegistry {
 
     /// Fetch a price using the configured mapping.
     ///
-    /// This method resolves the commodity to the appropriate source and ticker
-    /// based on the configuration, then fetches the price.
+    /// This method resolves the commodity to the appropriate source and
+    /// ticker based on the configuration, then fetches the price. When a
+    /// fallback chain is in play, each entry's per-source ticker is used
+    /// (issue #963).
     pub fn fetch_price(
         &self,
         commodity: &str,
@@ -196,12 +198,12 @@ impl PriceSourceRegistry {
         date: Option<NaiveDate>,
         mapping: &HashMap<String, CommodityMapping>,
     ) -> Result<PriceResponse> {
-        let (source_names, ticker) = self.resolve_mapping(commodity, mapping);
+        let attempts = self.resolve_mapping(commodity, mapping);
 
         let mut last_error = None;
         let mut unknown_sources = Vec::new();
 
-        for source_name in &source_names {
+        for (source_name, ticker) in &attempts {
             if let Some(source) = self.get(source_name) {
                 let request = PriceRequest {
                     ticker: ticker.clone(),
@@ -245,29 +247,42 @@ impl PriceSourceRegistry {
         Err(err_msg)
     }
 
-    /// Resolve a commodity to its source(s) and ticker.
+    /// Resolve a commodity to a list of `(source, ticker)` attempts to
+    /// try in order. Each fallback entry can carry its own ticker so a
+    /// chain like `EUR:ecbrates/GBP-EUR,EUR:ecb/GBP` queries each source
+    /// with the ticker shape it expects (issue #963).
     fn resolve_mapping(
         &self,
         commodity: &str,
         mapping: &HashMap<String, CommodityMapping>,
-    ) -> (Vec<String>, String) {
+    ) -> Vec<(String, String)> {
         if let Some(commodity_mapping) = mapping.get(commodity) {
             match commodity_mapping {
                 CommodityMapping::Simple(ticker) => {
-                    (vec![self.default_source.clone()], ticker.clone())
+                    vec![(self.default_source.clone(), ticker.clone())]
                 }
                 CommodityMapping::Detailed(d) => {
-                    let ticker = d.ticker.clone().unwrap_or_else(|| commodity.to_string());
-                    let sources = match &d.source {
-                        SourceRef::Single(s) => vec![s.clone()],
-                        SourceRef::Fallback(sources) => sources.clone(),
-                    };
-                    (sources, ticker)
+                    let parent_ticker = d.ticker.clone().unwrap_or_else(|| commodity.to_string());
+                    match &d.source {
+                        SourceRef::Single(s) => vec![(s.clone(), parent_ticker)],
+                        SourceRef::Fallback(entries) => entries
+                            .iter()
+                            .map(|e| {
+                                // Per-entry ticker wins; otherwise fall back to the
+                                // parent ticker. This mirrors the metadata semantics
+                                // the discovery layer encodes for chained `price:`.
+                                let t = e
+                                    .ticker()
+                                    .map_or_else(|| parent_ticker.clone(), str::to_string);
+                                (e.source_name().to_string(), t)
+                            })
+                            .collect(),
+                    }
                 }
             }
         } else {
             // No mapping - use default source with commodity as ticker
-            (vec![self.default_source.clone()], commodity.to_string())
+            vec![(self.default_source.clone(), commodity.to_string())]
         }
     }
 }
@@ -299,6 +314,7 @@ pub fn fetch_price(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::FallbackEntry;
 
     #[test]
     fn test_price_request_builder() {
@@ -358,9 +374,8 @@ mod tests {
             CommodityMapping::Simple("BTC-USD".to_string()),
         );
 
-        let (sources, ticker) = registry.resolve_mapping("BTC", &mapping);
-        assert_eq!(sources, vec!["yahoo"]);
-        assert_eq!(ticker, "BTC-USD");
+        let attempts = registry.resolve_mapping("BTC", &mapping);
+        assert_eq!(attempts, vec![("yahoo".to_string(), "BTC-USD".to_string())]);
     }
 
     #[test]
@@ -370,15 +385,23 @@ mod tests {
         mapping.insert(
             "EUR".to_string(),
             CommodityMapping::Detailed(crate::config::DetailedMapping {
-                source: SourceRef::Fallback(vec!["ecb".to_string(), "ratesapi".to_string()]),
+                source: SourceRef::Fallback(vec![
+                    FallbackEntry::Name("ecb".to_string()),
+                    FallbackEntry::Name("ratesapi".to_string()),
+                ]),
                 ticker: None,
                 quote_currency: None,
             }),
         );
 
-        let (sources, ticker) = registry.resolve_mapping("EUR", &mapping);
-        assert_eq!(sources, vec!["ecb", "ratesapi"]);
-        assert_eq!(ticker, "EUR");
+        let attempts = registry.resolve_mapping("EUR", &mapping);
+        assert_eq!(
+            attempts,
+            vec![
+                ("ecb".to_string(), "EUR".to_string()),
+                ("ratesapi".to_string(), "EUR".to_string()),
+            ]
+        );
     }
 
     #[test]
@@ -386,9 +409,79 @@ mod tests {
         let registry = PriceSourceRegistry::default();
         let mapping = HashMap::new();
 
-        let (sources, ticker) = registry.resolve_mapping("AAPL", &mapping);
-        assert_eq!(sources, vec!["yahoo"]);
-        assert_eq!(ticker, "AAPL");
+        let attempts = registry.resolve_mapping("AAPL", &mapping);
+        assert_eq!(attempts, vec![("yahoo".to_string(), "AAPL".to_string())]);
+    }
+
+    /// Issue #963: a fallback chain whose entries carry per-source
+    /// tickers must query each source with that source's own ticker.
+    /// Previously all sources reused the first spec's ticker.
+    #[test]
+    fn test_resolve_mapping_fallback_uses_per_source_tickers() {
+        let registry = PriceSourceRegistry::default();
+        let mut mapping = HashMap::new();
+        mapping.insert(
+            "GBP".to_string(),
+            CommodityMapping::Detailed(crate::config::DetailedMapping {
+                source: SourceRef::Fallback(vec![
+                    FallbackEntry::Detailed {
+                        source: "ecbrates".to_string(),
+                        ticker: Some("GBP-EUR".to_string()),
+                    },
+                    FallbackEntry::Detailed {
+                        source: "ecb".to_string(),
+                        ticker: Some("GBP".to_string()),
+                    },
+                ]),
+                ticker: Some("GBP-EUR".to_string()),
+                quote_currency: Some("EUR".to_string()),
+            }),
+        );
+
+        let attempts = registry.resolve_mapping("GBP", &mapping);
+        assert_eq!(
+            attempts,
+            vec![
+                ("ecbrates".to_string(), "GBP-EUR".to_string()),
+                ("ecb".to_string(), "GBP".to_string()),
+            ],
+            "each fallback source must use its own ticker (issue #963)"
+        );
+    }
+
+    /// Mixed-shape fallback: a bare-string entry inherits the parent
+    /// ticker, while an object entry uses its own. Verifies the
+    /// `FallbackEntry::Name(_)` arm of `resolve_mapping` falls through
+    /// to `parent_ticker` correctly.
+    #[test]
+    fn test_resolve_mapping_fallback_mixed_entries_inherit_parent_ticker() {
+        let registry = PriceSourceRegistry::default();
+        let mut mapping = HashMap::new();
+        mapping.insert(
+            "BTC".to_string(),
+            CommodityMapping::Detailed(crate::config::DetailedMapping {
+                source: SourceRef::Fallback(vec![
+                    FallbackEntry::Name("yahoo".to_string()),
+                    FallbackEntry::Detailed {
+                        source: "coingecko".to_string(),
+                        ticker: Some("bitcoin".to_string()),
+                    },
+                ]),
+                ticker: Some("BTC-USD".to_string()),
+                quote_currency: None,
+            }),
+        );
+
+        let attempts = registry.resolve_mapping("BTC", &mapping);
+        assert_eq!(
+            attempts,
+            vec![
+                // Bare-string entry inherits parent ticker.
+                ("yahoo".to_string(), "BTC-USD".to_string()),
+                // Detailed entry uses its own ticker.
+                ("coingecko".to_string(), "bitcoin".to_string()),
+            ]
+        );
     }
 
     #[test]

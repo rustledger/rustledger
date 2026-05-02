@@ -163,8 +163,53 @@ pub enum SourceRef {
     /// A single source name.
     Single(String),
 
-    /// Fallback chain of sources (try in order).
-    Fallback(Vec<String>),
+    /// Fallback chain of sources (try in order). Each entry can be a
+    /// bare source name (uses the parent `DetailedMapping.ticker`) or
+    /// an object with its own `ticker` (preserves per-source tickers
+    /// for cases like `"EUR:ecbrates/GBP-EUR,EUR:ecb/GBP"` where the
+    /// two sources expect different ticker shapes — issue #963).
+    Fallback(Vec<FallbackEntry>),
+}
+
+/// One entry in a fallback chain. Accepts either a bare source name
+/// or `{source = "...", ticker = "..."}` so per-source tickers can be
+/// preserved through the chain.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum FallbackEntry {
+    /// Bare source name. Ticker comes from `DetailedMapping.ticker`
+    /// (or the commodity name if that's also unset).
+    Name(String),
+
+    /// Source paired with its own ticker.
+    Detailed {
+        /// Source name (e.g. `"yahoo"`, `"ecb"`).
+        source: String,
+        /// Ticker shape this specific source expects. Overrides the
+        /// parent `DetailedMapping.ticker` for this attempt only.
+        #[serde(default)]
+        ticker: Option<String>,
+    },
+}
+
+impl FallbackEntry {
+    /// The source name this entry refers to.
+    #[must_use]
+    pub fn source_name(&self) -> &str {
+        match self {
+            Self::Name(s) => s,
+            Self::Detailed { source, .. } => source,
+        }
+    }
+
+    /// The ticker for this entry, if it has its own.
+    #[must_use]
+    pub fn ticker(&self) -> Option<&str> {
+        match self {
+            Self::Name(_) => None,
+            Self::Detailed { ticker, .. } => ticker.as_deref(),
+        }
+    }
 }
 
 /// Default configuration options.
@@ -1518,8 +1563,11 @@ source = ["ecb", "ratesapi"]
         }
 
         if let Some(CommodityMapping::Detailed(d)) = config.price.mapping.get("EUR") {
-            if let SourceRef::Fallback(sources) = &d.source {
-                assert_eq!(sources, &["ecb", "ratesapi"]);
+            if let SourceRef::Fallback(entries) = &d.source {
+                let names: Vec<&str> = entries.iter().map(FallbackEntry::source_name).collect();
+                assert_eq!(names, vec!["ecb", "ratesapi"]);
+                // Bare-string entries have no per-source ticker.
+                assert!(entries.iter().all(|e| e.ticker().is_none()));
             } else {
                 panic!("Expected Fallback source");
             }
@@ -1528,6 +1576,59 @@ source = ["ecb", "ratesapi"]
         } else {
             panic!("Expected Detailed mapping for EUR");
         }
+    }
+
+    /// Issue #963: a fallback chain entry can carry its own ticker so
+    /// that `price: "EUR:ecbrates/GBP-EUR,EUR:ecb/GBP"`-style metadata
+    /// survives into the executor without collapsing all sources onto
+    /// the first spec's ticker.
+    #[test]
+    fn test_parse_commodity_mapping_fallback_with_per_source_tickers() {
+        let content = r#"
+[price.mapping.GBP]
+source = [
+  { source = "ecbrates", ticker = "GBP-EUR" },
+  { source = "ecb", ticker = "GBP" },
+]
+quote_currency = "EUR"
+"#;
+        let config: Config = toml::from_str(content).unwrap();
+        let Some(CommodityMapping::Detailed(d)) = config.price.mapping.get("GBP") else {
+            panic!("Expected Detailed mapping for GBP");
+        };
+        let SourceRef::Fallback(entries) = &d.source else {
+            panic!("Expected Fallback source");
+        };
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].source_name(), "ecbrates");
+        assert_eq!(entries[0].ticker(), Some("GBP-EUR"));
+        assert_eq!(entries[1].source_name(), "ecb");
+        assert_eq!(entries[1].ticker(), Some("GBP"));
+    }
+
+    /// Mixed chain: bare names and `{source, ticker}` objects in the
+    /// same list both deserialize via `serde(untagged)` on FallbackEntry.
+    #[test]
+    fn test_parse_commodity_mapping_fallback_mixed_entry_shapes() {
+        let content = r#"
+[price.mapping.BTC]
+source = [
+  "yahoo",
+  { source = "coingecko", ticker = "bitcoin" },
+]
+ticker = "BTC-USD"
+"#;
+        let config: Config = toml::from_str(content).unwrap();
+        let Some(CommodityMapping::Detailed(d)) = config.price.mapping.get("BTC") else {
+            panic!("Expected Detailed mapping for BTC");
+        };
+        let SourceRef::Fallback(entries) = &d.source else {
+            panic!("Expected Fallback source");
+        };
+        assert_eq!(entries[0].source_name(), "yahoo");
+        assert_eq!(entries[0].ticker(), None);
+        assert_eq!(entries[1].source_name(), "coingecko");
+        assert_eq!(entries[1].ticker(), Some("bitcoin"));
     }
 
     #[test]

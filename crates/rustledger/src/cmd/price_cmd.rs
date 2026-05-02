@@ -195,6 +195,9 @@ pub fn run(args: &PriceArgs, price_config: &PriceConfig) -> Result<()> {
         }
     }
     symbols_to_fetch.sort();
+    // Dedup repeated CLI args (e.g. `rledger price AAPL AAPL`) so we
+    // don't fetch the same symbol twice.
+    symbols_to_fetch.dedup();
 
     if symbols_to_fetch.is_empty() {
         eprintln!(
@@ -244,38 +247,7 @@ pub fn run(args: &PriceArgs, price_config: &PriceConfig) -> Result<()> {
         );
     }
 
-    // Merge mappings in increasing precedence (later inserts override earlier
-    // ones via `HashMap::insert`). The effective high-to-low order is:
-    //   1. CLI --mapping (last to insert, wins)
-    //   2. Discovered `price:` metadata from commodity directives (#948)
-    //   3. Synthesized default-source mapping for file-discovered commodities
-    //      that opted in via `quote_currency:` only or matched `--undeclared`
-    //      (their `info.mapping` is `None` but discovery has already decided
-    //      they should be fetched — without synthesizing a mapping here,
-    //      `resolve_mapping` would fire the #966 explicit-source-required
-    //      error and fail those flows).
-    //   4. Config [price.mapping] (lowest precedence among config sources)
-    //
-    // CLI-only symbols (in `args.symbols` but not in `discovered`) are
-    // intentionally NOT auto-mapped here — they hit `resolve_mapping`'s
-    // error path unless the user passed `--source`, `--mapping`, or set
-    // `[price] use_default_source = true`. That's the #966 fix.
-    let mut combined_mapping = price_config.mapping.clone();
-    for (symbol, info) in &discovered {
-        if let Some(m) = &info.mapping {
-            combined_mapping.insert(symbol.clone(), m.clone());
-        } else {
-            // File-discovered with no source spec — discovery already
-            // opted this commodity in (via `quote_currency:` metadata or
-            // `--undeclared`). Synthesize a Simple mapping pointing at
-            // the default source so `fetch_price` doesn't trip the
-            // explicit-source-required guard.
-            combined_mapping.insert(symbol.clone(), CommodityMapping::Simple(symbol.clone()));
-        }
-    }
-    for (k, v) in cli_mapping {
-        combined_mapping.insert(k, v);
-    }
+    let combined_mapping = build_combined_mapping(&price_config.mapping, &discovered, &cli_mapping);
 
     let stdout = io::stdout();
     let mut handle = stdout.lock();
@@ -346,6 +318,51 @@ pub fn run(args: &PriceArgs, price_config: &PriceConfig) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Build the merged commodity-to-source mapping used during fetch.
+///
+/// Precedence (high to low):
+/// 1. CLI `--mapping <SYMBOL>:<TICKER>` (always wins).
+/// 2. Discovered `price:` metadata on a commodity directive.
+/// 3. Config-file `[price.mapping.X]` entries (preserved when discovery
+///    found the same commodity but only via `quote_currency:` /
+///    `--undeclared` — i.e. `info.mapping = None`).
+/// 4. Synthesized `Simple(symbol)` for file-discovered commodities that
+///    opt in via `quote_currency:` only or matched `--undeclared` and
+///    have no config entry. Without this, `resolve_mapping` would fire
+///    the #966 explicit-source-required error and break those flows.
+///
+/// CLI-only symbols (in `args.symbols` but not in `discovered`) are
+/// intentionally NOT auto-mapped — they hit `resolve_mapping`'s error
+/// path unless the user passed `--source`, `--mapping`, or set
+/// `[price] use_default_source = true`. That's the #966 fix.
+fn build_combined_mapping(
+    config_mapping: &HashMap<String, CommodityMapping>,
+    discovered: &HashMap<String, DiscoveredCommodity>,
+    cli_mapping: &HashMap<String, CommodityMapping>,
+) -> HashMap<String, CommodityMapping> {
+    let mut combined = config_mapping.clone();
+    for (symbol, info) in discovered {
+        if let Some(m) = &info.mapping {
+            // Discovered metadata explicitly named a source — overrides
+            // any config entry for the same symbol.
+            combined.insert(symbol.clone(), m.clone());
+        } else {
+            // No source spec from metadata. Synthesize a default-source
+            // mapping ONLY if the config doesn't already cover this
+            // symbol — otherwise we'd silently overwrite a deliberate
+            // `[price.mapping.X]` block with a Simple default-source
+            // dispatch.
+            combined
+                .entry(symbol.clone())
+                .or_insert_with(|| CommodityMapping::Simple(symbol.clone()));
+        }
+    }
+    for (k, v) in cli_mapping {
+        combined.insert(k.clone(), v.clone());
+    }
+    combined
 }
 
 /// Resolve the effective quote currency for a single symbol.
@@ -766,5 +783,139 @@ mod tests {
             resolve_quote_currency("AAPL", &discovered, &mapping, "USD"),
             "USD"
         );
+    }
+
+    /// Regression for self-review on PR #971: when discovery returns an
+    /// `info.mapping = None` for a symbol that ALSO has a config-level
+    /// `[price.mapping.X]` entry, the synthesized `Simple` default-source
+    /// mapping must NOT overwrite the user's deliberate config block.
+    #[test]
+    fn build_combined_mapping_preserves_config_for_quote_currency_only_commodity() {
+        // Config: BTC dispatches to coinbase.
+        let mut config_mapping = HashMap::new();
+        config_mapping.insert(
+            "BTC".to_string(),
+            CommodityMapping::Detailed(crate::config::DetailedMapping {
+                source: crate::config::SourceRef::Single("coinbase".to_string()),
+                ticker: Some("BTC-USD".to_string()),
+                quote_currency: None,
+            }),
+        );
+
+        // Discovery: BTC has `quote_currency: "USD"` only, no `price:`.
+        // -> `info.mapping = None`.
+        let mut discovered = HashMap::new();
+        discovered.insert(
+            "BTC".to_string(),
+            DiscoveredCommodity {
+                mapping: None,
+                quote_currency: Some("USD".to_string()),
+            },
+        );
+
+        let combined = build_combined_mapping(&config_mapping, &discovered, &HashMap::new());
+
+        let entry = combined.get("BTC").expect("BTC must remain in mapping");
+        match entry {
+            CommodityMapping::Detailed(d) => {
+                match &d.source {
+                    crate::config::SourceRef::Single(s) => assert_eq!(
+                        s, "coinbase",
+                        "config-level coinbase mapping must survive discovery synthesis"
+                    ),
+                    crate::config::SourceRef::Fallback(_) => {
+                        panic!("expected Single source, got Fallback")
+                    }
+                }
+                assert_eq!(d.ticker.as_deref(), Some("BTC-USD"));
+            }
+            CommodityMapping::Simple(_) => {
+                panic!("expected Detailed mapping; synthesis silently overwrote config");
+            }
+        }
+    }
+
+    /// `quote_currency:`-only / `--undeclared` symbols WITHOUT a config
+    /// entry must be synthesized to `Simple(symbol)` so they dispatch
+    /// through the default source rather than tripping the #966
+    /// explicit-source-required guard.
+    #[test]
+    fn build_combined_mapping_synthesizes_simple_for_unmapped_discovered_symbol() {
+        let config_mapping = HashMap::new();
+        let mut discovered = HashMap::new();
+        discovered.insert(
+            "GOVT_EU".to_string(),
+            DiscoveredCommodity {
+                mapping: None,
+                quote_currency: Some("EUR".to_string()),
+            },
+        );
+
+        let combined = build_combined_mapping(&config_mapping, &discovered, &HashMap::new());
+
+        match combined.get("GOVT_EU") {
+            Some(CommodityMapping::Simple(s)) => assert_eq!(s, "GOVT_EU"),
+            other => panic!("expected synthesized Simple(\"GOVT_EU\"), got {other:?}"),
+        }
+    }
+
+    /// Discovered metadata with a real source/ticker overrides any
+    /// config entry for that symbol (existing precedence rule from
+    /// #948/#951; pinned here so the synthesis refactor doesn't break it).
+    #[test]
+    fn build_combined_mapping_discovered_metadata_overrides_config() {
+        let mut config_mapping = HashMap::new();
+        config_mapping.insert(
+            "AAPL".to_string(),
+            CommodityMapping::Simple("AAPL-OLD".to_string()),
+        );
+        let mut discovered = HashMap::new();
+        discovered.insert(
+            "AAPL".to_string(),
+            DiscoveredCommodity {
+                mapping: Some(CommodityMapping::Detailed(crate::config::DetailedMapping {
+                    source: crate::config::SourceRef::Single("yahoo".to_string()),
+                    ticker: Some("AAPL".to_string()),
+                    quote_currency: None,
+                })),
+                quote_currency: None,
+            },
+        );
+
+        let combined = build_combined_mapping(&config_mapping, &discovered, &HashMap::new());
+        match combined.get("AAPL") {
+            Some(CommodityMapping::Detailed(d)) => match &d.source {
+                crate::config::SourceRef::Single(s) => assert_eq!(s, "yahoo"),
+                crate::config::SourceRef::Fallback(_) => {
+                    panic!("expected Single source, got Fallback")
+                }
+            },
+            other => panic!("expected metadata to override config, got {other:?}"),
+        }
+    }
+
+    /// CLI `--mapping` always wins, even over discovered metadata.
+    #[test]
+    fn build_combined_mapping_cli_mapping_wins_over_discovery() {
+        let config_mapping = HashMap::new();
+        let mut discovered = HashMap::new();
+        discovered.insert(
+            "AAPL".to_string(),
+            DiscoveredCommodity {
+                mapping: Some(CommodityMapping::Simple("AAPL-DISCOVERED".to_string())),
+                quote_currency: None,
+            },
+        );
+        let mut cli_mapping = HashMap::new();
+        cli_mapping.insert(
+            "AAPL".to_string(),
+            CommodityMapping::Simple("AAPL-CLI".to_string()),
+        );
+
+        let combined = build_combined_mapping(&config_mapping, &discovered, &cli_mapping);
+        match combined.get("AAPL") {
+            Some(CommodityMapping::Simple(s)) => assert_eq!(s, "AAPL-CLI"),
+            other => panic!("CLI must win, got {other:?}"),
+        }
     }
 }

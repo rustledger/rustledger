@@ -125,10 +125,14 @@ Fetching a symbol that has none of:
 - a CLI `--source <name>` flag,
 - a `[price.mapping.X]` entry in your config,
 - a `price:` metadata annotation on the commodity directive,
+- a `quote_currency:` metadata annotation on the commodity directive (treated as opt-in to default-source dispatch with that quote currency),
+- a match against `--undeclared` (ticker-shape heuristic on a `commodity` directive without metadata),
 
 is an **error** rather than a silent dispatch to the configured `default_source`. This prevents the failure mode where currency codes (e.g. `BAM`, the Bosnian convertible mark) get sent to Yahoo and return a stock price for an unrelated ticker that happens to share the symbol.
 
-To restore the previous behavior — where unmapped symbols always go to `default_source` — set:
+The four metadata/discovery paths above all opt into default-source dispatch — the strict guard only fires on commodities the user has *not* indicated should be fetched.
+
+To restore the previous behavior — where every unmapped symbol on the CLI also goes to `default_source` — set:
 
 ```toml
 [price]

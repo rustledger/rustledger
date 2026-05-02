@@ -614,6 +614,9 @@ impl PriceConfig {
         if other.cache_ttl.is_some() {
             self.cache_ttl = other.cache_ttl;
         }
+        if other.use_default_source.is_some() {
+            self.use_default_source = other.use_default_source;
+        }
 
         // Merge sources (other's sources override)
         for (name, source) in other.sources {
@@ -1793,6 +1796,7 @@ currency = "EUR"
         let config = PriceConfig::default();
         assert_eq!(config.effective_default_source(), "yahoo");
         assert_eq!(config.effective_timeout(), 30);
+        assert!(!config.effective_use_default_source());
 
         let custom = PriceConfig {
             default_source: Some("coinbase".to_string()),
@@ -1801,5 +1805,48 @@ currency = "EUR"
         };
         assert_eq!(custom.effective_default_source(), "coinbase");
         assert_eq!(custom.effective_timeout(), 60);
+    }
+
+    /// Copilot review on PR #971: the new `use_default_source` flag
+    /// must participate in layered config merging — without this,
+    /// setting it in a project/user config wouldn't take effect.
+    #[test]
+    fn test_merge_price_config_use_default_source() {
+        let base = Config {
+            price: PriceConfig {
+                use_default_source: None,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let override_cfg = Config {
+            price: PriceConfig {
+                use_default_source: Some(true),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let merged = base.merge(override_cfg);
+        assert_eq!(merged.price.use_default_source, Some(true));
+
+        // And the reverse: explicit `false` in a higher-precedence layer
+        // overrides a `true` from a lower-precedence layer.
+        let base_true = Config {
+            price: PriceConfig {
+                use_default_source: Some(true),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let override_false = Config {
+            price: PriceConfig {
+                use_default_source: Some(false),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let merged = base_true.merge(override_false);
+        assert_eq!(merged.price.use_default_source, Some(false));
     }
 }

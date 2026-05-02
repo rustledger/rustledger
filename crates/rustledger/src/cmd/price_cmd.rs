@@ -174,21 +174,26 @@ pub fn run(args: &PriceArgs, price_config: &PriceConfig) -> Result<()> {
         discover_symbols(
             &ledger.directives,
             &ledger.options,
-            &args.symbols,
             effective_inactive,
             effective_undeclared,
         )
     } else {
-        let mut out = HashMap::new();
-        for s in &args.symbols {
-            out.insert(s.clone(), DiscoveredCommodity::default());
-        }
-        out
+        HashMap::new()
     };
 
     // Stable order: alphabetical by symbol so output is deterministic across
-    // runs (the underlying discovery uses a HashMap).
+    // runs (the underlying discovery uses a HashMap). Symbols come from
+    // both file-based discovery and explicit CLI args; we union them, but
+    // remember which set each symbol belongs to so the explicit-fetch
+    // path (#966) only fires for CLI-only symbols (file-discovered
+    // commodities have already passed through metadata- or `--undeclared`-
+    // based opt-in checks).
     let mut symbols_to_fetch: Vec<String> = discovered.keys().cloned().collect();
+    for s in &args.symbols {
+        if !discovered.contains_key(s) {
+            symbols_to_fetch.push(s.clone());
+        }
+    }
     symbols_to_fetch.sort();
 
     if symbols_to_fetch.is_empty() {
@@ -243,11 +248,29 @@ pub fn run(args: &PriceArgs, price_config: &PriceConfig) -> Result<()> {
     // ones via `HashMap::insert`). The effective high-to-low order is:
     //   1. CLI --mapping (last to insert, wins)
     //   2. Discovered `price:` metadata from commodity directives (#948)
-    //   3. Config [price.mapping] (first to insert, lowest precedence)
+    //   3. Synthesized default-source mapping for file-discovered commodities
+    //      that opted in via `quote_currency:` only or matched `--undeclared`
+    //      (their `info.mapping` is `None` but discovery has already decided
+    //      they should be fetched — without synthesizing a mapping here,
+    //      `resolve_mapping` would fire the #966 explicit-source-required
+    //      error and fail those flows).
+    //   4. Config [price.mapping] (lowest precedence among config sources)
+    //
+    // CLI-only symbols (in `args.symbols` but not in `discovered`) are
+    // intentionally NOT auto-mapped here — they hit `resolve_mapping`'s
+    // error path unless the user passed `--source`, `--mapping`, or set
+    // `[price] use_default_source = true`. That's the #966 fix.
     let mut combined_mapping = price_config.mapping.clone();
     for (symbol, info) in &discovered {
         if let Some(m) = &info.mapping {
             combined_mapping.insert(symbol.clone(), m.clone());
+        } else {
+            // File-discovered with no source spec — discovery already
+            // opted this commodity in (via `quote_currency:` metadata or
+            // `--undeclared`). Synthesize a Simple mapping pointing at
+            // the default source so `fetch_price` doesn't trip the
+            // explicit-source-required guard.
+            combined_mapping.insert(symbol.clone(), CommodityMapping::Simple(symbol.clone()));
         }
     }
     for (k, v) in cli_mapping {

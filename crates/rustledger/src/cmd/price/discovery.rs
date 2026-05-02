@@ -62,9 +62,13 @@ struct PriceSpec {
 
 /// Discover the set of commodities to fetch prices for from a loaded ledger.
 ///
-/// Returns a map from commodity symbol to discovery info. Caller-supplied
-/// CLI symbols are always included (with empty discovery info) so they
-/// override or augment file-based discovery.
+/// Returns a map from commodity symbol to discovery info, covering only
+/// commodities present in the ledger that meet the discovery criteria.
+/// CLI-supplied symbols are intentionally NOT injected here — the caller
+/// handles them separately so that explicit `rledger price BAM`
+/// invocations hit the explicit-source-required check (#966) instead of
+/// the auto-synthesized default-source mapping that file-discovered
+/// commodities get.
 ///
 /// `inactive` corresponds to `bean-price --inactive`: when false (the
 /// default), only commodities with a non-zero balance on at least one open
@@ -84,7 +88,6 @@ struct PriceSpec {
 pub fn discover_symbols(
     directives: &[Spanned<Directive>],
     options: &Options,
-    cli_symbols: &[String],
     inactive: bool,
     undeclared: bool,
 ) -> HashMap<String, DiscoveredCommodity> {
@@ -142,11 +145,6 @@ pub fn discover_symbols(
         }
 
         out.insert(symbol.to_string(), info);
-    }
-
-    // CLI-supplied symbols always pass through with default (empty) info.
-    for symbol in cli_symbols {
-        out.entry(symbol.clone()).or_default();
     }
 
     out
@@ -532,7 +530,7 @@ mod tests {
                     )),
             ),
         ]);
-        let discovered = discover_symbols(&dirs, &Options::new(), &[], false, false);
+        let discovered = discover_symbols(&dirs, &Options::new(), false, false);
 
         // Even though "Vanguard_VTI" doesn't pass the ticker heuristic,
         // it has price: metadata, so it's discovered.
@@ -553,27 +551,24 @@ mod tests {
         let dirs = directives(vec![Directive::Commodity(comm)]);
 
         // Default: no active postings means OLD is not discovered.
-        let discovered = discover_symbols(&dirs, &Options::new(), &[], false, false);
+        let discovered = discover_symbols(&dirs, &Options::new(), false, false);
         assert!(!discovered.contains_key("OLD"));
 
         // Opt-in: inactive=true brings it back.
-        let discovered_all = discover_symbols(&dirs, &Options::new(), &[], true, false);
+        let discovered_all = discover_symbols(&dirs, &Options::new(), true, false);
         assert!(discovered_all.contains_key("OLD"));
     }
 
+    /// `discover_symbols` returns only file-discovered commodities; CLI
+    /// symbols are now handled separately by the caller (`price_cmd.rs`)
+    /// so they can be subjected to the explicit-source-required check
+    /// (#966) instead of getting auto-synthesized default-source
+    /// mappings like file-discovered symbols do.
     #[test]
-    fn cli_symbols_always_included_with_default_info() {
+    fn discover_returns_empty_for_empty_ledger() {
         let dirs: Vec<Spanned<Directive>> = vec![];
-        let discovered = discover_symbols(
-            &dirs,
-            &Options::new(),
-            &["MANUAL".to_string()],
-            false,
-            false,
-        );
-        let info = discovered.get("MANUAL").unwrap();
-        assert!(info.mapping.is_none());
-        assert!(info.quote_currency.is_none());
+        let discovered = discover_symbols(&dirs, &Options::new(), false, false);
+        assert!(discovered.is_empty());
     }
 
     /// Issue #962: a ticker-shaped commodity name without `price:`
@@ -600,14 +595,14 @@ mod tests {
             ),
         ]);
 
-        let strict = discover_symbols(&dirs, &Options::new(), &[], false, false);
+        let strict = discover_symbols(&dirs, &Options::new(), false, false);
         assert!(
             !strict.contains_key("BAM"),
             "BAM has no `price:` metadata, must not be discovered by default (#962)"
         );
 
         // `--undeclared` brings the heuristic back.
-        let with_undeclared = discover_symbols(&dirs, &Options::new(), &[], false, true);
+        let with_undeclared = discover_symbols(&dirs, &Options::new(), false, true);
         assert!(with_undeclared.contains_key("BAM"));
     }
 
@@ -634,7 +629,7 @@ mod tests {
         ]);
 
         // Even with --undeclared, the empty price: opt-out wins.
-        let discovered = discover_symbols(&dirs, &Options::new(), &[], false, true);
+        let discovered = discover_symbols(&dirs, &Options::new(), false, true);
         assert!(!discovered.contains_key("BAM"));
     }
 
@@ -665,7 +660,7 @@ mod tests {
             ),
         ]);
 
-        let discovered = discover_symbols(&dirs, &Options::new(), &[], false, false);
+        let discovered = discover_symbols(&dirs, &Options::new(), false, false);
         let info = discovered
             .get("GOVT_EU")
             .expect("quote_currency: alone should opt into discovery");
@@ -682,7 +677,7 @@ mod tests {
             date(2024, 1, 1),
             "OLD",
         ))]);
-        let discovered = discover_symbols(&dirs, &Options::new(), &[], true, true);
+        let discovered = discover_symbols(&dirs, &Options::new(), true, true);
         assert!(discovered.contains_key("OLD"));
     }
 
@@ -762,7 +757,7 @@ mod tests {
             ),
         ]);
 
-        let discovered = discover_symbols(&dirs, &Options::new(), &[], false, true);
+        let discovered = discover_symbols(&dirs, &Options::new(), false, true);
         assert!(!discovered.contains_key("BAM"));
     }
 

@@ -68,6 +68,10 @@ pub struct PriceSourceRegistry {
     sources: HashMap<String, Arc<dyn PriceSource>>,
     default_source: String,
     timeout: Duration,
+    /// When false, a commodity with no explicit source declaration
+    /// errors instead of silently using `default_source`. See #966 and
+    /// `PriceConfig::use_default_source`.
+    use_default_source: bool,
 }
 
 impl PriceSourceRegistry {
@@ -150,6 +154,7 @@ impl PriceSourceRegistry {
             sources,
             default_source: config.effective_default_source().to_string(),
             timeout,
+            use_default_source: config.effective_use_default_source(),
         }
     }
 
@@ -191,6 +196,13 @@ impl PriceSourceRegistry {
     /// ticker based on the configuration, then fetches the price. When a
     /// fallback chain is in play, each entry's per-source ticker is used
     /// (issue #963).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the commodity has no explicit source
+    /// declaration (no CLI `--source`, no `[price.mapping.X]` in config,
+    /// no `price:` metadata) and `[price] use_default_source = false`
+    /// (the default). See issue #966.
     pub fn fetch_price(
         &self,
         commodity: &str,
@@ -198,7 +210,7 @@ impl PriceSourceRegistry {
         date: Option<NaiveDate>,
         mapping: &HashMap<String, CommodityMapping>,
     ) -> Result<PriceResponse> {
-        let attempts = self.resolve_mapping(commodity, mapping);
+        let attempts = self.resolve_mapping(commodity, mapping)?;
 
         let mut last_error = None;
         let mut unknown_sources = Vec::new();
@@ -251,13 +263,19 @@ impl PriceSourceRegistry {
     /// try in order. Each fallback entry can carry its own ticker so a
     /// chain like `EUR:ecbrates/GBP-EUR,EUR:ecb/GBP` queries each source
     /// with the ticker shape it expects (issue #963).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `mapping` has no entry for `commodity` and
+    /// `use_default_source` is false. The error message lists the
+    /// remediation paths so users can pick whichever fits their workflow.
     fn resolve_mapping(
         &self,
         commodity: &str,
         mapping: &HashMap<String, CommodityMapping>,
-    ) -> Vec<(String, String)> {
+    ) -> Result<Vec<(String, String)>> {
         if let Some(commodity_mapping) = mapping.get(commodity) {
-            match commodity_mapping {
+            let attempts = match commodity_mapping {
                 CommodityMapping::Simple(ticker) => {
                     vec![(self.default_source.clone(), ticker.clone())]
                 }
@@ -279,11 +297,25 @@ impl PriceSourceRegistry {
                             .collect(),
                     }
                 }
-            }
-        } else {
-            // No mapping - use default source with commodity as ticker
-            vec![(self.default_source.clone(), commodity.to_string())]
+            };
+            return Ok(attempts);
         }
+
+        // No mapping. Issue #966: silently dispatching to `default_source`
+        // is the failure mode where currency codes like `BAM` get sent to
+        // Yahoo and return a stock price for an unrelated ticker. Refuse
+        // unless the user has opted in via `[price] use_default_source = true`.
+        if self.use_default_source {
+            return Ok(vec![(self.default_source.clone(), commodity.to_string())]);
+        }
+        Err(anyhow::anyhow!(
+            "no price source configured for {commodity}. Either pass `--source <name>`, \
+             add `[price.mapping.{commodity}]` to your config, annotate the commodity \
+             with `price: \"<quote>:<source>/<ticker>\"` metadata in your beancount file, \
+             or set `[price] use_default_source = true` to fall back to the default \
+             source ({default}) for unmapped symbols.",
+            default = self.default_source,
+        ))
     }
 }
 
@@ -374,7 +406,7 @@ mod tests {
             CommodityMapping::Simple("BTC-USD".to_string()),
         );
 
-        let attempts = registry.resolve_mapping("BTC", &mapping);
+        let attempts = registry.resolve_mapping("BTC", &mapping).unwrap();
         assert_eq!(attempts, vec![("yahoo".to_string(), "BTC-USD".to_string())]);
     }
 
@@ -394,7 +426,7 @@ mod tests {
             }),
         );
 
-        let attempts = registry.resolve_mapping("EUR", &mapping);
+        let attempts = registry.resolve_mapping("EUR", &mapping).unwrap();
         assert_eq!(
             attempts,
             vec![
@@ -404,12 +436,55 @@ mod tests {
         );
     }
 
+    /// Issue #966: by default, resolving a commodity that has no
+    /// mapping (and no `--source` was provided at the call site) is an
+    /// error rather than a silent dispatch to `default_source`. The
+    /// error message points the user at the three remediation paths.
     #[test]
-    fn test_resolve_mapping_no_mapping() {
+    fn test_resolve_mapping_no_mapping_errors_by_default() {
         let registry = PriceSourceRegistry::default();
         let mapping = HashMap::new();
 
-        let attempts = registry.resolve_mapping("AAPL", &mapping);
+        let result = registry.resolve_mapping("AAPL", &mapping);
+        let err = result.expect_err("default behavior must refuse unmapped symbols");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("AAPL"),
+            "error must name the offending symbol: {msg}"
+        );
+        // Each remediation path must be discoverable from the error.
+        assert!(
+            msg.contains("--source"),
+            "error must mention --source: {msg}"
+        );
+        assert!(
+            msg.contains("[price.mapping.AAPL]"),
+            "error must mention the per-symbol config block: {msg}"
+        );
+        assert!(
+            msg.contains("price:"),
+            "error must mention the metadata path: {msg}"
+        );
+        assert!(
+            msg.contains("use_default_source"),
+            "error must mention the opt-in flag: {msg}"
+        );
+    }
+
+    /// `[price] use_default_source = true` restores the previous
+    /// behavior — unmapped symbols dispatch to `default_source`.
+    #[test]
+    fn test_resolve_mapping_no_mapping_uses_default_when_opted_in() {
+        let config = PriceConfig {
+            use_default_source: Some(true),
+            ..PriceConfig::default()
+        };
+        let registry = PriceSourceRegistry::new(&config);
+        let mapping = HashMap::new();
+
+        let attempts = registry
+            .resolve_mapping("AAPL", &mapping)
+            .expect("opt-in must allow default-source dispatch");
         assert_eq!(attempts, vec![("yahoo".to_string(), "AAPL".to_string())]);
     }
 
@@ -438,7 +513,7 @@ mod tests {
             }),
         );
 
-        let attempts = registry.resolve_mapping("GBP", &mapping);
+        let attempts = registry.resolve_mapping("GBP", &mapping).unwrap();
         assert_eq!(
             attempts,
             vec![
@@ -472,7 +547,7 @@ mod tests {
             }),
         );
 
-        let attempts = registry.resolve_mapping("BTC", &mapping);
+        let attempts = registry.resolve_mapping("BTC", &mapping).unwrap();
         assert_eq!(
             attempts,
             vec![

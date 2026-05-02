@@ -119,6 +119,22 @@ The currency a price is quoted in is resolved separately, since a single source 
 
 Note that `[price.mapping.X]` blocks reject unknown keys: a typo like `currency = "EUR"` (vs the supported `quote_currency`) will fail config load with a clear error rather than being silently dropped.
 
+### Explicit source declaration required by default (issue #966)
+
+Fetching a symbol that has none of:
+- a CLI `--source <name>` flag,
+- a `[price.mapping.X]` entry in your config,
+- a `price:` metadata annotation on the commodity directive,
+
+is an **error** rather than a silent dispatch to the configured `default_source`. This prevents the failure mode where currency codes (e.g. `BAM`, the Bosnian convertible mark) get sent to Yahoo and return a stock price for an unrelated ticker that happens to share the symbol.
+
+To restore the previous behavior — where unmapped symbols always go to `default_source` — set:
+
+```toml
+[price]
+use_default_source = true
+```
+
 ## Price Caching
 
 Prices are cached to disk to reduce API calls. By default, cached prices expire after **30 minutes** (matching Python `bean-price` behavior).
@@ -206,6 +222,14 @@ Configure sources, mappings, and fallback chains in config:
 default_source = "yahoo"
 timeout = 30
 cache_ttl = 1800
+
+# Issue #966: by default, fetching a commodity that has no
+# `--source` flag, no [price.mapping.X] entry, and no `price:`
+# metadata is an error rather than a silent dispatch to
+# `default_source`. This prevents currency codes (e.g. BAM) from
+# being routed to a stock source and returning unrelated prices.
+# Set this to true to opt back into the previous behavior.
+# use_default_source = false
 
 [price.mapping]
 # Simple ticker mapping

@@ -20,7 +20,7 @@
 //! behavior and avoids wasting API calls on commodities the user no longer
 //! holds. Pass `include_inactive: true` to skip the activity filter.
 
-use crate::config::{CommodityMapping, DetailedMapping, FallbackEntry, SourceRef};
+use crate::config::{CommodityMapping, DetailedMapping, FallbackDetail, FallbackEntry, SourceRef};
 use rust_decimal::Decimal;
 use rustledger_core::{Directive, MetaValue};
 use rustledger_loader::Options;
@@ -147,9 +147,11 @@ fn build_mapping(specs: &[PriceSpec]) -> Option<CommodityMapping> {
     // queried with `GBP-EUR` (ecbrates' shape) instead of `GBP`.
     let entries: Vec<FallbackEntry> = specs
         .iter()
-        .map(|s| FallbackEntry::Detailed {
-            source: s.source.clone(),
-            ticker: Some(s.ticker.clone()),
+        .map(|s| {
+            FallbackEntry::Detailed(FallbackDetail {
+                source: s.source.clone(),
+                ticker: Some(s.ticker.clone()),
+            })
         })
         .collect();
     Some(CommodityMapping::Detailed(DetailedMapping {

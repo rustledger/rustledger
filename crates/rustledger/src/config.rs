@@ -182,14 +182,26 @@ pub enum FallbackEntry {
     Name(String),
 
     /// Source paired with its own ticker.
-    Detailed {
-        /// Source name (e.g. `"yahoo"`, `"ecb"`).
-        source: String,
-        /// Ticker shape this specific source expects. Overrides the
-        /// parent `DetailedMapping.ticker` for this attempt only.
-        #[serde(default)]
-        ticker: Option<String>,
-    },
+    Detailed(FallbackDetail),
+}
+
+/// `{source, ticker}` form of a fallback chain entry.
+///
+/// Lives in its own struct (rather than as an inline variant payload)
+/// so it can carry `#[serde(deny_unknown_fields)]` — without it, a
+/// typo like `{ source = "ecb", tickre = "GBP" }` would silently
+/// deserialize as `Detailed { source = "ecb", ticker = None }` and
+/// fall back to the parent ticker, masking the misconfiguration.
+/// Mirrors the same guard `DetailedMapping` carries (issue #952).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FallbackDetail {
+    /// Source name (e.g. `"yahoo"`, `"ecb"`).
+    pub source: String,
+    /// Ticker shape this specific source expects. Overrides the
+    /// parent `DetailedMapping.ticker` for this attempt only.
+    #[serde(default)]
+    pub ticker: Option<String>,
 }
 
 impl FallbackEntry {
@@ -198,7 +210,7 @@ impl FallbackEntry {
     pub fn source_name(&self) -> &str {
         match self {
             Self::Name(s) => s,
-            Self::Detailed { source, .. } => source,
+            Self::Detailed(d) => &d.source,
         }
     }
 
@@ -207,7 +219,7 @@ impl FallbackEntry {
     pub fn ticker(&self) -> Option<&str> {
         match self {
             Self::Name(_) => None,
-            Self::Detailed { ticker, .. } => ticker.as_deref(),
+            Self::Detailed(d) => d.ticker.as_deref(),
         }
     }
 }
@@ -1629,6 +1641,32 @@ ticker = "BTC-USD"
         assert_eq!(entries[0].ticker(), None);
         assert_eq!(entries[1].source_name(), "coingecko");
         assert_eq!(entries[1].ticker(), Some("bitcoin"));
+    }
+
+    /// Copilot review on PR #970: without `deny_unknown_fields`, a
+    /// typo in a fallback chain object (e.g. `tickre = "GBP"`) would
+    /// silently deserialize with `ticker = None` and fall back to the
+    /// parent ticker, masking the misconfiguration. `FallbackDetail`
+    /// carries `deny_unknown_fields` so the typo errors at config load,
+    /// matching the guard `DetailedMapping` already has (#952).
+    ///
+    /// Caveat: `SourceRef` and `CommodityMapping` are `serde(untagged)`,
+    /// so the inner "unknown field `tickre`" error gets wrapped into a
+    /// generic "data did not match any variant" by the time it reaches
+    /// the caller. We only assert load failure here — that's enough to
+    /// catch the regression. (Without `deny_unknown_fields`, this same
+    /// input deserializes successfully with `ticker = None`, the wrong
+    /// answer.)
+    #[test]
+    fn test_parse_commodity_mapping_fallback_rejects_unknown_field_in_entry() {
+        let content = r#"
+[price.mapping.GBP]
+source = [
+  { source = "ecb", tickre = "GBP" },
+]
+"#;
+        toml::from_str::<Config>(content)
+            .expect_err("a typo in a fallback chain entry must error at load");
     }
 
     #[test]

@@ -314,7 +314,7 @@ pub fn fetch_price(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::FallbackEntry;
+    use crate::config::{FallbackDetail, FallbackEntry};
 
     #[test]
     fn test_price_request_builder() {
@@ -424,14 +424,14 @@ mod tests {
             "GBP".to_string(),
             CommodityMapping::Detailed(crate::config::DetailedMapping {
                 source: SourceRef::Fallback(vec![
-                    FallbackEntry::Detailed {
+                    FallbackEntry::Detailed(FallbackDetail {
                         source: "ecbrates".to_string(),
                         ticker: Some("GBP-EUR".to_string()),
-                    },
-                    FallbackEntry::Detailed {
+                    }),
+                    FallbackEntry::Detailed(FallbackDetail {
                         source: "ecb".to_string(),
                         ticker: Some("GBP".to_string()),
-                    },
+                    }),
                 ]),
                 ticker: Some("GBP-EUR".to_string()),
                 quote_currency: Some("EUR".to_string()),
@@ -462,10 +462,10 @@ mod tests {
             CommodityMapping::Detailed(crate::config::DetailedMapping {
                 source: SourceRef::Fallback(vec![
                     FallbackEntry::Name("yahoo".to_string()),
-                    FallbackEntry::Detailed {
+                    FallbackEntry::Detailed(FallbackDetail {
                         source: "coingecko".to_string(),
                         ticker: Some("bitcoin".to_string()),
-                    },
+                    }),
                 ]),
                 ticker: Some("BTC-USD".to_string()),
                 quote_currency: None,

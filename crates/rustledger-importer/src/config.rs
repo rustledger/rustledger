@@ -689,10 +689,6 @@ mod tests {
     }
 
     // ========== AmountFormat::parse Tests (regression for #972) ==========
-    //
-    // Differential test: every value the default (POSIX) parser accepts must equal
-    // `Decimal::from_str` on the same string. This catches the upstream `parse_sym`
-    // bug class — silent miscoding of values containing zeros after the decimal.
 
     fn assert_matches_oracle(s: &str) {
         let ours = AmountFormat::default()
@@ -792,7 +788,7 @@ mod tests {
     #[test]
     fn parse_german_locale_swaps_decimal_and_grouping() {
         // de_DE uses ',' as decimal separator and '.' as grouping. "1.234,56" -> 1234.56.
-        let f = AmountFormat::Symbols(NumberSymbols::numeric(Locale::de_DE));
+        let f = AmountFormat::Symbols(NumberSymbols::monetary(Locale::de_DE));
         let v = f.parse("1.234,56").unwrap();
         assert_eq!(v, Decimal::from_str("1234.56").unwrap());
     }
@@ -800,15 +796,12 @@ mod tests {
     #[test]
     fn parse_german_locale_sub_cent() {
         // The same bug class would corrupt sub-unit German amounts: "0,01" must not become 0,1.
-        let f = AmountFormat::Symbols(NumberSymbols::numeric(Locale::de_DE));
+        let f = AmountFormat::Symbols(NumberSymbols::monetary(Locale::de_DE));
         let v = f.parse("0,01").unwrap();
         assert_eq!(v, Decimal::from_str("0.01").unwrap());
     }
 
     proptest::proptest! {
-        // Round-trip property: any Decimal we render with `Display` must parse back to itself
-        // through the default (POSIX) `AmountFormat::parse`. Generates values across the full
-        // i64 range with up to 9 fractional digits.
         #[test]
         fn parse_default_round_trips_through_display(
             mantissa in i64::MIN..=i64::MAX,

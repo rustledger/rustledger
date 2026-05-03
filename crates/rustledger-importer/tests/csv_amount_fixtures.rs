@@ -1,11 +1,4 @@
-//! End-to-end tests covering amount-parsing edge cases that real-world bank exports hit.
-//!
-//! Regression for issue #972: a CSV row with a sub-cent amount (interest accrual,
-//! rounding line, sub-cent FX, fee dust) used to be silently corrupted by 10×.
-//!
-//! Note: the zero-amount row is included in the fixture to confirm it no longer triggers
-//! a parse warning. The CSV importer's downstream behavior of skipping zero-amount rows
-//! is intentional and tested elsewhere (`csv_importer::tests::test_csv_import_zero_amount_skips_row`).
+//! Regression for issue #972: sub-cent CSV amounts (e.g. `0.01`) used to silently parse as `0.1`.
 
 use rust_decimal::Decimal;
 use rustledger_importer::ImporterConfig;
@@ -37,15 +30,14 @@ fn realistic_bank_export_parses_every_amount_correctly() {
 
     let result = config.extract_from_string(FIXTURE).unwrap();
 
-    // Zero-amount rows are intentionally skipped downstream of parsing — but they must
-    // *parse* cleanly. Before #972 the zero row produced a "Failed to parse amount" warning.
+    // The zero-amount row must parse cleanly (no warning). It's then dropped downstream
+    // by the importer's intentional zero-skip — covered by csv_importer's own tests.
     assert!(
         result.warnings.is_empty(),
         "expected no parse warnings, got: {:?}",
         result.warnings
     );
 
-    // Every non-zero row must round-trip to the exact decimal value from the source.
     let expected = [
         ("One cent interest", "0.01"),
         ("Sub-cent FX residual", "0.001"),

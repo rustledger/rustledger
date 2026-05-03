@@ -3,9 +3,9 @@
 use crate::ImportResult;
 use crate::csv_importer::CsvImporter;
 use anyhow::{Context, Result};
-use format_num_pattern::{Locale, NumberFormat, NumberSymbols, core::parse_sym, fmt_to, parse_fmt};
+use format_num_pattern::{Locale, NumberFormat, NumberSymbols, fmt_to, parse_fmt};
 use rust_decimal::Decimal;
-use std::{fmt::Display, ops::Neg, path::Path};
+use std::{fmt::Display, ops::Neg, path::Path, str::FromStr};
 
 /// Configuration for an importer.
 #[derive(Debug, Clone)]
@@ -117,15 +117,34 @@ pub enum AmountFormat {
     Format(NumberFormat),
 }
 
+// Do not replace with `format_num_pattern::core::parse_sym`: its `clean_num` strips post-decimal
+// leading zeros, so "0.00" fails and "0.01" silently parses as 0.1. See issue #972.
+fn parse_with_symbols(s: &str, sym: &NumberSymbols) -> Result<Decimal, rust_decimal::Error> {
+    let mut buf = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c.is_ascii_digit() {
+            buf.push(c);
+        } else if c == sym.negative_sym || c == '-' {
+            // Always accept ASCII '-' even if the locale's negative_sym differs (e.g. U+2212): otherwise the sign silently flips.
+            buf.push('-');
+        } else if c == sym.decimal_sep {
+            buf.push('.');
+        } else if c == sym.exponent_lower_sym || c == sym.exponent_upper_sym {
+            buf.push('e');
+        }
+    }
+    Decimal::from_str(&buf)
+}
+
 impl AmountFormat {
     /// Attempt to parse a string using the given format.
     pub fn parse(&self, amount: &str) -> Result<Decimal> {
         let value: Decimal = match self {
-            Self::Symbols(number_symbols) => parse_sym(amount, number_symbols)
-                .with_context(|| format!("unable to parse using symbols: {number_symbols:?}")),
+            Self::Symbols(number_symbols) => parse_with_symbols(amount, number_symbols)
+                .with_context(|| format!("unable to parse using symbols: {number_symbols:?}"))?,
             Self::Format(number_format) => parse_fmt(amount, number_format)
-                .with_context(|| format!("unable to parse using given format: {number_format}")),
-        }?;
+                .with_context(|| format!("unable to parse using given format: {number_format}"))?,
+        };
 
         if amount.trim().starts_with('(') && amount.trim().ends_with(')') {
             Ok(value.neg())
@@ -668,5 +687,143 @@ mod tests {
     fn test_column_spec_index() {
         let spec = ColumnSpec::Index(5);
         assert!(matches!(spec, ColumnSpec::Index(5)));
+    }
+
+    // ========== AmountFormat::parse Tests (regression for #972) ==========
+
+    fn assert_matches_oracle(s: &str) {
+        let ours = AmountFormat::default()
+            .parse(s)
+            .unwrap_or_else(|e| panic!("default parser rejected {s:?}: {e:?}"));
+        let oracle = Decimal::from_str(s)
+            .unwrap_or_else(|e| panic!("oracle Decimal::from_str rejected {s:?}: {e:?}"));
+        assert_eq!(
+            ours, oracle,
+            "default parser disagreed with Decimal::from_str on {s:?}"
+        );
+    }
+
+    #[test]
+    fn parse_default_matches_decimal_from_str_oracle() {
+        for s in [
+            "0",
+            "0.0",
+            "0.00",
+            "0.000",
+            "0.1",
+            "0.01",
+            "0.001",
+            "0.0001",
+            "0.10",
+            "0.05",
+            "0.50",
+            "-0",
+            "-0.0",
+            "-0.00",
+            "-0.1",
+            "-0.01",
+            "-0.001",
+            "1",
+            "1.0",
+            "1.00",
+            "1.23",
+            "1.230",
+            "10",
+            "100",
+            "1234",
+            "1234.56",
+            "-1",
+            "-1.00",
+            "-1.23",
+            "-1234.56",
+            "1234567890.1234567890",
+        ] {
+            assert_matches_oracle(s);
+        }
+    }
+
+    #[test]
+    fn parse_default_zero_amount_succeeds() {
+        // Direct regression for issue #972 reporter's case.
+        assert_eq!(
+            AmountFormat::default().parse("0.00").unwrap(),
+            Decimal::ZERO
+        );
+    }
+
+    #[test]
+    fn parse_default_one_cent_is_not_ten_cents() {
+        // The silent-corruption case: the buggy parser returned 0.1 for "0.01".
+        let v = AmountFormat::default().parse("0.01").unwrap();
+        assert_eq!(v, Decimal::from_str("0.01").unwrap());
+        assert_ne!(v, Decimal::from_str("0.1").unwrap());
+    }
+
+    #[test]
+    fn parse_default_negative_one_cent() {
+        let v = AmountFormat::default().parse("-0.01").unwrap();
+        assert_eq!(v, Decimal::from_str("-0.01").unwrap());
+    }
+
+    #[test]
+    fn parse_default_sub_cent() {
+        let v = AmountFormat::default().parse("0.001").unwrap();
+        assert_eq!(v, Decimal::from_str("0.001").unwrap());
+    }
+
+    #[test]
+    fn parse_default_parens_as_negative() {
+        // Accountancy convention: (123.45) means -123.45.
+        let v = AmountFormat::default().parse("(0.01)").unwrap();
+        assert_eq!(v, Decimal::from_str("-0.01").unwrap());
+    }
+
+    #[test]
+    fn parse_default_drops_currency_symbols_and_grouping() {
+        // POSIX symbols set decimal_sep='.', positive_sym=' '. Group separator and
+        // any unrecognized chars (currency, whitespace) are silently dropped.
+        let v = AmountFormat::default().parse("$1,234.56").unwrap();
+        assert_eq!(v, Decimal::from_str("1234.56").unwrap());
+    }
+
+    #[test]
+    fn parse_german_locale_swaps_decimal_and_grouping() {
+        // de_DE uses ',' as decimal separator and '.' as grouping. "1.234,56" -> 1234.56.
+        let f = AmountFormat::Symbols(NumberSymbols::monetary(Locale::de_DE));
+        let v = f.parse("1.234,56").unwrap();
+        assert_eq!(v, Decimal::from_str("1234.56").unwrap());
+    }
+
+    #[test]
+    fn parse_german_locale_sub_cent() {
+        // The same bug class would corrupt sub-unit German amounts: "0,01" must not become 0,1.
+        let f = AmountFormat::Symbols(NumberSymbols::monetary(Locale::de_DE));
+        let v = f.parse("0,01").unwrap();
+        assert_eq!(v, Decimal::from_str("0.01").unwrap());
+    }
+
+    #[test]
+    fn parse_ascii_minus_honored_when_locale_uses_unicode_minus() {
+        // If the configured locale's negative_sym is U+2212 but the CSV emits ASCII '-' (the
+        // common real-world case), the sign must not be silently dropped. Regression for
+        // Copilot's review on PR #974.
+        let mut sym = NumberSymbols::monetary(Locale::POSIX);
+        sym.negative_sym = '\u{2212}';
+        let f = AmountFormat::Symbols(sym);
+        let v = f.parse("-0.01").unwrap();
+        assert_eq!(v, Decimal::from_str("-0.01").unwrap());
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn parse_default_round_trips_through_display(
+            mantissa in i64::MIN..=i64::MAX,
+            scale in 0u32..=9
+        ) {
+            let original = Decimal::new(mantissa, scale);
+            let s = original.to_string();
+            let parsed = AmountFormat::default().parse(&s).unwrap();
+            proptest::prop_assert_eq!(parsed, original);
+        }
     }
 }

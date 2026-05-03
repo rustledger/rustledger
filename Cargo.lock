@@ -3401,6 +3401,7 @@ dependencies = [
  "format_num_pattern",
  "jiff",
  "ofxy",
+ "proptest",
  "rust_decimal",
  "rustledger-core",
  "rustledger-ops",

@@ -724,10 +724,6 @@ criteria = "safe-to-deploy"
 version = "0.1.1"
 criteria = "safe-to-deploy"
 
-[[exemptions.rand]]
-version = "0.8.6"
-criteria = "safe-to-deploy"
-
 [[exemptions.rawpointer]]
 version = "0.2.1"
 criteria = "safe-to-deploy"

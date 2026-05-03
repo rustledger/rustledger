@@ -11,7 +11,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use rustledger_core::NaiveDate;
 use rustledger_loader::LoadOptions;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -103,6 +103,18 @@ pub struct PriceArgs {
     /// a future release; prefer the granular flags. Hidden from help.
     #[arg(long, requires = "file", hide = true)]
     all_commodities: bool,
+
+    /// Print the list of symbols and resolved (source, ticker, currency)
+    /// tuples that would be fetched, then exit. No network calls.
+    /// Matches `bean-price --dry-run`.
+    #[arg(short = 'n', long)]
+    dry_run: bool,
+
+    /// Overwrite prices already present in the input file rather than
+    /// skipping them. Matches `bean-price --clobber`. Only meaningful
+    /// with `-f`; ignored otherwise.
+    #[arg(short = 'C', long, requires = "file")]
+    clobber: bool,
 }
 
 /// Run the price command.
@@ -155,7 +167,14 @@ pub fn run(args: &PriceArgs, price_config: &PriceConfig) -> Result<()> {
     }
     let effective_inactive = args.inactive || args.all_commodities;
     let effective_undeclared = args.undeclared || args.all_commodities;
-    let discovered: HashMap<String, DiscoveredCommodity> = if let Some(ref file) = args.file {
+    // Tuple keys for `--clobber`: every existing `price` directive in the file
+    // identifies a (symbol, quote_currency, date) we should skip fetching for
+    // unless `--clobber` is set. Built alongside discovery to avoid loading
+    // the ledger twice.
+    let (discovered, existing_prices): (
+        HashMap<String, DiscoveredCommodity>,
+        HashSet<(String, String, NaiveDate)>,
+    ) = if let Some(ref file) = args.file {
         // Load with booking so interpolated postings (units missing in source,
         // filled in by the booking engine) get explicit amounts. Without this,
         // the active-commodity check at `discovery::active_commodities` would
@@ -171,14 +190,25 @@ pub fn run(args: &PriceArgs, price_config: &PriceConfig) -> Result<()> {
         };
         let ledger = rustledger_loader::load(file, &opts)
             .with_context(|| format!("failed to load {} for symbol discovery", file.display()))?;
-        discover_symbols(
+        let discovered = discover_symbols(
             &ledger.directives,
             &ledger.options,
             effective_inactive,
             effective_undeclared,
-        )
+        );
+        let mut existing = HashSet::new();
+        for spanned in &ledger.directives {
+            if let rustledger_core::Directive::Price(p) = &spanned.value {
+                existing.insert((
+                    p.currency.as_str().to_string(),
+                    p.amount.currency.as_str().to_string(),
+                    p.date,
+                ));
+            }
+        }
+        (discovered, existing)
     } else {
-        HashMap::new()
+        (HashMap::new(), HashSet::new())
     };
 
     // Stable order: alphabetical by symbol so output is deterministic across
@@ -234,6 +264,19 @@ pub fn run(args: &PriceArgs, price_config: &PriceConfig) -> Result<()> {
         None
     };
 
+    let combined_mapping = build_combined_mapping(&price_config.mapping, &discovered, &cli_mapping);
+
+    if args.dry_run {
+        return dump_fetch_plan(
+            args,
+            &symbols_to_fetch,
+            &discovered,
+            &price_config.mapping,
+            &combined_mapping,
+            date,
+        );
+    }
+
     // Handle --source-cmd (ad-hoc external command)
     // This is placed after symbol discovery so -f flag works with --source-cmd
     if let Some(cmd) = &args.source_cmd {
@@ -244,10 +287,9 @@ pub fn run(args: &PriceArgs, price_config: &PriceConfig) -> Result<()> {
             date,
             price_config,
             &discovered,
+            &existing_prices,
         );
     }
-
-    let combined_mapping = build_combined_mapping(&price_config.mapping, &discovered, &cli_mapping);
 
     let stdout = io::stdout();
     let mut handle = stdout.lock();
@@ -268,6 +310,22 @@ pub fn run(args: &PriceArgs, price_config: &PriceConfig) -> Result<()> {
         // the merged map below; only currency resolution stays config-only.
         let effective_currency =
             resolve_quote_currency(symbol, &discovered, &price_config.mapping, &args.currency);
+
+        // --clobber: skip fetch when an explicit `price` directive for
+        // (symbol, effective_currency, fetch_date) already exists in the file.
+        // Match bean-price's semantics: existing prices are kept unless
+        // --clobber is set.
+        if !args.clobber {
+            let fetch_date = date.unwrap_or_else(|| jiff::Zoned::now().date());
+            if existing_prices.contains(&(symbol.clone(), effective_currency.clone(), fetch_date)) {
+                if args.verbose {
+                    eprintln!(
+                        "{symbol}: skipped (existing price for {fetch_date} {effective_currency}; pass --clobber to refetch)"
+                    );
+                }
+                continue;
+            }
+        }
 
         // Check cache first
         let key = cache_key(source_name_for_cache, symbol, &effective_currency, date);
@@ -413,6 +471,82 @@ fn fetch_with_source(
     source.fetch_price(&request)
 }
 
+/// Print the resolved fetch plan for `--dry-run`. One line per symbol:
+///   `<symbol> /<currency> @ <date> <source>(<ticker>)[, <source>(<ticker>)...]`
+fn dump_fetch_plan(
+    args: &PriceArgs,
+    symbols: &[String],
+    discovered: &HashMap<String, DiscoveredCommodity>,
+    config_mapping: &HashMap<String, CommodityMapping>,
+    combined_mapping: &HashMap<String, CommodityMapping>,
+    date: Option<NaiveDate>,
+) -> Result<()> {
+    let stdout = io::stdout();
+    let mut handle = stdout.lock();
+    let date_str = date.map_or_else(|| "today".to_string(), |d| d.to_string());
+
+    for symbol in symbols {
+        let currency = resolve_quote_currency(symbol, discovered, config_mapping, &args.currency);
+
+        // --source and --source-cmd bypass the mapping entirely.
+        let attempts: Vec<(String, String)> = if let Some(cmd) = &args.source_cmd {
+            vec![(format!("source-cmd:{cmd}"), symbol.clone())]
+        } else if let Some(s) = &args.source {
+            vec![(s.clone(), symbol.clone())]
+        } else {
+            describe_attempts(symbol, combined_mapping)
+        };
+
+        let attempts_str = if attempts.is_empty() {
+            "<unmapped>".to_string()
+        } else {
+            attempts
+                .iter()
+                .map(|(s, t)| format!("{s}({t})"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+
+        writeln!(handle, "{symbol} /{currency} @ {date_str} {attempts_str}")?;
+    }
+    Ok(())
+}
+
+/// Walk a `CommodityMapping` into the ordered list of (source, ticker) pairs
+/// the registry would attempt. Used by `dump_fetch_plan`.
+fn describe_attempts(
+    symbol: &str,
+    combined_mapping: &HashMap<String, CommodityMapping>,
+) -> Vec<(String, String)> {
+    use crate::config::SourceRef;
+    let Some(m) = combined_mapping.get(symbol) else {
+        return Vec::new();
+    };
+    match m {
+        CommodityMapping::Simple(ticker) => vec![("default".to_string(), ticker.clone())],
+        CommodityMapping::Detailed(d) => {
+            let parent_ticker = d.ticker.as_deref().unwrap_or(symbol);
+            match &d.source {
+                SourceRef::Single(s) => vec![(s.clone(), parent_ticker.to_string())],
+                SourceRef::Fallback(entries) => entries
+                    .iter()
+                    .map(|e| match e {
+                        crate::config::FallbackEntry::Name(s) => {
+                            (s.clone(), parent_ticker.to_string())
+                        }
+                        crate::config::FallbackEntry::Detailed(fd) => (
+                            fd.source.clone(),
+                            fd.ticker
+                                .clone()
+                                .unwrap_or_else(|| parent_ticker.to_string()),
+                        ),
+                    })
+                    .collect(),
+            }
+        }
+    }
+}
+
 /// Write a price response to the output.
 fn write_price(
     handle: &mut impl Write,
@@ -441,6 +575,7 @@ fn run_with_external_command(
     date: Option<NaiveDate>,
     price_config: &PriceConfig,
     discovered: &HashMap<String, DiscoveredCommodity>,
+    existing_prices: &HashSet<(String, String, NaiveDate)>,
 ) -> Result<()> {
     use crate::cmd::price::external::ExternalCommandSource;
 
@@ -465,6 +600,21 @@ fn run_with_external_command(
         // silently wipe out a config-file `Detailed.quote_currency`.
         let effective_currency =
             resolve_quote_currency(symbol, discovered, &price_config.mapping, &args.currency);
+
+        // --clobber: skip when an existing price for this (symbol, currency, date)
+        // is already in the file. Same rule as the network fetch path.
+        if !args.clobber {
+            let fetch_date = date.unwrap_or_else(|| jiff::Zoned::now().date());
+            if existing_prices.contains(&(symbol.clone(), effective_currency.clone(), fetch_date)) {
+                if args.verbose {
+                    eprintln!(
+                        "{symbol}: skipped (existing price for {fetch_date} {effective_currency}; pass --clobber to refetch)"
+                    );
+                }
+                continue;
+            }
+        }
+
         let request = PriceRequest {
             ticker: symbol.clone(),
             currency: effective_currency.clone(),

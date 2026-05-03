@@ -32,6 +32,8 @@ rledger price [OPTIONS] [SYMBOL]...
 | `--inactive` | Include commodities not currently held (matches `bean-price --inactive`). Requires `-f`. |
 | `--undeclared` | Also discover ticker-shaped commodities lacking `price:`/`quote_currency:` metadata. Approximate analogue of `bean-price --undeclared` (see note below). Requires `-f`. |
 | `--list-sources` | List configured sources and exit |
+| `-n, --dry-run` | Print resolved fetch plan and exit; no network. Matches `bean-price --dry-run`. |
+| `-C, --clobber` | Re-fetch prices even when the input file already has a `price` directive for that `(symbol, currency, date)`. Requires `-f`. Matches `bean-price --clobber`. |
 | `--no-cache` | Disable the price cache for this run |
 | `--clear-cache` | Clear the price cache before fetching |
 | `-v, --verbose` | Show verbose output |
@@ -103,21 +105,28 @@ rledger price -f main.beancount --inactive --undeclared
 
 ### Precedence for source/ticker resolution
 
-When multiple configurations apply to the same symbol, the order from highest to lowest precedence is:
+Two CLI flags **bypass** the mapping system entirely and override everything below:
 
-1. CLI `--mapping` (per-symbol overrides on the command line)
-2. CLI `--source` (forces source for every symbol in the run)
-3. `price:` metadata on the commodity directive
-4. Config-file `[price.mapping]` entries
-5. Default source from `[price.default_source]` (or `yahoo`)
+- `--source-cmd <CMD>`: every symbol is fetched by running `<CMD>` as an external program. Mapping/metadata/config are ignored for the source decision.
+- `--source <NAME>`: every symbol is fetched from the named built-in or configured source. Mapping/metadata/config are ignored for the source decision (but `quote_currency:` metadata still drives the per-symbol quote currency — see below).
+
+When neither bypass is in effect, the merged source mapping is built with this precedence (high to low):
+
+1. CLI `--mapping <SYMBOL>:<TICKER>[:<SOURCE>]` (per-symbol override at runtime)
+2. `price:` metadata on the commodity directive (each fallback entry preserves its own ticker — see issue #963)
+3. Config-file `[price.mapping.X]` entries
+4. **Synthesized `Simple(<symbol>)` default-source dispatch** — only for commodities discovered from the ledger that opted in via `quote_currency:` metadata, the `--undeclared` ticker-shape heuristic, or that lack their own metadata source spec. Without this synthesis, those commodities would hit the explicit-source-required guard below.
+5. Otherwise: **error** (the strict default from issue #966 — see "Explicit source declaration required by default" below). Disable with `[price] use_default_source = true`.
 
 ### Quote currency resolution
 
 The currency a price is quoted in is resolved separately, since a single source mapping can be queried in different currencies. From highest to lowest precedence:
 
-1. `quote_currency:` metadata on the commodity directive (or the first quote currency listed in a chained `price:` value)
+1. `quote_currency:` metadata on the commodity directive (or the first quote currency listed in a chained `price:` value) — issue #952
 2. `quote_currency = "..."` in the `[price.mapping.X]` config-file block
 3. The global `--currency` flag (or its default, `USD`)
+
+The same effective currency is then passed to `--source-cmd` external commands as `--currency <CCY>`. If the command's output omits a currency (e.g. emits a number-only line), the response adopts the requested currency rather than defaulting to USD — issue #979.
 
 Note that `[price.mapping.X]` blocks reject unknown keys: a typo like `currency = "EUR"` (vs the supported `quote_currency`) will fail config load with a clear error rather than being silently dropped.
 
@@ -305,6 +314,25 @@ rledger price BTC -m "BTC:BTC-USD"
 rledger price -f ledger.beancount -b
 ```
 
+### Debugging Discovery (Dry Run)
+
+Print what would be fetched without making any network calls. Each line shows the resolved `(symbol, quote_currency, date, source(s)/ticker(s))`:
+
+```bash
+rledger price -f ledger.beancount -n
+# AAPL /USD @ today yahoo(AAPL)
+# GBP  /EUR @ today ecbrates(GBP-EUR), ecb(GBP)
+# SAP  /EUR @ today yahoo(SAP.DE)
+```
+
+### Re-fetch Existing Prices (`--clobber`)
+
+By default, `rledger price -f` skips fetching for `(symbol, currency, date)` tuples that already have a `price` directive in the file (matches `bean-price`). Pass `--clobber` to fetch them anyway — the new directives can then replace the old ones in your file:
+
+```bash
+rledger price -f ledger.beancount --clobber -b > prices.beancount
+```
+
 ### Append to Price File
 
 ```bash
@@ -323,6 +351,20 @@ Run with cron:
 ```cron
 0 18 * * 1-5 /path/to/update-prices.sh
 ```
+
+## Differences from `bean-price`
+
+Most behavior matches Python `bean-price` 1:1 (verified via the differential test harness in `crates/rustledger/tests/bean_price_compat.rs`). A few intentional divergences:
+
+| Area | rledger | bean-price | Reason |
+|---|---|---|---|
+| Default discovery | strict: only commodities with `price:`/`quote_currency:` metadata that you currently hold | same since #965 | matches upstream after #962 fix |
+| `--undeclared` | walks `commodity` directives, applies a ticker-shape heuristic | walks **transactions** and unions all currencies, no shape filter | avoids spurious lookups for currency codes like `BAM`; closer alignment tracked as a follow-up |
+| Verbose output | plain `Fetching prices for: [...]` and `{symbol}: cached (source: …)` lines on stderr | Python `logging`-style `INFO: Fetching …` lines with module prefixes | rledger writes for a human reader, not for log aggregation; doubling `-v` is not currently supported |
+| `--no-cache` | disables the rledger disk cache (single TTL across all sources) | `--no-cache` plus per-source cache config | rledger's cache is global; per-source config is not currently exposed |
+| `--date` | passes the date through to source requests; the active-commodity filter still uses the latest balances | walks the file as-of `--date` for both balance computation and price lookup | small divergence; documented but not fixed yet |
+
+Suggesting alignment? File an issue against the audit umbrella in #967.
 
 ## See Also
 

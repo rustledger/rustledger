@@ -209,8 +209,9 @@ impl CsvImporter {
         // Get amount
         let amount = self.parse_amount(record, csv_config, header_map)?;
 
-        // Skip zero amount transactions
-        if amount == Decimal::ZERO {
+        // Skip zero-amount rows by default. Users can opt out via
+        // `skip_zero_amounts(false)` to preserve every source row (issue #972).
+        if csv_config.skip_zero_amounts && amount == Decimal::ZERO {
             return Ok(None);
         }
 
@@ -787,6 +788,31 @@ not-a-date,Coffee,-5.00
     }
 
     #[test]
+    fn test_csv_import_zero_amount_preserved_when_opted_in() {
+        // Issue #972 follow-up: skip_zero_amounts(false) keeps the row.
+        let config = ImporterConfig::csv()
+            .account("Assets:Bank")
+            .currency("USD")
+            .date_column("Date")
+            .narration_column("Description")
+            .amount_column("Amount")
+            .skip_zero_amounts(false)
+            .build()
+            .unwrap();
+
+        let csv_content = r"Date,Description,Amount
+2024-01-15,Zero balance marker,0.00
+2024-01-16,Normal,-10.00
+";
+
+        let result = config.extract_from_string(csv_content).unwrap();
+        assert_eq!(result.directives.len(), 2, "both rows should be kept");
+        if let Directive::Transaction(txn) = &result.directives[0] {
+            assert_eq!(txn.narration.as_str(), "Zero balance marker");
+        }
+    }
+
+    #[test]
     fn test_csv_import_default_currency() {
         // No currency specified - should default to USD
         let config = ImporterConfig::csv()
@@ -938,6 +964,7 @@ not-a-date,Coffee,-5.00
             mappings: Vec::new(),
             regex_mappings: Vec::new(),
             use_merchant_dict: false,
+            skip_zero_amounts: true,
         };
 
         let importer = CsvImporter::new(ImporterConfig {

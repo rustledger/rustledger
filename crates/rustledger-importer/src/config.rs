@@ -72,6 +72,12 @@ pub struct CsvConfig {
     /// Whether to use the built-in merchant dictionary as a fallback.
     /// The dictionary provides common merchant patterns at low priority.
     pub use_merchant_dict: bool,
+    /// Whether to drop rows whose amount parses to exactly zero. Defaults to
+    /// true for back-compat: most banks emit zero-amount rows for status
+    /// markers and importing them as transactions adds noise. Set false to
+    /// preserve every source row (matches the user's expectation when
+    /// auditing migrated data — see issue #972).
+    pub skip_zero_amounts: bool,
 }
 
 impl Default for CsvConfig {
@@ -95,6 +101,7 @@ impl Default for CsvConfig {
             mappings: Vec::new(),
             regex_mappings: Vec::new(),
             use_merchant_dict: false,
+            skip_zero_amounts: true,
         }
     }
 }
@@ -385,6 +392,14 @@ impl CsvConfigBuilder {
     /// Enable the built-in merchant dictionary as a fallback.
     pub const fn use_merchant_dict(mut self, enable: bool) -> Self {
         self.config.use_merchant_dict = enable;
+        self
+    }
+
+    /// Set whether to drop rows whose amount parses to zero. Default: true.
+    /// Pass `false` to preserve every source row, matching auditor expectations
+    /// when migrating from another tool (issue #972).
+    pub const fn skip_zero_amounts(mut self, skip: bool) -> Self {
+        self.config.skip_zero_amounts = skip;
         self
     }
 

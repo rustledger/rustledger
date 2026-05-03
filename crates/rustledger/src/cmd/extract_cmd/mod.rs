@@ -132,6 +132,12 @@ pub struct Args {
     #[arg(long)]
     invert_sign: bool,
 
+    /// Preserve rows whose amount is exactly zero (e.g. balance markers).
+    /// Default behavior drops them, matching most banks' use of zero rows
+    /// as status filler — see issue #972.
+    #[arg(long)]
+    include_zero_amounts: bool,
+
     /// Auto-detect CSV format (delimiter, columns, date format)
     #[arg(long, conflicts_with_all = [
         "date_column", "date_format", "narration_column", "amount_column",
@@ -313,7 +319,10 @@ pub fn run(args: &Args, file: &Path) -> Result<()> {
             eprintln!("  date_format: {}", inferred.date_format);
             eprintln!("  has_header: {}", inferred.has_header);
 
-            let csv_config = inferred.to_csv_config();
+            let mut csv_config = inferred.to_csv_config();
+            if args.include_zero_amounts {
+                csv_config.skip_zero_amounts = false;
+            }
             ImporterConfig {
                 account: args.account.clone(),
                 currency: Some(args.currency.clone()),
@@ -332,6 +341,7 @@ pub fn run(args: &Args, file: &Path) -> Result<()> {
                 .delimiter(args.delimiter)
                 .skip_rows(args.skip_rows)
                 .invert_sign(args.invert_sign)
+                .skip_zero_amounts(!args.include_zero_amounts)
                 .has_header(!args.no_header);
 
             if let Some(payee) = &args.payee_column {

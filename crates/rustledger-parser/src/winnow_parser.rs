@@ -2887,4 +2887,108 @@ mod tests {
             "slash-separated date in expression context should produce a parse error"
         );
     }
+
+    // ========== fast_parse_decimal differential tests ==========
+
+    fn assert_fast_path_matches_oracle(s: &str) {
+        let fast = fast_parse_decimal(s);
+        let oracle = Decimal::from_str(s).ok();
+        match (fast, oracle) {
+            (Some(f), Some(o)) => assert_eq!(
+                f, o,
+                "fast_parse_decimal({s:?})={f} disagreed with Decimal::from_str={o}"
+            ),
+            (Some(f), None) => {
+                panic!("fast_parse_decimal accepted {s:?} as {f} but Decimal::from_str rejected")
+            }
+            (None, _) => {} // fast path opt-out is always allowed; the slow path takes over.
+        }
+    }
+
+    #[test]
+    fn fast_parse_decimal_matches_oracle_on_known_inputs() {
+        for s in [
+            "0",
+            "1",
+            "10",
+            "100",
+            "1000",
+            "0.0",
+            "0.00",
+            "0.000",
+            "0.1",
+            "0.01",
+            "0.001",
+            "0.0001",
+            "1.0",
+            "1.00",
+            "1.23",
+            "1.230",
+            "100.50",
+            "1234.56",
+            "0.1234567890123456789", // 19 fractional digits, mantissa fits in i64
+            "9223372036854775807",   // i64::MAX exactly
+            "9223372036854775806.0", // forces overflow on next mul10 → opt-out OK
+            "99999999999999999999",  // 20 nines, must opt out (overflow)
+            "5.",                    // trailing-decimal form (lexer accepts `(\.\d*)?`)
+        ] {
+            assert_fast_path_matches_oracle(s);
+        }
+    }
+
+    #[test]
+    fn fast_parse_decimal_rejects_malformed() {
+        // "1,000" is a valid lexer Number token but parse_number routes commas to the slow path; the rest the lexer rejects outright. Either way fast_parse_decimal must return None.
+        for s in ["", "1.2.3", "abc", "1e5", "-1", "+1", "1,000"] {
+            assert_eq!(fast_parse_decimal(s), None, "should reject {s:?}");
+        }
+    }
+
+    #[test]
+    fn fast_parse_decimal_zero_with_leading_zeros() {
+        // Direct echo of the importer bug class (#972): make sure the fast path doesn't
+        // strip post-decimal leading zeros.
+        assert_eq!(
+            fast_parse_decimal("0.01"),
+            Some(Decimal::from_str("0.01").unwrap())
+        );
+        assert_eq!(
+            fast_parse_decimal("0.001"),
+            Some(Decimal::from_str("0.001").unwrap())
+        );
+        assert_eq!(fast_parse_decimal("0.00"), Some(Decimal::ZERO));
+    }
+
+    proptest::proptest! {
+        // Bounded comma-free subset of the lexer's Number grammar that fast_parse_decimal can plausibly accept; longer/comma inputs go to the slow path so we don't generate them here.
+        #[test]
+        fn fast_parse_decimal_agrees_with_decimal_from_str(
+            s in "[0-9]{1,18}(\\.[0-9]{1,18})?"
+        ) {
+            let fast = fast_parse_decimal(&s);
+            let oracle = Decimal::from_str(&s).ok();
+            if let Some(f) = fast {
+                proptest::prop_assert_eq!(Some(f), oracle);
+            }
+        }
+
+        #[test]
+        fn fast_parse_decimal_round_trips_through_display(
+            mantissa in 0i64..=i64::MAX,
+            scale in 0u32..=18
+        ) {
+            let original = Decimal::new(mantissa, scale);
+            let s = original.to_string();
+            // Display output has no commas/sign so we can hit fast_parse_decimal directly without going through the lexer.
+            let fast = fast_parse_decimal(&s);
+            let oracle = Decimal::from_str(&s).ok();
+            if let Some(f) = fast {
+                proptest::prop_assert_eq!(f, original);
+            }
+            // When the fast path opts out, the slow path (Decimal::from_str) must succeed.
+            if fast.is_none() {
+                proptest::prop_assert_eq!(oracle, Some(original));
+            }
+        }
+    }
 }

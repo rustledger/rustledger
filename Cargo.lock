@@ -3483,6 +3483,7 @@ dependencies = [
  "insta",
  "logos 0.16.1",
  "logosky",
+ "proptest",
  "rkyv 0.8.16",
  "rust_decimal",
  "rust_decimal_macros",

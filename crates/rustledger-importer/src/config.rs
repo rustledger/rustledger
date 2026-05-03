@@ -124,7 +124,8 @@ fn parse_with_symbols(s: &str, sym: &NumberSymbols) -> Result<Decimal, rust_deci
     for c in s.chars() {
         if c.is_ascii_digit() {
             buf.push(c);
-        } else if c == sym.negative_sym {
+        } else if c == sym.negative_sym || c == '-' {
+            // Always accept ASCII '-' even if the locale's negative_sym differs (e.g. U+2212): otherwise the sign silently flips.
             buf.push('-');
         } else if c == sym.decimal_sep {
             buf.push('.');
@@ -799,6 +800,18 @@ mod tests {
         let f = AmountFormat::Symbols(NumberSymbols::monetary(Locale::de_DE));
         let v = f.parse("0,01").unwrap();
         assert_eq!(v, Decimal::from_str("0.01").unwrap());
+    }
+
+    #[test]
+    fn parse_ascii_minus_honored_when_locale_uses_unicode_minus() {
+        // If the configured locale's negative_sym is U+2212 but the CSV emits ASCII '-' (the
+        // common real-world case), the sign must not be silently dropped. Regression for
+        // Copilot's review on PR #974.
+        let mut sym = NumberSymbols::monetary(Locale::POSIX);
+        sym.negative_sym = '\u{2212}';
+        let f = AmountFormat::Symbols(sym);
+        let v = f.parse("-0.01").unwrap();
+        assert_eq!(v, Decimal::from_str("-0.01").unwrap());
     }
 
     proptest::proptest! {

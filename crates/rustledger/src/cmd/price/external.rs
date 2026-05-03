@@ -76,8 +76,14 @@ impl ExternalCommandSource {
         }
     }
 
-    /// Parse output in simple format: `150.00 USD`
-    fn parse_simple_format(&self, line: &str) -> Result<(Decimal, String)> {
+    /// Parse output in simple format: `150.00 USD`. When the line omits a currency,
+    /// fall back to `requested_currency` (the value rledger passed via `--currency`)
+    /// rather than a hardcoded default — see issue #979.
+    fn parse_simple_format(
+        &self,
+        line: &str,
+        requested_currency: &str,
+    ) -> Result<(Decimal, String)> {
         let parts: Vec<&str> = line.split_whitespace().collect();
         if parts.len() >= 2 {
             let price = Decimal::from_str(parts[0])
@@ -87,14 +93,19 @@ impl ExternalCommandSource {
         } else if parts.len() == 1 {
             let price = Decimal::from_str(parts[0])
                 .with_context(|| format!("Invalid price value: {}", parts[0]))?;
-            Ok((price, "USD".to_string()))
+            Ok((price, requested_currency.to_string()))
         } else {
             anyhow::bail!("Invalid simple format output: {line}")
         }
     }
 
-    /// Parse output in JSON format.
-    fn parse_json_format(&self, line: &str) -> Result<(Decimal, String, Option<NaiveDate>)> {
+    /// Parse output in JSON format. Same `requested_currency` fallback rule as
+    /// `parse_simple_format`: missing `currency` field adopts the requested currency.
+    fn parse_json_format(
+        &self,
+        line: &str,
+        requested_currency: &str,
+    ) -> Result<(Decimal, String, Option<NaiveDate>)> {
         let json: serde_json::Value =
             serde_json::from_str(line).with_context(|| "Invalid JSON output")?;
 
@@ -114,7 +125,7 @@ impl ExternalCommandSource {
         let currency = json
             .get("currency")
             .and_then(|v| v.as_str())
-            .map_or_else(|| "USD".to_string(), String::from);
+            .map_or_else(|| requested_currency.to_string(), String::from);
 
         let date = json
             .get("date")
@@ -238,7 +249,7 @@ impl PriceSource for ExternalCommandSource {
 
             // Try JSON format first
             if line.starts_with('{') {
-                let (price, currency, date) = self.parse_json_format(line)?;
+                let (price, currency, date) = self.parse_json_format(line, &request.currency)?;
                 return Ok(PriceResponse {
                     price,
                     currency,
@@ -261,7 +272,7 @@ impl PriceSource for ExternalCommandSource {
             }
 
             // Try simple format
-            let (price, currency) = self.parse_simple_format(line)?;
+            let (price, currency) = self.parse_simple_format(line, &request.currency)?;
             return Ok(PriceResponse {
                 price,
                 currency,
@@ -282,17 +293,19 @@ mod tests {
     fn test_parse_simple_format() {
         let source = ExternalCommandSource::new(vec![], Duration::from_secs(30), HashMap::new());
 
-        let (price, currency) = source.parse_simple_format("150.00 USD").unwrap();
+        let (price, currency) = source.parse_simple_format("150.00 USD", "USD").unwrap();
         assert_eq!(price, Decimal::from_str("150.00").unwrap());
         assert_eq!(currency, "USD");
 
-        let (price, currency) = source.parse_simple_format("  99.99  EUR  ").unwrap();
+        // Explicit currency in output always wins over the requested fallback.
+        let (price, currency) = source.parse_simple_format("  99.99  EUR  ", "USD").unwrap();
         assert_eq!(price, Decimal::from_str("99.99").unwrap());
         assert_eq!(currency, "EUR");
 
-        let (price, currency) = source.parse_simple_format("42").unwrap();
+        // Number-only output adopts the requested currency (regression for #979).
+        let (price, currency) = source.parse_simple_format("42", "EUR").unwrap();
         assert_eq!(price, Decimal::from(42));
-        assert_eq!(currency, "USD");
+        assert_eq!(currency, "EUR");
     }
 
     #[test]
@@ -300,7 +313,10 @@ mod tests {
         let source = ExternalCommandSource::new(vec![], Duration::from_secs(30), HashMap::new());
 
         let (price, currency, date) = source
-            .parse_json_format(r#"{"price": 150.00, "currency": "USD", "date": "2024-01-15"}"#)
+            .parse_json_format(
+                r#"{"price": 150.00, "currency": "USD", "date": "2024-01-15"}"#,
+                "USD",
+            )
             .unwrap();
         assert_eq!(price, Decimal::from_str("150.00").unwrap());
         assert_eq!(currency, "USD");
@@ -309,9 +325,12 @@ mod tests {
             Some(rustledger_core::naive_date(2024, 1, 15).unwrap())
         );
 
-        let (price, currency, date) = source.parse_json_format(r#"{"price": "99.99"}"#).unwrap();
+        // Missing "currency" field adopts the requested currency (regression for #979).
+        let (price, currency, date) = source
+            .parse_json_format(r#"{"price": "99.99"}"#, "GBP")
+            .unwrap();
         assert_eq!(price, Decimal::from_str("99.99").unwrap());
-        assert_eq!(currency, "USD");
+        assert_eq!(currency, "GBP");
         assert!(date.is_none());
     }
 

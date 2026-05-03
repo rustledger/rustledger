@@ -80,24 +80,11 @@ fn extract_rledger_jobs(stdout: &str) -> BTreeSet<(String, String)> {
 }
 
 // `TempDir` (not `NamedTempFile`) so the script file has no open write handle — exec on Linux fails with ETXTBSY otherwise.
-//
-// Echo back the `--currency` arg rledger passes so the simple-format parser preserves
-// the requested currency. Without this, parse_simple_format hardcodes USD on
-// number-only output (a real bug in `--source-cmd`'s simple parser; tracked separately).
 fn stub_source() -> (TempDir, PathBuf) {
     use std::os::unix::fs::PermissionsExt;
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("stub-source.sh");
-    let script = "#!/usr/bin/env bash\n\
-                  ccy=USD\n\
-                  while [ $# -gt 0 ]; do\n\
-                  \x20\x20case \"$1\" in\n\
-                  \x20\x20\x20\x20--currency) ccy=\"$2\"; shift 2 ;;\n\
-                  \x20\x20\x20\x20*) shift ;;\n\
-                  \x20\x20esac\n\
-                  done\n\
-                  echo \"1.00 $ccy\"\n";
-    std::fs::write(&path, script).unwrap();
+    std::fs::write(&path, "#!/usr/bin/env bash\necho 1.00\n").unwrap();
     let mut perms = std::fs::metadata(&path).unwrap().permissions();
     perms.set_mode(0o755);
     std::fs::set_permissions(&path, perms).unwrap();

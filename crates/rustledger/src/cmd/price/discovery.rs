@@ -268,31 +268,81 @@ fn build_mapping(specs: &[PriceSpec]) -> Option<CommodityMapping> {
 
 /// Parse a `price:` metadata value into one or more specs.
 ///
-/// Format: `"<quote>:<source>/<ticker>"`, comma-separated for alternatives.
-/// Malformed entries are silently skipped (matches `bean-price`'s lenient
-/// parsing).
+/// Parses both rledger's and `bean-price`'s `price:` metadata syntaxes.
+///
+/// **bean-price form**: `<curr1>:<src1>,<src2>,...  <curr2>:<src1>,...`
+/// where currency blocks are separated by whitespace or `;`, and within
+/// each block sources are comma-separated, each as `<source>/<ticker>`.
+///
+/// **rledger form** (per #963/#970): `<curr>:<src>/<ticker>,<curr>:<src>/<ticker>,...`
+/// where each comma-separated entry repeats the currency.
+///
+/// The two are disambiguated per source-entry: if the part before the
+/// first `/` contains `:`, the entry is rledger's redundant form and
+/// supplies its own currency; otherwise it inherits the block's currency.
+/// That handles both natively without a mode flag and lets users mix the
+/// styles in one metadata string.
+///
+/// Examples (all valid):
+///   `"USD:yahoo/AAPL"`                               (single)
+///   `"USD:yahoo/AAPL,google/AAPL"`                   (bean-price multi-source)
+///   `"USD:yahoo/AAPL,USD:google/AAPL"`               (rledger redundant form)
+///   `"EUR:ecbrates/GBP-EUR,ecb/GBP"`                 (bean-price chain)
+///   `"USD:yahoo/AAPL CAD:google/AAPL"`               (bean-price multi-currency)
+///   `"USD:google/NASDAQ:AAPL"`                       (ticker contains `:`, fine)
+///
+/// Malformed entries are silently skipped — matches bean-price's lenient
+/// parsing (it logs a warning and continues; we already surface a malformed
+/// warning at the caller, see `classify_commodity_meta`).
 fn parse_price_metadata(raw: &str) -> Vec<PriceSpec> {
-    raw.split(',')
-        .filter_map(|chunk| {
-            let chunk = chunk.trim();
-            if chunk.is_empty() {
-                return None;
+    let mut specs = Vec::new();
+    // First split on whitespace/semicolons → currency blocks (bean-price multi-currency form).
+    for block in raw.split([' ', '\t', ';']) {
+        let block = block.trim();
+        if block.is_empty() {
+            continue;
+        }
+        let Some((block_quote, sources_str)) = block.split_once(':') else {
+            continue;
+        };
+        let block_quote = block_quote.trim();
+        if block_quote.is_empty() {
+            continue;
+        }
+        // Then split on `,` → sources within the currency block.
+        for entry in sources_str.split(',') {
+            let entry = entry.trim();
+            if entry.is_empty() {
+                continue;
             }
-            let (quote, rest) = chunk.split_once(':')?;
-            let (source, ticker) = rest.split_once('/')?;
-            let quote = quote.trim();
+            // Disambiguate: rledger's redundant form has a `:` before the
+            // first `/` (e.g. `USD:google/AAPL`); bean-price's bare form
+            // does not (e.g. `google/NASDAQ:AAPL` — the `:` is in the
+            // ticker, after the slash).
+            let (effective_quote, source_part) = match entry.split_once('/') {
+                Some((before_slash, _)) if before_slash.contains(':') => {
+                    let (q, _) = before_slash.split_once(':').unwrap();
+                    let after_first_colon = entry.split_once(':').map_or(entry, |(_, rest)| rest);
+                    (q.trim(), after_first_colon)
+                }
+                _ => (block_quote, entry),
+            };
+            let Some((source, ticker)) = source_part.split_once('/') else {
+                continue;
+            };
             let source = source.trim();
             let ticker = ticker.trim();
-            if quote.is_empty() || source.is_empty() || ticker.is_empty() {
-                return None;
+            if effective_quote.is_empty() || source.is_empty() || ticker.is_empty() {
+                continue;
             }
-            Some(PriceSpec {
-                quote_currency: quote.to_string(),
+            specs.push(PriceSpec {
+                quote_currency: effective_quote.to_string(),
                 source: source.to_string(),
                 ticker: ticker.to_string(),
-            })
-        })
-        .collect()
+            });
+        }
+    }
+    specs
 }
 
 const fn metavalue_as_str(v: &MetaValue) -> Option<&str> {
@@ -433,6 +483,64 @@ mod tests {
         assert_eq!(specs.len(), 2);
         assert_eq!(specs[0].quote_currency, "USD");
         assert_eq!(specs[1].quote_currency, "EUR");
+    }
+
+    #[test]
+    fn parses_bean_price_multi_source_form() {
+        // Bean-price syntax: one currency block, comma-separated bare sources.
+        // Each source inherits the block's currency.
+        let specs = parse_price_metadata("EUR:ecbrates/GBP-EUR,ecb/GBP");
+        assert_eq!(
+            specs,
+            vec![
+                PriceSpec {
+                    quote_currency: "EUR".into(),
+                    source: "ecbrates".into(),
+                    ticker: "GBP-EUR".into(),
+                },
+                PriceSpec {
+                    quote_currency: "EUR".into(),
+                    source: "ecb".into(),
+                    ticker: "GBP".into(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_bean_price_multi_currency_form() {
+        // Bean-price syntax: currency blocks separated by whitespace.
+        let specs = parse_price_metadata("USD:yahoo/AAPL CAD:google/AAPL");
+        assert_eq!(specs.len(), 2);
+        assert_eq!(specs[0].quote_currency, "USD");
+        assert_eq!(specs[0].source, "yahoo");
+        assert_eq!(specs[1].quote_currency, "CAD");
+        assert_eq!(specs[1].source, "google");
+        // Semicolon also accepted as a block separator.
+        let specs = parse_price_metadata("USD:yahoo/AAPL;CAD:google/AAPL");
+        assert_eq!(specs.len(), 2);
+    }
+
+    #[test]
+    fn parses_mixed_form() {
+        // First entry inherits from the block; second carries its own
+        // (redundant) `:` prefix per rledger's per-entry form.
+        let specs = parse_price_metadata("USD:yahoo/AAPL,USD:google/NASDAQ:AAPL");
+        assert_eq!(specs.len(), 2);
+        assert_eq!(specs[0].source, "yahoo");
+        assert_eq!(specs[1].source, "google");
+        assert_eq!(specs[1].ticker, "NASDAQ:AAPL");
+    }
+
+    #[test]
+    fn parses_ticker_with_embedded_colon_in_bean_price_form() {
+        // The disambiguation rule: a `:` AFTER the first `/` is part of
+        // the ticker, not a currency prefix.
+        let specs = parse_price_metadata("USD:google/NASDAQ:AAPL");
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].quote_currency, "USD");
+        assert_eq!(specs[0].source, "google");
+        assert_eq!(specs[0].ticker, "NASDAQ:AAPL");
     }
 
     #[test]

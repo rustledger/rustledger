@@ -313,8 +313,11 @@ fn extract_rledger_attempts(stdout: &str) -> Attempts {
 }
 
 fn run_bean_price_attempts(fixture: &std::path::Path) -> Attempts {
+    // `--inactive` opts out of the active-balance filter on both sides so
+    // the comparison focuses on source-resolution, not discovery filtering
+    // (which is exercised by the Layer 1 tests above).
     let out = Command::new("bean-price")
-        .args(["-n", fixture.to_str().unwrap()])
+        .args(["-n", "-i", fixture.to_str().unwrap()])
         .output()
         .expect("bean-price -n should execute");
     assert!(
@@ -327,7 +330,7 @@ fn run_bean_price_attempts(fixture: &std::path::Path) -> Attempts {
 
 fn run_rledger_attempts(fixture: &std::path::Path) -> Attempts {
     let out = Command::new(env!("CARGO_BIN_EXE_rledger"))
-        .args(["price", "-f", fixture.to_str().unwrap(), "-n"])
+        .args(["price", "-f", fixture.to_str().unwrap(), "-n", "--inactive"])
         .output()
         .expect("rledger price -n should execute");
     assert!(
@@ -368,20 +371,27 @@ fn rledger_and_bean_price_resolve_same_attempts_mixed_currencies() {
     assert_same_attempts(FIXTURE_MIXED_CURRENCIES, "mixed_currencies");
 }
 
-// Fallback-chain fixtures intentionally absent here. Bean-price parses
-// `price:` as `<curr>:<src1>,<src2>,...` (a single currency block with
-// comma-separated sources sharing trailing-ticker form). Rustledger parses
-// it as `<curr>:<src>/<ticker>,<curr>:<src>/<ticker>,...` (each entry
-// repeats the currency, with per-source tickers per #963/#970). The two
-// formats are incompatible: bean-price rejects rledger's syntax with
-// "Invalid source name". So the differential harness can't currently
-// exercise rledger's fallback-chain behavior — chain order is covered
-// instead by unit tests in `cmd/price_cmd.rs::tests::describe_attempts_*`.
-//
-// The `Vec`-valued `Attempts` map above is still load-bearing: the moment
-// both binaries can speak the same chain syntax (e.g. by extending
-// rledger's parser to also accept bean-price's form), this harness will
-// catch order regressions for free. Tracked as a follow-up.
+// Fallback-chain fixture in bean-price's syntax (single currency block,
+// comma-separated bare sources). rledger's parser now also accepts this
+// form, so both binaries see the same chain. The `Vec`-valued `Attempts`
+// map keeps order, so a regression that swaps `yahoo` and `oanda` would
+// fail this test. Sources chosen because both binaries ship them.
+const FIXTURE_FALLBACK_CHAIN: &str = "\
+2024-01-01 commodity EUR
+  price: \"USD:yahoo/EURUSD=X,oanda/EUR_USD\"
+
+2024-01-01 open Assets:Cash
+2024-01-01 open Equity:Open
+
+2024-01-15 * \"holding\"
+  Assets:Cash  100 EUR
+  Equity:Open
+";
+
+#[test]
+fn rledger_and_bean_price_resolve_same_attempts_fallback_chain() {
+    assert_same_attempts(FIXTURE_FALLBACK_CHAIN, "fallback_chain");
+}
 
 // Sanity check: when we're inside `nix develop`, `bean-price` must be on PATH —
 // otherwise removing beanprice from the flake would silently turn every harness

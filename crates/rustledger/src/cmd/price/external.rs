@@ -76,9 +76,8 @@ impl ExternalCommandSource {
         }
     }
 
-    /// Parse output in simple format: `150.00 USD`. When the line omits a currency,
-    /// fall back to `requested_currency` (the value rledger passed via `--currency`)
-    /// rather than a hardcoded default — see issue #979.
+    /// Parse output in simple format: `150.00 USD`. Number-only lines adopt
+    /// `requested_currency` rather than a hardcoded default.
     fn parse_simple_format(
         &self,
         line: &str,
@@ -99,8 +98,7 @@ impl ExternalCommandSource {
         }
     }
 
-    /// Parse output in JSON format. Same `requested_currency` fallback rule as
-    /// `parse_simple_format`: missing `currency` field adopts the requested currency.
+    /// Parse output in JSON format. A missing `currency` field adopts `requested_currency`.
     fn parse_json_format(
         &self,
         line: &str,
@@ -332,6 +330,12 @@ mod tests {
         assert_eq!(price, Decimal::from_str("99.99").unwrap());
         assert_eq!(currency, "GBP");
         assert!(date.is_none());
+
+        // Explicit "currency" in the JSON wins over the requested fallback.
+        let (_, currency, _) = source
+            .parse_json_format(r#"{"price": "99.99", "currency": "JPY"}"#, "GBP")
+            .unwrap();
+        assert_eq!(currency, "JPY");
     }
 
     #[test]

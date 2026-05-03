@@ -273,6 +273,8 @@ pub fn run(args: &PriceArgs, price_config: &PriceConfig) -> Result<()> {
             &discovered,
             &price_config.mapping,
             &combined_mapping,
+            &existing_prices,
+            price_config.effective_default_source(),
             date,
         );
     }
@@ -473,28 +475,34 @@ fn fetch_with_source(
 
 /// Print the resolved fetch plan for `--dry-run`. One line per symbol:
 ///   `<symbol> /<currency> @ <date> <source>(<ticker>)[, <source>(<ticker>)...]`
+/// Symbols whose `(symbol, currency, date)` is already in `existing_prices`
+/// are annotated `skip: existing` (matching the real run's `--clobber` gate)
+/// unless `--clobber` is set.
 fn dump_fetch_plan(
     args: &PriceArgs,
     symbols: &[String],
     discovered: &HashMap<String, DiscoveredCommodity>,
     config_mapping: &HashMap<String, CommodityMapping>,
     combined_mapping: &HashMap<String, CommodityMapping>,
+    existing_prices: &HashSet<(String, String, NaiveDate)>,
+    default_source: &str,
     date: Option<NaiveDate>,
 ) -> Result<()> {
     let stdout = io::stdout();
     let mut handle = stdout.lock();
     let date_str = date.map_or_else(|| "today".to_string(), |d| d.to_string());
+    let fetch_date = date.unwrap_or_else(|| jiff::Zoned::now().date());
 
     for symbol in symbols {
         let currency = resolve_quote_currency(symbol, discovered, config_mapping, &args.currency);
 
         // --source and --source-cmd bypass the mapping entirely.
-        let attempts: Vec<(String, String)> = if let Some(cmd) = &args.source_cmd {
-            vec![(format!("source-cmd:{cmd}"), symbol.clone())]
+        let attempts: Vec<(String, String)> = if args.source_cmd.is_some() {
+            vec![("source-cmd".to_string(), symbol.clone())]
         } else if let Some(s) = &args.source {
             vec![(s.clone(), symbol.clone())]
         } else {
-            describe_attempts(symbol, combined_mapping)
+            describe_attempts(symbol, combined_mapping, default_source)
         };
 
         let attempts_str = if attempts.is_empty() {
@@ -507,23 +515,39 @@ fn dump_fetch_plan(
                 .join(", ")
         };
 
-        writeln!(handle, "{symbol} /{currency} @ {date_str} {attempts_str}")?;
+        let skipped = !args.clobber
+            && existing_prices.contains(&(symbol.clone(), currency.clone(), fetch_date));
+        let suffix = if skipped {
+            "  [skip: existing price]"
+        } else {
+            ""
+        };
+
+        writeln!(
+            handle,
+            "{symbol} /{currency} @ {date_str} {attempts_str}{suffix}"
+        )?;
     }
     Ok(())
 }
 
 /// Walk a `CommodityMapping` into the ordered list of (source, ticker) pairs
-/// the registry would attempt. Used by `dump_fetch_plan`.
+/// the registry would attempt. Used by `dump_fetch_plan`. `Simple` mappings
+/// resolve their source name to the configured default (e.g. `yahoo`) so the
+/// dump shows what will actually run, not the placeholder string `default`.
 fn describe_attempts(
     symbol: &str,
     combined_mapping: &HashMap<String, CommodityMapping>,
+    default_source: &str,
 ) -> Vec<(String, String)> {
     use crate::config::SourceRef;
     let Some(m) = combined_mapping.get(symbol) else {
         return Vec::new();
     };
     match m {
-        CommodityMapping::Simple(ticker) => vec![("default".to_string(), ticker.clone())],
+        CommodityMapping::Simple(ticker) => {
+            vec![(default_source.to_string(), ticker.clone())]
+        }
         CommodityMapping::Detailed(d) => {
             let parent_ticker = d.ticker.as_deref().unwrap_or(symbol);
             match &d.source {
@@ -1067,5 +1091,102 @@ mod tests {
             Some(CommodityMapping::Simple(s)) => assert_eq!(s, "AAPL-CLI"),
             other => panic!("CLI must win, got {other:?}"),
         }
+    }
+
+    // ========== --dry-run / describe_attempts ==========
+
+    #[test]
+    fn describe_attempts_simple_mapping_uses_configured_default() {
+        // Simple mappings should resolve to the actual configured default source,
+        // not the placeholder "default" — otherwise the dry-run dump is useless
+        // for confirming what will run.
+        let mut combined = HashMap::new();
+        combined.insert(
+            "AAPL".to_string(),
+            CommodityMapping::Simple("AAPL".to_string()),
+        );
+        let attempts = describe_attempts("AAPL", &combined, "yahoo");
+        assert_eq!(attempts, vec![("yahoo".to_string(), "AAPL".to_string())]);
+    }
+
+    #[test]
+    fn describe_attempts_walks_fallback_chain_with_per_source_tickers() {
+        // Regression for #963: each fallback entry's own ticker must show up,
+        // not the parent's, so the dry-run accurately previews chained behavior.
+        use crate::config::{DetailedMapping, FallbackDetail, FallbackEntry, SourceRef};
+        let mut combined = HashMap::new();
+        combined.insert(
+            "GBP".to_string(),
+            CommodityMapping::Detailed(DetailedMapping {
+                source: SourceRef::Fallback(vec![
+                    FallbackEntry::Detailed(FallbackDetail {
+                        source: "ecbrates".to_string(),
+                        ticker: Some("GBP-EUR".to_string()),
+                    }),
+                    FallbackEntry::Detailed(FallbackDetail {
+                        source: "ecb".to_string(),
+                        ticker: Some("GBP".to_string()),
+                    }),
+                ]),
+                ticker: Some("GBP".to_string()),
+                quote_currency: Some("EUR".to_string()),
+            }),
+        );
+        let attempts = describe_attempts("GBP", &combined, "yahoo");
+        assert_eq!(
+            attempts,
+            vec![
+                ("ecbrates".to_string(), "GBP-EUR".to_string()),
+                ("ecb".to_string(), "GBP".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn describe_attempts_unmapped_returns_empty() {
+        // Unmapped symbols (CLI-only, no metadata, no config, no --source) should
+        // produce zero attempts so the dry-run prints `<unmapped>`.
+        let attempts = describe_attempts("AAPL", &HashMap::new(), "yahoo");
+        assert!(attempts.is_empty());
+    }
+
+    // ========== --clobber / -C parsing ==========
+
+    #[test]
+    fn test_price_args_clobber_flag() {
+        // --clobber requires -f, so test with -f present.
+        let args = Args::parse_from(["price", "-f", "ledger.beancount", "--clobber"]);
+        assert!(args.price_args.clobber);
+
+        // Short form -C also works.
+        let args = Args::parse_from(["price", "-f", "ledger.beancount", "-C"]);
+        assert!(args.price_args.clobber);
+
+        // Default is false.
+        let args = Args::parse_from(["price", "AAPL"]);
+        assert!(!args.price_args.clobber);
+    }
+
+    #[test]
+    fn test_price_args_clobber_requires_file() {
+        // --clobber without -f should error (declared `requires = "file"`).
+        let result = Args::try_parse_from(["price", "AAPL", "--clobber"]);
+        assert!(result.is_err(), "--clobber without -f must be rejected");
+    }
+
+    // ========== --dry-run parsing ==========
+
+    #[test]
+    fn test_price_args_dry_run_flag() {
+        let args = Args::parse_from(["price", "AAPL", "--dry-run"]);
+        assert!(args.price_args.dry_run);
+
+        // Short form -n.
+        let args = Args::parse_from(["price", "AAPL", "-n"]);
+        assert!(args.price_args.dry_run);
+
+        // dry-run does not require -f (works with explicit symbols).
+        let args = Args::try_parse_from(["price", "AAPL", "-n"]);
+        assert!(args.is_ok());
     }
 }

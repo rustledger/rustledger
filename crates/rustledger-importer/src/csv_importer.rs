@@ -349,7 +349,12 @@ impl CsvImporter {
                 }
             }
 
-            if any_parse_failure && amount == Decimal::ZERO {
+            // Strict: any non-blank cell that fails to parse is a malformed
+            // row, regardless of what the other side produced. Returning a
+            // half-credit value would silently mask the error (e.g. typo'd
+            // debit "abc" + credit "100" would import as +100, dropping the
+            // true debit).
+            if any_parse_failure {
                 anyhow::bail!("Failed to parse debit/credit amount");
             }
 
@@ -464,6 +469,44 @@ mod tests {
             let amount = txn.postings[0].amount().unwrap();
             assert_eq!(amount.number, Decimal::from_str("2500.00").unwrap());
         }
+    }
+
+    #[test]
+    fn test_csv_import_malformed_debit_or_credit_warns() {
+        // Per Copilot review on PR #982: a non-blank debit/credit cell that
+        // fails to parse should surface as a warning, not silently become a
+        // 0.00 (or half-valued) transaction. Blank cells remain normal.
+        let config = ImporterConfig::csv()
+            .account("Assets:Bank")
+            .currency("USD")
+            .date_column("Date")
+            .narration_column("Description")
+            .debit_column("Debit")
+            .credit_column("Credit")
+            .build()
+            .unwrap();
+
+        // Both sides non-blank: debit malformed, credit valid. The credit-only
+        // path would silently import +100 and drop the typo'd debit; we want
+        // the row rejected with a warning instead.
+        let csv = "Date,Description,Debit,Credit\n2024-01-15,Bad debit,abc,100.00\n";
+        let result = config.extract_from_string(csv).unwrap();
+        assert!(
+            result.directives.is_empty(),
+            "malformed debit must not produce a transaction"
+        );
+        assert_eq!(result.warnings.len(), 1);
+        assert!(
+            result.warnings[0].contains("parse"),
+            "warning should mention parse failure: {}",
+            result.warnings[0]
+        );
+
+        // Both blank: no warning (skipped as zero by default).
+        let csv_blank = "Date,Description,Debit,Credit\n2024-01-15,Empty,,\n";
+        let result = config.extract_from_string(csv_blank).unwrap();
+        assert!(result.directives.is_empty());
+        assert!(result.warnings.is_empty(), "blank cells must not warn");
     }
 
     #[test]

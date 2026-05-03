@@ -195,12 +195,30 @@ jobs:
             issue=$(basename "$f" .beancount | sed 's/issue-//')
             echo "- [#$issue](https://github.com/rustledger/rustledger/issues/$issue)" >> $GITHUB_STEP_SUMMARY
           done
+  # Bean-price compatibility tests — runs the harness inside `nix develop` so
+  # `bean-price` (provided by the dev shell) is on PATH. Without this job, the
+  # harness in `crates/rustledger/tests/bean_price_compat.rs` would silently
+  # skip in the main `Test` matrix (no nix shell there) and we'd never notice
+  # a flake regression that drops beanprice or breaks discovery compat.
+  bean-price-compat:
+    name: Bean-price compat
+    needs: [changes]
+    if: needs.changes.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@0c366fd6a839edf440554fa01a7085ccba70ac98 # v6
+      - name: Install Nix
+        uses: cachix/install-nix-action@ab739621df7a23f52766f9ccc97f38da6b7af14f # v31.10.5
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
+      - name: Run bean-price compat harness
+        run: nix develop --command cargo test -p rustledger --test bean_price_compat
   # Gate job - all core checks must pass (or be skipped on non-code PRs)
   build:
     name: build
     if: always()
     runs-on: ubuntu-latest
-    needs: [changes, fmt, unsafe-invariant, ci, doctest, regressions]
+    needs: [changes, fmt, unsafe-invariant, ci, doctest, regressions, bean-price-compat]
     steps:
       - name: Check results
         run: |
@@ -211,7 +229,7 @@ jobs:
           fi
 
           # Otherwise, check that all jobs passed
-          results="${{ needs.fmt.result }} ${{ needs.unsafe-invariant.result }} ${{ needs.ci.result }} ${{ needs.doctest.result }} ${{ needs.regressions.result }}"
+          results="${{ needs.fmt.result }} ${{ needs.unsafe-invariant.result }} ${{ needs.ci.result }} ${{ needs.doctest.result }} ${{ needs.regressions.result }} ${{ needs.bean-price-compat.result }}"
           echo "Job results: $results"
 
           if echo "$results" | grep -qE '(failure|cancelled)'; then

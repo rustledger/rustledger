@@ -142,8 +142,36 @@
             }
           );
 
+          # beanprice isn't packaged in nixpkgs (it's a separate PyPI distribution
+          # since beancount v3). Build it locally so we can run differential tests
+          # of `rledger price` against `bean-price` from CI / dev shells.
+          beanprice = pkgs.python312Packages.buildPythonApplication {
+            pname = "beanprice";
+            version = "2.1.0";
+            pyproject = true;
+
+            src = pkgs.python312Packages.fetchPypi {
+              pname = "beanprice";
+              version = "2.1.0";
+              hash = "sha256-2Q0mZB97rthEPN/bVUXDj40B+XYE7UrUFzsCNZiYKxM=";
+            };
+
+            build-system = with pkgs.python312Packages; [ setuptools ];
+
+            dependencies = with pkgs.python312Packages; [
+              beancount
+              python-dateutil
+              requests
+              curl-cffi
+              diskcache
+            ];
+
+            # Network-bound tests; skip in the build sandbox.
+            doCheck = false;
+          };
+
           # Python with beancount for compatibility testing
-          pythonWithBeancount = pkgs.python311.withPackages (
+          pythonWithBeancount = pkgs.python312.withPackages (
             ps: with ps; [
               beancount
               beanquery # For bean-query CLI (BQL)
@@ -210,6 +238,7 @@
 
             # Python for compat testing
             pythonWithBeancount
+            beanprice # `bean-price` CLI for differential price tests
           ];
 
         in
@@ -359,7 +388,7 @@
               echo "  - WASM: wasm32-unknown-unknown target (wasm-bindgen)"
               echo "  - WASI: wasm32-wasip1 target (wasmtime)"
               echo "  - TLA+: $(if command -v tlc >/dev/null; then tlc -help 2>&1 | grep -i version | head -1 | sed 's/^[[:space:]]*//'; else echo 'not available'; fi)"
-              echo "  - Python: $(python --version) with beancount"
+              echo "  - Python: $(python --version) with beancount + beanprice (bean-price CLI)"
               echo "  - Podman: $(podman --version)"
               echo ""
 

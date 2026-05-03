@@ -35,6 +35,7 @@ rkyv = { workspace = true, optional = true }
 rust_decimal_macros = "1.40"
 insta.workspace = true
 criterion.workspace = true
+proptest.workspace = true
 
 [[bench]]
 name = "parser_bench"

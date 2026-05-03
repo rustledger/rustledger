@@ -899,4 +899,59 @@ mod tests {
         assert_eq!(opts3.warnings.len(), 1);
         assert_eq!(opts3.warnings[0].code, "E7002");
     }
+
+    #[test]
+    fn test_display_precision_basic() {
+        let mut opts = Options::new();
+        opts.set("display_precision", "USD:0.01");
+        assert!(opts.warnings.is_empty(), "warnings: {:?}", opts.warnings);
+        assert_eq!(opts.display_precision.get("USD"), Some(&2));
+    }
+
+    #[test]
+    fn test_display_precision_high_precision() {
+        let mut opts = Options::new();
+        opts.set("display_precision", "BTC:0.00000001");
+        assert!(opts.warnings.is_empty());
+        assert_eq!(opts.display_precision.get("BTC"), Some(&8));
+    }
+
+    #[test]
+    fn test_display_precision_zero_decimals() {
+        // "JPY:1" → no fractional digits → precision 0.
+        let mut opts = Options::new();
+        opts.set("display_precision", "JPY:1");
+        assert!(opts.warnings.is_empty());
+        assert_eq!(opts.display_precision.get("JPY"), Some(&0));
+    }
+
+    #[test]
+    fn test_display_precision_repeatable_per_currency() {
+        let mut opts = Options::new();
+        opts.set("display_precision", "USD:0.01");
+        opts.set("display_precision", "EUR:0.001");
+        assert!(opts.warnings.is_empty(), "warnings: {:?}", opts.warnings);
+        assert_eq!(opts.display_precision.get("USD"), Some(&2));
+        assert_eq!(opts.display_precision.get("EUR"), Some(&3));
+    }
+
+    #[test]
+    fn test_display_precision_missing_colon_warns() {
+        let mut opts = Options::new();
+        opts.set("display_precision", "USD0.01");
+        assert_eq!(opts.warnings.len(), 1);
+        assert_eq!(opts.warnings[0].code, "E7002");
+        assert!(opts.warnings[0].message.contains("CURRENCY:EXAMPLE"));
+        assert!(opts.display_precision.is_empty());
+    }
+
+    #[test]
+    fn test_display_precision_invalid_example_warns() {
+        let mut opts = Options::new();
+        opts.set("display_precision", "USD:abc");
+        assert_eq!(opts.warnings.len(), 1);
+        assert_eq!(opts.warnings[0].code, "E7002");
+        assert!(opts.warnings[0].message.contains("Invalid precision"));
+        assert!(opts.display_precision.is_empty());
+    }
 }

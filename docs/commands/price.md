@@ -362,7 +362,6 @@ Commodity discovery is exercised against `bean-price` directly via the different
 | `--undeclared` | walks `commodity` directives, applies a ticker-shape heuristic | walks **transactions** and unions all currencies, no shape filter | avoids spurious lookups for currency codes like `BAM`; closer alignment tracked as a follow-up |
 | Verbose output | plain `Fetching prices for: [...]` and `{symbol}: cached (source: …)` lines on stderr | Python `logging`-style `INFO: Fetching …` lines with module prefixes | rledger writes for a human reader, not for log aggregation; doubling `-v` is not currently supported |
 | `--no-cache` | disables the rledger disk cache (single TTL across all sources) | `--no-cache` plus per-source cache config | rledger's cache is global; per-source config is not currently exposed |
-| `--date` | passes the date through to source requests; the active-commodity filter still uses the latest balances | walks the file as-of `--date` for both balance computation and price lookup | small divergence; documented but not fixed yet |
 
 Suggesting alignment? File an issue against the audit umbrella in #967.
 

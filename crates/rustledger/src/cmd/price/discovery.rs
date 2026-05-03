@@ -34,7 +34,7 @@
 
 use crate::config::{CommodityMapping, DetailedMapping, FallbackDetail, FallbackEntry, SourceRef};
 use rust_decimal::Decimal;
-use rustledger_core::{Directive, MetaValue};
+use rustledger_core::{Directive, MetaValue, NaiveDate};
 use rustledger_loader::Options;
 use rustledger_parser::Spanned;
 use std::collections::{HashMap, HashSet};
@@ -90,11 +90,12 @@ pub fn discover_symbols(
     options: &Options,
     inactive: bool,
     undeclared: bool,
+    as_of: Option<NaiveDate>,
 ) -> HashMap<String, DiscoveredCommodity> {
     let active = if inactive {
         None
     } else {
-        Some(active_commodities(directives, options))
+        Some(active_commodities(directives, options, as_of))
     };
 
     let mut out: HashMap<String, DiscoveredCommodity> = HashMap::new();
@@ -321,12 +322,21 @@ fn looks_like_ticker(symbol: &str) -> bool {
 ///
 /// The "Assets" / "Liabilities" prefix is read from `options` so ledgers
 /// using translated account roots (`Activos`, `Aktiva`, etc.) work too.
-fn active_commodities(directives: &[Spanned<Directive>], options: &Options) -> HashSet<String> {
+fn active_commodities(
+    directives: &[Spanned<Directive>],
+    options: &Options,
+    as_of: Option<NaiveDate>,
+) -> HashSet<String> {
     let assets_prefix = format!("{}:", options.name_assets);
     let liabilities_prefix = format!("{}:", options.name_liabilities);
     let is_balance_sheet = |account: &str| {
         account.starts_with(&assets_prefix) || account.starts_with(&liabilities_prefix)
     };
+    // Match bean-price's file-as-of-date semantics: with --date, both balance
+    // computation and account-close handling reflect the state on that date,
+    // not the latest. A commodity held on `as_of` but liquidated since then
+    // should still be considered active for the historical fetch.
+    let in_window = |date: NaiveDate| as_of.is_none_or(|cutoff| date <= cutoff);
 
     let mut balances: HashMap<(String, String), Decimal> = HashMap::new();
     let mut closed: HashSet<String> = HashSet::new();
@@ -334,6 +344,9 @@ fn active_commodities(directives: &[Spanned<Directive>], options: &Options) -> H
     for spanned in directives {
         match &spanned.value {
             Directive::Transaction(txn) => {
+                if !in_window(txn.date) {
+                    continue;
+                }
                 for posting in &txn.postings {
                     let account = posting.account.as_str();
                     if !is_balance_sheet(account) {
@@ -346,6 +359,9 @@ fn active_commodities(directives: &[Spanned<Directive>], options: &Options) -> H
                 }
             }
             Directive::Close(close) => {
+                if !in_window(close.date) {
+                    continue;
+                }
                 closed.insert(close.account.to_string());
             }
             _ => {}
@@ -473,13 +489,89 @@ mod tests {
                     )),
             ),
         ]);
-        let active = active_commodities(&dirs, &Options::new());
+        let active = active_commodities(&dirs, &Options::new(), None);
         assert!(active.contains("AAPL"));
         assert!(active.contains("EUR"));
         assert!(
             !active.contains("BTC"),
             "BTC was fully sold, should not be active"
         );
+    }
+
+    #[test]
+    fn as_of_filter_includes_holdings_at_that_date_only() {
+        // Bean-price compat: with --date X, the active filter should reflect
+        // balances ON X, not the latest. A commodity bought before X then
+        // fully sold afterwards must STILL be active when fetching as-of X.
+        let dirs = directives(vec![
+            Directive::Open(Open::new(date(2024, 1, 1), "Assets:Brokerage")),
+            Directive::Open(Open::new(date(2024, 1, 1), "Equity:Opening")),
+            Directive::Transaction(
+                Transaction::new(date(2024, 2, 1), "buy SHIB")
+                    .with_posting(Posting::new(
+                        "Assets:Brokerage",
+                        Amount::new(dec!(100), "SHIB"),
+                    ))
+                    .with_posting(Posting::new(
+                        "Equity:Opening",
+                        Amount::new(dec!(-100), "SHIB"),
+                    )),
+            ),
+            Directive::Transaction(
+                Transaction::new(date(2024, 6, 1), "sell SHIB")
+                    .with_posting(Posting::new(
+                        "Assets:Brokerage",
+                        Amount::new(dec!(-100), "SHIB"),
+                    ))
+                    .with_posting(Posting::new(
+                        "Equity:Opening",
+                        Amount::new(dec!(100), "SHIB"),
+                    )),
+            ),
+        ]);
+
+        // No as_of: the latest balance is zero — SHIB is NOT active.
+        let active_now = active_commodities(&dirs, &Options::new(), None);
+        assert!(!active_now.contains("SHIB"));
+
+        // as_of in the holding window: SHIB IS active.
+        let active_during = active_commodities(&dirs, &Options::new(), Some(date(2024, 4, 1)));
+        assert!(
+            active_during.contains("SHIB"),
+            "SHIB held on 2024-04-01 should be active when fetching as-of that date"
+        );
+
+        // as_of after the sell: SHIB no longer active.
+        let active_after = active_commodities(&dirs, &Options::new(), Some(date(2024, 12, 31)));
+        assert!(!active_after.contains("SHIB"));
+    }
+
+    #[test]
+    fn as_of_ignores_close_directive_after_cutoff() {
+        // A close in the future shouldn't retroactively wipe out balances
+        // that were active on the as-of date.
+        let dirs = directives(vec![
+            Directive::Open(Open::new(date(2024, 1, 1), "Assets:Brokerage")),
+            Directive::Open(Open::new(date(2024, 1, 1), "Equity:Opening")),
+            Directive::Transaction(
+                Transaction::new(date(2024, 2, 1), "buy")
+                    .with_posting(Posting::new(
+                        "Assets:Brokerage",
+                        Amount::new(dec!(10), "DOGE"),
+                    ))
+                    .with_posting(Posting::new(
+                        "Equity:Opening",
+                        Amount::new(dec!(-10), "DOGE"),
+                    )),
+            ),
+            Directive::Close(Close::new(date(2024, 12, 31), "Assets:Brokerage")),
+        ]);
+        // As of mid-2024 the account is still open and DOGE is held.
+        let active = active_commodities(&dirs, &Options::new(), Some(date(2024, 6, 1)));
+        assert!(active.contains("DOGE"));
+        // After the close directive's date, DOGE is no longer active.
+        let active_after = active_commodities(&dirs, &Options::new(), Some(date(2025, 1, 1)));
+        assert!(!active_after.contains("DOGE"));
     }
 
     #[test]
@@ -503,7 +595,7 @@ mod tests {
             ),
             Directive::Close(Close::new(date(2024, 12, 31), "Assets:Brokerage")),
         ]);
-        let active = active_commodities(&dirs, &Options::new());
+        let active = active_commodities(&dirs, &Options::new(), None);
         assert!(!active.contains("DEFUNCT"));
     }
 
@@ -530,7 +622,7 @@ mod tests {
                     )),
             ),
         ]);
-        let discovered = discover_symbols(&dirs, &Options::new(), false, false);
+        let discovered = discover_symbols(&dirs, &Options::new(), false, false, None);
 
         // Even though "Vanguard_VTI" doesn't pass the ticker heuristic,
         // it has price: metadata, so it's discovered.
@@ -551,11 +643,11 @@ mod tests {
         let dirs = directives(vec![Directive::Commodity(comm)]);
 
         // Default: no active postings means OLD is not discovered.
-        let discovered = discover_symbols(&dirs, &Options::new(), false, false);
+        let discovered = discover_symbols(&dirs, &Options::new(), false, false, None);
         assert!(!discovered.contains_key("OLD"));
 
         // Opt-in: inactive=true brings it back.
-        let discovered_all = discover_symbols(&dirs, &Options::new(), true, false);
+        let discovered_all = discover_symbols(&dirs, &Options::new(), true, false, None);
         assert!(discovered_all.contains_key("OLD"));
     }
 
@@ -567,7 +659,7 @@ mod tests {
     #[test]
     fn discover_returns_empty_for_empty_ledger() {
         let dirs: Vec<Spanned<Directive>> = vec![];
-        let discovered = discover_symbols(&dirs, &Options::new(), false, false);
+        let discovered = discover_symbols(&dirs, &Options::new(), false, false, None);
         assert!(discovered.is_empty());
     }
 
@@ -595,14 +687,14 @@ mod tests {
             ),
         ]);
 
-        let strict = discover_symbols(&dirs, &Options::new(), false, false);
+        let strict = discover_symbols(&dirs, &Options::new(), false, false, None);
         assert!(
             !strict.contains_key("BAM"),
             "BAM has no `price:` metadata, must not be discovered by default (#962)"
         );
 
         // `--undeclared` brings the heuristic back.
-        let with_undeclared = discover_symbols(&dirs, &Options::new(), false, true);
+        let with_undeclared = discover_symbols(&dirs, &Options::new(), false, true, None);
         assert!(with_undeclared.contains_key("BAM"));
     }
 
@@ -629,7 +721,7 @@ mod tests {
         ]);
 
         // Even with --undeclared, the empty price: opt-out wins.
-        let discovered = discover_symbols(&dirs, &Options::new(), false, true);
+        let discovered = discover_symbols(&dirs, &Options::new(), false, true, None);
         assert!(!discovered.contains_key("BAM"));
     }
 
@@ -660,7 +752,7 @@ mod tests {
             ),
         ]);
 
-        let discovered = discover_symbols(&dirs, &Options::new(), false, false);
+        let discovered = discover_symbols(&dirs, &Options::new(), false, false, None);
         let info = discovered
             .get("GOVT_EU")
             .expect("quote_currency: alone should opt into discovery");
@@ -677,7 +769,7 @@ mod tests {
             date(2024, 1, 1),
             "OLD",
         ))]);
-        let discovered = discover_symbols(&dirs, &Options::new(), true, true);
+        let discovered = discover_symbols(&dirs, &Options::new(), true, true, None);
         assert!(discovered.contains_key("OLD"));
     }
 
@@ -757,7 +849,7 @@ mod tests {
             ),
         ]);
 
-        let discovered = discover_symbols(&dirs, &Options::new(), false, true);
+        let discovered = discover_symbols(&dirs, &Options::new(), false, true, None);
         assert!(!discovered.contains_key("BAM"));
     }
 
@@ -784,7 +876,7 @@ mod tests {
                     )),
             ),
         ]);
-        let active = active_commodities(&dirs, &Options::new());
+        let active = active_commodities(&dirs, &Options::new(), None);
         assert!(active.contains("AAPL"));
     }
 }

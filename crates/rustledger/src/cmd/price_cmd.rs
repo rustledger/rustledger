@@ -167,6 +167,20 @@ pub fn run(args: &PriceArgs, price_config: &PriceConfig) -> Result<()> {
     }
     let effective_inactive = args.inactive || args.all_commodities;
     let effective_undeclared = args.undeclared || args.all_commodities;
+
+    // Parse `--date` early so it can be threaded into discovery. Without
+    // this, `--date 2020-01-01 -f file` would still use today's balances
+    // for the active-commodity filter — wrong for historical fetches and
+    // diverges from `bean-price`, which walks the file as-of `--date`.
+    let date: Option<NaiveDate> = if let Some(ref d) = args.date {
+        Some(
+            d.parse::<NaiveDate>()
+                .with_context(|| format!("Invalid date: {d}"))?,
+        )
+    } else {
+        None
+    };
+
     // Tuple keys for `--clobber`: every existing `price` directive in the file
     // identifies a (symbol, quote_currency, date) we should skip fetching for
     // unless `--clobber` is set. Built alongside discovery to avoid loading
@@ -195,6 +209,7 @@ pub fn run(args: &PriceArgs, price_config: &PriceConfig) -> Result<()> {
             &ledger.options,
             effective_inactive,
             effective_undeclared,
+            date,
         );
         let mut existing = HashSet::new();
         for spanned in &ledger.directives {
@@ -253,16 +268,6 @@ pub fn run(args: &PriceArgs, price_config: &PriceConfig) -> Result<()> {
     if args.verbose {
         eprintln!("Fetching prices for: {symbols_to_fetch:?}");
     }
-
-    // Parse target date
-    let date = if let Some(ref d) = args.date {
-        Some(
-            d.parse::<NaiveDate>()
-                .with_context(|| format!("Invalid date: {d}"))?,
-        )
-    } else {
-        None
-    };
 
     let combined_mapping = build_combined_mapping(&price_config.mapping, &discovered, &cli_mapping);
 

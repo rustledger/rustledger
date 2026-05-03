@@ -309,28 +309,25 @@ fn parse_price_metadata(raw: &str) -> Vec<PriceSpec> {
         if block_quote.is_empty() {
             continue;
         }
-        // Then split on `,` → sources within the currency block.
+        // Then split on `,` → sources within the currency block. Each
+        // source is either bean-price's bare `<source>/<ticker>` (inherits
+        // block currency) or rledger's redundant `<curr>:<source>/<ticker>`
+        // (overrides block currency). Disambiguate by whether the part
+        // before the first `/` contains a `:` — `:` AFTER the slash is
+        // part of the ticker, not a currency prefix.
         for entry in sources_str.split(',') {
             let entry = entry.trim();
             if entry.is_empty() {
                 continue;
             }
-            // Disambiguate: rledger's redundant form has a `:` before the
-            // first `/` (e.g. `USD:google/AAPL`); bean-price's bare form
-            // does not (e.g. `google/NASDAQ:AAPL` — the `:` is in the
-            // ticker, after the slash).
-            let (effective_quote, source_part) = match entry.split_once('/') {
-                Some((before_slash, _)) if before_slash.contains(':') => {
-                    let (q, _) = before_slash.split_once(':').unwrap();
-                    let after_first_colon = entry.split_once(':').map_or(entry, |(_, rest)| rest);
-                    (q.trim(), after_first_colon)
-                }
-                _ => (block_quote, entry),
-            };
-            let Some((source, ticker)) = source_part.split_once('/') else {
+            let Some((before_slash, ticker)) = entry.split_once('/') else {
                 continue;
             };
-            let source = source.trim();
+            let (effective_quote, source) = if let Some((q, src)) = before_slash.split_once(':') {
+                (q.trim(), src.trim())
+            } else {
+                (block_quote, before_slash.trim())
+            };
             let ticker = ticker.trim();
             if effective_quote.is_empty() || source.is_empty() || ticker.is_empty() {
                 continue;
@@ -510,6 +507,11 @@ mod tests {
     #[test]
     fn parses_bean_price_multi_currency_form() {
         // Bean-price syntax: currency blocks separated by whitespace.
+        // Note: the parser yields specs with distinct quote currencies, but
+        // the downstream `build_mapping` and `DiscoveredCommodity.quote_currency`
+        // only retain the first spec's currency — so today rledger fetches
+        // a multi-currency commodity in only one of its declared quotes.
+        // Tracked as a follow-up; bean-price emits one job per (base, quote).
         let specs = parse_price_metadata("USD:yahoo/AAPL CAD:google/AAPL");
         assert_eq!(specs.len(), 2);
         assert_eq!(specs[0].quote_currency, "USD");

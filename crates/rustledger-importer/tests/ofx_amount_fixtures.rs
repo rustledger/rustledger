@@ -122,6 +122,11 @@ fn ofx_negative_routes_to_expenses_positive_to_income() {
     let content = ofx_with_transactions(&txns);
     let importer = OfxImporter::new("Assets:Bank:Checking", "USD");
     let result = importer.extract_from_string(&content).unwrap();
+    assert!(
+        result.warnings.is_empty(),
+        "warnings: {:?}",
+        result.warnings
+    );
     assert_eq!(result.directives.len(), 2);
 
     let txn0 = result.directives[0].as_transaction().unwrap();

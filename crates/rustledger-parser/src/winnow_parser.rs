@@ -2973,7 +2973,7 @@ mod tests {
         }
 
         #[test]
-        fn parse_number_round_trips_through_display(
+        fn fast_parse_decimal_round_trips_through_display(
             mantissa in 0i64..=i64::MAX,
             scale in 0u32..=18
         ) {

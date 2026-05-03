@@ -30,6 +30,7 @@ chrono = "0.4"                      # ofxy exposes chrono::DateTime; needed for 
 
 [dev-dependencies]
 tempfile.workspace = true
+proptest.workspace = true
 
 [lints]
 workspace = true

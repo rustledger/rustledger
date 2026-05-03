@@ -264,7 +264,9 @@ fn extract_bean_price_attempts(stdout: &str) -> BTreeSet<(String, String, String
 fn extract_rledger_attempts(stdout: &str) -> BTreeSet<(String, String, String, String)> {
     let mut out = BTreeSet::new();
     for line in stdout.lines() {
-        // Drop the trailing skip annotation if present.
+        // Drop the trailing skip annotation if present. The two-space prefix
+        // is what `dump_fetch_plan` writes; if that ever changes, this strip
+        // becomes a no-op and the skip suffix is parsed as a bogus source.
         let line = line.split("  [skip:").next().unwrap_or(line).trim_end();
 
         let mut parts = line.split_whitespace();

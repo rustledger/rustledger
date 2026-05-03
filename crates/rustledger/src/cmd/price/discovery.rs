@@ -544,6 +544,14 @@ mod tests {
         // as_of after the sell: SHIB no longer active.
         let active_after = active_commodities(&dirs, &Options::new(), Some(date(2024, 12, 31)));
         assert!(!active_after.contains("SHIB"));
+
+        // Boundary: exactly on the buy date — buy applies, SHIB active.
+        let active_buy_day = active_commodities(&dirs, &Options::new(), Some(date(2024, 2, 1)));
+        assert!(active_buy_day.contains("SHIB"));
+
+        // Boundary: exactly on the sell date — both buy and sell apply, balance=0.
+        let active_sell_day = active_commodities(&dirs, &Options::new(), Some(date(2024, 6, 1)));
+        assert!(!active_sell_day.contains("SHIB"));
     }
 
     #[test]
@@ -572,6 +580,10 @@ mod tests {
         // After the close directive's date, DOGE is no longer active.
         let active_after = active_commodities(&dirs, &Options::new(), Some(date(2025, 1, 1)));
         assert!(!active_after.contains("DOGE"));
+
+        // Boundary: exactly on the close date — close is inclusive, so DOGE inactive.
+        let active_close_day = active_commodities(&dirs, &Options::new(), Some(date(2024, 12, 31)));
+        assert!(!active_close_day.contains("DOGE"));
     }
 
     #[test]

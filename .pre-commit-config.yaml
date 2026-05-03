@@ -100,3 +100,16 @@ repos:
         pass_filenames: false
         always_run: true
         stages: [pre-push]
+      # Bean-price compatibility harness — only fires when files that could
+      # change rledger ↔ bean-price discovery behavior are touched. Runs
+      # inside `nix develop` so `bean-price` is on PATH (added in #976).
+      # `nix develop --command` is required: CI doesn't run this harness
+      # (issue #967 acceptance criterion #1 is enforced locally only),
+      # so this hook is the only line of defense against silent regressions.
+      - id: bean-price-compat
+        name: bean-price compat tests (rledger price <-> bean-price)
+        entry: nix develop --command cargo test -p rustledger --test bean_price_compat
+        language: system
+        pass_filenames: false
+        files: ^(crates/rustledger/src/cmd/price(_cmd\.rs|/.*)|crates/rustledger/tests/bean_price_compat\.rs|flake\.(nix|lock))$
+        stages: [pre-push]

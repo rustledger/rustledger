@@ -104,6 +104,15 @@ pub fn discover_symbols(
         let Directive::Commodity(comm) = &spanned.value else {
             continue;
         };
+        // Match bean-price's `find_currencies_declared`: a commodity declared
+        // ON OR AFTER the as-of date is excluded from historical discovery.
+        // (Beanprice uses `entry.date >= date: break` since its directive list
+        // is date-sorted; we use `continue` because our slice may not be.)
+        if let Some(cutoff) = as_of
+            && comm.date >= cutoff
+        {
+            continue;
+        }
         let symbol = comm.currency.as_str();
 
         let classification = classify_commodity_meta(&comm.meta);
@@ -584,6 +593,56 @@ mod tests {
         // Boundary: exactly on the close date — close is inclusive, so DOGE inactive.
         let active_close_day = active_commodities(&dirs, &Options::new(), Some(date(2024, 12, 31)));
         assert!(!active_close_day.contains("DOGE"));
+    }
+
+    #[test]
+    fn as_of_filters_commodity_directives_before_walking_them() {
+        // Bean-price compat: a commodity directive dated ON OR AFTER the
+        // cutoff is excluded — the commodity didn't exist yet at as-of date.
+        // Without this filter, a future-dated `commodity` declaration with
+        // `price:` metadata would still trigger discovery for a historical
+        // fetch.
+        let mut early = Commodity::new(date(2024, 1, 1), "AAPL");
+        early.meta.insert(
+            "price".to_string(),
+            MetaValue::String("USD:yahoo/AAPL".into()),
+        );
+        let mut late = Commodity::new(date(2030, 1, 1), "FUTURECOIN");
+        late.meta.insert(
+            "price".to_string(),
+            MetaValue::String("USD:yahoo/FUTURECOIN".into()),
+        );
+        let dirs = directives(vec![
+            Directive::Commodity(early),
+            Directive::Commodity(late),
+        ]);
+
+        // No as_of: both commodity declarations visible (neither is active,
+        // so both filtered by the active check; bypass with inactive=true).
+        let all = discover_symbols(&dirs, &Options::new(), true, false, None);
+        assert!(all.contains_key("AAPL"));
+        assert!(all.contains_key("FUTURECOIN"));
+
+        // as_of in 2025: AAPL declared before, FUTURECOIN declared after.
+        // Only AAPL should be discoverable.
+        let historical =
+            discover_symbols(&dirs, &Options::new(), true, false, Some(date(2025, 6, 1)));
+        assert!(historical.contains_key("AAPL"));
+        assert!(
+            !historical.contains_key("FUTURECOIN"),
+            "commodity declared 2030-01-01 must not be discovered when fetching as-of 2025-06-01"
+        );
+
+        // Boundary: exactly on the declaration date is exclusive (matches
+        // bean-price's `entry.date >= date` skip rule).
+        let on_decl_day =
+            discover_symbols(&dirs, &Options::new(), true, false, Some(date(2030, 1, 1)));
+        assert!(!on_decl_day.contains_key("FUTURECOIN"));
+
+        // One day after: now visible.
+        let after_decl =
+            discover_symbols(&dirs, &Options::new(), true, false, Some(date(2030, 1, 2)));
+        assert!(after_decl.contains_key("FUTURECOIN"));
     }
 
     #[test]

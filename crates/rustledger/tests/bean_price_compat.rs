@@ -16,10 +16,17 @@
 
 #![cfg(unix)]
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::process::Command;
 use tempfile::{NamedTempFile, TempDir};
+
+/// Per-symbol resolved fetch plan: `(symbol, currency) -> ordered Vec<(source, ticker)>`.
+/// `BTreeMap` keys keep the comparison deterministic across runs; the `Vec`
+/// preserves fallback-chain order so a regression in source precedence (e.g.
+/// swapping ecbrates and ecb in a `price: "EUR:ecbrates/GBP-EUR,EUR:ecb/GBP"`
+/// chain) fails the test instead of silently passing under set semantics.
+type Attempts = BTreeMap<(String, String), Vec<(String, String)>>;
 
 fn bean_price_available() -> bool {
     Command::new("bean-price")
@@ -213,11 +220,11 @@ fn normalize_source(s: &str) -> String {
         .to_string()
 }
 
-/// Parse `bean-price -n` output. Each line ends with
-///   `[ beanprice.sources.yahoo(AAPL), beanprice.sources.google(VTI) ]`
-/// We extract the bracket section and split on commas.
-fn extract_bean_price_attempts(stdout: &str) -> BTreeSet<(String, String, String, String)> {
-    let mut out = BTreeSet::new();
+/// Parse `bean-price -n` output. Each line ends with a bracketed, comma-
+/// separated list of `module.path.name(TICKER)` attempts in fallback order:
+///   `GBP /EUR @ latest [ beanprice.sources.ecbrates(GBP-EUR), beanprice.sources.ecb(GBP) ]`
+fn extract_bean_price_attempts(stdout: &str) -> Attempts {
+    let mut out: Attempts = BTreeMap::new();
     for line in stdout.lines() {
         let mut parts = line.split_whitespace();
         let Some(sym) = parts.next() else { continue };
@@ -238,31 +245,30 @@ fn extract_bean_price_attempts(stdout: &str) -> BTreeSet<(String, String, String
         if close <= open {
             continue;
         }
-        let inside = line[open + 1..close].trim();
-        for entry in inside.split(',') {
-            let entry = entry.trim();
-            // `module.path.name(TICKER)` — split on the last '(' before ')'.
-            let Some(paren_open) = entry.rfind('(') else {
-                continue;
-            };
-            let Some(paren_close) = entry.rfind(')') else {
-                continue;
-            };
-            if paren_close <= paren_open {
-                continue;
-            }
-            let source = normalize_source(entry[..paren_open].trim());
-            let ticker = entry[paren_open + 1..paren_close].trim().to_string();
-            out.insert((sym.to_string(), cur.to_string(), source, ticker));
-        }
+        let chain: Vec<(String, String)> = line[open + 1..close]
+            .trim()
+            .split(',')
+            .filter_map(|entry| {
+                let entry = entry.trim();
+                let paren_open = entry.rfind('(')?;
+                let paren_close = entry.rfind(')')?;
+                if paren_close <= paren_open {
+                    return None;
+                }
+                let source = normalize_source(entry[..paren_open].trim());
+                let ticker = entry[paren_open + 1..paren_close].trim().to_string();
+                Some((source, ticker))
+            })
+            .collect();
+        out.insert((sym.to_string(), cur.to_string()), chain);
     }
     out
 }
 
 /// Parse `rledger price -n` output. Format:
 ///   `<symbol> /<currency> @ <date> <source>(<ticker>)[, <source>(<ticker>)...][  [skip: ...]]`
-fn extract_rledger_attempts(stdout: &str) -> BTreeSet<(String, String, String, String)> {
-    let mut out = BTreeSet::new();
+fn extract_rledger_attempts(stdout: &str) -> Attempts {
+    let mut out: Attempts = BTreeMap::new();
     for line in stdout.lines() {
         // Drop the trailing skip annotation if present. The two-space prefix
         // is what `dump_fetch_plan` writes; if that ever changes, this strip
@@ -284,31 +290,29 @@ fn extract_rledger_attempts(stdout: &str) -> BTreeSet<(String, String, String, S
         // Everything left is the source list. Rejoin to handle the
         // ", " separator (split_whitespace would split on it too).
         let rest = parts.collect::<Vec<_>>().join(" ");
-        for entry in rest.split(", ") {
-            let entry = entry.trim();
-            if entry == "<unmapped>" {
-                continue;
-            }
-            let Some(paren_open) = entry.rfind('(') else {
-                continue;
-            };
-            let Some(paren_close) = entry.rfind(')') else {
-                continue;
-            };
-            if paren_close <= paren_open {
-                continue;
-            }
-            let source = entry[..paren_open].trim().to_string();
-            let ticker = entry[paren_open + 1..paren_close].trim().to_string();
-            out.insert((sym.to_string(), cur.to_string(), source, ticker));
-        }
+        let chain: Vec<(String, String)> = rest
+            .split(", ")
+            .filter_map(|entry| {
+                let entry = entry.trim();
+                if entry == "<unmapped>" {
+                    return None;
+                }
+                let paren_open = entry.rfind('(')?;
+                let paren_close = entry.rfind(')')?;
+                if paren_close <= paren_open {
+                    return None;
+                }
+                let source = entry[..paren_open].trim().to_string();
+                let ticker = entry[paren_open + 1..paren_close].trim().to_string();
+                Some((source, ticker))
+            })
+            .collect();
+        out.insert((sym.to_string(), cur.to_string()), chain);
     }
     out
 }
 
-fn run_bean_price_attempts(
-    fixture: &std::path::Path,
-) -> BTreeSet<(String, String, String, String)> {
+fn run_bean_price_attempts(fixture: &std::path::Path) -> Attempts {
     let out = Command::new("bean-price")
         .args(["-n", fixture.to_str().unwrap()])
         .output()
@@ -321,7 +325,7 @@ fn run_bean_price_attempts(
     extract_bean_price_attempts(&String::from_utf8_lossy(&out.stdout))
 }
 
-fn run_rledger_attempts(fixture: &std::path::Path) -> BTreeSet<(String, String, String, String)> {
+fn run_rledger_attempts(fixture: &std::path::Path) -> Attempts {
     let out = Command::new(env!("CARGO_BIN_EXE_rledger"))
         .args(["price", "-f", fixture.to_str().unwrap(), "-n"])
         .output()
@@ -363,6 +367,21 @@ fn rledger_and_bean_price_resolve_same_attempts_basic() {
 fn rledger_and_bean_price_resolve_same_attempts_mixed_currencies() {
     assert_same_attempts(FIXTURE_MIXED_CURRENCIES, "mixed_currencies");
 }
+
+// Fallback-chain fixtures intentionally absent here. Bean-price parses
+// `price:` as `<curr>:<src1>,<src2>,...` (a single currency block with
+// comma-separated sources sharing trailing-ticker form). Rustledger parses
+// it as `<curr>:<src>/<ticker>,<curr>:<src>/<ticker>,...` (each entry
+// repeats the currency, with per-source tickers per #963/#970). The two
+// formats are incompatible: bean-price rejects rledger's syntax with
+// "Invalid source name". So the differential harness can't currently
+// exercise rledger's fallback-chain behavior — chain order is covered
+// instead by unit tests in `cmd/price_cmd.rs::tests::describe_attempts_*`.
+//
+// The `Vec`-valued `Attempts` map above is still load-bearing: the moment
+// both binaries can speak the same chain syntax (e.g. by extending
+// rledger's parser to also accept bean-price's form), this harness will
+// catch order regressions for free. Tracked as a follow-up.
 
 // Sanity check: when we're inside `nix develop`, `bean-price` must be on PATH —
 // otherwise removing beanprice from the flake would silently turn every harness

@@ -216,18 +216,20 @@ fn rledger_and_bean_price_discover_same_commodities_mixed_currencies() {
     assert_same_commodities(FIXTURE_MIXED_CURRENCIES, "mixed_currencies");
 }
 
-// CI sanity: in the nix dev shell `bean-price` must be installed. Without this guard,
-// removing beanprice from the flake would silently turn every test above into a no-op
-// (skip path) and we wouldn't notice. Linux-only because that's what CI runs.
+// Sanity check: when we're inside `nix develop`, `bean-price` must be on PATH —
+// otherwise removing beanprice from the flake would silently turn every harness
+// test into a no-op and we wouldn't notice. CI doesn't currently use the dev
+// shell so this guard only fires for local devs; making CI run inside nix is a
+// separate workflow change.
 #[cfg(target_os = "linux")]
 #[test]
 fn bean_price_must_be_on_path_in_dev_shell() {
-    if std::env::var_os("IN_NIX_SHELL").is_none() && std::env::var_os("CI").is_none() {
-        eprintln!("skipping: not in nix shell or CI");
+    if std::env::var_os("IN_NIX_SHELL").is_none() {
+        eprintln!("skipping: not running inside `nix develop`");
         return;
     }
     assert!(
         bean_price_available(),
-        "bean-price not on PATH inside nix dev shell or CI — flake regression?"
+        "bean-price not on PATH inside nix dev shell — flake regression?"
     );
 }

@@ -275,6 +275,7 @@ pub fn run(args: &PriceArgs, price_config: &PriceConfig) -> Result<()> {
             &combined_mapping,
             &existing_prices,
             price_config.effective_default_source(),
+            price_config.effective_use_default_source(),
             date,
         );
     }
@@ -317,6 +318,13 @@ pub fn run(args: &PriceArgs, price_config: &PriceConfig) -> Result<()> {
         // (symbol, effective_currency, fetch_date) already exists in the file.
         // Match bean-price's semantics: existing prices are kept unless
         // --clobber is set.
+        //
+        // Limitation: this checks the REQUESTED date (`--date` or today). Some
+        // sources return a different effective date for "latest" — ECB, for
+        // instance, returns the last published business day on weekends. An
+        // existing directive dated to the source's actual quote date will not
+        // be matched here, so a duplicate may still be emitted. Fixing this
+        // requires a post-fetch re-check; tracked as a follow-up.
         if !args.clobber {
             let fetch_date = date.unwrap_or_else(|| jiff::Zoned::now().date());
             if existing_prices.contains(&(symbol.clone(), effective_currency.clone(), fetch_date)) {
@@ -478,6 +486,7 @@ fn fetch_with_source(
 /// Symbols whose `(symbol, currency, date)` is already in `existing_prices`
 /// are annotated `skip: existing` (matching the real run's `--clobber` gate)
 /// unless `--clobber` is set.
+#[allow(clippy::too_many_arguments)]
 fn dump_fetch_plan(
     args: &PriceArgs,
     symbols: &[String],
@@ -486,6 +495,7 @@ fn dump_fetch_plan(
     combined_mapping: &HashMap<String, CommodityMapping>,
     existing_prices: &HashSet<(String, String, NaiveDate)>,
     default_source: &str,
+    use_default_source: bool,
     date: Option<NaiveDate>,
 ) -> Result<()> {
     let stdout = io::stdout();
@@ -497,13 +507,25 @@ fn dump_fetch_plan(
         let currency = resolve_quote_currency(symbol, discovered, config_mapping, &args.currency);
 
         // --source and --source-cmd bypass the mapping entirely.
-        let attempts: Vec<(String, String)> = if args.source_cmd.is_some() {
+        let mut attempts: Vec<(String, String)> = if args.source_cmd.is_some() {
             vec![("source-cmd".to_string(), symbol.clone())]
         } else if let Some(s) = &args.source {
             vec![(s.clone(), symbol.clone())]
         } else {
             describe_attempts(symbol, combined_mapping, default_source)
         };
+        // Mirror the runtime fallback: with `use_default_source = true`, a
+        // CLI-only symbol that isn't in any mapping still goes to
+        // `default_source` rather than erroring. Without this, dry-run
+        // disagrees with the actual fetch plan for users who opted back
+        // into default-source dispatch.
+        if attempts.is_empty()
+            && use_default_source
+            && args.source_cmd.is_none()
+            && args.source.is_none()
+        {
+            attempts.push((default_source.to_string(), symbol.clone()));
+        }
 
         let attempts_str = if attempts.is_empty() {
             "<unmapped>".to_string()

@@ -371,6 +371,19 @@ pub fn run(args: &Args, file: &Path) -> Result<()> {
             builder.build()?
         };
 
+        // Apply --include-zero-amounts uniformly across all config sources
+        // (--importer entry, explicit --config, --auto, raw CLI). Without this,
+        // the flag silently has no effect when the config came from a TOML
+        // entry — see Copilot review on PR #982.
+        let config = if args.include_zero_amounts {
+            let mut config = config;
+            let rustledger_importer::config::ImporterType::Csv(csv) = &mut config.importer_type;
+            csv.skip_zero_amounts = false;
+            config
+        } else {
+            config
+        };
+
         config.extract(file)?
     };
 

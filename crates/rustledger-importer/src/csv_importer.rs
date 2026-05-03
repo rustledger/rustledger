@@ -322,19 +322,35 @@ impl CsvImporter {
         // If we have separate debit/credit columns
         if csv_config.debit_column.is_some() || csv_config.credit_column.is_some() {
             let mut amount = Decimal::ZERO;
+            // Track whether ANY non-blank cell failed to parse. A blank cell
+            // is normal (banks leave one of debit/credit blank), but a non-
+            // blank cell that won't parse is a malformed row — surface it
+            // instead of silently importing 0 (which becomes a real 0.00
+            // transaction once `--include-zero-amounts` is set).
+            let mut any_parse_failure = false;
 
             if let Some(debit_col) = &csv_config.debit_column
                 && let Ok(debit_str) = self.get_column(record, debit_col, header_map)
-                && let Ok(val) = self.config.amount_format.parse(debit_str)
+                && !debit_str.trim().is_empty()
             {
-                amount -= val; // Debits are negative
+                match self.config.amount_format.parse(debit_str) {
+                    Ok(val) => amount -= val, // Debits are negative
+                    Err(_) => any_parse_failure = true,
+                }
             }
 
             if let Some(credit_col) = &csv_config.credit_column
                 && let Ok(credit_str) = self.get_column(record, credit_col, header_map)
-                && let Ok(val) = self.config.amount_format.parse(credit_str)
+                && !credit_str.trim().is_empty()
             {
-                amount += val; // Credits are positive
+                match self.config.amount_format.parse(credit_str) {
+                    Ok(val) => amount += val, // Credits are positive
+                    Err(_) => any_parse_failure = true,
+                }
+            }
+
+            if any_parse_failure && amount == Decimal::ZERO {
+                anyhow::bail!("Failed to parse debit/credit amount");
             }
 
             return Ok(amount);

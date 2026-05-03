@@ -112,7 +112,7 @@ Two CLI flags **bypass** the mapping system entirely and override everything bel
 
 When neither bypass is in effect, the merged source mapping is built with this precedence (high to low):
 
-1. CLI `--mapping <SYMBOL>:<TICKER>[:<SOURCE>]` (per-symbol override at runtime)
+1. CLI `--mapping <SYMBOL>:<TICKER>` (per-symbol override at runtime; the optional `:<SOURCE>` form is not yet parsed — pair with `--source` if you need to override both)
 2. `price:` metadata on the commodity directive (each fallback entry preserves its own ticker — see issue #963)
 3. Config-file `[price.mapping.X]` entries
 4. **Synthesized `Simple(<symbol>)` default-source dispatch** — only for commodities discovered from the ledger that opted in via `quote_currency:` metadata, the `--undeclared` ticker-shape heuristic, or that lack their own metadata source spec. Without this synthesis, those commodities would hit the explicit-source-required guard below.
@@ -354,7 +354,7 @@ Run with cron:
 
 ## Differences from `bean-price`
 
-Most behavior matches Python `bean-price` 1:1 (verified via the differential test harness in `crates/rustledger/tests/bean_price_compat.rs`). A few intentional divergences:
+Commodity discovery is exercised against `bean-price` directly via the differential harness in `crates/rustledger/tests/bean_price_compat.rs` (asserts the `(symbol, quote_currency)` set matches). Source-resolution / fallback-chain behavior is not yet covered by the harness — it relies on code inspection plus the unit tests in `price_cmd.rs`. Known intentional divergences:
 
 | Area | rledger | bean-price | Reason |
 |---|---|---|---|

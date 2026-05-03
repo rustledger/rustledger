@@ -128,6 +128,9 @@ fn run_bean_price(fixture: &std::path::Path) -> BTreeSet<(String, String)> {
 
 fn run_rledger(fixture: &std::path::Path) -> BTreeSet<(String, String)> {
     let (_dir, stub_path) = stub_source();
+    // rledger parses --source-cmd via shell_words::split, so a temp path containing
+    // whitespace would be word-split into multiple tokens and the exec would fail.
+    let stub_arg = shell_words::quote(stub_path.to_str().unwrap()).into_owned();
     let out = Command::new(env!("CARGO_BIN_EXE_rledger"))
         .args([
             "price",
@@ -135,7 +138,7 @@ fn run_rledger(fixture: &std::path::Path) -> BTreeSet<(String, String)> {
             fixture.to_str().unwrap(),
             "--beancount",
             "--source-cmd",
-            stub_path.to_str().unwrap(),
+            &stub_arg,
         ])
         .output()
         .expect("rledger price should execute");

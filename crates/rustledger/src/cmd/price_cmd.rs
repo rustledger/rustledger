@@ -272,7 +272,10 @@ pub fn run(args: &PriceArgs, price_config: &PriceConfig) -> Result<()> {
     let combined_mapping = build_combined_mapping(&price_config.mapping, &discovered, &cli_mapping);
 
     if args.dry_run {
+        let stdout = io::stdout();
+        let mut handle = stdout.lock();
         return dump_fetch_plan(
+            &mut handle,
             args,
             &symbols_to_fetch,
             &discovered,
@@ -543,6 +546,7 @@ fn fetch_with_source(
 /// unless `--clobber` is set.
 #[allow(clippy::too_many_arguments)]
 fn dump_fetch_plan(
+    handle: &mut impl Write,
     args: &PriceArgs,
     symbols: &[String],
     discovered: &HashMap<String, DiscoveredCommodity>,
@@ -553,8 +557,6 @@ fn dump_fetch_plan(
     use_default_source: bool,
     date: Option<NaiveDate>,
 ) -> Result<()> {
-    let stdout = io::stdout();
-    let mut handle = stdout.lock();
     let date_str = date.map_or_else(|| "today".to_string(), |d| d.to_string());
     let fetch_date = date.unwrap_or_else(|| jiff::Zoned::now().date());
 
@@ -863,6 +865,7 @@ fn list_sources(registry: &PriceSourceRegistry) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::SourceRef;
 
     #[test]
     fn test_price_args_parsing() {
@@ -1305,6 +1308,147 @@ mod tests {
         // produce zero attempts so the dry-run prints `<unmapped>`.
         let attempts = describe_attempts("AAPL", &HashMap::new(), "yahoo");
         assert!(attempts.is_empty());
+    }
+
+    // Helper: build a minimal PriceArgs for dump_fetch_plan tests.
+    // clap's defaults are applied via parse_from on a no-op invocation.
+    fn dump_args(extra: &[&str]) -> PriceArgs {
+        let mut argv = vec!["price"];
+        argv.extend_from_slice(extra);
+        Args::parse_from(argv).price_args
+    }
+
+    /// Multi-quote `price:` metadata produces one dry-run row per declared
+    /// quote currency, with each row showing the per-spec source (yahoo for
+    /// USD, oanda for CAD). Pre-fix, only the first spec's USD row was
+    /// emitted.
+    #[test]
+    fn dump_fetch_plan_emits_one_row_per_declared_quote() {
+        use crate::config::DetailedMapping;
+        let mut discovered = HashMap::new();
+        discovered.insert(
+            "AAPL".to_string(),
+            DiscoveredCommodity {
+                mapping: None,
+                quote_currency: None,
+                quote_specs: vec![
+                    crate::cmd::price::discovery::QuoteSpec {
+                        quote_currency: "USD".to_string(),
+                        mapping: Some(CommodityMapping::Detailed(DetailedMapping {
+                            source: SourceRef::Single("yahoo".to_string()),
+                            ticker: Some("AAPL".to_string()),
+                            quote_currency: Some("USD".to_string()),
+                        })),
+                    },
+                    crate::cmd::price::discovery::QuoteSpec {
+                        quote_currency: "CAD".to_string(),
+                        mapping: Some(CommodityMapping::Detailed(DetailedMapping {
+                            source: SourceRef::Single("oanda".to_string()),
+                            ticker: Some("AAPL".to_string()),
+                            quote_currency: Some("CAD".to_string()),
+                        })),
+                    },
+                ],
+            },
+        );
+        let combined = build_combined_mapping(&HashMap::new(), &discovered, &HashMap::new());
+
+        let mut buf = Vec::new();
+        let args = dump_args(&["-f", "x.beancount", "-n"]);
+        dump_fetch_plan(
+            &mut buf,
+            &args,
+            &["AAPL".to_string()],
+            &discovered,
+            &HashMap::new(),
+            &combined,
+            &HashSet::new(),
+            "yahoo",
+            false,
+            None,
+        )
+        .unwrap();
+
+        let out = String::from_utf8(buf).unwrap();
+        let usd_line = out
+            .lines()
+            .find(|l| l.contains("/USD"))
+            .expect("USD row must be present");
+        let cad_line = out.lines().find(|l| l.contains("/CAD")).expect(
+            "CAD row must be present (multi-quote regression: pre-fix this row was missing)",
+        );
+        assert!(
+            usd_line.contains("yahoo(AAPL)"),
+            "USD row must use the per-spec yahoo source: {usd_line}"
+        );
+        assert!(
+            cad_line.contains("oanda(AAPL)"),
+            "CAD row must use the per-spec oanda source (NOT the first-spec yahoo): {cad_line}"
+        );
+    }
+
+    /// `--source X` overrides per-spec sources for ALL declared quotes
+    /// (documented bypass behavior — see docs/commands/price.md). Multi-quote
+    /// commodities still produce one row per quote currency.
+    #[test]
+    fn dump_fetch_plan_source_flag_overrides_per_spec_for_all_quotes() {
+        use crate::config::DetailedMapping;
+        let mut discovered = HashMap::new();
+        discovered.insert(
+            "AAPL".to_string(),
+            DiscoveredCommodity {
+                mapping: None,
+                quote_currency: None,
+                quote_specs: vec![
+                    crate::cmd::price::discovery::QuoteSpec {
+                        quote_currency: "USD".to_string(),
+                        mapping: Some(CommodityMapping::Detailed(DetailedMapping {
+                            source: SourceRef::Single("yahoo".to_string()),
+                            ticker: Some("AAPL".to_string()),
+                            quote_currency: Some("USD".to_string()),
+                        })),
+                    },
+                    crate::cmd::price::discovery::QuoteSpec {
+                        quote_currency: "CAD".to_string(),
+                        mapping: Some(CommodityMapping::Detailed(DetailedMapping {
+                            source: SourceRef::Single("oanda".to_string()),
+                            ticker: Some("AAPL".to_string()),
+                            quote_currency: Some("CAD".to_string()),
+                        })),
+                    },
+                ],
+            },
+        );
+        let combined = build_combined_mapping(&HashMap::new(), &discovered, &HashMap::new());
+
+        let mut buf = Vec::new();
+        let args = dump_args(&["-f", "x.beancount", "-n", "--source", "coinbase"]);
+        dump_fetch_plan(
+            &mut buf,
+            &args,
+            &["AAPL".to_string()],
+            &discovered,
+            &HashMap::new(),
+            &combined,
+            &HashSet::new(),
+            "yahoo",
+            false,
+            None,
+        )
+        .unwrap();
+
+        let out = String::from_utf8(buf).unwrap();
+        let usd_line = out.lines().find(|l| l.contains("/USD")).unwrap();
+        let cad_line = out.lines().find(|l| l.contains("/CAD")).unwrap();
+        assert!(
+            usd_line.contains("coinbase(AAPL)"),
+            "--source coinbase must override the USD per-spec yahoo: {usd_line}"
+        );
+        assert!(
+            cad_line.contains("coinbase(AAPL)"),
+            "--source coinbase must also override the CAD per-spec oanda \
+             (documented bypass behavior — applies to ALL quotes): {cad_line}"
+        );
     }
 
     // ========== --clobber / -C parsing ==========

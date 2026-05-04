@@ -110,6 +110,8 @@ Two CLI flags **bypass** the mapping system entirely and override everything bel
 - `--source-cmd <CMD>`: every symbol is fetched by running `<CMD>` as an external program. Mapping/metadata/config are ignored for the source decision.
 - `--source <NAME>`: every symbol is fetched from the named built-in or configured source. Mapping/metadata/config are ignored for the source decision (but `quote_currency:` metadata still drives the per-symbol quote currency — see below).
 
+> **Multi-quote interaction**: when a commodity declares multiple quote currencies (e.g. `price: "USD:yahoo/AAPL CAD:google/AAPL"`), `--source` and `--source-cmd` apply to **every** declared `(base, quote)` pair — both USD and CAD would be fetched from the bypass source, ignoring the per-spec sources in the metadata. The dry-run output shows one row per quote so you can see both attempts. Drop the `--source` flag if you want the per-spec sources to take effect.
+
 When neither bypass is in effect, the merged source mapping is built with this precedence (high to low):
 
 1. CLI `--mapping <SYMBOL>:<TICKER>` (per-symbol override at runtime; the optional `:<SOURCE>` form is not yet parsed — pair with `--source` if you need to override both)

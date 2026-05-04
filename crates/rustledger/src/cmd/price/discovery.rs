@@ -213,16 +213,24 @@ pub fn discover_symbols(
     out
 }
 
-/// Currencies referenced from any posting in any transaction up to `as_of`.
-/// Includes the units currency, the at-cost currency, and the `@` price
-/// annotation currency. Matches bean-price's transaction-walking pass for
-/// `--undeclared`; the caller applies the ticker-shape filter that keeps
-/// currency codes out of stock-source dispatch (#962).
+/// Currencies referenced from any posting in any transaction strictly before
+/// `as_of`. Includes the units currency, the at-cost currency, and the `@`
+/// price annotation currency. Matches bean-price's transaction-walking pass
+/// for `--undeclared` (which uses `entry.date >= date: break`); the caller
+/// applies the ticker-shape filter that keeps currency codes out of
+/// stock-source dispatch (#962).
+///
+/// The strict-less-than convention also matches the commodity-walk above
+/// (line 138) and `find_currencies_declared` in upstream beanprice. Note
+/// `active_commodities` further down uses inclusive `<=` for its own
+/// reasons (active-balance is "as of end of `as_of`"); the discovery walks
+/// here use exclusive bounds so the two cutoff conventions don't drift
+/// out of sync with bean-price.
 fn transaction_walked_currencies(
     directives: &[Spanned<Directive>],
     as_of: Option<NaiveDate>,
 ) -> HashSet<String> {
-    let in_window = |d: NaiveDate| as_of.is_none_or(|cutoff| d <= cutoff);
+    let in_window = |d: NaiveDate| as_of.is_none_or(|cutoff| d < cutoff);
     let mut out = HashSet::new();
     for spanned in directives {
         let Directive::Transaction(txn) = &spanned.value else {
@@ -985,6 +993,44 @@ mod tests {
         // requires `price:` metadata. Opting into --undeclared is
         // declaring "I accept the heuristic might fetch currency codes."
         assert!(with_undeclared.contains_key("USD"));
+    }
+
+    #[test]
+    fn undeclared_transaction_walk_uses_strict_less_than_for_as_of() {
+        // The transaction-walking pass uses strict-less-than (matches
+        // bean-price's `entry.date >= date: break` and the commodity-walk
+        // above). A transaction dated exactly on `as_of` must NOT contribute
+        // its currencies. Without this, multi-day batch runs that pass
+        // `--date today` would pick up tomorrow's morning trades from a
+        // single ledger.
+        let dirs = directives(vec![
+            Directive::Open(Open::new(date(2024, 1, 1), "Assets:Brokerage")),
+            Directive::Open(Open::new(date(2024, 1, 1), "Equity:Opening")),
+            Directive::Transaction(
+                Transaction::new(date(2024, 3, 1), "boundary day SHIB buy")
+                    .with_posting(Posting::new(
+                        "Assets:Brokerage",
+                        Amount::new(dec!(100), "SHIB"),
+                    ))
+                    .with_posting(Posting::new(
+                        "Equity:Opening",
+                        Amount::new(dec!(-100), "SHIB"),
+                    )),
+            ),
+        ]);
+
+        // as_of == txn.date → exclude (strict less-than).
+        let at_cutoff =
+            discover_symbols(&dirs, &Options::new(), true, true, Some(date(2024, 3, 1)));
+        assert!(
+            !at_cutoff.contains_key("SHIB"),
+            "transaction dated exactly on as_of must be excluded (strict less-than, matches bean-price)"
+        );
+
+        // as_of > txn.date → include.
+        let after_cutoff =
+            discover_symbols(&dirs, &Options::new(), true, true, Some(date(2024, 3, 2)));
+        assert!(after_cutoff.contains_key("SHIB"));
     }
 
     #[test]

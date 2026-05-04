@@ -216,6 +216,67 @@ impl DisplayContext {
         self.precision
     }
 
+    /// Iterate the currencies that have observed dp samples or fixed
+    /// overrides, in deterministic-but-unspecified order.
+    ///
+    /// Skips the `__default__` sentinel — that bucket is for naked-decimal
+    /// columns (BQL `Value::Number`) and isn't a "real" currency from the
+    /// user's perspective.
+    pub fn currencies(&self) -> impl Iterator<Item = &str> {
+        let mut seen: HashSet<&str> = HashSet::new();
+        let mut out: Vec<&str> = Vec::new();
+        for currency in self
+            .distributions
+            .keys()
+            .chain(self.fixed_precisions.keys())
+            .map(String::as_str)
+        {
+            if currency != DEFAULT_CURRENCY && seen.insert(currency) {
+                out.push(currency);
+            }
+        }
+        out.sort_unstable();
+        out.into_iter()
+    }
+
+    /// Return the dp histogram for `currency` as ascending `(dp, count)`
+    /// pairs. Empty if the currency has no observed samples.
+    ///
+    /// Useful for diagnostic / debugging tooling
+    /// (e.g. `rledger doctor display-context`) that wants to show *why*
+    /// a particular precision was chosen.
+    #[must_use]
+    pub fn histogram(&self, currency: &str) -> Vec<(u32, u32)> {
+        self.distributions.get(currency).map_or_else(Vec::new, |d| {
+            d.hist.iter().map(|(&dp, &c)| (dp, c)).collect()
+        })
+    }
+
+    /// Look up the precision that *would* be returned under a specific
+    /// policy, without mutating `self`. Same semantics as
+    /// [`Self::get_precision`] but lets a single context be queried
+    /// under both policies (e.g. for diagnostic output that compares
+    /// `MostCommon` vs `Maximum`).
+    #[must_use]
+    pub fn precision_under(&self, currency: &str, policy: Precision) -> Option<u32> {
+        if let Some(&fixed) = self.fixed_precisions.get(currency) {
+            return Some(fixed);
+        }
+        let dist = self.distributions.get(currency)?;
+        match policy {
+            Precision::MostCommon => dist.mode(),
+            Precision::Maximum => dist.max(),
+        }
+    }
+
+    /// True if `currency` has a fixed-precision override
+    /// (from `option "display_precision"` or
+    /// [`Self::set_fixed_precision`]).
+    #[must_use]
+    pub fn has_fixed_precision(&self, currency: &str) -> bool {
+        self.fixed_precisions.contains_key(currency)
+    }
+
     /// Set the `render_commas` flag.
     pub const fn set_render_commas(&mut self, render_commas: bool) {
         self.render_commas = render_commas;
@@ -548,6 +609,33 @@ mod tests {
     }
 
     #[test]
+    fn test_format_default_integer_column_stays_integer() {
+        // A naked-decimal column where every observed value has scale 0
+        // (e.g. an integer count column from a query like
+        // `SELECT account, SUM(units) WHERE units > 0`) should render
+        // each value as an integer, NOT pad to some fractional precision
+        // borrowed from an unrelated currency.
+        //
+        // Even though USD has 2dp inferred, the __default__ bucket's
+        // mode is 0, so format_default returns the value's natural
+        // string ("100", "5", etc.) — the scale==0 padding branch only
+        // fires when the resolved default_precision > 0. Here dp = 0
+        // so no padding.
+        let mut ctx = DisplayContext::new();
+        ctx.update(dec!(1.23), "USD"); // ledger USD has 2dp
+        // Column observes integer values into __default__:
+        for n in [dec!(100), dec!(5), dec!(42)] {
+            ctx.update(n, DEFAULT_CURRENCY);
+        }
+        // __default__ mode is 0 → no padding, natural rendering.
+        assert_eq!(ctx.format_default(dec!(100)), "100");
+        assert_eq!(ctx.format_default(dec!(5)), "5");
+        // A fractional value still prints at its natural scale (matches
+        // Python `DecimalRenderer` per-row formatting).
+        assert_eq!(ctx.format_default(dec!(7.5)), "7.5");
+    }
+
+    #[test]
     fn test_default_precision_falls_back_when_default_bucket_empty() {
         // Issue #954: a column of `Value::Number(0)` (e.g. SUM that
         // collapsed to zero) has no naked-decimal observations to
@@ -559,6 +647,83 @@ mod tests {
         }
         // No __default__ observations.
         assert_eq!(ctx.default_precision(), 2);
+    }
+
+    // ===== Diagnostic-API tests (currencies / histogram / precision_under) =====
+
+    #[test]
+    fn test_currencies_skips_default_sentinel() {
+        let mut ctx = DisplayContext::new();
+        ctx.update(dec!(1.23), "USD");
+        ctx.update(dec!(0.5), "EUR");
+        ctx.update(dec!(100), DEFAULT_CURRENCY); // sentinel — must be hidden
+        let cs: Vec<&str> = ctx.currencies().collect();
+        assert_eq!(cs, vec!["EUR", "USD"]); // sorted, no __default__
+    }
+
+    #[test]
+    fn test_currencies_includes_fixed_only_currencies() {
+        let mut ctx = DisplayContext::new();
+        // Only a fixed override, no observed samples.
+        ctx.set_fixed_precision("BTC", 8);
+        let cs: Vec<&str> = ctx.currencies().collect();
+        assert_eq!(cs, vec!["BTC"]);
+    }
+
+    #[test]
+    fn test_histogram_returns_ascending_pairs() {
+        let mut ctx = DisplayContext::new();
+        for _ in 0..5 {
+            ctx.update(dec!(1.23), "USD"); // 2dp × 5
+        }
+        for _ in 0..2 {
+            ctx.update(dec!(1.234), "USD"); // 3dp × 2
+        }
+        ctx.update(dec!(100), "USD"); // 0dp × 1
+        let h = ctx.histogram("USD");
+        // Ascending dp order, full counts preserved.
+        assert_eq!(h, vec![(0, 1), (2, 5), (3, 2)]);
+    }
+
+    #[test]
+    fn test_histogram_empty_for_unknown_currency() {
+        let ctx = DisplayContext::new();
+        assert!(ctx.histogram("XYZ").is_empty());
+    }
+
+    #[test]
+    fn test_precision_under_does_not_mutate_active_policy() {
+        let mut ctx = DisplayContext::new();
+        for _ in 0..5 {
+            ctx.update(dec!(100), "USD");
+        }
+        ctx.update(dec!(1.234), "USD");
+        // Active policy is MostCommon; mode = 0.
+        assert_eq!(ctx.get_precision("USD"), Some(0));
+        // Querying under Maximum returns 3 — without changing active.
+        assert_eq!(ctx.precision_under("USD", Precision::Maximum), Some(3));
+        // Active policy unchanged after the introspection call.
+        assert_eq!(ctx.precision(), Precision::MostCommon);
+        assert_eq!(ctx.get_precision("USD"), Some(0));
+    }
+
+    #[test]
+    fn test_precision_under_respects_fixed_override() {
+        let mut ctx = DisplayContext::new();
+        ctx.update(dec!(1.234), "USD");
+        ctx.set_fixed_precision("USD", 2);
+        // Both policies see the fixed override, regardless.
+        assert_eq!(ctx.precision_under("USD", Precision::MostCommon), Some(2));
+        assert_eq!(ctx.precision_under("USD", Precision::Maximum), Some(2));
+    }
+
+    #[test]
+    fn test_has_fixed_precision() {
+        let mut ctx = DisplayContext::new();
+        ctx.update(dec!(1.23), "USD");
+        assert!(!ctx.has_fixed_precision("USD"));
+        ctx.set_fixed_precision("USD", 2);
+        assert!(ctx.has_fixed_precision("USD"));
     }
 
     #[test]

@@ -227,7 +227,7 @@ fn update_column_context(col_ctx: &mut DisplayContext, value: &Value, ledger_ctx
         // `__default__` has no samples (covers the issue #954 case where
         // an aggregate produces a 0 with no scale information).
         Value::Number(n) => {
-            col_ctx.update(*n, rustledger_core::display_context::DEFAULT_CURRENCY);
+            col_ctx.update(*n, rustledger_core::DEFAULT_CURRENCY);
             col_ctx.update_from(ledger_ctx);
         }
         _ => {}

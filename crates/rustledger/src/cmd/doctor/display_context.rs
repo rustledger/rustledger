@@ -1,7 +1,6 @@
 use anyhow::{Context, Result};
-use rustledger_core::{Directive, InternedStr};
+use rustledger_core::Precision;
 use rustledger_loader::Loader;
-use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::PathBuf;
 
@@ -11,54 +10,65 @@ pub(super) fn cmd_display_context<W: Write>(file: &PathBuf, writer: &mut W) -> R
         .load(file)
         .with_context(|| format!("failed to load {}", file.display()))?;
 
-    // Collect decimal precision from numbers in the file
-    let mut currency_scales: BTreeMap<InternedStr, i32> = BTreeMap::new();
+    let dctx = &load_result.display_context;
 
-    for spanned in &load_result.directives {
-        match &spanned.value {
-            Directive::Transaction(txn) => {
-                for posting in &txn.postings {
-                    if let Some(amount) = posting.amount() {
-                        let scale = amount.number.scale() as i32;
-                        let entry = currency_scales.entry(amount.currency.clone()).or_insert(0);
-                        if scale > *entry {
-                            *entry = scale;
-                        }
-                    }
-                }
-            }
-            Directive::Balance(bal) => {
-                let scale = bal.amount.number.scale() as i32;
-                let entry = currency_scales
-                    .entry(bal.amount.currency.clone())
-                    .or_insert(0);
-                if scale > *entry {
-                    *entry = scale;
-                }
-            }
-            Directive::Price(price) => {
-                let scale = price.amount.number.scale() as i32;
-                let entry = currency_scales
-                    .entry(price.amount.currency.clone())
-                    .or_insert(0);
-                if scale > *entry {
-                    *entry = scale;
-                }
-            }
-            _ => {}
-        }
-    }
-
-    writeln!(writer, "Display Context (decimal precision by currency)")?;
+    writeln!(writer, "Display Context for {}", file.display())?;
     writeln!(writer, "{}", "=".repeat(60))?;
     writeln!(writer)?;
+    writeln!(
+        writer,
+        "Inference policy: {:?} (default; matches Python bean-query)",
+        dctx.precision()
+    )?;
+    if dctx.render_commas() {
+        writeln!(writer, "Render commas: enabled")?;
+    }
+    writeln!(writer)?;
 
-    if currency_scales.is_empty() {
-        writeln!(writer, "No currencies found in file.")?;
-    } else {
-        for (currency, scale) in &currency_scales {
-            writeln!(writer, "{currency}: {scale} decimal places")?;
+    let currencies: Vec<&str> = dctx.currencies().collect();
+    if currencies.is_empty() {
+        writeln!(writer, "No currencies observed.")?;
+        return Ok(());
+    }
+
+    for currency in currencies {
+        let mode = dctx.precision_under(currency, Precision::MostCommon);
+        let max = dctx.precision_under(currency, Precision::Maximum);
+        let fixed = dctx.has_fixed_precision(currency);
+
+        writeln!(writer, "{currency}:")?;
+
+        // Effective dp under the active policy. Surfacing this first lines
+        // up with what BQL output will actually use.
+        let effective = dctx.get_precision(currency);
+        let effective_str = effective.map_or_else(|| "<none>".to_string(), |dp| dp.to_string());
+        let suffix = if fixed {
+            " (FIXED via option \"display_precision\")"
+        } else {
+            ""
+        };
+        writeln!(writer, "  effective: {effective_str} dp{suffix}")?;
+
+        // Distribution view — useful for understanding why mode != max.
+        let hist = dctx.histogram(currency);
+        if !hist.is_empty() {
+            let parts: Vec<String> = hist
+                .iter()
+                .map(|(dp, count)| format!("dp={dp}: {count}"))
+                .collect();
+            writeln!(writer, "  distribution: {}", parts.join(", "))?;
         }
+
+        // Both policies, for comparison. Helps users understand the
+        // MostCommon-vs-Maximum trade-off when diagnosing a divergence.
+        if let (Some(m), Some(x)) = (mode, max)
+            && m != x
+        {
+            writeln!(writer, "  mode (MostCommon): {m}")?;
+            writeln!(writer, "  max (Maximum):     {x}")?;
+        }
+
+        writeln!(writer)?;
     }
 
     Ok(())

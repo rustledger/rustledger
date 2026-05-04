@@ -653,11 +653,11 @@ user-login = "dtolnay"
 user-name = "David Tolnay"
 
 [[publisher.tokio]]
-version = "1.52.1"
-when = "2026-04-16"
-user-id = 1249
-user-login = "hawkw"
-user-name = "Eliza Weisman"
+version = "1.52.2"
+when = "2026-05-04"
+user-id = 6741
+user-login = "Darksonn"
+user-name = "Alice Ryhl"
 
 [[publisher.tokio-macros]]
 version = "2.7.0"
@@ -780,8 +780,8 @@ when = "2026-04-03"
 trusted-publisher = "github:bytecodealliance/wasm-tools"
 
 [[publisher.wasm-encoder]]
-version = "0.247.0"
-when = "2026-04-17"
+version = "0.248.0"
+when = "2026-04-28"
 trusted-publisher = "github:bytecodealliance/wasm-tools"
 
 [[publisher.wasm-metadata]]
@@ -801,8 +801,8 @@ when = "2026-04-03"
 trusted-publisher = "github:bytecodealliance/wasm-tools"
 
 [[publisher.wasmparser]]
-version = "0.247.0"
-when = "2026-04-17"
+version = "0.248.0"
+when = "2026-04-28"
 trusted-publisher = "github:bytecodealliance/wasm-tools"
 
 [[publisher.wasmprinter]]
@@ -891,13 +891,13 @@ when = "2026-04-30"
 trusted-publisher = "github:bytecodealliance/wasmtime"
 
 [[publisher.wast]]
-version = "247.0.0"
-when = "2026-04-17"
+version = "248.0.0"
+when = "2026-04-28"
 trusted-publisher = "github:bytecodealliance/wasm-tools"
 
 [[publisher.wat]]
-version = "1.247.0"
-when = "2026-04-17"
+version = "1.248.0"
+when = "2026-04-28"
 trusted-publisher = "github:bytecodealliance/wasm-tools"
 
 [[publisher.wiggle]]

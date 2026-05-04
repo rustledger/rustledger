@@ -393,6 +393,28 @@ fn rledger_and_bean_price_resolve_same_attempts_fallback_chain() {
     assert_same_attempts(FIXTURE_FALLBACK_CHAIN, "fallback_chain");
 }
 
+// Multi-currency `price:` metadata fixture — `EUR` is priced in two quote
+// currencies (USD via yahoo, CAD via oanda). bean-price emits one job per
+// (base, quote) pair; rledger now matches that. Pre-fix, only the first quote
+// (USD) was retained and the CAD job was silently dropped. Sources chosen
+// because both bean-price and rledger ship them.
+const FIXTURE_MULTI_CURRENCY: &str = "\
+2024-01-01 commodity EUR
+  price: \"USD:yahoo/EURUSD=X CAD:oanda/EUR_CAD\"
+
+2024-01-01 open Assets:Cash
+2024-01-01 open Equity:Open
+
+2024-01-15 * \"holding\"
+  Assets:Cash  100 EUR
+  Equity:Open
+";
+
+#[test]
+fn rledger_and_bean_price_resolve_same_attempts_multi_currency() {
+    assert_same_attempts(FIXTURE_MULTI_CURRENCY, "multi_currency");
+}
+
 // Sanity check: when we're inside `nix develop`, `bean-price` must be on PATH —
 // otherwise removing beanprice from the flake would silently turn every harness
 // test into a no-op and we wouldn't notice. CI doesn't currently use the dev

@@ -39,17 +39,39 @@ use rustledger_loader::Options;
 use rustledger_parser::Spanned;
 use std::collections::{HashMap, HashSet};
 
+/// One declared `(quote_currency, mapping)` pair for a commodity.
+///
+/// A commodity with `price: "USD:yahoo/AAPL CAD:google/AAPL"` produces two
+/// `QuoteSpec` entries — bean-price emits one fetch job per `(base, quote)`
+/// pair and rledger now matches that.
+#[derive(Debug, Clone)]
+pub struct QuoteSpec {
+    /// Quote currency for this fetch job (e.g. `USD`, `CAD`).
+    pub quote_currency: String,
+    /// `None` for `quote_currency:`-only discovery — source/ticker comes
+    /// from config, CLI args, or `[price.default_source]` downstream.
+    pub mapping: Option<CommodityMapping>,
+}
+
 /// What the discovery pass produces for a single commodity symbol.
+///
+/// `mapping` and `quote_currency` mirror the FIRST entry of `quote_specs`
+/// (kept for back-compat with code paths that fetch only one quote per
+/// symbol). When `quote_specs.len() > 1`, callers that want full
+/// multi-currency support should iterate `quote_specs`.
 #[derive(Debug, Clone, Default)]
 pub struct DiscoveredCommodity {
-    /// Optional source/ticker mapping derived from `price:` metadata.
-    /// `None` when discovery was driven by `quote_currency:` metadata
-    /// alone, by the `--undeclared` ticker-shape heuristic, or by a
-    /// CLI-supplied symbol — in those cases the source/ticker is
-    /// resolved later from CLI args, config, or `[price.default_source]`.
+    /// First spec's mapping. `None` when discovery was driven by
+    /// `quote_currency:` metadata alone, by the `--undeclared`
+    /// ticker-shape heuristic, or by a CLI-supplied symbol.
     pub mapping: Option<CommodityMapping>,
-    /// Optional per-commodity quote currency from `quote_currency:` metadata.
+    /// First spec's quote currency. `None` when only the heuristic fired.
     pub quote_currency: Option<String>,
+    /// All declared `(quote_currency, mapping)` pairs. Empty for
+    /// commodities discovered only via the `--undeclared` heuristic.
+    /// When non-empty, the first entry mirrors
+    /// `(quote_currency, mapping)` above.
+    pub quote_specs: Vec<QuoteSpec>,
 }
 
 /// One parsed entry from a `price:` metadata string.
@@ -100,6 +122,10 @@ pub fn discover_symbols(
 
     let mut out: HashMap<String, DiscoveredCommodity> = HashMap::new();
 
+    // Track which symbols already had a Commodity directive walk so the
+    // transaction-walking pass below doesn't duplicate them.
+    let mut seen_commodity_decl: HashSet<String> = HashSet::new();
+
     for spanned in directives {
         let Directive::Commodity(comm) = &spanned.value else {
             continue;
@@ -114,6 +140,7 @@ pub fn discover_symbols(
             continue;
         }
         let symbol = comm.currency.as_str();
+        seen_commodity_decl.insert(symbol.to_string());
 
         let classification = classify_commodity_meta(&comm.meta);
 
@@ -157,6 +184,69 @@ pub fn discover_symbols(
         out.insert(symbol.to_string(), info);
     }
 
+    // Bean-price compat for `--undeclared`: also walk transactions and pick
+    // up commodities that appear in postings (units, at-cost currency, @
+    // price annotation currency) but lack their own `commodity` directive.
+    // This brings rledger closer to bean-price's transaction-walking
+    // semantics while keeping the ticker-shape filter from #962 — so plain
+    // currency codes like `EUR` or `BAM` still aren't auto-routed to a
+    // stock source. Bean-price has no shape filter; rledger's stricter
+    // default is documented in `docs/commands/price.md`.
+    if undeclared {
+        let txn_symbols = transaction_walked_currencies(directives, as_of);
+        for symbol in txn_symbols {
+            if seen_commodity_decl.contains(&symbol) {
+                continue;
+            }
+            if !looks_like_ticker(&symbol) {
+                continue;
+            }
+            if let Some(ref active_set) = active
+                && !active_set.contains(&symbol)
+            {
+                continue;
+            }
+            out.entry(symbol).or_default();
+        }
+    }
+
+    out
+}
+
+/// Currencies referenced from any posting in any transaction up to `as_of`.
+/// Includes the units currency, the at-cost currency, and the `@` price
+/// annotation currency. Matches bean-price's transaction-walking pass for
+/// `--undeclared`; the caller applies the ticker-shape filter that keeps
+/// currency codes out of stock-source dispatch (#962).
+fn transaction_walked_currencies(
+    directives: &[Spanned<Directive>],
+    as_of: Option<NaiveDate>,
+) -> HashSet<String> {
+    let in_window = |d: NaiveDate| as_of.is_none_or(|cutoff| d <= cutoff);
+    let mut out = HashSet::new();
+    for spanned in directives {
+        let Directive::Transaction(txn) = &spanned.value else {
+            continue;
+        };
+        if !in_window(txn.date) {
+            continue;
+        }
+        for posting in &txn.postings {
+            if let Some(amount) = posting.amount() {
+                out.insert(amount.currency.to_string());
+            }
+            if let Some(cost) = &posting.cost
+                && let Some(c) = &cost.currency
+            {
+                out.insert(c.to_string());
+            }
+            if let Some(price) = &posting.price
+                && let Some(amount) = price.amount()
+            {
+                out.insert(amount.currency.to_string());
+            }
+        }
+    }
     out
 }
 
@@ -199,20 +289,59 @@ fn classify_commodity_meta(meta: &rustledger_core::Metadata) -> Classification {
     // We still return `Inherit`/`Discovered` based on other signals; the
     // caller logs a warning.
     let malformed_price = price_raw.is_some_and(|s| !s.trim().is_empty()) && price_specs.is_empty();
-    let mapping = build_mapping(&price_specs);
 
     let quote_currency_meta = meta.get("quote_currency").and_then(|v| match v {
         MetaValue::String(s) | MetaValue::Currency(s) => Some(s.clone()),
         _ => None,
     });
 
+    // Group price_specs by quote currency, preserving first-seen order.
+    // Each group becomes one QuoteSpec; multi-currency `price:` metadata
+    // (e.g. `USD:yahoo/AAPL CAD:google/AAPL`) yields multiple specs.
+    let mut quote_specs: Vec<QuoteSpec> = Vec::new();
+    for spec in &price_specs {
+        if let Some(existing) = quote_specs
+            .iter_mut()
+            .find(|qs| qs.quote_currency == spec.quote_currency)
+        {
+            // Same quote currency, additional source — fold into existing
+            // mapping by rebuilding from all specs that share this quote.
+            let same_quote: Vec<PriceSpec> = price_specs
+                .iter()
+                .filter(|s| s.quote_currency == existing.quote_currency)
+                .cloned()
+                .collect();
+            existing.mapping = build_mapping(&same_quote);
+        } else {
+            let same_quote: Vec<PriceSpec> = price_specs
+                .iter()
+                .filter(|s| s.quote_currency == spec.quote_currency)
+                .cloned()
+                .collect();
+            quote_specs.push(QuoteSpec {
+                quote_currency: spec.quote_currency.clone(),
+                mapping: build_mapping(&same_quote),
+            });
+        }
+    }
+    // `quote_currency:` metadata adds a single spec when `price:` didn't
+    // already cover it (the metadata is a backstop, not an additional fetch).
+    if quote_specs.is_empty()
+        && let Some(qc) = &quote_currency_meta
+    {
+        quote_specs.push(QuoteSpec {
+            quote_currency: qc.clone(),
+            mapping: None,
+        });
+    }
+
+    let first_mapping = quote_specs.first().and_then(|qs| qs.mapping.clone());
+    let first_quote = quote_specs.first().map(|qs| qs.quote_currency.clone());
+
     let info = DiscoveredCommodity {
-        mapping,
-        // If `price:` already specified a quote currency, prefer that.
-        quote_currency: price_specs
-            .first()
-            .map(|s| s.quote_currency.clone())
-            .or(quote_currency_meta),
+        mapping: first_mapping,
+        quote_currency: first_quote,
+        quote_specs,
     };
 
     let decision = if info.mapping.is_some() || info.quote_currency.is_some() {
@@ -507,11 +636,9 @@ mod tests {
     #[test]
     fn parses_bean_price_multi_currency_form() {
         // Bean-price syntax: currency blocks separated by whitespace.
-        // Note: the parser yields specs with distinct quote currencies, but
-        // the downstream `build_mapping` and `DiscoveredCommodity.quote_currency`
-        // only retain the first spec's currency — so today rledger fetches
-        // a multi-currency commodity in only one of its declared quotes.
-        // Tracked as a follow-up; bean-price emits one job per (base, quote).
+        // Each (quote_currency, source/ticker) tuple flows downstream as its
+        // own QuoteSpec, so the fetch loop emits one job per (base, quote)
+        // — matching bean-price's per-(base, quote) behavior.
         let specs = parse_price_metadata("USD:yahoo/AAPL CAD:google/AAPL");
         assert_eq!(specs.len(), 2);
         assert_eq!(specs[0].quote_currency, "USD");
@@ -781,6 +908,107 @@ mod tests {
     }
 
     #[test]
+    fn undeclared_walks_transactions_for_ticker_shaped_currencies() {
+        // Bean-price compat: --undeclared also picks up commodities that
+        // appear in postings without their own `commodity` directive.
+        // The ticker-shape filter still applies (preserves #962): currency
+        // codes like BAM/EUR aren't auto-routed to a stock source.
+        let dirs = directives(vec![
+            Directive::Open(Open::new(date(2024, 1, 1), "Assets:Brokerage")),
+            Directive::Open(Open::new(date(2024, 1, 1), "Equity:Opening")),
+            Directive::Transaction(
+                Transaction::new(date(2024, 2, 1), "Buy SHIB and BAM")
+                    .with_posting(Posting::new(
+                        "Assets:Brokerage",
+                        Amount::new(dec!(100), "SHIB"),
+                    ))
+                    .with_posting(Posting::new(
+                        "Equity:Opening",
+                        Amount::new(dec!(-100), "SHIB"),
+                    ))
+                    .with_posting(Posting::new(
+                        "Assets:Brokerage",
+                        Amount::new(dec!(50), "BAM"),
+                    ))
+                    .with_posting(Posting::new(
+                        "Equity:Opening",
+                        Amount::new(dec!(-50), "BAM"),
+                    )),
+            ),
+        ]);
+
+        // Without --undeclared: nothing discovered (no commodity directives).
+        let strict = discover_symbols(&dirs, &Options::new(), false, false, None);
+        assert!(strict.is_empty());
+
+        // With --undeclared: SHIB (ticker-shaped) discovered via the
+        // transaction walk; BAM also ticker-shaped per the heuristic
+        // (uppercase, ≤10 chars). Both pass the heuristic.
+        let with_undeclared = discover_symbols(&dirs, &Options::new(), false, true, None);
+        assert!(
+            with_undeclared.contains_key("SHIB"),
+            "ticker-shaped commodity in transactions should be discovered with --undeclared"
+        );
+    }
+
+    #[test]
+    fn undeclared_walks_transactions_picks_up_at_cost_currency() {
+        // A purchase like `10 AAPL {150 USD}` should make USD discoverable
+        // (in addition to AAPL) — bean-price's at-cost-currency walk.
+        // USD doesn't pass the ticker-shape filter, but BTC-shaped does.
+        let dirs = directives(vec![
+            Directive::Open(Open::new(date(2024, 1, 1), "Assets:Wallet")),
+            Directive::Open(Open::new(date(2024, 1, 1), "Equity:Opening")),
+            Directive::Transaction(
+                Transaction::new(date(2024, 2, 1), "Buy ETH with BTC")
+                    .with_posting(
+                        Posting::new("Assets:Wallet", Amount::new(dec!(1), "ETH"))
+                            .with_cost(rustledger_core::CostSpec::empty().with_currency("BTC-USD")),
+                    )
+                    .with_posting(Posting::new(
+                        "Equity:Opening",
+                        Amount::new(dec!(-50000), "USD"),
+                    )),
+            ),
+        ]);
+
+        let with_undeclared = discover_symbols(&dirs, &Options::new(), true, true, None);
+        assert!(with_undeclared.contains_key("ETH"));
+        assert!(
+            with_undeclared.contains_key("BTC-USD"),
+            "at-cost currency should also be discovered with --undeclared"
+        );
+        // USD is a 3-letter uppercase symbol → passes the ticker-shape
+        // heuristic too. The #962 protection isn't to filter currency
+        // codes from --undeclared output (they're hard to distinguish
+        // from tickers shape-wise) — it's that the strict DEFAULT
+        // requires `price:` metadata. Opting into --undeclared is
+        // declaring "I accept the heuristic might fetch currency codes."
+        assert!(with_undeclared.contains_key("USD"));
+    }
+
+    #[test]
+    fn undeclared_lowercase_or_long_names_still_excluded() {
+        // The ticker-shape filter still rejects non-ticker-shaped names
+        // even when they appear in transactions (e.g. accidentally-lowercase
+        // commodity names from a misconfigured bank importer).
+        let dirs = directives(vec![
+            Directive::Open(Open::new(date(2024, 1, 1), "Assets:X")),
+            Directive::Open(Open::new(date(2024, 1, 1), "Equity:Y")),
+            Directive::Transaction(
+                Transaction::new(date(2024, 2, 1), "use weird names")
+                    .with_posting(Posting::new("Assets:X", Amount::new(dec!(1), "Vanguard")))
+                    .with_posting(Posting::new("Equity:Y", Amount::new(dec!(-1), "Vanguard"))),
+            ),
+        ]);
+        let discovered = discover_symbols(&dirs, &Options::new(), true, true, None);
+        assert!(
+            !discovered.contains_key("Vanguard"),
+            "non-uppercase name should not be picked up even with --undeclared"
+        );
+    }
+
+    #[test]
     fn discover_picks_up_metadata_driven_commodity() {
         let mut comm = Commodity::new(date(2024, 1, 1), "Vanguard_VTI");
         comm.meta.insert(
@@ -812,6 +1040,66 @@ mod tests {
             .expect("should be discovered");
         assert!(info.mapping.is_some());
         assert_eq!(info.quote_currency.as_deref(), Some("USD"));
+        assert_eq!(info.quote_specs.len(), 1);
+        assert_eq!(info.quote_specs[0].quote_currency, "USD");
+    }
+
+    /// Multi-currency `price:` metadata (`USD:yahoo/AAPL CAD:google/AAPL`)
+    /// must produce one `QuoteSpec` per declared quote currency. The fetch
+    /// loop iterates `quote_specs` and emits one job per (base, quote) —
+    /// matching bean-price. Pre-fix, only the first quote was retained and
+    /// the CAD price was silently dropped.
+    #[test]
+    fn discover_picks_up_multi_currency_price_metadata() {
+        let mut comm = Commodity::new(date(2024, 1, 1), "AAPL");
+        comm.meta.insert(
+            "price".to_string(),
+            MetaValue::String("USD:yahoo/AAPL CAD:google/AAPL".into()),
+        );
+        let dirs = directives(vec![
+            Directive::Open(Open::new(date(2024, 1, 1), "Assets:Brokerage")),
+            Directive::Open(Open::new(date(2024, 1, 1), "Equity:Opening")),
+            Directive::Commodity(comm),
+            Directive::Transaction(
+                Transaction::new(date(2024, 2, 1), "Buy AAPL")
+                    .with_posting(Posting::new(
+                        "Assets:Brokerage",
+                        Amount::new(dec!(10), "AAPL"),
+                    ))
+                    .with_posting(Posting::new(
+                        "Equity:Opening",
+                        Amount::new(dec!(-10), "AAPL"),
+                    )),
+            ),
+        ]);
+        let discovered = discover_symbols(&dirs, &Options::new(), false, false, None);
+
+        let info = discovered.get("AAPL").expect("should be discovered");
+        assert_eq!(
+            info.quote_specs.len(),
+            2,
+            "multi-currency price: metadata must produce one QuoteSpec per quote"
+        );
+        assert_eq!(info.quote_specs[0].quote_currency, "USD");
+        assert_eq!(info.quote_specs[1].quote_currency, "CAD");
+        // Each spec carries its own source/ticker.
+        match info.quote_specs[0].mapping.as_ref().expect("USD mapping") {
+            CommodityMapping::Detailed(d) => match &d.source {
+                SourceRef::Single(s) => assert_eq!(s, "yahoo"),
+                SourceRef::Fallback(_) => panic!("expected Single yahoo for USD"),
+            },
+            CommodityMapping::Simple(_) => panic!("expected Detailed mapping for USD"),
+        }
+        match info.quote_specs[1].mapping.as_ref().expect("CAD mapping") {
+            CommodityMapping::Detailed(d) => match &d.source {
+                SourceRef::Single(s) => assert_eq!(s, "google"),
+                SourceRef::Fallback(_) => panic!("expected Single google for CAD"),
+            },
+            CommodityMapping::Simple(_) => panic!("expected Detailed mapping for CAD"),
+        }
+        // First-spec mirrors are preserved for legacy callers.
+        assert_eq!(info.quote_currency.as_deref(), Some("USD"));
+        assert!(info.mapping.is_some());
     }
 
     #[test]

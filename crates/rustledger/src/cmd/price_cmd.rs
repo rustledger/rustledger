@@ -309,77 +309,127 @@ pub fn run(args: &PriceArgs, price_config: &PriceConfig) -> Result<()> {
         .unwrap_or(price_config.effective_default_source());
 
     for symbol in &symbols_to_fetch {
-        // Resolve quote currency against `price_config.mapping`, not the
-        // merged `combined_mapping`. CLI `--mapping AUD:NEW-TICKER` creates
-        // a `Simple` entry that overwrites a config-file `Detailed` entry
-        // for the same symbol — using `combined_mapping` here would silently
-        // drop the config's `quote_currency` even though the user only
-        // intended to override the ticker. Source/ticker lookup still uses
-        // the merged map below; only currency resolution stays config-only.
-        let effective_currency =
-            resolve_quote_currency(symbol, &discovered, &price_config.mapping, &args.currency);
-
-        // --clobber: skip fetch when an explicit `price` directive for
-        // (symbol, effective_currency, fetch_date) already exists in the file.
-        // Match bean-price's semantics: existing prices are kept unless
-        // --clobber is set.
-        //
-        // Limitation: this checks the REQUESTED date (`--date` or today). Some
-        // sources return a different effective date for "latest" — ECB, for
-        // instance, returns the last published business day on weekends. An
-        // existing directive dated to the source's actual quote date will not
-        // be matched here, so a duplicate may still be emitted. Fixing this
-        // requires a post-fetch re-check; tracked as a follow-up.
-        if !args.clobber {
-            let fetch_date = date.unwrap_or_else(|| jiff::Zoned::now().date());
-            if existing_prices.contains(&(symbol.clone(), effective_currency.clone(), fetch_date)) {
-                if args.verbose {
-                    eprintln!(
-                        "{symbol}: skipped (existing price for {fetch_date} {effective_currency}; pass --clobber to refetch)"
+        // Expand to one fetch per declared quote currency. A commodity with
+        // `price: "USD:yahoo/AAPL CAD:google/AAPL"` produces two fetches
+        // (matches bean-price's one-job-per-(base, quote) behavior). Single-
+        // quote and CLI-only symbols collapse to one entry via the legacy
+        // resolve_quote_currency path.
+        let per_quote_jobs: Vec<(String, Option<CommodityMapping>)> = discovered
+            .get(symbol)
+            .filter(|info| !info.quote_specs.is_empty())
+            .map_or_else(
+                || {
+                    let qc = resolve_quote_currency(
+                        symbol,
+                        &discovered,
+                        &price_config.mapping,
+                        &args.currency,
                     );
+                    vec![(qc, None)]
+                },
+                |info| {
+                    info.quote_specs
+                        .iter()
+                        .map(|qs| (qs.quote_currency.clone(), qs.mapping.clone()))
+                        .collect()
+                },
+            );
+
+        for (effective_currency, per_spec_mapping) in per_quote_jobs {
+            // --clobber: pre-fetch skip when an explicit `price` directive for
+            // (symbol, effective_currency, requested_date) already exists. Avoids
+            // round-tripping through the source for the common case where the
+            // user re-runs `rledger price -f` and wants idempotent output.
+            if !args.clobber {
+                let fetch_date = date.unwrap_or_else(|| jiff::Zoned::now().date());
+                if existing_prices.contains(&(
+                    symbol.clone(),
+                    effective_currency.clone(),
+                    fetch_date,
+                )) {
+                    if args.verbose {
+                        eprintln!(
+                            "{symbol}: skipped (existing price for {fetch_date} {effective_currency}; pass --clobber to refetch)"
+                        );
+                    }
+                    continue;
                 }
+            }
+
+            // Check cache first
+            let key = cache_key(source_name_for_cache, symbol, &effective_currency, date);
+            if let Some(ref c) = cache
+                && let Some(cached) = c.get(&key)
+            {
+                if args.verbose {
+                    eprintln!("{symbol}: cached (source: {})", cached.source);
+                }
+                write_price(&mut handle, symbol, &cached, args.beancount)?;
                 continue;
             }
-        }
 
-        // Check cache first
-        let key = cache_key(source_name_for_cache, symbol, &effective_currency, date);
-        if let Some(ref c) = cache
-            && let Some(cached) = c.get(&key)
-        {
-            if args.verbose {
-                eprintln!("{symbol}: cached (source: {})", cached.source);
-            }
-            write_price(&mut handle, symbol, &cached, args.beancount)?;
-            continue;
-        }
+            // Per-quote source mapping (multi-currency `price:` metadata) overrides
+            // the merged combined_mapping for this single fetch. Build a one-shot
+            // override rather than mutating combined_mapping (which would leak
+            // across iterations).
+            let fetch_mapping: HashMap<String, CommodityMapping> = if let Some(m) = per_spec_mapping
+            {
+                let mut m1 = combined_mapping.clone();
+                m1.insert(symbol.clone(), m);
+                m1
+            } else {
+                combined_mapping.clone()
+            };
 
-        // Fetch from network
-        let result = if let Some(source_name) = &args.source {
-            fetch_with_source(&registry, source_name, symbol, &effective_currency, date)
-        } else {
-            registry.fetch_price(symbol, &effective_currency, date, &combined_mapping)
-        };
+            // Fetch from network
+            let result = if let Some(source_name) = &args.source {
+                fetch_with_source(&registry, source_name, symbol, &effective_currency, date)
+            } else {
+                registry.fetch_price(symbol, &effective_currency, date, &fetch_mapping)
+            };
 
-        match result {
-            Ok(response) => {
-                if let Some(ref mut c) = cache {
-                    // Use the actual source that responded (may differ from
-                    // default due to fallback chains)
-                    let actual_key = cache_key(&response.source, symbol, &effective_currency, date);
-                    c.insert(&actual_key, &response);
-                    // Also store under the default source key for fast lookup
-                    if actual_key != key {
-                        c.insert(&key, &response);
+            match result {
+                Ok(response) => {
+                    if let Some(ref mut c) = cache {
+                        // Use the actual source that responded (may differ from
+                        // default due to fallback chains)
+                        let actual_key =
+                            cache_key(&response.source, symbol, &effective_currency, date);
+                        c.insert(&actual_key, &response);
+                        // Also store under the default source key for fast lookup
+                        if actual_key != key {
+                            c.insert(&key, &response);
+                        }
                     }
+                    // Post-fetch --clobber re-check: the source's *returned* date
+                    // may differ from the requested date (ECB returns the last
+                    // published business day on weekends; JSON/beancount source-cmd
+                    // output can carry its own date). The pre-fetch skip uses the
+                    // requested date, so duplicates can still slip through. Re-check
+                    // here against the actual response date.
+                    if !args.clobber
+                        && existing_prices.contains(&(
+                            symbol.clone(),
+                            response.currency.clone(),
+                            response.date,
+                        ))
+                    {
+                        if args.verbose {
+                            eprintln!(
+                                "{symbol}: skipped after fetch (response dated {} {} matches existing directive)",
+                                response.date, response.currency
+                            );
+                        }
+                        continue;
+                    }
+                    write_price(&mut handle, symbol, &response, args.beancount)?;
                 }
-                write_price(&mut handle, symbol, &response, args.beancount)?;
-            }
-            Err(e) => {
-                if args.verbose {
-                    eprintln!("Error fetching {symbol}: {e}");
-                } else {
-                    eprintln!("; Failed to fetch {symbol}: {e}");
+                Err(e) => {
+                    if args.verbose {
+                        eprintln!("Error fetching {symbol}: {e}");
+                    } else {
+                        eprintln!("; Failed to fetch {symbol}: {e}");
+                    }
                 }
             }
         }
@@ -509,51 +559,84 @@ fn dump_fetch_plan(
     let fetch_date = date.unwrap_or_else(|| jiff::Zoned::now().date());
 
     for symbol in symbols {
-        let currency = resolve_quote_currency(symbol, discovered, config_mapping, &args.currency);
+        // Expand to one row per declared quote currency, matching the network
+        // and source-cmd paths. Each row dumps the attempts that quote spec
+        // would produce.
+        let per_quote_jobs: Vec<(String, Option<CommodityMapping>)> = discovered
+            .get(symbol)
+            .filter(|info| !info.quote_specs.is_empty())
+            .map_or_else(
+                || {
+                    let qc =
+                        resolve_quote_currency(symbol, discovered, config_mapping, &args.currency);
+                    vec![(qc, None)]
+                },
+                |info| {
+                    info.quote_specs
+                        .iter()
+                        .map(|qs| (qs.quote_currency.clone(), qs.mapping.clone()))
+                        .collect()
+                },
+            );
 
-        // --source and --source-cmd bypass the mapping entirely.
-        let mut attempts: Vec<(String, String)> = if args.source_cmd.is_some() {
-            vec![("source-cmd".to_string(), symbol.clone())]
-        } else if let Some(s) = &args.source {
-            vec![(s.clone(), symbol.clone())]
-        } else {
-            describe_attempts(symbol, combined_mapping, default_source)
-        };
-        // Mirror the runtime fallback: with `use_default_source = true`, a
-        // CLI-only symbol that isn't in any mapping still goes to
-        // `default_source` rather than erroring. Without this, dry-run
-        // disagrees with the actual fetch plan for users who opted back
-        // into default-source dispatch.
-        if attempts.is_empty()
-            && use_default_source
-            && args.source_cmd.is_none()
-            && args.source.is_none()
-        {
-            attempts.push((default_source.to_string(), symbol.clone()));
+        for (currency, per_spec_mapping) in per_quote_jobs {
+            // Apply the per-spec mapping override so describe_attempts shows
+            // the source/ticker that *this* quote will actually use, not
+            // whatever happened to win first-spec precedence in
+            // combined_mapping.
+            let attempts_mapping: HashMap<String, CommodityMapping> =
+                if let Some(m) = per_spec_mapping {
+                    let mut m1 = combined_mapping.clone();
+                    m1.insert(symbol.clone(), m);
+                    m1
+                } else {
+                    combined_mapping.clone()
+                };
+
+            // --source and --source-cmd bypass the mapping entirely.
+            let mut attempts: Vec<(String, String)> = if args.source_cmd.is_some() {
+                vec![("source-cmd".to_string(), symbol.clone())]
+            } else if let Some(s) = &args.source {
+                vec![(s.clone(), symbol.clone())]
+            } else {
+                describe_attempts(symbol, &attempts_mapping, default_source)
+            };
+            // Mirror the runtime fallback: with `use_default_source = true`, a
+            // CLI-only symbol that isn't in any mapping still goes to
+            // `default_source` rather than erroring. Without this, dry-run
+            // disagrees with the actual fetch plan for users who opted back
+            // into default-source dispatch.
+            if attempts.is_empty()
+                && use_default_source
+                && args.source_cmd.is_none()
+                && args.source.is_none()
+            {
+                attempts.push((default_source.to_string(), symbol.clone()));
+            }
+
+            let attempts_str = if attempts.is_empty() {
+                "<unmapped>".to_string()
+            } else {
+                attempts
+                    .iter()
+                    .map(|(s, t)| format!("{s}({t})"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+
+            let skipped = !args.clobber
+                && existing_prices.contains(&(symbol.clone(), currency.clone(), fetch_date));
+            let suffix = if skipped {
+                "  [skip: existing price]"
+            } else {
+                ""
+            };
+
+            writeln!(
+                handle,
+                "{symbol} /{currency} @ {date_str} {attempts_str}{suffix}"
+            )?;
         }
-
-        let attempts_str = if attempts.is_empty() {
-            "<unmapped>".to_string()
-        } else {
-            attempts
-                .iter()
-                .map(|(s, t)| format!("{s}({t})"))
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
-
-        let skipped = !args.clobber
-            && existing_prices.contains(&(symbol.clone(), currency.clone(), fetch_date));
-        let suffix = if skipped {
-            "  [skip: existing price]"
-        } else {
-            ""
-        };
-
-        writeln!(
-            handle,
-            "{symbol} /{currency} @ {date_str} {attempts_str}{suffix}"
-        )?;
     }
     Ok(())
 }
@@ -646,50 +729,93 @@ fn run_with_external_command(
     let mut handle = stdout.lock();
 
     for symbol in symbols {
-        // Same currency-resolution discipline as the network path: use the
-        // raw config mapping so a CLI `--mapping` Simple override can't
-        // silently wipe out a config-file `Detailed.quote_currency`.
-        let effective_currency =
-            resolve_quote_currency(symbol, discovered, &price_config.mapping, &args.currency);
+        // Expand to one fetch per declared quote currency, matching the
+        // network path. Multi-currency `price:` metadata produces one request
+        // per (base, quote) pair; single-quote and CLI-only symbols collapse
+        // to one entry via resolve_quote_currency.
+        let per_quote_currencies: Vec<String> = discovered
+            .get(symbol)
+            .filter(|info| !info.quote_specs.is_empty())
+            .map_or_else(
+                || {
+                    vec![resolve_quote_currency(
+                        symbol,
+                        discovered,
+                        &price_config.mapping,
+                        &args.currency,
+                    )]
+                },
+                |info| {
+                    info.quote_specs
+                        .iter()
+                        .map(|qs| qs.quote_currency.clone())
+                        .collect()
+                },
+            );
 
-        // --clobber: skip when an existing price for this (symbol, currency, date)
-        // is already in the file. Same rule as the network fetch path.
-        if !args.clobber {
-            let fetch_date = date.unwrap_or_else(|| jiff::Zoned::now().date());
-            if existing_prices.contains(&(symbol.clone(), effective_currency.clone(), fetch_date)) {
-                if args.verbose {
-                    eprintln!(
-                        "{symbol}: skipped (existing price for {fetch_date} {effective_currency}; pass --clobber to refetch)"
-                    );
+        for effective_currency in per_quote_currencies {
+            // --clobber: skip when an existing price for this (symbol, currency, date)
+            // is already in the file. Same rule as the network fetch path.
+            if !args.clobber {
+                let fetch_date = date.unwrap_or_else(|| jiff::Zoned::now().date());
+                if existing_prices.contains(&(
+                    symbol.clone(),
+                    effective_currency.clone(),
+                    fetch_date,
+                )) {
+                    if args.verbose {
+                        eprintln!(
+                            "{symbol}: skipped (existing price for {fetch_date} {effective_currency}; pass --clobber to refetch)"
+                        );
+                    }
+                    continue;
                 }
-                continue;
             }
-        }
 
-        let request = PriceRequest {
-            ticker: symbol.clone(),
-            currency: effective_currency.clone(),
-            date,
-        };
+            let request = PriceRequest {
+                ticker: symbol.clone(),
+                currency: effective_currency.clone(),
+                date,
+            };
 
-        match source.fetch_price(&request) {
-            Ok(response) => {
-                if args.beancount {
-                    let date_str = response.date.to_string();
-                    writeln!(
-                        handle,
-                        "{date_str} price {symbol} {} {}",
-                        response.price, response.currency
-                    )?;
-                } else {
-                    writeln!(handle, "{symbol}: {} {}", response.price, response.currency)?;
+            match source.fetch_price(&request) {
+                Ok(response) => {
+                    // Post-fetch --clobber re-check: source-cmd output (JSON or
+                    // beancount form) can carry its own date that differs from
+                    // the requested date. Skip writing if the actual response
+                    // duplicates an existing directive.
+                    if !args.clobber
+                        && existing_prices.contains(&(
+                            symbol.clone(),
+                            response.currency.clone(),
+                            response.date,
+                        ))
+                    {
+                        if args.verbose {
+                            eprintln!(
+                                "{symbol}: skipped after fetch (response dated {} {} matches existing directive)",
+                                response.date, response.currency
+                            );
+                        }
+                        continue;
+                    }
+                    if args.beancount {
+                        let date_str = response.date.to_string();
+                        writeln!(
+                            handle,
+                            "{date_str} price {symbol} {} {}",
+                            response.price, response.currency
+                        )?;
+                    } else {
+                        writeln!(handle, "{symbol}: {} {}", response.price, response.currency)?;
+                    }
                 }
-            }
-            Err(e) => {
-                if args.verbose {
-                    eprintln!("Error fetching {symbol}: {e}");
-                } else {
-                    eprintln!("; Failed to fetch {symbol}: {e}");
+                Err(e) => {
+                    if args.verbose {
+                        eprintln!("Error fetching {symbol}: {e}");
+                    } else {
+                        eprintln!("; Failed to fetch {symbol}: {e}");
+                    }
                 }
             }
         }
@@ -1011,6 +1137,7 @@ mod tests {
             DiscoveredCommodity {
                 mapping: None,
                 quote_currency: Some("USD".to_string()),
+                ..DiscoveredCommodity::default()
             },
         );
 
@@ -1049,6 +1176,7 @@ mod tests {
             DiscoveredCommodity {
                 mapping: None,
                 quote_currency: Some("EUR".to_string()),
+                ..DiscoveredCommodity::default()
             },
         );
 
@@ -1080,6 +1208,7 @@ mod tests {
                     quote_currency: None,
                 })),
                 quote_currency: None,
+                ..DiscoveredCommodity::default()
             },
         );
 
@@ -1105,6 +1234,7 @@ mod tests {
             DiscoveredCommodity {
                 mapping: Some(CommodityMapping::Simple("AAPL-DISCOVERED".to_string())),
                 quote_currency: None,
+                ..DiscoveredCommodity::default()
             },
         );
         let mut cli_mapping = HashMap::new();

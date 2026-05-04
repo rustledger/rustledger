@@ -43,7 +43,7 @@ jobs:
           private-key: ${{ secrets.BOT_PRIVATE_KEY }}
       # SECURITY: Checkout base branch first (trusted code), then fetch only Cargo.lock from PR
       - name: Checkout base branch
-        uses: actions/checkout@0c366fd6a839edf440554fa01a7085ccba70ac98 # v6
+        uses: actions/checkout@900f2210b1d28bbbd0bd22d17926b9e224e8f231 # v6
         with:
           ref: ${{ github.base_ref }}
           token: ${{ steps.app-token.outputs.token }}

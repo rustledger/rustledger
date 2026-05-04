@@ -147,6 +147,13 @@ fn clobber_post_fetch_emits_duplicate_when_clobber_is_set() {
 ///
 /// Triggered via `--source coinbase`: the cache lookup uses that source
 /// name and hits the entry we wrote, never reaching the network.
+///
+/// Linux-only: the `dirs` crate honors `XDG_CACHE_HOME` only on Linux
+/// (macOS uses `~/Library/Caches` via `NSSearchPathForDirectoriesInDomains`,
+/// Windows uses `FOLDERID_LocalAppData`). On those platforms the spawned
+/// rledger would read the wrong cache file, miss our pre-warmed entry,
+/// and try to fetch from the real coinbase API.
+#[cfg(target_os = "linux")]
 #[test]
 fn clobber_cache_hit_skips_when_cached_date_matches_existing() {
     use std::collections::HashMap;

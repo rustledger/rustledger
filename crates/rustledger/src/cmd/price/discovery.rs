@@ -219,8 +219,10 @@ pub fn discover_symbols(
 /// `as_of`. Includes the units currency, the at-cost currency, and the `@`
 /// price annotation currency. Matches bean-price's transaction-walking pass
 /// for `--undeclared` (which uses `entry.date >= date: break`); the caller
-/// applies the ticker-shape filter that keeps currency codes out of
-/// stock-source dispatch (#962).
+/// applies `looks_like_ticker`, which rejects only lowercase / > 10-char
+/// names — 3-letter uppercase codes like `EUR`, `USD`, `BAM` still pass.
+/// The #962 protection isn't this filter; it's that the strict default
+/// (no `--undeclared`) requires `price:` metadata.
 ///
 /// The strict-less-than convention also matches the commodity-walk above
 /// (line 138) and `find_currencies_declared` in upstream beanprice. Note

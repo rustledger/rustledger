@@ -213,12 +213,21 @@ fn update_column_context(col_ctx: &mut DisplayContext, value: &Value, ledger_ctx
                 }
             }
         }
-        // For naked Decimal columns (e.g. SUM(number)), the value carries no
-        // currency, so the column context can't infer one. Inherit the
-        // ledger's per-currency precision data so `format_default` has
-        // something to work with — otherwise a column of `Value::Number(0.00)`
-        // would render as "0" instead of "0.00". Issue #954.
-        Value::Number(_) => {
+        // For naked Decimal columns (e.g. SUM(number), cost_number),
+        // observe the column's actual values into the `__default__`
+        // bucket. Matches Python `bean-query`'s `DecimalRenderer`, which
+        // tracks per-column dp independently of the per-currency dctx.
+        // Pre-fix this only inherited from the ledger ctx, which made
+        // the column inherit precision from unrelated currencies (e.g.
+        // a column of USD `cost_number` values rendered at VBMPX's 3dp
+        // precision).
+        //
+        // Also inherit ledger precisions as a fallback: `format_default`
+        // walks `__default__` first, then falls back to max-of-modes if
+        // `__default__` has no samples (covers the issue #954 case where
+        // an aggregate produces a 0 with no scale information).
+        Value::Number(n) => {
+            col_ctx.update(*n, rustledger_core::display_context::DEFAULT_CURRENCY);
             col_ctx.update_from(ledger_ctx);
         }
         _ => {}

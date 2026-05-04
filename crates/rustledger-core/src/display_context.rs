@@ -138,8 +138,8 @@ pub struct DisplayContext {
     /// These take precedence over inferred precision under any policy.
     fixed_precisions: HashMap<String, u32>,
 
-    /// Inference policy for [`get_precision`]. Defaults to
-    /// [`Precision::MostCommon`] to match Python `bean-query`.
+    /// Inference policy for [`DisplayContext::get_precision`]. Defaults
+    /// to [`Precision::MostCommon`] to match Python `bean-query`.
     precision: Precision,
 }
 
@@ -201,7 +201,7 @@ impl DisplayContext {
         }
     }
 
-    /// Set the inference policy for [`get_precision`].
+    /// Set the inference policy for [`Self::get_precision`].
     ///
     /// Default is [`Precision::MostCommon`] to match Python `bean-query`.
     /// Callers that need to preserve the highest-precision sample (e.g.

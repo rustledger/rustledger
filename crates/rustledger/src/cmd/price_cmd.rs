@@ -364,6 +364,26 @@ pub fn run(args: &PriceArgs, price_config: &PriceConfig) -> Result<()> {
             if let Some(ref c) = cache
                 && let Some(cached) = c.get(&key)
             {
+                // Same post-fetch dedup we apply to fresh fetches: the cached
+                // response carries the source's actual date, which can differ
+                // from `date` (e.g. ECB on weekends). Without this, a "latest"
+                // price cached on Friday would re-emit the Friday `price`
+                // directive on Saturday and Sunday runs.
+                if !args.clobber
+                    && existing_prices.contains(&(
+                        symbol.clone(),
+                        cached.currency.clone(),
+                        cached.date,
+                    ))
+                {
+                    if args.verbose {
+                        eprintln!(
+                            "{symbol}: skipped from cache (cached date {} {} matches existing directive)",
+                            cached.date, cached.currency
+                        );
+                    }
+                    continue;
+                }
                 if args.verbose {
                     eprintln!("{symbol}: cached (source: {})", cached.source);
                 }
@@ -372,23 +392,24 @@ pub fn run(args: &PriceArgs, price_config: &PriceConfig) -> Result<()> {
             }
 
             // Per-quote source mapping (multi-currency `price:` metadata) overrides
-            // the merged combined_mapping for this single fetch. Build a one-shot
-            // override rather than mutating combined_mapping (which would leak
-            // across iterations).
-            let fetch_mapping: HashMap<String, CommodityMapping> = if let Some(m) = per_spec_mapping
-            {
-                let mut m1 = combined_mapping.clone();
-                m1.insert(symbol.clone(), m);
-                m1
-            } else {
-                combined_mapping.clone()
-            };
+            // the merged combined_mapping for this single fetch. Borrow the merged
+            // mapping in the common (single-quote) case; only allocate a one-shot
+            // override map when a per-spec mapping is present. The Cow keeps the
+            // hot-path zero-alloc on large ledgers.
+            let fetch_mapping: std::borrow::Cow<'_, HashMap<String, CommodityMapping>> =
+                if let Some(m) = per_spec_mapping {
+                    let mut m1 = combined_mapping.clone();
+                    m1.insert(symbol.clone(), m);
+                    std::borrow::Cow::Owned(m1)
+                } else {
+                    std::borrow::Cow::Borrowed(&combined_mapping)
+                };
 
             // Fetch from network
             let result = if let Some(source_name) = &args.source {
                 fetch_with_source(&registry, source_name, symbol, &effective_currency, date)
             } else {
-                registry.fetch_price(symbol, &effective_currency, date, &fetch_mapping)
+                registry.fetch_price(symbol, &effective_currency, date, fetch_mapping.as_ref())
             };
 
             match result {
@@ -585,14 +606,15 @@ fn dump_fetch_plan(
             // Apply the per-spec mapping override so describe_attempts shows
             // the source/ticker that *this* quote will actually use, not
             // whatever happened to win first-spec precedence in
-            // combined_mapping.
-            let attempts_mapping: HashMap<String, CommodityMapping> =
+            // combined_mapping. Borrow when no override (common case);
+            // only allocate when we have to install a per-spec mapping.
+            let attempts_mapping: std::borrow::Cow<'_, HashMap<String, CommodityMapping>> =
                 if let Some(m) = per_spec_mapping {
                     let mut m1 = combined_mapping.clone();
                     m1.insert(symbol.clone(), m);
-                    m1
+                    std::borrow::Cow::Owned(m1)
                 } else {
-                    combined_mapping.clone()
+                    std::borrow::Cow::Borrowed(combined_mapping)
                 };
 
             // --source and --source-cmd bypass the mapping entirely.
@@ -601,7 +623,7 @@ fn dump_fetch_plan(
             } else if let Some(s) = &args.source {
                 vec![(s.clone(), symbol.clone())]
             } else {
-                describe_attempts(symbol, &attempts_mapping, default_source)
+                describe_attempts(symbol, attempts_mapping.as_ref(), default_source)
             };
             // Mirror the runtime fallback: with `use_default_source = true`, a
             // CLI-only symbol that isn't in any mapping still goes to

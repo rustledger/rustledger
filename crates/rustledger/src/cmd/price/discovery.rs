@@ -188,10 +188,12 @@ pub fn discover_symbols(
     // up commodities that appear in postings (units, at-cost currency, @
     // price annotation currency) but lack their own `commodity` directive.
     // This brings rledger closer to bean-price's transaction-walking
-    // semantics while keeping the ticker-shape filter from #962 — so plain
-    // currency codes like `EUR` or `BAM` still aren't auto-routed to a
-    // stock source. Bean-price has no shape filter; rledger's stricter
-    // default is documented in `docs/commands/price.md`.
+    // semantics. Note `looks_like_ticker` only filters out *non-ticker-shaped*
+    // names (lowercase, > 10 chars) — 3-letter uppercase codes like `EUR`
+    // or `BAM` DO pass the heuristic and will be picked up here. The #962
+    // protection isn't this filter; it's that the strict DEFAULT requires
+    // `price:` metadata. Opting into `--undeclared` is opting into the
+    // shape-only filter, which has known false positives for currency codes.
     if undeclared {
         let txn_symbols = transaction_walked_currencies(directives, as_of);
         for symbol in txn_symbols {
@@ -919,8 +921,11 @@ mod tests {
     fn undeclared_walks_transactions_for_ticker_shaped_currencies() {
         // Bean-price compat: --undeclared also picks up commodities that
         // appear in postings without their own `commodity` directive.
-        // The ticker-shape filter still applies (preserves #962): currency
-        // codes like BAM/EUR aren't auto-routed to a stock source.
+        // The ticker-shape filter still applies — but only filters out
+        // *non-ticker-shaped* names (lowercase, > 10 chars). 3-letter
+        // uppercase codes like BAM and SHIB BOTH pass the heuristic
+        // and are discovered. The #962 protection is the strict default
+        // requiring `price:` metadata, NOT this heuristic.
         let dirs = directives(vec![
             Directive::Open(Open::new(date(2024, 1, 1), "Assets:Brokerage")),
             Directive::Open(Open::new(date(2024, 1, 1), "Equity:Opening")),
@@ -949,13 +954,21 @@ mod tests {
         let strict = discover_symbols(&dirs, &Options::new(), false, false, None);
         assert!(strict.is_empty());
 
-        // With --undeclared: SHIB (ticker-shaped) discovered via the
-        // transaction walk; BAM also ticker-shaped per the heuristic
-        // (uppercase, ≤10 chars). Both pass the heuristic.
+        // With --undeclared: SHIB AND BAM are both discovered — both pass
+        // the ticker-shape heuristic (uppercase, ≤10 chars). The shape
+        // filter does NOT filter out 3-letter currency codes; the #962
+        // protection is the strict default that excludes commodities
+        // without `price:` metadata. Opting into --undeclared opts into
+        // the known false-positive exposure for currency codes.
         let with_undeclared = discover_symbols(&dirs, &Options::new(), false, true, None);
         assert!(
             with_undeclared.contains_key("SHIB"),
             "ticker-shaped commodity in transactions should be discovered with --undeclared"
+        );
+        assert!(
+            with_undeclared.contains_key("BAM"),
+            "3-letter uppercase currency codes also pass the heuristic — \
+             documents the known false-positive exposure of --undeclared"
         );
     }
 

@@ -86,7 +86,7 @@ Pass `--inactive` to disable the filter and fetch prices for every declared comm
 
 If you have a ledger without `price:` annotations and want rustledger to guess based on commodity name, pass `--undeclared`. This re-enables a name heuristic: ticker-shaped names (uppercase letters, digits, dashes, dots; ≤ 10 chars) are picked up using the configured `[price.default_source]`.
 
-> **Divergence note**: rledger walks **both** `commodity` directives and transactions (unioning the unit, at-cost, and price-annotation currencies seen in transactions), then applies a ticker-shape filter to the transaction-derived set. Bean-price walks transactions only and applies no name filter. The filter is deliberate: it keeps currency codes like `EUR` or `BAM` out of stock sources by default (issue #962). Use the `[price.mapping.X]` config or per-commodity `price:` metadata if you need to fetch prices for a non-ticker-shaped name.
+> **Divergence note**: rledger walks **both** `commodity` directives and transactions (unioning the unit, at-cost, and price-annotation currencies seen in transactions), then applies a ticker-shape filter to the transaction-derived set. Bean-price walks transactions only and applies no name filter. The shape filter rejects lowercase or > 10-char names (e.g. `Vanguard`, `myaccount`), but it does **not** filter out 3-letter uppercase ISO currency codes — `EUR`, `USD`, `BAM` all pass the heuristic and will be picked up. The #962 protection isn't this filter; it's that the strict **default** (no `--undeclared`) requires `price:` metadata. Opting into `--undeclared` is opting into the known false-positive exposure for currency codes.
 
 ```bash
 # Default: strict — only commodities with price:/quote_currency: metadata
@@ -361,7 +361,7 @@ Commodity discovery is exercised against `bean-price` directly via the different
 | Area | rledger | bean-price | Reason |
 |---|---|---|---|
 | Default discovery | strict: only commodities with `price:`/`quote_currency:` metadata that you currently hold | same since #965 | matches upstream after #962 fix |
-| `--undeclared` | walks `commodity` directives **and** transactions; applies a ticker-shape heuristic to the transaction-derived set | walks transactions only, no shape filter | avoids spurious lookups for currency codes like `BAM` |
+| `--undeclared` | walks `commodity` directives **and** transactions; applies a ticker-shape heuristic to the transaction-derived set (rejects lowercase/long names; 3-letter uppercase codes still pass) | walks transactions only, no shape filter | shape filter excludes typo-shaped names like `Vanguard`; does NOT exclude ISO currency codes (#962 is the strict-default protection, not this filter) |
 | Verbose output | plain `Fetching prices for: [...]` and `{symbol}: cached (source: …)` lines on stderr | Python `logging`-style `INFO: Fetching …` lines with module prefixes | rledger writes for a human reader, not for log aggregation; doubling `-v` is not currently supported |
 | `--no-cache` | disables the rledger disk cache (single TTL across all sources) | `--no-cache` plus per-source cache config | rledger's cache is global; per-source config is not currently exposed |
 

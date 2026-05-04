@@ -318,12 +318,25 @@ impl DisplayContext {
     /// Get the default precision used when formatting a Decimal that has no
     /// associated currency (e.g. the result of `SUM(number)` in BQL).
     ///
-    /// Matches Python `bean-query`'s `format_decimal` behavior: pick the
-    /// max effective precision across every currency known to the context.
-    /// "Effective" means per-currency `fixed` overrides `inferred` (same rule
-    /// as [`get_precision`](Self::get_precision)) — so a fixed `display_precision`
-    /// of 2 for USD won't be overridden by an inferred 4-digit value seen
-    /// somewhere in the file. Returns 0 if no currencies have been recorded.
+    /// Resolution order (matches the BQL renderer's expectations after
+    /// PR #986):
+    ///
+    /// 1. **`__default__` bucket** — if any naked-decimal observations have
+    ///    been recorded via `update(n, DEFAULT_CURRENCY)`, the bucket's
+    ///    effective precision wins. This is what BQL populates for
+    ///    `Value::Number` columns (matches Python `bean-query`'s per-column
+    ///    `DecimalRenderer`).
+    /// 2. **Max effective precision across every other currency** — fallback
+    ///    when no naked-decimal observations exist. Covers issue #954: a
+    ///    column of `Value::Number(0)` that came from an aggregate
+    ///    collapsing to literal zero still renders with the column's
+    ///    expected dp (e.g. `0.00` for a USD-only file).
+    /// 3. **Returns 0** if no currencies have been recorded at all.
+    ///
+    /// "Effective" precision means per-currency `fixed` overrides `inferred`
+    /// (same rule as [`Self::get_precision`]) and respects the active
+    /// [`Precision`] policy, so a fixed `display_precision` of 2 for USD
+    /// won't be overridden by an inferred 4-digit value.
     #[must_use]
     pub fn default_precision(&self) -> u32 {
         // Prefer the `__default__` bucket if it has samples — this is what
@@ -874,6 +887,30 @@ mod tests {
         a.update_from(&b);
         // After merge: 5×2dp + 10×3dp → mode = 3dp
         assert_eq!(a.get_precision("USD"), Some(3));
+    }
+
+    #[test]
+    fn test_update_from_is_not_idempotent_under_add_merge() {
+        // Pin the semantics that triggered Copilot's review on PR #986:
+        // since update_from now ADDS counts (not max-merges), calling it
+        // multiple times multiplies the source's contribution. This is
+        // why the BQL renderer must guard against repeated inheritance
+        // per row (see crates/rustledger/src/cmd/query/output.rs).
+        let mut src = DisplayContext::new();
+        for _ in 0..10 {
+            src.update(dec!(1.23), "USD"); // 2dp × 10
+        }
+
+        let mut dst1 = DisplayContext::new();
+        dst1.update_from(&src);
+        // After 1 merge: 10×2dp.
+        assert_eq!(dst1.histogram("USD"), vec![(2, 10)]);
+
+        let mut dst2 = DisplayContext::new();
+        dst2.update_from(&src);
+        dst2.update_from(&src);
+        // After 2 merges: 20×2dp — counts compounded.
+        assert_eq!(dst2.histogram("USD"), vec![(2, 20)]);
     }
 
     #[test]

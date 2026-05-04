@@ -420,7 +420,16 @@ pub fn run(args: &PriceArgs, price_config: &PriceConfig) -> Result<()> {
                         let actual_key =
                             cache_key(&response.source, symbol, &effective_currency, date);
                         c.insert(&actual_key, &response);
-                        // Also store under the default source key for fast lookup
+                        // Also store under the default source key for fast lookup.
+                        // Trade-off: if a user later changes their `price:`
+                        // source for (symbol, currency) — e.g. yahoo→google —
+                        // a historical-date lookup (no TTL) under the global
+                        // default key will return the OLD source's payload
+                        // until the user runs `--clear-cache`. "Latest" lookups
+                        // are protected by the 30-min TTL on `:latest` keys
+                        // (cache.rs:64-74). Documented limitation; honors the
+                        // perf goal of not re-attempting failed-fallback sources
+                        // on every run.
                         if actual_key != key {
                             c.insert(&key, &response);
                         }

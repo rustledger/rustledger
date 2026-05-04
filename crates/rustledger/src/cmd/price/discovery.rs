@@ -387,8 +387,16 @@ fn build_mapping(specs: &[PriceSpec]) -> Option<CommodityMapping> {
     // first spec's ticker, which broke metadata like
     // `price: "EUR:ecbrates/GBP-EUR,EUR:ecb/GBP"` — the ECB source got
     // queried with `GBP-EUR` (ecbrates' shape) instead of `GBP`.
+    //
+    // Dedup by `(source, ticker)` to suppress accidental duplicate entries
+    // from typos like `"USD:yahoo/AAPL,USD:yahoo/AAPL"` — without this,
+    // the runtime would re-invoke yahoo on the first attempt's failure
+    // and the dry-run would print the same source twice. First occurrence
+    // wins (preserves order, which is significant for fallback semantics).
+    let mut seen: HashSet<(String, String)> = HashSet::new();
     let entries: Vec<FallbackEntry> = specs
         .iter()
+        .filter(|s| seen.insert((s.source.clone(), s.ticker.clone())))
         .map(|s| {
             FallbackEntry::Detailed(FallbackDetail {
                 source: s.source.clone(),
@@ -396,6 +404,17 @@ fn build_mapping(specs: &[PriceSpec]) -> Option<CommodityMapping> {
             })
         })
         .collect();
+    // After dedup, a single-entry chain collapses to Single (matches what
+    // the earlier `specs.len() == 1` short-circuit would have produced).
+    if entries.len() == 1
+        && let FallbackEntry::Detailed(d) = &entries[0]
+    {
+        return Some(CommodityMapping::Detailed(DetailedMapping {
+            source: SourceRef::Single(d.source.clone()),
+            ticker: d.ticker.clone(),
+            quote_currency: None,
+        }));
+    }
     Some(CommodityMapping::Detailed(DetailedMapping {
         source: SourceRef::Fallback(entries),
         // The parent ticker is no longer load-bearing for fallback chains
@@ -613,6 +632,53 @@ mod tests {
         assert_eq!(specs[1].source, "google");
         // Ticker preserves embedded colons after the first / split.
         assert_eq!(specs[1].ticker, "NASDAQ:AAPL");
+    }
+
+    #[test]
+    fn build_mapping_dedups_identical_fallback_entries() {
+        // User typo: `"USD:yahoo/AAPL,USD:yahoo/AAPL"`. Without dedup, the
+        // runtime would re-invoke yahoo on the first attempt's failure and
+        // the dry-run would print yahoo twice. After dedup the chain
+        // collapses to a Single mapping (one entry).
+        let specs = parse_price_metadata("USD:yahoo/AAPL,USD:yahoo/AAPL");
+        assert_eq!(specs.len(), 2, "parser preserves duplicates as written");
+        let m = build_mapping(&specs).expect("mapping should be built");
+        match m {
+            CommodityMapping::Detailed(d) => match d.source {
+                SourceRef::Single(s) => assert_eq!(s, "yahoo"),
+                SourceRef::Fallback(entries) => {
+                    panic!("duplicates should collapse to Single, got Fallback({entries:?})")
+                }
+            },
+            CommodityMapping::Simple(_) => panic!("expected Detailed mapping"),
+        }
+    }
+
+    #[test]
+    fn build_mapping_dedups_in_fallback_chain_preserves_distinct_entries() {
+        // Mixed: yahoo,ecb,yahoo — dedup drops the second yahoo, keeping
+        // the original first-seen order [yahoo, ecb]. Fallback semantics
+        // depend on order.
+        let specs = parse_price_metadata("USD:yahoo/AAPL,USD:ecb/AAPL,USD:yahoo/AAPL");
+        assert_eq!(specs.len(), 3);
+        let m = build_mapping(&specs).expect("mapping should be built");
+        match m {
+            CommodityMapping::Detailed(d) => match d.source {
+                SourceRef::Fallback(entries) => {
+                    assert_eq!(entries.len(), 2, "duplicate yahoo dropped");
+                    match &entries[0] {
+                        FallbackEntry::Detailed(fd) => assert_eq!(fd.source, "yahoo"),
+                        FallbackEntry::Name(_) => panic!("expected Detailed entry"),
+                    }
+                    match &entries[1] {
+                        FallbackEntry::Detailed(fd) => assert_eq!(fd.source, "ecb"),
+                        FallbackEntry::Name(_) => panic!("expected Detailed entry"),
+                    }
+                }
+                SourceRef::Single(_) => panic!("expected Fallback chain of 2"),
+            },
+            CommodityMapping::Simple(_) => panic!("expected Detailed mapping"),
+        }
     }
 
     #[test]

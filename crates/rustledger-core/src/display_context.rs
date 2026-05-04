@@ -721,6 +721,19 @@ mod tests {
     }
 
     #[test]
+    fn test_precision_under_returns_zero_when_fixed_is_zero() {
+        // `set_fixed_precision(c, 0)` is a legitimate setting (forces a
+        // currency to render as integer). Both policies must return Some(0)
+        // — not None, not the inferred precision.
+        let mut ctx = DisplayContext::new();
+        ctx.update(dec!(1.234), "JPY"); // inferred mode = 3
+        ctx.set_fixed_precision("JPY", 0); // user wants integer JPY
+        assert_eq!(ctx.precision_under("JPY", Precision::MostCommon), Some(0));
+        assert_eq!(ctx.precision_under("JPY", Precision::Maximum), Some(0));
+        assert_eq!(ctx.get_precision("JPY"), Some(0));
+    }
+
+    #[test]
     fn test_precision_under_respects_fixed_override() {
         let mut ctx = DisplayContext::new();
         ctx.update(dec!(1.234), "USD");

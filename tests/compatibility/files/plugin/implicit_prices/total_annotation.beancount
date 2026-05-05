@@ -1,0 +1,14 @@
+; Plugin differential harness fixture: implicit_prices, @@ total annotation.
+; Issue #992 reproducer — pre-#997 the plugin emitted 15152.07 EUR as a
+; per-unit price (the total amount, off by the units factor).
+
+plugin "beancount.plugins.implicit_prices"
+
+2020-01-01 open Assets:Insurance
+2020-01-01 open Assets:Cash
+2020-01-01 commodity BAM
+2020-01-01 commodity EUR
+
+2025-01-23 * "insurance matured"
+  Assets:Insurance  -27204.53 BAM @@ 15152.07 EUR
+  Assets:Cash  15152.07 EUR

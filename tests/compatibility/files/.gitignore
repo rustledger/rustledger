@@ -6,3 +6,9 @@
 
 # But track this .gitignore
 !.gitignore
+
+# Track in-tree plugin differential fixtures (Phase 2 of plugin-testing
+# plan, see #992). These exercise specific plugin code paths and ship
+# with the repo, unlike the downloaded corpus.
+!plugin/
+!plugin/**

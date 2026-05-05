@@ -1,0 +1,17 @@
+; Plugin differential harness fixture: implicit_prices, cost-only path.
+; Plugin generates a price directive from each posting's cost spec.
+
+plugin "beancount.plugins.implicit_prices"
+
+2024-01-01 open Assets:Brokerage
+2024-01-01 open Assets:Cash
+2024-01-01 commodity HOOL
+2024-01-01 commodity USD
+
+2024-01-15 * "Buy stock at cost"
+  Assets:Brokerage  10 HOOL {520 USD}
+  Assets:Cash  -5200 USD
+
+2024-02-15 * "Buy more at different cost"
+  Assets:Brokerage  5 HOOL {540 USD}
+  Assets:Cash  -2700 USD

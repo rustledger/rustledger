@@ -1,0 +1,27 @@
+; Plugin differential harness fixture: implicit_prices when a posting
+; has BOTH a cost spec AND a price annotation. Annotation wins; the
+; plugin must emit exactly ONE price (not two).
+;
+; Pre-#997 this fixture would have surfaced the double-emit bug.
+
+plugin "beancount.plugins.implicit_prices"
+
+2024-01-01 open Assets:Brokerage
+2024-01-01 open Assets:Cash
+2024-01-01 open Income:CapitalGains
+2024-01-01 commodity HOOL
+
+; Buy first so we have a lot to sell against
+2024-01-10 * "Buy stock"
+  Assets:Brokerage  10 HOOL {520 USD}
+  Assets:Cash  -5200 USD
+
+
+; The 100 USD discrepancy between cost basis (5×520) and sale price
+; (5×540) is the realized gain — beancount expects either explicit
+; routing to an Income:CapitalGains account or auto-balance with
+; Equity:Earnings:Current.
+2024-01-15 * "Sell at price (with cost basis)"
+  Assets:Brokerage     -5 HOOL {520 USD} @ 540 USD
+  Assets:Cash        2700 USD
+  Income:CapitalGains -100 USD

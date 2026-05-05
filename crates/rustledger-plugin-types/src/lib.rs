@@ -390,10 +390,37 @@ pub struct CostData {
 
 /// Price annotation data.
 ///
-/// Represents price annotations like `@ 100 USD` or `@@ 1000 USD` (total price).
+/// Represents price annotations like `@ 100 USD` or `@@ 1000 USD`
+/// (total price).
+///
+/// # Type-safe consumption (recommended)
+///
+/// Use [`PriceAnnotationData::view`] to get a [`PriceAnnotationView`]
+/// — a typed enum that forces consumers to handle `Unit` and `Total`
+/// arms exhaustively at compile time. **All new code that needs to
+/// distinguish per-unit from total prices MUST use `view()`** rather
+/// than reading `is_total` directly.
+///
+/// This struct is the wire format (kept for serialization stability
+/// across the WASM plugin boundary). The `view()` enum is a shaped
+/// accessor on top.
+///
+/// Pre-refactor (issue #992), the `implicit_prices` plugin read
+/// `posting.price.amount` directly and silently ignored `is_total`,
+/// emitting `@@` total amounts as per-unit prices. The fix in #997
+/// added explicit handling, but the type system didn't catch the bug
+/// originally because nothing forced consumers to read the bool. The
+/// `view()` enum closes that loop: a missing match arm is a compile
+/// error.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PriceAnnotationData {
     /// Whether this is a total price (`@@`) vs per-unit (`@`).
+    ///
+    /// **Prefer [`PriceAnnotationData::view`] for new code** — reading
+    /// this field directly is the bug shape that produced #992
+    /// (consumer ignores the field and treats every annotation as
+    /// per-unit). The `view()` enum forces exhaustive handling at
+    /// compile time.
     pub is_total: bool,
     /// The price amount (optional for incomplete/empty prices).
     pub amount: Option<AmountData>,
@@ -401,6 +428,67 @@ pub struct PriceAnnotationData {
     pub number: Option<String>,
     /// The currency only (for incomplete prices).
     pub currency: Option<String>,
+}
+
+/// Typed view of a [`PriceAnnotationData`].
+///
+/// Each arm distinguishes per-unit (`@`) from total (`@@`) at the
+/// **type level**, so a `match` on the view forces consumers to
+/// handle both cases. This is the recommended way to consume price
+/// annotations — see the docstring on [`PriceAnnotationData`] for the
+/// motivating bug.
+#[derive(Debug, Clone, Copy)]
+pub enum PriceAnnotationView<'a> {
+    /// `@ AMOUNT` — per-unit price with a complete amount.
+    Unit(&'a AmountData),
+    /// `@@ AMOUNT` — total price with a complete amount.
+    ///
+    /// Consumers that compute prices MUST divide by the posting's
+    /// `units.number.abs()` to recover the per-unit price. See
+    /// `rustledger_core::extract_per_unit_price` (in the
+    /// `rustledger-core` crate; not linked because that crate is not a
+    /// dependency of `rustledger-plugin-types`).
+    Total(&'a AmountData),
+    /// `@ NUMBER` / `@ CURRENCY` — per-unit annotation missing one
+    /// or both of (number, currency).
+    UnitIncomplete {
+        /// The number, if present.
+        number: Option<&'a str>,
+        /// The currency, if present.
+        currency: Option<&'a str>,
+    },
+    /// `@@ NUMBER` / `@@ CURRENCY` — incomplete total annotation.
+    TotalIncomplete {
+        /// The number, if present.
+        number: Option<&'a str>,
+        /// The currency, if present.
+        currency: Option<&'a str>,
+    },
+}
+
+impl PriceAnnotationData {
+    /// Get a typed view that distinguishes per-unit from total at
+    /// the type level. **Use this for new code that needs to handle
+    /// the price differently based on `@` vs `@@`.**
+    ///
+    /// Returns one of four variants — a missing match arm at the
+    /// consumer becomes a compile error, eliminating the class of
+    /// bug that produced issue #992.
+    #[must_use]
+    pub fn view(&self) -> PriceAnnotationView<'_> {
+        match (self.is_total, &self.amount) {
+            (false, Some(a)) => PriceAnnotationView::Unit(a),
+            (true, Some(a)) => PriceAnnotationView::Total(a),
+            (false, None) => PriceAnnotationView::UnitIncomplete {
+                number: self.number.as_deref(),
+                currency: self.currency.as_deref(),
+            },
+            (true, None) => PriceAnnotationView::TotalIncomplete {
+                number: self.number.as_deref(),
+                currency: self.currency.as_deref(),
+            },
+        }
+    }
 }
 
 // ============================================================================
@@ -686,5 +774,186 @@ mod tests {
         let msgpack = rmp_serde::to_vec(&input).unwrap();
         let decoded: PluginInput = rmp_serde::from_slice(&msgpack).unwrap();
         assert_eq!(decoded.directives.len(), 1);
+    }
+
+    // ===== PriceAnnotationData::view() — all four arms =====
+    //
+    // The view() enum is the type-safe interface that prevents the
+    // #992 bug shape (consumer ignoring the is_total discriminator).
+    // These tests pin the mapping from (is_total, amount) to each
+    // PriceAnnotationView variant so a refactor of the underlying
+    // struct can't silently change the dispatch.
+
+    fn amount(number: &str, currency: &str) -> AmountData {
+        AmountData {
+            number: number.to_string(),
+            currency: currency.to_string(),
+        }
+    }
+
+    #[test]
+    fn view_unit_complete() {
+        // `@ 1.40 EUR`
+        let pad = PriceAnnotationData {
+            is_total: false,
+            amount: Some(amount("1.40", "EUR")),
+            number: None,
+            currency: None,
+        };
+        match pad.view() {
+            PriceAnnotationView::Unit(a) => {
+                assert_eq!(a.number, "1.40");
+                assert_eq!(a.currency, "EUR");
+            }
+            other => panic!("expected Unit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn view_total_complete() {
+        // `@@ 1500 USD`
+        let pad = PriceAnnotationData {
+            is_total: true,
+            amount: Some(amount("1500", "USD")),
+            number: None,
+            currency: None,
+        };
+        match pad.view() {
+            PriceAnnotationView::Total(a) => {
+                assert_eq!(a.number, "1500");
+                assert_eq!(a.currency, "USD");
+            }
+            other => panic!("expected Total, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn view_unit_incomplete_number_only() {
+        // `@ 1.40` — number but no currency
+        let pad = PriceAnnotationData {
+            is_total: false,
+            amount: None,
+            number: Some("1.40".to_string()),
+            currency: None,
+        };
+        match pad.view() {
+            PriceAnnotationView::UnitIncomplete { number, currency } => {
+                assert_eq!(number, Some("1.40"));
+                assert_eq!(currency, None);
+            }
+            other => panic!("expected UnitIncomplete, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn view_unit_incomplete_currency_only() {
+        // `@ EUR` — currency but no number
+        let pad = PriceAnnotationData {
+            is_total: false,
+            amount: None,
+            number: None,
+            currency: Some("EUR".to_string()),
+        };
+        match pad.view() {
+            PriceAnnotationView::UnitIncomplete { number, currency } => {
+                assert_eq!(number, None);
+                assert_eq!(currency, Some("EUR"));
+            }
+            other => panic!("expected UnitIncomplete, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn view_unit_incomplete_neither() {
+        // `@` — bare annotation, neither number nor currency
+        let pad = PriceAnnotationData {
+            is_total: false,
+            amount: None,
+            number: None,
+            currency: None,
+        };
+        match pad.view() {
+            PriceAnnotationView::UnitIncomplete { number, currency } => {
+                assert_eq!(number, None);
+                assert_eq!(currency, None);
+            }
+            other => panic!("expected UnitIncomplete, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn view_total_incomplete_number_only() {
+        // `@@ 1500`
+        let pad = PriceAnnotationData {
+            is_total: true,
+            amount: None,
+            number: Some("1500".to_string()),
+            currency: None,
+        };
+        match pad.view() {
+            PriceAnnotationView::TotalIncomplete { number, currency } => {
+                assert_eq!(number, Some("1500"));
+                assert_eq!(currency, None);
+            }
+            other => panic!("expected TotalIncomplete, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn view_total_incomplete_currency_only() {
+        // `@@ USD`
+        let pad = PriceAnnotationData {
+            is_total: true,
+            amount: None,
+            number: None,
+            currency: Some("USD".to_string()),
+        };
+        match pad.view() {
+            PriceAnnotationView::TotalIncomplete { number, currency } => {
+                assert_eq!(number, None);
+                assert_eq!(currency, Some("USD"));
+            }
+            other => panic!("expected TotalIncomplete, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn view_total_incomplete_neither() {
+        // `@@` — bare total annotation
+        let pad = PriceAnnotationData {
+            is_total: true,
+            amount: None,
+            number: None,
+            currency: None,
+        };
+        match pad.view() {
+            PriceAnnotationView::TotalIncomplete { number, currency } => {
+                assert_eq!(number, None);
+                assert_eq!(currency, None);
+            }
+            other => panic!("expected TotalIncomplete, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn view_amount_present_takes_priority_over_number_currency_fields() {
+        // If both `amount` AND the loose `number`/`currency` fields
+        // are set, `amount` wins — view() returns Unit/Total, never
+        // an Incomplete variant. This pins the precedence so a
+        // future field-juggling refactor can't accidentally invert
+        // it.
+        let pad = PriceAnnotationData {
+            is_total: false,
+            amount: Some(amount("1.40", "EUR")),
+            number: Some("99".to_string()),    // ignored
+            currency: Some("XYZ".to_string()), // ignored
+        };
+        match pad.view() {
+            PriceAnnotationView::Unit(a) => {
+                assert_eq!(a.number, "1.40");
+                assert_eq!(a.currency, "EUR");
+            }
+            other => panic!("expected Unit, got {other:?}"),
+        }
     }
 }

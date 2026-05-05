@@ -43,13 +43,28 @@ fn write_text<W: Write>(
         return Ok(());
     }
 
-    // Build per-column display contexts by scanning all values.
+    // Build per-column display contexts by scanning all values. Naked-Decimal
+    // columns also inherit the ledger context as a fallback for the issue #954
+    // path (a column of `Value::Number(0)` from an aggregate that collapsed
+    // to literal zero needs *some* precision source). Inherit ONCE per column
+    // — `update_from` now merges histograms by summing counts (PR #986), so
+    // calling it per row would inflate the ledger's sample frequencies by N
+    // and could shift the column's effective mode. Caught by Copilot review.
     let mut col_contexts: Vec<DisplayContext> = vec![DisplayContext::new(); result.columns.len()];
+    let mut col_inherited: Vec<bool> = vec![false; result.columns.len()];
     for row in &result.rows {
         for (i, value) in row.iter().enumerate() {
-            if i < col_contexts.len() {
-                update_column_context(&mut col_contexts[i], value, ctx);
+            if i >= col_contexts.len() {
+                continue;
             }
+            // First Number value in the column triggers a single inheritance
+            // pass, so the column ctx has a precision fallback for the
+            // issue #954 zero-pad path.
+            if matches!(value, Value::Number(_)) && !col_inherited[i] {
+                col_contexts[i].update_from(ctx);
+                col_inherited[i] = true;
+            }
+            update_column_context(&mut col_contexts[i], value, ctx);
         }
     }
 
@@ -213,13 +228,22 @@ fn update_column_context(col_ctx: &mut DisplayContext, value: &Value, ledger_ctx
                 }
             }
         }
-        // For naked Decimal columns (e.g. SUM(number)), the value carries no
-        // currency, so the column context can't infer one. Inherit the
-        // ledger's per-currency precision data so `format_default` has
-        // something to work with — otherwise a column of `Value::Number(0.00)`
-        // would render as "0" instead of "0.00". Issue #954.
-        Value::Number(_) => {
-            col_ctx.update_from(ledger_ctx);
+        // For naked Decimal columns (e.g. SUM(number), cost_number),
+        // observe the column's actual values into the `__default__`
+        // bucket. Matches Python `bean-query`'s `DecimalRenderer`, which
+        // tracks per-column dp independently of the per-currency dctx.
+        // Pre-fix this only inherited from the ledger ctx, which made
+        // the column inherit precision from unrelated currencies (e.g.
+        // a column of USD `cost_number` values rendered at VBMPX's 3dp
+        // precision).
+        //
+        // The ledger-ctx inheritance happens ONCE per column at the
+        // call site (write_text) — see the `col_inherited` guard. Doing
+        // it here per-cell would inflate the ledger's histogram by N
+        // (number of rows) under the new add-merge semantics of
+        // `update_from`.
+        Value::Number(n) => {
+            col_ctx.update(*n, rustledger_core::DEFAULT_CURRENCY);
         }
         _ => {}
     }

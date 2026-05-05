@@ -28,13 +28,13 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@0c366fd6a839edf440554fa01a7085ccba70ac98 # v6
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@95e58e9a2cdfd71adc6e0353d5c52f41a045d225 # v4
+        uses: github/codeql-action/init@e46ed2cbd01164d986452f91f178727624ae40d7 # v4
         with:
           languages: ${{ matrix.language }}
           queries: security-and-quality
           config-file: .github/codeql-config.yml
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@95e58e9a2cdfd71adc6e0353d5c52f41a045d225 # v4
+        uses: github/codeql-action/analyze@e46ed2cbd01164d986452f91f178727624ae40d7 # v4
         with:
           category: "/language:${{ matrix.language }}"
   # Gate job - all CodeQL analyses must pass

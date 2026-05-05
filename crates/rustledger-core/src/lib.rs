@@ -63,7 +63,7 @@ pub use directive::{
     Metadata, Note, Open, Pad, Posting, Price, PriceAnnotation, Query, Transaction,
     sort_directives,
 };
-pub use display_context::DisplayContext;
+pub use display_context::{DEFAULT_CURRENCY, DisplayContext, Precision};
 pub use extract::{
     DEFAULT_CURRENCIES, extract_accounts, extract_accounts_iter, extract_currencies,
     extract_currencies_iter, extract_payees, extract_payees_iter,

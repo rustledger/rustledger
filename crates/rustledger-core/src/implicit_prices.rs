@@ -13,9 +13,8 @@
 //! `rustledger_plugin_types::TransactionData` with `String`). Each
 //! caller assembles its annotation/cost descriptors with its own
 //! currency type and the helper returns the per-unit price already
-//! paired with the matching currency — making the
-//! mismatched-currency bug from PR #997's review impossible by
-//! construction.
+//! paired with the matching currency — making mismatched
+//! (number, currency) pairs impossible to construct.
 //!
 //! [issue #992]: https://github.com/rustledger/rustledger/issues/992
 
@@ -26,17 +25,17 @@ use rust_decimal::Decimal;
 ///
 /// The currency is returned alongside the per-unit `Decimal` so that
 /// callers can never accidentally pair a cost-derived value with the
-/// annotation currency (the bug Copilot caught on PR #997). The helper
-/// matches each value to the currency that came in with it.
+/// annotation currency. The helper matches each value to the currency
+/// that came in with it.
 ///
 /// Resolution order, mirroring upstream beancount's
 /// `beancount.plugins.implicit_prices`:
 ///
-/// 1. **Price annotation** (`@` or `@@`) — if both an amount and a
+/// 1. **Price annotation** (`@` or `@@`) — if a parsed number and
 ///    currency are present (`annotation` is `Some`).
 ///    For `@@` (`is_total = true`), divides the total by
 ///    `units_number.abs()`. For `@` (`is_total = false`), returns the
-///    annotation amount directly.
+///    number directly.
 /// 2. **Cost spec** — only as a fallback when no usable price
 ///    annotation. Within the cost spec, `number_per` takes precedence
 ///    over `number_total` when both are set (matching Python

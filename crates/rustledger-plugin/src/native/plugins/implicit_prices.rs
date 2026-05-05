@@ -61,22 +61,22 @@ impl NativePlugin for ImplicitPricesPlugin {
                 // otherwise pass `None` so the helper falls through to
                 // cost cleanly (and won't pair a fall-through value
                 // with a stale annotation currency).
-                let annotation = posting.price.as_ref().and_then(|annotation| {
-                    let amount = annotation.amount.as_ref()?;
+                let annotation = posting.price.as_ref().and_then(|a| {
+                    let amount = a.amount.as_ref()?;
                     let number = Decimal::from_str(&amount.number).ok()?;
-                    Some((annotation.is_total, number, amount.currency.clone()))
+                    Some((a.is_total, number, amount.currency.clone()))
                 });
 
                 // Same shape for cost: only build the descriptor when
                 // a currency is present AND at least one of per/total
                 // parses.
-                let cost = posting.cost.as_ref().and_then(|cost| {
-                    let currency = cost.currency.clone()?;
-                    let per = cost
+                let cost = posting.cost.as_ref().and_then(|c| {
+                    let currency = c.currency.clone()?;
+                    let per = c
                         .number_per
                         .as_ref()
                         .and_then(|n| Decimal::from_str(n).ok());
-                    let total = cost
+                    let total = c
                         .number_total
                         .as_ref()
                         .and_then(|n| Decimal::from_str(n).ok());

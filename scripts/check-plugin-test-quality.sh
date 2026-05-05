@@ -151,9 +151,17 @@ PAT_D="${WB}"'assert!\([^)]*((\.(count|len|size)\(\))|\b(count|len|size|[a-z_]+_
 # siblings but use `\s*` (which includes `\n`), a bounded ident
 # match to avoid swallowing the rest of the file, and PCRE
 # negative-lookbehind to skip `prop_assert!` / `debug_assert!`.
+#
+# IMPORTANT: ML_PAT_B/D restrict the LHS to count-shaped expressions
+# the same way single-line PAT_B/D do — `.count()`/`.len()`/`.size()`
+# method calls or `*_count`/`*_len`/`*_size` (or bare `count`/`len`/
+# `size`) idents. Without this restriction the multi-line patterns
+# would false-positive on every `assert_ne!(balance, 0)` style check
+# (Copilot review on PR #1005).
+COUNT_LHS='(?:\w[\w.]*\.(?:count|len|size)\(\)|(?:\w+_)?(?:count|len|size))'
 ML_PAT_C='(?<!\w)assert!\(\s*!\w[\w.]*\.is_empty\(\)'
-ML_PAT_B='(?<!\w)assert_ne!\(\s*\w[\w.()]*\s*,\s*0\s*[,)]'
-ML_PAT_D='(?<!\w)assert!\(\s*\w[\w.()]*\s*!=\s*0\s*[,)]'
+ML_PAT_B='(?<!\w)assert_ne!\(\s*'"$COUNT_LHS"'\s*,\s*0\s*[,)]'
+ML_PAT_D='(?<!\w)assert!\(\s*'"$COUNT_LHS"'\s*!=\s*0\s*[,)]'
 
 bad=""
 for pat in "$PAT_A" "$PAT_B" "$PAT_C" "$PAT_D"; do

@@ -3051,13 +3051,17 @@ fn test_auto_tag_adds_tag_for_expense() {
         .iter()
         .find(|d| d.directive_type == "transaction")
         .unwrap();
-    if let DirectiveData::Transaction(data) = &txn.data {
-        assert_eq!(
-            data.tags.len(),
-            1,
-            "auto_tag should add exactly one tag for the single matching posting"
+    let DirectiveData::Transaction(data) = &txn.data else {
+        panic!(
+            "directive_type was 'transaction' but data variant is {:?} — impossible state",
+            txn.data
         );
-    }
+    };
+    assert_eq!(
+        data.tags.len(),
+        1,
+        "auto_tag should add exactly one tag for the single matching posting"
+    );
 }
 
 // ============================================================================

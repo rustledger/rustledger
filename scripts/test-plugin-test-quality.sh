@@ -164,6 +164,26 @@ run_case "debug_assert!(!x.is_empty()) does NOT fire (invariant)" 0 \
     );
 }'
 
+# Multi-line ML_PAT_B/D used to match ANY `, 0` / `!= 0` assertion;
+# they're now scoped to count/len/size LHS the same as PAT_B/D
+# (Copilot review on PR #1005). These guards confirm non-count
+# zero-comparisons do NOT fire the lint.
+run_case "ML_PAT_B guard: assert_ne!(balance, 0) (non-count) does NOT fire" 0 \
+    '#[test] fn t() {
+    assert_ne!(
+        balance,
+        0
+    );
+}'
+
+run_case "ML_PAT_D guard: assert!(balance != 0) (non-count) does NOT fire" 0 \
+    '#[test] fn t() {
+    assert!(
+        balance != 0,
+        "should be non-zero"
+    );
+}'
+
 # ----------------------------------------------------------------------
 # Allow annotation
 # ----------------------------------------------------------------------

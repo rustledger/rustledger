@@ -4,7 +4,7 @@ use crate::types::{
     AmountData, DirectiveData, DirectiveWrapper, PluginInput, PluginOutput, PriceData,
 };
 use rust_decimal::Decimal;
-use rustledger_core::{ImplicitPriceSource, extract_per_unit_price};
+use rustledger_core::extract_per_unit_price;
 use std::str::FromStr;
 
 use super::super::NativePlugin;
@@ -56,64 +56,39 @@ impl NativePlugin for ImplicitPricesPlugin {
                     continue;
                 };
 
-                // Pull annotation primitives. Tie the currency to a
-                // successfully-parsed number: if the number fails to
-                // parse, drop the currency too. Otherwise the
-                // helper would fall through to cost for the value but
-                // we'd still pair it with the annotation's currency.
-                let (annotation_is_total, annotation_amount, annotation_currency) =
-                    match &posting.price {
-                        Some(annotation) => {
-                            let amount_decimal = annotation
-                                .amount
-                                .as_ref()
-                                .and_then(|a| Decimal::from_str(&a.number).ok());
-                            let amount_currency = if amount_decimal.is_some() {
-                                annotation.amount.as_ref().map(|a| a.currency.clone())
-                            } else {
-                                None
-                            };
-                            (annotation.is_total, amount_decimal, amount_currency)
-                        }
-                        None => (false, None, None),
-                    };
+                // Build the helper's annotation descriptor only when
+                // we have BOTH a parseable number and a currency —
+                // otherwise pass `None` so the helper falls through to
+                // cost cleanly (and won't pair a fall-through value
+                // with a stale annotation currency).
+                let annotation = posting.price.as_ref().and_then(|annotation| {
+                    let amount = annotation.amount.as_ref()?;
+                    let number = Decimal::from_str(&amount.number).ok()?;
+                    Some((annotation.is_total, number, amount.currency.clone()))
+                });
 
-                // Pull cost primitives.
-                let (cost_per, cost_total, cost_currency) = match &posting.cost {
-                    Some(cost) => {
-                        let per = cost
-                            .number_per
-                            .as_ref()
-                            .and_then(|n| Decimal::from_str(n).ok());
-                        let total = cost
-                            .number_total
-                            .as_ref()
-                            .and_then(|n| Decimal::from_str(n).ok());
-                        (per, total, cost.currency.clone())
+                // Same shape for cost: only build the descriptor when
+                // a currency is present AND at least one of per/total
+                // parses.
+                let cost = posting.cost.as_ref().and_then(|cost| {
+                    let currency = cost.currency.clone()?;
+                    let per = cost
+                        .number_per
+                        .as_ref()
+                        .and_then(|n| Decimal::from_str(n).ok());
+                    let total = cost
+                        .number_total
+                        .as_ref()
+                        .and_then(|n| Decimal::from_str(n).ok());
+                    if per.is_none() && total.is_none() {
+                        return None;
                     }
-                    None => (None, None, None),
-                };
+                    Some((per, total, currency))
+                });
 
-                let Some((per_unit, source)) = extract_per_unit_price(
-                    units_number,
-                    annotation_is_total,
-                    annotation_amount,
-                    cost_per,
-                    cost_total,
-                ) else {
-                    continue;
-                };
-
-                // Pair the quote currency with the SAME source the helper
-                // used. Pre-fix (Copilot review on PR #997) this was
-                // unconditionally `annotation_currency.or(cost_currency)`,
-                // which produced mismatched (number, currency) pairs when
-                // an unusable `@@` annotation fell through to cost.
-                let quote_currency = match source {
-                    ImplicitPriceSource::Annotation => annotation_currency,
-                    ImplicitPriceSource::Cost => cost_currency,
-                };
-                let Some(quote_currency) = quote_currency else {
+                let Some((per_unit, quote_currency)) =
+                    extract_per_unit_price(units_number, annotation, cost)
+                else {
                     continue;
                 };
 

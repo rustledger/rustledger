@@ -112,45 +112,29 @@ impl PriceDatabase {
                 continue;
             };
 
-            // Extract primitives for the shared helper.
-            let (annotation_is_total, annotation_amount, annotation_currency) = match &posting.price
-            {
-                Some(annotation) => {
-                    let amount = annotation.amount();
-                    (
-                        !annotation.is_unit(),
-                        amount.map(|a| a.number),
-                        amount.map(|a| a.currency.clone()),
-                    )
+            // Build the helper's annotation descriptor only when both
+            // an amount and currency are available; the helper pairs
+            // the returned per-unit value with the matching currency
+            // by construction.
+            let annotation = posting.price.as_ref().and_then(|annotation| {
+                let amount = annotation.amount()?;
+                Some((
+                    !annotation.is_unit(),
+                    amount.number,
+                    amount.currency.clone(),
+                ))
+            });
+            let cost = posting.cost.as_ref().and_then(|c| {
+                let currency = c.currency.clone()?;
+                if c.number_per.is_none() && c.number_total.is_none() {
+                    return None;
                 }
-                None => (false, None, None),
-            };
-            let (cost_per, cost_total, cost_currency) = match &posting.cost {
-                Some(c) => (c.number_per, c.number_total, c.currency.clone()),
-                None => (None, None, None),
-            };
+                Some((c.number_per, c.number_total, currency))
+            });
 
-            let Some((per_unit, source)) = rustledger_core::extract_per_unit_price(
-                units.number,
-                annotation_is_total,
-                annotation_amount,
-                cost_per,
-                cost_total,
-            ) else {
-                continue;
-            };
-
-            // Pair the quote currency with the SAME source the helper used
-            // for the per-unit value. Pre-fix (Copilot review on PR #997)
-            // this was unconditionally `annotation_currency.or(cost_currency)`,
-            // which produced mismatched (number, currency) pairs when an
-            // unusable `@@` annotation fell through to cost. The helper
-            // now returns the source so callers can select correctly.
-            let quote_currency = match source {
-                rustledger_core::ImplicitPriceSource::Annotation => annotation_currency,
-                rustledger_core::ImplicitPriceSource::Cost => cost_currency,
-            };
-            let Some(quote) = quote_currency else {
+            let Some((per_unit, quote)) =
+                rustledger_core::extract_per_unit_price(units.number, annotation, cost)
+            else {
                 continue;
             };
 
@@ -802,5 +786,44 @@ mod tests {
 
         // At 2024-01-15 or later, should use implicit price 1.40 (latest)
         assert_eq!(db.get_latest_price("ABC", "EUR"), Some(dec!(1.40)));
+    }
+
+    /// Currency-pairing regression for the query path. Mirrors the
+    /// plugin-side `test_implicit_prices_zero_unit_total_falls_through_to_cost_currency`
+    /// (Copilot review on PR #997). With zero units, the `@@` total
+    /// annotation is unusable, so the per-unit value falls through to
+    /// the cost spec — and the quote currency MUST come from the cost,
+    /// not the dropped annotation. Pre-fix, both paths emitted
+    /// `(50, EUR)` instead of `(50, USD)`. The shared helper now binds
+    /// each value to its source currency, making this bug structurally
+    /// impossible. This test pins the query path's behavior so a
+    /// future caller-side refactor cannot silently regress it.
+    #[test]
+    fn test_implicit_price_zero_units_total_annotation_uses_cost_currency() {
+        use rustledger_core::{CostSpec, Posting, PriceAnnotation, Transaction};
+
+        let txn = Transaction::new(date(2024, 1, 15), "Close position").with_posting(
+            Posting::new("Assets:Stocks", Amount::new(dec!(0), "ABC"))
+                .with_cost(
+                    CostSpec::default()
+                        .with_number_per(dec!(50))
+                        .with_currency("USD"),
+                )
+                .with_price(PriceAnnotation::Total(Amount::new(dec!(100), "EUR"))),
+        );
+
+        let db = PriceDatabase::from_directives(&[Directive::Transaction(txn)]);
+
+        // Per-unit value (50) was paired with USD (cost currency),
+        // not EUR (dropped annotation currency).
+        assert_eq!(
+            db.get_price("ABC", "USD", date(2024, 1, 15)),
+            Some(dec!(50))
+        );
+        // ABC→EUR has no path: no direct entry, no inverse EUR→ABC,
+        // no chain through any other currency. Pre-fix this would
+        // have been Some(50) because the bogus (50, EUR) entry was
+        // recorded.
+        assert_eq!(db.get_price("ABC", "EUR", date(2024, 1, 15)), None);
     }
 }

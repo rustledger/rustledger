@@ -3147,7 +3147,14 @@ fn test_pedantic_runs_multiple_validators() {
 // ============================================================================
 // RxTxnPlugin Tests
 // ============================================================================
+//
+// `rx_txn` finds transactions tagged `#rx_txn` and adds default
+// metadata (`final = "None"`, `roll = "True"`) when those keys are
+// not already set. Existing values are preserved.
 
+/// Tagged transaction → both `final` and `roll` metadata added.
+/// Pre-fix this test asserted only "`has_final` OR `has_roll`" — weak
+/// because either metadata addition alone passed it. Now strict.
 #[test]
 fn test_rx_txn_adds_metadata_to_tagged_transaction() {
     let plugin = RxTxnPlugin;
@@ -3166,22 +3173,36 @@ fn test_rx_txn_adds_metadata_to_tagged_transaction() {
     ]);
     let output = plugin.process(input);
     assert!(output.errors.is_empty());
-    // Verify metadata was added to the tagged transaction
     let txn = output
         .directives
         .iter()
         .find(|d| d.directive_type == "transaction")
-        .unwrap();
-    if let DirectiveData::Transaction(data) = &txn.data {
-        let has_final = data.metadata.iter().any(|(k, _)| k == "final");
-        let has_roll = data.metadata.iter().any(|(k, _)| k == "roll");
-        assert!(
-            has_final || has_roll,
-            "rx_txn should add 'final' and/or 'roll' metadata to tagged transaction"
+        .expect("transaction must be present");
+    let DirectiveData::Transaction(data) = &txn.data else {
+        panic!(
+            "non-Transaction data on transaction directive: {:?}",
+            txn.data
         );
+    };
+    let final_meta = data.metadata.iter().find(|(k, _)| k == "final");
+    let roll_meta = data.metadata.iter().find(|(k, _)| k == "roll");
+    assert!(final_meta.is_some(), "rx_txn must add 'final' metadata");
+    assert!(roll_meta.is_some(), "rx_txn must add 'roll' metadata");
+    // Verify defaults specifically.
+    if let Some((_, MetaValueData::String(v))) = final_meta {
+        assert_eq!(v, "None", "default 'final' value is 'None'");
+    } else {
+        panic!("'final' metadata should be a string 'None'");
+    }
+    if let Some((_, MetaValueData::String(v))) = roll_meta {
+        assert_eq!(v, "True", "default 'roll' value is 'True'");
+    } else {
+        panic!("'roll' metadata should be a string 'True'");
     }
 }
 
+/// Untagged transaction → no metadata mutation. Pins the
+/// `tags.contains("rx_txn")` filter.
 #[test]
 fn test_rx_txn_ignores_untagged_transaction() {
     let plugin = RxTxnPlugin;
@@ -3199,6 +3220,179 @@ fn test_rx_txn_ignores_untagged_transaction() {
     ]);
     let output = plugin.process(input);
     assert!(output.errors.is_empty());
+    let txn = output
+        .directives
+        .iter()
+        .find(|d| d.directive_type == "transaction")
+        .expect("transaction must be present");
+    let DirectiveData::Transaction(data) = &txn.data else {
+        panic!(
+            "non-Transaction data on transaction directive: {:?}",
+            txn.data
+        );
+    };
+    assert!(
+        data.metadata.is_empty(),
+        "untagged transaction should have NO metadata added"
+    );
+}
+
+/// Existing `final` / `roll` metadata is preserved (not overwritten).
+/// Pins the `has_final` / `has_roll` precondition checks in the
+/// plugin.
+#[test]
+fn test_rx_txn_preserves_existing_metadata() {
+    let plugin = RxTxnPlugin;
+    let mut txn = make_transaction_with_tag(
+        "2024-01-15",
+        "Recurring with explicit metadata",
+        vec!["rx_txn"],
+        vec![
+            ("Expenses:Rent", "1000", "USD"),
+            ("Assets:Cash", "-1000", "USD"),
+        ],
+    );
+    if let DirectiveData::Transaction(ref mut data) = txn.data {
+        data.metadata.push((
+            "final".to_string(),
+            MetaValueData::String("2024-12-31".to_string()),
+        ));
+        data.metadata.push((
+            "roll".to_string(),
+            MetaValueData::String("False".to_string()),
+        ));
+    }
+    let input = make_input(vec![
+        make_open("2024-01-01", "Assets:Cash"),
+        make_open("2024-01-01", "Expenses:Rent"),
+        txn,
+    ]);
+    let output = plugin.process(input);
+    assert!(output.errors.is_empty());
+    let DirectiveData::Transaction(data) = &output
+        .directives
+        .iter()
+        .find(|d| d.directive_type == "transaction")
+        .expect("transaction must be present")
+        .data
+    else {
+        panic!("non-Transaction data on transaction directive");
+    };
+    assert_eq!(
+        data.metadata.len(),
+        2,
+        "existing metadata preserved, no defaults added (got {} entries)",
+        data.metadata.len()
+    );
+    let final_val = data
+        .metadata
+        .iter()
+        .find(|(k, _)| k == "final")
+        .map(|(_, v)| v);
+    if let Some(MetaValueData::String(v)) = final_val {
+        assert_eq!(v, "2024-12-31", "existing 'final' value preserved");
+    } else {
+        panic!("'final' metadata should remain as '2024-12-31'");
+    }
+}
+
+/// Only ONE of `final` / `roll` is set on the input → plugin adds
+/// the missing one without touching the existing.
+#[test]
+fn test_rx_txn_fills_in_missing_metadata_only() {
+    let plugin = RxTxnPlugin;
+    let mut txn = make_transaction_with_tag(
+        "2024-01-15",
+        "Half-configured rx",
+        vec!["rx_txn"],
+        vec![
+            ("Expenses:Rent", "1000", "USD"),
+            ("Assets:Cash", "-1000", "USD"),
+        ],
+    );
+    if let DirectiveData::Transaction(ref mut data) = txn.data {
+        // Only `final` is pre-set; `roll` should still get defaulted.
+        data.metadata.push((
+            "final".to_string(),
+            MetaValueData::String("2024-12-31".to_string()),
+        ));
+    }
+    let input = make_input(vec![
+        make_open("2024-01-01", "Assets:Cash"),
+        make_open("2024-01-01", "Expenses:Rent"),
+        txn,
+    ]);
+    let output = plugin.process(input);
+    let DirectiveData::Transaction(data) = &output
+        .directives
+        .iter()
+        .find(|d| d.directive_type == "transaction")
+        .expect("transaction must be present")
+        .data
+    else {
+        panic!("non-Transaction data on transaction directive");
+    };
+    assert_eq!(
+        data.metadata.len(),
+        2,
+        "got existing 'final' + defaulted 'roll'"
+    );
+
+    let final_val = data
+        .metadata
+        .iter()
+        .find(|(k, _)| k == "final")
+        .map(|(_, v)| v);
+    if let Some(MetaValueData::String(v)) = final_val {
+        assert_eq!(v, "2024-12-31", "pre-existing 'final' is untouched");
+    } else {
+        panic!("'final' metadata should be a string");
+    }
+
+    let roll_val = data
+        .metadata
+        .iter()
+        .find(|(k, _)| k == "roll")
+        .map(|(_, v)| v);
+    if let Some(MetaValueData::String(v)) = roll_val {
+        assert_eq!(v, "True", "missing 'roll' is filled with default");
+    } else {
+        panic!("'roll' metadata should be a string default");
+    }
+}
+
+/// `#rx_txn` alongside other tags still triggers the plugin.
+#[test]
+fn test_rx_txn_works_alongside_other_tags() {
+    let plugin = RxTxnPlugin;
+    let input = make_input(vec![
+        make_open("2024-01-01", "Assets:Cash"),
+        make_open("2024-01-01", "Expenses:Rent"),
+        make_transaction_with_tag(
+            "2024-01-15",
+            "Mixed tags",
+            vec!["rx_txn", "monthly", "essential"],
+            vec![
+                ("Expenses:Rent", "1000", "USD"),
+                ("Assets:Cash", "-1000", "USD"),
+            ],
+        ),
+    ]);
+    let output = plugin.process(input);
+    let DirectiveData::Transaction(data) = &output
+        .directives
+        .iter()
+        .find(|d| d.directive_type == "transaction")
+        .expect("transaction must be present")
+        .data
+    else {
+        panic!("non-Transaction data on transaction directive");
+    };
+    assert!(
+        data.metadata.iter().any(|(k, _)| k == "final"),
+        "rx_txn applies even when other tags are present"
+    );
+    assert_eq!(data.tags.len(), 3, "all tags preserved");
 }
 
 // ============================================================================
@@ -3332,7 +3526,46 @@ fn test_currency_accounts_single_currency_no_change() {
 // ============================================================================
 // EffectiveDatePlugin Tests
 // ============================================================================
+//
+// `effective_date` finds postings with `effective_date` metadata and
+// rewrites the transaction into:
+//   1. The original txn (modified) where the posting goes through a
+//      holding account on the entry date.
+//   2. A NEW txn at the effective date that moves from the holding
+//      account to the original target account.
+//   3. Open directives for the new holding accounts.
+//
+// Default config maps `Expenses:` and `Income:` prefixes to default
+// holding accounts. Other prefixes need a custom config or the
+// posting passes through unchanged.
 
+/// Helper: make a transaction with a single Expenses posting tagged
+/// with an `effective_date`. Used by several tests below.
+fn make_txn_with_effective_date(
+    entry_date: &str,
+    effective_date: &str,
+    expense_account: &str,
+) -> DirectiveWrapper {
+    let mut txn = make_transaction(
+        entry_date,
+        "Deferred",
+        vec![
+            (expense_account, "25", "USD"),
+            ("Assets:Cash", "-25", "USD"),
+        ],
+    );
+    if let DirectiveData::Transaction(ref mut data) = txn.data {
+        data.postings[0].metadata.push((
+            "effective_date".to_string(),
+            MetaValueData::Date(effective_date.to_string()),
+        ));
+    }
+    txn
+}
+
+/// No `effective_date` metadata anywhere → directives pass through
+/// unchanged (count and content). Pins the
+/// `has_effective_date_posting → false` filter.
 #[test]
 fn test_effective_date_no_metadata_passthrough() {
     let plugin = EffectiveDatePlugin;
@@ -3350,82 +3583,215 @@ fn test_effective_date_no_metadata_passthrough() {
     ]);
     let output = plugin.process(input);
     assert!(output.errors.is_empty());
-    // Without effective_date metadata, directives pass through unchanged
     assert_eq!(output.directives.len(), 3);
 }
 
+/// Effective date in the FUTURE (later than entry) → uses the
+/// 'later' holding account. For Expenses in the default config
+/// that's `Assets:Hold:Expenses`.
 #[test]
-fn test_effective_date_splits_transaction() {
+fn test_effective_date_future_uses_later_holding_account() {
     let plugin = EffectiveDatePlugin;
-    // Create transaction with effective_date metadata on a posting
-    let mut txn = make_transaction(
-        "2024-01-15",
-        "Deferred expense",
-        vec![
-            ("Expenses:Food", "25", "USD"),
-            ("Assets:Cash", "-25", "USD"),
-        ],
-    );
-    // Add effective_date to the first posting
-    if let DirectiveData::Transaction(ref mut data) = txn.data {
-        data.postings[0].metadata.push((
-            "effective_date".to_string(),
-            MetaValueData::Date("2024-02-15".to_string()),
-        ));
-    }
     let input = make_input(vec![
         make_open("2024-01-01", "Assets:Cash"),
         make_open("2024-01-01", "Expenses:Food"),
-        txn,
+        make_txn_with_effective_date("2024-01-15", "2024-02-15", "Expenses:Food"),
     ]);
     let output = plugin.process(input);
     assert!(output.errors.is_empty());
-    // Should have more directives than input (split + opens for holding account)
+
+    // Should emit an Open directive for `Assets:Hold:Expenses:Food`.
+    let opens: Vec<_> = output
+        .directives
+        .iter()
+        .filter(|d| d.directive_type == "open")
+        .collect();
+    let new_open = opens.iter().find(|d| {
+        if let DirectiveData::Open(o) = &d.data {
+            o.account == "Assets:Hold:Expenses:Food"
+        } else {
+            false
+        }
+    });
     assert!(
-        output.directives.len() > 3,
-        "effective_date should split into multiple directives (got {})",
-        output.directives.len()
+        new_open.is_some(),
+        "future effective_date should generate Open for 'later' holding (Assets:Hold:Expenses:Food); \
+         got opens: {:?}",
+        opens
+            .iter()
+            .filter_map(|d| {
+                if let DirectiveData::Open(o) = &d.data {
+                    Some(&o.account)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+    );
+
+    // And there must be a transaction at the effective date.
+    assert_eq!(
+        output
+            .directives
+            .iter()
+            .filter(|d| d.directive_type == "transaction" && d.date == "2024-02-15")
+            .count(),
+        1,
+        "exactly one new transaction at the effective date"
+    );
+}
+
+/// Effective date in the PAST (earlier than entry) → uses the
+/// 'earlier' holding account. For Expenses that's
+/// `Liabilities:Hold:Expenses`.
+#[test]
+fn test_effective_date_past_uses_earlier_holding_account() {
+    let plugin = EffectiveDatePlugin;
+    let input = make_input(vec![
+        make_open("2024-01-01", "Assets:Cash"),
+        make_open("2024-01-01", "Expenses:Food"),
+        make_txn_with_effective_date("2024-02-15", "2024-01-15", "Expenses:Food"),
+    ]);
+    let output = plugin.process(input);
+    assert!(output.errors.is_empty());
+
+    let opens: Vec<_> = output
+        .directives
+        .iter()
+        .filter(|d| d.directive_type == "open")
+        .collect();
+    let new_open = opens.iter().find(|d| {
+        if let DirectiveData::Open(o) = &d.data {
+            o.account == "Liabilities:Hold:Expenses:Food"
+        } else {
+            false
+        }
+    });
+    assert!(
+        new_open.is_some(),
+        "past effective_date should generate Open for 'earlier' holding (Liabilities:Hold:Expenses:Food)"
+    );
+
+    assert_eq!(
+        output
+            .directives
+            .iter()
+            .filter(|d| d.directive_type == "transaction" && d.date == "2024-01-15")
+            .count(),
+        1
+    );
+}
+
+/// Account prefix not in the default config (e.g. `Liabilities:`)
+/// → posting passes through unchanged. Pins the `find_holding_account
+/// → None → keep original` branch.
+#[test]
+fn test_effective_date_unconfigured_prefix_unchanged() {
+    let plugin = EffectiveDatePlugin;
+    // `Liabilities:` is not a default-mapped prefix. The plugin will
+    // see effective_date metadata, recognize it, but find no holding
+    // account → leaves the posting alone.
+    let input = make_input(vec![
+        make_open("2024-01-01", "Assets:Cash"),
+        make_open("2024-01-01", "Liabilities:CreditCard"),
+        make_txn_with_effective_date("2024-01-15", "2024-02-15", "Liabilities:CreditCard"),
+    ]);
+    let output = plugin.process(input);
+    assert!(output.errors.is_empty());
+
+    // No new opens should be created, no transaction at effective date.
+    assert!(
+        !output.directives.iter().any(|d| {
+            d.directive_type == "open"
+                && matches!(
+                    &d.data,
+                    DirectiveData::Open(o) if o.account.contains(":Hold:")
+                )
+        }),
+        "unconfigured prefix should NOT generate holding-account Opens"
+    );
+    assert_eq!(
+        output
+            .directives
+            .iter()
+            .filter(|d| d.directive_type == "transaction" && d.date == "2024-02-15")
+            .count(),
+        0,
+        "unconfigured prefix should NOT spawn a new effective-date txn"
+    );
+}
+
+/// Custom config with a different prefix mapping → that prefix is
+/// honored instead of the defaults. Pins the config-parse branch.
+#[test]
+fn test_effective_date_custom_config_remaps_prefix() {
+    let plugin = EffectiveDatePlugin;
+    let input = make_input_with_config(
+        vec![
+            make_open("2024-01-01", "Assets:Cash"),
+            make_open("2024-01-01", "Liabilities:Pay"),
+            make_txn_with_effective_date("2024-01-15", "2024-02-15", "Liabilities:Pay"),
+        ],
+        "{'Liabilities': {'earlier': 'Assets:Hold:Liab', 'later': 'Liabilities:Hold:Liab'}}",
+    );
+    let output = plugin.process(input);
+    assert!(output.errors.is_empty());
+
+    let opens: Vec<_> = output
+        .directives
+        .iter()
+        .filter(|d| d.directive_type == "open")
+        .collect();
+    let new_open = opens.iter().find(|d| {
+        if let DirectiveData::Open(o) = &d.data {
+            o.account.starts_with("Liabilities:Hold:Liab")
+        } else {
+            false
+        }
+    });
+    assert!(
+        new_open.is_some(),
+        "custom config should map Liabilities: → Liabilities:Hold:Liab; got opens: {:?}",
+        opens
+            .iter()
+            .filter_map(|d| {
+                if let DirectiveData::Open(o) = &d.data {
+                    Some(&o.account)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
     );
 }
 
 // ============================================================================
 // ForecastPlugin Tests
 // ============================================================================
+//
+// `forecast` finds transactions with `flag == "#"` and a recurrence
+// pattern `[INTERVAL [SKIP n TIMES] [REPEAT n TIMES] [UNTIL yyyy-mm-dd]]`
+// in the narration, then replicates the transaction at each
+// generated date with the bracketed pattern stripped.
+//
+// Plugin-internal unit tests (`forecast.rs::tests`) already cover
+// the date-arithmetic branches (monthly/weekly/until/skip). These
+// integration tests pin the end-to-end behavior with the actual
+// integration-test fixture helpers.
 
-#[test]
-fn test_forecast_no_forecast_flag_passthrough() {
-    let plugin = ForecastPlugin;
-    let input = make_input(vec![
-        make_open("2024-01-01", "Assets:Cash"),
-        make_open("2024-01-01", "Expenses:Rent"),
-        make_transaction(
-            "2024-01-15",
-            "Regular rent",
-            vec![
-                ("Expenses:Rent", "1000", "USD"),
-                ("Assets:Cash", "-1000", "USD"),
-            ],
-        ),
-    ]);
-    let output = plugin.process(input);
-    assert!(output.errors.is_empty());
-    // No forecast flag, so no expansion
-    assert_eq!(output.directives.len(), 3);
-}
-
-#[test]
-fn test_forecast_expands_recurring_transaction() {
-    let plugin = ForecastPlugin;
-    // Transaction with # flag and [MONTHLY REPEAT 3 TIMES] pattern
-    let forecast_txn = DirectiveWrapper {
+/// Build a forecast (#-flagged) transaction inline. The integration
+/// test helpers don't cover #-flag transactions, so this builder is
+/// local to the forecast section.
+fn make_forecast_txn(date: &str, narration: &str) -> DirectiveWrapper {
+    DirectiveWrapper {
         directive_type: "transaction".to_string(),
-        date: "2024-01-15".to_string(),
+        date: date.to_string(),
         filename: None,
         lineno: None,
         data: DirectiveData::Transaction(TransactionData {
             flag: "#".to_string(),
             payee: None,
-            narration: "Rent [MONTHLY REPEAT 3 TIMES]".to_string(),
+            narration: narration.to_string(),
             tags: vec![],
             links: vec![],
             metadata: vec![],
@@ -3454,23 +3820,189 @@ fn test_forecast_expands_recurring_transaction() {
                 },
             ],
         }),
-    };
+    }
+}
+
+/// `*`-flagged transactions are not forecast templates and pass
+/// through untouched. Pins the `flag == "#"` filter.
+#[test]
+fn test_forecast_no_forecast_flag_passthrough() {
+    let plugin = ForecastPlugin;
     let input = make_input(vec![
         make_open("2024-01-01", "Assets:Cash"),
         make_open("2024-01-01", "Expenses:Rent"),
-        forecast_txn,
+        make_transaction(
+            "2024-01-15",
+            "Regular rent",
+            vec![
+                ("Expenses:Rent", "1000", "USD"),
+                ("Assets:Cash", "-1000", "USD"),
+            ],
+        ),
     ]);
     let output = plugin.process(input);
     assert!(output.errors.is_empty());
-    let txn_count = output
+    assert_eq!(output.directives.len(), 3);
+}
+
+/// `[MONTHLY REPEAT 3 TIMES]` → exactly 3 dated copies, monthly
+/// stride. Strict count was previously `>= 3` (a weak-count shape
+/// the lint should catch on multi-line — see follow-up note in PR).
+#[test]
+fn test_forecast_monthly_repeat_emits_exactly_n_transactions() {
+    let plugin = ForecastPlugin;
+    let input = make_input(vec![
+        make_open("2024-01-01", "Assets:Cash"),
+        make_open("2024-01-01", "Expenses:Rent"),
+        make_forecast_txn("2024-01-15", "Rent [MONTHLY REPEAT 3 TIMES]"),
+    ]);
+    let output = plugin.process(input);
+    assert!(output.errors.is_empty());
+    let txns: Vec<_> = output
         .directives
         .iter()
         .filter(|d| d.directive_type == "transaction")
-        .count();
-    assert!(
-        txn_count >= 3,
-        "forecast should expand to at least 3 transactions (got {txn_count})"
+        .collect();
+    assert_eq!(txns.len(), 3, "MONTHLY REPEAT 3 TIMES emits exactly 3 txns");
+    let dates: Vec<&str> = txns.iter().map(|t| t.date.as_str()).collect();
+    assert_eq!(dates, vec!["2024-01-15", "2024-02-15", "2024-03-15"]);
+    // Bracketed pattern stripped from narration.
+    let DirectiveData::Transaction(data) = &txns[0].data else {
+        panic!("transaction directive_type with non-Transaction data");
+    };
+    assert_eq!(
+        data.narration, "Rent",
+        "bracketed pattern should be stripped from narration"
     );
+}
+
+/// `[WEEKLY REPEAT 4 TIMES]` → 4 dates 7 days apart.
+#[test]
+fn test_forecast_weekly_repeat() {
+    let plugin = ForecastPlugin;
+    let input = make_input(vec![
+        make_open("2024-01-01", "Assets:Cash"),
+        make_open("2024-01-01", "Expenses:Rent"),
+        make_forecast_txn("2024-01-01", "Groceries [WEEKLY REPEAT 4 TIMES]"),
+    ]);
+    let output = plugin.process(input);
+    let txns: Vec<_> = output
+        .directives
+        .iter()
+        .filter(|d| d.directive_type == "transaction")
+        .collect();
+    assert_eq!(txns.len(), 4);
+    let dates: Vec<&str> = txns.iter().map(|t| t.date.as_str()).collect();
+    assert_eq!(
+        dates,
+        vec!["2024-01-01", "2024-01-08", "2024-01-15", "2024-01-22"]
+    );
+}
+
+/// `[DAILY REPEAT 5 TIMES]` → 5 consecutive days.
+#[test]
+fn test_forecast_daily_repeat() {
+    let plugin = ForecastPlugin;
+    let input = make_input(vec![
+        make_open("2024-01-01", "Assets:Cash"),
+        make_open("2024-01-01", "Expenses:Rent"),
+        make_forecast_txn("2024-01-15", "Coffee [DAILY REPEAT 5 TIMES]"),
+    ]);
+    let output = plugin.process(input);
+    let txns: Vec<_> = output
+        .directives
+        .iter()
+        .filter(|d| d.directive_type == "transaction")
+        .collect();
+    assert_eq!(txns.len(), 5);
+    let dates: Vec<&str> = txns.iter().map(|t| t.date.as_str()).collect();
+    assert_eq!(
+        dates,
+        vec![
+            "2024-01-15",
+            "2024-01-16",
+            "2024-01-17",
+            "2024-01-18",
+            "2024-01-19",
+        ]
+    );
+}
+
+/// `[MONTHLY UNTIL 2024-04-15]` → all dates from start through end
+/// inclusive. Pins the until-date inclusive boundary.
+#[test]
+fn test_forecast_monthly_until_inclusive() {
+    let plugin = ForecastPlugin;
+    let input = make_input(vec![
+        make_open("2024-01-01", "Assets:Cash"),
+        make_open("2024-01-01", "Expenses:Rent"),
+        make_forecast_txn("2024-01-15", "Rent [MONTHLY UNTIL 2024-04-15]"),
+    ]);
+    let output = plugin.process(input);
+    let txns: Vec<_> = output
+        .directives
+        .iter()
+        .filter(|d| d.directive_type == "transaction")
+        .collect();
+    assert_eq!(txns.len(), 4, "until is inclusive: Jan, Feb, Mar, Apr");
+    let dates: Vec<&str> = txns.iter().map(|t| t.date.as_str()).collect();
+    assert_eq!(
+        dates,
+        vec!["2024-01-15", "2024-02-15", "2024-03-15", "2024-04-15"]
+    );
+}
+
+/// `[MONTHLY SKIP 1 TIME REPEAT 3 TIMES]` → bi-monthly (every 2nd
+/// month). SKIP n TIMES means stride = n+1.
+#[test]
+fn test_forecast_skip_increases_stride() {
+    let plugin = ForecastPlugin;
+    let input = make_input(vec![
+        make_open("2024-01-01", "Assets:Cash"),
+        make_open("2024-01-01", "Expenses:Rent"),
+        make_forecast_txn(
+            "2024-01-01",
+            "Quarterly insurance [MONTHLY SKIP 1 TIME REPEAT 3 TIMES]",
+        ),
+    ]);
+    let output = plugin.process(input);
+    let txns: Vec<_> = output
+        .directives
+        .iter()
+        .filter(|d| d.directive_type == "transaction")
+        .collect();
+    assert_eq!(txns.len(), 3);
+    let dates: Vec<&str> = txns.iter().map(|t| t.date.as_str()).collect();
+    assert_eq!(
+        dates,
+        vec!["2024-01-01", "2024-03-01", "2024-05-01"],
+        "SKIP 1 TIME = bi-monthly stride"
+    );
+}
+
+/// `#`-flagged transaction without a recurrence pattern → kept as
+/// a single-instance `#` transaction (no expansion). Pins the
+/// no-match path.
+#[test]
+fn test_forecast_no_pattern_in_narration_kept_unchanged() {
+    let plugin = ForecastPlugin;
+    let input = make_input(vec![
+        make_open("2024-01-01", "Assets:Cash"),
+        make_open("2024-01-01", "Expenses:Rent"),
+        make_forecast_txn("2024-01-15", "Forecast with no recurrence pattern"),
+    ]);
+    let output = plugin.process(input);
+    let txns: Vec<_> = output
+        .directives
+        .iter()
+        .filter(|d| d.directive_type == "transaction")
+        .collect();
+    assert_eq!(
+        txns.len(),
+        1,
+        "no recurrence pattern in narration → no expansion"
+    );
+    assert_eq!(txns[0].date, "2024-01-15");
 }
 
 // ============================================================================
@@ -3663,7 +4195,24 @@ fn test_zerosum_requires_config() {
 // ============================================================================
 // BoxAccrualPlugin Tests
 // ============================================================================
+//
+// `box_accrual` finds transactions with `synthetic_loan_expiry`
+// metadata and splits a single `:Capital-Losses` posting
+// proportionally across years (by day count). The final segment is
+// `total - sum(rounded_segments)` so the total is preserved exactly.
+// Each split posting carries an `effective_date` metadata for the
+// last day of its year segment (the final segment uses the actual
+// expiry date).
+//
+// Skip conditions (transaction passes through unchanged):
+//   - no `synthetic_loan_expiry` metadata
+//   - no posting whose account ends with `:Capital-Losses`
+//   - more than one such posting (the plugin only handles exactly 1)
+//   - same-year start and expiry (no split needed)
+//   - unparsable dates / non-decimal amount
 
+/// No `synthetic_loan_expiry` metadata → directives unchanged. Pins
+/// the early-skip when expiry metadata is absent.
 #[test]
 fn test_box_accrual_no_metadata_passthrough() {
     let plugin = BoxAccrualPlugin;
@@ -3681,31 +4230,210 @@ fn test_box_accrual_no_metadata_passthrough() {
     ]);
     let output = plugin.process(input);
     assert!(output.errors.is_empty());
-    // No synthetic_loan_expiry metadata → directives unchanged
     assert_eq!(output.directives.len(), 3);
 }
 
+/// Multi-year span → exactly one Capital-Losses posting per year,
+/// each tagged with the year's `effective_date`, and the segment
+/// amounts sum exactly to the original total. Pins the core
+/// preservation invariant.
 #[test]
-fn test_box_accrual_with_metadata_splits_losses() {
+fn test_box_accrual_multi_year_splits_preserve_total() {
+    use rust_decimal::Decimal;
+    use std::str::FromStr;
+
     let plugin = BoxAccrualPlugin;
+    // 2024-07-01 → 2026-06-30 spans 3 calendar years (2024, 2025, 2026).
     let input = make_input(vec![
         make_open("2024-01-01", "Income:Capital-Losses"),
-        make_open("2024-01-01", "Assets:Cash"),
+        make_open("2024-01-01", "Assets:Broker"),
         make_transaction_with_metadata(
             "2024-07-01",
-            "Loss with expiry",
+            "Sell synthetic spanning 3 years",
             vec![(
                 "synthetic_loan_expiry",
                 MetaValueData::Date("2026-06-30".to_string()),
             )],
             vec![
-                ("Income:Capital-Losses", "-1000", "USD"),
-                ("Assets:Cash", "1000", "USD"),
+                ("Income:Capital-Losses", "-1000.00", "USD"),
+                ("Assets:Broker", "1000.00", "USD"),
             ],
         ),
     ]);
     let output = plugin.process(input);
     assert!(output.errors.is_empty());
+
+    let txn = output
+        .directives
+        .iter()
+        .find(|d| d.directive_type == "transaction")
+        .expect("transaction must remain");
+    let DirectiveData::Transaction(data) = &txn.data else {
+        panic!("non-Transaction data on transaction directive");
+    };
+
+    let losses_iter = || {
+        data.postings
+            .iter()
+            .filter(|p| p.account.ends_with(":Capital-Losses"))
+    };
+    assert_eq!(
+        losses_iter().count(),
+        3,
+        "3-year span yields 3 Capital-Losses postings"
+    );
+
+    // Each split must carry an `effective_date`.
+    for p in losses_iter() {
+        assert!(
+            p.metadata.iter().any(|(k, _)| k == "effective_date"),
+            "every split should carry effective_date metadata"
+        );
+    }
+
+    // Sum of split amounts = original total (-1000.00). Pins the
+    // "final segment is remainder" invariant.
+    let sum: Decimal = losses_iter()
+        .filter_map(|p| p.units.as_ref())
+        .filter_map(|u| Decimal::from_str(&u.number).ok())
+        .sum();
+    assert_eq!(
+        sum,
+        Decimal::from_str("-1000.00").unwrap(),
+        "split amounts must sum exactly to the original total"
+    );
+}
+
+/// Same year for start and expiry → plugin skips the split (no
+/// reason to slice a single-year position). Transaction passes
+/// through with its original single Capital-Losses posting intact.
+#[test]
+fn test_box_accrual_same_year_no_split() {
+    let plugin = BoxAccrualPlugin;
+    let input = make_input(vec![
+        make_open("2024-01-01", "Income:Capital-Losses"),
+        make_open("2024-01-01", "Assets:Broker"),
+        make_transaction_with_metadata(
+            "2024-03-01",
+            "Same-year span",
+            vec![(
+                "synthetic_loan_expiry",
+                MetaValueData::Date("2024-12-31".to_string()),
+            )],
+            vec![
+                ("Income:Capital-Losses", "-365", "USD"),
+                ("Assets:Broker", "365", "USD"),
+            ],
+        ),
+    ]);
+    let output = plugin.process(input);
+    let txn = output
+        .directives
+        .iter()
+        .find(|d| d.directive_type == "transaction")
+        .expect("transaction must remain");
+    let DirectiveData::Transaction(data) = &txn.data else {
+        panic!("non-Transaction data on transaction directive");
+    };
+    let loss_postings: Vec<_> = data
+        .postings
+        .iter()
+        .filter(|p| p.account.ends_with(":Capital-Losses"))
+        .collect();
+    assert_eq!(
+        loss_postings.len(),
+        1,
+        "same-year transaction is left with its original single posting"
+    );
+    // And no effective_date metadata was added.
+    assert!(
+        !loss_postings[0]
+            .metadata
+            .iter()
+            .any(|(k, _)| k == "effective_date"),
+        "single-year passthrough should not add effective_date metadata"
+    );
+}
+
+/// Metadata present but no `:Capital-Losses` posting → plugin can't
+/// split anything, transaction passes through. Pins the
+/// `losses.len() != 1` skip.
+#[test]
+fn test_box_accrual_no_capital_losses_posting_unchanged() {
+    let plugin = BoxAccrualPlugin;
+    let input = make_input(vec![
+        make_open("2024-01-01", "Assets:Cash"),
+        make_open("2024-01-01", "Expenses:Food"),
+        make_transaction_with_metadata(
+            "2024-07-01",
+            "Lunch with stray expiry metadata",
+            vec![(
+                "synthetic_loan_expiry",
+                MetaValueData::Date("2026-06-30".to_string()),
+            )],
+            vec![
+                ("Expenses:Food", "25", "USD"),
+                ("Assets:Cash", "-25", "USD"),
+            ],
+        ),
+    ]);
+    let output = plugin.process(input);
+    let txn = output
+        .directives
+        .iter()
+        .find(|d| d.directive_type == "transaction")
+        .expect("transaction must remain");
+    let DirectiveData::Transaction(data) = &txn.data else {
+        panic!("non-Transaction data on transaction directive");
+    };
+    assert_eq!(
+        data.postings.len(),
+        2,
+        "no Capital-Losses → original postings preserved exactly"
+    );
+}
+
+/// More than one `:Capital-Losses` posting → plugin can't decide
+/// which to split, transaction passes through. Pins the
+/// `losses.len() != 1` skip in the multi-loss direction.
+#[test]
+fn test_box_accrual_two_capital_losses_postings_unchanged() {
+    let plugin = BoxAccrualPlugin;
+    let input = make_input(vec![
+        make_open("2024-01-01", "Income:Capital-Losses"),
+        make_open("2024-01-01", "Income:Other:Capital-Losses"),
+        make_open("2024-01-01", "Assets:Broker"),
+        make_transaction_with_metadata(
+            "2024-07-01",
+            "Two loss accounts",
+            vec![(
+                "synthetic_loan_expiry",
+                MetaValueData::Date("2026-06-30".to_string()),
+            )],
+            vec![
+                ("Income:Capital-Losses", "-500", "USD"),
+                ("Income:Other:Capital-Losses", "-500", "USD"),
+                ("Assets:Broker", "1000", "USD"),
+            ],
+        ),
+    ]);
+    let output = plugin.process(input);
+    let txn = output
+        .directives
+        .iter()
+        .find(|d| d.directive_type == "transaction")
+        .expect("transaction must remain");
+    let DirectiveData::Transaction(data) = &txn.data else {
+        panic!("non-Transaction data on transaction directive");
+    };
+    assert_eq!(
+        data.postings
+            .iter()
+            .filter(|p| p.account.ends_with(":Capital-Losses"))
+            .count(),
+        2,
+        "ambiguous case → both loss postings kept untouched"
+    );
 }
 
 // ============================================================================

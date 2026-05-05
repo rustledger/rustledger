@@ -2243,7 +2243,10 @@ fn test_registry_list_all() {
     let registry = NativePluginRegistry::new();
     let plugins = registry.list();
 
-    // Should have at least 13 plugins (14 minus auto_tag which might be different)
+    // Should have at least 13 plugins (14 minus auto_tag which might be different).
+    // allow weak-count: registry-shape test — count grows as plugins are added,
+    // pinning to a specific value would force every plugin addition to update
+    // this test. See scripts/check-plugin-test-quality.sh.
     assert!(plugins.len() >= 13, "should have at least 13 plugins");
 }
 

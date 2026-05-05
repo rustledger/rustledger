@@ -103,6 +103,20 @@ jobs:
       - uses: actions/checkout@900f2210b1d28bbbd0bd22d17926b9e224e8f231 # v6
       - name: Verify forbid-unsafe-code invariant
         run: ./scripts/check-unsafe-invariant.sh
+
+  # Plugin-test policies (Phase 5 of plugin-testing-quality plan, see #992).
+  # Catches weak count assertions and `(partial)` test ports that tend to
+  # silently mask plugin bugs.
+  plugin-test-quality:
+    name: Plugin Test Quality
+    needs: [changes]
+    if: needs.changes.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@900f2210b1d28bbbd0bd22d17926b9e224e8f231 # v6
+      - name: Run plugin-test-quality lints
+        run: ./scripts/check-plugin-test-quality.sh
+
   # Main CI matrix - check, clippy, test, doc (only on code changes)
   ci:
     name: ${{ matrix.name }}

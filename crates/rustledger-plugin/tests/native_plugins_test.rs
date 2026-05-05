@@ -1780,12 +1780,89 @@ fn test_unique_prices_different_pairs_ok() {
 // ImplicitPricesPlugin Tests (from implicit_prices_test.py)
 // ============================================================================
 
-/// Test price generation from cost.
-/// Converted from: `test_add_implicit_prices__all_cases` (partial)
+/// Helper that returns plugin-generated price directives only
+/// (filename = None), as a `Vec<(currency, number, quote_currency)>` for
+/// strict equality assertions.
+///
+/// Use this instead of `assert!(price_count >= N)` — the original test
+/// shape silently masked issue #992 because `>= 1` accepted both the
+/// correct emission AND the spurious extra one.
+fn implicit_prices_emitted(output: &PluginOutput) -> Vec<(String, String, String)> {
+    output
+        .directives
+        .iter()
+        .filter(|d| d.directive_type == "price" && d.filename.is_none())
+        .filter_map(|d| match &d.data {
+            DirectiveData::Price(p) => Some((
+                p.currency.clone(),
+                p.amount.number.clone(),
+                p.amount.currency.clone(),
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Build a transaction where the priced posting carries a price annotation
+/// (`@` or `@@`). Used by the implicit-prices tests below.
+fn make_txn_with_price_annotation(
+    date: &str,
+    narration: &str,
+    units: (&str, &str),
+    price: (&str, &str),
+    is_total: bool,
+) -> DirectiveWrapper {
+    DirectiveWrapper {
+        directive_type: "transaction".to_string(),
+        date: date.to_string(),
+        filename: None,
+        lineno: None,
+        data: DirectiveData::Transaction(TransactionData {
+            flag: "*".to_string(),
+            payee: None,
+            narration: narration.to_string(),
+            tags: vec![],
+            links: vec![],
+            metadata: vec![],
+            postings: vec![
+                PostingData {
+                    account: "Assets:Brokerage".to_string(),
+                    units: Some(AmountData {
+                        number: units.0.to_string(),
+                        currency: units.1.to_string(),
+                    }),
+                    cost: None,
+                    price: Some(PriceAnnotationData {
+                        amount: Some(AmountData {
+                            number: price.0.to_string(),
+                            currency: price.1.to_string(),
+                        }),
+                        is_total,
+                        number: None,
+                        currency: None,
+                    }),
+                    flag: None,
+                    metadata: vec![],
+                },
+                PostingData {
+                    account: "Assets:Cash".to_string(),
+                    units: None,
+                    cost: None,
+                    price: None,
+                    flag: None,
+                    metadata: vec![],
+                },
+            ],
+        }),
+    }
+}
+
+/// Cost-only path. Pinned with strict `assert_eq!` — replaces an earlier
+/// `>= 1` assertion that silently passed even when the plugin emitted
+/// extra spurious prices (issue #992).
 #[test]
 fn test_implicit_prices_from_cost() {
     let plugin = ImplicitPricesPlugin;
-
     let input = make_input(vec![
         make_open("2024-01-01", "Assets:Brokerage"),
         make_open("2024-01-01", "Assets:Cash"),
@@ -1798,33 +1875,114 @@ fn test_implicit_prices_from_cost() {
             "Assets:Cash",
         ),
     ]);
-
     let output = plugin.process(input);
-
-    // Should generate a price directive
-    let price_count = output
-        .directives
-        .iter()
-        .filter(|d| d.directive_type == "price")
-        .count();
-    assert!(
-        price_count >= 1,
-        "should generate at least 1 price directive"
+    assert_eq!(
+        implicit_prices_emitted(&output),
+        vec![("HOOL".into(), "520.00".into(), "USD".into())]
     );
+}
 
-    // Find the generated price
-    let price = output
-        .directives
-        .iter()
-        .find(|d| d.directive_type == "price");
-    assert!(price.is_some(), "should have a price directive");
+/// `@` per-unit annotation: the annotation amount is used directly.
+#[test]
+fn test_implicit_prices_from_unit_annotation() {
+    let plugin = ImplicitPricesPlugin;
+    let input = make_input(vec![
+        make_open("2024-01-01", "Assets:Brokerage"),
+        make_open("2024-01-01", "Assets:Cash"),
+        make_txn_with_price_annotation(
+            "2024-01-15",
+            "Sell at unit price",
+            ("-5", "HOOL"),
+            ("530", "USD"),
+            false, // is_total = false → @
+        ),
+    ]);
+    let output = plugin.process(input);
+    assert_eq!(
+        implicit_prices_emitted(&output),
+        vec![("HOOL".into(), "530".into(), "USD".into())]
+    );
+}
 
-    if let Some(p) = price
-        && let DirectiveData::Price(price_data) = &p.data
-    {
-        assert_eq!(price_data.currency, "HOOL");
-        assert_eq!(price_data.amount.currency, "USD");
-    }
+/// `@@` total annotation: the total is divided by `units.abs()` to produce
+/// a per-unit price. THIS IS THE ISSUE #992 REGRESSION TEST — pre-fix the
+/// plugin emitted the total amount directly as a per-unit price (off by
+/// a factor of `units`).
+#[test]
+fn test_implicit_prices_from_total_annotation_issue_992() {
+    let plugin = ImplicitPricesPlugin;
+    let input = make_input(vec![
+        make_open("2020-01-01", "Assets:Insurance"),
+        make_txn_with_price_annotation(
+            "2025-01-23",
+            "insurance matured",
+            ("-27204.53", "BAM"),
+            ("15152.07", "EUR"),
+            true, // is_total = true → @@
+        ),
+    ]);
+    let output = plugin.process(input);
+    let prices = implicit_prices_emitted(&output);
+    // Exactly one price, NOT two (one of which used to be 15152.07
+    // emitted as a per-unit price — the original bug).
+    assert_eq!(prices.len(), 1, "exactly one price per posting");
+    let (base, num_str, quote) = &prices[0];
+    assert_eq!(base, "BAM");
+    assert_eq!(quote, "EUR");
+    // The per-unit price is 15152.07 / 27204.53 ≈ 0.5569...
+    let parsed: rust_decimal::Decimal = num_str.parse().expect("price parses");
+    assert!(
+        parsed > rust_decimal_macros::dec!(0.55) && parsed < rust_decimal_macros::dec!(0.56),
+        "@@ total must be divided by units.abs(); got {num_str}"
+    );
+}
+
+/// Posting with BOTH `{cost}` AND `@` annotation: the annotation wins,
+/// AND the plugin must emit exactly one price (not two). Pre-fix the
+/// plugin double-emitted: one from the annotation block, one from the
+/// cost block immediately after. This is the secondary bug from #992.
+#[test]
+fn test_implicit_prices_annotation_and_cost_emits_one_not_two() {
+    let plugin = ImplicitPricesPlugin;
+    let input = make_input(vec![
+        make_open("2024-01-01", "Assets:Brokerage"),
+        make_open("2024-01-01", "Assets:Cash"),
+        // 5 ABC {1.25 EUR} @ 1.40 EUR
+        make_transaction_with_cost_and_price(
+            "2024-01-15",
+            "Sell with both cost and price",
+            "Assets:Brokerage",
+            ("-5", "ABC"),
+            ("1.25", "EUR"), // cost
+            ("1.40", "EUR"), // price annotation (per-unit)
+            "Assets:Cash",
+        ),
+    ]);
+    let output = plugin.process(input);
+    let prices = implicit_prices_emitted(&output);
+    assert_eq!(prices.len(), 1, "exactly one price (annotation wins)");
+    assert_eq!(
+        prices[0],
+        ("ABC".into(), "1.40".into(), "EUR".into()),
+        "annotation amount wins over cost"
+    );
+}
+
+/// Posting with NO price annotation and NO cost: emits nothing.
+#[test]
+fn test_implicit_prices_emits_nothing_for_plain_transfer() {
+    let plugin = ImplicitPricesPlugin;
+    let input = make_input(vec![
+        make_open("2024-01-01", "Assets:A"),
+        make_open("2024-01-01", "Assets:B"),
+        make_transaction(
+            "2024-01-15",
+            "Plain transfer",
+            vec![("Assets:A", "100", "USD"), ("Assets:B", "-100", "USD")],
+        ),
+    ]);
+    let output = plugin.process(input);
+    assert!(implicit_prices_emitted(&output).is_empty());
 }
 
 // ============================================================================

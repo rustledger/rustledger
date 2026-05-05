@@ -47,6 +47,7 @@ pub mod directive;
 pub mod display_context;
 pub mod extract;
 pub mod format;
+pub mod implicit_prices;
 pub mod intern;
 pub mod inventory;
 pub mod position;
@@ -69,6 +70,7 @@ pub use extract::{
     extract_currencies_iter, extract_payees, extract_payees_iter,
 };
 pub use format::{FormatConfig, format_directive};
+pub use implicit_prices::extract_per_unit_price;
 pub use intern::{InternedStr, StringInterner};
 pub use inventory::{
     AccountedBookingError, BookingError, BookingMethod, BookingResult, Inventory, ReductionScope,

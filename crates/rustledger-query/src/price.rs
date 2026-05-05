@@ -92,57 +92,63 @@ impl PriceDatabase {
 
     /// Add implicit prices from transaction postings.
     ///
-    /// Extracts prices from:
-    /// 1. Price annotations (`@ price` or `@@ total_price`) - takes priority
-    /// 2. Cost specifications (`{cost}`) when no valid price annotation
+    /// Delegates per-posting price math to
+    /// [`rustledger_core::extract_per_unit_price`], which is also used
+    /// by the native `implicit_prices` plugin
+    /// (`rustledger_plugin::native::plugins::implicit_prices`). Pre-fix
+    /// (issue #992) the two paths were independently implemented and
+    /// diverged on `@@` handling — the plugin emitted total amounts as
+    /// per-unit prices. The shared helper eliminates that drift by
+    /// construction.
     ///
-    /// This matches Python beancount's `implicit_prices` plugin behavior.
+    /// Resolution priority (matches Python beancount's
+    /// `implicit_prices` plugin):
+    /// 1. Price annotation (`@` or `@@`) when an amount is present
+    /// 2. Cost spec (`{...}`) as fallback
+    /// 3. Otherwise no price emitted
     pub fn add_implicit_prices_from_transaction(&mut self, txn: &Transaction) {
         for posting in &txn.postings {
-            // Get the posting's units (the commodity being priced)
-            if let Some(units) = posting.amount() {
-                // Priority 1: Price annotation (@ or @@) - if it yields a valid amount.
-                // If the annotation exists but amount() is None, we fall through to cost.
-                if let Some(price_annotation) = &posting.price
-                    && let Some(price_amount) = price_annotation.amount()
-                {
-                    // For @@ (total), calculate per-unit price
-                    let per_unit_price = if price_annotation.is_unit() {
-                        price_amount.number
-                    } else if !units.number.is_zero() {
-                        // Total price divided by units
-                        price_amount.number / units.number.abs()
-                    } else {
-                        continue;
-                    };
+            let Some(units) = posting.amount() else {
+                continue;
+            };
 
-                    self.add_implicit_price(
-                        txn.date,
-                        &units.currency,
-                        per_unit_price,
-                        &price_amount.currency,
-                    );
-                    // Successfully extracted from price annotation, skip cost fallback
-                    continue;
+            // Extract primitives for the shared helper.
+            let (annotation_is_total, annotation_amount, annotation_currency) = match &posting.price
+            {
+                Some(annotation) => {
+                    let amount = annotation.amount();
+                    (
+                        !annotation.is_unit(),
+                        amount.map(|a| a.number),
+                        amount.map(|a| a.currency.clone()),
+                    )
                 }
+                None => (false, None, None),
+            };
+            let (cost_per, cost_total, cost_currency) = match &posting.cost {
+                Some(c) => (c.number_per, c.number_total, c.currency.clone()),
+                None => (None, None, None),
+            };
 
-                // Priority 2: Cost specification (fallback if no valid price from annotation)
-                if let Some(cost_spec) = &posting.cost {
-                    if let (Some(number_per), Some(currency)) =
-                        (&cost_spec.number_per, &cost_spec.currency)
-                    {
-                        self.add_implicit_price(txn.date, &units.currency, *number_per, currency);
-                    } else if let (Some(number_total), Some(currency)) =
-                        (&cost_spec.number_total, &cost_spec.currency)
-                    {
-                        // Calculate per-unit from total
-                        if !units.number.is_zero() {
-                            let per_unit = *number_total / units.number.abs();
-                            self.add_implicit_price(txn.date, &units.currency, per_unit, currency);
-                        }
-                    }
-                }
-            }
+            let Some(per_unit) = rustledger_core::extract_per_unit_price(
+                units.number,
+                annotation_is_total,
+                annotation_amount,
+                cost_per,
+                cost_total,
+            ) else {
+                continue;
+            };
+
+            // Quote currency follows the same priority rule as the per-unit
+            // value: prefer the annotation's currency, fall back to cost's.
+            // The helper doesn't pick this — it returns only the magnitude.
+            let quote_currency = annotation_currency.or(cost_currency);
+            let Some(quote) = quote_currency else {
+                continue;
+            };
+
+            self.add_implicit_price(txn.date, &units.currency, per_unit, &quote);
         }
     }
 

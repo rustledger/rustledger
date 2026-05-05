@@ -1,13 +1,27 @@
 //! Plugin that generates price entries from transaction costs and prices.
 
-use crate::types::{DirectiveWrapper, PluginInput, PluginOutput};
+use crate::types::{
+    AmountData, DirectiveData, DirectiveWrapper, PluginInput, PluginOutput, PriceData,
+};
+use rust_decimal::Decimal;
+use rustledger_core::extract_per_unit_price;
+use std::str::FromStr;
 
 use super::super::NativePlugin;
 
-/// Plugin that generates price entries from transaction costs and prices.
+/// Plugin that generates price entries from transaction postings.
 ///
-/// When a transaction has a posting with a cost or price annotation,
-/// this plugin generates a corresponding Price directive.
+/// For each posting with a `@`/`@@` price annotation or a `{...}` cost
+/// spec, generates a corresponding `Price` directive. Mirrors Python
+/// beancount's `beancount.plugins.implicit_prices`.
+///
+/// Per-posting price math is delegated to
+/// [`rustledger_core::extract_per_unit_price`] — the same helper used
+/// by the BQL query path. Pre-fix (issue #992) this plugin had its own
+/// implementation that emitted `@@` total amounts as per-unit prices
+/// (off by a factor of `units`) AND emitted both an annotation-derived
+/// AND a cost-derived price for postings that had both. Both bugs
+/// disappear once the helper is the single source of truth.
 pub struct ImplicitPricesPlugin;
 
 impl NativePlugin for ImplicitPricesPlugin {
@@ -26,63 +40,86 @@ impl NativePlugin for ImplicitPricesPlugin {
         for wrapper in &input.directives {
             new_directives.push(wrapper.clone());
 
-            // Only process transactions
             if wrapper.directive_type != "transaction" {
                 continue;
             }
 
-            // Extract prices from transaction data
-            if let crate::types::DirectiveData::Transaction(ref txn) = wrapper.data {
-                for posting in &txn.postings {
-                    // Check for price annotation
-                    if let Some(ref units) = posting.units {
-                        if let Some(ref price) = posting.price {
-                            // Generate a price directive only if we have a complete amount
-                            if let Some(ref price_amount) = price.amount {
-                                let price_wrapper = DirectiveWrapper {
-                                    directive_type: "price".to_string(),
-                                    date: wrapper.date.clone(),
-                                    filename: None, // Plugin-generated
-                                    lineno: None,
-                                    data: crate::types::DirectiveData::Price(
-                                        crate::types::PriceData {
-                                            currency: units.currency.clone(),
-                                            amount: price_amount.clone(),
-                                            metadata: vec![],
-                                        },
-                                    ),
-                                };
-                                generated_prices.push(price_wrapper);
-                            }
-                        }
+            let DirectiveData::Transaction(ref txn) = wrapper.data else {
+                continue;
+            };
 
-                        // Check for cost with price info
-                        if let Some(ref cost) = posting.cost
-                            && let (Some(number), Some(currency)) =
-                                (&cost.number_per, &cost.currency)
-                        {
-                            let price_wrapper = DirectiveWrapper {
-                                directive_type: "price".to_string(),
-                                date: wrapper.date.clone(),
-                                filename: None, // Plugin-generated
-                                lineno: None,
-                                data: crate::types::DirectiveData::Price(crate::types::PriceData {
-                                    currency: units.currency.clone(),
-                                    amount: crate::types::AmountData {
-                                        number: number.clone(),
-                                        currency: currency.clone(),
-                                    },
-                                    metadata: vec![],
-                                }),
-                            };
-                            generated_prices.push(price_wrapper);
+            for posting in &txn.postings {
+                let Some(ref units) = posting.units else {
+                    continue;
+                };
+                let Ok(units_number) = Decimal::from_str(&units.number) else {
+                    continue;
+                };
+
+                // Pull annotation primitives.
+                let (annotation_is_total, annotation_amount, annotation_currency) =
+                    match &posting.price {
+                        Some(annotation) => {
+                            let amount_decimal = annotation
+                                .amount
+                                .as_ref()
+                                .and_then(|a| Decimal::from_str(&a.number).ok());
+                            let amount_currency =
+                                annotation.amount.as_ref().map(|a| a.currency.clone());
+                            (annotation.is_total, amount_decimal, amount_currency)
                         }
+                        None => (false, None, None),
+                    };
+
+                // Pull cost primitives.
+                let (cost_per, cost_total, cost_currency) = match &posting.cost {
+                    Some(cost) => {
+                        let per = cost
+                            .number_per
+                            .as_ref()
+                            .and_then(|n| Decimal::from_str(n).ok());
+                        let total = cost
+                            .number_total
+                            .as_ref()
+                            .and_then(|n| Decimal::from_str(n).ok());
+                        (per, total, cost.currency.clone())
                     }
-                }
+                    None => (None, None, None),
+                };
+
+                let Some(per_unit) = extract_per_unit_price(
+                    units_number,
+                    annotation_is_total,
+                    annotation_amount,
+                    cost_per,
+                    cost_total,
+                ) else {
+                    continue;
+                };
+
+                // Quote currency follows the same priority as the per-unit
+                // value: annotation first, cost as fallback.
+                let Some(quote_currency) = annotation_currency.or(cost_currency) else {
+                    continue;
+                };
+
+                generated_prices.push(DirectiveWrapper {
+                    directive_type: "price".to_string(),
+                    date: wrapper.date.clone(),
+                    filename: None, // plugin-generated
+                    lineno: None,
+                    data: DirectiveData::Price(PriceData {
+                        currency: units.currency.clone(),
+                        amount: AmountData {
+                            number: per_unit.to_string(),
+                            currency: quote_currency,
+                        },
+                        metadata: vec![],
+                    }),
+                });
             }
         }
 
-        // Add generated prices
         new_directives.extend(generated_prices);
 
         PluginOutput {

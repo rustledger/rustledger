@@ -445,7 +445,9 @@ pub enum PriceAnnotationView<'a> {
     ///
     /// Consumers that compute prices MUST divide by the posting's
     /// `units.number.abs()` to recover the per-unit price. See
-    /// [`rustledger_core::extract_per_unit_price`].
+    /// `rustledger_core::extract_per_unit_price` (in the
+    /// `rustledger-core` crate; not linked because that crate is not a
+    /// dependency of `rustledger-plugin-types`).
     Total(&'a AmountData),
     /// `@ NUMBER` / `@ CURRENCY` — per-unit annotation missing one
     /// or both of (number, currency).

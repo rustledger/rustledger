@@ -26,7 +26,9 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-TESTS_DIR="$REPO_ROOT/crates/rustledger-plugin/tests"
+# Override-able for the script's self-test (see test-plugin-test-quality.sh).
+# Defaults to the real plugin tests dir for normal CI/pre-push use.
+TESTS_DIR="${TESTS_DIR:-$REPO_ROOT/crates/rustledger-plugin/tests}"
 
 # Hard-fail if the tests directory disappeared (path moved, broken
 # worktree, etc.). Pre-fix this script silenced grep stderr with
@@ -66,14 +68,17 @@ grep_or_die() {
 }
 
 # For a `path:lineno:line` match, scan the 5 lines ending at lineno
-# (inclusive) for the given allow annotation. Returns 0 if found.
+# (inclusive) for the given allow annotation. Requires a NON-EMPTY
+# reason after the colon — `// allow weak-count:` (no reason) doesn't
+# count, because the whole point of the opt-out is to force the author
+# to articulate why the lint should be bypassed. Returns 0 if found.
 has_allow_above() {
     local match="$1"
     local annotation="$2"
     local file lineno start
     IFS=: read -r file lineno _ <<< "$match"
     start=$(( lineno > 5 ? lineno - 5 : 1 ))
-    sed -n "${start},${lineno}p" "$file" | grep -q "$annotation"
+    sed -n "${start},${lineno}p" "$file" | grep -qE "${annotation}:[[:space:]]*\S"
 }
 
 # ----------------------------------------------------------------------
@@ -82,22 +87,26 @@ has_allow_above() {
 
 echo "[1/2] weak count assertions"
 
-# Three shapes — all accept "1 OR 100":
+# Four shapes — all accept "1 OR 100":
 #   A. `assert!(x.len() >= N)` / `assert!(x.count() > N)` and
 #      precomputed `*_count` / `*_len` / `*_size` (or bare
 #      `count`/`len`/`size`) idents. The original #992 bug used
 #      `assert!(price_count >= 1)`.
 #   B. `assert_ne!(x.len(), 0)` / `assert_ne!(emitted_count, 0)`
 #   C. `assert!(!x.is_empty())`
+#   D. `assert!(x.len() != 0)` / `assert!(price_count != 0)` —
+#      semantically identical to B but written as an inequality
+#      instead of using `assert_ne!`.
 #
 # Per-match allowlist: `// allow weak-count: <reason>` within 5
 # leading lines.
 PAT_A='assert!\([^)]*((\.(count|len|size)\(\))|\b(count|len|size|[a-z_]+_(count|len|size)))[^)]*(>|>=)[[:space:]]*[0-9]+'
 PAT_B='assert_ne!\([^,]*((\.(count|len|size)\(\))|\b(count|len|size|[a-z_]+_(count|len|size)))[^,]*,[[:space:]]*0[[:space:]]*[,)]'
 PAT_C='assert!\([[:space:]]*!.+\.is_empty\(\)'
+PAT_D='assert!\([^)]*((\.(count|len|size)\(\))|\b(count|len|size|[a-z_]+_(count|len|size)))[^)]*!=[[:space:]]*0[[:space:]]*[,)]'
 
 bad=""
-for pat in "$PAT_A" "$PAT_B" "$PAT_C"; do
+for pat in "$PAT_A" "$PAT_B" "$PAT_C" "$PAT_D"; do
     matches=$(grep_or_die "$pat" "$TESTS_DIR")
     [ -z "$matches" ] && continue
     while IFS= read -r match; do

@@ -135,7 +135,7 @@ preserve_order = true
 # ----------------------------------------------------------------------
 # Plugin-emitted directives (Phase 2 of plugin-testing-quality plan).
 #
-# Fixtures under tests/compatibility/files/plugin/<plugin>/ enable
+# Fixtures under tests/compatibility/files/plugins/<plugin>/ enable
 # specific plugins via `plugin "..."` directives. These queries surface
 # what the plugin emitted, so a divergence between rledger's plugin
 # implementation and bean-check's shows up as a BQL mismatch in the

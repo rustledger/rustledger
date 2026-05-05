@@ -9,7 +9,15 @@
 
 # Track in-tree plugin differential fixtures (Phase 2 of plugin-testing
 # plan, see #992). These exercise specific plugin code paths and ship
-# with the repo, unlike the downloaded corpus. Whitelist *.beancount
-# files only so beancount's `.cache` sidecar files stay ignored.
-!plugin/
-!plugin/**/*.beancount
+# with the repo, unlike the downloaded corpus. The dir name `plugins`
+# matches the per-category key used in `.github/workflows/compat.yml`'s
+# `get_category` so these fixtures count toward the "plugins" metric.
+#
+# Pattern needs both the dir AND `**/` to allow Git to recurse into
+# nested per-plugin subdirectories (e.g. `plugins/implicit_prices/`).
+# Without `!plugins/**/`, the top-level `*` ignores the intermediate
+# dirs and `git add` would silently skip new fixtures unless invoked
+# with `-f`.
+!plugins/
+!plugins/**/
+!plugins/**/*.beancount

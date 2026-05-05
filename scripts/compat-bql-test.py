@@ -415,37 +415,54 @@ def main() -> int:
             "phase first or pass --files-from."
         )
 
+    test_dirs = DEFAULT_TEST_DIRS
+
+    # Resolve basenames → real paths BEFORE prioritization. The
+    # `--files-from` JSONL stores `file_path.name` (basename only —
+    # see `.github/workflows/compat.yml` `FileResult(file=...)`), so
+    # we can't tell from the basename alone whether a fixture lives
+    # under `plugins/` or anywhere else. Resolving first lets us
+    # prioritize on the resolved path and also surfaces collisions
+    # via `find_file`'s logic.
+    resolved: list[tuple[str, Path]] = []
+    unresolved: list[str] = []
+    for filename in valid:
+        path = find_file(filename, test_dirs)
+        if path is None:
+            unresolved.append(filename)
+        else:
+            resolved.append((filename, path))
+
     # Prioritize plugin-fixture files so they always make the MAX_FILES
     # cut. These exercise specific plugin code paths (Phase 2 of the
     # plugin-testing-quality plan, see #992) — losing them to random
-    # truncation defeats the purpose of having them.
-    plugin_fixtures = [f for f in valid if f.startswith("plugin/") or "_plugin_" in f]
-    other_fixtures = [f for f in valid if f not in plugin_fixtures]
-    # Truncate the non-plugin pool but keep all plugin fixtures.
-    remaining_budget = max(0, args.max_files - len(plugin_fixtures))
-    valid = plugin_fixtures + other_fixtures[:remaining_budget]
-    if plugin_fixtures:
+    # truncation defeats the purpose of having them. Identification is
+    # by resolved path: any fixture whose path includes a `plugins`
+    # directory segment counts (matches the `get_category` convention
+    # in `.github/workflows/compat.yml`).
+    def is_plugin_fixture(path: Path) -> bool:
+        return "plugins" in path.parts
+
+    plugin_pairs = [(fn, p) for (fn, p) in resolved if is_plugin_fixture(p)]
+    other_pairs = [(fn, p) for (fn, p) in resolved if not is_plugin_fixture(p)]
+    remaining_budget = max(0, args.max_files - len(plugin_pairs))
+    selected_pairs = plugin_pairs + other_pairs[:remaining_budget]
+
+    if plugin_pairs:
         print(
-            f"Testing against {len(valid)} files "
-            f"({len(plugin_fixtures)} plugin fixtures + "
-            f"{len(valid) - len(plugin_fixtures)} other)"
+            f"Testing against {len(selected_pairs)} files "
+            f"({len(plugin_pairs)} plugin fixtures + "
+            f"{len(selected_pairs) - len(plugin_pairs)} other)"
         )
     else:
-        print(f"Testing against {len(valid)} files")
-
-    test_dirs = DEFAULT_TEST_DIRS
+        print(f"Testing against {len(selected_pairs)} files")
 
     rledger_bin = [args.rledger, "query"]
     bean_query_bin = [args.bean_query]
 
     # Build (file, filename, query) cases
     cases = []
-    unresolved: list[str] = []
-    for filename in valid:
-        path = find_file(filename, test_dirs)
-        if not path:
-            unresolved.append(filename)
-            continue
+    for filename, path in selected_pairs:
         for q in queries:
             cases.append((path, filename, q))
 

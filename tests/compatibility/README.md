@@ -8,17 +8,24 @@ This directory contains test infrastructure for verifying compatibility between 
 tests/compatibility/
 ├── README.md           # This file
 ├── sources.toml        # Documentation of file sources and licenses
-└── files/              # Downloaded test files (~800, gitignored)
-    ├── beancount-v2/   # Files from beancount v2
-    ├── beancount-v3/   # Files from beancount v3
-    ├── fava/           # Files from fava
+└── files/              # Test files (~800 downloaded + a small in-tree set)
+    ├── beancount-v2/   # Files from beancount v2 (downloaded)
+    ├── beancount-v3/   # Files from beancount v3 (downloaded)
+    ├── fava/           # Files from fava (downloaded)
     ├── ledger2beancount/
+    ├── plugins/        # In-tree plugin differential fixtures (committed)
+    │   └── implicit_prices/
+    │       ├── cost_only.beancount
+    │       ├── total_annotation.beancount
+    │       └── annotation_and_cost.beancount
     └── ...             # Other sources
 ```
 
 ## Setup
 
-Test files are **not committed** to the repository. Download them before running tests:
+Most test files are **not committed** — `files/` is `.gitignore`d except
+for the `plugins/` subdirectory (see below). Download the rest before
+running tests:
 
 ```bash
 # Inside nix develop
@@ -26,6 +33,17 @@ Test files are **not committed** to the repository. Download them before running
 ```
 
 This downloads ~800 beancount files from 10+ open source repositories.
+
+### In-tree plugin differential fixtures
+
+`files/plugins/<plugin-name>/` ships **in the repo** (an exception to the
+`.gitignore` rule) so the BQL harness can diff plugin output between
+`bean-check` and `rledger` on every PR. These fixtures exercise specific
+plugin code paths (Phase 2 of the plugin-testing-quality plan in #992).
+
+To add coverage for a new plugin, drop fixtures under
+`files/plugins/<name>/`. The `.gitignore` re-includes
+`plugins/**/*.beancount` so `git add` works mechanically — no `-f` needed.
 
 ## Running Tests
 

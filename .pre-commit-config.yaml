@@ -100,6 +100,20 @@ repos:
         pass_filenames: false
         always_run: true
         stages: [pre-push]
+      # Plugin-test policy lint — sub-second grep-level check that
+      # enforces the rules from CONTRIBUTING.md → "Plugin testing
+      # requirements". Catches weak count assertions and `(partial)`
+      # test ports that historically masked plugin bugs (see issue #992).
+      # Runs on every push because policy violations can land in any
+      # PR that touches the plugin tests directory; the cost is
+      # negligible and CI also enforces the same script.
+      - id: plugin-test-quality
+        name: plugin-test-quality (CONTRIBUTING.md policies)
+        entry: scripts/check-plugin-test-quality.sh
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]
       # Bean-price compatibility harness — only fires when files that could
       # change rledger ↔ bean-price discovery behavior are touched. Runs
       # inside `nix develop` so `bean-price` is on PATH (added in #976).

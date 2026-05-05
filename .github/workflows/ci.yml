@@ -103,6 +103,24 @@ jobs:
       - uses: actions/checkout@900f2210b1d28bbbd0bd22d17926b9e224e8f231 # v6
       - name: Verify forbid-unsafe-code invariant
         run: ./scripts/check-unsafe-invariant.sh
+
+  # Plugin-test policies (Phase 5 of plugin-testing-quality plan, see #992).
+  # Catches weak count assertions and `(partial)` test ports that tend to
+  # silently mask plugin bugs.
+  #
+  # Always runs (no `should_build` gate), because the policy script and
+  # CONTRIBUTING.md changes themselves can land in docs-only PRs and we
+  # still want to lint the test files against the current policy.
+  plugin-test-quality:
+    name: Plugin Test Quality
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@900f2210b1d28bbbd0bd22d17926b9e224e8f231 # v6
+      - name: Self-test the lint script (catches regressions in the regexes)
+        run: ./scripts/test-plugin-test-quality.sh
+      - name: Run plugin-test-quality lints
+        run: ./scripts/check-plugin-test-quality.sh
+
   # Main CI matrix - check, clippy, test, doc (only on code changes)
   ci:
     name: ${{ matrix.name }}
@@ -200,11 +218,20 @@ jobs:
     name: build
     if: always()
     runs-on: ubuntu-latest
-    needs: [changes, fmt, unsafe-invariant, ci, doctest, regressions]
+    needs: [changes, fmt, unsafe-invariant, plugin-test-quality, ci, doctest, regressions]
     steps:
       - name: Check results
         run: |
-          # If no code changes, all jobs will be skipped - that's OK
+          # plugin-test-quality always runs (no should_build gate), so its
+          # result is always required.
+          plugin_quality="${{ needs.plugin-test-quality.result }}"
+          echo "plugin-test-quality result: $plugin_quality"
+          if [[ "$plugin_quality" != "success" ]]; then
+            echo "plugin-test-quality must pass"
+            exit 1
+          fi
+
+          # If no code changes, the remaining build jobs are skipped - that's OK
           if [[ "${{ needs.changes.outputs.should_build }}" == "false" ]]; then
             echo "No code changes - build skipped (OK)"
             exit 0

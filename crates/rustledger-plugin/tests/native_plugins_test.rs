@@ -2243,7 +2243,10 @@ fn test_registry_list_all() {
     let registry = NativePluginRegistry::new();
     let plugins = registry.list();
 
-    // Should have at least 13 plugins (14 minus auto_tag which might be different)
+    // Should have at least 13 plugins (14 minus auto_tag which might be different).
+    // allow weak-count: registry-shape test — count grows as plugins are added,
+    // pinning to a specific value would force every plugin addition to update
+    // this test. See scripts/check-plugin-test-quality.sh.
     assert!(plugins.len() >= 13, "should have at least 13 plugins");
 }
 
@@ -3076,9 +3079,13 @@ fn test_no_unused_warns_on_unused_account() {
         ),
     ]);
     let output = plugin.process(input);
-    assert!(!output.errors.is_empty(), "should warn about Assets:Unused");
+    assert_eq!(
+        output.errors.len(),
+        1,
+        "exactly one error for the single unused account"
+    );
     assert!(
-        output.errors.iter().any(|e| e.message.contains("Unused")),
+        output.errors[0].message.contains("Unused"),
         "error should mention the unused account"
     );
 }
@@ -3632,7 +3639,11 @@ fn test_zerosum_requires_config() {
         make_transaction("2024-01-15", "Test", vec![("Assets:Cash", "100", "USD")]),
     ]);
     let output = plugin.process(input);
-    assert!(!output.errors.is_empty(), "should error without config");
+    assert_eq!(
+        output.errors.len(),
+        1,
+        "exactly one error for missing required config"
+    );
     assert!(output.errors[0].message.contains("requires configuration"));
 }
 

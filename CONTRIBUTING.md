@@ -213,6 +213,55 @@ If your PR hasn't been reviewed, feel free to ping in the PR comments.
 - Close related issues
 - Update documentation if needed
 
+## Plugin testing requirements
+
+Native beancount plugins live in `crates/rustledger-plugin/src/native/plugins/` and are tested in `crates/rustledger-plugin/tests/native_plugins_test.rs`. Issue #992 surfaced a class of bug where a plugin silently emitted wrong output because the consumer ignored a discriminator field (`is_total`) and the test had a weak count assertion (`assert!(count >= 1)`). The plan in #992 documents the structural fixes; the requirements below codify them so future plugins don't regress.
+
+### Required for every new or modified plugin
+
+1. **Test matrix, not "happy path"**. Cover every input variant the plugin can encounter:
+   - Each branch of every input enum (e.g. `@`, `@@`, cost, both, none for posting prices)
+   - Edge cases (empty, zero, negative, missing optional fields)
+   - Each output kind the plugin can emit
+
+2. **Strict count assertions**. Use `assert_eq!(emitted.len(), 1)` — **never** `assert!(emitted.len() >= 1)`. The latter accepts both correct emission and over-emission, which is exactly the failure mode that hid the #992 double-emit bug.
+
+3. **No `(partial)` test ports**. When porting tests from upstream beancount's `<plugin>_test.py`, port the **whole file** or document explicitly which cases are intentionally skipped and why. Test files with `// Converted from … (partial)` comments are no longer accepted.
+
+4. **Differential coverage where applicable**. If your plugin reimplements a beancount built-in, drop a fixture under `tests/compatibility/files/plugin/<name>/` that enables the plugin via `plugin "..."` directive. The BQL compat harness (PR #1000, `scripts/compat-bql-test.py`) automatically diffs rledger's output against bean-check's. No new harness code is required — just the fixture.
+
+5. **Type-driven exhaustive matching**. When consuming an enum-shaped input, use `match` and let the compiler enforce that every variant is handled. Don't extract a discriminator field manually and condition on it — that's the bug shape from #992. (Example: `PriceAnnotationData::view()` from `rustledger-plugin-types` returns a typed enum; new consumers should `match` on its arms rather than reading the underlying `is_total: bool`. The view API is added in PR #999.)
+
+### For numeric plugins specifically
+
+Plugins that compute new numbers from existing ones (`implicit_prices`, `unrealized`, `sell_gains`, `coherent_cost`, `check_average_cost`) MUST also include at least one property test (`proptest`) covering an algebraic invariant. Examples:
+
+- `implicit_prices`: emitted price round-trips through `PriceDatabase` to the original
+- `unrealized`: `Sum(realized) + Sum(unrealized) = Sum(total)` at any cutoff date
+- `sell_gains`: gains posting balances the transaction
+- `no_duplicates`: output has no duplicates by `(date, type, key fields)`
+
+Property tests run 256 cases per CI run by default. They catch bugs example tests miss because the input space is too large to enumerate manually.
+
+### When adding a new plugin
+
+1. Implementation in `crates/rustledger-plugin/src/native/plugins/<name>.rs`
+2. Tests at `crates/rustledger-plugin/tests/native_plugins_test.rs` covering the matrix above
+3. Fixtures under `tests/compatibility/files/plugin/<name>/` if the plugin is a beancount reimplementation
+4. At least one proptest case if numeric computation
+5. Mutation-survival ≤ 10% on the new code (target; CI runs `cargo mutants` and warns today, see Phase 3 of the plugin-testing plan for the planned blocking gate)
+
+### Why these requirements exist
+
+See issue #992, which traced a single rendering bug to a chain of mutually-reinforcing test gaps:
+
+- `(partial)` upstream test port (only the cost path was covered, not `@`/`@@`)
+- `assert!(count >= 1)` — accepted both 1 emission AND 100 emissions
+- Two parallel implementations of the same logic (plugin path vs query path) that diverged because nothing tied them together
+- `is_total: bool` consumed without exhaustive matching
+
+Each requirement above closes one of those gaps. Following all of them eliminates the bug class structurally.
+
 ## Questions?
 
 Open an issue or discussion on GitHub.

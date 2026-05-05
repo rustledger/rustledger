@@ -141,6 +141,56 @@ BALANCES [FROM ...]
 JOURNAL 'Account:Name'
 ```
 
+## Output precision
+
+Numbers in query output are rendered using a per-currency precision inferred from the input file. This matches Python `bean-query`'s default behavior, so a column of `Position` values for USD prints with the same number of decimal places `bean-query` would use.
+
+### How precision is inferred
+
+For each currency, rledger tracks a frequency distribution of decimal-place counts seen across postings, balances, and price annotations during loading. The displayed precision for that currency is the **mode** of the distribution — i.e. the most common dp count. Outliers (a single 28-decimal computed price annotation, a single integer-valued cost amid mostly 2-decimal postings) don't dominate the inferred precision.
+
+Inspect the inferred precision and the underlying distribution with:
+
+```bash
+rledger doctor display-context my-ledger.beancount
+```
+
+Sample output:
+
+```
+Display Context for my-ledger.beancount
+============================================================
+
+Inference policy: MostCommon (default; matches Python bean-query)
+
+USD:
+  effective: 2 dp
+  distribution: dp=0: 5, dp=2: 141
+  mode (MostCommon): 2
+  max (Maximum):     4
+
+VBMPX:
+  effective: 3 dp
+  distribution: dp=3: 4
+```
+
+`mode` and `max` are shown side-by-side when they differ, so you can see why a particular column rendered at the precision it did.
+
+### Overriding inference
+
+Inferred precision is a heuristic. To pin a currency's display precision explicitly, use the `display_precision` option in your beancount file:
+
+```beancount
+option "display_precision" "USD" "2"
+option "display_precision" "BTC" "8"
+```
+
+Fixed overrides take precedence over inference for any matching currency, regardless of what the per-currency distribution shows. This is the recommended way to enforce a specific precision when the inferred mode would produce surprising results — for example, a small file with more `Price` directives than postings could see the inferred precision shift toward the price precision.
+
+### Naked-decimal columns
+
+Columns that produce bare numbers (no associated currency) — `cost_number`, `SUM(number)`, etc. — are tracked independently per column. Each value renders at its own natural decimal scale (matching `bean-query`'s `DecimalRenderer`), with one exception: if an aggregate collapses to literal zero, the column's inferred default precision is used to pad it (so `SUM(0.00)` renders as `0.00`, not `0`).
+
 ## See Also
 
 - [BQL Reference](../reference/bql.md) - Full query language docs

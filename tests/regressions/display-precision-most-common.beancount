@@ -1,0 +1,48 @@
+; Regression fixture for DisplayContext::Precision::MostCommon parity with bean-query.
+;
+; Pre-fix, rledger inferred USD precision = 2 (the MAX of all observed dp's),
+; so SUM(position) on Assets:Bank rendered as `910.11 USD` — but bean-query
+; renders `910 USD` because the MOST_COMMON dp for USD across the file is 0
+; (most postings are integers, only one is fractional).
+;
+; The fix lands rledger on bean-query's MOST_COMMON default. The harness
+; (scripts/compat-bql-test.py) runs both binaries against this fixture and
+; asserts byte-identical output for the position-touching queries.
+;
+; Specifically pinned by:
+;   SELECT account, SUM(position) WHERE account = 'Assets:Bank'
+;     → both render `910 USD`
+;   SELECT date, account, position WHERE account = 'Assets:Bank' ORDER BY date
+;     → both render `111 USD` for the fractional row (rounded to mode = 0dp)
+
+1900-01-01 open Assets:Bank
+1900-01-01 open Assets:Cash
+1900-01-01 open Equity:Open
+
+2020-01-01 * "txn1-integer"
+  Assets:Bank   -1 USD
+  Assets:Cash    1 USD
+
+2020-01-02 * "txn2-integer"
+  Assets:Bank   -1 USD
+  Assets:Cash    1 USD
+
+2020-01-03 * "txn3-integer"
+  Assets:Bank   500 USD
+  Assets:Cash  -500 USD
+
+2020-01-04 * "txn4-integer"
+  Assets:Bank   300 USD
+  Assets:Cash  -300 USD
+
+2020-01-05 * "txn5-integer"
+  Assets:Bank   100 USD
+  Assets:Cash  -100 USD
+
+2020-01-06 * "txn-fractional-outlier"
+  Assets:Bank   111.11 USD
+  Assets:Cash  -111.11 USD
+
+2020-01-07 * "txn7-integer"
+  Assets:Bank   1 USD
+  Assets:Cash  -1 USD

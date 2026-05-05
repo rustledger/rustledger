@@ -131,3 +131,28 @@ name = "journal-assets-at-units"
 query = "JOURNAL 'Assets' AT units"
 notes = "JOURNAL AT units — exercises summary_func(balance) stripping cost annotations from balance (issue #957)"
 preserve_order = true
+
+# ----------------------------------------------------------------------
+# Plugin-emitted directives (Phase 2 of plugin-testing-quality plan).
+#
+# Fixtures under tests/compatibility/files/plugin/<plugin>/ enable
+# specific plugins via `plugin "..."` directives. These queries surface
+# what the plugin emitted, so a divergence between rledger's plugin
+# implementation and bean-check's shows up as a BQL mismatch in the
+# existing harness — no new infrastructure required.
+#
+# Issue #992 (implicit_prices @@ bug) would have been caught by
+# `count-prices-from-plugin` on the total_annotation fixture: rledger
+# was emitting 2 prices, bean-check emits 1.
+# ----------------------------------------------------------------------
+
+[[query]]
+name = "count-prices-from-plugin"
+query = "SELECT COUNT(*) AS n FROM #prices"
+notes = "Number of price directives — catches plugin double-emit and missing-emit"
+
+[[query]]
+name = "prices-from-plugin-by-date"
+query = "SELECT date, currency, amount FROM #prices ORDER BY date, currency"
+notes = "Plugin-emitted price content — catches @@ vs @ confusion (issue #992)"
+preserve_order = true

@@ -57,7 +57,7 @@ DEFAULT_TEST_DIRS = [
 # Hard floor — guards against accidental corpus shrinkage. Bump
 # whenever the actual corpus grows. CI fails if the loaded corpus has
 # fewer queries than this.
-MIN_CORPUS_SIZE = 13
+MIN_CORPUS_SIZE = 15
 
 # Files we test against. 30 is enough breadth for representative coverage
 # without being slow; tune up if the corpus grows substantially.
@@ -414,8 +414,24 @@ def main() -> int:
             f"no valid files found in {args.files_from}. Run the check "
             "phase first or pass --files-from."
         )
-    valid = valid[: args.max_files]
-    print(f"Testing against {len(valid)} files")
+
+    # Prioritize plugin-fixture files so they always make the MAX_FILES
+    # cut. These exercise specific plugin code paths (Phase 2 of the
+    # plugin-testing-quality plan, see #992) — losing them to random
+    # truncation defeats the purpose of having them.
+    plugin_fixtures = [f for f in valid if f.startswith("plugin/") or "_plugin_" in f]
+    other_fixtures = [f for f in valid if f not in plugin_fixtures]
+    # Truncate the non-plugin pool but keep all plugin fixtures.
+    remaining_budget = max(0, args.max_files - len(plugin_fixtures))
+    valid = plugin_fixtures + other_fixtures[:remaining_budget]
+    if plugin_fixtures:
+        print(
+            f"Testing against {len(valid)} files "
+            f"({len(plugin_fixtures)} plugin fixtures + "
+            f"{len(valid) - len(plugin_fixtures)} other)"
+        )
+    else:
+        print(f"Testing against {len(valid)} files")
 
     test_dirs = DEFAULT_TEST_DIRS
 

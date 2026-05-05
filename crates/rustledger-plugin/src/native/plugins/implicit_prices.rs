@@ -1,7 +1,8 @@
 //! Plugin that generates price entries from transaction costs and prices.
 
 use crate::types::{
-    AmountData, DirectiveData, DirectiveWrapper, PluginInput, PluginOutput, PriceData,
+    AmountData, DirectiveData, DirectiveWrapper, PluginInput, PluginOutput, PriceAnnotationData,
+    PriceAnnotationView, PriceData,
 };
 use rust_decimal::Decimal;
 use rustledger_core::extract_per_unit_price;
@@ -56,16 +57,32 @@ impl NativePlugin for ImplicitPricesPlugin {
                     continue;
                 };
 
-                // Build the helper's annotation descriptor only when
-                // we have BOTH a parseable number and a currency —
-                // otherwise pass `None` so the helper falls through to
-                // cost cleanly (and won't pair a fall-through value
-                // with a stale annotation currency).
-                let annotation = posting.price.as_ref().and_then(|a| {
-                    let amount = a.amount.as_ref()?;
-                    let number = Decimal::from_str(&amount.number).ok()?;
-                    Some((a.is_total, number, amount.currency.clone()))
-                });
+                // Use the typed `view()` enum to derive `is_total` and
+                // pull the amount via exhaustive matching — the type
+                // system rejects code that confuses Unit and Total
+                // (which was exactly the #992 bug shape). We then
+                // build the helper's `Option<(is_total, number,
+                // currency)>` descriptor; the helper ties currency to
+                // value for us, so passing `None` on parse failure or
+                // an incomplete annotation cleanly falls through to
+                // cost without pairing a fall-through value with a
+                // stale annotation currency.
+                let annotation = posting
+                    .price
+                    .as_ref()
+                    .map(PriceAnnotationData::view)
+                    .and_then(|view| {
+                        let (is_total, amount) = match view {
+                            PriceAnnotationView::Unit(a) => (false, a),
+                            PriceAnnotationView::Total(a) => (true, a),
+                            // Incomplete annotations: helper can't use
+                            // them; drop the descriptor entirely.
+                            PriceAnnotationView::UnitIncomplete { .. }
+                            | PriceAnnotationView::TotalIncomplete { .. } => return None,
+                        };
+                        let number = Decimal::from_str(&amount.number).ok()?;
+                        Some((is_total, number, amount.currency.clone()))
+                    });
 
                 // Same shape for cost: only build the descriptor when
                 // a currency is present AND at least one of per/total

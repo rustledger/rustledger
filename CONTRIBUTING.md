@@ -230,7 +230,7 @@ Native beancount plugins live in `crates/rustledger-plugin/src/native/plugins/` 
 
 4. **Differential coverage where applicable**. If your plugin reimplements a beancount built-in, drop a fixture under `tests/compatibility/files/plugin/<name>/` that enables the plugin via `plugin "..."` directive. The BQL compat harness (PR #1000, `scripts/compat-bql-test.py`) automatically diffs rledger's output against bean-check's. No new harness code is required — just the fixture.
 
-5. **Type-driven exhaustive matching**. When consuming an enum-shaped input (e.g. `PriceAnnotationData::view()`), use `match` and let the compiler enforce that every variant is handled. Don't extract a discriminator field manually and conditional on it — that's the bug shape from #992.
+5. **Type-driven exhaustive matching**. When consuming an enum-shaped input, use `match` and let the compiler enforce that every variant is handled. Don't extract a discriminator field manually and condition on it — that's the bug shape from #992. (Example: `PriceAnnotationData::view()` from `rustledger-plugin-types` returns a typed enum; new consumers should `match` on its arms rather than reading the underlying `is_total: bool`. The view API is added in PR #999.)
 
 ### For numeric plugins specifically
 
@@ -249,7 +249,7 @@ Property tests run 256 cases per CI run by default. They catch bugs example test
 2. Tests at `crates/rustledger-plugin/tests/native_plugins_test.rs` covering the matrix above
 3. Fixtures under `tests/compatibility/files/plugin/<name>/` if the plugin is a beancount reimplementation
 4. At least one proptest case if numeric computation
-5. Mutation-survival ≤ 10% on the new code (CI enforces, see Phase 3 of plugin-testing plan)
+5. Mutation-survival ≤ 10% on the new code (target; CI runs `cargo mutants` and warns today, see Phase 3 of the plugin-testing plan for the planned blocking gate)
 
 ### Why these requirements exist
 

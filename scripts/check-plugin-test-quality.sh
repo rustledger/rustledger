@@ -7,7 +7,11 @@
 # Catches:
 #   1. Weak count assertions like `assert!(... >= N)` on emission counts.
 #      The original #992 bug shipped because the test had `assert!(count >= 1)`,
-#      which accepted both correct and over-emission.
+#      which accepted both correct and over-emission. Catches both spaced
+#      (`x >= 1`) and unspaced (`x>=1`) variants. To opt out (e.g. on
+#      registry-shape tests where the count grows with each plugin
+#      addition), prefix the assert with `// allow weak-count: <reason>`
+#      within 5 lines of leading context.
 #   2. `(partial)` test ports — incomplete upstream test conversions.
 #      A full port catches more bugs than a partial one; partials had
 #      historically been used as a shortcut and the comment was the only
@@ -39,26 +43,35 @@ echo "[1/2] weak count assertions ('assert!(... >= N)' / '> N')"
 #   - registry tests (filenames or comments mentioning "registry")
 #   - explicit allow comments: "// allow weak-count: <reason>"
 
-WEAK_PATTERN='assert!\([^)]*(\.count|\.len)\(\)[^)]*( >=| >) [0-9]+'
-# `-B 5` includes up to 5 lines above each match, so we can find
-# `// allow weak-count` annotations in the leading comment block.
-raw=$(grep -rEnB 5 "$WEAK_PATTERN" "$TESTS_DIR" 2>/dev/null || true)
+# Match three weak-assertion shapes:
+#   1. `assert!(x.count() >= N)` / `assert!(x.len() > N)` (with optional whitespace)
+#   2. `assert!(x.count()>=N)` / `assert!(x.len()>N)` (no whitespace)
+#   3. `assert!(price_count >= N)` — precomputed count var (any ident ending
+#      in `_count`, `_len`, `_size`, or named exactly `count`/`len`/`size`).
+# The original #992 bug used pattern 3 (`assert!(price_count >= 1)`).
+WEAK_PATTERN='assert!\([^)]*((\.(count|len|size)\(\))|\b(count|len|size|[a-z_]+_(count|len|size)))[^)]*[[:space:]]*(>|>=)[[:space:]]*[0-9]+'
 
-# awk script: split on `--`, check each block for "allow weak-count",
-# emit only the assert line from blocks that DON'T have the annotation.
-bad=$(echo "$raw" | awk '
-BEGIN { allowed = 0; assert_line = "" }
-/^--$/ {
-    if (!allowed && assert_line != "") print assert_line
-    allowed = 0; assert_line = ""
-    next
-}
-/allow weak-count/ { allowed = 1 }
-/assert!\(.*\.(count|len)\(\).*( >=| >) [0-9]+/ { assert_line = $0 }
-END {
-    if (!allowed && assert_line != "") print assert_line
-}
-')
+# Find every line matching the pattern with file:line prefixes.
+# Then for each match, check the 5 preceding lines for the
+# `// allow weak-count` opt-out annotation. Pre-fix used `grep -B 5`
+# + an awk block parser that lost violations when multiple matches
+# were close together within the same 5-line context window.
+matches=$(grep -rEn "$WEAK_PATTERN" "$TESTS_DIR" 2>/dev/null || true)
+
+bad=""
+while IFS= read -r match; do
+    [ -z "$match" ] && continue
+    # match looks like: path/to/file.rs:LINENO:assert!(...)
+    file_part="${match%%:*}"
+    rest="${match#*:}"
+    lineno="${rest%%:*}"
+    # Look back 5 lines for the opt-out annotation.
+    start=$(( lineno > 5 ? lineno - 5 : 1 ))
+    if ! sed -n "${start},${lineno}p" "$file_part" | grep -q "allow weak-count"; then
+        bad="${bad}${match}"$'\n'
+    fi
+done <<< "$matches"
+bad="${bad%$'\n'}"  # trim trailing newline
 
 if [ -n "$bad" ]; then
     echo "  ERROR: weak count assertions found (no 'allow weak-count' annotation)"

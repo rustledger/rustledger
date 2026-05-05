@@ -482,7 +482,7 @@ end = "2027-03-10"
 
 [[trusted.tokio]]
 criteria = "safe-to-deploy"
-user-id = 1249 # Eliza Weisman (hawkw)
+user-id = 1249
 start = "2020-04-04"
 end = "2027-04-20"
 

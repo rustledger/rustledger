@@ -81,6 +81,37 @@ has_allow_above() {
     sed -n "${start},${lineno}p" "$file" | grep -qE "${annotation}:[[:space:]]*\S"
 }
 
+# Find multi-line regex matches across all `*.rs` files under $1 and
+# emit them in `path:lineno:first-line-of-match` format that the rest
+# of the script consumes like `grep -rn` output.
+#
+# `grep -rEn` is line-anchored, so `assert!(\n  !x.is_empty()` (the
+# multi-line form, very common when the assertion has a message arg)
+# slips through the line-by-line patterns above. Python's `re` with
+# `DOTALL` handles cross-line matches cleanly and gives us correct
+# line numbers; bash + grep can't easily do both.
+#
+# Args: $1 = tests dir, remaining args = patterns to find.
+find_multiline_in_rs() {
+    local dir="$1"
+    shift
+    python3 - "$dir" "$@" <<'PYEOF'
+import re
+import sys
+from pathlib import Path
+
+dir_arg = sys.argv[1]
+patterns = sys.argv[2:]
+for path in sorted(Path(dir_arg).rglob("*.rs")):
+    text = path.read_text()
+    for pat in patterns:
+        for m in re.finditer(pat, text, flags=re.DOTALL):
+            lineno = text.count("\n", 0, m.start()) + 1
+            first_line = m.group(0).split("\n", 1)[0]
+            print(f"{path}:{lineno}:{first_line}")
+PYEOF
+}
+
 # ----------------------------------------------------------------------
 # Policy 1: no weak count assertions on emission counts
 # ----------------------------------------------------------------------
@@ -100,10 +131,29 @@ echo "[1/2] weak count assertions"
 #
 # Per-match allowlist: `// allow weak-count: <reason>` within 5
 # leading lines.
-PAT_A='assert!\([^)]*((\.(count|len|size)\(\))|\b(count|len|size|[a-z_]+_(count|len|size)))[^)]*(>|>=)[[:space:]]*[0-9]+'
-PAT_B='assert_ne!\([^,]*((\.(count|len|size)\(\))|\b(count|len|size|[a-z_]+_(count|len|size)))[^,]*,[[:space:]]*0[[:space:]]*[,)]'
-PAT_C='assert!\([[:space:]]*!.+\.is_empty\(\)'
-PAT_D='assert!\([^)]*((\.(count|len|size)\(\))|\b(count|len|size|[a-z_]+_(count|len|size)))[^)]*!=[[:space:]]*0[[:space:]]*[,)]'
+# `(^|[^[:alnum:]_])` prefix is a word-boundary check. Without it,
+# `prop_assert!(...)` and `debug_assert!(...)` would match the
+# `assert!(...)` substring inside them. property tests legitimately
+# use lower-bound assertions (different inputs produce different
+# output shapes), and `debug_assert!` is for invariants, not test
+# coverage. Both should be ignored.
+WB='(^|[^[:alnum:]_])'
+PAT_A="${WB}"'assert!\([^)]*((\.(count|len|size)\(\))|\b(count|len|size|[a-z_]+_(count|len|size)))[^)]*(>|>=)[[:space:]]*[0-9]+'
+PAT_B="${WB}"'assert_ne!\([^,]*((\.(count|len|size)\(\))|\b(count|len|size|[a-z_]+_(count|len|size)))[^,]*,[[:space:]]*0[[:space:]]*[,)]'
+PAT_C="${WB}"'assert!\([[:space:]]*!.+\.is_empty\(\)'
+PAT_D="${WB}"'assert!\([^)]*((\.(count|len|size)\(\))|\b(count|len|size|[a-z_]+_(count|len|size)))[^)]*!=[[:space:]]*0[[:space:]]*[,)]'
+
+# Multi-line forms of the same shapes. The line-anchored ERE patterns
+# above miss `assert!(\n    !x.is_empty(), "msg"\n)` and friends, which
+# is the more common form when the assertion carries a message arg.
+# These run via Python (re.DOTALL) so newlines between `(` and the
+# operand don't break matching. Patterns mirror their single-line
+# siblings but use `\s*` (which includes `\n`), a bounded ident
+# match to avoid swallowing the rest of the file, and PCRE
+# negative-lookbehind to skip `prop_assert!` / `debug_assert!`.
+ML_PAT_C='(?<!\w)assert!\(\s*!\w[\w.]*\.is_empty\(\)'
+ML_PAT_B='(?<!\w)assert_ne!\(\s*\w[\w.()]*\s*,\s*0\s*[,)]'
+ML_PAT_D='(?<!\w)assert!\(\s*\w[\w.()]*\s*!=\s*0\s*[,)]'
 
 bad=""
 for pat in "$PAT_A" "$PAT_B" "$PAT_C" "$PAT_D"; do
@@ -116,6 +166,26 @@ for pat in "$PAT_A" "$PAT_B" "$PAT_C" "$PAT_D"; do
         fi
     done <<< "$matches"
 done
+
+# Multi-line scan. Filter out anything already caught by the
+# single-line passes above (same file:lineno) so we don't double-
+# report.
+ml_matches=$(find_multiline_in_rs "$TESTS_DIR" "$ML_PAT_C" "$ML_PAT_B" "$ML_PAT_D")
+if [ -n "$ml_matches" ]; then
+    while IFS= read -r match; do
+        [ -z "$match" ] && continue
+        # Skip if the same file:lineno already appears in `bad`
+        # (single-line pattern already caught it).
+        IFS=: read -r ml_file ml_lineno _ <<< "$match"
+        if grep -qF "${ml_file}:${ml_lineno}:" <<< "$bad"; then
+            continue
+        fi
+        if ! has_allow_above "$match" "allow weak-count"; then
+            bad="${bad}${match}"$'\n'
+        fi
+    done <<< "$ml_matches"
+fi
+
 bad="${bad%$'\n'}"
 
 if [ -n "$bad" ]; then

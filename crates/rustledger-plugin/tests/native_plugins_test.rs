@@ -1752,12 +1752,13 @@ fn test_check_commodity_undeclared() {
 
     let output = plugin.process(input);
 
-    assert!(
-        !output.errors.is_empty(),
-        "expected warning for undeclared USD"
+    assert_eq!(
+        output.errors.len(),
+        1,
+        "exactly one warning for the single undeclared currency"
     );
     assert!(
-        output.errors.iter().any(|e| e.message.contains("USD")),
+        output.errors[0].message.contains("USD"),
         "warning should mention USD"
     );
 }
@@ -3051,9 +3052,10 @@ fn test_auto_tag_adds_tag_for_expense() {
         .find(|d| d.directive_type == "transaction")
         .unwrap();
     if let DirectiveData::Transaction(data) = &txn.data {
-        assert!(
-            !data.tags.is_empty(),
-            "auto_tag should add a tag for Expenses:Food posting"
+        assert_eq!(
+            data.tags.len(),
+            1,
+            "auto_tag should add exactly one tag for the single matching posting"
         );
     }
 }
@@ -3131,9 +3133,10 @@ fn test_pedantic_runs_multiple_validators() {
         ),
     ]);
     let output = plugin.process(input);
-    assert!(
-        !output.errors.is_empty(),
-        "pedantic should catch leaf-only violation"
+    assert_eq!(
+        output.errors.len(),
+        1,
+        "exactly one error for the single leaf-only violation"
     );
 }
 
@@ -3217,9 +3220,14 @@ fn test_sell_gains_warns_missing_gains_posting() {
     ]);
     let output = plugin.process(input);
     // Should warn about missing Income:Capital-Gains posting
+    assert_eq!(
+        output.errors.len(),
+        1,
+        "exactly one warning for the single sale missing gains posting"
+    );
     assert!(
-        !output.errors.is_empty(),
-        "should warn about missing gains posting"
+        output.errors[0].message.contains("gain") || output.errors[0].message.contains("Gain"),
+        "warning should reference the missing gains posting"
     );
 }
 
@@ -3274,9 +3282,10 @@ fn test_commodity_attr_error_with_missing_required_attr() {
     let input =
         make_input_with_config(vec![make_commodity("2024-01-01", "AAPL")], "{'name': null}");
     let output = plugin.process(input);
-    assert!(
-        !output.errors.is_empty(),
-        "should error when required 'name' attribute is missing"
+    assert_eq!(
+        output.errors.len(),
+        1,
+        "exactly one error for the single commodity missing required 'name'"
     );
 }
 

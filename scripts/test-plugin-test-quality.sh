@@ -115,6 +115,56 @@ run_case "shape D: assert!(price_count != 0)" 1 \
     '#[test] fn t() { let price_count = 0; assert!(price_count != 0); }'
 
 # ----------------------------------------------------------------------
+# Multi-line forms (the line-anchored grep above misses these — the
+# multi-line form is more common when the assert carries a message).
+# ----------------------------------------------------------------------
+
+run_case "multi-line shape C: assert!(\\\\n    !x.is_empty(),\\\\n    \"msg\"\\\\n)" 1 \
+    '#[test] fn t() {
+    assert!(
+        !output.errors.is_empty(),
+        "should warn"
+    );
+}'
+
+run_case "multi-line shape B: assert_ne!(\\\\n    x.len(),\\\\n    0\\\\n)" 1 \
+    '#[test] fn t() {
+    assert_ne!(
+        emitted.len(),
+        0
+    );
+}'
+
+run_case "multi-line shape D: assert!(\\\\n    x.len() != 0,\\\\n    \"msg\"\\\\n)" 1 \
+    '#[test] fn t() {
+    assert!(
+        emitted.len() != 0,
+        "msg"
+    );
+}'
+
+# ----------------------------------------------------------------------
+# Word-boundary guards: prop_assert! / debug_assert! must NOT match
+# even though they contain the literal substring `assert!`.
+# ----------------------------------------------------------------------
+
+run_case "prop_assert!(!x.is_empty()) does NOT fire (property tests)" 0 \
+    '#[test] fn t() {
+    prop_assert!(
+        !output.directives.is_empty(),
+        "Plugin should produce valid output"
+    );
+}'
+
+run_case "debug_assert!(!x.is_empty()) does NOT fire (invariant)" 0 \
+    'fn invariant() {
+    debug_assert!(
+        !cache.is_empty(),
+        "cache should be populated by init"
+    );
+}'
+
+# ----------------------------------------------------------------------
 # Allow annotation
 # ----------------------------------------------------------------------
 

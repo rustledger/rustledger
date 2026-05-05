@@ -4,7 +4,7 @@ use crate::types::{
     AmountData, DirectiveData, DirectiveWrapper, PluginInput, PluginOutput, PriceData,
 };
 use rust_decimal::Decimal;
-use rustledger_core::extract_per_unit_price;
+use rustledger_core::{ImplicitPriceSource, extract_per_unit_price};
 use std::str::FromStr;
 
 use super::super::NativePlugin;
@@ -56,7 +56,11 @@ impl NativePlugin for ImplicitPricesPlugin {
                     continue;
                 };
 
-                // Pull annotation primitives.
+                // Pull annotation primitives. Tie the currency to a
+                // successfully-parsed number: if the number fails to
+                // parse, drop the currency too. Otherwise the
+                // helper would fall through to cost for the value but
+                // we'd still pair it with the annotation's currency.
                 let (annotation_is_total, annotation_amount, annotation_currency) =
                     match &posting.price {
                         Some(annotation) => {
@@ -64,8 +68,11 @@ impl NativePlugin for ImplicitPricesPlugin {
                                 .amount
                                 .as_ref()
                                 .and_then(|a| Decimal::from_str(&a.number).ok());
-                            let amount_currency =
-                                annotation.amount.as_ref().map(|a| a.currency.clone());
+                            let amount_currency = if amount_decimal.is_some() {
+                                annotation.amount.as_ref().map(|a| a.currency.clone())
+                            } else {
+                                None
+                            };
                             (annotation.is_total, amount_decimal, amount_currency)
                         }
                         None => (false, None, None),
@@ -87,7 +94,7 @@ impl NativePlugin for ImplicitPricesPlugin {
                     None => (None, None, None),
                 };
 
-                let Some(per_unit) = extract_per_unit_price(
+                let Some((per_unit, source)) = extract_per_unit_price(
                     units_number,
                     annotation_is_total,
                     annotation_amount,
@@ -97,9 +104,16 @@ impl NativePlugin for ImplicitPricesPlugin {
                     continue;
                 };
 
-                // Quote currency follows the same priority as the per-unit
-                // value: annotation first, cost as fallback.
-                let Some(quote_currency) = annotation_currency.or(cost_currency) else {
+                // Pair the quote currency with the SAME source the helper
+                // used. Pre-fix (Copilot review on PR #997) this was
+                // unconditionally `annotation_currency.or(cost_currency)`,
+                // which produced mismatched (number, currency) pairs when
+                // an unusable `@@` annotation fell through to cost.
+                let quote_currency = match source {
+                    ImplicitPriceSource::Annotation => annotation_currency,
+                    ImplicitPriceSource::Cost => cost_currency,
+                };
+                let Some(quote_currency) = quote_currency else {
                     continue;
                 };
 

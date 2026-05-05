@@ -130,7 +130,7 @@ impl PriceDatabase {
                 None => (None, None, None),
             };
 
-            let Some(per_unit) = rustledger_core::extract_per_unit_price(
+            let Some((per_unit, source)) = rustledger_core::extract_per_unit_price(
                 units.number,
                 annotation_is_total,
                 annotation_amount,
@@ -140,10 +140,16 @@ impl PriceDatabase {
                 continue;
             };
 
-            // Quote currency follows the same priority rule as the per-unit
-            // value: prefer the annotation's currency, fall back to cost's.
-            // The helper doesn't pick this — it returns only the magnitude.
-            let quote_currency = annotation_currency.or(cost_currency);
+            // Pair the quote currency with the SAME source the helper used
+            // for the per-unit value. Pre-fix (Copilot review on PR #997)
+            // this was unconditionally `annotation_currency.or(cost_currency)`,
+            // which produced mismatched (number, currency) pairs when an
+            // unusable `@@` annotation fell through to cost. The helper
+            // now returns the source so callers can select correctly.
+            let quote_currency = match source {
+                rustledger_core::ImplicitPriceSource::Annotation => annotation_currency,
+                rustledger_core::ImplicitPriceSource::Cost => cost_currency,
+            };
             let Some(quote) = quote_currency else {
                 continue;
             };

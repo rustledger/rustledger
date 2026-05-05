@@ -18,6 +18,22 @@
 
 use rust_decimal::Decimal;
 
+/// Which input source produced an extracted implicit price.
+///
+/// Returned alongside the per-unit `Decimal` so callers know which
+/// quote-currency source to pair with it. Pre-fix (Copilot review on
+/// PR #997), callers picked the quote currency from the annotation
+/// even when the per-unit value came from the cost — for inputs like
+/// `0 ABC {50 USD} @@ 100 EUR` (zero-units total annotation falls
+/// through to cost), they emitted `50 EUR` instead of `50 USD`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImplicitPriceSource {
+    /// Value came from the `@` / `@@` price annotation.
+    Annotation,
+    /// Value came from the `{...}` cost spec.
+    Cost,
+}
+
 /// Decide the per-unit price implied by a posting.
 ///
 /// Resolution order, mirroring upstream beancount's
@@ -45,29 +61,29 @@ pub fn extract_per_unit_price(
     annotation_amount: Option<Decimal>,
     cost_number_per: Option<Decimal>,
     cost_number_total: Option<Decimal>,
-) -> Option<Decimal> {
+) -> Option<(Decimal, ImplicitPriceSource)> {
     // Priority 1: price annotation.
     if let Some(amount) = annotation_amount {
         if annotation_is_total {
             if !units_number.is_zero() {
-                return Some(amount / units_number.abs());
+                return Some((amount / units_number.abs(), ImplicitPriceSource::Annotation));
             }
             // Zero units + total annotation → can't compute per-unit,
             // fall through to cost. This matches the upstream behavior
             // (the @@ amount is unusable without a unit count).
         } else {
-            return Some(amount);
+            return Some((amount, ImplicitPriceSource::Annotation));
         }
     }
 
     // Priority 2: cost spec.
     if let Some(per) = cost_number_per {
-        return Some(per);
+        return Some((per, ImplicitPriceSource::Cost));
     }
     if let Some(total) = cost_number_total
         && !units_number.is_zero()
     {
-        return Some(total / units_number.abs());
+        return Some((total / units_number.abs(), ImplicitPriceSource::Cost));
     }
 
     None
@@ -84,14 +100,14 @@ mod tests {
     fn unit_annotation_returns_amount_directly() {
         // @ 1.40 EUR with 5 units → 1.40 (per-unit, used as-is).
         let p = extract_per_unit_price(dec!(5), false, Some(dec!(1.40)), None, None);
-        assert_eq!(p, Some(dec!(1.40)));
+        assert_eq!(p, Some((dec!(1.40), ImplicitPriceSource::Annotation)));
     }
 
     #[test]
     fn total_annotation_divides_by_unit_count() {
         // @@ 1500 USD with 10 units → 1500 / 10 = 150.
         let p = extract_per_unit_price(dec!(10), true, Some(dec!(1500)), None, None);
-        assert_eq!(p, Some(dec!(150)));
+        assert_eq!(p, Some((dec!(150), ImplicitPriceSource::Annotation)));
     }
 
     #[test]
@@ -100,16 +116,20 @@ mod tests {
         // must produce 15152.07 / 27204.53 ≈ 0.557 (NOT -0.557, NOT 15152.07).
         let p = extract_per_unit_price(dec!(-27204.53), true, Some(dec!(15152.07)), None, None);
         let expected = dec!(15152.07) / dec!(27204.53);
-        assert_eq!(p, Some(expected));
-        assert!(p.unwrap() > dec!(0.55) && p.unwrap() < dec!(0.56));
+        assert_eq!(p, Some((expected, ImplicitPriceSource::Annotation)));
+        assert!(p.unwrap().0 > dec!(0.55) && p.unwrap().0 < dec!(0.56));
     }
 
     #[test]
     fn total_annotation_with_zero_units_falls_through_to_cost() {
         // @@ 100 USD on 0 units → can't compute per-unit, but if a cost
-        // is also present, fall through to that.
+        // is also present, fall through to that. The SOURCE returned is
+        // Cost, so the caller knows to pick the cost's currency (this
+        // is the Copilot-flagged bug from PR #997: pre-fix, callers
+        // unconditionally picked the annotation currency, producing
+        // mismatched (number, currency) pairs).
         let p = extract_per_unit_price(dec!(0), true, Some(dec!(100)), Some(dec!(50)), None);
-        assert_eq!(p, Some(dec!(50)));
+        assert_eq!(p, Some((dec!(50), ImplicitPriceSource::Cost)));
     }
 
     #[test]
@@ -124,14 +144,14 @@ mod tests {
     fn cost_per_unit_used_when_no_annotation() {
         // 10 ABC {50.00 USD} → 50.00.
         let p = extract_per_unit_price(dec!(10), false, None, Some(dec!(50.00)), None);
-        assert_eq!(p, Some(dec!(50.00)));
+        assert_eq!(p, Some((dec!(50.00), ImplicitPriceSource::Cost)));
     }
 
     #[test]
     fn cost_total_divides_by_unit_count() {
         // 10 ABC {{500 USD}} → 500 / 10 = 50.
         let p = extract_per_unit_price(dec!(10), false, None, None, Some(dec!(500)));
-        assert_eq!(p, Some(dec!(50)));
+        assert_eq!(p, Some((dec!(50), ImplicitPriceSource::Cost)));
     }
 
     #[test]
@@ -145,24 +165,24 @@ mod tests {
     #[test]
     fn annotation_wins_over_cost_when_both_present() {
         // 5 ABC {1.25 EUR} @ 1.40 EUR → 1.40 (annotation wins).
-        // This is the case that originally surfaced as the plugin
-        // double-emitting in #992.
+        // Source = Annotation so the caller pairs with the annotation's
+        // currency, not the cost's.
         let p = extract_per_unit_price(dec!(5), false, Some(dec!(1.40)), Some(dec!(1.25)), None);
-        assert_eq!(p, Some(dec!(1.40)));
+        assert_eq!(p, Some((dec!(1.40), ImplicitPriceSource::Annotation)));
     }
 
     #[test]
     fn total_annotation_wins_over_cost_per_unit() {
         // -10 ABC {1.25 EUR} @@ 14 EUR → 14 / 10 = 1.40 (annotation wins).
         let p = extract_per_unit_price(dec!(-10), true, Some(dec!(14)), Some(dec!(1.25)), None);
-        assert_eq!(p, Some(dec!(1.4)));
+        assert_eq!(p, Some((dec!(1.4), ImplicitPriceSource::Annotation)));
     }
 
     #[test]
     fn cost_per_wins_over_cost_total_when_both_present() {
         // {50 USD, 500 USD-total} — number_per takes precedence.
         let p = extract_per_unit_price(dec!(10), false, None, Some(dec!(50)), Some(dec!(999)));
-        assert_eq!(p, Some(dec!(50)));
+        assert_eq!(p, Some((dec!(50), ImplicitPriceSource::Cost)));
     }
 
     // ===== Empty cases =====
@@ -176,8 +196,8 @@ mod tests {
     #[test]
     fn annotation_without_amount_falls_through_to_cost() {
         // Incomplete annotation like `@ EUR` (no number) → ann_amount is
-        // None → fall through. Cost present → use it.
+        // None → fall through. Cost present → use it. Source is Cost.
         let p = extract_per_unit_price(dec!(10), false, None, Some(dec!(7)), None);
-        assert_eq!(p, Some(dec!(7)));
+        assert_eq!(p, Some((dec!(7), ImplicitPriceSource::Cost)));
     }
 }

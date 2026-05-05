@@ -3079,9 +3079,13 @@ fn test_no_unused_warns_on_unused_account() {
         ),
     ]);
     let output = plugin.process(input);
-    assert!(!output.errors.is_empty(), "should warn about Assets:Unused");
+    assert_eq!(
+        output.errors.len(),
+        1,
+        "exactly one error for the single unused account"
+    );
     assert!(
-        output.errors.iter().any(|e| e.message.contains("Unused")),
+        output.errors[0].message.contains("Unused"),
         "error should mention the unused account"
     );
 }
@@ -3635,7 +3639,11 @@ fn test_zerosum_requires_config() {
         make_transaction("2024-01-15", "Test", vec![("Assets:Cash", "100", "USD")]),
     ]);
     let output = plugin.process(input);
-    assert!(!output.errors.is_empty(), "should error without config");
+    assert_eq!(
+        output.errors.len(),
+        1,
+        "exactly one error for missing required config"
+    );
     assert!(output.errors[0].message.contains("requires configuration"));
 }
 

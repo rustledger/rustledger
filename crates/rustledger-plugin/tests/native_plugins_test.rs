@@ -3815,15 +3815,16 @@ fn test_check_drained_adds_balance_assertions_on_close() {
     ]);
     let output = plugin.process(input);
     assert!(output.errors.is_empty());
-    // Should have added balance assertion directives
-    let balance_count = output
-        .directives
-        .iter()
-        .filter(|d| d.directive_type == "balance")
-        .count();
-    assert!(
-        balance_count > 0,
-        "should insert balance assertions after close"
+    // Should have added a balance assertion per (closed account,
+    // currency). Here: one Close on Assets:Bank (USD only) → 1 balance.
+    assert_eq!(
+        output
+            .directives
+            .iter()
+            .filter(|d| d.directive_type == "balance")
+            .count(),
+        1,
+        "exactly one balance assertion for the single closed account+currency"
     );
 }
 

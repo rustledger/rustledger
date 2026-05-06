@@ -119,6 +119,38 @@ run_case "shape D: assert!(price_count != 0)" 1 \
 # multi-line form is more common when the assert carries a message).
 # ----------------------------------------------------------------------
 
+run_case "multi-line shape A: assert!(\\\\n    x.len() >= 1,\\\\n    \"msg\"\\\\n)" 1 \
+    '#[test] fn t() {
+    assert!(
+        emitted.len() >= 1,
+        "should emit at least one"
+    );
+}'
+
+run_case "multi-line shape A: assert!(\\\\n    price_count >= 1\\\\n) (precomputed — original #992 shape)" 1 \
+    '#[test] fn t() {
+    let price_count = 0;
+    assert!(
+        price_count >= 1,
+        "got at least one price"
+    );
+}'
+
+run_case "multi-line shape A: assert!(\\\\n    x.count() > 0\\\\n)" 1 \
+    '#[test] fn t() {
+    assert!(
+        items.count() > 0
+    );
+}'
+
+run_case "ML_PAT_A guard: prop_assert!(\\\\n    x.len() >= 1\\\\n) does NOT fire" 0 \
+    '#[test] fn t() {
+    prop_assert!(
+        emitted.len() >= 1,
+        "Plugin should produce output"
+    );
+}'
+
 run_case "multi-line shape C: assert!(\\\\n    !x.is_empty(),\\\\n    \"msg\"\\\\n)" 1 \
     '#[test] fn t() {
     assert!(

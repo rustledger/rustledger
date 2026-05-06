@@ -35,12 +35,21 @@ jobs:
         with:
           python-version: '3.11'
       - name: Install dependencies
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
           pip install beancount
 
-          # Hyperfine
-          HYPERFINE_VERSION=$(curl -s https://api.github.com/repos/sharkdp/hyperfine/releases/latest | jq -r '.tag_name')
-          curl -sL "https://github.com/sharkdp/hyperfine/releases/download/${HYPERFINE_VERSION}/hyperfine-${HYPERFINE_VERSION}-x86_64-unknown-linux-gnu.tar.gz" | tar xz -C /tmp
+          # Hyperfine — use authenticated `gh api` (5000/hr rate limit
+          # vs 60/hr unauth) and `curl -f` so an HTTP error fails the
+          # step rather than piping a 404 page into tar.
+          HYPERFINE_VERSION=$(gh api repos/sharkdp/hyperfine/releases/latest --jq '.tag_name')
+          if [ -z "${HYPERFINE_VERSION:-}" ] || [ "$HYPERFINE_VERSION" = "null" ]; then
+            echo "::error::Failed to fetch hyperfine latest release tag" >&2
+            exit 1
+          fi
+          curl -sSfL "https://github.com/sharkdp/hyperfine/releases/download/${HYPERFINE_VERSION}/hyperfine-${HYPERFINE_VERSION}-x86_64-unknown-linux-gnu.tar.gz" | tar xz -C /tmp
           sudo mv "/tmp/hyperfine-${HYPERFINE_VERSION}-x86_64-unknown-linux-gnu/hyperfine" /usr/local/bin/
       - name: Build rustledger
         run: cargo build --release -p rustledger --no-default-features

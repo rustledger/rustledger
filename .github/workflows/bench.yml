@@ -53,7 +53,10 @@ jobs:
         with:
           node-version: '22'
       - name: Install dependencies
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
           # Python beancount + beanquery (for BQL)
           pip install beancount beanquery
 
@@ -66,22 +69,36 @@ jobs:
             libboost-date-time-dev libboost-filesystem-dev libboost-iostreams-dev \
             libboost-regex-dev libboost-test-dev libedit-dev libgmp3-dev libmpfr-dev
 
-          # hledger (Haskell) - pre-built binary from GitHub
-          curl -sL https://github.com/simonmichael/hledger/releases/latest/download/hledger-linux-x64.tar.gz | tar xz -C /tmp
+          # hledger (Haskell) — `curl -f` so a 404 fails loudly instead
+          # of piping HTML into tar.
+          curl -sSfL https://github.com/simonmichael/hledger/releases/latest/download/hledger-linux-x64.tar.gz | tar xz -C /tmp
           sudo mv /tmp/hledger /usr/local/bin/
 
-          # Hyperfine for accurate benchmarking (use latest release)
-          HYPERFINE_VERSION=$(curl -s https://api.github.com/repos/sharkdp/hyperfine/releases/latest | jq -r '.tag_name')
-          curl -sL "https://github.com/sharkdp/hyperfine/releases/download/${HYPERFINE_VERSION}/hyperfine-${HYPERFINE_VERSION}-x86_64-unknown-linux-gnu.tar.gz" | tar xz -C /tmp
+          # Hyperfine — authenticated `gh api` (5000/hr vs 60/hr) and
+          # `curl -f` so download errors don't cascade into "not in
+          # gzip format" (see issue surfaced in PR #1015 CI).
+          HYPERFINE_VERSION=$(gh api repos/sharkdp/hyperfine/releases/latest --jq '.tag_name')
+          if [ -z "${HYPERFINE_VERSION:-}" ] || [ "$HYPERFINE_VERSION" = "null" ]; then
+            echo "::error::Failed to fetch hyperfine latest release tag" >&2
+            exit 1
+          fi
+          curl -sSfL "https://github.com/sharkdp/hyperfine/releases/download/${HYPERFINE_VERSION}/hyperfine-${HYPERFINE_VERSION}-x86_64-unknown-linux-gnu.tar.gz" | tar xz -C /tmp
           sudo mv "/tmp/hyperfine-${HYPERFINE_VERSION}-x86_64-unknown-linux-gnu/hyperfine" /usr/local/bin/
       - name: Build ledger from source
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Get latest release tag from GitHub API
-          LEDGER_VERSION=$(curl -s https://api.github.com/repos/ledger/ledger/releases/latest | jq -r '.tag_name')
+          set -euo pipefail
+          # Get latest release tag from GitHub API (authenticated).
+          LEDGER_VERSION=$(gh api repos/ledger/ledger/releases/latest --jq '.tag_name')
+          if [ -z "${LEDGER_VERSION:-}" ] || [ "$LEDGER_VERSION" = "null" ]; then
+            echo "::error::Failed to fetch ledger latest release tag" >&2
+            exit 1
+          fi
           echo "Building ledger ${LEDGER_VERSION}"
 
           cd /tmp
-          curl -sL "https://github.com/ledger/ledger/archive/refs/tags/${LEDGER_VERSION}.tar.gz" | tar xz
+          curl -sSfL "https://github.com/ledger/ledger/archive/refs/tags/${LEDGER_VERSION}.tar.gz" | tar xz
           cd "ledger-${LEDGER_VERSION#v}"
           cmake -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_DOCS=OFF -DBUILD_WEB_DOCS=OFF
           cmake --build build --parallel $(nproc)
@@ -553,16 +570,23 @@ jobs:
         with:
           python-version: '3.11'
       - name: Install dependencies
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
           pip install beancount beanquery
 
-          # hledger binary
-          curl -sL https://github.com/simonmichael/hledger/releases/latest/download/hledger-linux-x64.tar.gz | tar xz -C /tmp
+          # hledger binary — `curl -f` so HTTP errors fail the step.
+          curl -sSfL https://github.com/simonmichael/hledger/releases/latest/download/hledger-linux-x64.tar.gz | tar xz -C /tmp
           sudo mv /tmp/hledger /usr/local/bin/
 
-          # Hyperfine
-          HYPERFINE_VERSION=$(curl -s https://api.github.com/repos/sharkdp/hyperfine/releases/latest | jq -r '.tag_name')
-          curl -sL "https://github.com/sharkdp/hyperfine/releases/download/${HYPERFINE_VERSION}/hyperfine-${HYPERFINE_VERSION}-x86_64-unknown-linux-gnu.tar.gz" | tar xz -C /tmp
+          # Hyperfine — authenticated lookup + hard-fail on download.
+          HYPERFINE_VERSION=$(gh api repos/sharkdp/hyperfine/releases/latest --jq '.tag_name')
+          if [ -z "${HYPERFINE_VERSION:-}" ] || [ "$HYPERFINE_VERSION" = "null" ]; then
+            echo "::error::Failed to fetch hyperfine latest release tag" >&2
+            exit 1
+          fi
+          curl -sSfL "https://github.com/sharkdp/hyperfine/releases/download/${HYPERFINE_VERSION}/hyperfine-${HYPERFINE_VERSION}-x86_64-unknown-linux-gnu.tar.gz" | tar xz -C /tmp
           sudo mv "/tmp/hyperfine-${HYPERFINE_VERSION}-x86_64-unknown-linux-gnu/hyperfine" /usr/local/bin/
       - name: Build rustledger
         run: cargo build --release -p rustledger --no-default-features

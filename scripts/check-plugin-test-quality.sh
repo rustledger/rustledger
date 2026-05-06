@@ -159,6 +159,7 @@ PAT_D="${WB}"'assert!\([^)]*((\.(count|len|size)\(\))|\b(count|len|size|[a-z_]+_
 # would false-positive on every `assert_ne!(balance, 0)` style check
 # (Copilot review on PR #1005).
 COUNT_LHS='(?:\w[\w.]*\.(?:count|len|size)\(\)|(?:\w+_)?(?:count|len|size))'
+ML_PAT_A='(?<!\w)assert!\(\s*'"$COUNT_LHS"'\s*(?:>|>=)\s*\d+'
 ML_PAT_C='(?<!\w)assert!\(\s*!\w[\w.]*\.is_empty\(\)'
 ML_PAT_B='(?<!\w)assert_ne!\(\s*'"$COUNT_LHS"'\s*,\s*0\s*[,)]'
 ML_PAT_D='(?<!\w)assert!\(\s*'"$COUNT_LHS"'\s*!=\s*0\s*[,)]'
@@ -178,7 +179,7 @@ done
 # Multi-line scan. Filter out anything already caught by the
 # single-line passes above (same file:lineno) so we don't double-
 # report.
-ml_matches=$(find_multiline_in_rs "$TESTS_DIR" "$ML_PAT_C" "$ML_PAT_B" "$ML_PAT_D")
+ml_matches=$(find_multiline_in_rs "$TESTS_DIR" "$ML_PAT_A" "$ML_PAT_B" "$ML_PAT_C" "$ML_PAT_D")
 if [ -n "$ml_matches" ]; then
     while IFS= read -r match; do
         [ -z "$match" ] && continue

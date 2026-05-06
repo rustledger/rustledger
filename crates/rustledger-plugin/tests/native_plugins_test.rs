@@ -4242,6 +4242,83 @@ proptest::proptest! {
             );
         }
     }
+
+    /// Two buys at different cost bases — the position aggregates,
+    /// and the unrealized gain at any market price is
+    ///
+    ///   (units_a + units_b) * market - (cost_a*units_a + cost_b*units_b)
+    ///
+    /// Pins the position-aggregation invariant. Pre-fix
+    /// `prop_unrealized_warning_amount_matches_units_times_delta` only
+    /// covered single buys, so weighted-average rounding bugs in
+    /// multi-buy aggregation would have slipped through.
+    #[test]
+    fn prop_unrealized_aggregates_two_buys_correctly(
+        units_a in 1u32..500,
+        units_b in 1u32..500,
+        cost_a_cents in 1u32..1_000_000,
+        cost_b_cents in 1u32..1_000_000,
+        market_cents in 1u32..1_000_000,
+    ) {
+        use rust_decimal::Decimal;
+
+        let to_dollars = |cents: u32| Decimal::new(i64::from(cents), 2);
+        let cost_a_d = to_dollars(cost_a_cents);
+        let cost_b_d = to_dollars(cost_b_cents);
+        let market_d = to_dollars(market_cents);
+        let units_a_d = Decimal::from(units_a);
+        let units_b_d = Decimal::from(units_b);
+
+        let plugin = UnrealizedPlugin::new();
+        let input = make_input(vec![
+            make_open("2024-01-01", "Assets:Stock"),
+            make_open("2024-01-01", "Assets:Cash"),
+            make_commodity("2024-01-01", "AAPL"),
+            make_transaction_with_cost(
+                "2024-01-15",
+                "Buy A",
+                "Assets:Stock",
+                (&units_a.to_string(), "AAPL"),
+                (&cost_a_d.to_string(), "USD"),
+                "Assets:Cash",
+            ),
+            make_transaction_with_cost(
+                "2024-02-15",
+                "Buy B",
+                "Assets:Stock",
+                (&units_b.to_string(), "AAPL"),
+                (&cost_b_d.to_string(), "USD"),
+                "Assets:Cash",
+            ),
+            make_price("2024-06-15", "AAPL", &market_d.to_string(), "USD"),
+        ]);
+        let output = plugin.process(input);
+
+        // Expected aggregate gain across both lots.
+        let total_units = units_a_d + units_b_d;
+        let total_cost = cost_a_d * units_a_d + cost_b_d * units_b_d;
+        let expected_gain = total_units * market_d - total_cost;
+        let above_threshold = expected_gain.abs() > Decimal::new(1, 2);
+
+        if above_threshold {
+            proptest::prop_assert_eq!(
+                output.errors.len(), 1,
+                "expected 1 aggregated warning; expected_gain={}", expected_gain
+            );
+            let msg = &output.errors[0].message;
+            proptest::prop_assert!(
+                msg.contains(&expected_gain.to_string()),
+                "warning '{}' should contain aggregate gain {}",
+                msg, expected_gain
+            );
+        } else {
+            proptest::prop_assert!(
+                output.errors.is_empty(),
+                "no warning expected for aggregate gain={} (≤ 0.01)",
+                expected_gain
+            );
+        }
+    }
 }
 
 /// Custom `gains_account` is stored on the plugin but never appears in
@@ -4567,14 +4644,12 @@ fn test_capital_gains_long_short_classifies_short_term() {
         );
     };
 
-    assert_eq!(
-        data.postings
-            .iter()
-            .filter(|p| p.account.contains(":Capital-Gains:Short"))
-            .count(),
-        1,
-        "short_term gain rebooks to :Short"
-    );
+    let short_postings: Vec<&PostingData> = data
+        .postings
+        .iter()
+        .filter(|p| p.account.contains(":Capital-Gains:Short"))
+        .collect();
+    assert_eq!(short_postings.len(), 1, "short_term gain rebooks to :Short");
     assert_eq!(
         data.postings
             .iter()
@@ -4583,6 +4658,19 @@ fn test_capital_gains_long_short_classifies_short_term() {
         0,
         "no long-term posting expected"
     );
+
+    // Pin the posting AMOUNT, not just the account. Plugin computes
+    // gain = (cost - price) * |units| = (100 - 150) * 10 = -500.
+    // Currency must come from the original generic posting.
+    let short_units = short_postings[0]
+        .units
+        .as_ref()
+        .expect("short posting must have units");
+    assert_eq!(
+        short_units.number, "-500",
+        "short_term gain amount = (cost - price) * |units| = -500"
+    );
+    assert_eq!(short_units.currency, "USD");
 
     // Verify a new Open directive was generated for the new account.
     assert!(
@@ -4634,14 +4722,12 @@ fn test_capital_gains_long_short_classifies_long_term() {
         );
     };
 
-    assert_eq!(
-        data.postings
-            .iter()
-            .filter(|p| p.account.contains(":Capital-Gains:Long"))
-            .count(),
-        1,
-        "long_term gain rebooks to :Long"
-    );
+    let long_postings: Vec<&PostingData> = data
+        .postings
+        .iter()
+        .filter(|p| p.account.contains(":Capital-Gains:Long"))
+        .collect();
+    assert_eq!(long_postings.len(), 1, "long_term gain rebooks to :Long");
     assert_eq!(
         data.postings
             .iter()
@@ -4650,6 +4736,18 @@ fn test_capital_gains_long_short_classifies_long_term() {
         0,
         "no short-term posting expected"
     );
+
+    // Pin the posting AMOUNT, not just the account. Plugin computes
+    // gain = (cost - price) * |units| = (100 - 150) * 10 = -500.
+    let long_units = long_postings[0]
+        .units
+        .as_ref()
+        .expect("long posting must have units");
+    assert_eq!(
+        long_units.number, "-500",
+        "long_term gain amount = (cost - price) * |units| = -500"
+    );
+    assert_eq!(long_units.currency, "USD");
 }
 
 /// Reduction posting with NO cost date, generic `Income:Capital-Gains`
@@ -4868,13 +4966,29 @@ fn test_capital_gains_gain_loss_negative_renames_to_gains() {
             txn.data
         );
     };
-    assert!(
-        data.postings
-            .iter()
-            .any(|p| p.account == "Income:Capital-Gains:Long:Gains"),
-        "negative posting should rebook to ...:Gains; got: {:?}",
-        data.postings.iter().map(|p| &p.account).collect::<Vec<_>>()
+    let renamed = data
+        .postings
+        .iter()
+        .find(|p| p.account == "Income:Capital-Gains:Long:Gains")
+        .unwrap_or_else(|| {
+            panic!(
+                "negative posting should rebook to ...:Gains; got: {:?}",
+                data.postings.iter().map(|p| &p.account).collect::<Vec<_>>()
+            )
+        });
+    // Plugin only renames the account — units must be preserved
+    // exactly. Pinning the amount catches any future "rename + reset"
+    // bug where the account changes but the value is dropped or
+    // mutated.
+    let renamed_units = renamed
+        .units
+        .as_ref()
+        .expect("renamed posting must keep its units");
+    assert_eq!(
+        renamed_units.number, "-100",
+        "rename preserves the original units value"
     );
+    assert_eq!(renamed_units.currency, "USD");
     assert!(
         !data
             .postings
@@ -4918,13 +5032,25 @@ fn test_capital_gains_gain_loss_positive_renames_to_losses() {
             txn.data
         );
     };
-    assert!(
-        data.postings
-            .iter()
-            .any(|p| p.account == "Income:Capital-Gains:Long:Losses"),
-        "positive posting should rebook to ...:Losses; got: {:?}",
-        data.postings.iter().map(|p| &p.account).collect::<Vec<_>>()
+    let renamed = data
+        .postings
+        .iter()
+        .find(|p| p.account == "Income:Capital-Gains:Long:Losses")
+        .unwrap_or_else(|| {
+            panic!(
+                "positive posting should rebook to ...:Losses; got: {:?}",
+                data.postings.iter().map(|p| &p.account).collect::<Vec<_>>()
+            )
+        });
+    let renamed_units = renamed
+        .units
+        .as_ref()
+        .expect("renamed posting must keep its units");
+    assert_eq!(
+        renamed_units.number, "100",
+        "rename preserves the original units value"
     );
+    assert_eq!(renamed_units.currency, "USD");
 }
 
 /// Posting on a non-matching account → unchanged. Pins that the
@@ -5004,11 +5130,22 @@ fn test_capital_gains_gain_loss_zero_renames_to_losses() {
             txn.data
         );
     };
-    assert!(
-        data.postings
-            .iter()
-            .any(|p| p.account == "Income:Capital-Gains:Long:Losses"),
-        "zero posting goes to :Losses (the >= 0 branch); got: {:?}",
-        data.postings.iter().map(|p| &p.account).collect::<Vec<_>>()
+    let renamed = data
+        .postings
+        .iter()
+        .find(|p| p.account == "Income:Capital-Gains:Long:Losses")
+        .unwrap_or_else(|| {
+            panic!(
+                "zero posting goes to :Losses (the >= 0 branch); got: {:?}",
+                data.postings.iter().map(|p| &p.account).collect::<Vec<_>>()
+            )
+        });
+    let renamed_units = renamed
+        .units
+        .as_ref()
+        .expect("renamed posting must keep its units");
+    assert_eq!(
+        renamed_units.number, "0",
+        "zero amount preserved through the rename"
     );
 }

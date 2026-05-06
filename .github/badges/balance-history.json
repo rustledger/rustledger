@@ -1,13 +1,5 @@
 [
   {
-    "date": "2026-02-11",
-    "timestamp": "2026-02-11T04:24:57Z",
-    "rustledger_ms": 45.7,
-    "beancount_ms": 1153.9,
-    "ledger_ms": 62.9,
-    "hledger_ms": 596.5
-  },
-  {
     "date": "2026-02-12",
     "timestamp": "2026-02-12T04:18:25Z",
     "rustledger_ms": 44.2,
@@ -718,5 +710,13 @@
     "beancount_ms": 1110.2,
     "ledger_ms": 66.1,
     "hledger_ms": 579.5
+  },
+  {
+    "date": "2026-05-06",
+    "timestamp": "2026-05-06T03:07:29Z",
+    "rustledger_ms": 31.4,
+    "beancount_ms": 1181.0,
+    "ledger_ms": 68.7,
+    "hledger_ms": 632.1
   }
 ]

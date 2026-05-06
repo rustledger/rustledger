@@ -3294,6 +3294,22 @@ fn test_rx_txn_preserves_existing_metadata() {
     } else {
         panic!("'final' metadata should remain as '2024-12-31'");
     }
+    // Also pin `roll` — if the plugin overwrote `roll` while leaving
+    // `final` intact, the count check above would still pass (both
+    // keys still present, length 2), so we have to assert the value.
+    let roll_val = data
+        .metadata
+        .iter()
+        .find(|(k, _)| k == "roll")
+        .map(|(_, v)| v);
+    if let Some(MetaValueData::String(v)) = roll_val {
+        assert_eq!(
+            v, "False",
+            "existing 'roll' value preserved (not overwritten)"
+        );
+    } else {
+        panic!("'roll' metadata should remain as 'False'");
+    }
 }
 
 /// Only ONE of `final` / `roll` is set on the input → plugin adds
@@ -3390,7 +3406,11 @@ fn test_rx_txn_works_alongside_other_tags() {
     };
     assert!(
         data.metadata.iter().any(|(k, _)| k == "final"),
-        "rx_txn applies even when other tags are present"
+        "rx_txn applies even when other tags are present (final missing)"
+    );
+    assert!(
+        data.metadata.iter().any(|(k, _)| k == "roll"),
+        "rx_txn applies even when other tags are present (roll missing)"
     );
     assert_eq!(data.tags.len(), 3, "all tags preserved");
 }
@@ -3539,20 +3559,20 @@ fn test_currency_accounts_single_currency_no_change() {
 // holding accounts. Other prefixes need a custom config or the
 // posting passes through unchanged.
 
-/// Helper: make a transaction with a single Expenses posting tagged
-/// with an `effective_date`. Used by several tests below.
+/// Helper: make a transaction with a single posting tagged with an
+/// `effective_date`. The `target_account` can be any account
+/// (Expenses, Income, Liabilities, etc.) — the plugin's behavior
+/// depends on whether the prefix matches the configured holding-
+/// account map. Used by several tests below.
 fn make_txn_with_effective_date(
     entry_date: &str,
     effective_date: &str,
-    expense_account: &str,
+    target_account: &str,
 ) -> DirectiveWrapper {
     let mut txn = make_transaction(
         entry_date,
         "Deferred",
-        vec![
-            (expense_account, "25", "USD"),
-            ("Assets:Cash", "-25", "USD"),
-        ],
+        vec![(target_account, "25", "USD"), ("Assets:Cash", "-25", "USD")],
     );
     if let DirectiveData::Transaction(ref mut data) = txn.data {
         data.postings[0].metadata.push((
@@ -3737,30 +3757,45 @@ fn test_effective_date_custom_config_remaps_prefix() {
     let output = plugin.process(input);
     assert!(output.errors.is_empty());
 
-    let opens: Vec<_> = output
+    // (a) An Open for the remapped holding account is emitted.
+    assert!(
+        output.directives.iter().any(|d| matches!(
+            &d.data,
+            DirectiveData::Open(o) if o.account.starts_with("Liabilities:Hold:Liab")
+        )),
+        "custom config should map Liabilities: → Liabilities:Hold:Liab"
+    );
+
+    // (b) Exactly one effective-date transaction is spawned.
+    let effective_txns: Vec<_> = output
         .directives
         .iter()
-        .filter(|d| d.directive_type == "open")
+        .filter(|d| d.directive_type == "transaction" && d.date == "2024-02-15")
         .collect();
-    let new_open = opens.iter().find(|d| {
-        if let DirectiveData::Open(o) = &d.data {
-            o.account.starts_with("Liabilities:Hold:Liab")
-        } else {
-            false
-        }
-    });
+    assert_eq!(
+        effective_txns.len(),
+        1,
+        "custom config should spawn exactly one effective-date transaction"
+    );
+
+    // (c) That transaction's postings reference the remapped holding
+    //     account, not the original account or the default mapping.
+    let DirectiveData::Transaction(eff_data) = &effective_txns[0].data else {
+        panic!(
+            "effective-date directive has non-Transaction data: {:?}",
+            effective_txns[0].data
+        );
+    };
     assert!(
-        new_open.is_some(),
-        "custom config should map Liabilities: → Liabilities:Hold:Liab; got opens: {:?}",
-        opens
+        eff_data
+            .postings
             .iter()
-            .filter_map(|d| {
-                if let DirectiveData::Open(o) = &d.data {
-                    Some(&o.account)
-                } else {
-                    None
-                }
-            })
+            .any(|p| p.account.starts_with("Liabilities:Hold:Liab")),
+        "effective-date txn should post to the remapped 'later' holding account; got: {:?}",
+        eff_data
+            .postings
+            .iter()
+            .map(|p| &p.account)
             .collect::<Vec<_>>()
     );
 }
@@ -3886,6 +3921,7 @@ fn test_forecast_weekly_repeat() {
         make_forecast_txn("2024-01-01", "Groceries [WEEKLY REPEAT 4 TIMES]"),
     ]);
     let output = plugin.process(input);
+    assert!(output.errors.is_empty());
     let txns: Vec<_> = output
         .directives
         .iter()
@@ -3909,6 +3945,7 @@ fn test_forecast_daily_repeat() {
         make_forecast_txn("2024-01-15", "Coffee [DAILY REPEAT 5 TIMES]"),
     ]);
     let output = plugin.process(input);
+    assert!(output.errors.is_empty());
     let txns: Vec<_> = output
         .directives
         .iter()
@@ -3939,6 +3976,7 @@ fn test_forecast_monthly_until_inclusive() {
         make_forecast_txn("2024-01-15", "Rent [MONTHLY UNTIL 2024-04-15]"),
     ]);
     let output = plugin.process(input);
+    assert!(output.errors.is_empty());
     let txns: Vec<_> = output
         .directives
         .iter()
@@ -3966,6 +4004,7 @@ fn test_forecast_skip_increases_stride() {
         ),
     ]);
     let output = plugin.process(input);
+    assert!(output.errors.is_empty());
     let txns: Vec<_> = output
         .directives
         .iter()
@@ -3992,6 +4031,7 @@ fn test_forecast_no_pattern_in_narration_kept_unchanged() {
         make_forecast_txn("2024-01-15", "Forecast with no recurrence pattern"),
     ]);
     let output = plugin.process(input);
+    assert!(output.errors.is_empty());
     let txns: Vec<_> = output
         .directives
         .iter()

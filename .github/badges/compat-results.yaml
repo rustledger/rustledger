@@ -1,12 +1,12 @@
 # Rustledger Compatibility Results
-# Generated: 2026-05-05T20:50:31Z
+# Generated: 2026-05-06T04:26:15Z
 
 summary:
   total_files: 786
   excluded_files: 7
   check_exit_match_pct: 99
   full_match_pct: 99
-  bql_match_pct: 89
+  bql_match_pct: 88
   regressions: 0
 
 check_compatibility:
@@ -29,8 +29,8 @@ ast_compatibility:
 
 bql_compatibility:
   queries_tested: 510
-  queries_matching: 444
-  match_pct: 89
+  queries_matching: 442
+  match_pct: 88
 
 regressions:
   count: 0

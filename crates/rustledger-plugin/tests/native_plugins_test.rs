@@ -6494,18 +6494,17 @@ fn test_capital_gains_long_short_classifies_long_term() {
 
 /// Reduction posting with NO cost date, generic `Income:Capital-Gains`
 /// posting present. The plugin reaches the classification loop but
-/// can't compute holding period from a date-less cost, so neither
-/// `short_gains` nor `long_gains` accumulates anything.
+/// can't compute holding period from a date-less cost.
 ///
-/// CURRENT BEHAVIOR (this test pins it): the generic Income:
-/// Capital-Gains posting is silently DROPPED and no :Short/:Long
-/// replacement is emitted, leaving the transaction unbalanced. This
-/// is almost certainly a bug in the plugin (it should either fall
-/// through the whole transaction unchanged when classification
-/// fails, or surface an error). When it gets fixed, this test
-/// should be updated to assert the new behavior.
+/// FIXED behavior (issue #1010): the plugin now falls through the
+/// entire transaction unchanged when any reduction lacks a parseable
+/// cost date. Pre-fix it would silently drop the generic Income:
+/// Capital-Gains posting in the post-loop filter, leaving the
+/// transaction unbalanced. This test pins the corrected behavior:
+/// the original transaction (with the Income:Capital-Gains posting
+/// intact) is preserved and no :Short/:Long replacement is emitted.
 #[test]
-fn test_capital_gains_long_short_no_cost_date_drops_generic_posting() {
+fn test_capital_gains_long_short_no_cost_date_passes_through_unchanged() {
     let plugin = CapitalGainsLongShortPlugin;
     // Build a transaction with:
     //   - a reduction posting (cost+units+price), but cost.date = None
@@ -6599,8 +6598,8 @@ fn test_capital_gains_long_short_no_cost_date_drops_generic_posting() {
         );
     };
 
-    // No :Short or :Long replacement was added (gains stayed at 0
-    // because the loop couldn't classify without a cost date).
+    // No :Short or :Long replacement is emitted — the plugin now
+    // falls through entirely when classification is impossible.
     assert_eq!(
         data.postings
             .iter()
@@ -6611,21 +6610,26 @@ fn test_capital_gains_long_short_no_cost_date_drops_generic_posting() {
         "no Short/Long postings emitted when cost_date is missing"
     );
 
-    // CURRENT BEHAVIOR: the generic Income:Capital-Gains posting was
-    // silently dropped by the post-loop filter. This leaves the
-    // transaction unbalanced — likely a plugin bug. If a future PR
-    // fixes the plugin to fall through cleanly when classification
-    // fails (preserving the original generic posting), update this
-    // assertion to expect the posting to be present.
+    // The generic Income:Capital-Gains posting is PRESERVED — the
+    // pre-fix behavior of silently dropping it (issue #1010) would
+    // leave the transaction unbalanced. The fix: skip the whole
+    // transaction when any reduction lacks a cost date.
     assert_eq!(
         data.postings
             .iter()
             .filter(|p| p.account == "Income:Capital-Gains")
             .count(),
-        0,
-        "generic Income:Capital-Gains posting is currently dropped — \
-         likely plugin bug; this test pins the behavior so a future fix \
-         is caught"
+        1,
+        "generic Income:Capital-Gains posting must be preserved when \
+         the plugin falls through (issue #1010 fix)"
+    );
+
+    // The full transaction is unchanged — same number of postings as
+    // input (asset + cash + Income:Capital-Gains = 3).
+    assert_eq!(
+        data.postings.len(),
+        3,
+        "all three input postings preserved on fall-through"
     );
 }
 

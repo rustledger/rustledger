@@ -154,6 +154,24 @@ fn process_long_short(input: PluginInput) -> PluginOutput {
                 continue;
             };
 
+            // Fall through if ANY reduction lacks a parseable cost
+            // date. Without it the plugin can't classify holding
+            // period, and pre-fix (issue #1010) it would silently
+            // drop the generic Income:Capital-Gains posting in the
+            // post-loop filter, leaving the transaction unbalanced.
+            // Falling through preserves the user's ledger.
+            let any_missing_cost_date = reductions.iter().any(|p| {
+                p.cost
+                    .as_ref()
+                    .and_then(|c| c.date.as_ref())
+                    .and_then(|d| d.parse::<NaiveDate>().ok())
+                    .is_none()
+            });
+            if any_missing_cost_date {
+                new_directives.push(directive);
+                continue;
+            }
+
             let mut short_gains = Decimal::ZERO;
             let mut long_gains = Decimal::ZERO;
 

@@ -3418,11 +3418,107 @@ fn test_rx_txn_works_alongside_other_tags() {
 // ============================================================================
 // SellGainsPlugin Tests
 // ============================================================================
+//
+// `sell_gains` walks every transaction and, for each *sale* posting
+// (negative units with both cost and price), warns when the expected
+// gain `(price - cost) * |units|` is non-zero AND no Income:* /
+// Expenses:* posting exists in the same transaction. It does NOT
+// inspect the gain posting's amount — only its presence.
+//
+// Matrix below pins:
+//   - sale + missing gain posting → warns
+//   - sale + Income posting → silent
+//   - sale + Expenses posting → silent (plugin treats either as ok)
+//   - buy (positive units) → silent regardless
+//   - sale at cost (zero gain) → silent
+//   - sale without cost or price → silent (preconditions not met)
+//   - two sales sharing one Income posting → ZERO warnings (both
+//     sales are considered covered by the single Income posting,
+//     because `has_gain_posting` is checked per-transaction, not
+//     per-sale-posting — documented quirk)
 
+/// Helper: build a 3-posting transaction (the asset, the cash,
+/// and an Income:* / Expenses:* posting) for `sell_gains` testing.
+/// `gain_account` lets us pick `Income:Capital-Gains` or
+/// `Expenses:Capital-Losses` to exercise both branches of the
+/// `starts_with` check in the plugin.
+fn make_sale_with_gain_posting(
+    date: &str,
+    asset_account: &str,
+    units: (&str, &str),
+    cost: (&str, &str),
+    price: (&str, &str),
+    gain_account: &str,
+    gain_amount: (&str, &str),
+) -> DirectiveWrapper {
+    DirectiveWrapper {
+        directive_type: "transaction".to_string(),
+        date: date.to_string(),
+        filename: None,
+        lineno: None,
+        data: DirectiveData::Transaction(TransactionData {
+            flag: "*".to_string(),
+            payee: None,
+            narration: "Sell with gain posting".to_string(),
+            tags: vec![],
+            links: vec![],
+            metadata: vec![],
+            postings: vec![
+                PostingData {
+                    account: asset_account.to_string(),
+                    units: Some(AmountData {
+                        number: units.0.to_string(),
+                        currency: units.1.to_string(),
+                    }),
+                    cost: Some(CostData {
+                        number_per: Some(cost.0.to_string()),
+                        number_total: None,
+                        currency: Some(cost.1.to_string()),
+                        date: None,
+                        label: None,
+                        merge: false,
+                    }),
+                    price: Some(PriceAnnotationData {
+                        is_total: false,
+                        amount: Some(AmountData {
+                            number: price.0.to_string(),
+                            currency: price.1.to_string(),
+                        }),
+                        number: None,
+                        currency: None,
+                    }),
+                    flag: None,
+                    metadata: vec![],
+                },
+                PostingData {
+                    account: "Assets:Cash".to_string(),
+                    units: None,
+                    cost: None,
+                    price: None,
+                    flag: None,
+                    metadata: vec![],
+                },
+                PostingData {
+                    account: gain_account.to_string(),
+                    units: Some(AmountData {
+                        number: gain_amount.0.to_string(),
+                        currency: gain_amount.1.to_string(),
+                    }),
+                    cost: None,
+                    price: None,
+                    flag: None,
+                    metadata: vec![],
+                },
+            ],
+        }),
+    }
+}
+
+/// Sale at $150 vs cost $100, no Income/Expenses posting → 1 warning.
+/// Existing test, kept (and tightened in #1005).
 #[test]
 fn test_sell_gains_warns_missing_gains_posting() {
     let plugin = SellGainsPlugin;
-    // Sale with cost and price but no Income posting
     let input = make_input(vec![
         make_open("2024-01-01", "Assets:Stock"),
         make_open("2024-01-01", "Assets:Cash"),
@@ -3437,7 +3533,6 @@ fn test_sell_gains_warns_missing_gains_posting() {
         ),
     ]);
     let output = plugin.process(input);
-    // Should warn about missing Income:Capital-Gains posting
     assert_eq!(
         output.errors.len(),
         1,
@@ -3446,6 +3541,256 @@ fn test_sell_gains_warns_missing_gains_posting() {
     assert!(
         output.errors[0].message.contains("gain") || output.errors[0].message.contains("Gain"),
         "warning should reference the missing gains posting"
+    );
+}
+
+/// Sale with a balancing `Income:Capital-Gains` posting → no warning.
+/// The plugin only checks for *presence* of an Income/Expenses
+/// posting, not whether its amount actually matches the expected
+/// gain.
+#[test]
+fn test_sell_gains_silent_with_income_posting() {
+    let plugin = SellGainsPlugin;
+    let input = make_input(vec![
+        make_open("2024-01-01", "Assets:Stock"),
+        make_open("2024-01-01", "Assets:Cash"),
+        make_open("2024-01-01", "Income:Capital-Gains"),
+        make_sale_with_gain_posting(
+            "2024-06-15",
+            "Assets:Stock",
+            ("-10", "AAPL"),
+            ("100", "USD"),
+            ("150", "USD"),
+            "Income:Capital-Gains",
+            ("-500", "USD"), // gain = (150-100)*10
+        ),
+    ]);
+    let output = plugin.process(input);
+    assert!(
+        output.errors.is_empty(),
+        "no warning when Income:Capital-Gains posting is present (got {} warnings)",
+        output.errors.len()
+    );
+}
+
+/// Sale + `Expenses:*` posting also satisfies the check (the plugin
+/// looks for either prefix). Pins this branch — losses can be booked
+/// to an Expenses account instead of negative-Income.
+#[test]
+fn test_sell_gains_silent_with_expenses_posting() {
+    let plugin = SellGainsPlugin;
+    let input = make_input(vec![
+        make_open("2024-01-01", "Assets:Stock"),
+        make_open("2024-01-01", "Assets:Cash"),
+        make_open("2024-01-01", "Expenses:Capital-Losses"),
+        make_sale_with_gain_posting(
+            "2024-06-15",
+            "Assets:Stock",
+            ("-10", "AAPL"),
+            ("100", "USD"),
+            ("80", "USD"), // selling at a loss
+            "Expenses:Capital-Losses",
+            ("200", "USD"),
+        ),
+    ]);
+    let output = plugin.process(input);
+    assert!(
+        output.errors.is_empty(),
+        "no warning when Expenses:* posting is present (got {} warnings)",
+        output.errors.len()
+    );
+}
+
+/// Buy (positive units) is never a sale — plugin should be silent
+/// regardless of whether an Income/Expenses posting is present. Pins
+/// the `units >= ZERO → continue` short-circuit.
+#[test]
+fn test_sell_gains_silent_for_buy() {
+    let plugin = SellGainsPlugin;
+    let input = make_input(vec![
+        make_open("2024-01-01", "Assets:Stock"),
+        make_open("2024-01-01", "Assets:Cash"),
+        make_transaction_with_cost_and_price(
+            "2024-01-15",
+            "Buy stock",
+            "Assets:Stock",
+            ("10", "AAPL"), // positive — buy, not sale
+            ("100", "USD"),
+            ("100", "USD"),
+            "Assets:Cash",
+        ),
+    ]);
+    let output = plugin.process(input);
+    assert!(
+        output.errors.is_empty(),
+        "buys are not flagged regardless of postings (got {} warnings)",
+        output.errors.len()
+    );
+}
+
+/// Sale at exactly cost basis (zero gain) → no warning even without
+/// an Income posting. Pins the `expected_gain != ZERO` guard.
+#[test]
+fn test_sell_gains_silent_when_gain_is_zero() {
+    let plugin = SellGainsPlugin;
+    let input = make_input(vec![
+        make_open("2024-01-01", "Assets:Stock"),
+        make_open("2024-01-01", "Assets:Cash"),
+        make_transaction_with_cost_and_price(
+            "2024-06-15",
+            "Sell at cost",
+            "Assets:Stock",
+            ("-10", "AAPL"),
+            ("100", "USD"),
+            ("100", "USD"), // same as cost → no gain
+            "Assets:Cash",
+        ),
+    ]);
+    let output = plugin.process(input);
+    assert!(
+        output.errors.is_empty(),
+        "zero gain doesn't warrant a warning (got {} warnings)",
+        output.errors.len()
+    );
+}
+
+/// Sale missing either cost or price → preconditions not met, plugin
+/// skips. Pins the `(units, cost, price)` triple-Some pattern guard.
+#[test]
+fn test_sell_gains_silent_without_cost() {
+    let plugin = SellGainsPlugin;
+    let input = make_input(vec![
+        make_open("2024-01-01", "Assets:Stock"),
+        make_open("2024-01-01", "Assets:Cash"),
+        // Standard transfer without cost/price annotations
+        make_transaction(
+            "2024-06-15",
+            "Transfer stock",
+            vec![
+                ("Assets:Stock", "-10", "AAPL"),
+                ("Assets:Cash", "1500", "USD"),
+            ],
+        ),
+    ]);
+    let output = plugin.process(input);
+    assert!(
+        output.errors.is_empty(),
+        "sale without cost/price annotation is not flagged (got {} warnings)",
+        output.errors.len()
+    );
+}
+
+/// Two sale postings in one transaction sharing a single Income
+/// posting → both are considered "covered" by the shared posting.
+/// This is a quirk of the plugin's per-transaction (not per-posting)
+/// check for `has_gain_posting`. Pins the actual behavior so a
+/// future refactor that tightens to per-posting matching is caught
+/// by this test (and would require updating it).
+#[test]
+fn test_sell_gains_two_sales_share_one_income_posting() {
+    let plugin = SellGainsPlugin;
+    // Build a transaction with TWO sale postings + one Income posting.
+    let txn = DirectiveWrapper {
+        directive_type: "transaction".to_string(),
+        date: "2024-06-15".to_string(),
+        filename: None,
+        lineno: None,
+        data: DirectiveData::Transaction(TransactionData {
+            flag: "*".to_string(),
+            payee: None,
+            narration: "Sell two lots".to_string(),
+            tags: vec![],
+            links: vec![],
+            metadata: vec![],
+            postings: vec![
+                // First sale (gain)
+                PostingData {
+                    account: "Assets:Stock".to_string(),
+                    units: Some(AmountData {
+                        number: "-5".to_string(),
+                        currency: "AAPL".to_string(),
+                    }),
+                    cost: Some(CostData {
+                        number_per: Some("100".to_string()),
+                        number_total: None,
+                        currency: Some("USD".to_string()),
+                        date: None,
+                        label: None,
+                        merge: false,
+                    }),
+                    price: Some(PriceAnnotationData {
+                        is_total: false,
+                        amount: Some(AmountData {
+                            number: "150".to_string(),
+                            currency: "USD".to_string(),
+                        }),
+                        number: None,
+                        currency: None,
+                    }),
+                    flag: None,
+                    metadata: vec![],
+                },
+                // Second sale (loss)
+                PostingData {
+                    account: "Assets:Stock".to_string(),
+                    units: Some(AmountData {
+                        number: "-3".to_string(),
+                        currency: "AAPL".to_string(),
+                    }),
+                    cost: Some(CostData {
+                        number_per: Some("200".to_string()),
+                        number_total: None,
+                        currency: Some("USD".to_string()),
+                        date: None,
+                        label: None,
+                        merge: false,
+                    }),
+                    price: Some(PriceAnnotationData {
+                        is_total: false,
+                        amount: Some(AmountData {
+                            number: "180".to_string(),
+                            currency: "USD".to_string(),
+                        }),
+                        number: None,
+                        currency: None,
+                    }),
+                    flag: None,
+                    metadata: vec![],
+                },
+                PostingData {
+                    account: "Income:Capital-Gains".to_string(),
+                    units: Some(AmountData {
+                        number: "-190".to_string(), // 250 gain - 60 loss
+                        currency: "USD".to_string(),
+                    }),
+                    cost: None,
+                    price: None,
+                    flag: None,
+                    metadata: vec![],
+                },
+                PostingData {
+                    account: "Assets:Cash".to_string(),
+                    units: None,
+                    cost: None,
+                    price: None,
+                    flag: None,
+                    metadata: vec![],
+                },
+            ],
+        }),
+    };
+    let input = make_input(vec![
+        make_open("2024-01-01", "Assets:Stock"),
+        make_open("2024-01-01", "Assets:Cash"),
+        make_open("2024-01-01", "Income:Capital-Gains"),
+        txn,
+    ]);
+    let output = plugin.process(input);
+    assert!(
+        output.errors.is_empty(),
+        "single Income posting covers both sales in this transaction \
+         (per-transaction check, not per-posting); got {} warnings",
+        output.errors.len()
     );
 }
 
@@ -4234,15 +4579,28 @@ fn test_split_expenses_divides_by_members() {
 // ============================================================================
 // UnrealizedPlugin Tests
 // ============================================================================
+//
+// `unrealized` walks every Transaction posting, accumulates units +
+// cost basis per (account, currency), then for each non-zero position
+// looks up a price entry to USD and emits a *warning* (NOT a directive)
+// when the market value (`units * market_price`) differs from
+// cost_basis by more than 0.01 USD.
+//
+// Coverage matrix below pins each branch: gain, loss, no-price,
+// zero-position, threshold, multi-buy aggregation. Note the plugin
+// hardcodes USD as the quote currency — non-USD positions are
+// silently skipped (test pins this).
 
+/// Single buy at 100, market jumps to 150 → unrealized gain of 500 USD.
+/// Pre-fix this test only checked "doesn't error out" — that would
+/// pass even if the plugin emitted no warnings at all.
 #[test]
-fn test_unrealized_reports_unrealized_gains() {
+fn test_unrealized_warns_on_unrealized_gain() {
     let plugin = UnrealizedPlugin::new();
     let input = make_input(vec![
         make_open("2024-01-01", "Assets:Stock"),
         make_open("2024-01-01", "Assets:Cash"),
         make_commodity("2024-01-01", "AAPL"),
-        // Buy stock
         make_transaction_with_cost(
             "2024-01-15",
             "Buy",
@@ -4251,19 +4609,404 @@ fn test_unrealized_reports_unrealized_gains() {
             ("100", "USD"),
             "Assets:Cash",
         ),
-        // Current market price higher
         make_price("2024-06-15", "AAPL", "150", "USD"),
     ]);
     let output = plugin.process(input);
-    // Should report unrealized gain of 10 * (150 - 100) = 500
-    // The plugin may generate warnings or new directives
-    // As long as it doesn't error out, the plugin works
+    assert_eq!(
+        output.errors.len(),
+        1,
+        "exactly one warning for the single position with a market price"
+    );
+    let msg = &output.errors[0].message;
     assert!(
-        output.errors.is_empty()
-            || output
-                .errors
-                .iter()
-                .all(|e| e.severity == PluginErrorSeverity::Warning)
+        msg.contains("500") && msg.contains("AAPL"),
+        "warning should report 500 USD gain on AAPL; got: {msg}"
+    );
+    assert_eq!(
+        output.errors[0].severity,
+        PluginErrorSeverity::Warning,
+        "unrealized changes are warnings, never errors"
+    );
+}
+
+/// Symmetric to the gain case: market drops below cost → negative
+/// unrealized number in the warning text.
+#[test]
+fn test_unrealized_warns_on_unrealized_loss() {
+    let plugin = UnrealizedPlugin::new();
+    let input = make_input(vec![
+        make_open("2024-01-01", "Assets:Stock"),
+        make_open("2024-01-01", "Assets:Cash"),
+        make_commodity("2024-01-01", "AAPL"),
+        make_transaction_with_cost(
+            "2024-01-15",
+            "Buy",
+            "Assets:Stock",
+            ("10", "AAPL"),
+            ("100", "USD"),
+            "Assets:Cash",
+        ),
+        make_price("2024-06-15", "AAPL", "50", "USD"),
+    ]);
+    let output = plugin.process(input);
+    assert_eq!(output.errors.len(), 1, "exactly one warning");
+    let msg = &output.errors[0].message;
+    assert!(
+        msg.contains("-500") && msg.contains("AAPL"),
+        "warning should report -500 USD (loss) on AAPL; got: {msg}"
+    );
+}
+
+/// Market price equals cost basis → no unrealized change → no warning.
+/// Pins the threshold logic (warning fires only on |Δ| > 0.01).
+#[test]
+fn test_unrealized_silent_when_market_equals_cost() {
+    let plugin = UnrealizedPlugin::new();
+    let input = make_input(vec![
+        make_open("2024-01-01", "Assets:Stock"),
+        make_open("2024-01-01", "Assets:Cash"),
+        make_commodity("2024-01-01", "AAPL"),
+        make_transaction_with_cost(
+            "2024-01-15",
+            "Buy",
+            "Assets:Stock",
+            ("10", "AAPL"),
+            ("100", "USD"),
+            "Assets:Cash",
+        ),
+        make_price("2024-06-15", "AAPL", "100", "USD"),
+    ]);
+    let output = plugin.process(input);
+    assert!(
+        output.errors.is_empty(),
+        "no warning when market price equals cost basis (got {} warnings)",
+        output.errors.len()
+    );
+}
+
+/// Position exists but no price directive → plugin can't compute
+/// unrealized, silently skips. Pins this fall-through.
+#[test]
+fn test_unrealized_silent_without_price_directive() {
+    let plugin = UnrealizedPlugin::new();
+    let input = make_input(vec![
+        make_open("2024-01-01", "Assets:Stock"),
+        make_open("2024-01-01", "Assets:Cash"),
+        make_commodity("2024-01-01", "AAPL"),
+        make_transaction_with_cost(
+            "2024-01-15",
+            "Buy",
+            "Assets:Stock",
+            ("10", "AAPL"),
+            ("100", "USD"),
+            "Assets:Cash",
+        ),
+        // Note: no price directive
+    ]);
+    let output = plugin.process(input);
+    assert!(
+        output.errors.is_empty(),
+        "no warning emitted when there's no current price (got {} warnings)",
+        output.errors.len()
+    );
+}
+
+/// Buy then fully sell → net position is zero → plugin skips even
+/// if a price exists. Pins the `units == ZERO` short-circuit.
+#[test]
+fn test_unrealized_silent_for_zero_position() {
+    let plugin = UnrealizedPlugin::new();
+    let input = make_input(vec![
+        make_open("2024-01-01", "Assets:Stock"),
+        make_open("2024-01-01", "Assets:Cash"),
+        make_commodity("2024-01-01", "AAPL"),
+        make_transaction_with_cost(
+            "2024-01-15",
+            "Buy",
+            "Assets:Stock",
+            ("10", "AAPL"),
+            ("100", "USD"),
+            "Assets:Cash",
+        ),
+        make_transaction_with_cost(
+            "2024-03-15",
+            "Sell",
+            "Assets:Stock",
+            ("-10", "AAPL"),
+            ("100", "USD"),
+            "Assets:Cash",
+        ),
+        make_price("2024-06-15", "AAPL", "150", "USD"),
+    ]);
+    let output = plugin.process(input);
+    assert!(
+        output.errors.is_empty(),
+        "no warning when position is fully closed (got {} warnings)",
+        output.errors.len()
+    );
+}
+
+/// Two buys at different cost bases. Market price chosen to land
+/// the average exactly at the weighted-average cost (no unrealized
+/// change). Documents that the plugin tracks aggregate cost basis,
+/// not per-lot.
+#[test]
+fn test_unrealized_aggregates_multiple_buys_into_position() {
+    let plugin = UnrealizedPlugin::new();
+    let input = make_input(vec![
+        make_open("2024-01-01", "Assets:Stock"),
+        make_open("2024-01-01", "Assets:Cash"),
+        make_commodity("2024-01-01", "AAPL"),
+        // 5 @ 100 = 500 cost basis
+        make_transaction_with_cost(
+            "2024-01-15",
+            "Buy",
+            "Assets:Stock",
+            ("5", "AAPL"),
+            ("100", "USD"),
+            "Assets:Cash",
+        ),
+        // 5 @ 200 = 1000 cost basis
+        make_transaction_with_cost(
+            "2024-02-15",
+            "Buy",
+            "Assets:Stock",
+            ("5", "AAPL"),
+            ("200", "USD"),
+            "Assets:Cash",
+        ),
+        // total: 10 units, $1500 cost. At market $150/unit, value =
+        // $1500. unrealized = 0 → no warning.
+        make_price("2024-06-15", "AAPL", "150", "USD"),
+    ]);
+    let output = plugin.process(input);
+    assert!(
+        output.errors.is_empty(),
+        "weighted-average cost basis: 10 units at avg $150 cost = $1500; \
+         market 10 × $150 = $1500; unrealized = 0 (got {} warnings)",
+        output.errors.len()
+    );
+}
+
+/// Position priced in a non-USD quote currency is silently skipped.
+/// Pins the hardcoded USD assumption in the plugin
+/// (`prices.get(&(currency, "USD"))`); a refactor that adds quote-
+/// currency configurability should also update this test.
+#[test]
+fn test_unrealized_silent_when_quote_currency_is_not_usd() {
+    let plugin = UnrealizedPlugin::new();
+    let input = make_input(vec![
+        make_open("2024-01-01", "Assets:Stock"),
+        make_open("2024-01-01", "Assets:Cash"),
+        make_commodity("2024-01-01", "ABC"),
+        make_transaction_with_cost(
+            "2024-01-15",
+            "Buy",
+            "Assets:Stock",
+            ("10", "ABC"),
+            ("100", "EUR"),
+            "Assets:Cash",
+        ),
+        // Price quoted in EUR, not USD. Plugin ignores it.
+        make_price("2024-06-15", "ABC", "150", "EUR"),
+    ]);
+    let output = plugin.process(input);
+    assert!(
+        output.errors.is_empty(),
+        "non-USD quote currencies are skipped today (got {} warnings)",
+        output.errors.len()
+    );
+}
+
+// Property test: unrealized gain reported in the warning equals
+// `units * (market_price - cost_per)` for any single-buy + market-
+// price scenario.
+//
+// This is the algebraic invariant of the plugin's core math.
+// Generators are expressed in *cents* (cost_cents, market_cents) so
+// the test actually exercises:
+//   - fractional prices (any cent value not divisible by 100 is
+//     fractional in dollar units)
+//   - threshold-boundary cases (delta_cents in 0..2 ⇒ gain of 0,
+//     0.01, or above when multiplied by units)
+//   - large unit counts (up to 1000)
+proptest::proptest! {
+    #![proptest_config(proptest::prelude::ProptestConfig::with_cases(64))]
+
+    #[test]
+    fn prop_unrealized_warning_amount_matches_units_times_delta(
+        // Units stay integer so cost_basis = cost_per * units is exact.
+        units in 1u32..1000,
+        // Cost and market in *cents*. Range covers values up to
+        // $10,000 with 0.01 USD precision, including fractional
+        // cent counts that make `cost_per` non-integer in dollars.
+        cost_cents in 1u32..1_000_000,
+        market_cents in 1u32..1_000_000,
+    ) {
+        use rust_decimal::Decimal;
+
+        // cents -> dollars: divide by 100.
+        let to_dollars = |cents: u32| -> Decimal {
+            Decimal::new(i64::from(cents), 2)
+        };
+        let cost_d = to_dollars(cost_cents);
+        let market_d = to_dollars(market_cents);
+
+        let plugin = UnrealizedPlugin::new();
+        let input = make_input(vec![
+            make_open("2024-01-01", "Assets:Stock"),
+            make_open("2024-01-01", "Assets:Cash"),
+            make_commodity("2024-01-01", "AAPL"),
+            make_transaction_with_cost(
+                "2024-01-15",
+                "Buy",
+                "Assets:Stock",
+                (&units.to_string(), "AAPL"),
+                (&cost_d.to_string(), "USD"),
+                "Assets:Cash",
+            ),
+            make_price("2024-06-15", "AAPL", &market_d.to_string(), "USD"),
+        ]);
+        let output = plugin.process(input);
+
+        let units_d = Decimal::from(units);
+        let expected_gain = (market_d - cost_d) * units_d;
+        // Threshold is `> Decimal::new(1, 2)` = 0.01.
+        let above_threshold = expected_gain.abs() > Decimal::new(1, 2);
+
+        if above_threshold {
+            proptest::prop_assert_eq!(
+                output.errors.len(), 1,
+                "expected 1 warning for expected_gain={}", expected_gain
+            );
+            let msg = &output.errors[0].message;
+            proptest::prop_assert!(
+                msg.contains(&expected_gain.to_string()),
+                "warning '{}' should contain the exact gain {}",
+                msg, expected_gain
+            );
+        } else {
+            proptest::prop_assert!(
+                output.errors.is_empty(),
+                "no warning expected for expected_gain={} (≤ 0.01 threshold)",
+                expected_gain
+            );
+        }
+    }
+
+    /// Two buys at different cost bases — the position aggregates,
+    /// and the unrealized gain at any market price is
+    ///
+    ///   (units_a + units_b) * market - (cost_a*units_a + cost_b*units_b)
+    ///
+    /// Pins the position-aggregation invariant. Pre-fix
+    /// `prop_unrealized_warning_amount_matches_units_times_delta` only
+    /// covered single buys, so weighted-average rounding bugs in
+    /// multi-buy aggregation would have slipped through.
+    #[test]
+    fn prop_unrealized_aggregates_two_buys_correctly(
+        units_a in 1u32..500,
+        units_b in 1u32..500,
+        cost_a_cents in 1u32..1_000_000,
+        cost_b_cents in 1u32..1_000_000,
+        market_cents in 1u32..1_000_000,
+    ) {
+        use rust_decimal::Decimal;
+
+        let to_dollars = |cents: u32| Decimal::new(i64::from(cents), 2);
+        let cost_a_d = to_dollars(cost_a_cents);
+        let cost_b_d = to_dollars(cost_b_cents);
+        let market_d = to_dollars(market_cents);
+        let units_a_d = Decimal::from(units_a);
+        let units_b_d = Decimal::from(units_b);
+
+        let plugin = UnrealizedPlugin::new();
+        let input = make_input(vec![
+            make_open("2024-01-01", "Assets:Stock"),
+            make_open("2024-01-01", "Assets:Cash"),
+            make_commodity("2024-01-01", "AAPL"),
+            make_transaction_with_cost(
+                "2024-01-15",
+                "Buy A",
+                "Assets:Stock",
+                (&units_a.to_string(), "AAPL"),
+                (&cost_a_d.to_string(), "USD"),
+                "Assets:Cash",
+            ),
+            make_transaction_with_cost(
+                "2024-02-15",
+                "Buy B",
+                "Assets:Stock",
+                (&units_b.to_string(), "AAPL"),
+                (&cost_b_d.to_string(), "USD"),
+                "Assets:Cash",
+            ),
+            make_price("2024-06-15", "AAPL", &market_d.to_string(), "USD"),
+        ]);
+        let output = plugin.process(input);
+
+        // Expected aggregate gain across both lots.
+        let total_units = units_a_d + units_b_d;
+        let total_cost = cost_a_d * units_a_d + cost_b_d * units_b_d;
+        let expected_gain = total_units * market_d - total_cost;
+        let above_threshold = expected_gain.abs() > Decimal::new(1, 2);
+
+        if above_threshold {
+            proptest::prop_assert_eq!(
+                output.errors.len(), 1,
+                "expected 1 aggregated warning; expected_gain={}", expected_gain
+            );
+            let msg = &output.errors[0].message;
+            proptest::prop_assert!(
+                msg.contains(&expected_gain.to_string()),
+                "warning '{}' should contain aggregate gain {}",
+                msg, expected_gain
+            );
+        } else {
+            proptest::prop_assert!(
+                output.errors.is_empty(),
+                "no warning expected for aggregate gain={} (≤ 0.01)",
+                expected_gain
+            );
+        }
+    }
+}
+
+/// Custom `gains_account` is stored on the plugin but never appears in
+/// the output today (the plugin emits warnings, not directives, so
+/// the account name is unused). Pins this so a future change to
+/// emit actual transactions to the account is caught by the test.
+#[test]
+fn test_unrealized_custom_gains_account_currently_unused_in_output() {
+    let plugin = UnrealizedPlugin::with_account("Income:Custom-Unrealized".to_string());
+    let input = make_input(vec![
+        make_open("2024-01-01", "Assets:Stock"),
+        make_open("2024-01-01", "Assets:Cash"),
+        make_commodity("2024-01-01", "AAPL"),
+        make_transaction_with_cost(
+            "2024-01-15",
+            "Buy",
+            "Assets:Stock",
+            ("10", "AAPL"),
+            ("100", "USD"),
+            "Assets:Cash",
+        ),
+        make_price("2024-06-15", "AAPL", "150", "USD"),
+    ]);
+    let output = plugin.process(input);
+    assert_eq!(
+        output.errors.len(),
+        1,
+        "warning still fires regardless of account customization"
+    );
+    // Today the warning text doesn't mention the gains_account at all.
+    // If a future change makes it do so, this test should be updated
+    // to assert on the new behavior.
+    assert!(
+        !output.errors[0]
+            .message
+            .contains("Income:Custom-Unrealized"),
+        "current behavior: gains_account is not surfaced in warnings"
     );
 }
 
@@ -4637,7 +5380,99 @@ proptest::proptest! {
 // ============================================================================
 // CapitalGainsLongShortPlugin Tests
 // ============================================================================
+//
+// `long_short` rebooks generic `Income:.*Capital-Gains` postings into
+// `:Short` / `:Long` accounts based on holding period. The plugin
+// classifies as long-term when `years_held > 1`, OR when
+// `years_held == 1` AND the entry's month/day is on/after the cost's
+// month/day (i.e. the holding has crossed the 1-year anniversary).
+//
+// Config format:
+//   {'pattern': ['account_to_replace', 'short_replacement', 'long_replacement']}
+//
+// The plugin needs cost_date on each reduction posting to classify;
+// without a cost date the transaction is left unchanged.
 
+/// Build a sale transaction with cost.date set, plus a generic
+/// `Income:Capital-Gains` posting that `long_short` can rewrite. The
+/// asset, cash, and gain postings all live on one transaction
+/// dated `entry_date`; the cost basis was acquired on `cost_date`.
+fn make_long_short_sale(
+    entry_date: &str,
+    cost_date: &str,
+    asset: (&str, &str), // (units, currency)
+    cost: (&str, &str),  // (per, currency)
+    price: (&str, &str), // (per, currency)
+    gain_account: &str,
+    gain_amount: (&str, &str),
+) -> DirectiveWrapper {
+    DirectiveWrapper {
+        directive_type: "transaction".to_string(),
+        date: entry_date.to_string(),
+        filename: None,
+        lineno: None,
+        data: DirectiveData::Transaction(TransactionData {
+            flag: "*".to_string(),
+            payee: None,
+            narration: "Sell with cost-dated lot".to_string(),
+            tags: vec![],
+            links: vec![],
+            metadata: vec![],
+            postings: vec![
+                PostingData {
+                    account: "Assets:Stock".to_string(),
+                    units: Some(AmountData {
+                        number: asset.0.to_string(),
+                        currency: asset.1.to_string(),
+                    }),
+                    cost: Some(CostData {
+                        number_per: Some(cost.0.to_string()),
+                        number_total: None,
+                        currency: Some(cost.1.to_string()),
+                        date: Some(cost_date.to_string()),
+                        label: None,
+                        merge: false,
+                    }),
+                    price: Some(PriceAnnotationData {
+                        is_total: false,
+                        amount: Some(AmountData {
+                            number: price.0.to_string(),
+                            currency: price.1.to_string(),
+                        }),
+                        number: None,
+                        currency: None,
+                    }),
+                    flag: None,
+                    metadata: vec![],
+                },
+                PostingData {
+                    account: "Assets:Cash".to_string(),
+                    units: None,
+                    cost: None,
+                    price: None,
+                    flag: None,
+                    metadata: vec![],
+                },
+                PostingData {
+                    account: gain_account.to_string(),
+                    units: Some(AmountData {
+                        number: gain_amount.0.to_string(),
+                        currency: gain_amount.1.to_string(),
+                    }),
+                    cost: None,
+                    price: None,
+                    flag: None,
+                    metadata: vec![],
+                },
+            ],
+        }),
+    }
+}
+
+const LONG_SHORT_CFG: &str =
+    "{'Income:Capital-Gains': [':Capital-Gains', ':Capital-Gains:Short', ':Capital-Gains:Long']}";
+
+/// No config string → plugin is a no-op (returns input unchanged).
 #[test]
 fn test_capital_gains_long_short_no_config_passthrough() {
     let plugin = CapitalGainsLongShortPlugin;
@@ -4650,9 +5485,349 @@ fn test_capital_gains_long_short_no_config_passthrough() {
     assert_eq!(output.directives.len(), 2);
 }
 
+/// Malformed config → plugin treats as no-op (the inner regex parse
+/// fails, plugin returns input unchanged). Pins the `parse_*_config
+/// → None → passthrough` branch.
+#[test]
+fn test_capital_gains_long_short_invalid_config_passthrough() {
+    let plugin = CapitalGainsLongShortPlugin;
+    let input = make_input_with_config(
+        vec![
+            make_open("2024-01-01", "Assets:Cash"),
+            make_transaction("2024-01-15", "Simple", vec![("Assets:Cash", "100", "USD")]),
+        ],
+        "this is not valid plugin config",
+    );
+    let output = plugin.process(input);
+    assert!(output.errors.is_empty());
+    assert_eq!(output.directives.len(), 2);
+}
+
+/// Config valid but no posting matches the pattern → transaction
+/// passes through unchanged (only the original directives, no
+/// new Open directives).
+#[test]
+fn test_capital_gains_long_short_no_matching_postings_unchanged() {
+    let plugin = CapitalGainsLongShortPlugin;
+    let input = make_input_with_config(
+        vec![
+            make_open("2024-01-01", "Assets:Cash"),
+            make_open("2024-01-01", "Expenses:Food"),
+            make_transaction(
+                "2024-01-15",
+                "Buy lunch",
+                vec![
+                    ("Expenses:Food", "10", "USD"),
+                    ("Assets:Cash", "-10", "USD"),
+                ],
+            ),
+        ],
+        LONG_SHORT_CFG,
+    );
+    let output = plugin.process(input);
+    assert_eq!(output.errors.len(), 0);
+    assert_eq!(
+        output.directives.len(),
+        3,
+        "no matching posting → no new Open directives, count unchanged"
+    );
+}
+
+/// Sale held < 1 year → gain rebooks to `:Capital-Gains:Short`.
+/// 6 months hold (Jan 15 → Jul 15) is well under the threshold.
+#[test]
+fn test_capital_gains_long_short_classifies_short_term() {
+    let plugin = CapitalGainsLongShortPlugin;
+    let input = make_input_with_config(
+        vec![
+            make_open("2024-01-01", "Assets:Stock"),
+            make_open("2024-01-01", "Assets:Cash"),
+            make_open("2024-01-01", "Income:Capital-Gains"),
+            make_long_short_sale(
+                "2024-07-15", // sold mid-year
+                "2024-01-15", // bought 6 months earlier
+                ("-10", "AAPL"),
+                ("100", "USD"),
+                ("150", "USD"),
+                "Income:Capital-Gains",
+                ("-500", "USD"),
+            ),
+        ],
+        LONG_SHORT_CFG,
+    );
+    let output = plugin.process(input);
+    assert_eq!(output.errors.len(), 0);
+
+    let txn = output
+        .directives
+        .iter()
+        .find(|d| d.directive_type == "transaction")
+        .expect("rewritten transaction should still be present");
+    let DirectiveData::Transaction(data) = &txn.data else {
+        panic!(
+            "transaction directive_type with non-Transaction data: {:?}",
+            txn.data
+        );
+    };
+
+    let short_postings: Vec<&PostingData> = data
+        .postings
+        .iter()
+        .filter(|p| p.account.contains(":Capital-Gains:Short"))
+        .collect();
+    assert_eq!(short_postings.len(), 1, "short_term gain rebooks to :Short");
+    assert_eq!(
+        data.postings
+            .iter()
+            .filter(|p| p.account.contains(":Capital-Gains:Long"))
+            .count(),
+        0,
+        "no long-term posting expected"
+    );
+
+    // Pin the posting AMOUNT, not just the account. Plugin computes
+    // gain = (cost - price) * |units| = (100 - 150) * 10 = -500.
+    // Currency must come from the original generic posting.
+    let short_units = short_postings[0]
+        .units
+        .as_ref()
+        .expect("short posting must have units");
+    assert_eq!(
+        short_units.number, "-500",
+        "short_term gain amount = (cost - price) * |units| = -500"
+    );
+    assert_eq!(short_units.currency, "USD");
+
+    // Verify a new Open directive was generated for the new account.
+    assert!(
+        output.directives.iter().any(|d| {
+            if let DirectiveData::Open(o) = &d.data {
+                o.account.contains(":Capital-Gains:Short")
+            } else {
+                false
+            }
+        }),
+        "plugin should emit Open for the new short-term account"
+    );
+}
+
+/// Sale held > 1 year → gain rebooks to `:Capital-Gains:Long`.
+/// Full 2-year hold removes any month/day boundary ambiguity.
+#[test]
+fn test_capital_gains_long_short_classifies_long_term() {
+    let plugin = CapitalGainsLongShortPlugin;
+    let input = make_input_with_config(
+        vec![
+            make_open("2022-01-01", "Assets:Stock"),
+            make_open("2022-01-01", "Assets:Cash"),
+            make_open("2022-01-01", "Income:Capital-Gains"),
+            make_long_short_sale(
+                "2024-07-15",
+                "2022-01-15", // ~2.5 years held
+                ("-10", "AAPL"),
+                ("100", "USD"),
+                ("150", "USD"),
+                "Income:Capital-Gains",
+                ("-500", "USD"),
+            ),
+        ],
+        LONG_SHORT_CFG,
+    );
+    let output = plugin.process(input);
+    assert_eq!(output.errors.len(), 0);
+
+    let txn = output
+        .directives
+        .iter()
+        .find(|d| d.directive_type == "transaction")
+        .expect("rewritten transaction should still be present");
+    let DirectiveData::Transaction(data) = &txn.data else {
+        panic!(
+            "transaction directive_type with non-Transaction data: {:?}",
+            txn.data
+        );
+    };
+
+    let long_postings: Vec<&PostingData> = data
+        .postings
+        .iter()
+        .filter(|p| p.account.contains(":Capital-Gains:Long"))
+        .collect();
+    assert_eq!(long_postings.len(), 1, "long_term gain rebooks to :Long");
+    assert_eq!(
+        data.postings
+            .iter()
+            .filter(|p| p.account.contains(":Capital-Gains:Short"))
+            .count(),
+        0,
+        "no short-term posting expected"
+    );
+
+    // Pin the posting AMOUNT, not just the account. Plugin computes
+    // gain = (cost - price) * |units| = (100 - 150) * 10 = -500.
+    let long_units = long_postings[0]
+        .units
+        .as_ref()
+        .expect("long posting must have units");
+    assert_eq!(
+        long_units.number, "-500",
+        "long_term gain amount = (cost - price) * |units| = -500"
+    );
+    assert_eq!(long_units.currency, "USD");
+}
+
+/// Reduction posting with NO cost date, generic `Income:Capital-Gains`
+/// posting present. The plugin reaches the classification loop but
+/// can't compute holding period from a date-less cost, so neither
+/// `short_gains` nor `long_gains` accumulates anything.
+///
+/// CURRENT BEHAVIOR (this test pins it): the generic Income:
+/// Capital-Gains posting is silently DROPPED and no :Short/:Long
+/// replacement is emitted, leaving the transaction unbalanced. This
+/// is almost certainly a bug in the plugin (it should either fall
+/// through the whole transaction unchanged when classification
+/// fails, or surface an error). When it gets fixed, this test
+/// should be updated to assert the new behavior.
+#[test]
+fn test_capital_gains_long_short_no_cost_date_drops_generic_posting() {
+    let plugin = CapitalGainsLongShortPlugin;
+    // Build a transaction with:
+    //   - a reduction posting (cost+units+price), but cost.date = None
+    //   - an Income:Capital-Gains posting (matches pattern → has_generic)
+    //   - the cash leg
+    // make_transaction_with_cost_and_price doesn't set cost.date and
+    // produces only asset+cash, so we build inline to add the third
+    // posting.
+    let txn = DirectiveWrapper {
+        directive_type: "transaction".to_string(),
+        date: "2024-07-15".to_string(),
+        filename: None,
+        lineno: None,
+        data: DirectiveData::Transaction(TransactionData {
+            flag: "*".to_string(),
+            payee: None,
+            narration: "Sell with no-date cost".to_string(),
+            tags: vec![],
+            links: vec![],
+            metadata: vec![],
+            postings: vec![
+                PostingData {
+                    account: "Assets:Stock".to_string(),
+                    units: Some(AmountData {
+                        number: "-10".to_string(),
+                        currency: "AAPL".to_string(),
+                    }),
+                    cost: Some(CostData {
+                        number_per: Some("100".to_string()),
+                        number_total: None,
+                        currency: Some("USD".to_string()),
+                        date: None, // ← the branch under test
+                        label: None,
+                        merge: false,
+                    }),
+                    price: Some(PriceAnnotationData {
+                        is_total: false,
+                        amount: Some(AmountData {
+                            number: "150".to_string(),
+                            currency: "USD".to_string(),
+                        }),
+                        number: None,
+                        currency: None,
+                    }),
+                    flag: None,
+                    metadata: vec![],
+                },
+                PostingData {
+                    account: "Assets:Cash".to_string(),
+                    units: None,
+                    cost: None,
+                    price: None,
+                    flag: None,
+                    metadata: vec![],
+                },
+                PostingData {
+                    account: "Income:Capital-Gains".to_string(),
+                    units: Some(AmountData {
+                        number: "-500".to_string(),
+                        currency: "USD".to_string(),
+                    }),
+                    cost: None,
+                    price: None,
+                    flag: None,
+                    metadata: vec![],
+                },
+            ],
+        }),
+    };
+    let input = make_input_with_config(
+        vec![
+            make_open("2024-01-01", "Assets:Stock"),
+            make_open("2024-01-01", "Assets:Cash"),
+            make_open("2024-01-01", "Income:Capital-Gains"),
+            txn,
+        ],
+        LONG_SHORT_CFG,
+    );
+    let output = plugin.process(input);
+    assert_eq!(output.errors.len(), 0);
+
+    let txn = output
+        .directives
+        .iter()
+        .find(|d| d.directive_type == "transaction")
+        .expect("transaction still present");
+    let DirectiveData::Transaction(data) = &txn.data else {
+        panic!(
+            "non-Transaction data on transaction directive: {:?}",
+            txn.data
+        );
+    };
+
+    // No :Short or :Long replacement was added (gains stayed at 0
+    // because the loop couldn't classify without a cost date).
+    assert_eq!(
+        data.postings
+            .iter()
+            .filter(|p| p.account.contains(":Capital-Gains:Short")
+                || p.account.contains(":Capital-Gains:Long"))
+            .count(),
+        0,
+        "no Short/Long postings emitted when cost_date is missing"
+    );
+
+    // CURRENT BEHAVIOR: the generic Income:Capital-Gains posting was
+    // silently dropped by the post-loop filter. This leaves the
+    // transaction unbalanced — likely a plugin bug. If a future PR
+    // fixes the plugin to fall through cleanly when classification
+    // fails (preserving the original generic posting), update this
+    // assertion to expect the posting to be present.
+    assert_eq!(
+        data.postings
+            .iter()
+            .filter(|p| p.account == "Income:Capital-Gains")
+            .count(),
+        0,
+        "generic Income:Capital-Gains posting is currently dropped — \
+         likely plugin bug; this test pins the behavior so a future fix \
+         is caught"
+    );
+}
+
 // ============================================================================
 // CapitalGainsGainLossPlugin Tests
 // ============================================================================
+//
+// `gain_loss` rebooks postings whose account matches the configured
+// pattern: NEGATIVE units → `gains_replacement` (income is -ve in
+// double-entry), POSITIVE units → `losses_replacement`.
+//
+// Config:
+//   {'pattern': ['account_to_replace', 'gains_replacement', 'losses_replacement']}
+//
+// Doesn't compute amounts — just renames accounts.
+
+const GAIN_LOSS_CFG: &str =
+    "{'Income:Capital-Gains:Long': [':Long', ':Long:Gains', ':Long:Losses']}";
 
 #[test]
 fn test_capital_gains_gain_loss_no_config_passthrough() {
@@ -4664,4 +5839,239 @@ fn test_capital_gains_gain_loss_no_config_passthrough() {
     let output = plugin.process(input);
     assert!(output.errors.is_empty());
     assert_eq!(output.directives.len(), 2);
+}
+
+/// Malformed config → no-op (regex parse fails). Pins the
+/// `parse_gain_loss_config → None → passthrough` branch.
+#[test]
+fn test_capital_gains_gain_loss_invalid_config_passthrough() {
+    let plugin = CapitalGainsGainLossPlugin;
+    let input = make_input_with_config(
+        vec![
+            make_open("2024-01-01", "Assets:Cash"),
+            make_transaction("2024-01-15", "Simple", vec![("Assets:Cash", "100", "USD")]),
+        ],
+        "{ malformed",
+    );
+    let output = plugin.process(input);
+    assert!(output.errors.is_empty());
+    assert_eq!(output.directives.len(), 2);
+}
+
+/// Negative posting on a matching account → renamed to gains
+/// replacement (`:Long` → `:Long:Gains`).
+#[test]
+fn test_capital_gains_gain_loss_negative_renames_to_gains() {
+    let plugin = CapitalGainsGainLossPlugin;
+    let input = make_input_with_config(
+        vec![
+            make_open("2024-01-01", "Assets:Broker"),
+            make_open("2024-01-01", "Income:Capital-Gains:Long"),
+            make_transaction(
+                "2024-01-15",
+                "Sell with gain",
+                vec![
+                    ("Assets:Broker", "1000", "USD"),
+                    ("Income:Capital-Gains:Long", "-100", "USD"),
+                ],
+            ),
+        ],
+        GAIN_LOSS_CFG,
+    );
+    let output = plugin.process(input);
+    assert_eq!(output.errors.len(), 0);
+
+    let txn = output
+        .directives
+        .iter()
+        .find(|d| d.directive_type == "transaction")
+        .expect("transaction still present");
+    let DirectiveData::Transaction(data) = &txn.data else {
+        panic!(
+            "non-Transaction data on transaction directive: {:?}",
+            txn.data
+        );
+    };
+    let renamed = data
+        .postings
+        .iter()
+        .find(|p| p.account == "Income:Capital-Gains:Long:Gains")
+        .unwrap_or_else(|| {
+            panic!(
+                "negative posting should rebook to ...:Gains; got: {:?}",
+                data.postings.iter().map(|p| &p.account).collect::<Vec<_>>()
+            )
+        });
+    // Plugin only renames the account — units must be preserved
+    // exactly. Pinning the amount catches any future "rename + reset"
+    // bug where the account changes but the value is dropped or
+    // mutated.
+    let renamed_units = renamed
+        .units
+        .as_ref()
+        .expect("renamed posting must keep its units");
+    assert_eq!(
+        renamed_units.number, "-100",
+        "rename preserves the original units value"
+    );
+    assert_eq!(renamed_units.currency, "USD");
+    assert!(
+        !data
+            .postings
+            .iter()
+            .any(|p| p.account == "Income:Capital-Gains:Long"),
+        "original posting should have been renamed away"
+    );
+}
+
+/// Positive posting on a matching account → renamed to losses
+/// replacement.
+#[test]
+fn test_capital_gains_gain_loss_positive_renames_to_losses() {
+    let plugin = CapitalGainsGainLossPlugin;
+    let input = make_input_with_config(
+        vec![
+            make_open("2024-01-01", "Assets:Broker"),
+            make_open("2024-01-01", "Income:Capital-Gains:Long"),
+            make_transaction(
+                "2024-01-15",
+                "Sell at loss",
+                vec![
+                    ("Assets:Broker", "-100", "USD"),
+                    ("Income:Capital-Gains:Long", "100", "USD"),
+                ],
+            ),
+        ],
+        GAIN_LOSS_CFG,
+    );
+    let output = plugin.process(input);
+    assert_eq!(output.errors.len(), 0);
+
+    let txn = output
+        .directives
+        .iter()
+        .find(|d| d.directive_type == "transaction")
+        .expect("transaction still present");
+    let DirectiveData::Transaction(data) = &txn.data else {
+        panic!(
+            "non-Transaction data on transaction directive: {:?}",
+            txn.data
+        );
+    };
+    let renamed = data
+        .postings
+        .iter()
+        .find(|p| p.account == "Income:Capital-Gains:Long:Losses")
+        .unwrap_or_else(|| {
+            panic!(
+                "positive posting should rebook to ...:Losses; got: {:?}",
+                data.postings.iter().map(|p| &p.account).collect::<Vec<_>>()
+            )
+        });
+    let renamed_units = renamed
+        .units
+        .as_ref()
+        .expect("renamed posting must keep its units");
+    assert_eq!(
+        renamed_units.number, "100",
+        "rename preserves the original units value"
+    );
+    assert_eq!(renamed_units.currency, "USD");
+}
+
+/// Posting on a non-matching account → unchanged. Pins that the
+/// pattern is required for any rewriting.
+#[test]
+fn test_capital_gains_gain_loss_pattern_no_match_unchanged() {
+    let plugin = CapitalGainsGainLossPlugin;
+    // Pattern matches `Income:Capital-Gains:Long`, but our posting
+    // is on `Income:Capital-Gains:Short`.
+    let input = make_input_with_config(
+        vec![
+            make_open("2024-01-01", "Assets:Broker"),
+            make_open("2024-01-01", "Income:Capital-Gains:Short"),
+            make_transaction(
+                "2024-01-15",
+                "Short-term sale",
+                vec![
+                    ("Assets:Broker", "1000", "USD"),
+                    ("Income:Capital-Gains:Short", "-100", "USD"),
+                ],
+            ),
+        ],
+        GAIN_LOSS_CFG,
+    );
+    let output = plugin.process(input);
+
+    let txn = output
+        .directives
+        .iter()
+        .find(|d| d.directive_type == "transaction")
+        .expect("transaction still present");
+    let DirectiveData::Transaction(data) = &txn.data else {
+        panic!(
+            "non-Transaction data on transaction directive: {:?}",
+            txn.data
+        );
+    };
+    assert!(
+        data.postings
+            .iter()
+            .any(|p| p.account == "Income:Capital-Gains:Short"),
+        "non-matching account should be left untouched"
+    );
+}
+
+/// Zero units on a matching account → renamed to losses (the plugin
+/// treats `>= 0` as the losses branch). Pins the boundary so a
+/// future "treat zero as no-op" change is caught.
+#[test]
+fn test_capital_gains_gain_loss_zero_renames_to_losses() {
+    let plugin = CapitalGainsGainLossPlugin;
+    let input = make_input_with_config(
+        vec![
+            make_open("2024-01-01", "Assets:Broker"),
+            make_open("2024-01-01", "Income:Capital-Gains:Long"),
+            make_transaction(
+                "2024-01-15",
+                "Zero-amount edge case",
+                vec![
+                    ("Assets:Broker", "0", "USD"),
+                    ("Income:Capital-Gains:Long", "0", "USD"),
+                ],
+            ),
+        ],
+        GAIN_LOSS_CFG,
+    );
+    let output = plugin.process(input);
+
+    let txn = output
+        .directives
+        .iter()
+        .find(|d| d.directive_type == "transaction")
+        .expect("transaction still present");
+    let DirectiveData::Transaction(data) = &txn.data else {
+        panic!(
+            "non-Transaction data on transaction directive: {:?}",
+            txn.data
+        );
+    };
+    let renamed = data
+        .postings
+        .iter()
+        .find(|p| p.account == "Income:Capital-Gains:Long:Losses")
+        .unwrap_or_else(|| {
+            panic!(
+                "zero posting goes to :Losses (the >= 0 branch); got: {:?}",
+                data.postings.iter().map(|p| &p.account).collect::<Vec<_>>()
+            )
+        });
+    let renamed_units = renamed
+        .units
+        .as_ref()
+        .expect("renamed posting must keep its units");
+    assert_eq!(
+        renamed_units.number, "0",
+        "zero amount preserved through the rename"
+    );
 }

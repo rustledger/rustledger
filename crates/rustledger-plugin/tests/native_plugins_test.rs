@@ -3218,9 +3218,10 @@ fn test_rx_txn_ignores_untagged_transaction() {
 //   - buy (positive units) → silent regardless
 //   - sale at cost (zero gain) → silent
 //   - sale without cost or price → silent (preconditions not met)
-//   - two sales sharing one Income posting → ONE warning suppressed
-//     by the shared posting (documented quirk of the plugin's
-//     per-transaction check)
+//   - two sales sharing one Income posting → ZERO warnings (both
+//     sales are considered covered by the single Income posting,
+//     because `has_gain_posting` is checked per-transaction, not
+//     per-sale-posting — documented quirk)
 
 /// Helper: build a 3-posting transaction (the asset, the cash,
 /// and an Income:* / Expenses:* posting) for `sell_gains` testing.
@@ -3931,7 +3932,8 @@ fn test_split_expenses_divides_by_members() {
 // `unrealized` walks every Transaction posting, accumulates units +
 // cost basis per (account, currency), then for each non-zero position
 // looks up a price entry to USD and emits a *warning* (NOT a directive)
-// when `|market - cost_basis| > 0.01`.
+// when the market value (`units * market_price`) differs from
+// cost_basis by more than 0.01 USD.
 //
 // Coverage matrix below pins each branch: gain, loss, no-price,
 // zero-position, threshold, multi-buy aggregation. Note the plugin
@@ -4167,25 +4169,37 @@ fn test_unrealized_silent_when_quote_currency_is_not_usd() {
 
 // Property test: unrealized gain reported in the warning equals
 // `units * (market_price - cost_per)` for any single-buy + market-
-// price scenario where the |gain| exceeds the 0.01 USD threshold.
+// price scenario.
 //
-// This is the algebraic invariant of the plugin's core math; example
-// tests above pin specific cases, this catches the surrounding input
-// space — fractional prices, large unit counts, edge values near
-// the threshold.
+// This is the algebraic invariant of the plugin's core math.
+// Generators are expressed in *cents* (cost_cents, market_cents) so
+// the test actually exercises:
+//   - fractional prices (any cent value not divisible by 100 is
+//     fractional in dollar units)
+//   - threshold-boundary cases (delta_cents in 0..2 ⇒ gain of 0,
+//     0.01, or above when multiplied by units)
+//   - large unit counts (up to 1000)
 proptest::proptest! {
     #![proptest_config(proptest::prelude::ProptestConfig::with_cases(64))]
 
     #[test]
     fn prop_unrealized_warning_amount_matches_units_times_delta(
-        // Units: integer to keep the cost basis exact (cost_basis =
-        // cost_per * units), so the assertion compares two exact
-        // Decimals without rounding noise.
+        // Units stay integer so cost_basis = cost_per * units is exact.
         units in 1u32..1000,
-        cost_per in 1u32..10_000,
-        market_price in 1u32..10_000,
+        // Cost and market in *cents*. Range covers values up to
+        // $10,000 with 0.01 USD precision, including fractional
+        // cent counts that make `cost_per` non-integer in dollars.
+        cost_cents in 1u32..1_000_000,
+        market_cents in 1u32..1_000_000,
     ) {
         use rust_decimal::Decimal;
+
+        // cents -> dollars: divide by 100.
+        let to_dollars = |cents: u32| -> Decimal {
+            Decimal::new(i64::from(cents), 2)
+        };
+        let cost_d = to_dollars(cost_cents);
+        let market_d = to_dollars(market_cents);
 
         let plugin = UnrealizedPlugin::new();
         let input = make_input(vec![
@@ -4197,16 +4211,14 @@ proptest::proptest! {
                 "Buy",
                 "Assets:Stock",
                 (&units.to_string(), "AAPL"),
-                (&cost_per.to_string(), "USD"),
+                (&cost_d.to_string(), "USD"),
                 "Assets:Cash",
             ),
-            make_price("2024-06-15", "AAPL", &market_price.to_string(), "USD"),
+            make_price("2024-06-15", "AAPL", &market_d.to_string(), "USD"),
         ]);
         let output = plugin.process(input);
 
         let units_d = Decimal::from(units);
-        let cost_d = Decimal::from(cost_per);
-        let market_d = Decimal::from(market_price);
         let expected_gain = (market_d - cost_d) * units_d;
         // Threshold is `> Decimal::new(1, 2)` = 0.01.
         let above_threshold = expected_gain.abs() > Decimal::new(1, 2);
@@ -4367,8 +4379,10 @@ fn test_box_accrual_with_metadata_splits_losses() {
 // ============================================================================
 //
 // `long_short` rebooks generic `Income:.*Capital-Gains` postings into
-// `:Short` / `:Long` accounts based on holding period (entry_date -
-// cost_date > 1 year → long).
+// `:Short` / `:Long` accounts based on holding period. The plugin
+// classifies as long-term when `years_held > 1`, OR when
+// `years_held == 1` AND the entry's month/day is on/after the cost's
+// month/day (i.e. the holding has crossed the 1-year anniversary).
 //
 // Config format:
 //   {'pattern': ['account_to_replace', 'short_replacement', 'long_replacement']}
@@ -4638,28 +4652,95 @@ fn test_capital_gains_long_short_classifies_long_term() {
     );
 }
 
-/// Cost spec without a date → plugin can't classify holding period,
-/// transaction passes through unchanged. Pins the `cost.date.is_none
-/// → skip` branch.
+/// Reduction posting with NO cost date, generic `Income:Capital-Gains`
+/// posting present. The plugin reaches the classification loop but
+/// can't compute holding period from a date-less cost, so neither
+/// `short_gains` nor `long_gains` accumulates anything.
+///
+/// CURRENT BEHAVIOR (this test pins it): the generic Income:
+/// Capital-Gains posting is silently DROPPED and no :Short/:Long
+/// replacement is emitted, leaving the transaction unbalanced. This
+/// is almost certainly a bug in the plugin (it should either fall
+/// through the whole transaction unchanged when classification
+/// fails, or surface an error). When it gets fixed, this test
+/// should be updated to assert the new behavior.
 #[test]
-fn test_capital_gains_long_short_no_cost_date_unchanged() {
+fn test_capital_gains_long_short_no_cost_date_drops_generic_posting() {
     let plugin = CapitalGainsLongShortPlugin;
+    // Build a transaction with:
+    //   - a reduction posting (cost+units+price), but cost.date = None
+    //   - an Income:Capital-Gains posting (matches pattern → has_generic)
+    //   - the cash leg
+    // make_transaction_with_cost_and_price doesn't set cost.date and
+    // produces only asset+cash, so we build inline to add the third
+    // posting.
+    let txn = DirectiveWrapper {
+        directive_type: "transaction".to_string(),
+        date: "2024-07-15".to_string(),
+        filename: None,
+        lineno: None,
+        data: DirectiveData::Transaction(TransactionData {
+            flag: "*".to_string(),
+            payee: None,
+            narration: "Sell with no-date cost".to_string(),
+            tags: vec![],
+            links: vec![],
+            metadata: vec![],
+            postings: vec![
+                PostingData {
+                    account: "Assets:Stock".to_string(),
+                    units: Some(AmountData {
+                        number: "-10".to_string(),
+                        currency: "AAPL".to_string(),
+                    }),
+                    cost: Some(CostData {
+                        number_per: Some("100".to_string()),
+                        number_total: None,
+                        currency: Some("USD".to_string()),
+                        date: None, // ← the branch under test
+                        label: None,
+                        merge: false,
+                    }),
+                    price: Some(PriceAnnotationData {
+                        is_total: false,
+                        amount: Some(AmountData {
+                            number: "150".to_string(),
+                            currency: "USD".to_string(),
+                        }),
+                        number: None,
+                        currency: None,
+                    }),
+                    flag: None,
+                    metadata: vec![],
+                },
+                PostingData {
+                    account: "Assets:Cash".to_string(),
+                    units: None,
+                    cost: None,
+                    price: None,
+                    flag: None,
+                    metadata: vec![],
+                },
+                PostingData {
+                    account: "Income:Capital-Gains".to_string(),
+                    units: Some(AmountData {
+                        number: "-500".to_string(),
+                        currency: "USD".to_string(),
+                    }),
+                    cost: None,
+                    price: None,
+                    flag: None,
+                    metadata: vec![],
+                },
+            ],
+        }),
+    };
     let input = make_input_with_config(
         vec![
             make_open("2024-01-01", "Assets:Stock"),
             make_open("2024-01-01", "Assets:Cash"),
             make_open("2024-01-01", "Income:Capital-Gains"),
-            // make_transaction_with_cost_and_price doesn't set
-            // cost.date — that's exactly what we want to test.
-            make_transaction_with_cost_and_price(
-                "2024-07-15",
-                "Sell with no-date cost",
-                "Assets:Stock",
-                ("-10", "AAPL"),
-                ("100", "USD"),
-                ("150", "USD"),
-                "Assets:Cash",
-            ),
+            txn,
         ],
         LONG_SHORT_CFG,
     );
@@ -4678,15 +4759,33 @@ fn test_capital_gains_long_short_no_cost_date_unchanged() {
         );
     };
 
-    // Without cost date the plugin can't compute the holding period;
-    // since the transaction also lacks an Income:Capital-Gains
-    // posting, the pattern check fails earlier and nothing changes.
-    assert!(
+    // No :Short or :Long replacement was added (gains stayed at 0
+    // because the loop couldn't classify without a cost date).
+    assert_eq!(
         data.postings
             .iter()
-            .all(|p| !p.account.contains(":Capital-Gains:Short")
-                && !p.account.contains(":Capital-Gains:Long")),
-        "no rebooking when cost_date absent and no Income:Capital-Gains posting"
+            .filter(|p| p.account.contains(":Capital-Gains:Short")
+                || p.account.contains(":Capital-Gains:Long"))
+            .count(),
+        0,
+        "no Short/Long postings emitted when cost_date is missing"
+    );
+
+    // CURRENT BEHAVIOR: the generic Income:Capital-Gains posting was
+    // silently dropped by the post-loop filter. This leaves the
+    // transaction unbalanced — likely a plugin bug. If a future PR
+    // fixes the plugin to fall through cleanly when classification
+    // fails (preserving the original generic posting), update this
+    // assertion to expect the posting to be present.
+    assert_eq!(
+        data.postings
+            .iter()
+            .filter(|p| p.account == "Income:Capital-Gains")
+            .count(),
+        0,
+        "generic Income:Capital-Gains posting is currently dropped — \
+         likely plugin bug; this test pins the behavior so a future fix \
+         is caught"
     );
 }
 

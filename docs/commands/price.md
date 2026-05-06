@@ -224,7 +224,44 @@ Use any external script or program as a price source:
 rledger price AAPL --source-cmd "my-price-fetcher"
 ```
 
-The command receives the ticker as the first argument, plus `--currency <CURRENCY>` and (when provided) `--date <YYYY-MM-DD>` flags. It should output in one of:
+The fetch context (ticker, currency, date) is passed to the command in **two parallel ways** so both rledger-purpose-built fetchers and arbitrary external tools (e.g. Python's `bean-price`) work:
+
+#### Recommended: environment variables
+
+The user's command runs verbatim. Three env vars are set for the child process:
+
+| Variable | Value |
+|---|---|
+| `RLEDGER_TICKER` | the symbol being priced |
+| `RLEDGER_CURRENCY` | the requested quote currency |
+| `RLEDGER_DATE` | `YYYY-MM-DD` of the requested date, or **empty** if no date was requested |
+
+This integrates cleanly with existing tools that have their own argument conventions. For example, invoking Python's `bean-price` directly:
+
+```bash
+rledger price PROP --currency AUD \
+  --source-cmd 'bean-price -e $RLEDGER_CURRENCY:my.module/$RLEDGER_TICKER'
+```
+
+The shell expands `$RLEDGER_*` so `bean-price` sees its own argument convention. No rledger-specific glue required.
+
+`RLEDGER_DATE` is set to the empty string (not unset) when no date is requested, so `${RLEDGER_DATE:-today}` shell idioms work.
+
+#### Legacy: appended CLI arguments
+
+For backward compatibility with rledger-purpose-built fetchers, the command additionally receives `<ticker> --date <YYYY-MM-DD> --currency <CURRENCY>` appended after its existing arguments. Tools that don't recognize these flags will fail — those should ignore them and read the env vars above instead, or wrap the command:
+
+```bash
+# Wrap to discard the appended args:
+rledger price PROP \
+  --source-cmd 'sh -c "bean-price -e $RLEDGER_CURRENCY:my.module/$RLEDGER_TICKER"'
+```
+
+The `sh -c "..."` form discards the trailing args because they become positional arguments to `sh` rather than being interpolated into the script.
+
+#### Output formats
+
+The command should print one of these on stdout:
 
 - Simple format: `150.00 USD`
 - Beancount format: `2024-01-15 price AAPL 150.00 USD`

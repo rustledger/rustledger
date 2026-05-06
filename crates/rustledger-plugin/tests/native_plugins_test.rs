@@ -4472,9 +4472,42 @@ fn test_forecast_no_pattern_in_narration_kept_unchanged() {
 // ============================================================================
 // GenerateBaseCcyPricesPlugin Tests
 // ============================================================================
+//
+// `generate_base_ccy_prices` reads existing price directives, looks for
+// chains where a `(C, X)` price exists alongside an `(X, base)` price,
+// and emits a derived `(C, base) = (C, X) * (X, base)` entry. The
+// plugin name (and config) provides the base currency.
+//
+// Matrix below covers: passthrough w/o config, simple chain,
+// duplicate-target suppression, base-currency short-circuit. Plus a
+// proptest pinning the multiplicative invariant.
 
+/// No config → plugin returns input unchanged. Pins the early-return
+/// when no base currency is configured.
 #[test]
-fn test_generate_base_ccy_prices_creates_derived_price() {
+fn test_generate_base_ccy_prices_no_config_passthrough() {
+    let plugin = GenerateBaseCcyPricesPlugin;
+    let input = make_input(vec![
+        make_price("2024-01-01", "EUR", "1.10", "USD"),
+        make_price("2024-01-01", "ETH", "2000", "EUR"),
+    ]);
+    let output = plugin.process(input);
+    assert!(output.errors.is_empty());
+    let price_count = output
+        .directives
+        .iter()
+        .filter(|d| d.directive_type == "price")
+        .count();
+    assert_eq!(
+        price_count, 2,
+        "no config → input passes through with no derived prices"
+    );
+}
+
+/// Two-leg chain: ETH→EUR + EUR→USD → emit ETH→USD = 2000 * 1.10 = 2200.
+/// Strict assertions on count, currency, and computed amount.
+#[test]
+fn test_generate_base_ccy_prices_emits_derived_chain() {
     let plugin = GenerateBaseCcyPricesPlugin;
     let input = make_input_with_config(
         vec![
@@ -4485,16 +4518,147 @@ fn test_generate_base_ccy_prices_creates_derived_price() {
     );
     let output = plugin.process(input);
     assert!(output.errors.is_empty());
-    // Should generate ETH in USD price
+
+    // Exactly 3 prices: 2 originals + 1 derived.
+    let prices: Vec<_> = output
+        .directives
+        .iter()
+        .filter(|d| d.directive_type == "price")
+        .collect();
+    assert_eq!(
+        prices.len(),
+        3,
+        "input prices + exactly one derived ETH→USD"
+    );
+
+    // Find the derived ETH→USD entry and pin its amount.
+    let derived = prices
+        .iter()
+        .find_map(|d| match &d.data {
+            DirectiveData::Price(p) if p.currency == "ETH" && p.amount.currency == "USD" => Some(p),
+            _ => None,
+        })
+        .expect("derived ETH→USD price must be emitted");
+    assert_eq!(
+        derived.amount.number, "2200",
+        "derived = 2000 EUR * 1.10 USD/EUR = 2200 USD"
+    );
+}
+
+/// Target price already exists (ETH→USD already given) → plugin
+/// must NOT emit a duplicate. Pins the `already_existing_price`
+/// short-circuit.
+#[test]
+fn test_generate_base_ccy_prices_skips_when_target_already_exists() {
+    let plugin = GenerateBaseCcyPricesPlugin;
+    let input = make_input_with_config(
+        vec![
+            make_price("2024-01-01", "EUR", "1.10", "USD"),
+            make_price("2024-01-01", "ETH", "2000", "EUR"),
+            // Pre-existing ETH→USD; plugin must not duplicate.
+            make_price("2024-01-01", "ETH", "1900", "USD"),
+        ],
+        "USD",
+    );
+    let output = plugin.process(input);
+    assert!(output.errors.is_empty());
+
+    let eth_usd_prices: Vec<_> = output
+        .directives
+        .iter()
+        .filter_map(|d| match &d.data {
+            DirectiveData::Price(p) if p.currency == "ETH" && p.amount.currency == "USD" => Some(p),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        eth_usd_prices.len(),
+        1,
+        "pre-existing ETH→USD suppresses derivation (no duplicate)"
+    );
+    assert_eq!(
+        eth_usd_prices[0].amount.number, "1900",
+        "pre-existing price preserved verbatim, NOT replaced by 2200"
+    );
+}
+
+/// Price already in the base currency (EUR→USD when base is USD) →
+/// plugin skips because the price is already in the target form.
+#[test]
+fn test_generate_base_ccy_prices_skips_prices_already_in_base() {
+    let plugin = GenerateBaseCcyPricesPlugin;
+    let input = make_input_with_config(
+        vec![
+            // Both prices are quoted in USD already; nothing to derive.
+            make_price("2024-01-01", "EUR", "1.10", "USD"),
+            make_price("2024-01-01", "GBP", "1.30", "USD"),
+        ],
+        "USD",
+    );
+    let output = plugin.process(input);
+    assert!(output.errors.is_empty());
     let price_count = output
         .directives
         .iter()
         .filter(|d| d.directive_type == "price")
         .count();
-    assert!(
-        price_count > 2,
-        "should generate derived price entries (got {price_count})"
+    assert_eq!(
+        price_count, 2,
+        "no derivation when all prices are already in base currency"
     );
+}
+
+// Property test: when a chain (C→X, X→base) exists, the derived
+// (C→base) price equals exact `(C→X rate) * (X→base rate)`. Pre-fix
+// the lone integration test only checked `price_count > 2` — a
+// rounding bug in the multiplication would still pass.
+proptest::proptest! {
+    #![proptest_config(proptest::prelude::ProptestConfig::with_cases(64))]
+
+    #[test]
+    fn prop_generate_base_ccy_prices_multiplies_chain_exactly(
+        // Both rates in cents (any rate from $0.01 to $100,000).
+        c_to_x_cents in 1u32..10_000_000,
+        x_to_base_cents in 1u32..10_000_000,
+    ) {
+        use rust_decimal::Decimal;
+
+        let to_dollars = |cents: u32| Decimal::new(i64::from(cents), 2);
+        let c_x = to_dollars(c_to_x_cents);
+        let x_b = to_dollars(x_to_base_cents);
+        let expected = c_x * x_b;
+
+        let plugin = GenerateBaseCcyPricesPlugin;
+        let input = make_input_with_config(
+            vec![
+                make_price("2024-01-01", "X", &x_b.to_string(), "USD"),
+                make_price("2024-01-01", "C", &c_x.to_string(), "X"),
+            ],
+            "USD",
+        );
+        let output = plugin.process(input);
+        proptest::prop_assert!(output.errors.is_empty());
+
+        let derived = output
+            .directives
+            .iter()
+            .find_map(|d| match &d.data {
+                DirectiveData::Price(p)
+                    if p.currency == "C" && p.amount.currency == "USD" =>
+                {
+                    Some(p)
+                }
+                _ => None,
+            });
+        proptest::prop_assert!(derived.is_some(), "derived C→USD must be emitted");
+        let derived = derived.unwrap();
+        let got: Decimal = derived.amount.number.parse().expect("derived parses");
+        proptest::prop_assert_eq!(
+            got, expected,
+            "derived rate must equal C→X * X→base exactly; got {} expected {}",
+            got, expected
+        );
+    }
 }
 
 // ============================================================================
@@ -4535,9 +4699,46 @@ fn test_rename_accounts_renames_in_transaction() {
 // ============================================================================
 // SplitExpensesPlugin Tests
 // ============================================================================
+//
+// `split_expenses` reads a member list from the config string and
+// splits any Expenses:* posting (whose account doesn't already
+// contain a member name) into N proportional sub-postings, one per
+// member. Each new posting carries `__automatic__: True` metadata
+// to mark it as plugin-generated. Open directives are emitted for
+// the new sub-accounts.
+//
+// Skip conditions (posting passes through unchanged):
+//   - no config / empty member list
+//   - non-Expenses account
+//   - account name already contains a member name (already split)
 
+/// No config → plugin returns input unchanged. Pins early-return.
 #[test]
-fn test_split_expenses_divides_by_members() {
+fn test_split_expenses_no_config_passthrough() {
+    let plugin = SplitExpensesPlugin;
+    let input = make_input(vec![
+        make_open("2024-01-01", "Expenses:Food"),
+        make_open("2024-01-01", "Assets:Cash"),
+        make_transaction(
+            "2024-01-15",
+            "Lunch",
+            vec![
+                ("Expenses:Food", "100", "USD"),
+                ("Assets:Cash", "-100", "USD"),
+            ],
+        ),
+    ]);
+    let output = plugin.process(input);
+    assert!(output.errors.is_empty());
+    assert_eq!(output.directives.len(), 3, "no config → unchanged");
+}
+
+/// Config = "Alice Bob" + Expenses:Food $100 → emit two sub-postings
+/// (one per member), each with split amount 50 USD. Pre-fix this
+/// test only checked `expense_postings.len() >= 2`, accepting any
+/// number from 2 upward.
+#[test]
+fn test_split_expenses_divides_amount_evenly_between_two_members() {
     let plugin = SplitExpensesPlugin;
     let input = make_input_with_config(
         vec![
@@ -4556,22 +4757,233 @@ fn test_split_expenses_divides_by_members() {
     );
     let output = plugin.process(input);
     assert!(output.errors.is_empty());
-    // Should have split the Expenses:Food posting into member postings
+
     let txn = output
         .directives
         .iter()
         .find(|d| d.directive_type == "transaction")
-        .unwrap();
-    if let DirectiveData::Transaction(data) = &txn.data {
-        let expense_postings: Vec<_> = data
+        .expect("transaction must remain");
+    let DirectiveData::Transaction(data) = &txn.data else {
+        panic!("non-Transaction data");
+    };
+
+    // Original Expenses:Food posting must be REPLACED by exactly two
+    // per-member postings; none should still be at the bare account.
+    assert_eq!(
+        data.postings
+            .iter()
+            .filter(|p| p.account == "Expenses:Food")
+            .count(),
+        0,
+        "original bare Expenses:Food posting must be replaced"
+    );
+
+    let alice = data
+        .postings
+        .iter()
+        .find(|p| p.account == "Expenses:Food:Alice")
+        .expect("Alice's split must be present");
+    let bob = data
+        .postings
+        .iter()
+        .find(|p| p.account == "Expenses:Food:Bob")
+        .expect("Bob's split must be present");
+
+    let alice_units = alice.units.as_ref().expect("Alice has units");
+    let bob_units = bob.units.as_ref().expect("Bob has units");
+    assert_eq!(alice_units.number, "50", "100 / 2 members = 50");
+    assert_eq!(bob_units.number, "50");
+    assert_eq!(alice_units.currency, "USD");
+    assert_eq!(bob_units.currency, "USD");
+
+    // `__automatic__: True` metadata marks the plugin-generated
+    // postings so downstream tools can distinguish them from
+    // hand-written ones.
+    for p in [alice, bob] {
+        assert!(
+            p.metadata.iter().any(|(k, v)| k == "__automatic__"
+                && matches!(v, MetaValueData::String(s) if s == "True")),
+            "split posting must carry __automatic__: True metadata"
+        );
+    }
+
+    // Plugin emits Open directives for the new sub-accounts.
+    let opens: std::collections::BTreeSet<&str> = output
+        .directives
+        .iter()
+        .filter_map(|d| match &d.data {
+            DirectiveData::Open(o) if o.account.starts_with("Expenses:Food:") => {
+                Some(o.account.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(
+        opens.contains("Expenses:Food:Alice") && opens.contains("Expenses:Food:Bob"),
+        "Open directives for both sub-accounts must be emitted; got: {opens:?}"
+    );
+}
+
+/// Account already contains a member name (e.g. `Expenses:Food:Alice`)
+/// → no split needed, posting passes through. Pins the
+/// `has_member` short-circuit.
+#[test]
+fn test_split_expenses_skips_already_split_account() {
+    let plugin = SplitExpensesPlugin;
+    let input = make_input_with_config(
+        vec![
+            make_open("2024-01-01", "Expenses:Food:Alice"),
+            make_open("2024-01-01", "Assets:Cash"),
+            make_transaction(
+                "2024-01-15",
+                "Alice's lunch",
+                vec![
+                    ("Expenses:Food:Alice", "20", "USD"),
+                    ("Assets:Cash", "-20", "USD"),
+                ],
+            ),
+        ],
+        "Alice Bob",
+    );
+    let output = plugin.process(input);
+    assert!(output.errors.is_empty());
+
+    let txn = output
+        .directives
+        .iter()
+        .find(|d| d.directive_type == "transaction")
+        .expect("transaction must remain");
+    let DirectiveData::Transaction(data) = &txn.data else {
+        panic!("non-Transaction data");
+    };
+    assert_eq!(
+        data.postings.len(),
+        2,
+        "already-split posting must NOT be re-split"
+    );
+    let alice = data
+        .postings
+        .iter()
+        .find(|p| p.account == "Expenses:Food:Alice")
+        .expect("Alice posting preserved");
+    assert_eq!(
+        alice.units.as_ref().unwrap().number,
+        "20",
+        "amount unchanged"
+    );
+    // No __automatic__ metadata since plugin didn't touch this posting.
+    assert!(
+        alice.metadata.iter().all(|(k, _)| k != "__automatic__"),
+        "untouched posting must not get __automatic__ metadata"
+    );
+}
+
+/// Non-Expenses posting (Assets, Income, Liabilities) → plugin
+/// leaves it untouched. Pins the `is_expense` filter.
+#[test]
+fn test_split_expenses_skips_non_expenses_postings() {
+    let plugin = SplitExpensesPlugin;
+    let input = make_input_with_config(
+        vec![
+            make_open("2024-01-01", "Assets:Cash"),
+            make_open("2024-01-01", "Income:Salary"),
+            make_transaction(
+                "2024-01-15",
+                "Paycheck",
+                vec![
+                    ("Income:Salary", "-1000", "USD"),
+                    ("Assets:Cash", "1000", "USD"),
+                ],
+            ),
+        ],
+        "Alice Bob",
+    );
+    let output = plugin.process(input);
+    assert!(output.errors.is_empty());
+    let txn = output
+        .directives
+        .iter()
+        .find(|d| d.directive_type == "transaction")
+        .expect("transaction must remain");
+    let DirectiveData::Transaction(data) = &txn.data else {
+        panic!("non-Transaction data");
+    };
+    assert_eq!(
+        data.postings.len(),
+        2,
+        "non-Expenses postings are not split"
+    );
+}
+
+// Property test: for any positive amount and 1..=5 members, the
+// sum of split amounts equals the original amount exactly. Pins
+// the division-and-rounding invariant under random inputs.
+proptest::proptest! {
+    #![proptest_config(proptest::prelude::ProptestConfig::with_cases(64))]
+
+    #[test]
+    fn prop_split_expenses_sum_preserves_total(
+        amount_cents in 1u32..1_000_000,
+        member_count in 1usize..=5,
+    ) {
+        use rust_decimal::Decimal;
+        use std::str::FromStr;
+
+        let amount = Decimal::new(i64::from(amount_cents), 2);
+        let members: Vec<String> = (0..member_count).map(|i| format!("M{i}")).collect();
+        let config = members.join(" ");
+
+        let plugin = SplitExpensesPlugin;
+        let input = make_input_with_config(
+            vec![
+                make_open("2024-01-01", "Expenses:Food"),
+                make_open("2024-01-01", "Assets:Cash"),
+                make_transaction(
+                    "2024-01-15",
+                    "Group meal",
+                    vec![
+                        ("Expenses:Food", &amount.to_string(), "USD"),
+                        ("Assets:Cash", &(-amount).to_string(), "USD"),
+                    ],
+                ),
+            ],
+            &config,
+        );
+        let output = plugin.process(input);
+        proptest::prop_assert!(output.errors.is_empty());
+
+        let txn = output
+            .directives
+            .iter()
+            .find(|d| d.directive_type == "transaction")
+            .expect("transaction must remain");
+        let DirectiveData::Transaction(data) = &txn.data else {
+            panic!("non-Transaction data");
+        };
+
+        // Sum of all Expenses:Food:* postings must equal the
+        // original amount. The plugin uses a simple divide which
+        // can produce repeating decimals (e.g. 100/3) that rust_decimal
+        // truncates — verify the sum matches what the plugin's own
+        // arithmetic would produce: (amount / N) * N.
+        let split_sum: Decimal = data
             .postings
             .iter()
-            .filter(|p| p.account.starts_with("Expenses:Food"))
-            .collect();
-        assert!(
-            expense_postings.len() >= 2,
-            "should split expense into at least 2 member postings (got {})",
-            expense_postings.len()
+            .filter(|p| p.account.starts_with("Expenses:Food:"))
+            .filter_map(|p| p.units.as_ref())
+            .filter_map(|u| Decimal::from_str(&u.number).ok())
+            .sum();
+        let expected = (amount / Decimal::from(member_count)) * Decimal::from(member_count);
+        proptest::prop_assert_eq!(
+            split_sum, expected,
+            "sum of {} splits must equal (amount/N)*N for amount={}, N={}",
+            member_count, amount, member_count
+        );
+
+        // Posting count: original 2 → (1 expense replaced by N splits) + 1 cash = N+1.
+        proptest::prop_assert_eq!(
+            data.postings.len(), member_count + 1,
+            "posting count after split should be N+1 (split×N + cash)"
         );
     }
 }
@@ -5013,14 +5425,46 @@ fn test_unrealized_custom_gains_account_currently_unused_in_output() {
 // ============================================================================
 // CheckAverageCostPlugin Tests
 // ============================================================================
+//
+// `check_average_cost` is a safety net for accounts opened with the
+// NONE booking method (where the ledger author manages lots manually
+// and there's no booker enforcing them). It tracks per-account
+// running average cost and warns if a reducing posting uses a cost
+// that differs from the average by more than `tolerance` (default
+// 1%).
+//
+// Importantly: accounts opened with any other booking method
+// (STRICT, FIFO, etc.) are SKIPPED — those bookers already enforce
+// lot matching, so re-checking here would produce false positives
+// (#907).
 
+/// Build an Open directive with a specific booking method. The
+/// default `make_open` helper sets `booking: None`; this plugin
+/// only checks accounts with `booking: Some("NONE")`.
+fn make_open_with_booking(date: &str, account: &str, booking: &str) -> DirectiveWrapper {
+    DirectiveWrapper {
+        directive_type: "open".to_string(),
+        date: date.to_string(),
+        filename: None,
+        lineno: None,
+        data: DirectiveData::Open(OpenData {
+            account: account.to_string(),
+            currencies: vec![],
+            booking: Some(booking.to_string()),
+            metadata: vec![],
+        }),
+    }
+}
+
+/// Buy + sale at exactly the average cost → no warning. The account
+/// is opened with NONE booking so the plugin actually runs its
+/// check on it.
 #[test]
-fn test_check_average_cost_no_error_on_correct_sale() {
+fn test_check_average_cost_silent_on_correct_sale() {
     let plugin = CheckAverageCostPlugin::new();
     let input = make_input(vec![
-        make_open("2024-01-01", "Assets:Stock"),
+        make_open_with_booking("2024-01-01", "Assets:Stock", "NONE"),
         make_open("2024-01-01", "Assets:Cash"),
-        // Buy at 100
         make_transaction_with_cost(
             "2024-01-15",
             "Buy",
@@ -5029,15 +5473,207 @@ fn test_check_average_cost_no_error_on_correct_sale() {
             ("100", "USD"),
             "Assets:Cash",
         ),
+        make_transaction_with_cost(
+            "2024-06-15",
+            "Sell at avg cost",
+            "Assets:Stock",
+            ("-5", "AAPL"),
+            ("100", "USD"),
+            "Assets:Cash",
+        ),
     ]);
     let output = plugin.process(input);
-    assert!(output.errors.is_empty());
+    assert!(
+        output.errors.is_empty(),
+        "sale at exact average cost is fine; got {} warnings",
+        output.errors.len()
+    );
+}
+
+/// Sale uses a cost that differs from the running average by more
+/// than tolerance → exactly one warning, mentioning the account.
+#[test]
+fn test_check_average_cost_warns_when_sale_cost_diverges_from_average() {
+    let plugin = CheckAverageCostPlugin::new();
+    let input = make_input(vec![
+        make_open_with_booking("2024-01-01", "Assets:Stock", "NONE"),
+        make_open("2024-01-01", "Assets:Cash"),
+        // Two buys at different prices: 5 @ 100 + 5 @ 200 → avg 150.
+        make_transaction_with_cost(
+            "2024-01-15",
+            "Buy 1",
+            "Assets:Stock",
+            ("5", "AAPL"),
+            ("100", "USD"),
+            "Assets:Cash",
+        ),
+        make_transaction_with_cost(
+            "2024-02-15",
+            "Buy 2",
+            "Assets:Stock",
+            ("5", "AAPL"),
+            ("200", "USD"),
+            "Assets:Cash",
+        ),
+        // Sale at 100 — that's 33% off the average 150 → > 1% tolerance.
+        make_transaction_with_cost(
+            "2024-06-15",
+            "Sell below average",
+            "Assets:Stock",
+            ("-3", "AAPL"),
+            ("100", "USD"),
+            "Assets:Cash",
+        ),
+    ]);
+    let output = plugin.process(input);
+    assert_eq!(
+        output.errors.len(),
+        1,
+        "exactly one warning for the diverging sale"
+    );
+    let msg = &output.errors[0].message;
+    assert!(
+        msg.contains("Assets:Stock") && msg.contains("AAPL"),
+        "warning should reference the account and commodity; got: {msg}"
+    );
+}
+
+/// Account is NOT opened with NONE booking → plugin skips it
+/// entirely, no warning even if the sale cost is wildly off.
+/// Pins the issue-#907 false-positive guard.
+#[test]
+fn test_check_average_cost_skips_strict_booking_account() {
+    let plugin = CheckAverageCostPlugin::new();
+    let input = make_input(vec![
+        // STRICT booking → plugin should skip this account.
+        make_open_with_booking("2024-01-01", "Assets:Stock", "STRICT"),
+        make_open("2024-01-01", "Assets:Cash"),
+        make_transaction_with_cost(
+            "2024-01-15",
+            "Buy",
+            "Assets:Stock",
+            ("10", "AAPL"),
+            ("100", "USD"),
+            "Assets:Cash",
+        ),
+        // Sale at completely wrong cost — but plugin doesn't touch
+        // this account.
+        make_transaction_with_cost(
+            "2024-06-15",
+            "Sell at very wrong cost",
+            "Assets:Stock",
+            ("-5", "AAPL"),
+            ("999", "USD"),
+            "Assets:Cash",
+        ),
+    ]);
+    let output = plugin.process(input);
+    assert!(
+        output.errors.is_empty(),
+        "STRICT-booking account is skipped; got {} warnings",
+        output.errors.len()
+    );
+}
+
+/// Account is opened with no booking method specified → plugin
+/// also skips it (only NONE-booking is checked). Pins the
+/// `is_some + eq_ignore_ascii_case("NONE")` filter chain.
+#[test]
+fn test_check_average_cost_skips_account_without_booking_specified() {
+    let plugin = CheckAverageCostPlugin::new();
+    let input = make_input(vec![
+        // make_open() leaves booking = None.
+        make_open("2024-01-01", "Assets:Stock"),
+        make_open("2024-01-01", "Assets:Cash"),
+        make_transaction_with_cost(
+            "2024-01-15",
+            "Buy",
+            "Assets:Stock",
+            ("10", "AAPL"),
+            ("100", "USD"),
+            "Assets:Cash",
+        ),
+        make_transaction_with_cost(
+            "2024-06-15",
+            "Sell at wrong cost",
+            "Assets:Stock",
+            ("-5", "AAPL"),
+            ("500", "USD"),
+            "Assets:Cash",
+        ),
+    ]);
+    let output = plugin.process(input);
+    assert!(
+        output.errors.is_empty(),
+        "account without explicit NONE booking is not checked"
+    );
+}
+
+/// Custom tolerance is honored. With a tolerance of 0.5 (50%),
+/// a sale at 50% of average is at the boundary — set sale cost to
+/// 0.51 below avg so it just exceeds. With default 1% tolerance
+/// the same sale would have warned.
+#[test]
+fn test_check_average_cost_respects_custom_tolerance() {
+    use rust_decimal::Decimal;
+
+    // 50% tolerance plugin instance.
+    let plugin = CheckAverageCostPlugin::with_tolerance(Decimal::new(5, 1)); // 0.5
+    let input = make_input(vec![
+        make_open_with_booking("2024-01-01", "Assets:Stock", "NONE"),
+        make_open("2024-01-01", "Assets:Cash"),
+        make_transaction_with_cost(
+            "2024-01-15",
+            "Buy",
+            "Assets:Stock",
+            ("10", "AAPL"),
+            ("100", "USD"),
+            "Assets:Cash",
+        ),
+        // Sale at 60 — that's 40% off average 100, BELOW the 50% tolerance.
+        make_transaction_with_cost(
+            "2024-06-15",
+            "Sell at -40% (within tolerance)",
+            "Assets:Stock",
+            ("-3", "AAPL"),
+            ("60", "USD"),
+            "Assets:Cash",
+        ),
+    ]);
+    let output = plugin.process(input);
+    assert!(
+        output.errors.is_empty(),
+        "40% deviation is within 50% custom tolerance; got {} warnings",
+        output.errors.len()
+    );
 }
 
 // ============================================================================
 // ZerosumPlugin Tests
 // ============================================================================
+//
+// `zerosum` finds postings in the configured "zerosum" accounts that
+// net to zero (within tolerance) and within a configurable date
+// range, then moves them to a "matched" account. Useful for tracking
+// in-flight transfers that haven't yet been reconciled.
+//
+// Config format (Python-dict-as-string):
+//   {
+//     'zerosum_accounts': {
+//       'Assets:ZeroSum:Transfers': ('Assets:ZeroSum-Matched:Transfers', 30),
+//     },
+//     'account_name_replace': ('ZeroSum', 'ZeroSum-Matched'),
+//     'tolerance': 0.01,
+//   }
+//
+// Skip / error conditions:
+//   - missing config → error
+//   - malformed config → error
 
+const ZEROSUM_CFG: &str =
+    "{'zerosum_accounts': {'Assets:ZeroSum': ('Assets:ZeroSum-Matched', 30)}}";
+
+/// Missing config → one error reported. Existing test, kept.
 #[test]
 fn test_zerosum_requires_config() {
     let plugin = ZerosumPlugin;
@@ -5052,6 +5688,185 @@ fn test_zerosum_requires_config() {
         "exactly one error for missing required config"
     );
     assert!(output.errors[0].message.contains("requires configuration"));
+}
+
+/// A pair of postings to the zerosum account that net to zero —
+/// within the date window — gets moved to the matched account.
+/// Pins the core "match and rewrite" branch.
+#[test]
+fn test_zerosum_matches_pair_within_window() {
+    let plugin = ZerosumPlugin;
+    let input = make_input_with_config(
+        vec![
+            make_open("2024-01-01", "Assets:Cash"),
+            make_open("2024-01-01", "Assets:ZeroSum"),
+            // Two transfers that net to zero within 30 days.
+            make_transaction(
+                "2024-01-05",
+                "Outgoing transfer",
+                vec![
+                    ("Assets:Cash", "-100", "USD"),
+                    ("Assets:ZeroSum", "100", "USD"),
+                ],
+            ),
+            make_transaction(
+                "2024-01-15",
+                "Incoming transfer",
+                vec![
+                    ("Assets:Cash", "100", "USD"),
+                    ("Assets:ZeroSum", "-100", "USD"),
+                ],
+            ),
+        ],
+        ZEROSUM_CFG,
+    );
+    let output = plugin.process(input);
+    assert!(output.errors.is_empty());
+
+    // After matching, NO posting should remain in `Assets:ZeroSum` —
+    // both got moved to `Assets:ZeroSum-Matched`.
+    let zerosum_count: usize = output
+        .directives
+        .iter()
+        .filter_map(|d| match &d.data {
+            DirectiveData::Transaction(t) => Some(
+                t.postings
+                    .iter()
+                    .filter(|p| p.account == "Assets:ZeroSum")
+                    .count(),
+            ),
+            _ => None,
+        })
+        .sum();
+    let matched_count: usize = output
+        .directives
+        .iter()
+        .filter_map(|d| match &d.data {
+            DirectiveData::Transaction(t) => Some(
+                t.postings
+                    .iter()
+                    .filter(|p| p.account == "Assets:ZeroSum-Matched")
+                    .count(),
+            ),
+            _ => None,
+        })
+        .sum();
+    assert_eq!(
+        zerosum_count, 0,
+        "matched postings should leave the zerosum account"
+    );
+    assert_eq!(
+        matched_count, 2,
+        "both halves of the pair land in the matched account"
+    );
+}
+
+/// Pair of zero-summing postings spaced beyond the date window →
+/// plugin does NOT match them. They stay in the zerosum account.
+/// Pins the date-range filter.
+#[test]
+fn test_zerosum_does_not_match_pair_outside_window() {
+    let plugin = ZerosumPlugin;
+    let input = make_input_with_config(
+        vec![
+            make_open("2024-01-01", "Assets:Cash"),
+            make_open("2024-01-01", "Assets:ZeroSum"),
+            make_transaction(
+                "2024-01-05",
+                "Outgoing",
+                vec![
+                    ("Assets:Cash", "-100", "USD"),
+                    ("Assets:ZeroSum", "100", "USD"),
+                ],
+            ),
+            // 60 days later — outside the 30-day window.
+            make_transaction(
+                "2024-03-10",
+                "Incoming far in the future",
+                vec![
+                    ("Assets:Cash", "100", "USD"),
+                    ("Assets:ZeroSum", "-100", "USD"),
+                ],
+            ),
+        ],
+        ZEROSUM_CFG,
+    );
+    let output = plugin.process(input);
+    assert!(output.errors.is_empty());
+
+    let zerosum_count: usize = output
+        .directives
+        .iter()
+        .filter_map(|d| match &d.data {
+            DirectiveData::Transaction(t) => Some(
+                t.postings
+                    .iter()
+                    .filter(|p| p.account == "Assets:ZeroSum")
+                    .count(),
+            ),
+            _ => None,
+        })
+        .sum();
+    let matched_count: usize = output
+        .directives
+        .iter()
+        .filter_map(|d| match &d.data {
+            DirectiveData::Transaction(t) => Some(
+                t.postings
+                    .iter()
+                    .filter(|p| p.account == "Assets:ZeroSum-Matched")
+                    .count(),
+            ),
+            _ => None,
+        })
+        .sum();
+    assert_eq!(
+        zerosum_count, 2,
+        "out-of-window pair stays in the zerosum account"
+    );
+    assert_eq!(matched_count, 0, "no postings moved to matched account");
+}
+
+/// Single unmatched posting (no counterpart) → stays in the
+/// zerosum account. Pins the "no pair found → leave alone" branch.
+#[test]
+fn test_zerosum_leaves_unmatched_posting_alone() {
+    let plugin = ZerosumPlugin;
+    let input = make_input_with_config(
+        vec![
+            make_open("2024-01-01", "Assets:Cash"),
+            make_open("2024-01-01", "Assets:ZeroSum"),
+            make_transaction(
+                "2024-01-05",
+                "Lonely outgoing",
+                vec![
+                    ("Assets:Cash", "-100", "USD"),
+                    ("Assets:ZeroSum", "100", "USD"),
+                ],
+            ),
+        ],
+        ZEROSUM_CFG,
+    );
+    let output = plugin.process(input);
+    assert!(output.errors.is_empty());
+
+    let zerosum_count: usize = output
+        .directives
+        .iter()
+        .filter_map(|d| match &d.data {
+            DirectiveData::Transaction(t) => Some(
+                t.postings
+                    .iter()
+                    .filter(|p| p.account == "Assets:ZeroSum")
+                    .count(),
+            ),
+            _ => None,
+        })
+        .sum();
+    assert_eq!(
+        zerosum_count, 1,
+        "unmatched posting remains in zerosum account"
+    );
 }
 
 // ============================================================================

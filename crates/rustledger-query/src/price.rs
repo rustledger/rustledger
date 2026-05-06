@@ -41,23 +41,46 @@ impl PriceDatabase {
 
     /// Build a price database from directives.
     ///
-    /// Extracts prices from:
-    /// - Explicit `price` directives
-    /// - Implicit prices from transaction postings (@ price annotations and cost specs)
+    /// Two passes:
+    /// 1. **Explicit `Price` directives** — added unconditionally.
+    /// 2. **Implicit prices from transaction postings** — added only
+    ///    for `(base, quote, date)` tuples that don't already have an
+    ///    explicit Price entry from pass 1.
     ///
-    /// This matches Python beancount's behavior when using the `implicit_prices` plugin.
+    /// The two-pass design fixes issue #1006: when the user enables
+    /// the `implicit_prices` plugin, it emits `Price` directives for
+    /// each priced posting; pass 1 picks those up. Pre-fix, pass 2
+    /// would then ALSO walk the same transactions and re-emit the
+    /// same implicit prices, doubling every entry. Now pass 2 sees
+    /// the explicit entry already exists and skips, so the plugin's
+    /// output is the single source of truth.
+    ///
+    /// When the plugin is NOT enabled (the rustledger-extension case
+    /// from #567 / #593 — `VALUE()` should work on implicit-priced
+    /// transactions automatically), pass 1 adds nothing for those
+    /// dates and pass 2 fills them in. Net effect: implicit prices
+    /// are reachable from BQL without requiring the user to wire up
+    /// a plugin, but never doubled when the plugin IS wired up.
     pub fn from_directives(directives: &[Directive]) -> Self {
         let mut db = Self::new();
 
+        // Pass 1: explicit Price directives.
         for directive in directives {
-            match directive {
-                Directive::Price(price) => {
-                    db.add_price(price);
-                }
-                Directive::Transaction(txn) => {
-                    db.add_implicit_prices_from_transaction(txn);
-                }
-                _ => {}
+            if let Directive::Price(price) = directive {
+                db.add_price(price);
+            }
+        }
+
+        // Snapshot the explicit `(base, quote, date)` tuples — pass 2
+        // skips any transaction-derived price that would land on one
+        // of these (the plugin already filled it in via pass 1).
+        let explicit = db.explicit_keys();
+
+        // Pass 2: implicit prices from transactions, gated on the
+        // explicit set.
+        for directive in directives {
+            if let Directive::Transaction(txn) = directive {
+                db.add_implicit_prices_from_transaction(txn, &explicit);
             }
         }
 
@@ -90,23 +113,45 @@ impl PriceDatabase {
             .push(entry);
     }
 
-    /// Add implicit prices from transaction postings.
+    /// Snapshot the set of `(base, quote, date)` tuples currently in
+    /// the database. Used by the two-pass build to gate transaction-
+    /// derived implicit prices against explicit Price directives that
+    /// already cover the same tuple (issue #1006).
+    pub fn explicit_keys(
+        &self,
+    ) -> std::collections::HashSet<(InternedStr, InternedStr, NaiveDate)> {
+        self.prices
+            .iter()
+            .flat_map(|(base, entries)| {
+                let base = base.clone();
+                entries
+                    .iter()
+                    .map(move |e| (base.clone(), e.currency.clone(), e.date))
+            })
+            .collect()
+    }
+
+    /// Add implicit prices from a transaction's postings, skipping
+    /// any `(base, quote, date)` tuple already present in `explicit`.
     ///
     /// Delegates per-posting price math to
-    /// [`rustledger_core::extract_per_unit_price`], which is also used
-    /// by the native `implicit_prices` plugin
-    /// (`rustledger_plugin::native::plugins::implicit_prices`). Pre-fix
-    /// (issue #992) the two paths were independently implemented and
-    /// diverged on `@@` handling — the plugin emitted total amounts as
-    /// per-unit prices. The shared helper eliminates that drift by
-    /// construction.
+    /// [`rustledger_core::extract_per_unit_price`] — the same helper
+    /// used by the native `implicit_prices` plugin
+    /// (`rustledger_plugin::native::plugins::implicit_prices`), so the
+    /// numeric output of both paths stays in sync (issue #992 was the
+    /// pre-shared-helper version where they drifted on `@@` handling).
     ///
-    /// Resolution priority (matches Python beancount's
-    /// `implicit_prices` plugin):
-    /// 1. Price annotation (`@` or `@@`) when an amount is present
-    /// 2. Cost spec (`{...}`) as fallback
-    /// 3. Otherwise no price emitted
-    pub fn add_implicit_prices_from_transaction(&mut self, txn: &Transaction) {
+    /// The `explicit` parameter is the set of `(base, quote, date)`
+    /// tuples already supplied by explicit `Price` directives. When
+    /// the `implicit_prices` plugin runs, it emits Price directives
+    /// for each priced posting, populating this set; pass 2 then
+    /// skips those tuples to avoid the duplication described in
+    /// issue #1006.
+    pub fn add_implicit_prices_from_transaction(
+        &mut self,
+        txn: &Transaction,
+        explicit: &std::collections::HashSet<(InternedStr, InternedStr, NaiveDate)>,
+    ) {
         for posting in &txn.postings {
             let Some(units) = posting.amount() else {
                 continue;
@@ -137,6 +182,13 @@ impl PriceDatabase {
             else {
                 continue;
             };
+
+            // Skip if an explicit Price directive already covers this
+            // (base, quote, date) tuple — the plugin's emission is
+            // authoritative and pass 2 must not duplicate.
+            if explicit.contains(&(units.currency.clone(), quote.clone(), txn.date)) {
+                continue;
+            }
 
             self.add_implicit_price(txn.date, &units.currency, per_unit, &quote);
         }
@@ -651,14 +703,27 @@ mod tests {
     }
 
     // ============================================================================
-    // Implicit Price Extraction Tests
+    // Implicit-price extraction tests
     // ============================================================================
+    //
+    // `from_directives` does TWO passes:
+    //   1. Add explicit `Price` directives.
+    //   2. Walk Transaction postings; extract implicit prices ONLY for
+    //      `(base, quote, date)` tuples not already covered by pass 1.
+    //
+    // This preserves the rustledger extension from #567 / #593 (BQL
+    // `VALUE()` works on implicit-priced transactions automatically,
+    // without requiring the `implicit_prices` plugin) AND fixes the
+    // duplication from #1006 (when the plugin IS enabled, its emitted
+    // Price directives suppress the same-tuple BQL extraction).
 
+    /// Transaction with `@` annotation, no plugin → BQL extracts the
+    /// implicit price (no explicit Price directive to suppress it).
+    /// Preserves the #567/#593 rustledger-extension behavior.
     #[test]
     fn test_implicit_price_from_annotation() {
         use rustledger_core::{CostSpec, Posting, PriceAnnotation, Transaction};
 
-        // Transaction with @ price annotation
         let txn = Transaction::new(date(2024, 1, 15), "Sell stock")
             .with_posting(
                 Posting::new("Assets:Stocks", Amount::new(dec!(-5), "ABC"))
@@ -671,19 +736,18 @@ mod tests {
             )
             .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(7.00), "EUR")));
 
-        let directives = vec![Directive::Transaction(txn)];
-        let db = PriceDatabase::from_directives(&directives);
-
-        // Should have implicit price ABC = 1.40 EUR (from @ annotation, not cost)
-        let price = db.get_price("ABC", "EUR", date(2024, 1, 15));
-        assert_eq!(price, Some(dec!(1.40)));
+        let db = PriceDatabase::from_directives(&[Directive::Transaction(txn)]);
+        assert_eq!(
+            db.get_price("ABC", "EUR", date(2024, 1, 15)),
+            Some(dec!(1.40))
+        );
     }
 
+    /// Cost spec only, no annotation → cost-derived implicit price.
     #[test]
     fn test_implicit_price_from_cost_only() {
         use rustledger_core::{CostSpec, Posting, Transaction};
 
-        // Transaction with cost but no price annotation
         let txn = Transaction::new(date(2024, 1, 10), "Buy stock")
             .with_posting(
                 Posting::new("Assets:Stocks", Amount::new(dec!(10), "XYZ")).with_cost(
@@ -694,19 +758,19 @@ mod tests {
             )
             .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(-500), "USD")));
 
-        let directives = vec![Directive::Transaction(txn)];
-        let db = PriceDatabase::from_directives(&directives);
-
-        // Should have implicit price XYZ = 50.00 USD (from cost)
-        let price = db.get_price("XYZ", "USD", date(2024, 1, 10));
-        assert_eq!(price, Some(dec!(50.00)));
+        let db = PriceDatabase::from_directives(&[Directive::Transaction(txn)]);
+        assert_eq!(
+            db.get_price("XYZ", "USD", date(2024, 1, 10)),
+            Some(dec!(50.00))
+        );
     }
 
+    /// `@@` total annotation — divided by units. Pins the #992 fix
+    /// is preserved end-to-end through the BQL extraction path.
     #[test]
     fn test_implicit_price_from_total_annotation() {
         use rustledger_core::{Posting, PriceAnnotation, Transaction};
 
-        // Transaction with @@ total price annotation
         let txn = Transaction::new(date(2024, 1, 15), "Sell")
             .with_posting(
                 Posting::new("Assets:Stocks", Amount::new(dec!(-10), "ABC"))
@@ -714,20 +778,19 @@ mod tests {
             )
             .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(1500), "USD")));
 
-        let directives = vec![Directive::Transaction(txn)];
-        let db = PriceDatabase::from_directives(&directives);
-
-        // Per-unit price should be 1500 / 10 = 150 USD
-        let price = db.get_price("ABC", "USD", date(2024, 1, 15));
-        assert_eq!(price, Some(dec!(150)));
+        let db = PriceDatabase::from_directives(&[Directive::Transaction(txn)]);
+        // 1500 USD / 10 = 150 USD per unit
+        assert_eq!(
+            db.get_price("ABC", "USD", date(2024, 1, 15)),
+            Some(dec!(150))
+        );
     }
 
+    /// Both annotation and cost present — annotation wins.
     #[test]
     fn test_implicit_price_annotation_takes_priority_over_cost() {
         use rustledger_core::{CostSpec, Posting, PriceAnnotation, Transaction};
 
-        // Transaction with both cost and @ price annotation
-        // The @ price (1.40) should be used, not the cost (1.25)
         let txn = Transaction::new(date(2024, 1, 15), "Sell")
             .with_posting(
                 Posting::new("Assets:Stocks", Amount::new(dec!(-5), "ABC"))
@@ -740,64 +803,15 @@ mod tests {
             )
             .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(7.00), "EUR")));
 
-        let directives = vec![Directive::Transaction(txn)];
-        let db = PriceDatabase::from_directives(&directives);
-
-        // Should use @ price, not cost
-        let price = db.get_price("ABC", "EUR", date(2024, 1, 15));
-        assert_eq!(price, Some(dec!(1.40)));
-    }
-
-    #[test]
-    fn test_implicit_price_combined_with_explicit() {
-        use rustledger_core::{CostSpec, Posting, PriceAnnotation, Transaction};
-
-        // Both explicit price directive and implicit price from transaction
-        let explicit_price = PriceDirective {
-            date: date(2024, 1, 10),
-            currency: "ABC".into(),
-            amount: Amount::new(dec!(1.30), "EUR"),
-            meta: Default::default(),
-        };
-
-        let txn = Transaction::new(date(2024, 1, 15), "Sell")
-            .with_posting(
-                Posting::new("Assets:Stocks", Amount::new(dec!(-5), "ABC"))
-                    .with_cost(
-                        CostSpec::default()
-                            .with_number_per(dec!(1.25))
-                            .with_currency("EUR"),
-                    )
-                    .with_price(PriceAnnotation::Unit(Amount::new(dec!(1.40), "EUR"))),
-            )
-            .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(7.00), "EUR")));
-
-        let directives = vec![
-            Directive::Price(explicit_price),
-            Directive::Transaction(txn),
-        ];
-        let db = PriceDatabase::from_directives(&directives);
-
-        // At 2024-01-10, should use explicit price 1.30
+        let db = PriceDatabase::from_directives(&[Directive::Transaction(txn)]);
         assert_eq!(
-            db.get_price("ABC", "EUR", date(2024, 1, 10)),
-            Some(dec!(1.30))
+            db.get_price("ABC", "EUR", date(2024, 1, 15)),
+            Some(dec!(1.40))
         );
-
-        // At 2024-01-15 or later, should use implicit price 1.40 (latest)
-        assert_eq!(db.get_latest_price("ABC", "EUR"), Some(dec!(1.40)));
     }
 
-    /// Currency-pairing regression for the query path. Mirrors the
-    /// plugin-side `test_implicit_prices_zero_unit_total_falls_through_to_cost_currency`
-    /// (Copilot review on PR #997). With zero units, the `@@` total
-    /// annotation is unusable, so the per-unit value falls through to
-    /// the cost spec — and the quote currency MUST come from the cost,
-    /// not the dropped annotation. Pre-fix, both paths emitted
-    /// `(50, EUR)` instead of `(50, USD)`. The shared helper now binds
-    /// each value to its source currency, making this bug structurally
-    /// impossible. This test pins the query path's behavior so a
-    /// future caller-side refactor cannot silently regress it.
+    /// Zero-units `@@` falls through to cost — regression for the
+    /// currency-pairing fix in #997 on the BQL path.
     #[test]
     fn test_implicit_price_zero_units_total_annotation_uses_cost_currency() {
         use rustledger_core::{CostSpec, Posting, PriceAnnotation, Transaction};
@@ -813,17 +827,142 @@ mod tests {
         );
 
         let db = PriceDatabase::from_directives(&[Directive::Transaction(txn)]);
-
-        // Per-unit value (50) was paired with USD (cost currency),
-        // not EUR (dropped annotation currency).
         assert_eq!(
             db.get_price("ABC", "USD", date(2024, 1, 15)),
             Some(dec!(50))
         );
-        // ABC→EUR has no path: no direct entry, no inverse EUR→ABC,
-        // no chain through any other currency. Pre-fix this would
-        // have been Some(50) because the bogus (50, EUR) entry was
-        // recorded.
+        // ABC→EUR has no path; the (50, EUR) bug from #997 stays fixed.
         assert_eq!(db.get_price("ABC", "EUR", date(2024, 1, 15)), None);
+    }
+
+    /// Combined explicit + implicit on different dates: explicit
+    /// price for an earlier date, implicit price (from transaction)
+    /// for the later date. Both reachable.
+    #[test]
+    fn test_implicit_price_combined_with_explicit() {
+        use rustledger_core::{CostSpec, Posting, PriceAnnotation, Transaction};
+
+        let explicit = PriceDirective {
+            date: date(2024, 1, 10),
+            currency: "ABC".into(),
+            amount: Amount::new(dec!(1.30), "EUR"),
+            meta: Default::default(),
+        };
+        let txn = Transaction::new(date(2024, 1, 15), "Sell")
+            .with_posting(
+                Posting::new("Assets:Stocks", Amount::new(dec!(-5), "ABC"))
+                    .with_cost(
+                        CostSpec::default()
+                            .with_number_per(dec!(1.25))
+                            .with_currency("EUR"),
+                    )
+                    .with_price(PriceAnnotation::Unit(Amount::new(dec!(1.40), "EUR"))),
+            )
+            .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(7.00), "EUR")));
+
+        let directives = vec![Directive::Price(explicit), Directive::Transaction(txn)];
+        let db = PriceDatabase::from_directives(&directives);
+        assert_eq!(
+            db.get_price("ABC", "EUR", date(2024, 1, 10)),
+            Some(dec!(1.30))
+        );
+        assert_eq!(db.get_latest_price("ABC", "EUR"), Some(dec!(1.40)));
+    }
+
+    // ============================================================================
+    // Issue #1006 regression — duplication when plugin runs
+    // ============================================================================
+
+    /// Plugin-emitted Price directive on the same `(base, quote, date)`
+    /// as a transaction's implicit price → exactly ONE entry in the DB.
+    /// Pre-fix this would have doubled (the BQL pass would re-extract
+    /// the same price the plugin already emitted).
+    #[test]
+    fn test_plugin_emitted_price_suppresses_bql_extraction_for_same_tuple() {
+        use rustledger_core::{CostSpec, Posting, PriceAnnotation, Transaction};
+
+        let directives = vec![
+            // Simulates `implicit_prices` plugin output.
+            Directive::Price(PriceDirective {
+                date: date(2024, 1, 15),
+                currency: "ABC".into(),
+                amount: Amount::new(dec!(1.40), "EUR"),
+                meta: Default::default(),
+            }),
+            // The original transaction the plugin derived from — still
+            // in the directive list, since plugins append rather than
+            // replace.
+            Directive::Transaction(
+                Transaction::new(date(2024, 1, 15), "Sell stock")
+                    .with_posting(
+                        Posting::new("Assets:Stocks", Amount::new(dec!(-5), "ABC"))
+                            .with_cost(
+                                CostSpec::default()
+                                    .with_number_per(dec!(1.25))
+                                    .with_currency("EUR"),
+                            )
+                            .with_price(PriceAnnotation::Unit(Amount::new(dec!(1.40), "EUR"))),
+                    )
+                    .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(7.00), "EUR"))),
+            ),
+        ];
+        let db = PriceDatabase::from_directives(&directives);
+
+        assert_eq!(
+            db.len(),
+            1,
+            "exactly one ABC→EUR entry; pre-fix this would be 2 (plugin + BQL)"
+        );
+        assert_eq!(
+            db.get_price("ABC", "EUR", date(2024, 1, 15)),
+            Some(dec!(1.40))
+        );
+    }
+
+    /// Two separate transactions on the same date emitting the same
+    /// implicit price — both legitimate, both should remain. Pre-fix
+    /// these were already kept (no dedup at insert) — verify the
+    /// new two-pass design preserves that.
+    #[test]
+    fn test_two_transactions_same_date_same_price_both_kept() {
+        use rustledger_core::{CostSpec, Posting, Transaction};
+
+        let directives = vec![
+            Directive::Transaction(
+                Transaction::new(date(2017, 12, 15), "Sale 1")
+                    .with_posting(
+                        Posting::new("Assets:Stock", Amount::new(dec!(-10), "BAM")).with_cost(
+                            CostSpec::default()
+                                .with_number_per(dec!(0.5113))
+                                .with_currency("EUR"),
+                        ),
+                    )
+                    .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(5.113), "EUR"))),
+            ),
+            Directive::Transaction(
+                Transaction::new(date(2017, 12, 15), "Sale 2")
+                    .with_posting(
+                        Posting::new("Assets:Stock", Amount::new(dec!(-20), "BAM")).with_cost(
+                            CostSpec::default()
+                                .with_number_per(dec!(0.5113))
+                                .with_currency("EUR"),
+                        ),
+                    )
+                    .with_posting(Posting::new(
+                        "Assets:Cash",
+                        Amount::new(dec!(10.226), "EUR"),
+                    )),
+            ),
+        ];
+        let db = PriceDatabase::from_directives(&directives);
+
+        // Both transactions emit BAM→EUR at 0.5113 on the same date.
+        // No explicit Price suppresses pass 2 → both kept (BQL extracts
+        // both since neither is in `explicit`).
+        assert_eq!(
+            db.len(),
+            2,
+            "two distinct transactions both emit implicit prices on the same date"
+        );
     }
 }

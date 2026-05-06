@@ -114,18 +114,24 @@ impl<'a> Executor<'a> {
         spanned_directives: &'a [Spanned<Directive>],
         source_map: &SourceMap,
     ) -> Self {
-        // Build price database from spanned directives
-        // Include both explicit prices and implicit prices from transactions
+        // Build price database from spanned directives — two passes
+        // (mirrors `PriceDatabase::from_directives`).
+        // Pass 1: explicit Price directives.
+        // Pass 2: implicit prices from transactions, gated on the
+        // `(base, quote, date)` tuples already added by pass 1 so the
+        // plugin's output (which lands as explicit Price directives in
+        // pass 1) isn't duplicated by pass 2's transaction walk
+        // (issue #1006).
         let mut price_db = crate::price::PriceDatabase::new();
         for spanned in spanned_directives {
-            match &spanned.value {
-                Directive::Price(p) => {
-                    price_db.add_price(p);
-                }
-                Directive::Transaction(txn) => {
-                    price_db.add_implicit_prices_from_transaction(txn);
-                }
-                _ => {}
+            if let Directive::Price(p) = &spanned.value {
+                price_db.add_price(p);
+            }
+        }
+        let explicit = price_db.explicit_keys();
+        for spanned in spanned_directives {
+            if let Directive::Transaction(txn) = &spanned.value {
+                price_db.add_implicit_prices_from_transaction(txn, &explicit);
             }
         }
         price_db.sort_prices();

@@ -3650,14 +3650,67 @@ fn test_effective_date_future_uses_later_holding_account() {
     );
 
     // And there must be a transaction at the effective date.
+    let effective_txns: Vec<_> = output
+        .directives
+        .iter()
+        .filter(|d| d.directive_type == "transaction" && d.date == "2024-02-15")
+        .collect();
     assert_eq!(
-        output
-            .directives
-            .iter()
-            .filter(|d| d.directive_type == "transaction" && d.date == "2024-02-15")
-            .count(),
+        effective_txns.len(),
         1,
         "exactly one new transaction at the effective date"
+    );
+
+    // The effective-date txn's hold posting must be the SIGN-FLIPPED
+    // version of the original target posting. The plugin's
+    // `create_opposite_posting` is what produces this; if it ever
+    // becomes a copy instead of a negate, the new transaction would
+    // be unbalanced and the test below would catch it.
+    let DirectiveData::Transaction(eff_data) = &effective_txns[0].data else {
+        panic!("effective-date directive has non-Transaction data");
+    };
+    let hold_posting = eff_data
+        .postings
+        .iter()
+        .find(|p| p.account == "Assets:Hold:Expenses:Food")
+        .expect("effective-date txn must have a hold posting");
+    let hold_units = hold_posting.units.as_ref().expect("hold has units");
+    assert_eq!(
+        hold_units.number, "-25",
+        "hold posting must be sign-flipped from the original (+25 → -25)"
+    );
+    assert_eq!(hold_units.currency, "USD");
+
+    // Both transactions (original-on-entry-date and the new
+    // effective-date txn) must share a link tying them together.
+    // Plugin generates this in `generate_link()` and pushes onto
+    // the original + sets it on the new one.
+    let original_txn = output
+        .directives
+        .iter()
+        .find(|d| d.directive_type == "transaction" && d.date == "2024-01-15")
+        .expect("original transaction must remain");
+    let DirectiveData::Transaction(orig_data) = &original_txn.data else {
+        panic!("original directive has non-Transaction data");
+    };
+    assert_eq!(
+        orig_data.links.len(),
+        1,
+        "plugin should attach exactly one link to the original txn"
+    );
+    assert_eq!(
+        eff_data.links.len(),
+        1,
+        "plugin should attach exactly one link to the effective-date txn"
+    );
+    assert_eq!(
+        orig_data.links[0], eff_data.links[0],
+        "the same link should appear on both transactions"
+    );
+    assert!(
+        orig_data.links[0].starts_with("edate-"),
+        "link should follow the `edate-<date>-<id>` shape; got '{}'",
+        orig_data.links[0]
     );
 }
 
@@ -3901,14 +3954,40 @@ fn test_forecast_monthly_repeat_emits_exactly_n_transactions() {
     assert_eq!(txns.len(), 3, "MONTHLY REPEAT 3 TIMES emits exactly 3 txns");
     let dates: Vec<&str> = txns.iter().map(|t| t.date.as_str()).collect();
     assert_eq!(dates, vec!["2024-01-15", "2024-02-15", "2024-03-15"]);
-    // Bracketed pattern stripped from narration.
-    let DirectiveData::Transaction(data) = &txns[0].data else {
-        panic!("transaction directive_type with non-Transaction data");
-    };
-    assert_eq!(
-        data.narration, "Rent",
-        "bracketed pattern should be stripped from narration"
-    );
+    // Each emitted transaction must preserve the original postings
+    // verbatim (account/units/cost/price/flag/metadata) and have the
+    // bracketed pattern stripped from the narration. A bug that
+    // dropped or mangled postings while replicating dates would
+    // otherwise pass the count+dates checks above.
+    for txn in &txns {
+        let DirectiveData::Transaction(data) = &txn.data else {
+            panic!("transaction directive_type with non-Transaction data");
+        };
+        assert_eq!(
+            data.narration, "Rent",
+            "bracketed pattern should be stripped from narration"
+        );
+        assert_eq!(data.flag, "#", "forecast flag preserved across replication");
+        assert_eq!(
+            data.postings.len(),
+            2,
+            "original posting count preserved (Expenses:Rent + Assets:Cash)"
+        );
+        assert_eq!(data.postings[0].account, "Expenses:Rent");
+        let units_0 = data.postings[0]
+            .units
+            .as_ref()
+            .expect("first posting has units");
+        assert_eq!(units_0.number, "1000");
+        assert_eq!(units_0.currency, "USD");
+        assert_eq!(data.postings[1].account, "Assets:Cash");
+        let units_1 = data.postings[1]
+            .units
+            .as_ref()
+            .expect("second posting has units");
+        assert_eq!(units_1.number, "-1000");
+        assert_eq!(units_1.currency, "USD");
+    }
 }
 
 /// `[WEEKLY REPEAT 4 TIMES]` → 4 dates 7 days apart.
@@ -4474,6 +4553,85 @@ fn test_box_accrual_two_capital_losses_postings_unchanged() {
         2,
         "ambiguous case → both loss postings kept untouched"
     );
+}
+
+// Property test: regardless of (total_loss, start_date, expiry_date)
+// the sum of split posting amounts equals the original total
+// exactly. The plugin's "final segment is remainder" math is
+// what guarantees this; a rounding bug in the per-year split
+// arithmetic would break it. The example test
+// `test_box_accrual_multi_year_splits_preserve_total` pins one
+// specific case; this catches the surrounding input space.
+proptest::proptest! {
+    #![proptest_config(proptest::prelude::ProptestConfig::with_cases(64))]
+
+    #[test]
+    fn prop_box_accrual_split_amounts_preserve_total(
+        // Total loss in cents (negative; -1 to -10_000_000 = -$0.01 to -$100,000).
+        total_cents in 1u32..10_000_000,
+        // Start in 2024 to give us a known year.
+        start_month in 1u32..=12,
+        start_day in 1u32..=28,
+        // Number of additional years to span (1 = 2-year, ..., 5 = 6-year).
+        extra_years in 1u32..=5,
+        // Expiry month/day (any valid in that year).
+        expiry_month in 1u32..=12,
+        expiry_day in 1u32..=28,
+    ) {
+        use rust_decimal::Decimal;
+        use std::str::FromStr;
+
+        let start_date = format!("2024-{start_month:02}-{start_day:02}");
+        let expiry_year = 2024 + extra_years;
+        let expiry_date = format!("{expiry_year:04}-{expiry_month:02}-{expiry_day:02}");
+        let total_loss = -Decimal::new(i64::from(total_cents), 2);
+
+        let plugin = BoxAccrualPlugin;
+        let input = make_input(vec![
+            make_open("2024-01-01", "Income:Capital-Losses"),
+            make_open("2024-01-01", "Assets:Broker"),
+            make_transaction_with_metadata(
+                &start_date,
+                "Synthetic with random expiry",
+                vec![(
+                    "synthetic_loan_expiry",
+                    MetaValueData::Date(expiry_date.clone()),
+                )],
+                vec![
+                    ("Income:Capital-Losses", &total_loss.to_string(), "USD"),
+                    ("Assets:Broker", &(-total_loss).to_string(), "USD"),
+                ],
+            ),
+        ]);
+        let output = plugin.process(input);
+        proptest::prop_assert!(output.errors.is_empty());
+
+        let txn = output
+            .directives
+            .iter()
+            .find(|d| d.directive_type == "transaction")
+            .expect("transaction must remain");
+        let DirectiveData::Transaction(data) = &txn.data else {
+            panic!("non-Transaction data");
+        };
+        let split_sum: Decimal = data
+            .postings
+            .iter()
+            .filter(|p| p.account.ends_with(":Capital-Losses"))
+            .filter_map(|p| p.units.as_ref())
+            .filter_map(|u| Decimal::from_str(&u.number).ok())
+            .sum();
+
+        // Split sum must equal the original total exactly. The plugin
+        // achieves this by setting the final segment to total minus
+        // sum-of-rounded-prior-segments; if that branch breaks under
+        // a particular (total, days) combination, this test catches it.
+        proptest::prop_assert_eq!(
+            split_sum, total_loss,
+            "split sum ({}) must equal original total ({}) for {} -> {}",
+            split_sum, total_loss, start_date, expiry_date
+        );
+    }
 }
 
 // ============================================================================

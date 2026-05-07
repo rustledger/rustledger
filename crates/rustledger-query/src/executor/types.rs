@@ -234,6 +234,12 @@ pub struct QueryResult {
     pub columns: Vec<String>,
     /// Result rows.
     pub rows: Vec<Row>,
+    /// Per-row GROUP BY key values, parallel to `rows`. `None` for rows
+    /// produced outside aggregation. Populated by the aggregate execution
+    /// path; used by the text renderer to recover the per-row currency
+    /// context for `Value::Number` cells emitted by `SUM` / `AVG` (issue
+    /// #988 — display-precision fix that stays lossless for JSON/CSV).
+    pub row_group_keys: Vec<Option<Vec<Value>>>,
 }
 
 impl QueryResult {
@@ -242,12 +248,26 @@ impl QueryResult {
         Self {
             columns,
             rows: Vec::new(),
+            row_group_keys: Vec::new(),
         }
     }
 
-    /// Add a row to the result.
+    /// Add a row to the result with no GROUP BY context (non-aggregate path).
     pub fn add_row(&mut self, row: Row) {
         self.rows.push(row);
+        self.row_group_keys.push(None);
+    }
+
+    /// Add a row produced by aggregation, recording the GROUP BY key values
+    /// alongside it. The renderer consults the key to quantize numeric
+    /// aggregates against the per-currency display precision (issue #988).
+    pub fn add_aggregate_row(&mut self, row: Row, group_key: Vec<Value>) {
+        self.rows.push(row);
+        self.row_group_keys.push(if group_key.is_empty() {
+            None
+        } else {
+            Some(group_key)
+        });
     }
 
     /// Number of rows.

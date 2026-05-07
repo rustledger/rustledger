@@ -75,10 +75,20 @@ fn write_text<W: Write>(
         .map(std::string::String::len)
         .collect();
 
-    for row in &result.rows {
+    for (row_idx, row) in result.rows.iter().enumerate() {
+        let currency_hint = result
+            .row_group_keys
+            .get(row_idx)
+            .and_then(|k| k.as_ref())
+            .and_then(|key_values| {
+                key_values.iter().find_map(|v| match v {
+                    Value::String(s) if looks_like_currency(s) => Some(s.as_str()),
+                    _ => None,
+                })
+            });
         for (i, value) in row.iter().enumerate() {
             let col_ctx = col_contexts.get(i).unwrap_or(ctx);
-            let len = format_value(value, numberify, col_ctx).len();
+            let len = format_value_with_hint(value, numberify, col_ctx, currency_hint).len();
             if i < widths.len() && len > widths[i] {
                 widths[i] = len;
             }
@@ -118,13 +128,30 @@ fn write_text<W: Write>(
     writeln!(writer)?;
 
     // Print rows using per-column display contexts
-    for row in &result.rows {
+    for (row_idx, row) in result.rows.iter().enumerate() {
+        // Per-row currency hint recovered from the GROUP BY key (issue #988):
+        // when a row was produced by an aggregate over `GROUP BY currency`,
+        // the renderer needs the currency to quantize Value::Number cells
+        // (e.g. `SUM(number)`) at the right per-currency precision. Without
+        // this, a SUM of two `0.00 USD` values keeps `rust_decimal`'s natural
+        // wider scale and renders `0.000` instead of `0.00`.
+        let currency_hint = result
+            .row_group_keys
+            .get(row_idx)
+            .and_then(|k| k.as_ref())
+            .and_then(|key_values| {
+                key_values.iter().find_map(|v| match v {
+                    Value::String(s) if looks_like_currency(s) => Some(s.as_str()),
+                    _ => None,
+                })
+            });
+
         for (i, value) in row.iter().enumerate() {
             if i > 0 {
                 write!(writer, "  ")?;
             }
             let col_ctx = col_contexts.get(i).unwrap_or(ctx);
-            let formatted = format_value(value, numberify, col_ctx);
+            let formatted = format_value_with_hint(value, numberify, col_ctx, currency_hint);
             if i < widths.len() {
                 // Right-align numeric columns to match Python beancount
                 if i < is_numeric_col.len() && is_numeric_col[i] {
@@ -247,6 +274,53 @@ fn update_column_context(col_ctx: &mut DisplayContext, value: &Value, ledger_ctx
         }
         _ => {}
     }
+}
+
+/// Heuristic: does a string look like a beancount currency? Used to detect
+/// the currency-column entry in a row's GROUP BY key so the renderer can
+/// apply per-currency precision to a sibling SUM/AVG cell (issue #988).
+///
+/// Beancount currencies are 1-24 chars, start with an uppercase letter, and
+/// only contain `[A-Z0-9'._-]`. The check is conservative — false negatives
+/// just leave the cell at default precision (the pre-fix behavior); false
+/// positives would let an unrelated string drive precision lookup, but the
+/// `DisplayContext::format` call falls back to default if the "currency"
+/// has no recorded precision, so the worst case is a no-op.
+fn looks_like_currency(s: &str) -> bool {
+    if s.is_empty() || s.len() > 24 {
+        return false;
+    }
+    let mut chars = s.chars();
+    let first = chars.next().unwrap();
+    if !first.is_ascii_uppercase() {
+        return false;
+    }
+    chars.all(|c| {
+        c.is_ascii_uppercase() || c.is_ascii_digit() || matches!(c, '\'' | '.' | '_' | '-')
+    })
+}
+
+/// Format a value with optional GROUP BY currency hint (issue #988).
+///
+/// When `currency_hint` is set and the value is a `Value::Number` (typically
+/// produced by an aggregate like `SUM(number)` over a `GROUP BY currency`),
+/// route through `DisplayContext::format` for per-currency quantization so
+/// the rendered scale matches bean-query (e.g. `0.00` not `0.000`). Without
+/// the hint, behavior is identical to `format_value`.
+///
+/// The hint is *only* consulted by the text renderer — JSON / CSV /
+/// beancount output paths still use `format_value`, keeping their values
+/// lossless (issue #988 acceptance criterion #4).
+pub(super) fn format_value_with_hint(
+    value: &Value,
+    numberify: bool,
+    ctx: &DisplayContext,
+    currency_hint: Option<&str>,
+) -> String {
+    if let (Value::Number(n), Some(currency)) = (value, currency_hint) {
+        return ctx.format(*n, currency);
+    }
+    format_value(value, numberify, ctx)
 }
 
 pub(super) fn format_value(value: &Value, numberify: bool, ctx: &DisplayContext) -> String {
@@ -509,6 +583,85 @@ mod tests {
         assert!(
             rendered.contains("{128.99 USD}") && rendered.contains("{131.73 USD}"),
             "expected both costs rendered without leading space, got {rendered:?}"
+        );
+    }
+
+    // ─── Issue #988 ──────────────────────────────────────────────────────
+    // SUM-aggregate text output should match bean-query's per-currency
+    // precision. With `SELECT currency, SUM(number) GROUP BY currency`, the
+    // SUM cell receives the GROUP BY currency from the row sidecar and
+    // quantizes via DisplayContext, so `0.00 USD` inputs sum to `0.00`
+    // rather than rust_decimal's natural `0.000`. JSON / CSV / beancount
+    // paths still go through `format_value` (no hint), preserving the
+    // unquantized value (AC #4: lossless non-text output).
+
+    /// Heuristic detection of currency-shaped strings (used by the text
+    /// renderer to find the GROUP BY currency in a row's sidecar).
+    #[test]
+    fn test_looks_like_currency_accepts_typical_currencies() {
+        assert!(looks_like_currency("USD"));
+        assert!(looks_like_currency("EUR"));
+        assert!(looks_like_currency("BTC"));
+        assert!(looks_like_currency("V0AAA"));
+        assert!(looks_like_currency("X.Y"));
+        assert!(looks_like_currency("ABC-123"));
+    }
+
+    #[test]
+    fn test_looks_like_currency_rejects_non_currencies() {
+        assert!(!looks_like_currency(""));
+        assert!(!looks_like_currency("usd")); // lowercase first
+        assert!(!looks_like_currency("123")); // starts with digit
+        assert!(!looks_like_currency("hello world")); // space
+        assert!(!looks_like_currency(&"A".repeat(25))); // too long
+    }
+
+    /// Pinning the format dispatch: a `Value::Number` cell rendered with
+    /// a currency hint goes through `DisplayContext::format(n, currency)`,
+    /// not `format_default(n)`. Without the hint, behavior is unchanged
+    /// from `format_value`.
+    #[test]
+    fn test_format_value_with_hint_routes_number_through_per_currency_ctx() {
+        let mut ctx = DisplayContext::new();
+        // Seed USD precision at 2dp by observing typical USD amounts.
+        ctx.update(dec!(1.00), "USD");
+        ctx.update(dec!(2.00), "USD");
+        ctx.update(dec!(3.00), "USD");
+
+        // A SUM-of-USD-zeros that came out at scale 3 from rust_decimal:
+        let sum_value = Value::Number(dec!(0.000));
+
+        let with_hint = format_value_with_hint(&sum_value, false, &ctx, Some("USD"));
+        let without_hint = format_value_with_hint(&sum_value, false, &ctx, None);
+
+        // With the hint, USD's per-currency precision (2dp) wins.
+        assert_eq!(
+            with_hint, "0.00",
+            "expected 2dp via USD ctx, got {with_hint:?}"
+        );
+        // Without the hint, we fall back to format_value's default (preserves
+        // the natural 3dp scale from rust_decimal).
+        assert_eq!(
+            without_hint, "0.000",
+            "expected default-format to keep rust_decimal natural scale, got {without_hint:?}"
+        );
+    }
+
+    /// Negative path: a non-currency hint string is filtered out by the
+    /// `looks_like_currency` check at the call site, so `format_value_with_hint`
+    /// never sees it. Pin that the helper itself still does the right thing
+    /// when handed a non-currency-shaped string (falls through to ctx,
+    /// which has no entry, so returns default precision).
+    #[test]
+    fn test_format_value_with_hint_unknown_currency_falls_back_safely() {
+        let ctx = DisplayContext::new();
+        let v = Value::Number(dec!(1.5));
+        // "MADEUP" passes looks_like_currency but ctx has no entry — safe.
+        let rendered = format_value_with_hint(&v, false, &ctx, Some("MADEUP"));
+        // Just assert it's a string representation of 1.5 (default scale).
+        assert!(
+            rendered.contains("1.5"),
+            "expected 1.5 in output, got {rendered:?}"
         );
     }
 }

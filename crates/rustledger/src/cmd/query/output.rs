@@ -264,8 +264,7 @@ fn update_column_context(col_ctx: &mut DisplayContext, value: &Value, ledger_ctx
 /// uppercase string in the key) would route a `Value::Number` through
 /// `DisplayContext::format`, whose unknown-currency fallback calls
 /// `normalize()` and *strips* trailing zeros (`0.000` → `0`), making
-/// output worse than the pre-fix state. Caught by Copilot review on PR
-/// #1022.
+/// output worse than the pre-fix state.
 fn looks_like_currency(s: &str) -> bool {
     if s.is_empty() || s.len() > 24 {
         return false;
@@ -282,30 +281,30 @@ fn looks_like_currency(s: &str) -> bool {
 
 /// Find the per-row currency hint for issue #988 quantization.
 ///
-/// Scans the row's GROUP BY key (from `row_group_keys[row_idx]`) for the
+/// Scans the row's GROUP BY key (from `QueryResult::group_key`) for the
 /// first string that both *looks* like a currency AND has tracked precision
 /// in the active `DisplayContext`. The precision check is essential — see
 /// `looks_like_currency`'s docstring for why a heuristic-only filter would
 /// regress output.
+///
+/// Multi-currency-column GROUP BY (rare but possible) takes the *first*
+/// match in iteration order — see `QueryResult::add_aggregate_row`'s
+/// docstring for the contract.
 fn currency_hint_for_row<'a>(
     result: &'a rustledger_query::QueryResult,
     row_idx: usize,
     ctx: &DisplayContext,
 ) -> Option<&'a str> {
-    result
-        .row_group_keys
-        .get(row_idx)
-        .and_then(|k| k.as_ref())
-        .and_then(|key_values| {
-            key_values.iter().find_map(|v| match v {
-                Value::String(s)
-                    if looks_like_currency(s) && ctx.get_precision(s.as_str()).is_some() =>
-                {
-                    Some(s.as_str())
-                }
-                _ => None,
-            })
+    result.group_key(row_idx).and_then(|key_values| {
+        key_values.iter().find_map(|v| match v {
+            Value::String(s)
+                if looks_like_currency(s) && ctx.get_precision(s.as_str()).is_some() =>
+            {
+                Some(s.as_str())
+            }
+            _ => None,
         })
+    })
 }
 
 /// Format a value with optional GROUP BY currency hint (issue #988).
@@ -603,10 +602,16 @@ mod tests {
     // SUM-aggregate text output should match bean-query's per-currency
     // precision. With `SELECT currency, SUM(number) GROUP BY currency`, the
     // SUM cell receives the GROUP BY currency from the row sidecar and
-    // quantizes via DisplayContext, so `0.00 USD` inputs sum to `0.00`
-    // rather than rust_decimal's natural `0.000`. JSON / CSV / beancount
-    // paths still go through `format_value` (no hint), preserving the
-    // unquantized value (AC #4: lossless non-text output).
+    // quantizes via DisplayContext. Concretely, the bug shows up when
+    // inputs have varying scales (e.g. one `0.000` mixed with several
+    // `0.00`s): `rust_decimal::Decimal::add` returns max-scale, so the sum
+    // keeps the wider `0.000` form even though USD's tracked precision is
+    // 2dp. After the fix, the per-currency hint pulls the SUM through
+    // `DisplayContext::format(_, "USD")`, rounding back to 2dp.
+    //
+    // JSON / CSV / beancount paths still go through `format_value` (no
+    // hint), preserving the unquantized value (AC #4: lossless non-text
+    // output).
 
     /// Heuristic detection of currency-shaped strings (used by the text
     /// renderer to find the GROUP BY currency in a row's sidecar).
@@ -697,6 +702,213 @@ mod tests {
             madeup_hint, None,
             "untracked currency must NOT be returned as a hint — would cause \
              DisplayContext::format to strip trailing zeros via normalize()"
+        );
+    }
+
+    // ─── AC #4: lossless CSV / JSON / beancount output ───────────────────
+    //
+    // The fix MUST NOT bleed into non-text renderers. Aggregate values
+    // there should still be the unquantized rust_decimal — JSON consumers
+    // parsing exact scales depend on this. These tests pin the contract
+    // by rendering an aggregate `Value::Number(0.000)` with a USD
+    // GROUP BY key context that *would* be quantized in text mode.
+
+    /// CSV of an aggregate row preserves the unquantized decimal even
+    /// when a GROUP BY currency would otherwise drive 2dp quantization.
+    #[test]
+    fn test_csv_aggregate_output_preserves_unquantized_decimal() {
+        use rustledger_query::QueryResult;
+
+        let mut ctx = DisplayContext::new();
+        ctx.update(dec!(1.00), "USD");
+        ctx.update(dec!(2.00), "USD");
+
+        let mut result = QueryResult::new(vec!["currency".into(), "sum".into()]);
+        result.add_aggregate_row(
+            vec![Value::String("USD".into()), Value::Number(dec!(0.000))],
+            vec![Value::String("USD".into())],
+        );
+
+        let mut buf: Vec<u8> = Vec::new();
+        write_csv(&result, &mut buf, false, &ctx).expect("csv ok");
+        let csv = String::from_utf8(buf).expect("utf8");
+
+        assert!(
+            csv.contains("USD,0.000"),
+            "expected unquantized 0.000 in CSV, got {csv:?}"
+        );
+        assert!(
+            !csv.contains("USD,0.00\n") && !csv.contains("USD,0.00,"),
+            "CSV must NOT have been quantized to 0.00, got {csv:?}"
+        );
+    }
+
+    /// JSON of an aggregate row likewise preserves the unquantized
+    /// decimal — JSON consumers (e.g. downstream pipelines reading
+    /// `bean-query --format json`) get the raw `rust_decimal` scale.
+    #[test]
+    fn test_json_aggregate_output_preserves_unquantized_decimal() {
+        use rustledger_query::QueryResult;
+
+        let mut ctx = DisplayContext::new();
+        ctx.update(dec!(1.00), "USD");
+        ctx.update(dec!(2.00), "USD");
+        // ctx is unused by write_json (path takes no DisplayContext) but
+        // building one mirrors the realistic call-site.
+        let _ = ctx;
+
+        let mut result = QueryResult::new(vec!["currency".into(), "sum".into()]);
+        result.add_aggregate_row(
+            vec![Value::String("USD".into()), Value::Number(dec!(0.000))],
+            vec![Value::String("USD".into())],
+        );
+
+        let mut buf: Vec<u8> = Vec::new();
+        write_json(&result, &mut buf).expect("json ok");
+        let json = String::from_utf8(buf).expect("utf8");
+
+        assert!(
+            json.contains("\"0.000\""),
+            "expected unquantized \"0.000\" in JSON, got {json}"
+        );
+        assert!(
+            !json.contains("\"0.00\"") || json.matches("\"0.00\"").count() == 0,
+            "JSON must NOT contain 0.00 (would mean it was quantized), got {json}"
+        );
+    }
+
+    /// `bean-query`-style beancount output similarly stays at the
+    /// natural decimal scale.
+    #[test]
+    fn test_beancount_aggregate_output_preserves_unquantized_decimal() {
+        use rustledger_query::QueryResult;
+
+        let mut ctx = DisplayContext::new();
+        ctx.update(dec!(1.00), "USD");
+        ctx.update(dec!(2.00), "USD");
+
+        let mut result = QueryResult::new(vec!["currency".into(), "sum".into()]);
+        result.add_aggregate_row(
+            vec![Value::String("USD".into()), Value::Number(dec!(0.000))],
+            vec![Value::String("USD".into())],
+        );
+
+        let mut buf: Vec<u8> = Vec::new();
+        write_beancount(&result, &mut buf, &ctx).expect("beancount ok");
+        let out = String::from_utf8(buf).expect("utf8");
+
+        assert!(
+            out.contains("0.000"),
+            "expected unquantized 0.000 in beancount output, got {out:?}"
+        );
+    }
+
+    /// Mirror of the AC #4 tests for the *text* renderer: same input
+    /// MUST be quantized. This is the bug we're fixing — without the
+    /// hint, text output would also keep 0.000. Together with the
+    /// three lossless tests above, this pins the divergence: text
+    /// quantizes, everything else doesn't.
+    #[test]
+    fn test_text_aggregate_output_quantizes_via_currency_hint() {
+        use rustledger_query::QueryResult;
+
+        let mut ctx = DisplayContext::new();
+        ctx.update(dec!(1.00), "USD");
+        ctx.update(dec!(2.00), "USD");
+        ctx.update(dec!(3.00), "USD");
+
+        let mut result = QueryResult::new(vec!["currency".into(), "sum".into()]);
+        result.add_aggregate_row(
+            vec![Value::String("USD".into()), Value::Number(dec!(0.000))],
+            vec![Value::String("USD".into())],
+        );
+
+        let mut buf: Vec<u8> = Vec::new();
+        write_text(&result, &mut buf, false, &ctx).expect("text ok");
+        let text = String::from_utf8(buf).expect("utf8");
+
+        assert!(
+            text.contains("0.00") && !text.contains("0.000"),
+            "text output should be quantized to 2dp via USD hint, got {text:?}"
+        );
+    }
+
+    /// End-to-end integration test (the canary the issue's compat
+    /// harness would fire). Drives a real BQL query
+    /// `SELECT currency, SUM(number) GROUP BY currency` through the
+    /// Executor and the text renderer, then asserts the rendered
+    /// output is quantized to USD's tracked precision (2dp) instead of
+    /// `rust_decimal`'s natural 3dp.
+    ///
+    /// This is the only test in the file that exercises the FULL
+    /// pipeline — Executor populates `row_group_keys`, `write_text`
+    /// reads via `currency_hint_for_row`, format dispatches through
+    /// `DisplayContext::format`. A regression that breaks the wiring
+    /// (e.g. someone reverting `add_aggregate_row` to `add_row` in
+    /// the executor) would fire here even if the helper-level tests
+    /// stay green.
+    #[test]
+    fn test_e2e_sum_group_by_currency_text_output_matches_per_currency_precision() {
+        use rustledger_core::{Amount, Directive, Posting, Transaction};
+        use rustledger_query::{Executor, parse};
+
+        let date = |y, m, d| rustledger_core::naive_date(y, m, d).unwrap();
+
+        // Build a tiny ledger where SUM(number) GROUP BY currency on USD
+        // mixes scales: 5.00 + (-5.00) + 0.000 = 0.000 (rust_decimal
+        // natural). Without the fix this renders as `0.000`. With the
+        // fix and a USD-tracked DisplayContext at 2dp, it should render
+        // as `0.00`.
+        let directives = vec![
+            Directive::Transaction(
+                Transaction::new(date(2024, 1, 15), "Coffee")
+                    .with_flag('*')
+                    .with_posting(Posting::new(
+                        "Expenses:Food",
+                        Amount::new(dec!(5.00), "USD"),
+                    ))
+                    .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(-5.00), "USD"))),
+            ),
+            // A scale-3 input that bumps SUM's natural scale to 3.
+            Directive::Transaction(
+                Transaction::new(date(2024, 1, 16), "Refund")
+                    .with_flag('*')
+                    .with_posting(Posting::new(
+                        "Expenses:Food",
+                        Amount::new(dec!(0.000), "USD"),
+                    ))
+                    .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(0.0), "USD"))),
+            ),
+        ];
+
+        // Build a DisplayContext that would naturally come from the
+        // loader observing typical USD amounts at 2dp.
+        let mut ctx = DisplayContext::new();
+        ctx.update(dec!(5.00), "USD");
+        ctx.update(dec!(-5.00), "USD");
+
+        let mut executor = Executor::new(&directives);
+        let query =
+            parse("SELECT currency, SUM(number) GROUP BY currency").expect("parse should succeed");
+        let result = executor.execute(&query).expect("execute should succeed");
+
+        // The executor MUST have recorded the GROUP BY currency.
+        // Otherwise the renderer can't know to quantize.
+        assert!(
+            result.group_key(0).is_some(),
+            "aggregate executor must populate row_group_keys; got None for row 0"
+        );
+
+        let mut buf: Vec<u8> = Vec::new();
+        write_text(&result, &mut buf, false, &ctx).expect("write_text ok");
+        let text = String::from_utf8(buf).expect("utf8");
+
+        // The aggregate cell for USD must NOT have the 3dp form.
+        // (The full text contains the column header and currency cell
+        // too; assert on the SUM scale specifically.)
+        assert!(
+            !text.contains("0.000"),
+            "text output should be quantized to USD's 2dp; raw output:\n{text}"
         );
     }
 }

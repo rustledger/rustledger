@@ -68,8 +68,9 @@ impl Executor<'_> {
         }
 
         // Sort the rows. Use `QueryResult::sort_by` (not `result.rows.sort_by`)
-        // so the per-row `row_group_keys` sidecar stays in lockstep — see
-        // issue #988 / PR #1022 review.
+        // so the per-row `row_group_keys` sidecar stays in lockstep — without
+        // this, the renderer would apply a row's currency hint to a different
+        // row's content after sort.
         result.sort_by(|a, b| {
             for (idx, ascending) in &sort_specs {
                 if *idx >= a.len() || *idx >= b.len() {

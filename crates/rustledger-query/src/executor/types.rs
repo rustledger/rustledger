@@ -246,11 +246,11 @@ pub struct QueryResult {
     /// context for `Value::Number` cells emitted by `SUM` / `AVG` (issue
     /// #988 — display-precision fix that stays lossless for JSON/CSV).
     ///
-    /// Reach in directly only inside `rustledger-query` and only with
-    /// extreme care — every mutation must be matched by a parallel
-    /// mutation to `rows`. External crates should use `group_key()`.
-    #[doc(hidden)]
-    pub row_group_keys: Vec<Option<Vec<Value>>>,
+    /// `pub(crate)` so external consumers can't accidentally violate the
+    /// parallel-vector invariant; reach in directly only inside this crate
+    /// and only with extreme care. External access goes through
+    /// [`Self::group_key`].
+    pub(crate) row_group_keys: Vec<Option<Vec<Value>>>,
 }
 
 impl QueryResult {
@@ -264,6 +264,9 @@ impl QueryResult {
     }
 
     /// Add a row to the result with no GROUP BY context (non-aggregate path).
+    /// The sidecar (`row_group_keys`) records `None` for this row, so the
+    /// text renderer applies no per-currency quantization (issue #988).
+    /// Aggregate paths must use [`Self::add_aggregate_row`] instead.
     pub fn add_row(&mut self, row: Row) {
         self.rows.push(row);
         self.row_group_keys.push(None);
@@ -512,5 +515,23 @@ mod tests {
         r.add_aggregate_row(vec![Value::Integer(42)], vec![]);
 
         assert_eq!(r.group_key(0), None);
+    }
+
+    /// `sort_by`'s lockstep invariant is enforced by an unconditional
+    /// `assert_eq!`. This test deliberately corrupts the sidecar (by
+    /// pushing to `rows` without a matching push to `row_group_keys`)
+    /// then calls `sort_by`, expecting a panic. Pins the safety net
+    /// against accidental removal of the assert.
+    #[test]
+    #[should_panic(expected = "QueryResult invariant violated")]
+    fn test_sort_by_panics_on_lockstep_violation() {
+        let mut r = QueryResult::new(vec!["x".into()]);
+        // Reach in directly to corrupt the sidecar — the only way to
+        // hit the assert without going through the helpers (which are
+        // designed to make it impossible). Available because tests live
+        // inside `rustledger-query` and `row_group_keys` is `pub(crate)`.
+        r.rows.push(vec![Value::Integer(1)]);
+        // Deliberately skip pushing to `row_group_keys`.
+        r.sort_by(|_, _| std::cmp::Ordering::Equal);
     }
 }

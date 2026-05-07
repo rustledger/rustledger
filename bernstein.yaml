@@ -1,0 +1,44 @@
+# Bernstein orchestration config — rustledger
+#
+# Setup:
+#   - Claude Code uses Max OAuth (`claude login`); no ANTHROPIC_API_KEY needed.
+#   - opencode routes through the local Bifrost gateway (~/.config/opencode/
+#     opencode.json), which fronts Fireworks / Together / OpenAI / Ollama. No
+#     provider env vars required at the Bernstein level — opencode handles
+#     everything via its own config.
+#
+# Usage:
+#   1. Pass the run goal via `bernstein -g "..."` (preferred — keeps git clean),
+#      OR uncomment `goal:` below for repeatable runs.
+#   2. Run `bernstein` (or `bernstein --dry-run` to preview the task plan).
+#   3. Watch via `bernstein live` (TUI) or `bernstein dashboard` (web).
+
+# goal: >
+#   Describe the run-specific objective here, or pass via `bernstein -g "..."`.
+
+# `auto` lets Bernstein pick per-task between opencode and claude.
+# Override with `cli: opencode` to force everything through Bifrost (cheap),
+# or `cli: claude` to route everything through Max (no per-token cost).
+cli: auto
+team: auto
+budget: "$5"
+
+# Cap concurrent agents. Worktrees are cheap on this repo, but each agent
+# triggers `cargo build` so 4 is a reasonable ceiling for IO/RAM.
+max_agents: 4
+
+# Constraints passed verbatim into every spawned agent's system prompt.
+# Mirror the must-do rules from CLAUDE.md so agents don't have to read it
+# in full to internalize them.
+constraints:
+  - "All work must use git worktrees via ./scripts/worktree (never `git checkout -b` in the main repo)."
+  - "Run `cargo check --all-features --all-targets`, `cargo test --all-features`, `cargo clippy --all-features -- -D warnings`, and `cargo fmt --all -- --check` before declaring a task done."
+  - "No `.unwrap()` in library code. Use `Result<T, E>` and `?`."
+  - "No `|| true`, `2>/dev/null`, or other silent-error-swallowing patterns in scripts or workflows."
+  - "Conventional Commits for commit messages (e.g. `fix(query): ...`, `feat(plugin): ...`)."
+
+# Files appended to every agent's context window so they can pattern-match
+# against repo conventions without burning tokens to discover them.
+context_files:
+  - CLAUDE.md
+  - CONTRIBUTING.md

@@ -68,3 +68,18 @@ tests/compatibility/synthetic/
 .opencode/
 .venv-plugins/
 packaging/arch/rustledger/.SRCINFO
+# Bernstein orchestrator workspace (regenerable via `bernstein init`).
+# Treats the whole `.sdd/` tree as ephemeral state — runtime logs, agent
+# chat transcripts, decision records, audit trails, and run-local config
+# all live here. Anything an agent writes back can include code excerpts,
+# accidentally-leaked env values, or partial work-in-progress, so the
+# safest default is to keep none of it in git history.
+.sdd/
+
+# Default Bernstein scaffolding (roles/prompts/review configs/templates).
+# `bernstein init` rewrites these on every project, so checking them in
+# bloats diffs without adding anything not reproducible from the package.
+# If/when this project customizes a template, lift just the customized
+# file out of this ignore (e.g. `!templates/prompts/judge.md`) rather
+# than committing the full tree.
+templates/

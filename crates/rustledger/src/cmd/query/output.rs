@@ -276,7 +276,7 @@ pub(super) fn format_value(value: &Value, numberify: bool, ctx: &DisplayContext)
                 let mut s = ctx.format_amount(p.units.number, p.units.currency.as_str());
                 if let Some(ref cost) = p.cost {
                     s.push_str(&format!(
-                        " {{ {}}}",
+                        " {{{}}}",
                         ctx.format_amount(cost.number, cost.currency.as_str())
                     ));
                 }
@@ -343,7 +343,7 @@ pub(super) fn format_value(value: &Value, numberify: bool, ctx: &DisplayContext)
                         let mut s = ctx.format_amount(p.units.number, p.units.currency.as_str());
                         if let Some(ref cost) = p.cost {
                             s.push_str(&format!(
-                                " {{ {}}}",
+                                " {{{}}}",
                                 ctx.format_amount(cost.number, cost.currency.as_str())
                             ));
                         }
@@ -453,5 +453,62 @@ fn escape_csv(s: &str) -> String {
         format!("\"{}\"", s.replace('"', "\"\""))
     } else {
         s.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rust_decimal_macros::dec;
+    use rustledger_core::{Amount, Cost, Inventory, Position};
+
+    /// Issue #987: cost-spec braces in BQL output had a leading space
+    /// inside the open brace (`{ 128.99 USD}` instead of `{128.99 USD}`),
+    /// diverging from `bean-query`. Pin both the `Position` and
+    /// `Inventory` paths so a future change to the format string can't
+    /// silently regress.
+    #[test]
+    fn test_position_with_cost_renders_without_leading_space_inside_braces() {
+        let pos = Position::with_cost(
+            Amount::new(dec!(8.373), "RGAGX"),
+            Cost::new(dec!(128.99), "USD"),
+        );
+        let value = Value::Position(Box::new(pos));
+        let ctx = DisplayContext::new();
+        let rendered = format_value(&value, false, &ctx);
+
+        assert!(
+            !rendered.contains("{ "),
+            "expected no leading space after `{{`, got {rendered:?}"
+        );
+        assert!(
+            rendered.contains("{128.99 USD}"),
+            "expected `{{128.99 USD}}` in output, got {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn test_inventory_with_cost_renders_without_leading_space_inside_braces() {
+        let mut inv = Inventory::new();
+        inv.add(Position::with_cost(
+            Amount::new(dec!(8.373), "RGAGX"),
+            Cost::new(dec!(128.99), "USD"),
+        ));
+        inv.add(Position::with_cost(
+            Amount::new(dec!(8.199), "RGAGX"),
+            Cost::new(dec!(131.73), "USD"),
+        ));
+        let value = Value::Inventory(Box::new(inv));
+        let ctx = DisplayContext::new();
+        let rendered = format_value(&value, false, &ctx);
+
+        assert!(
+            !rendered.contains("{ "),
+            "expected no leading space after `{{`, got {rendered:?}"
+        );
+        assert!(
+            rendered.contains("{128.99 USD}") && rendered.contains("{131.73 USD}"),
+            "expected both costs rendered without leading space, got {rendered:?}"
+        );
     }
 }

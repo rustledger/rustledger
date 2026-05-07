@@ -1,25 +1,50 @@
 # Bernstein orchestration config — rustledger
 #
-# Setup:
-#   - Claude Code uses Max OAuth (`claude login`); no ANTHROPIC_API_KEY needed.
-#   - opencode routes through the local Bifrost gateway (~/.config/opencode/
-#     opencode.json), which fronts Fireworks / Together / OpenAI / Ollama. No
-#     provider env vars required at the Bernstein level — opencode handles
-#     everything via its own config.
+# ─── Architecture: orchestrator vs workers ─────────────────────────────────
+# Bernstein has two distinct LLM-using layers:
 #
-# Usage:
-#   1. Pass the run goal via `bernstein -g "..."` (preferred — keeps git clean),
-#      OR uncomment `goal:` below for repeatable runs.
-#   2. Run `bernstein` (or `bernstein --dry-run` to preview the task plan).
+#   1. The MANAGER (planning, queue review, completion review). Configured
+#      via `internal_llm_provider` + `internal_llm_model`. Default is
+#      `none` (deterministic Python, no LLM at all).
+#
+#   2. The WORKER agents (one per spawned task). Configured via `cli:` for
+#      the default adapter, plus `role_model_policy:` for per-role overrides.
+#
+# We want Claude (Max) on the orchestrator path, and cheaper non-Anthropic
+# models on the workers — which inverts Bernstein's defaults.
+#
+# ─── Auth model ────────────────────────────────────────────────────────────
+#   - Claude Code uses Max OAuth (`claude login`); no ANTHROPIC_API_KEY.
+#   - opencode routes through the local Bifrost gateway (~/.config/opencode/
+#     opencode.json), which fronts Fireworks / Together / OpenAI / Ollama.
+#     No provider env vars required at the Bernstein level.
+#   - gemini uses Google OAuth (`gemini auth login`).
+#
+# ─── Usage ─────────────────────────────────────────────────────────────────
+#   1. Pass the run goal via `bernstein -g "..."` (preferred — keeps git
+#      clean), OR uncomment `goal:` below for repeatable runs.
+#   2. Run `bernstein` (or `bernstein --dry-run` to preview).
 #   3. Watch via `bernstein live` (TUI) or `bernstein dashboard` (web).
 
 # goal: >
 #   Describe the run-specific objective here, or pass via `bernstein -g "..."`.
 
-# `auto` lets Bernstein pick per-task between opencode and claude.
-# Override with `cli: opencode` to force everything through Bifrost (cheap),
-# or `cli: claude` to route everything through Max (no per-token cost).
-cli: auto
+# ─── Orchestrator (manager) ────────────────────────────────────────────────
+# `claude` is a registered CLI provider (core/routing/llm.py:110). Bernstein
+# shells out to `claude --print -p <prompt> --model <name> --output-format
+# text --max-turns 1` for planning / queue review / completion review,
+# hitting the Max OAuth session — no API key.
+internal_llm_provider: claude
+internal_llm_model: sonnet  # use `opus` for heavier planning runs
+
+# ─── Worker default ────────────────────────────────────────────────────────
+# Default subtasks to opencode → Bifrost. The opencode adapter passes the
+# `model` value raw to `opencode run -m <model>`, so this must be a name
+# from `opencode models`. GLM-5.1 picked as a strong general-purpose default;
+# `bernstein cost` will report actual spend per task.
+cli: opencode
+model: bifrost/togetherai/zai-org/GLM-5.1
+
 team: auto
 budget: "$5"
 
@@ -27,7 +52,28 @@ budget: "$5"
 # triggers `cargo build` so 4 is a reasonable ceiling for IO/RAM.
 max_agents: 4
 
-# Constraints passed verbatim into every spawned agent's system prompt.
+# ─── Per-role overrides ────────────────────────────────────────────────────
+# Tunes adapter + model per role. Names match templates/roles/.
+role_model_policy:
+  # Reviewer benefits from heavy reasoning — route to gemini-3.1-pro.
+  reviewer:
+    cli: gemini
+    model: gemini-3.1-pro
+  # Coding-heavy roles get Qwen3-Coder-480B (Fireworks, fast + capable for
+  # mechanical Rust changes).
+  backend:
+    cli: opencode
+    model: bifrost/fireworks/accounts/fireworks/models/qwen3-coder-480b-a35b-instruct
+  ci-fixer:
+    cli: opencode
+    model: bifrost/fireworks/accounts/fireworks/models/qwen3-coder-480b-a35b-instruct
+  # If a manager-role *agent* is spawned (distinct from the orchestrator),
+  # let it use Claude Max so its judgment matches the orchestrator's.
+  manager:
+    cli: claude
+    model: sonnet
+
+# ─── Constraints (verbatim into every agent's system prompt) ───────────────
 # Mirror the must-do rules from CLAUDE.md so agents don't have to read it
 # in full to internalize them.
 constraints:

@@ -70,11 +70,24 @@ fn write_text<W: Write>(
 
     // Resolve per-row currency hints once. The hint feeds both the
     // width-calculation pass and the print pass; computing per-pass
-    // would duplicate the lookup. The borrow lives for the rest of
-    // this function (no mutation of `result` between here and print).
-    let currency_hints: Vec<Option<&str>> = (0..result.rows.len())
-        .map(|i| currency_hint_for_row(result, i, ctx))
-        .collect();
+    // would duplicate the lookup.
+    //
+    // Lifetime: the `&str` entries borrow from `result.row_group_keys`.
+    // Safe because `result` is `&`-borrowed for the rest of this
+    // function — any future refactor that mutates `result` mid-stream
+    // would break this and the borrow checker would point at the cache.
+    //
+    // Short-circuit: when no row has a GROUP BY key (the common case for
+    // non-aggregate queries), every hint would be `None` — skip the
+    // allocation entirely. Access via `currency_hints.get(i).copied().flatten()`
+    // tolerates the empty Vec.
+    let currency_hints: Vec<Option<&str>> = if result.has_aggregate_rows() {
+        (0..result.rows.len())
+            .map(|i| currency_hint_for_row(result, i, ctx))
+            .collect()
+    } else {
+        Vec::new()
+    };
 
     // Calculate column widths using per-column contexts
     let mut widths: Vec<usize> = result
@@ -84,7 +97,7 @@ fn write_text<W: Write>(
         .collect();
 
     for (row_idx, row) in result.rows.iter().enumerate() {
-        let currency_hint = currency_hints[row_idx];
+        let currency_hint = currency_hints.get(row_idx).copied().flatten();
         for (i, value) in row.iter().enumerate() {
             let col_ctx = col_contexts.get(i).unwrap_or(ctx);
             let len = format_value_with_hint(value, numberify, col_ctx, currency_hint).len();
@@ -128,7 +141,7 @@ fn write_text<W: Write>(
 
     // Print rows using per-column display contexts
     for (row_idx, row) in result.rows.iter().enumerate() {
-        let currency_hint = currency_hints[row_idx];
+        let currency_hint = currency_hints.get(row_idx).copied().flatten();
 
         for (i, value) in row.iter().enumerate() {
             if i > 0 {
@@ -1054,6 +1067,62 @@ mod tests {
             hint,
             Some("USD"),
             "expected USD hint extracted from second key element"
+        );
+    }
+
+    /// Pins the documented "first match wins" contract on
+    /// `add_aggregate_row`: when TWO currency-shaped strings appear in
+    /// the GROUP BY key (rare but possible — e.g.
+    /// `GROUP BY currency, quote_currency`), iteration picks the first
+    /// one. A future change to `find_map` → `last`, scoring, or
+    /// alphabetical-min would break this test (which is the point —
+    /// the contract is load-bearing for downstream behavior).
+    #[test]
+    fn test_currency_hint_for_row_first_currency_wins_when_multiple() {
+        use rustledger_query::QueryResult;
+
+        let mut ctx = DisplayContext::new();
+        // Both EUR and USD have tracked precision so the gate doesn't
+        // disambiguate — only the iteration order does.
+        ctx.update(dec!(1.00), "EUR");
+        ctx.update(dec!(2.00), "EUR");
+        ctx.update(dec!(1.00), "USD");
+        ctx.update(dec!(2.00), "USD");
+
+        let mut result = QueryResult::new(vec![
+            "currency".into(),
+            "quote_currency".into(),
+            "sum".into(),
+        ]);
+        // Row 0 key: [EUR, USD]. First-wins → EUR.
+        result.add_aggregate_row(
+            vec![
+                Value::String("EUR".into()),
+                Value::String("USD".into()),
+                Value::Number(dec!(0.000)),
+            ],
+            vec![Value::String("EUR".into()), Value::String("USD".into())],
+        );
+        // Row 1 key: [USD, EUR] — reversed. Confirms the result tracks
+        // key order, not some side property of EUR/USD specifically.
+        result.add_aggregate_row(
+            vec![
+                Value::String("USD".into()),
+                Value::String("EUR".into()),
+                Value::Number(dec!(0.000)),
+            ],
+            vec![Value::String("USD".into()), Value::String("EUR".into())],
+        );
+
+        assert_eq!(
+            currency_hint_for_row(&result, 0, &ctx),
+            Some("EUR"),
+            "first-wins: [EUR, USD] should pick EUR"
+        );
+        assert_eq!(
+            currency_hint_for_row(&result, 1, &ctx),
+            Some("USD"),
+            "first-wins: [USD, EUR] should pick USD"
         );
     }
 }

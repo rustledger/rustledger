@@ -297,9 +297,20 @@ impl QueryResult {
     /// row index is out of range. This is the public read-side of the
     /// `row_group_keys` sidecar — prefer it over reaching into the
     /// field directly.
+    ///
+    /// Returns `&[Value]` rather than `&Vec<Value>` so callers aren't
+    /// tied to the specific container type.
     #[must_use]
-    pub fn group_key(&self, row_idx: usize) -> Option<&Vec<Value>> {
-        self.row_group_keys.get(row_idx).and_then(|k| k.as_ref())
+    pub fn group_key(&self, row_idx: usize) -> Option<&[Value]> {
+        self.row_group_keys.get(row_idx).and_then(|k| k.as_deref())
+    }
+
+    /// Whether any row in the result was produced by aggregation. Lets
+    /// downstream renderers short-circuit per-row hint lookups when
+    /// the cache would be all `None` anyway (issue #988 follow-up).
+    #[must_use]
+    pub fn has_aggregate_rows(&self) -> bool {
+        self.row_group_keys.iter().any(Option::is_some)
     }
 
     /// Truncate to the first `len` rows, keeping `row_group_keys` in
@@ -325,11 +336,16 @@ impl QueryResult {
             self.row_group_keys.len(),
             "QueryResult invariant violated: rows.len() must equal row_group_keys.len()"
         );
+        let n = self.rows.len();
         let mut paired: Vec<(Row, Option<Vec<Value>>)> = std::mem::take(&mut self.rows)
             .into_iter()
             .zip(std::mem::take(&mut self.row_group_keys))
             .collect();
         paired.sort_by(|(a, _), (b, _)| compare(a, b));
+        // Pre-allocate the now-empty Vecs back to known capacity to skip
+        // the incremental-grow allocations during push-back.
+        self.rows.reserve_exact(n);
+        self.row_group_keys.reserve_exact(n);
         for (row, key) in paired {
             self.rows.push(row);
             self.row_group_keys.push(key);
@@ -468,9 +484,9 @@ mod tests {
 
         // After sort, row[0] is EUR, row[1] is GBP, row[2] is USD.
         // The sidecar MUST have followed.
-        assert_eq!(r.group_key(0), Some(&vec![Value::String("EUR".into())]));
-        assert_eq!(r.group_key(1), Some(&vec![Value::String("GBP".into())]));
-        assert_eq!(r.group_key(2), Some(&vec![Value::String("USD".into())]));
+        assert_eq!(r.group_key(0), Some(&[Value::String("EUR".into())][..]));
+        assert_eq!(r.group_key(1), Some(&[Value::String("GBP".into())][..]));
+        assert_eq!(r.group_key(2), Some(&[Value::String("USD".into())][..]));
     }
 
     /// `truncate` drops the same suffix from rows AND `row_group_keys`.
@@ -482,8 +498,8 @@ mod tests {
         assert_eq!(r.rows.len(), 2);
         assert_eq!(r.row_group_keys.len(), 2);
         // Surviving keys are the first two: USD, EUR.
-        assert_eq!(r.group_key(0), Some(&vec![Value::String("USD".into())]));
-        assert_eq!(r.group_key(1), Some(&vec![Value::String("EUR".into())]));
+        assert_eq!(r.group_key(0), Some(&[Value::String("USD".into())][..]));
+        assert_eq!(r.group_key(1), Some(&[Value::String("EUR".into())][..]));
         // Out-of-range index returns None gracefully.
         assert_eq!(r.group_key(2), None);
     }
@@ -501,9 +517,9 @@ mod tests {
 
         assert_eq!(r.rows.len(), 3);
         assert_eq!(r.row_group_keys.len(), 3);
-        assert_eq!(r.group_key(0), Some(&vec![Value::String("USD".into())]));
+        assert_eq!(r.group_key(0), Some(&[Value::String("USD".into())][..]));
         assert_eq!(r.group_key(1), None);
-        assert_eq!(r.group_key(2), Some(&vec![Value::String("EUR".into())]));
+        assert_eq!(r.group_key(2), Some(&[Value::String("EUR".into())][..]));
     }
 
     /// Empty `group_key` arg means "no GROUP BY context" — sidecar
@@ -533,5 +549,19 @@ mod tests {
         r.rows.push(vec![Value::Integer(1)]);
         // Deliberately skip pushing to `row_group_keys`.
         r.sort_by(|_, _| std::cmp::Ordering::Equal);
+    }
+
+    /// Direct test for `add_row`: the non-aggregate path records `None`
+    /// in the sidecar, keeping the parallel-vector invariant. Covered
+    /// indirectly by `test_add_row_and_add_aggregate_row_mixed` but
+    /// pinned standalone here so the contract is unambiguous.
+    #[test]
+    fn test_add_row_records_none_in_sidecar() {
+        let mut r = QueryResult::new(vec!["x".into()]);
+        r.add_row(vec![Value::Integer(1)]);
+
+        assert_eq!(r.rows.len(), 1);
+        assert_eq!(r.row_group_keys.len(), 1);
+        assert_eq!(r.group_key(0), None);
     }
 }

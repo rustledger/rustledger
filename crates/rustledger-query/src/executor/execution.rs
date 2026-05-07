@@ -224,7 +224,7 @@ impl Executor<'_> {
 
         // Apply LIMIT
         if let Some(limit) = query.limit {
-            result.rows.truncate(limit as usize);
+            result.truncate(limit as usize);
         }
 
         Ok(result)
@@ -338,7 +338,7 @@ impl Executor<'_> {
 
         // Apply LIMIT
         if let Some(limit) = outer_query.limit {
-            result.rows.truncate(limit as usize);
+            result.truncate(limit as usize);
         }
 
         Ok(result)
@@ -460,7 +460,7 @@ impl Executor<'_> {
 
         // Apply LIMIT
         if let Some(limit) = query.limit {
-            result.rows.truncate(limit as usize);
+            result.truncate(limit as usize);
         }
 
         Ok(result)
@@ -590,7 +590,7 @@ impl Executor<'_> {
 
         // Apply LIMIT
         if let Some(limit) = query.limit {
-            result.rows.truncate(limit as usize);
+            result.truncate(limit as usize);
         }
 
         Ok(result)

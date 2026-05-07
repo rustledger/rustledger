@@ -270,6 +270,33 @@ impl QueryResult {
         });
     }
 
+    /// Truncate to the first `len` rows, keeping `row_group_keys` in
+    /// lockstep so the parallel-vector invariant survives LIMIT.
+    pub fn truncate(&mut self, len: usize) {
+        self.rows.truncate(len);
+        self.row_group_keys.truncate(len);
+    }
+
+    /// Sort rows by a comparator, keeping `row_group_keys` in lockstep.
+    /// Pair-sort prevents the sidecar from desynchronizing after ORDER BY
+    /// (otherwise text rendering would apply the wrong currency hint to
+    /// a row — caught by review on PR #1022).
+    pub fn sort_by<F>(&mut self, mut compare: F)
+    where
+        F: FnMut(&Row, &Row) -> std::cmp::Ordering,
+    {
+        debug_assert_eq!(self.rows.len(), self.row_group_keys.len());
+        let mut paired: Vec<(Row, Option<Vec<Value>>)> = std::mem::take(&mut self.rows)
+            .into_iter()
+            .zip(std::mem::take(&mut self.row_group_keys))
+            .collect();
+        paired.sort_by(|(a, _), (b, _)| compare(a, b));
+        for (row, key) in paired {
+            self.rows.push(row);
+            self.row_group_keys.push(key);
+        }
+    }
+
     /// Number of rows.
     pub const fn len(&self) -> usize {
         self.rows.len()

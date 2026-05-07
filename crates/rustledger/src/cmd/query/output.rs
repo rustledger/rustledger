@@ -76,16 +76,7 @@ fn write_text<W: Write>(
         .collect();
 
     for (row_idx, row) in result.rows.iter().enumerate() {
-        let currency_hint = result
-            .row_group_keys
-            .get(row_idx)
-            .and_then(|k| k.as_ref())
-            .and_then(|key_values| {
-                key_values.iter().find_map(|v| match v {
-                    Value::String(s) if looks_like_currency(s) => Some(s.as_str()),
-                    _ => None,
-                })
-            });
+        let currency_hint = currency_hint_for_row(result, row_idx, ctx);
         for (i, value) in row.iter().enumerate() {
             let col_ctx = col_contexts.get(i).unwrap_or(ctx);
             let len = format_value_with_hint(value, numberify, col_ctx, currency_hint).len();
@@ -129,22 +120,7 @@ fn write_text<W: Write>(
 
     // Print rows using per-column display contexts
     for (row_idx, row) in result.rows.iter().enumerate() {
-        // Per-row currency hint recovered from the GROUP BY key (issue #988):
-        // when a row was produced by an aggregate over `GROUP BY currency`,
-        // the renderer needs the currency to quantize Value::Number cells
-        // (e.g. `SUM(number)`) at the right per-currency precision. Without
-        // this, a SUM of two `0.00 USD` values keeps `rust_decimal`'s natural
-        // wider scale and renders `0.000` instead of `0.00`.
-        let currency_hint = result
-            .row_group_keys
-            .get(row_idx)
-            .and_then(|k| k.as_ref())
-            .and_then(|key_values| {
-                key_values.iter().find_map(|v| match v {
-                    Value::String(s) if looks_like_currency(s) => Some(s.as_str()),
-                    _ => None,
-                })
-            });
+        let currency_hint = currency_hint_for_row(result, row_idx, ctx);
 
         for (i, value) in row.iter().enumerate() {
             if i > 0 {
@@ -276,16 +252,20 @@ fn update_column_context(col_ctx: &mut DisplayContext, value: &Value, ledger_ctx
     }
 }
 
-/// Heuristic: does a string look like a beancount currency? Used to detect
-/// the currency-column entry in a row's GROUP BY key so the renderer can
-/// apply per-currency precision to a sibling SUM/AVG cell (issue #988).
+/// Heuristic: does a string look like a beancount currency? Used as a
+/// pre-filter when scanning a row's GROUP BY key for a candidate currency
+/// to drive per-cell precision lookup (issue #988). Beancount currencies
+/// are 1-24 chars, start with an uppercase letter, and only contain
+/// `[A-Z0-9'._-]`.
 ///
-/// Beancount currencies are 1-24 chars, start with an uppercase letter, and
-/// only contain `[A-Z0-9'._-]`. The check is conservative — false negatives
-/// just leave the cell at default precision (the pre-fix behavior); false
-/// positives would let an unrelated string drive precision lookup, but the
-/// `DisplayContext::format` call falls back to default if the "currency"
-/// has no recorded precision, so the worst case is a no-op.
+/// This is only step one of two. The caller (`currency_hint_for_row`) ALSO
+/// checks that the candidate has tracked precision in the `DisplayContext`
+/// before returning it — without that gate, a false-positive (unrelated
+/// uppercase string in the key) would route a `Value::Number` through
+/// `DisplayContext::format`, whose unknown-currency fallback calls
+/// `normalize()` and *strips* trailing zeros (`0.000` → `0`), making
+/// output worse than the pre-fix state. Caught by Copilot review on PR
+/// #1022.
 fn looks_like_currency(s: &str) -> bool {
     if s.is_empty() || s.len() > 24 {
         return false;
@@ -300,6 +280,34 @@ fn looks_like_currency(s: &str) -> bool {
     })
 }
 
+/// Find the per-row currency hint for issue #988 quantization.
+///
+/// Scans the row's GROUP BY key (from `row_group_keys[row_idx]`) for the
+/// first string that both *looks* like a currency AND has tracked precision
+/// in the active `DisplayContext`. The precision check is essential — see
+/// `looks_like_currency`'s docstring for why a heuristic-only filter would
+/// regress output.
+fn currency_hint_for_row<'a>(
+    result: &'a rustledger_query::QueryResult,
+    row_idx: usize,
+    ctx: &DisplayContext,
+) -> Option<&'a str> {
+    result
+        .row_group_keys
+        .get(row_idx)
+        .and_then(|k| k.as_ref())
+        .and_then(|key_values| {
+            key_values.iter().find_map(|v| match v {
+                Value::String(s)
+                    if looks_like_currency(s) && ctx.get_precision(s.as_str()).is_some() =>
+                {
+                    Some(s.as_str())
+                }
+                _ => None,
+            })
+        })
+}
+
 /// Format a value with optional GROUP BY currency hint (issue #988).
 ///
 /// When `currency_hint` is set and the value is a `Value::Number` (typically
@@ -311,6 +319,11 @@ fn looks_like_currency(s: &str) -> bool {
 /// The hint is *only* consulted by the text renderer — JSON / CSV /
 /// beancount output paths still use `format_value`, keeping their values
 /// lossless (issue #988 acceptance criterion #4).
+///
+/// The caller is responsible for ensuring the hint resolves to a currency
+/// with tracked precision (`ctx.get_precision(currency).is_some()`) — pass
+/// `None` otherwise. See `currency_hint_for_row` for the canonical
+/// extraction path.
 pub(super) fn format_value_with_hint(
     value: &Value,
     numberify: bool,
@@ -647,21 +660,43 @@ mod tests {
         );
     }
 
-    /// Negative path: a non-currency hint string is filtered out by the
-    /// `looks_like_currency` check at the call site, so `format_value_with_hint`
-    /// never sees it. Pin that the helper itself still does the right thing
-    /// when handed a non-currency-shaped string (falls through to ctx,
-    /// which has no entry, so returns default precision).
+    /// Critical regression test (Copilot review on PR #1022 caught this):
+    /// `DisplayContext::format(n, currency)` falls back to `n.normalize()`
+    /// when the currency has no tracked precision, which STRIPS trailing
+    /// zeros. So a false-positive hint isn't a no-op — it would render
+    /// `0.000` as `0`, making output WORSE than the pre-fix state. The
+    /// gate lives in `currency_hint_for_row` (only returns hints for
+    /// currencies that pass `ctx.get_precision().is_some()`); this test
+    /// pins that contract end-to-end.
     #[test]
-    fn test_format_value_with_hint_unknown_currency_falls_back_safely() {
-        let ctx = DisplayContext::new();
-        let v = Value::Number(dec!(1.5));
-        // "MADEUP" passes looks_like_currency but ctx has no entry — safe.
-        let rendered = format_value_with_hint(&v, false, &ctx, Some("MADEUP"));
-        // Just assert it's a string representation of 1.5 (default scale).
-        assert!(
-            rendered.contains("1.5"),
-            "expected 1.5 in output, got {rendered:?}"
+    fn test_currency_hint_for_row_filters_untracked_currencies() {
+        use rustledger_query::QueryResult;
+
+        let mut ctx = DisplayContext::new();
+        ctx.update(dec!(1.00), "USD");
+        ctx.update(dec!(2.00), "USD");
+
+        let mut result = QueryResult::new(vec!["currency".into(), "sum".into()]);
+        // Row 0: GROUP BY key contains tracked USD → hint returned.
+        result.add_aggregate_row(
+            vec![Value::String("USD".into()), Value::Number(dec!(0.000))],
+            vec![Value::String("USD".into())],
+        );
+        // Row 1: GROUP BY key contains MADEUP — passes shape check but
+        // has no tracked precision → hint MUST be filtered out.
+        result.add_aggregate_row(
+            vec![Value::String("MADEUP".into()), Value::Number(dec!(0.000))],
+            vec![Value::String("MADEUP".into())],
+        );
+
+        let usd_hint = currency_hint_for_row(&result, 0, &ctx);
+        let madeup_hint = currency_hint_for_row(&result, 1, &ctx);
+
+        assert_eq!(usd_hint, Some("USD"));
+        assert_eq!(
+            madeup_hint, None,
+            "untracked currency must NOT be returned as a hint — would cause \
+             DisplayContext::format to strip trailing zeros via normalize()"
         );
     }
 }

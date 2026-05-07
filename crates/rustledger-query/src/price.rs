@@ -61,6 +61,15 @@ impl PriceDatabase {
     /// dates and pass 2 fills them in. Net effect: implicit prices
     /// are reachable from BQL without requiring the user to wire up
     /// a plugin, but never doubled when the plugin IS wired up.
+    ///
+    /// **Behavior note**: an explicit `Price` directive *suppresses*
+    /// any divergent transaction-derived implicit price on the same
+    /// `(base, quote, date)`. This is intentional — explicit Price is
+    /// authoritative — but a behavior change vs pre-#1015, where a
+    /// user-written `2024-01-15 price ABC 1.40 EUR` plus a transaction
+    /// emitting ABC@EUR with a different value on the same date would
+    /// have stored both. Now only the explicit value survives. In
+    /// practice this only surfaces with hand-authored conflicts.
     pub fn from_directives(directives: &[Directive]) -> Self {
         let mut db = Self::new();
 
@@ -74,7 +83,7 @@ impl PriceDatabase {
         // Snapshot the explicit `(base, quote, date)` tuples — pass 2
         // skips any transaction-derived price that would land on one
         // of these (the plugin already filled it in via pass 1).
-        let explicit = db.explicit_keys();
+        let explicit = db.snapshot_keys();
 
         // Pass 2: implicit prices from transactions, gated on the
         // explicit set.
@@ -113,11 +122,14 @@ impl PriceDatabase {
             .push(entry);
     }
 
-    /// Snapshot the set of `(base, quote, date)` tuples currently in
-    /// the database. Used by the two-pass build to gate transaction-
-    /// derived implicit prices against explicit Price directives that
-    /// already cover the same tuple (issue #1006).
-    pub fn explicit_keys(
+    /// Snapshot every `(base, quote, date)` tuple currently in the
+    /// database. **Internal helper for the two-pass build only** —
+    /// the result reflects whatever is in the DB at the moment of the
+    /// call; it is "explicit" only because callers invoke it after
+    /// pass 1 (which adds explicit `Price` directives) and before
+    /// pass 2 (which adds transaction-derived implicit prices). See
+    /// [`from_directives`] for the protocol.
+    pub(crate) fn snapshot_keys(
         &self,
     ) -> std::collections::HashSet<(InternedStr, InternedStr, NaiveDate)> {
         self.prices
@@ -147,7 +159,7 @@ impl PriceDatabase {
     /// for each priced posting, populating this set; pass 2 then
     /// skips those tuples to avoid the duplication described in
     /// issue #1006.
-    pub fn add_implicit_prices_from_transaction(
+    pub(crate) fn add_implicit_prices_from_transaction(
         &mut self,
         txn: &Transaction,
         explicit: &std::collections::HashSet<(InternedStr, InternedStr, NaiveDate)>,
@@ -963,6 +975,81 @@ mod tests {
             db.len(),
             2,
             "two distinct transactions both emit implicit prices on the same date"
+        );
+    }
+
+    /// The actual 2017-12-15 case from issue #1006: the
+    /// `implicit_prices` plugin runs and emits one Price directive per
+    /// priced posting (NOT one per unique tuple). When two distinct
+    /// transactions on the same date emit the same `(base, quote)`
+    /// pair, the plugin produces two Price directives — pass 1 keeps
+    /// both, pass 2 skips both transactions (the tuple is in
+    /// `explicit`). Net: two entries, matching what `bean-query`
+    /// shows for that date. Pins the plugin+multi-txn interaction
+    /// that the original PR's tests left implicit.
+    #[test]
+    fn test_plugin_emits_per_posting_two_txns_same_tuple_both_kept() {
+        use rustledger_core::{CostSpec, Posting, Transaction};
+
+        let directives = vec![
+            // Plugin output: one Price per priced posting. Two
+            // postings on the same date with the same (base, quote)
+            // → two Price directives at the same tuple.
+            Directive::Price(PriceDirective {
+                date: date(2017, 12, 15),
+                currency: "BAM".into(),
+                amount: Amount::new(dec!(0.5113), "EUR"),
+                meta: Default::default(),
+            }),
+            Directive::Price(PriceDirective {
+                date: date(2017, 12, 15),
+                currency: "BAM".into(),
+                amount: Amount::new(dec!(0.5113), "EUR"),
+                meta: Default::default(),
+            }),
+            // The original transactions the plugin derived from.
+            // Pass 2 must skip both (the (BAM, EUR, 2017-12-15) tuple
+            // is already in `explicit` from pass 1's first add).
+            Directive::Transaction(
+                Transaction::new(date(2017, 12, 15), "Sale 1")
+                    .with_posting(
+                        Posting::new("Assets:Stock", Amount::new(dec!(-10), "BAM")).with_cost(
+                            CostSpec::default()
+                                .with_number_per(dec!(0.5113))
+                                .with_currency("EUR"),
+                        ),
+                    )
+                    .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(5.113), "EUR"))),
+            ),
+            Directive::Transaction(
+                Transaction::new(date(2017, 12, 15), "Sale 2")
+                    .with_posting(
+                        Posting::new("Assets:Stock", Amount::new(dec!(-20), "BAM")).with_cost(
+                            CostSpec::default()
+                                .with_number_per(dec!(0.5113))
+                                .with_currency("EUR"),
+                        ),
+                    )
+                    .with_posting(Posting::new(
+                        "Assets:Cash",
+                        Amount::new(dec!(10.226), "EUR"),
+                    )),
+            ),
+        ];
+        let db = PriceDatabase::from_directives(&directives);
+
+        // Two entries — both from pass 1 (the plugin), zero from
+        // pass 2 (gated). Pre-#1015 fix this would have been four
+        // (2 plugin + 2 BQL re-extraction). Mirrors the bean-query
+        // behavior reported in the issue.
+        assert_eq!(
+            db.len(),
+            2,
+            "plugin emits one Price per priced posting; pass 2 must skip both transactions"
+        );
+        assert_eq!(
+            db.get_price("BAM", "EUR", date(2017, 12, 15)),
+            Some(dec!(0.5113))
         );
     }
 }

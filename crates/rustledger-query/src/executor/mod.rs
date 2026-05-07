@@ -128,7 +128,7 @@ impl<'a> Executor<'a> {
                 price_db.add_price(p);
             }
         }
-        let explicit = price_db.explicit_keys();
+        let explicit = price_db.snapshot_keys();
         for spanned in spanned_directives {
             if let Directive::Transaction(txn) = &spanned.value {
                 price_db.add_implicit_prices_from_transaction(txn, &explicit);

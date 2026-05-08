@@ -1655,14 +1655,129 @@ fn test_having_filters_all() {
 
 // ============================================================================
 // PIVOT BY Tests
+//
+// Post-#1034: PIVOT BY takes EXACTLY two columns (matches bean-query):
+//   PIVOT BY <pivot_value_col>, <group_by_col>
+// First column's values become the new column headers; second is the
+// GROUP BY column to keep as the row key.
 // ============================================================================
 
 #[test]
-fn test_parse_pivot_by() {
-    let query =
-        parse("SELECT account, YEAR(date), SUM(position) GROUP BY 1, 2 PIVOT BY YEAR(date)")
-            .expect("should parse");
+fn test_parse_pivot_by_two_columns() {
+    // Bean-query-compatible form: two columns required.
+    let query = parse(
+        "SELECT account, YEAR(date), SUM(position) GROUP BY 1, 2 \
+         ORDER BY account PIVOT BY YEAR(date), account",
+    )
+    .expect("should parse");
     assert!(matches!(query, rustledger_query::Query::Select(_)));
+}
+
+#[test]
+fn test_parse_pivot_by_one_column_parses_but_executes_with_arity_error() {
+    // Parser accepts 1+ pivot expressions (permissive); the executor
+    // enforces exactly 2 with PivotWrongArity. This split lets us give
+    // a useful error message at the right layer.
+    let query = parse("SELECT account, currency, SUM(number) GROUP BY 1, 2 PIVOT BY currency")
+        .expect("should parse one-arg form");
+    let directives = make_test_directives();
+    let mut executor = Executor::new(&directives);
+    let err = executor.execute(&query).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("PIVOT BY requires exactly two columns"),
+        "expected PivotWrongArity message; got: {msg}"
+    );
+}
+
+#[test]
+fn test_pivot_by_same_column_rejected() {
+    // bean-query rejects this with: "the two PIVOT BY columns cannot be
+    // the same column". rledger uses identical wording for upstream parity.
+    let query = parse(
+        "SELECT account, currency, SUM(number) GROUP BY 1, 2 \
+         PIVOT BY currency, currency",
+    )
+    .expect("should parse");
+    let directives = make_test_directives();
+    let mut executor = Executor::new(&directives);
+    let err = executor.execute(&query).unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("the two PIVOT BY columns cannot be the same column"),
+        "got: {err}"
+    );
+}
+
+#[test]
+fn test_pivot_by_second_column_must_be_in_group_by() {
+    // The second pivot column must be a GROUP BY target. Here `account`
+    // is a SELECT target but NOT in GROUP BY, so it can't be the row key.
+    let query = parse(
+        "SELECT account, currency, SUM(number) GROUP BY currency \
+         PIVOT BY currency, account",
+    )
+    .expect("should parse");
+    let directives = make_test_directives();
+    let mut executor = Executor::new(&directives);
+    let err = executor.execute(&query).unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("the second PIVOT BY column must be a GROUP BY column"),
+        "got: {err}"
+    );
+}
+
+#[test]
+fn test_pivot_by_with_order_by_works() {
+    // PIVOT + ORDER BY combination — bean-query supports this when
+    // ORDER BY comes BEFORE PIVOT BY in the source. Pre-#1034 rledger
+    // had the clauses in the opposite parse order, AND the post-pivot
+    // hidden-column strip silently dropped pivot values when ORDER BY
+    // referenced a column not in SELECT. Both fixed in #1034 by
+    // reordering the parser + the execution pipeline so PIVOT runs
+    // AFTER sort + strip.
+    let directives = make_test_directives();
+    let result = execute_query(
+        "SELECT account, currency, SUM(number) GROUP BY 1, 2 \
+         ORDER BY account PIVOT BY currency, account",
+        &directives,
+    );
+    // Smoke check: produced a non-empty result with at least the
+    // account-key column and one pivoted currency column.
+    assert!(!result.columns.is_empty());
+    assert!(result.columns.iter().any(|c| c == "account"));
+}
+
+#[test]
+fn test_pivot_by_with_order_by_on_hidden_column_works() {
+    // The strip-hidden + pivot interaction (item #4 of #1034). Pre-fix:
+    // hidden ORDER BY column ended up in the middle of pivoted rows
+    // and the strip-from-end truncated pivot values instead. Post-fix
+    // (PIVOT after sort+strip), the strip operates on the pre-pivot
+    // shape where hidden cols ARE trailing — they're correctly removed
+    // before pivot runs.
+    let directives = make_test_directives();
+    let result = execute_query(
+        "SELECT account, currency, SUM(number) GROUP BY 1, 2 \
+         ORDER BY MIN(date) PIVOT BY currency, account",
+        &directives,
+    );
+    assert!(!result.columns.is_empty());
+    // The pivoted USD column should be present (the bug pre-fix dropped
+    // pivot values when num_hidden > 0).
+    assert!(
+        result.columns.iter().any(|c| c == "USD"),
+        "expected USD pivot column post-fix; got columns: {:?}",
+        result.columns
+    );
+    // The hidden MIN(date) column must NOT survive into the final
+    // result — it was stripped before the pivot ran.
+    assert!(
+        !result.columns.iter().any(|c| c.contains("date")),
+        "hidden ORDER BY column should be stripped; got columns: {:?}",
+        result.columns
+    );
 }
 
 // ============================================================================

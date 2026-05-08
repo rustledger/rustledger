@@ -54,4 +54,26 @@ pub enum QueryError {
     /// Evaluation error.
     #[error("evaluation error: {0}")]
     Evaluation(String),
+    /// PIVOT BY clause does not have exactly two columns.
+    ///
+    /// Matches bean-query's compiler check (`_compile_pivot_by` in
+    /// `beanquery/compiler.py`). The first column is the pivot value
+    /// (whose values become new column headers); the second is the
+    /// GROUP BY column to keep as the row key.
+    #[error("PIVOT BY requires exactly two columns, got {0}")]
+    PivotWrongArity(usize),
+    /// PIVOT BY's two columns refer to the same target.
+    ///
+    /// Bean-query message: `the two PIVOT BY columns cannot be the
+    /// same column`. Same wording reused for upstream parity.
+    #[error("the two PIVOT BY columns cannot be the same column")]
+    PivotSameColumn,
+    /// PIVOT BY's second column isn't in the GROUP BY clause.
+    ///
+    /// The second pivot column has to be a GROUP BY key — otherwise
+    /// the pivot output rows wouldn't have a stable identity. Bean-
+    /// query message: `the second PIVOT BY column must be a GROUP BY
+    /// column`.
+    #[error("the second PIVOT BY column must be a GROUP BY column")]
+    PivotSecondNotInGroupBy,
 }

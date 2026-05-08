@@ -95,12 +95,29 @@ impl Executor<'_> {
     /// All other columns become "value" cells, populated at the
     /// intersection of (`group_by_col` value, `pivot_value_col` value).
     ///
-    /// **Validation** (matches `_compile_pivot_by` in
-    /// `beanquery/compiler.py`):
+    /// **Validation** (rules 1–3 match `_compile_pivot_by` in
+    /// `beanquery/compiler.py`; rule 4 is rledger-specific):
     /// - exactly two pivot columns (`PivotWrongArity` otherwise)
     /// - the two columns must differ (`PivotSameColumn` otherwise)
     /// - the second column must be a GROUP BY target
     ///   (`PivotSecondNotInGroupBy` otherwise)
+    /// - PIVOT BY requires an explicit `GROUP BY` clause
+    ///   (`PivotWithoutGroupBy` otherwise). Bean-query reaches the
+    ///   same outcome through grammar — the second-must-be-in-GROUP-BY
+    ///   rule is only checked when GROUP BY exists, but their parser
+    ///   typically rejects PIVOT-without-GROUP-BY queries earlier.
+    ///   rledger's parser is more permissive, so we surface the case
+    ///   with a specific error rather than the misleading "second
+    ///   column not in GROUP BY".
+    ///
+    /// **Input contract**: callers should provide `result` with at most
+    /// one row per `(key_col, pivot_value_col)` pair — the typical
+    /// guarantee from `GROUP BY <key>, <pivot_value>`. If the input has
+    /// duplicate `(key, pivot_value)` rows, only the first one in row
+    /// order contributes its value cells; later duplicates are silently
+    /// ignored. Validator-rejected aggregate queries always satisfy
+    /// this; non-aggregate queries with PIVOT would need the caller to
+    /// enforce uniqueness.
     ///
     /// **Pipeline ordering**: this runs AFTER `sort_results` and the
     /// hidden-column strip (`execute_select`), so `result.columns`
@@ -181,9 +198,14 @@ impl Executor<'_> {
             .collect();
 
         // Build new column names. Layout: [key_col, <value_col × pivot_value>...].
-        // For a single value column (the common case) we use just the
-        // pivot value as the header; for multiple, we qualify with the
-        // value column name to stay unambiguous.
+        //
+        // Single-value-column case (the typical SUM(number) shape) gets
+        // just the pivot value as the header — matches bean-query
+        // exactly. Multi-value-column case qualifies with the value
+        // column name (`<value_col> / <pivot_value>`) so the headers
+        // stay unambiguous when there's more than one aggregate. The
+        // asymmetry is deliberate: a single-aggregate header like
+        // `USD` is what users expect from the typical pivot.
         let mut new_columns: Vec<String> =
             Vec::with_capacity(1 + value_col_idxs.len() * pivot_values.len());
         new_columns.push(result.columns[key_col_idx].clone());
@@ -214,12 +236,11 @@ impl Executor<'_> {
             let h = hash_single_value(&key);
             let bucket = group_index.entry(h).or_default();
             let existing = bucket.iter().find(|&&idx| groups[idx].0 == key).copied();
-            match existing {
-                Some(idx) => groups[idx].1.push(row),
-                None => {
-                    bucket.push(groups.len());
-                    groups.push((key, vec![row]));
-                }
+            if let Some(idx) = existing {
+                groups[idx].1.push(row);
+            } else {
+                bucket.push(groups.len());
+                groups.push((key, vec![row]));
             }
         }
 
@@ -233,8 +254,12 @@ impl Executor<'_> {
             // whose pivot column equals it; pull the value-column cell.
             // Hash bucket + structural `==` for collision-safety, same
             // pattern as the group_index above.
-            let mut pivot_lookup: HashMap<u64, Vec<&&Row>> = HashMap::new();
-            for row in &group_rows {
+            //
+            // If multiple input rows share the same `(key, pivot_value)`
+            // pair, only the first one wins — see "Input contract" in
+            // the function docstring.
+            let mut pivot_lookup: HashMap<u64, Vec<&Row>> = HashMap::new();
+            for &row in &group_rows {
                 let pv = row.get(pivot_value_col_idx).cloned().unwrap_or(Value::Null);
                 pivot_lookup
                     .entry(hash_single_value(&pv))

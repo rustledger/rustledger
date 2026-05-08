@@ -1467,6 +1467,42 @@ fn precision_metadata_non_integer_falls_back() {
 }
 
 #[test]
+fn precision_metadata_valid_then_invalid_keeps_first() {
+    // Same currency declared twice: first valid (2), second invalid (-1).
+    // The invalid declaration is silently skipped by the loader, so the
+    // earlier valid override stays in place. This pins the
+    // "first-valid-wins-when-later-is-invalid" behavior — it's a
+    // deliberate choice over strict last-wins because falling back to
+    // inference because of a typo two pages later would be more
+    // surprising. The validator still emits E5003 for the bad one
+    // (covered separately).
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("precision_valid_then_invalid.beancount");
+    std::fs::write(
+        &path,
+        r#"2024-01-01 commodity USD
+  precision: 2
+
+2024-06-01 commodity USD
+  precision: -1
+
+2024-01-01 open Assets:Cash
+2024-01-15 * "test"
+  Assets:Cash    1.2345 USD
+  Assets:Cash   -1.2345 USD
+"#,
+    )
+    .unwrap();
+    let result = load_raw(&path).expect("load");
+    assert_eq!(
+        result.display_context.get_precision("USD"),
+        Some(2),
+        "earlier valid precision must persist when a later declaration is invalid"
+    );
+    assert!(result.display_context.has_fixed_precision("USD"));
+}
+
+#[test]
 fn precision_metadata_string_value_falls_back() {
     // `precision: "abc"` is the wrong MetaValue variant → invalid →
     // inference wins (2dp here).

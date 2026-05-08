@@ -1973,6 +1973,28 @@ mod tests {
     }
 
     #[test]
+    fn precision_meta_valid_then_invalid_same_currency_warns_only_once() {
+        // Two commodity directives for USD: first valid (2), second invalid
+        // (-1). The validator must surface the bad one as E5003 even though
+        // the loader pins the earlier valid override. This pairs with the
+        // loader-side test `precision_metadata_valid_then_invalid_keeps_first`.
+        let directives = vec![
+            commodity_with_precision(MetaValue::Number(dec!(2))),
+            commodity_with_precision(MetaValue::Number(dec!(-1))),
+        ];
+        let warnings: Vec<_> = validate(&directives)
+            .into_iter()
+            .filter(|e| e.code == ErrorCode::InvalidPrecisionMetadata)
+            .collect();
+        assert_eq!(
+            warnings.len(),
+            1,
+            "exactly one E5003 expected (only the invalid declaration)"
+        );
+        assert!(warnings[0].message.contains("non-negative"));
+    }
+
+    #[test]
     fn precision_meta_e5003_is_warning_severity() {
         // Pin the severity classification — InvalidPrecisionMetadata must be
         // a warning (loading does not fail). Used by CLI / LSP renderers to

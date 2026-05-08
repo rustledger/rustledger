@@ -87,6 +87,7 @@ pub type Metadata = FxHashMap<String, MetaValue>;
 ///
 /// Returns a human-readable explanation when the value is not a number,
 /// is negative, has a fractional part, or is out of `u32` range.
+#[must_use = "ignoring the result silently drops invalid `precision:` metadata; the loader expects to skip invalid values, the validator expects to surface them"]
 pub fn parse_precision_meta(value: &MetaValue) -> Result<u32, String> {
     use rust_decimal::prelude::ToPrimitive;
     let MetaValue::Number(n) = value else {
@@ -1723,6 +1724,11 @@ mod tests {
         assert_eq!(parse_precision_meta(&MetaValue::Number(dec!(0))), Ok(0));
         assert_eq!(parse_precision_meta(&MetaValue::Number(dec!(2))), Ok(2));
         assert_eq!(parse_precision_meta(&MetaValue::Number(dec!(28))), Ok(28));
+        // Integer-valued decimals (e.g. `precision: 2.0` in source) must
+        // round-trip the same as `precision: 2` — the parser will produce
+        // `Number(dec!(2.0))` for the dotted form.
+        assert_eq!(parse_precision_meta(&MetaValue::Number(dec!(2.0))), Ok(2));
+        assert_eq!(parse_precision_meta(&MetaValue::Number(dec!(0.000))), Ok(0));
     }
 
     #[test]

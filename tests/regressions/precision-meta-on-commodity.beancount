@@ -1,0 +1,45 @@
+; Regression fixture for `precision: N` metadata on commodity directives
+; (issue #991, rledger-specific feature).
+;
+; This fixture is exercised by the compat harness (scripts/compat-bql-test.py)
+; to pin the upstream-compatibility property: bean-check must accept
+; `precision: N` on a commodity directive without error, since the metadata is
+; just a key/value pair to upstream beancount. The harness diffs bean-check
+; vs `rledger check` exit codes and AST counts; this fixture pins that they
+; both succeed.
+;
+; If a future bean-check version starts rejecting integer metadata values on
+; commodity directives, this fixture will turn red and we'll see it before
+; users do.
+;
+; The semantic effect (USD pinned to 2dp, JPY to 0dp) is rledger-specific
+; — bean-check ignores the key, so its display behavior is unchanged. That
+; divergence is intentional and is not under compat-harness scrutiny here.
+
+option "title" "Precision metadata on commodity directives"
+
+2024-01-01 commodity USD
+  precision: 2
+
+2024-01-01 commodity JPY
+  precision: 0
+
+2024-01-01 commodity BTC
+  precision: 8
+
+2024-01-01 open Assets:Cash:USD
+2024-01-01 open Assets:Cash:JPY
+2024-01-01 open Assets:Wallet:BTC
+2024-01-01 open Equity:Opening-Balances
+
+2024-01-15 * "USD opening"
+  Assets:Cash:USD          1234.56 USD
+  Equity:Opening-Balances
+
+2024-01-15 * "JPY opening"
+  Assets:Cash:JPY          100000 JPY
+  Equity:Opening-Balances
+
+2024-01-15 * "BTC opening"
+  Assets:Wallet:BTC        0.50000000 BTC
+  Equity:Opening-Balances

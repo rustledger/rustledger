@@ -56,6 +56,8 @@ pub enum ErrorCode {
     UndeclaredCurrency,
     /// E5002: Currency not allowed in account.
     CurrencyNotAllowed,
+    /// E5003: Invalid `precision` metadata on commodity directive (warning).
+    InvalidPrecisionMetadata,
 
     // === Option Errors (E7xxx) ===
     /// E7001: Unknown option name.
@@ -105,6 +107,7 @@ impl ErrorCode {
             // Currency errors
             Self::UndeclaredCurrency => "E5001",
             Self::CurrencyNotAllowed => "E5002",
+            Self::InvalidPrecisionMetadata => "E5003",
             // Option errors
             Self::UnknownOption => "E7001",
             Self::InvalidOptionValue => "E7002",
@@ -126,6 +129,7 @@ impl ErrorCode {
                 | Self::SinglePosting
                 | Self::AccountCloseNotEmpty
                 | Self::DateOutOfOrder
+                | Self::InvalidPrecisionMetadata
         )
     }
 

@@ -62,7 +62,7 @@ pub use cost::{Cost, CostSpec};
 pub use directive::{
     Balance, Close, Commodity, Custom, Directive, DirectivePriority, Document, Event, MetaValue,
     Metadata, Note, Open, Pad, Posting, Price, PriceAnnotation, Query, Transaction,
-    sort_directives,
+    parse_precision_meta, sort_directives,
 };
 pub use display_context::{DEFAULT_CURRENCY, DisplayContext, Precision};
 pub use extract::{

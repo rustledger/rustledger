@@ -1301,3 +1301,190 @@ fn test_missing_wasm_plugin_reports_error() {
         ledger.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
     );
 }
+
+// ----- precision: N metadata on commodity directives (issue #991) ------------
+//
+// All tests use load_raw (not the full load() path) so the assertions stay
+// scoped to display_context construction and aren't affected by validation /
+// booking. Validator behavior for invalid values is exercised separately.
+
+#[test]
+fn precision_metadata_sets_fixed_precision() {
+    // `precision: 2` alone should pin USD to 2dp regardless of the inferred
+    // dp distribution (here 4dp would normally win under MostCommon).
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("precision_meta.beancount");
+    std::fs::write(
+        &path,
+        r#"2024-01-01 commodity USD
+  precision: 2
+
+2024-01-01 open Assets:Cash
+2024-01-01 open Income:Salary
+
+2024-01-15 * "test"
+  Assets:Cash       100.0000 USD
+  Income:Salary
+"#,
+    )
+    .unwrap();
+    let result = load_raw(&path).expect("load");
+    assert_eq!(
+        result.display_context.get_precision("USD"),
+        Some(2),
+        "commodity precision metadata should pin USD to 2dp"
+    );
+    assert!(result.display_context.has_fixed_precision("USD"));
+}
+
+#[test]
+fn precision_metadata_zero_is_valid() {
+    // JPY-style integer-only currency: `precision: 0` must be honored.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("precision_zero.beancount");
+    std::fs::write(
+        &path,
+        r#"2024-01-01 commodity JPY
+  precision: 0
+
+2024-01-01 open Assets:Cash
+2024-01-15 * "yen"
+  Assets:Cash    1000 JPY
+  Assets:Cash   -1000 JPY
+"#,
+    )
+    .unwrap();
+    let result = load_raw(&path).expect("load");
+    assert_eq!(result.display_context.get_precision("JPY"), Some(0));
+}
+
+#[test]
+fn precision_metadata_wins_over_option_display_precision() {
+    // option says 2dp, commodity meta says 4dp → meta wins (per #991).
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("precision_vs_option.beancount");
+    std::fs::write(
+        &path,
+        r#"option "display_precision" "USD" "2"
+
+2024-01-01 commodity USD
+  precision: 4
+
+2024-01-01 open Assets:Cash
+2024-01-15 * "test"
+  Assets:Cash    1.00 USD
+  Assets:Cash   -1.00 USD
+"#,
+    )
+    .unwrap();
+    let result = load_raw(&path).expect("load");
+    assert_eq!(
+        result.display_context.get_precision("USD"),
+        Some(4),
+        "commodity metadata must override option display_precision"
+    );
+}
+
+#[test]
+fn precision_metadata_multi_declaration_last_wins() {
+    // Two commodity directives for USD; the second's precision wins.
+    // Last-wins matches typical option-stacking semantics.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("precision_multi.beancount");
+    std::fs::write(
+        &path,
+        r#"2024-01-01 commodity USD
+  precision: 2
+
+2024-06-01 commodity USD
+  precision: 6
+
+2024-01-01 open Assets:Cash
+2024-01-15 * "test"
+  Assets:Cash    1 USD
+  Assets:Cash   -1 USD
+"#,
+    )
+    .unwrap();
+    let result = load_raw(&path).expect("load");
+    assert_eq!(
+        result.display_context.get_precision("USD"),
+        Some(6),
+        "last commodity declaration's precision must win"
+    );
+}
+
+#[test]
+fn precision_metadata_invalid_falls_back_to_inference() {
+    // `precision: -1` is invalid → loader silently skips it and inference
+    // runs (USD postings are 4dp in this fixture).
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("precision_invalid.beancount");
+    std::fs::write(
+        &path,
+        r#"2024-01-01 commodity USD
+  precision: -1
+
+2024-01-01 open Assets:Cash
+2024-01-15 * "test"
+  Assets:Cash    1.2345 USD
+  Assets:Cash   -1.2345 USD
+"#,
+    )
+    .unwrap();
+    let result = load_raw(&path).expect("load");
+    assert_eq!(
+        result.display_context.get_precision("USD"),
+        Some(4),
+        "invalid precision must fall back to inferred dp"
+    );
+    assert!(
+        !result.display_context.has_fixed_precision("USD"),
+        "invalid precision must NOT install a fixed override"
+    );
+}
+
+#[test]
+fn precision_metadata_non_integer_falls_back() {
+    // `precision: 2.5` is non-integer → invalid → inference wins (3dp here).
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("precision_non_integer.beancount");
+    std::fs::write(
+        &path,
+        r#"2024-01-01 commodity USD
+  precision: 2.5
+
+2024-01-01 open Assets:Cash
+2024-01-15 * "test"
+  Assets:Cash    1.234 USD
+  Assets:Cash   -1.234 USD
+"#,
+    )
+    .unwrap();
+    let result = load_raw(&path).expect("load");
+    assert_eq!(result.display_context.get_precision("USD"), Some(3));
+    assert!(!result.display_context.has_fixed_precision("USD"));
+}
+
+#[test]
+fn precision_metadata_string_value_falls_back() {
+    // `precision: "abc"` is the wrong MetaValue variant → invalid →
+    // inference wins (2dp here).
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("precision_string.beancount");
+    std::fs::write(
+        &path,
+        r#"2024-01-01 commodity USD
+  precision: "abc"
+
+2024-01-01 open Assets:Cash
+2024-01-15 * "test"
+  Assets:Cash    1.23 USD
+  Assets:Cash   -1.23 USD
+"#,
+    )
+    .unwrap();
+    let result = load_raw(&path).expect("load");
+    assert_eq!(result.display_context.get_precision("USD"), Some(2));
+    assert!(!result.display_context.has_fixed_precision("USD"));
+}

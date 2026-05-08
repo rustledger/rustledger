@@ -715,6 +715,22 @@ fn build_display_context(directives: &[Spanned<Directive>], options: &Options) -
         ctx.set_fixed_precision(currency, *precision);
     }
 
+    // Apply per-commodity `precision: N` metadata (issue #991), AFTER the
+    // options loop so a commodity-level declaration wins over the global
+    // option. Multi-declaration of the same currency is last-wins (matches
+    // typical option-stacking semantics). Invalid values are silently
+    // skipped here — `rustledger-validate` surfaces them as
+    // `InvalidPrecisionMetadata` warnings (E5003) so users see the problem
+    // without breaking loading.
+    for spanned in directives {
+        if let Directive::Commodity(comm) = &spanned.value
+            && let Some(value) = comm.meta.get("precision")
+            && let Ok(precision) = rustledger_core::parse_precision_meta(value)
+        {
+            ctx.set_fixed_precision(comm.currency.as_str(), precision);
+        }
+    }
+
     ctx
 }
 

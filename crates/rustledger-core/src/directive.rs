@@ -75,6 +75,55 @@ impl fmt::Display for MetaValue {
 /// Metadata is a key-value map attached to directives and postings.
 pub type Metadata = FxHashMap<String, MetaValue>;
 
+/// Try to interpret a [`MetaValue`] as a non-negative integer ≤ `u32::MAX`.
+///
+/// Used by the `precision` metadata feature on `commodity` directives (issue
+/// #991). Shared between the loader (which silently skips invalid values and
+/// falls back to inferred precision) and the validator (which surfaces the
+/// problem as an `InvalidPrecisionMetadata` warning), so both paths agree on
+/// what counts as valid.
+///
+/// # Errors
+///
+/// Returns a human-readable explanation when the value is not a number,
+/// is negative, has a fractional part, or is out of `u32` range.
+pub fn parse_precision_meta(value: &MetaValue) -> Result<u32, String> {
+    use rust_decimal::prelude::ToPrimitive;
+    let MetaValue::Number(n) = value else {
+        return Err(format!(
+            "expected a non-negative integer, got {} value",
+            meta_value_kind(value)
+        ));
+    };
+    if n.is_sign_negative() {
+        return Err(format!("expected a non-negative integer, got {n}"));
+    }
+    if !n.fract().is_zero() {
+        return Err(format!("expected an integer, got {n}"));
+    }
+    n.to_u32().ok_or_else(|| {
+        format!(
+            "value {n} exceeds the maximum supported precision ({})",
+            u32::MAX
+        )
+    })
+}
+
+const fn meta_value_kind(v: &MetaValue) -> &'static str {
+    match v {
+        MetaValue::String(_) => "string",
+        MetaValue::Account(_) => "account",
+        MetaValue::Currency(_) => "currency",
+        MetaValue::Tag(_) => "tag",
+        MetaValue::Link(_) => "link",
+        MetaValue::Date(_) => "date",
+        MetaValue::Number(_) => "number",
+        MetaValue::Bool(_) => "bool",
+        MetaValue::Amount(_) => "amount",
+        MetaValue::None => "none",
+    }
+}
+
 /// A posting within a transaction.
 ///
 /// Postings represent the individual legs of a transaction. Each posting
@@ -1665,5 +1714,49 @@ mod tests {
         );
         let dir_balance = Directive::Balance(balance.clone());
         assert_eq!(format!("{dir_balance}"), format!("{balance}"));
+    }
+
+    // ----- parse_precision_meta (issue #991) ---------------------------------
+
+    #[test]
+    fn parse_precision_meta_accepts_non_negative_integers() {
+        assert_eq!(parse_precision_meta(&MetaValue::Number(dec!(0))), Ok(0));
+        assert_eq!(parse_precision_meta(&MetaValue::Number(dec!(2))), Ok(2));
+        assert_eq!(parse_precision_meta(&MetaValue::Number(dec!(28))), Ok(28));
+    }
+
+    #[test]
+    fn parse_precision_meta_rejects_negatives() {
+        let err = parse_precision_meta(&MetaValue::Number(dec!(-1))).unwrap_err();
+        assert!(err.contains("non-negative"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_precision_meta_rejects_fractional() {
+        let err = parse_precision_meta(&MetaValue::Number(dec!(2.5))).unwrap_err();
+        assert!(err.contains("integer"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_precision_meta_rejects_overflow() {
+        // 2^33 — out of u32 range.
+        let err = parse_precision_meta(&MetaValue::Number(dec!(8589934592))).unwrap_err();
+        assert!(err.contains("exceeds"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_precision_meta_rejects_non_number_variants() {
+        let cases = [
+            MetaValue::String("2".into()),
+            MetaValue::Bool(true),
+            MetaValue::None,
+            MetaValue::Tag("foo".into()),
+        ];
+        for case in cases {
+            assert!(
+                parse_precision_meta(&case).is_err(),
+                "should reject {case:?}"
+            );
+        }
     }
 }

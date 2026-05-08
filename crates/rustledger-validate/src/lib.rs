@@ -33,6 +33,7 @@
 //! | E4005 | Negative cost amount |
 //! | E5001 | Currency not declared |
 //! | E5002 | Currency not allowed in account |
+//! | E5003 | Invalid `precision` metadata on commodity directive (warning) |
 //! | E7001 | Unknown option |
 //! | E7002 | Invalid option value |
 //! | E7003 | Duplicate option |
@@ -61,7 +62,7 @@ use rustledger_core::NaiveDate;
 const PARALLEL_SORT_THRESHOLD: usize = 5000;
 use rust_decimal::Decimal;
 use rustc_hash::{FxHashMap, FxHashSet};
-use rustledger_core::{BookingMethod, Directive, InternedStr, Inventory};
+use rustledger_core::{BookingMethod, Commodity, Directive, InternedStr, Inventory};
 use rustledger_parser::{SYNTHESIZED_FILE_ID, Spanned};
 
 /// Account state for tracking lifecycle.
@@ -371,6 +372,7 @@ pub fn validate_with_options(
             }
             Directive::Commodity(comm) => {
                 state.commodities.insert(comm.currency.clone());
+                validate_commodity_precision_meta(comm, &mut errors);
             }
             Directive::Pad(pad) => {
                 validate_pad(&mut state, pad, &mut errors);
@@ -493,6 +495,7 @@ pub fn validate_spanned_with_options(
             }
             Directive::Commodity(comm) => {
                 state.commodities.insert(comm.currency.clone());
+                validate_commodity_precision_meta(comm, &mut errors);
             }
             Directive::Pad(pad) => {
                 validate_pad(&mut state, pad, &mut errors);
@@ -548,12 +551,34 @@ pub fn validate_spanned_with_options(
     errors
 }
 
+/// Validate the rledger-specific `precision` metadata key on a commodity directive.
+///
+/// Per #991, `precision: N` on a `commodity` directive sets a fixed display
+/// precision for that currency. The loader silently falls back to inference
+/// for invalid values; this validator is the channel that surfaces the
+/// problem to the user.
+fn validate_commodity_precision_meta(comm: &Commodity, errors: &mut Vec<ValidationError>) {
+    let Some(value) = comm.meta.get("precision") else {
+        return;
+    };
+    if let Err(reason) = rustledger_core::parse_precision_meta(value) {
+        errors.push(ValidationError::new(
+            ErrorCode::InvalidPrecisionMetadata,
+            format!(
+                "invalid `precision` metadata on commodity {}: {reason}; falling back to inferred precision",
+                comm.currency
+            ),
+            comm.date,
+        ));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use rust_decimal_macros::dec;
     use rustledger_core::{
-        Amount, Balance, Close, Document, NaiveDate, Open, Pad, Posting, Transaction,
+        Amount, Balance, Close, Document, MetaValue, NaiveDate, Open, Pad, Posting, Transaction,
     };
 
     fn date(year: i32, month: u32, day: u32) -> NaiveDate {
@@ -1860,5 +1885,102 @@ mod tests {
 
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].code, ErrorCode::DuplicateOption);
+    }
+
+    // ----- E5003: invalid `precision` metadata on commodity (issue #991) ----
+
+    fn commodity_with_precision(value: MetaValue) -> Directive {
+        let mut meta = rustledger_core::Metadata::default();
+        meta.insert("precision".into(), value);
+        Directive::Commodity(
+            rustledger_core::Commodity::new(date(2024, 1, 1), "USD").with_meta(meta),
+        )
+    }
+
+    #[test]
+    fn precision_meta_valid_integer_emits_no_warning() {
+        let directives = vec![commodity_with_precision(MetaValue::Number(dec!(2)))];
+        let errors = validate(&directives);
+        assert!(
+            errors
+                .iter()
+                .all(|e| e.code != ErrorCode::InvalidPrecisionMetadata),
+            "valid precision must not produce a warning, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn precision_meta_zero_is_valid() {
+        let directives = vec![commodity_with_precision(MetaValue::Number(dec!(0)))];
+        let errors = validate(&directives);
+        assert!(
+            errors
+                .iter()
+                .all(|e| e.code != ErrorCode::InvalidPrecisionMetadata)
+        );
+    }
+
+    #[test]
+    fn precision_meta_negative_emits_e5003() {
+        let directives = vec![commodity_with_precision(MetaValue::Number(dec!(-1)))];
+        let errors = validate(&directives);
+        let warnings: Vec<_> = errors
+            .iter()
+            .filter(|e| e.code == ErrorCode::InvalidPrecisionMetadata)
+            .collect();
+        assert_eq!(warnings.len(), 1, "expected one E5003");
+        assert_eq!(warnings[0].code.severity(), Severity::Warning);
+        assert!(warnings[0].message.contains("non-negative"));
+    }
+
+    #[test]
+    fn precision_meta_non_integer_emits_e5003() {
+        let directives = vec![commodity_with_precision(MetaValue::Number(dec!(2.5)))];
+        let errors = validate(&directives);
+        let warnings: Vec<_> = errors
+            .iter()
+            .filter(|e| e.code == ErrorCode::InvalidPrecisionMetadata)
+            .collect();
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].message.contains("integer"));
+    }
+
+    #[test]
+    fn precision_meta_string_value_emits_e5003() {
+        let directives = vec![commodity_with_precision(MetaValue::String("abc".into()))];
+        let errors = validate(&directives);
+        let warnings: Vec<_> = errors
+            .iter()
+            .filter(|e| e.code == ErrorCode::InvalidPrecisionMetadata)
+            .collect();
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].message.contains("string"));
+    }
+
+    #[test]
+    fn precision_meta_out_of_u32_range_emits_e5003() {
+        // 2^33 — too big for u32.
+        let directives = vec![commodity_with_precision(MetaValue::Number(dec!(
+            8589934592
+        )))];
+        let errors = validate(&directives);
+        let warnings: Vec<_> = errors
+            .iter()
+            .filter(|e| e.code == ErrorCode::InvalidPrecisionMetadata)
+            .collect();
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].message.contains("exceeds"));
+    }
+
+    #[test]
+    fn precision_meta_e5003_is_warning_severity() {
+        // Pin the severity classification — InvalidPrecisionMetadata must be
+        // a warning (loading does not fail). Used by CLI / LSP renderers to
+        // pick the right color and exit code.
+        assert_eq!(
+            ErrorCode::InvalidPrecisionMetadata.severity(),
+            Severity::Warning
+        );
+        assert_eq!(ErrorCode::InvalidPrecisionMetadata.code(), "E5003");
     }
 }

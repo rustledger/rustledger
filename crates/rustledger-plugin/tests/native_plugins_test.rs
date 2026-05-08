@@ -2654,44 +2654,51 @@ fn test_implicit_prices_emitted_excludes_input_price_directives() {
     );
 }
 
-// Property test: per-unit price round-trips through `@@` total form.
+// Property test: emitted per-unit price equals the generated per-unit
+// price under both `@` and `@@` annotations.
 //
-// For any units N and per-unit price P, a posting `N C @@ (N*P) Q`
-// must produce a Price directive with per-unit number == P. This is
-// the EXACT regression test for the #992 bug: pre-fix, the plugin
-// emitted the total amount as a per-unit price (off by a factor of N).
+// For any units N, per-unit price P, and annotation form:
+//   - `@` (is_total=false): posting `N C @ P Q` → emitted Price `C @ P Q`
+//     (identity — emitted price equals annotation amount directly)
+//   - `@@` (is_total=true): posting `N C @@ (N*P) Q` → emitted Price `C @ P Q`
+//     (round-trip — emitted per-unit = total / N exactly)
+//
+// The `@@` case is the EXACT regression test for the #992 bug, where the
+// plugin emitted the total amount as a per-unit price (off by a factor
+// of N). The `@` case pins the trivial-but-still-mutable identity path.
 //
 // Generators are in cents so fractional dollar prices like $5.27 are
 // covered; integer units (1..=1000) keep `total = per_unit * units`
-// exactly representable. The `@` (per-unit) form is also tested as
-// the identity case: emitted price equals annotation price exactly.
+// exactly representable.
 proptest::proptest! {
     #![proptest_config(proptest::prelude::ProptestConfig::with_cases(64))]
 
     #[test]
-    fn prop_implicit_prices_per_unit_roundtrips_through_total_form(
+    fn prop_implicit_prices_emits_per_unit_for_both_annotation_forms(
         units in 1u32..1000,
         per_unit_cents in 1u32..1_000_000,
+        is_total in proptest::bool::ANY,
     ) {
         use rust_decimal::Decimal;
         use std::str::FromStr;
 
         let units_d = Decimal::from(units);
         let per_unit = Decimal::new(i64::from(per_unit_cents), 2);
-        let total = per_unit * units_d;
+        // For `@`, the annotation carries the per-unit price directly;
+        // for `@@`, it carries the total. The plugin's helper divides
+        // total by units when is_total=true.
+        let annotation_amount = if is_total { per_unit * units_d } else { per_unit };
 
         let plugin = ImplicitPricesPlugin;
         let input = make_input(vec![
             make_open("2024-01-01", "Assets:Brokerage"),
             make_open("2024-01-01", "Assets:Cash"),
-            make_transaction_with_cost_and_price_total(
+            make_txn_with_price_annotation(
                 "2024-01-15",
-                "Buy at total price",
-                "Assets:Brokerage",
+                "Buy",
                 (&units.to_string(), "HOOL"),
-                ("0", "USD"), // cost stub — per-unit annotation should win
-                (&total.to_string(), "USD"),
-                "Assets:Cash",
+                (&annotation_amount.to_string(), "USD"),
+                is_total,
             ),
         ]);
 
@@ -2701,20 +2708,22 @@ proptest::proptest! {
         // Exactly one price emitted (one priced posting).
         proptest::prop_assert_eq!(
             emitted.len(), 1,
-            "expected 1 emitted price for units={} total={}", units, total
+            "expected 1 emitted price for units={} annotation={} is_total={}",
+            units, annotation_amount, is_total
         );
         let (currency, number_str, quote) = &emitted[0];
         proptest::prop_assert_eq!(currency, "HOOL");
         proptest::prop_assert_eq!(quote, "USD");
 
-        // The emitted per-unit price must equal `per_unit` exactly.
-        // Pre-fix #992 this would have been `total` (off by units).
+        // The emitted per-unit price must equal `per_unit` exactly,
+        // regardless of which annotation form was used. Under `@@`,
+        // a pre-fix #992-style bug would have emitted the total instead.
         let emitted_d = Decimal::from_str(number_str)
             .expect("emitted number must be a valid Decimal");
         proptest::prop_assert_eq!(
             emitted_d, per_unit,
-            "emitted price {} must equal generated per-unit {} (round-trip via @@)",
-            emitted_d, per_unit
+            "emitted {} must equal per-unit {} (is_total={})",
+            emitted_d, per_unit, is_total
         );
     }
 }
@@ -6943,11 +6952,13 @@ proptest::proptest! {
     ) {
         use rust_decimal::Decimal;
 
-        // Compute the expected weighted mean. Sum cost as
-        // Σ(units * price) in cents, then divide by total units, then
-        // divide by 100 to convert cents to dollars. Using the same
-        // operation order as the plugin (`total_cost / total_units`)
-        // ensures that any precision loss is identical on both sides.
+        // Compute the expected weighted mean using the same arithmetic
+        // the plugin uses internally: `total_cost / total_units`, with
+        // each price already represented in dollars via
+        // `Decimal::new(price_cents, 2)` (scale 2 ⇒ value = cents/100).
+        // Identical operation order on both sides guarantees that any
+        // precision loss is identical too — a real bug, not a precision
+        // artifact, would be required to make the assertion fail.
         let total_units: Decimal = buys.iter()
             .map(|(u, _)| Decimal::from(*u))
             .sum();

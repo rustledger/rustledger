@@ -72,12 +72,11 @@ fn collect_fixed_sources(load_result: &LoadResult) -> FixedSources {
 /// override.
 ///
 /// Pinned strings (issue #1031 AC):
-/// - option only:    `(fixed via option "display_precision")`
-/// - metadata only:  `(fixed via commodity metadata)`
-/// - both:           `(fixed via commodity metadata, overrides option "display_precision")`
-/// - programmatic:   `(fixed via programmatic source)` — only reachable
-///                   from test paths that hand-build a `DisplayContext`
-///                   without a `LoadResult`.
+/// - option only: `(fixed via option "display_precision")`
+/// - metadata only: `(fixed via commodity metadata)`
+/// - both: `(fixed via commodity metadata, overrides option "display_precision")`
+/// - programmatic: `(fixed via programmatic source)` — only reachable from
+///   test paths that hand-build a `DisplayContext` without a `LoadResult`.
 fn fixed_label_suffix(
     currency: &str,
     has_fixed: bool,
@@ -410,25 +409,53 @@ option "display_precision" "USD:0.001"
         cmd_display_context(&path, &mut buf).expect("cmd should succeed");
         let out = String::from_utf8(buf).unwrap();
 
+        // Scope each label assertion to the per-currency block so a bug
+        // that produced the right *count* of labels in the wrong sections
+        // would still fire (Copilot review on PR #1036).
+        assert_eq!(
+            currency_section(&out, "GBP").trim_end(),
+            "  effective: 2 dp (fixed via option \"display_precision\")\n  \
+             distribution: dp=2: 1",
+            "GBP block; full output:\n{out}"
+        );
+        assert_eq!(
+            currency_section(&out, "BTC").trim_end(),
+            "  effective: 8 dp (fixed via commodity metadata)\n  \
+             distribution: dp=8: 1",
+            "BTC block; full output:\n{out}"
+        );
+        // USD has the override case AND a non-trivial mode/max difference
+        // (option=3dp, metadata=4dp; observed 2dp). Scope to the section
+        // and check the label substring; the mode/max specifics aren't
+        // the contract this test is pinning.
+        let usd_section = currency_section(&out, "USD");
         assert!(
-            out.contains("GBP:") && out.contains("(fixed via option \"display_precision\")"),
-            "GBP should be labeled option-only; got:\n{out}"
+            usd_section
+                .contains("(fixed via commodity metadata, overrides option \"display_precision\")"),
+            "USD section should carry the override label; section was:\n{usd_section}"
         );
         assert!(
-            out.contains("BTC:") && out.contains("(fixed via commodity metadata)"),
-            "BTC should be labeled metadata-only; got:\n{out}"
+            !usd_section.contains("(fixed via option \"display_precision\")\n"),
+            "USD section must NOT carry the option-only label; section was:\n{usd_section}"
         );
-        assert!(
-            out.contains("USD:")
-                && out.contains(
-                    "(fixed via commodity metadata, overrides option \"display_precision\")"
-                ),
-            "USD should be labeled metadata-overrides-option; got:\n{out}"
-        );
-        // None of the labels should be the legacy `(fixed override)` form.
+
+        // None of the labels should be the legacy `(fixed override)` form
+        // anywhere in the output.
         assert!(
             !out.contains("(fixed override)"),
             "legacy source-agnostic label should be gone; got:\n{out}"
         );
+    }
+
+    /// Extract the per-currency block from a doctor output. Returns
+    /// everything from the line after `<CCY>:` up to the next blank
+    /// line (or end-of-output). Used by `e2e_*` tests to scope label
+    /// assertions to the right currency.
+    fn currency_section<'a>(out: &'a str, currency: &str) -> &'a str {
+        let header = format!("{currency}:\n");
+        let start = out.find(&header).map(|i| i + header.len()).unwrap_or(0);
+        let rest = &out[start..];
+        let end = rest.find("\n\n").unwrap_or(rest.len());
+        &rest[..end]
     }
 }

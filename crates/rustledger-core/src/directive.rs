@@ -1752,16 +1752,31 @@ mod tests {
 
     #[test]
     fn parse_precision_meta_rejects_non_number_variants() {
+        // Cover every non-Number `MetaValue` variant so the kind-labeling
+        // arms in `meta_value_kind` are all exercised. Each error message
+        // names the kind ("string value", "bool value", etc.) so users
+        // see what they actually wrote.
+        use crate::Amount;
+        use rust_decimal_macros::dec;
         let cases = [
-            MetaValue::String("2".into()),
-            MetaValue::Bool(true),
-            MetaValue::None,
-            MetaValue::Tag("foo".into()),
+            (MetaValue::String("2".into()), "string"),
+            (MetaValue::Account("Assets:Cash".into()), "account"),
+            (MetaValue::Currency("USD".into()), "currency"),
+            (MetaValue::Tag("foo".into()), "tag"),
+            (MetaValue::Link("bar".into()), "link"),
+            (MetaValue::Date(date(2024, 1, 1)), "date"),
+            (MetaValue::Bool(true), "bool"),
+            (MetaValue::Amount(Amount::new(dec!(2), "USD")), "amount"),
+            (MetaValue::None, "none"),
         ];
-        for case in cases {
+        for (case, kind) in cases {
+            let err = match parse_precision_meta(&case) {
+                Ok(_) => panic!("should have rejected {case:?}"),
+                Err(e) => e,
+            };
             assert!(
-                parse_precision_meta(&case).is_err(),
-                "should reject {case:?}"
+                err.contains(kind),
+                "error for {case:?} should mention kind {kind:?}, got: {err}"
             );
         }
     }

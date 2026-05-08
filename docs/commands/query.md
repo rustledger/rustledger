@@ -180,11 +180,11 @@ VBMPX:
 
 Inferred precision is a heuristic. There are two ways to pin a currency's display precision explicitly.
 
-**`option "display_precision"`** — file-level setting:
+**`option "display_precision"`** — file-level setting (precision is the scale of the example value):
 
 ```beancount
-option "display_precision" "USD" "2"
-option "display_precision" "BTC" "8"
+option "display_precision" "USD:0.01"      ; 2dp
+option "display_precision" "BTC:0.00000001" ; 8dp
 ```
 
 **`precision: N` metadata on a `commodity` directive** (rledger extension, issue #991):
@@ -205,7 +205,7 @@ Both achieve the same outcome — pinning the displayed precision for that curre
 **Precedence.** When both are set for the same currency, the per-commodity `precision:` metadata wins:
 
 ```beancount
-option "display_precision" "USD" "2"
+option "display_precision" "USD:0.01"  ; 2dp
 
 2024-01-01 commodity USD
   precision: 4    ; this wins — USD renders at 4dp
@@ -213,7 +213,7 @@ option "display_precision" "USD" "2"
 
 If the same currency has `precision:` metadata on multiple `commodity` directives, the last one in load order wins.
 
-**Validation.** `precision:` metadata must be a non-negative integer (0 through 4_294_967_295). Invalid values — strings, negatives, fractions, out-of-range — produce an `E5003` warning during validation and the loader silently falls back to inference for that currency. Loading does not fail.
+**Validation.** `precision:` metadata must be a non-negative integer (0 through 4_294_967_295). Invalid values — strings, negatives, fractions, out-of-range — produce an `E5003` warning during validation and the loader ignores that declaration. The currency's effective precision then falls back through the precedence stack: any other valid `precision:` metadata on the same currency, then `option "display_precision"` if set, then inference. Loading does not fail.
 
 **Reserved key.** The `precision` key on `commodity` directives is reserved by the loader — pre-existing user-defined uses of this key on commodity directives will be reinterpreted as a precision override. Pick a different key (e.g. `display_precision`, `precision_note`) if you need to attach unrelated metadata.
 

@@ -554,9 +554,8 @@ pub fn validate_spanned_with_options(
 /// Validate the rledger-specific `precision` metadata key on a commodity directive.
 ///
 /// Per #991, `precision: N` on a `commodity` directive sets a fixed display
-/// precision for that currency. The loader silently falls back to inference
-/// for invalid values; this validator is the channel that surfaces the
-/// problem to the user.
+/// precision for that currency. The loader silently ignores invalid values;
+/// this validator is the channel that surfaces the problem to the user.
 fn validate_commodity_precision_meta(comm: &Commodity, errors: &mut Vec<ValidationError>) {
     let Some(value) = comm.meta.get("precision") else {
         return;
@@ -565,7 +564,7 @@ fn validate_commodity_precision_meta(comm: &Commodity, errors: &mut Vec<Validati
         errors.push(ValidationError::new(
             ErrorCode::InvalidPrecisionMetadata,
             format!(
-                "invalid `precision` metadata on commodity {}: {reason}; falling back to inferred precision",
+                "invalid `precision` metadata on commodity {}: {reason}; this declaration is ignored — display precision falls back to `option \"display_precision\"` if set, otherwise to inference",
                 comm.currency
             ),
             comm.date,

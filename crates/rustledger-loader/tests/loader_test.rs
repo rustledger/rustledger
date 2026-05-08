@@ -1360,12 +1360,14 @@ fn precision_metadata_zero_is_valid() {
 
 #[test]
 fn precision_metadata_wins_over_option_display_precision() {
-    // option says 2dp, commodity meta says 4dp → meta wins (per #991).
+    // option says 2dp (`USD:0.01` — the colon-encoded form rledger's
+    // option parser accepts; precision = scale of the example value),
+    // commodity meta says 4dp → meta wins (per #991).
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("precision_vs_option.beancount");
     std::fs::write(
         &path,
-        r#"option "display_precision" "USD" "2"
+        r#"option "display_precision" "USD:0.01"
 
 2024-01-01 commodity USD
   precision: 4
@@ -1416,8 +1418,10 @@ fn precision_metadata_multi_declaration_last_wins() {
 
 #[test]
 fn precision_metadata_invalid_falls_back_to_inference() {
-    // `precision: -1` is invalid → loader silently skips it and inference
-    // runs (USD postings are 4dp in this fixture).
+    // `precision: -1` is invalid → loader silently skips it. With no
+    // `option "display_precision"` set, inference takes over (USD postings
+    // are 4dp in this fixture). The option-present case is covered
+    // separately by `precision_metadata_invalid_with_option_keeps_option`.
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("precision_invalid.beancount");
     std::fs::write(
@@ -1464,6 +1468,40 @@ fn precision_metadata_non_integer_falls_back() {
     let result = load_raw(&path).expect("load");
     assert_eq!(result.display_context.get_precision("USD"), Some(3));
     assert!(!result.display_context.has_fixed_precision("USD"));
+}
+
+#[test]
+fn precision_metadata_invalid_with_option_keeps_option() {
+    // option says 2dp; commodity meta is invalid (-1). The invalid value is
+    // ignored; the option override stays at 2dp. Pins the precedence stack
+    // documented in docs/commands/query.md ("Overriding inference"):
+    //   valid precision metadata > option "display_precision" > inference.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("precision_invalid_with_option.beancount");
+    std::fs::write(
+        &path,
+        r#"option "display_precision" "USD:0.01"
+
+2024-01-01 commodity USD
+  precision: -1
+
+2024-01-01 open Assets:Cash
+2024-01-15 * "test"
+  Assets:Cash    1.2345 USD
+  Assets:Cash   -1.2345 USD
+"#,
+    )
+    .unwrap();
+    let result = load_raw(&path).expect("load");
+    assert_eq!(
+        result.display_context.get_precision("USD"),
+        Some(2),
+        "option fixed precision must persist when commodity meta is invalid"
+    );
+    assert!(
+        result.display_context.has_fixed_precision("USD"),
+        "option fixed override must remain in effect"
+    );
 }
 
 #[test]

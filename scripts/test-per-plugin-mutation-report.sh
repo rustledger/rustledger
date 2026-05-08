@@ -207,6 +207,27 @@ fixture=$(make_fixture case9a)
 run_case "exactly-10-percent-passes" 0 "All plugins pass" "$fixture"
 
 # ----------------------------------------------------------------------
+# Case 10: regression test for the truncation bug. 11 missed out of
+# 101 total = 10.89%, which is strictly greater than the 10% floor and
+# MUST fail. A naïve `m * 100 / total` integer division would compute
+# 10 and incorrectly pass — this case pins the cross-multiplication
+# fix from PR #1041 review (Copilot inline comment).
+# ----------------------------------------------------------------------
+CAUGHT_LINES=""
+for i in $(seq 1 90); do
+    CAUGHT_LINES="${CAUGHT_LINES}crates/rustledger-plugin/src/native/plugins/foo.rs:$i:1: a${i}"$'\n'
+done
+MISSED_LINES=""
+for i in $(seq 91 101); do
+    MISSED_LINES="${MISSED_LINES}crates/rustledger-plugin/src/native/plugins/foo.rs:$i:1: m${i}"$'\n'
+done
+CAUGHT="${CAUGHT_LINES%$'\n'}"
+MISSED="${MISSED_LINES%$'\n'}"
+TIMEOUT='' UNVIABLE=''
+fixture=$(make_fixture case10)
+run_case "just-over-10-percent-fails" 1 "exceeds 10% floor" "$fixture"
+
+# ----------------------------------------------------------------------
 
 echo ""
 echo "Summary: $PASS passed, $FAIL failed"

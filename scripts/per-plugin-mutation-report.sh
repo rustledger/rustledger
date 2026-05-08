@@ -16,10 +16,12 @@
 # `crates/rustledger-plugin/src/native/plugins/*.rs`.
 #
 # Usage:
-#   scripts/per-plugin-mutation-report.sh                     # report only
+#   scripts/per-plugin-mutation-report.sh                     # default floor (10%)
 #   MUTATION_FLOOR=15 scripts/per-plugin-mutation-report.sh   # custom floor
+#   MUTATION_FLOOR=0  scripts/per-plugin-mutation-report.sh   # disable enforcement
+#                                                             # (report only)
 #   GITHUB_ANNOTATIONS=1 scripts/per-plugin-mutation-report.sh # also emit
-#                                                              # ::error:: lines
+#                                                              # ::warning:: lines
 #                                                              # for inline PR
 #                                                              # annotations
 #
@@ -140,15 +142,20 @@ emit_github_annotations() {
     # `|| [ -n "$line" ]` handles a final line without a trailing newline.
     # Without it, the last entry is silently dropped — and cargo-mutants
     # output may or may not have a trailing newline depending on version.
+    #
+    # Parse once with bash's =~ regex (single in-process operation) instead
+    # of spawning four `sed` subprocesses per line; on a 1000-line missed.txt
+    # that's 4000 fewer fork/exec pairs.
+    local line_re='^(.+\.rs):([0-9]+):([0-9]+):[[:space:]]*(.*)$'
     while IFS= read -r line || [ -n "$line" ]; do
         [ -z "$line" ] && continue
-        # Parse out file, line, column. Example line:
-        #   crates/.../foo.rs:42:5: replace ...
-        local file lineno col rest
-        file=$(echo "$line" | sed -E 's/^([^:]+\.rs):.*/\1/')
-        lineno=$(echo "$line" | sed -E 's/^[^:]+\.rs:([0-9]+):.*/\1/')
-        col=$(echo "$line" | sed -E 's/^[^:]+\.rs:[0-9]+:([0-9]+):.*/\1/')
-        rest=$(echo "$line" | sed -E 's/^[^:]+\.rs:[0-9]+:[0-9]+:[[:space:]]*//')
+        if [[ ! "$line" =~ $line_re ]]; then
+            continue
+        fi
+        local file="${BASH_REMATCH[1]}"
+        local lineno="${BASH_REMATCH[2]}"
+        local col="${BASH_REMATCH[3]}"
+        local rest="${BASH_REMATCH[4]}"
         # GitHub annotation format. Newlines in the message are escaped
         # as %0A per the workflow command spec.
         printf '::warning file=%s,line=%s,col=%s,title=Mutant survived::%s%%0A%%0AThis mutation was not caught by any test. Either tighten a test or annotate with #[mutants::skip] (with a reason).\n' \
@@ -198,11 +205,8 @@ for bucket in $sorted_buckets; do
     total=$((c + m + t))
     if [ $total -eq 0 ]; then
         survival="N/A"
-        survival_pct=0
     else
-        # Integer arithmetic; survival_pct is the percentage as int.
-        survival_pct=$(( m * 100 / total ))
-        # Print with 1 decimal of precision.
+        # Print with 1 decimal of precision via awk float math.
         survival_dec=$(awk -v m="$m" -v t="$total" 'BEGIN { printf "%.1f", (m * 100.0) / t }')
         survival="${survival_dec}%"
     fi
@@ -213,7 +217,11 @@ for bucket in $sorted_buckets; do
         status="(not enforced)"
     elif [ $total -eq 0 ]; then
         status="(no mutants)"
-    elif [ "$survival_pct" -gt "$MUTATION_FLOOR" ]; then
+    # Cross-multiplication avoids lossy integer division: instead of
+    # `(m * 100 / total) > floor`, which truncates 10.89% to 10 and
+    # incorrectly passes, compare `m * 100 > floor * total` directly.
+    # This is strictly greater (any value > floor fails).
+    elif [ $((m * 100)) -gt $((MUTATION_FLOOR * total)) ]; then
         status="❌ exceeds ${MUTATION_FLOOR}% floor"
         fail=1
         plugin_fail=$((plugin_fail + 1))
@@ -248,8 +256,8 @@ if [ $fail -eq 1 ]; then
     echo ""
     echo "Each surviving mutant means a code change that no test caught. To fix:"
     echo "  1. Tighten the relevant test to fail under the mutated code, OR"
-    echo "  2. Annotate the function with #[cfg_attr(test, mutants::skip)] and"
-    echo "     a leading comment explaining why mutation testing isn't useful here."
+    echo "  2. Annotate the function with #[mutants::skip] and a leading"
+    echo "     '// reason: …' comment. See CONTRIBUTING.md → Mutation testing."
     echo ""
     echo "See mutants.out/missed.txt for the full list."
     exit 1

@@ -130,6 +130,16 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
     // without forcing rounding when there are no explicit amounts (#251).
     let mut cost_scale_by_currency: HashMap<InternedStr, u32> = HashMap::with_capacity(2);
 
+    // Track per-currency count of postings whose weight contribution is unknown
+    // because the cost spec is empty (e.g., `{}`) and resolution is deferred to
+    // the booking pass (lot matching). Each such posting is one unknown for
+    // interpolation accounting and gets added to the per-currency unknowns
+    // total alongside missing-amount postings (issue #1026). Without this,
+    // rledger would silently use a fallback weight (price annotation, if
+    // present) and accept transactions with more unknowns than the
+    // interpolation rule allows.
+    let mut cost_unknowns_by_currency: HashMap<InternedStr, usize> = HashMap::with_capacity(2);
+
     for (i, posting) in transaction.postings.iter().enumerate() {
         match &posting.units {
             Some(IncompleteAmount::Complete(amount)) => {
@@ -205,6 +215,36 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
                             .or_insert(scale);
                     }
                     *residuals.entry(currency).or_default() += cost_amount;
+                } else if posting.cost.is_some() {
+                    // Cost spec exists but has no determinable cost number (e.g.,
+                    // an empty `{}` spec where the lot's cost will be filled by
+                    // booking-time lot matching). The WEIGHT of this posting is
+                    // the cost basis × units, NOT the price × units — so we must
+                    // not fall through to the price branch below and use price
+                    // as a substitute (that's what happened pre-#1026 fix and
+                    // produced silent acceptance of unsolvable transactions).
+                    //
+                    // Track this as one unknown for the cost currency. The
+                    // post-loop check then enforces the "at most one unknown
+                    // per currency group" rule that bean-check enforces.
+                    let price_currency = posting.price.as_ref().and_then(|p| match p {
+                        rustledger_core::PriceAnnotation::Unit(a)
+                        | rustledger_core::PriceAnnotation::Total(a) => Some(a.currency.clone()),
+                        rustledger_core::PriceAnnotation::UnitIncomplete(inc)
+                        | rustledger_core::PriceAnnotation::TotalIncomplete(inc) => {
+                            inc.as_amount().map(|a| a.currency.clone())
+                        }
+                        _ => None,
+                    });
+                    let cost_currency = posting
+                        .cost
+                        .as_ref()
+                        .and_then(|c| c.currency.clone())
+                        .or(price_currency)
+                        .or_else(|| get_inferred_currency(&mut inferred_cost_currency));
+                    if let Some(curr) = cost_currency {
+                        *cost_unknowns_by_currency.entry(curr).or_default() += 1;
+                    }
                 } else if let Some(price) = &posting.price {
                     // Price annotation: converts units to price currency
                     // Note: We do NOT track scale from per-unit prices (they're multipliers).
@@ -258,9 +298,6 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
                             *residuals.entry(amount.currency.clone()).or_default() += amount.number;
                         }
                     }
-                } else if posting.cost.is_some() {
-                    // Cost spec exists but is empty (e.g., `{}`), and no price annotation
-                    // Don't contribute to residual - cost will be filled by lot matching
                 } else {
                     // Simple posting: weight is just the units
                     *residuals.entry(amount.currency.clone()).or_default() += amount.number;
@@ -327,14 +364,46 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
             .and_modify(|s| *s = (*s).max(cost_scale));
     }
 
-    // Check for multiple missing in same currency
-    for (currency, indices) in &missing_by_currency {
-        if indices.len() > 1 {
+    // Check for multiple unknowns in the same currency group. An "unknown"
+    // is either a missing-amount posting or a posting with an empty cost
+    // spec (whose cost-basis weight contribution is unknown until booking
+    // resolves the lot match). Bean-check enforces "at most one unknown
+    // per currency group" — see issue #1026.
+    let currencies_with_unknowns: std::collections::HashSet<&InternedStr> = missing_by_currency
+        .keys()
+        .chain(cost_unknowns_by_currency.keys())
+        .collect();
+    for currency in currencies_with_unknowns {
+        let missing_count = missing_by_currency
+            .get(currency)
+            .map_or(0, std::vec::Vec::len);
+        let cost_unknown_count = cost_unknowns_by_currency
+            .get(currency)
+            .copied()
+            .unwrap_or(0);
+        let total = missing_count + cost_unknown_count;
+        if total > 1 {
             return Err(InterpolationError::MultipleMissing {
                 currency: currency.clone(),
-                count: indices.len(),
+                count: total,
             });
         }
+    }
+
+    // Same rule extended to "would-be" landing currencies for unassigned
+    // missing postings: an unassigned missing (no currency context) ends up
+    // assigned to whichever currency has a non-zero residual at fill time.
+    // If that currency also has a cost-unknown, total unknowns become 2 →
+    // error. Conservative check: if there's any cost-unknown AND any
+    // unassigned missing, flag the first cost-unknown's currency. This
+    // matches bean-check's behavior on the htsec fixture (#1026).
+    if !unassigned_missing.is_empty()
+        && let Some((curr, &count)) = cost_unknowns_by_currency.iter().next()
+    {
+        return Err(InterpolationError::MultipleMissing {
+            currency: curr.clone(),
+            count: count + unassigned_missing.len(),
+        });
     }
 
     // Fill in known-currency missing postings
@@ -1271,5 +1340,120 @@ mod tests {
         assert_eq!(preserved.account, "Income:Unopened");
         let amount = preserved.units.as_ref().unwrap().as_amount().unwrap();
         assert!(amount.number.is_zero());
+    }
+
+    // ─── Issue #1026: empty cost spec + missing posting in same group ───
+    //
+    // bean-check rejects with "Too many missing numbers for currency
+    // group 'CCY'" when a transaction has both:
+    //   1. A posting with empty cost spec `{}` (cost-basis weight unknown
+    //      until booking-pass lot matching).
+    //   2. Another posting in the same currency group missing its amount.
+    //
+    // Pre-fix, rledger silently used the price annotation as the
+    // posting's weight when cost was unknown, producing a balanced
+    // residual and accepting the transaction.
+
+    /// Minimal repro from #1026's body: position with `{} @ price` plus
+    /// missing-amount Income:PnL must error.
+    #[test]
+    fn test_interpolate_empty_cost_spec_with_missing_amount_errors() {
+        use rustledger_core::CostSpec;
+
+        let txn = Transaction::new(date(2022, 1, 12), "sell what was never bought")
+            .with_posting(
+                Posting::new(
+                    "Assets:Htsec:Positions",
+                    Amount::new(dec!(-13000.00), "SH513050"),
+                )
+                .with_cost(CostSpec::empty()) // empty `{}` — unknown cost
+                .with_price(rustledger_core::PriceAnnotation::Unit(Amount::new(
+                    dec!(1.300),
+                    "CNY",
+                ))),
+            )
+            .with_posting(Posting::new(
+                "Assets:Htsec:Cash",
+                Amount::new(dec!(16900.00), "CNY"),
+            ))
+            .with_posting(Posting::new(
+                "Assets:Htsec:Cash",
+                Amount::new(dec!(-0.85), "CNY"),
+            ))
+            .with_posting(Posting::new(
+                "Expenses:Htsec:Commission",
+                Amount::new(dec!(0.85), "CNY"),
+            ))
+            .with_posting(Posting::auto("Income:Htsec:PnL"));
+
+        let result = interpolate(&txn);
+        assert!(
+            matches!(result, Err(InterpolationError::MultipleMissing { .. })),
+            "expected MultipleMissing error from empty cost spec + missing posting; got {result:?}"
+        );
+        if let Err(InterpolationError::MultipleMissing { currency, count }) = result {
+            assert_eq!(currency.as_str(), "CNY");
+            assert!(
+                count >= 2,
+                "expected count >= 2 unknowns in CNY group, got {count}"
+            );
+        }
+    }
+
+    /// Empty cost spec by itself (no other missing posting) is OK — the
+    /// booking pass will resolve the lot match. Pre- and post-fix should
+    /// agree.
+    #[test]
+    fn test_interpolate_empty_cost_spec_alone_ok() {
+        use rustledger_core::CostSpec;
+
+        let txn = Transaction::new(date(2022, 1, 12), "Sell HOOL")
+            .with_posting(
+                Posting::new("Assets:Stock", Amount::new(dec!(-10), "HOOL"))
+                    .with_cost(CostSpec::empty())
+                    .with_price(rustledger_core::PriceAnnotation::Unit(Amount::new(
+                        dec!(150),
+                        "USD",
+                    ))),
+            )
+            .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(1500), "USD")));
+
+        let result = interpolate(&txn);
+        assert!(
+            result.is_ok(),
+            "single empty cost spec with no missing postings should succeed; got {result:?}"
+        );
+    }
+
+    /// Two empty cost specs in the same currency group: two cost-unknowns
+    /// in one group, no missing-amount postings needed → still errors.
+    #[test]
+    fn test_interpolate_two_empty_cost_specs_same_currency_errors() {
+        use rustledger_core::CostSpec;
+
+        let txn = Transaction::new(date(2022, 1, 12), "Two unknown-cost sells")
+            .with_posting(
+                Posting::new("Assets:StockA", Amount::new(dec!(-10), "AAPL"))
+                    .with_cost(CostSpec::empty())
+                    .with_price(rustledger_core::PriceAnnotation::Unit(Amount::new(
+                        dec!(150),
+                        "USD",
+                    ))),
+            )
+            .with_posting(
+                Posting::new("Assets:StockB", Amount::new(dec!(-5), "GOOG"))
+                    .with_cost(CostSpec::empty())
+                    .with_price(rustledger_core::PriceAnnotation::Unit(Amount::new(
+                        dec!(2000),
+                        "USD",
+                    ))),
+            )
+            .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(11500), "USD")));
+
+        let result = interpolate(&txn);
+        assert!(
+            matches!(result, Err(InterpolationError::MultipleMissing { .. })),
+            "two empty cost specs in same currency should error; got {result:?}"
+        );
     }
 }

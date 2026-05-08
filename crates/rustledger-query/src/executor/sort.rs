@@ -112,17 +112,24 @@ impl Executor<'_> {
         pivot_values.sort_by(|a, b| self.compare_values_for_sort(a, b));
         pivot_values.dedup();
 
-        // Build new column names: original columns (except pivot) + pivot values
+        // Identify the "value" column (usually the last one, or the one
+        // with the aggregate). The row-builder below excludes it from
+        // `group_cols`, so the column header MUST exclude it too —
+        // otherwise post-pivot rows have len = group_cols + pivots while
+        // columns has len = (orig - pivot_col) + pivots, off by one.
+        // Pre-fix, the resulting mismatch silently dropped the SUM cell
+        // from JSON output (#1023's e2e test caught this).
+        let value_col_idx = result.columns.len() - 1;
+
+        // Build new column names: original columns (except pivot AND
+        // value) + pivot values.
         let mut new_columns: Vec<String> = result
             .columns
             .iter()
             .enumerate()
-            .filter(|(i, _)| *i != pivot_col_idx)
+            .filter(|(i, _)| *i != pivot_col_idx && *i != value_col_idx)
             .map(|(_, c)| c.clone())
             .collect();
-
-        // Identify the "value" column (usually the last one, or the one with aggregate)
-        let value_col_idx = result.columns.len() - 1;
 
         // Add pivot value columns
         for pv in &pivot_values {

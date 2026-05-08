@@ -156,3 +156,17 @@ name = "prices-from-plugin-by-date"
 query = "SELECT date, currency, amount FROM #prices ORDER BY date, currency"
 notes = "Plugin-emitted price content — catches @@ vs @ confusion (issue #992)"
 preserve_order = true
+
+# ----------------------------------------------------------------------
+# PIVOT BY currency — issue #1023. The #988 fix (per-currency
+# precision via row sidecar) was partial: PIVOT discards the sidecar
+# because `apply_pivot` uses `add_row` instead of `add_aggregate_row`.
+# The pivoted column NAME carries the currency, so the renderer needs
+# a column-name fallback to recover the precision context.
+# ----------------------------------------------------------------------
+
+[[query]]
+name = "sum-by-account-pivot-by-currency"
+query = "SELECT account, currency, SUM(number) GROUP BY account, currency PIVOT BY currency ORDER BY account LIMIT 10"
+notes = "PIVOT BY currency precision — catches the post-#1022 regression where pivoted SUM cells lost per-currency quantization (issue #1023)"
+preserve_order = true

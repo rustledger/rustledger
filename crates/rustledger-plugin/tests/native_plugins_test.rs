@@ -1864,17 +1864,16 @@ fn test_onecommodity_three_currencies_cascade() {
     // with different pairings — so we check the pairings, not just the count.)
     assert_eq!(output.errors.len(), 2, "got: {:?}", output.errors);
     let messages: Vec<_> = output.errors.iter().map(|e| e.message.as_str()).collect();
+    // Format-strict: the source emits "...uses multiple currencies: <existing> and <new>",
+    // so the recorded USD must come first in each pairing. A bug that recorded
+    // EUR or GBP first (or reversed the format) would not match.
     assert!(
-        messages
-            .iter()
-            .any(|m| m.contains("USD") && m.contains("EUR")),
-        "expected USD↔EUR pairing in: {messages:?}"
+        messages.iter().any(|m| m.contains("USD and EUR")),
+        "expected literal `USD and EUR` pairing in: {messages:?}"
     );
     assert!(
-        messages
-            .iter()
-            .any(|m| m.contains("USD") && m.contains("GBP")),
-        "expected USD↔GBP pairing in: {messages:?}"
+        messages.iter().any(|m| m.contains("USD and GBP")),
+        "expected literal `USD and GBP` pairing in: {messages:?}"
     );
     // Both errors should reference the offending account.
     for m in &messages {
@@ -3353,9 +3352,13 @@ fn test_check_closing_ignores_non_transaction_directives() {
 }
 
 /// Malformed transaction date → `increment_date()` returns `None` → the
-/// plugin defensively skips emission rather than panicking. In practice this
-/// branch is unreachable (the parser validates dates before plugins run),
-/// but the source code guards against it, so we pin the guard.
+/// plugin defensively skips emission rather than panicking.
+///
+/// Unreachable from parser-loaded ledgers (the parser validates date format
+/// upstream), but reachable from any caller constructing `DirectiveWrapper`
+/// programmatically — including other plugins in a chain, transformation
+/// passes that synthesize directives, and tests like this one. The source
+/// code guards against it, so we pin the guard.
 #[test]
 fn test_check_closing_invalid_date_skips_emission() {
     let plugin = CheckClosingPlugin;
@@ -3396,6 +3399,15 @@ fn test_check_closing_invalid_date_skips_emission() {
     assert_eq!(
         balance_count, 0,
         "no balance emitted when date can't be incremented"
+    );
+    // The input transaction itself must still pass through unchanged — a
+    // regression that early-returned and dropped the input would slip past
+    // the balance-count check above.
+    assert_eq!(
+        output.directives.len(),
+        1,
+        "original transaction should pass through; got: {:?}",
+        output.directives
     );
 }
 

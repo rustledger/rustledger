@@ -1736,31 +1736,79 @@ fn test_onecommodity_empty_input() {
 
 /// Auto-balanced postings (`units = None`) are skipped — they don't have
 /// a currency to record or check, so they can't violate the rule.
+///
+/// The plugin's `if let Some(units) = &posting.units` branch should fall
+/// through for the None posting: the account is neither tracked nor checked.
+/// We prove this by following up with a different currency on the same
+/// account in a later transaction — if the None posting had been treated as
+/// "first seen", we'd see a mismatch error; instead the later currency is
+/// the first recorded and produces no error.
 #[test]
 fn test_onecommodity_skips_auto_balanced_posting() {
     let plugin = OneCommodityPlugin;
+
+    // Transaction with one explicit-USD posting on Assets:Cash and one
+    // auto-balanced (`units = None`) posting on Expenses:Misc. The None
+    // posting must NOT contribute to currency tracking.
+    let txn_with_none_posting = DirectiveWrapper {
+        directive_type: "transaction".to_string(),
+        date: "2024-01-15".to_string(),
+        filename: None,
+        lineno: None,
+        data: DirectiveData::Transaction(TransactionData {
+            flag: "*".to_string(),
+            payee: None,
+            narration: "Auto-balanced".to_string(),
+            tags: vec![],
+            links: vec![],
+            metadata: vec![],
+            postings: vec![
+                PostingData {
+                    account: "Assets:Cash".to_string(),
+                    units: Some(AmountData {
+                        number: "-10.00".to_string(),
+                        currency: "USD".to_string(),
+                    }),
+                    cost: None,
+                    price: None,
+                    flag: None,
+                    metadata: vec![],
+                },
+                PostingData {
+                    // units = None → must hit the skip branch.
+                    account: "Expenses:Misc".to_string(),
+                    units: None,
+                    cost: None,
+                    price: None,
+                    flag: None,
+                    metadata: vec![],
+                },
+            ],
+        }),
+    };
+
     let input = make_input(vec![
         make_open("2024-01-01", "Assets:Cash"),
         make_open("2024-01-01", "Expenses:Misc"),
-        // Two postings: first explicit USD, second auto-balanced (None).
-        // The auto-balanced one shouldn't be processed.
-        make_transaction(
-            "2024-01-15",
-            "Test",
-            vec![("Expenses:Misc", "10.00", "USD")],
-        ),
-        // Use a different currency on Expenses:Misc — should fail with 1 error.
+        txn_with_none_posting,
+        // Now use Expenses:Misc with EUR. If the prior None posting had been
+        // tracked (in any form), this would mismatch and produce an error.
+        // With the skip working correctly, EUR is the FIRST currency
+        // recorded for Expenses:Misc → no error.
         make_transaction(
             "2024-01-16",
-            "Test 2",
+            "EUR follow-up",
             vec![("Expenses:Misc", "20.00", "EUR")],
         ),
     ]);
+
     let output = plugin.process(input);
-    // Expenses:Misc used USD then EUR → 1 error. Assets:Cash never appeared
-    // (auto-balanced postings would have been omitted from the helper).
-    assert_eq!(output.errors.len(), 1, "got: {:?}", output.errors);
-    assert!(output.errors[0].message.contains("Expenses:Misc"));
+    assert_eq!(
+        output.errors.len(),
+        0,
+        "None posting should be skipped (no currency recorded for that account); got: {:?}",
+        output.errors
+    );
 }
 
 /// Different accounts using different currencies → no error. The rule is

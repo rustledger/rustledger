@@ -1858,8 +1858,31 @@ fn test_onecommodity_three_currencies_cascade() {
     ]);
     let output = plugin.process(input);
     // First-seen currency for Assets:Mixed = USD. EUR and GBP each fail
-    // the match check. → 2 errors.
+    // the match check against the recorded USD. → exactly 2 errors, each
+    // pairing the recorded USD with the offending currency. (A bug that
+    // recorded EUR or GBP as the "first" would still produce 2 errors but
+    // with different pairings — so we check the pairings, not just the count.)
     assert_eq!(output.errors.len(), 2, "got: {:?}", output.errors);
+    let messages: Vec<_> = output.errors.iter().map(|e| e.message.as_str()).collect();
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.contains("USD") && m.contains("EUR")),
+        "expected USD↔EUR pairing in: {messages:?}"
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.contains("USD") && m.contains("GBP")),
+        "expected USD↔GBP pairing in: {messages:?}"
+    );
+    // Both errors should reference the offending account.
+    for m in &messages {
+        assert!(
+            m.contains("Assets:Mixed"),
+            "every error should name Assets:Mixed: {m}"
+        );
+    }
 }
 
 /// Non-Transaction directives are ignored. Pins the "only Transaction
@@ -2054,6 +2077,68 @@ fn test_check_commodity_undeclared_cost_currency() {
     let output = plugin.process(input);
     assert_eq!(output.errors.len(), 1, "got: {:?}", output.errors);
     assert!(output.errors[0].message.contains("USD"));
+}
+
+/// A posting with `cost = Some(...)` but `cost.currency = None` should not
+/// contribute to `used_commodities` — the plugin's inner `if let Some(ref
+/// currency) = cost.currency` guard skips the insert. Pins that None-skip.
+#[test]
+fn test_check_commodity_cost_with_none_currency_skipped() {
+    let plugin = CheckCommodityPlugin;
+    let input = make_input(vec![
+        make_commodity("2024-01-01", "HOOL"),
+        make_open("2024-01-01", "Assets:Brokerage"),
+        make_open("2024-01-01", "Equity:Open"),
+        DirectiveWrapper {
+            directive_type: "transaction".to_string(),
+            date: "2024-02-01".to_string(),
+            filename: None,
+            lineno: None,
+            data: DirectiveData::Transaction(TransactionData {
+                flag: "*".to_string(),
+                payee: None,
+                narration: "Cost with no currency".to_string(),
+                tags: vec![],
+                links: vec![],
+                metadata: vec![],
+                postings: vec![
+                    PostingData {
+                        account: "Assets:Brokerage".to_string(),
+                        units: Some(AmountData {
+                            number: "5".to_string(),
+                            currency: "HOOL".to_string(),
+                        }),
+                        // Cost present but with currency = None — must NOT
+                        // be added to the used-commodities set.
+                        cost: Some(CostData {
+                            number_per: Some("100.00".to_string()),
+                            number_total: None,
+                            currency: None,
+                            date: None,
+                            label: None,
+                            merge: false,
+                        }),
+                        price: None,
+                        flag: None,
+                        metadata: vec![],
+                    },
+                    PostingData {
+                        account: "Equity:Open".to_string(),
+                        units: None,
+                        cost: None,
+                        price: None,
+                        flag: None,
+                        metadata: vec![],
+                    },
+                ],
+            }),
+        },
+    ]);
+    let output = plugin.process(input);
+    // Only HOOL is used and it's declared → zero warnings. If the cost.currency
+    // = None branch were misimplemented (e.g., inserting an empty string), we'd
+    // see a spurious warning here.
+    assert_eq!(output.errors.len(), 0, "got: {:?}", output.errors);
 }
 
 /// Currency in a Balance directive is also tracked. Undeclared → warning.
@@ -3102,6 +3187,13 @@ fn test_check_closing_non_bool_metadata_no_emission() {
 
 /// Closing posting with `units = None` falls back to the default "USD"
 /// currency in the emitted balance assertion. Pins the units-fallback branch.
+///
+/// NOTE: the fallback is hardcoded to "USD" in the plugin source; it does
+/// NOT consult `options.operating_currencies`. A user whose operating
+/// currency is EUR will still get a USD-denominated zero balance assertion
+/// from an auto-balanced closing posting, which may surprise them. This
+/// test pins the *current* behavior; revisit if/when the plugin learns to
+/// respect operating currencies.
 #[test]
 fn test_check_closing_units_none_defaults_to_usd() {
     let plugin = CheckClosingPlugin;
@@ -3258,6 +3350,53 @@ fn test_check_closing_ignores_non_transaction_directives() {
     assert_eq!(balance_count, 0);
     // All inputs preserved.
     assert_eq!(output.directives.len(), 3);
+}
+
+/// Malformed transaction date → `increment_date()` returns `None` → the
+/// plugin defensively skips emission rather than panicking. In practice this
+/// branch is unreachable (the parser validates dates before plugins run),
+/// but the source code guards against it, so we pin the guard.
+#[test]
+fn test_check_closing_invalid_date_skips_emission() {
+    let plugin = CheckClosingPlugin;
+    let input = make_input(vec![DirectiveWrapper {
+        directive_type: "transaction".to_string(),
+        // Month "13" is rejected by `increment_date` (the days-in-month
+        // match returns None for any month outside 1..=12).
+        date: "2024-13-01".to_string(),
+        filename: None,
+        lineno: None,
+        data: DirectiveData::Transaction(TransactionData {
+            flag: "*".to_string(),
+            payee: None,
+            narration: "Bad date".to_string(),
+            tags: vec![],
+            links: vec![],
+            metadata: vec![],
+            postings: vec![PostingData {
+                account: "Assets:Bank".to_string(),
+                units: Some(AmountData {
+                    number: "-100.00".to_string(),
+                    currency: "USD".to_string(),
+                }),
+                cost: None,
+                price: None,
+                flag: None,
+                metadata: vec![("closing".to_string(), MetaValueData::Bool(true))],
+            }],
+        }),
+    }]);
+    let output = plugin.process(input);
+    assert!(output.errors.is_empty());
+    let balance_count = output
+        .directives
+        .iter()
+        .filter(|d| d.directive_type == "balance")
+        .count();
+    assert_eq!(
+        balance_count, 0,
+        "no balance emitted when date can't be incremented"
+    );
 }
 
 /// Mixed posting metadata: a closing posting alongside a posting carrying

@@ -1750,6 +1750,58 @@ fn test_pivot_by_with_order_by_works() {
 }
 
 #[test]
+fn test_pivot_by_without_group_by_clause_rejected() {
+    // Implicit grouping (aggregates without GROUP BY) produces a
+    // single-row result whose key dimension is undefined. PIVOT BY
+    // can't identify a row key from such a result. Pin the
+    // PivotWithoutGroupBy error so a future refactor doesn't fall
+    // back to the more generic PivotSecondNotInGroupBy message.
+    let query = parse("SELECT SUM(number) PIVOT BY currency, account").expect("should parse");
+    let directives = make_test_directives();
+    let mut executor = Executor::new(&directives);
+    let err = executor.execute(&query).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("PIVOT BY requires an explicit GROUP BY clause"),
+        "expected PivotWithoutGroupBy message; got: {msg}"
+    );
+}
+
+#[test]
+fn test_pivot_by_multi_value_column_qualifies_headers() {
+    // When the SELECT has more than one non-pivot non-key column —
+    // e.g. SUM and COUNT side-by-side — apply_pivot generalizes by
+    // qualifying the new column headers as `<value_col_name> / <pivot_value>`.
+    // The single-value-column case (every other PIVOT test) just uses
+    // the pivot value alone. This test pins the multi-value branch.
+    let directives = make_test_directives();
+    let result = execute_query(
+        "SELECT account, currency, SUM(number), COUNT(*) GROUP BY 1, 2 \
+         PIVOT BY currency, account",
+        &directives,
+    );
+
+    // Expected layout: account-key + (SUM/<ccy>, COUNT/<ccy>) per pivot value.
+    let columns_joined = result.columns.join(",");
+    assert!(
+        result.columns.iter().any(|c| c.contains(" / ")),
+        "expected qualified headers in multi-value-column case; got {columns_joined}"
+    );
+    // The qualified format is "<value_col_name> / <pivot_value>".
+    // The aggregator names columns by the bare function name (`SUM`,
+    // `COUNT`), so qualified headers look like `SUM / USD`, `COUNT / USD`.
+    // Both value columns must survive into the output.
+    assert!(
+        result.columns.iter().any(|c| c.starts_with("SUM /")),
+        "missing SUM-qualified columns in multi-value case; got {columns_joined}"
+    );
+    assert!(
+        result.columns.iter().any(|c| c.starts_with("COUNT /")),
+        "missing COUNT-qualified columns in multi-value case; got {columns_joined}"
+    );
+}
+
+#[test]
 fn test_pivot_by_with_order_by_on_hidden_column_works() {
     // The strip-hidden + pivot interaction (item #4 of #1034). Pre-fix:
     // hidden ORDER BY column ended up in the middle of pivoted rows

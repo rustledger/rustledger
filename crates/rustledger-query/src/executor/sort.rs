@@ -113,48 +113,61 @@ impl Executor<'_> {
         pivot_exprs: &[Expr],
         group_by: &Option<Vec<Expr>>,
     ) -> Result<QueryResult, QueryError> {
-        // No PIVOT BY clause → identity.
-        if pivot_exprs.is_empty() {
-            return Ok(result.clone());
-        }
+        // The parser uses `at_least(1)` for the PIVOT BY clause and
+        // execute_select only calls this fn inside `if let Some(pivot_exprs)`,
+        // so an empty slice is unreachable. Belt-and-suspenders.
+        debug_assert!(
+            !pivot_exprs.is_empty(),
+            "apply_pivot called with empty pivot_exprs (parser invariant violated)"
+        );
 
-        // Validation #1: arity.
+        // Validation #1: arity. Bean-query requires exactly two columns.
         if pivot_exprs.len() != 2 {
             return Err(QueryError::PivotWrongArity(pivot_exprs.len()));
         }
 
+        // Validation #2: PIVOT BY requires an explicit GROUP BY clause.
+        // Implicit grouping (aggregates without GROUP BY) produces a
+        // single-row result whose key dimension is undefined — PIVOT
+        // can't identify a row key from such a result. Reject early
+        // so the user gets a specific error, not the misleading
+        // "second column not in GROUP BY".
+        let Some(gb) = group_by.as_ref() else {
+            return Err(QueryError::PivotWithoutGroupBy);
+        };
+
         let pivot_value_col_idx = self.find_pivot_column(result, &pivot_exprs[0])?;
         let key_col_idx = self.find_pivot_column(result, &pivot_exprs[1])?;
 
-        // Validation #2: the two columns must differ.
+        // Validation #3: the two columns must differ.
         if pivot_value_col_idx == key_col_idx {
             return Err(QueryError::PivotSameColumn);
         }
 
-        // Validation #3: the second column must be a GROUP BY target.
-        // The grammar allows `PIVOT BY` without `GROUP BY`, but the
-        // semantics of the second column require it to identify a
-        // grouping key — otherwise the pivoted output rows wouldn't
-        // have a stable identity. Resolve each GROUP BY expression to
-        // its result column index and check membership.
-        let key_in_group_by = group_by.as_ref().is_some_and(|gb| {
-            gb.iter()
-                .filter_map(|expr| self.find_pivot_column(result, expr).ok())
-                .any(|idx| idx == key_col_idx)
-        });
+        // Validation #4: the second column must be a GROUP BY target.
+        // Resolve each GROUP BY expression to its result column index
+        // and check membership.
+        let key_in_group_by = gb
+            .iter()
+            .filter_map(|expr| self.find_pivot_column(result, expr).ok())
+            .any(|idx| idx == key_col_idx);
         if !key_in_group_by {
             return Err(QueryError::PivotSecondNotInGroupBy);
         }
 
         // Collect unique pivot values, preserving the row-order they
         // appear in (which post-sort means the user's ORDER BY drives
-        // the new column order). Stable dedup via a HashSet sidecar.
+        // the new column order). Linear-scan dedup via structural
+        // PartialEq — pivot values are typically small (handful of
+        // currencies), and `Value` doesn't implement `Hash` because
+        // some inner types (Decimal, Inventory) don't, so a pure
+        // hash-based dedup either risks 2⁻⁶⁴ collisions (false-merging
+        // distinct values) or requires a wrapper type. Structural eq
+        // sidesteps both.
         let mut pivot_values: Vec<Value> = Vec::new();
-        let mut seen: std::collections::HashSet<u64> = std::collections::HashSet::new();
         for row in &result.rows {
             let v = row.get(pivot_value_col_idx).cloned().unwrap_or(Value::Null);
-            let h = hash_single_value(&v);
-            if seen.insert(h) {
+            if !pivot_values.contains(&v) {
                 pivot_values.push(v);
             }
         }
@@ -189,16 +202,24 @@ impl Executor<'_> {
 
         // Group rows by their key-column value, preserving first-seen
         // order so the post-sort row order survives into the pivot.
+        //
+        // The hash bucket is a fast first-pass; structural `==` inside
+        // the bucket guarantees we don't false-merge distinct keys
+        // that share a u64 hash (probability ~2⁻⁶⁴, but pinned out
+        // for correctness). Same pattern as `pivot_lookup` below.
         let mut groups: Vec<(Value, Vec<&Row>)> = Vec::new();
-        let mut group_index: HashMap<u64, usize> = HashMap::new();
+        let mut group_index: HashMap<u64, Vec<usize>> = HashMap::new();
         for row in &result.rows {
             let key = row.get(key_col_idx).cloned().unwrap_or(Value::Null);
             let h = hash_single_value(&key);
-            if let Some(&idx) = group_index.get(&h) {
-                groups[idx].1.push(row);
-            } else {
-                group_index.insert(h, groups.len());
-                groups.push((key, vec![row]));
+            let bucket = group_index.entry(h).or_default();
+            let existing = bucket.iter().find(|&&idx| groups[idx].0 == key).copied();
+            match existing {
+                Some(idx) => groups[idx].1.push(row),
+                None => {
+                    bucket.push(groups.len());
+                    groups.push((key, vec![row]));
+                }
             }
         }
 
@@ -210,18 +231,27 @@ impl Executor<'_> {
 
             // For each pivot value, find the input row in this group
             // whose pivot column equals it; pull the value-column cell.
-            // O(1) per pivot value via hashed lookup.
-            let pivot_lookup: HashMap<u64, &&Row> = group_rows
-                .iter()
-                .map(|row| {
-                    let pv = row.get(pivot_value_col_idx).cloned().unwrap_or(Value::Null);
-                    (hash_single_value(&pv), row)
-                })
-                .collect();
+            // Hash bucket + structural `==` for collision-safety, same
+            // pattern as the group_index above.
+            let mut pivot_lookup: HashMap<u64, Vec<&&Row>> = HashMap::new();
+            for row in &group_rows {
+                let pv = row.get(pivot_value_col_idx).cloned().unwrap_or(Value::Null);
+                pivot_lookup
+                    .entry(hash_single_value(&pv))
+                    .or_default()
+                    .push(row);
+            }
 
             for pv in &pivot_values {
                 let pv_hash = hash_single_value(pv);
-                let matched = pivot_lookup.get(&pv_hash);
+                // Find the row in this bucket whose pivot value equals
+                // `pv` structurally — guards against the hash-only
+                // collision case.
+                let matched = pivot_lookup.get(&pv_hash).and_then(|bucket| {
+                    bucket
+                        .iter()
+                        .find(|row| row.get(pivot_value_col_idx).is_some_and(|cell| cell == pv))
+                });
                 for &vci in &value_col_idxs {
                     let cell = matched
                         .and_then(|row| row.get(vci))

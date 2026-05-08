@@ -31,7 +31,11 @@ impl ParseError {
 }
 
 /// Error returned when executing a query fails.
+///
+/// Marked `#[non_exhaustive]` so adding new variants doesn't break
+/// downstream consumers that match exhaustively.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum QueryError {
     /// Parse error.
     #[error("parse error: {0}")]
@@ -76,4 +80,13 @@ pub enum QueryError {
     /// column`.
     #[error("the second PIVOT BY column must be a GROUP BY column")]
     PivotSecondNotInGroupBy,
+    /// PIVOT BY used on a query with no `GROUP BY` clause.
+    ///
+    /// Implicit grouping (a SELECT with aggregates but no GROUP BY)
+    /// produces a single row whose key is undefined; PIVOT BY's second
+    /// column has nothing meaningful to refer to. Distinct from
+    /// `PivotSecondNotInGroupBy` (which is for "GROUP BY exists but the
+    /// key column isn't in it").
+    #[error("PIVOT BY requires an explicit GROUP BY clause")]
+    PivotWithoutGroupBy,
 }

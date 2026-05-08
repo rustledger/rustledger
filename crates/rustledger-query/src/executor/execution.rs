@@ -201,7 +201,13 @@ impl Executor<'_> {
             self.sort_results(&mut result, order_by)?;
         } else if has_grouping && !result.rows.is_empty() && !result.columns.is_empty() {
             // When there's GROUP BY (explicit or implicit) but no ORDER BY, sort by
-            // the first column for deterministic output (matches Python beancount behavior)
+            // the first column for deterministic output (matches Python beancount behavior).
+            //
+            // `result.columns[0]` is the first VISIBLE select target.
+            // `find_hidden_order_by_targets` appends hidden cols at
+            // positions `targets.len()..`, so position 0 is always
+            // visible. A future refactor that reorders `extended_targets`
+            // would need to revisit this default.
             let first_col = result.columns[0].clone();
             let default_order = vec![OrderSpec {
                 expr: Expr::Column(first_col),

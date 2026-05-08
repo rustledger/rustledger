@@ -3184,17 +3184,11 @@ fn test_check_closing_non_bool_metadata_no_emission() {
     assert_eq!(balance_count, 0);
 }
 
-/// Closing posting with `units = None` falls back to the default "USD"
-/// currency in the emitted balance assertion. Pins the units-fallback branch.
-///
-/// NOTE: the fallback is hardcoded to "USD" in the plugin source; it does
-/// NOT consult `options.operating_currencies`. A user whose operating
-/// currency is EUR will still get a USD-denominated zero balance assertion
-/// from an auto-balanced closing posting, which may surprise them. This
-/// test pins the *current* behavior; revisit if/when the plugin learns to
-/// respect operating currencies.
+/// Closing posting with `units = None` uses the first operating currency.
+/// Here `make_input` sets `operating_currencies = ["USD"]`, so the emitted
+/// balance asserts USD.
 #[test]
-fn test_check_closing_units_none_defaults_to_usd() {
+fn test_check_closing_units_none_uses_operating_currency_usd() {
     let plugin = CheckClosingPlugin;
     let input = make_input(vec![
         make_open("2024-01-01", "Assets:Bank"),
@@ -3213,7 +3207,7 @@ fn test_check_closing_units_none_defaults_to_usd() {
                 metadata: vec![],
                 postings: vec![
                     PostingData {
-                        // Closing posting with units=None — should default to USD.
+                        // Closing posting with units=None — picks up operating_currencies[0].
                         account: "Assets:Bank".to_string(),
                         units: None,
                         cost: None,
@@ -3246,7 +3240,129 @@ fn test_check_closing_units_none_defaults_to_usd() {
     if let DirectiveData::Balance(b) = &balance.data {
         assert_eq!(b.account, "Assets:Bank");
         assert_eq!(b.amount.number, "0");
-        assert_eq!(b.amount.currency, "USD", "default currency on units=None");
+        assert_eq!(b.amount.currency, "USD");
+    } else {
+        panic!("expected Balance directive");
+    }
+}
+
+/// Closing posting with `units = None` and `operating_currencies = ["EUR"]`
+/// emits a balance assertion in EUR — NOT USD. This is the fix for #1039:
+/// previously the fallback was hardcoded to "USD" regardless of the user's
+/// operating currency.
+#[test]
+fn test_check_closing_units_none_uses_operating_currency_eur() {
+    let plugin = CheckClosingPlugin;
+    let input = PluginInput {
+        directives: vec![
+            make_open("2024-01-01", "Assets:Bank"),
+            make_open("2024-01-01", "Expenses:Final"),
+            DirectiveWrapper {
+                directive_type: "transaction".to_string(),
+                date: "2024-01-15".to_string(),
+                filename: None,
+                lineno: None,
+                data: DirectiveData::Transaction(TransactionData {
+                    flag: "*".to_string(),
+                    payee: None,
+                    narration: "Auto-balanced close".to_string(),
+                    tags: vec![],
+                    links: vec![],
+                    metadata: vec![],
+                    postings: vec![
+                        PostingData {
+                            account: "Assets:Bank".to_string(),
+                            units: None,
+                            cost: None,
+                            price: None,
+                            flag: None,
+                            metadata: vec![("closing".to_string(), MetaValueData::Bool(true))],
+                        },
+                        PostingData {
+                            account: "Expenses:Final".to_string(),
+                            units: Some(AmountData {
+                                number: "100.00".to_string(),
+                                currency: "EUR".to_string(),
+                            }),
+                            cost: None,
+                            price: None,
+                            flag: None,
+                            metadata: vec![],
+                        },
+                    ],
+                }),
+            },
+        ],
+        options: PluginOptions {
+            operating_currencies: vec!["EUR".to_string()],
+            title: None,
+        },
+        config: None,
+    };
+    let output = plugin.process(input);
+    let balance = output
+        .directives
+        .iter()
+        .find(|d| d.directive_type == "balance")
+        .expect("should have balance assertion");
+    if let DirectiveData::Balance(b) = &balance.data {
+        assert_eq!(b.account, "Assets:Bank");
+        assert_eq!(b.amount.number, "0");
+        assert_eq!(
+            b.amount.currency, "EUR",
+            "operating_currencies[0] (EUR) should win over the USD literal fallback"
+        );
+    } else {
+        panic!("expected Balance directive");
+    }
+}
+
+/// Closing posting with `units = None` and `operating_currencies = []`
+/// (no operating currencies configured) falls back to "USD" for backward
+/// compatibility. Pins the `unwrap_or_else(|| "USD")` branch.
+#[test]
+fn test_check_closing_units_none_falls_back_to_usd_when_no_operating_ccy() {
+    let plugin = CheckClosingPlugin;
+    let input = PluginInput {
+        directives: vec![
+            make_open("2024-01-01", "Assets:Bank"),
+            DirectiveWrapper {
+                directive_type: "transaction".to_string(),
+                date: "2024-01-15".to_string(),
+                filename: None,
+                lineno: None,
+                data: DirectiveData::Transaction(TransactionData {
+                    flag: "*".to_string(),
+                    payee: None,
+                    narration: "Auto-balanced close".to_string(),
+                    tags: vec![],
+                    links: vec![],
+                    metadata: vec![],
+                    postings: vec![PostingData {
+                        account: "Assets:Bank".to_string(),
+                        units: None,
+                        cost: None,
+                        price: None,
+                        flag: None,
+                        metadata: vec![("closing".to_string(), MetaValueData::Bool(true))],
+                    }],
+                }),
+            },
+        ],
+        options: PluginOptions {
+            operating_currencies: vec![],
+            title: None,
+        },
+        config: None,
+    };
+    let output = plugin.process(input);
+    let balance = output
+        .directives
+        .iter()
+        .find(|d| d.directive_type == "balance")
+        .expect("should have balance assertion");
+    if let DirectiveData::Balance(b) = &balance.data {
+        assert_eq!(b.amount.currency, "USD", "fallback when no operating ccy");
     } else {
         panic!("expected Balance directive");
     }

@@ -26,6 +26,16 @@ impl NativePlugin for CheckClosingPlugin {
     fn process(&self, input: PluginInput) -> PluginOutput {
         let mut new_directives: Vec<DirectiveWrapper> = Vec::new();
 
+        // Default currency for auto-balanced (units=None) closing postings:
+        // prefer the user's first operating currency, falling back to "USD"
+        // when none is configured. Closes #1039.
+        let default_currency = input
+            .options
+            .operating_currencies
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "USD".to_string());
+
         for wrapper in &input.directives {
             new_directives.push(wrapper.clone());
 
@@ -39,11 +49,13 @@ impl NativePlugin for CheckClosingPlugin {
                     if has_closing {
                         // Parse the date and add one day
                         if let Some(next_date) = increment_date(&wrapper.date) {
-                            // Get the currency from the posting
+                            // Use the posting's units currency if present,
+                            // otherwise the resolved default (operating
+                            // currency or "USD" fallback).
                             let currency = posting
                                 .units
                                 .as_ref()
-                                .map_or_else(|| "USD".to_string(), |u| u.currency.clone());
+                                .map_or_else(|| default_currency.clone(), |u| u.currency.clone());
 
                             // Add zero balance assertion
                             new_directives.push(DirectiveWrapper {

@@ -11,12 +11,25 @@ use thiserror::Error;
 /// Errors that can occur during interpolation.
 #[derive(Debug, Clone, Error)]
 pub enum InterpolationError {
-    /// Multiple postings are missing amounts for the same currency.
-    #[error("multiple postings missing amounts for currency {currency}")]
+    /// Multiple unknowns in the same currency group, where an unknown is
+    /// either a posting with a missing amount or a posting with an empty
+    /// cost spec (`{}`) whose cost-basis weight is deferred to booking-
+    /// time lot matching. Bean-check enforces "at most one unknown per
+    /// currency group" — see issue #1026 for the cost-spec extension.
+    ///
+    /// The variant name `MultipleMissing` is kept for API stability;
+    /// "missing amounts" in the error message is a slight overgeneral
+    /// (the count includes cost-unknowns, not just missing amounts), but
+    /// the field semantics are correct.
+    #[error(
+        "multiple postings missing amounts or with unresolved cost specs for currency {currency} ({count} unknowns)"
+    )]
     MultipleMissing {
-        /// The currency with multiple missing amounts.
+        /// The currency group with too many unknowns.
         currency: InternedStr,
-        /// Number of postings missing this currency.
+        /// Total count of unknowns: missing-amount postings plus
+        /// empty-cost-spec postings whose weight is deferred to
+        /// booking-time lot matching.
         count: usize,
     },
 
@@ -87,8 +100,8 @@ fn round_interpolated(residual: Decimal, existing_scale: Option<u32>) -> Decimal
 ///   cost spec (e.g., `{}`) as one unknown for their cost currency, since
 ///   the cost-basis weight is unknown until booking-pass lot matching
 ///   resolves it (issue #1026). The TLA+ model `Interpolation.tla`
-///   currently models only missing-amount postings; updating it to cover
-///   cost-unknowns is tracked separately.
+///   currently models only missing-amount postings; extending it to cover
+///   cost-unknowns is tracked in issue #1030.
 /// - `CompleteImpliesBalanced`: After interpolation, `sum(postings) = 0`
 ///   for each currency
 /// - `HasNullAccurate`: `filled_indices` contains exactly the indices of

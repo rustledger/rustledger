@@ -636,6 +636,64 @@ mod tests {
         assert_eq!(residual.get("AAPL"), Some(&dec!(-10)));
     }
 
+    /// Issue #1026: when an empty cost spec is paired with a price
+    /// annotation (`{} @ price`), the residual computation must NOT
+    /// fall through to using the price as the posting's weight. The
+    /// canonical weight of a cost-tracked posting is `units × cost`,
+    /// not `units × price`. Pre-fix, this branch produced a balanced
+    /// residual using the wrong weight; the htsec compat fixture (and
+    /// the interpolate.rs caller chain) was the visible victim.
+    ///
+    /// Pinned here at the lib.rs level so a future revert of the
+    /// branch reordering would fail this test directly, independent
+    /// of the interpolate.rs end-to-end tests.
+    #[test]
+    fn test_calculate_residual_empty_cost_spec_with_price_skips_not_uses_price() {
+        let txn = Transaction::new(date(2024, 1, 15), "Sale, empty cost + price")
+            .with_posting(
+                Posting::new("Assets:Stock", Amount::new(dec!(-10), "HOOL"))
+                    .with_cost(CostSpec::empty())
+                    .with_price(rustledger_core::PriceAnnotation::Unit(Amount::new(
+                        dec!(150),
+                        "USD",
+                    ))),
+            )
+            .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(1500), "USD")));
+
+        let residual = calculate_residual(&txn);
+        // Pre-fix: residual[USD] = 0 (price-as-weight contributed
+        // -1500, cancelling cash's +1500).
+        // Post-fix: residual[USD] = +1500 (cost-unknown skipped, only
+        // cash contributes; the residual stays open for booking-pass
+        // lot matching to resolve via cost basis).
+        assert_eq!(residual.get("USD"), Some(&dec!(1500)));
+    }
+
+    /// Companion to the previous test for the `BigDecimal` variant.
+    /// Same fix, same semantics.
+    #[test]
+    fn test_calculate_residual_precise_empty_cost_spec_with_price_skips_not_uses_price() {
+        use bigdecimal::BigDecimal;
+        use std::str::FromStr;
+
+        let txn = Transaction::new(date(2024, 1, 15), "Sale, empty cost + price")
+            .with_posting(
+                Posting::new("Assets:Stock", Amount::new(dec!(-10), "HOOL"))
+                    .with_cost(CostSpec::empty())
+                    .with_price(rustledger_core::PriceAnnotation::Unit(Amount::new(
+                        dec!(150),
+                        "USD",
+                    ))),
+            )
+            .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(1500), "USD")));
+
+        let residual = calculate_residual_precise(&txn);
+        assert_eq!(
+            residual.get("USD"),
+            Some(&BigDecimal::from_str("1500").unwrap())
+        );
+    }
+
     // =========================================================================
     // Price annotation residual tests
     // =========================================================================

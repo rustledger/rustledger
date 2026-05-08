@@ -1182,7 +1182,7 @@ mod tests {
     // `None` for those rows. The renderer needs a column-name fallback
     // to recover the precision context.
 
-    /// Pivoted rows have `None` group_key but the column name is a
+    /// Pivoted rows have `None` `group_key` but the column name is a
     /// currency code. The width-calc and print passes both consult the
     /// column-name fallback, so a `Value::Number(0.000)` in a USD-named
     /// column should render as `0.00` (matching USD's tracked 2dp).

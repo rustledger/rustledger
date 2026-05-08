@@ -36,10 +36,23 @@
  *   - Models the validation rule from #1029 (the spec's contribution).
  *   - Does NOT model the residual arithmetic that produces the filled
  *     amount — that was the original spec's `Interpolate` action and is
- *     intentionally out of scope here. A separate spec covering the
- *     full booking-pass numerical interpolation could be filed later;
- *     the rule this spec enforces is structural ("≤ 1 unknown per
- *     currency"), not arithmetical.
+ *     intentionally out of scope here. The `complete` variable means
+ *     "validation passed at the point the interpolator looked at the
+ *     posting layout", NOT "all NULL amounts have been replaced." A
+ *     separate spec covering the booking-pass numerical interpolation
+ *     could be filed later; the rule enforced here is structural
+ *     ("≤ 1 unknown per currency"), not arithmetical.
+ *   - Only models missing-amount postings whose currency is *known*
+ *     (`AddNullAmount(i, ccy)`). The implementation has a separate code
+ *     path for "unassigned-missing" postings — postings with no number
+ *     and no currency hint, which the interpolator must route to a
+ *     currency group based on which group has a residual. The
+ *     additional rejection logic that fires when an unassigned-missing
+ *     coexists with a cost-unknown (see `unassigned_missing` /
+ *     `cost_unknowns_by_currency` interaction in `interpolate.rs`) is
+ *     not modeled. Adding `AddUnassignedMissing` would be the natural
+ *     extension; it's omitted here because the state-space cost was
+ *     judged not worth the marginal gain.
  *)
 
 EXTENDS Integers, FiniteSets, TLC
@@ -168,13 +181,31 @@ ValidationOk ==
 
 -----------------------------------------------------------------------------
 
-(* Mark the transaction complete only if validation passes. Mirrors
- * the implementation: if `ValidationOk` fails, the interpolator
- * returns `MultipleMissing` (or the equivalent) and never completes. *)
+(* Set of slot indices that have been used (have a posting). *)
+UsedSlots ==
+    {i \in 1..MaxPostings : postings[i].amount # UNSET}
+
+(* Mark the transaction "validation passed" only if `ValidationOk`
+ * holds. Mirrors the implementation: if the rule fails, the
+ * interpolator returns `MultipleMissing` (or the equivalent) and
+ * never completes.
+ *
+ * NOTE: `complete = TRUE` here means "the validation rule held when
+ * the interpolator looked at the posting layout" — NOT "all NULL
+ * amounts have been replaced by their residual fills." This spec
+ * intentionally stops at the structural-validation step; the fill
+ * arithmetic is out of scope (see SCOPE in the header).
+ *
+ * `MaxPostings` is an upper bound on how many postings the
+ * transaction can have. Real transactions need ≥ 2 postings to
+ * balance, but slots beyond the actual posting count remain UNSET
+ * and are correctly ignored by `ValidationOk` /
+ * `ActiveCurrencies` / `UnknownCurrency` (UNSET routes to
+ * NoCurrency, which is filtered out). *)
 Validate ==
     /\ ~complete
     /\ ValidationOk
-    /\ \A i \in 1..MaxPostings : postings[i].amount # UNSET
+    /\ Cardinality(UsedSlots) >= 2
     /\ complete' = TRUE
     /\ UNCHANGED postings
 
@@ -197,11 +228,15 @@ Next ==
 CompleteImpliesValidated ==
     complete => ValidationOk
 
-(* Backward-compatible alias for the original 2-posting `AtMostOneNull`.
- * The N-posting / multi-currency generalization is captured by
- * `ValidationOk`; the old name is preserved so external references
- * (test names, prior commits, CHANGELOG entries) continue to resolve. *)
+(* Multi-currency generalization of the original 2-posting
+ * `AtMostOneNull`. *)
 AtMostOneUnknownPerCurrency == ValidationOk
+
+(* Backward-compatible alias under the original name. The 2-posting
+ * single-currency form was strictly weaker; the new name above is
+ * preferred. Kept so external references (older commits, CHANGELOG
+ * entries, blog posts that link this name) continue to resolve. *)
+AtMostOneNull == ValidationOk
 
 (* `CompleteImpliesBalanced` from the original 2-posting model:
  *   complete => posting1 + posting2 = 0

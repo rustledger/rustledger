@@ -93,19 +93,19 @@ fn round_interpolated(residual: Decimal, existing_scale: Option<u32>) -> Decimal
 ///
 /// # TLA+ Specification
 ///
-/// Implements invariants from `Interpolation.tla`:
-/// - `AtMostOneNull`: At most one posting per currency can have a missing
-///   amount (returns `MultipleMissing` error if violated). This
-///   implementation extends the rule to also count postings with an empty
-///   cost spec (e.g., `{}`) as one unknown for their cost currency, since
-///   the cost-basis weight is unknown until booking-pass lot matching
-///   resolves it (issue #1026). The TLA+ model `Interpolation.tla`
-///   currently models only missing-amount postings; extending it to cover
-///   cost-unknowns is tracked in issue #1030.
-/// - `CompleteImpliesBalanced`: After interpolation, `sum(postings) = 0`
-///   for each currency
-/// - `HasNullAccurate`: `filled_indices` contains exactly the indices of
-///   postings that were originally missing amounts
+/// Implements invariants from `Interpolation.tla` (post-#1030 redesign for
+/// N postings + multi-currency + cost-unknowns):
+/// - `AtMostOneUnknownPerCurrency`: For each currency group, at most one
+///   posting may be "unknown" — either a missing amount (counts toward
+///   the units currency) or an empty cost spec like `{}` (counts toward
+///   the cost currency, since the cost-basis weight is unresolved until
+///   booking-pass lot matching). Returns `MultipleMissing` if violated.
+/// - `CompleteImpliesValidated`: Interpolation only completes the
+///   transaction when the validation rule holds.
+///
+/// The spec models the structural validation rule, not the residual
+/// arithmetic that produces filled amounts — see `Interpolation.tla`'s
+/// header for the scope rationale.
 ///
 /// See: `spec/tla/Interpolation.tla`
 ///

@@ -105,7 +105,7 @@ impl Executor<'_> {
 
             // Group and aggregate
             let grouped = self.group_postings(&postings, group_by_exprs.as_ref())?;
-            for (_, group) in grouped {
+            for (group_key, group) in grouped {
                 // Use extended_targets to include hidden columns for ORDER BY
                 let row = self.evaluate_aggregate_row(&extended_targets, &group)?;
 
@@ -123,7 +123,10 @@ impl Executor<'_> {
                     continue;
                 }
 
-                result.add_row(row);
+                // Carry the GROUP BY key alongside the aggregated row so the
+                // text renderer can recover per-row currency context for
+                // numeric aggregates (issue #988).
+                result.add_aggregate_row(row, group_key);
             }
         } else {
             // Check if query has window functions
@@ -221,7 +224,7 @@ impl Executor<'_> {
 
         // Apply LIMIT
         if let Some(limit) = query.limit {
-            result.rows.truncate(limit as usize);
+            result.truncate(limit as usize);
         }
 
         Ok(result)
@@ -335,7 +338,7 @@ impl Executor<'_> {
 
         // Apply LIMIT
         if let Some(limit) = outer_query.limit {
-            result.rows.truncate(limit as usize);
+            result.truncate(limit as usize);
         }
 
         Ok(result)
@@ -457,7 +460,7 @@ impl Executor<'_> {
 
         // Apply LIMIT
         if let Some(limit) = query.limit {
-            result.rows.truncate(limit as usize);
+            result.truncate(limit as usize);
         }
 
         Ok(result)
@@ -587,7 +590,7 @@ impl Executor<'_> {
 
         // Apply LIMIT
         if let Some(limit) = query.limit {
-            result.rows.truncate(limit as usize);
+            result.truncate(limit as usize);
         }
 
         Ok(result)

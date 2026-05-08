@@ -39,6 +39,41 @@ There is no standalone PyPI package to provide this functionality.
 Fava has a similar plugin at fava.plugins.forecast but with different API.
 """
 
+[[exclusions]]
+pattern = "beancount-import/testdata_source_google_purchases_test_invalid_journal.beancount"
+reason = "bean-query FIRST(balance) is upstream-buggy; rledger is correct (#989, beanquery#279)"
+details = """
+The `first-balance-by-month` query against this fixture diverges between
+rledger and bean-query because of an upstream bug in beanquery's `FIRST`
+aggregator interacting with the stateful `balance` column.
+
+bean-query gives different `FIRST(balance)` values for the same query
+depending on which OTHER aggregators are in the SELECT list:
+
+  SELECT year, month, FIRST(balance)              -> 2018-7 = -31.84  (wrong)
+  SELECT year, month, FIRST(balance), LAST(balance) -> 2018-7 = -53.68  (correct)
+
+Root cause: `balance` mutates a shared accumulator on every call (in
+`beanquery/sources/beancount.py`). `FIRST.update` short-circuits operand
+evaluation after the first row, so `balance(context)` is not called for
+later rows in the group, leaving the accumulator stale for subsequent
+groups. This violates the documented contract that `balance` is
+"automatically calculated based on the previous selected rows" — the
+filtered rows ARE selected, but the implementation only updates the
+accumulator for rows where the operand was evaluated.
+
+rledger pre-computes `ctx.balance` per row in posting collection; the
+column evaluator is a pure read. FIRST and LAST always agree on
+single-row groups, and the result is independent of which other
+aggregators are queried.
+
+Filed upstream as https://github.com/beancount/beanquery/issues/279.
+The fixture is a deliberately-malformed `_invalid_journal` test file
+from beancount-import (jbms/beancount-import) — its purpose is to test
+how that project's importers handle bad input, not to be a balanced
+ledger. Excluding it from compat doesn't lose meaningful coverage.
+"""
+
 # === Non-ASCII account name exclusions (#572, #736, #739) ===
 #
 # rustledger's `Token::Account` lexer regex enforces two related rules

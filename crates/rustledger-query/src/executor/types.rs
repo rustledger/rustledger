@@ -228,12 +228,29 @@ pub fn hash_single_value(value: &Value) -> u64 {
 }
 
 /// Query result containing column names and rows.
+///
+/// **Invariant**: `rows.len() == row_group_keys.len()`. Always. Mutating
+/// either field directly will violate this; use the helper methods
+/// (`add_row`, `add_aggregate_row`, `truncate`, `sort_by`, etc.) that
+/// keep both vectors in lockstep. The invariant is enforced at runtime
+/// with `assert_eq!` inside `sort_by`.
 #[derive(Debug, Clone)]
 pub struct QueryResult {
     /// Column names.
     pub columns: Vec<String>,
     /// Result rows.
     pub rows: Vec<Row>,
+    /// Per-row GROUP BY key values, parallel to `rows`. `None` for rows
+    /// produced outside aggregation. Populated by the aggregate execution
+    /// path; used by the text renderer to recover the per-row currency
+    /// context for `Value::Number` cells emitted by `SUM` / `AVG` (issue
+    /// #988 — display-precision fix that stays lossless for JSON/CSV).
+    ///
+    /// `pub(crate)` so external consumers can't accidentally violate the
+    /// parallel-vector invariant; reach in directly only inside this crate
+    /// and only with extreme care. External access goes through
+    /// [`Self::group_key`].
+    pub(crate) row_group_keys: Vec<Option<Vec<Value>>>,
 }
 
 impl QueryResult {
@@ -242,12 +259,97 @@ impl QueryResult {
         Self {
             columns,
             rows: Vec::new(),
+            row_group_keys: Vec::new(),
         }
     }
 
-    /// Add a row to the result.
+    /// Add a row to the result with no GROUP BY context (non-aggregate path).
+    /// The sidecar (`row_group_keys`) records `None` for this row, so the
+    /// text renderer applies no per-currency quantization (issue #988).
+    /// Aggregate paths must use [`Self::add_aggregate_row`] instead.
     pub fn add_row(&mut self, row: Row) {
         self.rows.push(row);
+        self.row_group_keys.push(None);
+    }
+
+    /// Add a row produced by aggregation, recording the GROUP BY key values
+    /// alongside it. The renderer consults the key to quantize numeric
+    /// aggregates against the per-currency display precision (issue #988).
+    ///
+    /// Multi-column GROUP BY note: when several columns are grouped (e.g.
+    /// `GROUP BY account, currency`), the entire key is preserved here.
+    /// The renderer's currency-hint extraction (`currency_hint_for_row`
+    /// in `rustledger/src/cmd/query/output.rs`) takes the *first*
+    /// currency-shaped string in iteration order — so put the currency
+    /// column first if both are currency-shaped, which is rare in
+    /// practice but possible.
+    pub fn add_aggregate_row(&mut self, row: Row, group_key: Vec<Value>) {
+        self.rows.push(row);
+        self.row_group_keys.push(if group_key.is_empty() {
+            None
+        } else {
+            Some(group_key)
+        });
+    }
+
+    /// Get the GROUP BY key for a given row, if it was produced by
+    /// aggregation. Returns `None` for non-aggregate rows or when the
+    /// row index is out of range. This is the public read-side of the
+    /// `row_group_keys` sidecar — prefer it over reaching into the
+    /// field directly.
+    ///
+    /// Returns `&[Value]` rather than `&Vec<Value>` so callers aren't
+    /// tied to the specific container type.
+    #[must_use]
+    pub fn group_key(&self, row_idx: usize) -> Option<&[Value]> {
+        self.row_group_keys.get(row_idx).and_then(|k| k.as_deref())
+    }
+
+    /// Whether any row in the result was produced by aggregation. Lets
+    /// downstream renderers short-circuit per-row hint lookups when
+    /// the cache would be all `None` anyway (issue #988 follow-up).
+    #[must_use]
+    pub fn has_aggregate_rows(&self) -> bool {
+        self.row_group_keys.iter().any(Option::is_some)
+    }
+
+    /// Truncate to the first `len` rows, keeping `row_group_keys` in
+    /// lockstep so the parallel-vector invariant survives LIMIT.
+    pub fn truncate(&mut self, len: usize) {
+        self.rows.truncate(len);
+        self.row_group_keys.truncate(len);
+    }
+
+    /// Sort rows by a comparator, keeping `row_group_keys` in lockstep.
+    /// Pair-sort prevents the sidecar from desynchronizing after ORDER BY
+    /// (otherwise text rendering would apply the wrong currency hint to
+    /// a row).
+    pub fn sort_by<F>(&mut self, mut compare: F)
+    where
+        F: FnMut(&Row, &Row) -> std::cmp::Ordering,
+    {
+        // Hard assert (not debug_assert!): the invariant is load-bearing
+        // for correctness; a release-mode mismatch would silently apply
+        // the wrong currency hint to rows after sort.
+        assert_eq!(
+            self.rows.len(),
+            self.row_group_keys.len(),
+            "QueryResult invariant violated: rows.len() must equal row_group_keys.len()"
+        );
+        let n = self.rows.len();
+        let mut paired: Vec<(Row, Option<Vec<Value>>)> = std::mem::take(&mut self.rows)
+            .into_iter()
+            .zip(std::mem::take(&mut self.row_group_keys))
+            .collect();
+        paired.sort_by(|(a, _), (b, _)| compare(a, b));
+        // Pre-allocate the now-empty Vecs back to known capacity to skip
+        // the incremental-grow allocations during push-back.
+        self.rows.reserve_exact(n);
+        self.row_group_keys.reserve_exact(n);
+        for (row, key) in paired {
+            self.rows.push(row);
+            self.row_group_keys.push(key);
+        }
     }
 
     /// Number of rows.
@@ -344,5 +446,122 @@ mod tests {
             "Value enum too large: {} bytes",
             size_of::<Value>()
         );
+    }
+
+    // ─── QueryResult parallel-vector invariant (issue #988) ───────────
+    //
+    // The `row_group_keys` sidecar must stay aligned with `rows` across
+    // every mutation. These tests pin the contract for the helpers that
+    // mutate both vectors. A failure here means future renderer logic
+    // would apply the wrong currency hint to a row.
+
+    fn make_keyed_result() -> QueryResult {
+        let mut r = QueryResult::new(vec!["currency".into(), "sum".into()]);
+        r.add_aggregate_row(
+            vec![Value::String("USD".into()), Value::Integer(100)],
+            vec![Value::String("USD".into())],
+        );
+        r.add_aggregate_row(
+            vec![Value::String("EUR".into()), Value::Integer(50)],
+            vec![Value::String("EUR".into())],
+        );
+        r.add_aggregate_row(
+            vec![Value::String("GBP".into()), Value::Integer(75)],
+            vec![Value::String("GBP".into())],
+        );
+        r
+    }
+
+    /// `sort_by` reorders rows AND `row_group_keys` together.
+    #[test]
+    fn test_sort_by_keeps_row_group_keys_in_lockstep() {
+        let mut r = make_keyed_result();
+        // Sort by the integer column ascending: 50 (EUR), 75 (GBP), 100 (USD).
+        r.sort_by(|a, b| match (&a[1], &b[1]) {
+            (Value::Integer(x), Value::Integer(y)) => x.cmp(y),
+            _ => std::cmp::Ordering::Equal,
+        });
+
+        // After sort, row[0] is EUR, row[1] is GBP, row[2] is USD.
+        // The sidecar MUST have followed.
+        assert_eq!(r.group_key(0), Some(&[Value::String("EUR".into())][..]));
+        assert_eq!(r.group_key(1), Some(&[Value::String("GBP".into())][..]));
+        assert_eq!(r.group_key(2), Some(&[Value::String("USD".into())][..]));
+    }
+
+    /// `truncate` drops the same suffix from rows AND `row_group_keys`.
+    #[test]
+    fn test_truncate_keeps_row_group_keys_in_lockstep() {
+        let mut r = make_keyed_result();
+        r.truncate(2);
+
+        assert_eq!(r.rows.len(), 2);
+        assert_eq!(r.row_group_keys.len(), 2);
+        // Surviving keys are the first two: USD, EUR.
+        assert_eq!(r.group_key(0), Some(&[Value::String("USD".into())][..]));
+        assert_eq!(r.group_key(1), Some(&[Value::String("EUR".into())][..]));
+        // Out-of-range index returns None gracefully.
+        assert_eq!(r.group_key(2), None);
+    }
+
+    /// Mixed aggregate / non-aggregate rows: `add_row` writes `None` to
+    /// the sidecar so the invariant is preserved when the two paths
+    /// interleave (e.g. a synthetic explanatory row appended after an
+    /// aggregate).
+    #[test]
+    fn test_add_row_and_add_aggregate_row_mixed() {
+        let mut r = QueryResult::new(vec!["x".into()]);
+        r.add_aggregate_row(vec![Value::Integer(1)], vec![Value::String("USD".into())]);
+        r.add_row(vec![Value::Integer(2)]);
+        r.add_aggregate_row(vec![Value::Integer(3)], vec![Value::String("EUR".into())]);
+
+        assert_eq!(r.rows.len(), 3);
+        assert_eq!(r.row_group_keys.len(), 3);
+        assert_eq!(r.group_key(0), Some(&[Value::String("USD".into())][..]));
+        assert_eq!(r.group_key(1), None);
+        assert_eq!(r.group_key(2), Some(&[Value::String("EUR".into())][..]));
+    }
+
+    /// Empty `group_key` arg means "no GROUP BY context" — sidecar
+    /// records `None` so callers don't see a misleading `Some(vec![])`.
+    #[test]
+    fn test_add_aggregate_row_empty_key_records_none() {
+        let mut r = QueryResult::new(vec!["count".into()]);
+        // Pure aggregate (e.g. SELECT COUNT(*)) has no GROUP BY at all.
+        r.add_aggregate_row(vec![Value::Integer(42)], vec![]);
+
+        assert_eq!(r.group_key(0), None);
+    }
+
+    /// `sort_by`'s lockstep invariant is enforced by an unconditional
+    /// `assert_eq!`. This test deliberately corrupts the sidecar (by
+    /// pushing to `rows` without a matching push to `row_group_keys`)
+    /// then calls `sort_by`, expecting a panic. Pins the safety net
+    /// against accidental removal of the assert.
+    #[test]
+    #[should_panic(expected = "QueryResult invariant violated")]
+    fn test_sort_by_panics_on_lockstep_violation() {
+        let mut r = QueryResult::new(vec!["x".into()]);
+        // Reach in directly to corrupt the sidecar — the only way to
+        // hit the assert without going through the helpers (which are
+        // designed to make it impossible). Available because tests live
+        // inside `rustledger-query` and `row_group_keys` is `pub(crate)`.
+        r.rows.push(vec![Value::Integer(1)]);
+        // Deliberately skip pushing to `row_group_keys`.
+        r.sort_by(|_, _| std::cmp::Ordering::Equal);
+    }
+
+    /// Direct test for `add_row`: the non-aggregate path records `None`
+    /// in the sidecar, keeping the parallel-vector invariant. Covered
+    /// indirectly by `test_add_row_and_add_aggregate_row_mixed` but
+    /// pinned standalone here so the contract is unambiguous.
+    #[test]
+    fn test_add_row_records_none_in_sidecar() {
+        let mut r = QueryResult::new(vec!["x".into()]);
+        r.add_row(vec![Value::Integer(1)]);
+
+        assert_eq!(r.rows.len(), 1);
+        assert_eq!(r.row_group_keys.len(), 1);
+        assert_eq!(r.group_key(0), None);
     }
 }

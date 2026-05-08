@@ -56,6 +56,28 @@ pub fn calculate_tolerance(amounts: &[&Amount]) -> HashMap<InternedStr, Decimal>
     tolerances
 }
 
+/// Extract the currency named in a posting's price annotation, if any.
+///
+/// Walks all `PriceAnnotation` shapes — `Unit`, `Total`, the `Incomplete`
+/// variants when they carry a complete amount, and the empty variants
+/// (which return `None`). Used by the booking residual computations and
+/// interpolation to look up a posting's price-side currency without
+/// duplicating the match in three places.
+#[must_use]
+pub(crate) fn price_currency_of(posting: &rustledger_core::Posting) -> Option<InternedStr> {
+    posting.price.as_ref().and_then(|p| match p {
+        rustledger_core::PriceAnnotation::Unit(a) | rustledger_core::PriceAnnotation::Total(a) => {
+            Some(a.currency.clone())
+        }
+        rustledger_core::PriceAnnotation::UnitIncomplete(inc)
+        | rustledger_core::PriceAnnotation::TotalIncomplete(inc) => {
+            inc.as_amount().map(|a| a.currency.clone())
+        }
+        rustledger_core::PriceAnnotation::UnitEmpty
+        | rustledger_core::PriceAnnotation::TotalEmpty => None,
+    })
+}
+
 /// Infer the cost currency from other postings in the transaction.
 ///
 /// Python beancount infers cost currency from simple postings (those without
@@ -160,22 +182,11 @@ pub fn calculate_residual(transaction: &Transaction) -> HashMap<InternedStr, Dec
             // 1. Price annotation
             // 2. Other postings in the transaction
             let cost_contribution = posting.cost.as_ref().and_then(|cost_spec| {
-                // Helper to get currency from price annotation
-                let price_currency = posting.price.as_ref().and_then(|p| match p {
-                    rustledger_core::PriceAnnotation::Unit(a)
-                    | rustledger_core::PriceAnnotation::Total(a) => Some(a.currency.clone()),
-                    rustledger_core::PriceAnnotation::UnitIncomplete(inc)
-                    | rustledger_core::PriceAnnotation::TotalIncomplete(inc) => {
-                        inc.as_amount().map(|a| a.currency.clone())
-                    }
-                    _ => None,
-                });
-
                 // Try to get cost currency, falling back to price currency, then other postings
                 let inferred_currency = cost_spec
                     .currency
                     .clone()
-                    .or(price_currency)
+                    .or_else(|| price_currency_of(posting))
                     .or_else(|| get_inferred_currency(&mut inferred_cost_currency));
 
                 // Check number_total first: when both per-unit and total are present
@@ -198,6 +209,16 @@ pub fn calculate_residual(transaction: &Transaction) -> HashMap<InternedStr, Dec
             if let Some((currency, amount)) = cost_contribution {
                 // Cost-based posting: weight is in the cost currency
                 *residuals.entry(currency).or_default() += amount;
+            } else if posting.cost.is_some() {
+                // Cost spec exists but has no determinable cost number
+                // (e.g., empty `{}`). The CANONICAL weight of a cost-tracked
+                // posting is `units × cost`, NOT `units × price` — even if a
+                // price annotation is present. Falling through to the price
+                // branch would silently produce a balanced residual using
+                // the wrong weight (issue #1026). Skip contribution; the
+                // booking pass will resolve via lot matching, and the
+                // interpolation rule (in `interpolate.rs`) accounts for
+                // this posting as one cost-unknown for its currency group.
             } else if let Some(price) = &posting.price {
                 // Price annotation: converts units to price currency for balance purposes.
                 // The weight is in the price currency, not the units currency.
@@ -237,9 +258,6 @@ pub fn calculate_residual(transaction: &Transaction) -> HashMap<InternedStr, Dec
                         *residuals.entry(units.currency.clone()).or_default() += units.number;
                     }
                 }
-            } else if posting.cost.is_some() {
-                // Cost spec exists but is empty (e.g., `{}`), and no price annotation
-                // Don't contribute to residual - cost will be filled by lot matching
             } else {
                 // Simple posting: weight is just the units
                 *residuals.entry(units.currency.clone()).or_default() += units.number;
@@ -283,20 +301,10 @@ pub fn calculate_residual_precise(transaction: &Transaction) -> HashMap<Interned
             let units_number = to_big(units.number);
 
             let cost_contribution = posting.cost.as_ref().and_then(|cost_spec| {
-                let price_currency = posting.price.as_ref().and_then(|p| match p {
-                    rustledger_core::PriceAnnotation::Unit(a)
-                    | rustledger_core::PriceAnnotation::Total(a) => Some(a.currency.clone()),
-                    rustledger_core::PriceAnnotation::UnitIncomplete(inc)
-                    | rustledger_core::PriceAnnotation::TotalIncomplete(inc) => {
-                        inc.as_amount().map(|a| a.currency.clone())
-                    }
-                    _ => None,
-                });
-
                 let inferred_currency = cost_spec
                     .currency
                     .clone()
-                    .or(price_currency)
+                    .or_else(|| price_currency_of(posting))
                     .or_else(|| get_inferred_currency(&mut inferred_cost_currency));
 
                 // Check number_total first: when both per-unit and total are present
@@ -321,6 +329,12 @@ pub fn calculate_residual_precise(transaction: &Transaction) -> HashMap<Interned
 
             if let Some((currency, amount)) = cost_contribution {
                 *residuals.entry(currency).or_default() += amount;
+            } else if posting.cost.is_some() {
+                // Cost spec exists but has no determinable cost number
+                // (e.g., empty `{}`). Same as `calculate_residual` —
+                // cost beats price for posting weight; falling through
+                // to the price branch produces a wrong-weight balanced
+                // residual (issue #1026).
             } else if let Some(price) = &posting.price {
                 match price {
                     rustledger_core::PriceAnnotation::Unit(price_amt) => {
@@ -357,8 +371,6 @@ pub fn calculate_residual_precise(transaction: &Transaction) -> HashMap<Interned
                             units_number.clone();
                     }
                 }
-            } else if posting.cost.is_some() {
-                // Empty cost spec — don't contribute to residual
             } else {
                 *residuals.entry(units.currency.clone()).or_default() += units_number;
             }
@@ -622,6 +634,64 @@ mod tests {
         let residual = calculate_residual(&txn);
         // Empty cost spec posting doesn't contribute, only the second posting does
         assert_eq!(residual.get("AAPL"), Some(&dec!(-10)));
+    }
+
+    /// Issue #1026: when an empty cost spec is paired with a price
+    /// annotation (`{} @ price`), the residual computation must NOT
+    /// fall through to using the price as the posting's weight. The
+    /// canonical weight of a cost-tracked posting is `units × cost`,
+    /// not `units × price`. Pre-fix, this branch produced a balanced
+    /// residual using the wrong weight; the htsec compat fixture (and
+    /// the interpolate.rs caller chain) was the visible victim.
+    ///
+    /// Pinned here at the lib.rs level so a future revert of the
+    /// branch reordering would fail this test directly, independent
+    /// of the interpolate.rs end-to-end tests.
+    #[test]
+    fn test_calculate_residual_empty_cost_spec_with_price_skips_not_uses_price() {
+        let txn = Transaction::new(date(2024, 1, 15), "Sale, empty cost + price")
+            .with_posting(
+                Posting::new("Assets:Stock", Amount::new(dec!(-10), "HOOL"))
+                    .with_cost(CostSpec::empty())
+                    .with_price(rustledger_core::PriceAnnotation::Unit(Amount::new(
+                        dec!(150),
+                        "USD",
+                    ))),
+            )
+            .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(1500), "USD")));
+
+        let residual = calculate_residual(&txn);
+        // Pre-fix: residual[USD] = 0 (price-as-weight contributed
+        // -1500, cancelling cash's +1500).
+        // Post-fix: residual[USD] = +1500 (cost-unknown skipped, only
+        // cash contributes; the residual stays open for booking-pass
+        // lot matching to resolve via cost basis).
+        assert_eq!(residual.get("USD"), Some(&dec!(1500)));
+    }
+
+    /// Companion to the previous test for the `BigDecimal` variant.
+    /// Same fix, same semantics.
+    #[test]
+    fn test_calculate_residual_precise_empty_cost_spec_with_price_skips_not_uses_price() {
+        use bigdecimal::BigDecimal;
+        use std::str::FromStr;
+
+        let txn = Transaction::new(date(2024, 1, 15), "Sale, empty cost + price")
+            .with_posting(
+                Posting::new("Assets:Stock", Amount::new(dec!(-10), "HOOL"))
+                    .with_cost(CostSpec::empty())
+                    .with_price(rustledger_core::PriceAnnotation::Unit(Amount::new(
+                        dec!(150),
+                        "USD",
+                    ))),
+            )
+            .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(1500), "USD")));
+
+        let residual = calculate_residual_precise(&txn);
+        assert_eq!(
+            residual.get("USD"),
+            Some(&BigDecimal::from_str("1500").unwrap())
+        );
     }
 
     // =========================================================================

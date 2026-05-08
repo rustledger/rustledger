@@ -68,6 +68,27 @@ fn write_text<W: Write>(
         }
     }
 
+    // Resolve per-row currency hints once. The hint feeds both the
+    // width-calculation pass and the print pass; computing per-pass
+    // would duplicate the lookup.
+    //
+    // Lifetime: the `&str` entries borrow from `result.row_group_keys`.
+    // Safe because `result` is `&`-borrowed for the rest of this
+    // function — any future refactor that mutates `result` mid-stream
+    // would break this and the borrow checker would point at the cache.
+    //
+    // Short-circuit: when no row has a GROUP BY key (the common case for
+    // non-aggregate queries), every hint would be `None` — skip the
+    // allocation entirely. Access via `currency_hints.get(i).copied().flatten()`
+    // tolerates the empty Vec.
+    let currency_hints: Vec<Option<&str>> = if result.has_aggregate_rows() {
+        (0..result.rows.len())
+            .map(|i| currency_hint_for_row(result, i, ctx))
+            .collect()
+    } else {
+        Vec::new()
+    };
+
     // Calculate column widths using per-column contexts
     let mut widths: Vec<usize> = result
         .columns
@@ -75,10 +96,11 @@ fn write_text<W: Write>(
         .map(std::string::String::len)
         .collect();
 
-    for row in &result.rows {
+    for (row_idx, row) in result.rows.iter().enumerate() {
+        let currency_hint = currency_hints.get(row_idx).copied().flatten();
         for (i, value) in row.iter().enumerate() {
             let col_ctx = col_contexts.get(i).unwrap_or(ctx);
-            let len = format_value(value, numberify, col_ctx).len();
+            let len = format_value_with_hint(value, numberify, col_ctx, currency_hint).len();
             if i < widths.len() && len > widths[i] {
                 widths[i] = len;
             }
@@ -118,13 +140,15 @@ fn write_text<W: Write>(
     writeln!(writer)?;
 
     // Print rows using per-column display contexts
-    for row in &result.rows {
+    for (row_idx, row) in result.rows.iter().enumerate() {
+        let currency_hint = currency_hints.get(row_idx).copied().flatten();
+
         for (i, value) in row.iter().enumerate() {
             if i > 0 {
                 write!(writer, "  ")?;
             }
             let col_ctx = col_contexts.get(i).unwrap_or(ctx);
-            let formatted = format_value(value, numberify, col_ctx);
+            let formatted = format_value_with_hint(value, numberify, col_ctx, currency_hint);
             if i < widths.len() {
                 // Right-align numeric columns to match Python beancount
                 if i < is_numeric_col.len() && is_numeric_col[i] {
@@ -247,6 +271,105 @@ fn update_column_context(col_ctx: &mut DisplayContext, value: &Value, ledger_ctx
         }
         _ => {}
     }
+}
+
+/// Heuristic: does a string look like a beancount currency? Used as a
+/// pre-filter when scanning a row's GROUP BY key for a candidate currency
+/// to drive per-cell precision lookup (issue #988). Beancount currencies
+/// are 2-24 chars (the spec allows shorter, but every real-world ticker
+/// is at least 2 — the lower bound is a defensive narrowing of the
+/// heuristic since single uppercase letters mostly aren't currencies),
+/// start with an uppercase letter, and only contain `[A-Z0-9'._-]`.
+///
+/// This is only step one of two. The caller (`currency_hint_for_row`) ALSO
+/// checks that the candidate has tracked precision in the `DisplayContext`
+/// before returning it — without that gate, a false-positive (unrelated
+/// uppercase string in the key) would route a `Value::Number` through
+/// `DisplayContext::format`, whose unknown-currency fallback calls
+/// `normalize()` and *strips* trailing zeros (`0.000` → `0`), making
+/// output worse than the pre-fix state.
+fn looks_like_currency(s: &str) -> bool {
+    if s.len() < 2 || s.len() > 24 {
+        return false;
+    }
+    let mut chars = s.chars();
+    let first = chars.next().unwrap();
+    if !first.is_ascii_uppercase() {
+        return false;
+    }
+    chars.all(|c| {
+        c.is_ascii_uppercase() || c.is_ascii_digit() || matches!(c, '\'' | '.' | '_' | '-')
+    })
+}
+
+/// Find the per-row currency hint for issue #988 quantization.
+///
+/// Scans the row's GROUP BY key (from `QueryResult::group_key`) for the
+/// first string that both *looks* like a currency AND has tracked precision
+/// in the active `DisplayContext`. The precision check is essential — see
+/// `looks_like_currency`'s docstring for why a heuristic-only filter would
+/// regress output.
+///
+/// Multi-currency-column GROUP BY (rare but possible) takes the *first*
+/// match in iteration order — see `QueryResult::add_aggregate_row`'s
+/// docstring for the contract.
+fn currency_hint_for_row<'a>(
+    result: &'a rustledger_query::QueryResult,
+    row_idx: usize,
+    ctx: &DisplayContext,
+) -> Option<&'a str> {
+    result.group_key(row_idx).and_then(|key_values| {
+        key_values.iter().find_map(|v| match v {
+            Value::String(s)
+                if looks_like_currency(s) && ctx.get_precision(s.as_str()).is_some() =>
+            {
+                Some(s.as_str())
+            }
+            _ => None,
+        })
+    })
+}
+
+/// Format a value with optional GROUP BY currency hint (issue #988).
+///
+/// When `currency_hint` is set and the value is a `Value::Number` (typically
+/// produced by an aggregate like `SUM(number)` over a `GROUP BY currency`),
+/// route through `DisplayContext::format` for per-currency quantization so
+/// the rendered scale matches bean-query (e.g. `0.00` not `0.000`). Without
+/// the hint, behavior is identical to `format_value`.
+///
+/// The hint is *only* consulted by the text renderer — JSON / CSV /
+/// beancount output paths still use `format_value`, keeping their values
+/// lossless (issue #988 acceptance criterion #4).
+///
+/// The caller is responsible for ensuring the hint resolves to a currency
+/// with tracked precision (`ctx.get_precision(currency).is_some()`) — pass
+/// `None` otherwise. See `currency_hint_for_row` for the canonical
+/// extraction path.
+pub(super) fn format_value_with_hint(
+    value: &Value,
+    numberify: bool,
+    ctx: &DisplayContext,
+    currency_hint: Option<&str>,
+) -> String {
+    if let (Value::Number(n), Some(currency)) = (value, currency_hint) {
+        // Debug-only tripwire for the contract documented above: fire if a
+        // future caller passes a hint without filtering through the
+        // precision gate first. Only meaningful inside this branch — for
+        // non-Number values the hint is ignored, so a "bad" hint there is
+        // harmless. Release builds skip the check; the worst observable
+        // effect is the strip-trailing-zeros regression that the gate
+        // was designed to prevent.
+        debug_assert!(
+            ctx.get_precision(currency).is_some(),
+            "format_value_with_hint called with currency {currency:?} lacking \
+             tracked precision in the DisplayContext — would silently strip \
+             trailing zeros via the normalize() fallback. Filter via \
+             currency_hint_for_row first."
+        );
+        return ctx.format(*n, currency);
+    }
+    format_value(value, numberify, ctx)
 }
 
 pub(super) fn format_value(value: &Value, numberify: bool, ctx: &DisplayContext) -> String {
@@ -509,6 +632,497 @@ mod tests {
         assert!(
             rendered.contains("{128.99 USD}") && rendered.contains("{131.73 USD}"),
             "expected both costs rendered without leading space, got {rendered:?}"
+        );
+    }
+
+    // ─── Issue #988 ──────────────────────────────────────────────────────
+    // SUM-aggregate text output should match bean-query's per-currency
+    // precision. With `SELECT currency, SUM(number) GROUP BY currency`, the
+    // SUM cell receives the GROUP BY currency from the row sidecar and
+    // quantizes via DisplayContext. Concretely, the bug shows up when
+    // inputs have varying scales (e.g. one `0.000` mixed with several
+    // `0.00`s): `rust_decimal::Decimal::add` returns max-scale, so the sum
+    // keeps the wider `0.000` form even though USD's tracked precision is
+    // 2dp. After the fix, the per-currency hint pulls the SUM through
+    // `DisplayContext::format(_, "USD")`, rounding back to 2dp.
+    //
+    // JSON / CSV / beancount paths still go through `format_value` (no
+    // hint), preserving the unquantized value (AC #4: lossless non-text
+    // output).
+
+    /// Heuristic detection of currency-shaped strings (used by the text
+    /// renderer to find the GROUP BY currency in a row's sidecar).
+    #[test]
+    fn test_looks_like_currency_accepts_typical_currencies() {
+        assert!(looks_like_currency("USD"));
+        assert!(looks_like_currency("EUR"));
+        assert!(looks_like_currency("BTC"));
+        assert!(looks_like_currency("V0AAA"));
+        assert!(looks_like_currency("X.Y"));
+        assert!(looks_like_currency("ABC-123"));
+    }
+
+    #[test]
+    fn test_looks_like_currency_rejects_non_currencies() {
+        assert!(!looks_like_currency(""));
+        assert!(!looks_like_currency("U")); // single char (real currencies are 2+)
+        assert!(!looks_like_currency("usd")); // lowercase first
+        assert!(!looks_like_currency("123")); // starts with digit
+        assert!(!looks_like_currency("hello world")); // space
+        assert!(!looks_like_currency(&"A".repeat(25))); // too long
+    }
+
+    /// Pinning the format dispatch: a `Value::Number` cell rendered with
+    /// a currency hint goes through `DisplayContext::format(n, currency)`,
+    /// not `format_default(n)`. Without the hint, behavior is unchanged
+    /// from `format_value`.
+    #[test]
+    fn test_format_value_with_hint_routes_number_through_per_currency_ctx() {
+        let mut ctx = DisplayContext::new();
+        // Seed USD precision at 2dp by observing typical USD amounts.
+        ctx.update(dec!(1.00), "USD");
+        ctx.update(dec!(2.00), "USD");
+        ctx.update(dec!(3.00), "USD");
+
+        // A SUM-of-USD-zeros that came out at scale 3 from rust_decimal:
+        let sum_value = Value::Number(dec!(0.000));
+
+        let with_hint = format_value_with_hint(&sum_value, false, &ctx, Some("USD"));
+        let without_hint = format_value_with_hint(&sum_value, false, &ctx, None);
+
+        // With the hint, USD's per-currency precision (2dp) wins.
+        assert_eq!(
+            with_hint, "0.00",
+            "expected 2dp via USD ctx, got {with_hint:?}"
+        );
+        // Without the hint, we fall back to format_value's default (preserves
+        // the natural 3dp scale from rust_decimal).
+        assert_eq!(
+            without_hint, "0.000",
+            "expected default-format to keep rust_decimal natural scale, got {without_hint:?}"
+        );
+    }
+
+    /// Critical regression: `DisplayContext::format(n, currency)` falls
+    /// back to `n.normalize()` when the currency has no tracked precision,
+    /// which STRIPS trailing zeros. So a false-positive hint isn't a no-op
+    /// — it would render `0.000` as `0`, making output WORSE than the
+    /// pre-fix state. The gate lives in `currency_hint_for_row` (only
+    /// returns hints for currencies that pass `ctx.get_precision().is_some()`);
+    /// this test pins that contract end-to-end.
+    #[test]
+    fn test_currency_hint_for_row_filters_untracked_currencies() {
+        use rustledger_query::QueryResult;
+
+        let mut ctx = DisplayContext::new();
+        ctx.update(dec!(1.00), "USD");
+        ctx.update(dec!(2.00), "USD");
+
+        let mut result = QueryResult::new(vec!["currency".into(), "sum".into()]);
+        // Row 0: GROUP BY key contains tracked USD → hint returned.
+        result.add_aggregate_row(
+            vec![Value::String("USD".into()), Value::Number(dec!(0.000))],
+            vec![Value::String("USD".into())],
+        );
+        // Row 1: GROUP BY key contains MADEUP — passes shape check but
+        // has no tracked precision → hint MUST be filtered out.
+        result.add_aggregate_row(
+            vec![Value::String("MADEUP".into()), Value::Number(dec!(0.000))],
+            vec![Value::String("MADEUP".into())],
+        );
+
+        let usd_hint = currency_hint_for_row(&result, 0, &ctx);
+        let madeup_hint = currency_hint_for_row(&result, 1, &ctx);
+
+        assert_eq!(usd_hint, Some("USD"));
+        assert_eq!(
+            madeup_hint, None,
+            "untracked currency must NOT be returned as a hint — would cause \
+             DisplayContext::format to strip trailing zeros via normalize()"
+        );
+    }
+
+    // ─── AC #4: lossless CSV / JSON / beancount output ───────────────────
+    //
+    // The fix MUST NOT bleed into non-text renderers. Aggregate values
+    // there should still be the unquantized rust_decimal — JSON consumers
+    // parsing exact scales depend on this. These tests pin the contract
+    // by rendering an aggregate `Value::Number(0.000)` with a USD
+    // GROUP BY key context that *would* be quantized in text mode.
+
+    /// CSV of an aggregate row preserves the unquantized decimal even
+    /// when a GROUP BY currency would otherwise drive 2dp quantization.
+    #[test]
+    fn test_csv_aggregate_output_preserves_unquantized_decimal() {
+        use rustledger_query::QueryResult;
+
+        let mut ctx = DisplayContext::new();
+        ctx.update(dec!(1.00), "USD");
+        ctx.update(dec!(2.00), "USD");
+
+        let mut result = QueryResult::new(vec!["currency".into(), "sum".into()]);
+        result.add_aggregate_row(
+            vec![Value::String("USD".into()), Value::Number(dec!(0.000))],
+            vec![Value::String("USD".into())],
+        );
+
+        let mut buf: Vec<u8> = Vec::new();
+        write_csv(&result, &mut buf, false, &ctx).expect("csv ok");
+        let csv = String::from_utf8(buf).expect("utf8");
+
+        // Parse the data row by splitting on lines and commas — robust
+        // to either `\n` or `\r\n` line endings that platform-specific
+        // String/I/O might emit.
+        let data_row = csv
+            .lines()
+            .nth(1)
+            .expect("CSV should have a header line + 1 data row");
+        let cells: Vec<&str> = data_row.split(',').collect();
+        assert_eq!(cells.len(), 2, "expected 2 columns, got: {cells:?}");
+        assert_eq!(cells[0], "USD");
+        assert_eq!(
+            cells[1], "0.000",
+            "CSV sum cell must be the unquantized 0.000 (lossless AC #4)"
+        );
+    }
+
+    /// JSON of an aggregate row likewise preserves the unquantized
+    /// decimal — JSON consumers (e.g. downstream pipelines reading
+    /// `bean-query --format json`) get the raw `rust_decimal` scale.
+    #[test]
+    fn test_json_aggregate_output_preserves_unquantized_decimal() {
+        use rustledger_query::QueryResult;
+
+        // `write_json` takes no DisplayContext — it serializes raw Decimal
+        // values via `to_string()`, so per-currency precision can't bleed
+        // into the JSON path even by accident.
+
+        let mut result = QueryResult::new(vec!["currency".into(), "sum".into()]);
+        result.add_aggregate_row(
+            vec![Value::String("USD".into()), Value::Number(dec!(0.000))],
+            vec![Value::String("USD".into())],
+        );
+
+        let mut buf: Vec<u8> = Vec::new();
+        write_json(&result, &mut buf).expect("json ok");
+        let json = String::from_utf8(buf).expect("utf8");
+
+        // Lossless: the literal string "0.000" appears as the Number's
+        // serialized form. Quoted (since the JSON emitter stringifies
+        // decimals to preserve precision).
+        assert!(
+            json.contains(r#""0.000""#),
+            "expected unquantized \"0.000\" in JSON, got {json}"
+        );
+        // And the quantized form must NOT appear. `r#""0.00""#` is a
+        // unique substring (the closing quote distinguishes it from
+        // `"0.000"` — `0.000` contains `0.00` but not `0.00"`).
+        assert!(
+            !json.contains(r#""0.00""#),
+            "JSON must NOT contain quantized \"0.00\", got {json}"
+        );
+    }
+
+    /// `bean-query`-style beancount output similarly stays at the
+    /// natural decimal scale.
+    #[test]
+    fn test_beancount_aggregate_output_preserves_unquantized_decimal() {
+        use rustledger_query::QueryResult;
+
+        let mut ctx = DisplayContext::new();
+        ctx.update(dec!(1.00), "USD");
+        ctx.update(dec!(2.00), "USD");
+
+        let mut result = QueryResult::new(vec!["currency".into(), "sum".into()]);
+        result.add_aggregate_row(
+            vec![Value::String("USD".into()), Value::Number(dec!(0.000))],
+            vec![Value::String("USD".into())],
+        );
+
+        let mut buf: Vec<u8> = Vec::new();
+        write_beancount(&result, &mut buf, &ctx).expect("beancount ok");
+        let out = String::from_utf8(buf).expect("utf8");
+
+        assert!(
+            out.contains("0.000"),
+            "expected unquantized 0.000 in beancount output, got {out:?}"
+        );
+    }
+
+    /// Mirror of the AC #4 tests for the *text* renderer: same input
+    /// MUST be quantized. This is the bug we're fixing — without the
+    /// hint, text output would also keep 0.000. Together with the
+    /// three lossless tests above, this pins the divergence: text
+    /// quantizes, everything else doesn't.
+    #[test]
+    fn test_text_aggregate_output_quantizes_via_currency_hint() {
+        use rustledger_query::QueryResult;
+
+        let mut ctx = DisplayContext::new();
+        ctx.update(dec!(1.00), "USD");
+        ctx.update(dec!(2.00), "USD");
+        ctx.update(dec!(3.00), "USD");
+
+        let mut result = QueryResult::new(vec!["currency".into(), "sum".into()]);
+        result.add_aggregate_row(
+            vec![Value::String("USD".into()), Value::Number(dec!(0.000))],
+            vec![Value::String("USD".into())],
+        );
+
+        let mut buf: Vec<u8> = Vec::new();
+        write_text(&result, &mut buf, false, &ctx).expect("text ok");
+        let text = String::from_utf8(buf).expect("utf8");
+
+        assert!(
+            text.contains("0.00") && !text.contains("0.000"),
+            "text output should be quantized to 2dp via USD hint, got {text:?}"
+        );
+    }
+
+    /// End-to-end integration test (the canary the issue's compat
+    /// harness would fire). Drives a real BQL query
+    /// `SELECT currency, SUM(number) GROUP BY currency` through the
+    /// Executor and the text renderer, then asserts the rendered
+    /// output is quantized to USD's tracked precision (2dp) instead of
+    /// `rust_decimal`'s natural 3dp.
+    ///
+    /// This is the only test in the file that exercises the FULL
+    /// pipeline — Executor populates `row_group_keys`, `write_text`
+    /// reads via `currency_hint_for_row`, format dispatches through
+    /// `DisplayContext::format`. A regression that breaks the wiring
+    /// (e.g. someone reverting `add_aggregate_row` to `add_row` in
+    /// the executor) would fire here even if the helper-level tests
+    /// stay green.
+    #[test]
+    fn test_e2e_sum_group_by_currency_text_output_matches_per_currency_precision() {
+        use rustledger_core::{Amount, Directive, Posting, Transaction};
+        use rustledger_query::{Executor, parse};
+
+        let date = |y, m, d| rustledger_core::naive_date(y, m, d).unwrap();
+
+        // Build a tiny ledger where SUM(number) GROUP BY currency on USD
+        // mixes scales: 5.00 + (-5.00) + 0.000 = 0.000 (rust_decimal
+        // natural). Without the fix this renders as `0.000`. With the
+        // fix and a USD-tracked DisplayContext at 2dp, it should render
+        // as `0.00`.
+        let directives = vec![
+            Directive::Transaction(
+                Transaction::new(date(2024, 1, 15), "Coffee")
+                    .with_flag('*')
+                    .with_posting(Posting::new(
+                        "Expenses:Food",
+                        Amount::new(dec!(5.00), "USD"),
+                    ))
+                    .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(-5.00), "USD"))),
+            ),
+            // A scale-3 input that bumps SUM's natural scale to 3.
+            Directive::Transaction(
+                Transaction::new(date(2024, 1, 16), "Refund")
+                    .with_flag('*')
+                    .with_posting(Posting::new(
+                        "Expenses:Food",
+                        Amount::new(dec!(0.000), "USD"),
+                    ))
+                    .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(0.0), "USD"))),
+            ),
+        ];
+
+        // Build a DisplayContext that would naturally come from the
+        // loader observing typical USD amounts at 2dp.
+        let mut ctx = DisplayContext::new();
+        ctx.update(dec!(5.00), "USD");
+        ctx.update(dec!(-5.00), "USD");
+
+        let mut executor = Executor::new(&directives);
+        let query =
+            parse("SELECT currency, SUM(number) GROUP BY currency").expect("parse should succeed");
+        let result = executor.execute(&query).expect("execute should succeed");
+
+        // The executor MUST have recorded the GROUP BY currency.
+        // Otherwise the renderer can't know to quantize.
+        assert!(
+            result.group_key(0).is_some(),
+            "aggregate executor must populate row_group_keys; got None for row 0"
+        );
+
+        let mut buf: Vec<u8> = Vec::new();
+        write_text(&result, &mut buf, false, &ctx).expect("write_text ok");
+        let text = String::from_utf8(buf).expect("utf8");
+
+        // Anchor the assertion on the data-row's last whitespace-
+        // separated token (the SUM cell, right-aligned). Avoids a
+        // brittle global substring scan: e.g. an unrelated "0.0001"
+        // elsewhere in the table would defeat a `!text.contains("0.000")`
+        // check, but the column-anchored slice is the actual contract.
+        let data_row = text
+            .lines()
+            .find(|l| l.contains("USD"))
+            .unwrap_or_else(|| panic!("expected a USD data row; raw output:\n{text}"));
+        let sum_cell = data_row
+            .split_whitespace()
+            .last()
+            .unwrap_or_else(|| panic!("expected non-empty data row; got: {data_row:?}"));
+        assert_eq!(
+            sum_cell, "0.00",
+            "SUM cell should be quantized to USD's 2dp; row was {data_row:?}, raw output:\n{text}"
+        );
+    }
+
+    /// Implicit GROUP BY: when the SELECT clause mixes aggregate and
+    /// non-aggregate exprs without an explicit `GROUP BY`, the executor
+    /// implicitly groups by the non-aggregate columns
+    /// (`extract_implicit_group_by_exprs` in
+    /// `rustledger-query/src/executor/aggregation.rs`). This test
+    /// verifies the implicit path also populates `row_group_keys` with
+    /// the currency, so the renderer's quantization works for queries
+    /// that omit `GROUP BY` — bean-query's most common shape.
+    #[test]
+    fn test_e2e_implicit_group_by_currency_text_output_quantized() {
+        use rustledger_core::{Amount, Directive, Posting, Transaction};
+        use rustledger_query::{Executor, parse};
+
+        let date = |y, m, d| rustledger_core::naive_date(y, m, d).unwrap();
+
+        let directives = vec![
+            Directive::Transaction(
+                Transaction::new(date(2024, 1, 15), "T1")
+                    .with_flag('*')
+                    .with_posting(Posting::new(
+                        "Expenses:Food",
+                        Amount::new(dec!(5.00), "USD"),
+                    ))
+                    .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(-5.00), "USD"))),
+            ),
+            Directive::Transaction(
+                Transaction::new(date(2024, 1, 16), "T2")
+                    .with_flag('*')
+                    .with_posting(Posting::new(
+                        "Expenses:Food",
+                        Amount::new(dec!(0.000), "USD"),
+                    ))
+                    .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(0.0), "USD"))),
+            ),
+        ];
+
+        let mut ctx = DisplayContext::new();
+        ctx.update(dec!(5.00), "USD");
+        ctx.update(dec!(-5.00), "USD");
+
+        let mut executor = Executor::new(&directives);
+        // Note: NO `GROUP BY currency` — implicit grouping kicks in.
+        let query = parse("SELECT currency, SUM(number)").expect("parse should succeed");
+        let result = executor.execute(&query).expect("execute should succeed");
+
+        assert!(
+            result.group_key(0).is_some(),
+            "implicit-group-by aggregate must populate row_group_keys"
+        );
+
+        let mut buf: Vec<u8> = Vec::new();
+        write_text(&result, &mut buf, false, &ctx).expect("write_text ok");
+        let text = String::from_utf8(buf).expect("utf8");
+
+        let data_row = text
+            .lines()
+            .find(|l| l.contains("USD"))
+            .unwrap_or_else(|| panic!("expected USD data row; raw output:\n{text}"));
+        let sum_cell = data_row.split_whitespace().last().expect("non-empty row");
+        assert_eq!(
+            sum_cell, "0.00",
+            "implicit GROUP BY should quantize same as explicit; got {sum_cell:?} \
+             in row {data_row:?}\n full output:\n{text}"
+        );
+    }
+
+    /// Multi-column GROUP BY: when the key has both a non-currency
+    /// column (account) and a currency column, the renderer should
+    /// pick the currency-shaped string regardless of position. Pins
+    /// the contract documented on `add_aggregate_row`.
+    #[test]
+    fn test_currency_hint_for_row_finds_currency_in_multi_column_group_by_key() {
+        use rustledger_query::QueryResult;
+
+        let mut ctx = DisplayContext::new();
+        ctx.update(dec!(1.00), "USD");
+        ctx.update(dec!(2.00), "USD");
+
+        let mut result = QueryResult::new(vec!["account".into(), "currency".into(), "sum".into()]);
+        // Key order: [account="Assets:Bank", currency="USD"]. account
+        // doesn't pass `looks_like_currency` (lowercase chars + colon),
+        // so the iterator skips to the second key element and picks USD.
+        result.add_aggregate_row(
+            vec![
+                Value::String("Assets:Bank".into()),
+                Value::String("USD".into()),
+                Value::Number(dec!(0.000)),
+            ],
+            vec![
+                Value::String("Assets:Bank".into()),
+                Value::String("USD".into()),
+            ],
+        );
+
+        let hint = currency_hint_for_row(&result, 0, &ctx);
+        assert_eq!(
+            hint,
+            Some("USD"),
+            "expected USD hint extracted from second key element"
+        );
+    }
+
+    /// Pins the documented "first match wins" contract on
+    /// `add_aggregate_row`: when TWO currency-shaped strings appear in
+    /// the GROUP BY key (rare but possible — e.g.
+    /// `GROUP BY currency, quote_currency`), iteration picks the first
+    /// one. A future change to `find_map` → `last`, scoring, or
+    /// alphabetical-min would break this test (which is the point —
+    /// the contract is load-bearing for downstream behavior).
+    #[test]
+    fn test_currency_hint_for_row_first_currency_wins_when_multiple() {
+        use rustledger_query::QueryResult;
+
+        let mut ctx = DisplayContext::new();
+        // Both EUR and USD have tracked precision so the gate doesn't
+        // disambiguate — only the iteration order does.
+        ctx.update(dec!(1.00), "EUR");
+        ctx.update(dec!(2.00), "EUR");
+        ctx.update(dec!(1.00), "USD");
+        ctx.update(dec!(2.00), "USD");
+
+        let mut result = QueryResult::new(vec![
+            "currency".into(),
+            "quote_currency".into(),
+            "sum".into(),
+        ]);
+        // Row 0 key: [EUR, USD]. First-wins → EUR.
+        result.add_aggregate_row(
+            vec![
+                Value::String("EUR".into()),
+                Value::String("USD".into()),
+                Value::Number(dec!(0.000)),
+            ],
+            vec![Value::String("EUR".into()), Value::String("USD".into())],
+        );
+        // Row 1 key: [USD, EUR] — reversed. Confirms the result tracks
+        // key order, not some side property of EUR/USD specifically.
+        result.add_aggregate_row(
+            vec![
+                Value::String("USD".into()),
+                Value::String("EUR".into()),
+                Value::Number(dec!(0.000)),
+            ],
+            vec![Value::String("USD".into()), Value::String("EUR".into())],
+        );
+
+        assert_eq!(
+            currency_hint_for_row(&result, 0, &ctx),
+            Some("EUR"),
+            "first-wins: [EUR, USD] should pick EUR"
+        );
+        assert_eq!(
+            currency_hint_for_row(&result, 1, &ctx),
+            Some("USD"),
+            "first-wins: [USD, EUR] should pick USD"
         );
     }
 }

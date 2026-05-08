@@ -57,7 +57,15 @@ jobs:
           # Pinned to immutable commits so compat CI is reproducible —
           # tracking HEAD turns unrelated upstream commits into
           # spurious red CI here. Bump deliberately when needed.
-          pip install git+https://github.com/redstreet/beancount_reds_plugins@41af12d13c6ba5b2949b2939dfa180f43a5cb307
+          # Bumped to include the box_accrual plugin (added 2025-10-14
+          # in commit 6d67ce6cbdb5b36e71e76adb5c741ef6734ec407). The
+          # previous pin (41af12d) predated the plugin, so bean-check
+          # failed with ModuleNotFoundError on the
+          # `beancount_reds_plugins/box_accrual/test.beancount` fixture
+          # while rledger (which has a native port) succeeded — the
+          # `rust_only_pass` divergence reported in #990 was
+          # environmental, not semantic.
+          pip install git+https://github.com/redstreet/beancount_reds_plugins@c94911f15ddb8776eac8280e6688ead578aaf344
           pip install git+https://github.com/Evernight/beancount-lazy-plugins@1a685eddbd5e15e420fdf93604506eed6ca94c45
       # Cache downloaded test files to avoid re-cloning repos every run
       - name: Cache compatibility test files

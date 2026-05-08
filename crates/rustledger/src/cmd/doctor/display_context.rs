@@ -296,9 +296,13 @@ mod tests {
 
     #[test]
     fn fixed_with_sources_but_currency_not_in_either_falls_back_to_programmatic() {
-        // Defensive: if the source map doesn't list a currency that has
-        // a fixed override, the only explanation is a programmatic call.
-        // Same label as the None-sources case.
+        // Defensive degradation: if the source map doesn't list a currency
+        // that has a fixed override, the most likely explanation is a
+        // programmatic `set_fixed_precision` call (i.e. someone built the
+        // context outside the loader path). A bug in `collect_fixed_sources`
+        // could ALSO produce this state — the renderer's behavior here is
+        // to fall back gracefully rather than misattribute. Same label as
+        // the None-sources case.
         let mut ctx = DisplayContext::new();
         ctx.update(dec!(1.234), "USD");
         ctx.set_fixed_precision("USD", 2);
@@ -447,13 +451,70 @@ option "display_precision" "USD:0.001"
         );
     }
 
+    /// E2E: invalid `precision:` metadata coexisting with a valid
+    /// `option "display_precision"`. The loader applies the option,
+    /// skips the invalid metadata (validator emits E5003), and the
+    /// effective precision comes from the option. The doctor label
+    /// must say "fixed via option", NOT "fixed via commodity metadata"
+    /// — pinning that `collect_fixed_sources`'s `parse_precision_meta`
+    /// gate matches the loader's gate. Without this test, a future
+    /// "simplification" of `collect_fixed_sources` (e.g. dropping the
+    /// validity check and treating any `precision` key as
+    /// metadata-sourced) would silently mislabel the override.
+    #[test]
+    fn e2e_invalid_metadata_with_option_labels_as_option() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("e2e_invalid.beancount");
+        std::fs::write(
+            &path,
+            r#"option "display_precision" "USD:0.01"
+
+2024-01-01 commodity USD
+  precision: -1
+
+2024-01-01 open Assets:USD
+2024-01-01 open Equity:Opening
+
+2024-01-15 * "USD"
+  Assets:USD       100.00 USD
+  Equity:Opening
+"#,
+        )
+        .unwrap();
+
+        let mut buf: Vec<u8> = Vec::new();
+        cmd_display_context(&path, &mut buf).expect("cmd should succeed");
+        let out = String::from_utf8(buf).unwrap();
+
+        let usd = currency_section(&out, "USD");
+        assert!(
+            usd.contains("(fixed via option \"display_precision\")"),
+            "USD should be option-sourced (invalid metadata is skipped); section:\n{usd}"
+        );
+        assert!(
+            !usd.contains("commodity metadata"),
+            "invalid metadata must NOT be labeled metadata-sourced; section:\n{usd}"
+        );
+    }
+
     /// Extract the per-currency block from a doctor output. Returns
     /// everything from the line after `<CCY>:` up to the next blank
     /// line (or end-of-output). Used by `e2e_*` tests to scope label
     /// assertions to the right currency.
+    ///
+    /// Panics if the currency isn't in the output — silent fallthrough
+    /// would let a typo'd test name silently assert against the doctor
+    /// header section.
+    ///
+    /// The header search is anchored to a preceding newline (`\n<CCY>:\n`)
+    /// so a mid-line mention of `<CCY>:` (e.g. an inline summary that a
+    /// future format change might add) doesn't match.
     fn currency_section<'a>(out: &'a str, currency: &str) -> &'a str {
-        let header = format!("{currency}:\n");
-        let start = out.find(&header).map(|i| i + header.len()).unwrap_or(0);
+        let header = format!("\n{currency}:\n");
+        let start = out
+            .find(&header)
+            .unwrap_or_else(|| panic!("currency {currency:?} not found in output:\n{out}"))
+            + header.len();
         let rest = &out[start..];
         let end = rest.find("\n\n").unwrap_or(rest.len());
         &rest[..end]

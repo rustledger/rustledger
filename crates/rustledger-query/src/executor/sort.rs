@@ -90,7 +90,7 @@ impl Executor<'_> {
         &self,
         result: &QueryResult,
         pivot_exprs: &[Expr],
-        _targets: &[Target],
+        targets: &[Target],
     ) -> Result<QueryResult, QueryError> {
         if pivot_exprs.is_empty() {
             return Ok(result.clone());
@@ -112,17 +112,44 @@ impl Executor<'_> {
         pivot_values.sort_by(|a, b| self.compare_values_for_sort(a, b));
         pivot_values.dedup();
 
-        // Build new column names: original columns (except pivot) + pivot values
+        // Identify the "value" column — the LAST VISIBLE SELECT target,
+        // not just the last column in `result`. `execute_select` appends
+        // hidden columns for ORDER BY targets that aren't in SELECT;
+        // those live at positions `targets.len()..result.columns.len()`,
+        // and using `result.columns.len() - 1` would misidentify a
+        // hidden column as the value column to pivot, producing
+        // garbage output.
+        //
+        // Caught by Copilot review on PR #1033. Pivoting in the
+        // presence of hidden ORDER BY columns also has a separate bug
+        // with the post-pivot strip — see #1034 for that one (it doesn't
+        // affect this PR's scope as long as we identify the right
+        // value column here).
+        //
+        // The row-builder below excludes the value column from
+        // `group_cols`, so the column header MUST exclude it too —
+        // otherwise post-pivot rows have len = group_cols + pivots while
+        // columns has len = (orig - pivot_col) + pivots, off by one.
+        // Pre-fix, the resulting mismatch silently dropped the SUM cell
+        // from JSON output (#1023's e2e test caught this).
+        let value_col_idx = if targets.is_empty() {
+            // Defensive: targets shouldn't be empty when pivot_by is set
+            // (parser/planner would reject), but if it ever is, fall
+            // back to the prior assumption rather than panicking.
+            result.columns.len().saturating_sub(1)
+        } else {
+            targets.len() - 1
+        };
+
+        // Build new column names: original columns (except pivot AND
+        // value) + pivot values.
         let mut new_columns: Vec<String> = result
             .columns
             .iter()
             .enumerate()
-            .filter(|(i, _)| *i != pivot_col_idx)
+            .filter(|(i, _)| *i != pivot_col_idx && *i != value_col_idx)
             .map(|(_, c)| c.clone())
             .collect();
-
-        // Identify the "value" column (usually the last one, or the one with aggregate)
-        let value_col_idx = result.columns.len() - 1;
 
         // Add pivot value columns
         for pv in &pivot_values {

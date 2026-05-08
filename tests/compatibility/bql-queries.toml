@@ -156,3 +156,11 @@ name = "prices-from-plugin-by-date"
 query = "SELECT date, currency, amount FROM #prices ORDER BY date, currency"
 notes = "Plugin-emitted price content — catches @@ vs @ confusion (issue #992)"
 preserve_order = true
+
+# ----------------------------------------------------------------------
+# PIVOT BY queries are intentionally NOT in this corpus. bean-query's
+# PIVOT BY takes TWO columns (pivot value + group key) where rledger
+# takes ONE. The two tools produce structurally different output for
+# any PIVOT query, so a row-by-row diff would be permanently red.
+# Tracking the semantic reconciliation separately — see #1034.
+# ----------------------------------------------------------------------

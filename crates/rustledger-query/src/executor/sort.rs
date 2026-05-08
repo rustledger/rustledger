@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use crate::ast::{Expr, Literal, OrderSpec, SortDirection, Target};
+use crate::ast::{Expr, Literal, OrderSpec, SortDirection};
 use crate::error::QueryError;
 
 use super::Executor;
@@ -86,121 +86,203 @@ impl Executor<'_> {
 
         Ok(())
     }
+    /// Apply the PIVOT BY transformation, matching bean-query semantics
+    /// (issue #1034).
+    ///
+    /// **Syntax**: `PIVOT BY <pivot_value_col>, <group_by_col>` — exactly
+    /// two columns. The first column's values become the new column
+    /// headers; the second is the GROUP BY column to keep as the row key.
+    /// All other columns become "value" cells, populated at the
+    /// intersection of (`group_by_col` value, `pivot_value_col` value).
+    ///
+    /// **Validation** (rules 1–3 match `_compile_pivot_by` in
+    /// `beanquery/compiler.py`; rule 4 is rledger-specific):
+    /// - exactly two pivot columns (`PivotWrongArity` otherwise)
+    /// - the two columns must differ (`PivotSameColumn` otherwise)
+    /// - the second column must be a GROUP BY target
+    ///   (`PivotSecondNotInGroupBy` otherwise)
+    /// - PIVOT BY requires an explicit `GROUP BY` clause
+    ///   (`PivotWithoutGroupBy` otherwise). Bean-query reaches the
+    ///   same outcome through grammar — the second-must-be-in-GROUP-BY
+    ///   rule is only checked when GROUP BY exists, but their parser
+    ///   typically rejects PIVOT-without-GROUP-BY queries earlier.
+    ///   rledger's parser is more permissive, so we surface the case
+    ///   with a specific error rather than the misleading "second
+    ///   column not in GROUP BY".
+    ///
+    /// **Input contract**: callers should provide `result` with at most
+    /// one row per `(key_col, pivot_value_col)` pair — the typical
+    /// guarantee from `GROUP BY <key>, <pivot_value>`. If the input has
+    /// duplicate `(key, pivot_value)` rows, only the first one in row
+    /// order contributes its value cells; later duplicates are silently
+    /// ignored. Validator-rejected aggregate queries always satisfy
+    /// this; non-aggregate queries with PIVOT would need the caller to
+    /// enforce uniqueness.
+    ///
+    /// **Pipeline ordering**: this runs AFTER `sort_results` and the
+    /// hidden-column strip (`execute_select`), so `result.columns`
+    /// holds only the visible select targets in the user-requested
+    /// sort order. That contract is what makes the strip+pivot
+    /// interaction (item #4 of #1034) cleanly disappear.
     pub(super) fn apply_pivot(
         &self,
         result: &QueryResult,
         pivot_exprs: &[Expr],
-        targets: &[Target],
+        group_by: &Option<Vec<Expr>>,
     ) -> Result<QueryResult, QueryError> {
-        if pivot_exprs.is_empty() {
-            return Ok(result.clone());
+        // The parser uses `at_least(1)` for the PIVOT BY clause and
+        // execute_select only calls this fn inside `if let Some(pivot_exprs)`,
+        // so an empty slice is unreachable. Belt-and-suspenders.
+        debug_assert!(
+            !pivot_exprs.is_empty(),
+            "apply_pivot called with empty pivot_exprs (parser invariant violated)"
+        );
+
+        // Validation #1: arity. Bean-query requires exactly two columns.
+        if pivot_exprs.len() != 2 {
+            return Err(QueryError::PivotWrongArity(pivot_exprs.len()));
         }
 
-        // For simplicity, we'll pivot on the first expression only
-        // A full implementation would support multiple pivot columns
-        let pivot_expr = &pivot_exprs[0];
-
-        // Find which column in the result matches the pivot expression
-        let pivot_col_idx = self.find_pivot_column(result, pivot_expr)?;
-
-        // Collect unique pivot values
-        let mut pivot_values: Vec<Value> = result
-            .rows
-            .iter()
-            .map(|row| row.get(pivot_col_idx).cloned().unwrap_or(Value::Null))
-            .collect();
-        pivot_values.sort_by(|a, b| self.compare_values_for_sort(a, b));
-        pivot_values.dedup();
-
-        // Identify the "value" column — the LAST VISIBLE SELECT target,
-        // not just the last column in `result`. `execute_select` appends
-        // hidden columns for ORDER BY targets that aren't in SELECT;
-        // those live at positions `targets.len()..result.columns.len()`,
-        // and using `result.columns.len() - 1` would misidentify a
-        // hidden column as the value column to pivot, producing
-        // garbage output.
-        //
-        // Caught by Copilot review on PR #1033. Pivoting in the
-        // presence of hidden ORDER BY columns also has a separate bug
-        // with the post-pivot strip — see #1034 for that one (it doesn't
-        // affect this PR's scope as long as we identify the right
-        // value column here).
-        //
-        // The row-builder below excludes the value column from
-        // `group_cols`, so the column header MUST exclude it too —
-        // otherwise post-pivot rows have len = group_cols + pivots while
-        // columns has len = (orig - pivot_col) + pivots, off by one.
-        // Pre-fix, the resulting mismatch silently dropped the SUM cell
-        // from JSON output (#1023's e2e test caught this).
-        let value_col_idx = if targets.is_empty() {
-            // Defensive: targets shouldn't be empty when pivot_by is set
-            // (parser/planner would reject), but if it ever is, fall
-            // back to the prior assumption rather than panicking.
-            result.columns.len().saturating_sub(1)
-        } else {
-            targets.len() - 1
+        // Validation #2: PIVOT BY requires an explicit GROUP BY clause.
+        // Implicit grouping (aggregates without GROUP BY) produces a
+        // single-row result whose key dimension is undefined — PIVOT
+        // can't identify a row key from such a result. Reject early
+        // so the user gets a specific error, not the misleading
+        // "second column not in GROUP BY".
+        let Some(gb) = group_by.as_ref() else {
+            return Err(QueryError::PivotWithoutGroupBy);
         };
 
-        // Build new column names: original columns (except pivot AND
-        // value) + pivot values.
-        let mut new_columns: Vec<String> = result
-            .columns
+        let pivot_value_col_idx = self.find_pivot_column(result, &pivot_exprs[0])?;
+        let key_col_idx = self.find_pivot_column(result, &pivot_exprs[1])?;
+
+        // Validation #3: the two columns must differ.
+        if pivot_value_col_idx == key_col_idx {
+            return Err(QueryError::PivotSameColumn);
+        }
+
+        // Validation #4: the second column must be a GROUP BY target.
+        // Resolve each GROUP BY expression to its result column index
+        // and check membership.
+        let key_in_group_by = gb
             .iter()
-            .enumerate()
-            .filter(|(i, _)| *i != pivot_col_idx && *i != value_col_idx)
-            .map(|(_, c)| c.clone())
+            .filter_map(|expr| self.find_pivot_column(result, expr).ok())
+            .any(|idx| idx == key_col_idx);
+        if !key_in_group_by {
+            return Err(QueryError::PivotSecondNotInGroupBy);
+        }
+
+        // Collect unique pivot values, preserving the row-order they
+        // appear in (which post-sort means the user's ORDER BY drives
+        // the new column order). Linear-scan dedup via structural
+        // PartialEq — pivot values are typically small (handful of
+        // currencies), and `Value` doesn't implement `Hash` because
+        // some inner types (Decimal, Inventory) don't, so a pure
+        // hash-based dedup either risks 2⁻⁶⁴ collisions (false-merging
+        // distinct values) or requires a wrapper type. Structural eq
+        // sidesteps both.
+        let mut pivot_values: Vec<Value> = Vec::new();
+        for row in &result.rows {
+            let v = row.get(pivot_value_col_idx).cloned().unwrap_or(Value::Null);
+            if !pivot_values.contains(&v) {
+                pivot_values.push(v);
+            }
+        }
+
+        // The "value" cells to place at each (key, pivot_value)
+        // intersection are EVERY OTHER column that's not the pivot and
+        // not the key. Today the typical query has exactly one such
+        // column (the aggregate), but the design generalizes.
+        let value_col_idxs: Vec<usize> = (0..result.columns.len())
+            .filter(|i| *i != pivot_value_col_idx && *i != key_col_idx)
             .collect();
 
-        // Add pivot value columns
+        // Build new column names. Layout: [key_col, <value_col × pivot_value>...].
+        //
+        // Single-value-column case (the typical SUM(number) shape) gets
+        // just the pivot value as the header — matches bean-query
+        // exactly. Multi-value-column case qualifies with the value
+        // column name (`<value_col> / <pivot_value>`) so the headers
+        // stay unambiguous when there's more than one aggregate. The
+        // asymmetry is deliberate: a single-aggregate header like
+        // `USD` is what users expect from the typical pivot.
+        let mut new_columns: Vec<String> =
+            Vec::with_capacity(1 + value_col_idxs.len() * pivot_values.len());
+        new_columns.push(result.columns[key_col_idx].clone());
         for pv in &pivot_values {
-            new_columns.push(Self::value_to_string(pv));
+            let pv_str = Self::value_to_string(pv);
+            if value_col_idxs.len() == 1 {
+                new_columns.push(pv_str);
+            } else {
+                for &vci in &value_col_idxs {
+                    new_columns.push(format!("{} / {pv_str}", result.columns[vci]));
+                }
+            }
         }
 
         let mut new_result = QueryResult::new(new_columns);
 
-        // Group rows by non-pivot, non-value columns
-        let group_cols: Vec<usize> = (0..result.columns.len())
-            .filter(|i| *i != pivot_col_idx && *i != value_col_idx)
-            .collect();
-
-        let mut groups: HashMap<String, Vec<&Row>> = HashMap::new();
+        // Group rows by their key-column value, preserving first-seen
+        // order so the post-sort row order survives into the pivot.
+        //
+        // The hash bucket is a fast first-pass; structural `==` inside
+        // the bucket guarantees we don't false-merge distinct keys
+        // that share a u64 hash (probability ~2⁻⁶⁴, but pinned out
+        // for correctness). Same pattern as `pivot_lookup` below.
+        let mut groups: Vec<(Value, Vec<&Row>)> = Vec::new();
+        let mut group_index: HashMap<u64, Vec<usize>> = HashMap::new();
         for row in &result.rows {
-            let key: String = group_cols
-                .iter()
-                .map(|&i| Self::value_to_string(&row[i]))
-                .collect::<Vec<_>>()
-                .join("|");
-            groups.entry(key).or_default().push(row);
+            let key = row.get(key_col_idx).cloned().unwrap_or(Value::Null);
+            let h = hash_single_value(&key);
+            let bucket = group_index.entry(h).or_default();
+            let existing = bucket.iter().find(|&&idx| groups[idx].0 == key).copied();
+            if let Some(idx) = existing {
+                groups[idx].1.push(row);
+            } else {
+                bucket.push(groups.len());
+                groups.push((key, vec![row]));
+            }
         }
 
-        // Build pivoted rows
-        for (_key, group_rows) in groups {
-            let mut new_row: Vec<Value> = group_cols
-                .iter()
-                .map(|&i| group_rows[0][i].clone())
-                .collect();
+        // Build pivoted rows.
+        for (key, group_rows) in groups {
+            let mut new_row: Vec<Value> =
+                Vec::with_capacity(1 + value_col_idxs.len() * pivot_values.len());
+            new_row.push(key);
 
-            // Build O(1) pivot value -> row index for this group
-            let pivot_index: HashMap<u64, usize> = group_rows
-                .iter()
-                .enumerate()
-                .filter_map(|(idx, row)| {
-                    row.get(pivot_col_idx).map(|v| (hash_single_value(v), idx))
-                })
-                .collect();
+            // For each pivot value, find the input row in this group
+            // whose pivot column equals it; pull the value-column cell.
+            // Hash bucket + structural `==` for collision-safety, same
+            // pattern as the group_index above.
+            //
+            // If multiple input rows share the same `(key, pivot_value)`
+            // pair, only the first one wins — see "Input contract" in
+            // the function docstring.
+            let mut pivot_lookup: HashMap<u64, Vec<&Row>> = HashMap::new();
+            for &row in &group_rows {
+                let pv = row.get(pivot_value_col_idx).cloned().unwrap_or(Value::Null);
+                pivot_lookup
+                    .entry(hash_single_value(&pv))
+                    .or_default()
+                    .push(row);
+            }
 
-            // Add pivot values with O(1) lookup
             for pv in &pivot_values {
                 let pv_hash = hash_single_value(pv);
-                if let Some(&row_idx) = pivot_index.get(&pv_hash) {
-                    new_row.push(
-                        group_rows[row_idx]
-                            .get(value_col_idx)
-                            .cloned()
-                            .unwrap_or(Value::Null),
-                    );
-                } else {
-                    new_row.push(Value::Null);
+                // Find the row in this bucket whose pivot value equals
+                // `pv` structurally — guards against the hash-only
+                // collision case.
+                let matched = pivot_lookup.get(&pv_hash).and_then(|bucket| {
+                    bucket
+                        .iter()
+                        .find(|row| row.get(pivot_value_col_idx).is_some_and(|cell| cell == pv))
+                });
+                for &vci in &value_col_idxs {
+                    let cell = matched
+                        .and_then(|row| row.get(vci))
+                        .cloned()
+                        .unwrap_or(Value::Null);
+                    new_row.push(cell);
                 }
             }
 
@@ -250,12 +332,47 @@ impl Executor<'_> {
                     )))
                 }
             }
+            Expr::Function(func) => {
+                // Two-tier resolution matching `sort_results`'s ORDER BY
+                // logic: try the bare function name first (e.g.
+                // `YEAR(date)` → column `year`), then fall back to the
+                // full expression string (e.g. column literally named
+                // `YEAR(date)`). Same convention as bean-query's column
+                // naming.
+                //
+                // Without this, `PIVOT BY YEAR(date), account` would
+                // fail at find_pivot_column AND `GROUP BY YEAR(date)`
+                // would silently be skipped from the membership check
+                // — misreporting `PivotSecondNotInGroupBy` for valid
+                // queries (Copilot review on PR #1037).
+                let expr_str = pivot_expr.to_string();
+                let upper_func = func.name.to_uppercase();
+                result
+                    .columns
+                    .iter()
+                    .position(|c| c.to_uppercase() == upper_func)
+                    .or_else(|| result.columns.iter().position(|c| c == &expr_str))
+                    .ok_or_else(|| {
+                        QueryError::Evaluation(format!(
+                            "PIVOT BY expression '{expr_str}' not found in SELECT"
+                        ))
+                    })
+            }
             _ => {
-                // For complex expressions, try to find a matching column by string representation
-                // This is a simplified approach
-                Err(QueryError::Evaluation(
-                    "PIVOT BY must reference a column name or index".to_string(),
-                ))
+                // For other expression kinds (binary ops, literals,
+                // etc.) try the full expression string against column
+                // names — matches the hidden-column alias convention
+                // used by `find_hidden_order_by_targets`.
+                let expr_str = pivot_expr.to_string();
+                result
+                    .columns
+                    .iter()
+                    .position(|c| c == &expr_str)
+                    .ok_or_else(|| {
+                        QueryError::Evaluation(format!(
+                            "PIVOT BY expression '{expr_str}' not found in SELECT"
+                        ))
+                    })
             }
         }
     }

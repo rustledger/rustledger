@@ -164,17 +164,21 @@ fn select_query<'a>() -> impl Parser<'a, ParserInput<'a>, SelectQuery, ParserExt
             .then(where_clause().or_not())
             .then(group_by_clause().or_not())
             .then(having_clause().or_not())
-            .then(pivot_by_clause().or_not())
+            // Clause order matches bean-query (#1034): ORDER BY before
+            // PIVOT BY. Pre-#1034 rledger had PIVOT BY before ORDER BY,
+            // which is bean-query-incompatible — flipping the order here
+            // gives upstream parity for queries that use both.
             .then(order_by_clause().or_not())
+            .then(pivot_by_clause().or_not())
             .then(limit_clause().or_not())
             .map(
                 |(
                     (
                         (
                             (((((distinct, targets), from), where_clause), group_by), having),
-                            pivot_by,
+                            order_by,
                         ),
-                        order_by,
+                        pivot_by,
                     ),
                     limit,
                 )| {

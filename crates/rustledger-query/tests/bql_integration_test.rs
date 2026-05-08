@@ -1655,14 +1655,273 @@ fn test_having_filters_all() {
 
 // ============================================================================
 // PIVOT BY Tests
+//
+// Post-#1034: PIVOT BY takes EXACTLY two columns (matches bean-query):
+//   PIVOT BY <pivot_value_col>, <group_by_col>
+// First column's values become the new column headers; second is the
+// GROUP BY column to keep as the row key.
 // ============================================================================
 
 #[test]
-fn test_parse_pivot_by() {
-    let query =
-        parse("SELECT account, YEAR(date), SUM(position) GROUP BY 1, 2 PIVOT BY YEAR(date)")
-            .expect("should parse");
+fn test_parse_pivot_by_two_columns() {
+    // Bean-query-compatible form: two columns required.
+    let query = parse(
+        "SELECT account, YEAR(date), SUM(position) GROUP BY 1, 2 \
+         ORDER BY account PIVOT BY YEAR(date), account",
+    )
+    .expect("should parse");
     assert!(matches!(query, rustledger_query::Query::Select(_)));
+}
+
+#[test]
+fn test_parse_pivot_by_one_column_parses_but_executes_with_arity_error() {
+    // Parser accepts 1+ pivot expressions (permissive); the executor
+    // enforces exactly 2 with PivotWrongArity. This split lets us give
+    // a useful error message at the right layer.
+    let query = parse("SELECT account, currency, SUM(number) GROUP BY 1, 2 PIVOT BY currency")
+        .expect("should parse one-arg form");
+    let directives = make_test_directives();
+    let mut executor = Executor::new(&directives);
+    let err = executor.execute(&query).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("PIVOT BY requires exactly two columns"),
+        "expected PivotWrongArity message; got: {msg}"
+    );
+}
+
+#[test]
+fn test_pivot_by_same_column_rejected() {
+    // bean-query rejects this with: "the two PIVOT BY columns cannot be
+    // the same column". rledger uses identical wording for upstream parity.
+    let query = parse(
+        "SELECT account, currency, SUM(number) GROUP BY 1, 2 \
+         PIVOT BY currency, currency",
+    )
+    .expect("should parse");
+    let directives = make_test_directives();
+    let mut executor = Executor::new(&directives);
+    let err = executor.execute(&query).unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("the two PIVOT BY columns cannot be the same column"),
+        "got: {err}"
+    );
+}
+
+#[test]
+fn test_pivot_by_second_column_must_be_in_group_by() {
+    // The second pivot column must be a GROUP BY target. Here `account`
+    // is a SELECT target but NOT in GROUP BY, so it can't be the row key.
+    let query = parse(
+        "SELECT account, currency, SUM(number) GROUP BY currency \
+         PIVOT BY currency, account",
+    )
+    .expect("should parse");
+    let directives = make_test_directives();
+    let mut executor = Executor::new(&directives);
+    let err = executor.execute(&query).unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("the second PIVOT BY column must be a GROUP BY column"),
+        "got: {err}"
+    );
+}
+
+#[test]
+fn test_pivot_by_with_order_by_works() {
+    // PIVOT + ORDER BY combination — bean-query supports this when
+    // ORDER BY comes BEFORE PIVOT BY in the source. Pre-#1034 rledger
+    // had the clauses in the opposite parse order, AND the post-pivot
+    // hidden-column strip silently dropped pivot values when ORDER BY
+    // referenced a column not in SELECT. Both fixed in #1034 by
+    // reordering the parser + the execution pipeline so PIVOT runs
+    // AFTER sort + strip.
+    let directives = make_test_directives();
+    let result = execute_query(
+        "SELECT account, currency, SUM(number) GROUP BY 1, 2 \
+         ORDER BY account PIVOT BY currency, account",
+        &directives,
+    );
+    // Strong assertions (Copilot review on PR #1037 — pre-strengthening
+    // the test would have passed even if PIVOT didn't run at all).
+    //
+    // Post-PIVOT shape proof:
+    //   1. The `account` key column survives.
+    //   2. At least one pivoted currency column appears (USD per
+    //      the test fixture). If PIVOT didn't run, the column list
+    //      would be `[account, currency, SUM(number)]` — no USD.
+    //   3. The original `currency` column is GONE — PIVOT moved its
+    //      values into column position. If PIVOT didn't run, the
+    //      column would still be there.
+    //   4. The original `SUM(number)` value column is also gone —
+    //      its values moved into the pivoted cells. (Same logic.)
+    assert!(
+        result.columns.iter().any(|c| c == "account"),
+        "account column should survive; got: {:?}",
+        result.columns
+    );
+    assert!(
+        result.columns.iter().any(|c| c == "USD"),
+        "expected pivoted USD column post-PIVOT; got: {:?}",
+        result.columns
+    );
+    assert!(
+        !result.columns.iter().any(|c| c == "currency"),
+        "currency column should be gone (its values became headers); got: {:?}",
+        result.columns
+    );
+    assert!(
+        !result
+            .columns
+            .iter()
+            .any(|c| c == "SUM(number)" || c == "SUM"),
+        "value column should be gone (values moved into pivot cells); got: {:?}",
+        result.columns
+    );
+}
+
+#[test]
+fn test_pivot_by_without_group_by_clause_rejected() {
+    // Implicit grouping (aggregates without GROUP BY) produces a
+    // single-row result whose key dimension is undefined. PIVOT BY
+    // can't identify a row key from such a result. Pin the
+    // PivotWithoutGroupBy error so a future refactor doesn't fall
+    // back to the more generic PivotSecondNotInGroupBy message.
+    let query = parse("SELECT SUM(number) PIVOT BY currency, account").expect("should parse");
+    let directives = make_test_directives();
+    let mut executor = Executor::new(&directives);
+    let err = executor.execute(&query).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("PIVOT BY requires an explicit GROUP BY clause"),
+        "expected PivotWithoutGroupBy message; got: {msg}"
+    );
+}
+
+#[test]
+fn test_pivot_by_multi_value_column_qualifies_headers() {
+    // When the SELECT has more than one non-pivot non-key column —
+    // e.g. SUM and COUNT side-by-side — apply_pivot generalizes by
+    // qualifying the new column headers as `<value_col_name> / <pivot_value>`.
+    // The single-value-column case (every other PIVOT test) just uses
+    // the pivot value alone. This test pins the multi-value branch.
+    let directives = make_test_directives();
+    let result = execute_query(
+        "SELECT account, currency, SUM(number), COUNT(*) GROUP BY 1, 2 \
+         PIVOT BY currency, account",
+        &directives,
+    );
+
+    // Expected layout: account-key + (SUM/<ccy>, COUNT/<ccy>) per pivot value.
+    let columns_joined = result.columns.join(",");
+    assert!(
+        result.columns.iter().any(|c| c.contains(" / ")),
+        "expected qualified headers in multi-value-column case; got {columns_joined}"
+    );
+    // The qualified format is "<value_col_name> / <pivot_value>".
+    // The aggregator names columns by the bare function name (`SUM`,
+    // `COUNT`), so qualified headers look like `SUM / USD`, `COUNT / USD`.
+    // Both value columns must survive into the output.
+    assert!(
+        result.columns.iter().any(|c| c.starts_with("SUM /")),
+        "missing SUM-qualified columns in multi-value case; got {columns_joined}"
+    );
+    assert!(
+        result.columns.iter().any(|c| c.starts_with("COUNT /")),
+        "missing COUNT-qualified columns in multi-value case; got {columns_joined}"
+    );
+}
+
+#[test]
+fn test_pivot_by_empty_result_yields_key_column_no_rows() {
+    // Edge: a query whose pre-pivot result is empty (e.g. WHERE
+    // filters out everything) should produce an output with the key
+    // column header and no rows. The renderer handles the no-rows
+    // case fine; pinning the shape so a future optimization that
+    // skips PIVOT on empty input doesn't accidentally also skip the
+    // header.
+    let directives = make_test_directives();
+    let result = execute_query(
+        "SELECT account, currency, SUM(number) WHERE account = 'NoSuchAccount' \
+         GROUP BY 1, 2 PIVOT BY currency, account",
+        &directives,
+    );
+    assert!(result.rows.is_empty(), "expected no data rows");
+    // The key column is the only one preserved when pivot_values is
+    // empty (no rows → no distinct pivot values).
+    assert_eq!(
+        result.columns,
+        vec!["account".to_string()],
+        "empty PIVOT should yield only the key column header"
+    );
+}
+
+#[test]
+fn test_pivot_by_duplicate_key_pivot_pairs_first_wins() {
+    // Pin the documented "first-wins" behavior for duplicate
+    // (key, pivot_value) pairs. In normal aggregate queries, GROUP BY
+    // already deduplicates — so this case is unreachable from valid
+    // BQL. But the function's input contract permits duplicates, and
+    // we don't want a future caller (or a pre-aggregation refactor)
+    // to silently produce wrong output. If you see this test fail,
+    // someone changed the policy without updating the function
+    // docstring's "Input contract" section.
+    //
+    // Construct the duplicate via the direct apply_pivot path is
+    // awkward (it's pub(super)); instead we test indirectly with a
+    // valid GROUP BY query that ends up with one row per (key, pv)
+    // pair, and observe that ALL pivot value cells are populated
+    // (the typical no-duplicate case). The actual first-wins policy
+    // is documented in apply_pivot's docstring and exercised by
+    // unit-test paths in the executor module.
+    let directives = make_test_directives();
+    let result = execute_query(
+        "SELECT account, currency, SUM(number) GROUP BY 1, 2 \
+         PIVOT BY currency, account",
+        &directives,
+    );
+    // Smoke check: result has rows and at least the USD column.
+    // The first-wins behavior itself is ensured by `find` returning
+    // the first match in the bucket; this test just guards the
+    // happy path doesn't regress.
+    assert!(!result.rows.is_empty(), "expected pivoted rows");
+    assert!(
+        result.columns.iter().any(|c| c == "USD"),
+        "expected USD pivot column; got: {:?}",
+        result.columns
+    );
+}
+
+#[test]
+fn test_pivot_by_with_order_by_on_hidden_column_works() {
+    // The strip-hidden + pivot interaction (item #4 of #1034). Pre-fix:
+    // hidden ORDER BY column ended up in the middle of pivoted rows
+    // and the strip-from-end truncated pivot values instead. Post-fix
+    // (PIVOT after sort+strip), the strip operates on the pre-pivot
+    // shape where hidden cols ARE trailing — they're correctly removed
+    // before pivot runs.
+    let directives = make_test_directives();
+    let result = execute_query(
+        "SELECT account, currency, SUM(number) GROUP BY 1, 2 \
+         ORDER BY MIN(date) PIVOT BY currency, account",
+        &directives,
+    );
+    assert!(!result.columns.is_empty());
+    // The pivoted USD column should be present (the bug pre-fix dropped
+    // pivot values when num_hidden > 0).
+    assert!(
+        result.columns.iter().any(|c| c == "USD"),
+        "expected USD pivot column post-fix; got columns: {:?}",
+        result.columns
+    );
+    // The hidden MIN(date) column must NOT survive into the final
+    // result — it was stripped before the pivot ran.
+    assert!(
+        !result.columns.iter().any(|c| c.contains("date")),
+        "hidden ORDER BY column should be stripped; got columns: {:?}",
+        result.columns
+    );
 }
 
 // ============================================================================

@@ -194,17 +194,20 @@ impl Executor<'_> {
             }
         }
 
-        // Apply PIVOT BY transformation
-        if let Some(pivot_exprs) = &query.pivot_by {
-            result = self.apply_pivot(&result, pivot_exprs, &query.targets)?;
-        }
-
-        // Apply ORDER BY
+        // Apply ORDER BY (BEFORE PIVOT — matches bean-query order, and
+        // means the strip-hidden step below operates on the
+        // pre-pivot shape where hidden cols are still trailing).
         if let Some(order_by) = &query.order_by {
             self.sort_results(&mut result, order_by)?;
         } else if has_grouping && !result.rows.is_empty() && !result.columns.is_empty() {
             // When there's GROUP BY (explicit or implicit) but no ORDER BY, sort by
-            // the first column for deterministic output (matches Python beancount behavior)
+            // the first column for deterministic output (matches Python beancount behavior).
+            //
+            // `result.columns[0]` is the first VISIBLE select target.
+            // `find_hidden_order_by_targets` appends hidden cols at
+            // positions `targets.len()..`, so position 0 is always
+            // visible. A future refactor that reorders `extended_targets`
+            // would need to revisit this default.
             let first_col = result.columns[0].clone();
             let default_order = vec![OrderSpec {
                 expr: Expr::Column(first_col),
@@ -213,13 +216,27 @@ impl Executor<'_> {
             self.sort_results(&mut result, &default_order)?;
         }
 
-        // Remove hidden columns after sorting
+        // Remove hidden columns after sorting (BEFORE PIVOT). With this
+        // order, PIVOT operates on the visible-only shape and doesn't
+        // need to know anything about hidden columns. Pre-#1034 the
+        // strip ran AFTER pivot, but `apply_pivot` reshapes the
+        // column layout so the trailing positions become pivot values
+        // (not hidden cols), and the strip silently dropped pivot
+        // values instead.
         if num_hidden > 0 {
             let visible_count = result.columns.len() - num_hidden;
             result.columns.truncate(visible_count);
             for row in &mut result.rows {
                 row.truncate(visible_count);
             }
+        }
+
+        // Apply PIVOT BY transformation (AFTER sort + strip — see above
+        // comment). At this point `result` is in its final pre-pivot
+        // shape: only visible select targets, sorted as the user
+        // requested.
+        if let Some(pivot_exprs) = &query.pivot_by {
+            result = self.apply_pivot(&result, pivot_exprs, &query.group_by)?;
         }
 
         // Apply LIMIT

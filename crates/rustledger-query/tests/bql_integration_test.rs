@@ -1743,10 +1743,42 @@ fn test_pivot_by_with_order_by_works() {
          ORDER BY account PIVOT BY currency, account",
         &directives,
     );
-    // Smoke check: produced a non-empty result with at least the
-    // account-key column and one pivoted currency column.
-    assert!(!result.columns.is_empty());
-    assert!(result.columns.iter().any(|c| c == "account"));
+    // Strong assertions (Copilot review on PR #1037 — pre-strengthening
+    // the test would have passed even if PIVOT didn't run at all).
+    //
+    // Post-PIVOT shape proof:
+    //   1. The `account` key column survives.
+    //   2. At least one pivoted currency column appears (USD per
+    //      the test fixture). If PIVOT didn't run, the column list
+    //      would be `[account, currency, SUM(number)]` — no USD.
+    //   3. The original `currency` column is GONE — PIVOT moved its
+    //      values into column position. If PIVOT didn't run, the
+    //      column would still be there.
+    //   4. The original `SUM(number)` value column is also gone —
+    //      its values moved into the pivoted cells. (Same logic.)
+    assert!(
+        result.columns.iter().any(|c| c == "account"),
+        "account column should survive; got: {:?}",
+        result.columns
+    );
+    assert!(
+        result.columns.iter().any(|c| c == "USD"),
+        "expected pivoted USD column post-PIVOT; got: {:?}",
+        result.columns
+    );
+    assert!(
+        !result.columns.iter().any(|c| c == "currency"),
+        "currency column should be gone (its values became headers); got: {:?}",
+        result.columns
+    );
+    assert!(
+        !result
+            .columns
+            .iter()
+            .any(|c| c == "SUM(number)" || c == "SUM"),
+        "value column should be gone (values moved into pivot cells); got: {:?}",
+        result.columns
+    );
 }
 
 #[test]

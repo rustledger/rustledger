@@ -332,12 +332,47 @@ impl Executor<'_> {
                     )))
                 }
             }
+            Expr::Function(func) => {
+                // Two-tier resolution matching `sort_results`'s ORDER BY
+                // logic: try the bare function name first (e.g.
+                // `YEAR(date)` → column `year`), then fall back to the
+                // full expression string (e.g. column literally named
+                // `YEAR(date)`). Same convention as bean-query's column
+                // naming.
+                //
+                // Without this, `PIVOT BY YEAR(date), account` would
+                // fail at find_pivot_column AND `GROUP BY YEAR(date)`
+                // would silently be skipped from the membership check
+                // — misreporting `PivotSecondNotInGroupBy` for valid
+                // queries (Copilot review on PR #1037).
+                let expr_str = pivot_expr.to_string();
+                let upper_func = func.name.to_uppercase();
+                result
+                    .columns
+                    .iter()
+                    .position(|c| c.to_uppercase() == upper_func)
+                    .or_else(|| result.columns.iter().position(|c| c == &expr_str))
+                    .ok_or_else(|| {
+                        QueryError::Evaluation(format!(
+                            "PIVOT BY expression '{expr_str}' not found in SELECT"
+                        ))
+                    })
+            }
             _ => {
-                // For complex expressions, try to find a matching column by string representation
-                // This is a simplified approach
-                Err(QueryError::Evaluation(
-                    "PIVOT BY must reference a column name or index".to_string(),
-                ))
+                // For other expression kinds (binary ops, literals,
+                // etc.) try the full expression string against column
+                // names — matches the hidden-column alias convention
+                // used by `find_hidden_order_by_targets`.
+                let expr_str = pivot_expr.to_string();
+                result
+                    .columns
+                    .iter()
+                    .position(|c| c == &expr_str)
+                    .ok_or_else(|| {
+                        QueryError::Evaluation(format!(
+                            "PIVOT BY expression '{expr_str}' not found in SELECT"
+                        ))
+                    })
             }
         }
     }

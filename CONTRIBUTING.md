@@ -249,7 +249,31 @@ Property tests run 256 cases per CI run by default. They catch bugs example test
 2. Tests at `crates/rustledger-plugin/tests/native_plugins_test.rs` covering the matrix above
 3. Fixtures under `tests/compatibility/files/plugins/<name>/` if the plugin is a beancount reimplementation
 4. At least one proptest case if numeric computation
-5. Mutation-survival ≤ 10% on the new code (target; CI runs `cargo mutants` and warns today, see Phase 3 of the plugin-testing plan for the planned blocking gate)
+5. Mutation-survival ≤ 10% on the new code. CI runs `cargo mutants` on every PR touching `crates/rustledger-plugin/src/native/plugins/*.rs` and **fails** if any plugin's survival rate exceeds 10%. The per-plugin floor is enforced by `scripts/per-plugin-mutation-report.sh`. See "Mutation testing" below for how to handle false-positive mutants.
+
+### Mutation testing
+
+`cargo mutants` mutates plugin code (e.g., flips a `>` to `>=`, replaces a function body with `Default::default()`) and runs the tests against each mutated version. A mutant that "survives" — i.e., the tests still pass after the mutation — is a sign that the tests don't actually constrain that piece of code.
+
+The per-plugin floor is **≤10% survival rate**, computed as `missed / (caught + missed + timeout)`. Infrastructure files outside `src/native/plugins/` are reported but not enforced.
+
+To run locally:
+
+```bash
+cargo mutants -p rustledger-plugin --jobs 4 --timeout 300 -- --all-features
+scripts/per-plugin-mutation-report.sh
+```
+
+When you see a missed mutant, prefer **tightening the test** to catch it. Sometimes that's not possible — for instance, a mutation that produces semantically-equivalent behavior (e.g., `vec![]` vs `Vec::new()`) or a code path only reachable from a different crate. For those, annotate the function with a `#[mutants::skip]` attribute and a leading `// reason:` comment:
+
+```rust
+// reason: function body returns the same canonical empty value either way;
+// no test can distinguish vec![] from Vec::new() at this call site.
+#[mutants::skip]
+fn some_function() -> Vec<T> { Vec::new() }
+```
+
+The reason is required so future readers understand why the function is exempt. The annotation applies to whole functions, not individual expressions.
 
 ### Why these requirements exist
 

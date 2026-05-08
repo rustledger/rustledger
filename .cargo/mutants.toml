@@ -1,0 +1,27 @@
+# cargo-mutants configuration for rustledger.
+# See: https://mutants.rs/config-file.html
+#
+# This file is consumed by `cargo mutants` to filter out mutations that
+# can't meaningfully be caught by tests. Without it, mutation testing
+# floods the report with false positives that drown out real coverage
+# gaps.
+#
+# Phase 3 of the plugin-testing-quality plan (#992, #1003).
+
+# Mutations whose names match these regexes are SKIPPED (never tested).
+# Matched against the format that `cargo mutants --list` prints, e.g.:
+#   crates/foo/src/bar.rs:42:5: replace <impl Trait for Foo>::method -> ReturnType with ...
+exclude_re = [
+    # NativePlugin metadata methods. `name()` and `description()` return
+    # fixed-string constants used only for registry lookup and display.
+    # cargo-mutants tries `""` and `"xyzzy"` as replacements; both
+    # survive because no behavior depends on the literal text. Pinning
+    # the literals to the test would force every description tweak to
+    # update a test for no real benefit. The registry-shape test
+    # (test_registry_finds_all_plugins) already proves that name() is
+    # consulted by callers.
+    '<impl NativePlugin for [A-Za-z]+>::(name|description)',
+    # Same family for the runtime Plugin enum's name() — also a label
+    # function with no behavioral consequence.
+    'Plugin::name -> &str',
+]

@@ -188,3 +188,23 @@ jobs:
           else
             echo "Mutation score ($SCORE%) meets threshold ($THRESHOLD%)"
           fi
+      # Per-plugin floor enforcement (Phase 3 of #992 plan, closes #1003).
+      #
+      # The aggregate threshold above is permissive: it can be satisfied
+      # by a few well-tested plugins masking many badly-tested ones.
+      # The per-plugin script enforces a tighter floor (default ≤10%
+      # survival rate) on EACH plugin file under
+      # `crates/rustledger-plugin/src/native/plugins/*.rs`. Infrastructure
+      # files (registry, runtime, convert, types) are reported but not
+      # enforced — they have a different shape from per-plugin code and
+      # need their own threshold conversation.
+      #
+      # GITHUB_ANNOTATIONS=1 surfaces each surviving mutant as an inline
+      # `::warning::` annotation on the PR diff, satisfying the
+      # "PR inline comments for surviving mutants" criterion of #1003.
+      - name: Per-plugin mutation floor check
+        if: contains(steps.packages.outputs.packages, 'rustledger-plugin')
+        env:
+          GITHUB_ANNOTATIONS: '1'
+          MUTATION_FLOOR: '10'
+        run: scripts/per-plugin-mutation-report.sh

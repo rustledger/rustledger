@@ -120,6 +120,8 @@ jobs:
         run: ./scripts/test-plugin-test-quality.sh
       - name: Run plugin-test-quality lints
         run: ./scripts/check-plugin-test-quality.sh
+      - name: Self-test the per-plugin mutation report script
+        run: ./scripts/test-per-plugin-mutation-report.sh
 
   # Main CI matrix - check, clippy, test, doc (only on code changes)
   ci:

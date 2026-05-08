@@ -158,15 +158,9 @@ notes = "Plugin-emitted price content — catches @@ vs @ confusion (issue #992)
 preserve_order = true
 
 # ----------------------------------------------------------------------
-# PIVOT BY currency — issue #1023. The #988 fix (per-currency
-# precision via row sidecar) was partial: PIVOT discards the sidecar
-# because `apply_pivot` uses `add_row` instead of `add_aggregate_row`.
-# The pivoted column NAME carries the currency, so the renderer needs
-# a column-name fallback to recover the precision context.
+# PIVOT BY queries are intentionally NOT in this corpus. bean-query's
+# PIVOT BY takes TWO columns (pivot value + group key) where rledger
+# takes ONE. The two tools produce structurally different output for
+# any PIVOT query, so a row-by-row diff would be permanently red.
+# Tracking the semantic reconciliation separately — see #1034.
 # ----------------------------------------------------------------------
-
-[[query]]
-name = "sum-by-account-pivot-by-currency"
-query = "SELECT account, currency, SUM(number) GROUP BY account, currency PIVOT BY currency ORDER BY account LIMIT 10"
-notes = "PIVOT BY currency precision — catches the post-#1022 regression where pivoted SUM cells lost per-currency quantization (issue #1023)"
-preserve_order = true

@@ -123,13 +123,9 @@ fn write_text<W: Write>(
         .collect();
 
     for (row_idx, row) in result.rows.iter().enumerate() {
-        let row_hint = currency_hints.get(row_idx).copied().flatten();
         for (i, value) in row.iter().enumerate() {
             let col_ctx = col_contexts.get(i).unwrap_or(ctx);
-            // Row sidecar wins over column-name fallback (#1023): aggregate
-            // rows always know their grouping currency more precisely than
-            // any column-name heuristic could.
-            let cell_hint = row_hint.or_else(|| column_currency_hints.get(i).copied().flatten());
+            let cell_hint = resolve_cell_hint(&currency_hints, &column_currency_hints, row_idx, i);
             let len = format_value_with_hint(value, numberify, col_ctx, cell_hint).len();
             if i < widths.len() && len > widths[i] {
                 widths[i] = len;
@@ -171,17 +167,12 @@ fn write_text<W: Write>(
 
     // Print rows using per-column display contexts
     for (row_idx, row) in result.rows.iter().enumerate() {
-        let row_hint = currency_hints.get(row_idx).copied().flatten();
-
         for (i, value) in row.iter().enumerate() {
             if i > 0 {
                 write!(writer, "  ")?;
             }
             let col_ctx = col_contexts.get(i).unwrap_or(ctx);
-            // Row sidecar wins over column-name fallback (#1023). Must
-            // match the same precedence used in the width-calculation
-            // pass above — otherwise widths and rendered values disagree.
-            let cell_hint = row_hint.or_else(|| column_currency_hints.get(i).copied().flatten());
+            let cell_hint = resolve_cell_hint(&currency_hints, &column_currency_hints, row_idx, i);
             let formatted = format_value_with_hint(value, numberify, col_ctx, cell_hint);
             if i < widths.len() {
                 // Right-align numeric columns to match Python beancount
@@ -362,6 +353,29 @@ fn currency_hint_for_row<'a>(
             _ => None,
         })
     })
+}
+
+/// Combine row sidecar and column-name hints into a single per-cell hint.
+///
+/// Precedence: **row hint wins** over column-name fallback. The row sidecar
+/// came from the actual GROUP BY key (`add_aggregate_row`), so it's a more
+/// authoritative signal than the column name (a heuristic from
+/// `looks_like_currency`).
+///
+/// Pinning the precedence in one helper guarantees the width-calculation
+/// pass and the print pass agree — they MUST, otherwise rendered widths
+/// don't match the rendered values they were sized for.
+fn resolve_cell_hint<'a>(
+    row_hints: &[Option<&'a str>],
+    col_hints: &[Option<&'a str>],
+    row_idx: usize,
+    col_idx: usize,
+) -> Option<&'a str> {
+    row_hints
+        .get(row_idx)
+        .copied()
+        .flatten()
+        .or_else(|| col_hints.get(col_idx).copied().flatten())
 }
 
 /// Format a value with optional GROUP BY currency hint (issue #988).
@@ -1404,5 +1418,107 @@ mod tests {
         // fixture brittle). The text-renderer behavior IS the contract
         // this PR changes; the JSON path goes through `write_json`
         // unchanged.
+    }
+
+    /// Multi-currency PIVOT: USD column at 2dp, JPY column at 0dp on the
+    /// same row. Each pivoted column must use its OWN precision via the
+    /// per-column hint — the column-name fallback isn't a single global
+    /// setting, it's resolved per cell.
+    #[test]
+    fn test_text_pivoted_multi_currency_uses_per_column_precision() {
+        use rustledger_query::QueryResult;
+
+        let mut ctx = DisplayContext::new();
+        // USD seeded at 2dp, JPY at 0dp.
+        ctx.update(dec!(1.00), "USD");
+        ctx.update(dec!(2.00), "USD");
+        ctx.update(dec!(100), "JPY");
+        ctx.update(dec!(200), "JPY");
+
+        // Simulate post-PIVOT shape: same row has BOTH a USD value at
+        // scale 3 and a JPY value at scale 2. After the per-column
+        // fallback, USD should render at 2dp and JPY at 0dp.
+        let mut result = QueryResult::new(vec!["account".into(), "USD".into(), "JPY".into()]);
+        result.add_row(vec![
+            Value::String("Assets:Cash".into()),
+            Value::Number(dec!(0.000)),
+            Value::Number(dec!(50.00)),
+        ]);
+
+        let mut buf: Vec<u8> = Vec::new();
+        write_text(&result, &mut buf, false, &ctx).expect("text ok");
+        let text = String::from_utf8(buf).expect("utf8");
+
+        let data_row = text
+            .lines()
+            .find(|l| l.contains("Assets:Cash"))
+            .unwrap_or_else(|| panic!("expected Assets:Cash row; raw output:\n{text}"));
+
+        // Pull both numeric cells. Whitespace-split is safe here — both
+        // numeric cells have no internal whitespace and the account name
+        // has no spaces.
+        let tokens: Vec<&str> = data_row.split_whitespace().collect();
+        let [_account, usd_cell, jpy_cell] = tokens.as_slice() else {
+            panic!("expected 3 whitespace-separated tokens, got: {tokens:?}");
+        };
+        assert_eq!(
+            *usd_cell, "0.00",
+            "USD column should render at 2dp; row was {data_row:?}"
+        );
+        assert_eq!(
+            *jpy_cell, "50",
+            "JPY column should render at 0dp (integer); row was {data_row:?}"
+        );
+    }
+
+    /// Defensive regression test: a non-pivoted query with a column
+    /// aliased as a currency code (e.g. `SELECT … AS USD`) must NOT have
+    /// its values silently quantized when the active context tracks USD
+    /// for unrelated reasons.
+    ///
+    /// The column-name fallback's `ctx.get_precision().is_some()` guard
+    /// would let the hint kick in if USD is tracked. The expected behavior
+    /// here is debatable — but pinning it as a test means a future change
+    /// will be a deliberate choice, not a silent drift.
+    ///
+    /// Today's contract: WITH tracked USD precision, the fallback DOES
+    /// quantize cells in the USD-aliased column. This is the same
+    /// behavior PIVOT relies on; we're just acknowledging that
+    /// non-pivoted queries inherit it too. If it turns out to be a real
+    /// problem in practice, the fix is to gate the fallback on something
+    /// PIVOT-specific (e.g. a boolean on `QueryResult` set by
+    /// `apply_pivot`).
+    #[test]
+    fn test_non_pivoted_currency_named_column_inherits_fallback_quantization() {
+        use rustledger_query::QueryResult;
+
+        let mut ctx = DisplayContext::new();
+        ctx.update(dec!(1.00), "USD");
+        ctx.update(dec!(2.00), "USD");
+
+        // Non-pivoted result: column literally named USD, value at scale 3.
+        // No row sidecar (so `currency_hints` is empty for this row).
+        let mut result = QueryResult::new(vec!["label".into(), "USD".into()]);
+        result.add_row(vec![
+            Value::String("test".into()),
+            Value::Number(dec!(0.000)),
+        ]);
+
+        let mut buf: Vec<u8> = Vec::new();
+        write_text(&result, &mut buf, false, &ctx).expect("text ok");
+        let text = String::from_utf8(buf).expect("utf8");
+
+        // With USD tracked at 2dp, the column-name fallback applies even
+        // outside the PIVOT path. Pin this behavior so a future tightening
+        // (e.g. PIVOT-only fallback) is a deliberate change.
+        let data_row = text
+            .lines()
+            .find(|l| l.contains("test"))
+            .unwrap_or_else(|| panic!("expected `test` row; raw output:\n{text}"));
+        let last_cell = data_row.split_whitespace().last().expect("non-empty row");
+        assert_eq!(
+            last_cell, "0.00",
+            "currency-named column drives quantization regardless of PIVOT path; row was {data_row:?}"
+        );
     }
 }

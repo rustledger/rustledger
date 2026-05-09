@@ -142,35 +142,22 @@
             }
           );
 
-          # beanprice isn't packaged in nixpkgs (it's a separate PyPI distribution
-          # since beancount v3). Build it locally so we can run differential tests
-          # of `rledger price` against `bean-price` from CI / dev shells.
-          beanprice = pkgs.python312Packages.buildPythonApplication {
-            pname = "beanprice";
-            version = "2.1.0";
-            pyproject = true;
-
-            src = pkgs.python312Packages.fetchPypi {
-              pname = "beanprice";
-              version = "2.1.0";
-              hash = "sha256-2Q0mZB97rthEPN/bVUXDj40B+XYE7UrUFzsCNZiYKxM=";
-            };
-
-            build-system = with pkgs.python312Packages; [ setuptools ];
-
-            dependencies = with pkgs.python312Packages; [
-              beancount
-              python-dateutil
-              requests
-              curl-cffi
-              diskcache
-            ];
-
-            # Network-bound tests; skip in the build sandbox.
-            doCheck = false;
-          };
-
-          # Python with beancount for compatibility testing
+          # Python with beancount for benchmarking against the canonical
+          # Python implementation. Used by `devShells.bench` only.
+          #
+          # NOT included in the main dev shell because nixpkgs lags PyPI
+          # by 3+ patch versions on `beancount` (e.g. nixpkgs 3.2.0 vs
+          # PyPI 3.2.3 as of 2026-05) and the patch versions occasionally
+          # change `Position.__str__` rendering. CI installs from PyPI,
+          # so the Nix-provided versions diverged from CI's, which led
+          # to a wrong call on PR #1046. Compat testing must use the
+          # PyPI versions to match CI; install separately via:
+          #
+          #   python3 -m venv .venv && source .venv/bin/activate
+          #   pip install beancount beanquery
+          #
+          # Benchmark shell is unaffected by the rendering skew (it
+          # measures perf, not output format).
           pythonWithBeancount = pkgs.python312.withPackages (
             ps: with ps; [
               beancount
@@ -236,9 +223,12 @@
             nix-tree
             nvd
 
-            # Python for compat testing
-            pythonWithBeancount
-            beanprice # `bean-price` CLI for differential price tests
+            # Python compat tooling (bean-check, bean-query, bean-price,
+            # bean-format, ...) runs in a Podman container — see
+            # `containers/compat/Containerfile`. The shellHook below
+            # prepends `scripts/bin/` to PATH so the wrappers act as
+            # transparent shims. One-time setup:
+            #   ./scripts/compat-container-build.sh
           ];
 
         in
@@ -372,6 +362,25 @@
                 prek install --hook-type pre-commit --hook-type pre-push --hook-type commit-msg 2>/dev/null || true
               fi
 
+              # Compat-tooling wrappers (bean-check, bean-query, bean-price,
+              # ...) are container-backed shims under scripts/bin/. Prepend
+              # them to PATH so they shadow any system installs.
+              # See containers/compat/Containerfile for what's inside.
+              if [ -d "$PWD/scripts/bin" ]; then
+                export PATH="$PWD/scripts/bin:$PATH"
+              fi
+
+              # Rootless Podman on NixOS needs the suid-wrapped
+              # `newuidmap` / `newgidmap` from `/run/wrappers/bin/`,
+              # not the unwrapped store versions on the default Nix
+              # PATH. Without this, `podman build` fails with:
+              #   newuidmap: write to uid_map failed: Operation not permitted
+              # The directory is a no-op on non-NixOS systems (it
+              # won't exist), so this is safe to always export.
+              if [ -d /run/wrappers/bin ]; then
+                export PATH="/run/wrappers/bin:$PATH"
+              fi
+
               echo "🦀 rustledger development environment"
               echo ""
               echo "Available commands:"
@@ -388,7 +397,12 @@
               echo "  - WASM: wasm32-unknown-unknown target (wasm-bindgen)"
               echo "  - WASI: wasm32-wasip1 target (wasmtime)"
               echo "  - TLA+: $(if command -v tlc >/dev/null; then tlc -help 2>&1 | grep -i version | head -1 | sed 's/^[[:space:]]*//'; else echo 'not available'; fi)"
-              echo "  - Python: $(python --version) with beancount + beanprice (bean-price CLI)"
+              if podman image exists rustledger-compat:latest 2>/dev/null; then
+                echo "  - Python: bean-{query,check,price,format,...} (container, $(bean-query --version 2>/dev/null | head -1))"
+              else
+                echo "  - Python: compat container NOT built. One-time setup:"
+                echo "              ./scripts/compat-container-build.sh"
+              fi
               echo "  - Podman: $(podman --version)"
               echo ""
 

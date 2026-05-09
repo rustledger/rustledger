@@ -1,0 +1,41 @@
+# Compat-tooling container: beancount + beanquery + beanprice from PyPI.
+#
+# Why a container?
+# - nixpkgs lags PyPI by 3+ patch versions on `beancount` and the
+#   patch versions occasionally change `Position.__str__` rendering.
+#   That caused a local-vs-CI divergence that misled review on PR #1046.
+# - A pip venv works for pure-Python tools (bean-check, bean-query)
+#   but `beanprice` pulls in `curl-cffi`, whose binary wheel needs
+#   `libstdc++.so.6` at a path Nix doesn't provide. Fixing that is
+#   per-machine glibc archaeology.
+# - A container packages the whole Python env once, and runs it the
+#   same way everywhere.
+#
+# Versioning policy: latest at build time, no pins.
+#   CI's compat workflow does `pip install beancount beanquery
+#   beanprice` (unpinned), so each CI run installs whatever PyPI is
+#   serving. Pinning here would re-introduce exactly the local-vs-CI
+#   skew this container is trying to eliminate. Each fresh image
+#   build pulls the same "latest" CI does, and we'd see upstream-
+#   breakage problems locally at the same time CI does.
+#
+# Refresh: if upstream releases a new patch version and you want it
+# locally, just run `./scripts/compat-container-build.sh` again. Use
+# `--no-cache` (passed through automatically by the build script) to
+# bypass the layer cache.
+
+FROM python:3.12-slim
+
+# `--no-cache-dir` keeps the image small. No version pins — see the
+# header comment for the policy.
+RUN pip install --no-cache-dir \
+        beancount \
+        beanquery \
+        beanprice \
+    && pip cache purge 2>/dev/null || true
+
+# Tools run against files mounted from the host. Wrapper scripts in
+# `scripts/bin/` mount the dev-shell cwd at /work and set this as the
+# working directory, so paths like `tests/compatibility/files/foo.beancount`
+# resolve transparently.
+WORKDIR /work

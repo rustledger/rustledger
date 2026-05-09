@@ -427,8 +427,25 @@ fn bean_price_must_be_on_path_in_dev_shell() {
         eprintln!("skipping: not running inside `nix develop`");
         return;
     }
+    // The dev shell ships `bean-price` as a Podman wrapper under
+    // `scripts/bin/`. The wrapper itself must resolve on PATH (a
+    // flake regression would break that), but `--help` only works
+    // after `./scripts/compat-container-build.sh` has been run.
+    // Skip the functional check if the image isn't built so a fresh
+    // checkout doesn't fail this test before the user has a chance
+    // to bootstrap.
+    let on_path = Command::new("which")
+        .arg("bean-price")
+        .output()
+        .is_ok_and(|o| o.status.success());
     assert!(
-        bean_price_available(),
+        on_path,
         "bean-price not on PATH inside nix dev shell — flake regression?"
     );
+    if !bean_price_available() {
+        eprintln!(
+            "skipping functional check: compat container not built. \
+             Run `./scripts/compat-container-build.sh` to enable."
+        );
+    }
 }

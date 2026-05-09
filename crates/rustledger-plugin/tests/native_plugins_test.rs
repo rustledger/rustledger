@@ -2654,6 +2654,80 @@ fn test_implicit_prices_emitted_excludes_input_price_directives() {
     );
 }
 
+// Property test: emitted per-unit price equals the generated per-unit
+// price under both `@` and `@@` annotations.
+//
+// For any units N, per-unit price P, and annotation form:
+//   - `@` (is_total=false): posting `N C @ P Q` → emitted Price `C @ P Q`
+//     (identity — emitted price equals annotation amount directly)
+//   - `@@` (is_total=true): posting `N C @@ (N*P) Q` → emitted Price `C @ P Q`
+//     (round-trip — emitted per-unit = total / N exactly)
+//
+// The `@@` case is the EXACT regression test for the #992 bug, where the
+// plugin emitted the total amount as a per-unit price (off by a factor
+// of N). The `@` case pins the trivial-but-still-mutable identity path.
+//
+// Generators are in cents so fractional dollar prices like $5.27 are
+// covered; integer units (1..=1000) keep `total = per_unit * units`
+// exactly representable.
+proptest::proptest! {
+    #![proptest_config(proptest::prelude::ProptestConfig::with_cases(64))]
+
+    #[test]
+    fn prop_implicit_prices_emits_per_unit_for_both_annotation_forms(
+        units in 1u32..1000,
+        per_unit_cents in 1u32..1_000_000,
+        is_total in proptest::bool::ANY,
+    ) {
+        use rust_decimal::Decimal;
+        use std::str::FromStr;
+
+        let units_d = Decimal::from(units);
+        let per_unit = Decimal::new(i64::from(per_unit_cents), 2);
+        // For `@`, the annotation carries the per-unit price directly;
+        // for `@@`, it carries the total. The plugin's helper divides
+        // total by units when is_total=true.
+        let annotation_amount = if is_total { per_unit * units_d } else { per_unit };
+
+        let plugin = ImplicitPricesPlugin;
+        let input = make_input(vec![
+            make_open("2024-01-01", "Assets:Brokerage"),
+            make_open("2024-01-01", "Assets:Cash"),
+            make_txn_with_price_annotation(
+                "2024-01-15",
+                "Buy",
+                (&units.to_string(), "HOOL"),
+                (&annotation_amount.to_string(), "USD"),
+                is_total,
+            ),
+        ]);
+
+        let output = plugin.process(input.clone());
+        let emitted = implicit_prices_emitted(&input, &output);
+
+        // Exactly one price emitted (one priced posting).
+        proptest::prop_assert_eq!(
+            emitted.len(), 1,
+            "expected 1 emitted price for units={} annotation={} is_total={}",
+            units, annotation_amount, is_total
+        );
+        let (currency, number_str, quote) = &emitted[0];
+        proptest::prop_assert_eq!(currency, "HOOL");
+        proptest::prop_assert_eq!(quote, "USD");
+
+        // The emitted per-unit price must equal `per_unit` exactly,
+        // regardless of which annotation form was used. Under `@@`,
+        // a pre-fix #992-style bug would have emitted the total instead.
+        let emitted_d = Decimal::from_str(number_str)
+            .expect("emitted number must be a valid Decimal");
+        proptest::prop_assert_eq!(
+            emitted_d, per_unit,
+            "emitted {} must equal per-unit {} (is_total={})",
+            emitted_d, per_unit, is_total
+        );
+    }
+}
+
 // ============================================================================
 // NativePluginRegistry Tests
 // ============================================================================
@@ -3999,6 +4073,119 @@ fn make_open_with_currencies(date: &str, account: &str, currencies: Vec<&str>) -
     }
 }
 
+// Property test: emitted error count equals the size of the
+// `currencies_with_cost ∩ currencies_with_price_only` intersection.
+//
+// The plugin's invariant is purely set-theoretic: for any sequence of
+// postings, an error is emitted for every currency that appears in
+// BOTH the "with cost" and "price-only" buckets. Generators produce a
+// list of (currency_id, posting_kind) — kind is one of (cost, price-
+// only, both). The reference computation in the test mirrors the
+// plugin's bookkeeping; any drift in classification (e.g., a bug that
+// counts a `cost+price` posting in the price-only bucket) would make
+// the assertion fail.
+proptest::proptest! {
+    #![proptest_config(proptest::prelude::ProptestConfig::with_cases(64))]
+
+    #[test]
+    fn prop_coherent_cost_errors_match_intersection(
+        // Up to 8 postings, each with a currency_id ∈ 0..4 and a
+        // kind ∈ 0..3 (0=cost-only, 1=price-only, 2=both cost+price).
+        postings in proptest::collection::vec(
+            (0u32..4, 0u32..3),
+            1..=8,
+        ),
+    ) {
+        use std::collections::HashSet;
+
+        let plugin = CoherentCostPlugin;
+
+        // Build the synthetic transaction. Each posting goes into a
+        // separate transaction to avoid balance constraints; the
+        // plugin treats each posting independently anyway.
+        let mut directives: Vec<DirectiveWrapper> = vec![
+            make_open("2020-01-01", "Assets:Bank"),
+        ];
+        for (i, (cid, kind)) in postings.iter().enumerate() {
+            let currency = format!("C{cid}");
+            let has_cost = matches!(kind, 0 | 2);
+            let has_price = matches!(kind, 1 | 2);
+            directives.push(DirectiveWrapper {
+                directive_type: "transaction".to_string(),
+                date: format!("2024-01-{:02}", (i % 28) + 1),
+                filename: None,
+                lineno: None,
+                data: DirectiveData::Transaction(TransactionData {
+                    flag: "*".to_string(),
+                    payee: None,
+                    narration: "p".to_string(),
+                    tags: vec![],
+                    links: vec![],
+                    metadata: vec![],
+                    postings: vec![PostingData {
+                        account: "Assets:Bank".to_string(),
+                        units: Some(AmountData {
+                            number: "1".to_string(),
+                            currency: currency.clone(),
+                        }),
+                        cost: if has_cost {
+                            Some(CostData {
+                                number_per: Some("100".to_string()),
+                                number_total: None,
+                                currency: Some("USD".to_string()),
+                                date: None,
+                                label: None,
+                                merge: false,
+                            })
+                        } else {
+                            None
+                        },
+                        price: if has_price {
+                            Some(PriceAnnotationData {
+                                is_total: false,
+                                amount: Some(AmountData {
+                                    number: "100".to_string(),
+                                    currency: "USD".to_string(),
+                                }),
+                                number: None,
+                                currency: None,
+                            })
+                        } else {
+                            None
+                        },
+                        flag: None,
+                        metadata: vec![],
+                    }],
+                }),
+            });
+        }
+        let input = make_input(directives);
+
+        // Reference computation: mirror the plugin's classification.
+        // A posting with cost goes to with_cost; one with price-only
+        // (no cost) goes to price_only. `cost+price` (kind=2) is
+        // explicitly NOT problematic per the plugin's docstring.
+        let mut with_cost: HashSet<u32> = HashSet::new();
+        let mut price_only: HashSet<u32> = HashSet::new();
+        for (cid, kind) in &postings {
+            match kind {
+                0 | 2 => { with_cost.insert(*cid); }
+                1     => { price_only.insert(*cid); }
+                _ => {}
+            }
+        }
+        let expected_errors = with_cost.intersection(&price_only).count();
+
+        let output = plugin.process(input);
+        proptest::prop_assert_eq!(
+            output.errors.len(), expected_errors,
+            "expected {} error(s) (currencies in both cost and price-only sets); \
+             postings={:?}",
+            expected_errors, postings
+        );
+    }
+}
+
 // ============================================================================
 // AutoTagPlugin Tests
 // ============================================================================
@@ -4767,6 +4954,119 @@ fn test_sell_gains_two_sales_share_one_income_posting() {
          (per-transaction check, not per-posting); got {} warnings",
         output.errors.len()
     );
+}
+
+// Property test: a sale with no Income/Expenses posting warns iff the
+// expected gain `(sale_price - cost_per) * |units|` is non-zero.
+//
+// The plugin's invariant is binary: when `expected_gain != 0` AND no
+// gain-shaped posting exists, emit exactly one warning per sale; when
+// either `expected_gain == 0` (sale at cost) OR a gain posting exists,
+// stay silent. Generators sweep cost and price independently in cents
+// (covers `P > C` gains, `P < C` losses, and the `P == C` zero-gain
+// case), and a boolean toggles the presence of an Income posting.
+proptest::proptest! {
+    #![proptest_config(proptest::prelude::ProptestConfig::with_cases(64))]
+
+    #[test]
+    fn prop_sell_gains_warns_iff_nonzero_gain_with_no_income_posting(
+        units in 1u32..1000,
+        cost_cents in 1u32..1_000_000,
+        sale_cents in 1u32..1_000_000,
+        with_income_posting in proptest::bool::ANY,
+    ) {
+        use rust_decimal::Decimal;
+
+        let plugin = SellGainsPlugin;
+        let cost_d = Decimal::new(i64::from(cost_cents), 2);
+        let sale_d = Decimal::new(i64::from(sale_cents), 2);
+        let units_d = Decimal::from(units);
+        let expected_gain = (sale_d - cost_d) * units_d;
+
+        // Build the sale posting: -units AAPL {cost USD} @ sale USD.
+        let sale_posting = PostingData {
+            account: "Assets:Brokerage".to_string(),
+            units: Some(AmountData {
+                number: format!("-{units}"),
+                currency: "AAPL".to_string(),
+            }),
+            cost: Some(CostData {
+                number_per: Some(cost_d.to_string()),
+                number_total: None,
+                currency: Some("USD".to_string()),
+                date: None,
+                label: None,
+                merge: false,
+            }),
+            price: Some(PriceAnnotationData {
+                is_total: false,
+                amount: Some(AmountData {
+                    number: sale_d.to_string(),
+                    currency: "USD".to_string(),
+                }),
+                number: None,
+                currency: None,
+            }),
+            flag: None,
+            metadata: vec![],
+        };
+        // Balancing posting — auto-balanced (units=None) so it doesn't
+        // introduce a second sale leg the plugin would also analyze.
+        let cash_posting = PostingData {
+            account: "Assets:Cash".to_string(),
+            units: None,
+            cost: None,
+            price: None,
+            flag: None,
+            metadata: vec![],
+        };
+        // Optional Income posting that satisfies the gain-coverage
+        // condition. The plugin only checks for the prefix, not the
+        // amount, so any Income:* account suppresses the warning.
+        let income_posting = PostingData {
+            account: "Income:Capital-Gains".to_string(),
+            units: None,
+            cost: None,
+            price: None,
+            flag: None,
+            metadata: vec![],
+        };
+        let mut postings = vec![sale_posting, cash_posting];
+        if with_income_posting {
+            postings.push(income_posting);
+        }
+
+        let input = make_input(vec![
+            make_open("2024-01-01", "Assets:Brokerage"),
+            make_open("2024-01-01", "Assets:Cash"),
+            make_open("2024-01-01", "Income:Capital-Gains"),
+            DirectiveWrapper {
+                directive_type: "transaction".to_string(),
+                date: "2024-06-15".to_string(),
+                filename: None,
+                lineno: None,
+                data: DirectiveData::Transaction(TransactionData {
+                    flag: "*".to_string(),
+                    payee: None,
+                    narration: "Sale".to_string(),
+                    tags: vec![],
+                    links: vec![],
+                    metadata: vec![],
+                    postings,
+                }),
+            },
+        ]);
+
+        let output = plugin.process(input);
+
+        let should_warn = expected_gain != Decimal::ZERO && !with_income_posting;
+        let expected_count = usize::from(should_warn);
+        proptest::prop_assert_eq!(
+            output.errors.len(), expected_count,
+            "expected {} warning(s) for cost={} sale={} units={} with_income={}",
+            expected_count, cost_d, sale_d, units, with_income_posting
+        );
+    }
 }
 
 // ============================================================================
@@ -6622,6 +6922,99 @@ fn test_check_average_cost_respects_custom_tolerance() {
         "40% deviation is within 50% custom tolerance; got {} warnings",
         output.errors.len()
     );
+}
+
+// Property test: selling at the exact weighted-average cost basis
+// produces no warning, regardless of how many buys at how many prices
+// preceded the sale.
+//
+// The plugin's invariant is the standard weighted-mean formula:
+//
+//   avg = Σ(units_i * price_i) / Σ(units_i)
+//
+// We compute that mean in the test using `rust_decimal` (the same
+// crate the plugin uses) and pass it as the `cost_per` of the sale
+// leg. With identical arithmetic on both sides the difference is
+// exactly zero, well within any tolerance, so no warning is expected.
+// A rounding bug or off-by-one in the running totals would surface
+// as an unexpected warning.
+proptest::proptest! {
+    #![proptest_config(proptest::prelude::ProptestConfig::with_cases(64))]
+
+    #[test]
+    fn prop_check_average_cost_sell_at_weighted_mean_produces_no_warning(
+        // 1..=5 buys, each (units, price-in-cents). Small ranges keep
+        // arithmetic well inside Decimal precision.
+        buys in proptest::collection::vec(
+            (1u32..100, 1u32..1_000_000),
+            1..=5,
+        ),
+    ) {
+        use rust_decimal::Decimal;
+
+        // Compute the expected weighted mean using the same arithmetic
+        // the plugin uses internally: `total_cost / total_units`, with
+        // each price already represented in dollars via
+        // `Decimal::new(price_cents, 2)` (scale 2 ⇒ value = cents/100).
+        // Identical operation order on both sides guarantees that any
+        // precision loss is identical too — a real bug, not a precision
+        // artifact, would be required to make the assertion fail.
+        let total_units: Decimal = buys.iter()
+            .map(|(u, _)| Decimal::from(*u))
+            .sum();
+        let total_cost: Decimal = buys.iter()
+            .map(|(u, p)| Decimal::from(*u) * Decimal::new(i64::from(*p), 2))
+            .sum();
+        let avg = total_cost / total_units;
+
+        // Build directives: open with NONE booking, then one buy txn
+        // per generated entry, then a single sell at the weighted mean.
+        let mut directives: Vec<DirectiveWrapper> = vec![
+            DirectiveWrapper {
+                directive_type: "open".to_string(),
+                date: "2024-01-01".to_string(),
+                filename: None,
+                lineno: None,
+                data: DirectiveData::Open(OpenData {
+                    account: "Assets:Broker".to_string(),
+                    currencies: vec![],
+                    booking: Some("NONE".to_string()),
+                    metadata: vec![],
+                }),
+            },
+        ];
+        for (i, (units, price_cents)) in buys.iter().enumerate() {
+            let price = Decimal::new(i64::from(*price_cents), 2);
+            directives.push(make_transaction_with_cost(
+                &format!("2024-01-{:02}", (i % 28) + 1),
+                "Buy",
+                "Assets:Broker",
+                (&units.to_string(), "AAPL"),
+                (&price.to_string(), "USD"),
+                "Assets:Cash",
+            ));
+        }
+        // Sell 1 unit at exactly the weighted-mean cost.
+        directives.push(make_transaction_with_cost(
+            "2024-12-01",
+            "Sell at average",
+            "Assets:Broker",
+            ("-1", "AAPL"),
+            (&avg.to_string(), "USD"),
+            "Assets:Cash",
+        ));
+
+        let plugin = CheckAverageCostPlugin::new();
+        let input = make_input(directives);
+        let output = plugin.process(input);
+
+        proptest::prop_assert_eq!(
+            output.errors.len(), 0,
+            "selling at computed weighted mean {} should produce 0 warnings; \
+             buys={:?}, errors={:?}",
+            avg, buys, output.errors
+        );
+    }
 }
 
 // ============================================================================

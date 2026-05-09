@@ -5424,6 +5424,90 @@ fn test_prices_table_basic_select() {
     assert_eq!(result.rows[0][0], Value::Date(date(2025, 1, 1)));
 }
 
+/// Issue #1048: `#prices` must NOT include transaction-derived implicit
+/// prices unless the user declared the `implicit_prices` plugin.
+///
+/// Pre-fix, the BQL executor's pass-2 walk added implicit prices from
+/// every cost-bearing posting unconditionally, so `SELECT * FROM #prices`
+/// surfaced prices that bean-query's `#prices` does NOT — accounting
+/// for ~35 of 53 BQL compat mismatches before the fix.
+///
+/// Internal `VALUE()` lookups still see those entries (rustledger UX
+/// extension from #567/#593) — see
+/// `test_value_works_without_explicit_price_directive` below.
+#[test]
+fn test_prices_table_excludes_transaction_derived_implicit_prices() {
+    // No `Directive::Price` entries; only a buy with cost. bean-query
+    // would return 0 rows for `#prices` here.
+    let directives = vec![
+        Directive::Open(Open::new(date(2024, 1, 1), "Assets:Stock")),
+        Directive::Open(Open::new(date(2024, 1, 1), "Assets:Cash")),
+        Directive::Transaction(
+            Transaction::new(date(2024, 1, 10), "Buy")
+                .with_posting(
+                    Posting::new("Assets:Stock", Amount::new(dec!(10), "HOOL")).with_cost(
+                        CostSpec::empty()
+                            .with_number_per(dec!(520))
+                            .with_currency("USD"),
+                    ),
+                )
+                .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(-5200), "USD"))),
+        ),
+    ];
+
+    let result = execute_query("SELECT count(*) FROM #prices", &directives);
+    assert_eq!(result.len(), 1);
+    assert_eq!(
+        result.rows[0][0],
+        Value::Integer(0),
+        "#prices must be empty when no Price directive is declared, even if \
+         transactions carry cost annotations (bean-query compat — issue #1048)"
+    );
+}
+
+/// Companion to the test above: even though `#prices` is empty without
+/// a declared Price directive, internal `VALUE()` lookups still get
+/// the implicit prices from the executor's pass-2 walk. This is the
+/// rustledger UX extension from #567/#593 — `VALUE()` on cost-priced
+/// positions works without requiring the user to wire up the
+/// `implicit_prices` plugin. The fix for #1048 must NOT regress that.
+#[test]
+fn test_value_works_without_explicit_price_directive() {
+    let directives = vec![
+        Directive::Open(Open::new(date(2024, 1, 1), "Assets:Stock")),
+        Directive::Open(Open::new(date(2024, 1, 1), "Assets:Cash")),
+        Directive::Transaction(
+            Transaction::new(date(2024, 1, 10), "Buy")
+                .with_posting(
+                    Posting::new("Assets:Stock", Amount::new(dec!(10), "HOOL")).with_cost(
+                        CostSpec::empty()
+                            .with_number_per(dec!(520))
+                            .with_currency("USD"),
+                    ),
+                )
+                .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(-5200), "USD"))),
+        ),
+    ];
+
+    let result = execute_query(
+        "SELECT account, value(position) WHERE account = 'Assets:Stock'",
+        &directives,
+    );
+    assert_eq!(result.len(), 1);
+    // 10 HOOL @ 520 USD (from the implicit price the pass-2 walk
+    // derives from the cost annotation) = 5200 USD.
+    if let Value::Amount(a) = &result.rows[0][1] {
+        assert_eq!(a.number, dec!(5200));
+        assert_eq!(a.currency, "USD");
+    } else {
+        panic!(
+            "VALUE() should resolve via implicit prices even without an \
+             explicit Price directive; got {:?}",
+            result.rows[0][1]
+        );
+    }
+}
+
 #[test]
 fn test_prices_table_select_all() {
     // Test: SELECT * FROM #prices

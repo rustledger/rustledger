@@ -1732,6 +1732,13 @@ impl<'a> Executor<'a> {
     /// - date: The date of the price directive
     /// - currency: The base currency being priced
     /// - amount: The price as an Amount (number + quote currency)
+    ///
+    /// Only **explicit** Price directives surface here — those that
+    /// came from a `price` directive in the source or were emitted by
+    /// a declared plugin (e.g. `implicit_prices`). Transaction-derived
+    /// implicit prices that the executor's pass-2 walk added for
+    /// internal `VALUE()` lookups are intentionally excluded so the
+    /// `#prices` table matches `bean-query`'s output (issue #1048).
     fn build_prices_table(&self) -> Table {
         let columns = vec![
             "date".to_string(),
@@ -1740,8 +1747,11 @@ impl<'a> Executor<'a> {
         ];
         let mut table = Table::new(columns);
 
-        // Collect all price entries from the price database
-        let mut entries: Vec<_> = self.price_db.iter_entries().collect();
+        // Collect explicit price entries only — transaction-derived
+        // implicit prices are kept in the database for internal
+        // lookups but hidden from the `#prices` table for bean-query
+        // compat.
+        let mut entries: Vec<_> = self.price_db.iter_explicit_entries().collect();
         // Sort by (date, base_currency) for consistent, deterministic output
         entries.sort_by(|(currency_a, date_a, _, _), (currency_b, date_b, _, _)| {
             date_a.cmp(date_b).then_with(|| currency_a.cmp(currency_b))

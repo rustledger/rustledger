@@ -10,7 +10,12 @@ use rustledger_core::{
 use std::collections::HashMap;
 
 /// A price entry.
+///
+/// Marked `#[non_exhaustive]` so future provenance/metadata fields can
+/// be added without breaking downstream struct-literal construction.
+/// Internal construction in this module isn't restricted.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct PriceEntry {
     /// Date of the price.
     pub date: NaiveDate,
@@ -18,6 +23,16 @@ pub struct PriceEntry {
     pub price: Decimal,
     /// Quote currency.
     pub currency: InternedStr,
+    /// `true` if sourced from an explicit `Price` directive (or a
+    /// plugin-emitted one — same shape after plugin runs); `false` if
+    /// derived from a transaction posting in the executor's pass-2
+    /// fallback. The `#prices` BQL table filters to `explicit: true`
+    /// to match `bean-query`, which only surfaces explicit Price
+    /// directives. Internal price lookups (`get_price`, `getprice()`
+    /// BQL function) still see all entries — that preserves the
+    /// rustledger UX extension where `VALUE()` works without the
+    /// `implicit_prices` plugin being declared (issues #567, #593).
+    pub explicit: bool,
 }
 
 /// Database of currency prices.
@@ -70,6 +85,15 @@ impl PriceDatabase {
     /// emitting ABC@EUR with a different value on the same date would
     /// have stored both. Now only the explicit value survives. In
     /// practice this only surfaces with hand-authored conflicts.
+    ///
+    /// **Provenance tagging** (issue #1048): each entry stores
+    /// `explicit: bool`. Pass-1 entries are `true`, pass-2
+    /// transaction-derived entries are `false`. The `#prices` BQL
+    /// table filters to `explicit: true` via `iter_explicit_entries`
+    /// to match `bean-query`, which only surfaces real `Price`
+    /// directives. Internal `get_price` / `convert` lookups see
+    /// both kinds — that's how `VALUE()` keeps working without the
+    /// `implicit_prices` plugin being declared.
     pub fn from_directives(directives: &[Directive]) -> Self {
         let mut db = Self::new();
 
@@ -109,11 +133,15 @@ impl PriceDatabase {
     }
 
     /// Add a price directive to the database.
+    ///
+    /// Marks the entry as `explicit: true` — these entries surface in
+    /// the `#prices` BQL table.
     pub fn add_price(&mut self, price: &PriceDirective) {
         let entry = PriceEntry {
             date: price.date,
             price: price.amount.number,
             currency: price.amount.currency.clone(),
+            explicit: true,
         };
 
         self.prices
@@ -207,6 +235,10 @@ impl PriceDatabase {
     }
 
     /// Add an implicit price entry.
+    ///
+    /// Marks the entry as `explicit: false` — internal lookups still
+    /// see it, but the `#prices` BQL table hides it (matches
+    /// bean-query, which only shows explicit Price directives).
     fn add_implicit_price(
         &mut self,
         date: NaiveDate,
@@ -218,6 +250,7 @@ impl PriceDatabase {
             date,
             price,
             currency: quote_currency.clone(),
+            explicit: false,
         };
 
         self.prices
@@ -456,13 +489,22 @@ impl PriceDatabase {
         self.prices.is_empty()
     }
 
-    /// Iterate over all price entries with their base currency.
+    /// Iterate over explicit price entries only — those sourced from
+    /// `Price` directives (either user-written or plugin-emitted).
+    /// Excludes transaction-derived entries added by the executor's
+    /// pass-2 fallback. Used by the `#prices` BQL table to match
+    /// `bean-query`'s behavior.
     ///
-    /// Returns tuples of (`base_currency`, `date`, `price`, `quote_currency`).
-    pub fn iter_entries(&self) -> impl Iterator<Item = (&str, NaiveDate, Decimal, &str)> {
+    /// For internal price *lookups* (e.g. `VALUE()`, `getprice()`),
+    /// use `get_price` / `convert` / `convert_latest` — those walk
+    /// the underlying entries without filtering, which preserves the
+    /// rustledger UX extension where implicit prices are usable for
+    /// conversion without declaring the `implicit_prices` plugin.
+    pub fn iter_explicit_entries(&self) -> impl Iterator<Item = (&str, NaiveDate, Decimal, &str)> {
         self.prices.iter().flat_map(|(base, entries)| {
             entries
                 .iter()
+                .filter(|e| e.explicit)
                 .map(move |e| (base.as_str(), e.date, e.price, e.currency.as_str()))
         })
     }

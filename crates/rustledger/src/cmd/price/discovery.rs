@@ -142,6 +142,12 @@ pub fn discover_symbols(
     // transaction-walking pass below doesn't duplicate them.
     let mut seen_commodity_decl: HashSet<String> = HashSet::new();
 
+    // Track explicit `price: ""` opt-outs so the config-mapping pass at
+    // the bottom of the function doesn't re-include commodities the user
+    // deliberately suppressed via metadata. Metadata is more specific
+    // than config — when both are present, the metadata opt-out wins.
+    let mut opted_out: HashSet<String> = HashSet::new();
+
     for spanned in directives {
         let Directive::Commodity(comm) = &spanned.value else {
             continue;
@@ -175,8 +181,13 @@ pub fn discover_symbols(
         let info = match classification.decision {
             // `price: ""` (or whitespace) is an explicit opt-out, honored
             // regardless of `undeclared` so users can suppress commodities
-            // that would otherwise be picked up by the heuristic.
-            DiscoveryDecision::OptOut => continue,
+            // that would otherwise be picked up by the heuristic OR by a
+            // config-level `[price.mapping.X]` entry (handled at the
+            // bottom of this function — see `opted_out` filter).
+            DiscoveryDecision::OptOut => {
+                opted_out.insert(symbol.to_string());
+                continue;
+            }
             DiscoveryDecision::Discovered(info) => info,
             // No metadata: only include if `--undeclared` is set AND the
             // commodity name looks like a ticker symbol. This is a strict
@@ -210,21 +221,31 @@ pub fn discover_symbols(
     // protection isn't this filter; it's that the strict DEFAULT requires
     // `price:` metadata. Opting into `--undeclared` is opting into the
     // shape-only filter, which has known false positives for currency codes.
+    //
+    // The transaction-walked set is computed once and shared with the
+    // config-mapping pass below — without sharing, a ledger with both
+    // `--undeclared` and a non-empty `[price.mapping.*]` would walk
+    // transactions twice for the same data.
+    let txn_symbols: HashSet<String> = if undeclared || !config_mapping.is_empty() {
+        transaction_walked_currencies(directives, as_of)
+    } else {
+        HashSet::new()
+    };
+
     if undeclared {
-        let txn_symbols = transaction_walked_currencies(directives, as_of);
-        for symbol in txn_symbols {
-            if seen_commodity_decl.contains(&symbol) {
+        for symbol in &txn_symbols {
+            if seen_commodity_decl.contains(symbol) {
                 continue;
             }
-            if !looks_like_ticker(&symbol) {
+            if !looks_like_ticker(symbol) {
                 continue;
             }
             if let Some(ref active_set) = active
-                && !active_set.contains(&symbol)
+                && !active_set.contains(symbol)
             {
                 continue;
             }
-            out.entry(symbol).or_default();
+            out.entry(symbol.clone()).or_default();
         }
     }
 
@@ -240,27 +261,39 @@ pub fn discover_symbols(
     // active OR `--inactive` set) and the in-ledger filter (must have
     // a `Commodity` directive OR appear in a transaction) so a stale
     // config entry doesn't accidentally fetch commodities the user
-    // doesn't actually use anymore.
-    let in_ledger: HashSet<String> = if config_mapping.is_empty() {
-        HashSet::new()
-    } else {
-        let mut set = seen_commodity_decl.clone();
-        set.extend(transaction_walked_currencies(directives, as_of));
-        set
-    };
-    for symbol in config_mapping.keys() {
-        if out.contains_key(symbol) {
-            continue;
+    // doesn't actually use anymore. We also honor explicit `price: ""`
+    // opt-outs (`opted_out`) — metadata wins over config when both
+    // are present.
+    //
+    // We deliberately do NOT populate `info.quote_currency` from the
+    // config entry: `resolve_quote_currency` reads
+    // `mapping[symbol].Detailed.quote_currency` (step 2 of its
+    // precedence chain) and `build_combined_mapping` starts from
+    // `config_mapping.clone()`, so the config's `quote_currency` is
+    // already the source of truth downstream.
+    if !config_mapping.is_empty() {
+        let ledger_symbols: HashSet<&str> = seen_commodity_decl
+            .iter()
+            .map(String::as_str)
+            .chain(txn_symbols.iter().map(String::as_str))
+            .collect();
+        for symbol in config_mapping.keys() {
+            if out.contains_key(symbol) {
+                continue;
+            }
+            if opted_out.contains(symbol) {
+                continue;
+            }
+            if !ledger_symbols.contains(symbol.as_str()) {
+                continue;
+            }
+            if let Some(ref active_set) = active
+                && !active_set.contains(symbol)
+            {
+                continue;
+            }
+            out.insert(symbol.clone(), DiscoveredCommodity::default());
         }
-        if !in_ledger.contains(symbol) {
-            continue;
-        }
-        if let Some(ref active_set) = active
-            && !active_set.contains(symbol)
-        {
-            continue;
-        }
-        out.insert(symbol.clone(), DiscoveredCommodity::default());
     }
 
     out
@@ -1580,6 +1613,47 @@ mod tests {
         assert!(
             inclusive.contains_key("PSK"),
             "--inactive opts the config-mapped commodity in"
+        );
+    }
+
+    /// `price: ""` opt-out wins over a `[price.mapping.X]` config entry.
+    /// Metadata is more specific than config — a deliberate opt-out
+    /// must NOT be re-included by the config-mapping pass. Without this
+    /// guard the user would have to either remove their config entry
+    /// or accept their opt-out being silently overridden.
+    #[test]
+    fn discover_opt_out_metadata_wins_over_config_mapping() {
+        let mut comm = Commodity::new(date(2024, 1, 1), "PSK");
+        comm.meta
+            .insert("price".to_string(), MetaValue::String(String::new()));
+        let dirs = directives(vec![
+            Directive::Open(Open::new(date(2024, 1, 1), "Assets:Brokerage")),
+            Directive::Open(Open::new(date(2024, 1, 1), "Equity:Opening")),
+            Directive::Commodity(comm),
+            Directive::Transaction(
+                Transaction::new(date(2024, 2, 1), "buy")
+                    .with_posting(Posting::new(
+                        "Assets:Brokerage",
+                        Amount::new(dec!(10), "PSK"),
+                    ))
+                    .with_posting(Posting::new(
+                        "Equity:Opening",
+                        Amount::new(dec!(-10), "PSK"),
+                    )),
+            ),
+        ]);
+        // Config maps PSK — but the metadata opt-out should win.
+        let mut config_mapping = HashMap::new();
+        config_mapping.insert(
+            "PSK".to_string(),
+            CommodityMapping::Simple("PSK".to_string()),
+        );
+
+        let discovered =
+            discover_symbols(&dirs, &Options::new(), false, false, None, &config_mapping);
+        assert!(
+            !discovered.contains_key("PSK"),
+            "explicit `price: \"\"` opt-out must override config mapping"
         );
     }
 

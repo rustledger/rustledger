@@ -102,17 +102,33 @@ struct PriceSpec {
 /// like a ticker symbol are also picked up using configured/default
 /// sources.
 ///
+/// `config_mapping` is the user's `[price.mapping.*]` table from
+/// `.rledger.toml`. Any commodity present in both the ledger (as either a
+/// `Commodity` directive or a transaction posting) and `config_mapping` is
+/// included regardless of `price:` metadata or `undeclared` — an explicit
+/// config entry is itself a strong signal that the user wants this
+/// commodity fetched (issue #1028). The active-commodity filter still
+/// applies, so unused commodities the user added to config months ago
+/// don't suddenly start being fetched.
+///
 /// Takes the directive slice directly so it works with either `LoadResult`
 /// (raw load) or the post-processing `Ledger` type without coupling. Reads
 /// the configured account-type names from `options` so the
 /// active-commodity check works on ledgers using non-English account
 /// roots (e.g., `Activos:` instead of `Assets:`).
+// `pub fn` taking a default-hasher `HashMap` triggers
+// `clippy::implicit_hasher` (pedantic). All callers in this crate use the
+// default hasher (it's the type stored in `PriceConfig`); generalizing
+// over `BuildHasher` would just bloat the signature without unblocking
+// any real consumer.
+#[allow(clippy::implicit_hasher)]
 pub fn discover_symbols(
     directives: &[Spanned<Directive>],
     options: &Options,
     inactive: bool,
     undeclared: bool,
     as_of: Option<NaiveDate>,
+    config_mapping: &HashMap<String, CommodityMapping>,
 ) -> HashMap<String, DiscoveredCommodity> {
     let active = if inactive {
         None
@@ -125,6 +141,12 @@ pub fn discover_symbols(
     // Track which symbols already had a Commodity directive walk so the
     // transaction-walking pass below doesn't duplicate them.
     let mut seen_commodity_decl: HashSet<String> = HashSet::new();
+
+    // Track explicit `price: ""` opt-outs so the config-mapping pass at
+    // the bottom of the function doesn't re-include commodities the user
+    // deliberately suppressed via metadata. Metadata is more specific
+    // than config — when both are present, the metadata opt-out wins.
+    let mut opted_out: HashSet<String> = HashSet::new();
 
     for spanned in directives {
         let Directive::Commodity(comm) = &spanned.value else {
@@ -159,8 +181,13 @@ pub fn discover_symbols(
         let info = match classification.decision {
             // `price: ""` (or whitespace) is an explicit opt-out, honored
             // regardless of `undeclared` so users can suppress commodities
-            // that would otherwise be picked up by the heuristic.
-            DiscoveryDecision::OptOut => continue,
+            // that would otherwise be picked up by the heuristic OR by a
+            // config-level `[price.mapping.X]` entry (handled at the
+            // bottom of this function — see `opted_out` filter).
+            DiscoveryDecision::OptOut => {
+                opted_out.insert(symbol.to_string());
+                continue;
+            }
             DiscoveryDecision::Discovered(info) => info,
             // No metadata: only include if `--undeclared` is set AND the
             // commodity name looks like a ticker symbol. This is a strict
@@ -194,21 +221,78 @@ pub fn discover_symbols(
     // protection isn't this filter; it's that the strict DEFAULT requires
     // `price:` metadata. Opting into `--undeclared` is opting into the
     // shape-only filter, which has known false positives for currency codes.
+    //
+    // The transaction-walked set is computed once and shared with the
+    // config-mapping pass below — without sharing, a ledger with both
+    // `--undeclared` and a non-empty `[price.mapping.*]` would walk
+    // transactions twice for the same data.
+    let txn_symbols: HashSet<String> = if undeclared || !config_mapping.is_empty() {
+        transaction_walked_currencies(directives, as_of)
+    } else {
+        HashSet::new()
+    };
+
     if undeclared {
-        let txn_symbols = transaction_walked_currencies(directives, as_of);
-        for symbol in txn_symbols {
-            if seen_commodity_decl.contains(&symbol) {
+        for symbol in &txn_symbols {
+            if seen_commodity_decl.contains(symbol) {
                 continue;
             }
-            if !looks_like_ticker(&symbol) {
+            if !looks_like_ticker(symbol) {
                 continue;
             }
             if let Some(ref active_set) = active
-                && !active_set.contains(&symbol)
+                && !active_set.contains(symbol)
             {
                 continue;
             }
-            out.entry(symbol).or_default();
+            out.entry(symbol.clone()).or_default();
+        }
+    }
+
+    // Issue #1028: commodities the user explicitly mapped in
+    // `[price.mapping.X]` are picked up here even without `price:`
+    // metadata or `--undeclared`. The presence of a config mapping is
+    // a strong signal of user intent; without this pass, `-f` mode
+    // silently skipped them and the user had to either duplicate the
+    // mapping into ledger metadata or fall back to per-symbol CLI
+    // invocations.
+    //
+    // We still apply the standard activity filter (commodity must be
+    // active OR `--inactive` set) and the in-ledger filter (must have
+    // a `Commodity` directive OR appear in a transaction) so a stale
+    // config entry doesn't accidentally fetch commodities the user
+    // doesn't actually use anymore. We also honor explicit `price: ""`
+    // opt-outs (`opted_out`) — metadata wins over config when both
+    // are present.
+    //
+    // We deliberately do NOT populate `info.quote_currency` from the
+    // config entry: `resolve_quote_currency` reads
+    // `mapping[symbol].Detailed.quote_currency` (step 2 of its
+    // precedence chain) and `build_combined_mapping` starts from
+    // `config_mapping.clone()`, so the config's `quote_currency` is
+    // already the source of truth downstream.
+    if !config_mapping.is_empty() {
+        let ledger_symbols: HashSet<&str> = seen_commodity_decl
+            .iter()
+            .map(String::as_str)
+            .chain(txn_symbols.iter().map(String::as_str))
+            .collect();
+        for symbol in config_mapping.keys() {
+            if out.contains_key(symbol) {
+                continue;
+            }
+            if opted_out.contains(symbol) {
+                continue;
+            }
+            if !ledger_symbols.contains(symbol.as_str()) {
+                continue;
+            }
+            if let Some(ref active_set) = active
+                && !active_set.contains(symbol)
+            {
+                continue;
+            }
+            out.insert(symbol.clone(), DiscoveredCommodity::default());
         }
     }
 
@@ -934,14 +1018,20 @@ mod tests {
 
         // No as_of: both commodity declarations visible (neither is active,
         // so both filtered by the active check; bypass with inactive=true).
-        let all = discover_symbols(&dirs, &Options::new(), true, false, None);
+        let all = discover_symbols(&dirs, &Options::new(), true, false, None, &HashMap::new());
         assert!(all.contains_key("AAPL"));
         assert!(all.contains_key("FUTURECOIN"));
 
         // as_of in 2025: AAPL declared before, FUTURECOIN declared after.
         // Only AAPL should be discoverable.
-        let historical =
-            discover_symbols(&dirs, &Options::new(), true, false, Some(date(2025, 6, 1)));
+        let historical = discover_symbols(
+            &dirs,
+            &Options::new(),
+            true,
+            false,
+            Some(date(2025, 6, 1)),
+            &HashMap::new(),
+        );
         assert!(historical.contains_key("AAPL"));
         assert!(
             !historical.contains_key("FUTURECOIN"),
@@ -950,13 +1040,25 @@ mod tests {
 
         // Boundary: exactly on the declaration date is exclusive (matches
         // bean-price's `entry.date >= date` skip rule).
-        let on_decl_day =
-            discover_symbols(&dirs, &Options::new(), true, false, Some(date(2030, 1, 1)));
+        let on_decl_day = discover_symbols(
+            &dirs,
+            &Options::new(),
+            true,
+            false,
+            Some(date(2030, 1, 1)),
+            &HashMap::new(),
+        );
         assert!(!on_decl_day.contains_key("FUTURECOIN"));
 
         // One day after: now visible.
-        let after_decl =
-            discover_symbols(&dirs, &Options::new(), true, false, Some(date(2030, 1, 2)));
+        let after_decl = discover_symbols(
+            &dirs,
+            &Options::new(),
+            true,
+            false,
+            Some(date(2030, 1, 2)),
+            &HashMap::new(),
+        );
         assert!(after_decl.contains_key("FUTURECOIN"));
     }
 
@@ -1019,7 +1121,7 @@ mod tests {
         ]);
 
         // Without --undeclared: nothing discovered (no commodity directives).
-        let strict = discover_symbols(&dirs, &Options::new(), false, false, None);
+        let strict = discover_symbols(&dirs, &Options::new(), false, false, None, &HashMap::new());
         assert!(strict.is_empty());
 
         // With --undeclared: SHIB AND BAM are both discovered — both pass
@@ -1028,7 +1130,8 @@ mod tests {
         // protection is the strict default that excludes commodities
         // without `price:` metadata. Opting into --undeclared opts into
         // the known false-positive exposure for currency codes.
-        let with_undeclared = discover_symbols(&dirs, &Options::new(), false, true, None);
+        let with_undeclared =
+            discover_symbols(&dirs, &Options::new(), false, true, None, &HashMap::new());
         assert!(
             with_undeclared.contains_key("SHIB"),
             "ticker-shaped commodity in transactions should be discovered with --undeclared"
@@ -1061,7 +1164,8 @@ mod tests {
             ),
         ]);
 
-        let with_undeclared = discover_symbols(&dirs, &Options::new(), true, true, None);
+        let with_undeclared =
+            discover_symbols(&dirs, &Options::new(), true, true, None, &HashMap::new());
         assert!(with_undeclared.contains_key("ETH"));
         assert!(
             with_undeclared.contains_key("BTC-USD"),
@@ -1101,16 +1205,28 @@ mod tests {
         ]);
 
         // as_of == txn.date → exclude (strict less-than).
-        let at_cutoff =
-            discover_symbols(&dirs, &Options::new(), true, true, Some(date(2024, 3, 1)));
+        let at_cutoff = discover_symbols(
+            &dirs,
+            &Options::new(),
+            true,
+            true,
+            Some(date(2024, 3, 1)),
+            &HashMap::new(),
+        );
         assert!(
             !at_cutoff.contains_key("SHIB"),
             "transaction dated exactly on as_of must be excluded (strict less-than, matches bean-price)"
         );
 
         // as_of > txn.date → include.
-        let after_cutoff =
-            discover_symbols(&dirs, &Options::new(), true, true, Some(date(2024, 3, 2)));
+        let after_cutoff = discover_symbols(
+            &dirs,
+            &Options::new(),
+            true,
+            true,
+            Some(date(2024, 3, 2)),
+            &HashMap::new(),
+        );
         assert!(after_cutoff.contains_key("SHIB"));
     }
 
@@ -1128,7 +1244,8 @@ mod tests {
                     .with_posting(Posting::new("Equity:Y", Amount::new(dec!(-1), "Vanguard"))),
             ),
         ]);
-        let discovered = discover_symbols(&dirs, &Options::new(), true, true, None);
+        let discovered =
+            discover_symbols(&dirs, &Options::new(), true, true, None, &HashMap::new());
         assert!(
             !discovered.contains_key("Vanguard"),
             "non-uppercase name should not be picked up even with --undeclared"
@@ -1158,7 +1275,8 @@ mod tests {
                     )),
             ),
         ]);
-        let discovered = discover_symbols(&dirs, &Options::new(), false, false, None);
+        let discovered =
+            discover_symbols(&dirs, &Options::new(), false, false, None, &HashMap::new());
 
         // Even though "Vanguard_VTI" doesn't pass the ticker heuristic,
         // it has price: metadata, so it's discovered.
@@ -1199,7 +1317,8 @@ mod tests {
                     )),
             ),
         ]);
-        let discovered = discover_symbols(&dirs, &Options::new(), false, false, None);
+        let discovered =
+            discover_symbols(&dirs, &Options::new(), false, false, None, &HashMap::new());
 
         let info = discovered.get("AAPL").expect("should be discovered");
         assert_eq!(
@@ -1239,11 +1358,13 @@ mod tests {
         let dirs = directives(vec![Directive::Commodity(comm)]);
 
         // Default: no active postings means OLD is not discovered.
-        let discovered = discover_symbols(&dirs, &Options::new(), false, false, None);
+        let discovered =
+            discover_symbols(&dirs, &Options::new(), false, false, None, &HashMap::new());
         assert!(!discovered.contains_key("OLD"));
 
         // Opt-in: inactive=true brings it back.
-        let discovered_all = discover_symbols(&dirs, &Options::new(), true, false, None);
+        let discovered_all =
+            discover_symbols(&dirs, &Options::new(), true, false, None, &HashMap::new());
         assert!(discovered_all.contains_key("OLD"));
     }
 
@@ -1255,7 +1376,8 @@ mod tests {
     #[test]
     fn discover_returns_empty_for_empty_ledger() {
         let dirs: Vec<Spanned<Directive>> = vec![];
-        let discovered = discover_symbols(&dirs, &Options::new(), false, false, None);
+        let discovered =
+            discover_symbols(&dirs, &Options::new(), false, false, None, &HashMap::new());
         assert!(discovered.is_empty());
     }
 
@@ -1283,14 +1405,15 @@ mod tests {
             ),
         ]);
 
-        let strict = discover_symbols(&dirs, &Options::new(), false, false, None);
+        let strict = discover_symbols(&dirs, &Options::new(), false, false, None, &HashMap::new());
         assert!(
             !strict.contains_key("BAM"),
             "BAM has no `price:` metadata, must not be discovered by default (#962)"
         );
 
         // `--undeclared` brings the heuristic back.
-        let with_undeclared = discover_symbols(&dirs, &Options::new(), false, true, None);
+        let with_undeclared =
+            discover_symbols(&dirs, &Options::new(), false, true, None, &HashMap::new());
         assert!(with_undeclared.contains_key("BAM"));
     }
 
@@ -1317,7 +1440,8 @@ mod tests {
         ]);
 
         // Even with --undeclared, the empty price: opt-out wins.
-        let discovered = discover_symbols(&dirs, &Options::new(), false, true, None);
+        let discovered =
+            discover_symbols(&dirs, &Options::new(), false, true, None, &HashMap::new());
         assert!(!discovered.contains_key("BAM"));
     }
 
@@ -1348,7 +1472,8 @@ mod tests {
             ),
         ]);
 
-        let discovered = discover_symbols(&dirs, &Options::new(), false, false, None);
+        let discovered =
+            discover_symbols(&dirs, &Options::new(), false, false, None, &HashMap::new());
         let info = discovered
             .get("GOVT_EU")
             .expect("quote_currency: alone should opt into discovery");
@@ -1365,8 +1490,217 @@ mod tests {
             date(2024, 1, 1),
             "OLD",
         ))]);
-        let discovered = discover_symbols(&dirs, &Options::new(), true, true, None);
+        let discovered =
+            discover_symbols(&dirs, &Options::new(), true, true, None, &HashMap::new());
         assert!(discovered.contains_key("OLD"));
+    }
+
+    /// Issue #1028: a commodity present in the ledger AND in the user's
+    /// `[price.mapping.X]` config must be discovered even without
+    /// `price:` metadata or `--undeclared`. Pre-fix, `-f` mode silently
+    /// skipped these because discovery only ever fired on metadata.
+    #[test]
+    fn discover_includes_config_mapped_commodity_without_metadata() {
+        let dirs = directives(vec![
+            Directive::Open(Open::new(date(2024, 1, 1), "Assets:Brokerage")),
+            Directive::Open(Open::new(date(2024, 1, 1), "Equity:Opening")),
+            // Commodity directive has NO `price:` and NO `quote_currency:`.
+            Directive::Commodity(Commodity::new(date(2024, 1, 1), "PSK")),
+            // PSK is held (active) so the strict-default activity filter
+            // shouldn't reject it.
+            Directive::Transaction(
+                Transaction::new(date(2024, 2, 1), "buy")
+                    .with_posting(Posting::new(
+                        "Assets:Brokerage",
+                        Amount::new(dec!(10), "PSK"),
+                    ))
+                    .with_posting(Posting::new(
+                        "Equity:Opening",
+                        Amount::new(dec!(-10), "PSK"),
+                    )),
+            ),
+        ]);
+
+        // User's `.rledger.toml` maps PSK to a custom command source.
+        let mut config_mapping = HashMap::new();
+        config_mapping.insert(
+            "PSK".to_string(),
+            CommodityMapping::Detailed(DetailedMapping {
+                source: SourceRef::Single("mybank".to_string()),
+                ticker: Some("PSK".to_string()),
+                quote_currency: Some("USD".to_string()),
+            }),
+        );
+
+        let discovered =
+            discover_symbols(&dirs, &Options::new(), false, false, None, &config_mapping);
+        assert!(
+            discovered.contains_key("PSK"),
+            "PSK has a config mapping and is held — must be discovered without metadata"
+        );
+    }
+
+    /// A config mapping for a commodity that's NOT in the ledger should
+    /// NOT cause a phantom discovery. Pins the in-ledger filter so a
+    /// stale config entry doesn't auto-fetch unused commodities.
+    #[test]
+    fn discover_skips_config_mapped_commodity_not_in_ledger() {
+        let dirs = directives(vec![
+            // Only USD appears; PSK has no Commodity directive and no
+            // transactions.
+            Directive::Open(Open::new(date(2024, 1, 1), "Assets:Cash")),
+        ]);
+        let mut config_mapping = HashMap::new();
+        config_mapping.insert(
+            "PSK".to_string(),
+            CommodityMapping::Simple("PSK".to_string()),
+        );
+
+        let discovered =
+            discover_symbols(&dirs, &Options::new(), true, false, None, &config_mapping);
+        assert!(
+            !discovered.contains_key("PSK"),
+            "PSK is in config but absent from ledger — must NOT be discovered"
+        );
+    }
+
+    /// Active filter still applies to config-mapped commodities: an
+    /// inactive holding (zero balance) is skipped under the default
+    /// (`inactive=false`), included under `--inactive`.
+    #[test]
+    fn discover_config_mapped_commodity_respects_active_filter() {
+        let dirs = directives(vec![
+            Directive::Open(Open::new(date(2024, 1, 1), "Assets:Brokerage")),
+            Directive::Open(Open::new(date(2024, 1, 1), "Equity:Opening")),
+            Directive::Commodity(Commodity::new(date(2024, 1, 1), "PSK")),
+            // Buy + sell same amount → zero balance → inactive.
+            Directive::Transaction(
+                Transaction::new(date(2024, 2, 1), "buy")
+                    .with_posting(Posting::new(
+                        "Assets:Brokerage",
+                        Amount::new(dec!(10), "PSK"),
+                    ))
+                    .with_posting(Posting::new(
+                        "Equity:Opening",
+                        Amount::new(dec!(-10), "PSK"),
+                    )),
+            ),
+            Directive::Transaction(
+                Transaction::new(date(2024, 3, 1), "sell")
+                    .with_posting(Posting::new(
+                        "Assets:Brokerage",
+                        Amount::new(dec!(-10), "PSK"),
+                    ))
+                    .with_posting(Posting::new("Equity:Opening", Amount::new(dec!(10), "PSK"))),
+            ),
+        ]);
+        let mut config_mapping = HashMap::new();
+        config_mapping.insert(
+            "PSK".to_string(),
+            CommodityMapping::Simple("PSK".to_string()),
+        );
+
+        // Strict default (inactive=false): zero balance → skipped.
+        let strict = discover_symbols(&dirs, &Options::new(), false, false, None, &config_mapping);
+        assert!(
+            !strict.contains_key("PSK"),
+            "inactive holding skipped under default (active filter applies)"
+        );
+
+        // With --inactive: included regardless of activity.
+        let inclusive =
+            discover_symbols(&dirs, &Options::new(), true, false, None, &config_mapping);
+        assert!(
+            inclusive.contains_key("PSK"),
+            "--inactive opts the config-mapped commodity in"
+        );
+    }
+
+    /// `price: ""` opt-out wins over a `[price.mapping.X]` config entry.
+    /// Metadata is more specific than config — a deliberate opt-out
+    /// must NOT be re-included by the config-mapping pass. Without this
+    /// guard the user would have to either remove their config entry
+    /// or accept their opt-out being silently overridden.
+    #[test]
+    fn discover_opt_out_metadata_wins_over_config_mapping() {
+        let mut comm = Commodity::new(date(2024, 1, 1), "PSK");
+        comm.meta
+            .insert("price".to_string(), MetaValue::String(String::new()));
+        let dirs = directives(vec![
+            Directive::Open(Open::new(date(2024, 1, 1), "Assets:Brokerage")),
+            Directive::Open(Open::new(date(2024, 1, 1), "Equity:Opening")),
+            Directive::Commodity(comm),
+            Directive::Transaction(
+                Transaction::new(date(2024, 2, 1), "buy")
+                    .with_posting(Posting::new(
+                        "Assets:Brokerage",
+                        Amount::new(dec!(10), "PSK"),
+                    ))
+                    .with_posting(Posting::new(
+                        "Equity:Opening",
+                        Amount::new(dec!(-10), "PSK"),
+                    )),
+            ),
+        ]);
+        // Config maps PSK — but the metadata opt-out should win.
+        let mut config_mapping = HashMap::new();
+        config_mapping.insert(
+            "PSK".to_string(),
+            CommodityMapping::Simple("PSK".to_string()),
+        );
+
+        let discovered =
+            discover_symbols(&dirs, &Options::new(), false, false, None, &config_mapping);
+        assert!(
+            !discovered.contains_key("PSK"),
+            "explicit `price: \"\"` opt-out must override config mapping"
+        );
+    }
+
+    /// Discovery from `price:` metadata still wins over the config-only
+    /// pass: a commodity with both metadata AND a config entry should
+    /// keep the metadata-derived `info.mapping`, not be overwritten with
+    /// the empty default. Pins precedence so the fix doesn't regress
+    /// prior behavior.
+    #[test]
+    fn discover_metadata_precedence_unchanged_by_config_mapping_pass() {
+        let mut comm = Commodity::new(date(2024, 1, 1), "PSK");
+        comm.meta.insert(
+            "price".to_string(),
+            MetaValue::String("USD:yahoo/PSK".into()),
+        );
+        let dirs = directives(vec![
+            Directive::Open(Open::new(date(2024, 1, 1), "Assets:Brokerage")),
+            Directive::Open(Open::new(date(2024, 1, 1), "Equity:Opening")),
+            Directive::Commodity(comm),
+            Directive::Transaction(
+                Transaction::new(date(2024, 2, 1), "buy")
+                    .with_posting(Posting::new(
+                        "Assets:Brokerage",
+                        Amount::new(dec!(10), "PSK"),
+                    ))
+                    .with_posting(Posting::new(
+                        "Equity:Opening",
+                        Amount::new(dec!(-10), "PSK"),
+                    )),
+            ),
+        ]);
+        let mut config_mapping = HashMap::new();
+        config_mapping.insert(
+            "PSK".to_string(),
+            CommodityMapping::Simple("PSK".to_string()),
+        );
+
+        let discovered =
+            discover_symbols(&dirs, &Options::new(), false, false, None, &config_mapping);
+        let info = discovered.get("PSK").expect("PSK discovered");
+        // Metadata-derived mapping should remain — the config pass must
+        // see PSK already in `out` and skip it.
+        assert!(
+            info.mapping.is_some(),
+            "metadata-driven discovery should leave info.mapping set; \
+             the config pass must not overwrite it with default"
+        );
     }
 
     /// Malformed `price:` metadata (e.g. typo, wrong format) produces no
@@ -1445,7 +1779,8 @@ mod tests {
             ),
         ]);
 
-        let discovered = discover_symbols(&dirs, &Options::new(), false, true, None);
+        let discovered =
+            discover_symbols(&dirs, &Options::new(), false, true, None, &HashMap::new());
         assert!(!discovered.contains_key("BAM"));
     }
 

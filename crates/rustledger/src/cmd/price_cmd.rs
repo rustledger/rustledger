@@ -210,6 +210,7 @@ pub fn run(args: &PriceArgs, price_config: &PriceConfig) -> Result<()> {
             effective_inactive,
             effective_undeclared,
             date,
+            &price_config.mapping,
         );
         let mut existing = HashSet::new();
         for spanned in &ledger.directives {

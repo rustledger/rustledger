@@ -461,6 +461,7 @@ mod tests {
         })
     }
 
+    #[allow(clippy::needless_pass_by_value)] // test helper; ergonomic with `vec![]` literals
     fn make_transaction(date: &str, postings: Vec<serde_json::Value>) -> serde_json::Value {
         serde_json::json!({
             "type": "transaction",
@@ -609,12 +610,11 @@ mod tests {
         assert!(result.entries.len() >= 3);
 
         // Check that a summary transaction was created
-        let summary_txns: Vec<_> = result
+        let has_summary_txn = result
             .entries
             .iter()
-            .filter(|e| e["type"] == "transaction" && e["meta"]["filename"] == "<summarization>")
-            .collect();
-        assert!(!summary_txns.is_empty(), "Should have summary transactions");
+            .any(|e| e["type"] == "transaction" && e["meta"]["filename"] == "<summarization>");
+        assert!(has_summary_txn, "Should have summary transactions");
     }
 
     #[test]

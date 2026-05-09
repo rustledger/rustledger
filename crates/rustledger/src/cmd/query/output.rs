@@ -446,8 +446,12 @@ pub(super) fn format_value(value: &Value, numberify: bool, ctx: &DisplayContext)
             } else {
                 let mut s = ctx.format_amount(p.units.number, p.units.currency.as_str());
                 if let Some(ref cost) = p.cost {
+                    // `{ N CCY}` — leading space inside `{` matches
+                    // Beancount Position.__str__. Pre-fix this emitted
+                    // `{N CCY}` and accounted for ~137 of 510 BQL
+                    // compat (file × query) mismatches.
                     s.push_str(&format!(
-                        " {{{}}}",
+                        " {{ {}}}",
                         ctx.format_amount(cost.number, cost.currency.as_str())
                     ));
                 }
@@ -513,8 +517,10 @@ pub(super) fn format_value(value: &Value, numberify: bool, ctx: &DisplayContext)
                     } else {
                         let mut s = ctx.format_amount(p.units.number, p.units.currency.as_str());
                         if let Some(ref cost) = p.cost {
+                            // See `Value::Position` arm above for why
+                            // there's a leading space after `{`.
                             s.push_str(&format!(
-                                " {{{}}}",
+                                " {{ {}}}",
                                 ctx.format_amount(cost.number, cost.currency.as_str())
                             ));
                         }
@@ -633,13 +639,20 @@ mod tests {
     use rust_decimal_macros::dec;
     use rustledger_core::{Amount, Cost, Inventory, Position};
 
-    /// Issue #987: cost-spec braces in BQL output had a leading space
-    /// inside the open brace (`{ 128.99 USD}` instead of `{128.99 USD}`),
-    /// diverging from `bean-query`. Pin both the `Position` and
-    /// `Inventory` paths so a future change to the format string can't
-    /// silently regress.
+    /// Cost-spec braces in BQL output match Beancount's
+    /// `Position.__str__`: `{ 128.99 USD}` — single space after `{`,
+    /// no space before `}`.
+    ///
+    /// Earlier (#987) tests pinned the no-leading-space form after
+    /// comparing against an older bean-query release that emitted
+    /// `{128.99 USD}`. With beanquery 0.2.0 + beancount 3.2.3 (what
+    /// CI installs and the dev shell ships via the compat container,
+    /// PR #1047), bean-query renders with the leading space — so
+    /// matching it closes ~137 of 510 BQL compat (file × query)
+    /// mismatches. Pin both `Position` and `Inventory` paths so a
+    /// future format change can't silently regress.
     #[test]
-    fn test_position_with_cost_renders_without_leading_space_inside_braces() {
+    fn test_position_with_cost_matches_beancount_position_str() {
         let pos = Position::with_cost(
             Amount::new(dec!(8.373), "RGAGX"),
             Cost::new(dec!(128.99), "USD"),
@@ -649,17 +662,17 @@ mod tests {
         let rendered = format_value(&value, false, &ctx);
 
         assert!(
-            !rendered.contains("{ "),
-            "expected no leading space after `{{`, got {rendered:?}"
+            rendered.contains("{ 128.99 USD}"),
+            "expected `{{ 128.99 USD}}` (matching bean-query), got {rendered:?}"
         );
         assert!(
-            rendered.contains("{128.99 USD}"),
-            "expected `{{128.99 USD}}` in output, got {rendered:?}"
+            !rendered.contains(" }"),
+            "no space immediately before `}}`, got {rendered:?}"
         );
     }
 
     #[test]
-    fn test_inventory_with_cost_renders_without_leading_space_inside_braces() {
+    fn test_inventory_with_cost_matches_beancount_position_str() {
         let mut inv = Inventory::new();
         inv.add(Position::with_cost(
             Amount::new(dec!(8.373), "RGAGX"),
@@ -674,12 +687,8 @@ mod tests {
         let rendered = format_value(&value, false, &ctx);
 
         assert!(
-            !rendered.contains("{ "),
-            "expected no leading space after `{{`, got {rendered:?}"
-        );
-        assert!(
-            rendered.contains("{128.99 USD}") && rendered.contains("{131.73 USD}"),
-            "expected both costs rendered without leading space, got {rendered:?}"
+            rendered.contains("{ 128.99 USD}") && rendered.contains("{ 131.73 USD}"),
+            "expected both costs rendered with leading space, got {rendered:?}"
         );
     }
 

@@ -130,12 +130,29 @@ impl Cost {
 
 impl fmt::Display for Cost {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{{{} {}", self.number, self.currency)?;
+        // Match Beancount's `Position.__str__` format: `{ 520 USD}` —
+        // single space after the opening brace, no space before the
+        // closing brace. The space matters for BQL-output compat: the
+        // compat harness diffs row-by-row against bean-query, and the
+        // pre-fix `{520 USD}` form accounted for ~137 of 510 file ×
+        // query mismatches. Verified against beanquery 0.2.0 + beancount
+        // 3.2.3 (matches what CI installs and what the dev shell now
+        // ships via the compat container — see PR #1047). Source-level
+        // `format_cost_spec` (used by `rledger format` to round-trip
+        // ledger files) keeps the no-space `{N CCY}` form because that
+        // matches Beancount's `print` command output, not its
+        // `Position.__str__`.
+        write!(f, "{{ {} {}", self.number, self.currency)?;
         if let Some(date) = self.date {
             write!(f, ", {date}")?;
         }
         if let Some(label) = &self.label {
-            write!(f, ", \"{label}\"")?;
+            // Escape via `format::escape_string` so labels containing
+            // `"`, `\`, or `\n` round-trip safely. Without this a label
+            // like `say "hi"` would render as `"say "hi""` — a parse
+            // error if anyone tried to feed it back to a Beancount-
+            // compatible reader.
+            write!(f, ", \"{}\"", crate::format::escape_string(label))?;
         }
         write!(f, "}}")
     }
@@ -394,6 +411,46 @@ mod tests {
         assert!(s.contains("USD"));
         assert!(s.contains("2024-01-15"));
         assert!(s.contains("lot1"));
+    }
+
+    /// Exact-format regression covering both fixes in this PR:
+    /// - leading space inside `{` (matches Beancount Position.__str__)
+    /// - special-character escaping in labels via `format::escape_string`
+    #[test]
+    fn test_cost_display_escapes_special_characters_in_label() {
+        // Bare per-unit cost — pin the leading-space form.
+        let bare = Cost::new(dec!(520), "USD");
+        assert_eq!(format!("{bare}"), "{ 520 USD}");
+
+        // With date.
+        let dated = Cost::new(dec!(520.00), "USD").with_date(date(2024, 1, 15));
+        assert_eq!(format!("{dated}"), "{ 520.00 USD, 2024-01-15}");
+
+        // Embedded double-quote.
+        let quoted = Cost::new(dec!(100.00), "USD")
+            .with_date(date(2024, 1, 15))
+            .with_label("say \"hi\"");
+        assert_eq!(
+            format!("{quoted}"),
+            "{ 100.00 USD, 2024-01-15, \"say \\\"hi\\\"\"}"
+        );
+
+        // Embedded backslash.
+        let backslash = Cost::new(dec!(50.00), "USD").with_label("path\\to\\lot");
+        assert_eq!(
+            format!("{backslash}"),
+            "{ 50.00 USD, \"path\\\\to\\\\lot\"}"
+        );
+
+        // Embedded newline.
+        let newline = Cost::new(dec!(75.00), "USD").with_label("line1\nline2");
+        assert_eq!(format!("{newline}"), "{ 75.00 USD, \"line1\\nline2\"}");
+
+        // Plain label still works (no escaping changes for safe chars).
+        let plain = Cost::new(dec!(540.00), "USD")
+            .with_date(date(2024, 2, 15))
+            .with_label("lot-A");
+        assert_eq!(format!("{plain}"), "{ 540.00 USD, 2024-02-15, \"lot-A\"}");
     }
 
     #[test]

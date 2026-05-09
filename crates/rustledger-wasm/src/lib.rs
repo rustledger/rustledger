@@ -765,6 +765,7 @@ include "accounts.beancount"
     fn test_total_cost_produces_per_unit_cost() {
         use helpers::load_and_book;
         use rustledger_core::Directive;
+        use std::str::FromStr;
 
         let source = r#"
 2020-01-01 open Assets:Investments:PROP PROP
@@ -803,7 +804,6 @@ include "accounts.beancount"
             .expect("total cost {{}} should be converted to per-unit cost, but number_per is None");
 
         // 150.00 / 273.2200 ≈ 0.5490
-        use std::str::FromStr;
         let expected = rustledger_core::Decimal::from_str("0.5490").unwrap();
         let diff = (per_unit - expected).abs();
         assert!(
@@ -889,17 +889,6 @@ include "accounts.beancount"
     /// Parity: total cost `{{ }}` produces identical per-unit costs.
     #[test]
     fn test_parity_total_cost() {
-        let source = r#"
-2020-01-01 open Assets:Investments PROP
-2020-01-01 open Assets:Bank AUD
-
-2020-01-16 * "Buy"
-  Assets:Investments  273.2200 PROP {{150.00 AUD}}
-  Assets:Bank         -150.00 AUD
-"#;
-        let cli = cli_process(source);
-        let wasm = wasm_process(source);
-
         fn get_cost_per_unit(
             directives: &[rustledger_core::Directive],
         ) -> rustledger_core::Decimal {
@@ -915,6 +904,17 @@ include "accounts.beancount"
                 .expect("should have a cost")
         }
 
+        let source = r#"
+2020-01-01 open Assets:Investments PROP
+2020-01-01 open Assets:Bank AUD
+
+2020-01-16 * "Buy"
+  Assets:Investments  273.2200 PROP {{150.00 AUD}}
+  Assets:Bank         -150.00 AUD
+"#;
+        let cli = cli_process(source);
+        let wasm = wasm_process(source);
+
         assert_eq!(
             get_cost_per_unit(&cli),
             get_cost_per_unit(&wasm),
@@ -925,17 +925,6 @@ include "accounts.beancount"
     /// Parity: interpolation fills in missing amounts identically.
     #[test]
     fn test_parity_interpolation() {
-        let source = r#"
-2024-01-01 open Assets:Bank USD
-2024-01-01 open Expenses:Food USD
-
-2024-01-15 * "Coffee"
-  Expenses:Food  5.00 USD
-  Assets:Bank
-"#;
-        let cli = cli_process(source);
-        let wasm = wasm_process(source);
-
         fn get_bank_amount(directives: &[rustledger_core::Directive]) -> rustledger_core::Decimal {
             directives
                 .iter()
@@ -953,6 +942,17 @@ include "accounts.beancount"
                 })
                 .expect("should have bank posting with amount")
         }
+
+        let source = r#"
+2024-01-01 open Assets:Bank USD
+2024-01-01 open Expenses:Food USD
+
+2024-01-15 * "Coffee"
+  Expenses:Food  5.00 USD
+  Assets:Bank
+"#;
+        let cli = cli_process(source);
+        let wasm = wasm_process(source);
 
         assert_eq!(
             get_bank_amount(&cli),
@@ -993,6 +993,7 @@ include "accounts.beancount"
     #[test]
     fn test_parsed_ledger_serialize_roundtrip() {
         use crate::cache;
+        use crate::editor::EditorCache;
         use crate::helpers::load_and_book;
 
         let source = r#"
@@ -1040,7 +1041,6 @@ option "operating_currency" "USD"
         );
 
         // Verify the from_cache path works (re-parses source for editor features)
-        use crate::editor::EditorCache;
         let parse_result = rustledger_parser::parse(source);
         let editor_cache = EditorCache::new(source, &parse_result);
         assert!(

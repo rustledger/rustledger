@@ -266,6 +266,23 @@ pub fn process(raw: LoadResult, options: &LoadOptions) -> Result<Ledger, Process
         run_booking(&mut directives, effective_method, &mut errors);
     }
 
+    // Booking has consumed the cost-reduction-aware order; switch to a
+    // file-position tie-break that's order-equivalent to Python
+    // beancount's `(date, type_priority, lineno)` for downstream
+    // consumers (plugins, validation, BQL queries, display). We sort by
+    // `(date, priority, file_id, span.start)` — `span.start` is a byte
+    // offset and `file_id` indexes the `SourceMap`, so within a file
+    // the offset orders directives the same way line numbers would
+    // (line N starts before line N+1), without paying for the byte→line
+    // conversion. Across files the `file_id` tie-break preserves the
+    // include order they were added to the `SourceMap`. Without this
+    // re-sort, BQL output diverges from bean-query on fixtures that
+    // mix augmentation and reduction transactions on the same date —
+    // same rows, different tie-break (issue #1049, ~10 of 53 BQL
+    // compat mismatches). Stable sort preserves the existing in-loader
+    // order among directives with identical sort keys.
+    directives.sort_by_key(|d| (d.value.date(), d.value.priority(), d.file_id, d.span.start));
+
     // 3. Run plugins (including document discovery when run_plugins is enabled)
     // Note: Document discovery only runs when run_plugins is true to respect raw mode semantics.
     // LoadOptions::raw() sets run_plugins=false to prevent any directive mutations.

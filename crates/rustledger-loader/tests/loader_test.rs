@@ -1562,3 +1562,87 @@ fn precision_metadata_string_value_falls_back() {
     assert_eq!(result.display_context.get_precision("USD"), Some(2));
     assert!(!result.display_context.has_fixed_precision("USD"));
 }
+
+#[test]
+fn same_date_directives_keep_file_order_after_booking() {
+    // Issue #1049: the loader's pre-booking sort uses
+    // `(date, priority, has_cost_reduction)` so the booking engine
+    // sees augmentations before reductions on the same date (issue
+    // #841). After booking runs, we re-sort by `(date, priority,
+    // file_id, span.start)` to match Python beancount's
+    // `(date, type_priority, lineno)` order — otherwise BQL output
+    // diverges from bean-query on same-date tie-breaks.
+    //
+    // This fixture has a Sell stamped *before* a Buy in the file but
+    // on the same date. Booking reorders them so the Buy creates the
+    // lot first; the post-booking re-sort then restores file order
+    // for downstream consumers.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("same_date_order.beancount");
+    std::fs::write(
+        &path,
+        r#"2024-01-01 open Assets:Stock
+2024-01-01 open Assets:Cash
+2024-01-01 open Equity:Opening
+
+2024-01-10 * "Initial cash"
+  Assets:Cash       2000.00 USD
+  Equity:Opening   -2000.00 USD
+
+2024-01-15 * "Sell — appears first in file"
+  Assets:Stock     -5 STK {100.00 USD}
+  Assets:Cash     500.00 USD
+
+2024-01-15 * "Buy — appears second in file but creates the lot"
+  Assets:Stock     10 STK {100.00 USD}
+  Assets:Cash   -1000.00 USD
+"#,
+    )
+    .unwrap();
+    let options = LoadOptions::default();
+    let ledger = load(&path, &options).expect("should load");
+
+    // Booking succeeded — the Sell found a matching lot from the Buy
+    // even though it's textually earlier (issue #841).
+    assert!(
+        ledger
+            .errors
+            .iter()
+            .all(|e| !matches!(e.severity, ErrorSeverity::Error)),
+        "booking should succeed across same-date sell-before-buy: {:?}",
+        ledger
+            .errors
+            .iter()
+            .filter(|e| matches!(e.severity, ErrorSeverity::Error))
+            .collect::<Vec<_>>()
+    );
+
+    // Find the two same-date transactions and assert file order is
+    // preserved: the textually-first "Sell" before the textually-second "Buy".
+    let target_date = jiff::civil::date(2024, 1, 15);
+    let txns_on_date: Vec<&str> = ledger
+        .directives
+        .iter()
+        .filter_map(|d| {
+            if let rustledger_core::Directive::Transaction(t) = &d.value
+                && t.date == target_date
+            {
+                return Some(t.narration.as_str());
+            }
+            None
+        })
+        .collect();
+    assert_eq!(
+        txns_on_date.len(),
+        2,
+        "expected two same-date transactions, got {txns_on_date:?}"
+    );
+    assert!(
+        txns_on_date[0].starts_with("Sell"),
+        "textually-first Sell should come first after post-booking sort, got: {txns_on_date:?}"
+    );
+    assert!(
+        txns_on_date[1].starts_with("Buy"),
+        "textually-second Buy should come second, got: {txns_on_date:?}"
+    );
+}

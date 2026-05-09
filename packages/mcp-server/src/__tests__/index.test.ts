@@ -585,8 +585,8 @@ describe('Tool Handlers', () => {
 // ============================================================================
 
 describe('Tool Definitions', () => {
-  it('should have 25 tools defined', () => {
-    expect(TOOLS.length).toBe(25);
+  it('should have 27 tools defined', () => {
+    expect(TOOLS.length).toBe(27);
   });
 
   it('all tools should have required fields', () => {

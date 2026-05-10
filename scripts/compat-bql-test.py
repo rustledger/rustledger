@@ -92,11 +92,67 @@ KNOWN_PYTHON_DIVERGENCES: set[tuple[str, str]] = {
 }
 
 
-def _is_known_python_divergence(file: str, query_name: str) -> bool:
-    return (file, query_name) in KNOWN_PYTHON_DIVERGENCES or (
-        file,
+# Queries whose "empty source" case is divergent because beanquery
+# returns 0 rows for `SELECT COUNT(*) FROM <empty_source>` (and
+# similar pure-aggregate, no-GROUP-BY shapes) where standard SQL —
+# and rledger — returns 1 row with the aggregate identity (e.g., 0
+# for COUNT). Non-standard beanquery behavior; see #1055.
+#
+# Maps query_name -> the rs row content that constitutes the
+# canonical quirk shape. Checking the row content (not just the row
+# count) is what makes the predicate safe against future regressions:
+# a fixture where bean-query sees 0 prices but rledger over-emits
+# `N>0` would also produce `py_rows=0 rs_rows=1`, but the rs row
+# would be `"N"`, not `"0"` — so we wouldn't mask the bug.
+#
+# Add a sibling no-GROUP-BY aggregate query by appending one entry,
+# keyed on the corpus query name and mapped to its aggregate identity
+# (e.g. SUM → "0", or "0.00" if the column carries a tracked
+# precision; check what bean-query renders empirically).
+_BEANQUERY_EMPTY_AGGREGATE_IDENTITY: dict[str, str] = {
+    # SELECT COUNT(*) AS n FROM #prices  →  identity is integer 0
+    "count-prices-from-plugin": "0",
+}
+
+
+def _is_beanquery_empty_aggregate_quirk(run: "QueryRun") -> bool:
+    """True if this run's mismatch is the beanquery empty-aggregate quirk.
+
+    Beanquery returns 0 rows from a pure-aggregate query (no GROUP BY)
+    when the source table is empty; standard SQL (and rledger) returns
+    1 row with the aggregate identity. We treat this as a known
+    divergence ONLY when:
+
+    1. Both tools ran successfully (`*_failed` false). A bean-query
+       timeout or non-zero exit produces empty stdout, so `py_rows ==
+       0`, and could otherwise be misclassified as the quirk.
+    2. The row-count fingerprint matches: `py_rows == 0` and
+       `rs_rows == 1`.
+    3. Rledger's row content equals the aggregate identity for this
+       query (`_BEANQUERY_EMPTY_AGGREGATE_IDENTITY`). Without this
+       check, a fixture where bean-query sees 0 prices but rledger
+       over-emits would fingerprint identically and be silently
+       masked — defeating the purpose of the predicate set vs. a
+       blanket allowlist.
+    """
+    expected_identity = _BEANQUERY_EMPTY_AGGREGATE_IDENTITY.get(run.query_name)
+    return (
+        expected_identity is not None
+        and not run.py_failed
+        and not run.rs_failed
+        and run.py_rows == 0
+        and run.rs_rows == 1
+        and run.rs_first_row == expected_identity
+    )
+
+
+def _is_known_python_divergence(run: "QueryRun") -> bool:
+    if (run.file, run.query_name) in KNOWN_PYTHON_DIVERGENCES or (
+        run.file,
         "*",
-    ) in KNOWN_PYTHON_DIVERGENCES
+    ) in KNOWN_PYTHON_DIVERGENCES:
+        return True
+    return _is_beanquery_empty_aggregate_quirk(run)
 
 
 # ---------------------------------------------------------------------
@@ -133,6 +189,18 @@ class QueryRun:
     # into an empty-result match.
     py_failure: str = ""
     rs_failure: str = ""
+    # Explicit failure flags. Mirrors `ToolOutput.failed`. Lets predicates
+    # gate cleanly on "the tool ran successfully" without relying on the
+    # implicit invariant that `*_failure` is non-empty iff `*_failed` is
+    # true. Use these in any new known-divergence fingerprint check.
+    py_failed: bool = False
+    rs_failed: bool = False
+    # First row of rledger's output, normalized via `extract_data` (so
+    # whitespace is collapsed). Used by quirk fingerprints that need to
+    # distinguish "rs returned the aggregate identity (e.g. `0`)" from
+    # "rs returned a real value", since `rs_rows == 1` alone can't tell
+    # those apart. None when rledger returned no rows.
+    rs_first_row: str | None = None
 
 
 # ---------------------------------------------------------------------
@@ -330,6 +398,9 @@ def test_one(
         diff_samples=[] if match else diff_rows(py, rs),
         py_failure=py_out.reason,
         rs_failure=rs_out.reason,
+        py_failed=py_out.failed,
+        rs_failed=rs_out.failed,
+        rs_first_row=rs[0] if rs else None,
     )
 
 
@@ -498,7 +569,7 @@ def main() -> int:
     matching = sum(1 for r in results if r.match)
     known_div = sum(
         1 for r in results
-        if not r.match and _is_known_python_divergence(r.file, r.query_name)
+        if not r.match and _is_known_python_divergence(r)
     )
     real_mismatches = total - matching - known_div
     effective_match = matching + known_div
@@ -559,11 +630,7 @@ def main() -> int:
         print()
         print(f"=== {len(bad)} mismatches ===")
         for r in bad:
-            label = (
-                "KNOWN"
-                if _is_known_python_divergence(r.file, r.query_name)
-                else "MISMATCH"
-            )
+            label = "KNOWN" if _is_known_python_divergence(r) else "MISMATCH"
             print(f"  {label}: {r.file} | {r.query_name}")
             if r.py_failure:
                 print(f"    py FAILED: {r.py_failure}")

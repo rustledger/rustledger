@@ -38,7 +38,7 @@
 //! assert_eq!(ctx.format(dec!(1.5), "EUR"), "1.5");
 //! ```
 
-use rust_decimal::Decimal;
+use rust_decimal::{Decimal, MathematicalOps};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// Sentinel currency key for "naked-decimal" observations.
@@ -459,37 +459,34 @@ impl DisplayContext {
     /// the column's expected dp.
     #[must_use]
     pub fn format_default(&self, number: Decimal) -> String {
-        let dp = self.default_precision();
-        let formatted = if number.scale() == 0 && dp > 0 {
-            // Bare integer-scale value (typical of an aggregate that
-            // collapsed to literal zero, or any unscaled `Value::Number`):
-            // pad to the column's default precision. Without this, a
-            // `SUM` that returns 0 would render `0` where bean-query
-            // renders `0.00` (issue #954).
-            let mut padded = number;
-            padded.rescale(dp);
-            padded.to_string()
-        } else {
-            // Natural per-value rendering — matches Python
-            // DecimalRenderer's `f'{value:<width}'`, which preserves the
-            // value's intrinsic scale and does NOT impose uniform
-            // precision across rows. This is the common path: each
-            // aggregate result keeps the scale produced by the aggregate
-            // (rust_decimal's `+` returns max-scale-of-operands).
-            //
-            // Cap total significant digits at 28 to match Python's
-            // default `Decimal` context precision (`getcontext().prec`).
-            // rust_decimal's 96-bit mantissa can land at 29 sig figs from
-            // some divisions (e.g., `300 / 1.763 = 170.16449…` with 26
-            // fractional + 3 integer = 29 digits, where Python clamps
-            // the same division at 25 fractional digits = 28 total).
-            // Without this cap, BQL queries surfacing high-precision
-            // computed costs (`cost_number`) diverge from bean-query on
-            // the `cost-basis-fields` corpus query (issue #1051).
-            const PYTHON_DECIMAL_PRECISION: u32 = 28;
-            let capped = Self::cap_significant_digits(number, PYTHON_DECIMAL_PRECISION);
-            capped.to_string()
-        };
+        // Match Python `bean-query`'s `DecimalRenderer.format`: render
+        // each value at its intrinsic scale. No padding to a "column
+        // default precision" — that branch was added as a fix for
+        // #954 ("`SUM(0.00 + -0.00)` rendered as `0` instead of
+        // `0.00`"), but the real bug there was `n.normalize()` stripping
+        // the SUM result's scale to 0 *before* rendering. Once that
+        // normalize was removed, scale-2 SUMs naturally render as
+        // `0.00` via `to_string()` without any padding step. The padding
+        // overfit covered up the symptom but caused two new shapes of
+        // divergence:
+        //
+        // 1. Mixed-scale columns where a scale-0 cell renders next to
+        //    a scale-25 cell get the scale-0 value padded to 25dp
+        //    (`1000` → `1000.0000000000000000000000000`). Bean-query
+        //    renders the scale-0 cell as `1000`.
+        // 2. Literal `Decimal(0)` values rendered as `0.00` instead of
+        //    `0` even when no SUM aggregator was involved. Bean-query
+        //    renders `Decimal(0)` as `0`.
+        //
+        // Cap total significant digits at 28 to match Python's default
+        // `Decimal` context precision (`getcontext().prec`). rust_decimal's
+        // 96-bit mantissa can land at 29 sig figs from some divisions
+        // (e.g. `300 / 1.763 = 170.16449…` with 26 fractional + 3 integer
+        // = 29 digits, where Python clamps the same division at 25
+        // fractional digits = 28 total).
+        const PYTHON_DECIMAL_PRECISION: u32 = 28;
+        let capped = Self::cap_significant_digits(number, PYTHON_DECIMAL_PRECISION);
+        let formatted = capped.to_string();
         if self.render_commas {
             Self::add_commas(&formatted)
         } else {
@@ -500,8 +497,20 @@ impl DisplayContext {
     /// Round `number` to at most `max_sig` significant digits, matching
     /// Python's `Decimal` context-precision-clamped arithmetic. No-op
     /// when the value already fits; otherwise rounds half-even (Python's
-    /// `Decimal` default rounding mode), preserving sign and integer
-    /// portion when possible.
+    /// `Decimal` default rounding mode).
+    ///
+    /// Handles both fractional and integer-only excess:
+    ///
+    /// - Fractional case (`new_scale > 0`): rounds via
+    ///   [`Decimal::round_dp_with_strategy`] which truncates trailing
+    ///   fractional digits.
+    /// - Integer-only case (`number.scale() < digits - max_sig`):
+    ///   `round_dp_with_strategy(0, …)` would leave the over-precise
+    ///   integer unchanged, since it can't go to negative scales. We
+    ///   scale by a power of ten, round to nearest integer, then
+    ///   restore the magnitude — same as Python's clamp on a 29-digit
+    ///   integer, which puts it in scientific form with a 28-digit
+    ///   mantissa. Caught by Copilot review on PR #1064.
     fn cap_significant_digits(number: Decimal, max_sig: u32) -> Decimal {
         // mantissa() returns the integer mantissa; its decimal length is
         // the number of significant digits regardless of scale.
@@ -514,11 +523,32 @@ impl DisplayContext {
         if digits <= max_sig {
             return number;
         }
-        let new_scale = number.scale().saturating_sub(digits - max_sig);
-        number.round_dp_with_strategy(
-            new_scale,
-            rust_decimal::RoundingStrategy::MidpointNearestEven,
-        )
+        let excess = digits - max_sig;
+        if excess <= number.scale() {
+            // Trimming only affects fractional digits — use the standard
+            // dp-based rounding directly.
+            return number.round_dp_with_strategy(
+                number.scale() - excess,
+                rust_decimal::RoundingStrategy::MidpointNearestEven,
+            );
+        }
+        // Excess exceeds the available fractional digits: we have to
+        // round integer-portion digits, which `round_dp_with_strategy`
+        // can't express (it doesn't support negative dp). Lift by a
+        // power of 10, round to nearest integer, drop back.
+        // `integer_excess` is always >= 1 here.
+        let integer_excess = excess - number.scale();
+        let Some(factor) = Decimal::TEN.checked_powu(u64::from(integer_excess)) else {
+            // `10^integer_excess` overflows when `integer_excess` is
+            // implausibly large (>28). The input must have been an
+            // already-overflowed Decimal; bail out with the original
+            // value rather than panicking.
+            return number;
+        };
+        let lifted = number / factor;
+        let rounded =
+            lifted.round_dp_with_strategy(0, rust_decimal::RoundingStrategy::MidpointNearestEven);
+        rounded * factor
     }
 
     /// Get the decimal precision (number of digits after decimal point) of a number.
@@ -1123,15 +1153,30 @@ mod tests {
     }
 
     #[test]
-    fn test_format_default_pads_to_max_precision() {
+    fn test_format_default_does_not_pad_scale_zero_to_column_precision() {
+        // Inverted from the pre-fix `test_format_default_pads_to_max_precision`.
+        //
+        // Python `bean-query`'s `DecimalRenderer.format` calls
+        // `str(value)` — no padding step. A `Decimal(0)` (scale 0)
+        // renders as `"0"` regardless of what other cells in the
+        // column look like; a `Decimal(0.0000)` renders as `"0.0000"`.
+        //
+        // We used to pad scale-0 values to the column's default
+        // precision as an over-fit for #954, but that broke mixed-scale
+        // columns (issue #1051's `cost-basis-fields` cases on fixtures
+        // like `tests_test_inputs_missing_prices.beancount`, where a
+        // scale-0 `cost_number=1000` was rendered as
+        // `"1000.0000000000000000000000000"` because the column's other
+        // row had a scale-25 cost from a `{{total}}`-form spec). The
+        // #954 case (`SUM(0.00 + -0.00)`) still renders `"0.00"`
+        // correctly because the aggregator preserves the inputs' max
+        // scale — `to_string()` on the resulting `Decimal('0.00')` is
+        // `"0.00"` without any padding.
         let mut ctx = DisplayContext::new();
         ctx.update(dec!(1.23), "USD");
         ctx.update(dec!(1.2345), "EUR");
-
-        // Default precision = 4 (EUR's), so even an integer-shaped value
-        // gets four trailing zeros.
-        assert_eq!(ctx.format_default(dec!(0)), "0.0000");
-        assert_eq!(ctx.format_default(dec!(100)), "100.0000");
+        assert_eq!(ctx.format_default(dec!(0)), "0");
+        assert_eq!(ctx.format_default(dec!(100)), "100");
     }
 
     #[test]
@@ -1216,6 +1261,29 @@ mod tests {
             ctx.format_default(v),
             "-1234.567890123456789012345679",
             "negative + integer part preserved; fractional rounded half-even"
+        );
+    }
+
+    /// Integer-only excess: a 29-digit scale-0 Decimal must actually
+    /// round (to nearest 10), not pass through unchanged. Pre-fix
+    /// `cap_significant_digits` did `saturating_sub` on the scale
+    /// which clamped to 0, and `round_dp_with_strategy(0, …)` left
+    /// the integer alone — contradicting the doc comment. Caught by
+    /// Copilot review on PR #1064.
+    #[test]
+    fn test_format_default_caps_integer_only_excess() {
+        let ctx = DisplayContext::new();
+        // 29 digits, scale 0. Cap to 28 → round to nearest 10.
+        // 12345678901234567890123456789 / 10 = 1234567890123456789012345678.9
+        // rounded half-even at 0dp = 1234567890123456789012345679
+        // × 10 = 12345678901234567890123456790
+        let v = Decimal::from_str_exact("12345678901234567890123456789").unwrap();
+        assert_eq!(v.scale(), 0);
+        assert_eq!(
+            ctx.format_default(v),
+            "12345678901234567890123456790",
+            "29-digit integer must round to nearest 10 (28 sig figs), \
+             trailing 0 marks the rounded position"
         );
     }
 }

@@ -7313,6 +7313,61 @@ fn test_weight_column_total_price_default_from() {
 }
 
 #[test]
+fn test_weight_total_price_credit_side_flips_sign() {
+    // Issue #1052: a posting like `-27204.53 BAM @@ 15152.07 EUR` (negative
+    // units, `@@` total price) must have weight `-15152.07 EUR`. The total
+    // amount is always written as a positive magnitude in the source, so
+    // `weight` has to flip sign on credit-side postings for the transaction
+    // to balance. Pre-fix we returned the @@ amount as-is, giving +15152.07
+    // and breaking parity with bean-query on `total_annotation.beancount`.
+    let directives = vec![
+        Directive::Open(Open::new(date(2024, 1, 1), "Assets:Insurance")),
+        Directive::Open(Open::new(date(2024, 1, 1), "Assets:Cash")),
+        Directive::Transaction(
+            Transaction::new(date(2025, 1, 23), "insurance matured")
+                .with_posting(
+                    Posting::new("Assets:Insurance", Amount::new(dec!(-27204.53), "BAM"))
+                        .with_price(PriceAnnotation::Total(Amount::new(dec!(15152.07), "EUR"))),
+                )
+                .with_posting(Posting::new(
+                    "Assets:Cash",
+                    Amount::new(dec!(15152.07), "EUR"),
+                )),
+        ),
+    ];
+
+    // Path 1: #postings table (build_postings_table)
+    let result = execute_query(
+        "SELECT weight FROM #postings WHERE account = 'Assets:Insurance'",
+        &directives,
+    );
+    assert_eq!(
+        result.rows[0][0],
+        Value::Amount(Amount::new(dec!(-15152.07), "EUR")),
+        "weight on a credit-side @@ posting must flip sign (#postings path)"
+    );
+
+    // Path 2: default FROM (evaluate_column)
+    let result = execute_query(
+        "SELECT weight WHERE account = 'Assets:Insurance'",
+        &directives,
+    );
+    assert_eq!(
+        result.rows[0][0],
+        Value::Amount(Amount::new(dec!(-15152.07), "EUR")),
+        "weight on a credit-side @@ posting must flip sign (default-FROM path)"
+    );
+
+    // Sanity check: positive-units side keeps the magnitude as-written.
+    let result = execute_query("SELECT weight WHERE account = 'Assets:Cash'", &directives);
+    assert_eq!(
+        result.rows[0][0],
+        Value::Amount(Amount::new(dec!(15152.07), "EUR")),
+        "Cash posting has positive units, weight should be +amount"
+    );
+}
+
+#[test]
 fn test_postings_table_lineno_query() {
     // The original issue (#820) mentions SELECT lineno should work
     let directives = make_postings_test_directives();

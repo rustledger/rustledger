@@ -26,6 +26,61 @@ use rustledger_parser::Spanned;
 use crate::ast::{Expr, FromClause, FunctionCall, Query, Target};
 use crate::error::QueryError;
 
+/// Compute a posting's `weight` — the cost-converted amount used for
+/// transaction balancing.
+///
+/// Rules (matching Beancount):
+/// - Cost annotation present and resolvable: `units × cost_per_unit` in
+///   the cost currency. `CostSpec::resolve` handles `{{total ...}}` by
+///   dividing the total by `|units|`, so callers don't need to special-case
+///   that shape.
+/// - `@` per-unit price: `units × price` in the price currency. Sign
+///   carries through `units` naturally.
+/// - `@@` total price: `sign(units) × total` in the price currency. The
+///   `@@` amount is written as a positive magnitude in the source, so
+///   credit-side postings need an explicit sign flip — without it,
+///   `weight` returns `+T` where bean-query returns `−T` and the
+///   transaction can't balance against the matching cash side
+///   (issue #1052).
+/// - Otherwise (or if a cost spec was present but couldn't resolve and
+///   no usable price annotation either): `units` as-is.
+///
+/// Returns `Value::Null` for postings without resolved units. Used by
+/// both [`Executor::build_postings_table`] (the `#postings` table
+/// builder) and [`Executor::evaluate_column`] (the default-FROM column
+/// accessor) so the two paths can't drift again.
+pub(super) fn compute_posting_weight(
+    posting: &rustledger_core::Posting,
+    txn_date: NaiveDate,
+) -> Value {
+    let Some(units) = posting.amount() else {
+        return Value::Null;
+    };
+    if let Some(cost_spec) = &posting.cost
+        && let Some(cost) = cost_spec.resolve(units.number, txn_date)
+    {
+        return Value::Amount(Amount::new(units.number * cost.number, cost.currency));
+    }
+    if let Some(price_ann) = &posting.price
+        && let Some(price_amt) = price_ann.amount()
+    {
+        return if price_ann.is_unit() {
+            Value::Amount(Amount::new(
+                units.number * price_amt.number,
+                price_amt.currency.clone(),
+            ))
+        } else {
+            let signed = if units.number.is_sign_negative() {
+                -price_amt.number
+            } else {
+                price_amt.number
+            };
+            Value::Amount(Amount::new(signed, price_amt.currency.clone()))
+        };
+    }
+    Value::Amount(units.clone())
+}
+
 /// Query executor.
 pub struct Executor<'a> {
     /// All directives to query over.
@@ -2526,39 +2581,11 @@ impl<'a> Executor<'a> {
                     .and_then(|p| p.amount())
                     .map_or(Value::Null, |a| Value::Amount(a.clone()));
 
-                // Weight: the cost-converted amount used for transaction balancing.
-                // With cost: units × cost (in cost currency)
-                // With @ price: units × price (in price currency)
-                // With @@ price: the total price directly (already in target currency)
-                // Otherwise: units as-is
-                let weight_val = if let Some(units) = posting.amount() {
-                    if let Some(cost_spec) = &posting.cost {
-                        if let Some(cost) = cost_spec.resolve(units.number, txn.date) {
-                            Value::Amount(Amount::new(units.number * cost.number, cost.currency))
-                        } else {
-                            Value::Amount(units.clone())
-                        }
-                    } else if let Some(price_ann) = &posting.price {
-                        if let Some(price_amt) = price_ann.amount() {
-                            if price_ann.is_unit() {
-                                // @ per-unit price: weight = units × price
-                                Value::Amount(Amount::new(
-                                    units.number * price_amt.number,
-                                    price_amt.currency.clone(),
-                                ))
-                            } else {
-                                // @@ total price: the amount IS the total weight
-                                Value::Amount(price_amt.clone())
-                            }
-                        } else {
-                            Value::Amount(units.clone())
-                        }
-                    } else {
-                        Value::Amount(units.clone())
-                    }
-                } else {
-                    Value::Null
-                };
+                // Weight delegates to `compute_posting_weight` so the
+                // `#postings` table and the default-FROM `weight` column
+                // accessor stay in lockstep — the two used to drift on
+                // `@@` sign handling (issue #1052).
+                let weight_val = compute_posting_weight(posting, txn.date);
 
                 let balance_val = Value::Inventory(Box::new(cumulative_balance.clone()));
                 let account_balance_val = account_balances

@@ -476,13 +476,49 @@ impl DisplayContext {
             // precision across rows. This is the common path: each
             // aggregate result keeps the scale produced by the aggregate
             // (rust_decimal's `+` returns max-scale-of-operands).
-            number.to_string()
+            //
+            // Cap total significant digits at 28 to match Python's
+            // default `Decimal` context precision (`getcontext().prec`).
+            // rust_decimal's 96-bit mantissa can land at 29 sig figs from
+            // some divisions (e.g., `300 / 1.763 = 170.16449…` with 26
+            // fractional + 3 integer = 29 digits, where Python clamps
+            // the same division at 25 fractional digits = 28 total).
+            // Without this cap, BQL queries surfacing high-precision
+            // computed costs (`cost_number`) diverge from bean-query on
+            // the `cost-basis-fields` corpus query (issue #1051).
+            const PYTHON_DECIMAL_PRECISION: u32 = 28;
+            let capped = Self::cap_significant_digits(number, PYTHON_DECIMAL_PRECISION);
+            capped.to_string()
         };
         if self.render_commas {
             Self::add_commas(&formatted)
         } else {
             formatted
         }
+    }
+
+    /// Round `number` to at most `max_sig` significant digits, matching
+    /// Python's `Decimal` context-precision-clamped arithmetic. No-op
+    /// when the value already fits; otherwise rounds half-even (Python's
+    /// `Decimal` default rounding mode), preserving sign and integer
+    /// portion when possible.
+    fn cap_significant_digits(number: Decimal, max_sig: u32) -> Decimal {
+        // mantissa() returns the integer mantissa; its decimal length is
+        // the number of significant digits regardless of scale.
+        let digits = number
+            .mantissa()
+            .unsigned_abs()
+            .to_string()
+            .trim_start_matches('0')
+            .len() as u32;
+        if digits <= max_sig {
+            return number;
+        }
+        let new_scale = number.scale().saturating_sub(digits - max_sig);
+        number.round_dp_with_strategy(
+            new_scale,
+            rust_decimal::RoundingStrategy::MidpointNearestEven,
+        )
     }
 
     /// Get the decimal precision (number of digits after decimal point) of a number.
@@ -1127,5 +1163,59 @@ mod tests {
         ctx.set_render_commas(true);
 
         assert_eq!(ctx.format_default(dec!(1234567.89)), "1,234,567.89");
+    }
+
+    /// Issue #1051 example 4: `rust_decimal`'s 96-bit mantissa can land
+    /// at 29 sig figs from divisions like `300 / 1.763`, where Python's
+    /// default `Decimal` context (`getcontext().prec = 28`) clamps the
+    /// same operation at 28. Without the cap in `format_default`, BQL's
+    /// `cost_number` rendering would show 29 digits where bean-query
+    /// shows 28, surfacing as a `cost-basis-fields` mismatch on every
+    /// fixture with computed (`{{total}}`-form) cost specs.
+    #[test]
+    fn test_format_default_caps_significant_digits_at_28() {
+        let ctx = DisplayContext::new();
+        // 300 / 1.763 in rust_decimal lands at 29 sig figs:
+        // 170.16449234259784458309699376 (3 integer + 26 fractional).
+        let v = Decimal::from_str_exact("170.16449234259784458309699376").unwrap();
+        assert_eq!(v.scale(), 26, "test setup: input has scale 26");
+        // After capping to 28 sig figs total, the fractional scale drops
+        // by 1 to 25 — matching Python's `Decimal('300') / Decimal('1.763')
+        // = Decimal('170.1644923425978445830969938')`.
+        assert_eq!(
+            ctx.format_default(v),
+            "170.1644923425978445830969938",
+            "should cap at 28 sig figs (3 integer + 25 fractional)"
+        );
+    }
+
+    #[test]
+    fn test_format_default_28_digit_or_fewer_passes_through_unchanged() {
+        let ctx = DisplayContext::new();
+        // Fits within 28 — no rounding. Don't accidentally re-quantize
+        // values that are already at the right precision.
+        assert_eq!(ctx.format_default(dec!(170.16449)), "170.16449");
+        // Edge case: exactly 28 digits.
+        let v = Decimal::from_str_exact("1.234567890123456789012345678").unwrap();
+        assert_eq!(v.scale(), 27);
+        assert_eq!(
+            ctx.format_default(v),
+            "1.234567890123456789012345678",
+            "value at exactly 28 sig figs must pass through unchanged"
+        );
+    }
+
+    #[test]
+    fn test_format_default_cap_preserves_sign_and_integer_part() {
+        let ctx = DisplayContext::new();
+        // Negative value > 28 sig figs: sign and integer part survive
+        // the rescale; only fractional digits get truncated.
+        let v = Decimal::from_str_exact("-1234.5678901234567890123456789").unwrap();
+        // mantissa has 29 digits; capping to 28 drops the last fractional digit.
+        assert_eq!(
+            ctx.format_default(v),
+            "-1234.567890123456789012345679",
+            "negative + integer part preserved; fractional rounded half-even"
+        );
     }
 }

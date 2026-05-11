@@ -85,6 +85,24 @@ fn cost_fingerprint(cost: &CostData, units_number: Decimal) -> Option<String> {
 /// reducing-sell-with-`{}` posting on fixtures like fava-portfolio-
 /// returns (closes the residual ~5 over-emit cases left behind by
 /// #1048).
+///
+/// Pipeline assumption: this plugin operates on **post-booking**
+/// directives. Postings that would cross zero (e.g. a `-150` sell
+/// against a `+100` lot) have already been split by the booker into
+/// two postings — one fully-reducing leg against the existing lot
+/// and one augmenting/creating leg for the residual. Our inline
+/// inventory update sees them sequentially and correctly classifies
+/// the residual leg as not-REDUCED. If the plugin is ever moved
+/// earlier in the pipeline, the gate would over-suppress on
+/// pre-split crossing postings.
+///
+/// Lots with a cost spec that carries neither `number_per` nor
+/// `number_total` (e.g. bare `{2024-01-01}`) aren't tracked in the
+/// inventory — `cost_fingerprint` returns `None` and the posting
+/// passes through the cost-emit branch directly. Python's
+/// `Inventory.add_amount` would still track these, but since the
+/// cost-derived emit path also requires a number, the tracker
+/// participation doesn't change emit decisions.
 pub struct ImplicitPricesPlugin;
 
 impl NativePlugin for ImplicitPricesPlugin {

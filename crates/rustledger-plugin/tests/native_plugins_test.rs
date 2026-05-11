@@ -2802,6 +2802,62 @@ fn test_implicit_prices_reduced_gate_and_dedup_are_scale_insensitive() {
     );
 }
 
+/// Over-sell crossing zero: the booker pre-splits a `-150` sell against
+/// a `+100` lot into two postings — a fully-reducing `-100` leg matched
+/// to the existing lot, and an augmenting `-50` leg creating a new
+/// short position. Our inline inventory update sees them in order, so
+/// the first leg classifies REDUCED (no emit) and the second leg sees
+/// `prior=0` and classifies CREATED (emit). Hard-coded here to lock in
+/// the assumption that this plugin runs on post-booking input —
+/// regression-guards against future pipeline reordering that would
+/// hand us un-split crossing postings.
+#[test]
+fn test_implicit_prices_oversell_crossing_zero_emits_for_residual_leg() {
+    let plugin = ImplicitPricesPlugin;
+    let input = make_input(vec![
+        make_open("2024-01-01", "Assets:Brokerage"),
+        make_open("2024-01-01", "Assets:Cash"),
+        // Initial buy of 100 X at 1 USD.
+        make_transaction_with_cost(
+            "2024-02-01",
+            "Buy",
+            "Assets:Brokerage",
+            ("100", "X"),
+            ("1", "USD"),
+            "Assets:Cash",
+        ),
+        // Booker's split form of "sell -150 X": leg 1 fully reduces
+        // the existing lot at the same cost. No emit expected.
+        make_transaction_with_cost(
+            "2024-03-01",
+            "Reducing leg",
+            "Assets:Brokerage",
+            ("-100", "X"),
+            ("1", "USD"),
+            "Assets:Cash",
+        ),
+        // Leg 2 creates a -50 short position at a (hypothetical) new
+        // cost basis. Emit expected.
+        make_transaction_with_cost(
+            "2024-03-01",
+            "New-short leg",
+            "Assets:Brokerage",
+            ("-50", "X"),
+            ("2", "USD"),
+            "Assets:Cash",
+        ),
+    ]);
+    let output = plugin.process(input.clone());
+    let prices = implicit_prices_emitted(&input, &output);
+    assert_eq!(
+        prices.len(),
+        2,
+        "buy + residual short leg emit; reducing leg suppressed. Got: {prices:?}"
+    );
+    assert!(prices.contains(&("X".into(), "1".into(), "USD".into())));
+    assert!(prices.contains(&("X".into(), "2".into(), "USD".into())));
+}
+
 /// Posting with NO price annotation and NO cost: emits nothing.
 #[test]
 fn test_implicit_prices_emits_nothing_for_plain_transfer() {

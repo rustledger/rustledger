@@ -401,6 +401,18 @@ impl<'a> Executor<'a> {
         let needs_balance = query_references_column(query, "balance");
         let needs_account_balance = query_references_column(query, "account_balance");
 
+        // Tighter gate for the *pre-WHERE* `balance` clone — only
+        // required when the WHERE clause itself reads `balance`. For
+        // queries like `SELECT balance FROM #postings` (`balance` in
+        // SELECT, no WHERE-time read), the pre-snapshot is never
+        // observed; we skip the extra clone and let the post-WHERE
+        // refresh fill `ctx.balance`. Caught by Copilot review on
+        // PR #1085. `account_balance` doesn't need an analogous gate
+        // because it isn't refreshed post-WHERE — it's already the
+        // running total after the eager update above.
+        let where_reads_balance =
+            where_clause.is_some_and(|w| expr_references_column(w, "balance"));
+
         let mut postings = Vec::new();
         // Per-account running balance — accumulates every posting regardless of
         // FROM/WHERE filters, so `account_balance` always reflects the account's
@@ -500,12 +512,28 @@ impl<'a> Executor<'a> {
                     // `Inventory` is the hot allocation — it grows monotonically
                     // across the iteration, so a 22k-posting WHERE-filtered
                     // query was producing ~3 clones × thousands of positions per
-                    // posting (issue #1080 — multi-GB WASM heap growth). Skip
-                    // both clones when the query doesn't reference `balance`.
+                    // posting (issue #1080 — multi-GB WASM heap growth).
+                    //
+                    // `balance` and `account_balance` have asymmetric pre/post
+                    // semantics so they gate differently:
+                    //
+                    // * `balance` is refreshed post-WHERE below — its pre-WHERE
+                    //   slot only matters when the WHERE clause itself reads
+                    //   the column. For `SELECT balance FROM #postings` (no
+                    //   WHERE-time read), we skip the pre-WHERE clone entirely
+                    //   and let the post-WHERE refresh fill it. Saves one
+                    //   clone-per-posting versus the gating logic
+                    //   in the first cut of this fix (Copilot review on PR #1085).
+                    //
+                    // * `account_balance` is NOT refreshed post-WHERE —
+                    //   account_balances is updated *before* this block, so
+                    //   the value here is already the post-update running
+                    //   total. We populate it eagerly when `needs_account_balance`
+                    //   so SELECT / ORDER BY / HAVING / etc. can read it.
                     let mut ctx = PostingContext {
                         transaction: txn,
                         posting_index: i,
-                        balance: if needs_balance {
+                        balance: if where_reads_balance {
                             Some(cumulative_balance.clone())
                         } else {
                             None
@@ -2702,7 +2730,24 @@ fn expr_references_column(expr: &Expr, name: &str) -> bool {
     match expr {
         Expr::Column(col) => col.eq_ignore_ascii_case(name),
         Expr::Function(call) => call.args.iter().any(|a| expr_references_column(a, name)),
-        Expr::Window(call) => call.args.iter().any(|a| expr_references_column(a, name)),
+        Expr::Window(call) => {
+            // Function args + the OVER clause's PARTITION BY / ORDER BY
+            // expressions all need to be walked — a window function like
+            // `SUM(amount) OVER (PARTITION BY balance)` references
+            // `balance` in the partition-by, not the function args.
+            // Caught by Copilot review on PR #1085.
+            call.args.iter().any(|a| expr_references_column(a, name))
+                || call
+                    .over
+                    .partition_by
+                    .as_ref()
+                    .is_some_and(|ps| ps.iter().any(|p| expr_references_column(p, name)))
+                || call
+                    .over
+                    .order_by
+                    .as_ref()
+                    .is_some_and(|os| os.iter().any(|o| expr_references_column(&o.expr, name)))
+        }
         Expr::BinaryOp(op) => {
             expr_references_column(&op.left, name) || expr_references_column(&op.right, name)
         }
@@ -3970,5 +4015,60 @@ mod tests {
         assert_refs("SELECT account WHERE units(balance) IS NOT NULL", true);
         // Nested in BETWEEN
         assert_refs("SELECT account WHERE balance BETWEEN 0 AND 100", true);
+    }
+
+    /// `expr_references_column` must traverse the OVER clause of a
+    /// window function, not just its args. A reference to `balance`
+    /// inside `PARTITION BY` / `ORDER BY` of an `OVER` clause must
+    /// trigger the snapshot path. Caught by Copilot review on PR
+    /// #1085 — pre-fix this returned a false negative and the resulting
+    /// query would have read a `None` `ctx.balance`.
+    #[test]
+    fn test_expr_references_column_walks_window_over_clause() {
+        use crate::ast::{
+            BinaryOp, BinaryOperator, OrderSpec, SortDirection, WindowFunction, WindowSpec,
+        };
+
+        let col_balance = Expr::Column("balance".to_string());
+        let col_unrelated = Expr::Column("amount".to_string());
+
+        // PARTITION BY references balance.
+        let win_partition = Expr::Window(WindowFunction {
+            name: "row_number".to_string(),
+            args: vec![],
+            over: WindowSpec {
+                partition_by: Some(vec![col_balance.clone()]),
+                order_by: None,
+            },
+        });
+        assert!(
+            expr_references_column(&win_partition, "balance"),
+            "OVER (PARTITION BY balance) must be detected"
+        );
+        assert!(
+            !expr_references_column(&win_partition, "account"),
+            "should not match unrelated column"
+        );
+
+        // ORDER BY inside OVER references balance (nested in BinaryOp).
+        let win_order = Expr::Window(WindowFunction {
+            name: "row_number".to_string(),
+            args: vec![],
+            over: WindowSpec {
+                partition_by: None,
+                order_by: Some(vec![OrderSpec {
+                    expr: Expr::BinaryOp(Box::new(BinaryOp {
+                        left: col_balance,
+                        op: BinaryOperator::Add,
+                        right: col_unrelated,
+                    })),
+                    direction: SortDirection::Asc,
+                }]),
+            },
+        });
+        assert!(
+            expr_references_column(&win_order, "balance"),
+            "OVER (ORDER BY balance + amount) must be detected"
+        );
     }
 }

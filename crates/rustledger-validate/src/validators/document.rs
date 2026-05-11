@@ -1,7 +1,8 @@
 //! Document and note validation.
 
+use rustc_hash::FxHashMap;
 use rustledger_core::{Document, Note};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::LedgerState;
 use crate::error::{ErrorCode, ValidationError};
@@ -34,7 +35,20 @@ pub fn validate_note(state: &LedgerState, note: &Note, errors: &mut Vec<Validati
 /// represents an explicit base set by the caller (e.g. the main ledger
 /// directory), whereas `document_dirs` is a search path derived from
 /// `option "documents"` declarations.
-pub fn validate_document(state: &LedgerState, doc: &Document, errors: &mut Vec<ValidationError>) {
+///
+/// The `exists_cache` is consulted instead of calling `Path::exists()`
+/// directly. The caller (see `build_document_exists_cache` in `lib.rs`)
+/// pre-resolves all candidate paths in one rayon batch before the
+/// main per-directive loop, so this function stays syscall-free in the
+/// hot path. The cache is empty when `check_documents` is disabled —
+/// also fine, because the lookups in this function are gated by the
+/// same flag.
+pub fn validate_document(
+    state: &LedgerState,
+    doc: &Document,
+    exists_cache: &FxHashMap<PathBuf, bool>,
+    errors: &mut Vec<ValidationError>,
+) {
     // Check account exists
     if !state.accounts.contains_key(&doc.account) {
         errors.push(ValidationError::new(
@@ -47,21 +61,22 @@ pub fn validate_document(state: &LedgerState, doc: &Document, errors: &mut Vec<V
     // Check if document file exists (if enabled)
     if state.options.check_documents {
         let doc_path = Path::new(&doc.path);
+        let lookup = |p: &Path| exists_cache.get(p).copied().unwrap_or(false);
 
         let mut file_was_found = false;
         let full_path = if doc_path.is_absolute() {
-            file_was_found = doc_path.exists();
+            file_was_found = lookup(doc_path);
             doc_path.to_path_buf()
         } else if let Some(base) = &state.options.document_base {
             let p = base.join(doc_path);
-            file_was_found = p.exists();
+            file_was_found = lookup(&p);
             p
         } else if !state.options.document_dirs.is_empty() {
             // Try resolving relative path against each document directory
             let mut found = None;
             for dir in &state.options.document_dirs {
                 let candidate = dir.join(doc_path);
-                if candidate.exists() {
+                if lookup(&candidate) {
                     found = Some(candidate);
                     break;
                 }
@@ -74,7 +89,7 @@ pub fn validate_document(state: &LedgerState, doc: &Document, errors: &mut Vec<V
                 None => doc_path.to_path_buf(),
             }
         } else {
-            file_was_found = doc_path.exists();
+            file_was_found = lookup(doc_path);
             doc_path.to_path_buf()
         };
 

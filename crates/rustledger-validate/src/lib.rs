@@ -60,6 +60,11 @@ use rustledger_core::NaiveDate;
 /// Threshold for using parallel sort. For small collections, sequential sort
 /// is faster due to reduced threading overhead.
 const PARALLEL_SORT_THRESHOLD: usize = 5000;
+
+/// Threshold for fanning the per-Document `Path::exists()` pre-pass
+/// out via rayon. Below this, the dispatch overhead outweighs the
+/// per-syscall savings.
+const PARALLEL_DOC_EXISTS_THRESHOLD: usize = 64;
 use rust_decimal::Decimal;
 use rustc_hash::{FxHashMap, FxHashSet};
 use rustledger_core::{BookingMethod, Commodity, Directive, InternedStr, Inventory};
@@ -344,6 +349,13 @@ fn validate_inner<D: ValidatableDirective>(
     options: ValidationOptions,
     today: NaiveDate,
 ) -> Vec<ValidationError> {
+    // Pre-pass: batch-resolve `Path::exists()` for every `Document`
+    // directive's candidate paths. The lookup map is consulted by
+    // `validate_document` instead of issuing individual exists()
+    // syscalls inside the main loop. Skipped entirely when
+    // `check_documents` is disabled (no candidate paths needed).
+    let document_exists_cache = build_document_exists_cache(directives, &options);
+
     let mut state = LedgerState::with_options(options);
     let mut errors = Vec::new();
 
@@ -421,7 +433,7 @@ fn validate_inner<D: ValidatableDirective>(
                 validate_pad(&mut state, pad, &mut errors);
             }
             Directive::Document(doc) => {
-                validate_document(&state, doc, &mut errors);
+                validate_document(&state, doc, &document_exists_cache, &mut errors);
             }
             Directive::Note(note) => {
                 validate_note(&state, note, &mut errors);
@@ -484,6 +496,71 @@ fn validate_inner<D: ValidatableDirective>(
 /// `jiff::Zoned::now()` syscall per re-validation.
 fn today() -> NaiveDate {
     jiff::Zoned::now().date()
+}
+
+/// Pre-resolve `Path::exists()` for every candidate path that
+/// [`validate_document`] would otherwise check inside the main
+/// per-directive loop. Returns a `(path -> exists)` lookup map.
+///
+/// When `check_documents` is disabled there's nothing to resolve; we
+/// return an empty map. Otherwise we enumerate the same candidate
+/// paths the validator would build — absolute path, `document_base`
+/// join, each `document_dirs` join, or the fallback — and check
+/// existence in one batch. For ledgers with many `Document`
+/// directives this serializes I/O into a single rayon fan-out instead
+/// of one syscall per directive in the main loop.
+///
+/// Mirrors the resolution logic in
+/// [`validators::document::validate_document`]; if that logic changes
+/// the candidate enumeration here must follow.
+fn build_document_exists_cache<D: ValidatableDirective>(
+    directives: &[D],
+    options: &ValidationOptions,
+) -> FxHashMap<std::path::PathBuf, bool> {
+    if !options.check_documents {
+        return FxHashMap::default();
+    }
+
+    // Collect unique candidate paths once. FxHashSet so we don't
+    // pay for duplicate exists() calls if two Document directives
+    // reference the same file.
+    let mut candidates: FxHashSet<std::path::PathBuf> = FxHashSet::default();
+    for d in directives {
+        if let Directive::Document(doc) = d.directive() {
+            let doc_path = std::path::Path::new(&doc.path);
+            if doc_path.is_absolute() {
+                candidates.insert(doc_path.to_path_buf());
+            } else if let Some(base) = &options.document_base {
+                candidates.insert(base.join(doc_path));
+            } else if !options.document_dirs.is_empty() {
+                for dir in &options.document_dirs {
+                    candidates.insert(dir.join(doc_path));
+                }
+            } else {
+                candidates.insert(doc_path.to_path_buf());
+            }
+        }
+    }
+
+    let candidates: Vec<std::path::PathBuf> = candidates.into_iter().collect();
+
+    if candidates.len() >= PARALLEL_DOC_EXISTS_THRESHOLD {
+        candidates
+            .into_par_iter()
+            .map(|p| {
+                let exists = p.exists();
+                (p, exists)
+            })
+            .collect()
+    } else {
+        candidates
+            .into_iter()
+            .map(|p| {
+                let exists = p.exists();
+                (p, exists)
+            })
+            .collect()
+    }
 }
 
 /// Validate a stream of directives.
@@ -1033,6 +1110,68 @@ mod tests {
         assert!(
             !errors.iter().any(|e| e.code == ErrorCode::DocumentNotFound),
             "Absolute path should work even with wrong document_dirs: {errors:?}"
+        );
+    }
+
+    /// Regression test for the parallel `Path::exists()` pre-pass.
+    /// Constructs enough Document directives (mix of found + missing)
+    /// to cross `PARALLEL_DOC_EXISTS_THRESHOLD` and confirms that:
+    ///
+    /// 1. The found documents validate without `DocumentNotFound`.
+    /// 2. The missing documents still report `DocumentNotFound`.
+    /// 3. The error-context "searched: ..." message survives the
+    ///    cache-routed code path (was constructed inline before).
+    #[test]
+    fn test_validate_document_parallel_batch_check() {
+        let dir = tempfile::tempdir().unwrap();
+        let doc_subdir = dir.path().join("docs");
+        std::fs::create_dir_all(&doc_subdir).unwrap();
+
+        // PARALLEL_DOC_EXISTS_THRESHOLD = 64. Generate 100 documents:
+        // even-numbered exist, odd-numbered don't.
+        let mut directives: Vec<Directive> =
+            vec![Directive::Open(Open::new(date(2024, 1, 1), "Assets:Bank"))];
+        for i in 0..100 {
+            let filename = format!("receipt_{i}.pdf");
+            if i % 2 == 0 {
+                std::fs::write(doc_subdir.join(&filename), "x").unwrap();
+            }
+            directives.push(Directive::Document(Document {
+                date: date(2024, 1, 15),
+                account: "Assets:Bank".into(),
+                path: filename,
+                tags: vec![],
+                links: vec![],
+                meta: Default::default(),
+            }));
+        }
+
+        let options = ValidationOptions::default().with_document_dirs(vec![doc_subdir]);
+        let errors = validate_with_options(&directives, options);
+
+        let not_found_count = errors
+            .iter()
+            .filter(|e| e.code == ErrorCode::DocumentNotFound)
+            .count();
+        assert_eq!(
+            not_found_count, 50,
+            "exactly 50 of 100 documents should error as not-found"
+        );
+
+        // Spot-check that the error context message still mentions the
+        // searched document_dirs path (it's built from
+        // state.options.document_dirs, independently of the cache).
+        let example = errors
+            .iter()
+            .find(|e| e.code == ErrorCode::DocumentNotFound)
+            .expect("should have at least one not-found error");
+        assert!(
+            example
+                .context
+                .as_deref()
+                .is_some_and(|c| c.contains("searched")),
+            "error context should mention the searched dirs, got: {:?}",
+            example.context
         );
     }
 

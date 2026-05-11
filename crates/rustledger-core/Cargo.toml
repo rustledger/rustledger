@@ -29,6 +29,7 @@ serde.workspace = true
 serde_json.workspace = true
 rkyv = { workspace = true, optional = true }
 rustc-hash.workspace = true
+parking_lot.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

@@ -29,11 +29,11 @@
 //!   target directory doesn't exist, [`save_cache_entry`] creates it.
 
 use crate::Options;
+use blake3::Hasher;
 use rust_decimal::Decimal;
 use rustledger_core::Directive;
 use rustledger_core::intern::StringInterner;
 use rustledger_parser::Spanned;
-use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -205,7 +205,7 @@ struct CacheHeader {
     magic: [u8; 8],
     /// Cache format version.
     version: u32,
-    /// SHA-256 hash of source files.
+    /// BLAKE3 hash of source files (path + mtime + size).
     hash: [u8; 32],
     /// Length of the serialized data.
     data_len: u64,
@@ -253,7 +253,7 @@ impl CacheHeader {
 /// contribute only their path to the hash. This is intentional — the resulting
 /// hash mismatch will cause a cache miss on next load.
 fn compute_hash(files: &[&Path]) -> [u8; 32] {
-    let mut hasher = Sha256::new();
+    let mut hasher = Hasher::new();
 
     for file in files {
         // Hash the file path
@@ -264,15 +264,15 @@ fn compute_hash(files: &[&Path]) -> [u8; 32] {
             if let Ok(mtime) = metadata.modified()
                 && let Ok(duration) = mtime.duration_since(std::time::UNIX_EPOCH)
             {
-                hasher.update(duration.as_secs().to_le_bytes());
-                hasher.update(duration.subsec_nanos().to_le_bytes());
+                hasher.update(&duration.as_secs().to_le_bytes());
+                hasher.update(&duration.subsec_nanos().to_le_bytes());
             }
             // Hash the file size
-            hasher.update(metadata.len().to_le_bytes());
+            hasher.update(&metadata.len().to_le_bytes());
         }
     }
 
-    hasher.finalize().into()
+    *hasher.finalize().as_bytes()
 }
 
 /// Environment variable that overrides the default cache filename pattern.

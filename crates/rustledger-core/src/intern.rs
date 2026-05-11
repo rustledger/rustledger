@@ -392,33 +392,36 @@ impl CurrencyInterner {
 
 /// Thread-safe string interner using a mutex.
 ///
-/// Use this when interning strings from multiple threads.
+/// Use this when interning strings from multiple threads. Backed by
+/// `parking_lot::Mutex` which avoids the OS-level syscall that
+/// `std::sync::Mutex` requires on lock/unlock and is non-poisoning, so
+/// `lock()` returns the guard directly without an `.unwrap()`.
 #[derive(Debug, Default)]
 pub struct SyncStringInterner {
-    inner: std::sync::Mutex<StringInterner>,
+    inner: parking_lot::Mutex<StringInterner>,
 }
 
 impl SyncStringInterner {
     /// Create a new thread-safe interner.
     pub fn new() -> Self {
         Self {
-            inner: std::sync::Mutex::new(StringInterner::new()),
+            inner: parking_lot::Mutex::new(StringInterner::new()),
         }
     }
 
     /// Intern a string (thread-safe).
     pub fn intern(&self, s: &str) -> InternedStr {
-        self.inner.lock().unwrap().intern(s)
+        self.inner.lock().intern(s)
     }
 
     /// Get the number of unique strings.
     pub fn len(&self) -> usize {
-        self.inner.lock().unwrap().len()
+        self.inner.lock().len()
     }
 
     /// Check if empty.
     pub fn is_empty(&self) -> bool {
-        self.inner.lock().unwrap().is_empty()
+        self.inner.lock().is_empty()
     }
 }
 

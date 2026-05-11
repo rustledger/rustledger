@@ -3363,6 +3363,7 @@ version = "0.14.1"
 dependencies = [
  "criterion",
  "jiff",
+ "parking_lot",
  "proptest",
  "rkyv 0.8.16",
  "rust_decimal",
@@ -3414,6 +3415,7 @@ dependencies = [
 name = "rustledger-loader"
 version = "0.14.1"
 dependencies = [
+ "blake3",
  "glob",
  "jiff",
  "rayon",
@@ -3427,7 +3429,6 @@ dependencies = [
  "rustledger-plugin",
  "rustledger-plugin-types",
  "rustledger-validate",
- "sha2 0.11.0",
  "tempfile",
  "thiserror 2.0.18",
 ]

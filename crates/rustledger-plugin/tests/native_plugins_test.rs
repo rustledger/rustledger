@@ -2605,6 +2605,259 @@ fn test_implicit_prices_zero_unit_total_falls_through_to_cost_currency() {
     );
 }
 
+/// Reducing-sell gate: a sell whose cost spec resolves to an existing
+/// lot (Python's `MatchResult.REDUCED`) must NOT emit an extra price.
+/// Pre-fix this plugin emitted one phantom price per matched lot, so a
+/// `Sell -50 X {1 USD}` against a prior `Buy +100 X {1 USD}` would
+/// produce a duplicate `1 USD` price entry, and a `Sell -250 X {}` that
+/// FIFO-matched three different cost lots would produce three phantom
+/// prices. Python's `implicit_prices` plugin gates the cost-derived
+/// emit on `Inventory.add_position` returning anything except
+/// `MatchResult.REDUCED`; we mirror that here with a per-account lot
+/// tracker. Closes the residual ~5 over-emit cases left behind by
+/// #1048 (e.g. fava-portfolio-returns/example_stock: py=6 rs=10).
+#[test]
+fn test_implicit_prices_skips_reducing_sell_with_cost() {
+    let plugin = ImplicitPricesPlugin;
+    let input = make_input(vec![
+        make_open("2024-01-01", "Assets:Brokerage"),
+        make_open("2024-01-01", "Assets:Cash"),
+        // Buy 100 X {1 USD} on 2024-02-01 — augmenting, emit price.
+        make_transaction_with_cost(
+            "2024-02-01",
+            "Buy 100 X",
+            "Assets:Brokerage",
+            ("100", "X"),
+            ("1", "USD"),
+            "Assets:Cash",
+        ),
+        // Sell -50 X {1 USD} on 2024-03-01 — reduces the buy's lot,
+        // must NOT emit an extra price.
+        make_transaction_with_cost(
+            "2024-03-01",
+            "Sell 50 X",
+            "Assets:Brokerage",
+            ("-50", "X"),
+            ("1", "USD"),
+            "Assets:Cash",
+        ),
+    ]);
+    let output = plugin.process(input.clone());
+    let prices = implicit_prices_emitted(&input, &output);
+    assert_eq!(
+        prices,
+        vec![("X".into(), "1".into(), "USD".into())],
+        "exactly one implicit price (from the buy); the sell must not \
+         re-emit the same lot's cost as a price"
+    );
+}
+
+/// Companion to the above: a reducing sell with both `{cost}` AND a
+/// `@` price annotation still emits the *annotation* price (Python's
+/// `from_price` branch fires regardless of REDUCED). The cost-derived
+/// emit is suppressed, but the annotation isn't.
+#[test]
+fn test_implicit_prices_reducing_sell_with_annotation_emits_from_price() {
+    let plugin = ImplicitPricesPlugin;
+    let input = make_input(vec![
+        make_open("2024-01-01", "Assets:Brokerage"),
+        make_open("2024-01-01", "Assets:Cash"),
+        make_transaction_with_cost(
+            "2024-02-01",
+            "Buy",
+            "Assets:Brokerage",
+            ("10", "X"),
+            ("100", "USD"),
+            "Assets:Cash",
+        ),
+        // -5 X {100 USD} @ 110 USD: reducing, but the annotation
+        // should still produce a 110 USD price.
+        make_transaction_with_cost_and_price(
+            "2024-03-01",
+            "Sell with explicit price",
+            "Assets:Brokerage",
+            ("-5", "X"),
+            ("100", "USD"), // cost (matches the lot)
+            ("110", "USD"), // @ annotation
+            "Assets:Cash",
+        ),
+    ]);
+    let output = plugin.process(input.clone());
+    let prices = implicit_prices_emitted(&input, &output);
+    // Two emits: 100 from the buy's cost, 110 from the sell's annotation.
+    // Crucially NOT three (no extra 100 from the sell's cost-from-REDUCED).
+    assert_eq!(prices.len(), 2, "exactly two emits: buy-cost + sell-@");
+    assert!(prices.contains(&("X".into(), "100".into(), "USD".into())));
+    assert!(prices.contains(&("X".into(), "110".into(), "USD".into())));
+}
+
+/// Same-day dedup: two augmenting buys on the same day at the same
+/// per-unit cost emit ONE price, not two. Mirrors Python's
+/// `new_price_entry_map` keyed by `(date, base_currency, number,
+/// quote_currency)`. Without this gate, fixtures with multi-asset
+/// portfolio buys (where the same fund is bought across several
+/// accounts on the same date at the same NAV) inflate `#prices`'s
+/// row count compared to bean-check. Concrete impact on
+/// `beangrow/example_ledger.beancount`: 854 → 782 rows after dedup,
+/// matching bean-query exactly.
+#[test]
+fn test_implicit_prices_dedup_same_day_same_price() {
+    let plugin = ImplicitPricesPlugin;
+    let input = make_input(vec![
+        make_open("2024-01-01", "Assets:RetirementA"),
+        make_open("2024-01-01", "Assets:RetirementB"),
+        make_open("2024-01-01", "Assets:Cash"),
+        // Two buys on the same day at the same per-unit price.
+        make_transaction_with_cost(
+            "2024-02-01",
+            "Buy in account A",
+            "Assets:RetirementA",
+            ("10", "FUND"),
+            ("100", "USD"),
+            "Assets:Cash",
+        ),
+        make_transaction_with_cost(
+            "2024-02-01",
+            "Buy in account B",
+            "Assets:RetirementB",
+            ("20", "FUND"),
+            ("100", "USD"),
+            "Assets:Cash",
+        ),
+    ]);
+    let output = plugin.process(input.clone());
+    let prices = implicit_prices_emitted(&input, &output);
+    assert_eq!(
+        prices,
+        vec![("FUND".into(), "100".into(), "USD".into())],
+        "two same-day same-price buys should dedup to one emit"
+    );
+}
+
+/// Scale-insensitivity of the REDUCED gate AND same-day dedup.
+/// Numerically equal costs / prices written with different scales
+/// (`"100"` vs `"100.00"`) must produce the same lot key and the same
+/// dedup key, matching Python's `(date, base, number, quote)`
+/// Decimal-value comparison. Pre-fix the keys used raw `.to_string()`,
+/// so `"100"` and `"100.00"` were distinct keys — a reducing sell at
+/// `{100 USD}` against a prior buy at `{100.00 USD}` would NOT
+/// classify as REDUCED, slipping the phantom price emit back in.
+/// Caught by Copilot review on PR #1061.
+#[test]
+fn test_implicit_prices_reduced_gate_and_dedup_are_scale_insensitive() {
+    let plugin = ImplicitPricesPlugin;
+    let input = make_input(vec![
+        make_open("2024-01-01", "Assets:Brokerage"),
+        make_open("2024-01-01", "Assets:Cash"),
+        // Buy: cost spec written with scale 2 ("100.00").
+        make_transaction_with_cost(
+            "2024-02-01",
+            "Buy",
+            "Assets:Brokerage",
+            ("10", "X"),
+            ("100.00", "USD"),
+            "Assets:Cash",
+        ),
+        // Buy again on the same day at the same numeric price, but
+        // written with scale 0 ("100"). Pre-fix the dedup key
+        // ("100" vs "100.00") would treat these as distinct and emit
+        // BOTH prices. Post-fix only one emit.
+        make_transaction_with_cost(
+            "2024-02-01",
+            "Buy more",
+            "Assets:Brokerage",
+            ("5", "X"),
+            ("100", "USD"),
+            "Assets:Cash",
+        ),
+        // Sell using the scale-0 form ("100") against the scale-2
+        // existing lot. Pre-fix REDUCED gate would miss this and emit
+        // a phantom price. Post-fix it classifies as REDUCED → no emit.
+        make_transaction_with_cost(
+            "2024-03-01",
+            "Sell",
+            "Assets:Brokerage",
+            ("-5", "X"),
+            ("100", "USD"),
+            "Assets:Cash",
+        ),
+    ]);
+    let output = plugin.process(input.clone());
+    let prices = implicit_prices_emitted(&input, &output);
+    assert_eq!(
+        prices.len(),
+        1,
+        "exactly one emit: the first buy. Second buy dedups, sell is \
+         REDUCED. Got: {prices:?}"
+    );
+    assert_eq!(prices[0].0, "X", "base currency carries through");
+    assert_eq!(prices[0].2, "USD", "quote currency carries through");
+    // The emitted number string is whatever the FIRST buy's cost spec
+    // produced (scale 2 here, since the buy was written "100.00").
+    // The dedup key normalizes for comparison but doesn't normalize
+    // the user-facing emitted form.
+    assert_eq!(
+        prices[0].1, "100.00",
+        "emitted price preserves the first-emit cost's intrinsic scale"
+    );
+}
+
+/// Over-sell crossing zero: the booker pre-splits a `-150` sell against
+/// a `+100` lot into two postings — a fully-reducing `-100` leg matched
+/// to the existing lot, and an augmenting `-50` leg creating a new
+/// short position. Our inline inventory update sees them in order, so
+/// the first leg classifies REDUCED (no emit) and the second leg sees
+/// `prior=0` and classifies CREATED (emit). Hard-coded here to lock in
+/// the assumption that this plugin runs on post-booking input —
+/// regression-guards against future pipeline reordering that would
+/// hand us un-split crossing postings.
+#[test]
+fn test_implicit_prices_oversell_crossing_zero_emits_for_residual_leg() {
+    let plugin = ImplicitPricesPlugin;
+    let input = make_input(vec![
+        make_open("2024-01-01", "Assets:Brokerage"),
+        make_open("2024-01-01", "Assets:Cash"),
+        // Initial buy of 100 X at 1 USD.
+        make_transaction_with_cost(
+            "2024-02-01",
+            "Buy",
+            "Assets:Brokerage",
+            ("100", "X"),
+            ("1", "USD"),
+            "Assets:Cash",
+        ),
+        // Booker's split form of "sell -150 X": leg 1 fully reduces
+        // the existing lot at the same cost. No emit expected.
+        make_transaction_with_cost(
+            "2024-03-01",
+            "Reducing leg",
+            "Assets:Brokerage",
+            ("-100", "X"),
+            ("1", "USD"),
+            "Assets:Cash",
+        ),
+        // Leg 2 creates a -50 short position at a (hypothetical) new
+        // cost basis. Emit expected.
+        make_transaction_with_cost(
+            "2024-03-01",
+            "New-short leg",
+            "Assets:Brokerage",
+            ("-50", "X"),
+            ("2", "USD"),
+            "Assets:Cash",
+        ),
+    ]);
+    let output = plugin.process(input.clone());
+    let prices = implicit_prices_emitted(&input, &output);
+    assert_eq!(
+        prices.len(),
+        2,
+        "buy + residual short leg emit; reducing leg suppressed. Got: {prices:?}"
+    );
+    assert!(prices.contains(&("X".into(), "1".into(), "USD".into())));
+    assert!(prices.contains(&("X".into(), "2".into(), "USD".into())));
+}
+
 /// Posting with NO price annotation and NO cost: emits nothing.
 #[test]
 fn test_implicit_prices_emits_nothing_for_plain_transfer() {

@@ -73,8 +73,7 @@ pub use format::{FormatConfig, format_directive};
 pub use implicit_prices::extract_per_unit_price;
 pub use intern::{InternedStr, StringInterner};
 pub use inventory::{
-    AccountedBookingError, BookingError, BookingMethod, BookingResult, Inventory, MatchedLots,
-    ReductionScope,
+    AccountedBookingError, BookingError, BookingMethod, BookingResult, Inventory, ReductionScope,
 };
 pub use position::Position;
 

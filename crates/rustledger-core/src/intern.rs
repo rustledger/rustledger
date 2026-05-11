@@ -390,41 +390,6 @@ impl CurrencyInterner {
     }
 }
 
-/// Thread-safe string interner using a mutex.
-///
-/// Use this when interning strings from multiple threads. Backed by
-/// `parking_lot::Mutex` which avoids the OS-level syscall that
-/// `std::sync::Mutex` requires on lock/unlock and is non-poisoning, so
-/// `lock()` returns the guard directly without an `.unwrap()`.
-#[derive(Debug, Default)]
-pub struct SyncStringInterner {
-    inner: parking_lot::Mutex<StringInterner>,
-}
-
-impl SyncStringInterner {
-    /// Create a new thread-safe interner.
-    pub fn new() -> Self {
-        Self {
-            inner: parking_lot::Mutex::new(StringInterner::new()),
-        }
-    }
-
-    /// Intern a string (thread-safe).
-    pub fn intern(&self, s: &str) -> InternedStr {
-        self.inner.lock().intern(s)
-    }
-
-    /// Get the number of unique strings.
-    pub fn len(&self) -> usize {
-        self.inner.lock().len()
-    }
-
-    /// Check if empty.
-    pub fn is_empty(&self) -> bool {
-        self.inner.lock().is_empty()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -493,31 +458,6 @@ mod tests {
         assert!(usd1.ptr_eq(&usd2));
         assert!(!usd1.ptr_eq(&eur));
         assert_eq!(interner.len(), 2);
-    }
-
-    #[test]
-    fn test_sync_interner() {
-        use std::thread;
-
-        let interner = std::sync::Arc::new(SyncStringInterner::new());
-
-        let handles: Vec<_> = (0..4)
-            .map(|_| {
-                let interner = interner.clone();
-                thread::spawn(move || {
-                    for _ in 0..100 {
-                        interner.intern("shared-string");
-                    }
-                })
-            })
-            .collect();
-
-        for handle in handles {
-            handle.join().unwrap();
-        }
-
-        // Should only have one unique string despite being interned 400 times
-        assert_eq!(interner.len(), 1);
     }
 
     #[test]

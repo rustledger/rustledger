@@ -3363,7 +3363,6 @@ version = "0.14.1"
 dependencies = [
  "criterion",
  "jiff",
- "parking_lot",
  "proptest",
  "rkyv 0.8.16",
  "rust_decimal",

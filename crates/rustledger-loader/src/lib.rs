@@ -30,6 +30,7 @@
 
 #[cfg(feature = "cache")]
 pub mod cache;
+mod dedup;
 mod options;
 #[cfg(any(feature = "booking", feature = "plugins", feature = "validation"))]
 mod process;
@@ -40,8 +41,9 @@ mod vfs;
 pub use cache::{
     CACHE_FILENAME_ENV, CacheEntry, CachedOptions, CachedPlugin, DISABLE_CACHE_ENV,
     cache_disabled_by_env, cache_path, default_cache_path, invalidate_cache, load_cache_entry,
-    reintern_directives, reintern_plain_directives, save_cache_entry,
+    save_cache_entry,
 };
+pub use dedup::{reintern_directives, reintern_plain_directives};
 pub use options::Options;
 pub use source_map::{SourceFile, SourceMap};
 pub use vfs::{DiskFileSystem, FileSystem, VirtualFileSystem};
@@ -374,6 +376,20 @@ impl Loader {
             &mut source_map,
             &mut errors,
         )?;
+
+        // Deduplicate InternedStr across files. Each file parses with
+        // its own per-file `StringInterner`, so the same account /
+        // currency / tag string appearing in two included files lands
+        // in two different `Arc<str>` allocations — defeating the
+        // `Arc::ptr_eq` fast path in `InternedStr`'s `PartialEq` and
+        // forcing all cross-file equality through byte comparison.
+        //
+        // The cache-hit path already runs `reintern_directives` to fix
+        // this (see `crates/rustledger/src/cmd/check.rs`). Doing the
+        // same here aligns the fresh-parse path with the cache path:
+        // every consumer of `LoadResult` sees a deduplicated directive
+        // list regardless of how it was produced. Closes #1071.
+        dedup::reintern_directives(&mut directives);
 
         // Build display context from directives and options
         let display_context = build_display_context(&directives, &options);
@@ -1077,6 +1093,68 @@ include "./transactions/*.beancount"
             has_glob_error,
             "expected GlobNoMatch error, got: {:?}",
             result.errors
+        );
+    }
+
+    /// Regression test for #1071: a fresh multi-file parse must produce
+    /// deduplicated `InternedStr` values, so two `Posting`s referencing
+    /// the same account from different files share one `Arc<str>`.
+    /// Pre-fix the per-file `StringInterner` kept the two `Arc`s
+    /// distinct and `Arc::ptr_eq` fell through to byte comparison.
+    #[test]
+    fn test_fresh_parse_deduplicates_internedstr_across_files() {
+        let mut vfs = VirtualFileSystem::new();
+        vfs.add_file(
+            "main.beancount",
+            r#"
+2024-01-01 open Assets:Bank USD
+include "transactions.beancount"
+"#,
+        );
+        vfs.add_file(
+            "transactions.beancount",
+            r#"
+2024-01-15 * "Coffee"
+  Assets:Bank   -5.00 USD
+  Expenses:Coffee  5.00 USD
+
+2024-01-16 open Expenses:Coffee
+"#,
+        );
+
+        let result = Loader::new()
+            .with_filesystem(Box::new(vfs))
+            .load(Path::new("main.beancount"))
+            .unwrap();
+
+        // Collect every `Assets:Bank` `InternedStr` (one from `open`,
+        // one from the posting). They originate in different files, so
+        // pre-fix they had distinct `Arc<str>` allocations.
+        let bank_accounts: Vec<&rustledger_core::InternedStr> = result
+            .directives
+            .iter()
+            .filter_map(|s| match &s.value {
+                rustledger_core::Directive::Open(o) if o.account.as_str() == "Assets:Bank" => {
+                    Some(&o.account)
+                }
+                rustledger_core::Directive::Transaction(t) => t
+                    .postings
+                    .iter()
+                    .find(|p| p.account.as_str() == "Assets:Bank")
+                    .map(|p| &p.account),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            bank_accounts.len(),
+            2,
+            "expected one Open and one posting for Assets:Bank"
+        );
+        assert!(
+            bank_accounts[0].ptr_eq(bank_accounts[1]),
+            "Assets:Bank from cross-file open/posting must share the same Arc<str> \
+             after Loader::load runs reintern_directives"
         );
     }
 }

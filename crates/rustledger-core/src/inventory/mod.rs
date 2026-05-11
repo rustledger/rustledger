@@ -7,11 +7,20 @@
 use rust_decimal::Decimal;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
+use smallvec::SmallVec;
 use std::fmt;
 use std::str::FromStr;
 
 use crate::intern::InternedStr;
 use crate::{Amount, CostSpec, Position};
+
+/// Inline storage for `BookingResult::matched`.
+///
+/// STRICT booking (the default) always produces exactly one matched lot
+/// per posting; FIFO / LIFO frequently match a single lot too. Inline
+/// cap of 1 covers the hot case with zero heap allocation while still
+/// spilling to the heap for multi-lot matches.
+pub type MatchedLots = SmallVec<[Position; 1]>;
 
 mod booking;
 
@@ -93,8 +102,12 @@ pub enum ReductionScope {
 /// Result of a booking operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BookingResult {
-    /// Positions that were matched/reduced.
-    pub matched: Vec<Position>,
+    /// Positions that were matched/reduced. Backed by a [`SmallVec`] so
+    /// the single-match common case (always true under STRICT, common
+    /// under FIFO/LIFO) doesn't touch the heap. Derefs to `[Position]`
+    /// so iteration/indexing/`.len()`/`.is_empty()` call sites are
+    /// unchanged.
+    pub matched: MatchedLots,
     /// The cost basis of the matched positions (for capital gains).
     pub cost_basis: Option<Amount>,
 }

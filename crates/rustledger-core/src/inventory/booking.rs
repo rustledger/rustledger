@@ -6,7 +6,9 @@
 use rust_decimal::Decimal;
 use rust_decimal::prelude::Signed;
 
-use super::{BookingError, BookingMethod, BookingResult, Inventory};
+use smallvec::{SmallVec, smallvec};
+
+use super::{BookingError, BookingMethod, BookingResult, Inventory, MatchedLots};
 use crate::{Amount, Cost, CostSpec, InternedStr, Position};
 
 /// Compute weighted-average cost from a set of positions.
@@ -159,7 +161,7 @@ impl Inventory {
         reverse: bool,
     ) -> Result<BookingResult, BookingError> {
         let mut remaining = units.number.abs();
-        let mut matched = Vec::new();
+        let mut matched: MatchedLots = SmallVec::new();
         let mut cost_basis = Decimal::ZERO;
         let mut cost_currency = None;
 
@@ -235,7 +237,7 @@ impl Inventory {
         spec: &CostSpec,
     ) -> Result<BookingResult, BookingError> {
         let mut remaining = units.number.abs();
-        let mut matched = Vec::new();
+        let mut matched: MatchedLots = SmallVec::new();
         let mut cost_basis = Decimal::ZERO;
         let mut cost_currency = None;
 
@@ -335,7 +337,7 @@ impl Inventory {
         let cost_basis = average_cost_from_positions(&matching, total_units)?
             .map(|(avg_cost, currency)| Amount::new(reduction * avg_cost, currency));
 
-        let matched: Vec<Position> = matching.into_iter().cloned().collect();
+        let matched: MatchedLots = matching.into_iter().cloned().collect();
 
         Ok(BookingResult {
             matched,
@@ -365,7 +367,7 @@ impl Inventory {
         let (matched, _) = pos.split(requested * pos.units.number.signum());
 
         Ok(BookingResult {
-            matched: vec![matched],
+            matched: smallvec![matched],
             cost_basis,
         })
     }
@@ -558,7 +560,7 @@ impl Inventory {
         spec: &CostSpec,
     ) -> Result<BookingResult, BookingError> {
         let mut remaining = units.number.abs();
-        let mut matched = Vec::new();
+        let mut matched: MatchedLots = SmallVec::new();
         let mut cost_basis = Decimal::ZERO;
         let mut cost_currency = None;
 
@@ -653,7 +655,7 @@ impl Inventory {
         reverse: bool,
     ) -> Result<BookingResult, BookingError> {
         let mut remaining = units.number.abs();
-        let mut matched = Vec::new();
+        let mut matched: MatchedLots = SmallVec::new();
         let mut cost_basis = Decimal::ZERO;
         let mut cost_currency = None;
 
@@ -771,7 +773,7 @@ impl Inventory {
         let cost_basis = average_cost_from_positions(&matching, total_units)?
             .map(|(avg_cost, currency)| Amount::new(reduction * avg_cost, currency));
 
-        let matched: Vec<Position> = matching.into_iter().cloned().collect();
+        let matched: MatchedLots = matching.into_iter().cloned().collect();
         let new_units = total_units + units.number;
 
         // Remove all positions of this currency
@@ -852,7 +854,7 @@ impl Inventory {
             label: None,
         };
 
-        let matched = vec![Position::with_cost(
+        let matched: MatchedLots = smallvec![Position::with_cost(
             Amount::new(units.number.abs(), units.currency.clone()),
             make_avg_cost(),
         )];
@@ -894,7 +896,7 @@ impl Inventory {
             // This is an augmentation, not a reduction - just add it
             self.add(Position::simple(units.clone()));
             return Ok(BookingResult {
-                matched: vec![],
+                matched: SmallVec::new(),
                 cost_basis: None,
             });
         }
@@ -965,7 +967,7 @@ impl Inventory {
         }
 
         Ok(BookingResult {
-            matched: vec![matched],
+            matched: smallvec![matched],
             cost_basis,
         })
     }

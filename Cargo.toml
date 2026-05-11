@@ -103,6 +103,9 @@ rayon = "1.12"
 rustc-hash = "2"
 blake3 = "1"
 
+# Inline-storage collections (avoids heap allocation for small sizes)
+smallvec = "1"
+
 # Testing
 proptest = "1"
 criterion = "0.8"

@@ -225,24 +225,41 @@ fn parse_number(stream: &mut TokenStream<'_>) -> ParseRes<Decimal> {
 
 /// Fast decimal parser for simple beancount number formats.
 ///
-/// Handles `[0-9]+(\.[0-9]+)?` — no sign, no commas, no exponent.
-/// Returns `None` for anything more complex, falling through to
-/// `Decimal::from_str`.
+/// Handles `[0-9]+(\.[0-9]*)?` — no sign, no commas, no exponent. The
+/// `[0-9]*` after the dot matches the lexer's grammar and accepts
+/// trailing-decimal forms like `"5."`. Returns `None` for anything more
+/// complex (sign included — see [`parse_signed_number`]), falling
+/// through to `Decimal::from_str`.
+///
+/// Mantissa accumulator is `u128` so the fast path accepts the full
+/// range that `rust_decimal` itself supports (96-bit mantissa, up to
+/// 7.9e28). Before this fix the accumulator was `i64` and bailed past
+/// `9.2e18`, which forced 8-decimal crypto amounts and accumulated
+/// price math through the slow `Decimal::from_str` path on every
+/// parse. Construction goes through [`Decimal::try_from_i128_with_scale`]
+/// which rejects mantissa values that don't fit in `rust_decimal`'s
+/// 96-bit field — those still opt out of the fast path so the caller's
+/// slow-path fallback sees them.
 fn fast_parse_decimal(s: &str) -> Option<Decimal> {
     let bytes = s.as_bytes();
     if bytes.is_empty() {
         return None;
     }
 
-    let mut mantissa: i64 = 0;
+    let mut mantissa: u128 = 0;
     let mut scale: u32 = 0;
     let mut in_decimal = false;
 
     for &b in bytes {
         match b {
             b'0'..=b'9' => {
-                // Check for overflow before multiplying
-                mantissa = mantissa.checked_mul(10)?.checked_add(i64::from(b - b'0'))?;
+                // Check for overflow before multiplying. u128 can absorb
+                // up to ~3.4e38 before overflowing — well past
+                // rust_decimal's effective limit, so the `?` only fires
+                // on genuinely huge inputs (40+ digits).
+                mantissa = mantissa
+                    .checked_mul(10)?
+                    .checked_add(u128::from(b - b'0'))?;
                 if in_decimal {
                     scale += 1;
                 }
@@ -254,7 +271,11 @@ fn fast_parse_decimal(s: &str) -> Option<Decimal> {
         }
     }
 
-    Some(Decimal::new(mantissa, scale))
+    // Cast to i128: only fails when the u128 high bit is set (mantissa
+    // > 1.7e38). That's already past Decimal::MAX (7.9e28), so the
+    // try_from below would reject too — this just bails earlier.
+    let mantissa_i128 = i128::try_from(mantissa).ok()?;
+    Decimal::try_from_i128_with_scale(mantissa_i128, scale).ok()
 }
 
 /// Parse a number with optional leading minus sign.
@@ -2928,11 +2949,54 @@ mod tests {
             "1234.56",
             "0.1234567890123456789", // 19 fractional digits, mantissa fits in i64
             "9223372036854775807",   // i64::MAX exactly
-            "9223372036854775806.0", // forces overflow on next mul10 → opt-out OK
-            "99999999999999999999",  // 20 nines, must opt out (overflow)
-            "5.",                    // trailing-decimal form (lexer accepts `(\.\d*)?`)
+            "9223372036854775806.0", // pre-u128 forced overflow on next mul10 — should now stay on fast path
+            "99999999999999999999", // 20 nines, pre-u128 must opt out — should now stay on fast path
+            "5.",                   // trailing-decimal form (lexer accepts `(\.\d*)?`)
         ] {
             assert_fast_path_matches_oracle(s);
+        }
+    }
+
+    /// Inputs in the i64-overflow regime that the i64-mantissa version
+    /// punted to `Decimal::from_str` and the u128 version now accepts.
+    /// Verifies (a) the fast path returns Some, not None, and (b) the
+    /// value matches the slow-path oracle exactly.
+    #[test]
+    fn fast_parse_decimal_handles_u128_range() {
+        for s in [
+            // 20-digit integer, ~1.8x i64::MAX
+            "18446744073709551616",
+            // BTC-scale 8-decimal amount past i64
+            "123456789.12345678",
+            // High-precision price computation result (28 sig figs total)
+            "1.234567890123456789012345678",
+            // Decimal::MAX as an integer (2^96 - 1 = 79228162514264337593543950335)
+            "79228162514264337593543950335",
+        ] {
+            let fast = fast_parse_decimal(s);
+            let oracle = Decimal::from_str(s).ok();
+            assert!(
+                fast.is_some(),
+                "fast path should accept {s:?} now that mantissa is u128"
+            );
+            assert_eq!(fast, oracle, "fast vs slow disagree on {s:?}");
+        }
+    }
+
+    /// Past `Decimal::MAX` (mantissa > 2^96 - 1) the fast path must
+    /// opt out so the caller's `Decimal::from_str` fallback can return
+    /// the same rejection. Locks in the bail-out behavior we rely on.
+    #[test]
+    fn fast_parse_decimal_opts_out_past_decimal_max() {
+        for s in [
+            "79228162514264337593543950336", // 2^96 — first integer past Decimal::MAX
+            "1000000000000000000000000000000", // 30 digits, well past
+        ] {
+            assert_eq!(
+                fast_parse_decimal(s),
+                None,
+                "fast path should opt out on {s:?} so slow path can handle / reject it"
+            );
         }
     }
 
@@ -2960,10 +3024,20 @@ mod tests {
     }
 
     proptest::proptest! {
-        // Bounded comma-free subset of the lexer's Number grammar that fast_parse_decimal can plausibly accept; longer/comma inputs go to the slow path so we don't generate them here.
+        // Bounded comma-free subset of the lexer's Number grammar that
+        // fast_parse_decimal can plausibly accept. Widened to 28 digits
+        // per side from the pre-fix cap of 18 (which was constrained by
+        // i64 overflow on the fast path). Note: not every generated
+        // input is representable — `rust_decimal`'s actual limit is ~29
+        // significant digits total with scale ≤ 28, so a generated
+        // string like `9999…9.9999…9` with 28 digits per side has 56
+        // sig figs and will overflow. That's intentional: those inputs
+        // exercise the opt-out branch, and we assert agreement only
+        // when fast_parse_decimal returns `Some`. Longer/comma inputs
+        // go to the slow path so we don't generate them here.
         #[test]
         fn fast_parse_decimal_agrees_with_decimal_from_str(
-            s in "[0-9]{1,18}(\\.[0-9]{1,18})?"
+            s in "[0-9]{1,28}(\\.[0-9]{1,28})?"
         ) {
             let fast = fast_parse_decimal(&s);
             let oracle = Decimal::from_str(&s).ok();

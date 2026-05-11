@@ -297,35 +297,69 @@ impl LedgerState {
     }
 }
 
-/// Validate a stream of directives.
+/// Internal trait that lets [`validate_inner`] operate over both plain
+/// `Directive`s and `Spanned<Directive>`s without duplicating the loop
+/// body. The two inputs differ only in whether errors get a span/file
+/// stamp at the end of each iteration — encoded here as the return of
+/// [`Self::span_info`].
 ///
-/// Returns a list of validation errors found.
-pub fn validate(directives: &[Directive]) -> Vec<ValidationError> {
-    validate_with_options(directives, ValidationOptions::default())
+/// `Sync` bound: needed so `&D` is `Send`, which `rayon::par_sort_by`
+/// requires for the large-collection sort path.
+trait ValidatableDirective: Sync {
+    fn directive(&self) -> &Directive;
+    /// Span + file id for this directive's source location, if any.
+    /// Plain `Directive` always returns `None`; `Spanned<Directive>`
+    /// returns the carried info.
+    fn span_info(&self) -> Option<(rustledger_parser::Span, u16)>;
 }
 
-/// Validate a stream of directives with custom options.
-///
-/// Returns a list of validation errors and warnings found.
-pub fn validate_with_options(
-    directives: &[Directive],
+impl ValidatableDirective for Directive {
+    fn directive(&self) -> &Directive {
+        self
+    }
+    fn span_info(&self) -> Option<(rustledger_parser::Span, u16)> {
+        None
+    }
+}
+
+impl ValidatableDirective for Spanned<Directive> {
+    fn directive(&self) -> &Directive {
+        &self.value
+    }
+    fn span_info(&self) -> Option<(rustledger_parser::Span, u16)> {
+        Some((self.span, self.file_id))
+    }
+}
+
+/// Unified validation body shared by all the public `validate*` entry
+/// points. Iterating per-directive plus the post-pass span/file patch
+/// used to live in two copy-pasted impls (`validate_with_options` for
+/// `&[Directive]` and `validate_spanned_with_options` for
+/// `&[Spanned<Directive>]`). Folded together via the
+/// [`ValidatableDirective`] trait; `today` is taken as a parameter so
+/// callers like the LSP can avoid the `jiff::Zoned::now()` syscall per
+/// keystroke.
+fn validate_inner<D: ValidatableDirective>(
+    directives: &[D],
     options: ValidationOptions,
+    today: NaiveDate,
 ) -> Vec<ValidationError> {
     let mut state = LedgerState::with_options(options);
     let mut errors = Vec::new();
 
-    let today = jiff::Zoned::now().date();
-
     // Sort directives by date, then by type priority
-    // (e.g., balance assertions before transactions on the same day)
-    // Use parallel sort only for large collections (threading overhead otherwise)
-    let mut sorted: Vec<&Directive> = Vec::with_capacity(directives.len());
+    // (e.g., balance assertions before transactions on the same day).
+    // Parallel sort only for large collections (threading overhead
+    // otherwise).
+    let mut sorted: Vec<&D> = Vec::with_capacity(directives.len());
     sorted.extend(directives.iter());
-    let sort_fn = |a: &&Directive, b: &&Directive| {
-        a.date()
-            .cmp(&b.date())
-            .then_with(|| a.priority().cmp(&b.priority()))
-            .then_with(|| a.has_cost_reduction().cmp(&b.has_cost_reduction()))
+    let sort_fn = |a: &&D, b: &&D| {
+        let ad = a.directive();
+        let bd = b.directive();
+        ad.date()
+            .cmp(&bd.date())
+            .then_with(|| ad.priority().cmp(&bd.priority()))
+            .then_with(|| ad.has_cost_reduction().cmp(&bd.has_cost_reduction()))
     };
     if sorted.len() >= PARALLEL_SORT_THRESHOLD {
         sorted.par_sort_by(sort_fn);
@@ -333,150 +367,36 @@ pub fn validate_with_options(
         sorted.sort_by(sort_fn);
     }
 
-    for directive in sorted {
-        let date = directive.date();
-
-        // Check for date ordering (info only - we sort anyway)
-        if let Some(last) = state.last_date
-            && date < last
-        {
-            errors.push(ValidationError::new(
-                ErrorCode::DateOutOfOrder,
-                format!("Directive date {date} is before previous directive {last}"),
-                date,
-            ));
-        }
-        state.last_date = Some(date);
-
-        // Check for future dates if enabled
-        if state.options.warn_future_dates && date > today {
-            errors.push(ValidationError::new(
-                ErrorCode::FutureDate,
-                format!("Entry dated in the future: {date}"),
-                date,
-            ));
-        }
-
-        match directive {
-            Directive::Open(open) => {
-                validate_open(&mut state, open, &mut errors);
-            }
-            Directive::Close(close) => {
-                validate_close(&mut state, close, &mut errors);
-            }
-            Directive::Transaction(txn) => {
-                validate_transaction(&mut state, txn, &mut errors);
-            }
-            Directive::Balance(bal) => {
-                validate_balance(&mut state, bal, &mut errors);
-            }
-            Directive::Commodity(comm) => {
-                state.commodities.insert(comm.currency.clone());
-                validate_commodity_precision_meta(comm, &mut errors);
-            }
-            Directive::Pad(pad) => {
-                validate_pad(&mut state, pad, &mut errors);
-            }
-            Directive::Document(doc) => {
-                validate_document(&state, doc, &mut errors);
-            }
-            Directive::Note(note) => {
-                validate_note(&state, note, &mut errors);
-            }
-            _ => {}
-        }
-    }
-
-    // Check for unused pads (E2003)
-    for (target_account, pads) in &state.pending_pads {
-        for pad in pads {
-            if !pad.used {
-                errors.push(
-                    ValidationError::new(
-                        ErrorCode::PadWithoutBalance,
-                        "Unused Pad entry".to_string(),
-                        pad.date,
-                    )
-                    .with_context(format!(
-                        "   {} pad {} {}",
-                        pad.date, target_account, pad.source_account
-                    )),
-                );
-            }
-        }
-    }
-
-    errors
-}
-
-/// Validate a stream of spanned directives with custom options.
-///
-/// This variant accepts `Spanned<Directive>` to preserve source location information,
-/// which is propagated to any validation errors. This enables IDE-friendly error
-/// messages with `file:line` information.
-///
-/// Returns a list of validation errors and warnings found, each with source location
-/// when available.
-pub fn validate_spanned_with_options(
-    directives: &[Spanned<Directive>],
-    options: ValidationOptions,
-) -> Vec<ValidationError> {
-    let mut state = LedgerState::with_options(options);
-    let mut errors = Vec::new();
-
-    let today = jiff::Zoned::now().date();
-
-    // Sort directives by date, then by type priority
-    // Use parallel sort only for large collections (threading overhead otherwise)
-    let mut sorted: Vec<&Spanned<Directive>> = Vec::with_capacity(directives.len());
-    sorted.extend(directives.iter());
-    let sort_fn = |a: &&Spanned<Directive>, b: &&Spanned<Directive>| {
-        a.value
-            .date()
-            .cmp(&b.value.date())
-            .then_with(|| a.value.priority().cmp(&b.value.priority()))
-            .then_with(|| {
-                a.value
-                    .has_cost_reduction()
-                    .cmp(&b.value.has_cost_reduction())
-            })
-    };
-    if sorted.len() >= PARALLEL_SORT_THRESHOLD {
-        sorted.par_sort_by(sort_fn);
-    } else {
-        sorted.sort_by(sort_fn);
-    }
-
-    for spanned in sorted {
-        let directive = &spanned.value;
+    for d in sorted {
+        let directive = d.directive();
         let date = directive.date();
 
         // Snapshot before ANY errors are pushed for this directive so the
         // downstream patching loop can enrich every error tied to this
         // directive — including the ordering / future-date checks below,
-        // not just the ones produced by the per-kind validators (issue #896).
+        // not just the ones produced by the per-kind validators
+        // (issue #896). No cost for the unspanned path; the skip-then-
+        // patch loop is bypassed when `span_info()` returns `None`.
         let error_count_before = errors.len();
 
-        // Check for date ordering (info only - we sort anyway)
+        // Check for date ordering (info only — we sort anyway).
         if let Some(last) = state.last_date
             && date < last
         {
-            errors.push(ValidationError::with_location(
+            errors.push(ValidationError::new(
                 ErrorCode::DateOutOfOrder,
                 format!("Directive date {date} is before previous directive {last}"),
                 date,
-                spanned,
             ));
         }
         state.last_date = Some(date);
 
-        // Check for future dates if enabled
+        // Check for future dates if enabled.
         if state.options.warn_future_dates && date > today {
-            errors.push(ValidationError::with_location(
+            errors.push(ValidationError::new(
                 ErrorCode::FutureDate,
                 format!("Entry dated in the future: {date}"),
                 date,
-                spanned,
             ));
         }
 
@@ -512,24 +432,29 @@ pub fn validate_spanned_with_options(
         // Patch any new errors with location info from the current directive,
         // and tag plugin-synthesized directives with an advisory note so users
         // can trace errors that don't correspond to anything in their source
-        // files back to a plugin (see issue #896).
-        for error in errors.iter_mut().skip(error_count_before) {
-            if error.span.is_none() {
-                error.span = Some(spanned.span);
-                error.file_id = Some(spanned.file_id);
-            }
-            if error.note.is_none() && spanned.file_id == SYNTHESIZED_FILE_ID {
-                error.note = Some(
-                    "directive was synthesized by a plugin (no source location); \
-                     check your `plugin \"…\"` declarations for the responsible plugin"
-                        .to_string(),
-                );
+        // files back to a plugin (see issue #896). Only runs for the
+        // spanned-input path; `Directive`'s `span_info()` returns `None`
+        // so this whole block is a no-op for the CLI / unspanned callers.
+        if let Some((span, file_id)) = d.span_info() {
+            for error in errors.iter_mut().skip(error_count_before) {
+                if error.span.is_none() {
+                    error.span = Some(span);
+                    error.file_id = Some(file_id);
+                }
+                if error.note.is_none() && file_id == SYNTHESIZED_FILE_ID {
+                    error.note = Some(
+                        "directive was synthesized by a plugin (no source location); \
+                         check your `plugin \"…\"` declarations for the responsible plugin"
+                            .to_string(),
+                    );
+                }
             }
         }
     }
 
-    // Check for unused pads (E2003)
-    // Note: These errors won't have location info since we don't store spans in PendingPad
+    // Check for unused pads (E2003).
+    // These errors won't have location info since we don't store spans
+    // in PendingPad.
     for (target_account, pads) in &state.pending_pads {
         for pad in pads {
             if !pad.used {
@@ -549,6 +474,76 @@ pub fn validate_spanned_with_options(
     }
 
     errors
+}
+
+/// Compute today's date for default validation calls.
+///
+/// Each public `validate*` entry point that doesn't take an explicit
+/// `today` calls this once. LSP callers should use the `_with_today`
+/// variants below and cache the date themselves to avoid the
+/// `jiff::Zoned::now()` syscall per re-validation.
+fn today() -> NaiveDate {
+    jiff::Zoned::now().date()
+}
+
+/// Validate a stream of directives.
+///
+/// Returns a list of validation errors found.
+pub fn validate(directives: &[Directive]) -> Vec<ValidationError> {
+    validate_with_options(directives, ValidationOptions::default())
+}
+
+/// Validate a stream of directives with custom options.
+///
+/// Returns a list of validation errors and warnings found.
+pub fn validate_with_options(
+    directives: &[Directive],
+    options: ValidationOptions,
+) -> Vec<ValidationError> {
+    validate_inner(directives, options, today())
+}
+
+/// Validate a stream of directives with custom options and an
+/// explicit "today" date.
+///
+/// Use this from LSP / interactive contexts that re-validate frequently
+/// — caching the date in the caller skips the
+/// [`jiff::Zoned::now`] syscall per re-validation.
+pub fn validate_with_today(
+    directives: &[Directive],
+    options: ValidationOptions,
+    today: NaiveDate,
+) -> Vec<ValidationError> {
+    validate_inner(directives, options, today)
+}
+
+/// Validate a stream of spanned directives with custom options.
+///
+/// This variant accepts `Spanned<Directive>` to preserve source location information,
+/// which is propagated to any validation errors. This enables IDE-friendly error
+/// messages with `file:line` information.
+///
+/// Returns a list of validation errors and warnings found, each with source location
+/// when available.
+pub fn validate_spanned_with_options(
+    directives: &[Spanned<Directive>],
+    options: ValidationOptions,
+) -> Vec<ValidationError> {
+    validate_inner(directives, options, today())
+}
+
+/// Validate a stream of spanned directives with custom options and an
+/// explicit "today" date.
+///
+/// LSP-friendly variant of [`validate_spanned_with_options`] — caching
+/// the date in the caller skips the [`jiff::Zoned::now`] syscall per
+/// re-validation.
+pub fn validate_spanned_with_today(
+    directives: &[Spanned<Directive>],
+    options: ValidationOptions,
+    today: NaiveDate,
+) -> Vec<ValidationError> {
+    validate_inner(directives, options, today)
 }
 
 /// Validate the rledger-specific `precision` metadata key on a commodity directive.
@@ -861,6 +856,38 @@ mod tests {
         assert!(
             errors.iter().any(|e| e.code == ErrorCode::FutureDate),
             "Should warn about future dates when enabled"
+        );
+    }
+
+    /// `validate_with_today` is the LSP-friendly entry point that
+    /// accepts the "today" date as a parameter instead of calling
+    /// `jiff::Zoned::now()` internally. Verify it threads the parameter
+    /// through correctly: with `today` set BEFORE the directive's date,
+    /// the directive is in the future relative to `today`; with `today`
+    /// set AFTER, the directive is in the past.
+    #[test]
+    fn test_validate_with_today_threads_today_parameter() {
+        let directives = vec![Directive::Open(Open {
+            date: date(2024, 6, 15),
+            account: "Assets:Bank".into(),
+            currencies: vec![],
+            booking: None,
+            meta: Default::default(),
+        })];
+        let options = ValidationOptions::default().with_warn_future_dates(true);
+
+        // today = 2024-01-01 → directive at 2024-06-15 is in the future
+        let errors = validate_with_today(&directives, options.clone(), date(2024, 1, 1));
+        assert!(
+            errors.iter().any(|e| e.code == ErrorCode::FutureDate),
+            "with today=2024-01-01 the 2024-06-15 directive must trigger a FutureDate warning"
+        );
+
+        // today = 2025-01-01 → directive at 2024-06-15 is in the past
+        let errors = validate_with_today(&directives, options, date(2025, 1, 1));
+        assert!(
+            !errors.iter().any(|e| e.code == ErrorCode::FutureDate),
+            "with today=2025-01-01 the 2024-06-15 directive must not trigger a FutureDate warning"
         );
     }
 

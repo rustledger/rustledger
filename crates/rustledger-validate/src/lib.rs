@@ -498,68 +498,73 @@ fn today() -> NaiveDate {
     jiff::Zoned::now().date()
 }
 
-/// Pre-resolve `Path::exists()` for every candidate path that
-/// [`validate_document`] would otherwise check inside the main
-/// per-directive loop. Returns a `(path -> exists)` lookup map.
+/// Pre-resolve each unique `Document` directive's path so the main
+/// per-directive loop can answer "does this document exist?" with a
+/// hashmap lookup instead of a syscall.
 ///
-/// When `check_documents` is disabled there's nothing to resolve; we
-/// return an empty map. Otherwise we enumerate the same candidate
-/// paths the validator would build — absolute path, `document_base`
-/// join, each `document_dirs` join, or the fallback — and check
-/// existence in one batch. For ledgers with many `Document`
-/// directives this serializes I/O into a single rayon fan-out instead
-/// of one syscall per directive in the main loop.
+/// Returns a `doc.path -> found` map. Resolution mirrors
+/// [`validators::document::validate_document`]: absolute paths check
+/// themselves; relative paths try `document_base`, then each entry of
+/// `document_dirs` in order with short-circuit on first hit, then fall
+/// back to the path as-is. Two `Document` directives with the same
+/// `path` resolve identically, so the map dedupes naturally.
 ///
-/// Mirrors the resolution logic in
-/// [`validators::document::validate_document`]; if that logic changes
-/// the candidate enumeration here must follow.
+/// The per-document resolutions run via [`rayon::par_iter`] above
+/// [`PARALLEL_DOC_EXISTS_THRESHOLD`]; below that, the dispatch
+/// overhead outweighs the I/O parallelism. Crucially the unit of
+/// parallel work is **one Document**, not one candidate path — this
+/// preserves the short-circuit on `document_dirs` so we don't issue
+/// more total syscalls than the pre-fix sequential code did. Caught
+/// by Copilot review on PR #1082.
+///
+/// When `check_documents` is disabled the function short-circuits to
+/// an empty map.
 fn build_document_exists_cache<D: ValidatableDirective>(
     directives: &[D],
     options: &ValidationOptions,
-) -> FxHashMap<std::path::PathBuf, bool> {
+) -> FxHashMap<String, bool> {
     if !options.check_documents {
         return FxHashMap::default();
     }
 
-    // Collect unique candidate paths once. FxHashSet so we don't
-    // pay for duplicate exists() calls if two Document directives
-    // reference the same file.
-    let mut candidates: FxHashSet<std::path::PathBuf> = FxHashSet::default();
+    // Collect unique doc.path strings. Each (doc_path, options) pair
+    // resolves to exactly one (found?) bool, so deduping here saves
+    // syscalls when the same path is referenced by multiple Document
+    // directives.
+    let mut paths: FxHashSet<&str> = FxHashSet::default();
     for d in directives {
         if let Directive::Document(doc) = d.directive() {
-            let doc_path = std::path::Path::new(&doc.path);
-            if doc_path.is_absolute() {
-                candidates.insert(doc_path.to_path_buf());
-            } else if let Some(base) = &options.document_base {
-                candidates.insert(base.join(doc_path));
-            } else if !options.document_dirs.is_empty() {
-                for dir in &options.document_dirs {
-                    candidates.insert(dir.join(doc_path));
-                }
-            } else {
-                candidates.insert(doc_path.to_path_buf());
-            }
+            paths.insert(doc.path.as_str());
         }
     }
+    let paths: Vec<&str> = paths.into_iter().collect();
 
-    let candidates: Vec<std::path::PathBuf> = candidates.into_iter().collect();
+    // One closure-per-path resolves it through the same priority
+    // chain the validator uses. Stops on the first hit so a Document
+    // found in `document_dirs[0]` still costs exactly one syscall —
+    // matching pre-fix sequential I/O cost, but in parallel across
+    // Documents.
+    let resolve = |s: &str| -> (String, bool) {
+        let doc_path = std::path::Path::new(s);
+        let found = if doc_path.is_absolute() {
+            doc_path.exists()
+        } else if let Some(base) = &options.document_base {
+            base.join(doc_path).exists()
+        } else if !options.document_dirs.is_empty() {
+            options
+                .document_dirs
+                .iter()
+                .any(|dir| dir.join(doc_path).exists())
+        } else {
+            doc_path.exists()
+        };
+        (s.to_string(), found)
+    };
 
-    if candidates.len() >= PARALLEL_DOC_EXISTS_THRESHOLD {
-        candidates
-            .into_par_iter()
-            .map(|p| {
-                let exists = p.exists();
-                (p, exists)
-            })
-            .collect()
+    if paths.len() >= PARALLEL_DOC_EXISTS_THRESHOLD {
+        paths.into_par_iter().map(resolve).collect()
     } else {
-        candidates
-            .into_iter()
-            .map(|p| {
-                let exists = p.exists();
-                (p, exists)
-            })
-            .collect()
+        paths.into_iter().map(resolve).collect()
     }
 }
 

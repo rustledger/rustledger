@@ -23,7 +23,7 @@ use rustledger_core::{MetaValue, Transaction};
 use rustledger_loader::SourceMap;
 use rustledger_parser::Spanned;
 
-use crate::ast::{Expr, FromClause, FunctionCall, Query, Target};
+use crate::ast::{Expr, FromClause, FunctionCall, Query, SelectQuery, Target};
 use crate::error::QueryError;
 
 /// Compute a posting's `weight` — the cost-converted amount used for
@@ -380,11 +380,27 @@ impl<'a> Executor<'a> {
     }
 
     /// Collect postings matching the FROM and WHERE clauses.
-    fn collect_postings(
-        &self,
-        from: Option<&FromClause>,
-        where_clause: Option<&Expr>,
-    ) -> Result<Vec<PostingContext<'a>>, QueryError> {
+    fn collect_postings(&self, query: &SelectQuery) -> Result<Vec<PostingContext<'a>>, QueryError> {
+        let from = query.from.as_ref();
+        let where_clause = query.where_clause.as_ref();
+
+        // Both `balance` (cumulative, WHERE-filtered) and `account_balance`
+        // (per-account, raw) are running-state columns. Each PostingContext
+        // built below carries snapshots — and `cumulative_balance` grows
+        // monotonically across the iteration, so cloning it per posting on
+        // a 100k-posting ledger was the runaway-allocation regression in
+        // issue #1080.
+        //
+        // Gate the clones on whether the query actually references the
+        // columns anywhere (SELECT / WHERE / ORDER BY / HAVING / GROUP BY /
+        // FROM filter). Queries that don't touch them (the common case —
+        // `SELECT account WHERE account ~ "^Assets"` references neither)
+        // skip the entire state-tracking + clone path. Pre-fix, the only
+        // gate was `where_clause.is_some()` for the pre-WHERE snapshot,
+        // which fired even when the WHERE didn't read balance.
+        let needs_balance = query_references_column(query, "balance");
+        let needs_account_balance = query_references_column(query, "account_balance");
+
         let mut postings = Vec::new();
         // Per-account running balance — accumulates every posting regardless of
         // FROM/WHERE filters, so `account_balance` always reflects the account's
@@ -434,11 +450,14 @@ impl<'a> Executor<'a> {
                         // Update per-account balances but don't include in results
                         // and don't touch the cumulative balance — these postings
                         // didn't make it past the FROM filter.
-                        for posting in &txn.postings {
-                            if let Some(pos) = resolve_position(posting, txn.date) {
-                                let bal =
-                                    account_balances.entry(posting.account.clone()).or_default();
-                                bal.add(pos);
+                        if needs_account_balance {
+                            for posting in &txn.postings {
+                                if let Some(pos) = resolve_position(posting, txn.date) {
+                                    let bal = account_balances
+                                        .entry(posting.account.clone())
+                                        .or_default();
+                                    bal.add(pos);
+                                }
                             }
                         }
                         continue;
@@ -464,8 +483,12 @@ impl<'a> Executor<'a> {
                     // Update the account-level running balance regardless of
                     // whether this posting passes WHERE — `account_balance`
                     // should always reflect the underlying ledger truth.
+                    // Skip the update entirely when the query doesn't read
+                    // account_balance (saves the `.clone()` + map probe per
+                    // posting; `Inventory::add` allocates internally so the
+                    // saving compounds across a long run).
                     let resolved = resolve_position(posting, txn.date);
-                    if let Some(pos) = resolved.clone() {
+                    if needs_account_balance && let Some(pos) = resolved.clone() {
                         let bal = account_balances.entry(posting.account.clone()).or_default();
                         bal.add(pos);
                     }
@@ -473,14 +496,25 @@ impl<'a> Executor<'a> {
                     // Build the context with both balance views. The cumulative
                     // snapshot is the running total *before* this posting; we
                     // update it after WHERE passes so postings rejected by WHERE
-                    // don't pollute the cumulative. Skip the pre-update clone
-                    // when there's no WHERE clause — nothing reads ctx.balance
-                    // before the post-WHERE refresh in that case.
+                    // don't pollute the cumulative. Cloning the cumulative
+                    // `Inventory` is the hot allocation — it grows monotonically
+                    // across the iteration, so a 22k-posting WHERE-filtered
+                    // query was producing ~3 clones × thousands of positions per
+                    // posting (issue #1080 — multi-GB WASM heap growth). Skip
+                    // both clones when the query doesn't reference `balance`.
                     let mut ctx = PostingContext {
                         transaction: txn,
                         posting_index: i,
-                        balance: where_clause.map(|_| cumulative_balance.clone()),
-                        account_balance: account_balances.get(&posting.account).cloned(),
+                        balance: if needs_balance {
+                            Some(cumulative_balance.clone())
+                        } else {
+                            None
+                        },
+                        account_balance: if needs_account_balance {
+                            account_balances.get(&posting.account).cloned()
+                        } else {
+                            None
+                        },
                         directive_index: Some(directive_index),
                     };
 
@@ -493,11 +527,14 @@ impl<'a> Executor<'a> {
 
                     // WHERE passed: contribute this posting to the cumulative
                     // balance and refresh the snapshot in ctx so SELECT sees
-                    // the post-update value.
-                    if let Some(pos) = resolved {
-                        cumulative_balance.add(pos);
+                    // the post-update value. Both steps are no-ops when the
+                    // query doesn't read `balance`.
+                    if needs_balance {
+                        if let Some(pos) = resolved {
+                            cumulative_balance.add(pos);
+                        }
+                        ctx.balance = Some(cumulative_balance.clone());
                     }
-                    ctx.balance = Some(cumulative_balance.clone());
                     postings.push(ctx);
                 }
             }
@@ -2652,6 +2689,82 @@ impl<'a> Executor<'a> {
         table
     }
 }
+
+/// Walk an [`Expr`] tree, returning `true` if any [`Expr::Column`]
+/// references the given column name (case-insensitive).
+///
+/// Used to decide whether [`Executor::collect_postings`] needs to
+/// materialize the per-posting `balance` / `account_balance` snapshots
+/// — they're expensive (cumulative `Inventory` clones per posting,
+/// the runaway cost in #1080) so we skip the work when no part of the
+/// query reads them.
+fn expr_references_column(expr: &Expr, name: &str) -> bool {
+    match expr {
+        Expr::Column(col) => col.eq_ignore_ascii_case(name),
+        Expr::Function(call) => call.args.iter().any(|a| expr_references_column(a, name)),
+        Expr::Window(call) => call.args.iter().any(|a| expr_references_column(a, name)),
+        Expr::BinaryOp(op) => {
+            expr_references_column(&op.left, name) || expr_references_column(&op.right, name)
+        }
+        Expr::UnaryOp(op) => expr_references_column(&op.operand, name),
+        Expr::Paren(inner) => expr_references_column(inner, name),
+        Expr::Between { value, low, high } => {
+            expr_references_column(value, name)
+                || expr_references_column(low, name)
+                || expr_references_column(high, name)
+        }
+        Expr::Set(items) => items.iter().any(|i| expr_references_column(i, name)),
+        Expr::Wildcard | Expr::Literal(_) => false,
+    }
+}
+
+/// Return `true` if any part of a `SelectQuery` references the given
+/// column. Walks SELECT targets, WHERE, GROUP BY, HAVING, PIVOT BY,
+/// ORDER BY, and the FROM filter expression. A subquery in FROM is
+/// treated as opaque — its inner references don't surface to the
+/// outer query's posting iterator.
+fn query_references_column(query: &SelectQuery, name: &str) -> bool {
+    if query
+        .targets
+        .iter()
+        .any(|t| expr_references_column(&t.expr, name))
+    {
+        return true;
+    }
+    if let Some(w) = &query.where_clause
+        && expr_references_column(w, name)
+    {
+        return true;
+    }
+    if let Some(g) = &query.group_by
+        && g.iter().any(|e| expr_references_column(e, name))
+    {
+        return true;
+    }
+    if let Some(h) = &query.having
+        && expr_references_column(h, name)
+    {
+        return true;
+    }
+    if let Some(p) = &query.pivot_by
+        && p.iter().any(|e| expr_references_column(e, name))
+    {
+        return true;
+    }
+    if let Some(o) = &query.order_by
+        && o.iter().any(|s| expr_references_column(&s.expr, name))
+    {
+        return true;
+    }
+    if let Some(from) = &query.from
+        && let Some(f) = &from.filter
+        && expr_references_column(f, name)
+    {
+        return true;
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::types::{hash_row, hash_single_value};
@@ -3817,5 +3930,45 @@ mod tests {
             result.rows[0][0],
             Value::Date(rustledger_core::naive_date(2024, 1, 15).unwrap())
         );
+    }
+
+    /// Verify `query_references_column` walks every relevant query
+    /// part. The `collect_postings` optimization in #1080 hinges on
+    /// this — a false negative here would skip the cumulative-balance
+    /// clone for a query that depends on it.
+    #[test]
+    fn test_query_references_column_covers_all_query_parts() {
+        // Helper: parse a SELECT and assert `balance` references in it.
+        fn assert_refs(sql: &str, expected: bool) {
+            let q = match parse(sql).unwrap() {
+                Query::Select(s) => s,
+                _ => panic!("expected Select for {sql:?}"),
+            };
+            assert_eq!(
+                query_references_column(&q, "balance"),
+                expected,
+                "query_references_column(balance) wrong for {sql:?}"
+            );
+        }
+
+        // Negative cases — no reference, should skip the clone.
+        assert_refs("SELECT account FROM #postings", false);
+        assert_refs("SELECT account WHERE account ~ '^Assets' LIMIT 10", false);
+
+        // Positive cases — balance referenced in different positions.
+        assert_refs("SELECT balance FROM #postings", true);
+        assert_refs("SELECT account WHERE balance > 0", true);
+        assert_refs("SELECT account ORDER BY balance", true);
+        assert_refs("SELECT account GROUP BY balance", true);
+        assert_refs(
+            "SELECT account, sum(balance) FROM #postings GROUP BY account",
+            true,
+        );
+        // Case-insensitive
+        assert_refs("SELECT BALANCE FROM #postings", true);
+        // Nested in function arg
+        assert_refs("SELECT account WHERE units(balance) IS NOT NULL", true);
+        // Nested in BETWEEN
+        assert_refs("SELECT account WHERE balance BETWEEN 0 AND 100", true);
     }
 }

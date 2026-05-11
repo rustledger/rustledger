@@ -605,7 +605,7 @@ fn test_journal_balance_is_cumulative_across_matched_accounts() {
         Value::Inventory(inv) => inv,
         other => panic!("expected Inventory, got {other:?}"),
     };
-    let positions_0 = balance_0.positions();
+    let positions_0 = balance_0.position_list();
     assert_eq!(positions_0.len(), 1);
     assert_eq!(positions_0[0].units.currency.as_str(), "USD");
     assert_eq!(positions_0[0].units.number, dec!(1000));
@@ -619,7 +619,6 @@ fn test_journal_balance_is_cumulative_across_matched_accounts() {
     };
     let mut currencies: Vec<&str> = balance_1
         .positions()
-        .iter()
         .map(|p| p.units.currency.as_str())
         .collect();
     currencies.sort_unstable();
@@ -715,7 +714,7 @@ fn test_journal_from_clause_filters_cumulative_balance() {
         Value::Inventory(inv) => inv,
         other => panic!("expected Inventory, got {other:?}"),
     };
-    let positions = balance.positions();
+    let positions = balance.position_list();
     assert_eq!(positions.len(), 1);
     assert_eq!(
         positions[0].units.number,
@@ -836,7 +835,7 @@ fn test_journal_at_cost_collapses_balance_to_cost_currency() {
         Value::Inventory(inv) => inv,
         other => panic!("expected Inventory, got {other:?}"),
     };
-    let positions = balance.positions();
+    let positions = balance.position_list();
     assert_eq!(positions.len(), 1);
     // 10 AAPL { 150 USD } collapsed to 1500 USD (cost-currency total).
     assert_eq!(positions[0].units.number, dec!(1500));
@@ -902,7 +901,7 @@ fn test_journal_at_cost_with_from_clause_filters_then_collapses() {
         Value::Inventory(inv) => inv,
         other => panic!("expected Inventory, got {other:?}"),
     };
-    let positions = balance.positions();
+    let positions = balance.position_list();
     assert_eq!(
         positions.len(),
         1,
@@ -942,7 +941,7 @@ fn test_journal_at_units_strips_cost_from_balance() {
         Value::Inventory(inv) => inv,
         other => panic!("expected Inventory, got {other:?}"),
     };
-    let positions = balance.positions();
+    let positions = balance.position_list();
     assert_eq!(positions.len(), 1);
     // AT units shows units only — same number / currency as the position.
     assert_eq!(positions[0].units.number, dec!(10));
@@ -980,7 +979,7 @@ fn test_journal_at_cost_balance_preserves_no_cost_positions() {
         Value::Inventory(inv) => inv,
         other => panic!("expected Inventory, got {other:?}"),
     };
-    let positions = balance.positions();
+    let positions = balance.position_list();
     assert_eq!(positions.len(), 1);
     assert_eq!(positions[0].units.number, dec!(100));
     assert_eq!(positions[0].units.currency.as_str(), "USD");
@@ -1178,7 +1177,7 @@ fn test_balances_with_different_from_filters_are_independent() {
         Value::Inventory(i) => i,
         other => panic!("expected Inventory, got {other:?}"),
     };
-    let positions = inv.positions();
+    let positions = inv.position_list();
     assert_eq!(positions.len(), 1);
     assert_eq!(
         positions[0].units.number,
@@ -1213,7 +1212,7 @@ fn test_balance_is_cumulative_across_accounts() {
     );
     // Row 3 cumulative: 5000 - 150 - 45 = 4805 USD.
     if let Value::Inventory(inv) = &result.rows[2][1] {
-        let positions = inv.positions();
+        let positions = inv.position_list();
         assert_eq!(
             positions.len(),
             1,
@@ -1260,7 +1259,7 @@ fn test_balance_carries_across_different_accounts() {
         &directives,
     );
     let inv = find_balance_by_account(&result, "Assets:Bank:Savings", 2);
-    assert_eq!(inv.positions()[0].units.number, dec!(5805));
+    assert_eq!(inv.position_list()[0].units.number, dec!(5805));
 }
 
 #[test]
@@ -1275,7 +1274,7 @@ fn test_account_balance_is_per_account() {
         &directives,
     );
     let savings = find_balance_by_account(&result, "Assets:Bank:Savings", 2);
-    assert_eq!(savings.positions()[0].units.number, dec!(1000));
+    assert_eq!(savings.position_list()[0].units.number, dec!(1000));
 
     // Pre-Savings, Checking has run 5000 - 150 - 45 = 4805 across the
     // first three Assets postings. Find the gas row (2024-01-22) by
@@ -1287,7 +1286,7 @@ fn test_account_balance_is_per_account() {
             && a == "Assets:Bank:Checking"
             && let Value::Inventory(inv) = &row[2]
         {
-            last_checking_balance = Some(inv.positions()[0].units.number);
+            last_checking_balance = Some(inv.position_list()[0].units.number);
         }
     }
     // After all 5 Checking postings (5000, -150, -45, -1000, -80): final = 3725.
@@ -1308,7 +1307,7 @@ fn test_where_rejected_postings_do_not_pollute_cumulative_balance() {
     // The very first row is the salary posting to Checking: balance = 5000.
     // If cumulative were polluted by Income's -5000, this would be 0.
     if let Value::Inventory(inv) = &result.rows[0][1] {
-        assert_eq!(inv.positions()[0].units.number, dec!(5000));
+        assert_eq!(inv.position_list()[0].units.number, dec!(5000));
     } else {
         panic!("expected Inventory at first row");
     }
@@ -5185,7 +5184,7 @@ fn test_value_no_currency_aggregated_returns_as_is() {
             assert_eq!(*a, expected, "Expected 80 USD amount");
         }
         Value::Inventory(inv) => {
-            let positions = inv.positions();
+            let positions = inv.position_list();
             assert_eq!(positions.len(), 1, "Expected single-currency inventory");
             assert_eq!(positions[0].units, expected, "Expected 80 USD in inventory");
         }
@@ -7737,7 +7736,7 @@ fn test_convert_unconvertible_currency_kept_original() {
     // Should return an Inventory with both EUR and JPY (JPY kept as original)
     match &result.rows[0][0] {
         Value::Inventory(inv) => {
-            let positions = inv.positions();
+            let positions = inv.position_list();
             assert_eq!(
                 positions.len(),
                 2,
@@ -8175,7 +8174,7 @@ fn test_convert_no_price_fallback() {
     // (this matches Python beancount fallback behavior)
     match &result.rows[0][1] {
         Value::Inventory(inv) => {
-            let positions = inv.positions();
+            let positions = inv.position_list();
             assert_eq!(positions.len(), 1);
             assert_eq!(positions[0].units.number, dec!(100));
             assert_eq!(positions[0].units.currency.as_ref(), "USD");
@@ -8333,7 +8332,7 @@ fn test_issue_593_cost_preserves_sign_for_sells() {
     let sum_value = match &sum_result.rows[0][0] {
         Value::Amount(a) => a.number,
         Value::Inventory(inv) => {
-            let positions = inv.positions();
+            let positions = inv.position_list();
             assert_eq!(positions.len(), 1, "Expected single position in inventory");
             assert_eq!(positions[0].units.currency.as_ref(), "EUR");
             positions[0].units.number
@@ -8357,7 +8356,7 @@ fn test_issue_593_cost_preserves_sign_for_sells() {
     let cost_sum_value = match &cost_sum_result.rows[0][0] {
         Value::Amount(a) => a.number,
         Value::Inventory(inv) => {
-            let positions = inv.positions();
+            let positions = inv.position_list();
             assert_eq!(positions.len(), 1, "Expected single position in inventory");
             assert_eq!(positions[0].units.currency.as_ref(), "EUR");
             positions[0].units.number
@@ -8496,7 +8495,7 @@ fn test_issue_593_value_uses_latest_implicit_price() {
     let sum_value = match &sum_result.rows[0][0] {
         Value::Amount(a) => a.number,
         Value::Inventory(inv) => {
-            let positions = inv.positions();
+            let positions = inv.position_list();
             assert_eq!(positions.len(), 1, "Expected single position in inventory");
             assert_eq!(positions[0].units.currency.as_ref(), "EUR");
             positions[0].units.number

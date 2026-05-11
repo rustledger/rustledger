@@ -673,7 +673,7 @@ impl<'a> Executor<'a> {
                     Value::Inventory(inv) => {
                         // For inventory, only return a number if all positions share the same
                         // currency. Summing across different currencies is not meaningful.
-                        let positions = inv.positions();
+                        let positions: Vec<&Position> = inv.positions().collect();
                         if positions.is_empty() {
                             return Ok(Value::Number(Decimal::ZERO));
                         }
@@ -702,7 +702,7 @@ impl<'a> Executor<'a> {
                     Value::Position(p) => Ok(Value::String(p.units.currency.to_string())),
                     Value::Inventory(inv) => {
                         // Return the currency of the first position, or Null if empty
-                        if let Some(pos) = inv.positions().first() {
+                        if let Some(pos) = inv.positions().next() {
                             Ok(Value::String(pos.units.currency.to_string()))
                         } else {
                             Ok(Value::Null)
@@ -1040,7 +1040,6 @@ impl<'a> Executor<'a> {
                     Value::Inventory(inv) => {
                         let filtered: Vec<Position> = inv
                             .positions()
-                            .iter()
                             .filter(|p| p.units.currency.as_str() == currency)
                             .cloned()
                             .collect();
@@ -1175,7 +1174,7 @@ impl<'a> Executor<'a> {
                         }
                         // If result has single currency matching target, return as Amount
                         // If result is empty, return zero in target currency (issue #586)
-                        let positions = result.positions();
+                        let positions: Vec<&Position> = result.positions().collect();
                         if positions.is_empty() {
                             Ok(Value::Amount(Amount::new(Decimal::ZERO, &target_currency)))
                         } else if positions.len() == 1
@@ -1630,7 +1629,6 @@ impl<'a> Executor<'a> {
                 Value::Position(p) => p.cost.as_ref().map(|c| c.currency.to_string()),
                 Value::Inventory(inv) => inv
                     .positions()
-                    .iter()
                     .find_map(|p| p.cost.as_ref().map(|c| c.currency.to_string())),
                 _ => None,
             };

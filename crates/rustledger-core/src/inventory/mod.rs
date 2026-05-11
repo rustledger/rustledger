@@ -4,6 +4,7 @@
 //! [`Position`]s. It provides methods for adding and reducing positions
 //! using different booking methods (FIFO, LIFO, STRICT, NONE).
 
+use im::Vector;
 use rust_decimal::Decimal;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
@@ -297,23 +298,33 @@ impl std::error::Error for AccountedBookingError {}
 /// assert_eq!(inv.units("AAPL"), dec!(10));
 /// ```
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[cfg_attr(
-    feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
-)]
 pub struct Inventory {
-    positions: Vec<Position>,
+    /// Persistent (structurally-shared) RRB-tree-backed vector. Cloning
+    /// is O(1) (Arc bump on tree nodes); `push_back` / indexed mutation
+    /// are O(log N) but share structure with previous versions. This is
+    /// the critical property for JOURNAL-style row-per-snapshot patterns
+    /// in BQL (issue #1086): N nested snapshots cost O(N) memory instead
+    /// of O(N²), and the per-row clone cost drops from O(positions) to
+    /// O(1). Booking and BQL aggregator mutations see a small constant-
+    /// factor slowdown (log₂ of typical-inventory size = 3-4 ops vs
+    /// Vec's amortized 1) but no measurable regression at realistic
+    /// inventory sizes (see `inventory_bench`).
+    ///
+    /// `rkyv` derives were dropped when this changed from `Vec<Position>`
+    /// to `im::Vector` because (a) `im::Vector` has no `rkyv` impl and
+    /// (b) no code path currently archives an `Inventory` (confirmed in
+    /// the `SmallVec` experiment for #1069). Serde still works (sequence-
+    /// typed wire format, identical for both containers).
+    positions: Vector<Position>,
     /// Index for O(1) lookup of simple positions (no cost) by currency.
-    /// Maps currency to position index in the `positions` Vec.
+    /// Maps currency to position index in the `positions` vector.
     /// Not serialized - rebuilt on demand.
     #[serde(skip)]
-    #[cfg_attr(feature = "rkyv", rkyv(with = rkyv::with::Skip))]
     simple_index: FxHashMap<InternedStr, usize>,
     /// Cache of total units per currency for O(1) `units()` lookups.
     /// Updated incrementally on `add()` and `reduce()`.
     /// Not serialized - rebuilt on demand.
     #[serde(skip)]
-    #[cfg_attr(feature = "rkyv", rkyv(with = rkyv::with::Skip))]
     units_cache: FxHashMap<InternedStr, Decimal>,
 }
 
@@ -333,14 +344,37 @@ impl Inventory {
         Self::default()
     }
 
-    /// Get all positions.
-    #[must_use]
-    pub fn positions(&self) -> &[Position] {
-        &self.positions
+    /// Iterate over all positions.
+    ///
+    /// Previously returned `&[Position]`; now returns an iterator
+    /// because the underlying storage is a tree-based persistent
+    /// vector (`im::Vector`) that doesn't expose a contiguous slice.
+    /// Most callers already iterate — for callers that need
+    /// random-access / indexed / `.len()` slice semantics, see
+    /// [`Self::position_list`].
+    pub fn positions(&self) -> impl Iterator<Item = &Position> + '_ {
+        self.positions.iter()
     }
 
-    /// Get mutable access to all positions.
-    pub const fn positions_mut(&mut self) -> &mut Vec<Position> {
+    /// Materialize all positions as a `Vec<&Position>` for slice-style
+    /// access (indexing, `.len()`, `.first()`, `.is_empty()`).
+    ///
+    /// Allocates `O(N)` pointers per call. Callers that only iterate
+    /// once should use [`Self::positions`] instead — this is for code
+    /// paths that need slice semantics.
+    #[must_use]
+    pub fn position_list(&self) -> Vec<&Position> {
+        self.positions.iter().collect()
+    }
+
+    /// Get mutable access to the underlying positions vector.
+    ///
+    /// Returns `&mut im::Vector<Position>` (was `&mut Vec<Position>`
+    /// before issue #1086). `im::Vector` supports the same surface
+    /// for `push_back`, `pop_back`, `retain`, indexed access, and
+    /// iteration — but mutations are O(log N) with structural sharing
+    /// instead of O(1) amortized.
+    pub const fn positions_mut(&mut self) -> &mut Vector<Position> {
         &mut self.positions
     }
 
@@ -356,7 +390,7 @@ impl Inventory {
 
     /// Get the number of positions (including empty ones).
     #[must_use]
-    pub const fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         self.positions.len()
     }
 
@@ -475,14 +509,14 @@ impl Inventory {
             let idx = self.positions.len();
             self.simple_index
                 .insert(position.units.currency.clone(), idx);
-            self.positions.push(position);
+            self.positions.push_back(position);
             return;
         }
 
         // For positions with cost, just add as a new lot.
         // This is O(1) and keeps all lots separate, matching Python beancount behavior.
         // Lot aggregation for display purposes is handled separately in query output.
-        self.positions.push(position);
+        self.positions.push_back(position);
     }
 
     /// Reduce positions from the inventory using the specified booking method.

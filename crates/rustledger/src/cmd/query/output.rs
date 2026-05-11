@@ -463,7 +463,7 @@ pub(super) fn format_value(value: &Value, numberify: bool, ctx: &DisplayContext)
             use std::collections::HashMap;
 
             let mut aggregated: HashMap<(String, Option<String>), Position> = HashMap::new();
-            for pos in inv.positions().iter().filter(|p| !p.is_empty()) {
+            for pos in inv.positions().filter(|p| !p.is_empty()) {
                 let cost_key = pos.cost.as_ref().map(|c| {
                     format!(
                         "{}|{}|{:?}|{:?}",
@@ -587,7 +587,7 @@ fn value_to_json(value: &Value) -> serde_json::Value {
             })),
         }),
         Value::Inventory(inv) => serde_json::json!({
-            "positions": inv.positions().iter().map(|p| serde_json::json!({
+            "positions": inv.positions().map(|p| serde_json::json!({
                 "number": p.units.number.to_string(),
                 "currency": p.units.currency,
             })).collect::<Vec<_>>(),

@@ -106,6 +106,11 @@ blake3 = "1"
 # Inline-storage collections (avoids heap allocation for small sizes)
 smallvec = "1"
 
+# Persistent (structurally-shared) collections — O(1) clone for tree-based
+# vectors, used by Inventory.positions so JOURNAL-style row-per-snapshot
+# patterns become O(N log N) instead of O(N²). See issue #1086.
+im = { version = "15", features = ["serde"] }
+
 # Testing
 proptest = "1"
 criterion = "0.8"

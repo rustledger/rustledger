@@ -136,7 +136,7 @@ pub fn value_to_cell(value: &rustledger_query::Value) -> CellValue {
             }),
         },
         Value::Inventory(inv) => {
-            let positions = inv.positions();
+            let positions = inv.position_list();
             CellValue::Inventory {
                 positions: positions
                     .iter()

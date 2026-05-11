@@ -163,7 +163,7 @@ impl Executor<'_> {
                 }
                 // If result has single currency matching target, return as Amount
                 // If result is empty, return zero in target currency (issue #586)
-                let positions = result.positions();
+                let positions: Vec<&Position> = result.positions().collect();
                 if positions.is_empty() {
                     Ok(Value::Amount(Amount::new(Decimal::ZERO, &target_currency)))
                 } else if positions.len() == 1 && positions[0].units.currency == target_currency {
@@ -378,7 +378,6 @@ impl Executor<'_> {
         // Find positions matching the currency
         let matching: Vec<_> = inv
             .positions()
-            .iter()
             .filter(|p| p.units.currency == key)
             .collect();
 

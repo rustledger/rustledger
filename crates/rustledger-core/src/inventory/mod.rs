@@ -300,21 +300,27 @@ impl std::error::Error for AccountedBookingError {}
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Inventory {
     /// Persistent (structurally-shared) RRB-tree-backed vector. Cloning
-    /// is O(1) (Arc bump on tree nodes); `push_back` / indexed mutation
-    /// are O(log N) but share structure with previous versions. This is
-    /// the critical property for JOURNAL-style row-per-snapshot patterns
-    /// in BQL (issue #1086): N nested snapshots cost O(N) memory instead
-    /// of O(N²), and the per-row clone cost drops from O(positions) to
-    /// O(1). Booking and BQL aggregator mutations see a small constant-
-    /// factor slowdown (log₂ of typical-inventory size = 3-4 ops vs
-    /// Vec's amortized 1) but no measurable regression at realistic
-    /// inventory sizes (see `inventory_bench`).
+    /// is O(1) (Arc bump on the tree root); `push_back` / indexed mutation
+    /// are O(log N) per op but share structure with previous versions.
+    /// This is the critical property for JOURNAL-style row-per-snapshot
+    /// patterns in BQL (issue #1086): N nested snapshots cost O(base + Σ
+    /// deltas) memory instead of O(N · base), and the per-row clone cost
+    /// drops from O(positions) to O(1).
     ///
-    /// `rkyv` derives were dropped when this changed from `Vec<Position>`
-    /// to `im::Vector` because (a) `im::Vector` has no `rkyv` impl and
-    /// (b) no code path currently archives an `Inventory` (confirmed in
-    /// the `SmallVec` experiment for #1069). Serde still works (sequence-
-    /// typed wire format, identical for both containers).
+    /// The trade is real: booking and BQL aggregator mutations pay an
+    /// O(log N) tree walk vs `Vec`'s amortized O(1) push. Measured impact
+    /// scales with inventory size M: +85 ns/op at M=10, +1.6 µs/op at
+    /// M=100, +19 µs/op at M=500 (criterion `reduce_fifo/*`). For typical
+    /// small-M ledgers the overhead is sub-millisecond per `rledger
+    /// check`; the users who feel it are users with very large inventories,
+    /// the same users who hit the JOURNAL OOM today.
+    ///
+    /// `rkyv` derives were dropped because (a) `im::Vector` has no `rkyv`
+    /// impl and (b) no code path currently archives an `Inventory`
+    /// (confirmed in the `SmallVec` experiment for #1069). Pre-1.0 break;
+    /// downstream callers archiving `Inventory` directly will need to
+    /// archive `Vec<Position>` themselves. Serde wire format is unchanged
+    /// (sequence-typed, identical for both backings).
     positions: Vector<Position>,
     /// Index for O(1) lookup of simple positions (no cost) by currency.
     /// Maps currency to position index in the `positions` vector.

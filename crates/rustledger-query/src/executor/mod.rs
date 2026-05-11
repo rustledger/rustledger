@@ -673,21 +673,21 @@ impl<'a> Executor<'a> {
                     Value::Inventory(inv) => {
                         // For inventory, only return a number if all positions share the same
                         // currency. Summing across different currencies is not meaningful.
-                        let positions: Vec<&Position> = inv.positions().collect();
-                        if positions.is_empty() {
+                        // Single pass: track the first currency and running total, bail out
+                        // to Null on any currency mismatch.
+                        let mut iter = inv.positions();
+                        let Some(first) = iter.next() else {
                             return Ok(Value::Number(Decimal::ZERO));
+                        };
+                        let first_currency = &first.units.currency;
+                        let mut total = first.units.number;
+                        for pos in iter {
+                            if &pos.units.currency != first_currency {
+                                return Ok(Value::Null);
+                            }
+                            total += pos.units.number;
                         }
-                        let first_currency = &positions[0].units.currency;
-                        let all_same_currency = positions
-                            .iter()
-                            .all(|p| &p.units.currency == first_currency);
-                        if all_same_currency {
-                            let total: Decimal = positions.iter().map(|p| p.units.number).sum();
-                            Ok(Value::Number(total))
-                        } else {
-                            // Multiple currencies - return NULL rather than a meaningless sum
-                            Ok(Value::Null)
-                        }
+                        Ok(Value::Number(total))
                     }
                     Value::Null => Ok(Value::Null),
                     _ => Err(QueryError::Type(

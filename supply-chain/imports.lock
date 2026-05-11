@@ -1850,6 +1850,12 @@ criteria = "safe-to-deploy"
 delta = "0.50.1 -> 0.50.3"
 notes = "CI changes, Rust changes, nothing out of the ordinary."
 
+[[audits.bytecode-alliance.audits.num-conv]]
+who = "Alex Crichton <alex@alexcrichton.com>"
+criteria = "safe-to-deploy"
+delta = "0.2.0 -> 0.2.1"
+notes = "Minor update, nothing major"
+
 [[audits.bytecode-alliance.audits.num-traits]]
 who = "Andrew Brown <andrew.brown@intel.com>"
 criteria = "safe-to-deploy"
@@ -3218,6 +3224,23 @@ aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-ch
 who = "Erich Gubler <erichdongubler@gmail.com>"
 criteria = "safe-to-deploy"
 delta = "0.4.26 -> 0.4.29"
+aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.num-conv]]
+who = "Alex Franchuk <afranchuk@mozilla.com>"
+criteria = "safe-to-deploy"
+version = "0.1.0"
+notes = """
+Very straightforward, simple crate. No dependencies, unsafe, extern,
+side-effectful std functions, etc.
+"""
+aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.num-conv]]
+who = "Lars Eggert <lars@eggert.org>"
+criteria = "safe-to-deploy"
+delta = "0.1.0 -> 0.2.0"
+notes = "Revision only removes code"
 aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
 
 [[audits.mozilla.audits.oorandom]]

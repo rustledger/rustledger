@@ -29,11 +29,11 @@
 //!   target directory doesn't exist, [`save_cache_entry`] creates it.
 
 use crate::Options;
+use blake3::Hasher;
 use rust_decimal::Decimal;
 use rustledger_core::Directive;
 use rustledger_core::intern::StringInterner;
 use rustledger_parser::Spanned;
-use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -196,7 +196,12 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 /// v1: Initial release with string-based Decimal/NaiveDate
 /// v2: Binary Decimal (16 bytes) and `NaiveDate` (i32 days)
 /// v3: Fixed account type defaults in `CachedOptions`
-const CACHE_VERSION: u32 = 3;
+/// v4: Hash algorithm switched from SHA-256 to BLAKE3 — same 32-byte
+///     output so the header layout is unchanged, but old hashes won't
+///     match new files. Bumping the version short-circuits stale
+///     caches at the header check instead of paying the rkyv
+///     deserialize cost only to fail the hash compare.
+const CACHE_VERSION: u32 = 4;
 
 /// Cache header stored at the start of cache files.
 #[derive(Debug, Clone)]
@@ -205,7 +210,7 @@ struct CacheHeader {
     magic: [u8; 8],
     /// Cache format version.
     version: u32,
-    /// SHA-256 hash of source files.
+    /// BLAKE3 hash of source files (path + mtime + size).
     hash: [u8; 32],
     /// Length of the serialized data.
     data_len: u64,
@@ -253,7 +258,7 @@ impl CacheHeader {
 /// contribute only their path to the hash. This is intentional — the resulting
 /// hash mismatch will cause a cache miss on next load.
 fn compute_hash(files: &[&Path]) -> [u8; 32] {
-    let mut hasher = Sha256::new();
+    let mut hasher = Hasher::new();
 
     for file in files {
         // Hash the file path
@@ -264,15 +269,15 @@ fn compute_hash(files: &[&Path]) -> [u8; 32] {
             if let Ok(mtime) = metadata.modified()
                 && let Ok(duration) = mtime.duration_since(std::time::UNIX_EPOCH)
             {
-                hasher.update(duration.as_secs().to_le_bytes());
-                hasher.update(duration.subsec_nanos().to_le_bytes());
+                hasher.update(&duration.as_secs().to_le_bytes());
+                hasher.update(&duration.subsec_nanos().to_le_bytes());
             }
             // Hash the file size
-            hasher.update(metadata.len().to_le_bytes());
+            hasher.update(&metadata.len().to_le_bytes());
         }
     }
 
-    hasher.finalize().into()
+    *hasher.finalize().as_bytes()
 }
 
 /// Environment variable that overrides the default cache filename pattern.

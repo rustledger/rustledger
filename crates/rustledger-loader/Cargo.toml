@@ -16,7 +16,7 @@ readme = "README.md"
 default = ["cache", "full"]
 
 # Enable rkyv-based binary caching for faster loads
-cache = ["dep:rkyv", "dep:sha2", "rustledger-parser/rkyv"]
+cache = ["dep:rkyv", "dep:blake3", "rustledger-parser/rkyv"]
 
 # Full processing: booking + plugins + validation (like Python's loader.load_file())
 full = ["booking", "plugins", "validation"]
@@ -39,7 +39,7 @@ thiserror.workspace = true
 jiff.workspace = true
 glob.workspace = true
 rkyv = { workspace = true, optional = true }
-sha2 = { workspace = true, optional = true }
+blake3 = { workspace = true, optional = true }
 rustc-hash.workspace = true
 rayon.workspace = true
 

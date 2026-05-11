@@ -215,7 +215,6 @@ pub type Row = Vec<Value>;
 /// `FxHashMap` in the workspace). DISTINCT / GROUP BY keys are internal
 /// dedup tokens — they need speed, not DoS-resistance.
 pub fn hash_row(row: &Row) -> u64 {
-    use std::hash::Hasher;
     let mut hasher = rustc_hash::FxHasher::default();
     for value in row {
         value.hash_value(&mut hasher);
@@ -225,7 +224,6 @@ pub fn hash_row(row: &Row) -> u64 {
 
 /// Compute a hash for a single value (for PIVOT lookups).
 pub fn hash_single_value(value: &Value) -> u64 {
-    use std::hash::Hasher;
     let mut hasher = rustc_hash::FxHasher::default();
     value.hash_value(&mut hasher);
     hasher.finish()

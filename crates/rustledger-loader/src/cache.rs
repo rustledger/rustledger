@@ -196,7 +196,12 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 /// v1: Initial release with string-based Decimal/NaiveDate
 /// v2: Binary Decimal (16 bytes) and `NaiveDate` (i32 days)
 /// v3: Fixed account type defaults in `CachedOptions`
-const CACHE_VERSION: u32 = 3;
+/// v4: Hash algorithm switched from SHA-256 to BLAKE3 — same 32-byte
+///     output so the header layout is unchanged, but old hashes won't
+///     match new files. Bumping the version short-circuits stale
+///     caches at the header check instead of paying the rkyv
+///     deserialize cost only to fail the hash compare.
+const CACHE_VERSION: u32 = 4;
 
 /// Cache header stored at the start of cache files.
 #[derive(Debug, Clone)]

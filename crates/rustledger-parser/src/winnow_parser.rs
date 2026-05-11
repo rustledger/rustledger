@@ -225,19 +225,21 @@ fn parse_number(stream: &mut TokenStream<'_>) -> ParseRes<Decimal> {
 
 /// Fast decimal parser for simple beancount number formats.
 ///
-/// Handles `[0-9]+(\.[0-9]+)?` — no sign, no commas, no exponent.
-/// Returns `None` for anything more complex (sign included — see
-/// [`parse_signed_number`]), falling through to `Decimal::from_str`.
+/// Handles `[0-9]+(\.[0-9]*)?` — no sign, no commas, no exponent. The
+/// `[0-9]*` after the dot matches the lexer's grammar and accepts
+/// trailing-decimal forms like `"5."`. Returns `None` for anything more
+/// complex (sign included — see [`parse_signed_number`]), falling
+/// through to `Decimal::from_str`.
 ///
 /// Mantissa accumulator is `u128` so the fast path accepts the full
 /// range that `rust_decimal` itself supports (96-bit mantissa, up to
-/// 7.9e28). Pre-fix this used `i64` and bailed past `9.2e18`, which
-/// forced 8-decimal crypto amounts and accumulated price math through
-/// the slow `Decimal::from_str` path on every parse. Construction goes
-/// through [`Decimal::try_from_i128_with_scale`] which rejects mantissa
-/// values that don't fit in `rust_decimal`'s 96-bit field — those still
-/// opt out of the fast path so the caller's slow-path fallback sees
-/// them.
+/// 7.9e28). Before this fix the accumulator was `i64` and bailed past
+/// `9.2e18`, which forced 8-decimal crypto amounts and accumulated
+/// price math through the slow `Decimal::from_str` path on every
+/// parse. Construction goes through [`Decimal::try_from_i128_with_scale`]
+/// which rejects mantissa values that don't fit in `rust_decimal`'s
+/// 96-bit field — those still opt out of the fast path so the caller's
+/// slow-path fallback sees them.
 fn fast_parse_decimal(s: &str) -> Option<Decimal> {
     let bytes = s.as_bytes();
     if bytes.is_empty() {
@@ -3024,10 +3026,15 @@ mod tests {
     proptest::proptest! {
         // Bounded comma-free subset of the lexer's Number grammar that
         // fast_parse_decimal can plausibly accept. Widened to 28 digits
-        // per side (Decimal's effective precision limit) once mantissa
-        // grew to u128 — pre-fix this was capped at 18 to avoid i64
-        // overflow on the fast path. Longer/comma inputs go to the slow
-        // path so we don't generate them here.
+        // per side from the pre-fix cap of 18 (which was constrained by
+        // i64 overflow on the fast path). Note: not every generated
+        // input is representable — `rust_decimal`'s actual limit is ~29
+        // significant digits total with scale ≤ 28, so a generated
+        // string like `9999…9.9999…9` with 28 digits per side has 56
+        // sig figs and will overflow. That's intentional: those inputs
+        // exercise the opt-out branch, and we assert agreement only
+        // when fast_parse_decimal returns `Some`. Longer/comma inputs
+        // go to the slow path so we don't generate them here.
         #[test]
         fn fast_parse_decimal_agrees_with_decimal_from_str(
             s in "[0-9]{1,28}(\\.[0-9]{1,28})?"

@@ -1,15 +1,23 @@
 //! Cross-file `InternedStr` deduplication.
 //!
 //! Each parsed file has its own per-file [`StringInterner`], so the
-//! same account / currency / tag string appearing in two included
-//! files lands in two different `Arc<str>` allocations. The
-//! [`InternedStr`] `PartialEq` fast path (`Arc::ptr_eq`) then fails on
-//! cross-file equality and falls back to byte comparison.
+//! same string (account name, currency code, tag, link, payee,
+//! narration) appearing in two included files lands in two different
+//! `Arc<str>` allocations. The [`InternedStr`] `PartialEq` fast path
+//! (`Arc::ptr_eq`) then fails on cross-file equality and falls back
+//! to byte comparison.
 //!
 //! This module provides the merge step: walk a slice of directives
 //! through a single shared [`StringInterner`] so identical strings
 //! share one `Arc`. After this pass, equality checks across the entire
 //! directive list hit the pointer-equality fast path.
+//!
+//! Coverage: every `InternedStr` and `Vec<InternedStr>` field reachable
+//! from a `Directive` is re-interned — including `Transaction.payee`,
+//! `Transaction.narration`, `Transaction.tags`, `Transaction.links`,
+//! and `Document.tags` / `Document.links`. (Earlier versions of this
+//! pass only covered posting-level `account` / `currency` fields;
+//! Copilot review on PR #1081 expanded the walk.)
 //!
 //! The dedup walk is feature-independent (no `cache` / `rkyv`
 //! dependency) so it can run on every load path, not just cache hits.
@@ -50,19 +58,55 @@ pub fn reintern_plain_directives(directives: &mut [Directive]) -> usize {
     dedup_count
 }
 
-/// Re-intern all `InternedStr` fields in a single directive, deduplicating
-/// identical strings to share a single `Arc<str>` allocation.
-fn reintern_directive(directive: &mut Directive, interner: &mut StringInterner) -> usize {
-    fn do_intern(s: &mut InternedStr, interner: &mut StringInterner) -> bool {
-        let already_exists = interner.contains(s.as_str());
-        *s = interner.intern(s.as_str());
-        already_exists
-    }
+/// Single-lookup helper used by [`reintern_directive`]. The
+/// `intern_with_status` API on [`StringInterner`] does one hash probe
+/// and returns both the interned value and a "was it already there?"
+/// flag — replacing the earlier `contains` + `intern` double-lookup.
+/// Caught by Copilot review on PR #1081. Returns `true` when the
+/// string was already present (i.e., this call contributed a dedup
+/// hit).
+fn do_intern(s: &mut InternedStr, interner: &mut StringInterner) -> bool {
+    let (new, was_new) = interner.intern_with_status(s.as_str());
+    *s = new;
+    !was_new
+}
 
+/// Re-intern every entry of a `Vec<InternedStr>`, tallying the dedup
+/// hits into `dedup_count`. Hoisted to module scope rather than nested
+/// inside [`reintern_directive`] so clippy's `items_after_statements`
+/// lint stays happy.
+fn intern_vec(v: &mut [InternedStr], interner: &mut StringInterner, dedup_count: &mut usize) {
+    for s in v.iter_mut() {
+        if do_intern(s, interner) {
+            *dedup_count += 1;
+        }
+    }
+}
+
+/// Re-intern all `InternedStr` fields in a single directive,
+/// deduplicating identical strings to share a single `Arc<str>`
+/// allocation. Returns the count of strings that were already present
+/// in the interner (i.e., this directive's contribution to the
+/// dedup-hit total).
+fn reintern_directive(directive: &mut Directive, interner: &mut StringInterner) -> usize {
     let mut dedup_count = 0;
 
     match directive {
         Directive::Transaction(txn) => {
+            // Transaction-level InternedStr fields. The pre-Copilot
+            // version of this walk skipped these — cross-file payees /
+            // narrations / tags / links never hit `Arc::ptr_eq`.
+            if let Some(ref mut payee) = txn.payee
+                && do_intern(payee, interner)
+            {
+                dedup_count += 1;
+            }
+            if do_intern(&mut txn.narration, interner) {
+                dedup_count += 1;
+            }
+            intern_vec(&mut txn.tags, interner, &mut dedup_count);
+            intern_vec(&mut txn.links, interner, &mut dedup_count);
+
             for posting in &mut txn.postings {
                 if do_intern(&mut posting.account, interner) {
                     dedup_count += 1;
@@ -129,11 +173,7 @@ fn reintern_directive(directive: &mut Directive, interner: &mut StringInterner) 
             if do_intern(&mut open.account, interner) {
                 dedup_count += 1;
             }
-            for cur in &mut open.currencies {
-                if do_intern(cur, interner) {
-                    dedup_count += 1;
-                }
-            }
+            intern_vec(&mut open.currencies, interner, &mut dedup_count);
         }
         Directive::Close(close) => {
             if do_intern(&mut close.account, interner) {
@@ -162,6 +202,9 @@ fn reintern_directive(directive: &mut Directive, interner: &mut StringInterner) 
             if do_intern(&mut doc.account, interner) {
                 dedup_count += 1;
             }
+            // Pre-Copilot this skipped tags/links. They're now covered.
+            intern_vec(&mut doc.tags, interner, &mut dedup_count);
+            intern_vec(&mut doc.links, interner, &mut dedup_count);
         }
         Directive::Price(price) => {
             if do_intern(&mut price.currency, interner) {

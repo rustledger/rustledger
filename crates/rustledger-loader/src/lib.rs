@@ -377,12 +377,14 @@ impl Loader {
             &mut errors,
         )?;
 
-        // Deduplicate InternedStr across files. Each file parses with
-        // its own per-file `StringInterner`, so the same account /
-        // currency / tag string appearing in two included files lands
-        // in two different `Arc<str>` allocations — defeating the
-        // `Arc::ptr_eq` fast path in `InternedStr`'s `PartialEq` and
-        // forcing all cross-file equality through byte comparison.
+        // Deduplicate every `InternedStr` reachable from a directive
+        // across files. Each file parses with its own per-file
+        // `StringInterner`, so identical strings — accounts,
+        // currencies, tags, links, payees, narrations — appearing in
+        // two included files land in two different `Arc<str>`
+        // allocations, defeating the `Arc::ptr_eq` fast path in
+        // `InternedStr`'s `PartialEq` and forcing all cross-file
+        // equality through byte comparison.
         //
         // The cache-hit path already runs `reintern_directives` to fix
         // this (see `crates/rustledger/src/cmd/check.rs`). Doing the
@@ -1155,6 +1157,66 @@ include "transactions.beancount"
             bank_accounts[0].ptr_eq(bank_accounts[1]),
             "Assets:Bank from cross-file open/posting must share the same Arc<str> \
              after Loader::load runs reintern_directives"
+        );
+    }
+
+    /// Companion to the previous test — covers the Transaction-level
+    /// `InternedStr` fields (payee, narration, tags, links) that the
+    /// pre-Copilot version of `reintern_directive` silently skipped
+    /// (Copilot review on PR #1081). Two transactions in different
+    /// files share the same payee + tag; after `Loader::load` they
+    /// must share one `Arc<str>` per string.
+    #[test]
+    fn test_fresh_parse_deduplicates_transaction_fields_across_files() {
+        let mut vfs = VirtualFileSystem::new();
+        vfs.add_file(
+            "main.beancount",
+            r#"
+2024-01-01 open Assets:Bank USD
+2024-01-01 open Expenses:Coffee
+
+2024-01-15 * "Cafe Bench" "Latte" #morning
+  Assets:Bank   -5.00 USD
+  Expenses:Coffee  5.00 USD
+
+include "more.beancount"
+"#,
+        );
+        vfs.add_file(
+            "more.beancount",
+            r#"
+2024-01-16 * "Cafe Bench" "Espresso" #morning
+  Assets:Bank   -3.00 USD
+  Expenses:Coffee  3.00 USD
+"#,
+        );
+
+        let result = Loader::new()
+            .with_filesystem(Box::new(vfs))
+            .load(Path::new("main.beancount"))
+            .unwrap();
+
+        let txns: Vec<&rustledger_core::Transaction> = result
+            .directives
+            .iter()
+            .filter_map(|s| match &s.value {
+                rustledger_core::Directive::Transaction(t) => Some(t),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(txns.len(), 2, "expected the two transactions");
+        let p1 = txns[0].payee.as_ref().expect("first txn has payee");
+        let p2 = txns[1].payee.as_ref().expect("second txn has payee");
+        assert!(
+            p1.ptr_eq(p2),
+            "Identical payee \"Cafe Bench\" across files must share one Arc<str>"
+        );
+
+        assert!(!txns[0].tags.is_empty() && !txns[1].tags.is_empty());
+        assert!(
+            txns[0].tags[0].ptr_eq(&txns[1].tags[0]),
+            "Identical tag #morning across files must share one Arc<str>"
         );
     }
 }

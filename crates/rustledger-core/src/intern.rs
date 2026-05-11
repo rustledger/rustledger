@@ -263,12 +263,23 @@ impl StringInterner {
     /// to the existing copy. Otherwise, stores the string and returns
     /// a reference to the new copy.
     pub fn intern(&mut self, s: &str) -> InternedStr {
+        self.intern_with_status(s).0
+    }
+
+    /// Intern a string, also returning whether it was newly inserted.
+    ///
+    /// Equivalent to [`Self::intern`] but exposes the insertion bit
+    /// without a second hash lookup. Useful for dedup-counting passes
+    /// (see `rustledger_loader::dedup`) that previously called
+    /// `contains` then `intern` — a redundant double lookup. Returns
+    /// `(interned, was_new)`.
+    pub fn intern_with_status(&mut self, s: &str) -> (InternedStr, bool) {
         if let Some(existing) = self.strings.get(s) {
-            InternedStr(existing.clone())
+            (InternedStr(existing.clone()), false)
         } else {
             let arc: Arc<str> = s.into();
             self.strings.insert(arc.clone());
-            InternedStr(arc)
+            (InternedStr(arc), true)
         }
     }
 

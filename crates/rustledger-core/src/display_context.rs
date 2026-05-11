@@ -513,13 +513,11 @@ impl DisplayContext {
     ///   mantissa. Caught by Copilot review on PR #1064.
     fn cap_significant_digits(number: Decimal, max_sig: u32) -> Decimal {
         // mantissa() returns the integer mantissa; its decimal length is
-        // the number of significant digits regardless of scale.
-        let digits = number
-            .mantissa()
-            .unsigned_abs()
-            .to_string()
-            .trim_start_matches('0')
-            .len() as u32;
+        // the number of significant digits regardless of scale. Zero has
+        // zero significant digits by this convention — `ilog10` returns
+        // `None` and we fall through to the early-return below.
+        let mantissa_abs = number.mantissa().unsigned_abs();
+        let digits = mantissa_abs.checked_ilog10().map_or(0, |x| x + 1);
         if digits <= max_sig {
             return number;
         }
@@ -1284,6 +1282,29 @@ mod tests {
             "12345678901234567890123456790",
             "29-digit integer must round to nearest 10 (28 sig figs), \
              trailing 0 marks the rounded position"
+        );
+    }
+
+    /// Zero values render at their intrinsic scale and skip the
+    /// significant-digit cap (since `mantissa()` is 0). Guards against
+    /// `checked_ilog10(0) → None` regressing into an off-by-one or
+    /// accidental cap. Together with
+    /// `test_format_default_does_not_pad_scale_zero_to_column_precision`
+    /// this locks in bean-query parity for both `Decimal(0)` and
+    /// `Decimal(0.00)` shapes.
+    #[test]
+    fn test_format_default_zero_preserves_intrinsic_scale() {
+        let ctx = DisplayContext::new();
+        assert_eq!(ctx.format_default(dec!(0)), "0", "Decimal(0) → \"0\"");
+        assert_eq!(
+            ctx.format_default(dec!(0.00)),
+            "0.00",
+            "Decimal(0.00) → \"0.00\" — the SUM-of-scale-2-zeros case from #954"
+        );
+        assert_eq!(
+            ctx.format_default(dec!(-0.0000)),
+            "0.0000",
+            "Decimal(-0.0000) — rust_decimal canonicalizes negative zero"
         );
     }
 }

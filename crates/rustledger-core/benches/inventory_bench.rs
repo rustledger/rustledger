@@ -61,7 +61,7 @@ fn bench_inventory_add(c: &mut Criterion) {
 /// Clone benchmark — important because Inventory is cloned in many code
 /// paths (BQL aggregator snapshots, plugin pre-state, validation). For
 /// small-N inventories backed by `Vec<Position>`, every clone allocates;
-/// the SmallVec switch makes 1-position clones allocation-free.
+/// the `SmallVec` switch makes 1-position clones allocation-free.
 fn bench_inventory_clone(c: &mut Criterion) {
     let mut group = c.benchmark_group("inventory_clone");
 

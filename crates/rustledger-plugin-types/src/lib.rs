@@ -86,6 +86,8 @@
 //!
 //! The output will be in `target/wasm32-unknown-unknown/release/your_plugin.wasm`
 
+#![warn(missing_docs)]
+
 use serde::{Deserialize, Serialize};
 
 // ============================================================================

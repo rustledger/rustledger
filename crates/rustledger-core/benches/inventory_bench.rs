@@ -36,8 +36,12 @@ fn generate_inventory(num_positions: usize) -> Inventory {
 fn bench_inventory_add(c: &mut Criterion) {
     let mut group = c.benchmark_group("inventory_add");
 
-    for size in [10, 100, 1000] {
-        group.throughput(Throughput::Elements(size as u64));
+    // Include 0/1/2/3 to capture the small-N regime where storage choice
+    // (heap Vec vs inline SmallVec) makes the largest relative difference.
+    for size in [0, 1, 2, 3, 10, 100, 1000] {
+        if size > 0 {
+            group.throughput(Throughput::Elements(size as u64));
+        }
 
         group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, &size| {
             b.iter(|| {
@@ -48,6 +52,24 @@ fn bench_inventory_add(c: &mut Criterion) {
                 }
                 std::hint::black_box(inv)
             });
+        });
+    }
+
+    group.finish();
+}
+
+/// Clone benchmark — important because Inventory is cloned in many code
+/// paths (BQL aggregator snapshots, plugin pre-state, validation). For
+/// small-N inventories backed by `Vec<Position>`, every clone allocates;
+/// the `SmallVec` switch makes 1-position clones allocation-free.
+fn bench_inventory_clone(c: &mut Criterion) {
+    let mut group = c.benchmark_group("inventory_clone");
+
+    for size in [0, 1, 2, 3, 10] {
+        let inv = generate_inventory(size);
+
+        group.bench_with_input(BenchmarkId::from_parameter(size), &inv, |b, inv| {
+            b.iter(|| std::hint::black_box(inv.clone()));
         });
     }
 
@@ -196,6 +218,7 @@ fn bench_inventory_merge(c: &mut Criterion) {
 criterion_group!(
     benches,
     bench_inventory_add,
+    bench_inventory_clone,
     bench_inventory_units,
     bench_inventory_book_value,
     bench_inventory_at_cost,

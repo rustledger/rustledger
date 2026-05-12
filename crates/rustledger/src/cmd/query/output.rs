@@ -6,6 +6,16 @@ use rustledger_core::{Directive, DisplayContext};
 use rustledger_query::{Executor, Value, parse as parse_query};
 use std::io::Write;
 
+/// Cap on the dynamic width passed to `write!("{:width$}", .., width = w)`.
+/// `std::fmt::rt::Argument::from_usize` panics with "Formatting argument
+/// out of range" when the runtime width exceeds `u16::MAX`. Cells wider
+/// than this cap are still written verbatim because `write!` does not
+/// truncate when content length exceeds the requested width — capping
+/// only suppresses padding, which is the correct fallback at this scale
+/// (no terminal can usefully align 65k-character columns). Surfaces on
+/// JOURNAL queries with thousands of lots in the `balance` column (#1086).
+const MAX_COLUMN_WIDTH: usize = u16::MAX as usize;
+
 pub(super) fn execute_query<W: Write>(
     query_str: &str,
     directives: &[Directive],
@@ -115,11 +125,13 @@ fn write_text<W: Write>(
         })
         .collect();
 
-    // Calculate column widths using per-column contexts
+    // Calculate column widths using per-column contexts. Each column is
+    // clamped to `MAX_COLUMN_WIDTH` to keep the dynamic width passed to
+    // `write!` below within the stdlib's `u16::MAX` cap — see the constant.
     let mut widths: Vec<usize> = result
         .columns
         .iter()
-        .map(std::string::String::len)
+        .map(|c| c.len().min(MAX_COLUMN_WIDTH))
         .collect();
 
     for (row_idx, row) in result.rows.iter().enumerate() {
@@ -128,7 +140,7 @@ fn write_text<W: Write>(
             let cell_hint = resolve_cell_hint(&currency_hints, &column_currency_hints, row_idx, i);
             let len = format_value_with_hint(value, numberify, col_ctx, cell_hint).len();
             if i < widths.len() && len > widths[i] {
-                widths[i] = len;
+                widths[i] = len.min(MAX_COLUMN_WIDTH);
             }
         }
     }
@@ -463,7 +475,7 @@ pub(super) fn format_value(value: &Value, numberify: bool, ctx: &DisplayContext)
             use std::collections::HashMap;
 
             let mut aggregated: HashMap<(String, Option<String>), Position> = HashMap::new();
-            for pos in inv.positions().iter().filter(|p| !p.is_empty()) {
+            for pos in inv.positions().filter(|p| !p.is_empty()) {
                 let cost_key = pos.cost.as_ref().map(|c| {
                     format!(
                         "{}|{}|{:?}|{:?}",
@@ -587,7 +599,7 @@ fn value_to_json(value: &Value) -> serde_json::Value {
             })),
         }),
         Value::Inventory(inv) => serde_json::json!({
-            "positions": inv.positions().iter().map(|p| serde_json::json!({
+            "positions": inv.positions().map(|p| serde_json::json!({
                 "number": p.units.number.to_string(),
                 "currency": p.units.currency,
             })).collect::<Vec<_>>(),
@@ -689,6 +701,35 @@ mod tests {
         assert!(
             rendered.contains("{ 128.99 USD}") && rendered.contains("{ 131.73 USD}"),
             "expected both costs rendered with leading space, got {rendered:?}"
+        );
+    }
+
+    /// `write_text` must not panic when a single cell renders to more
+    /// than `u16::MAX` characters. `std::fmt::rt::Argument::from_usize`
+    /// panics with "Formatting argument out of range" if a dynamic
+    /// `{:width$}` width parameter exceeds `u16::MAX`, which happens on
+    /// JOURNAL queries whose `balance` column holds inventories with
+    /// thousands of lots (see #1086 stress workloads). The fix in
+    /// `write_text` caps width at `u16::MAX`; cells wider than the cap
+    /// are still written verbatim because `write!` does not truncate
+    /// when content exceeds the requested width.
+    #[test]
+    fn test_write_text_does_not_panic_on_cells_wider_than_u16_max() {
+        use rustledger_query::QueryResult;
+
+        let mut result = QueryResult::new(vec!["wide".into()]);
+        // 70_000 chars > u16::MAX = 65_535
+        let wide = "x".repeat(70_000);
+        result.add_row(vec![Value::String(wide.clone())]);
+
+        let ctx = DisplayContext::new();
+        let mut buf: Vec<u8> = Vec::new();
+        write_text(&result, &mut buf, false, &ctx).expect("write_text must not panic on wide cell");
+
+        let text = String::from_utf8(buf).expect("utf8");
+        assert!(
+            text.contains(&wide),
+            "wide cell content must still appear verbatim in output"
         );
     }
 

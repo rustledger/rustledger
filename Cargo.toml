@@ -67,10 +67,8 @@ regex = "1"
 # Parsing
 format_num_pattern = { version = "0.9.5", features = ["rust_decimal"] }
 chumsky = "1.0.0-alpha.7"
-winnow = { version = "1.0", features = ["simd"] }
 miette = { version = "7", features = ["fancy"] }
 logos = "0.16"
-logosky = "0.2"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

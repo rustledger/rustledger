@@ -1,16 +1,16 @@
-//! Winnow-based parser for Beancount syntax.
+//! High-performance hand-rolled parser for Beancount syntax.
 //!
-//! This module provides a high-performance parser using winnow combinators,
-//! designed as a faster alternative to the chumsky-based parser.
+//! Despite the file name, this is a manual state-machine parser over a
+//! Logos-produced token stream, not a winnow-combinators parser. The
+//! filename is historical: an early version targeted winnow's Stream
+//! trait but the manual approach turned out simpler and faster, so the
+//! winnow dependency was removed and only the file name remains.
 //!
 //! # Architecture
 //!
 //! ```text
 //! Source (&str) → Logos tokenize() → Vec<SpannedToken> → Manual parser → Directives
 //! ```
-//!
-//! We use a manual token stream approach rather than implementing winnow's Stream
-//! trait, as it provides simpler code and good performance.
 
 use std::borrow::Cow;
 

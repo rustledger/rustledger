@@ -135,8 +135,8 @@ user-login = "epage"
 user-name = "Ed Page"
 
 [[publisher.clap_complete]]
-version = "4.6.3"
-when = "2026-04-27"
+version = "4.6.5"
+when = "2026-05-11"
 user-id = 6743
 user-login = "epage"
 user-name = "Ed Page"
@@ -653,8 +653,8 @@ user-login = "dtolnay"
 user-name = "David Tolnay"
 
 [[publisher.tokio]]
-version = "1.52.2"
-when = "2026-05-04"
+version = "1.52.3"
+when = "2026-05-08"
 user-id = 6741
 user-login = "Darksonn"
 user-name = "Alice Ryhl"

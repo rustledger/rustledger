@@ -31,7 +31,6 @@
 use lsp_types::Uri;
 use std::path::PathBuf;
 
-pub mod db;
 pub mod handlers;
 pub mod ledger_state;
 pub mod main_loop;

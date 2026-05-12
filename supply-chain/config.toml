@@ -420,6 +420,10 @@ criteria = "safe-to-deploy"
 version = "2.2.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.im]]
+version = "15.1.0"
+criteria = "safe-to-deploy"
+
 [[exemptions.indexmap]]
 version = "2.14.0"
 criteria = "safe-to-deploy"
@@ -720,6 +724,10 @@ criteria = "safe-to-deploy"
 version = "0.1.1"
 criteria = "safe-to-deploy"
 
+[[exemptions.rand_xoshiro]]
+version = "0.6.0"
+criteria = "safe-to-deploy"
+
 [[exemptions.rawpointer]]
 version = "0.2.1"
 criteria = "safe-to-deploy"
@@ -850,6 +858,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.siphasher]]
 version = "1.0.2"
+criteria = "safe-to-deploy"
+
+[[exemptions.sized-chunks]]
+version = "0.6.5"
 criteria = "safe-to-deploy"
 
 [[exemptions.sprs]]

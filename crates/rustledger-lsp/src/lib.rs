@@ -17,11 +17,9 @@
 //! # Example
 //!
 //! ```ignore
-//! use rustledger_lsp::Server;
-//!
-//! #[tokio::main]
-//! async fn main() {
-//!     Server::new().run().await;
+//! fn main() -> std::process::ExitCode {
+//!     rustledger_lsp::start_stdio().map(|()| std::process::ExitCode::SUCCESS)
+//!         .unwrap_or(std::process::ExitCode::FAILURE)
 //! }
 //! ```
 

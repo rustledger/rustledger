@@ -73,7 +73,6 @@ pub fn validate_close(state: &mut LedgerState, close: &Close, errors: &mut Vec<V
                 {
                     let positions: Vec<String> = inv
                         .positions()
-                        .iter()
                         .map(|p| format!("{} {}", p.units.number, p.units.currency))
                         .collect();
                     errors.push(

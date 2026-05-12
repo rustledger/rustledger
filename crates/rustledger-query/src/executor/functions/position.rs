@@ -79,7 +79,6 @@ impl Executor<'_> {
                     (Value::Inventory(inv), Value::String(curr)) => {
                         let filtered: Vec<Position> = inv
                             .positions()
-                            .iter()
                             .filter(|p| p.units.currency.as_str() == curr)
                             .cloned()
                             .collect();
@@ -181,7 +180,6 @@ impl Executor<'_> {
             Value::Inventory(inv) => {
                 let positions: Vec<String> = inv
                     .positions()
-                    .iter()
                     .map(|p| format!("{} {}", p.units.number, p.units.currency))
                     .collect();
                 Ok(Value::String(positions.join(", ")))

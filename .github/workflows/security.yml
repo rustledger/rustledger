@@ -30,9 +30,17 @@ jobs:
       - uses: actions/checkout@900f2210b1d28bbbd0bd22d17926b9e224e8f231 # v6
         with:
           fetch-depth: 0 # Full history for scanning
-      - name: Run Gitleaks
-        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
-          GITLEAKS_CONFIG: .gitleaks.toml
+      - name: Run Gitleaks (standalone binary)
+        run: |
+          version=8.21.2
+          checksum=5bc41815076e6ed6ef8fbecc9d9b75bcae31f39029ceb55da08086315316e3ba
+
+          # Download and verify
+          curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v${version}/gitleaks_${version}_linux_x64.tar.gz -o gitleaks.tar.gz
+          echo "${checksum}  gitleaks.tar.gz" | sha256sum -c - || exit 1
+
+          # Extract binary only (avoid clobbering LICENSE/README.md)
+          tar -xzf gitleaks.tar.gz gitleaks
+
+          # Run scan
+          ./gitleaks detect --config .gitleaks.toml --source . --verbose --redact

@@ -49,7 +49,7 @@ name = "rustledger"
 
 [workspace.dependencies]
 # Core
-rust_decimal = { version = "1.41", features = ["serde"] }
+rust_decimal = { version = "1.42", features = ["serde"] }
 # `js` feature is wasm32-only (cfg-gated inside jiff) and pulls in
 # js-sys so jiff::Zoned::now() / Timestamp::now() work in browsers
 # instead of panicking with "getting the current time in
@@ -65,7 +65,7 @@ anyhow = "1"
 regex = "1"
 
 # Parsing
-format_num_pattern = { version = "0.9.4", features = ["rust_decimal"] }
+format_num_pattern = { version = "0.9.5", features = ["rust_decimal"] }
 chumsky = "1.0.0-alpha.7"
 winnow = { version = "1.0", features = ["simd"] }
 miette = { version = "7", features = ["fancy"] }
@@ -105,6 +105,11 @@ blake3 = "1"
 
 # Inline-storage collections (avoids heap allocation for small sizes)
 smallvec = "1"
+
+# Persistent (structurally-shared) collections — O(1) clone for tree-based
+# vectors, used by Inventory.positions so JOURNAL-style row-per-snapshot
+# patterns become O(N log N) instead of O(N²). See issue #1086.
+im = { version = "15", features = ["serde"] }
 
 # Testing
 proptest = "1"

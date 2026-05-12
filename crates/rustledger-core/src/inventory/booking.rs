@@ -782,7 +782,7 @@ impl Inventory {
 
         // Add back the remainder if non-zero
         if !new_units.is_zero() {
-            self.positions.push(Position::simple(Amount::new(
+            self.positions.push_back(Position::simple(Amount::new(
                 new_units,
                 units.currency.clone(),
             )));
@@ -872,7 +872,7 @@ impl Inventory {
         // Add back a single merged lot with the remainder
         let remaining = total_units + units.number; // units.number is negative for reductions
         if !remaining.is_zero() {
-            self.positions.push(Position::with_cost(
+            self.positions.push_back(Position::with_cost(
                 Amount::new(remaining, units.currency.clone()),
                 make_avg_cost(),
             ));

@@ -135,20 +135,17 @@ pub fn value_to_cell(value: &rustledger_query::Value) -> CellValue {
                 label: c.label.clone(),
             }),
         },
-        Value::Inventory(inv) => {
-            let positions = inv.positions();
-            CellValue::Inventory {
-                positions: positions
-                    .iter()
-                    .map(|p| PositionValue {
-                        units: AmountValue {
-                            number: p.units.number.to_string(),
-                            currency: p.units.currency.to_string(),
-                        },
-                    })
-                    .collect(),
-            }
-        }
+        Value::Inventory(inv) => CellValue::Inventory {
+            positions: inv
+                .positions()
+                .map(|p| PositionValue {
+                    units: AmountValue {
+                        number: p.units.number.to_string(),
+                        currency: p.units.currency.to_string(),
+                    },
+                })
+                .collect(),
+        },
         Value::StringSet(set) => CellValue::StringSet(set.clone()),
         Value::Set(values) => {
             CellValue::Set(values.iter().map(|v| Box::new(value_to_cell(v))).collect())

@@ -31,8 +31,8 @@
 
 mod error;
 pub mod logos_lexer;
+mod parser;
 mod span;
-mod winnow_parser;
 
 pub use error::{ParseError, ParseErrorKind};
 pub use span::{SYNTHESIZED_FILE_ID, Span, Spanned};
@@ -89,7 +89,7 @@ impl ParseWarning {
 ///
 /// A `ParseResult` containing directives, options, includes, plugins, and errors.
 pub fn parse(source: &str) -> ParseResult {
-    winnow_parser::parse(source)
+    parser::parse(source)
 }
 
 /// Parse beancount source code, returning only directives and errors.

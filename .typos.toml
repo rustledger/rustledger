@@ -25,3 +25,5 @@ commoditiy = "commoditiy"
 qurey = "qurey"
 qeury = "qeury"
 cusotm = "cusotm"
+# Intentional typo for testing --lint argument validation (#1099 / #1111)
+tranfsers = "tranfsers"

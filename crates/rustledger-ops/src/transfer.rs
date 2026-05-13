@@ -123,8 +123,10 @@ pub fn find_transfers(
 /// when you have one combined ledger and want all internal transfers
 /// detected without manually splitting by file.
 ///
-/// Directives without a determinable account (non-transactions, or
-/// transactions whose first posting lacks units) are silently dropped.
+/// Non-transaction directives (Open, Balance, Pad, etc.) are skipped at
+/// grouping time. Transactions whose first posting has no units are still
+/// grouped (by that posting's account), but they can never match — the
+/// per-pair predicate requires units on both sides.
 ///
 /// Idempotent: pairs whose transactions already share at least one `^link:`
 /// tag are skipped.

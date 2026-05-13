@@ -29,7 +29,7 @@ pub enum OutputFormat {
     /// Human-readable text (default).
     #[default]
     Text,
-    /// JSON, one object per detected match.
+    /// JSON: a single object with a `matches` array and an `applied` flag.
     Json,
 }
 

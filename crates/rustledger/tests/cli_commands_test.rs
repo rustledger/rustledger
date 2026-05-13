@@ -333,12 +333,17 @@ fn test_lint_transfers_apply_is_idempotent() {
 
     let bin = require_rledger!();
     // First apply.
-    let _ = Command::new(&bin)
+    let first = Command::new(&bin)
         .args(["lint", "transfers", "--apply"])
         .arg(&checking)
         .arg(&savings)
         .output()
         .expect("first --apply");
+    assert!(
+        first.status.success(),
+        "first --apply must exit 0. stderr: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
     let after_first = std::fs::read_to_string(&checking).unwrap();
     assert!(
         after_first.contains("^xfer-20240115-"),
@@ -346,12 +351,17 @@ fn test_lint_transfers_apply_is_idempotent() {
     );
 
     // Second apply must be a no-op.
-    let _ = Command::new(&bin)
+    let second = Command::new(&bin)
         .args(["lint", "transfers", "--apply"])
         .arg(&checking)
         .arg(&savings)
         .output()
         .expect("second --apply");
+    assert!(
+        second.status.success(),
+        "second --apply must exit 0. stderr: {}",
+        String::from_utf8_lossy(&second.stderr)
+    );
     let after_second = std::fs::read_to_string(&checking).unwrap();
     assert_eq!(
         after_first, after_second,
@@ -362,6 +372,24 @@ fn test_lint_transfers_apply_is_idempotent() {
 // =============================================================================
 // rledger check --lint transfers tests (Phase 2)
 // =============================================================================
+
+#[test]
+fn test_check_with_lint_unknown_name_rejected_at_parse_time() {
+    // ValueEnum should reject typos at clap parse time, not silently no-op.
+    let output = Command::new(require_rledger!())
+        .args(["check", "--lint", "tranfsers", "/tmp/whatever.bean"])
+        .output()
+        .expect("Failed to run rledger check --lint tranfsers");
+    assert!(
+        !output.status.success(),
+        "unknown lint name must fail at argument parsing"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("tranfsers") || stderr.contains("invalid value"),
+        "expected clap to flag the typo, got stderr: {stderr}"
+    );
+}
 
 #[test]
 fn test_check_with_lint_transfers_emits_warning_but_succeeds() {

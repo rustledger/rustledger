@@ -28,6 +28,17 @@ pub enum OutputFormat {
     Json,
 }
 
+/// Advisory lints that can be run alongside `check`.
+///
+/// Modeled as an enum (not a free-form `String`) so unknown names like
+/// `--lint tranfsers` fail at argument parsing time instead of silently
+/// no-op'ing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum LintName {
+    /// Detect likely unlinked inter-account transfer pairs.
+    Transfers,
+}
+
 /// A diagnostic message in JSON format.
 #[derive(Debug, Serialize)]
 pub struct JsonDiagnostic {
@@ -141,11 +152,10 @@ pub struct Args {
 
     /// Run non-fatal advisory lints alongside validation.
     ///
-    /// Supported names: `transfers` (detect unlinked inter-account transfer
-    /// pairs). Repeatable to enable multiple lints. Findings are emitted as
+    /// Repeatable to enable multiple lints. Findings are emitted as
     /// warnings, never errors — exit code is unaffected.
-    #[arg(long = "lint", value_name = "NAME")]
-    pub lints: Vec<String>,
+    #[arg(long = "lint", value_enum, value_name = "NAME")]
+    pub lints: Vec<LintName>,
 
     /// Minimum confidence (0.0 - 1.0) for `--lint transfers` matches to be
     /// reported. Default 0.8 silences the noisy 0.7 floor.
@@ -751,11 +761,7 @@ pub fn run(args: &Args) -> Result<ExitCode> {
     // here only for the other cfg branch.
     #[cfg(not(feature = "python-plugin-wasm"))]
     let mut warning_count = warning_count;
-    if args
-        .lints
-        .iter()
-        .any(|l| l.eq_ignore_ascii_case("transfers"))
-    {
+    if args.lints.contains(&LintName::Transfers) {
         let mut wrappers: Vec<rustledger_plugin::types::DirectiveWrapper> =
             Vec::with_capacity(spanned_directives.len());
         for spanned in &spanned_directives {

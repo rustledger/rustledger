@@ -867,6 +867,33 @@ mod tests {
         assert_eq!(ctx.format(dec!(7.5), "USD"), "7.50");
     }
 
+    /// Issue #1103: when the value's intrinsic scale exceeds the
+    /// currency's tracked precision, render at the value's scale
+    /// rather than quantizing down. Matches bean-query: a
+    /// `SUM(number)` over a fixture with high-precision arithmetic
+    /// (cost-spec interpolation residuals, manual high-dp postings)
+    /// produces a Decimal whose scale we MUST preserve to align with
+    /// Python's `decimal` representation. The currency hint only ever
+    /// PADS UP from a shorter scale; it never rounds DOWN from a
+    /// longer one.
+    #[test]
+    fn test_format_preserves_value_scale_above_tracked_precision() {
+        let mut ctx = DisplayContext::new();
+        // USD tracked at 2dp (mode of two 2dp observations).
+        ctx.update(dec!(100.00), "USD");
+        ctx.update(dec!(50.25), "USD");
+        assert_eq!(ctx.get_precision("USD"), Some(2));
+
+        // Value scale > tracked dp → preserve value scale (no round-down).
+        assert_eq!(ctx.format(dec!(1.234), "USD"), "1.234");
+        assert_eq!(ctx.format(dec!(-1202.00896), "USD"), "-1202.00896");
+        assert_eq!(ctx.format(dec!(0.00000), "USD"), "0.00000");
+
+        // Value scale ≤ tracked dp → pad up (unchanged from #988 fix).
+        assert_eq!(ctx.format(dec!(7.5), "USD"), "7.50");
+        assert_eq!(ctx.format(dec!(0), "USD"), "0.00");
+    }
+
     #[test]
     fn test_format_unknown_currency() {
         let ctx = DisplayContext::new();

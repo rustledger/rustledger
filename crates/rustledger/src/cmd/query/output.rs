@@ -944,9 +944,21 @@ mod tests {
         write_text(&result, &mut buf, false, &ctx).expect("text ok");
         let text = String::from_utf8(buf).expect("utf8");
 
-        assert!(
-            text.contains("0.00"),
-            "scale-0 input should pad up to USD's 2dp via hint, got {text:?}"
+        // Anchor on the data-row's SUM cell exactly. `text.contains("0.00")`
+        // would pass for a (now-incorrect) "0.000" rendering because "0.00"
+        // is a substring of "0.000"; pinning the right-aligned cell token
+        // catches both directions.
+        let data_row = text
+            .lines()
+            .find(|l| l.contains("USD"))
+            .unwrap_or_else(|| panic!("expected USD data row; raw output:\n{text}"));
+        let sum_cell = data_row
+            .split_whitespace()
+            .last()
+            .expect("non-empty data row");
+        assert_eq!(
+            sum_cell, "0.00",
+            "scale-0 input should pad up to USD's 2dp via hint; got {sum_cell:?} in {data_row:?}"
         );
     }
 
@@ -972,10 +984,16 @@ mod tests {
         let date = |y, m, d| rustledger_core::naive_date(y, m, d).unwrap();
 
         // Build a tiny ledger where SUM(number) GROUP BY currency on USD
-        // mixes scales: 5.00 + (-5.00) + 0.000 = 0.000 (rust_decimal
-        // natural). Without the fix this renders as `0.000`. With the
-        // fix and a USD-tracked DisplayContext at 2dp, it should render
-        // as `0.00`.
+        // ends up with a value at a scale ≤ USD's tracked 2dp. The
+        // `0.000` and `0.0` inputs collapse to a zero whose scale ≤ 2 in
+        // rust_decimal Add semantics, and a USD-tracked DisplayContext
+        // at 2dp pads up to `0.00` via `max(value_scale, currency_dp)`.
+        // After PR #1106, the hint pads up but never quantizes down, so
+        // a SUM result with scale > 2 would render at its higher scale
+        // — that case is covered by the per-currency unit tests in
+        // `display_context.rs`; this e2e test verifies the executor
+        // populates `row_group_keys` so the renderer's hint resolution
+        // can route the value through the per-currency context.
         let directives = vec![
             Directive::Transaction(
                 Transaction::new(date(2024, 1, 15), "Coffee")
@@ -1045,8 +1063,12 @@ mod tests {
     /// (`extract_implicit_group_by_exprs` in
     /// `rustledger-query/src/executor/aggregation.rs`). This test
     /// verifies the implicit path also populates `row_group_keys` with
-    /// the currency, so the renderer's quantization works for queries
-    /// that omit `GROUP BY` — bean-query's most common shape.
+    /// the currency, so the renderer's hint resolution works for
+    /// queries that omit `GROUP BY` — bean-query's most common shape.
+    /// As with `test_e2e_sum_group_by_currency_*` above, the assertion
+    /// holds because the SUM result scale is ≤ USD's tracked 2dp; for
+    /// scale > tracked-dp behavior (post-#1106 preserve), see the
+    /// `display_context.rs` unit tests.
     #[test]
     fn test_e2e_implicit_group_by_currency_text_output_quantized() {
         use rustledger_core::{Amount, Directive, Posting, Transaction};

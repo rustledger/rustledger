@@ -11,22 +11,23 @@ pub fn format_transaction(txn: &Transaction, config: &FormatConfig) -> String {
     let mut out = String::with_capacity(400);
 
     // Date and flag
-    write!(out, "{} {}", txn.date, txn.flag).unwrap();
+    write!(out, "{} {}", txn.date, txn.flag).expect("write to String is infallible");
 
     // Payee and narration
     if let Some(payee) = &txn.payee {
-        write!(out, " \"{}\"", super::escape_string(payee)).unwrap();
+        write!(out, " \"{}\"", super::escape_string(payee)).expect("write to String is infallible");
     }
-    write!(out, " \"{}\"", super::escape_string(&txn.narration)).unwrap();
+    write!(out, " \"{}\"", super::escape_string(&txn.narration))
+        .expect("write to String is infallible");
 
     // Tags
     for tag in &txn.tags {
-        write!(out, " #{tag}").unwrap();
+        write!(out, " #{tag}").expect("write to String is infallible");
     }
 
     // Links
     for link in &txn.links {
-        write!(out, " ^{link}").unwrap();
+        write!(out, " ^{link}").expect("write to String is infallible");
     }
 
     out.push('\n');
@@ -41,20 +42,20 @@ pub fn format_transaction(txn: &Transaction, config: &FormatConfig) -> String {
     for posting in &txn.postings {
         // Output comments that appear before this posting
         for comment in &posting.comments {
-            writeln!(out, "{}{}", &config.indent, comment).unwrap();
+            writeln!(out, "{}{}", &config.indent, comment).expect("write to String is infallible");
         }
         // Output the posting line
         let posting_line = format_posting(posting, config);
         // Append trailing comment on same line if present (only first one)
         if let Some(trailing) = posting.trailing_comments.first() {
-            writeln!(out, "{posting_line} {trailing}").unwrap();
+            writeln!(out, "{posting_line} {trailing}").expect("write to String is infallible");
         } else {
             out.push_str(&posting_line);
             out.push('\n');
         }
         // Output any additional trailing comments on their own lines
         for trailing in posting.trailing_comments.iter().skip(1) {
-            writeln!(out, "{}{}", &config.indent, trailing).unwrap();
+            writeln!(out, "{}{}", &config.indent, trailing).expect("write to String is infallible");
         }
         // Posting-level metadata (indented one level deeper than the posting)
         if !posting.meta.is_empty() {
@@ -64,7 +65,7 @@ pub fn format_transaction(txn: &Transaction, config: &FormatConfig) -> String {
 
     // Output transaction trailing comments (comments after all postings)
     for comment in &txn.trailing_comments {
-        writeln!(out, "{}{}", &config.indent, comment).unwrap();
+        writeln!(out, "{}{}", &config.indent, comment).expect("write to String is infallible");
     }
 
     out
@@ -77,7 +78,7 @@ pub fn format_posting(posting: &Posting, config: &FormatConfig) -> String {
 
     // Flag (if present)
     if let Some(flag) = posting.flag {
-        write!(line, "{flag} ").unwrap();
+        write!(line, "{flag} ").expect("write to String is infallible");
     }
 
     // Account

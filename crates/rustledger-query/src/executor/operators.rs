@@ -479,8 +479,8 @@ impl Executor<'_> {
             (Value::Position(a), Value::Position(b)) => a.units.number.cmp(&b.units.number),
             // Compare inventories by first position's value (for single-currency)
             (Value::Inventory(a), Value::Inventory(b)) => {
-                let a_val = a.positions().first().map(|p| &p.units.number);
-                let b_val = b.positions().first().map(|p| &p.units.number);
+                let a_val = a.positions().next().map(|p| &p.units.number);
+                let b_val = b.positions().next().map(|p| &p.units.number);
                 match (a_val, b_val) {
                     (Some(av), Some(bv)) => av.cmp(bv),
                     (Some(_), None) => std::cmp::Ordering::Less,

@@ -1,4 +1,4 @@
-//! Beancount parser using Logos lexer and Winnow manual parser.
+//! Beancount parser using a Logos lexer and a hand-rolled state-machine parser.
 //!
 //! This crate provides a parser for the Beancount file format. It produces
 //! a stream of [`Directive`]s from source text, along with any parse errors.
@@ -31,8 +31,8 @@
 
 mod error;
 pub mod logos_lexer;
+mod parser;
 mod span;
-mod winnow_parser;
 
 pub use error::{ParseError, ParseErrorKind};
 pub use span::{SYNTHESIZED_FILE_ID, Span, Spanned};
@@ -79,7 +79,10 @@ impl ParseWarning {
 
 /// Parse beancount source code.
 ///
-/// Uses a fast token-based parser (Logos lexer + Winnow combinators).
+/// Uses a fast token-based parser: a Logos lexer feeds a hand-rolled
+/// state-machine parser. An early version targeted winnow's Stream
+/// trait but the manual approach turned out simpler and faster, so the
+/// winnow dependency was removed.
 ///
 /// # Arguments
 ///
@@ -89,7 +92,7 @@ impl ParseWarning {
 ///
 /// A `ParseResult` containing directives, options, includes, plugins, and errors.
 pub fn parse(source: &str) -> ParseResult {
-    winnow_parser::parse(source)
+    parser::parse(source)
 }
 
 /// Parse beancount source code, returning only directives and errors.

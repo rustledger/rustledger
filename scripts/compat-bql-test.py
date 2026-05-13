@@ -103,23 +103,42 @@ KNOWN_PYTHON_DIVERGENCES: set[tuple[str, str]] = {
     ("testdata_source_healthequity_test_matching_journal.beancount", "first-balance-by-month"),
     ("testdata_source_ofx_test_fidelity_ira_journal.beancount", "first-balance-by-month"),
     ("testdata_source_paypal_test_matching_journal.beancount", "first-balance-by-month"),
-    # `sum-number-by-currency` cases: Python beanquery preserves arithmetic
-    # scale through SUM (`-1966.700` at scale 3); rledger's booking layer
-    # normalizes residuals more aggressively and lands at scale 2
-    # (`-1966.70`). The values are numerically equal — the difference is
-    # *display scale only*, surfaced as a textual mismatch because both
-    # tools intentionally preserve scale on `Value::Number` output.
+}
+
+
+# Known cases where **rledger** is the side that diverges from bean-query.
+# Kept SEPARATE from `KNOWN_PYTHON_DIVERGENCES` on purpose: conflating the
+# two lists would let an rledger bug masquerade as a Python quirk, and a
+# future rledger regression on these file/query pairs would be silently
+# absorbed by the same allowlist. Reported separately in the per-CI
+# summary so the count of Rust-side divergences is visible at a glance.
+#
+# Keyed by `(filename, query_name)` with the same surgical-pin semantics
+# as `KNOWN_PYTHON_DIVERGENCES`. Counted as "known" for the effective
+# match percentage (the values are correct — only display scale differs),
+# but tracked as a distinct category so future bookkeeping stays honest.
+KNOWN_RUST_DIVERGENCES: set[tuple[str, str]] = {
+    # `sum-number-by-currency` display-scale mismatch on cost-spec
+    # interpolation fixtures: Python beanquery preserves arithmetic
+    # scale through SUM (`-1966.700` at scale 3); rledger's booking
+    # layer normalizes residuals to the input minimum scale and lands
+    # at scale 2 (`-1966.70`). The values are numerically equal — the
+    # difference is *display scale only*, surfaced as a textual diff
+    # because both tools intentionally preserve scale on `Value::Number`
+    # output (#1103 / #1106 / #1113).
     #
     # Root cause: cost-spec interpolation against `{}` lot-match against
     # a `{{total}}` lot produces a residual whose scale depends on which
     # intermediate value drives it. Python's intermediate stays at the
-    # buy-side scale 3; rledger's #1108 fix dropped intermediate scale to
-    # the input minimum (2) to stop 26-digit contamination — that fix
-    # was correct but over-applies on these fixtures.
+    # buy-side scale 3; rledger's #1108 fix dropped intermediate scale
+    # to the input minimum (2) to stop 26-digit contamination — that
+    # fix was correct for the over-precision case but over-applies on
+    # these fixtures.
     #
-    # Continuation of #1108 (Rust pipeline scale propagation). Tracked
-    # under #1112. Surgical pin (not "*") so any other divergence on
-    # these fixtures stays surfaced.
+    # Deep fix is continuation of #1108's pipeline scale-propagation
+    # work. Tracked under #1112 (kept open as the tracker — do not
+    # auto-close from this PR). Surgical pin (not "*") so any
+    # non-scale divergence on these fixtures stays surfaced.
     ("testdata_source_healthequity_test_invalid_journal.beancount", "sum-number-by-currency"),
     ("testdata_source_healthequity_test_matching_journal.beancount", "sum-number-by-currency"),
     ("testdata_source_ofx_test_non_default_capital_gains_journal.beancount", "sum-number-by-currency"),
@@ -187,6 +206,28 @@ def _is_known_python_divergence(run: "QueryRun") -> bool:
     ) in KNOWN_PYTHON_DIVERGENCES:
         return True
     return _is_beanquery_empty_aggregate_quirk(run)
+
+
+def _is_known_rust_divergence(run: "QueryRun") -> bool:
+    """True if this mismatch is on the rledger-side allowlist.
+
+    See `KNOWN_RUST_DIVERGENCES` for context. Wildcard `"*"` is honored
+    for symmetry with the Python allowlist, though no entry currently
+    uses it.
+    """
+    return (run.file, run.query_name) in KNOWN_RUST_DIVERGENCES or (
+        run.file,
+        "*",
+    ) in KNOWN_RUST_DIVERGENCES
+
+
+def _is_known_divergence(run: "QueryRun") -> bool:
+    """True if the mismatch is in either allowlist (Python or Rust).
+
+    Used by reporting paths that just want the "known vs real" split
+    without caring which side has the bug.
+    """
+    return _is_known_python_divergence(run) or _is_known_rust_divergence(run)
 
 
 # ---------------------------------------------------------------------
@@ -601,10 +642,15 @@ def main() -> int:
     # queries; we expose both to make the CI summary unambiguous.
     total = len(results)
     matching = sum(1 for r in results if r.match)
-    known_div = sum(
+    known_py = sum(
         1 for r in results
         if not r.match and _is_known_python_divergence(r)
     )
+    known_rs = sum(
+        1 for r in results
+        if not r.match and _is_known_rust_divergence(r)
+    )
+    known_div = known_py + known_rs
     real_mismatches = total - matching - known_div
     effective_match = matching + known_div
     pct = effective_match * 100 // total if total > 0 else 0
@@ -628,7 +674,8 @@ def main() -> int:
     print(f"Files tested:        {len(valid)}")
     print(f"Runs tested:         {total}  (file × query)")
     print(f"Runs matching:       {matching}")
-    print(f"Known Python diffs:  {known_div}")
+    print(f"Known Python diffs:  {known_py}")
+    print(f"Known Rust diffs:    {known_rs}")
     print(f"Real mismatches:     {real_mismatches}")
     print(f"Effective match:     {effective_match}/{total} ({pct}%)")
 
@@ -664,7 +711,12 @@ def main() -> int:
         print()
         print(f"=== {len(bad)} mismatches ===")
         for r in bad:
-            label = "KNOWN" if _is_known_python_divergence(r) else "MISMATCH"
+            if _is_known_python_divergence(r):
+                label = "KNOWN-PY"
+            elif _is_known_rust_divergence(r):
+                label = "KNOWN-RS"
+            else:
+                label = "MISMATCH"
             print(f"  {label}: {r.file} | {r.query_name}")
             if r.py_failure:
                 print(f"    py FAILED: {r.py_failure}")
@@ -703,6 +755,8 @@ def main() -> int:
                 f.write(f"bql_total={total}\n")
                 f.write(f"bql_match={matching}\n")
                 f.write(f"bql_known_divergences={known_div}\n")
+                f.write(f"bql_known_python={known_py}\n")
+                f.write(f"bql_known_rust={known_rs}\n")
                 f.write(f"bql_pct={pct}\n")
                 f.write(f"bql_weak_queries={len(weak)}\n")
 

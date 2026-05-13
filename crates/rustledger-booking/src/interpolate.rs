@@ -140,15 +140,29 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
     let mut unassigned_missing: Vec<usize> = Vec::with_capacity(2);
 
     // Track maximum scale (decimal places) per currency for rounding interpolated amounts.
-    // Python beancount rounds interpolated amounts to match the precision of other amounts
-    // in the same currency, which can create small residuals within tolerance.
+    //
+    // Matches Python beancount's `infer_tolerances` rule: only NON-INTEGER posting
+    // units contribute to the per-currency tolerance/precision. Integer amounts
+    // ("1 CAD" commission, "1 CSU" share count) do NOT contribute — they don't
+    // tell us anything about that currency's display precision.
+    //
+    // Cost spec scales are deliberately NOT included. With Python's default
+    // `infer_tolerance_from_cost = False`, cost annotations don't influence the
+    // residual quantization either. The natural Decimal arithmetic that flows
+    // through `cost_amount = units × per_unit` preserves whatever scale the
+    // operands carry, so a transaction with no non-integer posting units in a
+    // given currency simply doesn't get a quantization step (the residual is
+    // rendered at its natural scale).
+    //
+    // - #333 (`70.538 ABC {100 USD}` → missing CAD with cost-derived weight):
+    //   no non-integer CAD posting units; residual passes through unrounded at
+    //   its natural scale (which is `cost_spec_scale` from the explicit literal,
+    //   typically 2dp).
+    // - #1107 (`-1.763 STOCK {}` lot-matched against high-precision per_unit):
+    //   the cash side `336.73 USD` gives USD scale=2; the residual gets
+    //   quantized to 2dp instead of inheriting the lot's derived 26-digit
+    //   per_unit precision.
     let mut max_scale_by_currency: HashMap<InternedStr, u32> = HashMap::with_capacity(4);
-
-    // Track scales from cost specs separately. These are merged with max_scale_by_currency
-    // after the loop, but only for currencies that have explicit amounts. This ensures we
-    // preserve precision when cost has more decimal places than other postings (#333),
-    // without forcing rounding when there are no explicit amounts (#251).
-    let mut cost_scale_by_currency: HashMap<InternedStr, u32> = HashMap::with_capacity(2);
 
     // Track per-currency count of postings whose weight contribution is unknown
     // because the cost spec is empty (e.g., `{}`) and resolution is deferred to
@@ -163,12 +177,17 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
     for (i, posting) in transaction.postings.iter().enumerate() {
         match &posting.units {
             Some(IncompleteAmount::Complete(amount)) => {
-                // Track scale (decimal places) for rounding interpolated amounts
+                // Track scale (decimal places) for rounding interpolated amounts.
+                // Skip integer (scale==0) amounts — matches Python's
+                // `infer_tolerances`, which ignores integer posting.units
+                // since they don't reflect intentional currency precision.
                 let scale = amount.number.scale();
-                max_scale_by_currency
-                    .entry(amount.currency.clone())
-                    .and_modify(|s| *s = (*s).max(scale))
-                    .or_insert(scale);
+                if scale > 0 {
+                    max_scale_by_currency
+                        .entry(amount.currency.clone())
+                        .and_modify(|s| *s = (*s).max(scale))
+                        .or_insert(scale);
+                }
 
                 // Determine the "weight" of this posting for balance purposes.
                 // This must match the logic in calculate_residual().
@@ -194,35 +213,23 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
                         (&cost_spec.number_per, &inferred_currency)
                     {
                         let cost_amount = amount.number * per_unit;
-                        // Track the scale of number_per for rounding interpolated amounts.
-                        // This ensures we preserve the precision of the per-unit price.
-                        // See: https://github.com/rustledger/rustledger/issues/333
-                        Some((cost_curr.clone(), cost_amount, Some(per_unit.scale())))
+                        Some((cost_curr.clone(), cost_amount))
                     } else if let (Some(total), Some(cost_curr)) =
                         (&cost_spec.number_total, &inferred_currency)
                     {
                         // For total cost, sign depends on units sign
-                        // Track the scale of number_total for rounding
-                        Some((
-                            cost_curr.clone(),
-                            *total * amount.number.signum(),
-                            Some(total.scale()),
-                        ))
+                        Some((cost_curr.clone(), *total * amount.number.signum()))
                     } else {
                         None // Cost spec without determinable amount (e.g., empty `{}`)
                     }
                 });
 
-                if let Some((currency, cost_amount, cost_scale)) = cost_contribution {
+                if let Some((currency, cost_amount)) = cost_contribution {
                     // Cost-based posting: weight is in the cost currency.
-                    // Track cost scale separately - it will be merged later only for
-                    // currencies that have explicit amounts.
-                    if let Some(scale) = cost_scale {
-                        cost_scale_by_currency
-                            .entry(currency.clone())
-                            .and_modify(|s| *s = (*s).max(scale))
-                            .or_insert(scale);
-                    }
+                    // Cost spec scales are intentionally NOT tracked in
+                    // `max_scale_by_currency` — see its declaration for the
+                    // rationale (Python beancount with default
+                    // `infer_tolerance_from_cost = False`).
                     *residuals.entry(currency).or_default() += cost_amount;
                 } else if posting.cost.is_some() {
                     // Cost spec exists but has no determinable cost number (e.g.,
@@ -353,15 +360,6 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
                 unassigned_missing.push(i);
             }
         }
-    }
-
-    // Merge cost scales into max_scale_by_currency, but only for currencies that
-    // already have explicit amounts. This preserves precision from cost specs (#333)
-    // without forcing rounding when there are no explicit amounts (#251).
-    for (currency, cost_scale) in cost_scale_by_currency {
-        max_scale_by_currency
-            .entry(currency)
-            .and_modify(|s| *s = (*s).max(cost_scale));
     }
 
     // Check for multiple unknowns in the same currency group. An "unknown"
@@ -1510,6 +1508,68 @@ mod tests {
     }
 
     /// Companion to the previous test — same shape but with an
+    /// Issue #1107: an interpolated residual must not inherit the high
+    /// scale of a derived per-unit cost (which can be 26+ digits from
+    /// `total / units` division). Python beancount quantizes the
+    /// residual to currency precision derived from explicit posting
+    /// units, not cost spec scales.
+    ///
+    /// Repro: a sell with explicit high-precision per-unit cost. Pre-fix,
+    /// the cost scale (5) merged into `max_scale_by_currency[USD]`,
+    /// rounding the residual to 5dp (`-36.72498`). Post-fix, only the
+    /// `336.73 USD` cash side contributes to USD precision (scale=2), so
+    /// the residual is `-36.72` (matches bean-query exactly).
+    #[test]
+    fn test_interpolate_residual_ignores_cost_spec_scale() {
+        use rustledger_core::CostSpec;
+
+        let cost_spec = CostSpec {
+            number_per: Some(dec!(170.16734)),
+            number_total: None,
+            currency: Some(InternedStr::from("USD")),
+            date: None,
+            label: None,
+            merge: false,
+        };
+
+        let txn = Transaction::new(date(2016, 2, 12), "Sell")
+            .with_posting(Posting::new(
+                "Assets:Cash",
+                Amount::new(dec!(336.73), "USD"),
+            ))
+            .with_posting(
+                Posting::new("Assets:Brokerage", Amount::new(dec!(-1.763), "STOCK"))
+                    .with_cost(cost_spec)
+                    .with_price(rustledger_core::PriceAnnotation::Unit(Amount::new(
+                        dec!(191.00),
+                        "USD",
+                    ))),
+            )
+            .with_posting(Posting::auto("Income:Capital-Gains"));
+
+        let result = interpolate(&txn).expect("interpolation should succeed");
+        let filled = &result.transaction.postings[2];
+        let amount = get_amount(filled).expect("Income should have amount");
+
+        assert_eq!(
+            amount.currency.as_str(),
+            "USD",
+            "residual currency should be USD"
+        );
+        assert_eq!(
+            amount.number.scale(),
+            2,
+            "residual scale must be 2 (USD precision from `336.73 USD`), \
+             not 5 (from cost spec). Pre-fix this was 5. (#1107)"
+        );
+        assert_eq!(
+            amount.number,
+            dec!(-36.72),
+            "residual value should match bean-query exactly (#1107). \
+             Was -36.72498 before fix."
+        );
+    }
+
     /// UNASSIGNED missing posting (no currency context) instead of a
     /// currency-known one. bean-check rejects this because the
     /// unassigned could absorb residuals across all currencies including

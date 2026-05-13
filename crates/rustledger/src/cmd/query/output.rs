@@ -325,6 +325,28 @@ fn update_column_context(col_ctx: &mut DisplayContext, value: &Value, ledger_ctx
 /// `DisplayContext::format`, whose unknown-currency fallback calls
 /// `normalize()` and *strips* trailing zeros (`0.000` → `0`), making
 /// output worse than the pre-fix state.
+/// Whether a `Position`'s units, when rounded to the currency's tracked
+/// display precision, equal zero.
+///
+/// Used to suppress sub-cent residuals (rounding artifacts of cost-spec
+/// interpolation) from `Value::Inventory` rendering. Pure mathematical
+/// zero is already filtered via `Position::is_empty`; this also catches
+/// `-0.0003183 USD` (the kind of capital-gains rounding residual that
+/// matches bean-query's blank-cell display for SUM(position) / BALANCES
+/// outputs when the underlying value is below currency display
+/// precision). Matches Python beancount's behavior of suppressing
+/// zero-valued positions in aggregate output (#1104).
+fn position_renders_as_zero(pos: &rustledger_core::Position, ctx: &DisplayContext) -> bool {
+    if pos.units.number.is_zero() {
+        return true;
+    }
+    if let Some(dp) = ctx.get_precision(pos.units.currency.as_str()) {
+        pos.units.number.round_dp(dp).is_zero()
+    } else {
+        false
+    }
+}
+
 fn looks_like_currency(s: &str) -> bool {
     if s.len() < 2 || s.len() > 24 {
         return false;
@@ -522,7 +544,7 @@ pub(super) fn format_value(value: &Value, numberify: bool, ctx: &DisplayContext)
 
             let positions: Vec<String> = sorted_positions
                 .iter()
-                .filter(|p| !p.is_empty())
+                .filter(|p| !position_renders_as_zero(p, ctx))
                 .map(|p| {
                     if numberify {
                         ctx.format(p.units.number, p.units.currency.as_str())
@@ -730,6 +752,53 @@ mod tests {
         assert!(
             text.contains(&wide),
             "wide cell content must still appear verbatim in output"
+        );
+    }
+
+    /// Issue #1104: a position whose units round to zero at the currency's
+    /// tracked display precision is suppressed from `Value::Inventory`
+    /// rendering. Matches bean-query, which renders such cells as blank
+    /// in SUM(position) / BALANCES output rather than showing `0.00 USD`.
+    ///
+    /// Concrete trigger: capital-gains residuals from cost-spec interpolation
+    /// often land near the noise floor (e.g., `-0.0003183 USD`). At USD's
+    /// tracked 2dp precision, that rounds to `-0.00`, which is semantically
+    /// "no position" — both Python and now rust suppress it.
+    #[test]
+    fn test_value_inventory_suppresses_sub_precision_positions() {
+        let mut ctx = DisplayContext::new();
+        // Seed USD precision at 2dp.
+        ctx.update(dec!(1.00), "USD");
+        ctx.update(dec!(2.00), "USD");
+
+        // Sub-cent residual: -0.0003183 USD is "zero at USD precision".
+        let mut inv = Inventory::new();
+        inv.add(Position::simple(Amount::new(dec!(-0.0003183), "USD")));
+
+        let rendered = format_value(&Value::Inventory(Box::new(inv)), false, &ctx);
+        assert_eq!(
+            rendered, "",
+            "sub-cent USD residual must render as blank to match bean-query; \
+             got {rendered:?}"
+        );
+    }
+
+    /// Sister test: a position that's NOT sub-precision should still render.
+    /// Pins the boundary so a future regression that over-broadly suppresses
+    /// (e.g., everything below 1 USD) would fail loudly.
+    #[test]
+    fn test_value_inventory_renders_above_precision() {
+        let mut ctx = DisplayContext::new();
+        ctx.update(dec!(1.00), "USD");
+        ctx.update(dec!(2.00), "USD");
+
+        let mut inv = Inventory::new();
+        inv.add(Position::simple(Amount::new(dec!(-0.01), "USD")));
+
+        let rendered = format_value(&Value::Inventory(Box::new(inv)), false, &ctx);
+        assert!(
+            rendered.contains("-0.01"),
+            "-0.01 USD is exactly at USD precision; must still render. Got {rendered:?}"
         );
     }
 

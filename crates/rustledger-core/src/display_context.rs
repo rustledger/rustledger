@@ -402,21 +402,38 @@ impl DisplayContext {
 
     /// Format a decimal number for a currency using the tracked precision.
     ///
-    /// If the currency has been seen, formats with the maximum precision.
-    /// Otherwise, formats with the number's natural precision (no trailing zeros).
-    /// Uses half-up rounding to match Python beancount behavior.
+    /// Render rules (matching bean-query's `AmountRenderer.format`):
+    /// - If the value's intrinsic scale exceeds the currency's tracked
+    ///   precision, render at the value's scale. Python's `decimal`
+    ///   carries scale through arithmetic and bean-query preserves it,
+    ///   so a `SUM(number) GROUP BY currency` that aggregates a
+    ///   `-805.50896` row and a `-396.50000` row renders as
+    ///   `-1202.00896` (scale=5), not `-1202.01` (rounded to USD's 2dp).
+    /// - If the value's scale is less than the tracked precision, pad
+    ///   with trailing zeros (`7.5 USD` → `7.50`). Preserves the
+    ///   #954 fix that stops `SUM(0.00) = 0` rendering as plain `0`.
+    /// - If the currency has no tracked precision, fall through to the
+    ///   value's natural rendering with trailing zeros stripped.
+    ///
+    /// The previous implementation always quantized to the tracked
+    /// precision via `round_dp(dp)`. That was correct for under-scale
+    /// padding but wrong for over-scale truncation — it lost
+    /// arithmetic precision that bean-query preserved (closes #1103).
     #[must_use]
     pub fn format(&self, number: Decimal, currency: &str) -> String {
         let precision = self.get_precision(currency);
 
         if let Some(dp) = precision {
-            // Round with half-up (MidpointAwayFromZero) to match Python behavior
-            // Note: format!("{:.N}", decimal) uses truncation which gives wrong results
-            // for values like -1202.00896 (would give -1202.00 instead of -1202.01)
-            let rounded = number.round_dp(dp);
+            // Render at max(value_scale, tracked_dp). When value_scale
+            // already meets or exceeds dp, `round_dp` is a no-op (it only
+            // rounds when scale > target). When value_scale is shorter,
+            // `ensure_decimal_places` pads to dp. So this branch covers
+            // both "preserve high precision" and "pad short precision"
+            // without losing either.
+            let effective_dp = number.scale().max(dp);
+            let rounded = number.round_dp(effective_dp);
             let formatted = format!("{rounded}");
-            // Ensure we have the right number of decimal places (add trailing zeros if needed)
-            let formatted = Self::ensure_decimal_places(&formatted, dp);
+            let formatted = Self::ensure_decimal_places(&formatted, effective_dp);
             if self.render_commas {
                 Self::add_commas(&formatted)
             } else {

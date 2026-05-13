@@ -733,6 +733,11 @@ mod tests {
     /// a currency hint goes through `DisplayContext::format(n, currency)`,
     /// not `format_default(n)`. Without the hint, behavior is unchanged
     /// from `format_value`.
+    ///
+    /// With the hint, the rendered scale is `max(value_scale, currency_dp)`
+    /// — so a scale-0 value (`dec!(0)`) is padded up to USD's tracked 2dp,
+    /// while a scale-3 value (`dec!(0.000)`) is preserved at 3dp because
+    /// the currency hint only pads up; it never quantizes down (closes #1103).
     #[test]
     fn test_format_value_with_hint_routes_number_through_per_currency_ctx() {
         let mut ctx = DisplayContext::new();
@@ -741,19 +746,25 @@ mod tests {
         ctx.update(dec!(2.00), "USD");
         ctx.update(dec!(3.00), "USD");
 
-        // A SUM-of-USD-zeros that came out at scale 3 from rust_decimal:
-        let sum_value = Value::Number(dec!(0.000));
-
-        let with_hint = format_value_with_hint(&sum_value, false, &ctx, Some("USD"));
-        let without_hint = format_value_with_hint(&sum_value, false, &ctx, None);
-
-        // With the hint, USD's per-currency precision (2dp) wins.
+        // Scale-0 input: the hint pads up to USD's 2dp.
+        let pad_value = Value::Number(dec!(0));
+        let padded = format_value_with_hint(&pad_value, false, &ctx, Some("USD"));
         assert_eq!(
-            with_hint, "0.00",
-            "expected 2dp via USD ctx, got {with_hint:?}"
+            padded, "0.00",
+            "scale-0 value should pad up to USD's 2dp, got {padded:?}"
         );
-        // Without the hint, we fall back to format_value's default (preserves
+
+        // Scale-3 input: the hint preserves the higher scale (post-#1103).
+        let high_scale_value = Value::Number(dec!(0.000));
+        let preserved = format_value_with_hint(&high_scale_value, false, &ctx, Some("USD"));
+        assert_eq!(
+            preserved, "0.000",
+            "scale-3 value should preserve scale (max(3, 2) = 3), got {preserved:?}"
+        );
+
+        // Without the hint, fall through to format_value's default (preserves
         // the natural 3dp scale from rust_decimal).
+        let without_hint = format_value_with_hint(&high_scale_value, false, &ctx, None);
         assert_eq!(
             without_hint, "0.000",
             "expected default-format to keep rust_decimal natural scale, got {without_hint:?}"
@@ -906,13 +917,15 @@ mod tests {
         );
     }
 
-    /// Mirror of the AC #4 tests for the *text* renderer: same input
-    /// MUST be quantized. This is the bug we're fixing — without the
-    /// hint, text output would also keep 0.000. Together with the
-    /// three lossless tests above, this pins the divergence: text
-    /// quantizes, everything else doesn't.
+    /// Text-renderer aggregate cells use the currency hint to PAD short
+    /// values up to the currency's tracked precision. A scale-0 input
+    /// rendered under a USD (2dp) hint becomes `0.00`, not the natural
+    /// `0`. The hint does NOT quantize down — scale-3 inputs preserve
+    /// their scale, matching bean-query (closes #1103). The "pad up"
+    /// behavior is what makes `SUM(0.00) → 0.00` instead of `0`
+    /// (the #954 fix that this code path was added for).
     #[test]
-    fn test_text_aggregate_output_quantizes_via_currency_hint() {
+    fn test_text_aggregate_output_pads_via_currency_hint() {
         use rustledger_query::QueryResult;
 
         let mut ctx = DisplayContext::new();
@@ -920,9 +933,10 @@ mod tests {
         ctx.update(dec!(2.00), "USD");
         ctx.update(dec!(3.00), "USD");
 
+        // Scale-0 input under USD's 2dp hint pads up.
         let mut result = QueryResult::new(vec!["currency".into(), "sum".into()]);
         result.add_aggregate_row(
-            vec![Value::String("USD".into()), Value::Number(dec!(0.000))],
+            vec![Value::String("USD".into()), Value::Number(dec!(0))],
             vec![Value::String("USD".into())],
         );
 
@@ -931,8 +945,8 @@ mod tests {
         let text = String::from_utf8(buf).expect("utf8");
 
         assert!(
-            text.contains("0.00") && !text.contains("0.000"),
-            "text output should be quantized to 2dp via USD hint, got {text:?}"
+            text.contains("0.00"),
+            "scale-0 input should pad up to USD's 2dp via hint, got {text:?}"
         );
     }
 
@@ -1193,8 +1207,11 @@ mod tests {
 
     /// Pivoted rows have `None` `group_key` but the column name is a
     /// currency code. The width-calc and print passes both consult the
-    /// column-name fallback, so a `Value::Number(0.000)` in a USD-named
-    /// column should render as `0.00` (matching USD's tracked 2dp).
+    /// column-name fallback, so a scale-0 `Value::Number(0)` in a
+    /// USD-named column should render as `0.00` (padded to USD's
+    /// tracked 2dp). After #1103, the hint pads up but never quantizes
+    /// down — so a scale-3 input would render as `0.000`. This test
+    /// uses scale-0 to exercise the padding path the fallback enables.
     #[test]
     fn test_text_pivoted_column_uses_column_name_as_currency_hint() {
         use rustledger_query::QueryResult;
@@ -1209,7 +1226,7 @@ mod tests {
         let mut result = QueryResult::new(vec!["account".into(), "USD".into()]);
         result.add_row(vec![
             Value::String("Assets:Cash".into()),
-            Value::Number(dec!(0.000)),
+            Value::Number(dec!(0)),
         ]);
 
         let mut buf: Vec<u8> = Vec::new();
@@ -1226,7 +1243,7 @@ mod tests {
             .unwrap_or_else(|| panic!("expected non-empty data row; got: {data_row:?}"));
         assert_eq!(
             last_cell, "0.00",
-            "pivoted column named USD should drive 2dp quantization; row was {data_row:?}, raw output:\n{text}"
+            "pivoted column named USD should pad scale-0 input up to 2dp; row was {data_row:?}, raw output:\n{text}"
         );
     }
 
@@ -1274,6 +1291,12 @@ mod tests {
     /// some_other_col`), the row's sidecar is the more authoritative
     /// signal — it came from the actual GROUP BY key, not a heuristic
     /// over the column header.
+    ///
+    /// Test the precedence with a scale-0 input: the JPY (0dp) column-name
+    /// would pad to `0`, but the USD (2dp) row sidecar wins and pads to
+    /// `0.00`. (Post-#1103, the hint pads up but never quantizes down,
+    /// so we use scale-0 to exercise the padding path that distinguishes
+    /// 0dp from 2dp hints.)
     #[test]
     fn test_row_sidecar_wins_over_column_name_fallback() {
         use rustledger_query::QueryResult;
@@ -1284,13 +1307,10 @@ mod tests {
         ctx.update(dec!(100), "JPY");
 
         // Column name says JPY (0dp); row sidecar says USD (2dp).
-        // The row sidecar must win → 2dp quantization.
+        // The row sidecar must win → padded to 2dp.
         let mut result = QueryResult::new(vec!["account".into(), "JPY".into()]);
         result.add_aggregate_row(
-            vec![
-                Value::String("Assets:Cash".into()),
-                Value::Number(dec!(0.000)),
-            ],
+            vec![Value::String("Assets:Cash".into()), Value::Number(dec!(0))],
             vec![Value::String("USD".into())],
         );
 
@@ -1435,6 +1455,11 @@ mod tests {
     /// same row. Each pivoted column must use its OWN precision via the
     /// per-column hint — the column-name fallback isn't a single global
     /// setting, it's resolved per cell.
+    ///
+    /// Test with scale-0 inputs so the per-column hint drives different
+    /// padding: USD pads to 2dp, JPY stays at 0dp (max(0, 0) = 0).
+    /// Post-#1103 the hint pads up but never quantizes down, so scale-0
+    /// is the right shape to exercise per-column padding differences.
     #[test]
     fn test_text_pivoted_multi_currency_uses_per_column_precision() {
         use rustledger_query::QueryResult;
@@ -1446,14 +1471,14 @@ mod tests {
         ctx.update(dec!(100), "JPY");
         ctx.update(dec!(200), "JPY");
 
-        // Simulate post-PIVOT shape: same row has BOTH a USD value at
-        // scale 3 and a JPY value at scale 2. After the per-column
-        // fallback, USD should render at 2dp and JPY at 0dp.
+        // Simulate post-PIVOT shape: same row has scale-0 values in both
+        // columns. After the per-column fallback, USD pads to 2dp and JPY
+        // stays at 0dp.
         let mut result = QueryResult::new(vec!["account".into(), "USD".into(), "JPY".into()]);
         result.add_row(vec![
             Value::String("Assets:Cash".into()),
-            Value::Number(dec!(0.000)),
-            Value::Number(dec!(50.00)),
+            Value::Number(dec!(0)),
+            Value::Number(dec!(50)),
         ]);
 
         let mut buf: Vec<u8> = Vec::new();
@@ -1483,20 +1508,17 @@ mod tests {
     }
 
     /// Defensive regression test: a non-pivoted query with a column
-    /// aliased as a currency code (e.g. `SELECT … AS USD`) must NOT have
-    /// its values silently quantized when the active context tracks USD
-    /// for unrelated reasons.
+    /// aliased as a currency code (e.g. `SELECT … AS USD`) inherits the
+    /// column-name fallback's padding behavior — values get padded up to
+    /// the tracked currency precision.
     ///
-    /// The column-name fallback's `ctx.get_precision().is_some()` guard
-    /// would let the hint kick in if USD is tracked. The expected behavior
-    /// here is debatable — but pinning it as a test means a future change
-    /// will be a deliberate choice, not a silent drift.
-    ///
-    /// Today's contract: WITH tracked USD precision, the fallback DOES
-    /// quantize cells in the USD-aliased column. This is the same
-    /// behavior PIVOT relies on; we're just acknowledging that
-    /// non-pivoted queries inherit it too. If it turns out to be a real
-    /// problem in practice, the fix is to gate the fallback on something
+    /// Today's contract: WITH tracked USD precision (2dp), a scale-0
+    /// value in a USD-aliased column renders padded to `0.00`. After
+    /// #1103, the fallback only pads UP (`max(scale, dp)`); it never
+    /// quantizes higher-scale values DOWN. This is the same behavior
+    /// PIVOT relies on; we're just acknowledging that non-pivoted
+    /// queries inherit it too. If it turns out to be a real problem in
+    /// practice, the fix is to gate the fallback on something
     /// PIVOT-specific (e.g. a boolean on `QueryResult` set by
     /// `apply_pivot`).
     #[test]
@@ -1507,13 +1529,10 @@ mod tests {
         ctx.update(dec!(1.00), "USD");
         ctx.update(dec!(2.00), "USD");
 
-        // Non-pivoted result: column literally named USD, value at scale 3.
+        // Non-pivoted result: column literally named USD, scale-0 value.
         // No row sidecar (so `currency_hints` is empty for this row).
         let mut result = QueryResult::new(vec!["label".into(), "USD".into()]);
-        result.add_row(vec![
-            Value::String("test".into()),
-            Value::Number(dec!(0.000)),
-        ]);
+        result.add_row(vec![Value::String("test".into()), Value::Number(dec!(0))]);
 
         let mut buf: Vec<u8> = Vec::new();
         write_text(&result, &mut buf, false, &ctx).expect("text ok");
@@ -1529,7 +1548,7 @@ mod tests {
         let last_cell = data_row.split_whitespace().last().expect("non-empty row");
         assert_eq!(
             last_cell, "0.00",
-            "currency-named column drives quantization regardless of PIVOT path; row was {data_row:?}"
+            "currency-named column drives padding regardless of PIVOT path; row was {data_row:?}"
         );
     }
 }

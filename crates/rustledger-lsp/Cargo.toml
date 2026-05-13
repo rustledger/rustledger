@@ -15,9 +15,6 @@ categories = ["development-tools", "text-editors"]
 lsp-server.workspace = true
 lsp-types.workspace = true
 
-# Async runtime
-tokio.workspace = true
-
 # Document management
 ropey.workspace = true
 
@@ -38,13 +35,10 @@ rust_decimal.workspace = true
 # Utilities
 tracing.workspace = true
 tracing-subscriber.workspace = true
-thiserror.workspace = true
-serde.workspace = true
 serde_json.workspace = true
 jiff.workspace = true
 
 [dev-dependencies]
-tokio-test = "0.4"
 tempfile.workspace = true
 
 [[bin]]

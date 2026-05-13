@@ -60,7 +60,7 @@ impl Span {
         &source[self.start..self.end]
     }
 
-    /// Convert to a chumsky span.
+    /// Convert to a byte-offset `Range<usize>` for downstream span consumers.
     #[must_use]
     pub const fn into_range(self) -> Range<usize> {
         self.start..self.end

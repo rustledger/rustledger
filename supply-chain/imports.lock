@@ -64,13 +64,6 @@ user-id = 3618
 user-login = "dtolnay"
 user-name = "David Tolnay"
 
-[[publisher.bstr]]
-version = "1.12.1"
-when = "2025-10-26"
-user-id = 189
-user-login = "BurntSushi"
-user-name = "Andrew Gallant"
-
 [[publisher.bumpalo]]
 version = "3.20.2"
 when = "2026-02-19"
@@ -135,8 +128,8 @@ user-login = "epage"
 user-name = "Ed Page"
 
 [[publisher.clap_complete]]
-version = "4.6.3"
-when = "2026-04-27"
+version = "4.6.5"
+when = "2026-05-11"
 user-id = 6743
 user-login = "epage"
 user-name = "Ed Page"
@@ -653,15 +646,8 @@ user-login = "dtolnay"
 user-name = "David Tolnay"
 
 [[publisher.tokio]]
-version = "1.52.2"
-when = "2026-05-04"
-user-id = 6741
-user-login = "Darksonn"
-user-name = "Alice Ryhl"
-
-[[publisher.tokio-macros]]
-version = "2.7.0"
-when = "2026-04-03"
+version = "1.52.3"
+when = "2026-05-08"
 user-id = 6741
 user-login = "Darksonn"
 user-name = "Alice Ryhl"
@@ -1527,12 +1513,6 @@ Well documented invariants, good assertions for those invariants in unsafe code,
 and tested with MIRI to boot. LGTM.
 """
 
-[[audits.bytecode-alliance.audits.beef]]
-who = "Pat Hickey <pat@moreproductive.org>"
-criteria = "safe-to-deploy"
-version = "0.5.2"
-notes = "This is a more compact implementation of std's Cow. It uses lots of unsafe, but appears sound in my audit."
-
 [[audits.bytecode-alliance.audits.bitflags]]
 who = "Jamey Sharp <jsharp@fastly.com>"
 criteria = "safe-to-deploy"
@@ -1572,6 +1552,15 @@ who = "Alex Crichton <alex@alexcrichton.com>"
 criteria = "safe-to-deploy"
 delta = "2.10.0 -> 2.11.1"
 notes = "Minor updates, nothing awry here."
+
+[[audits.bytecode-alliance.audits.bitmaps]]
+who = "Nick Fitzgerald <fitzgen@gmail.com>"
+criteria = "safe-to-deploy"
+version = "2.1.0"
+notes = """
+No ambient I/O. Minimal unsafe, purely related to simd ISA extensions and
+obviously correct with only local reasoning.
+"""
 
 [[audits.bytecode-alliance.audits.block-buffer]]
 who = "Benjamin Bouvier <public@benj.me>"
@@ -1731,6 +1720,12 @@ size of this crate comes from the large generated unicode tables file. This
 crate is broadly used throughout the ecosystem and does not contain anything
 suspicious.
 """
+
+[[audits.bytecode-alliance.audits.inout]]
+who = "Andrew Brown <andrew.brown@intel.com>"
+criteria = "safe-to-deploy"
+version = "0.1.3"
+notes = "A part of RustCrypto/utils, this crate is designed to handle unsafe buffers and carefully documents the safety concerns throughout. Older versions of this tally up to ~130k daily downloads."
 
 [[audits.bytecode-alliance.audits.ittapi]]
 who = "Andrew Brown <andrew.brown@intel.com>"
@@ -2691,6 +2686,11 @@ who = "David Cook <dcook@divviup.org>"
 criteria = "safe-to-deploy"
 delta = "0.4.0 -> 0.4.1"
 
+[[audits.isrg.audits.inout]]
+who = "David Cook <dcook@divviup.org>"
+criteria = "safe-to-deploy"
+delta = "0.1.4 -> 0.2.2"
+
 [[audits.isrg.audits.once_cell]]
 who = "J.C. Jones <jc@divviup.org>"
 criteria = "safe-to-deploy"
@@ -2920,12 +2920,6 @@ who = "Alex Franchuk <afranchuk@mozilla.com>"
 criteria = "safe-to-deploy"
 delta = "0.7.2 -> 0.7.6"
 notes = "Manually verified new unsafe pointer arithmetic."
-aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
-
-[[audits.mozilla.audits.ascii]]
-who = "Glenn Watson <git@chillybin.org>"
-criteria = "safe-to-deploy"
-version = "1.1.0"
 aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
 
 [[audits.mozilla.audits.bit-set]]
@@ -3294,16 +3288,6 @@ feature. No new dependencies or unsafe code.
 """
 aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
 
-[[audits.mozilla.audits.rustc_version]]
-who = "Nika Layzell <nika@thelayzells.com>"
-criteria = "safe-to-deploy"
-version = "0.4.0"
-notes = """
-Use of powerful capabilities is limited to invoking `rustc -vV` to get version
-information for parsing version information.
-"""
-aggregated-from = "https://raw.githubusercontent.com/mozilla/cargo-vet/main/supply-chain/audits.toml"
-
 [[audits.mozilla.audits.seahash]]
 who = "Benjamin VanderSloot <bvandersloot@mozilla.com>"
 criteria = "safe-to-deploy"
@@ -3668,17 +3652,16 @@ criteria = "safe-to-deploy"
 delta = "0.3.2 -> 0.3.3"
 aggregated-from = "https://raw.githubusercontent.com/zcash/librustzcash/main/supply-chain/audits.toml"
 
+[[audits.zcash.audits.inout]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "0.1.3 -> 0.1.4"
+aggregated-from = "https://raw.githubusercontent.com/zcash/wallet/main/supply-chain/audits.toml"
+
 [[audits.zcash.audits.rand_xorshift]]
 who = "Sean Bowe <ewillbefull@gmail.com>"
 criteria = "safe-to-deploy"
 version = "0.3.0"
-aggregated-from = "https://raw.githubusercontent.com/zcash/zcash/master/qa/supply-chain/audits.toml"
-
-[[audits.zcash.audits.rustc_version]]
-who = "Jack Grigg <jack@electriccoin.co>"
-criteria = "safe-to-deploy"
-delta = "0.4.0 -> 0.4.1"
-notes = "Changes to `Command` usage are to add support for `RUSTC_WRAPPER`."
 aggregated-from = "https://raw.githubusercontent.com/zcash/zcash/master/qa/supply-chain/audits.toml"
 
 [[audits.zcash.audits.rustversion]]

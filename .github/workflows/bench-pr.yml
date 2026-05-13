@@ -167,6 +167,13 @@ jobs:
             echo "Could not fetch baseline history"
           fi
       - name: Post PR comment
+        # GITHUB_TOKEN is read-only on `pull_request` workflows from forks
+        # (a GitHub security guarantee; `permissions: pull-requests: write`
+        # above does not override it). Make comment-posting best-effort so
+        # the job's success/failure reflects the actual benchmark result,
+        # not whether we could leave a comment. Fork PRs silently skip with
+        # a log line; non-fork PRs continue to receive the comment. (#1093)
+        continue-on-error: true
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |

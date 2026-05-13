@@ -514,9 +514,9 @@ fn at_function<'a>() -> impl Parser<'a, ParserInput<'a>, String, ParserExtra<'a>
 
 /// Parse an expression (with precedence climbing).
 #[allow(clippy::large_stack_frames)]
-fn expr<'a>() -> impl Parser<'a, ParserInput<'a>, Expr, ParserExtra<'a>> + Clone {
+fn expr<'a>() -> Boxed<'a, 'a, ParserInput<'a>, Expr, ParserExtra<'a>> {
     recursive(|expr| {
-        let primary = primary_expr(expr.clone());
+        let primary = primary_expr(expr.clone()).boxed();
 
         // Unary minus
         let unary = just('-')
@@ -529,32 +529,39 @@ fn expr<'a>() -> impl Parser<'a, ParserInput<'a>, Expr, ParserExtra<'a>> + Clone
                 } else {
                     e
                 }
-            });
+            })
+            .boxed();
 
         // Multiplicative: * / %
-        let multiplicative = unary.clone().foldl(
-            ws().ignore_then(choice((
-                just('*').to(BinaryOperator::Mul),
-                just('/').to(BinaryOperator::Div),
-                just('%').to(BinaryOperator::Mod),
-            )))
-            .then_ignore(ws())
-            .then(unary)
-            .repeated(),
-            |left, (op, right)| Expr::binary(left, op, right),
-        );
+        let multiplicative = unary
+            .clone()
+            .foldl(
+                ws().ignore_then(choice((
+                    just('*').to(BinaryOperator::Mul),
+                    just('/').to(BinaryOperator::Div),
+                    just('%').to(BinaryOperator::Mod),
+                )))
+                .then_ignore(ws())
+                .then(unary)
+                .repeated(),
+                |left, (op, right)| Expr::binary(left, op, right),
+            )
+            .boxed();
 
         // Additive: + -
-        let additive = multiplicative.clone().foldl(
-            ws().ignore_then(choice((
-                just('+').to(BinaryOperator::Add),
-                just('-').to(BinaryOperator::Sub),
-            )))
-            .then_ignore(ws())
-            .then(multiplicative)
-            .repeated(),
-            |left, (op, right)| Expr::binary(left, op, right),
-        );
+        let additive = multiplicative
+            .clone()
+            .foldl(
+                ws().ignore_then(choice((
+                    just('+').to(BinaryOperator::Add),
+                    just('-').to(BinaryOperator::Sub),
+                )))
+                .then_ignore(ws())
+                .then(multiplicative)
+                .repeated(),
+                |left, (op, right)| Expr::binary(left, op, right),
+            )
+            .boxed();
 
         // Comparison: = != < <= > >= ~ !~ IN NOT IN BETWEEN IS NULL
         let comparison = additive
@@ -629,7 +636,8 @@ fn expr<'a>() -> impl Parser<'a, ParserInput<'a>, Expr, ParserExtra<'a>> + Clone
                 } else {
                     expr
                 }
-            });
+            })
+            .boxed();
 
         // NOT
         let not_expr = kw("NOT")
@@ -640,17 +648,21 @@ fn expr<'a>() -> impl Parser<'a, ParserInput<'a>, Expr, ParserExtra<'a>> + Clone
             .map(|(nots, e)| {
                 nots.into_iter()
                     .fold(e, |acc, ()| Expr::unary(UnaryOperator::Not, acc))
-            });
+            })
+            .boxed();
 
         // AND
-        let and_expr = not_expr.clone().foldl(
-            ws1()
-                .ignore_then(kw("AND"))
-                .ignore_then(ws1())
-                .ignore_then(not_expr)
-                .repeated(),
-            |left, right| Expr::binary(left, BinaryOperator::And, right),
-        );
+        let and_expr = not_expr
+            .clone()
+            .foldl(
+                ws1()
+                    .ignore_then(kw("AND"))
+                    .ignore_then(ws1())
+                    .ignore_then(not_expr)
+                    .repeated(),
+                |left, right| Expr::binary(left, BinaryOperator::And, right),
+            )
+            .boxed();
 
         // OR (lowest precedence)
         and_expr.clone().foldl(
@@ -662,6 +674,7 @@ fn expr<'a>() -> impl Parser<'a, ParserInput<'a>, Expr, ParserExtra<'a>> + Clone
             |left, right| Expr::binary(left, BinaryOperator::Or, right),
         )
     })
+    .boxed()
 }
 
 /// Parse comparison operators (excluding IN/NOT IN which are handled specially).

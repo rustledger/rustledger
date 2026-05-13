@@ -69,7 +69,7 @@ impl Executor<'_> {
         let mut result = QueryResult::new(column_names.clone());
 
         // Collect matching postings
-        let postings = self.collect_postings(query.from.as_ref(), query.where_clause.as_ref())?;
+        let postings = self.collect_postings(query)?;
 
         // Check if this is an aggregate query.
         // A query is aggregate if any SELECT target contains an aggregate function,

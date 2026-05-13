@@ -331,7 +331,6 @@ pub fn value_to_json(value: &rustledger_query::Value) -> serde_json::Value {
         Value::Inventory(inv) => {
             let positions: Vec<_> = inv
                 .positions()
-                .iter()
                 .map(|p| {
                     serde_json::json!({
                         "units": {

@@ -621,11 +621,13 @@ pub fn run(args: &Args) -> Result<ExitCode> {
             error_count += 1;
         }
     }
-    let mut warning_count = ledger
+    let warning_count = ledger
         .errors
         .iter()
         .filter(|e| matches!(e.severity, rustledger_loader::ErrorSeverity::Warning))
         .count();
+    #[cfg(feature = "python-plugin-wasm")]
+    let mut warning_count = warning_count;
 
     // === Run CLI-specified WASM plugins as post-processing ===
     // File-declared plugins (native, WASM, Python) are all handled by

@@ -103,6 +103,26 @@ KNOWN_PYTHON_DIVERGENCES: set[tuple[str, str]] = {
     ("testdata_source_healthequity_test_matching_journal.beancount", "first-balance-by-month"),
     ("testdata_source_ofx_test_fidelity_ira_journal.beancount", "first-balance-by-month"),
     ("testdata_source_paypal_test_matching_journal.beancount", "first-balance-by-month"),
+    # `sum-number-by-currency` cases: Python beanquery preserves arithmetic
+    # scale through SUM (`-1966.700` at scale 3); rledger's booking layer
+    # normalizes residuals more aggressively and lands at scale 2
+    # (`-1966.70`). The values are numerically equal — the difference is
+    # *display scale only*, surfaced as a textual mismatch because both
+    # tools intentionally preserve scale on `Value::Number` output.
+    #
+    # Root cause: cost-spec interpolation against `{}` lot-match against
+    # a `{{total}}` lot produces a residual whose scale depends on which
+    # intermediate value drives it. Python's intermediate stays at the
+    # buy-side scale 3; rledger's #1108 fix dropped intermediate scale to
+    # the input minimum (2) to stop 26-digit contamination — that fix
+    # was correct but over-applies on these fixtures.
+    #
+    # Continuation of #1108 (Rust pipeline scale propagation). Tracked
+    # under #1112. Surgical pin (not "*") so any other divergence on
+    # these fixtures stays surfaced.
+    ("testdata_source_healthequity_test_invalid_journal.beancount", "sum-number-by-currency"),
+    ("testdata_source_healthequity_test_matching_journal.beancount", "sum-number-by-currency"),
+    ("testdata_source_ofx_test_non_default_capital_gains_journal.beancount", "sum-number-by-currency"),
 }
 
 

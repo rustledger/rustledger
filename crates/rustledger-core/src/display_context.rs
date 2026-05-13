@@ -451,9 +451,64 @@ impl DisplayContext {
     }
 
     /// Format an amount (number + currency) using the tracked precision.
+    ///
+    /// Unlike [`Self::format`] (which preserves over-scale arithmetic
+    /// precision to match Python `bean-query`'s `DecimalRenderer` for
+    /// scalar `Value::Number` results), this method always *quantizes* to
+    /// the currency's tracked dp — matching bean-query's `AmountRenderer`
+    /// for Amounts, Positions, and Inventory entries.
+    ///
+    /// Python uses two distinct renderers for the two semantic kinds of
+    /// output:
+    ///
+    /// - `DecimalRenderer` for naked decimals (preserves scale, since
+    ///   Python `decimal` carries scale through arithmetic).
+    /// - `AmountRenderer` for amount-typed values (uses the ledger's
+    ///   display context per-currency dp, which is the user-facing
+    ///   "how many decimal places does this currency render at" setting).
+    ///
+    /// Rust used to conflate the two through a single `format` call,
+    /// which is why #1103's fix (preserving scale in `format`) inadvertently
+    /// regressed the BQL compat suite by ~7pp on queries that produce
+    /// `Value::Inventory` — the position amounts inside the inventory now
+    /// render with raw arithmetic scale instead of the currency's display
+    /// dp. See #1112 for the regression analysis.
     #[must_use]
     pub fn format_amount(&self, number: Decimal, currency: &str) -> String {
-        format!("{} {}", self.format(number, currency), currency)
+        format!("{} {}", self.format_quantized(number, currency), currency)
+    }
+
+    /// Format the number portion of an Amount/Position (no currency
+    /// suffix), quantized to the tracked dp.
+    ///
+    /// Used by the BQL `numberify` rendering path that strips the
+    /// currency from positions/inventories — same semantics as
+    /// [`Self::format_amount`] but without the trailing ` <CURRENCY>`.
+    #[must_use]
+    pub fn format_amount_number(&self, number: Decimal, currency: &str) -> String {
+        self.format_quantized(number, currency)
+    }
+
+    /// Internal: quantize `number` to `currency`'s tracked dp (rounding
+    /// and padding) and stringify. Falls back to natural representation
+    /// when the currency is untracked.
+    fn format_quantized(&self, number: Decimal, currency: &str) -> String {
+        let raw = match self.get_precision(currency) {
+            Some(dp) => {
+                let mut rounded = number.round_dp(dp);
+                // `round_dp` leaves a smaller scale than `dp` when the
+                // input had fewer dp; `rescale` pads with trailing zeros
+                // to exactly `dp`.
+                rounded.rescale(dp);
+                rounded.to_string()
+            }
+            None => number.normalize().to_string(),
+        };
+        if self.render_commas {
+            Self::add_commas(&raw)
+        } else {
+            raw
+        }
     }
 
     /// Format a Decimal that has no associated currency.
@@ -892,6 +947,55 @@ mod tests {
         // Value scale ≤ tracked dp → pad up (unchanged from #988 fix).
         assert_eq!(ctx.format(dec!(7.5), "USD"), "7.50");
         assert_eq!(ctx.format(dec!(0), "USD"), "0.00");
+    }
+
+    /// Pins the post-#1112 fix: `format` and `format_amount` must NOT share
+    /// rounding behavior.
+    ///
+    /// `format` (used for scalar `Value::Number`) preserves the Decimal's
+    /// arithmetic scale — matches Python `DecimalRenderer`. `format_amount`
+    /// (used for Amounts/Positions/Inventory) quantizes to the currency's
+    /// tracked dp — matches Python `AmountRenderer`. Conflating them is
+    /// what caused the 7pp BQL compat regression on main since #1106.
+    #[test]
+    fn test_format_vs_format_amount_split_semantics() {
+        let mut ctx = DisplayContext::new();
+        ctx.update(dec!(100.00), "USD");
+        ctx.update(dec!(50.25), "USD");
+        assert_eq!(ctx.get_precision("USD"), Some(2));
+
+        // `format`: scalar Number → preserve arithmetic scale (over and under).
+        assert_eq!(ctx.format(dec!(-1202.00896), "USD"), "-1202.00896");
+        assert_eq!(ctx.format(dec!(7.5), "USD"), "7.50");
+
+        // `format_amount`: Amount → quantize to tracked dp (over and under).
+        assert_eq!(ctx.format_amount(dec!(-1202.00896), "USD"), "-1202.01 USD");
+        assert_eq!(ctx.format_amount(dec!(7.5), "USD"), "7.50 USD");
+        // Cost-spec interpolation can produce 26-digit per-unit values; the
+        // Amount renderer must clamp those to the currency's display dp.
+        assert_eq!(
+            ctx.format_amount(dec!(170.16449234259784458309699376), "USD"),
+            "170.16 USD"
+        );
+
+        // `format_amount_number`: same quantize semantics, no currency suffix.
+        assert_eq!(
+            ctx.format_amount_number(dec!(-1202.00896), "USD"),
+            "-1202.01"
+        );
+        assert_eq!(ctx.format_amount_number(dec!(7.5), "USD"), "7.50");
+    }
+
+    /// Untracked currencies fall through to natural rendering in both
+    /// `format` and `format_amount`. Trailing zeros are stripped because
+    /// there's no display-precision target to pad against.
+    #[test]
+    fn test_format_amount_untracked_currency_uses_natural_scale() {
+        let ctx = DisplayContext::new();
+        // No prior `update` calls — get_precision("USD") returns None.
+        assert_eq!(ctx.format_amount(dec!(170.164), "USD"), "170.164 USD");
+        assert_eq!(ctx.format_amount(dec!(7.5), "USD"), "7.5 USD");
+        assert_eq!(ctx.format_amount(dec!(100), "USD"), "100 USD");
     }
 
     #[test]

@@ -476,7 +476,7 @@ pub(super) fn format_value(value: &Value, numberify: bool, ctx: &DisplayContext)
         }
         Value::Position(p) => {
             if numberify {
-                ctx.format(p.units.number, p.units.currency.as_str())
+                ctx.format_amount_number(p.units.number, p.units.currency.as_str())
             } else {
                 let mut s = ctx.format_amount(p.units.number, p.units.currency.as_str());
                 if let Some(ref cost) = p.cost {
@@ -547,7 +547,7 @@ pub(super) fn format_value(value: &Value, numberify: bool, ctx: &DisplayContext)
                 .filter(|p| !position_renders_as_zero(p, ctx))
                 .map(|p| {
                     if numberify {
-                        ctx.format(p.units.number, p.units.currency.as_str())
+                        ctx.format_amount_number(p.units.number, p.units.currency.as_str())
                     } else {
                         let mut s = ctx.format_amount(p.units.number, p.units.currency.as_str());
                         if let Some(ref cost) = p.cost {

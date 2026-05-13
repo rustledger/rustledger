@@ -1589,7 +1589,7 @@ mod tests {
     ///
     /// Concretely models the healthequity fixture pattern: buy with
     /// `{{total}}` total cost, sell with `{}` lot-match. After booking,
-    /// the sell's filled CostSpec carries the high-scale per_unit from
+    /// the sell's filled `CostSpec` carries the high-scale `per_unit` from
     /// the division — and interpolation must STILL round the missing
     /// Income residual to USD's 2dp (no posting-unit-scale cost-scale
     /// contamination).

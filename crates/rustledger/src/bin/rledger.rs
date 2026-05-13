@@ -131,6 +131,12 @@ enum Commands {
         action: CompatAction,
     },
 
+    /// Non-fatal advisory passes — e.g., detect inter-account transfer pairs
+    Lint {
+        #[command(flatten)]
+        args: rustledger::cmd::lint::Args,
+    },
+
     /// Generate shell completions
     Completions {
         /// Shell to generate completions for
@@ -431,6 +437,13 @@ fn main() -> ExitCode {
                 }
             }
         }
+        Commands::Lint { args } => match rustledger::cmd::lint::run(&args) {
+            Ok(code) => code,
+            Err(e) => {
+                eprintln!("error: {e:#}");
+                ExitCode::from(1)
+            }
+        },
         Commands::Compat { action } => match action {
             CompatAction::Install { prefix } => {
                 match rustledger::cmd::compat::install(prefix.as_deref()) {

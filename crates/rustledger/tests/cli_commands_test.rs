@@ -246,8 +246,159 @@ fn test_check_ambiguous_lot_match_reports_once() {
 }
 
 // =============================================================================
-// rledger query tests
+// rledger lint transfers tests
 // =============================================================================
+
+#[test]
+fn test_lint_transfers_help() {
+    let output = Command::new(require_rledger!())
+        .args(["lint", "transfers", "--help"])
+        .output()
+        .expect("Failed to run rledger lint transfers --help");
+    assert!(output.status.success(), "Help should succeed");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("min-confidence") || stdout.contains("min_confidence"),
+        "help should mention --min-confidence flag: {stdout}"
+    );
+}
+
+#[test]
+fn test_lint_transfers_detects_pair_across_files() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let checking = dir.path().join("checking.bean");
+    let savings = dir.path().join("savings.bean");
+    std::fs::write(
+        &checking,
+        "2024-01-01 open Assets:Checking USD\n\
+         \n\
+         2024-01-15 * \"Transfer to savings\"\n  \
+         Assets:Checking  -500.00 USD\n  \
+         Assets:Savings    500.00 USD\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &savings,
+        "2024-01-01 open Assets:Savings USD\n\
+         \n\
+         2024-01-15 * \"Transfer from checking\"\n  \
+         Assets:Savings    500.00 USD\n  \
+         Assets:Checking  -500.00 USD\n",
+    )
+    .unwrap();
+
+    let output = Command::new(require_rledger!())
+        .args(["lint", "transfers", "--format", "json"])
+        .arg(&checking)
+        .arg(&savings)
+        .output()
+        .expect("Failed to run rledger lint transfers");
+    assert!(
+        output.status.success(),
+        "lint should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("xfer-20240115-"),
+        "expected link_name in JSON output, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("\"applied\": false") || stdout.contains("\"applied\":false"),
+        "without --apply, JSON should show applied=false: {stdout}"
+    );
+}
+
+#[test]
+fn test_lint_transfers_apply_is_idempotent() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let checking = dir.path().join("checking.bean");
+    let savings = dir.path().join("savings.bean");
+    std::fs::write(
+        &checking,
+        "2024-01-01 open Assets:Checking USD\n\
+         2024-01-15 * \"Transfer to savings\"\n  \
+         Assets:Checking  -500.00 USD\n  \
+         Assets:Savings    500.00 USD\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &savings,
+        "2024-01-01 open Assets:Savings USD\n\
+         2024-01-15 * \"Transfer from checking\"\n  \
+         Assets:Savings    500.00 USD\n  \
+         Assets:Checking  -500.00 USD\n",
+    )
+    .unwrap();
+
+    let bin = require_rledger!();
+    // First apply.
+    let _ = Command::new(&bin)
+        .args(["lint", "transfers", "--apply"])
+        .arg(&checking)
+        .arg(&savings)
+        .output()
+        .expect("first --apply");
+    let after_first = std::fs::read_to_string(&checking).unwrap();
+    assert!(
+        after_first.contains("^xfer-20240115-"),
+        "first --apply should add link: {after_first}"
+    );
+
+    // Second apply must be a no-op.
+    let _ = Command::new(&bin)
+        .args(["lint", "transfers", "--apply"])
+        .arg(&checking)
+        .arg(&savings)
+        .output()
+        .expect("second --apply");
+    let after_second = std::fs::read_to_string(&checking).unwrap();
+    assert_eq!(
+        after_first, after_second,
+        "second --apply must not modify the file (idempotency); got:\n{after_second}"
+    );
+}
+
+// =============================================================================
+// rledger check --lint transfers tests (Phase 2)
+// =============================================================================
+
+#[test]
+fn test_check_with_lint_transfers_emits_warning_but_succeeds() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let combined = dir.path().join("combined.bean");
+    std::fs::write(
+        &combined,
+        "option \"operating_currency\" \"USD\"\n\
+         2024-01-01 open Assets:Checking USD\n\
+         2024-01-01 open Assets:Savings USD\n\
+         \n\
+         2024-01-15 * \"Transfer to savings\"\n  \
+         Assets:Checking  -500.00 USD\n  \
+         Assets:Savings    500.00 USD\n\
+         \n\
+         2024-01-15 * \"Transfer from checking\"\n  \
+         Assets:Savings    500.00 USD\n  \
+         Assets:Checking  -500.00 USD\n",
+    )
+    .unwrap();
+
+    let output = Command::new(require_rledger!())
+        .args(["check", "--lint", "transfers", "-f", "json"])
+        .arg(&combined)
+        .output()
+        .expect("Failed to run rledger check --lint transfers");
+    assert!(
+        output.status.success(),
+        "check --lint should still exit 0 — lint is non-fatal. stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("LINT-XFER"),
+        "expected LINT-XFER diagnostic, got: {stdout}"
+    );
+}
 
 #[test]
 fn test_query_version() {

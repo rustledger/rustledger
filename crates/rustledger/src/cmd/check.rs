@@ -138,6 +138,19 @@ pub struct Args {
     /// Output format (text or json)
     #[arg(long, short = 'f', value_enum, default_value = "text")]
     pub format: OutputFormat,
+
+    /// Run non-fatal advisory lints alongside validation.
+    ///
+    /// Supported names: `transfers` (detect unlinked inter-account transfer
+    /// pairs). Repeatable to enable multiple lints. Findings are emitted as
+    /// warnings, never errors — exit code is unaffected.
+    #[arg(long = "lint", value_name = "NAME")]
+    pub lints: Vec<String>,
+
+    /// Minimum confidence (0.0 - 1.0) for `--lint transfers` matches to be
+    /// reported. Default 0.8 silences the noisy 0.7 floor.
+    #[arg(long, default_value_t = 0.8)]
+    pub lint_min_confidence: f64,
 }
 
 /// Run the check command with the given arguments.
@@ -711,7 +724,7 @@ pub fn run(args: &Args) -> Result<ExitCode> {
                     let msg = format!("WASM plugin execution failed: {e}");
                     if json_mode {
                         diagnostics.push(JsonDiagnostic {
-                            file: main_file_str,
+                            file: main_file_str.clone(),
                             line: 1,
                             column: 1,
                             end_line: 1,
@@ -729,6 +742,81 @@ pub fn run(args: &Args) -> Result<ExitCode> {
                     error_count += 1;
                 }
             }
+        }
+    }
+
+    // === Non-fatal advisory lints (--lint NAME) ===
+    // Lint findings are warnings, never errors. They never affect exit code.
+    // Under `python-plugin-wasm` the binding above is already `mut`; rebind
+    // here only for the other cfg branch.
+    #[cfg(not(feature = "python-plugin-wasm"))]
+    let mut warning_count = warning_count;
+    if args
+        .lints
+        .iter()
+        .any(|l| l.eq_ignore_ascii_case("transfers"))
+    {
+        let mut wrappers: Vec<rustledger_plugin::types::DirectiveWrapper> =
+            Vec::with_capacity(spanned_directives.len());
+        for spanned in &spanned_directives {
+            let (filename, lineno) = if let Some(file) = source_map.get(spanned.file_id as usize) {
+                let (line, _col) = file.line_col(spanned.span.start);
+                (
+                    Some(file.path.to_string_lossy().into_owned()),
+                    u32::try_from(line).ok(),
+                )
+            } else {
+                (None, None)
+            };
+            wrappers.push(rustledger_plugin::directive_to_wrapper_with_location(
+                &spanned.value,
+                filename,
+                lineno,
+            ));
+        }
+        let config = rustledger_ops::transfer::TransferConfig::default();
+        let matches: Vec<_> =
+            rustledger_ops::transfer::find_transfers_in_ledger(&wrappers, &config)
+                .into_iter()
+                .filter(|m| m.confidence >= args.lint_min_confidence)
+                .collect();
+        for m in &matches {
+            let msg = format!(
+                "likely transfer pair: {} {} {} → {} (confidence {:.2}); link with ^xfer-... to silence",
+                m.amount,
+                m.currency,
+                m.from_account.as_deref().unwrap_or("?"),
+                m.to_account.as_deref().unwrap_or("?"),
+                m.confidence,
+            );
+            if json_mode {
+                diagnostics.push(JsonDiagnostic {
+                    file: m
+                        .from_filename
+                        .clone()
+                        .unwrap_or_else(|| main_file_str.clone()),
+                    line: m.from_lineno.map_or(1, |n| n as usize),
+                    column: 1,
+                    end_line: m.from_lineno.map_or(1, |n| n as usize),
+                    end_column: 1,
+                    severity: "warning".to_string(),
+                    phase: "lint".to_string(),
+                    code: "LINT-XFER".to_string(),
+                    message: msg,
+                    hint: Some(
+                        "run `rledger lint transfers --apply <files>` to add links".to_string(),
+                    ),
+                    context: None,
+                });
+            } else if !args.quiet {
+                let loc = format!(
+                    "{}:{}",
+                    m.from_filename.as_deref().unwrap_or("?"),
+                    m.from_lineno.map_or_else(|| "?".into(), |n| n.to_string()),
+                );
+                writeln!(stdout, "{loc}: warning[LINT-XFER]: {msg}")?;
+            }
+            warning_count += 1;
         }
     }
 

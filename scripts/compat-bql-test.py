@@ -85,8 +85,6 @@ KNOWN_PYTHON_DIVERGENCES: set[tuple[str, str]] = {
     # the ledger's display context. Affects any query that projects
     # `position` or sums it.
     ("testdata_source_generic_importer_test_invalid_journal.beancount", "*"),
-    # Interpolation quantization: Python rounds residual to zero
-    ("testdata_source_ofx_test_non_default_capital_gains_journal.beancount", "*"),
     # DisplayContext common vs max precision (#724)
     ("testdata_source_ofx_test_fidelity_journal.beancount", "*"),
     # beancount/beanquery#279: FIRST aggregator short-circuits operand

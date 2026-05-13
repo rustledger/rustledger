@@ -96,7 +96,7 @@ KNOWN_PYTHON_DIVERGENCES: set[tuple[str, str]] = {
     # values depending on whether other aggregators (e.g. LAST) appear
     # in the SELECT list — because LAST's presence forces the operand
     # to be evaluated on every row. See tests/compatibility/exclusions.toml
-    # for the full root-cause writeup. Rledger pre-computes ctx.balance
+    # for the full root-cause writeup. rledger pre-computes ctx.balance
     # per row so FIRST/LAST always agree; we don't want to mirror the
     # upstream bug. Surgical pin (not "*") so any other genuine
     # divergence on these fixtures stays surfaced.

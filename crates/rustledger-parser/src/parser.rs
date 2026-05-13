@@ -1759,7 +1759,8 @@ fn apply_pushed_meta(directive: &mut Directive, meta_stack: &[(String, MetaValue
 // Public API
 // ============================================================================
 
-/// Parse beancount source code using winnow-based parser.
+/// Parse beancount source code using the hand-rolled state-machine parser
+/// over a Logos-produced token stream.
 pub fn parse(source: &str) -> ParseResult {
     let raw_tokens: Vec<SpannedToken<'_>> = tokenize(source)
         .into_iter()

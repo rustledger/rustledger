@@ -1,4 +1,4 @@
-//! Beancount parser using Logos lexer and Winnow manual parser.
+//! Beancount parser using a Logos lexer and a hand-rolled state-machine parser.
 //!
 //! This crate provides a parser for the Beancount file format. It produces
 //! a stream of [`Directive`]s from source text, along with any parse errors.
@@ -79,7 +79,10 @@ impl ParseWarning {
 
 /// Parse beancount source code.
 ///
-/// Uses a fast token-based parser (Logos lexer + Winnow combinators).
+/// Uses a fast token-based parser: a Logos lexer feeds a hand-rolled
+/// state-machine parser. An early version targeted winnow's Stream
+/// trait but the manual approach turned out simpler and faster, so the
+/// winnow dependency was removed.
 ///
 /// # Arguments
 ///

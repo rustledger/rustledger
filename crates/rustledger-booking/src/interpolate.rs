@@ -154,10 +154,14 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
     // given currency simply doesn't get a quantization step (the residual is
     // rendered at its natural scale).
     //
-    // - #333 (`70.538 ABC {100 USD}` → missing CAD with cost-derived weight):
-    //   no non-integer CAD posting units; residual passes through unrounded at
-    //   its natural scale (which is `cost_spec_scale` from the explicit literal,
-    //   typically 2dp).
+    // - #333 (`1 CSU {2800.01 CAD}` + `1 CAD` commission + missing CAD):
+    //   no non-integer CAD posting units in this transaction; residual
+    //   passes through unrounded at its natural scale, which is 2dp from
+    //   the explicit cost literal `{2800.01}` flowing through
+    //   `cost_amount = units × per_unit`.
+    // - #251 (`70.538 ABC {100 USD}` + missing posting): no non-integer
+    //   USD posting units; residual = `70.538 × 100 = 7053.800` (scale 3
+    //   from the rust_decimal multiplication), preserved naturally.
     // - #1107 (`-1.763 STOCK {}` lot-matched against high-precision per_unit):
     //   the cash side `336.73 USD` gives USD scale=2; the residual gets
     //   quantized to 2dp instead of inheriting the lot's derived 26-digit
@@ -263,12 +267,18 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
                                 converted * amount.number.signum();
                         }
                         rustledger_core::PriceAnnotation::Total(price_amt) => {
-                            // Total price is an explicit amount - track its scale
+                            // Total price is an explicit amount — track its
+                            // scale only when non-integer, matching the
+                            // posting.units rule above. An integer `@@ 1 USD`
+                            // shouldn't quantize an elided same-currency
+                            // residual to whole units.
                             let scale = price_amt.number.scale();
-                            max_scale_by_currency
-                                .entry(price_amt.currency.clone())
-                                .and_modify(|s| *s = (*s).max(scale))
-                                .or_insert(scale);
+                            if scale > 0 {
+                                max_scale_by_currency
+                                    .entry(price_amt.currency.clone())
+                                    .and_modify(|s| *s = (*s).max(scale))
+                                    .or_insert(scale);
+                            }
                             *residuals.entry(price_amt.currency.clone()).or_default() +=
                                 price_amt.number * amount.number.signum();
                         }
@@ -285,12 +295,14 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
                         }
                         rustledger_core::PriceAnnotation::TotalIncomplete(inc) => {
                             if let Some(price_amt) = inc.as_amount() {
-                                // Total price is an explicit amount - track its scale
+                                // Same filter as the Total branch above.
                                 let scale = price_amt.number.scale();
-                                max_scale_by_currency
-                                    .entry(price_amt.currency.clone())
-                                    .and_modify(|s| *s = (*s).max(scale))
-                                    .or_insert(scale);
+                                if scale > 0 {
+                                    max_scale_by_currency
+                                        .entry(price_amt.currency.clone())
+                                        .and_modify(|s| *s = (*s).max(scale))
+                                        .or_insert(scale);
+                                }
                                 *residuals.entry(price_amt.currency.clone()).or_default() +=
                                     price_amt.number * amount.number.signum();
                             } else {
@@ -1507,7 +1519,6 @@ mod tests {
         );
     }
 
-    /// Companion to the previous test — same shape but with an
     /// Issue #1107: an interpolated residual must not inherit the high
     /// scale of a derived per-unit cost (which can be 26+ digits from
     /// `total / units` division). Python beancount quantizes the
@@ -1568,6 +1579,88 @@ mod tests {
             "residual value should match bean-query exactly (#1107). \
              Was -36.72498 before fix."
         );
+    }
+
+    /// End-to-end #1107 repro through the booking pass — this is the
+    /// path that actually surfaces in real ledgers, where the booking
+    /// engine derives a 26+ digit per-unit cost from `{{total}} / units`
+    /// (or lot-matches a `{}` sell against such a derived cost) and
+    /// previously propagated that scale into the interpolated residual.
+    ///
+    /// Concretely models the healthequity fixture pattern: buy with
+    /// `{{total}}` total cost, sell with `{}` lot-match. After booking,
+    /// the sell's filled CostSpec carries the high-scale per_unit from
+    /// the division — and interpolation must STILL round the missing
+    /// Income residual to USD's 2dp (no posting-unit-scale cost-scale
+    /// contamination).
+    #[test]
+    fn test_interpolate_residual_after_booking_total_cost_division() {
+        use crate::book::BookingEngine;
+        use rustledger_core::{Cost, CostSpec, IncompleteAmount, PriceAnnotation};
+
+        // Buy: 1.763 STOCK {{300.00 USD}} → booking derives
+        // per_unit = 300.00 / 1.763 = ~170.16449... at 26-digit scale.
+        let buy = Transaction::new(date(2016, 1, 1), "Buy")
+            .with_posting(
+                Posting::new("Assets:Brokerage", Amount::new(dec!(1.763), "STOCK")).with_cost(
+                    CostSpec {
+                        number_per: None,
+                        number_total: Some(dec!(300.00)),
+                        currency: Some(InternedStr::from("USD")),
+                        date: None,
+                        label: None,
+                        merge: false,
+                    },
+                ),
+            )
+            .with_posting(Posting::new(
+                "Assets:Cash",
+                Amount::new(dec!(-300.00), "USD"),
+            ));
+
+        // Sell: -1.763 STOCK {} @ 191.00 USD — empty cost spec; booking
+        // lot-matches against the previous buy, filling the high-scale
+        // derived per_unit. Income is missing, must be interpolated.
+        let sell = Transaction::new(date(2016, 2, 12), "Sell")
+            .with_posting(Posting::new(
+                "Assets:Cash",
+                Amount::new(dec!(336.73), "USD"),
+            ))
+            .with_posting(
+                Posting::new("Assets:Brokerage", Amount::new(dec!(-1.763), "STOCK"))
+                    .with_cost(CostSpec::empty())
+                    .with_price(PriceAnnotation::Unit(Amount::new(dec!(191.00), "USD"))),
+            )
+            .with_posting(Posting::auto("Income:Capital-Gains"));
+
+        let mut engine = BookingEngine::new();
+        engine.apply(&buy);
+
+        // book_and_interpolate handles the empty `{}` lot match AND
+        // runs interpolation on the booked transaction. The Income
+        // residual must end up at USD's 2dp scale — pre-fix this
+        // inherited the lot's derived 26-digit per_unit scale.
+        let result = engine
+            .book_and_interpolate(&sell)
+            .expect("booking+interpolation should succeed");
+
+        let income = &result.transaction.postings[2];
+        let amount = get_amount(income).expect("Income should have an amount after interpolation");
+
+        assert_eq!(amount.currency.as_str(), "USD");
+        assert!(
+            amount.number.scale() <= 2,
+            "residual scale must be ≤ 2 (USD's tracked precision), \
+             not inherited from the lot's high-scale derived per_unit. \
+             Got scale={} number={}",
+            amount.number.scale(),
+            amount.number
+        );
+
+        // Use `_ = Cost::new` to keep the import live without an
+        // unrelated unused-import warning if the test grows.
+        let _ = Cost::new(dec!(1), "USD");
+        let _: Option<IncompleteAmount> = None;
     }
 
     /// UNASSIGNED missing posting (no currency context) instead of a

@@ -802,6 +802,83 @@ mod tests {
         );
     }
 
+    /// Issue #1104 cross-format coverage: the zero-position suppression
+    /// must also apply to CSV and beancount outputs, not just the
+    /// human-facing text table. This matches bean-query, whose CSV
+    /// output renders sub-precision positions as blank (verified
+    /// empirically against the #1104 fixture).
+    ///
+    /// This is distinct from the #988 AC#4 "lossless" contract for
+    /// `Value::Number` (which preserves Decimal scale across non-text
+    /// renderers): that contract is about NUMERIC precision; this fix
+    /// is about ZERO-POSITION semantic suppression. Both happen to use
+    /// `format_value`, but they target different value types and
+    /// different concerns.
+    #[test]
+    fn test_csv_inventory_suppresses_sub_precision_positions() {
+        use rustledger_query::QueryResult;
+
+        let mut ctx = DisplayContext::new();
+        ctx.update(dec!(1.00), "USD");
+        ctx.update(dec!(2.00), "USD");
+
+        let mut inv = Inventory::new();
+        inv.add(Position::simple(Amount::new(dec!(-0.0003183), "USD")));
+
+        let mut result = QueryResult::new(vec!["account".into(), "sum".into()]);
+        result.add_row(vec![
+            Value::String("Income:Capital-Gains".into()),
+            Value::Inventory(Box::new(inv)),
+        ]);
+
+        let mut buf: Vec<u8> = Vec::new();
+        write_csv(&result, &mut buf, false, &ctx).expect("csv ok");
+        let csv = String::from_utf8(buf).expect("utf8");
+
+        let data_row = csv
+            .lines()
+            .find(|l| l.contains("Capital-Gains"))
+            .unwrap_or_else(|| panic!("expected data row; raw output:\n{csv}"));
+
+        // The position cell after the comma should be empty (or only
+        // whitespace) — matching bean-query's CSV behavior of blanking
+        // sub-precision positions. Anchor on absence of "USD" in the
+        // value cell.
+        let value_cell = data_row
+            .split_once(',')
+            .map(|(_, rest)| rest)
+            .unwrap_or_default();
+        assert!(
+            !value_cell.contains("USD"),
+            "sub-precision USD position must not render in CSV value cell; \
+             got cell {value_cell:?} in row {data_row:?}"
+        );
+    }
+
+    #[test]
+    fn test_beancount_inventory_suppresses_sub_precision_positions() {
+        use rustledger_query::QueryResult;
+
+        let mut ctx = DisplayContext::new();
+        ctx.update(dec!(1.00), "USD");
+        ctx.update(dec!(2.00), "USD");
+
+        let mut inv = Inventory::new();
+        inv.add(Position::simple(Amount::new(dec!(-0.0003183), "USD")));
+
+        let mut result = QueryResult::new(vec!["sum".into()]);
+        result.add_row(vec![Value::Inventory(Box::new(inv))]);
+
+        let mut buf: Vec<u8> = Vec::new();
+        write_beancount(&result, &mut buf, &ctx).expect("beancount ok");
+        let out = String::from_utf8(buf).expect("utf8");
+
+        assert!(
+            !out.contains("USD"),
+            "sub-precision USD position must not render in beancount output; got {out:?}"
+        );
+    }
+
     // ─── Issue #988 ──────────────────────────────────────────────────────
     // SUM-aggregate text output should match bean-query's per-currency
     // precision. With `SELECT currency, SUM(number) GROUP BY currency`, the

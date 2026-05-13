@@ -679,7 +679,7 @@ mod tests {
         assert_eq!(inv.units("VIIIX"), dec!(1.763));
 
         // Check cost was calculated correctly (300/1.763 ≈ 170.16)
-        let pos = inv.positions().first().unwrap();
+        let pos = inv.positions().next().unwrap();
         assert!(pos.cost.is_some(), "Expected cost on position");
         eprintln!("Position cost: {:?}", pos.cost);
     }
@@ -765,7 +765,6 @@ mod tests {
         // Check that the AAPL position has cost with USD currency
         let aapl_pos = inv
             .positions()
-            .iter()
             .find(|p| p.units.currency.as_ref() == "AAPL")
             .expect("Should have AAPL position");
 
@@ -1005,7 +1004,7 @@ mod tests {
 
         // Check inventory has the position with correct cost
         let inv = engine.inventory(&"Assets:Abc".into()).unwrap();
-        let pos = inv.positions().first().unwrap();
+        let pos = inv.positions().next().unwrap();
         assert!(pos.cost.is_some(), "Position should have cost");
         let cost = pos.cost.as_ref().unwrap();
         assert_eq!(cost.currency.as_ref(), "USD", "Cost currency should be USD");

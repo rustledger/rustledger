@@ -89,6 +89,22 @@ KNOWN_PYTHON_DIVERGENCES: set[tuple[str, str]] = {
     ("testdata_source_ofx_test_non_default_capital_gains_journal.beancount", "*"),
     # DisplayContext common vs max precision (#724)
     ("testdata_source_ofx_test_fidelity_journal.beancount", "*"),
+    # beancount/beanquery#279: FIRST aggregator short-circuits operand
+    # evaluation after the first row, leaving the stateful `balance`
+    # accumulator stale for subsequent groups. The exact same query
+    # against the exact same fixture gives different FIRST(balance)
+    # values depending on whether other aggregators (e.g. LAST) appear
+    # in the SELECT list — because LAST's presence forces the operand
+    # to be evaluated on every row. See tests/compatibility/exclusions.toml
+    # for the full root-cause writeup. rledger pre-computes ctx.balance
+    # per row so FIRST/LAST always agree; we don't want to mirror the
+    # upstream bug. Surgical pin (not "*") so any other genuine
+    # divergence on these fixtures stays surfaced.
+    ("cost_only.beancount", "first-balance-by-month"),
+    ("testdata_source_healthequity_test_invalid_journal.beancount", "first-balance-by-month"),
+    ("testdata_source_healthequity_test_matching_journal.beancount", "first-balance-by-month"),
+    ("testdata_source_ofx_test_fidelity_ira_journal.beancount", "first-balance-by-month"),
+    ("testdata_source_paypal_test_matching_journal.beancount", "first-balance-by-month"),
 }
 
 

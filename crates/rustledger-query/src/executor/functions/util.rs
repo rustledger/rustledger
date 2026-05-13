@@ -161,13 +161,24 @@ impl Executor<'_> {
                         result.add(Position::simple(pos.units.clone()));
                     }
                 }
-                // If result has single currency matching target, return as Amount
-                // If result is empty, return zero in target currency (issue #586)
-                let positions = result.positions();
-                if positions.is_empty() {
+                // If result has single currency matching target, return as Amount.
+                // If result is empty, return zero in target currency (issue #586).
+                // Peek the first two positions to decide; the single-match Amount
+                // is cloned eagerly (O(1) — `Decimal` + interned currency) so the
+                // iterator borrow is dropped before we move `result` below.
+                let single_match: Option<Amount> = {
+                    let mut iter = result.positions();
+                    match (iter.next(), iter.next()) {
+                        (Some(only), None) if only.units.currency == target_currency => {
+                            Some(only.units.clone())
+                        }
+                        _ => None,
+                    }
+                };
+                if let Some(units) = single_match {
+                    Ok(Value::Amount(units))
+                } else if result.is_empty() {
                     Ok(Value::Amount(Amount::new(Decimal::ZERO, &target_currency)))
-                } else if positions.len() == 1 && positions[0].units.currency == target_currency {
-                    Ok(Value::Amount(positions[0].units.clone()))
                 } else {
                     Ok(Value::Inventory(Box::new(result)))
                 }
@@ -378,7 +389,6 @@ impl Executor<'_> {
         // Find positions matching the currency
         let matching: Vec<_> = inv
             .positions()
-            .iter()
             .filter(|p| p.units.currency == key)
             .collect();
 

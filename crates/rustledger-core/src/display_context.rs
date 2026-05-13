@@ -402,21 +402,38 @@ impl DisplayContext {
 
     /// Format a decimal number for a currency using the tracked precision.
     ///
-    /// If the currency has been seen, formats with the maximum precision.
-    /// Otherwise, formats with the number's natural precision (no trailing zeros).
-    /// Uses half-up rounding to match Python beancount behavior.
+    /// Render rules (matching bean-query's `AmountRenderer.format`):
+    /// - If the value's intrinsic scale exceeds the currency's tracked
+    ///   precision, render at the value's scale. Python's `decimal`
+    ///   carries scale through arithmetic and bean-query preserves it,
+    ///   so a `SUM(number) GROUP BY currency` that aggregates a
+    ///   `-805.50896` row and a `-396.50000` row renders as
+    ///   `-1202.00896` (scale=5), not `-1202.01` (rounded to USD's 2dp).
+    /// - If the value's scale is less than the tracked precision, pad
+    ///   with trailing zeros (`7.5 USD` → `7.50`). Preserves the
+    ///   #954 fix that stops `SUM(0.00) = 0` rendering as plain `0`.
+    /// - If the currency has no tracked precision, fall through to the
+    ///   value's natural rendering with trailing zeros stripped.
+    ///
+    /// The previous implementation always quantized to the tracked
+    /// precision via `round_dp(dp)`. That was correct for under-scale
+    /// padding but wrong for over-scale truncation — it lost
+    /// arithmetic precision that bean-query preserved (closes #1103).
     #[must_use]
     pub fn format(&self, number: Decimal, currency: &str) -> String {
         let precision = self.get_precision(currency);
 
         if let Some(dp) = precision {
-            // Round with half-up (MidpointAwayFromZero) to match Python behavior
-            // Note: format!("{:.N}", decimal) uses truncation which gives wrong results
-            // for values like -1202.00896 (would give -1202.00 instead of -1202.01)
-            let rounded = number.round_dp(dp);
+            // Render at max(value_scale, tracked_dp). When value_scale
+            // already meets or exceeds dp, `round_dp` is a no-op (it only
+            // rounds when scale > target). When value_scale is shorter,
+            // `ensure_decimal_places` pads to dp. So this branch covers
+            // both "preserve high precision" and "pad short precision"
+            // without losing either.
+            let effective_dp = number.scale().max(dp);
+            let rounded = number.round_dp(effective_dp);
             let formatted = format!("{rounded}");
-            // Ensure we have the right number of decimal places (add trailing zeros if needed)
-            let formatted = Self::ensure_decimal_places(&formatted, dp);
+            let formatted = Self::ensure_decimal_places(&formatted, effective_dp);
             if self.render_commas {
                 Self::add_commas(&formatted)
             } else {
@@ -848,6 +865,33 @@ mod tests {
         assert_eq!(ctx.format(dec!(100), "USD"), "100.00");
         assert_eq!(ctx.format(dec!(50.25), "USD"), "50.25");
         assert_eq!(ctx.format(dec!(7.5), "USD"), "7.50");
+    }
+
+    /// Issue #1103: when the value's intrinsic scale exceeds the
+    /// currency's tracked precision, render at the value's scale
+    /// rather than quantizing down. Matches bean-query: a
+    /// `SUM(number)` over a fixture with high-precision arithmetic
+    /// (cost-spec interpolation residuals, manual high-dp postings)
+    /// produces a Decimal whose scale we MUST preserve to align with
+    /// Python's `decimal` representation. The currency hint only ever
+    /// PADS UP from a shorter scale; it never rounds DOWN from a
+    /// longer one.
+    #[test]
+    fn test_format_preserves_value_scale_above_tracked_precision() {
+        let mut ctx = DisplayContext::new();
+        // USD tracked at 2dp (mode of two 2dp observations).
+        ctx.update(dec!(100.00), "USD");
+        ctx.update(dec!(50.25), "USD");
+        assert_eq!(ctx.get_precision("USD"), Some(2));
+
+        // Value scale > tracked dp → preserve value scale (no round-down).
+        assert_eq!(ctx.format(dec!(1.234), "USD"), "1.234");
+        assert_eq!(ctx.format(dec!(-1202.00896), "USD"), "-1202.00896");
+        assert_eq!(ctx.format(dec!(0.00000), "USD"), "0.00000");
+
+        // Value scale ≤ tracked dp → pad up (unchanged from #988 fix).
+        assert_eq!(ctx.format(dec!(7.5), "USD"), "7.50");
+        assert_eq!(ctx.format(dec!(0), "USD"), "0.00");
     }
 
     #[test]

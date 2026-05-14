@@ -8,9 +8,7 @@ use rustledger_core::{BookingMethod, Directive};
 use rustledger_loader::{LoadOptions, Options as LoaderOptions, Plugin, SourceMap};
 use rustledger_parser::{ParseError, ParseResult, Span, Spanned};
 use rustledger_plugin::NativePluginRegistry;
-use rustledger_validate::{
-    Severity, ValidationError, ValidationOptions, validate_spanned_with_options,
-};
+use rustledger_validate::{Phase, Severity, ValidationError, ValidationOptions, ValidationSession};
 
 use super::utils::LineIndex;
 use crate::ledger_state::LedgerState;
@@ -314,7 +312,15 @@ pub fn validation_errors_to_diagnostics(
         }
     }
 
-    let validation_errors = validate_spanned_with_options(&booked_directives, validation_options);
+    // LSP receives already-booked directives, so it has no booking step
+    // to interleave between phases. Run Early + Late back-to-back
+    // against the same input. See `rustledger_validate::Phase` for the
+    // architecture rationale.
+    let today = jiff::Zoned::now().date();
+    let mut session = ValidationSession::new(validation_options);
+    let mut validation_errors = session.run_phase_spanned(&booked_directives, Phase::Early, today);
+    validation_errors.extend(session.run_phase_spanned(&booked_directives, Phase::Late, today));
+    validation_errors.extend(session.finalize());
 
     // Filter errors to only those in the current file (if file_id filtering is enabled).
     // Also include errors with file_id == None, as these are global errors (e.g., duplicate

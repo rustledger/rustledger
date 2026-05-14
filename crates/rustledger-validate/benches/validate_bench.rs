@@ -9,7 +9,18 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 use rust_decimal_macros::dec;
 use rustledger_core::NaiveDate;
 use rustledger_core::{Amount, Balance, Directive, Open, Posting, Transaction};
-use rustledger_validate::validate;
+use rustledger_validate::{Phase, ValidationError, ValidationOptions, ValidationSession};
+
+/// Bench helper mirroring the deleted public `validate()`. Chains
+/// Early + Late + finalize through a single session.
+fn validate(directives: &[Directive]) -> Vec<ValidationError> {
+    let today = rustledger_core::naive_date(2030, 1, 1).unwrap();
+    let mut session = ValidationSession::new(ValidationOptions::default());
+    let mut errors = session.run_phase(directives, Phase::Early, today);
+    errors.extend(session.run_phase(directives, Phase::Late, today));
+    errors.extend(session.finalize());
+    errors
+}
 
 #[allow(clippy::missing_const_for_fn)]
 fn date(year: i32, month: u32, day: u32) -> NaiveDate {

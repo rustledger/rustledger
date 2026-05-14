@@ -11,7 +11,7 @@ use rustledger_loader::Loader;
 use rustledger_plugin::{
     NativePluginRegistry, PluginInput, PluginOptions, directive_to_wrapper, wrapper_to_directive,
 };
-use rustledger_validate::{ValidationOptions, validate_spanned_with_options};
+use rustledger_validate::{Phase, ValidationOptions, ValidationSession};
 
 use super::error::RpcError;
 use super::request::{
@@ -304,9 +304,22 @@ fn handle_validate(params: &serde_json::Value) -> Result<serde_json::Value, RpcE
 
     // Only run semantic validation when there are no syntactic (parse) errors.
     // Booking errors are semantic and don't prevent validation from running.
+    //
+    // The FFI receives already-booked directives, so it runs Early +
+    // Late + finalize back-to-back through a single `ValidationSession`
+    // — same shape as the LSP. See `rustledger_validate::Phase` for the
+    // architecture rationale.
     if parse_error_count == 0 {
-        let validation_errors =
-            validate_spanned_with_options(&load.spanned_directives, ValidationOptions::default());
+        let today = jiff::Zoned::now().date();
+        let mut session = ValidationSession::new(ValidationOptions::default());
+        let mut validation_errors =
+            session.run_phase_spanned(&load.spanned_directives, Phase::Early, today);
+        validation_errors.extend(session.run_phase_spanned(
+            &load.spanned_directives,
+            Phase::Late,
+            today,
+        ));
+        validation_errors.extend(session.finalize());
         for err in validation_errors {
             let mut e = Error::new(&err.message).validate_phase();
             if let Some(span) = err.span {

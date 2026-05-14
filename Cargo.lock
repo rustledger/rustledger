@@ -3246,6 +3246,7 @@ dependencies = [
 name = "rustledger-ffi-wasi"
 version = "0.14.1"
 dependencies = [
+ "jiff",
  "rustc-hash",
  "rustledger-booking",
  "rustledger-core",

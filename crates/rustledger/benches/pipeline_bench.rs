@@ -12,7 +12,18 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 use rustledger_booking::interpolate;
 use rustledger_core::Directive;
 use rustledger_parser::parse;
-use rustledger_validate::validate;
+use rustledger_validate::{Phase, ValidationOptions, ValidationSession};
+
+/// Bench helper: run both validation phases through a single session,
+/// mirroring what the LSP / FFI do on already-booked input.
+fn validate(directives: &[Directive]) -> Vec<rustledger_validate::ValidationError> {
+    let today = jiff::Zoned::now().date();
+    let mut session = ValidationSession::new(ValidationOptions::default());
+    let mut errors = session.run_phase(directives, Phase::Early, today);
+    errors.extend(session.run_phase(directives, Phase::Late, today));
+    errors.extend(session.finalize());
+    errors
+}
 
 /// Generate a realistic ledger with N transactions.
 #[allow(clippy::vec_init_then_push)]

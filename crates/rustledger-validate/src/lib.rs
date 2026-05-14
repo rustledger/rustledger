@@ -367,34 +367,6 @@ impl ValidatableDirective for Spanned<Directive> {
     }
 }
 
-/// Unified validation body shared by all the public `validate*` entry
-/// points. Iterating per-directive plus the post-pass span/file patch
-/// used to live in two copy-pasted impls (`validate_with_options` for
-/// `&[Directive]` and `validate_spanned_with_options` for
-/// `&[Spanned<Directive>]`). Folded together via the
-/// [`ValidatableDirective`] trait; `today` is taken as a parameter so
-/// callers like the LSP can avoid the `jiff::Zoned::now()` syscall per
-/// keystroke.
-fn validate_inner<D: ValidatableDirective>(
-    directives: &[D],
-    options: ValidationOptions,
-    today: NaiveDate,
-) -> Vec<ValidationError> {
-    // Backward-compat path: chain early + late for callers that don't
-    // run booking between them (LSP, tests, FFI). Equivalent to the
-    // single-pass behavior before the split.
-    let mut state = LedgerState::with_options(options);
-    let mut errors = validate_phase_inner(directives, &mut state, Phase::Early, today);
-    errors.extend(validate_phase_inner(
-        directives,
-        &mut state,
-        Phase::Late,
-        today,
-    ));
-    errors.extend(check_unused_pads(&state));
-    errors
-}
-
 /// Internal: run ONE validation phase over a sorted view of `directives`,
 /// reading from / writing to `state`.
 ///
@@ -576,16 +548,6 @@ fn check_unused_pads(state: &LedgerState) -> Vec<ValidationError> {
     errors
 }
 
-/// Compute today's date for default validation calls.
-///
-/// Each public `validate*` entry point that doesn't take an explicit
-/// `today` calls this once. LSP callers should use the `_with_today`
-/// variants below and cache the date themselves to avoid the
-/// `jiff::Zoned::now()` syscall per re-validation.
-fn today() -> NaiveDate {
-    jiff::Zoned::now().date()
-}
-
 /// Pre-resolve each unique `Document` directive's path so the main
 /// per-directive loop can answer "does this document exist?" with a
 /// hashmap lookup instead of a syscall.
@@ -656,65 +618,21 @@ fn build_document_exists_cache<D: ValidatableDirective>(
     }
 }
 
-/// Validate a stream of directives.
-///
-/// Returns a list of validation errors found.
-pub fn validate(directives: &[Directive]) -> Vec<ValidationError> {
-    validate_with_options(directives, ValidationOptions::default())
-}
-
-/// Validate a stream of directives with custom options.
-///
-/// Returns a list of validation errors and warnings found.
-pub fn validate_with_options(
-    directives: &[Directive],
-    options: ValidationOptions,
-) -> Vec<ValidationError> {
-    validate_inner(directives, options, today())
-}
-
-/// Validate a stream of directives with custom options and an
-/// explicit "today" date.
-///
-/// Use this from LSP / interactive contexts that re-validate frequently
-/// — caching the date in the caller skips the
-/// [`jiff::Zoned::now`] syscall per re-validation.
-pub fn validate_with_today(
-    directives: &[Directive],
-    options: ValidationOptions,
-    today: NaiveDate,
-) -> Vec<ValidationError> {
-    validate_inner(directives, options, today)
-}
-
-/// Validate a stream of spanned directives with custom options.
-///
-/// This variant accepts `Spanned<Directive>` to preserve source location information,
-/// which is propagated to any validation errors. This enables IDE-friendly error
-/// messages with `file:line` information.
-///
-/// Returns a list of validation errors and warnings found, each with source location
-/// when available.
-pub fn validate_spanned_with_options(
-    directives: &[Spanned<Directive>],
-    options: ValidationOptions,
-) -> Vec<ValidationError> {
-    validate_inner(directives, options, today())
-}
-
-/// Validate a stream of spanned directives with custom options and an
-/// explicit "today" date.
-///
-/// LSP-friendly variant of [`validate_spanned_with_options`] — caching
-/// the date in the caller skips the [`jiff::Zoned::now`] syscall per
-/// re-validation.
-pub fn validate_spanned_with_today(
-    directives: &[Spanned<Directive>],
-    options: ValidationOptions,
-    today: NaiveDate,
-) -> Vec<ValidationError> {
-    validate_inner(directives, options, today)
-}
+// ── Validation entry: [`ValidationSession`] ──────────────────────────────
+//
+// The single supported entry to the validator is [`ValidationSession`].
+// Callers that just want "validate this list of directives, give me all
+// errors" wire three calls: `run_phase(_, Early, today)`,
+// `run_phase(_, Late, today)`, `finalize()`. The visible verbosity is
+// deliberate — it surfaces the phase split so callers can choose where
+// to insert booking between phases (the loader does this) or run both
+// back-to-back on already-booked input (LSP / FFI / tests do this).
+//
+// Prior versions of this crate exposed `validate()`, `validate_with_options()`,
+// `validate_with_today()`, and spanned variants as free-function
+// shortcuts. They were removed in the validate-phase-split refactor
+// (#1115 / #1116) — see the migration note there for the pattern to
+// adopt.
 
 /// Stateful two-phase validation harness for callers (like the loader)
 /// that need to interleave validation with other pipeline steps.
@@ -817,6 +735,45 @@ mod tests {
 
     fn date(year: i32, month: u32, day: u32) -> NaiveDate {
         rustledger_core::naive_date(year, month, day).unwrap()
+    }
+
+    /// Default "today" for tests that don't otherwise care. Set in the
+    /// past relative to most fixtures so the future-date warning
+    /// doesn't fire unexpectedly.
+    fn test_today() -> NaiveDate {
+        date(2030, 1, 1)
+    }
+
+    /// Test-only convenience: run both phases through a fresh
+    /// `ValidationSession` and return the combined error list.
+    /// Mirrors the deleted public `validate()` shortcut. Kept inside
+    /// `mod tests` so it stays out of the crate's public API.
+    fn validate(directives: &[Directive]) -> Vec<ValidationError> {
+        validate_with_options(directives, ValidationOptions::default())
+    }
+
+    /// Test-only convenience: same as [`validate`] but with caller-
+    /// supplied [`ValidationOptions`].
+    fn validate_with_options(
+        directives: &[Directive],
+        options: ValidationOptions,
+    ) -> Vec<ValidationError> {
+        validate_with_today(directives, options, test_today())
+    }
+
+    /// Test-only convenience: same as [`validate_with_options`] but with
+    /// caller-supplied "today" date (covers tests that exercise
+    /// future-date / date-ordering behavior).
+    fn validate_with_today(
+        directives: &[Directive],
+        options: ValidationOptions,
+        today: NaiveDate,
+    ) -> Vec<ValidationError> {
+        let mut session = ValidationSession::new(options);
+        let mut errors = session.run_phase(directives, Phase::Early, today);
+        errors.extend(session.run_phase(directives, Phase::Late, today));
+        errors.extend(session.finalize());
+        errors
     }
 
     #[test]
@@ -1069,11 +1026,11 @@ mod tests {
 
     #[test]
     fn test_validate_future_date_warning() {
-        // Create a date in the future
-        let future_date = jiff::Zoned::now()
-            .date()
-            .checked_add(jiff::ToSpan::days(30))
-            .unwrap();
+        // Anchor "today" so this test isn't time-dependent. The
+        // directive is 30 days after the anchor — unambiguously in
+        // the future from `today`'s perspective.
+        let today = date(2024, 1, 1);
+        let future_date = today.checked_add(jiff::ToSpan::days(30)).unwrap();
 
         let directives = vec![Directive::Open(Open {
             date: future_date,
@@ -1084,7 +1041,7 @@ mod tests {
         })];
 
         // Without warn_future_dates option, no warnings
-        let errors = validate(&directives);
+        let errors = validate_with_today(&directives, ValidationOptions::default(), today);
         assert!(
             !errors.iter().any(|e| e.code == ErrorCode::FutureDate),
             "Should not warn about future dates by default"
@@ -1092,7 +1049,7 @@ mod tests {
 
         // With warn_future_dates option, should warn
         let options = ValidationOptions::default().with_warn_future_dates(true);
-        let errors = validate_with_options(&directives, options);
+        let errors = validate_with_today(&directives, options, today);
         assert!(
             errors.iter().any(|e| e.code == ErrorCode::FutureDate),
             "Should warn about future dates when enabled"

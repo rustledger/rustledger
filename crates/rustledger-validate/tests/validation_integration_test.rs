@@ -8,7 +8,41 @@ use rustledger_core::{
     Amount, Balance, Close, Directive, NaiveDate, Open, Pad, Posting, PriceAnnotation, Transaction,
 };
 use rustledger_parser::{Span, Spanned};
-use rustledger_validate::{ErrorCode, ValidationOptions, validate, validate_spanned_with_options};
+use rustledger_validate::{
+    ErrorCode, Phase, ValidationError, ValidationOptions, ValidationSession,
+};
+
+// ── Test helpers ─────────────────────────────────────────────────────────
+//
+// `validate()` and `validate_spanned_with_options()` used to be public
+// shortcuts on the validate crate. They were removed in the
+// validate-phase-split refactor in favor of `ValidationSession`. These
+// helpers preserve the old call shape for this test file only — they
+// chain Early + Late + finalize internally and stay scoped to tests
+// (not exported).
+
+fn test_today() -> NaiveDate {
+    rustledger_core::naive_date(2030, 1, 1).unwrap()
+}
+
+fn validate(directives: &[Directive]) -> Vec<ValidationError> {
+    let mut session = ValidationSession::new(ValidationOptions::default());
+    let mut errors = session.run_phase(directives, Phase::Early, test_today());
+    errors.extend(session.run_phase(directives, Phase::Late, test_today()));
+    errors.extend(session.finalize());
+    errors
+}
+
+fn validate_spanned_with_options(
+    directives: &[Spanned<Directive>],
+    options: ValidationOptions,
+) -> Vec<ValidationError> {
+    let mut session = ValidationSession::new(options);
+    let mut errors = session.run_phase_spanned(directives, Phase::Early, test_today());
+    errors.extend(session.run_phase_spanned(directives, Phase::Late, test_today()));
+    errors.extend(session.finalize());
+    errors
+}
 
 // ============================================================================
 // Helper Functions

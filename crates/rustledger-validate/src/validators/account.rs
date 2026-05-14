@@ -94,7 +94,11 @@ pub fn validate_close(state: &mut LedgerState, close: &Close, errors: &mut Vec<V
 /// `validate_transaction_late`'s `update_inventories` step in
 /// date-sorted order) and warns if the account being closed still
 /// holds a non-zero balance.
-pub fn validate_close_late(state: &LedgerState, close: &Close, errors: &mut Vec<ValidationError>) {
+pub fn validate_close_late(
+    state: &mut LedgerState,
+    close: &Close,
+    errors: &mut Vec<ValidationError>,
+) {
     // Only check accounts that actually got closed (i.e., not those
     // the early phase already flagged with E1001 or AccountClosed).
     // The early phase sets `account_state.closed = Some(close.date)`
@@ -103,6 +107,13 @@ pub fn validate_close_late(state: &LedgerState, close: &Close, errors: &mut Vec<
         return;
     };
     if account_state.closed != Some(close.date) {
+        return;
+    }
+    // Skip the duplicate Close that the early phase already rejected
+    // with `AccountClosed`. Without this guard, two same-day closes
+    // for the same account would both pass the `closed == Some(close.date)`
+    // check and double-emit `AccountCloseNotEmpty`.
+    if !state.late_close_processed.insert(close.account.clone()) {
         return;
     }
     if let Some(inv) = state.inventories.get(&close.account)

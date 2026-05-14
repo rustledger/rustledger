@@ -255,6 +255,12 @@ pub struct LedgerState {
     /// Accumulated tolerances per currency from transaction amounts.
     /// Balance assertions use these with 2x multiplier (Python beancount behavior).
     tolerances: FxHashMap<InternedStr, Decimal>,
+    /// Accounts whose late-phase Close check has already fired. Guards
+    /// against duplicate same-day Close directives running the
+    /// non-empty-balance check twice (the early phase only rejects the
+    /// duplicate with `AccountClosed`; without this set, `validate_close_late`'s
+    /// `closed == Some(close.date)` guard would let both through).
+    pub(crate) late_close_processed: FxHashSet<InternedStr>,
 }
 
 impl LedgerState {
@@ -2460,6 +2466,51 @@ mod tests {
         assert!(
             late_pos < finalize_pos,
             "late-phase errors must precede finalize; got {codes:?}"
+        );
+    }
+
+    #[test]
+    fn test_duplicate_same_day_close_emits_close_not_empty_once() {
+        // Regression for the Copilot inline review on PR #1116: two
+        // Close directives for the same account on the same date used
+        // to bypass the `validate_close_late` guard, double-emitting
+        // `AccountCloseNotEmpty`. The early phase rejects the duplicate
+        // with `AccountClosed`; the late phase should run the
+        // non-empty-balance check exactly once.
+        let directives = vec![
+            Directive::Open(Open::new(date(2024, 1, 1), "Assets:Bank")),
+            // Leave a non-zero balance on Assets:Bank so the late-phase
+            // non-empty check actually fires.
+            Directive::Transaction(
+                Transaction::new(date(2024, 1, 10), "leave residue")
+                    .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(50), "USD")))
+                    .with_posting(Posting::new(
+                        "Equity:Opening",
+                        Amount::new(dec!(-50), "USD"),
+                    )),
+            ),
+            Directive::Open(Open::new(date(2024, 1, 1), "Equity:Opening")),
+            Directive::Close(Close::new(date(2024, 6, 1), "Assets:Bank")),
+            Directive::Close(Close::new(date(2024, 6, 1), "Assets:Bank")),
+        ];
+
+        let errors = validate(&directives);
+        let close_not_empty_count = errors
+            .iter()
+            .filter(|e| e.code == ErrorCode::AccountCloseNotEmpty)
+            .count();
+        assert_eq!(
+            close_not_empty_count, 1,
+            "AccountCloseNotEmpty must fire exactly once for duplicate same-day closes; got {errors:?}"
+        );
+        // And the duplicate still gets its early-phase `AccountClosed` flag.
+        let account_closed_count = errors
+            .iter()
+            .filter(|e| e.code == ErrorCode::AccountClosed)
+            .count();
+        assert_eq!(
+            account_closed_count, 1,
+            "duplicate close should still report AccountClosed once; got {errors:?}"
         );
     }
 }

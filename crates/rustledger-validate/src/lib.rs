@@ -1887,6 +1887,45 @@ mod tests {
     }
 
     #[test]
+    fn test_e2004_fires_after_prior_balance_consumed_a_pad() {
+        // Pinning the post-#1116-self-review semantics: a successfully
+        // applied pad gets drained from `pending_pads`, so a later
+        // sequence of two unused pads correctly triggers E2004 even
+        // when an earlier pad already served a previous balance.
+        // Pre-#1116 the `!any(used)` clause suppressed this case.
+        let directives = vec![
+            Directive::Open(Open::new(date(2024, 1, 1), "Assets:Bank")),
+            Directive::Open(Open::new(date(2024, 1, 1), "Equity:Opening")),
+            // First Pad → Balance pair: pad gets used, then drained.
+            Directive::Pad(Pad::new(date(2024, 1, 1), "Assets:Bank", "Equity:Opening")),
+            Directive::Balance(Balance::new(
+                date(2024, 1, 2),
+                "Assets:Bank",
+                Amount::new(dec!(100.00), "USD"),
+            )),
+            // Two more unused pads, then a balance — this is the
+            // ambiguous case E2004 is meant to flag.
+            Directive::Pad(Pad::new(date(2024, 2, 1), "Assets:Bank", "Equity:Opening")),
+            Directive::Pad(Pad::new(date(2024, 2, 2), "Assets:Bank", "Equity:Opening")),
+            Directive::Balance(Balance::new(
+                date(2024, 2, 3),
+                "Assets:Bank",
+                Amount::new(dec!(200.00), "USD"),
+            )),
+        ];
+
+        let errors = validate(&directives);
+        let multi_pad_count = errors
+            .iter()
+            .filter(|e| e.code == ErrorCode::MultiplePadForBalance)
+            .count();
+        assert_eq!(
+            multi_pad_count, 1,
+            "E2004 must fire exactly once on the second balance; got {errors:?}"
+        );
+    }
+
+    #[test]
     fn test_error_severity() {
         // Errors
         assert_eq!(ErrorCode::AccountNotOpen.severity(), Severity::Error);

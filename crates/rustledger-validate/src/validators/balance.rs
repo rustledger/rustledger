@@ -80,22 +80,18 @@ pub fn validate_pad(state: &mut LedgerState, pad: &Pad, errors: &mut Vec<Validat
 /// comparison is deferred to the late phase, since it depends on the
 /// inventory state that booking + the late-phase transaction validator
 /// build up.
-///
-/// Returns `false` if validation should not continue to the late phase.
 pub fn validate_balance_early(
     state: &LedgerState,
     bal: &Balance,
     errors: &mut Vec<ValidationError>,
-) -> bool {
+) {
     if !state.accounts.contains_key(&bal.account) {
         errors.push(ValidationError::new(
             ErrorCode::AccountNotOpen,
             format!("Account {} was never opened", bal.account),
             bal.date,
         ));
-        return false;
     }
-    true
 }
 
 /// Late-phase balance validation — runs after booking + plugins.
@@ -122,8 +118,24 @@ pub fn validate_balance_late(
         // and the E2003 finalize sweep scans every pad ever pushed.
         pending_pads.retain(|p| !p.used);
 
-        // Check for multiple pads (E2004) - only warn if none have been used yet
-        if pending_pads.len() > 1 && !pending_pads.iter().any(|p| p.used) {
+        // A Pad on date D is effective for the NEXT Balance on the
+        // target account dated strictly after D (Python beancount
+        // semantics — Pad creates an entry "between" D and the next
+        // balance). Filter `pending_pads` to those whose date precedes
+        // this balance; later-dated pads are still pending for some
+        // future balance and must not be considered here. Required
+        // because the phase split pre-registers ALL pads during Early
+        // before any Balance runs in Late.
+        let effective_idx: Vec<usize> = pending_pads
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.date < bal.date)
+            .map(|(i, _)| i)
+            .collect();
+
+        // Check for multiple effective pads (E2004) — every effective
+        // pad is unused (retain ran above), so we just need to count.
+        if effective_idx.len() > 1 {
             errors.push(
                 ValidationError::new(
                     ErrorCode::MultiplePadForBalance,
@@ -135,17 +147,17 @@ pub fn validate_balance_late(
                 )
                 .with_context(format!(
                     "pad dates: {}",
-                    pending_pads
+                    effective_idx
                         .iter()
-                        .map(|p| p.date.to_string())
+                        .map(|&i| pending_pads[i].date.to_string())
                         .collect::<Vec<_>>()
                         .join(", ")
                 )),
             );
         }
 
-        // Use the most recent pad
-        if let Some(pending_pad) = pending_pads.last_mut() {
+        // Use the most recent effective pad
+        if let Some(pending_pad) = effective_idx.last().and_then(|&i| pending_pads.get_mut(i)) {
             // Apply padding: calculate difference and add to both accounts
             // Balance assertions include sub-accounts, so sum them all up
             let actual =
@@ -176,9 +188,14 @@ pub fn validate_balance_late(
                     pending_pad.used = true;
                 }
             }
+            // An effective pad applied (or matched a zero difference);
+            // either way, the regular balance check below would be
+            // redundant.
+            return;
         }
-        // After padding, the balance should match (no error needed)
-        return;
+        // No effective pad for this balance — fall through to the
+        // regular balance check so the user gets a real assertion
+        // result instead of silent skip.
     }
 
     // Get inventory and check balance (no padding case).

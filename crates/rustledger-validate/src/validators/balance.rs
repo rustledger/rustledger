@@ -65,7 +65,7 @@ pub fn validate_pad(state: &mut LedgerState, pad: &Pad, errors: &mut Vec<Validat
     let pending_pad = PendingPad {
         source_account: pad.source_account.clone(),
         date: pad.date,
-        used: false,
+        padded_currencies: rustc_hash::FxHashSet::default(),
     };
     state
         .pending_pads
@@ -113,10 +113,14 @@ pub fn validate_balance_late(
     // Check if there are pending pads for this account
     // Use get_mut instead of remove - a pad can apply to multiple currencies
     if let Some(pending_pads) = state.pending_pads.get_mut(&bal.account) {
-        // Drop pads that already served a previous balance assertion.
-        // Without this, the vec grows for the lifetime of the session
-        // and the E2003 finalize sweep scans every pad ever pushed.
-        pending_pads.retain(|p| !p.used);
+        // Drop pads that have already served a balance in THIS specific
+        // currency. A single Pad can still serve multiple
+        // currency-specific Balance assertions on the same target —
+        // we only remove pads that have nothing left to offer for the
+        // currency being asserted right now. Without this, the vec grows
+        // for the lifetime of the session and E2003 / E2004 detection
+        // fires against pads that already served their purpose.
+        pending_pads.retain(|p| !p.padded_currencies.contains(&bal.amount.currency));
 
         // A Pad on date D is effective for the NEXT Balance on the
         // target account dated strictly after D (Python beancount
@@ -126,6 +130,11 @@ pub fn validate_balance_late(
         // future balance and must not be considered here. Required
         // because the phase split pre-registers ALL pads during Early
         // before any Balance runs in Late.
+        //
+        // The early-phase iteration sorts pads by date (see
+        // `validate_phase_inner`), so `pending_pads` is itself in
+        // date-sorted push order — `effective_idx.last()` is therefore
+        // the most recent effective pad (Python's `active_pad`).
         let effective_idx: Vec<usize> = pending_pads
             .iter()
             .enumerate()
@@ -184,8 +193,10 @@ pub fn validate_balance_late(
                         )));
                     }
 
-                    // Mark pad as used only if padding was actually needed
-                    pending_pad.used = true;
+                    // Record that this pad covered the asserted currency.
+                    pending_pad
+                        .padded_currencies
+                        .insert(bal.amount.currency.clone());
                 }
             }
             // An effective pad applied (or matched a zero difference);

@@ -233,8 +233,13 @@ struct PendingPad {
     source_account: InternedStr,
     /// Date of the pad directive.
     date: NaiveDate,
-    /// Whether this pad has been used (has at least one balance assertion).
-    used: bool,
+    /// Currencies for which this pad has already inserted padding.
+    /// A single Pad can serve multiple currency-specific Balance
+    /// assertions on the same target account (e.g. `pad → balance USD
+    /// → balance EUR`), so we track per-currency rather than a single
+    /// `used` flag. Empty set = no balance has consumed this pad yet
+    /// (drives E2003 in `check_unused_pads`).
+    padded_currencies: FxHashSet<InternedStr>,
 }
 
 /// Ledger state for validation.
@@ -541,7 +546,7 @@ fn check_unused_pads(state: &LedgerState) -> Vec<ValidationError> {
     let mut errors = Vec::new();
     for (target_account, pads) in &state.pending_pads {
         for pad in pads {
-            if !pad.used {
+            if pad.padded_currencies.is_empty() {
                 errors.push(
                     ValidationError::new(
                         ErrorCode::PadWithoutBalance,
@@ -1922,6 +1927,118 @@ mod tests {
         assert_eq!(
             multi_pad_count, 1,
             "E2004 must fire exactly once on the second balance; got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_pad_serves_multi_currency_balances_on_same_day() {
+        // A single Pad must remain available to subsequent Balance
+        // assertions in DIFFERENT currencies on the same target
+        // account. Pre-#1116 the `any(used)` clause kept the pad
+        // visible after the first currency consumed it. The retain
+        // change in 05fcba8b broke this by dropping the pad as soon
+        // as the first currency was padded.
+        let directives = vec![
+            Directive::Open(Open::new(date(2024, 1, 1), "Assets:Bank")),
+            Directive::Open(Open::new(date(2024, 1, 1), "Equity:Opening")),
+            Directive::Pad(Pad::new(date(2024, 1, 1), "Assets:Bank", "Equity:Opening")),
+            // Two balances on the same day, different currencies.
+            Directive::Balance(Balance::new(
+                date(2024, 1, 2),
+                "Assets:Bank",
+                Amount::new(dec!(100.00), "USD"),
+            )),
+            Directive::Balance(Balance::new(
+                date(2024, 1, 2),
+                "Assets:Bank",
+                Amount::new(dec!(50.00), "EUR"),
+            )),
+        ];
+
+        let errors = validate(&directives);
+        assert!(
+            !errors
+                .iter()
+                .any(|e| e.code == ErrorCode::BalanceAssertionFailed),
+            "pad should serve both USD and EUR; got {errors:?}"
+        );
+        assert!(
+            !errors
+                .iter()
+                .any(|e| e.code == ErrorCode::PadWithoutBalance),
+            "pad serves at least one balance; should not be E2003; got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_same_day_pad_does_not_apply_to_same_day_balance() {
+        // Python beancount semantics: a Pad on date D only takes
+        // effect for the NEXT Balance dated strictly after D. So a
+        // same-day Pad+Balance leaves the Balance unpadded (regular
+        // assertion runs) AND the Pad orphaned (E2003).
+        let directives = vec![
+            Directive::Open(Open::new(date(2024, 1, 1), "Assets:Bank")),
+            Directive::Open(Open::new(date(2024, 1, 1), "Equity:Opening")),
+            Directive::Pad(Pad::new(date(2024, 1, 2), "Assets:Bank", "Equity:Opening")),
+            Directive::Balance(Balance::new(
+                date(2024, 1, 2),
+                "Assets:Bank",
+                Amount::new(dec!(100.00), "USD"),
+            )),
+        ];
+
+        let errors = validate(&directives);
+        // The pad is ignored, so the balance assertion runs against
+        // the unpadded inventory (0 USD) and fails against the
+        // asserted 100 USD.
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.code == ErrorCode::BalanceAssertionFailed),
+            "same-day pad should NOT apply; balance fails on bare inventory; got {errors:?}"
+        );
+        // The pad never serves a balance, so E2003 fires.
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.code == ErrorCode::PadWithoutBalance),
+            "same-day pad never consumed; expected E2003; got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_future_pad_does_not_apply_to_earlier_balance() {
+        // The date-filter in `validate_balance_late` must prevent a
+        // later-dated Pad from being silently consumed by an earlier
+        // Balance — a regression that would surface as the wrong
+        // source account being debited. Regression test for commit
+        // 83369fd8.
+        let directives = vec![
+            Directive::Open(Open::new(date(2024, 1, 1), "Assets:Bank")),
+            Directive::Open(Open::new(date(2024, 1, 1), "Equity:Opening")),
+            Directive::Balance(Balance::new(
+                date(2024, 1, 2),
+                "Assets:Bank",
+                Amount::new(dec!(0.00), "USD"),
+            )),
+            Directive::Pad(Pad::new(date(2024, 6, 1), "Assets:Bank", "Equity:Opening")),
+        ];
+
+        let errors = validate(&directives);
+        // The future pad must NOT consume the earlier balance; balance
+        // asserts 0 USD against an empty inventory, which matches.
+        assert!(
+            !errors
+                .iter()
+                .any(|e| e.code == ErrorCode::BalanceAssertionFailed),
+            "future pad should not influence earlier balance; got {errors:?}"
+        );
+        // The pad never gets used, so E2003 fires.
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.code == ErrorCode::PadWithoutBalance),
+            "future-dated pad without subsequent balance should fire E2003; got {errors:?}"
         );
     }
 

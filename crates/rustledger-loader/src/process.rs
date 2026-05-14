@@ -419,7 +419,20 @@ fn run_booking(
                         "BOOK",
                         format!("{} ({}, \"{}\")", e, txn.date, txn.narration),
                     ));
-                    failed.insert((file_id, span_start));
+                    // Synthesized directives (from plugins like auto_tag,
+                    // rx_txn, box_accrual, etc.) all share
+                    // `(SYNTHESIZED_FILE_ID, 0)` as their (file_id,
+                    // span.start) key, so a single failure would
+                    // over-match and suppress late-phase checks on
+                    // every synthesized txn in the file. Skip
+                    // insertion in that case — validate will emit
+                    // cascading errors on synthesized failures, but
+                    // that's no worse than the pre-fix behavior for
+                    // file-authored txns, and avoids the cross-txn
+                    // over-suppression bug.
+                    if file_id != rustledger_parser::SYNTHESIZED_FILE_ID {
+                        failed.insert((file_id, span_start));
+                    }
                 }
             }
         }

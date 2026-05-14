@@ -751,6 +751,12 @@ impl ValidationSession {
     /// alone (default: empty). Call before [`run_phase_spanned`] with
     /// [`Phase::Late`]; calling later has no effect on already-run
     /// phases.
+    ///
+    /// Keys whose `file_id` is `SYNTHESIZED_FILE_ID` (= `u16::MAX`)
+    /// will match every plugin-synthesized directive in the file
+    /// (they all share `(SYNTHESIZED_FILE_ID, 0)`). Loader callers
+    /// should not insert those keys; cascading errors on synthesized
+    /// failures are accepted as the lesser evil.
     pub fn set_failed_bookings(&mut self, failed: FxHashSet<(u16, usize)>) {
         self.state.failed_bookings = failed;
     }

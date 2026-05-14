@@ -227,17 +227,22 @@ pub fn process(raw: LoadResult, options: &LoadOptions) -> Result<Ledger, Process
         errors.push(LedgerError::error("LOAD", load_err.to_string()).with_phase("parse"));
     }
 
-    // 1. Sort by date, type priority, then cost-basis reductions last.
-    // Transactions without cost reductions (no negative-units + cost-spec
-    // postings) process before those that reduce lots, ensuring lots exist
-    // when matched regardless of file ordering.
-    directives.sort_by_cached_key(|d| {
-        (
-            d.value.date(),
-            d.value.priority(),
-            d.value.has_cost_reduction(),
-        )
-    });
+    // 1. Sort once into canonical display order: `(date, priority, file_id,
+    //    span.start)`. This is what BQL / JSON / format output expect and
+    //    what Python beancount produces via `(date, type_priority, lineno)`.
+    //    `span.start` is a byte offset that orders within a file the same
+    //    way line numbers would; `file_id` preserves include order across
+    //    files (issue #1049 — same rows, different tie-break would diverge
+    //    BQL output on same-date augmentation+reduction fixtures).
+    //
+    //    Booking needs a different iteration order — augmentations BEFORE
+    //    reductions on the same `(date, priority)` so lots exist when
+    //    matched — but it doesn't need the underlying vec reordered.
+    //    `run_booking` walks the vec via a transient `Vec<usize>` index
+    //    that adds `has_cost_reduction` as an extra tiebreaker; this
+    //    avoids a second full sort of `Vec<Spanned<Directive>>` (large
+    //    structs) after booking just to put display order back.
+    directives.sort_by_key(|d| (d.value.date(), d.value.priority(), d.file_id, d.span.start));
 
     // 2. Plugins — run BEFORE early validation so plugins like
     // `auto_accounts` (which synthesizes Open directives based on
@@ -319,7 +324,7 @@ pub fn process(raw: LoadResult, options: &LoadOptions) -> Result<Ledger, Process
     // references, so it's safe to prune now (the now-removed
     // `INTERPOLATED_MARKER` workaround in #1114 is obsolete).
     #[cfg(feature = "booking")]
-    {
+    let failed_bookings: rustc_hash::FxHashSet<(u16, usize)> = {
         let file_set_booking = raw.options.set_options.contains("booking_method");
         let effective_method = if file_set_booking {
             raw.options
@@ -329,31 +334,20 @@ pub fn process(raw: LoadResult, options: &LoadOptions) -> Result<Ledger, Process
         } else {
             options.booking_method
         };
-        run_booking(&mut directives, effective_method, &mut errors);
-    }
-
-    // Booking has consumed the cost-reduction-aware order; switch to a
-    // file-position tie-break that's order-equivalent to Python
-    // beancount's `(date, type_priority, lineno)` for downstream
-    // consumers (plugins, validation, BQL queries, display). We sort by
-    // `(date, priority, file_id, span.start)` — `span.start` is a byte
-    // offset and `file_id` indexes the `SourceMap`, so within a file
-    // the offset orders directives the same way line numbers would
-    // (line N starts before line N+1), without paying for the byte→line
-    // conversion. Across files the `file_id` tie-break preserves the
-    // include order they were added to the `SourceMap`. Without this
-    // re-sort, BQL output diverges from bean-query on fixtures that
-    // mix augmentation and reduction transactions on the same date —
-    // same rows, different tie-break (issue #1049, ~10 of 53 BQL
-    // compat mismatches). Stable sort preserves the existing in-loader
-    // order among directives with identical sort keys.
-    directives.sort_by_key(|d| (d.value.date(), d.value.priority(), d.file_id, d.span.start));
+        run_booking(&mut directives, effective_method, &mut errors)
+    };
+    #[cfg(not(feature = "booking"))]
+    let failed_bookings: rustc_hash::FxHashSet<(u16, usize)> = rustc_hash::FxHashSet::default();
 
     // 5. Validation (late phase) — runs on booked + plugin-processed
     // directives. Reuses the `ValidationSession` from step 2 so
-    // account/commodity/pad bookkeeping carries forward.
+    // account/commodity/pad bookkeeping carries forward. Transactions
+    // whose booking failed are flagged so late-phase inventory checks
+    // skip them (booking already reported the root cause; re-running
+    // lot matching here would cascade misleading errors).
     #[cfg(feature = "validation")]
     if let Some(mut session) = validation_session {
+        session.set_failed_bookings(failed_bookings);
         let phase_errors =
             session.run_phase_spanned(&directives, rustledger_validate::Phase::Late, today);
         ledger_errors_extend(&mut errors, phase_errors, &raw.source_map);
@@ -372,18 +366,48 @@ pub fn process(raw: LoadResult, options: &LoadOptions) -> Result<Ledger, Process
 }
 
 /// Run booking and interpolation on transactions.
+///
+/// The caller has already sorted `directives` into canonical display
+/// order `(date, priority, file_id, span.start)`. Booking needs the
+/// extra constraint that cost-reduction transactions process AFTER
+/// augmentations on the same `(date, priority)` so lots exist when
+/// matched. Rather than re-sorting the whole vec, we build a transient
+/// `Vec<usize>` of indices, sort that by booking order, and walk the
+/// vec via the index. Stable sort preserves display-order tiebreaks
+/// between transactions with the same `has_cost_reduction` flag.
+///
+/// Returns `(file_id, span.start)` pairs for transactions whose
+/// booking failed. The validate late phase reads this set to skip
+/// late-phase inventory/balance checks on those transactions — they'd
+/// otherwise cascade misleading errors (e.g., a `NoMatchingLot` in
+/// the next transaction whose lot was supposed to be created by the
+/// failed one).
 #[cfg(feature = "booking")]
 fn run_booking(
-    directives: &mut Vec<Spanned<Directive>>,
+    directives: &mut [Spanned<Directive>],
     booking_method: BookingMethod,
     errors: &mut Vec<LedgerError>,
-) {
+) -> rustc_hash::FxHashSet<(u16, usize)> {
     use rustledger_booking::BookingEngine;
 
     let mut engine = BookingEngine::with_method(booking_method);
     engine.register_account_methods(directives.iter().map(|s| &s.value));
 
-    for spanned in directives.iter_mut() {
+    // Build an index ordered for booking: stable sort by
+    // `has_cost_reduction` only (display order — `(date, priority,
+    // file_id, span.start)` — is already encoded in the existing
+    // positional order, and stable_sort preserves that as the tiebreak).
+    let mut order: Vec<usize> = (0..directives.len()).collect();
+    order.sort_by_key(|&i| {
+        let d = &directives[i].value;
+        (d.date(), d.priority(), d.has_cost_reduction())
+    });
+
+    let mut failed: rustc_hash::FxHashSet<(u16, usize)> = rustc_hash::FxHashSet::default();
+    for &i in &order {
+        let spanned = &mut directives[i];
+        let file_id = spanned.file_id;
+        let span_start = spanned.span.start;
         if let Directive::Transaction(txn) = &mut spanned.value {
             match engine.book_and_interpolate(txn) {
                 Ok(result) => {
@@ -395,10 +419,12 @@ fn run_booking(
                         "BOOK",
                         format!("{} ({}, \"{}\")", e, txn.date, txn.narration),
                     ));
+                    failed.insert((file_id, span_start));
                 }
             }
         }
     }
+    failed
 }
 
 /// Run plugins on directives.

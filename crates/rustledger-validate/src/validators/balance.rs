@@ -74,15 +74,43 @@ pub fn validate_pad(state: &mut LedgerState, pad: &Pad, errors: &mut Vec<Validat
         .push(pending_pad);
 }
 
-/// Validate a Balance directive.
-pub fn validate_balance(state: &mut LedgerState, bal: &Balance, errors: &mut Vec<ValidationError>) {
-    // Check account exists
+/// Early-phase balance validation — runs on pre-booking directives.
+///
+/// Only checks account presence (E1001). The actual-vs-asserted
+/// comparison is deferred to the late phase, since it depends on the
+/// inventory state that booking + the late-phase transaction validator
+/// build up.
+///
+/// Returns `false` if validation should not continue to the late phase.
+pub fn validate_balance_early(
+    state: &LedgerState,
+    bal: &Balance,
+    errors: &mut Vec<ValidationError>,
+) -> bool {
     if !state.accounts.contains_key(&bal.account) {
         errors.push(ValidationError::new(
             ErrorCode::AccountNotOpen,
             format!("Account {} was never opened", bal.account),
             bal.date,
         ));
+        return false;
+    }
+    true
+}
+
+/// Late-phase balance validation — runs after booking + plugins.
+///
+/// Applies pending pads if any (E2004 multi-pad warning), then compares
+/// the asserted balance against the accumulated inventory state.
+pub fn validate_balance_late(
+    state: &mut LedgerState,
+    bal: &Balance,
+    errors: &mut Vec<ValidationError>,
+) {
+    // The early phase already verified the account exists. If somehow
+    // it disappeared between phases (it shouldn't), bail out quietly —
+    // the early error is already in the report.
+    if !state.accounts.contains_key(&bal.account) {
         return;
     }
 

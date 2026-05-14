@@ -49,9 +49,40 @@ mod validators;
 
 pub use error::{ErrorCode, Severity, ValidationError};
 
+/// Which phase of two-phase validation to run.
+///
+/// The loader pipeline splits validation around booking. Checks that
+/// don't need filled-in amounts (account presence, account lifecycle,
+/// structural integrity, date ordering, document presence, commodity
+/// metadata) run as [`Phase::Early`] BEFORE booking, so they see elided
+/// postings to unopened accounts before booking drops zero-value
+/// interpolations. Checks that need filled-in amounts (currency
+/// constraints, balance residuals, inventory updates, balance
+/// assertions) run as [`Phase::Late`] AFTER booking + plugins.
+///
+/// Standalone callers (LSP, tests, FFI) that don't run booking between
+/// phases typically just use the legacy [`validate`] entry points,
+/// which internally chain `Early` then `Late` for full coverage.
+///
+/// See the "Python Compatibility Policy" section in `CLAUDE.md` for the
+/// rationale on why we deliberately catch elided-zero-to-unopened-account
+/// references that Python beancount silently accepts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Phase {
+    /// Pre-booking checks: account presence (E1001), account lifecycle,
+    /// structural integrity, date ordering, future-date warnings,
+    /// document presence, commodity metadata.
+    Early,
+    /// Post-booking checks: currency constraints on filled postings,
+    /// transaction balance, balance assertions, inventory updates with
+    /// lot matching / capital gains, residual checks.
+    Late,
+}
+
 use validators::{
-    validate_balance, validate_close, validate_document, validate_note, validate_open,
-    validate_pad, validate_transaction,
+    validate_balance_early, validate_balance_late, validate_close, validate_close_late,
+    validate_document, validate_note, validate_open, validate_pad, validate_transaction_early,
+    validate_transaction_late,
 };
 
 use rayon::prelude::*;
@@ -349,14 +380,52 @@ fn validate_inner<D: ValidatableDirective>(
     options: ValidationOptions,
     today: NaiveDate,
 ) -> Vec<ValidationError> {
-    // Pre-pass: batch-resolve `Path::exists()` for every `Document`
-    // directive's candidate paths. The lookup map is consulted by
-    // `validate_document` instead of issuing individual exists()
-    // syscalls inside the main loop. Skipped entirely when
-    // `check_documents` is disabled (no candidate paths needed).
-    let document_exists_cache = build_document_exists_cache(directives, &options);
-
+    // Backward-compat path: chain early + late for callers that don't
+    // run booking between them (LSP, tests, FFI). Equivalent to the
+    // single-pass behavior before the split.
     let mut state = LedgerState::with_options(options);
+    let mut errors = validate_phase_inner(directives, &mut state, Phase::Early, today);
+    errors.extend(validate_phase_inner(
+        directives,
+        &mut state,
+        Phase::Late,
+        today,
+    ));
+    errors.extend(check_unused_pads(&state));
+    errors
+}
+
+/// Internal: run ONE validation phase over a sorted view of `directives`,
+/// reading from / writing to `state`.
+///
+/// The same `state` is threaded through `Early` then `Late` so the
+/// account/commodity/pad bookkeeping accumulated by `Early` is visible
+/// to `Late`'s balance/inventory checks.
+///
+/// Date-ordering and future-date checks run only in `Early` (date is
+/// independent of booking), so callers running both phases don't get
+/// duplicate `DateOutOfOrder` / `FutureDate` warnings.
+fn validate_phase_inner<D: ValidatableDirective>(
+    directives: &[D],
+    state: &mut LedgerState,
+    phase: Phase,
+    today: NaiveDate,
+) -> Vec<ValidationError> {
+    // Document existence is checked in the Early phase; skip the I/O
+    // pre-pass when we're running Late.
+    let document_exists_cache = if phase == Phase::Early {
+        build_document_exists_cache(directives, &state.options)
+    } else {
+        FxHashMap::default()
+    };
+
+    // Reset `last_date` at the start of each phase so the date-ordering
+    // check (which runs in Early) doesn't get confused by a previous
+    // Late pass having advanced past every directive.
+    if phase == Phase::Early {
+        state.last_date = None;
+    }
+
     let mut errors = Vec::new();
 
     // Sort directives by date, then by type priority
@@ -391,53 +460,68 @@ fn validate_inner<D: ValidatableDirective>(
         // patch loop is bypassed when `span_info()` returns `None`.
         let error_count_before = errors.len();
 
-        // Check for date ordering (info only — we sort anyway).
-        if let Some(last) = state.last_date
-            && date < last
-        {
-            errors.push(ValidationError::new(
-                ErrorCode::DateOutOfOrder,
-                format!("Directive date {date} is before previous directive {last}"),
-                date,
-            ));
-        }
-        state.last_date = Some(date);
+        // Date-ordering and future-date checks only run in Early. Date
+        // is independent of booking, and we don't want duplicate errors
+        // when both phases iterate.
+        if phase == Phase::Early {
+            if let Some(last) = state.last_date
+                && date < last
+            {
+                errors.push(ValidationError::new(
+                    ErrorCode::DateOutOfOrder,
+                    format!("Directive date {date} is before previous directive {last}"),
+                    date,
+                ));
+            }
+            state.last_date = Some(date);
 
-        // Check for future dates if enabled.
-        if state.options.warn_future_dates && date > today {
-            errors.push(ValidationError::new(
-                ErrorCode::FutureDate,
-                format!("Entry dated in the future: {date}"),
-                date,
-            ));
+            if state.options.warn_future_dates && date > today {
+                errors.push(ValidationError::new(
+                    ErrorCode::FutureDate,
+                    format!("Entry dated in the future: {date}"),
+                    date,
+                ));
+            }
         }
 
-        match directive {
-            Directive::Open(open) => {
-                validate_open(&mut state, open, &mut errors);
+        match (phase, directive) {
+            // ── Early-only kinds (state setup, structural / presence checks) ──
+            (Phase::Early, Directive::Open(open)) => {
+                validate_open(state, open, &mut errors);
             }
-            Directive::Close(close) => {
-                validate_close(&mut state, close, &mut errors);
+            (Phase::Early, Directive::Close(close)) => {
+                validate_close(state, close, &mut errors);
             }
-            Directive::Transaction(txn) => {
-                validate_transaction(&mut state, txn, &mut errors);
+            (Phase::Late, Directive::Close(close)) => {
+                validate_close_late(state, close, &mut errors);
             }
-            Directive::Balance(bal) => {
-                validate_balance(&mut state, bal, &mut errors);
-            }
-            Directive::Commodity(comm) => {
+            (Phase::Early, Directive::Commodity(comm)) => {
                 state.commodities.insert(comm.currency.clone());
                 validate_commodity_precision_meta(comm, &mut errors);
             }
-            Directive::Pad(pad) => {
-                validate_pad(&mut state, pad, &mut errors);
+            (Phase::Early, Directive::Pad(pad)) => {
+                validate_pad(state, pad, &mut errors);
             }
-            Directive::Document(doc) => {
-                validate_document(&state, doc, &document_exists_cache, &mut errors);
+            (Phase::Early, Directive::Document(doc)) => {
+                validate_document(state, doc, &document_exists_cache, &mut errors);
             }
-            Directive::Note(note) => {
-                validate_note(&state, note, &mut errors);
+            (Phase::Early, Directive::Note(note)) => {
+                validate_note(state, note, &mut errors);
             }
+            // ── Phase-split kinds ──
+            (Phase::Early, Directive::Transaction(txn)) => {
+                validate_transaction_early(state, txn, &mut errors);
+            }
+            (Phase::Late, Directive::Transaction(txn)) => {
+                validate_transaction_late(state, txn, &mut errors);
+            }
+            (Phase::Early, Directive::Balance(bal)) => {
+                validate_balance_early(state, bal, &mut errors);
+            }
+            (Phase::Late, Directive::Balance(bal)) => {
+                validate_balance_late(state, bal, &mut errors);
+            }
+            // ── Everything else: skipped in this phase ──
             _ => {}
         }
 
@@ -464,9 +548,14 @@ fn validate_inner<D: ValidatableDirective>(
         }
     }
 
-    // Check for unused pads (E2003).
-    // These errors won't have location info since we don't store spans
-    // in PendingPad.
+    errors
+}
+
+/// Collect unused-pad errors (E2003). Called once after both phases
+/// have run — pads can be marked `used` by either phase's balance
+/// applications.
+fn check_unused_pads(state: &LedgerState) -> Vec<ValidationError> {
+    let mut errors = Vec::new();
     for (target_account, pads) in &state.pending_pads {
         for pad in pads {
             if !pad.used {
@@ -484,7 +573,6 @@ fn validate_inner<D: ValidatableDirective>(
             }
         }
     }
-
     errors
 }
 
@@ -626,6 +714,76 @@ pub fn validate_spanned_with_today(
     today: NaiveDate,
 ) -> Vec<ValidationError> {
     validate_inner(directives, options, today)
+}
+
+/// Stateful two-phase validation harness for callers (like the loader)
+/// that need to interleave validation with other pipeline steps.
+///
+/// Typical use: run [`run_phase`](Self::run_phase) with [`Phase::Early`]
+/// BEFORE booking, then [`Phase::Late`] AFTER booking + plugins. Call
+/// [`finalize`](Self::finalize) at the end to flush deferred checks
+/// (e.g., unused pads).
+///
+/// Standalone callers that don't run booking between phases should
+/// prefer the [`validate`] / [`validate_with_options`] convenience
+/// entries, which chain both phases internally.
+///
+/// # Example
+///
+/// ```ignore
+/// let mut session = ValidationSession::new(options);
+/// let mut errors = session.run_phase(&directives, Phase::Early, today);
+/// // ... booking, plugins mutate `directives` ...
+/// errors.extend(session.run_phase(&directives, Phase::Late, today));
+/// errors.extend(session.finalize());
+/// ```
+pub struct ValidationSession {
+    state: LedgerState,
+}
+
+impl ValidationSession {
+    /// Create a new session with the given validation options.
+    #[must_use]
+    pub fn new(options: ValidationOptions) -> Self {
+        Self {
+            state: LedgerState::with_options(options),
+        }
+    }
+
+    /// Run one validation phase over a slice of raw [`Directive`]s.
+    ///
+    /// `Early` runs account/structural checks that don't need
+    /// filled-in amounts. `Late` runs balance/inventory/currency
+    /// checks that do. The session's internal `LedgerState` is updated
+    /// by each phase so subsequent calls see the accumulated state.
+    pub fn run_phase(
+        &mut self,
+        directives: &[Directive],
+        phase: Phase,
+        today: NaiveDate,
+    ) -> Vec<ValidationError> {
+        validate_phase_inner(directives, &mut self.state, phase, today)
+    }
+
+    /// Variant of [`run_phase`](Self::run_phase) for `Spanned<Directive>`
+    /// slices. Preserves source-location info on emitted errors —
+    /// matches what `validate_spanned_with_options` does for the
+    /// non-phased entry point.
+    pub fn run_phase_spanned(
+        &mut self,
+        directives: &[Spanned<Directive>],
+        phase: Phase,
+        today: NaiveDate,
+    ) -> Vec<ValidationError> {
+        validate_phase_inner(directives, &mut self.state, phase, today)
+    }
+
+    /// Flush deferred end-of-validation checks. Currently emits unused
+    /// pad warnings (E2003). Call once after both phases have run.
+    #[must_use]
+    pub fn finalize(self) -> Vec<ValidationError> {
+        check_unused_pads(&self.state)
+    }
 }
 
 /// Validate the rledger-specific `precision` metadata key on a commodity directive.
@@ -2174,5 +2332,114 @@ mod tests {
             Severity::Warning
         );
         assert_eq!(ErrorCode::InvalidPrecisionMetadata.code(), "E5003");
+    }
+
+    // ─── Phase-split (refs #1115) ────────────────────────────────────────
+
+    /// `validate_early` must catch E1001 on a posting to an account that
+    /// was never opened — even when the posting is elided (no units), so
+    /// the loader's pre-booking validation can see it before booking
+    /// drops zero-value interpolations. This is the load-bearing test
+    /// for the rustledger#877 strictness deviation from Python beancount.
+    #[test]
+    fn test_validate_early_emits_e1001_on_elided_posting() {
+        let directives = vec![
+            Directive::Open(Open::new(date(2024, 1, 1), "Assets:Bank")),
+            Directive::Transaction(
+                Transaction::new(date(2024, 1, 15), "Zero to unopened")
+                    .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(0.00), "USD")))
+                    .with_posting(Posting::auto("Expenses:NeverOpened")),
+            ),
+        ];
+
+        let mut session = ValidationSession::new(ValidationOptions::default());
+        let errors = session.run_phase(&directives, Phase::Early, date(2026, 1, 1));
+
+        assert!(
+            errors.iter().any(|e| e.code == ErrorCode::AccountNotOpen
+                && e.to_string().contains("Expenses:NeverOpened")),
+            "early phase must emit E1001 on elided posting to unopened account; got: {errors:?}"
+        );
+    }
+
+    /// `validate_late` must NOT re-emit account-presence errors that the
+    /// early phase already produced — otherwise the loader pipeline
+    /// would surface duplicate E1001 diagnostics per posting.
+    #[test]
+    fn test_validate_late_does_not_duplicate_e1001() {
+        let directives = vec![
+            Directive::Open(Open::new(date(2024, 1, 1), "Assets:Bank")),
+            Directive::Transaction(
+                Transaction::new(date(2024, 1, 15), "To unopened")
+                    .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(100), "USD")))
+                    .with_posting(Posting::new(
+                        "Expenses:NeverOpened",
+                        Amount::new(dec!(-100), "USD"),
+                    )),
+            ),
+        ];
+
+        let mut session = ValidationSession::new(ValidationOptions::default());
+        let early = session.run_phase(&directives, Phase::Early, date(2026, 1, 1));
+        let late = session.run_phase(&directives, Phase::Late, date(2026, 1, 1));
+
+        let early_e1001 = early
+            .iter()
+            .filter(|e| e.code == ErrorCode::AccountNotOpen)
+            .count();
+        let late_e1001 = late
+            .iter()
+            .filter(|e| e.code == ErrorCode::AccountNotOpen)
+            .count();
+
+        assert_eq!(early_e1001, 1, "early phase should emit E1001 once");
+        assert_eq!(
+            late_e1001, 0,
+            "late phase must not re-emit account-presence errors; got: {late:?}"
+        );
+    }
+
+    /// The legacy convenience entry `validate()` chains `Early` then
+    /// `Late` internally. Its error list must match what you'd get from
+    /// explicitly running both phases against the same input — so
+    /// existing callers (LSP, FFI, direct test code) don't observe a
+    /// behavior change after the phase split.
+    #[test]
+    fn test_validate_chained_matches_explicit_phases() {
+        // A mix that exercises both phases: an Open, a Transaction with
+        // an unopened account, a same-day Balance that needs late-phase
+        // inventory state.
+        let directives = vec![
+            Directive::Open(Open::new(date(2024, 1, 1), "Assets:Bank")),
+            Directive::Transaction(
+                Transaction::new(date(2024, 1, 15), "Mixed")
+                    .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(50), "USD")))
+                    .with_posting(Posting::new("Income:Salary", Amount::new(dec!(-50), "USD"))),
+            ),
+            Directive::Balance(Balance::new(
+                date(2024, 1, 16),
+                "Assets:Bank",
+                Amount::new(dec!(50), "USD"),
+            )),
+        ];
+
+        // Legacy single-call.
+        let chained = validate(&directives);
+
+        // Explicit phase split.
+        let mut session = ValidationSession::new(ValidationOptions::default());
+        let mut explicit = session.run_phase(&directives, Phase::Early, date(2026, 1, 1));
+        explicit.extend(session.run_phase(&directives, Phase::Late, date(2026, 1, 1)));
+        explicit.extend(session.finalize());
+
+        // Same set of (code, date, message) tuples in the same order.
+        // String comparison sidesteps the ValidationError struct's
+        // non-pub fields and matches what users actually see.
+        let chained_strs: Vec<String> = chained.iter().map(ToString::to_string).collect();
+        let explicit_strs: Vec<String> = explicit.iter().map(ToString::to_string).collect();
+        assert_eq!(
+            chained_strs, explicit_strs,
+            "legacy `validate()` and explicit `Early` + `Late` must produce identical error lists"
+        );
     }
 }

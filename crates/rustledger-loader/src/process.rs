@@ -239,7 +239,61 @@ pub fn process(raw: LoadResult, options: &LoadOptions) -> Result<Ledger, Process
         )
     });
 
-    // 2. Booking/interpolation
+    // 2. Plugins — run BEFORE early validation so plugins like
+    // `auto_accounts` (which synthesizes Open directives based on
+    // observed posting accounts) get a chance to register accounts
+    // before E1001 fires. This is a deliberate deviation from Python
+    // beancount's pipeline ordering (Python runs plugins after
+    // booking) — see `rustledger_validate::Phase` docs and CLAUDE.md's
+    // "Python Compatibility Policy" section.
+    //
+    // The built-in plugins we ship (`auto_accounts`, `implicit_prices`,
+    // document discovery) don't depend on booked state, so moving them
+    // earlier in the pipeline is safe. User-written Python plugins
+    // that depend on post-booking state would break under this order;
+    // none currently exist in our test corpus.
+    #[cfg(feature = "plugins")]
+    if options.run_plugins || !options.extra_plugins.is_empty() || options.auto_accounts {
+        run_plugins(
+            &mut directives,
+            &raw.plugins,
+            &raw.options,
+            options,
+            &raw.source_map,
+            &mut errors,
+        )?;
+    }
+
+    // 3. Validation (early phase) — runs on pre-booking directives,
+    // AFTER plugins so account-presence checks (E1001) see any Opens
+    // that plugins like `auto_accounts` injected.
+    //
+    // This is what lets booking match Python's "prune zero-interp
+    // postings" behavior in step 4 without losing E1001 on the
+    // elided-zero-to-unopened-account case (rustledger#877).
+    //
+    // The `ValidationSession` carries state (open accounts,
+    // commodities, pending pads, accumulated tolerances) into the late
+    // phase at step 5 so balance assertions and inventory updates see
+    // everything the early phase recorded.
+    #[cfg(feature = "validation")]
+    let mut validation_session = if options.validate {
+        Some(rustledger_validate::ValidationSession::new(
+            build_validation_options(&raw.options, &raw.source_map),
+        ))
+    } else {
+        None
+    };
+
+    #[cfg(feature = "validation")]
+    if let Some(session) = validation_session.as_mut() {
+        let today = jiff::Zoned::now().date();
+        let phase_errors =
+            session.run_phase_spanned(&directives, rustledger_validate::Phase::Early, today);
+        ledger_errors_extend(&mut errors, phase_errors, &raw.source_map);
+    }
+
+    // 4. Booking/interpolation
     //
     // The booking method comes from two sources: the API-level
     // `LoadOptions.booking_method` and the file-level `option
@@ -252,6 +306,13 @@ pub fn process(raw: LoadResult, options: &LoadOptions) -> Result<Ledger, Process
     // We check `set_options` (not `booking_method.is_empty()`) because
     // `Options::new()` defaults `booking_method` to "STRICT", so the
     // string is never empty.
+    //
+    // Booking drops zero-value interpolated postings as part of
+    // `interpolate()` — see the comment in
+    // `rustledger-booking/src/interpolate.rs`. The early validation
+    // pass above already caught E1001 on any unopened-account
+    // references, so it's safe to prune now (the now-removed
+    // `INTERPOLATED_MARKER` workaround in #1114 is obsolete).
     #[cfg(feature = "booking")]
     {
         let file_set_booking = raw.options.set_options.contains("booking_method");
@@ -283,41 +344,18 @@ pub fn process(raw: LoadResult, options: &LoadOptions) -> Result<Ledger, Process
     // order among directives with identical sort keys.
     directives.sort_by_key(|d| (d.value.date(), d.value.priority(), d.file_id, d.span.start));
 
-    // 3. Run plugins (including document discovery when run_plugins is enabled)
-    // Note: Document discovery only runs when run_plugins is true to respect raw mode semantics.
-    // LoadOptions::raw() sets run_plugins=false to prevent any directive mutations.
-    #[cfg(feature = "plugins")]
-    if options.run_plugins || !options.extra_plugins.is_empty() || options.auto_accounts {
-        run_plugins(
-            &mut directives,
-            &raw.plugins,
-            &raw.options,
-            options,
-            &raw.source_map,
-            &mut errors,
-        )?;
-    }
-
-    // 4. Validation
+    // 5. Validation (late phase) — runs on booked + plugin-processed
+    // directives. Reuses the `ValidationSession` from step 2 so
+    // account/commodity/pad bookkeeping carries forward.
     #[cfg(feature = "validation")]
-    if options.validate {
-        run_validation(&directives, &raw.options, &raw.source_map, &mut errors);
+    if let Some(mut session) = validation_session {
+        let today = jiff::Zoned::now().date();
+        let phase_errors =
+            session.run_phase_spanned(&directives, rustledger_validate::Phase::Late, today);
+        ledger_errors_extend(&mut errors, phase_errors, &raw.source_map);
+        let finalize_errors = session.finalize();
+        ledger_errors_extend(&mut errors, finalize_errors, &raw.source_map);
     }
-
-    // 5. Post-validation: prune zero-value interpolated postings.
-    //
-    // The booking pass tags every posting it filled in with the
-    // `INTERPOLATED_MARKER` metadata key. We can now drop the ones whose
-    // interpolated value came out to zero — they were kept through
-    // validation so things like E1001 (account not opened) could fire on
-    // them, but they don't belong in user-facing output (matches Python
-    // beancount, which drops zero-residual interpolated postings).
-    //
-    // Strip the marker from every interpolated posting that survives
-    // (i.e., non-zero filled amounts), so the internal tag never leaks
-    // into BQL queries, JSON output, or formatted ledgers.
-    #[cfg(feature = "booking")]
-    prune_zero_interpolated_postings(&mut directives);
 
     Ok(Ledger {
         directives,
@@ -327,40 +365,6 @@ pub fn process(raw: LoadResult, options: &LoadOptions) -> Result<Ledger, Process
         errors,
         display_context: raw.display_context,
     })
-}
-
-/// Drop zero-value interpolated postings from each transaction and strip
-/// the `INTERPOLATED_MARKER` tag from the rest.
-///
-/// Run AFTER validation so the validator's account-presence checks (E1001)
-/// still see every elided posting. See `process()` step 5 for context.
-#[cfg(feature = "booking")]
-fn prune_zero_interpolated_postings(directives: &mut [Spanned<Directive>]) {
-    use rustledger_booking::INTERPOLATED_MARKER;
-    for spanned in directives.iter_mut() {
-        if let Directive::Transaction(txn) = &mut spanned.value {
-            txn.postings.retain(|p| {
-                let interpolated = p.meta.contains_key(INTERPOLATED_MARKER);
-                if !interpolated {
-                    return true;
-                }
-                // Posting was filled by booking. Drop iff the filled
-                // amount is exactly zero — surviving non-zero ones are
-                // real values the user wants to see.
-                let is_zero = p
-                    .units
-                    .as_ref()
-                    .and_then(|u| u.as_amount())
-                    .is_some_and(|a| a.number.is_zero());
-                !is_zero
-            });
-            // Survivors keep their value; strip the internal marker so
-            // it doesn't leak into user-facing output.
-            for posting in &mut txn.postings {
-                posting.meta.remove(INTERPOLATED_MARKER);
-            }
-        }
-    }
 }
 
 /// Run booking and interpolation on transactions.
@@ -794,17 +798,23 @@ pub fn run_plugins(
     Ok(())
 }
 
-/// Run validation on directives.
+/// Build a [`ValidationOptions`] from loader-level file options.
+///
+/// Factored out of the old `run_validation` so both the early and
+/// late phases in `process()` can share the same `ValidationSession`
+/// configuration. Document-dir resolution is relative to the main
+/// file's parent directory.
 #[cfg(feature = "validation")]
-fn run_validation(
-    directives: &[Spanned<Directive>],
+fn build_validation_options(
     file_options: &Options,
     source_map: &SourceMap,
-    errors: &mut Vec<LedgerError>,
-) {
-    use rustledger_validate::{ValidationOptions, validate_spanned_with_options};
+) -> rustledger_validate::ValidationOptions {
+    use rustledger_validate::ValidationOptions;
 
-    // Resolve document directories relative to the main file's directory
+    // Resolve document directories relative to the main file's
+    // directory. Absolute paths pass through; relative paths are
+    // joined onto the source map's first file's parent. Matches the
+    // pre-refactor `run_validation` behavior exactly.
     let base_dir = source_map
         .files()
         .first()
@@ -830,15 +840,26 @@ fn run_validation(
         .map(|s| (*s).to_string())
         .collect();
 
-    let validation_options = ValidationOptions::default()
+    ValidationOptions::default()
         .with_account_types(account_types)
         .with_document_dirs(resolved_document_dirs)
         .with_infer_tolerance_from_cost(file_options.infer_tolerance_from_cost)
         .with_tolerance_multiplier(file_options.inferred_tolerance_multiplier)
-        .with_inferred_tolerance_default(file_options.inferred_tolerance_default.clone());
+        .with_inferred_tolerance_default(file_options.inferred_tolerance_default.clone())
+}
 
-    let validation_errors = validate_spanned_with_options(directives, validation_options);
-
+/// Convert a batch of [`rustledger_validate::ValidationError`]s into
+/// loader-level [`LedgerError`]s (with resolved `file:line:column`
+/// locations) and append to the existing list.
+///
+/// Factored out so both validation phases in `process()` share the
+/// same conversion path.
+#[cfg(feature = "validation")]
+fn ledger_errors_extend(
+    errors: &mut Vec<LedgerError>,
+    validation_errors: Vec<rustledger_validate::ValidationError>,
+    source_map: &SourceMap,
+) {
     for err in validation_errors {
         let phase = if err.code.is_parse_phase() {
             "parse"

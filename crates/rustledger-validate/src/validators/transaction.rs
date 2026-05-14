@@ -11,18 +11,69 @@ use crate::error::{ErrorCode, ValidationError};
 use crate::{AccountState, LedgerState, ValidationOptions};
 
 /// Validate a Transaction directive.
-pub fn validate_transaction(
+/// Early-phase transaction validation — runs on pre-booking directives.
+///
+/// Includes only checks that don't require booked amounts:
+/// structure (posting count), account-presence (E1001), and
+/// account-lifecycle (used-before-open / used-after-close).
+///
+/// Currency-constraint checking (which calls `posting.amount()`) is
+/// deliberately deferred to the late phase, since elided postings have
+/// `units: None` here.
+///
+/// Returns `false` if validation should not continue to the late phase
+/// (e.g., transaction has no postings — there's nothing to check).
+pub fn validate_transaction_early(
+    state: &LedgerState,
+    txn: &Transaction,
+    errors: &mut Vec<ValidationError>,
+) -> bool {
+    if !validate_transaction_structure(txn, errors) {
+        return false;
+    }
+    // Inline the presence + lifecycle subset of `validate_posting_accounts`
+    // here — we don't want to run the currency check yet (deferred to late
+    // phase so it sees filled units).
+    for posting in &txn.postings {
+        match state.accounts.get(&posting.account) {
+            Some(account_state) => {
+                validate_account_lifecycle(txn, posting, account_state, errors);
+            }
+            None => {
+                errors.push(ValidationError::new(
+                    ErrorCode::AccountNotOpen,
+                    format!("Account {} was never opened", posting.account),
+                    txn.date,
+                ));
+            }
+        }
+    }
+    true
+}
+
+/// Late-phase transaction validation — runs on post-booking directives.
+///
+/// Includes checks that need filled-in amounts: currency-constraint
+/// enforcement on filled postings, tolerance calculation, balance
+/// residual, and inventory updates (lot matching, capital gains).
+pub fn validate_transaction_late(
     state: &mut LedgerState,
     txn: &Transaction,
     errors: &mut Vec<ValidationError>,
 ) {
-    // Check transaction structure
-    if !validate_transaction_structure(txn, errors) {
-        return; // No point checking further if no postings
+    // Currency-constraint checks on filled postings. These need to run
+    // late because they call `posting.amount()`, which is `None` for
+    // elided postings until booking fills them in.
+    //
+    // Account-presence (E1001) already ran in the early phase; we
+    // deliberately don't re-emit here, but we still need the account
+    // state to enforce currency constraints — so skip the check rather
+    // than re-flagging unopened accounts.
+    for posting in &txn.postings {
+        if let Some(account_state) = state.accounts.get(&posting.account) {
+            validate_posting_currency(state, txn, posting, account_state, errors);
+        }
     }
-
-    // Check each posting's account lifecycle and currency constraints
-    validate_posting_accounts(state, txn, errors);
 
     // Calculate tolerances once — used for both balance checking and accumulation.
     let tolerances = calculate_tolerances(txn, &state.options);
@@ -140,29 +191,6 @@ pub fn validate_transaction_structure(
     }
 
     true
-}
-
-/// Validate account lifecycle and currency constraints for each posting.
-pub fn validate_posting_accounts(
-    state: &LedgerState,
-    txn: &Transaction,
-    errors: &mut Vec<ValidationError>,
-) {
-    for posting in &txn.postings {
-        match state.accounts.get(&posting.account) {
-            Some(account_state) => {
-                validate_account_lifecycle(txn, posting, account_state, errors);
-                validate_posting_currency(state, txn, posting, account_state, errors);
-            }
-            None => {
-                errors.push(ValidationError::new(
-                    ErrorCode::AccountNotOpen,
-                    format!("Account {} was never opened", posting.account),
-                    txn.date,
-                ));
-            }
-        }
-    }
 }
 
 /// Validate that an account is open at transaction time and not closed.

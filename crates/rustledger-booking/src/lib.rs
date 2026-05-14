@@ -27,7 +27,7 @@ mod interpolate;
 mod pad;
 
 pub use book::{BookedTransaction, BookingEngine, BookingError, CapitalGain, book_transactions};
-pub use interpolate::{INTERPOLATED_MARKER, InterpolationError, InterpolationResult, interpolate};
+pub use interpolate::{InterpolationError, InterpolationResult, interpolate};
 pub use pad::{PadError, PadResult, expand_pads, merge_with_padding, process_pads};
 
 use bigdecimal::BigDecimal;

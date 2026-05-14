@@ -1660,10 +1660,13 @@ fn same_date_directives_keep_file_order_after_booking() {
 //    should NOT show it. Python beancount drops these from its rendered
 //    output; rledger should too.
 //
-// The fix: booking tags every interpolated posting with
-// `INTERPOLATED_MARKER` metadata, validation runs (so #877's check fires),
-// and the loader then drops zero-value interpolated postings before
-// returning the ledger. Both invariants preserved.
+// The fix: the loader's `process()` runs `validate_early` BEFORE
+// booking, so account-presence checks (E1001) fire on every elided
+// posting — including ones that would later interpolate to zero.
+// Then booking runs and prunes zero-value interpolated postings (to
+// match Python's user-facing display). Then `validate_late` runs for
+// balance/inventory checks. See `rustledger_validate::Phase` and the
+// "Python Compatibility Policy" section in CLAUDE.md.
 
 #[test]
 fn test_zero_interpolated_posting_pruned_on_opened_account() {
@@ -1790,44 +1793,6 @@ fn test_non_zero_interpolated_posting_is_preserved() {
     assert_eq!(amount.number, rust_decimal::Decimal::from(-50));
 }
 
-#[test]
-fn test_interpolated_marker_does_not_leak_to_user_output() {
-    // Defensive: even for non-zero interpolated postings that survive
-    // pruning, the internal `__interpolated__` metadata marker must be
-    // stripped so it never appears in BQL queries, JSON output, or
-    // formatted ledgers.
-    use rustledger_booking::INTERPOLATED_MARKER;
-    use rustledger_loader::{LoadOptions, process};
-
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let path = tmp.path().join("marker_strip.beancount");
-    std::fs::write(
-        &path,
-        "option \"operating_currency\" \"USD\"\n\
-         2020-01-01 open Assets:Bank USD\n\
-         2020-01-01 open Income:Trading\n\
-         \n\
-         2020-01-15 * \"Trade with non-zero income\"\n  \
-         Assets:Bank      150 USD\n  \
-         Assets:Bank     -100 USD\n  \
-         Income:Trading\n",
-    )
-    .unwrap();
-
-    let raw = rustledger_loader::load_raw(&path).expect("load raw");
-    let ledger = process(raw, &LoadOptions::default()).expect("process");
-
-    for spanned in &ledger.directives {
-        if let rustledger_core::Directive::Transaction(t) = &spanned.value {
-            for p in &t.postings {
-                assert!(
-                    !p.meta.contains_key(INTERPOLATED_MARKER),
-                    "INTERPOLATED_MARKER must not leak to user-facing output \
-                     on posting {} {:?}",
-                    p.account,
-                    p.units
-                );
-            }
-        }
-    }
-}
+// (Test for the INTERPOLATED_MARKER side channel was deleted with the
+// rest of that workaround when the validate-phase-split landed; the
+// marker no longer exists.)

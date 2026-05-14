@@ -4,9 +4,21 @@
 
 use rust_decimal::Decimal;
 use rust_decimal::prelude::Signed;
-use rustledger_core::{Amount, IncompleteAmount, InternedStr, Transaction};
+use rustledger_core::{Amount, IncompleteAmount, InternedStr, MetaValue, Transaction};
 use std::collections::HashMap;
 use thiserror::Error;
+
+/// Metadata key set on interpolation-filled postings.
+///
+/// The loader's post-validation pruning step uses this marker to identify
+/// zero-value interpolated postings that should be dropped from
+/// user-facing output, matching Python beancount's behavior — without
+/// losing the validation visibility that #877 / beancount/beancount#962
+/// required.
+///
+/// The marker is stripped from any posting that survives pruning so it
+/// does not leak into BQL queries, JSON output, or formatted ledgers.
+pub const INTERPOLATED_MARKER: &str = "__interpolated__";
 
 /// Errors that can occur during interpolation.
 #[derive(Debug, Clone, Error)]
@@ -545,10 +557,22 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
         }
     }
 
-    // Note: We intentionally do NOT prune postings that interpolate to zero.
-    // Although Python beancount removes such postings, pruning them before
-    // validation hides errors (e.g., E1001 for unopened accounts).
+    // Note: We intentionally do NOT prune postings that interpolate to zero
+    // here. Although Python beancount removes such postings, pruning them
+    // before validation hides errors (e.g., E1001 for unopened accounts).
     // See issue #877 / beancount/beancount#962.
+    //
+    // Instead, tag every interpolated posting with `INTERPOLATED_MARKER`
+    // so the loader's post-validation prune step can drop zero-value ones
+    // from user-facing output (matching Python's display behavior) while
+    // validation still gets to see them.
+    for &idx in &filled_indices {
+        if let Some(posting) = result.postings.get_mut(idx) {
+            posting
+                .meta
+                .insert(INTERPOLATED_MARKER.to_string(), MetaValue::Bool(true));
+        }
+    }
 
     // Return the residuals we've been tracking incrementally
     // (no need to recalculate - we've updated residuals as we filled amounts)

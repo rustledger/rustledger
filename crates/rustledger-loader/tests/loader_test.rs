@@ -1646,3 +1646,188 @@ fn same_date_directives_keep_file_order_after_booking() {
         "textually-second Buy should come second, got: {txns_on_date:?}"
     );
 }
+
+// ─── Zero-value interpolated posting handling (#877 + Python compat) ────
+//
+// Two competing invariants:
+//
+// 1. (#877) When an elided posting interpolates to zero on an account that
+//    was never `open`ed, validation must still emit E1001. Pruning the
+//    posting before validation hides the error.
+//
+// 2. (Python compat) When the elided posting interpolates to zero on a
+//    legitimately-opened account, user-facing output (BQL, JSON, format)
+//    should NOT show it. Python beancount drops these from its rendered
+//    output; rledger should too.
+//
+// The fix: booking tags every interpolated posting with
+// `INTERPOLATED_MARKER` metadata, validation runs (so #877's check fires),
+// and the loader then drops zero-value interpolated postings before
+// returning the ledger. Both invariants preserved.
+
+#[test]
+fn test_zero_interpolated_posting_pruned_on_opened_account() {
+    use rustledger_loader::{LoadOptions, process};
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("zero_interp.beancount");
+    std::fs::write(
+        &path,
+        "option \"operating_currency\" \"USD\"\n\
+         2020-01-01 open Assets:Bank USD\n\
+         2020-01-01 open Income:Trading\n\
+         \n\
+         2020-01-15 * \"Balanced trade with zero income\"\n  \
+         Assets:Bank      100 USD\n  \
+         Assets:Bank     -100 USD\n  \
+         Income:Trading\n",
+    )
+    .unwrap();
+
+    let raw = rustledger_loader::load_raw(&path).expect("load raw");
+    let ledger = process(raw, &LoadOptions::default()).expect("process");
+
+    let txn = ledger
+        .directives
+        .iter()
+        .find_map(|d| match &d.value {
+            rustledger_core::Directive::Transaction(t) => Some(t),
+            _ => None,
+        })
+        .expect("transaction present");
+
+    // The Income:Trading posting was interpolated to 0 USD and should
+    // have been pruned post-validation.
+    let accounts: Vec<&str> = txn.postings.iter().map(|p| p.account.as_str()).collect();
+    assert!(
+        !accounts.contains(&"Income:Trading"),
+        "zero-value interpolated Income:Trading should be pruned, got: {accounts:?}"
+    );
+    assert_eq!(txn.postings.len(), 2, "expected only the two cash postings");
+
+    // No validation errors expected on opened accounts.
+    let errors: Vec<&str> = ledger.errors.iter().map(|e| e.message.as_str()).collect();
+    assert!(
+        errors.is_empty(),
+        "expected no errors on legitimately-opened accounts, got: {errors:?}"
+    );
+}
+
+#[test]
+fn test_zero_interpolated_posting_keeps_e1001_on_unopened_account() {
+    // Reproduces #877. The interpolated posting on Expenses:NeverOpened
+    // resolves to 0 USD but must still surface as E1001 because the
+    // account was never opened.
+    use rustledger_loader::{LoadOptions, process};
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("issue877.beancount");
+    std::fs::write(
+        &path,
+        "option \"operating_currency\" \"USD\"\n\
+         2020-01-01 open Assets:Bank USD\n\
+         \n\
+         2020-01-15 * \"Zero balance to unopened account\"\n  \
+         Assets:Bank  0.00 USD\n  \
+         Expenses:NeverOpened\n",
+    )
+    .unwrap();
+
+    let raw = rustledger_loader::load_raw(&path).expect("load raw");
+    let ledger = process(raw, &LoadOptions::default()).expect("process");
+
+    let has_e1001 = ledger.errors.iter().any(|e| e.code == "E1001");
+    assert!(
+        has_e1001,
+        "expected E1001 for never-opened account (per #877); got errors: {:?}",
+        ledger.errors.iter().map(|e| &e.code).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn test_non_zero_interpolated_posting_is_preserved() {
+    // Sanity: only ZERO-value interpolated postings are pruned. A
+    // legitimate interpolated residual (non-zero) must stay in output.
+    use rustledger_loader::{LoadOptions, process};
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("nonzero_interp.beancount");
+    std::fs::write(
+        &path,
+        "option \"operating_currency\" \"USD\"\n\
+         2020-01-01 open Assets:Bank USD\n\
+         2020-01-01 open Income:Trading\n\
+         \n\
+         2020-01-15 * \"Trade with non-zero income\"\n  \
+         Assets:Bank      150 USD\n  \
+         Assets:Bank     -100 USD\n  \
+         Income:Trading\n",
+    )
+    .unwrap();
+
+    let raw = rustledger_loader::load_raw(&path).expect("load raw");
+    let ledger = process(raw, &LoadOptions::default()).expect("process");
+
+    let txn = ledger
+        .directives
+        .iter()
+        .find_map(|d| match &d.value {
+            rustledger_core::Directive::Transaction(t) => Some(t),
+            _ => None,
+        })
+        .expect("transaction present");
+
+    let income = txn
+        .postings
+        .iter()
+        .find(|p| p.account.as_str() == "Income:Trading")
+        .expect("Income:Trading should still be present (interpolated -50 USD)");
+    let amount = income
+        .units
+        .as_ref()
+        .and_then(|u| u.as_amount())
+        .expect("filled");
+    assert_eq!(amount.number, rust_decimal::Decimal::from(-50));
+}
+
+#[test]
+fn test_interpolated_marker_does_not_leak_to_user_output() {
+    // Defensive: even for non-zero interpolated postings that survive
+    // pruning, the internal `__interpolated__` metadata marker must be
+    // stripped so it never appears in BQL queries, JSON output, or
+    // formatted ledgers.
+    use rustledger_booking::INTERPOLATED_MARKER;
+    use rustledger_loader::{LoadOptions, process};
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("marker_strip.beancount");
+    std::fs::write(
+        &path,
+        "option \"operating_currency\" \"USD\"\n\
+         2020-01-01 open Assets:Bank USD\n\
+         2020-01-01 open Income:Trading\n\
+         \n\
+         2020-01-15 * \"Trade with non-zero income\"\n  \
+         Assets:Bank      150 USD\n  \
+         Assets:Bank     -100 USD\n  \
+         Income:Trading\n",
+    )
+    .unwrap();
+
+    let raw = rustledger_loader::load_raw(&path).expect("load raw");
+    let ledger = process(raw, &LoadOptions::default()).expect("process");
+
+    for spanned in &ledger.directives {
+        if let rustledger_core::Directive::Transaction(t) = &spanned.value {
+            for p in &t.postings {
+                assert!(
+                    !p.meta.contains_key(INTERPOLATED_MARKER),
+                    "INTERPOLATED_MARKER must not leak to user-facing output \
+                     on posting {} {:?}",
+                    p.account,
+                    p.units
+                );
+            }
+        }
+    }
+}

@@ -304,6 +304,21 @@ pub fn process(raw: LoadResult, options: &LoadOptions) -> Result<Ledger, Process
         run_validation(&directives, &raw.options, &raw.source_map, &mut errors);
     }
 
+    // 5. Post-validation: prune zero-value interpolated postings.
+    //
+    // The booking pass tags every posting it filled in with the
+    // `INTERPOLATED_MARKER` metadata key. We can now drop the ones whose
+    // interpolated value came out to zero — they were kept through
+    // validation so things like E1001 (account not opened) could fire on
+    // them, but they don't belong in user-facing output (matches Python
+    // beancount, which drops zero-residual interpolated postings).
+    //
+    // Strip the marker from every interpolated posting that survives
+    // (i.e., non-zero filled amounts), so the internal tag never leaks
+    // into BQL queries, JSON output, or formatted ledgers.
+    #[cfg(feature = "booking")]
+    prune_zero_interpolated_postings(&mut directives);
+
     Ok(Ledger {
         directives,
         options: raw.options,
@@ -312,6 +327,40 @@ pub fn process(raw: LoadResult, options: &LoadOptions) -> Result<Ledger, Process
         errors,
         display_context: raw.display_context,
     })
+}
+
+/// Drop zero-value interpolated postings from each transaction and strip
+/// the `INTERPOLATED_MARKER` tag from the rest.
+///
+/// Run AFTER validation so the validator's account-presence checks (E1001)
+/// still see every elided posting. See `process()` step 5 for context.
+#[cfg(feature = "booking")]
+fn prune_zero_interpolated_postings(directives: &mut [Spanned<Directive>]) {
+    use rustledger_booking::INTERPOLATED_MARKER;
+    for spanned in directives.iter_mut() {
+        if let Directive::Transaction(txn) = &mut spanned.value {
+            txn.postings.retain(|p| {
+                let interpolated = p.meta.contains_key(INTERPOLATED_MARKER);
+                if !interpolated {
+                    return true;
+                }
+                // Posting was filled by booking. Drop iff the filled
+                // amount is exactly zero — surviving non-zero ones are
+                // real values the user wants to see.
+                let is_zero = p
+                    .units
+                    .as_ref()
+                    .and_then(|u| u.as_amount())
+                    .is_some_and(|a| a.number.is_zero());
+                !is_zero
+            });
+            // Survivors keep their value; strip the internal marker so
+            // it doesn't leak into user-facing output.
+            for posting in &mut txn.postings {
+                posting.meta.remove(INTERPOLATED_MARKER);
+            }
+        }
+    }
 }
 
 /// Run booking and interpolation on transactions.

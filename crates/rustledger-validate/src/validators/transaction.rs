@@ -75,20 +75,9 @@ pub fn validate_transaction_late(
         }
     }
 
-    // Calculate tolerances once — used for both balance checking and accumulation.
+    // Compute tolerances and check transaction balance.
     let tolerances = calculate_tolerances(txn, &state.options);
-
-    // Check transaction balance (reuses pre-computed tolerances)
     validate_transaction_balance(txn, &tolerances, errors);
-
-    // Accumulate tolerances for balance assertions (Python beancount behavior).
-    for (currency, tolerance) in tolerances {
-        state
-            .tolerances
-            .entry(currency)
-            .and_modify(|t| *t = (*t).max(tolerance))
-            .or_insert(tolerance);
-    }
 
     // Update inventories with booking validation
     update_inventories(state, txn, errors);

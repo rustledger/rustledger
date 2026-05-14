@@ -285,9 +285,14 @@ pub fn process(raw: LoadResult, options: &LoadOptions) -> Result<Ledger, Process
         None
     };
 
+    // Compute `today` once for both phases — avoids a midnight-crossing
+    // race where Early and Late could disagree on what day it is, and
+    // gives `FutureDate` warnings a single coherent reference point.
+    #[cfg(feature = "validation")]
+    let today = jiff::Zoned::now().date();
+
     #[cfg(feature = "validation")]
     if let Some(session) = validation_session.as_mut() {
-        let today = jiff::Zoned::now().date();
         let phase_errors =
             session.run_phase_spanned(&directives, rustledger_validate::Phase::Early, today);
         ledger_errors_extend(&mut errors, phase_errors, &raw.source_map);
@@ -349,7 +354,6 @@ pub fn process(raw: LoadResult, options: &LoadOptions) -> Result<Ledger, Process
     // account/commodity/pad bookkeeping carries forward.
     #[cfg(feature = "validation")]
     if let Some(mut session) = validation_session {
-        let today = jiff::Zoned::now().date();
         let phase_errors =
             session.run_phase_spanned(&directives, rustledger_validate::Phase::Late, today);
         ledger_errors_extend(&mut errors, phase_errors, &raw.source_map);

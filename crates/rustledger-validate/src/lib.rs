@@ -54,11 +54,12 @@ pub use error::{ErrorCode, Severity, ValidationError};
 /// The loader pipeline splits validation around booking. Checks that
 /// don't need filled-in amounts (account presence, account lifecycle,
 /// structural integrity, date ordering, document presence, commodity
-/// metadata) run as [`Phase::Early`] BEFORE booking, so they see elided
-/// postings to unopened accounts before booking drops zero-value
-/// interpolations. Checks that need filled-in amounts (currency
-/// constraints, balance residuals, inventory updates, balance
-/// assertions) run as [`Phase::Late`] AFTER booking + plugins.
+/// metadata) run as [`Phase::Early`] AFTER plugins but BEFORE booking,
+/// so they see elided postings to unopened accounts (with any Opens
+/// plugins like `auto_accounts` injected) before booking drops
+/// zero-value interpolations. Checks that need filled-in amounts
+/// (currency constraints, balance residuals, inventory updates,
+/// balance assertions) run as [`Phase::Late`] AFTER booking.
 ///
 /// Standalone callers (LSP, tests, FFI) that don't run booking between
 /// phases typically chain `Early` → `Late` → [`ValidationSession::finalize`]
@@ -257,9 +258,6 @@ pub struct LedgerState {
     options: ValidationOptions,
     /// Track previous directive date for out-of-order detection.
     last_date: Option<NaiveDate>,
-    /// Accumulated tolerances per currency from transaction amounts.
-    /// Balance assertions use these with 2x multiplier (Python beancount behavior).
-    tolerances: FxHashMap<InternedStr, Decimal>,
     /// `(account, close_date)` pairs whose late-phase Close check has
     /// already fired. Guards against duplicate same-day Close
     /// directives running the non-empty-balance check twice (the early
@@ -654,8 +652,8 @@ fn build_document_exists_cache<D: ValidatableDirective>(
 /// that need to interleave validation with other pipeline steps.
 ///
 /// Typical use: run [`run_phase`](Self::run_phase) with [`Phase::Early`]
-/// BEFORE booking, then [`Phase::Late`] AFTER booking + plugins. Call
-/// [`finalize`](Self::finalize) at the end to flush deferred checks
+/// AFTER plugins but BEFORE booking, then [`Phase::Late`] AFTER booking.
+/// Call [`finalize`](Self::finalize) at the end to flush deferred checks
 /// (e.g., unused pads).
 ///
 /// Standalone callers that don't run booking between phases (e.g.
@@ -695,7 +693,7 @@ fn build_document_exists_cache<D: ValidatableDirective>(
 ///
 /// let mut session = ValidationSession::new(ValidationOptions::default());
 /// let mut errors = session.run_phase(&directives, Phase::Early, today);
-/// // ... booking, plugins mutate `directives` here ...
+/// // ... booking runs here; plugins ran BEFORE Early ...
 /// errors.extend(session.run_phase(&directives, Phase::Late, today));
 /// errors.extend(session.finalize());
 /// ```
@@ -787,7 +785,7 @@ impl ValidationSession {
         if self.phases_run & bit != 0 {
             debug_assert!(
                 false,
-                "ValidationSession::run_phase called twice for {phase:?}; \
+                "ValidationSession::run_phase{{,_spanned}} called twice for {phase:?}; \
                  each phase must run exactly once per session"
             );
             return false;
@@ -795,7 +793,7 @@ impl ValidationSession {
         if matches!(phase, Phase::Late) && self.phases_run & Self::PHASE_EARLY_BIT == 0 {
             debug_assert!(
                 false,
-                "ValidationSession::run_phase(Phase::Late) called before Phase::Early; \
+                "ValidationSession::run_phase{{,_spanned}}(Phase::Late) called before Phase::Early; \
                  Late depends on state Early builds (open accounts, commodities, pending pads)"
             );
             return false;

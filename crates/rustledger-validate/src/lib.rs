@@ -642,9 +642,11 @@ fn build_document_exists_cache<D: ValidatableDirective>(
 /// [`finalize`](Self::finalize) at the end to flush deferred checks
 /// (e.g., unused pads).
 ///
-/// Standalone callers that don't run booking between phases should
-/// prefer the [`validate`] / [`validate_with_options`] convenience
-/// entries, which chain both phases internally.
+/// Standalone callers that don't run booking between phases (e.g.
+/// LSP, FFI, tests) run the three calls back-to-back against the same
+/// directive list. The verbosity is intentional — it surfaces the
+/// phase split so callers explicitly choose whether to interleave
+/// booking between Early and Late.
 ///
 /// # Example
 ///
@@ -684,9 +686,9 @@ impl ValidationSession {
     }
 
     /// Variant of [`run_phase`](Self::run_phase) for `Spanned<Directive>`
-    /// slices. Preserves source-location info on emitted errors —
-    /// matches what `validate_spanned_with_options` does for the
-    /// non-phased entry point.
+    /// slices. Preserves source-location info on emitted errors so
+    /// callers (LSP, loader, FFI) can render `file:line:column`
+    /// diagnostics directly.
     pub fn run_phase_spanned(
         &mut self,
         directives: &[Spanned<Directive>],
@@ -2397,6 +2399,67 @@ mod tests {
         assert_eq!(
             chained_strs, explicit_strs,
             "legacy `validate()` and explicit `Early` + `Late` must produce identical error lists"
+        );
+    }
+
+    #[test]
+    fn test_phase_order_early_then_late_then_finalize() {
+        // Pin the error emission ordering across phases:
+        //   1. Early-phase errors  (E1001 AccountNotOpen)
+        //   2. Late-phase errors   (E2002 BalanceAssertionFailed)
+        //   3. Finalize errors     (E2003 PadWithoutBalance)
+        // Stable ordering matters for LSP diagnostics and CLI output;
+        // accidental reordering of the pipeline would surface here.
+        let directives = vec![
+            Directive::Open(Open::new(date(2024, 1, 1), "Assets:Bank")),
+            Directive::Open(Open::new(date(2024, 1, 1), "Assets:Other")),
+            Directive::Open(Open::new(date(2024, 1, 1), "Equity:Opening")),
+            // Early: posting to unopened Income:Salary → E1001.
+            Directive::Transaction(
+                Transaction::new(date(2024, 1, 5), "early")
+                    .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(100), "USD")))
+                    .with_posting(Posting::new(
+                        "Income:Salary",
+                        Amount::new(dec!(-100), "USD"),
+                    )),
+            ),
+            // Finalize: pad on Assets:Other has no following Balance → E2003.
+            Directive::Pad(Pad::new(
+                date(2024, 1, 10),
+                "Assets:Other",
+                "Equity:Opening",
+            )),
+            // Late: wrong amount → E2002. (Posted balance is 100 USD.)
+            Directive::Balance(Balance::new(
+                date(2024, 2, 1),
+                "Assets:Bank",
+                Amount::new(dec!(999), "USD"),
+            )),
+        ];
+
+        let errors = validate(&directives);
+        let codes: Vec<ErrorCode> = errors.iter().map(|e| e.code).collect();
+
+        let early_pos = codes
+            .iter()
+            .position(|c| *c == ErrorCode::AccountNotOpen)
+            .unwrap_or_else(|| panic!("expected E1001 in {codes:?}"));
+        let late_pos = codes
+            .iter()
+            .position(|c| *c == ErrorCode::BalanceAssertionFailed)
+            .unwrap_or_else(|| panic!("expected E2002 in {codes:?}"));
+        let finalize_pos = codes
+            .iter()
+            .position(|c| *c == ErrorCode::PadWithoutBalance)
+            .unwrap_or_else(|| panic!("expected E2003 in {codes:?}"));
+
+        assert!(
+            early_pos < late_pos,
+            "early-phase errors must precede late-phase; got {codes:?}"
+        );
+        assert!(
+            late_pos < finalize_pos,
+            "late-phase errors must precede finalize; got {codes:?}"
         );
     }
 }

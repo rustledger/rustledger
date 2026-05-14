@@ -208,9 +208,15 @@ impl NativePlugin for CurrencyAccountsPlugin {
             //
             // Python's plugin strips price annotations here
             // (currency_accounts.py:145) because its pipeline runs
-            // plugins BEFORE booking. In rustledger, booking runs
-            // first and the validator re-checks afterwards, so we
-            // must keep prices to preserve the weight-based balance.
+            // plugins BEFORE booking. rustledger also runs plugins
+            // before booking (since PR #1116), but we still keep prices
+            // because the appended neutralizing postings already make
+            // each currency group balanced on its own — booking then
+            // fills any elided posting from the per-currency residual
+            // and the extra prices are redundant rather than harmful.
+            // See `rustledger_validate::Phase` docs and CLAUDE.md's
+            // "Python Compatibility Policy" section for the broader
+            // ordering rationale.
             let mut new_postings: Vec<PostingData> =
                 Vec::with_capacity(txn.postings.len() + curmap.len());
             for posting in &txn.postings {

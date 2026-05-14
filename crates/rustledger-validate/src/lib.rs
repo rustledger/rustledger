@@ -61,8 +61,8 @@ pub use error::{ErrorCode, Severity, ValidationError};
 /// assertions) run as [`Phase::Late`] AFTER booking + plugins.
 ///
 /// Standalone callers (LSP, tests, FFI) that don't run booking between
-/// phases typically just use the legacy [`validate`] entry points,
-/// which internally chain `Early` then `Late` for full coverage.
+/// phases typically chain `Early` → `Late` → [`ValidationSession::finalize`]
+/// through a single session — there is no shortcut entry point anymore.
 ///
 /// See the "Python Compatibility Policy" section in `CLAUDE.md` for the
 /// rationale on why we deliberately catch elided-zero-to-unopened-account

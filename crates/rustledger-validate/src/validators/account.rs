@@ -112,8 +112,13 @@ pub fn validate_close_late(
     // Skip the duplicate Close that the early phase already rejected
     // with `AccountClosed`. Without this guard, two same-day closes
     // for the same account would both pass the `closed == Some(close.date)`
-    // check and double-emit `AccountCloseNotEmpty`.
-    if !state.late_close_processed.insert(close.account.clone()) {
+    // check and double-emit `AccountCloseNotEmpty`. Keyed by
+    // (account, date) so that a legitimate later close after a reopen
+    // (if that's ever supported) still runs the inventory check.
+    if !state
+        .late_close_processed
+        .insert((close.account.clone(), close.date))
+    {
         return;
     }
     if let Some(inv) = state.inventories.get(&close.account)

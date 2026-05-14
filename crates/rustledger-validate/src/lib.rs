@@ -255,12 +255,17 @@ pub struct LedgerState {
     /// Accumulated tolerances per currency from transaction amounts.
     /// Balance assertions use these with 2x multiplier (Python beancount behavior).
     tolerances: FxHashMap<InternedStr, Decimal>,
-    /// Accounts whose late-phase Close check has already fired. Guards
-    /// against duplicate same-day Close directives running the
-    /// non-empty-balance check twice (the early phase only rejects the
-    /// duplicate with `AccountClosed`; without this set, `validate_close_late`'s
-    /// `closed == Some(close.date)` guard would let both through).
-    pub(crate) late_close_processed: FxHashSet<InternedStr>,
+    /// `(account, close_date)` pairs whose late-phase Close check has
+    /// already fired. Guards against duplicate same-day Close
+    /// directives running the non-empty-balance check twice (the early
+    /// phase only rejects the duplicate with `AccountClosed`; without
+    /// this set, `validate_close_late`'s `closed == Some(close.date)`
+    /// guard would let both through).
+    ///
+    /// Keyed by `(account, date)` rather than account alone so that if
+    /// reopen-after-close is ever supported, a legitimate later close on
+    /// the same account still runs the inventory check.
+    pub(crate) late_close_processed: FxHashSet<(InternedStr, NaiveDate)>,
 }
 
 impl LedgerState {
@@ -654,25 +659,60 @@ fn build_document_exists_cache<D: ValidatableDirective>(
 /// phase split so callers explicitly choose whether to interleave
 /// booking between Early and Late.
 ///
+/// # Migration from pre-#1116
+///
+/// The free-function shortcuts `validate`, `validate_with_options`,
+/// `validate_with_today`, `validate_spanned_with_options`, and
+/// `validate_spanned_with_today` were removed. Replace each call site
+/// with the three-step `ValidationSession` sequence shown below.
+///
+/// # Preconditions
+///
+/// Each session is single-use:
+/// - Call [`Phase::Early`] at most once.
+/// - Call [`Phase::Late`] at most once, and only AFTER `Early`.
+/// - Call [`finalize`](Self::finalize) at most once, and only AFTER both phases.
+///
+/// In debug builds, violating this contract panics. In release builds
+/// the duplicate / out-of-order call is a no-op that returns an empty
+/// error list — this is deliberate so a buggy caller can't silently
+/// corrupt the shared `LedgerState` (inventories are additive, so a
+/// second `Late` pass would double-book every transaction).
+///
 /// # Example
 ///
-/// ```ignore
-/// let mut session = ValidationSession::new(options);
+/// ```
+/// use rustledger_validate::{Phase, ValidationOptions, ValidationSession};
+/// use rustledger_core::{Directive, naive_date};
+///
+/// let directives: Vec<Directive> = vec![];
+/// let today = naive_date(2030, 1, 1).unwrap();
+///
+/// let mut session = ValidationSession::new(ValidationOptions::default());
 /// let mut errors = session.run_phase(&directives, Phase::Early, today);
-/// // ... booking, plugins mutate `directives` ...
+/// // ... booking, plugins mutate `directives` here ...
 /// errors.extend(session.run_phase(&directives, Phase::Late, today));
 /// errors.extend(session.finalize());
 /// ```
 pub struct ValidationSession {
     state: LedgerState,
+    /// Bitmask of phases that have already executed. Bit 0 = Early,
+    /// bit 1 = Late. Used to detect re-runs and out-of-order calls.
+    /// `finalize` is guarded by `self`-by-move on its signature, so it
+    /// doesn't need a bit.  See type-level docs § Preconditions.
+    phases_run: u8,
 }
 
 impl ValidationSession {
+    const PHASE_EARLY_BIT: u8 = 1 << 0;
+    const PHASE_LATE_BIT: u8 = 1 << 1;
+
     /// Create a new session with the given validation options.
     #[must_use]
     pub fn new(options: ValidationOptions) -> Self {
         Self {
             state: LedgerState::with_options(options),
+            phases_run: 0,
         }
     }
 
@@ -682,12 +722,22 @@ impl ValidationSession {
     /// filled-in amounts. `Late` runs balance/inventory/currency
     /// checks that do. The session's internal `LedgerState` is updated
     /// by each phase so subsequent calls see the accumulated state.
+    ///
+    /// # Panics (debug only)
+    ///
+    /// Panics in debug builds if called out of order — `Phase::Late`
+    /// before `Phase::Early`, or either phase invoked twice. In release
+    /// builds the offending call is a no-op returning an empty `Vec`.
+    /// See the type-level "Preconditions" section.
     pub fn run_phase(
         &mut self,
         directives: &[Directive],
         phase: Phase,
         today: NaiveDate,
     ) -> Vec<ValidationError> {
+        if !self.check_phase_ordering(phase) {
+            return Vec::new();
+        }
         validate_phase_inner(directives, &mut self.state, phase, today)
     }
 
@@ -695,20 +745,58 @@ impl ValidationSession {
     /// slices. Preserves source-location info on emitted errors so
     /// callers (LSP, loader, FFI) can render `file:line:column`
     /// diagnostics directly.
+    ///
+    /// Same phase-ordering preconditions as [`run_phase`](Self::run_phase).
     pub fn run_phase_spanned(
         &mut self,
         directives: &[Spanned<Directive>],
         phase: Phase,
         today: NaiveDate,
     ) -> Vec<ValidationError> {
+        if !self.check_phase_ordering(phase) {
+            return Vec::new();
+        }
         validate_phase_inner(directives, &mut self.state, phase, today)
     }
 
     /// Flush deferred end-of-validation checks. Currently emits unused
-    /// pad warnings (E2003). Call once after both phases have run.
+    /// pad warnings (E2003). Call once after both phases have run —
+    /// dropping the returned `Vec` discards those warnings.
+    ///
+    /// Consumes the session because deferred state is per-session;
+    /// re-running `finalize` on the same state would re-emit the same
+    /// errors.
     #[must_use]
     pub fn finalize(self) -> Vec<ValidationError> {
         check_unused_pads(&self.state)
+    }
+
+    /// Validate the requested phase against the session's run history.
+    /// Returns `true` if the caller may proceed, `false` if the call
+    /// should no-op. In debug builds, violations panic instead.
+    fn check_phase_ordering(&mut self, phase: Phase) -> bool {
+        let bit = match phase {
+            Phase::Early => Self::PHASE_EARLY_BIT,
+            Phase::Late => Self::PHASE_LATE_BIT,
+        };
+        if self.phases_run & bit != 0 {
+            debug_assert!(
+                false,
+                "ValidationSession::run_phase called twice for {phase:?}; \
+                 each phase must run exactly once per session"
+            );
+            return false;
+        }
+        if matches!(phase, Phase::Late) && self.phases_run & Self::PHASE_EARLY_BIT == 0 {
+            debug_assert!(
+                false,
+                "ValidationSession::run_phase(Phase::Late) called before Phase::Early; \
+                 Late depends on state Early builds (open accounts, commodities, pending pads)"
+            );
+            return false;
+        }
+        self.phases_run |= bit;
+        true
     }
 }
 
@@ -2512,5 +2600,24 @@ mod tests {
             account_closed_count, 1,
             "duplicate close should still report AccountClosed once; got {errors:?}"
         );
+    }
+
+    #[test]
+    #[should_panic(expected = "called twice for Late")]
+    fn test_run_phase_duplicate_late_panics_in_debug() {
+        let directives = vec![Directive::Open(Open::new(date(2024, 1, 1), "Assets:Bank"))];
+        let mut session = ValidationSession::new(ValidationOptions::default());
+        let _ = session.run_phase(&directives, Phase::Early, date(2030, 1, 1));
+        let _ = session.run_phase(&directives, Phase::Late, date(2030, 1, 1));
+        // Second Late: should panic via debug_assert.
+        let _ = session.run_phase(&directives, Phase::Late, date(2030, 1, 1));
+    }
+
+    #[test]
+    #[should_panic(expected = "Phase::Late) called before Phase::Early")]
+    fn test_run_phase_late_before_early_panics_in_debug() {
+        let directives = vec![Directive::Open(Open::new(date(2024, 1, 1), "Assets:Bank"))];
+        let mut session = ValidationSession::new(ValidationOptions::default());
+        let _ = session.run_phase(&directives, Phase::Late, date(2030, 1, 1));
     }
 }

@@ -117,6 +117,11 @@ pub fn validate_balance_late(
     // Check if there are pending pads for this account
     // Use get_mut instead of remove - a pad can apply to multiple currencies
     if let Some(pending_pads) = state.pending_pads.get_mut(&bal.account) {
+        // Drop pads that already served a previous balance assertion.
+        // Without this, the vec grows for the lifetime of the session
+        // and the E2003 finalize sweep scans every pad ever pushed.
+        pending_pads.retain(|p| !p.used);
+
         // Check for multiple pads (E2004) - only warn if none have been used yet
         if pending_pads.len() > 1 && !pending_pads.iter().any(|p| p.used) {
             errors.push(

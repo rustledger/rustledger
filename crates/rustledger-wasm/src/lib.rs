@@ -510,7 +510,21 @@ pub fn init() {
 mod tests {
     use super::*;
     use rustledger_parser::parse as parse_beancount;
-    use rustledger_validate::validate as validate_ledger;
+    use rustledger_validate::{Phase, ValidationOptions, ValidationSession};
+
+    /// Test helper mirroring the deleted public `validate()`. Chains
+    /// Early + Late + finalize through a single session against the
+    /// same input.
+    fn validate_ledger(
+        directives: &[rustledger_core::Directive],
+    ) -> Vec<rustledger_validate::ValidationError> {
+        let today = rustledger_core::naive_date(2999, 12, 31).unwrap();
+        let mut session = ValidationSession::new(ValidationOptions::default());
+        let mut errors = session.run_phase(directives, Phase::Early, today);
+        errors.extend(session.run_phase(directives, Phase::Late, today));
+        errors.extend(session.finalize());
+        errors
+    }
 
     #[test]
     fn test_parse_simple() {

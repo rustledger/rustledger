@@ -9,24 +9,31 @@
 
 #![cfg(unix)]
 
-use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
 use std::process::Command;
-use tempfile::{NamedTempFile, TempDir};
+use tempfile::NamedTempFile;
+#[cfg(target_os = "linux")]
+use tempfile::TempDir;
 
-fn stub_emitting_date(date: &str) -> (TempDir, PathBuf) {
-    let dir = TempDir::new().unwrap();
-    let path = dir.path().join("stub-source.sh");
-    // Beancount-form output: `<date> price <ticker> <amount> <currency>`.
-    // The source-cmd parser picks up the date from this line. Args (ticker,
-    // currency) are ignored — we always emit the same line so we can assert
-    // the dedup behavior is driven by the *response* date.
-    let body = format!("#!/usr/bin/env bash\necho '{date} price AAPL 150.00 USD'\n");
-    std::fs::write(&path, body).unwrap();
-    let mut perms = std::fs::metadata(&path).unwrap().permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(&path, perms).unwrap();
-    (dir, path)
+/// Build a `--source-cmd` invocation that emits the given date in
+/// beancount price form.
+///
+/// We invoke `sh -c '<body>'` directly rather than writing an
+/// executable shell script with a `#!/usr/bin/env bash` shebang
+/// because hermetic build sandboxes (Nix in particular — see
+/// rustledger#1119) don't expose `/usr/bin/env`. Without it the
+/// kernel's shebang resolution fails, `Command::spawn` returns ENOENT,
+/// the fetch silently errors, and the test sees empty stdout.
+/// Resolving `sh` via `$PATH` works on every Unix the test suite
+/// targets, including Nix's stdenv.
+///
+/// Output is `<date> price <ticker> <amount> <currency>` — beancount
+/// form. The source-cmd parser keys off the date in this line. The
+/// script ignores its positional args; we always emit the same line
+/// so the dedup assertions are driven by the *response* date, not the
+/// requested date.
+fn stub_cmd_emitting_date(date: &str) -> String {
+    let body = format!("echo '{date} price AAPL 150.00 USD'");
+    format!("sh -c {}", shell_words::quote(&body))
 }
 
 fn write_fixture(content: &str) -> NamedTempFile {
@@ -60,8 +67,7 @@ fn clobber_post_fetch_skips_when_response_date_matches_existing() {
 2024-01-10 price AAPL 150.00 USD
 ";
     let f = write_fixture(fixture);
-    let (_dir, stub_path) = stub_emitting_date("2024-01-10");
-    let stub_arg = shell_words::quote(stub_path.to_str().unwrap()).into_owned();
+    let stub_cmd = stub_cmd_emitting_date("2024-01-10");
 
     let out = Command::new(env!("CARGO_BIN_EXE_rledger"))
         .args([
@@ -70,7 +76,7 @@ fn clobber_post_fetch_skips_when_response_date_matches_existing() {
             f.path().to_str().unwrap(),
             "--beancount",
             "--source-cmd",
-            &stub_arg,
+            &stub_cmd,
             "--date",
             "2024-01-15",
         ])
@@ -111,8 +117,7 @@ fn clobber_post_fetch_emits_duplicate_when_clobber_is_set() {
 2024-01-10 price AAPL 150.00 USD
 ";
     let f = write_fixture(fixture);
-    let (_dir, stub_path) = stub_emitting_date("2024-01-10");
-    let stub_arg = shell_words::quote(stub_path.to_str().unwrap()).into_owned();
+    let stub_cmd = stub_cmd_emitting_date("2024-01-10");
 
     let out = Command::new(env!("CARGO_BIN_EXE_rledger"))
         .args([
@@ -121,7 +126,7 @@ fn clobber_post_fetch_emits_duplicate_when_clobber_is_set() {
             f.path().to_str().unwrap(),
             "--beancount",
             "--source-cmd",
-            &stub_arg,
+            &stub_cmd,
             "--date",
             "2024-01-15",
             "--clobber",

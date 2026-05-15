@@ -69,11 +69,18 @@ impl NativePlugin for SplitExpensesPlugin {
         let num_members = Decimal::from(members.len());
         let mut new_accounts: HashSet<String> = HashSet::new();
         let mut earliest_date: Option<String> = None;
+        // Accounts already opened by the user; we must not synthesize
+        // a duplicate Open for any of these or Late validation will
+        // emit E1002 (AccountAlreadyOpen).
+        let mut existing_opens: HashSet<String> = HashSet::new();
 
-        // Compute earliest date across all input directives.
+        // Compute earliest date AND record existing opens in one pass.
         for d in &input.directives {
             if earliest_date.as_ref().is_none_or(|e| d.date < *e) {
                 earliest_date = Some(d.date.clone());
+            }
+            if let DirectiveData::Open(open) = &d.data {
+                existing_opens.insert(open.account.clone());
             }
         }
 
@@ -155,9 +162,13 @@ impl NativePlugin for SplitExpensesPlugin {
             }
         }
 
-        // Insert Open directives for newly synthesized member sub-accounts.
+        // Insert Open directives for newly synthesized member sub-accounts
+        // that the user hasn't already opened.
         if let Some(date) = earliest_date {
-            let mut accounts: Vec<String> = new_accounts.into_iter().collect();
+            let mut accounts: Vec<String> = new_accounts
+                .into_iter()
+                .filter(|a| !existing_opens.contains(a))
+                .collect();
             accounts.sort();
             for account in accounts {
                 ops.push(PluginOp::Insert(DirectiveWrapper {

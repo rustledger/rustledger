@@ -277,7 +277,7 @@ pub fn materialize_plugin_ops(
                 }
             }
             rustledger_plugin::PluginOp::Modify(_, w) | rustledger_plugin::PluginOp::Insert(w) => {
-                out.push(w.clone())
+                out.push(w.clone());
             }
             rustledger_plugin::PluginOp::Delete(_) => {}
         }

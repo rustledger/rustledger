@@ -119,6 +119,16 @@ fn process_long_short(input: PluginInput) -> PluginOutput {
         .min()
         .unwrap_or("1970-01-01")
         .to_string();
+    // Accounts already opened by the user; we must not synthesize a
+    // duplicate Open or Late validation will emit E1002.
+    let existing_opens: HashSet<String> = input
+        .directives
+        .iter()
+        .filter_map(|d| match &d.data {
+            DirectiveData::Open(open) => Some(open.account.clone()),
+            _ => None,
+        })
+        .collect();
 
     for (i, directive) in input.directives.into_iter().enumerate() {
         if directive.directive_type != "transaction" {
@@ -322,8 +332,12 @@ fn process_long_short(input: PluginInput) -> PluginOutput {
         }
     }
 
-    // Insert Open directives for newly synthesized accounts.
+    // Insert Open directives for newly synthesized accounts the user
+    // hasn't already opened.
     for account in &new_accounts {
+        if existing_opens.contains(account) {
+            continue;
+        }
         ops.push(PluginOp::Insert(DirectiveWrapper {
             directive_type: "open".to_string(),
             date: earliest_date.clone(),
@@ -374,6 +388,15 @@ fn process_gain_loss(input: PluginInput) -> PluginOutput {
         .min()
         .unwrap_or("1970-01-01")
         .to_string();
+    // Accounts already opened by the user; suppress duplicate Opens.
+    let existing_opens: HashSet<String> = input
+        .directives
+        .iter()
+        .filter_map(|d| match &d.data {
+            DirectiveData::Open(open) => Some(open.account.clone()),
+            _ => None,
+        })
+        .collect();
 
     for (i, directive) in input.directives.into_iter().enumerate() {
         if directive.directive_type != "transaction" {
@@ -444,8 +467,12 @@ fn process_gain_loss(input: PluginInput) -> PluginOutput {
         }
     }
 
-    // Insert Open directives for newly synthesized accounts.
+    // Insert Open directives for newly synthesized accounts the user
+    // hasn't already opened.
     for account in &new_accounts {
+        if existing_opens.contains(account) {
+            continue;
+        }
         ops.push(PluginOp::Insert(DirectiveWrapper {
             directive_type: "open".to_string(),
             date: earliest_date.clone(),

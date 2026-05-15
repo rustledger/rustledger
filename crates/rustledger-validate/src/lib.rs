@@ -748,7 +748,8 @@ impl ValidationSession {
     /// late-phase checks would only cascade misleading reports.
     ///
     /// Standalone callers that don't run booking should leave this
-    /// alone (default: empty). Call before [`run_phase_spanned`] with
+    /// alone (default: empty). Call before
+    /// [`run_phase_spanned`](Self::run_phase_spanned) with
     /// [`Phase::Late`]; calling later has no effect on already-run
     /// phases.
     ///

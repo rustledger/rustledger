@@ -20,6 +20,23 @@ pub trait NativePlugin: Send + Sync {
 
     /// Process directives and return modified directives + errors.
     fn process(&self, input: PluginInput) -> PluginOutput;
+
+    /// Whether this plugin synthesizes directives the loader's
+    /// `Phase::Early` validation depends on (e.g. injecting `Open`
+    /// directives so account-presence checks see them).
+    ///
+    /// Plugins returning `true` run in the loader's pre-booking pass;
+    /// plugins returning `false` (the default — transformations on
+    /// already-parsed directives) run post-booking so they see
+    /// filled-in `cost.number_per` values from the booker.
+    ///
+    /// This is the trait-level analogue of the loader's `PluginPass`
+    /// enum; the loader consults this method to classify each plugin
+    /// at scheduling time, avoiding a hardcoded list of synthesizer
+    /// names.
+    fn is_synth(&self) -> bool {
+        false
+    }
 }
 
 /// Registry of built-in native plugins.

@@ -327,12 +327,16 @@ pub fn process(raw: LoadResult, options: &LoadOptions) -> Result<Ledger, Process
     // pass above already caught E1001 on any unopened-account
     // references, so it's safe to prune now (the now-removed
     // `INTERPOLATED_MARKER` workaround in #1114 is obsolete).
-    // Run booking and capture the indices of transactions whose
-    // booking failed. The indices reference the current `directives`
-    // vec and are valid until the next mutation — which is the
-    // partition immediately below.
+    // Run booking and receive the directives partitioned into
+    // `(booked, failed)`. Failed transactions are in pre-booking shape
+    // (unresolved cost specs, unfilled elided slots, possibly
+    // unbalanced); they don't flow into regular plugins or Late
+    // validation — booking already reported the root cause and the
+    // downstream checks would cascade misleading errors. They get
+    // re-merged for the final `Ledger.directives` so the user still
+    // sees their original input.
     #[cfg(feature = "booking")]
-    let failed_indices: Vec<usize> = {
+    let (mut booked, failed): (Vec<Spanned<Directive>>, Vec<Spanned<Directive>>) = {
         let file_set_booking = raw.options.set_options.contains("booking_method");
         let effective_method = if file_set_booking {
             raw.options
@@ -342,35 +346,11 @@ pub fn process(raw: LoadResult, options: &LoadOptions) -> Result<Ledger, Process
         } else {
             options.booking_method
         };
-        run_booking(&mut directives, effective_method, &mut errors)
+        run_booking(directives, effective_method, &mut errors)
     };
     #[cfg(not(feature = "booking"))]
-    let failed_indices: Vec<usize> = Vec::new();
-
-    // Partition: failed transactions are in pre-booking shape
-    // (unresolved cost specs, unfilled elided slots, possibly
-    // unbalanced). Letting them flow into regular plugins or Late
-    // validation cascades misleading errors for one root cause that
-    // the BOOK error already reported. Set them aside and re-merge
-    // for the final `Ledger.directives` so the user still sees their
-    // original input in output.
-    //
-    // Indices are stable here (the vec hasn't been touched since
-    // `run_booking` returned them). After partition we work on
-    // `booked` until merging at the end.
-    let (mut booked, failed): (Vec<Spanned<Directive>>, Vec<Spanned<Directive>>) = {
-        let failed_set: rustc_hash::FxHashSet<usize> = failed_indices.iter().copied().collect();
-        let mut booked = Vec::with_capacity(directives.len().saturating_sub(failed_indices.len()));
-        let mut failed = Vec::with_capacity(failed_indices.len());
-        for (i, d) in directives.into_iter().enumerate() {
-            if failed_set.contains(&i) {
-                failed.push(d);
-            } else {
-                booked.push(d);
-            }
-        }
-        (booked, failed)
-    };
+    let (mut booked, failed): (Vec<Spanned<Directive>>, Vec<Spanned<Directive>>) =
+        (directives, Vec::new());
 
     // 5. Post-booking plugins — file-declared plugins + CLI extras.
     // Runs AFTER booking so cost-spec-reading plugins
@@ -425,31 +405,31 @@ pub fn process(raw: LoadResult, options: &LoadOptions) -> Result<Ledger, Process
     })
 }
 
-/// Run booking and interpolation on transactions.
+/// Run booking and interpolation on transactions, returning the
+/// directives partitioned into `(booked, failed)`.
 ///
 /// The caller has already sorted `directives` into canonical display
 /// order `(date, priority, file_id, span.start)`. Booking needs the
 /// extra constraint that cost-reduction transactions process AFTER
 /// augmentations on the same `(date, priority)` so lots exist when
-/// matched. Rather than re-sorting the whole vec, we build a transient
-/// `Vec<usize>` of indices, sort that by booking order, and walk the
-/// vec via the index. Stable sort preserves display-order tiebreaks
-/// between transactions with the same `has_cost_reduction` flag.
+/// matched. Rather than re-sorting the whole vec, we walk it via a
+/// transient `Vec<usize>` of indices sorted by booking order. Stable
+/// sort preserves display-order tiebreaks between transactions with
+/// the same `has_cost_reduction` flag.
 ///
-/// Returns the indices of transactions whose booking failed. The
-/// caller is expected to PARTITION the `directives` vec immediately
-/// after — failed transactions must not flow into regular plugins or
-/// Late validation (they're in pre-booking shape: postings have
-/// unresolved cost specs and unfilled elided slots, so downstream
-/// processing would cascade misleading errors). The indices are
-/// stable until the next vec mutation, which is exactly the partition
-/// step.
+/// Failed transactions are partitioned out into the second return
+/// value so they don't flow into regular plugins or Late validation
+/// (they're in pre-booking shape — postings have unresolved cost
+/// specs and unfilled elided slots, so downstream processing would
+/// cascade misleading errors). The caller is responsible for
+/// re-merging `failed` into the final `Ledger.directives` for output
+/// so the user still sees their original input.
 #[cfg(feature = "booking")]
 fn run_booking(
-    directives: &mut [Spanned<Directive>],
+    mut directives: Vec<Spanned<Directive>>,
     booking_method: BookingMethod,
     errors: &mut Vec<LedgerError>,
-) -> Vec<usize> {
+) -> (Vec<Spanned<Directive>>, Vec<Spanned<Directive>>) {
     use rustledger_booking::BookingEngine;
 
     let mut engine = BookingEngine::with_method(booking_method);
@@ -465,7 +445,7 @@ fn run_booking(
         (d.date(), d.priority(), d.has_cost_reduction())
     });
 
-    let mut failed: Vec<usize> = Vec::new();
+    let mut failed_indices: Vec<usize> = Vec::new();
     for &i in &order {
         let spanned = &mut directives[i];
         if let Directive::Transaction(txn) = &mut spanned.value {
@@ -479,12 +459,28 @@ fn run_booking(
                         "BOOK",
                         format!("{} ({}, \"{}\")", e, txn.date, txn.narration),
                     ));
-                    failed.push(i);
+                    failed_indices.push(i);
                 }
             }
         }
     }
-    failed
+
+    // Partition into (booked, failed). Indices are valid in the current
+    // `directives` vec (no mutation has happened since they were
+    // collected); after this consuming iteration the vec is gone and
+    // partition is fait accompli — no window where a caller could
+    // accidentally mutate between collection and partition.
+    let failed_set: rustc_hash::FxHashSet<usize> = failed_indices.iter().copied().collect();
+    let mut booked = Vec::with_capacity(directives.len() - failed_indices.len());
+    let mut failed = Vec::with_capacity(failed_indices.len());
+    for (i, d) in directives.into_iter().enumerate() {
+        if failed_set.contains(&i) {
+            failed.push(d);
+        } else {
+            booked.push(d);
+        }
+    }
+    (booked, failed)
 }
 
 /// Which subset of plugins to run.
@@ -576,14 +572,24 @@ pub fn run_plugins(
         Vec::new()
     };
 
+    // Build the native plugin registry up front so we can ask each
+    // plugin whether it's a synthesizer (via `NativePlugin::is_synth`)
+    // during the classification step below. Constructing the registry
+    // is O(n_plugins) and just instantiates the plugin structs; it's
+    // cheap to do before we know whether any plugins will actually
+    // run.
+    let registry = NativePluginRegistry::new();
+
     // Collect raw plugin names first (we'll resolve them with the registry later)
     // Tuple: (name, config, force_python)
     let mut raw_plugins: Vec<(String, Option<String>, bool)> = Vec::new();
 
-    // Synthesizer plugin names — these run pre-booking (so injected
-    // directives reach Early validation) and are skipped in
-    // PostBooking (so they don't run twice).
-    let is_synth = |name: &str| matches!(name, "auto_accounts");
+    // Classify a plugin by name. Self-classification lives on the
+    // `NativePlugin::is_synth` trait method (see
+    // `rustledger-plugin/src/native/mod.rs`). Plugins not in the
+    // native registry (WASM, Python) default to non-synth — they
+    // run post-booking like file-authored beancount plugins.
+    let is_synth = |name: &str| -> bool { registry.find(name).is_some_and(NativePlugin::is_synth) };
 
     // The API-level `options.auto_accounts` flag is a synth source.
     if options.auto_accounts && matches!(pass, PluginPass::PreBookingSynth | PluginPass::All) {
@@ -676,10 +682,9 @@ pub fn run_plugins(
         wrappers = output.directives;
     }
 
-    // Run each plugin (only create registry if we have plugins to run)
+    // Run each plugin (registry was constructed earlier for the
+    // synth classification step).
     if !raw_plugins.is_empty() {
-        let registry = NativePluginRegistry::new();
-
         for (raw_name, plugin_config, force_python) in &raw_plugins {
             // Resolve the plugin name - try direct match first, then prefixed variants.
             // Skip native resolution when force_python is set (plugin "python:..." prefix).

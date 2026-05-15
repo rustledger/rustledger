@@ -274,6 +274,7 @@ pub fn validation_errors_to_diagnostics(
             &load_options,
             ctx.source_map,
             &mut plugin_errors,
+            rustledger_loader::PluginPass::All,
         ) {
             Ok(()) => {
                 // Convert plugin errors to diagnostics.

@@ -49,13 +49,13 @@ pub use source_map::{SourceFile, SourceMap};
 pub use vfs::{DiskFileSystem, FileSystem, VirtualFileSystem};
 
 // Re-export processing API when features are enabled
-#[cfg(feature = "plugins")]
-pub use process::run_plugins;
 #[cfg(any(feature = "booking", feature = "plugins", feature = "validation"))]
 pub use process::{
     ErrorLocation, ErrorSeverity, Ledger, LedgerError, LoadOptions, ProcessError, load, load_raw,
     process,
 };
+#[cfg(feature = "plugins")]
+pub use process::{PluginPass, run_plugins};
 
 use rustledger_core::{Directive, DisplayContext};
 use rustledger_parser::{ParseError, Span, Spanned};

@@ -54,12 +54,18 @@ pub use error::{ErrorCode, Severity, ValidationError};
 /// The loader pipeline splits validation around booking. Checks that
 /// don't need filled-in amounts (account presence, account lifecycle,
 /// structural integrity, date ordering, document presence, commodity
-/// metadata) run as [`Phase::Early`] AFTER plugins but BEFORE booking,
-/// so they see elided postings to unopened accounts (with any Opens
-/// plugins like `auto_accounts` injected) before booking drops
-/// zero-value interpolations. Checks that need filled-in amounts
-/// (currency constraints, balance residuals, inventory updates,
-/// balance assertions) run as [`Phase::Late`] AFTER booking.
+/// metadata) run as [`Phase::Early`] AFTER synthesizer plugins
+/// (`auto_accounts`, `document_discovery`) but BEFORE booking, so
+/// they see elided postings to unopened accounts (with any Opens
+/// plugins injected) before booking drops zero-value interpolations.
+/// Checks that need filled-in amounts (currency constraints, balance
+/// residuals, inventory updates, balance assertions) run as
+/// [`Phase::Late`] AFTER booking AND after the regular plugin pass
+/// (so cost-spec-reading plugins like `implicit_prices` see filled
+/// `cost.number_per` values).
+///
+/// The pipeline is therefore:
+///     sort → synth-plugins → Early → book → regular-plugins → Late → finalize
 ///
 /// Standalone callers (LSP, tests, FFI) that don't run booking between
 /// phases typically chain `Early` → `Late` → [`ValidationSession::finalize`]

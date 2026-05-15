@@ -1,4 +1,4 @@
-//! Processing pipeline: sort → book → plugins → validate.
+//! Processing pipeline: sort → synth-plugins → Early → book → regular-plugins → Late → finalize.
 //!
 //! This module orchestrates the full processing pipeline for a beancount ledger,
 //! equivalent to Python's `loader.load_file()` function.
@@ -244,21 +244,16 @@ pub fn process(raw: LoadResult, options: &LoadOptions) -> Result<Ledger, Process
     //    structs) after booking just to put display order back.
     directives.sort_by_key(|d| (d.value.date(), d.value.priority(), d.file_id, d.span.start));
 
-    // 2. Plugins — run BEFORE early validation so plugins like
-    // `auto_accounts` (which synthesizes Open directives based on
-    // observed posting accounts) get a chance to register accounts
-    // before E1001 fires. This is a deliberate deviation from Python
-    // beancount's pipeline ordering (Python runs plugins after
-    // booking) — see `rustledger_validate::Phase` docs and CLAUDE.md's
-    // "Python Compatibility Policy" section.
-    //
-    // The built-in plugins we ship (`auto_accounts`, `implicit_prices`,
-    // document discovery) don't depend on booked state, so moving them
-    // earlier in the pipeline is safe. User-written Python plugins
-    // that depend on post-booking state would break under this order;
-    // none currently exist in our test corpus.
+    // 2. Synth-only plugins — run BEFORE early validation so the
+    // synthesizers (`auto_accounts` and `document_discovery`) inject
+    // Opens / Documents that Early checks depend on (E1001 account
+    // presence, E5001 missing-document file). Only this narrow synth
+    // subset runs here; everything else waits until after booking
+    // (step 5) so cost-spec-reading plugins see filled-in
+    // `cost.number_per` values. See `PluginPass` rustdoc for the
+    // detailed split rationale.
     #[cfg(feature = "plugins")]
-    if options.run_plugins || !options.extra_plugins.is_empty() || options.auto_accounts {
+    if options.run_plugins || options.auto_accounts {
         run_plugins(
             &mut directives,
             &raw.plugins,
@@ -266,6 +261,7 @@ pub fn process(raw: LoadResult, options: &LoadOptions) -> Result<Ledger, Process
             options,
             &raw.source_map,
             &mut errors,
+            PluginPass::PreBookingSynth,
         )?;
     }
 
@@ -339,7 +335,27 @@ pub fn process(raw: LoadResult, options: &LoadOptions) -> Result<Ledger, Process
     #[cfg(not(feature = "booking"))]
     let failed_bookings: rustc_hash::FxHashSet<(u16, usize)> = rustc_hash::FxHashSet::default();
 
-    // 5. Validation (late phase) — runs on booked + plugin-processed
+    // 5. Post-booking plugins — file-declared plugins + CLI extras.
+    // Runs AFTER booking so cost-spec-reading plugins
+    // (`implicit_prices`, `capital_gains_classifier`,
+    // `check_average_cost`, `sell_gains`, `unrealized`, `valuation`)
+    // see filled-in `cost.number_per` values. This matches Python
+    // beancount's plugins-after-booking ordering and closes
+    // rustledger#1117.
+    #[cfg(feature = "plugins")]
+    if options.run_plugins || !options.extra_plugins.is_empty() {
+        run_plugins(
+            &mut directives,
+            &raw.plugins,
+            &raw.options,
+            options,
+            &raw.source_map,
+            &mut errors,
+            PluginPass::PostBooking,
+        )?;
+    }
+
+    // 6. Validation (late phase) — runs on booked + plugin-processed
     // directives. Reuses the `ValidationSession` from step 2 so
     // account/commodity/pad bookkeeping carries forward. Transactions
     // whose booking failed are flagged so late-phase inventory checks
@@ -440,14 +456,48 @@ fn run_booking(
     failed
 }
 
+/// Which subset of plugins to run.
+///
+/// The loader pipeline calls `run_plugins` twice: once with
+/// [`PluginPass::PreBookingSynth`] before the Early validation phase
+/// (so synthesizers can inject Opens / Documents that early checks
+/// depend on), and once with [`PluginPass::PostBooking`] after booking
+/// (so cost-spec-reading plugins like `implicit_prices`,
+/// `capital_gains_classifier`, `check_average_cost`, `sell_gains`,
+/// `unrealized`, and `valuation` see filled-in `cost.number_per`
+/// values).
+///
+/// Standalone callers (LSP, FFI, tests) that operate on already-booked
+/// input should pass [`PluginPass::All`] for the historical single-pass
+/// behavior.
+#[cfg(feature = "plugins")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PluginPass {
+    /// Only plugins that synthesize directives the Early validator
+    /// depends on: `auto_accounts` (synthesizes Open directives) and
+    /// the built-in document discovery walker (synthesizes Document
+    /// directives the early phase checks for missing files).
+    PreBookingSynth,
+    /// All file-declared plugins and CLI `extra_plugins`, EXCLUDING
+    /// `auto_accounts` and `document_discovery` (those ran pre-booking).
+    /// Includes the 28 plugins that don't depend on synth state but
+    /// may depend on booked cost specs.
+    PostBooking,
+    /// Every plugin — historical single-pass behavior. Used by callers
+    /// (LSP, FFI, standalone tests) that don't run booking themselves
+    /// or that work on already-booked input.
+    All,
+}
+
 /// Run plugins on directives.
 ///
 /// Executes native plugins (and document discovery) on the given directives,
 /// modifying them in-place. Plugin errors are appended to `errors`.
 ///
-/// This is called by [`process()`] as part of the full pipeline, but can also
-/// be called standalone (e.g., by the LSP) when plugin execution is needed
-/// outside the normal load flow.
+/// `pass` selects which subset of plugins to run — see [`PluginPass`].
+/// The loader pipeline calls this twice (synth pass before Early,
+/// regular pass after booking). LSP / FFI / standalone callers pass
+/// `PluginPass::All` for the historical behavior.
 #[cfg(feature = "plugins")]
 pub fn run_plugins(
     directives: &mut Vec<Spanned<Directive>>,
@@ -456,6 +506,7 @@ pub fn run_plugins(
     options: &LoadOptions,
     source_map: &SourceMap,
     errors: &mut Vec<LedgerError>,
+    pass: PluginPass,
 ) -> Result<(), ProcessError> {
     use rustledger_plugin::{
         DocumentDiscoveryPlugin, NativePlugin, NativePluginRegistry, PluginInput, PluginOptions,
@@ -470,7 +521,13 @@ pub fn run_plugins(
         .and_then(|f| f.path.parent())
         .unwrap_or_else(|| std::path::Path::new("."));
 
-    let has_document_dirs = options.run_plugins && !file_options.documents.is_empty();
+    // `document_discovery` is a synthesizer — runs in PreBookingSynth
+    // and All, skipped in PostBooking (it already injected directives
+    // during the synth pass).
+    let run_doc_discovery = matches!(pass, PluginPass::PreBookingSynth | PluginPass::All)
+        && options.run_plugins
+        && !file_options.documents.is_empty();
+    let has_document_dirs = run_doc_discovery;
     let resolved_documents: Vec<String> = if has_document_dirs {
         file_options
             .documents
@@ -492,26 +549,50 @@ pub fn run_plugins(
     // Tuple: (name, config, force_python)
     let mut raw_plugins: Vec<(String, Option<String>, bool)> = Vec::new();
 
-    // Add auto_accounts first if requested
-    if options.auto_accounts {
+    // Synthesizer plugin names — these run pre-booking (so injected
+    // directives reach Early validation) and are skipped in
+    // PostBooking (so they don't run twice).
+    let is_synth = |name: &str| matches!(name, "auto_accounts");
+
+    // The API-level `options.auto_accounts` flag is a synth source.
+    if options.auto_accounts && matches!(pass, PluginPass::PreBookingSynth | PluginPass::All) {
         raw_plugins.push(("auto_accounts".to_string(), None, false));
     }
 
-    // Add plugins from the file
+    // File-declared plugins: synth plugins go in PreBookingSynth,
+    // everything else (including the 6 cost-spec-reading ones) goes in
+    // PostBooking. `PluginPass::All` runs everything for standalone
+    // callers (LSP / FFI / tests on already-booked input).
     if options.run_plugins {
         for plugin in file_plugins {
-            raw_plugins.push((
-                plugin.name.clone(),
-                plugin.config.clone(),
-                plugin.force_python,
-            ));
+            let synth = is_synth(&plugin.name);
+            let in_pass = match pass {
+                PluginPass::PreBookingSynth => synth,
+                PluginPass::PostBooking => !synth,
+                PluginPass::All => true,
+            };
+            if in_pass {
+                raw_plugins.push((
+                    plugin.name.clone(),
+                    plugin.config.clone(),
+                    plugin.force_python,
+                ));
+            }
         }
     }
 
-    // Add extra plugins from options
+    // CLI extras: same synth/regular split as file plugins.
     for (i, plugin_name) in options.extra_plugins.iter().enumerate() {
-        let config = options.extra_plugin_configs.get(i).cloned().flatten();
-        raw_plugins.push((plugin_name.clone(), config, false));
+        let synth = is_synth(plugin_name);
+        let in_pass = match pass {
+            PluginPass::PreBookingSynth => synth,
+            PluginPass::PostBooking => !synth,
+            PluginPass::All => true,
+        };
+        if in_pass {
+            let config = options.extra_plugin_configs.get(i).cloned().flatten();
+            raw_plugins.push((plugin_name.clone(), config, false));
+        }
     }
 
     // Check if we have any work to do - early return before creating registry
@@ -949,7 +1030,7 @@ fn ledger_errors_extend(
 /// Load and fully process a beancount file.
 ///
 /// This is the main entry point, equivalent to Python's `loader.load_file()`.
-/// It performs: parse → sort → book → plugins → validate.
+/// It performs: parse → sort → synth-plugins → Early → book → regular-plugins → Late → finalize.
 ///
 /// # Example
 ///

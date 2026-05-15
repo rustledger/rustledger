@@ -1796,3 +1796,52 @@ fn test_non_zero_interpolated_posting_is_preserved() {
 // (Test for the INTERPOLATED_MARKER side channel was deleted with the
 // rest of that workaround when the validate-phase-split landed; the
 // marker no longer exists.)
+
+/// Regression for the booking-failure partition: when a transaction
+/// fails booking (e.g. `NoMatchingLot`), the loader removes it from
+/// the directive flow that regular plugins and Late validation see,
+/// then re-merges it for the final `Ledger.directives` output.
+/// Without partition, the failed txn's unresolved-cost state cascades
+/// into misleading downstream validation errors (and the prior
+/// `failed_bookings`-keyed-by-span workaround broke under plugins
+/// that round-trip directives through the wrapper protocol).
+#[test]
+fn test_booking_failure_partitioned_from_late_validation() {
+    use rustledger_loader::{LoadOptions, load};
+
+    let path = fixtures_path("booking_failure_partition.beancount");
+    let ledger = load(&path, &LoadOptions::default()).expect("should load");
+
+    // Exactly one BOOK error for the failed txn.
+    let book_errors: Vec<_> = ledger.errors.iter().filter(|e| e.code == "BOOK").collect();
+    assert_eq!(
+        book_errors.len(),
+        1,
+        "expected exactly one BOOK error on the failing txn; got: {book_errors:?}"
+    );
+
+    // No cascading validation errors — partition keeps the failed txn
+    // out of Late's iteration.
+    let cascading: Vec<_> = ledger
+        .errors
+        .iter()
+        .filter(|e| e.code.starts_with('E') || e.code.starts_with('W'))
+        .collect();
+    assert!(
+        cascading.is_empty(),
+        "no validation errors expected after partition; got: {cascading:?}"
+    );
+
+    // The failed txn is still present in the output for the user to
+    // see — we partition during processing, but re-merge for display.
+    use rustledger_core::Directive;
+    let txn_count = ledger
+        .directives
+        .iter()
+        .filter(|d| matches!(d.value, Directive::Transaction(_)))
+        .count();
+    assert_eq!(
+        txn_count, 3,
+        "all three transactions should appear in final Ledger output (including the failed one); got {txn_count}"
+    );
+}

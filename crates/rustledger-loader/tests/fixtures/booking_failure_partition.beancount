@@ -1,0 +1,36 @@
+; Fixture for the booking-failure partition regression: a transaction
+; with an explicit cost spec that has no matching lot. Booking fails
+; on this txn with NoMatchingLot. The loader should partition it out
+; before late-phase validation, so the user sees ONLY the BOOK error
+; — no cascading TransactionUnbalanced or follow-on validation noise.
+;
+; The auto_tag plugin runs after booking and round-trips every txn
+; through the wrapper protocol (which doesn't preserve byte spans).
+; Pre-partition this scenario broke `failed_bookings` lookup because
+; the post-plugin span no longer matched what was recorded at booking
+; time. Partition sidesteps the issue entirely.
+
+option "operating_currency" "USD"
+plugin "auto_tag" "{}"
+
+2024-01-01 open Assets:Stock STOCK
+2024-01-01 open Assets:Cash USD
+
+2024-02-01 * "buy lot"
+  Assets:Stock   10 STOCK {1.00 USD}
+  Assets:Cash  -10.00 USD
+
+; Booking fails: no lot at 999.99 USD exists.
+2024-03-01 * "sell from nonexistent lot"
+  Assets:Stock   -5 STOCK {999.99 USD}
+  Assets:Cash     5.00 USD
+
+; A subsequent legitimate txn that should NOT cascade errors. Without
+; partition, the failed txn above stays in the directive list with
+; unresolved cost on its remaining 5 STOCK lot reduction, and Late
+; phase tries to reduce it from the validator's separate inventory
+; state — which never received the failed reduction — emitting
+; misleading NoMatchingLot/InsufficientUnits errors here.
+2024-04-01 * "legitimate sell from remaining lot"
+  Assets:Stock   -5 STOCK {1.00 USD}
+  Assets:Cash     5.00 USD

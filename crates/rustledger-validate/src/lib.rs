@@ -264,16 +264,6 @@ pub struct LedgerState {
     options: ValidationOptions,
     /// Track previous directive date for out-of-order detection.
     last_date: Option<NaiveDate>,
-    /// `(file_id, span.start)` pairs identifying transactions whose
-    /// booking failed in the loader pipeline. Late-phase validation
-    /// skips per-posting inventory / balance / currency checks on
-    /// these — booking already reported the root cause, and re-running
-    /// the checks here would cascade misleading errors (e.g.
-    /// `NoMatchingLot` on a downstream sell whose lot would have been
-    /// created by the failed earlier transaction). Populated by the
-    /// loader via [`ValidationSession::set_failed_bookings`]; always
-    /// empty for standalone callers that don't run booking.
-    pub(crate) failed_bookings: FxHashSet<(u16, usize)>,
     /// `(account, close_date)` pairs whose late-phase Close check has
     /// already fired. Guards against duplicate same-day Close
     /// directives running the non-empty-balance check twice (the early
@@ -515,19 +505,7 @@ fn validate_phase_inner<D: ValidatableDirective>(
                 validate_transaction_early(state, txn, &mut errors);
             }
             (Phase::Late, Directive::Transaction(txn)) => {
-                // Skip late-phase checks on transactions whose booking
-                // failed in the loader (see
-                // `ValidationSession::set_failed_bookings`). Booking
-                // already reported the root cause; running balance /
-                // currency / inventory checks on an unbooked txn would
-                // cascade misleading errors. Standalone callers
-                // (no booking) have an empty set and proceed normally.
-                let booking_failed = d
-                    .span_info()
-                    .is_some_and(|(span, fid)| state.failed_bookings.contains(&(fid, span.start)));
-                if !booking_failed {
-                    validate_transaction_late(state, txn, &mut errors);
-                }
+                validate_transaction_late(state, txn, &mut errors);
             }
             (Phase::Early, Directive::Balance(bal)) => {
                 validate_balance_early(state, bal, &mut errors);
@@ -745,27 +723,6 @@ impl ValidationSession {
             state: LedgerState::with_options(options),
             phases_run: 0,
         }
-    }
-
-    /// Record which transactions had booking failures, identified by
-    /// `(file_id, span.start)`. Late-phase validation skips per-posting
-    /// inventory / balance / currency checks on these — booking already
-    /// emitted the root-cause error in the loader's error stream; the
-    /// late-phase checks would only cascade misleading reports.
-    ///
-    /// Standalone callers that don't run booking should leave this
-    /// alone (default: empty). Call before
-    /// [`run_phase_spanned`](Self::run_phase_spanned) with
-    /// [`Phase::Late`]; calling later has no effect on already-run
-    /// phases.
-    ///
-    /// Keys whose `file_id` is `SYNTHESIZED_FILE_ID` (= `u16::MAX`)
-    /// will match every plugin-synthesized directive in the file
-    /// (they all share `(SYNTHESIZED_FILE_ID, 0)`). Loader callers
-    /// should not insert those keys; cascading errors on synthesized
-    /// failures are accepted as the lesser evil.
-    pub fn set_failed_bookings(&mut self, failed: FxHashSet<(u16, usize)>) {
-        self.state.failed_bookings = failed;
     }
 
     /// Run one validation phase over a slice of raw [`Directive`]s.
@@ -2822,73 +2779,5 @@ mod tests {
         let directives = vec![Directive::Open(Open::new(date(2024, 1, 1), "Assets:Bank"))];
         let mut session = ValidationSession::new(ValidationOptions::default());
         let _ = session.run_phase(&directives, Phase::Late, date(2030, 1, 1));
-    }
-
-    #[test]
-    fn test_set_failed_bookings_skips_late_transaction_checks() {
-        use rustledger_parser::{Span, Spanned};
-
-        // Spanned variant exposes (file_id, span.start) — the key the
-        // loader populates via `set_failed_bookings` to flag a
-        // transaction whose booking failed. Late phase should skip
-        // balance / inventory / currency checks on that txn so the
-        // user only sees the BOOK error and isn't drowned in
-        // cascading validate-side reports.
-        let txn = Spanned {
-            value: Directive::Transaction(
-                // Deliberately unbalanced — would emit
-                // TransactionUnbalanced in Late if not skipped.
-                Transaction::new(date(2024, 1, 5), "broken")
-                    .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(100), "USD")))
-                    .with_posting(Posting::new("Income:Salary", Amount::new(dec!(-50), "USD"))),
-            ),
-            span: Span::new(42, 100),
-            file_id: 7,
-        };
-        let opens: Vec<Spanned<Directive>> = vec![
-            Spanned {
-                value: Directive::Open(Open::new(date(2024, 1, 1), "Assets:Bank")),
-                span: Span::new(0, 20),
-                file_id: 7,
-            },
-            Spanned {
-                value: Directive::Open(Open::new(date(2024, 1, 1), "Income:Salary")),
-                span: Span::new(21, 41),
-                file_id: 7,
-            },
-        ];
-        let directives: Vec<Spanned<Directive>> =
-            opens.into_iter().chain(std::iter::once(txn)).collect();
-
-        // Without `set_failed_bookings`: validate reports the unbalance.
-        let mut baseline = ValidationSession::new(ValidationOptions::default());
-        let mut baseline_errors =
-            baseline.run_phase_spanned(&directives, Phase::Early, date(2030, 1, 1));
-        baseline_errors.extend(baseline.run_phase_spanned(
-            &directives,
-            Phase::Late,
-            date(2030, 1, 1),
-        ));
-        assert!(
-            baseline_errors
-                .iter()
-                .any(|e| e.code == ErrorCode::TransactionUnbalanced),
-            "without skip flag, the unbalanced txn should be reported; got {baseline_errors:?}"
-        );
-
-        // With `set_failed_bookings` carrying (7, 42): the txn's
-        // late-phase checks are skipped.
-        let mut session = ValidationSession::new(ValidationOptions::default());
-        let mut failed: FxHashSet<(u16, usize)> = FxHashSet::default();
-        failed.insert((7, 42));
-        session.set_failed_bookings(failed);
-        let mut errors = session.run_phase_spanned(&directives, Phase::Early, date(2030, 1, 1));
-        errors.extend(session.run_phase_spanned(&directives, Phase::Late, date(2030, 1, 1)));
-        assert!(
-            !errors
-                .iter()
-                .any(|e| e.code == ErrorCode::TransactionUnbalanced),
-            "skip flag should suppress late-phase TransactionUnbalanced; got {errors:?}"
-        );
     }
 }

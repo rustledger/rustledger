@@ -319,8 +319,12 @@ pub fn process(raw: LoadResult, options: &LoadOptions) -> Result<Ledger, Process
     // pass above already caught E1001 on any unopened-account
     // references, so it's safe to prune now (the now-removed
     // `INTERPOLATED_MARKER` workaround in #1114 is obsolete).
+    // Run booking and capture the indices of transactions whose
+    // booking failed. The indices reference the current `directives`
+    // vec and are valid until the next mutation — which is the
+    // partition immediately below.
     #[cfg(feature = "booking")]
-    let failed_bookings: rustc_hash::FxHashSet<(u16, usize)> = {
+    let failed_indices: Vec<usize> = {
         let file_set_booking = raw.options.set_options.contains("booking_method");
         let effective_method = if file_set_booking {
             raw.options
@@ -333,7 +337,32 @@ pub fn process(raw: LoadResult, options: &LoadOptions) -> Result<Ledger, Process
         run_booking(&mut directives, effective_method, &mut errors)
     };
     #[cfg(not(feature = "booking"))]
-    let failed_bookings: rustc_hash::FxHashSet<(u16, usize)> = rustc_hash::FxHashSet::default();
+    let failed_indices: Vec<usize> = Vec::new();
+
+    // Partition: failed transactions are in pre-booking shape
+    // (unresolved cost specs, unfilled elided slots, possibly
+    // unbalanced). Letting them flow into regular plugins or Late
+    // validation cascades misleading errors for one root cause that
+    // the BOOK error already reported. Set them aside and re-merge
+    // for the final `Ledger.directives` so the user still sees their
+    // original input in output.
+    //
+    // Indices are stable here (the vec hasn't been touched since
+    // `run_booking` returned them). After partition we work on
+    // `booked` until merging at the end.
+    let (mut booked, failed): (Vec<Spanned<Directive>>, Vec<Spanned<Directive>>) = {
+        let failed_set: rustc_hash::FxHashSet<usize> = failed_indices.iter().copied().collect();
+        let mut booked = Vec::with_capacity(directives.len().saturating_sub(failed_indices.len()));
+        let mut failed = Vec::with_capacity(failed_indices.len());
+        for (i, d) in directives.into_iter().enumerate() {
+            if failed_set.contains(&i) {
+                failed.push(d);
+            } else {
+                booked.push(d);
+            }
+        }
+        (booked, failed)
+    };
 
     // 5. Post-booking plugins — file-declared plugins + CLI extras.
     // Runs AFTER booking so cost-spec-reading plugins
@@ -341,11 +370,12 @@ pub fn process(raw: LoadResult, options: &LoadOptions) -> Result<Ledger, Process
     // `check_average_cost`, `sell_gains`, `unrealized`, `valuation`)
     // see filled-in `cost.number_per` values. This matches Python
     // beancount's plugins-after-booking ordering and closes
-    // rustledger#1117.
+    // rustledger#1117. Failed transactions were partitioned out
+    // above; plugins only see successfully-booked input.
     #[cfg(feature = "plugins")]
     if options.run_plugins || !options.extra_plugins.is_empty() {
         run_plugins(
-            &mut directives,
+            &mut booked,
             &raw.plugins,
             &raw.options,
             options,
@@ -357,19 +387,25 @@ pub fn process(raw: LoadResult, options: &LoadOptions) -> Result<Ledger, Process
 
     // 6. Validation (late phase) — runs on booked + plugin-processed
     // directives. Reuses the `ValidationSession` from step 2 so
-    // account/commodity/pad bookkeeping carries forward. Transactions
-    // whose booking failed are flagged so late-phase inventory checks
-    // skip them (booking already reported the root cause; re-running
-    // lot matching here would cascade misleading errors).
+    // account/commodity/pad bookkeeping carries forward.
     #[cfg(feature = "validation")]
     if let Some(mut session) = validation_session {
-        session.set_failed_bookings(failed_bookings);
         let phase_errors =
-            session.run_phase_spanned(&directives, rustledger_validate::Phase::Late, today);
+            session.run_phase_spanned(&booked, rustledger_validate::Phase::Late, today);
         ledger_errors_extend(&mut errors, phase_errors, &raw.source_map);
         let finalize_errors = session.finalize();
         ledger_errors_extend(&mut errors, finalize_errors, &raw.source_map);
     }
+
+    // 7. Re-merge failed transactions back into the directive list
+    // for output. The user wrote them and expects to see them in the
+    // resulting `Ledger.directives`; we just kept them isolated from
+    // post-booking processing. Re-sort to restore canonical display
+    // order (booked retained order during plugin transformation; the
+    // sort restores the failed entries' positions).
+    let mut directives = booked;
+    directives.extend(failed);
+    directives.sort_by_key(|d| (d.value.date(), d.value.priority(), d.file_id, d.span.start));
 
     Ok(Ledger {
         directives,
@@ -392,18 +428,20 @@ pub fn process(raw: LoadResult, options: &LoadOptions) -> Result<Ledger, Process
 /// vec via the index. Stable sort preserves display-order tiebreaks
 /// between transactions with the same `has_cost_reduction` flag.
 ///
-/// Returns `(file_id, span.start)` pairs for transactions whose
-/// booking failed. The validate late phase reads this set to skip
-/// late-phase inventory/balance checks on those transactions — they'd
-/// otherwise cascade misleading errors (e.g., a `NoMatchingLot` in
-/// the next transaction whose lot was supposed to be created by the
-/// failed one).
+/// Returns the indices of transactions whose booking failed. The
+/// caller is expected to PARTITION the `directives` vec immediately
+/// after — failed transactions must not flow into regular plugins or
+/// Late validation (they're in pre-booking shape: postings have
+/// unresolved cost specs and unfilled elided slots, so downstream
+/// processing would cascade misleading errors). The indices are
+/// stable until the next vec mutation, which is exactly the partition
+/// step.
 #[cfg(feature = "booking")]
 fn run_booking(
     directives: &mut [Spanned<Directive>],
     booking_method: BookingMethod,
     errors: &mut Vec<LedgerError>,
-) -> rustc_hash::FxHashSet<(u16, usize)> {
+) -> Vec<usize> {
     use rustledger_booking::BookingEngine;
 
     let mut engine = BookingEngine::with_method(booking_method);
@@ -419,11 +457,9 @@ fn run_booking(
         (d.date(), d.priority(), d.has_cost_reduction())
     });
 
-    let mut failed: rustc_hash::FxHashSet<(u16, usize)> = rustc_hash::FxHashSet::default();
+    let mut failed: Vec<usize> = Vec::new();
     for &i in &order {
         let spanned = &mut directives[i];
-        let file_id = spanned.file_id;
-        let span_start = spanned.span.start;
         if let Directive::Transaction(txn) = &mut spanned.value {
             match engine.book_and_interpolate(txn) {
                 Ok(result) => {
@@ -435,20 +471,7 @@ fn run_booking(
                         "BOOK",
                         format!("{} ({}, \"{}\")", e, txn.date, txn.narration),
                     ));
-                    // Synthesized directives (from plugins like auto_tag,
-                    // rx_txn, box_accrual, etc.) all share
-                    // `(SYNTHESIZED_FILE_ID, 0)` as their (file_id,
-                    // span.start) key, so a single failure would
-                    // over-match and suppress late-phase checks on
-                    // every synthesized txn in the file. Skip
-                    // insertion in that case — validate will emit
-                    // cascading errors on synthesized failures, but
-                    // that's no worse than the pre-fix behavior for
-                    // file-authored txns, and avoids the cross-txn
-                    // over-suppression bug.
-                    if file_id != rustledger_parser::SYNTHESIZED_FILE_ID {
-                        failed.insert((file_id, span_start));
-                    }
+                    failed.push(i);
                 }
             }
         }

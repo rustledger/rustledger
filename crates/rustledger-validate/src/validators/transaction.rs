@@ -20,16 +20,13 @@ use crate::{AccountState, LedgerState, ValidationOptions};
 /// Currency-constraint checking (which calls `posting.amount()`) is
 /// deliberately deferred to the late phase, since elided postings have
 /// `units: None` here.
-///
-/// Returns `false` if validation should not continue to the late phase
-/// (e.g., transaction has no postings — there's nothing to check).
 pub fn validate_transaction_early(
     state: &LedgerState,
     txn: &Transaction,
     errors: &mut Vec<ValidationError>,
-) -> bool {
+) {
     if !validate_transaction_structure(txn, errors) {
-        return false;
+        return;
     }
     // Inline the presence + lifecycle subset of `validate_posting_accounts`
     // here — we don't want to run the currency check yet (deferred to late
@@ -48,7 +45,6 @@ pub fn validate_transaction_early(
             }
         }
     }
-    true
 }
 
 /// Late-phase transaction validation — runs on post-booking directives.

@@ -213,11 +213,19 @@ impl LedgerError {
 
 /// Process a raw load result into a fully processed ledger.
 ///
-/// This applies the processing pipeline:
-/// 1. Sort directives by date
-/// 2. Run booking/interpolation
-/// 3. Run plugins
-/// 4. Run validation (optional)
+/// Pipeline (see numbered comments below for the rationale of each step):
+///
+/// ```text
+///   1. sort                         (canonical display order)
+///   2. synth plugins                (auto_accounts, document_discovery)
+///   3. Early validation             (account presence, structural, lifecycle)
+///   4. booking                      (cost spec resolution, interpolation)
+///   5. partition                    (set aside failed-booking txns)
+///   6. regular plugins              (file plugins + extras, on booked only)
+///   7. Late validation              (balance, currency, inventory, on booked only)
+///   8. finalize                     (unused-pad warnings)
+///   9. re-merge                     (booked + failed → final Ledger.directives)
+/// ```
 pub fn process(raw: LoadResult, options: &LoadOptions) -> Result<Ledger, ProcessError> {
     let mut directives = raw.directives;
     let mut errors: Vec<LedgerError> = Vec::new();

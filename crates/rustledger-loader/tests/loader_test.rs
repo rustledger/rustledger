@@ -1807,6 +1807,7 @@ fn test_non_zero_interpolated_posting_is_preserved() {
 /// that round-trip directives through the wrapper protocol).
 #[test]
 fn test_booking_failure_partitioned_from_late_validation() {
+    use rustledger_core::Directive;
     use rustledger_loader::{LoadOptions, load};
 
     let path = fixtures_path("booking_failure_partition.beancount");
@@ -1834,7 +1835,6 @@ fn test_booking_failure_partitioned_from_late_validation() {
 
     // The failed txn is still present in the output for the user to
     // see — we partition during processing, but re-merge for display.
-    use rustledger_core::Directive;
     let txn_count = ledger
         .directives
         .iter()

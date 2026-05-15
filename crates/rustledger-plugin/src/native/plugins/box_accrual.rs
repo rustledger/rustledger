@@ -18,8 +18,8 @@ use rust_decimal::prelude::*;
 use rustledger_core::NaiveDate;
 
 use crate::types::{
-    AmountData, DirectiveData, DirectiveWrapper, MetaValueData, PluginInput, PluginOutput,
-    PostingData, TransactionData,
+    AmountData, DirectiveData, DirectiveWrapper, MetaValueData, PluginInput, PluginOp,
+    PluginOutput, PostingData, TransactionData,
 };
 
 use super::super::NativePlugin;
@@ -37,11 +37,11 @@ impl NativePlugin for BoxAccrualPlugin {
     }
 
     fn process(&self, input: PluginInput) -> PluginOutput {
-        let mut new_directives = Vec::new();
+        let mut ops: Vec<PluginOp> = Vec::with_capacity(input.directives.len());
 
-        for directive in input.directives {
+        for (i, directive) in input.directives.into_iter().enumerate() {
             if directive.directive_type != "transaction" {
-                new_directives.push(directive);
+                ops.push(PluginOp::Keep(i));
                 continue;
             }
 
@@ -60,7 +60,7 @@ impl NativePlugin for BoxAccrualPlugin {
                 let expiry_date = if let Some(d) = expiry_date {
                     d
                 } else {
-                    new_directives.push(directive);
+                    ops.push(PluginOp::Keep(i));
                     continue;
                 };
 
@@ -72,7 +72,7 @@ impl NativePlugin for BoxAccrualPlugin {
                     .collect();
 
                 if losses.len() != 1 {
-                    new_directives.push(directive);
+                    ops.push(PluginOp::Keep(i));
                     continue;
                 }
 
@@ -81,25 +81,25 @@ impl NativePlugin for BoxAccrualPlugin {
                     let number = if let Ok(n) = Decimal::from_str(&units.number) {
                         n
                     } else {
-                        new_directives.push(directive);
+                        ops.push(PluginOp::Keep(i));
                         continue;
                     };
                     (number, units.currency.clone())
                 } else {
-                    new_directives.push(directive);
+                    ops.push(PluginOp::Keep(i));
                     continue;
                 };
 
                 let start_date = if let Ok(d) = directive.date.parse::<NaiveDate>() {
                     d
                 } else {
-                    new_directives.push(directive);
+                    ops.push(PluginOp::Keep(i));
                     continue;
                 };
 
                 // If same year, no splitting needed
                 if start_date.year() == expiry_date.year() {
-                    new_directives.push(directive);
+                    ops.push(PluginOp::Keep(i));
                     continue;
                 }
 
@@ -107,7 +107,7 @@ impl NativePlugin for BoxAccrualPlugin {
                 let total_days =
                     i64::from(expiry_date.since(start_date).unwrap_or_default().get_days()) + 1;
                 if total_days <= 0 {
-                    new_directives.push(directive);
+                    ops.push(PluginOp::Keep(i));
                     continue;
                 }
 
@@ -176,28 +176,31 @@ impl NativePlugin for BoxAccrualPlugin {
                     .collect();
                 new_postings.extend(splits);
 
-                new_directives.push(DirectiveWrapper {
-                    directive_type: "transaction".to_string(),
-                    date: directive.date.clone(),
-                    filename: directive.filename.clone(),
-                    lineno: directive.lineno,
-                    data: DirectiveData::Transaction(TransactionData {
-                        flag: txn.flag.clone(),
-                        payee: txn.payee.clone(),
-                        narration: txn.narration.clone(),
-                        tags: txn.tags.clone(),
-                        links: txn.links.clone(),
-                        metadata: txn.metadata.clone(),
-                        postings: new_postings,
-                    }),
-                });
+                ops.push(PluginOp::Modify(
+                    i,
+                    DirectiveWrapper {
+                        directive_type: "transaction".to_string(),
+                        date: directive.date.clone(),
+                        filename: directive.filename.clone(),
+                        lineno: directive.lineno,
+                        data: DirectiveData::Transaction(TransactionData {
+                            flag: txn.flag.clone(),
+                            payee: txn.payee.clone(),
+                            narration: txn.narration.clone(),
+                            tags: txn.tags.clone(),
+                            links: txn.links.clone(),
+                            metadata: txn.metadata.clone(),
+                            postings: new_postings,
+                        }),
+                    },
+                ));
             } else {
-                new_directives.push(directive);
+                ops.push(PluginOp::Keep(i));
             }
         }
 
         PluginOutput {
-            directives: new_directives,
+            ops,
             errors: Vec::new(),
         }
     }
@@ -215,6 +218,7 @@ fn format_decimal(d: Decimal) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::super::utils::materialize_ops;
     use super::*;
     use crate::types::*;
 
@@ -271,14 +275,15 @@ mod tests {
             config: None,
         };
 
+        let input_dirs = input.directives.clone();
         let output = plugin.process(input);
         assert_eq!(output.errors.len(), 0);
+        let directives = materialize_ops(&input_dirs, &output);
 
         // Find the transaction
-        let txn = output
-            .directives
+        let txn = directives
             .iter()
-            .find(|d| d.directive_type == "transaction");
+            .find(|d| matches!(d.data, DirectiveData::Transaction(_)));
         assert!(txn.is_some());
 
         if let DirectiveData::Transaction(t) = &txn.unwrap().data {
@@ -339,11 +344,13 @@ mod tests {
             config: None,
         };
 
+        let input_dirs = input.directives.clone();
         let output = plugin.process(input);
         assert_eq!(output.errors.len(), 0);
+        let directives = materialize_ops(&input_dirs, &output);
 
         // Should be unchanged (same year)
-        if let DirectiveData::Transaction(t) = &output.directives[0].data {
+        if let DirectiveData::Transaction(t) = &directives[0].data {
             assert_eq!(t.postings.len(), 1);
         }
     }

@@ -3,7 +3,7 @@
 //! Sets default metadata values for transactions tagged with `#rx_txn`.
 //! This is used by the beanahead tool for managing recurring transactions.
 
-use crate::types::{DirectiveData, MetaValueData, PluginInput, PluginOutput};
+use crate::types::{DirectiveData, MetaValueData, PluginInput, PluginOp, PluginOutput};
 
 use super::super::NativePlugin;
 
@@ -28,40 +28,40 @@ impl NativePlugin for RxTxnPlugin {
     }
 
     fn process(&self, input: PluginInput) -> PluginOutput {
-        let directives: Vec<_> = input
-            .directives
-            .into_iter()
-            .map(|mut wrapper| {
-                if wrapper.directive_type == "transaction"
-                    && let DirectiveData::Transaction(ref mut txn) = wrapper.data
-                {
-                    // Check if transaction has the rx_txn tag
-                    if txn.tags.contains(&TAG_RX.to_string()) {
-                        // Set default metadata values if not already present
-                        // Metadata is Vec<(String, MetaValueData)>
-                        let has_final = txn.metadata.iter().any(|(k, _)| k == "final");
-                        let has_roll = txn.metadata.iter().any(|(k, _)| k == "roll");
+        let mut ops: Vec<PluginOp> = Vec::with_capacity(input.directives.len());
+        for (i, mut wrapper) in input.directives.into_iter().enumerate() {
+            let needs_change = matches!(&wrapper.data, DirectiveData::Transaction(t)
+                if t.tags.contains(&TAG_RX.to_string())
+                    && (!t.metadata.iter().any(|(k, _)| k == "final")
+                        || !t.metadata.iter().any(|(k, _)| k == "roll")));
 
-                        if !has_final {
-                            txn.metadata.push((
-                                "final".to_string(),
-                                MetaValueData::String("None".to_string()),
-                            ));
-                        }
-                        if !has_roll {
-                            txn.metadata.push((
-                                "roll".to_string(),
-                                MetaValueData::String("True".to_string()),
-                            ));
-                        }
-                    }
+            if !needs_change {
+                ops.push(PluginOp::Keep(i));
+                continue;
+            }
+
+            if let DirectiveData::Transaction(ref mut txn) = wrapper.data {
+                let has_final = txn.metadata.iter().any(|(k, _)| k == "final");
+                let has_roll = txn.metadata.iter().any(|(k, _)| k == "roll");
+
+                if !has_final {
+                    txn.metadata.push((
+                        "final".to_string(),
+                        MetaValueData::String("None".to_string()),
+                    ));
                 }
-                wrapper
-            })
-            .collect();
+                if !has_roll {
+                    txn.metadata.push((
+                        "roll".to_string(),
+                        MetaValueData::String("True".to_string()),
+                    ));
+                }
+            }
+            ops.push(PluginOp::Modify(i, wrapper));
+        }
 
         PluginOutput {
-            directives,
+            ops,
             errors: Vec::new(),
         }
     }
@@ -69,6 +69,7 @@ impl NativePlugin for RxTxnPlugin {
 
 #[cfg(test)]
 mod tests {
+    use super::super::utils::materialize_ops;
     use super::*;
     use crate::types::*;
 
@@ -129,11 +130,13 @@ mod tests {
             config: None,
         };
 
+        let input_dirs = input.directives.clone();
         let output = plugin.process(input);
         assert_eq!(output.errors.len(), 0);
-        assert_eq!(output.directives.len(), 1);
+        let directives = materialize_ops(&input_dirs, &output);
+        assert_eq!(directives.len(), 1);
 
-        if let DirectiveData::Transaction(txn) = &output.directives[0].data {
+        if let DirectiveData::Transaction(txn) = &directives[0].data {
             let has_final = txn.metadata.iter().any(|(k, _)| k == "final");
             let has_roll = txn.metadata.iter().any(|(k, _)| k == "roll");
             assert!(has_final, "Should have 'final' metadata");
@@ -159,10 +162,12 @@ mod tests {
             config: None,
         };
 
+        let input_dirs = input.directives.clone();
         let output = plugin.process(input);
         assert_eq!(output.errors.len(), 0);
+        let directives = materialize_ops(&input_dirs, &output);
 
-        if let DirectiveData::Transaction(txn) = &output.directives[0].data {
+        if let DirectiveData::Transaction(txn) = &directives[0].data {
             // Should only have 2 metadata items (the original ones)
             assert_eq!(txn.metadata.len(), 2);
             let final_meta = txn.metadata.iter().find(|(k, _)| k == "final").unwrap();
@@ -189,10 +194,12 @@ mod tests {
             config: None,
         };
 
+        let input_dirs = input.directives.clone();
         let output = plugin.process(input);
         assert_eq!(output.errors.len(), 0);
+        let directives = materialize_ops(&input_dirs, &output);
 
-        if let DirectiveData::Transaction(txn) = &output.directives[0].data {
+        if let DirectiveData::Transaction(txn) = &directives[0].data {
             // Should have no metadata added
             assert!(txn.metadata.is_empty());
         } else {
@@ -213,10 +220,12 @@ mod tests {
             config: None,
         };
 
+        let input_dirs = input.directives.clone();
         let output = plugin.process(input);
         assert_eq!(output.errors.len(), 0);
+        let directives = materialize_ops(&input_dirs, &output);
 
-        if let DirectiveData::Transaction(txn) = &output.directives[0].data {
+        if let DirectiveData::Transaction(txn) = &directives[0].data {
             // Should have no metadata added
             assert!(txn.metadata.is_empty());
         } else {

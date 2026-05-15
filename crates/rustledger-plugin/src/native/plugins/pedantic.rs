@@ -1,6 +1,6 @@
 //! Enable all strict validation rules.
 
-use crate::types::{PluginInput, PluginOutput};
+use crate::types::{PluginInput, PluginOp, PluginOutput};
 
 use super::super::NativePlugin;
 use super::check_commodity::CheckCommodityPlugin;
@@ -66,7 +66,7 @@ impl NativePlugin for PedanticPlugin {
         all_errors.extend(result.errors);
 
         PluginOutput {
-            directives: input.directives,
+            ops: (0..input.directives.len()).map(PluginOp::Keep).collect(),
             errors: all_errors,
         }
     }

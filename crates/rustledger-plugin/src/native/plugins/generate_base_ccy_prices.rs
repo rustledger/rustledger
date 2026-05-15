@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use rust_decimal::Decimal;
 
 use crate::types::{
-    AmountData, DirectiveData, DirectiveWrapper, PluginInput, PluginOutput, PriceData,
+    AmountData, DirectiveData, DirectiveWrapper, PluginInput, PluginOp, PluginOutput, PriceData,
 };
 
 use super::super::NativePlugin;
@@ -46,7 +46,7 @@ impl NativePlugin for GenerateBaseCcyPricesPlugin {
             None => {
                 // If no config, just return unchanged
                 return PluginOutput {
-                    directives: input.directives,
+                    ops: (0..input.directives.len()).map(PluginOp::Keep).collect(),
                     errors: Vec::new(),
                 };
             }
@@ -101,12 +101,14 @@ impl NativePlugin for GenerateBaseCcyPricesPlugin {
             }
         }
 
-        // Combine original directives with new ones
-        let mut all_directives = input.directives;
-        all_directives.extend(additional_entries);
+        // Keep all original directives, then insert generated price entries.
+        let mut ops: Vec<PluginOp> = (0..input.directives.len()).map(PluginOp::Keep).collect();
+        for w in additional_entries {
+            ops.push(PluginOp::Insert(w));
+        }
 
         PluginOutput {
-            directives: all_directives,
+            ops,
             errors: Vec::new(),
         }
     }
@@ -195,6 +197,7 @@ fn format_decimal(d: Decimal) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::super::utils::materialize_ops;
     use super::*;
     use crate::types::*;
 
@@ -239,15 +242,16 @@ mod tests {
             config: Some("USD".to_string()),
         };
 
+        let input_dirs = input.directives.clone();
         let output = plugin.process(input);
         assert_eq!(output.errors.len(), 0);
+        let directives = materialize_ops(&input_dirs, &output);
 
         // Should have original 2 prices + 1 generated (ETH in USD)
-        assert_eq!(output.directives.len(), 3);
+        assert_eq!(directives.len(), 3);
 
         // Find the generated price
-        let generated_prices: Vec<_> = output
-            .directives
+        let generated_prices: Vec<_> = directives
             .iter()
             .filter(|d| {
                 if let DirectiveData::Price(p) = &d.data {
@@ -282,10 +286,12 @@ mod tests {
             config: Some("USD".to_string()),
         };
 
+        let input_dirs = input.directives.clone();
         let output = plugin.process(input);
         assert_eq!(output.errors.len(), 0);
+        let directives = materialize_ops(&input_dirs, &output);
         // Should have only the original price
-        assert_eq!(output.directives.len(), 1);
+        assert_eq!(directives.len(), 1);
     }
 
     #[test]
@@ -306,10 +312,12 @@ mod tests {
             config: Some("USD".to_string()),
         };
 
+        let input_dirs = input.directives.clone();
         let output = plugin.process(input);
         assert_eq!(output.errors.len(), 0);
+        let directives = materialize_ops(&input_dirs, &output);
         // Should have only original 3 prices
-        assert_eq!(output.directives.len(), 3);
+        assert_eq!(directives.len(), 3);
     }
 
     #[test]
@@ -325,8 +333,10 @@ mod tests {
             config: None,
         };
 
+        let input_dirs = input.directives.clone();
         let output = plugin.process(input);
         assert_eq!(output.errors.len(), 0);
-        assert_eq!(output.directives.len(), 1);
+        let directives = materialize_ops(&input_dirs, &output);
+        assert_eq!(directives.len(), 1);
     }
 }

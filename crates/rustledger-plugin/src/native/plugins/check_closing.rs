@@ -1,8 +1,8 @@
 //! Zero balance assertion on account closing.
 
 use crate::types::{
-    AmountData, BalanceData, DirectiveData, DirectiveWrapper, MetaValueData, PluginInput,
-    PluginOutput, sort_directives,
+    AmountData, BalanceData, DirectiveData, DirectiveWrapper, MetaValueData, PluginInput, PluginOp,
+    PluginOutput,
 };
 
 use super::super::NativePlugin;
@@ -24,7 +24,7 @@ impl NativePlugin for CheckClosingPlugin {
     }
 
     fn process(&self, input: PluginInput) -> PluginOutput {
-        let mut new_directives: Vec<DirectiveWrapper> = Vec::new();
+        let mut ops: Vec<PluginOp> = Vec::new();
 
         // Default currency for auto-balanced (units=None) closing postings:
         // prefer the user's first operating currency, falling back to "USD"
@@ -36,8 +36,8 @@ impl NativePlugin for CheckClosingPlugin {
             .cloned()
             .unwrap_or_else(|| "USD".to_string());
 
-        for wrapper in &input.directives {
-            new_directives.push(wrapper.clone());
+        for (i, wrapper) in input.directives.iter().enumerate() {
+            ops.push(PluginOp::Keep(i));
 
             if let DirectiveData::Transaction(txn) = &wrapper.data {
                 for posting in &txn.postings {
@@ -58,7 +58,7 @@ impl NativePlugin for CheckClosingPlugin {
                                 .map_or_else(|| default_currency.clone(), |u| u.currency.clone());
 
                             // Add zero balance assertion
-                            new_directives.push(DirectiveWrapper {
+                            ops.push(PluginOp::Insert(DirectiveWrapper {
                                 directive_type: "balance".to_string(),
                                 date: next_date,
                                 filename: None, // Plugin-generated
@@ -72,18 +72,17 @@ impl NativePlugin for CheckClosingPlugin {
                                     tolerance: None,
                                     metadata: vec![],
                                 }),
-                            });
+                            }));
                         }
                     }
                 }
             }
         }
 
-        // Sort using beancount's standard ordering
-        sort_directives(&mut new_directives);
-
+        // Final ordering is the loader's responsibility — it re-sorts
+        // directives after the plugin pass.
         PluginOutput {
-            directives: new_directives,
+            ops,
             errors: Vec::new(),
         }
     }

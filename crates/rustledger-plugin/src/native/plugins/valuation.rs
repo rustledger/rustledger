@@ -29,8 +29,8 @@ use rust_decimal::Decimal;
 
 use crate::types::{
     AmountData, CommodityData, CostData, DirectiveData, DirectiveWrapper, MetaValueData,
-    PluginError, PluginErrorSeverity, PluginInput, PluginOutput, PostingData, PriceAnnotationData,
-    PriceData, TransactionData,
+    PluginError, PluginErrorSeverity, PluginInput, PluginOp, PluginOutput, PostingData,
+    PriceAnnotationData, PriceData, TransactionData,
 };
 
 use super::super::NativePlugin;
@@ -89,7 +89,7 @@ impl NativePlugin for ValuationPlugin {
 
     fn process(&self, input: PluginInput) -> PluginOutput {
         let mut errors: Vec<PluginError> = Vec::new();
-        let mut output_directives: Vec<DirectiveWrapper> = Vec::new();
+        let mut ops: Vec<PluginOp> = Vec::with_capacity(input.directives.len());
 
         // Track state per account
         let mut account_states: HashMap<String, AccountState> = HashMap::new();
@@ -120,7 +120,7 @@ impl NativePlugin for ValuationPlugin {
         }
 
         // Second pass: process directives in order
-        for directive in input.directives {
+        for (i, directive) in input.directives.into_iter().enumerate() {
             last_date = Some(directive.date.clone());
 
             match &directive.data {
@@ -132,7 +132,7 @@ impl NativePlugin for ValuationPlugin {
                         .any(|p| account_states.contains_key(&p.account));
 
                     if !has_mapped_posting {
-                        output_directives.push(directive);
+                        ops.push(PluginOp::Keep(i));
                         continue;
                     }
 
@@ -144,10 +144,12 @@ impl NativePlugin for ValuationPlugin {
                         &mut commodities_present,
                     );
 
-                    // Add any price directives generated
-                    output_directives.extend(new_directives);
+                    // Add any price directives generated as Inserts.
+                    for new_d in new_directives {
+                        ops.push(PluginOp::Insert(new_d));
+                    }
                     errors.extend(new_errors);
-                    output_directives.push(transformed);
+                    ops.push(PluginOp::Modify(i, transformed));
                 }
                 DirectiveData::Custom(custom)
                     if custom.custom_type == "valuation" && !custom.values.is_empty() =>
@@ -155,26 +157,30 @@ impl NativePlugin for ValuationPlugin {
                     // Check if this is a config (pass through) or a valuation assertion
                     if matches!(custom.values.first(), Some(MetaValueData::String(s)) if s == "config")
                     {
-                        output_directives.push(directive);
+                        ops.push(PluginOp::Keep(i));
                         continue;
                     }
 
-                    // This is a valuation assertion
+                    // This is a valuation assertion — replace it with the
+                    // synthesized directives (Delete + Inserts).
                     let (new_directives, new_errors) =
                         process_valuation_assertion(&directive, custom, &mut account_states);
 
-                    output_directives.extend(new_directives);
+                    ops.push(PluginOp::Delete(i));
+                    for new_d in new_directives {
+                        ops.push(PluginOp::Insert(new_d));
+                    }
                     errors.extend(new_errors);
                 }
                 DirectiveData::Custom(_) => {
-                    output_directives.push(directive);
+                    ops.push(PluginOp::Keep(i));
                 }
                 DirectiveData::Commodity(commodity) => {
                     commodities_present.insert(commodity.currency.clone());
-                    output_directives.push(directive);
+                    ops.push(PluginOp::Keep(i));
                 }
                 _ => {
-                    output_directives.push(directive);
+                    ops.push(PluginOp::Keep(i));
                 }
             }
         }
@@ -184,7 +190,7 @@ impl NativePlugin for ValuationPlugin {
         if let Some(date) = last_date {
             for state in account_states.values() {
                 if !commodities_present.contains(&state.config.currency) {
-                    output_directives.push(DirectiveWrapper {
+                    ops.push(PluginOp::Insert(DirectiveWrapper {
                         directive_type: "commodity".to_string(),
                         date: date.clone(),
                         filename: Some("<valuation>".to_string()),
@@ -193,17 +199,14 @@ impl NativePlugin for ValuationPlugin {
                             currency: state.config.currency.clone(),
                             metadata: vec![],
                         }),
-                    });
+                    }));
                     // Only add once
                     commodities_present.insert(state.config.currency.clone());
                 }
             }
         }
 
-        PluginOutput {
-            directives: output_directives,
-            errors,
-        }
+        PluginOutput { ops, errors }
     }
 }
 

@@ -1,7 +1,7 @@
 //! Close descendant accounts automatically.
 
 use crate::types::{
-    CloseData, DirectiveData, DirectiveWrapper, PluginInput, PluginOutput, sort_directives,
+    CloseData, DirectiveData, DirectiveWrapper, PluginInput, PluginOp, PluginOutput,
 };
 
 use super::super::NativePlugin;
@@ -45,43 +45,47 @@ impl NativePlugin for CloseTreePlugin {
             }
         }
 
-        // Find child accounts for each closed parent
-        let mut new_directives = input.directives;
+        // Collect accounts that are already closed in input.
+        let mut already_closed: HashSet<String> = HashSet::new();
+        for wrapper in &input.directives {
+            if let DirectiveData::Close(data) = &wrapper.data {
+                already_closed.insert(data.account.clone());
+            }
+        }
+
+        // Start with Keep ops for every input directive.
+        let mut ops: Vec<PluginOp> = (0..input.directives.len()).map(PluginOp::Keep).collect();
+
+        // Track close directives we will insert so the same descendant
+        // doesn't get inserted twice when multiple parent prefixes apply.
+        let mut inserted_closes: HashSet<String> = HashSet::new();
 
         for (parent, close_date) in &closed_parents {
             let prefix = format!("{parent}:");
             for account in &all_accounts {
-                if account.starts_with(&prefix) {
-                    // Check if already closed
-                    let already_closed = new_directives.iter().any(|w| {
-                        if let DirectiveData::Close(data) = &w.data {
-                            &data.account == account
-                        } else {
-                            false
-                        }
-                    });
-
-                    if !already_closed {
-                        new_directives.push(DirectiveWrapper {
-                            directive_type: "close".to_string(),
-                            date: close_date.clone(),
-                            filename: None, // Plugin-generated
-                            lineno: None,
-                            data: DirectiveData::Close(CloseData {
-                                account: account.clone(),
-                                metadata: vec![],
-                            }),
-                        });
-                    }
+                if account.starts_with(&prefix)
+                    && !already_closed.contains(account)
+                    && !inserted_closes.contains(account)
+                {
+                    inserted_closes.insert(account.clone());
+                    ops.push(PluginOp::Insert(DirectiveWrapper {
+                        directive_type: "close".to_string(),
+                        date: close_date.clone(),
+                        filename: None, // Plugin-generated
+                        lineno: None,
+                        data: DirectiveData::Close(CloseData {
+                            account: account.clone(),
+                            metadata: vec![],
+                        }),
+                    }));
                 }
             }
         }
 
-        // Sort using beancount's standard ordering
-        sort_directives(&mut new_directives);
-
+        // Final ordering is the loader's responsibility — it re-sorts
+        // directives after the plugin pass.
         PluginOutput {
-            directives: new_directives,
+            ops,
             errors: Vec::new(),
         }
     }

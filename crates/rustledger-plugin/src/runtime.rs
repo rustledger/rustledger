@@ -30,7 +30,31 @@ use std::time::SystemTime;
 use anyhow::{Context, Result};
 use wasmtime::{Config, Engine, Linker, Module, Store};
 
-use crate::types::{PluginInput, PluginOutput};
+use crate::types::{DirectiveWrapper, PluginInput, PluginOp, PluginOutput};
+
+/// Materialize a plugin's `ops` against its input directive list,
+/// producing the resulting flat list of wrappers.
+///
+/// Used by `execute_all` to chain plugin outputs back into the next
+/// plugin's input. The loader uses a more elaborate version
+/// (`apply_plugin_ops` in `rustledger-loader`) that also validates the
+/// ops protocol invariants and preserves source spans; here we just
+/// need the materialized list.
+fn materialize_ops(input: &[DirectiveWrapper], output: &PluginOutput) -> Vec<DirectiveWrapper> {
+    let mut out = Vec::with_capacity(output.ops.len());
+    for op in &output.ops {
+        match op {
+            PluginOp::Keep(i) => {
+                if let Some(w) = input.get(*i) {
+                    out.push(w.clone());
+                }
+            }
+            PluginOp::Modify(_, w) | PluginOp::Insert(w) => out.push(w.clone()),
+            PluginOp::Delete(_) => {}
+        }
+    }
+    out
+}
 
 /// Configuration for the plugin runtime.
 #[derive(Debug, Clone)]
@@ -262,22 +286,38 @@ impl PluginManager {
     }
 
     /// Execute all loaded plugins in sequence.
+    ///
+    /// Note: because the ops protocol references the **plugin's** input
+    /// indices and `execute_all` chains plugins by materializing each
+    /// stage's ops before feeding the next, the final ops returned
+    /// here describe the result relative to the original input as a
+    /// **rebuild**: every output directive is encoded as
+    /// [`PluginOp::Insert`] and every original input is encoded as
+    /// [`PluginOp::Delete`]. Loader callers don't go through this
+    /// path — they apply ops one plugin at a time — so this simplifies
+    /// the multi-plugin WASM-runtime case to "here's the resulting
+    /// directive list" without losing the protocol's invariants.
     pub fn execute_all(&self, mut input: PluginInput) -> Result<PluginOutput> {
-        // Lazy allocation: the common case is "all plugins ran clean" and
-        // we'd rather pay zero allocations for that path than preallocate
-        // for errors that never arrive. `Vec::new()` has no allocation
-        // cost; the first `extend` from a non-empty `output.errors` pays
-        // for the first grow.
         let mut all_errors = Vec::new();
+        let n_original = input.directives.len();
 
         for plugin in &self.plugins {
             let output = plugin.execute(&input, &self.config)?;
+            // Materialize this plugin's ops to feed the next plugin.
+            input.directives = materialize_ops(&input.directives, &output);
             all_errors.extend(output.errors);
-            input.directives = output.directives;
+        }
+
+        // Rebuild-style ops: Delete every original input, Insert every
+        // final directive. Order: deletes first so the protocol
+        // invariant (each input index appears once) is satisfied.
+        let mut ops: Vec<PluginOp> = (0..n_original).map(PluginOp::Delete).collect();
+        for w in input.directives {
+            ops.push(PluginOp::Insert(w));
         }
 
         Ok(PluginOutput {
-            directives: input.directives,
+            ops,
             errors: all_errors,
         })
     }
@@ -473,17 +513,26 @@ impl WatchingPluginManager {
     }
 
     /// Execute all loaded plugins in sequence.
+    ///
+    /// See [`PluginManager::execute_all`] for the rebuild-style
+    /// (Delete-all-Insert-all) op encoding rationale.
     pub fn execute_all(&self, mut input: PluginInput) -> Result<PluginOutput> {
         let mut all_errors = Vec::new();
+        let n_original = input.directives.len();
 
         for tracked in &self.plugins {
             let output = tracked.plugin.execute(&input, &self.config)?;
+            input.directives = materialize_ops(&input.directives, &output);
             all_errors.extend(output.errors);
-            input.directives = output.directives;
+        }
+
+        let mut ops: Vec<PluginOp> = (0..n_original).map(PluginOp::Delete).collect();
+        for w in input.directives {
+            ops.push(PluginOp::Insert(w));
         }
 
         Ok(PluginOutput {
-            directives: input.directives,
+            ops,
             errors: all_errors,
         })
     }
@@ -811,7 +860,7 @@ mod tests {
         let result = manager.execute_all(input);
         assert!(result.is_ok());
         let output = result.unwrap();
-        assert!(output.directives.is_empty());
+        assert!(output.ops.is_empty());
         assert!(output.errors.is_empty());
     }
 
@@ -826,7 +875,7 @@ mod tests {
         let result = manager.execute_all(input);
         assert!(result.is_ok());
         let output = result.unwrap();
-        assert!(output.directives.is_empty());
+        assert!(output.ops.is_empty());
         assert!(output.errors.is_empty());
     }
 

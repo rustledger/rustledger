@@ -537,7 +537,6 @@ pub fn run_plugins(
 ) -> Result<(), ProcessError> {
     use rustledger_plugin::{
         DocumentDiscoveryPlugin, NativePlugin, NativePluginRegistry, PluginInput, PluginOptions,
-        directive_to_wrapper_with_location, wrapper_to_directive,
     };
 
     // Resolve document directories relative to the main file's directory
@@ -637,49 +636,28 @@ pub fn run_plugins(
         return Ok(());
     }
 
-    // Convert directives to plugin format with source locations
-    let mut wrappers: Vec<_> = directives
-        .iter()
-        .map(|spanned| {
-            let (filename, lineno) = if let Some(file) = source_map.get(spanned.file_id as usize) {
-                let (line, _col) = file.line_col(spanned.span.start);
-                (Some(file.path.display().to_string()), Some(line as u32))
-            } else {
-                (None, None)
-            };
-            directive_to_wrapper_with_location(&spanned.value, filename, lineno)
-        })
-        .collect();
-
     let plugin_options = PluginOptions {
         operating_currencies: file_options.operating_currency.clone(),
         title: file_options.title.clone(),
     };
 
-    // Run document discovery plugin if documents directories are configured
+    // Run document discovery plugin if documents directories are configured.
+    // Each plugin call builds wrappers freshly from the current `directives`,
+    // sends them to the plugin, receives `PluginOp`s, and applies the ops
+    // to update `directives` — spans on `Keep` / `Modify` ops are inherited
+    // from the original `directives` entry by index, so plugin-transformed
+    // directives retain byte-precise source locations.
     if has_document_dirs {
         let doc_plugin = DocumentDiscoveryPlugin::new(resolved_documents, base_dir.to_path_buf());
+        let wrappers = build_wrappers(directives, source_map);
         let input = PluginInput {
-            directives: std::mem::take(&mut wrappers),
+            directives: wrappers,
             options: plugin_options.clone(),
             config: None,
         };
         let output = doc_plugin.process(input);
-
-        // Collect plugin errors
-        for err in output.errors {
-            let ledger_err = match err.severity {
-                rustledger_plugin::PluginErrorSeverity::Error => {
-                    LedgerError::error("PLUGIN", err.message)
-                }
-                rustledger_plugin::PluginErrorSeverity::Warning => {
-                    LedgerError::warning("PLUGIN", err.message)
-                }
-            };
-            errors.push(ledger_err);
-        }
-
-        wrappers = output.directives;
+        record_plugin_errors(errors, output.errors, false);
+        apply_plugin_ops(directives, output.ops, errors)?;
     }
 
     // Run each plugin (registry was constructed earlier for the
@@ -705,31 +683,15 @@ pub fn run_plugins(
             if let Some(name) = resolved_name
                 && let Some(plugin) = registry.find(name)
             {
-                // Move wrappers into the plugin input instead of cloning.
-                // The plugin returns modified directives in its output,
-                // which we reassign to `wrappers` below.
+                let wrappers = build_wrappers(directives, source_map);
                 let input = PluginInput {
-                    directives: std::mem::take(&mut wrappers),
+                    directives: wrappers,
                     options: plugin_options.clone(),
                     config: plugin_config.clone(),
                 };
-
                 let output = plugin.process(input);
-
-                // Collect plugin errors
-                for err in output.errors {
-                    let ledger_err = match err.severity {
-                        rustledger_plugin::PluginErrorSeverity::Error => {
-                            LedgerError::error("PLUGIN", err.message).with_phase("plugin")
-                        }
-                        rustledger_plugin::PluginErrorSeverity::Warning => {
-                            LedgerError::warning("PLUGIN", err.message).with_phase("plugin")
-                        }
-                    };
-                    errors.push(ledger_err);
-                }
-
-                wrappers = output.directives;
+                record_plugin_errors(errors, output.errors, true);
+                apply_plugin_ops(directives, output.ops, errors)?;
             } else {
                 // Not a native plugin — categorize and handle
                 let plugin_path = std::path::Path::new(raw_name);
@@ -785,13 +747,14 @@ pub fn run_plugins(
                                 continue;
                             }
                         };
+                        let wrappers = build_wrappers(directives, source_map);
                         match run_wasm_plugin(&wasm_path, &wrappers, &plugin_options, plugin_config)
                         {
-                            Ok((output_directives, plugin_errors)) => {
+                            Ok((ops, plugin_errors)) => {
                                 for err in plugin_errors {
                                     errors.push(err);
                                 }
-                                wrappers = output_directives;
+                                apply_plugin_ops(directives, ops, errors)?;
                             }
                             Err(e) => {
                                 errors.push(
@@ -831,6 +794,7 @@ pub fn run_plugins(
                                 continue;
                             }
                         };
+                        let wrappers = build_wrappers(directives, source_map);
                         match run_python_plugin(
                             raw_name,
                             &resolved,
@@ -839,11 +803,11 @@ pub fn run_plugins(
                             &plugin_options,
                             plugin_config,
                         ) {
-                            Ok((output_directives, plugin_errors)) => {
+                            Ok((ops, plugin_errors)) => {
                                 for err in plugin_errors {
                                     errors.push(err);
                                 }
-                                wrappers = output_directives;
+                                apply_plugin_ops(directives, ops, errors)?;
                             }
                             Err(e) => {
                                 errors.push(LedgerError::error("E8002", e).with_phase("plugin"));
@@ -907,51 +871,159 @@ pub fn run_plugins(
         }
     }
 
-    // Build a filename -> file_id lookup for restoring locations
-    let filename_to_file_id: std::collections::HashMap<String, u16> = source_map
-        .files()
+    // No final wrapper→directive conversion needed: `apply_plugin_ops`
+    // updates `directives` in place after each plugin call, preserving
+    // original spans on Keep/Modify ops. Plugin-synthesized directives
+    // (Insert ops) get `SYNTHESIZED_FILE_ID` and a zero span.
+    Ok(())
+}
+
+/// Build a fresh `Vec<DirectiveWrapper>` from the current directives,
+/// carrying filename + line number for plugin-side error reporting.
+/// Spans don't need to round-trip through the wrappers — the loader
+/// preserves them via `apply_plugin_ops` matching on op index.
+#[cfg(feature = "plugins")]
+fn build_wrappers(
+    directives: &[Spanned<Directive>],
+    source_map: &SourceMap,
+) -> Vec<rustledger_plugin::DirectiveWrapper> {
+    use rustledger_plugin::directive_to_wrapper_with_location;
+
+    directives
         .iter()
-        .map(|f| (f.path.display().to_string(), f.id as u16))
-        .collect();
-
-    // Convert back to directives, preserving source locations from wrappers
-    let mut new_directives = Vec::with_capacity(wrappers.len());
-    for wrapper in &wrappers {
-        let directive = wrapper_to_directive(wrapper)
-            .map_err(|e| ProcessError::PluginConversion(e.to_string()))?;
-
-        // Reconstruct span from filename/lineno if available, falling back to
-        // the plugin-synthesized sentinel when no source location is recoverable.
-        // See `rustledger_parser::SYNTHESIZED_FILE_ID` and issue #896.
-        let (span, file_id) =
-            if let (Some(filename), Some(lineno)) = (&wrapper.filename, wrapper.lineno) {
-                if let Some(&fid) = filename_to_file_id.get(filename) {
-                    // Found the file - reconstruct approximate span from line number
-                    if let Some(file) = source_map.get(fid as usize) {
-                        let span_start = file.line_start(lineno as usize).unwrap_or(0);
-                        (rustledger_parser::Span::new(span_start, span_start), fid)
-                    } else {
-                        (
-                            rustledger_parser::Span::new(0, 0),
-                            rustledger_parser::SYNTHESIZED_FILE_ID,
-                        )
-                    }
-                } else {
-                    // Plugin-generated directive with an unknown/synthetic filename.
-                    (
-                        rustledger_parser::Span::new(0, 0),
-                        rustledger_parser::SYNTHESIZED_FILE_ID,
-                    )
-                }
+        .map(|spanned| {
+            let (filename, lineno) = if let Some(file) = source_map.get(spanned.file_id as usize) {
+                let (line, _col) = file.line_col(spanned.span.start);
+                (Some(file.path.display().to_string()), Some(line as u32))
             } else {
-                // Plugin-generated directive with no source location at all.
-                (
-                    rustledger_parser::Span::new(0, 0),
-                    rustledger_parser::SYNTHESIZED_FILE_ID,
-                )
+                (None, None)
             };
+            directive_to_wrapper_with_location(&spanned.value, filename, lineno)
+        })
+        .collect()
+}
 
-        new_directives.push(Spanned::new(directive, span).with_file_id(file_id as usize));
+/// Push plugin errors into the ledger's error stream, optionally tagging
+/// them with `phase: "plugin"` (used for non-document-discovery plugins).
+#[cfg(feature = "plugins")]
+fn record_plugin_errors(
+    errors: &mut Vec<LedgerError>,
+    plugin_errors: Vec<rustledger_plugin::PluginError>,
+    tag_phase: bool,
+) {
+    for err in plugin_errors {
+        let mut ledger_err = match err.severity {
+            rustledger_plugin::PluginErrorSeverity::Error => {
+                LedgerError::error("PLUGIN", err.message)
+            }
+            rustledger_plugin::PluginErrorSeverity::Warning => {
+                LedgerError::warning("PLUGIN", err.message)
+            }
+        };
+        if tag_phase {
+            ledger_err = ledger_err.with_phase("plugin");
+        }
+        errors.push(ledger_err);
+    }
+}
+
+/// Apply a plugin's `Vec<PluginOp>` to `directives` in place.
+///
+/// Validates that the op set forms a complete partition of the input
+/// indices (each input index appears in exactly one `Keep` / `Modify` /
+/// `Delete` op). Protocol violations produce a `PLUGIN` error in
+/// `errors` and leave `directives` untouched.
+///
+/// For `Keep(i)` / `Modify(i, w)`, the resulting `Spanned<Directive>`
+/// inherits `directives[i]`'s span and `file_id` — this is the core of
+/// the ops protocol's correctness guarantee (plugin-transformed
+/// directives keep their original source identity for error reporting).
+/// `Insert(w)` directives get `(Span::new(0, 0), SYNTHESIZED_FILE_ID)`.
+#[cfg(feature = "plugins")]
+fn apply_plugin_ops(
+    directives: &mut Vec<Spanned<Directive>>,
+    ops: Vec<rustledger_plugin::PluginOp>,
+    errors: &mut Vec<LedgerError>,
+) -> Result<(), ProcessError> {
+    use rustledger_plugin::PluginOp;
+    use rustledger_plugin::wrapper_to_directive;
+
+    let n = directives.len();
+
+    // Validate: every input index in {Keep, Modify, Delete} exactly once.
+    let mut seen = vec![false; n];
+    for op in &ops {
+        let idx = match op {
+            PluginOp::Keep(i) | PluginOp::Modify(i, _) | PluginOp::Delete(i) => Some(*i),
+            PluginOp::Insert(_) => None,
+        };
+        if let Some(i) = idx {
+            if i >= n {
+                errors.push(
+                    LedgerError::error(
+                        "PLUGIN",
+                        format!(
+                            "plugin op references out-of-bounds input index {i} (input has {n} directives)"
+                        ),
+                    )
+                    .with_phase("plugin"),
+                );
+                return Ok(());
+            }
+            if seen[i] {
+                errors.push(
+                    LedgerError::error(
+                        "PLUGIN",
+                        format!("plugin op references input index {i} more than once"),
+                    )
+                    .with_phase("plugin"),
+                );
+                return Ok(());
+            }
+            seen[i] = true;
+        }
+    }
+    for (i, was_seen) in seen.iter().enumerate() {
+        if !was_seen {
+            errors.push(
+                LedgerError::error(
+                    "PLUGIN",
+                    format!(
+                        "plugin omitted input directive {i} (must appear in exactly one of Keep/Modify/Delete)"
+                    ),
+                )
+                .with_phase("plugin"),
+            );
+            return Ok(());
+        }
+    }
+
+    // Materialize new directives, preserving spans for Keep/Modify.
+    let mut new_directives = Vec::with_capacity(ops.len());
+    for op in ops {
+        match op {
+            PluginOp::Keep(i) => {
+                new_directives.push(directives[i].clone());
+            }
+            PluginOp::Modify(i, wrapper) => {
+                let directive = wrapper_to_directive(&wrapper)
+                    .map_err(|e| ProcessError::PluginConversion(e.to_string()))?;
+                new_directives.push(Spanned {
+                    value: directive,
+                    span: directives[i].span,
+                    file_id: directives[i].file_id,
+                });
+            }
+            PluginOp::Insert(wrapper) => {
+                let directive = wrapper_to_directive(&wrapper)
+                    .map_err(|e| ProcessError::PluginConversion(e.to_string()))?;
+                new_directives.push(
+                    Spanned::new(directive, rustledger_parser::Span::new(0, 0))
+                        .with_file_id(rustledger_parser::SYNTHESIZED_FILE_ID as usize),
+                );
+            }
+            PluginOp::Delete(_) => {}
+        }
     }
 
     *directives = new_directives;
@@ -1098,20 +1170,14 @@ pub fn load_raw(path: &Path) -> Result<LoadResult, LoadError> {
     crate::Loader::new().load(path)
 }
 
-/// Run a WASM plugin and return its output directives and errors.
+/// Run a WASM plugin and return its output ops and errors.
 #[cfg(feature = "wasm-plugins")]
 fn run_wasm_plugin(
     wasm_path: &std::path::Path,
-    directives: &[rustledger_plugin_types::DirectiveWrapper],
+    directives: &[rustledger_plugin::DirectiveWrapper],
     options: &rustledger_plugin::PluginOptions,
     config: &Option<String>,
-) -> Result<
-    (
-        Vec<rustledger_plugin_types::DirectiveWrapper>,
-        Vec<LedgerError>,
-    ),
-    String,
-> {
+) -> Result<(Vec<rustledger_plugin::PluginOp>, Vec<LedgerError>), String> {
     use rustledger_plugin::{PluginInput, PluginManager};
 
     let mut mgr = PluginManager::new();
@@ -1142,7 +1208,7 @@ fn run_wasm_plugin(
         errors.push(ledger_err);
     }
 
-    Ok((output.directives, errors))
+    Ok((output.ops, errors))
 }
 
 /// Run a Python module plugin via the WASI-based Python runtime.
@@ -1151,16 +1217,10 @@ fn run_python_plugin(
     module_name: &str,
     resolved_path: &std::path::Path,
     base_dir: &std::path::Path,
-    directives: &[rustledger_plugin_types::DirectiveWrapper],
+    directives: &[rustledger_plugin::DirectiveWrapper],
     options: &rustledger_plugin::PluginOptions,
     config: &Option<String>,
-) -> Result<
-    (
-        Vec<rustledger_plugin_types::DirectiveWrapper>,
-        Vec<LedgerError>,
-    ),
-    String,
-> {
+) -> Result<(Vec<rustledger_plugin::PluginOp>, Vec<LedgerError>), String> {
     use rustledger_plugin::{PluginInput, python::PythonRuntime};
 
     let runtime = PythonRuntime::new().map_err(|e| format!("Python runtime unavailable: {e}"))?;
@@ -1201,5 +1261,5 @@ fn run_python_plugin(
         errors.push(ledger_err);
     }
 
-    Ok((output.directives, errors))
+    Ok((output.ops, errors))
 }

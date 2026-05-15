@@ -149,8 +149,9 @@ with open('/work/output.json', 'w') as f:
         // Execute Python
         let output = self.run_python(&script, BEANCOUNT_COMPAT_PY, plugin_code)?;
 
-        // Parse output
-        parse_plugin_output(&output)
+        // Parse output (pass input length so the Python bridge can
+        // encode the opaque rebuild as `Delete(all-input) + Insert(all-output)`).
+        parse_plugin_output(&output, input.directives.len())
     }
 
     /// Execute a built-in beancount plugin by module name.
@@ -374,7 +375,17 @@ fn serialize_directives_to_json(
 }
 
 /// Parse the plugin output from the output file.
-fn parse_plugin_output(output: &str) -> Result<PluginOutput, PythonError> {
+///
+/// `input_len` is the length of the **plugin's** input directive list;
+/// the Python plugin returns a full replacement list (opaque to us),
+/// so we encode the result as a rebuild: `Delete(0..input_len)`
+/// followed by `Insert(...)` for every directive Python returned. This
+/// satisfies the ops protocol invariant (each input index appears
+/// exactly once) without forcing the Python bridge to track which
+/// input indices it preserved.
+fn parse_plugin_output(output: &str, input_len: usize) -> Result<PluginOutput, PythonError> {
+    use crate::types::PluginOp;
+
     let separator = "---SEPARATOR---";
     let parts: Vec<&str> = output.split(separator).collect();
 
@@ -414,7 +425,12 @@ fn parse_plugin_output(output: &str) -> Result<PluginOutput, PythonError> {
         })
         .collect();
 
-    Ok(PluginOutput { directives, errors })
+    let mut ops: Vec<PluginOp> = (0..input_len).map(PluginOp::Delete).collect();
+    for w in directives {
+        ops.push(PluginOp::Insert(w));
+    }
+
+    Ok(PluginOutput { ops, errors })
 }
 
 // =============================================================================
@@ -526,8 +542,8 @@ mod tests {
     #[test]
     fn test_parse_plugin_output() {
         let output = "[]\n---SEPARATOR---\n[]";
-        let result = parse_plugin_output(output).unwrap();
-        assert!(result.directives.is_empty());
+        let result = parse_plugin_output(output, 0).unwrap();
+        assert!(result.ops.is_empty());
         assert!(result.errors.is_empty());
     }
 

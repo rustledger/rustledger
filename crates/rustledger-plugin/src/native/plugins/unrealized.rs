@@ -1,6 +1,6 @@
 //! Calculate unrealized gains/losses.
 
-use crate::types::{DirectiveData, PluginError, PluginInput, PluginOutput};
+use crate::types::{DirectiveData, PluginError, PluginInput, PluginOp, PluginOutput};
 
 use super::super::NativePlugin;
 
@@ -127,7 +127,7 @@ impl NativePlugin for UnrealizedPlugin {
         }
 
         PluginOutput {
-            directives: input.directives,
+            ops: (0..input.directives.len()).map(PluginOp::Keep).collect(),
             errors,
         }
     }

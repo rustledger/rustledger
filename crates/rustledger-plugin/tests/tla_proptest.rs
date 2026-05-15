@@ -7,6 +7,7 @@
 
 use proptest::prelude::*;
 use rustledger_plugin::native::NativePluginRegistry;
+use rustledger_plugin::test_helpers::materialize_ops;
 use rustledger_plugin::types::*;
 
 // ============================================================================
@@ -161,8 +162,9 @@ proptest! {
 
             last_plugin_name = plugin.name().to_string();
 
-            // Pass output to next iteration (chain processing)
-            input.directives = output.directives;
+            // Pass output to next iteration (chain processing) — materialize
+            // ops against the current input to produce the next plugin's input.
+            input.directives = materialize_ops(&input.directives, &output);
         }
     }
 
@@ -201,11 +203,13 @@ proptest! {
         let registry = NativePluginRegistry::new();
         if let Some(plugin) = registry.find("implicit_prices") {
             let input = make_input(directives);
+            let input_dirs = input.directives.clone();
             let output = plugin.process(input);
+            let materialized = materialize_ops(&input_dirs, &output);
 
             // Check that transaction directives maintain their relative order
             let mut prev_date: Option<&str> = None;
-            for wrapper in &output.directives {
+            for wrapper in &materialized {
                 if let Some(date) = extract_transaction_date(wrapper) {
                     if let Some(pd) = prev_date {
                         // Order should be maintained (or equal for same-day txns)
@@ -276,11 +280,13 @@ proptest! {
         for plugin_name in &["implicit_prices", "auto_accounts", "noduplicates"] {
             if let Some(plugin) = registry.find(plugin_name) {
                 let input = make_input(directives.clone());
+                let input_dirs = input.directives.clone();
                 let output = plugin.process(input);
+                let materialized = materialize_ops(&input_dirs, &output);
 
                 // Output should be valid (no panic, has directives)
                 prop_assert!(
-                    !output.directives.is_empty(),
+                    !materialized.is_empty(),
                     "Plugin {} should produce valid output",
                     plugin_name
                 );
@@ -311,8 +317,8 @@ proptest! {
             let output2 = plugin.process(input);
 
             prop_assert_eq!(
-                output1.directives.len(),
-                output2.directives.len(),
+                output1.ops.len(),
+                output2.ops.len(),
                 "Plugin should be deterministic"
             );
 

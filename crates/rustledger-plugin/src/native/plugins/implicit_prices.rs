@@ -1,7 +1,7 @@
 //! Plugin that generates price entries from transaction costs and prices.
 
 use crate::types::{
-    AmountData, CostData, DirectiveData, DirectiveWrapper, PluginInput, PluginOutput,
+    AmountData, CostData, DirectiveData, DirectiveWrapper, PluginInput, PluginOp, PluginOutput,
     PriceAnnotationData, PriceAnnotationView, PriceData,
 };
 use rust_decimal::Decimal;
@@ -115,7 +115,6 @@ impl NativePlugin for ImplicitPricesPlugin {
     }
 
     fn process(&self, input: PluginInput) -> PluginOutput {
-        let mut new_directives = Vec::new();
         let mut generated_prices = Vec::new();
 
         // Per-account lot quantities, keyed identically to Python's
@@ -133,8 +132,6 @@ impl NativePlugin for ImplicitPricesPlugin {
         let mut emitted_keys: HashSet<(String, String, String, String)> = HashSet::new();
 
         for wrapper in &input.directives {
-            new_directives.push(wrapper.clone());
-
             if wrapper.directive_type != "transaction" {
                 continue;
             }
@@ -272,10 +269,14 @@ impl NativePlugin for ImplicitPricesPlugin {
             }
         }
 
-        new_directives.extend(generated_prices);
+        // Keep all input directives, then insert generated price entries.
+        let mut ops: Vec<PluginOp> = (0..input.directives.len()).map(PluginOp::Keep).collect();
+        for w in generated_prices {
+            ops.push(PluginOp::Insert(w));
+        }
 
         PluginOutput {
-            directives: new_directives,
+            ops,
             errors: Vec::new(),
         }
     }

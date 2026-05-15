@@ -214,17 +214,37 @@ fn handle_load_file(params: &serde_json::Value) -> Result<serde_json::Value, Rpc
                     config: None,
                 };
 
+                // Materialize the plugin's ops back into a flat wrapper list.
+                let input_dirs = input.directives.clone();
                 let output = plugin.process(input);
 
                 for err in output.errors {
                     errors.push(Error::new(err.message));
                 }
 
+                let materialized = {
+                    let mut out: Vec<rustledger_plugin::types::DirectiveWrapper> =
+                        Vec::with_capacity(output.ops.len());
+                    for op in &output.ops {
+                        match op {
+                            rustledger_plugin::PluginOp::Keep(i) => {
+                                if let Some(w) = input_dirs.get(*i) {
+                                    out.push(w.clone());
+                                }
+                            }
+                            rustledger_plugin::PluginOp::Modify(_, w)
+                            | rustledger_plugin::PluginOp::Insert(w) => out.push(w.clone()),
+                            rustledger_plugin::PluginOp::Delete(_) => {}
+                        }
+                    }
+                    out
+                };
+
                 let mut new_directives = Vec::new();
                 let mut new_lines = Vec::new();
                 let mut new_files = Vec::new();
 
-                for wrapper in &output.directives {
+                for wrapper in &materialized {
                     if let Ok(directive) = wrapper_to_directive(wrapper) {
                         new_directives.push(directive);
                         new_lines.push(wrapper.lineno.unwrap_or(0));

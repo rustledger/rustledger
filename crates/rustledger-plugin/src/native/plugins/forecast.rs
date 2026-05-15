@@ -23,7 +23,7 @@ use regex::Regex;
 use rustledger_core::NaiveDate;
 use std::sync::LazyLock;
 
-use crate::types::{DirectiveData, PluginInput, PluginOutput};
+use crate::types::{DirectiveData, PluginInput, PluginOp, PluginOutput};
 
 use super::super::NativePlugin;
 
@@ -65,29 +65,22 @@ impl NativePlugin for ForecastPlugin {
     }
 
     fn process(&self, input: PluginInput) -> PluginOutput {
-        let mut forecast_entries = Vec::new();
-        let mut filtered_entries = Vec::new();
-
-        // Separate forecast entries from regular entries
-        for directive in input.directives {
-            if directive.directive_type == "transaction"
-                && let DirectiveData::Transaction(ref txn) = directive.data
-                && txn.flag == "#"
-            {
-                forecast_entries.push(directive);
-            } else {
-                filtered_entries.push(directive);
-            }
-        }
-
         // Get current year end as default until date
         let today = jiff::Zoned::now().date();
         let default_until = rustledger_core::naive_date(i32::from(today.year()), 12, 31).unwrap();
 
-        // Generate recurring transactions
-        let mut new_entries = Vec::new();
+        let mut ops: Vec<PluginOp> = Vec::with_capacity(input.directives.len());
 
-        for directive in forecast_entries {
+        for (i, directive) in input.directives.into_iter().enumerate() {
+            // Only `#`-flagged transactions are forecast templates; all
+            // others pass through unchanged.
+            let is_forecast = matches!(&directive.data,
+                DirectiveData::Transaction(t) if t.flag == "#");
+            if !is_forecast {
+                ops.push(PluginOp::Keep(i));
+                continue;
+            }
+
             if let DirectiveData::Transaction(ref txn) = directive.data {
                 if let Some(caps) = FORECAST_PATTERN_RE.captures(&txn.narration) {
                     let narration_prefix = caps.get(1).map_or("", |m| m.as_str().trim());
@@ -113,8 +106,8 @@ impl NativePlugin for ForecastPlugin {
                     let start_date = if let Ok(date) = directive.date.parse::<NaiveDate>() {
                         date
                     } else {
-                        // Skip if date is unparsable
-                        new_entries.push(directive);
+                        // Skip if date is unparsable — keep original template.
+                        ops.push(PluginOp::Keep(i));
                         continue;
                     };
 
@@ -125,32 +118,31 @@ impl NativePlugin for ForecastPlugin {
                     let dates =
                         generate_dates(start_date, interval, skip_count, repeat_count, until);
 
-                    // Create a transaction for each date
+                    // Drop the template (Delete) and Insert one transaction per date.
+                    ops.push(PluginOp::Delete(i));
                     for date in dates {
                         let mut new_directive = directive.clone();
                         new_directive.date = date.to_string();
+                        new_directive.filename = None;
+                        new_directive.lineno = None;
 
                         if let DirectiveData::Transaction(ref mut new_txn) = new_directive.data {
                             new_txn.narration = narration_prefix.to_string();
                         }
 
-                        new_entries.push(new_directive);
+                        ops.push(PluginOp::Insert(new_directive));
                     }
                 } else {
                     // No pattern match, keep original
-                    new_entries.push(directive);
+                    ops.push(PluginOp::Keep(i));
                 }
+            } else {
+                ops.push(PluginOp::Keep(i));
             }
         }
 
-        // Sort new entries by date
-        new_entries.sort_by(|a, b| a.date.cmp(&b.date));
-
-        // Combine filtered entries with new entries
-        filtered_entries.extend(new_entries);
-
         PluginOutput {
-            directives: filtered_entries,
+            ops,
             errors: Vec::new(),
         }
     }
@@ -217,6 +209,7 @@ fn add_months(date: NaiveDate, months: i32) -> NaiveDate {
 
 #[cfg(test)]
 mod tests {
+    use super::super::utils::materialize_ops;
     use super::*;
     use crate::types::*;
 
@@ -277,17 +270,19 @@ mod tests {
             config: None,
         };
 
+        let input_dirs = input.directives.clone();
         let output = plugin.process(input);
         assert_eq!(output.errors.len(), 0);
-        assert_eq!(output.directives.len(), 3);
+        let directives = materialize_ops(&input_dirs, &output);
+        assert_eq!(directives.len(), 3);
 
         // Check dates
-        assert_eq!(output.directives[0].date, "2024-01-15");
-        assert_eq!(output.directives[1].date, "2024-02-15");
-        assert_eq!(output.directives[2].date, "2024-03-15");
+        assert_eq!(directives[0].date, "2024-01-15");
+        assert_eq!(directives[1].date, "2024-02-15");
+        assert_eq!(directives[2].date, "2024-03-15");
 
         // Check narration is cleaned
-        if let DirectiveData::Transaction(txn) = &output.directives[0].data {
+        if let DirectiveData::Transaction(txn) = &directives[0].data {
             assert_eq!(txn.narration, "Electric bill");
         }
     }
@@ -308,13 +303,15 @@ mod tests {
             config: None,
         };
 
+        let input_dirs = input.directives.clone();
         let output = plugin.process(input);
-        assert_eq!(output.directives.len(), 4);
+        let directives = materialize_ops(&input_dirs, &output);
+        assert_eq!(directives.len(), 4);
 
-        assert_eq!(output.directives[0].date, "2024-01-01");
-        assert_eq!(output.directives[1].date, "2024-01-08");
-        assert_eq!(output.directives[2].date, "2024-01-15");
-        assert_eq!(output.directives[3].date, "2024-01-22");
+        assert_eq!(directives[0].date, "2024-01-01");
+        assert_eq!(directives[1].date, "2024-01-08");
+        assert_eq!(directives[2].date, "2024-01-15");
+        assert_eq!(directives[3].date, "2024-01-22");
     }
 
     #[test]
@@ -333,12 +330,14 @@ mod tests {
             config: None,
         };
 
+        let input_dirs = input.directives.clone();
         let output = plugin.process(input);
-        assert_eq!(output.directives.len(), 3);
+        let directives = materialize_ops(&input_dirs, &output);
+        assert_eq!(directives.len(), 3);
 
-        assert_eq!(output.directives[0].date, "2024-01-15");
-        assert_eq!(output.directives[1].date, "2024-02-15");
-        assert_eq!(output.directives[2].date, "2024-03-15");
+        assert_eq!(directives[0].date, "2024-01-15");
+        assert_eq!(directives[1].date, "2024-02-15");
+        assert_eq!(directives[2].date, "2024-03-15");
     }
 
     #[test]
@@ -357,13 +356,15 @@ mod tests {
             config: None,
         };
 
+        let input_dirs = input.directives.clone();
         let output = plugin.process(input);
-        assert_eq!(output.directives.len(), 3);
+        let directives = materialize_ops(&input_dirs, &output);
+        assert_eq!(directives.len(), 3);
 
         // With SKIP 1 TIME, it should skip every other month (bi-monthly)
-        assert_eq!(output.directives[0].date, "2024-01-01");
-        assert_eq!(output.directives[1].date, "2024-03-01");
-        assert_eq!(output.directives[2].date, "2024-05-01");
+        assert_eq!(directives[0].date, "2024-01-01");
+        assert_eq!(directives[1].date, "2024-03-01");
+        assert_eq!(directives[2].date, "2024-05-01");
     }
 
     #[test]
@@ -384,10 +385,12 @@ mod tests {
             config: None,
         };
 
+        let input_dirs = input.directives.clone();
         let output = plugin.process(input);
-        assert_eq!(output.directives.len(), 1);
+        let directives = materialize_ops(&input_dirs, &output);
+        assert_eq!(directives.len(), 1);
 
-        if let DirectiveData::Transaction(txn) = &output.directives[0].data {
+        if let DirectiveData::Transaction(txn) = &directives[0].data {
             assert_eq!(txn.flag, "*");
             assert_eq!(txn.narration, "Regular purchase");
         }

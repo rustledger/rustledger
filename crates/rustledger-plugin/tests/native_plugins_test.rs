@@ -10,11 +10,35 @@ use rustledger_plugin::native::{
     NoUnusedPlugin, OneCommodityPlugin, PedanticPlugin, RenameAccountsPlugin, RxTxnPlugin,
     SellGainsPlugin, SplitExpensesPlugin, UniquePricesPlugin, UnrealizedPlugin, ZerosumPlugin,
 };
+use rustledger_plugin::test_helpers::materialize_ops;
 use rustledger_plugin::types::*;
 
 // ============================================================================
 // Helper Functions
 // ============================================================================
+
+/// Test-only `PluginOutput` shim that fronts the ops protocol with the
+/// pre-refactor `directives` getter. Lets us migrate `output.directives`
+/// sites incrementally without inverting the input/output flow in every
+/// individual assertion. Computed once at the `let output = ...` site.
+struct ProcessedOutput {
+    directives: Vec<DirectiveWrapper>,
+    errors: Vec<PluginError>,
+}
+
+#[allow(dead_code)]
+fn process_and_materialize<P: NativePlugin + ?Sized>(
+    plugin: &P,
+    input: PluginInput,
+) -> ProcessedOutput {
+    let input_dirs = input.directives.clone();
+    let out = plugin.process(input);
+    let directives = materialize_ops(&input_dirs, &out);
+    ProcessedOutput {
+        directives,
+        errors: out.errors,
+    }
+}
 
 fn make_input(directives: Vec<DirectiveWrapper>) -> PluginInput {
     PluginInput {
@@ -320,7 +344,7 @@ fn test_leafonly_error_on_parent_account() {
         ),
     ]);
 
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
 
     // Should have 1 error for posting to Expenses:Food
     assert_eq!(
@@ -355,7 +379,7 @@ fn test_leafonly_ok_on_leaf_accounts() {
         ),
     ]);
 
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(output.errors.is_empty(), "expected no errors");
 }
 
@@ -392,7 +416,7 @@ fn test_noduplicates_transaction() {
         ),
     ]);
 
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
 
     assert_eq!(output.errors.len(), 1, "expected 1 duplicate error");
     assert!(
@@ -428,7 +452,7 @@ fn test_noduplicates_ok_different_amounts() {
         ),
     ]);
 
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(output.errors.is_empty(), "expected no errors");
 }
 
@@ -473,7 +497,7 @@ fn test_noduplicates_distinct_links_are_not_duplicates() {
         txn_b,
     ]);
 
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(
         output.errors.is_empty(),
         "distinct ^link values should disambiguate otherwise-identical transactions, got: {:?}",
@@ -519,7 +543,7 @@ fn test_noduplicates_distinct_tags_are_not_duplicates() {
         txn_b,
     ]);
 
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(
         output.errors.is_empty(),
         "distinct tags should disambiguate otherwise-identical transactions, got: {:?}",
@@ -565,7 +589,7 @@ fn test_noduplicates_duplicate_tags_collapse_to_set() {
         txn_b,
     ]);
 
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert_eq!(
         output.errors.len(),
         1,
@@ -617,7 +641,7 @@ fn test_noduplicates_tag_link_boundary_no_collision() {
         txn_b,
     ]);
 
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(
         output.errors.is_empty(),
         "tags=[a,b] with no links must NOT collide with tags=[a] links=[b], \
@@ -664,7 +688,7 @@ fn test_noduplicates_tag_order_independent() {
         txn_b,
     ]);
 
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert_eq!(
         output.errors.len(),
         1,
@@ -704,7 +728,7 @@ fn test_noduplicates_distinct_costs_are_not_duplicates() {
         txn_b,
     ]);
 
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(
         output.errors.is_empty(),
         "distinct cost specs should disambiguate otherwise-identical transactions, got: {:?}",
@@ -742,7 +766,7 @@ fn test_noduplicates_distinct_prices_are_not_duplicates() {
         txn_b,
     ]);
 
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(
         output.errors.is_empty(),
         "distinct prices should disambiguate otherwise-identical transactions, got: {:?}",
@@ -797,7 +821,7 @@ fn test_noduplicates_metadata_differences_are_still_duplicates() {
         txn_b,
     ]);
 
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert_eq!(
         output.errors.len(),
         1,
@@ -844,7 +868,7 @@ fn test_noduplicates_distinct_flags_are_not_duplicates() {
         txn_b,
     ]);
 
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(
         output.errors.is_empty(),
         "distinct flags should disambiguate otherwise-identical transactions, got: {:?}",
@@ -895,7 +919,7 @@ fn test_noduplicates_distinct_dates_are_not_duplicates() {
         make_transaction("2024-01-15", "Coffee", postings.clone()),
         make_transaction("2024-01-16", "Coffee", postings),
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(
         output.errors.is_empty(),
         "different dates must not collide, got: {:?}",
@@ -917,7 +941,7 @@ fn test_noduplicates_distinct_narration_are_not_duplicates() {
         make_transaction("2024-01-15", "Coffee", postings.clone()),
         make_transaction("2024-01-15", "Lunch", postings),
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(
         output.errors.is_empty(),
         "different narration must not collide, got: {:?}",
@@ -945,7 +969,7 @@ fn test_noduplicates_distinct_payees_are_not_duplicates() {
         txn_a,
         txn_b,
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(
         output.errors.is_empty(),
         "different payees must not collide, got: {:?}",
@@ -975,7 +999,7 @@ fn test_noduplicates_none_vs_empty_payee_differ() {
         txn_a,
         txn_b,
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(
         output.errors.is_empty(),
         "None payee must not collide with Some(\"\"), got: {:?}",
@@ -1003,7 +1027,7 @@ fn test_noduplicates_link_order_independent() {
         txn_a,
         txn_b,
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert_eq!(
         output.errors.len(),
         1,
@@ -1032,7 +1056,7 @@ fn test_noduplicates_empty_vs_absent_tags_are_duplicates() {
         txn_a,
         txn_b,
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert_eq!(
         output.errors.len(),
         1,
@@ -1068,7 +1092,7 @@ fn test_noduplicates_distinct_accounts_are_not_duplicates() {
             ],
         ),
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(
         output.errors.is_empty(),
         "different account must not collide, got: {:?}",
@@ -1102,7 +1126,7 @@ fn test_noduplicates_distinct_posting_count_are_not_duplicates() {
             ],
         ),
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(
         output.errors.is_empty(),
         "different posting counts must not collide, got: {:?}",
@@ -1137,7 +1161,7 @@ fn test_noduplicates_reordered_postings_are_not_duplicates() {
             ],
         ),
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(
         output.errors.is_empty(),
         "reordered postings must not collide (postings are an ordered list in \
@@ -1178,7 +1202,7 @@ fn test_noduplicates_none_vs_some_units_differ() {
         txn_a,
         txn_b,
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(
         output.errors.is_empty(),
         "None units must not collide with Some units, got: {:?}",
@@ -1219,7 +1243,7 @@ fn test_noduplicates_cost_with_date_differs() {
         txn_a,
         txn_b,
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(
         output.errors.is_empty(),
         "cost with date must not collide with cost without date, got: {:?}",
@@ -1258,7 +1282,7 @@ fn test_noduplicates_cost_with_label_differs() {
         txn_a,
         txn_b,
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(
         output.errors.is_empty(),
         "cost with label must not collide with cost without label, got: {:?}",
@@ -1300,7 +1324,7 @@ fn test_noduplicates_total_vs_per_unit_cost_differ() {
         txn_a,
         txn_b,
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(
         output.errors.is_empty(),
         "per-unit cost must not collide with total cost, got: {:?}",
@@ -1357,7 +1381,7 @@ fn test_noduplicates_unit_vs_total_price_differ() {
         txn_a,
         txn_b,
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(
         output.errors.is_empty(),
         "`@` and `@@` prices must not collide, got: {:?}",
@@ -1411,7 +1435,7 @@ fn test_noduplicates_incomplete_vs_complete_price_differ() {
         txn_a,
         txn_b,
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(
         output.errors.is_empty(),
         "incomplete and complete prices must not collide, got: {:?}",
@@ -1449,7 +1473,7 @@ fn test_noduplicates_distinct_posting_flags_differ() {
         txn_a,
         txn_b,
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(
         output.errors.is_empty(),
         "distinct posting flags must not collide, got: {:?}",
@@ -1491,7 +1515,7 @@ fn test_noduplicates_posting_metadata_does_not_disambiguate() {
         txn_a,
         txn_b,
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert_eq!(
         output.errors.len(),
         1,
@@ -1519,7 +1543,7 @@ fn test_noduplicates_three_identical_reports_two_duplicates() {
         make_transaction("2024-01-15", "Coffee", postings.clone()),
         make_transaction("2024-01-15", "Coffee", postings),
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert_eq!(
         output.errors.len(),
         2,
@@ -1550,7 +1574,7 @@ fn test_noduplicates_ignores_non_transaction_directives() {
         make_open("2024-02-01", "Assets:Savings"),
         make_transaction("2024-01-15", "Coffee", postings),
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert_eq!(
         output.errors.len(),
         1,
@@ -1568,7 +1592,7 @@ fn test_noduplicates_empty_postings_edge_case() {
     let txn_a = make_txn_with("2024-01-15", "placeholder", vec![], |_| {});
     let txn_b = make_txn_with("2024-01-15", "placeholder", vec![], |_| {});
     let input = make_input(vec![txn_a, txn_b]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert_eq!(
         output.errors.len(),
         1,
@@ -1605,7 +1629,7 @@ fn test_noduplicates_detects_duplicates_across_distance() {
     // Duplicate of the first Coffee transaction, 50 entries later.
     directives.push(make_transaction("2024-01-15", "Coffee", target_postings));
     let input = make_input(directives);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert_eq!(
         output.errors.len(),
         1,
@@ -1637,7 +1661,7 @@ fn test_noduplicates_source_location_not_part_of_identity() {
         txn_a,
         txn_b,
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert_eq!(
         output.errors.len(),
         1,
@@ -1679,7 +1703,7 @@ fn test_onecommodity_error_multiple_currencies() {
         ),
     ]);
 
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
 
     // Both Expenses:Restaurant and Assets:Cash use USD and CAD
     assert_eq!(
@@ -1722,7 +1746,7 @@ fn test_onecommodity_ok_single_currency() {
         ),
     ]);
 
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(output.errors.is_empty(), "expected no errors");
 }
 
@@ -1730,7 +1754,7 @@ fn test_onecommodity_ok_single_currency() {
 #[test]
 fn test_onecommodity_empty_input() {
     let plugin = OneCommodityPlugin;
-    let output = plugin.process(make_input(vec![]));
+    let output = process_and_materialize(&plugin, make_input(vec![]));
     assert_eq!(output.errors.len(), 0);
 }
 
@@ -1802,7 +1826,7 @@ fn test_onecommodity_skips_auto_balanced_posting() {
         ),
     ]);
 
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert_eq!(
         output.errors.len(),
         0,
@@ -1837,7 +1861,7 @@ fn test_onecommodity_independent_accounts_ok() {
             ],
         ),
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     // Equity:Open uses both USD and EUR → 1 error for Equity:Open.
     // Assets:USD and Assets:EUR are each single-currency — no errors.
     assert_eq!(output.errors.len(), 1);
@@ -1856,7 +1880,7 @@ fn test_onecommodity_three_currencies_cascade() {
         make_transaction("2024-01-16", "EUR", vec![("Assets:Mixed", "50.00", "EUR")]),
         make_transaction("2024-01-17", "GBP", vec![("Assets:Mixed", "30.00", "GBP")]),
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     // First-seen currency for Assets:Mixed = USD. EUR and GBP each fail
     // the match check against the recorded USD. → exactly 2 errors, each
     // pairing the recorded USD with the offending currency. (A bug that
@@ -1897,7 +1921,7 @@ fn test_onecommodity_ignores_non_transaction_directives() {
         make_price("2024-01-15", "USD", "0.85", "EUR"),
         // No Transactions at all → no errors.
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert_eq!(output.errors.len(), 0);
 }
 
@@ -1925,7 +1949,7 @@ fn test_check_commodity_undeclared() {
         ),
     ]);
 
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
 
     assert_eq!(
         output.errors.len(),
@@ -1958,7 +1982,7 @@ fn test_check_commodity_declared_ok() {
         ),
     ]);
 
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
 
     // Should not have warning about USD since it's declared
     let has_usd_warning = output.errors.iter().any(|e| e.message.contains("USD"));
@@ -1969,7 +1993,7 @@ fn test_check_commodity_declared_ok() {
 #[test]
 fn test_check_commodity_empty_input() {
     let plugin = CheckCommodityPlugin;
-    let output = plugin.process(make_input(vec![]));
+    let output = process_and_materialize(&plugin, make_input(vec![]));
     assert_eq!(output.errors.len(), 0);
     assert_eq!(output.directives.len(), 0);
 }
@@ -1991,7 +2015,7 @@ fn test_check_commodity_severity_is_warning() {
             ],
         ),
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert_eq!(output.errors.len(), 1);
     assert_eq!(
         output.errors[0].severity,
@@ -2011,7 +2035,7 @@ fn test_check_commodity_passthrough_unchanged() {
         make_transaction("2024-01-15", "Test", vec![("Assets:Bank", "10.00", "USD")]),
     ];
     let input = make_input(input_directives.clone());
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert_eq!(output.directives.len(), input_directives.len());
     for (a, b) in output.directives.iter().zip(input_directives.iter()) {
         assert_eq!(a.directive_type, b.directive_type);
@@ -2073,7 +2097,7 @@ fn test_check_commodity_undeclared_cost_currency() {
             }),
         },
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert_eq!(output.errors.len(), 1, "got: {:?}", output.errors);
     assert!(output.errors[0].message.contains("USD"));
 }
@@ -2133,7 +2157,7 @@ fn test_check_commodity_cost_with_none_currency_skipped() {
             }),
         },
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     // Only HOOL is used and it's declared → zero warnings. If the cost.currency
     // = None branch were misimplemented (e.g., inserting an empty string), we'd
     // see a spurious warning here.
@@ -2162,7 +2186,7 @@ fn test_check_commodity_undeclared_in_balance_directive() {
             }),
         },
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert_eq!(output.errors.len(), 1);
     assert!(output.errors[0].message.contains("GBP"));
 }
@@ -2174,7 +2198,7 @@ fn test_check_commodity_undeclared_in_price_directive() {
     let plugin = CheckCommodityPlugin;
     // Neither HOOL nor USD declared → 2 warnings.
     let input = make_input(vec![make_price("2024-01-15", "HOOL", "520.00", "USD")]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert_eq!(output.errors.len(), 2, "got: {:?}", output.errors);
     let messages: Vec<_> = output.errors.iter().map(|e| e.message.clone()).collect();
     assert!(messages.iter().any(|m| m.contains("HOOL")));
@@ -2215,7 +2239,7 @@ fn test_check_commodity_dedupes_repeated_undeclared() {
             ],
         ),
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert_eq!(output.errors.len(), 1, "deduped to one warning");
     assert!(output.errors[0].message.contains("USD"));
 }
@@ -2235,7 +2259,7 @@ fn test_check_commodity_mixed_declared_and_undeclared() {
         make_transaction("2024-01-16", "EUR", vec![("Assets:EUR", "20.00", "EUR")]),
         make_transaction("2024-01-17", "GBP", vec![("Assets:GBP", "30.00", "GBP")]),
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert_eq!(output.errors.len(), 2, "EUR and GBP undeclared, USD ok");
     let messages: Vec<_> = output.errors.iter().map(|e| e.message.clone()).collect();
     assert!(messages.iter().any(|m| m.contains("EUR")));
@@ -2257,7 +2281,7 @@ fn test_unique_prices_duplicate_error() {
         make_price("2024-01-15", "HOOL", "525.00", "USD"), // Duplicate
     ]);
 
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
 
     assert_eq!(output.errors.len(), 1, "expected 1 duplicate price error");
     assert!(
@@ -2276,7 +2300,7 @@ fn test_unique_prices_different_days_ok() {
         make_price("2024-01-16", "HOOL", "525.00", "USD"),
     ]);
 
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(output.errors.is_empty(), "expected no errors");
 }
 
@@ -2290,7 +2314,7 @@ fn test_unique_prices_different_pairs_ok() {
         make_price("2024-01-15", "GOOG", "150.00", "USD"),
     ]);
 
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(output.errors.is_empty(), "expected no errors");
 }
 
@@ -2314,7 +2338,7 @@ fn test_unique_prices_different_pairs_ok() {
 /// correct emission AND the spurious extra one.
 fn implicit_prices_emitted(
     input: &PluginInput,
-    output: &PluginOutput,
+    output: &ProcessedOutput,
 ) -> Vec<(String, String, String)> {
     fn extract(directives: &[DirectiveWrapper]) -> Vec<(String, String, String)> {
         directives
@@ -2414,7 +2438,7 @@ fn test_implicit_prices_from_cost() {
             "Assets:Cash",
         ),
     ]);
-    let output = plugin.process(input.clone());
+    let output = process_and_materialize(&plugin, input.clone());
     assert_eq!(
         implicit_prices_emitted(&input, &output),
         vec![("HOOL".into(), "520.00".into(), "USD".into())]
@@ -2476,7 +2500,7 @@ fn test_implicit_prices_from_cost_total() {
             }),
         },
     ]);
-    let output = plugin.process(input.clone());
+    let output = process_and_materialize(&plugin, input.clone());
     assert_eq!(
         implicit_prices_emitted(&input, &output),
         vec![("ABC".into(), "50".into(), "USD".into())],
@@ -2499,7 +2523,7 @@ fn test_implicit_prices_from_unit_annotation() {
             false, // is_total = false → @
         ),
     ]);
-    let output = plugin.process(input.clone());
+    let output = process_and_materialize(&plugin, input.clone());
     assert_eq!(
         implicit_prices_emitted(&input, &output),
         vec![("HOOL".into(), "530".into(), "USD".into())]
@@ -2523,7 +2547,7 @@ fn test_implicit_prices_from_total_annotation_issue_992() {
             true, // is_total = true → @@
         ),
     ]);
-    let output = plugin.process(input.clone());
+    let output = process_and_materialize(&plugin, input.clone());
     let prices = implicit_prices_emitted(&input, &output);
     // Exactly one price, NOT two (one of which used to be 15152.07
     // emitted as a per-unit price — the original bug).
@@ -2560,7 +2584,7 @@ fn test_implicit_prices_annotation_and_cost_emits_one_not_two() {
             "Assets:Cash",
         ),
     ]);
-    let output = plugin.process(input.clone());
+    let output = process_and_materialize(&plugin, input.clone());
     let prices = implicit_prices_emitted(&input, &output);
     assert_eq!(prices.len(), 1, "exactly one price (annotation wins)");
     assert_eq!(
@@ -2594,7 +2618,7 @@ fn test_implicit_prices_zero_unit_total_falls_through_to_cost_currency() {
             "Assets:Cash",
         ),
     ]);
-    let output = plugin.process(input.clone());
+    let output = process_and_materialize(&plugin, input.clone());
     let prices = implicit_prices_emitted(&input, &output);
     assert_eq!(prices.len(), 1, "exactly one price");
     assert_eq!(
@@ -2642,7 +2666,7 @@ fn test_implicit_prices_skips_reducing_sell_with_cost() {
             "Assets:Cash",
         ),
     ]);
-    let output = plugin.process(input.clone());
+    let output = process_and_materialize(&plugin, input.clone());
     let prices = implicit_prices_emitted(&input, &output);
     assert_eq!(
         prices,
@@ -2682,7 +2706,7 @@ fn test_implicit_prices_reducing_sell_with_annotation_emits_from_price() {
             "Assets:Cash",
         ),
     ]);
-    let output = plugin.process(input.clone());
+    let output = process_and_materialize(&plugin, input.clone());
     let prices = implicit_prices_emitted(&input, &output);
     // Two emits: 100 from the buy's cost, 110 from the sell's annotation.
     // Crucially NOT three (no extra 100 from the sell's cost-from-REDUCED).
@@ -2725,7 +2749,7 @@ fn test_implicit_prices_dedup_same_day_same_price() {
             "Assets:Cash",
         ),
     ]);
-    let output = plugin.process(input.clone());
+    let output = process_and_materialize(&plugin, input.clone());
     let prices = implicit_prices_emitted(&input, &output);
     assert_eq!(
         prices,
@@ -2782,7 +2806,7 @@ fn test_implicit_prices_reduced_gate_and_dedup_are_scale_insensitive() {
             "Assets:Cash",
         ),
     ]);
-    let output = plugin.process(input.clone());
+    let output = process_and_materialize(&plugin, input.clone());
     let prices = implicit_prices_emitted(&input, &output);
     assert_eq!(
         prices.len(),
@@ -2847,7 +2871,7 @@ fn test_implicit_prices_oversell_crossing_zero_emits_for_residual_leg() {
             "Assets:Cash",
         ),
     ]);
-    let output = plugin.process(input.clone());
+    let output = process_and_materialize(&plugin, input.clone());
     let prices = implicit_prices_emitted(&input, &output);
     assert_eq!(
         prices.len(),
@@ -2871,7 +2895,7 @@ fn test_implicit_prices_emits_nothing_for_plain_transfer() {
             vec![("Assets:A", "100", "USD"), ("Assets:B", "-100", "USD")],
         ),
     ]);
-    let output = plugin.process(input.clone());
+    let output = process_and_materialize(&plugin, input.clone());
     assert!(implicit_prices_emitted(&input, &output).is_empty());
 }
 
@@ -2898,7 +2922,7 @@ fn test_implicit_prices_emitted_excludes_input_price_directives() {
             "Assets:Cash",
         ),
     ]);
-    let output = plugin.process(input.clone());
+    let output = process_and_materialize(&plugin, input.clone());
     // The explicit price (500.00) must NOT appear in plugin output.
     // Only the cost-derived 520.00 should.
     assert_eq!(
@@ -2955,7 +2979,7 @@ proptest::proptest! {
             ),
         ]);
 
-        let output = plugin.process(input.clone());
+        let output = process_and_materialize(&plugin, input.clone());
         let emitted = implicit_prices_emitted(&input, &output);
 
         // Exactly one price emitted (one priced posting).
@@ -3037,7 +3061,7 @@ fn test_auto_accounts_generates_opens() {
     use rustledger_plugin::*;
 
     let registry = NativePluginRegistry::new();
-    let plugin = registry.find("auto_accounts").unwrap();
+    let plugin: &dyn NativePlugin = registry.find("auto_accounts").unwrap();
 
     // Create test input with transaction using unopened accounts
     let input = PluginInput {
@@ -3083,7 +3107,7 @@ fn test_auto_accounts_generates_opens() {
         config: None,
     };
 
-    let output = plugin.process(input);
+    let output = process_and_materialize(plugin, input);
 
     eprintln!("Output directives: {}", output.directives.len());
     for d in &output.directives {
@@ -3135,7 +3159,7 @@ fn test_auto_accounts_same_date_ordering() {
     use rustledger_plugin::*;
 
     let registry = NativePluginRegistry::new();
-    let plugin = registry.find("auto_accounts").unwrap();
+    let plugin: &dyn NativePlugin = registry.find("auto_accounts").unwrap();
 
     // Input: existing open + transaction that uses new account on same date as first use
     let input = PluginInput {
@@ -3195,7 +3219,12 @@ fn test_auto_accounts_same_date_ordering() {
         config: None,
     };
 
-    let output = plugin.process(input);
+    let mut output = process_and_materialize(plugin, input);
+    // Plugins under the ops protocol no longer sort their own output —
+    // the loader's `apply_plugin_ops` re-sorts after the plugin pass.
+    // For unit tests that bypass the loader, apply the same sort here
+    // so we exercise the post-pipeline directive order.
+    sort_directives(&mut output.directives);
 
     eprintln!("\n=== Output directives (ordered) ===");
     for (i, d) in output.directives.iter().enumerate() {
@@ -3336,7 +3365,7 @@ fn test_check_closing_adds_balance_assertion() {
         ),
     ]);
 
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
 
     assert!(output.errors.is_empty(), "expected no errors");
 
@@ -3376,7 +3405,7 @@ fn test_check_closing_no_metadata() {
         ),
     ]);
 
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
 
     assert!(output.errors.is_empty(), "expected no errors");
 
@@ -3396,7 +3425,7 @@ fn test_check_closing_no_metadata() {
 #[test]
 fn test_check_closing_empty_input() {
     let plugin = CheckClosingPlugin;
-    let output = plugin.process(make_input(vec![]));
+    let output = process_and_materialize(&plugin, make_input(vec![]));
     assert!(output.errors.is_empty());
     assert_eq!(output.directives.len(), 0);
 }
@@ -3445,7 +3474,7 @@ fn test_check_closing_false_value_no_emission() {
             }),
         },
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(output.errors.is_empty());
     let balance_count = output
         .directives
@@ -3502,7 +3531,7 @@ fn test_check_closing_non_bool_metadata_no_emission() {
             }),
         },
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     let balance_count = output
         .directives
         .iter()
@@ -3557,7 +3586,7 @@ fn test_check_closing_units_none_uses_operating_currency_usd() {
             }),
         },
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     let balance = output
         .directives
         .iter()
@@ -3626,7 +3655,7 @@ fn test_check_closing_units_none_uses_operating_currency_eur() {
         },
         config: None,
     };
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     let balance = output
         .directives
         .iter()
@@ -3682,7 +3711,7 @@ fn test_check_closing_units_none_falls_back_to_usd_when_no_operating_ccy() {
         },
         config: None,
     };
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     let balance = output
         .directives
         .iter()
@@ -3751,7 +3780,7 @@ fn test_check_closing_multiple_closings_in_one_txn() {
             }),
         },
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     let balances: Vec<_> = output
         .directives
         .iter()
@@ -3782,7 +3811,7 @@ fn test_check_closing_ignores_non_transaction_directives() {
         make_open("2024-01-01", "Assets:Bank"),
         make_price("2024-01-15", "USD", "1.10", "EUR"),
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(output.errors.is_empty());
     let balance_count = output
         .directives
@@ -3832,7 +3861,7 @@ fn test_check_closing_invalid_date_skips_emission() {
             }],
         }),
     }]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(output.errors.is_empty());
     let balance_count = output
         .directives
@@ -3902,7 +3931,7 @@ fn test_check_closing_unrelated_metadata_doesnt_trigger() {
             }),
         },
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     let balances: Vec<_> = output
         .directives
         .iter()
@@ -3953,7 +3982,7 @@ fn test_close_tree_closes_children() {
         make_close("2024-12-31", "Assets:Bank"),
     ]);
 
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
 
     assert!(output.errors.is_empty(), "expected no errors");
 
@@ -3999,7 +4028,7 @@ fn test_close_tree_no_duplicate_close() {
         make_close("2024-12-31", "Assets:Bank"),
     ]);
 
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
 
     // Count close directives for Checking
     let checking_closes = output
@@ -4104,7 +4133,7 @@ fn test_coherent_cost_mixed_usage_error() {
         ),
     ]);
 
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
 
     assert_eq!(
         output.errors.len(),
@@ -4143,7 +4172,7 @@ fn test_coherent_cost_only_cost_ok() {
         ),
     ]);
 
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(
         output.errors.is_empty(),
         "expected no errors when using only cost"
@@ -4176,7 +4205,7 @@ fn test_coherent_cost_only_price_ok() {
         ),
     ]);
 
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(
         output.errors.is_empty(),
         "expected no errors when using only price"
@@ -4214,7 +4243,7 @@ fn test_coherent_cost_cost_and_price_ok() {
         ),
     ]);
 
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(
         output.errors.is_empty(),
         "expected no errors when using cost+price on same posting (capital gains)"
@@ -4429,7 +4458,7 @@ proptest::proptest! {
         }
         let expected_errors = with_cost.intersection(&price_only).count();
 
-        let output = plugin.process(input);
+        let output = process_and_materialize(&plugin, input);
         proptest::prop_assert_eq!(
             output.errors.len(), expected_errors,
             "expected {} error(s) (currencies in both cost and price-only sets); \
@@ -4458,7 +4487,7 @@ fn test_auto_tag_adds_tag_for_expense() {
             ],
         ),
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(output.errors.is_empty());
     // Verify a tag was added to the transaction
     let txn = output
@@ -4499,7 +4528,7 @@ fn test_no_unused_warns_on_unused_account() {
             ],
         ),
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert_eq!(
         output.errors.len(),
         1,
@@ -4526,7 +4555,7 @@ fn test_no_unused_ok_when_all_used() {
             ],
         ),
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(output.errors.is_empty(), "no unused accounts");
 }
 
@@ -4551,7 +4580,7 @@ fn test_pedantic_runs_multiple_validators() {
             ],
         ),
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert_eq!(
         output.errors.len(),
         1,
@@ -4586,7 +4615,7 @@ fn test_rx_txn_adds_metadata_to_tagged_transaction() {
             ],
         ),
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(output.errors.is_empty());
     let txn = output
         .directives
@@ -4633,7 +4662,7 @@ fn test_rx_txn_ignores_untagged_transaction() {
             ],
         ),
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(output.errors.is_empty());
     let txn = output
         .directives
@@ -4682,7 +4711,7 @@ fn test_rx_txn_preserves_existing_metadata() {
         make_open("2024-01-01", "Expenses:Rent"),
         txn,
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(output.errors.is_empty());
     let DirectiveData::Transaction(data) = &output
         .directives
@@ -4753,7 +4782,7 @@ fn test_rx_txn_fills_in_missing_metadata_only() {
         make_open("2024-01-01", "Expenses:Rent"),
         txn,
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     let DirectiveData::Transaction(data) = &output
         .directives
         .iter()
@@ -4809,7 +4838,7 @@ fn test_rx_txn_works_alongside_other_tags() {
             ],
         ),
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     let DirectiveData::Transaction(data) = &output
         .directives
         .iter()
@@ -4947,7 +4976,7 @@ fn test_sell_gains_warns_missing_gains_posting() {
             "Assets:Cash",
         ),
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert_eq!(
         output.errors.len(),
         1,
@@ -4980,7 +5009,7 @@ fn test_sell_gains_silent_with_income_posting() {
             ("-500", "USD"), // gain = (150-100)*10
         ),
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(
         output.errors.is_empty(),
         "no warning when Income:Capital-Gains posting is present (got {} warnings)",
@@ -5008,7 +5037,7 @@ fn test_sell_gains_silent_with_expenses_posting() {
             ("200", "USD"),
         ),
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(
         output.errors.is_empty(),
         "no warning when Expenses:* posting is present (got {} warnings)",
@@ -5035,7 +5064,7 @@ fn test_sell_gains_silent_for_buy() {
             "Assets:Cash",
         ),
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(
         output.errors.is_empty(),
         "buys are not flagged regardless of postings (got {} warnings)",
@@ -5061,7 +5090,7 @@ fn test_sell_gains_silent_when_gain_is_zero() {
             "Assets:Cash",
         ),
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(
         output.errors.is_empty(),
         "zero gain doesn't warrant a warning (got {} warnings)",
@@ -5087,7 +5116,7 @@ fn test_sell_gains_silent_without_cost() {
             ],
         ),
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(
         output.errors.is_empty(),
         "sale without cost/price annotation is not flagged (got {} warnings)",
@@ -5200,7 +5229,7 @@ fn test_sell_gains_two_sales_share_one_income_posting() {
         make_open("2024-01-01", "Income:Capital-Gains"),
         txn,
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(
         output.errors.is_empty(),
         "single Income posting covers both sales in this transaction \
@@ -5310,7 +5339,7 @@ proptest::proptest! {
             },
         ]);
 
-        let output = plugin.process(input);
+        let output = process_and_materialize(&plugin, input);
 
         let should_warn = expected_gain != Decimal::ZERO && !with_income_posting;
         let expected_count = usize::from(should_warn);
@@ -5341,7 +5370,7 @@ fn test_check_drained_adds_balance_assertions_on_close() {
         ),
         make_close("2024-12-31", "Assets:Bank"),
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(output.errors.is_empty());
     // Should have added a balance assertion per (closed account,
     // currency). Here: one Close on Assets:Bank (USD only) → 1 balance.
@@ -5364,7 +5393,7 @@ fn test_check_drained_adds_balance_assertions_on_close() {
 fn test_commodity_attr_ok_with_no_config() {
     let plugin = CommodityAttrPlugin::new();
     let input = make_input(vec![make_commodity("2024-01-01", "USD")]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(output.errors.is_empty());
 }
 
@@ -5373,7 +5402,7 @@ fn test_commodity_attr_error_with_missing_required_attr() {
     let plugin = CommodityAttrPlugin::new();
     let input =
         make_input_with_config(vec![make_commodity("2024-01-01", "AAPL")], "{'name': null}");
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert_eq!(
         output.errors.len(),
         1,
@@ -5400,7 +5429,7 @@ fn test_currency_accounts_single_currency_no_change() {
             ],
         ),
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(output.errors.is_empty());
     // Single-currency transaction should not add currency account postings
     let txn = output
@@ -5475,7 +5504,7 @@ fn test_effective_date_no_metadata_passthrough() {
             ],
         ),
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(output.errors.is_empty());
     assert_eq!(output.directives.len(), 3);
 }
@@ -5491,7 +5520,7 @@ fn test_effective_date_future_uses_later_holding_account() {
         make_open("2024-01-01", "Expenses:Food"),
         make_txn_with_effective_date("2024-01-15", "2024-02-15", "Expenses:Food"),
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(output.errors.is_empty());
 
     // Should emit an Open directive for `Assets:Hold:Expenses:Food`.
@@ -5599,7 +5628,7 @@ fn test_effective_date_past_uses_earlier_holding_account() {
         make_open("2024-01-01", "Expenses:Food"),
         make_txn_with_effective_date("2024-02-15", "2024-01-15", "Expenses:Food"),
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(output.errors.is_empty());
 
     let opens: Vec<_> = output
@@ -5643,7 +5672,7 @@ fn test_effective_date_unconfigured_prefix_unchanged() {
         make_open("2024-01-01", "Liabilities:CreditCard"),
         make_txn_with_effective_date("2024-01-15", "2024-02-15", "Liabilities:CreditCard"),
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(output.errors.is_empty());
 
     // No new opens should be created, no transaction at effective date.
@@ -5681,7 +5710,7 @@ fn test_effective_date_custom_config_remaps_prefix() {
         ],
         "{'Liabilities': {'earlier': 'Assets:Hold:Liab', 'later': 'Liabilities:Hold:Liab'}}",
     );
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(output.errors.is_empty());
 
     // (a) An Open for the remapped holding account is emitted.
@@ -5802,7 +5831,7 @@ fn test_forecast_no_forecast_flag_passthrough() {
             ],
         ),
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(output.errors.is_empty());
     assert_eq!(output.directives.len(), 3);
 }
@@ -5818,7 +5847,7 @@ fn test_forecast_monthly_repeat_emits_exactly_n_transactions() {
         make_open("2024-01-01", "Expenses:Rent"),
         make_forecast_txn("2024-01-15", "Rent [MONTHLY REPEAT 3 TIMES]"),
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(output.errors.is_empty());
     let txns: Vec<_> = output
         .directives
@@ -5873,7 +5902,7 @@ fn test_forecast_weekly_repeat() {
         make_open("2024-01-01", "Expenses:Rent"),
         make_forecast_txn("2024-01-01", "Groceries [WEEKLY REPEAT 4 TIMES]"),
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(output.errors.is_empty());
     let txns: Vec<_> = output
         .directives
@@ -5897,7 +5926,7 @@ fn test_forecast_daily_repeat() {
         make_open("2024-01-01", "Expenses:Rent"),
         make_forecast_txn("2024-01-15", "Coffee [DAILY REPEAT 5 TIMES]"),
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(output.errors.is_empty());
     let txns: Vec<_> = output
         .directives
@@ -5928,7 +5957,7 @@ fn test_forecast_monthly_until_inclusive() {
         make_open("2024-01-01", "Expenses:Rent"),
         make_forecast_txn("2024-01-15", "Rent [MONTHLY UNTIL 2024-04-15]"),
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(output.errors.is_empty());
     let txns: Vec<_> = output
         .directives
@@ -5956,7 +5985,7 @@ fn test_forecast_skip_increases_stride() {
             "Quarterly insurance [MONTHLY SKIP 1 TIME REPEAT 3 TIMES]",
         ),
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(output.errors.is_empty());
     let txns: Vec<_> = output
         .directives
@@ -5983,7 +6012,7 @@ fn test_forecast_no_pattern_in_narration_kept_unchanged() {
         make_open("2024-01-01", "Expenses:Rent"),
         make_forecast_txn("2024-01-15", "Forecast with no recurrence pattern"),
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(output.errors.is_empty());
     let txns: Vec<_> = output
         .directives
@@ -6020,7 +6049,7 @@ fn test_generate_base_ccy_prices_no_config_passthrough() {
         make_price("2024-01-01", "EUR", "1.10", "USD"),
         make_price("2024-01-01", "ETH", "2000", "EUR"),
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(output.errors.is_empty());
     let price_count = output
         .directives
@@ -6045,7 +6074,7 @@ fn test_generate_base_ccy_prices_emits_derived_chain() {
         ],
         "USD",
     );
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(output.errors.is_empty());
 
     // Exactly 3 prices: 2 originals + 1 derived.
@@ -6089,7 +6118,7 @@ fn test_generate_base_ccy_prices_skips_when_target_already_exists() {
         ],
         "USD",
     );
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(output.errors.is_empty());
 
     let eth_usd_prices: Vec<_> = output
@@ -6124,7 +6153,7 @@ fn test_generate_base_ccy_prices_skips_prices_already_in_base() {
         ],
         "USD",
     );
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(output.errors.is_empty());
     let price_count = output
         .directives
@@ -6165,7 +6194,7 @@ proptest::proptest! {
             ],
             "USD",
         );
-        let output = plugin.process(input);
+        let output = process_and_materialize(&plugin, input);
         proptest::prop_assert!(output.errors.is_empty());
 
         let derived = output
@@ -6212,7 +6241,7 @@ fn test_rename_accounts_renames_in_transaction() {
         ],
         "{'Expenses:OldName': 'Expenses:NewName'}",
     );
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(output.errors.is_empty());
     // Check that account was renamed
     let has_new_name = output.directives.iter().any(|d| {
@@ -6257,7 +6286,7 @@ fn test_split_expenses_no_config_passthrough() {
             ],
         ),
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(output.errors.is_empty());
     assert_eq!(output.directives.len(), 3, "no config → unchanged");
 }
@@ -6284,7 +6313,7 @@ fn test_split_expenses_divides_amount_evenly_between_two_members() {
         ],
         "Alice Bob",
     );
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(output.errors.is_empty());
 
     let txn = output
@@ -6374,7 +6403,7 @@ fn test_split_expenses_skips_already_split_account() {
         ],
         "Alice Bob",
     );
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(output.errors.is_empty());
 
     let txn = output
@@ -6427,7 +6456,7 @@ fn test_split_expenses_skips_non_expenses_postings() {
         ],
         "Alice Bob",
     );
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(output.errors.is_empty());
     let txn = output
         .directives
@@ -6478,7 +6507,7 @@ proptest::proptest! {
             ],
             &config,
         );
-        let output = plugin.process(input);
+        let output = process_and_materialize(&plugin, input);
         proptest::prop_assert!(output.errors.is_empty());
 
         let txn = output
@@ -6552,7 +6581,7 @@ fn test_unrealized_warns_on_unrealized_gain() {
         ),
         make_price("2024-06-15", "AAPL", "150", "USD"),
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert_eq!(
         output.errors.len(),
         1,
@@ -6589,7 +6618,7 @@ fn test_unrealized_warns_on_unrealized_loss() {
         ),
         make_price("2024-06-15", "AAPL", "50", "USD"),
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert_eq!(output.errors.len(), 1, "exactly one warning");
     let msg = &output.errors[0].message;
     assert!(
@@ -6617,7 +6646,7 @@ fn test_unrealized_silent_when_market_equals_cost() {
         ),
         make_price("2024-06-15", "AAPL", "100", "USD"),
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(
         output.errors.is_empty(),
         "no warning when market price equals cost basis (got {} warnings)",
@@ -6644,7 +6673,7 @@ fn test_unrealized_silent_without_price_directive() {
         ),
         // Note: no price directive
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(
         output.errors.is_empty(),
         "no warning emitted when there's no current price (got {} warnings)",
@@ -6679,7 +6708,7 @@ fn test_unrealized_silent_for_zero_position() {
         ),
         make_price("2024-06-15", "AAPL", "150", "USD"),
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(
         output.errors.is_empty(),
         "no warning when position is fully closed (got {} warnings)",
@@ -6720,7 +6749,7 @@ fn test_unrealized_aggregates_multiple_buys_into_position() {
         // $1500. unrealized = 0 → no warning.
         make_price("2024-06-15", "AAPL", "150", "USD"),
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(
         output.errors.is_empty(),
         "weighted-average cost basis: 10 units at avg $150 cost = $1500; \
@@ -6751,7 +6780,7 @@ fn test_unrealized_silent_when_quote_currency_is_not_usd() {
         // Price quoted in EUR, not USD. Plugin ignores it.
         make_price("2024-06-15", "ABC", "150", "EUR"),
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(
         output.errors.is_empty(),
         "non-USD quote currencies are skipped today (got {} warnings)",
@@ -6808,7 +6837,7 @@ proptest::proptest! {
             ),
             make_price("2024-06-15", "AAPL", &market_d.to_string(), "USD"),
         ]);
-        let output = plugin.process(input);
+        let output = process_and_materialize(&plugin, input);
 
         let units_d = Decimal::from(units);
         let expected_gain = (market_d - cost_d) * units_d;
@@ -6884,7 +6913,7 @@ proptest::proptest! {
             ),
             make_price("2024-06-15", "AAPL", &market_d.to_string(), "USD"),
         ]);
-        let output = plugin.process(input);
+        let output = process_and_materialize(&plugin, input);
 
         // Expected aggregate gain across both lots.
         let total_units = units_a_d + units_b_d;
@@ -6934,7 +6963,7 @@ fn test_unrealized_custom_gains_account_currently_unused_in_output() {
         ),
         make_price("2024-06-15", "AAPL", "150", "USD"),
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert_eq!(
         output.errors.len(),
         1,
@@ -7011,7 +7040,7 @@ fn test_check_average_cost_silent_on_correct_sale() {
             "Assets:Cash",
         ),
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(
         output.errors.is_empty(),
         "sale at exact average cost is fine; got {} warnings",
@@ -7054,7 +7083,7 @@ fn test_check_average_cost_warns_when_sale_cost_diverges_from_average() {
             "Assets:Cash",
         ),
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert_eq!(
         output.errors.len(),
         1,
@@ -7096,7 +7125,7 @@ fn test_check_average_cost_skips_strict_booking_account() {
             "Assets:Cash",
         ),
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(
         output.errors.is_empty(),
         "STRICT-booking account is skipped; got {} warnings",
@@ -7131,7 +7160,7 @@ fn test_check_average_cost_skips_account_without_booking_specified() {
             "Assets:Cash",
         ),
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(
         output.errors.is_empty(),
         "account without explicit NONE booking is not checked"
@@ -7169,7 +7198,7 @@ fn test_check_average_cost_respects_custom_tolerance() {
             "Assets:Cash",
         ),
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(
         output.errors.is_empty(),
         "40% deviation is within 50% custom tolerance; got {} warnings",
@@ -7259,7 +7288,7 @@ proptest::proptest! {
 
         let plugin = CheckAverageCostPlugin::new();
         let input = make_input(directives);
-        let output = plugin.process(input);
+        let output = process_and_materialize(&plugin, input);
 
         proptest::prop_assert_eq!(
             output.errors.len(), 0,
@@ -7303,7 +7332,7 @@ fn test_zerosum_requires_config() {
         make_open("2024-01-01", "Assets:Cash"),
         make_transaction("2024-01-15", "Test", vec![("Assets:Cash", "100", "USD")]),
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert_eq!(
         output.errors.len(),
         1,
@@ -7342,7 +7371,7 @@ fn test_zerosum_matches_pair_within_window() {
         ],
         ZEROSUM_CFG,
     );
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(output.errors.is_empty());
 
     // After matching, NO posting should remain in `Assets:ZeroSum` —
@@ -7413,7 +7442,7 @@ fn test_zerosum_does_not_match_pair_outside_window() {
         ],
         ZEROSUM_CFG,
     );
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(output.errors.is_empty());
 
     let zerosum_count: usize = output
@@ -7469,7 +7498,7 @@ fn test_zerosum_leaves_unmatched_posting_alone() {
         ],
         ZEROSUM_CFG,
     );
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(output.errors.is_empty());
 
     let zerosum_count: usize = output
@@ -7527,7 +7556,7 @@ fn test_box_accrual_no_metadata_passthrough() {
             ],
         ),
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(output.errors.is_empty());
     assert_eq!(output.directives.len(), 3);
 }
@@ -7559,7 +7588,7 @@ fn test_box_accrual_multi_year_splits_preserve_total() {
             ],
         ),
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(output.errors.is_empty());
 
     let txn = output
@@ -7625,7 +7654,7 @@ fn test_box_accrual_same_year_no_split() {
             ],
         ),
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     let txn = output
         .directives
         .iter()
@@ -7676,7 +7705,7 @@ fn test_box_accrual_no_capital_losses_posting_unchanged() {
             ],
         ),
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     let txn = output
         .directives
         .iter()
@@ -7716,7 +7745,7 @@ fn test_box_accrual_two_capital_losses_postings_unchanged() {
             ],
         ),
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     let txn = output
         .directives
         .iter()
@@ -7783,7 +7812,7 @@ proptest::proptest! {
                 ],
             ),
         ]);
-        let output = plugin.process(input);
+        let output = process_and_materialize(&plugin, input);
         proptest::prop_assert!(output.errors.is_empty());
 
         let txn = output
@@ -7917,7 +7946,7 @@ fn test_capital_gains_long_short_no_config_passthrough() {
         make_open("2024-01-01", "Assets:Cash"),
         make_transaction("2024-01-15", "Simple", vec![("Assets:Cash", "100", "USD")]),
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(output.errors.is_empty());
     assert_eq!(output.directives.len(), 2);
 }
@@ -7935,7 +7964,7 @@ fn test_capital_gains_long_short_invalid_config_passthrough() {
         ],
         "this is not valid plugin config",
     );
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(output.errors.is_empty());
     assert_eq!(output.directives.len(), 2);
 }
@@ -7961,7 +7990,7 @@ fn test_capital_gains_long_short_no_matching_postings_unchanged() {
         ],
         LONG_SHORT_CFG,
     );
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert_eq!(output.errors.len(), 0);
     assert_eq!(
         output.directives.len(),
@@ -7992,7 +8021,7 @@ fn test_capital_gains_long_short_classifies_short_term() {
         ],
         LONG_SHORT_CFG,
     );
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert_eq!(output.errors.len(), 0);
 
     let txn = output
@@ -8070,7 +8099,7 @@ fn test_capital_gains_long_short_classifies_long_term() {
         ],
         LONG_SHORT_CFG,
     );
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert_eq!(output.errors.len(), 0);
 
     let txn = output
@@ -8204,7 +8233,7 @@ fn test_capital_gains_long_short_no_cost_date_passes_through_unchanged() {
         ],
         LONG_SHORT_CFG,
     );
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert_eq!(output.errors.len(), 0);
 
     let txn = output
@@ -8277,7 +8306,7 @@ fn test_capital_gains_gain_loss_no_config_passthrough() {
         make_open("2024-01-01", "Assets:Cash"),
         make_transaction("2024-01-15", "Simple", vec![("Assets:Cash", "100", "USD")]),
     ]);
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(output.errors.is_empty());
     assert_eq!(output.directives.len(), 2);
 }
@@ -8294,7 +8323,7 @@ fn test_capital_gains_gain_loss_invalid_config_passthrough() {
         ],
         "{ malformed",
     );
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert!(output.errors.is_empty());
     assert_eq!(output.directives.len(), 2);
 }
@@ -8319,7 +8348,7 @@ fn test_capital_gains_gain_loss_negative_renames_to_gains() {
         ],
         GAIN_LOSS_CFG,
     );
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert_eq!(output.errors.len(), 0);
 
     let txn = output
@@ -8385,7 +8414,7 @@ fn test_capital_gains_gain_loss_positive_renames_to_losses() {
         ],
         GAIN_LOSS_CFG,
     );
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
     assert_eq!(output.errors.len(), 0);
 
     let txn = output
@@ -8442,7 +8471,7 @@ fn test_capital_gains_gain_loss_pattern_no_match_unchanged() {
         ],
         GAIN_LOSS_CFG,
     );
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
 
     let txn = output
         .directives
@@ -8484,7 +8513,7 @@ fn test_capital_gains_gain_loss_zero_renames_to_losses() {
         ],
         GAIN_LOSS_CFG,
     );
-    let output = plugin.process(input);
+    let output = process_and_materialize(&plugin, input);
 
     let txn = output
         .directives

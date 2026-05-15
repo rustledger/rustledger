@@ -16,7 +16,7 @@ use regex::Regex;
 use std::sync::LazyLock;
 
 use crate::types::{
-    DirectiveData, DirectiveWrapper, PadData, PluginInput, PluginOutput, PostingData,
+    DirectiveData, DirectiveWrapper, PadData, PluginInput, PluginOp, PluginOutput, PostingData,
 };
 
 use super::super::NativePlugin;
@@ -47,7 +47,7 @@ impl NativePlugin for RenameAccountsPlugin {
                 Err(_) => {
                     // If config parsing fails, return unchanged
                     return PluginOutput {
-                        directives: input.directives,
+                        ops: (0..input.directives.len()).map(PluginOp::Keep).collect(),
                         errors: Vec::new(),
                     };
                 }
@@ -55,23 +55,55 @@ impl NativePlugin for RenameAccountsPlugin {
             None => {
                 // No config, return unchanged
                 return PluginOutput {
-                    directives: input.directives,
+                    ops: (0..input.directives.len()).map(PluginOp::Keep).collect(),
                     errors: Vec::new(),
                 };
             }
         };
 
-        // Process entries
-        let new_directives: Vec<DirectiveWrapper> = input
-            .directives
-            .into_iter()
-            .map(|directive| rename_in_directive(directive, &renames))
-            .collect();
+        // Process entries — emit Modify when an account name changed,
+        // Keep otherwise. We compare before/after rename to avoid emitting
+        // a Modify wrapper for directives the rename rules didn't touch.
+        let mut ops: Vec<PluginOp> = Vec::with_capacity(input.directives.len());
+        for (i, directive) in input.directives.iter().enumerate() {
+            let renamed = rename_in_directive(directive.clone(), &renames);
+            if directive_has_same_accounts(directive, &renamed) {
+                ops.push(PluginOp::Keep(i));
+            } else {
+                ops.push(PluginOp::Modify(i, renamed));
+            }
+        }
 
         PluginOutput {
-            directives: new_directives,
+            ops,
             errors: Vec::new(),
         }
+    }
+}
+
+/// Cheap structural check — only compares the account name fields the
+/// rename plugin can touch. Avoids a full `PartialEq` requirement and
+/// keeps the check tight to what changed.
+fn directive_has_same_accounts(a: &DirectiveWrapper, b: &DirectiveWrapper) -> bool {
+    match (&a.data, &b.data) {
+        (DirectiveData::Transaction(ta), DirectiveData::Transaction(tb)) => {
+            ta.postings.len() == tb.postings.len()
+                && ta
+                    .postings
+                    .iter()
+                    .zip(tb.postings.iter())
+                    .all(|(pa, pb)| pa.account == pb.account)
+        }
+        (DirectiveData::Open(a), DirectiveData::Open(b)) => a.account == b.account,
+        (DirectiveData::Close(a), DirectiveData::Close(b)) => a.account == b.account,
+        (DirectiveData::Balance(a), DirectiveData::Balance(b)) => a.account == b.account,
+        (DirectiveData::Pad(a), DirectiveData::Pad(b)) => {
+            a.account == b.account && a.source_account == b.source_account
+        }
+        (DirectiveData::Note(a), DirectiveData::Note(b)) => a.account == b.account,
+        (DirectiveData::Document(a), DirectiveData::Document(b)) => a.account == b.account,
+        // Other directive types don't carry account references.
+        _ => true,
     }
 }
 
@@ -176,6 +208,7 @@ fn parse_config(config: &str) -> Result<Vec<RenameRule>, String> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::utils::materialize_ops;
     use super::*;
     use crate::types::*;
 
@@ -244,18 +277,20 @@ mod tests {
             config: Some("{'Expenses:Taxes': 'Income:Taxes'}".to_string()),
         };
 
+        let input_dirs = input.directives.clone();
         let output = plugin.process(input);
         assert_eq!(output.errors.len(), 0);
+        let directives = materialize_ops(&input_dirs, &output);
 
         // Check Open directive was renamed
-        if let DirectiveData::Open(open) = &output.directives[0].data {
+        if let DirectiveData::Open(open) = &directives[0].data {
             assert_eq!(open.account, "Income:Taxes");
         } else {
             panic!("Expected Open directive");
         }
 
         // Check Transaction posting was renamed
-        if let DirectiveData::Transaction(txn) = &output.directives[1].data {
+        if let DirectiveData::Transaction(txn) = &directives[1].data {
             assert_eq!(txn.postings[1].account, "Income:Taxes");
         } else {
             panic!("Expected Transaction directive");
@@ -280,14 +315,16 @@ mod tests {
             config: Some("{'Expenses:Food:(.*)': 'Expenses:Dining:$1'}".to_string()),
         };
 
+        let input_dirs = input.directives.clone();
         let output = plugin.process(input);
         assert_eq!(output.errors.len(), 0);
+        let directives = materialize_ops(&input_dirs, &output);
 
-        if let DirectiveData::Open(open) = &output.directives[0].data {
+        if let DirectiveData::Open(open) = &directives[0].data {
             assert_eq!(open.account, "Expenses:Dining:Groceries");
         }
 
-        if let DirectiveData::Open(open) = &output.directives[1].data {
+        if let DirectiveData::Open(open) = &directives[1].data {
             assert_eq!(open.account, "Expenses:Dining:Restaurant");
         }
     }
@@ -305,10 +342,12 @@ mod tests {
             config: None,
         };
 
+        let input_dirs = input.directives.clone();
         let output = plugin.process(input);
         assert_eq!(output.errors.len(), 0);
+        let directives = materialize_ops(&input_dirs, &output);
 
-        if let DirectiveData::Open(open) = &output.directives[0].data {
+        if let DirectiveData::Open(open) = &directives[0].data {
             assert_eq!(open.account, "Expenses:Taxes");
         }
     }

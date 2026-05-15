@@ -1,8 +1,7 @@
 //! Auto-discover documents from directories.
 
 use crate::types::{
-    DirectiveData, DirectiveWrapper, DocumentData, PluginError, PluginInput, PluginOutput,
-    sort_directives,
+    DirectiveData, DirectiveWrapper, DocumentData, PluginError, PluginInput, PluginOp, PluginOutput,
 };
 
 use super::super::NativePlugin;
@@ -98,17 +97,15 @@ impl NativePlugin for DocumentDiscoveryPlugin {
             }
         }
 
-        // Add discovered documents to directives
-        let mut all_directives = input.directives;
-        all_directives.extend(new_directives);
-
-        // Sort using beancount's standard ordering
-        sort_directives(&mut all_directives);
-
-        PluginOutput {
-            directives: all_directives,
-            errors,
+        // Keep all input directives, then insert discovered documents.
+        let mut ops: Vec<PluginOp> = (0..input.directives.len()).map(PluginOp::Keep).collect();
+        for w in new_directives {
+            ops.push(PluginOp::Insert(w));
         }
+
+        // Final ordering is the loader's responsibility — it re-sorts
+        // directives after the plugin pass.
+        PluginOutput { ops, errors }
     }
 }
 

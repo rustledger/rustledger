@@ -1,6 +1,6 @@
 //! Plugin that automatically adds tags based on account patterns.
 
-use crate::types::{DirectiveData, PluginInput, PluginOutput};
+use crate::types::{DirectiveData, PluginInput, PluginOp, PluginOutput};
 
 use super::super::NativePlugin;
 
@@ -51,31 +51,39 @@ impl NativePlugin for AutoTagPlugin {
     }
 
     fn process(&self, input: PluginInput) -> PluginOutput {
-        let directives: Vec<_> = input
-            .directives
-            .into_iter()
-            .map(|mut wrapper| {
-                if wrapper.directive_type == "transaction"
-                    && let DirectiveData::Transaction(ref mut txn) = wrapper.data
-                {
-                    // Check each posting against rules
-                    for posting in &txn.postings {
-                        for (prefix, tag) in &self.rules {
-                            if posting.account.starts_with(prefix) {
-                                // Add tag if not already present
-                                if !txn.tags.contains(tag) {
-                                    txn.tags.push(tag.clone());
-                                }
-                            }
+        let mut ops = Vec::with_capacity(input.directives.len());
+        for (i, wrapper) in input.directives.into_iter().enumerate() {
+            // Only transactions can be transformed; other directives pass through.
+            if let DirectiveData::Transaction(ref txn) = wrapper.data {
+                // Determine which tags would be added by the rules.
+                let mut new_tags: Vec<String> = Vec::new();
+                for posting in &txn.postings {
+                    for (prefix, tag) in &self.rules {
+                        if posting.account.starts_with(prefix)
+                            && !txn.tags.contains(tag)
+                            && !new_tags.contains(tag)
+                        {
+                            new_tags.push(tag.clone());
                         }
                     }
                 }
-                wrapper
-            })
-            .collect();
+
+                if new_tags.is_empty() {
+                    ops.push(PluginOp::Keep(i));
+                } else {
+                    let mut modified = wrapper;
+                    if let DirectiveData::Transaction(ref mut txn_mut) = modified.data {
+                        txn_mut.tags.extend(new_tags);
+                    }
+                    ops.push(PluginOp::Modify(i, modified));
+                }
+            } else {
+                ops.push(PluginOp::Keep(i));
+            }
+        }
 
         PluginOutput {
-            directives,
+            ops,
             errors: Vec::new(),
         }
     }
@@ -83,6 +91,7 @@ impl NativePlugin for AutoTagPlugin {
 
 #[cfg(test)]
 mod tests {
+    use super::super::utils::materialize_ops;
     use super::*;
     use crate::types::*;
 
@@ -136,11 +145,13 @@ mod tests {
             config: None,
         };
 
+        let input_dirs = input.directives.clone();
         let output = plugin.process(input);
         assert_eq!(output.errors.len(), 0);
-        assert_eq!(output.directives.len(), 1);
+        let directives = materialize_ops(&input_dirs, &output);
+        assert_eq!(directives.len(), 1);
 
-        if let DirectiveData::Transaction(txn) = &output.directives[0].data {
+        if let DirectiveData::Transaction(txn) = &directives[0].data {
             assert!(txn.tags.contains(&"food".to_string()));
         } else {
             panic!("Expected transaction");

@@ -1,6 +1,6 @@
 //! Validate Commodity directives have required metadata attributes.
 
-use crate::types::{DirectiveData, PluginError, PluginInput, PluginOutput};
+use crate::types::{DirectiveData, PluginError, PluginInput, PluginOp, PluginOutput};
 
 use super::super::NativePlugin;
 
@@ -126,7 +126,7 @@ impl NativePlugin for CommodityAttrPlugin {
         // If no required attributes configured, pass through
         if required.is_empty() {
             return PluginOutput {
-                directives: input.directives,
+                ops: (0..input.directives.len()).map(PluginOp::Keep).collect(),
                 errors: Vec::new(),
             };
         }
@@ -168,7 +168,7 @@ impl NativePlugin for CommodityAttrPlugin {
         }
 
         PluginOutput {
-            directives: input.directives,
+            ops: (0..input.directives.len()).map(PluginOp::Keep).collect(),
             errors,
         }
     }

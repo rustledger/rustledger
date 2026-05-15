@@ -1,5 +1,31 @@
 //! Shared utility functions for native plugins.
 
+#[cfg(test)]
+use crate::types::{DirectiveWrapper, PluginOp, PluginOutput};
+
+/// Materialize a plugin's ops back into a flat list of `DirectiveWrapper`s.
+///
+/// Test-only helper used by the inline plugin tests that previously
+/// inspected `output.directives` directly. The mapping is:
+/// - `Keep(i)` → `input[i].clone()`
+/// - `Modify(i, w)` → `w` (carries `input[i]`'s identity in production,
+///   but for test inspection the wrapper's content is what we care about)
+/// - `Insert(w)` → `w`
+/// - `Delete(_)` → omitted
+#[cfg(test)]
+#[must_use]
+pub fn materialize_ops(input: &[DirectiveWrapper], output: &PluginOutput) -> Vec<DirectiveWrapper> {
+    let mut out = Vec::with_capacity(output.ops.len());
+    for op in &output.ops {
+        match op {
+            PluginOp::Keep(i) => out.push(input[*i].clone()),
+            PluginOp::Modify(_, w) | PluginOp::Insert(w) => out.push(w.clone()),
+            PluginOp::Delete(_) => {}
+        }
+    }
+    out
+}
+
 /// Increment a date string by one day.
 /// Returns None if the date format is invalid.
 pub fn increment_date(date: &str) -> Option<String> {

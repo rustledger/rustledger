@@ -1,6 +1,6 @@
 //! Zero balance assertion on balance sheet account close.
 
-use crate::types::{DirectiveData, DirectiveWrapper, PluginInput, PluginOutput, sort_directives};
+use crate::types::{DirectiveData, DirectiveWrapper, PluginInput, PluginOp, PluginOutput};
 
 use super::super::NativePlugin;
 use super::utils::increment_date;
@@ -61,10 +61,10 @@ impl NativePlugin for CheckDrainedPlugin {
         }
 
         // Second pass: generate balance assertions for closed balance sheet accounts
-        let mut new_directives: Vec<DirectiveWrapper> = Vec::new();
+        let mut ops: Vec<PluginOp> = Vec::new();
 
-        for wrapper in &input.directives {
-            new_directives.push(wrapper.clone());
+        for (i, wrapper) in input.directives.iter().enumerate() {
+            ops.push(PluginOp::Keep(i));
 
             if let DirectiveData::Close(data) = &wrapper.data {
                 // Only generate for balance sheet accounts (Assets, Liabilities, Equity)
@@ -88,7 +88,7 @@ impl NativePlugin for CheckDrainedPlugin {
                         sorted_currencies.sort(); // Consistent ordering
 
                         for currency in sorted_currencies {
-                            new_directives.push(DirectiveWrapper {
+                            ops.push(PluginOp::Insert(DirectiveWrapper {
                                 directive_type: "balance".to_string(),
                                 date: next_date.clone(),
                                 filename: None, // Plugin-generated
@@ -102,18 +102,17 @@ impl NativePlugin for CheckDrainedPlugin {
                                     tolerance: None,
                                     metadata: vec![],
                                 }),
-                            });
+                            }));
                         }
                     }
                 }
             }
         }
 
-        // Sort using beancount's standard ordering
-        sort_directives(&mut new_directives);
-
+        // Final ordering is the loader's responsibility — it re-sorts
+        // directives after the plugin pass.
         PluginOutput {
-            directives: new_directives,
+            ops,
             errors: Vec::new(),
         }
     }
@@ -121,6 +120,7 @@ impl NativePlugin for CheckDrainedPlugin {
 
 #[cfg(test)]
 mod check_drained_tests {
+    use super::super::utils::materialize_ops;
     use super::*;
     use crate::types::*;
 
@@ -185,17 +185,18 @@ mod check_drained_tests {
             config: None,
         };
 
+        let input_dirs = input.directives.clone();
         let output = plugin.process(input);
         assert_eq!(output.errors.len(), 0);
 
+        let directives = materialize_ops(&input_dirs, &output);
         // Should have 4 directives: open, transaction, close, balance
-        assert_eq!(output.directives.len(), 4);
+        assert_eq!(directives.len(), 4);
 
         // Find the balance directive
-        let balance = output
-            .directives
+        let balance = directives
             .iter()
-            .find(|d| d.directive_type == "balance")
+            .find(|d| matches!(d.data, DirectiveData::Balance(_)))
             .expect("Should have balance directive");
 
         assert_eq!(balance.date, "2025-01-01"); // Day after close
@@ -244,14 +245,15 @@ mod check_drained_tests {
             config: None,
         };
 
+        let input_dirs = input.directives.clone();
         let output = plugin.process(input);
+        let directives = materialize_ops(&input_dirs, &output);
         // Should not add balance assertions for income/expense accounts
-        assert_eq!(output.directives.len(), 2);
+        assert_eq!(directives.len(), 2);
         assert!(
-            !output
-                .directives
+            !directives
                 .iter()
-                .any(|d| d.directive_type == "balance")
+                .any(|d| matches!(d.data, DirectiveData::Balance(_)))
         );
     }
 
@@ -341,14 +343,15 @@ mod check_drained_tests {
             config: None,
         };
 
+        let input_dirs = input.directives.clone();
         let output = plugin.process(input);
+        let directives = materialize_ops(&input_dirs, &output);
         // Should have 6 directives: open, 2 transactions, close, 2 balance assertions
-        assert_eq!(output.directives.len(), 6);
+        assert_eq!(directives.len(), 6);
 
-        let balances: Vec<_> = output
-            .directives
+        let balances: Vec<_> = directives
             .iter()
-            .filter(|d| d.directive_type == "balance")
+            .filter(|d| matches!(d.data, DirectiveData::Balance(_)))
             .collect();
         assert_eq!(balances.len(), 2);
 

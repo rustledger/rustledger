@@ -45,6 +45,7 @@ pub mod native;
 pub mod python;
 #[cfg(feature = "wasm-runtime")]
 pub mod runtime;
+pub mod test_helpers;
 pub mod types;
 
 pub use convert::{
@@ -56,4 +57,7 @@ pub use native::{DocumentDiscoveryPlugin, NativePlugin, NativePluginRegistry};
 pub use runtime::{
     Plugin, PluginManager, RuntimeConfig, WatchingPluginManager, validate_plugin_module,
 };
-pub use types::{PluginError, PluginErrorSeverity, PluginInput, PluginOptions, PluginOutput};
+pub use types::{
+    DirectiveWrapper, PluginError, PluginErrorSeverity, PluginInput, PluginOp, PluginOptions,
+    PluginOutput,
+};

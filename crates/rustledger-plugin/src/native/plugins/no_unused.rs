@@ -1,6 +1,8 @@
 //! Warn about unused accounts.
 
-use crate::types::{DirectiveData, MetaValueData, PluginError, PluginInput, PluginOutput};
+use crate::types::{
+    DirectiveData, MetaValueData, PluginError, PluginInput, PluginOp, PluginOutput,
+};
 
 use super::super::NativePlugin;
 
@@ -80,7 +82,7 @@ impl NativePlugin for NoUnusedPlugin {
         }
 
         PluginOutput {
-            directives: input.directives,
+            ops: (0..input.directives.len()).map(PluginOp::Keep).collect(),
             errors,
         }
     }

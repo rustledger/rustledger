@@ -28,7 +28,7 @@ use std::collections::HashSet;
 use std::str::FromStr;
 
 use crate::types::{
-    AmountData, DirectiveData, DirectiveWrapper, MetaValueData, OpenData, PluginInput,
+    AmountData, DirectiveData, DirectiveWrapper, MetaValueData, OpenData, PluginInput, PluginOp,
     PluginOutput, PostingData,
 };
 
@@ -53,7 +53,7 @@ impl NativePlugin for SplitExpensesPlugin {
             None => {
                 // No config provided, return unchanged
                 return PluginOutput {
-                    directives: input.directives,
+                    ops: (0..input.directives.len()).map(PluginOp::Keep).collect(),
                     errors: Vec::new(),
                 };
             }
@@ -61,7 +61,7 @@ impl NativePlugin for SplitExpensesPlugin {
 
         if members.is_empty() {
             return PluginOutput {
-                directives: input.directives,
+                ops: (0..input.directives.len()).map(PluginOp::Keep).collect(),
                 errors: Vec::new(),
             };
         }
@@ -70,108 +70,113 @@ impl NativePlugin for SplitExpensesPlugin {
         let mut new_accounts: HashSet<String> = HashSet::new();
         let mut earliest_date: Option<String> = None;
 
-        // Process directives
-        let directives: Vec<_> = input
-            .directives
-            .into_iter()
-            .map(|mut wrapper| {
-                // Track earliest date for creating Open directives
-                if earliest_date.is_none()
-                    || wrapper.date < *earliest_date.as_ref().unwrap_or(&String::new())
-                {
-                    earliest_date = Some(wrapper.date.clone());
-                }
+        // Compute earliest date across all input directives.
+        for d in &input.directives {
+            if earliest_date.as_ref().is_none_or(|e| d.date < *e) {
+                earliest_date = Some(d.date.clone());
+            }
+        }
 
-                if wrapper.directive_type == "transaction"
-                    && let DirectiveData::Transaction(ref mut txn) = wrapper.data
-                {
-                    let mut new_postings = Vec::new();
+        let mut ops: Vec<PluginOp> = Vec::with_capacity(input.directives.len());
 
-                    for posting in &txn.postings {
-                        // Check if this is an expense account
-                        let is_expense = posting.account.starts_with("Expenses:");
+        for (i, mut wrapper) in input.directives.into_iter().enumerate() {
+            if wrapper.directive_type != "transaction" {
+                ops.push(PluginOp::Keep(i));
+                continue;
+            }
 
-                        // Check if account already contains a member name
-                        let has_member =
-                            members.iter().any(|m| posting.account.contains(m.as_str()));
+            let mut changed = false;
+            if let DirectiveData::Transaction(ref mut txn) = wrapper.data {
+                let mut new_postings = Vec::new();
 
-                        if is_expense && !has_member {
-                            // Split this posting among members
-                            if let Some(ref units) = posting.units {
-                                // Parse the amount
-                                if let Ok(amount) = Decimal::from_str(&units.number) {
-                                    let split_amount = amount / num_members;
+                for posting in &txn.postings {
+                    // Check if this is an expense account
+                    let is_expense = posting.account.starts_with("Expenses:");
 
-                                    for member in &members {
-                                        // Create subaccount with member name
-                                        let subaccount = format!("{}:{}", posting.account, member);
-                                        new_accounts.insert(subaccount.clone());
+                    // Check if account already contains a member name
+                    let has_member = members.iter().any(|m| posting.account.contains(m.as_str()));
 
-                                        // Create new posting for this member
-                                        let mut new_metadata = posting.metadata.clone();
-                                        // Mark as automatically calculated
-                                        new_metadata.push((
-                                            "__automatic__".to_string(),
-                                            MetaValueData::String("True".to_string()),
-                                        ));
+                    if is_expense && !has_member {
+                        // Split this posting among members
+                        if let Some(ref units) = posting.units {
+                            // Parse the amount
+                            if let Ok(amount) = Decimal::from_str(&units.number) {
+                                let split_amount = amount / num_members;
 
-                                        new_postings.push(PostingData {
-                                            account: subaccount,
-                                            units: Some(AmountData {
-                                                number: split_amount.to_string(),
-                                                currency: units.currency.clone(),
-                                            }),
-                                            cost: posting.cost.clone(),
-                                            price: posting.price.clone(),
-                                            flag: posting.flag.clone(),
-                                            metadata: new_metadata,
-                                        });
-                                    }
-                                } else {
-                                    // Couldn't parse amount, keep original
-                                    new_postings.push(posting.clone());
+                                for member in &members {
+                                    // Create subaccount with member name
+                                    let subaccount = format!("{}:{}", posting.account, member);
+                                    new_accounts.insert(subaccount.clone());
+
+                                    // Create new posting for this member
+                                    let mut new_metadata = posting.metadata.clone();
+                                    // Mark as automatically calculated
+                                    new_metadata.push((
+                                        "__automatic__".to_string(),
+                                        MetaValueData::String("True".to_string()),
+                                    ));
+
+                                    new_postings.push(PostingData {
+                                        account: subaccount,
+                                        units: Some(AmountData {
+                                            number: split_amount.to_string(),
+                                            currency: units.currency.clone(),
+                                        }),
+                                        cost: posting.cost.clone(),
+                                        price: posting.price.clone(),
+                                        flag: posting.flag.clone(),
+                                        metadata: new_metadata,
+                                    });
                                 }
+                                changed = true;
                             } else {
-                                // No units, keep original
+                                // Couldn't parse amount, keep original
                                 new_postings.push(posting.clone());
                             }
                         } else {
-                            // Keep posting as is
+                            // No units, keep original
                             new_postings.push(posting.clone());
                         }
+                    } else {
+                        // Keep posting as is
+                        new_postings.push(posting.clone());
                     }
+                }
 
+                if changed {
                     txn.postings = new_postings;
                 }
-                wrapper
-            })
-            .collect();
+            }
 
-        // Create Open directives for new accounts
-        let mut open_directives: Vec<DirectiveWrapper> = Vec::new();
+            if changed {
+                ops.push(PluginOp::Modify(i, wrapper));
+            } else {
+                ops.push(PluginOp::Keep(i));
+            }
+        }
+
+        // Insert Open directives for newly synthesized member sub-accounts.
         if let Some(date) = earliest_date {
-            for account in &new_accounts {
-                open_directives.push(DirectiveWrapper {
+            let mut accounts: Vec<String> = new_accounts.into_iter().collect();
+            accounts.sort();
+            for account in accounts {
+                ops.push(PluginOp::Insert(DirectiveWrapper {
                     directive_type: "open".to_string(),
                     date: date.clone(),
                     filename: Some("<split_expenses>".to_string()),
                     lineno: Some(0),
                     data: DirectiveData::Open(OpenData {
-                        account: account.clone(),
+                        account,
                         currencies: vec![],
                         booking: None,
                         metadata: vec![],
                     }),
-                });
+                }));
             }
         }
 
-        // Combine open directives with original directives
-        let mut all_directives = open_directives;
-        all_directives.extend(directives);
-
         PluginOutput {
-            directives: all_directives,
+            ops,
             errors: Vec::new(),
         }
     }
@@ -179,6 +184,7 @@ impl NativePlugin for SplitExpensesPlugin {
 
 #[cfg(test)]
 mod tests {
+    use super::super::utils::materialize_ops;
     use super::*;
     use crate::types::*;
 
@@ -236,17 +242,18 @@ mod tests {
             config: Some("Martin Caroline".to_string()),
         };
 
+        let input_dirs = input.directives.clone();
         let output = plugin.process(input);
         assert_eq!(output.errors.len(), 0);
+        let directives = materialize_ops(&input_dirs, &output);
 
         // Should have 2 open directives + 1 transaction
-        assert_eq!(output.directives.len(), 3);
+        assert_eq!(directives.len(), 3);
 
         // Find the transaction
-        let txn = output
-            .directives
+        let txn = directives
             .iter()
-            .find(|d| d.directive_type == "transaction")
+            .find(|d| matches!(d.data, DirectiveData::Transaction(_)))
             .unwrap();
 
         if let DirectiveData::Transaction(txn_data) = &txn.data {
@@ -319,12 +326,14 @@ mod tests {
             config: Some("Martin Caroline".to_string()),
         };
 
+        let input_dirs = input.directives.clone();
         let output = plugin.process(input);
+        let directives = materialize_ops(&input_dirs, &output);
 
         // Should have only 1 directive (no new open directives since account already has member)
-        assert_eq!(output.directives.len(), 1);
+        assert_eq!(directives.len(), 1);
 
-        if let DirectiveData::Transaction(txn_data) = &output.directives[0].data {
+        if let DirectiveData::Transaction(txn_data) = &directives[0].data {
             // Postings should be unchanged
             assert_eq!(txn_data.postings.len(), 2);
             assert!(
@@ -361,11 +370,13 @@ mod tests {
             config: None,
         };
 
+        let input_dirs = input.directives.clone();
         let output = plugin.process(input);
+        let directives = materialize_ops(&input_dirs, &output);
 
         // Should return unchanged
-        assert_eq!(output.directives.len(), 1);
-        if let DirectiveData::Transaction(txn_data) = &output.directives[0].data {
+        assert_eq!(directives.len(), 1);
+        if let DirectiveData::Transaction(txn_data) = &directives[0].data {
             assert_eq!(txn_data.postings.len(), 1);
             assert_eq!(txn_data.postings[0].account, "Expenses:Food");
         } else {

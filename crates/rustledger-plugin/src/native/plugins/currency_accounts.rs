@@ -1,6 +1,6 @@
 //! Auto-generate currency trading account postings.
 
-use crate::types::{DirectiveData, DirectiveWrapper, PluginInput, PluginOutput};
+use crate::types::{DirectiveData, DirectiveWrapper, PluginInput, PluginOp, PluginOutput};
 
 use super::super::NativePlugin;
 
@@ -94,12 +94,12 @@ impl NativePlugin for CurrencyAccountsPlugin {
         }
         let earliest_date = earliest_date.unwrap_or("1970-01-01").to_string();
 
-        let mut new_directives: Vec<DirectiveWrapper> = Vec::with_capacity(input.directives.len());
+        let mut ops: Vec<PluginOp> = Vec::with_capacity(input.directives.len());
         let mut created_accounts: HashSet<String> = HashSet::new();
 
-        for wrapper in &input.directives {
+        for (i, wrapper) in input.directives.iter().enumerate() {
             let DirectiveData::Transaction(txn) = &wrapper.data else {
-                new_directives.push(wrapper.clone());
+                ops.push(PluginOp::Keep(i));
                 continue;
             };
 
@@ -137,7 +137,7 @@ impl NativePlugin for CurrencyAccountsPlugin {
             // Only neutralize when there's at least one price AND more than
             // one currency group. This is Python's gating condition.
             if !has_price || curmap.len() < 2 {
-                new_directives.push(wrapper.clone());
+                ops.push(PluginOp::Keep(i));
                 continue;
             }
 
@@ -254,20 +254,26 @@ impl NativePlugin for CurrencyAccountsPlugin {
             let mut modified_txn = txn.clone();
             modified_txn.postings = new_postings;
 
-            new_directives.push(DirectiveWrapper {
-                directive_type: wrapper.directive_type.clone(),
-                date: wrapper.date.clone(),
-                filename: wrapper.filename.clone(),
-                lineno: wrapper.lineno,
-                data: DirectiveData::Transaction(modified_txn),
-            });
+            ops.push(PluginOp::Modify(
+                i,
+                DirectiveWrapper {
+                    directive_type: wrapper.directive_type.clone(),
+                    date: wrapper.date.clone(),
+                    filename: wrapper.filename.clone(),
+                    lineno: wrapper.lineno,
+                    data: DirectiveData::Transaction(modified_txn),
+                },
+            ));
         }
 
-        // Generate Open directives for created currency accounts (skip existing).
-        let mut open_directives: Vec<DirectiveWrapper> = created_accounts
+        // Insert Open directives for newly-created currency accounts (skip existing).
+        let mut new_open_accounts: Vec<String> = created_accounts
             .into_iter()
             .filter(|account| !existing_opens.contains(account))
-            .map(|account| DirectiveWrapper {
+            .collect();
+        new_open_accounts.sort();
+        for account in new_open_accounts {
+            ops.push(PluginOp::Insert(DirectiveWrapper {
                 directive_type: "open".to_string(),
                 date: earliest_date.clone(),
                 filename: Some("<currency_accounts>".to_string()),
@@ -278,24 +284,11 @@ impl NativePlugin for CurrencyAccountsPlugin {
                     booking: None,
                     metadata: vec![],
                 }),
-            })
-            .collect();
-
-        // Sort for deterministic output.
-        open_directives.sort_by(|a, b| {
-            if let (DirectiveData::Open(oa), DirectiveData::Open(ob)) = (&a.data, &b.data) {
-                oa.account.cmp(&ob.account)
-            } else {
-                std::cmp::Ordering::Equal
-            }
-        });
-
-        // Prepend Open directives to the output (matches Python which does
-        // `open_entries + new_entries`).
-        open_directives.extend(new_directives);
+            }));
+        }
 
         PluginOutput {
-            directives: open_directives,
+            ops,
             errors: Vec::new(),
         }
     }
@@ -303,6 +296,7 @@ impl NativePlugin for CurrencyAccountsPlugin {
 
 #[cfg(test)]
 mod currency_accounts_tests {
+    use super::super::utils::materialize_ops;
     use super::*;
     use crate::types::*;
 
@@ -378,14 +372,15 @@ mod currency_accounts_tests {
             config: None,
         };
 
+        let input_dirs = input.directives.clone();
         let output = plugin.process(input);
         assert_eq!(output.errors.len(), 0);
+        let directives = materialize_ops(&input_dirs, &output);
 
         // 2 opens + 1 modified txn
-        assert_eq!(output.directives.len(), 3);
+        assert_eq!(directives.len(), 3);
 
-        let opens: Vec<&str> = output
-            .directives
+        let mut opens: Vec<&str> = directives
             .iter()
             .filter_map(|d| {
                 if let DirectiveData::Open(o) = &d.data {
@@ -395,10 +390,15 @@ mod currency_accounts_tests {
                 }
             })
             .collect();
+        opens.sort_unstable();
         assert_eq!(opens, vec!["Equity:Currency:EUR", "Equity:Currency:USD"]);
 
-        let DirectiveData::Transaction(txn) = &output.directives[2].data else {
-            panic!("expected transaction at index 2");
+        let txn_dir = directives
+            .iter()
+            .find(|d| matches!(d.data, DirectiveData::Transaction(_)))
+            .expect("expected transaction");
+        let DirectiveData::Transaction(txn) = &txn_dir.data else {
+            unreachable!()
         };
         // 2 originals + 2 neutralizers
         assert_eq!(txn.postings.len(), 4);
@@ -462,10 +462,12 @@ mod currency_accounts_tests {
             config: None,
         };
 
+        let input_dirs = input.directives.clone();
         let output = plugin.process(input);
         assert_eq!(output.errors.len(), 0);
-        assert_eq!(output.directives.len(), 1);
-        let DirectiveData::Transaction(txn) = &output.directives[0].data else {
+        let directives = materialize_ops(&input_dirs, &output);
+        assert_eq!(directives.len(), 1);
+        let DirectiveData::Transaction(txn) = &directives[0].data else {
             panic!("expected transaction");
         };
         assert_eq!(txn.postings.len(), 3);
@@ -488,9 +490,11 @@ mod currency_accounts_tests {
             config: None,
         };
 
+        let input_dirs = input.directives.clone();
         let output = plugin.process(input);
-        assert_eq!(output.directives.len(), 1);
-        let DirectiveData::Transaction(txn) = &output.directives[0].data else {
+        let directives = materialize_ops(&input_dirs, &output);
+        assert_eq!(directives.len(), 1);
+        let DirectiveData::Transaction(txn) = &directives[0].data else {
             panic!("expected transaction");
         };
         assert_eq!(txn.postings.len(), 2);
@@ -514,16 +518,18 @@ mod currency_accounts_tests {
             config: Some("Income:Trading".to_string()),
         };
 
+        let input_dirs = input.directives.clone();
         let output = plugin.process(input);
-        assert_eq!(output.directives.len(), 3);
-        assert!(output.directives.iter().any(|d| {
+        let directives = materialize_ops(&input_dirs, &output);
+        assert_eq!(directives.len(), 3);
+        assert!(directives.iter().any(|d| {
             if let DirectiveData::Open(o) = &d.data {
                 o.account == "Income:Trading:EUR"
             } else {
                 false
             }
         }));
-        assert!(output.directives.iter().any(|d| {
+        assert!(directives.iter().any(|d| {
             if let DirectiveData::Open(o) = &d.data {
                 o.account == "Income:Trading:USD"
             } else {
@@ -567,13 +573,14 @@ mod currency_accounts_tests {
             config: None,
         };
 
+        let input_dirs = input.directives.clone();
         let output = plugin.process(input);
+        let directives = materialize_ops(&input_dirs, &output);
 
         // Only Equity:CurrencyAccounts:EUR should be a newly-created open
         // (filename marker <currency_accounts>). The USD open passed
         // through from the input.
-        let new_currency_opens: Vec<&str> = output
-            .directives
+        let new_currency_opens: Vec<&str> = directives
             .iter()
             .filter_map(|d| {
                 if let DirectiveData::Open(o) = &d.data
@@ -622,8 +629,10 @@ mod currency_accounts_tests {
             config: None,
         };
 
+        let input_dirs = input.directives.clone();
         let output = plugin.process(input);
-        for wrapper in &output.directives {
+        let directives = materialize_ops(&input_dirs, &output);
+        for wrapper in &directives {
             if let DirectiveData::Open(o) = &wrapper.data
                 && o.account.starts_with("Equity:CurrencyAccounts:")
                 && wrapper.filename.as_deref() == Some("<currency_accounts>")

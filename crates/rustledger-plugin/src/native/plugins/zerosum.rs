@@ -42,7 +42,7 @@ static TOLERANCE_RE: LazyLock<Regex> = LazyLock::new(|| {
 
 use crate::types::{
     DirectiveData, DirectiveWrapper, OpenData, PluginError, PluginErrorSeverity, PluginInput,
-    PluginOutput,
+    PluginOp, PluginOutput,
 };
 
 use super::super::NativePlugin;
@@ -68,7 +68,7 @@ impl NativePlugin for ZerosumPlugin {
             Some(c) => c,
             None => {
                 return PluginOutput {
-                    directives: input.directives,
+                    ops: (0..input.directives.len()).map(PluginOp::Keep).collect(),
                     errors: vec![PluginError {
                         message: "zerosum plugin requires configuration".to_string(),
                         source_file: None,
@@ -84,7 +84,7 @@ impl NativePlugin for ZerosumPlugin {
             Ok(c) => c,
             Err(e) => {
                 return PluginOutput {
-                    directives: input.directives,
+                    ops: (0..input.directives.len()).map(PluginOp::Keep).collect(),
                     errors: vec![PluginError {
                         message: format!("Failed to parse zerosum config: {e}"),
                         source_file: None,
@@ -130,8 +130,11 @@ impl NativePlugin for ZerosumPlugin {
             }
         }
 
-        // Convert to mutable
+        // Convert to mutable.
         let mut directives = input.directives;
+        // Track which input indices were mutated, so we can emit Modify
+        // ops for them and Keep ops for everything else.
+        let mut modified_indices: HashSet<usize> = HashSet::new();
 
         // For each zerosum account, find matching pairs
         for (zs_account, (target_account_opt, date_range)) in &zerosum_accounts {
@@ -285,19 +288,31 @@ impl NativePlugin for ZerosumPlugin {
                     && *post_i < txn.postings.len()
                 {
                     txn.postings[*post_i].account.clone_from(&target_account);
+                    modified_indices.insert(*txn_i);
                 }
             }
         }
 
-        // Create Open directives for new accounts (only if not already opened)
-        let mut open_directives: Vec<DirectiveWrapper> = Vec::new();
+        // Emit ops: Modify for mutated indices, Keep otherwise.
+        let mut ops: Vec<PluginOp> = Vec::with_capacity(directives.len() + new_accounts.len());
+        for (i, d) in directives.into_iter().enumerate() {
+            if modified_indices.contains(&i) {
+                ops.push(PluginOp::Modify(i, d));
+            } else {
+                ops.push(PluginOp::Keep(i));
+            }
+        }
+
+        // Insert Open directives for newly synthesized matched accounts
+        // (only if not already opened).
         if let Some(date) = earliest_date {
-            for account in &new_accounts {
-                // Skip if account already has an Open directive
+            let mut accounts: Vec<&String> = new_accounts.iter().collect();
+            accounts.sort();
+            for account in accounts {
                 if existing_opens.contains(account) {
                     continue;
                 }
-                open_directives.push(DirectiveWrapper {
+                ops.push(PluginOp::Insert(DirectiveWrapper {
                     directive_type: "open".to_string(),
                     date: date.clone(),
                     filename: Some("<zerosum>".to_string()),
@@ -308,16 +323,12 @@ impl NativePlugin for ZerosumPlugin {
                         booking: None,
                         metadata: vec![],
                     }),
-                });
+                }));
             }
         }
 
-        // Combine open directives with modified directives
-        let mut all_directives = open_directives;
-        all_directives.extend(directives);
-
         PluginOutput {
-            directives: all_directives,
+            ops,
             errors: Vec::new(),
         }
     }
@@ -416,6 +427,7 @@ fn within_date_range(date1: &str, date2: &str, days: i64) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::super::utils::materialize_ops;
     use super::*;
     use crate::types::*;
 
@@ -500,12 +512,14 @@ mod tests {
             config: Some(config.to_string()),
         };
 
+        let input_dirs = input.directives.clone();
         let output = plugin.process(input);
         assert_eq!(output.errors.len(), 0);
+        let directives = materialize_ops(&input_dirs, &output);
 
         // Check that matched postings were moved to target account
         let mut found_matched = false;
-        for directive in &output.directives {
+        for directive in &directives {
             if let DirectiveData::Transaction(ref txn) = directive.data {
                 for posting in &txn.postings {
                     if posting.account == "Assets:ZeroSum-Matched:Transfers" {
@@ -552,12 +566,14 @@ mod tests {
             config: Some(config.to_string()),
         };
 
+        let input_dirs = input.directives.clone();
         let output = plugin.process(input);
         assert_eq!(output.errors.len(), 0);
+        let directives = materialize_ops(&input_dirs, &output);
 
         // Check that postings were NOT matched (still in original account)
         let mut found_unmatched = false;
-        for directive in &output.directives {
+        for directive in &directives {
             if let DirectiveData::Transaction(ref txn) = directive.data {
                 for posting in &txn.postings {
                     if posting.account == "Assets:ZeroSum:Transfers" {
@@ -620,12 +636,13 @@ mod tests {
             config: Some(config.to_string()),
         };
 
+        let input_dirs = input.directives.clone();
         let output = plugin.process(input);
         assert_eq!(output.errors.len(), 0);
+        let directives = materialize_ops(&input_dirs, &output);
 
         // Count Open directives for the target account
-        let open_count = output
-            .directives
+        let open_count = directives
             .iter()
             .filter(|d| {
                 if let DirectiveData::Open(ref open) = d.data {

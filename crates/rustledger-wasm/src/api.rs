@@ -259,6 +259,34 @@ pub fn expand_pads(source: &str) -> Result<JsValue, JsError> {
 /// Run a native plugin on the source.
 ///
 /// Available plugins can be listed with `listPlugins()`.
+/// Materialize a plugin's `ops` against its input wrapper list,
+/// producing the resulting flat wrapper list. Used by WASM entry
+/// points that need to round-trip a plugin's output back to
+/// `Vec<Directive>` for JSON serialization.
+#[cfg(feature = "plugins")]
+pub fn materialize_plugin_ops(
+    input: &[rustledger_plugin::types::DirectiveWrapper],
+    output: &rustledger_plugin::types::PluginOutput,
+) -> Vec<rustledger_plugin::types::DirectiveWrapper> {
+    let mut out = Vec::with_capacity(output.ops.len());
+    for op in &output.ops {
+        match op {
+            rustledger_plugin::PluginOp::Keep(i) => {
+                if let Some(w) = input.get(*i) {
+                    out.push(w.clone());
+                }
+            }
+            rustledger_plugin::PluginOp::Modify(_, w) | rustledger_plugin::PluginOp::Insert(w) => {
+                out.push(w.clone())
+            }
+            rustledger_plugin::PluginOp::Delete(_) => {}
+        }
+    }
+    out
+}
+
+/// Run a single named plugin against a Beancount source and return
+/// the resulting directives as JSON.
 #[cfg(feature = "plugins")]
 #[wasm_bindgen(js_name = "runPlugin")]
 pub fn run_plugin(source: &str, plugin_name: &str) -> Result<JsValue, JsError> {
@@ -296,10 +324,12 @@ pub fn run_plugin(source: &str, plugin_name: &str) -> Result<JsValue, JsError> {
         config: None,
     };
 
+    let input_dirs = input.directives.clone();
     let output = plugin.process(input);
 
-    // Convert back
-    let output_directives = match wrappers_to_directives(&output.directives) {
+    // Materialize ops back to wrappers, then convert.
+    let materialized_wrappers = materialize_plugin_ops(&input_dirs, &output);
+    let output_directives = match wrappers_to_directives(&materialized_wrappers) {
         Ok(dirs) => dirs,
         Err(e) => {
             let result = PluginResult {

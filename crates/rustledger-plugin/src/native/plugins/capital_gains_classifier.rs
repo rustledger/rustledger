@@ -26,8 +26,8 @@ use std::str::FromStr;
 use std::sync::LazyLock;
 
 use crate::types::{
-    AmountData, DirectiveData, DirectiveWrapper, OpenData, PluginInput, PluginOutput, PostingData,
-    TransactionData,
+    AmountData, DirectiveData, DirectiveWrapper, OpenData, PluginInput, PluginOp, PluginOutput,
+    PostingData, TransactionData,
 };
 
 use super::super::NativePlugin;
@@ -96,25 +96,33 @@ fn process_long_short(input: PluginInput) -> PluginOutput {
             Some(cfg) => cfg,
             None => {
                 return PluginOutput {
-                    directives: input.directives,
+                    ops: (0..input.directives.len()).map(PluginOp::Keep).collect(),
                     errors: Vec::new(),
                 };
             }
         },
         None => {
             return PluginOutput {
-                directives: input.directives,
+                ops: (0..input.directives.len()).map(PluginOp::Keep).collect(),
                 errors: Vec::new(),
             };
         }
     };
 
     let mut new_accounts: HashSet<String> = HashSet::new();
-    let mut new_directives: Vec<DirectiveWrapper> = Vec::new();
+    let mut ops: Vec<PluginOp> = Vec::with_capacity(input.directives.len());
+    // Track earliest date from input directives for synthesized Open directives.
+    let earliest_date = input
+        .directives
+        .iter()
+        .map(|d| d.date.as_str())
+        .min()
+        .unwrap_or("1970-01-01")
+        .to_string();
 
-    for directive in input.directives {
+    for (i, directive) in input.directives.into_iter().enumerate() {
         if directive.directive_type != "transaction" {
-            new_directives.push(directive);
+            ops.push(PluginOp::Keep(i));
             continue;
         }
 
@@ -130,7 +138,7 @@ fn process_long_short(input: PluginInput) -> PluginOutput {
             });
 
             if !has_generic || has_specific {
-                new_directives.push(directive);
+                ops.push(PluginOp::Keep(i));
                 continue;
             }
 
@@ -142,7 +150,7 @@ fn process_long_short(input: PluginInput) -> PluginOutput {
                 .collect();
 
             if reductions.is_empty() {
-                new_directives.push(directive);
+                ops.push(PluginOp::Keep(i));
                 continue;
             }
 
@@ -150,7 +158,7 @@ fn process_long_short(input: PluginInput) -> PluginOutput {
             let entry_date = if let Ok(d) = directive.date.parse::<NaiveDate>() {
                 d
             } else {
-                new_directives.push(directive);
+                ops.push(PluginOp::Keep(i));
                 continue;
             };
 
@@ -168,7 +176,7 @@ fn process_long_short(input: PluginInput) -> PluginOutput {
                     .is_none()
             });
             if any_missing_cost_date {
-                new_directives.push(directive);
+                ops.push(PluginOp::Keep(i));
                 continue;
             }
 
@@ -225,7 +233,7 @@ fn process_long_short(input: PluginInput) -> PluginOutput {
                 .collect();
 
             if orig_postings.is_empty() {
-                new_directives.push(directive);
+                ops.push(PluginOp::Keep(i));
                 continue;
             }
 
@@ -291,37 +299,32 @@ fn process_long_short(input: PluginInput) -> PluginOutput {
                 });
             }
 
-            new_directives.push(DirectiveWrapper {
-                directive_type: "transaction".to_string(),
-                date: directive.date.clone(),
-                filename: directive.filename.clone(),
-                lineno: directive.lineno,
-                data: DirectiveData::Transaction(TransactionData {
-                    flag: txn.flag.clone(),
-                    payee: txn.payee.clone(),
-                    narration: txn.narration.clone(),
-                    tags: txn.tags.clone(),
-                    links: txn.links.clone(),
-                    metadata: txn.metadata.clone(),
-                    postings: new_postings,
-                }),
-            });
+            ops.push(PluginOp::Modify(
+                i,
+                DirectiveWrapper {
+                    directive_type: "transaction".to_string(),
+                    date: directive.date.clone(),
+                    filename: directive.filename.clone(),
+                    lineno: directive.lineno,
+                    data: DirectiveData::Transaction(TransactionData {
+                        flag: txn.flag.clone(),
+                        payee: txn.payee.clone(),
+                        narration: txn.narration.clone(),
+                        tags: txn.tags.clone(),
+                        links: txn.links.clone(),
+                        metadata: txn.metadata.clone(),
+                        postings: new_postings,
+                    }),
+                },
+            ));
         } else {
-            new_directives.push(directive);
+            ops.push(PluginOp::Keep(i));
         }
     }
 
-    // Create Open directives for new accounts
-    let earliest_date = new_directives
-        .iter()
-        .map(|d| d.date.as_str())
-        .min()
-        .unwrap_or("1970-01-01")
-        .to_string();
-
-    let mut open_directives: Vec<DirectiveWrapper> = new_accounts
-        .iter()
-        .map(|account| DirectiveWrapper {
+    // Insert Open directives for newly synthesized accounts.
+    for account in &new_accounts {
+        ops.push(PluginOp::Insert(DirectiveWrapper {
             directive_type: "open".to_string(),
             date: earliest_date.clone(),
             filename: Some("<long_short>".to_string()),
@@ -332,13 +335,11 @@ fn process_long_short(input: PluginInput) -> PluginOutput {
                 booking: None,
                 metadata: vec![],
             }),
-        })
-        .collect();
-
-    open_directives.extend(new_directives);
+        }));
+    }
 
     PluginOutput {
-        directives: open_directives,
+        ops,
         errors: Vec::new(),
     }
 }
@@ -350,25 +351,33 @@ fn process_gain_loss(input: PluginInput) -> PluginOutput {
             Some(cfg) => cfg,
             None => {
                 return PluginOutput {
-                    directives: input.directives,
+                    ops: (0..input.directives.len()).map(PluginOp::Keep).collect(),
                     errors: Vec::new(),
                 };
             }
         },
         None => {
             return PluginOutput {
-                directives: input.directives,
+                ops: (0..input.directives.len()).map(PluginOp::Keep).collect(),
                 errors: Vec::new(),
             };
         }
     };
 
     let mut new_accounts: HashSet<String> = HashSet::new();
-    let mut new_directives: Vec<DirectiveWrapper> = Vec::new();
+    let mut ops: Vec<PluginOp> = Vec::with_capacity(input.directives.len());
+    // Earliest date from input for synthesized Open directives.
+    let earliest_date = input
+        .directives
+        .iter()
+        .map(|d| d.date.as_str())
+        .min()
+        .unwrap_or("1970-01-01")
+        .to_string();
 
-    for directive in input.directives {
+    for (i, directive) in input.directives.into_iter().enumerate() {
         if directive.directive_type != "transaction" {
-            new_directives.push(directive);
+            ops.push(PluginOp::Keep(i));
             continue;
         }
 
@@ -409,40 +418,35 @@ fn process_gain_loss(input: PluginInput) -> PluginOutput {
             }
 
             if modified {
-                new_directives.push(DirectiveWrapper {
-                    directive_type: "transaction".to_string(),
-                    date: directive.date.clone(),
-                    filename: directive.filename.clone(),
-                    lineno: directive.lineno,
-                    data: DirectiveData::Transaction(TransactionData {
-                        flag: txn.flag.clone(),
-                        payee: txn.payee.clone(),
-                        narration: txn.narration.clone(),
-                        tags: txn.tags.clone(),
-                        links: txn.links.clone(),
-                        metadata: txn.metadata.clone(),
-                        postings: new_postings,
-                    }),
-                });
+                ops.push(PluginOp::Modify(
+                    i,
+                    DirectiveWrapper {
+                        directive_type: "transaction".to_string(),
+                        date: directive.date.clone(),
+                        filename: directive.filename.clone(),
+                        lineno: directive.lineno,
+                        data: DirectiveData::Transaction(TransactionData {
+                            flag: txn.flag.clone(),
+                            payee: txn.payee.clone(),
+                            narration: txn.narration.clone(),
+                            tags: txn.tags.clone(),
+                            links: txn.links.clone(),
+                            metadata: txn.metadata.clone(),
+                            postings: new_postings,
+                        }),
+                    },
+                ));
             } else {
-                new_directives.push(directive);
+                ops.push(PluginOp::Keep(i));
             }
         } else {
-            new_directives.push(directive);
+            ops.push(PluginOp::Keep(i));
         }
     }
 
-    // Create Open directives for new accounts
-    let earliest_date = new_directives
-        .iter()
-        .map(|d| d.date.as_str())
-        .min()
-        .unwrap_or("1970-01-01")
-        .to_string();
-
-    let mut open_directives: Vec<DirectiveWrapper> = new_accounts
-        .iter()
-        .map(|account| DirectiveWrapper {
+    // Insert Open directives for newly synthesized accounts.
+    for account in &new_accounts {
+        ops.push(PluginOp::Insert(DirectiveWrapper {
             directive_type: "open".to_string(),
             date: earliest_date.clone(),
             filename: Some("<gain_loss>".to_string()),
@@ -453,13 +457,11 @@ fn process_gain_loss(input: PluginInput) -> PluginOutput {
                 booking: None,
                 metadata: vec![],
             }),
-        })
-        .collect();
-
-    open_directives.extend(new_directives);
+        }));
+    }
 
     PluginOutput {
-        directives: open_directives,
+        ops,
         errors: Vec::new(),
     }
 }
@@ -512,6 +514,7 @@ fn format_decimal(d: Decimal) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::super::utils::materialize_ops;
     use super::*;
     use crate::types::*;
 
@@ -590,14 +593,15 @@ mod tests {
             ),
         };
 
+        let input_dirs = input.directives.clone();
         let output = plugin.process(input);
         assert_eq!(output.errors.len(), 0);
+        let directives = materialize_ops(&input_dirs, &output);
 
         // Find the transaction
-        let txn = output
-            .directives
+        let txn = directives
             .iter()
-            .find(|d| d.directive_type == "transaction");
+            .find(|d| matches!(d.data, DirectiveData::Transaction(_)));
         assert!(txn.is_some());
 
         if let DirectiveData::Transaction(t) = &txn.unwrap().data {

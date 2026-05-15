@@ -1,7 +1,7 @@
 //! Auto-generate Open directives for accounts used without explicit open.
 
 use crate::types::{
-    DirectiveData, DirectiveWrapper, OpenData, PluginInput, PluginOutput, sort_directives,
+    DirectiveData, DirectiveWrapper, OpenData, PluginInput, PluginOp, PluginOutput,
 };
 
 use super::super::NativePlugin;
@@ -90,9 +90,12 @@ impl NativePlugin for AutoAccountsPlugin {
             .collect();
         accounts_to_open.sort_by_key(|(account, _)| *account);
 
-        let mut new_directives: Vec<DirectiveWrapper> = Vec::new();
+        // Start with Keep ops for every input directive (preserves spans).
+        let mut ops: Vec<PluginOp> = (0..input.directives.len()).map(PluginOp::Keep).collect();
+
+        // Insert synthesized Open directives for accounts without explicit open.
         for (index, (account, date)) in accounts_to_open.into_iter().enumerate() {
-            new_directives.push(DirectiveWrapper {
+            ops.push(PluginOp::Insert(DirectiveWrapper {
                 directive_type: "open".to_string(),
                 date: date.clone(),
                 filename: Some("<auto_accounts>".to_string()),
@@ -103,17 +106,13 @@ impl NativePlugin for AutoAccountsPlugin {
                     booking: None,
                     metadata: vec![],
                 }),
-            });
+            }));
         }
 
-        // Add existing directives
-        new_directives.extend(input.directives);
-
-        // Sort using beancount's standard ordering: date, type order, line number
-        sort_directives(&mut new_directives);
-
+        // Final ordering is the loader's responsibility — it re-sorts
+        // directives after the plugin pass.
         PluginOutput {
-            directives: new_directives,
+            ops,
             errors: Vec::new(),
         }
     }

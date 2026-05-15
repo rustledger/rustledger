@@ -6,7 +6,7 @@
 //!
 //! Mirrors Python beancount's `beancount.plugins.noduplicates`.
 
-use crate::types::{PluginInput, PluginOutput};
+use crate::types::{PluginInput, PluginOp, PluginOutput};
 
 use super::super::NativePlugin;
 
@@ -30,7 +30,7 @@ impl NativePlugin for NoDuplicatesPlugin {
             .collect();
 
         PluginOutput {
-            directives: input.directives,
+            ops: (0..input.directives.len()).map(PluginOp::Keep).collect(),
             errors,
         }
     }

@@ -2762,6 +2762,15 @@ mod tests {
         );
     }
 
+    // These `#[should_panic]` tests assert the `debug_assert!` calls in
+    // `ValidationSession::check_phase_ordering` fire on misuse. Since
+    // `debug_assert!` is a no-op in release builds, gate the tests on
+    // `cfg(debug_assertions)` so `cargo test --release` (Nix builds via
+    // crane, packagers, etc.) doesn't see a `should_panic` test that
+    // can't panic. The phase-ordering check still no-ops correctly in
+    // release builds — that's the documented "release builds gracefully
+    // ignore the violation" behavior on `ValidationSession`.
+    #[cfg(debug_assertions)]
     #[test]
     #[should_panic(expected = "called twice for Late")]
     fn test_run_phase_duplicate_late_panics_in_debug() {
@@ -2773,6 +2782,7 @@ mod tests {
         let _ = session.run_phase(&directives, Phase::Late, date(2030, 1, 1));
     }
 
+    #[cfg(debug_assertions)]
     #[test]
     #[should_panic(expected = "Phase::Late) called before Phase::Early")]
     fn test_run_phase_late_before_early_panics_in_debug() {

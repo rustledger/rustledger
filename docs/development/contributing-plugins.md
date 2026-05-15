@@ -48,7 +48,7 @@ Create a new file in `crates/rustledger-plugin/src/native/plugins/`:
 // crates/rustledger-plugin/src/native/plugins/my_plugin.rs
 
 use crate::native::NativePlugin;
-use crate::types::{PluginError, PluginErrorSeverity, PluginInput, PluginOutput};
+use crate::types::{PluginError, PluginErrorSeverity, PluginInput, PluginOp, PluginOutput};
 
 /// My Plugin - brief description.
 ///
@@ -72,15 +72,26 @@ impl NativePlugin for MyPlugin {
     }
 
     fn process(&self, input: PluginInput) -> PluginOutput {
-        let mut directives = input.directives;
-        let mut errors = Vec::new();
+        let errors = Vec::new();
 
         // Your plugin logic here
         // Access config via: input.config
         // Access options via: input.options
+        //
+        // Emit ops describing the resulting directive list:
+        //   PluginOp::Keep(i)         — reuse input[i] unchanged
+        //   PluginOp::Modify(i, w)    — replace input[i]'s content
+        //   PluginOp::Insert(w)       — append a synthesized directive
+        //   PluginOp::Delete(i)       — drop input[i] (must be explicit)
 
-        PluginOutput { directives, errors }
+        // Pure-validator default: pass everything through unchanged.
+        let ops = (0..input.directives.len()).map(PluginOp::Keep).collect();
+        PluginOutput { ops, errors }
     }
+
+    // Override `is_synth() -> true` if this plugin synthesizes directives
+    // (e.g. injected `Open`s) that the loader's pre-booking Early validation
+    // depends on. Defaults to false (post-booking pass).
 }
 ````
 
@@ -163,7 +174,9 @@ mod tests {
         let output = plugin.process(input);
 
         assert!(output.errors.is_empty());
-        assert_eq!(output.directives.len(), 1);
+        // Pure validator passes through every input as Keep.
+        assert_eq!(output.ops.len(), 1);
+        assert!(matches!(output.ops[0], PluginOp::Keep(0)));
     }
 
     #[test]
@@ -251,8 +264,8 @@ fn test_my_plugin_integration() {
     // Verify no errors
     assert!(output.errors.is_empty(), "expected no errors");
 
-    // Verify directives were processed
-    assert_eq!(output.directives.len(), 1);
+    // Verify every input directive was accounted for in the op list.
+    assert_eq!(output.ops.len(), 1);
 }
 ```
 
@@ -306,31 +319,39 @@ for wrapper in &input.directives {
 
 ### Modifying Directives
 
+Emit `PluginOp::Modify(i, wrapper)` for every input index you change,
+and `PluginOp::Keep(i)` for the rest. `Modify` inherits the original
+directive's span and `file_id` so errors keep pointing at the source.
+
 ```rust
 fn process(&self, input: PluginInput) -> PluginOutput {
-    let directives: Vec<_> = input.directives
-        .into_iter()
-        .map(|mut wrapper| {
-            if let DirectiveData::Transaction(ref mut txn) = wrapper.data {
-                // Modify transaction
-                txn.tags.push("processed".to_string());
-            }
-            wrapper
-        })
-        .collect();
-
-    PluginOutput {
-        directives,
-        errors: vec![],
+    let mut ops = Vec::with_capacity(input.directives.len());
+    for (i, mut wrapper) in input.directives.into_iter().enumerate() {
+        if let DirectiveData::Transaction(ref mut txn) = wrapper.data {
+            txn.tags.push("processed".to_string());
+            ops.push(PluginOp::Modify(i, wrapper));
+        } else {
+            ops.push(PluginOp::Keep(i));
+        }
     }
+
+    PluginOutput { ops, errors: vec![] }
 }
 ```
 
 ### Adding New Directives
 
+Keep every input index and append `PluginOp::Insert(wrapper)` for each
+synthesized directive. Inserted directives get `SYNTHESIZED_FILE_ID`
+and a zero span. If your plugin synthesizes `Open` or `Document`
+directives that the loader's pre-booking Early validation depends on,
+also override `is_synth(&self) -> bool { true }` so the loader runs it
+in the synth pass.
+
 ```rust
 fn process(&self, input: PluginInput) -> PluginOutput {
-    let mut directives = input.directives;
+    let mut ops: Vec<PluginOp> =
+        (0..input.directives.len()).map(PluginOp::Keep).collect();
 
     // Generate new directives using wrapper types
     let new_price = DirectiveWrapper {
@@ -347,13 +368,9 @@ fn process(&self, input: PluginInput) -> PluginOutput {
             metadata: vec![],
         }),
     };
+    ops.push(PluginOp::Insert(new_price));
 
-    directives.push(new_price);
-
-    PluginOutput {
-        directives,
-        errors: vec![],
-    }
+    PluginOutput { ops, errors: vec![] }
 }
 ```
 
@@ -366,17 +383,16 @@ fn process(&self, input: PluginInput) -> PluginOutput {
     let mut errors = Vec::new();
 
     for directive in &input.directives {
-        if let Directive::Transaction(txn) = directive {
+        if let DirectiveData::Transaction(txn) = &directive.data {
             if txn.postings.is_empty() {
                 errors.push(PluginError::error("Transaction has no postings"));
             }
         }
     }
 
-    PluginOutput {
-        directives: input.directives,
-        errors,
-    }
+    // Pure validator: pass every input through unchanged.
+    let ops = (0..input.directives.len()).map(PluginOp::Keep).collect();
+    PluginOutput { ops, errors }
 }
 ```
 

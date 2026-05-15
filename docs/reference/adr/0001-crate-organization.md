@@ -21,7 +21,7 @@ Organize the codebase as a workspace with multiple focused crates:
 
 - **rustledger-core**: Core types (Directive, Transaction, Amount, etc.) with no internal dependencies
 - **rustledger-parser**: Beancount file parser, depends only on core
-- **rustledger-loader**: File loading, includes, caching, and processing pipeline (sort → book → plugins → validate)
+- **rustledger-loader**: File loading, includes, caching, and processing pipeline (sort → synth-plugins → Early validation → book → regular-plugins → Late validation → finalize)
 - **rustledger-validate**: Validation rules, depends on core, parser, booking
 - **rustledger-booking**: Balance booking algorithms, depends on core
 - **rustledger-query**: BQL query language, depends on core, parser, loader

@@ -44,10 +44,15 @@ rustledger supports three types of plugins:
                           ▼
 ┌─────────────────────────────────────────────────────────┐
 │              Plugin Output (PluginOutput)               │
-│  - directives: Vec<DirectiveWrapper> (possibly modified)│
+│  - ops: Vec<PluginOp>  (Keep/Modify/Insert/Delete)      │
 │  - errors: Vec<PluginError>                             │
 └─────────────────────────────────────────────────────────┘
 ```
+
+`PluginOp` is an ordered operation list — not a replacement directive
+list — so transformed directives can inherit the source span / `file_id`
+of the input they came from. See [Custom Plugins Guide](../guides/custom-plugins.md)
+for the variants and conventions.
 
 ### Plugin Loading
 
@@ -66,19 +71,43 @@ plugin "beancount.plugins.split_expenses" "alice bob"
 
 ### Plugin Execution Order
 
-Plugins execute in the order they appear in your file. This matters because:
+The loader splits plugin execution around booking. Synthesizer plugins
+that inject directives the Early validator depends on
+(`auto_accounts`, `document_discovery`) run BEFORE Early validation
+and BEFORE booking. Every other plugin runs AFTER booking and BEFORE
+Late validation so cost-spec-reading plugins (`implicit_prices`,
+`sellgains`, `unrealized`, etc.) see filled-in `cost.number_per`
+values from the booker.
+
+The full pipeline is:
+
+```
+sort → synth-plugins → Early validation → booking
+     → regular-plugins → Late validation → finalize
+```
+
+Native plugins opt into the synth pass by overriding `is_synth(&self) -> bool`
+on the `NativePlugin` trait (default: `false`). The loader uses the
+`PluginPass` enum (`PreBookingSynth`, `PostBooking`, `All`) to select
+which subset of plugins to run on each pass. Standalone callers (LSP,
+FFI, tests) that operate on already-booked input pass `PluginPass::All`
+for the historical single-pass behavior.
+
+Within each pass, plugins still execute in the order they appear in
+your file. This matters because:
 
 - Transformation plugins modify directives that subsequent plugins see
 - Validation plugins should typically run after transformation plugins
 
 ```beancount
-; 1. First, auto-generate Open directives
+; auto_accounts is a synthesizer — runs pre-booking, regardless of
+; ordering with other plugins. Listed first by convention.
 plugin "beancount.plugins.auto_accounts"
 
-; 2. Then, generate implicit prices from costs
+; Post-booking pass: implicit_prices reads booked cost specs.
 plugin "beancount.plugins.implicit_prices"
 
-; 3. Finally, validate the complete ledger
+; Post-booking pass: validation plugins run last.
 plugin "beancount.plugins.check_commodity"
 plugin "beancount.plugins.noduplicates"
 ```

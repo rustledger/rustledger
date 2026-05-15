@@ -18,20 +18,32 @@ Beancount validation with 27 error codes for ledger correctness.
 
 ## Example
 
+Validation is run through a `ValidationSession`. Standalone callers
+(LSP, FFI, tests on already-booked input) drive the two phases plus
+`finalize` directly; the loader pipeline interleaves booking between
+phases.
+
 ```rust
-use rustledger_validate::{validate, validate_with_options, ValidationOptions};
+use rustledger_validate::{Phase, ValidationOptions, ValidationSession};
+use rustledger_core::{Directive, naive_date};
 
-// Simple validation
-let errors = validate(&directives);
+let directives: Vec<Directive> = vec![/* parsed + booked input */];
+let today = naive_date(2030, 1, 1).unwrap();
 
-// Validation with options
-let options = ValidationOptions::default();
-let errors = validate_with_options(&directives, options);
+let mut session = ValidationSession::new(ValidationOptions::default());
+let mut errors = session.run_phase(&directives, Phase::Early, today);
+errors.extend(session.run_phase(&directives, Phase::Late, today));
+errors.extend(session.finalize());
 
 for error in errors {
     eprintln!("{}: {}", error.code(), error.message());
 }
 ```
+
+The previous free-function shortcuts (`validate`, `validate_with_options`)
+were removed in #1116 when validation was split around booking. Callers
+must now thread state through a `ValidationSession` so that `Phase::Late`
+sees the inventory state accumulated during `Phase::Early`.
 
 ## Features
 

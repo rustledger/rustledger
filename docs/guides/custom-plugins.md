@@ -69,8 +69,23 @@ struct PluginInput {
 // Plugin output structure
 #[derive(Serialize)]
 struct PluginOutput {
-    directives: Vec<Directive>,
+    /// Ordered ops describing the resulting directive list.
+    /// Every input index must appear in exactly one Keep/Modify/Delete.
+    ops: Vec<PluginOp>,
     errors: Vec<PluginError>,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type")]
+enum PluginOp {
+    /// Reuse input[i] unchanged (preserves span + file_id).
+    Keep(usize),
+    /// Replace input[i]'s content with `wrapper`, inheriting its source identity.
+    Modify(usize, Directive),
+    /// Emit a fresh directive with synthesized location.
+    Insert(Directive),
+    /// Drop input[i]. Must be explicit.
+    Delete(usize),
 }
 
 #[derive(Serialize)]
@@ -222,11 +237,12 @@ pub extern "C" fn process(input_ptr: u32, input_len: u32) -> u64 {
 
 fn write_error(message: &str) -> u64 {
     let output = PluginOutput {
-        directives: vec![],
+        ops: vec![],
         errors: vec![PluginError {
             message: message.to_string(),
             severity: "error".to_string(),
-            source: None,
+            source_file: None,
+            line_number: None,
         }],
     };
     let bytes = rmp_serde::to_vec(&output).unwrap_or_default();
@@ -238,27 +254,18 @@ fn write_error(message: &str) -> u64 {
 
 // Your plugin logic goes here
 fn process_directives(input: PluginInput) -> PluginOutput {
-    let mut directives = input.directives;
     let mut errors = Vec::new();
+    let mut ops: Vec<PluginOp> = Vec::with_capacity(input.directives.len());
 
-    // Example: Add a tag to all transactions
-    for directive in &mut directives {
-        if let Directive::Transaction(txn) = directive {
-            if !txn.tags.contains(&"processed".to_string()) {
-                txn.tags.push("processed".to_string());
-            }
-        }
-    }
-
-    // Example: Warn about large transactions
     let threshold: f64 = input.config
         .as_ref()
         .and_then(|c| c.strip_prefix("threshold="))
         .and_then(|s| s.parse().ok())
         .unwrap_or(10000.0);
 
-    for directive in &directives {
-        if let Directive::Transaction(txn) = directive {
+    for (i, mut directive) in input.directives.into_iter().enumerate() {
+        if let Directive::Transaction(ref mut txn) = directive {
+            // Warn about large postings
             for posting in &txn.postings {
                 if let Some(units) = &posting.units {
                     if let Ok(amount) = units.number.parse::<f64>() {
@@ -276,10 +283,20 @@ fn process_directives(input: PluginInput) -> PluginOutput {
                     }
                 }
             }
+
+            // Add a tag to every transaction
+            if !txn.tags.contains(&"processed".to_string()) {
+                txn.tags.push("processed".to_string());
+                ops.push(PluginOp::Modify(i, directive));
+            } else {
+                ops.push(PluginOp::Keep(i));
+            }
+        } else {
+            ops.push(PluginOp::Keep(i));
         }
     }
 
-    PluginOutput { directives, errors }
+    PluginOutput { ops, errors }
 }
 ```
 
@@ -346,16 +363,15 @@ fn process_directives(input: PluginInput) -> PluginOutput {
                     ),
                     severity: "error".to_string(),
                     source_file: None,
-                                line_number: None,
+                    line_number: None,
                 });
             }
         }
     }
 
-    PluginOutput {
-        directives: input.directives,
-        errors,
-    }
+    // Pure validator: pass every input through unchanged.
+    let ops = (0..input.directives.len()).map(PluginOp::Keep).collect();
+    PluginOutput { ops, errors }
 }
 ```
 
@@ -363,24 +379,24 @@ fn process_directives(input: PluginInput) -> PluginOutput {
 
 ```rust
 fn process_directives(input: PluginInput) -> PluginOutput {
-    let mut directives = input.directives;
+    let mut ops = Vec::with_capacity(input.directives.len());
 
-    for directive in &mut directives {
-        if let Directive::Transaction(txn) = directive {
+    for (i, mut directive) in input.directives.into_iter().enumerate() {
+        if let Directive::Transaction(ref mut txn) = directive {
             // Add review-status metadata if not present
             if !txn.meta.contains_key("review-status") {
                 txn.meta.insert(
                     "review-status".to_string(),
-                    "pending".to_string()
+                    "pending".to_string(),
                 );
+                ops.push(PluginOp::Modify(i, directive));
+                continue;
             }
         }
+        ops.push(PluginOp::Keep(i));
     }
 
-    PluginOutput {
-        directives,
-        errors: vec![],
-    }
+    PluginOutput { ops, errors: vec![] }
 }
 ```
 
@@ -408,7 +424,7 @@ fn process_directives(input: PluginInput) -> PluginOutput {
                             ),
                             severity: "error".to_string(),
                             source_file: None,
-                                line_number: None,
+                            line_number: None,
                         });
                     }
                 }
@@ -416,10 +432,9 @@ fn process_directives(input: PluginInput) -> PluginOutput {
         }
     }
 
-    PluginOutput {
-        directives: input.directives,
-        errors,
-    }
+    // Pure validator: pass every input through unchanged.
+    let ops = (0..input.directives.len()).map(PluginOp::Keep).collect();
+    PluginOutput { ops, errors }
 }
 ```
 
@@ -437,8 +452,17 @@ fn process_directives(input: PluginInput) -> PluginOutput {
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `directives` | `Vec<Directive>` | Modified directives (or unchanged) |
+| `ops` | `Vec<PluginOp>` | Ordered Keep/Modify/Insert/Delete ops describing the resulting directive list |
 | `errors` | `Vec<PluginError>` | Errors and warnings to report |
+
+### PluginOp
+
+| Variant | Description |
+|---------|-------------|
+| `Keep(i)` | Reuse `input[i]` unchanged (preserves span + `file_id`) |
+| `Modify(i, w)` | Replace `input[i]`'s content with `w`, inheriting its source identity |
+| `Insert(w)` | Emit a fresh directive with synthesized location |
+| `Delete(i)` | Drop `input[i]` (must be explicit) |
 
 ### PluginError
 
@@ -446,7 +470,8 @@ fn process_directives(input: PluginInput) -> PluginOutput {
 |-------|------|-------------|
 | `message` | `String` | Human-readable error message |
 | `severity` | `String` | `"error"` or `"warning"` |
-| `source` | `Option<Source>` | Location in source file |
+| `source_file` | `Option<String>` | Source file path (if known) |
+| `line_number` | `Option<u32>` | 1-based line number (if known) |
 
 ## Testing Your Plugin
 
@@ -480,8 +505,16 @@ mod tests {
 
         let output = process_directives(input);
 
-        if let Directive::Transaction(txn) = &output.directives[0] {
-            assert!(txn.tags.contains(&"processed".to_string()));
+        // The transformer rewrites input[0], so we expect Modify(0, _).
+        match &output.ops[0] {
+            PluginOp::Modify(0, wrapper) => {
+                if let Directive::Transaction(txn) = wrapper {
+                    assert!(txn.tags.contains(&"processed".to_string()));
+                } else {
+                    panic!("expected Transaction");
+                }
+            }
+            other => panic!("expected Modify(0, _), got {:?}", other),
         }
     }
 }

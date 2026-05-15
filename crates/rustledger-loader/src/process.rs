@@ -656,8 +656,8 @@ pub fn run_plugins(
             config: None,
         };
         let output = doc_plugin.process(input);
-        record_plugin_errors(errors, output.errors, false);
-        apply_plugin_ops(directives, output.ops, errors)?;
+        record_plugin_errors(errors, output.errors, source_map);
+        apply_plugin_ops(directives, output.ops, errors, source_map)?;
     }
 
     // Run each plugin (registry was constructed earlier for the
@@ -690,8 +690,8 @@ pub fn run_plugins(
                     config: plugin_config.clone(),
                 };
                 let output = plugin.process(input);
-                record_plugin_errors(errors, output.errors, true);
-                apply_plugin_ops(directives, output.ops, errors)?;
+                record_plugin_errors(errors, output.errors, source_map);
+                apply_plugin_ops(directives, output.ops, errors, source_map)?;
             } else {
                 // Not a native plugin — categorize and handle
                 let plugin_path = std::path::Path::new(raw_name);
@@ -754,7 +754,7 @@ pub fn run_plugins(
                                 for err in plugin_errors {
                                     errors.push(err);
                                 }
-                                apply_plugin_ops(directives, ops, errors)?;
+                                apply_plugin_ops(directives, ops, errors, source_map)?;
                             }
                             Err(e) => {
                                 errors.push(
@@ -807,7 +807,7 @@ pub fn run_plugins(
                                 for err in plugin_errors {
                                     errors.push(err);
                                 }
-                                apply_plugin_ops(directives, ops, errors)?;
+                                apply_plugin_ops(directives, ops, errors, source_map)?;
                             }
                             Err(e) => {
                                 errors.push(LedgerError::error("E8002", e).with_phase("plugin"));
@@ -903,25 +903,46 @@ fn build_wrappers(
         .collect()
 }
 
-/// Push plugin errors into the ledger's error stream, optionally tagging
-/// them with `phase: "plugin"` (used for non-document-discovery plugins).
+/// Push plugin errors into the ledger's error stream, tagged with
+/// `phase: "plugin"` and — when the plugin set `source_file` /
+/// `line_number` on the error — an attached `ErrorLocation` so
+/// downstream renderers (CLI, LSP, JSON output) can pinpoint where
+/// the plugin objected.
+///
+/// Source-location resolution: if the wrapper's `source_file` resolves
+/// to a real file in the source map, use that for `ErrorLocation.file`
+/// and treat `line_number` as the line index. Plugin-synthesized
+/// filenames (e.g. `"<auto_accounts>"`) that don't match any real
+/// file are passed through as `PathBuf::from(name)` so the rendered
+/// location still attributes the error to the originating plugin —
+/// better than silently dropping the field.
 #[cfg(feature = "plugins")]
 fn record_plugin_errors(
     errors: &mut Vec<LedgerError>,
     plugin_errors: Vec<rustledger_plugin::PluginError>,
-    tag_phase: bool,
+    source_map: &SourceMap,
 ) {
     for err in plugin_errors {
         let mut ledger_err = match err.severity {
             rustledger_plugin::PluginErrorSeverity::Error => {
-                LedgerError::error("PLUGIN", err.message)
+                LedgerError::error("PLUGIN", err.message).with_phase("plugin")
             }
             rustledger_plugin::PluginErrorSeverity::Warning => {
-                LedgerError::warning("PLUGIN", err.message)
+                LedgerError::warning("PLUGIN", err.message).with_phase("plugin")
             }
         };
-        if tag_phase {
-            ledger_err = ledger_err.with_phase("plugin");
+        // Propagate plugin-set source location into `ErrorLocation`.
+        // Column defaults to 1 — plugin errors don't carry column info
+        // through the wrapper protocol.
+        if let (Some(file), Some(line)) = (&err.source_file, err.line_number) {
+            let resolved_path = source_map
+                .get_by_path(std::path::Path::new(file))
+                .map_or_else(|| std::path::PathBuf::from(file), |f| f.path.clone());
+            ledger_err = ledger_err.with_location(ErrorLocation {
+                file: resolved_path,
+                line: line as usize,
+                column: 1,
+            });
         }
         errors.push(ledger_err);
     }
@@ -944,6 +965,7 @@ fn apply_plugin_ops(
     directives: &mut Vec<Spanned<Directive>>,
     ops: Vec<rustledger_plugin::PluginOp>,
     errors: &mut Vec<LedgerError>,
+    source_map: &SourceMap,
 ) -> Result<(), ProcessError> {
     use rustledger_plugin::PluginOp;
     use rustledger_plugin::wrapper_to_directive;
@@ -1015,12 +1037,35 @@ fn apply_plugin_ops(
                 });
             }
             PluginOp::Insert(wrapper) => {
+                // Resolve the wrapper's filename + line number, if set,
+                // into a real (file_id, span) when the filename
+                // corresponds to a loaded source file. Falls back to
+                // SYNTHESIZED_FILE_ID + zero span otherwise — including
+                // for plugin-only attribution like `"<auto_accounts>"`
+                // (which never matches a loaded file).
+                let (span, file_id) = match (&wrapper.filename, wrapper.lineno) {
+                    (Some(filename), Some(lineno)) => {
+                        if let Some(file) = source_map.get_by_path(std::path::Path::new(filename)) {
+                            let span_start = file.line_start(lineno as usize).unwrap_or(0);
+                            (
+                                rustledger_parser::Span::new(span_start, span_start),
+                                file.id as u16,
+                            )
+                        } else {
+                            (
+                                rustledger_parser::Span::new(0, 0),
+                                rustledger_parser::SYNTHESIZED_FILE_ID,
+                            )
+                        }
+                    }
+                    _ => (
+                        rustledger_parser::Span::new(0, 0),
+                        rustledger_parser::SYNTHESIZED_FILE_ID,
+                    ),
+                };
                 let directive = wrapper_to_directive(&wrapper)
                     .map_err(|e| ProcessError::PluginConversion(e.to_string()))?;
-                new_directives.push(
-                    Spanned::new(directive, rustledger_parser::Span::new(0, 0))
-                        .with_file_id(rustledger_parser::SYNTHESIZED_FILE_ID as usize),
-                );
+                new_directives.push(Spanned::new(directive, span).with_file_id(file_id as usize));
             }
             PluginOp::Delete(_) => {}
         }

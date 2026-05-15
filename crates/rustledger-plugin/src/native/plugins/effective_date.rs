@@ -72,12 +72,20 @@ impl NativePlugin for EffectiveDatePlugin {
 
         let mut new_accounts: HashSet<String> = HashSet::new();
         let mut earliest_date: Option<String> = None;
+        // Accounts already opened by the user; suppress duplicate Opens
+        // for holding accounts the user has pre-declared (else Late
+        // validation emits E1002 AccountAlreadyOpen). Mirrors the
+        // pattern in `zerosum`, `currency_accounts`, `split_expenses`,
+        // and `capital_gains_classifier`.
+        let mut existing_opens: HashSet<String> = HashSet::new();
 
-        // Compute earliest date across all input directives (covers both
-        // interesting and pass-through directives).
+        // Compute earliest date AND record existing opens in one pass.
         for directive in &input.directives {
             if earliest_date.is_none() || directive.date < *earliest_date.as_ref().unwrap() {
                 earliest_date = Some(directive.date.clone());
+            }
+            if let DirectiveData::Open(open) = &directive.data {
+                existing_opens.insert(open.account.clone());
             }
         }
 
@@ -183,9 +191,13 @@ impl NativePlugin for EffectiveDatePlugin {
             ops.push(PluginOp::Insert(w));
         }
 
-        // Insert Open directives for newly synthesized holding accounts.
+        // Insert Open directives for newly synthesized holding accounts
+        // the user hasn't already opened.
         if let Some(date) = &earliest_date {
             for account in &new_accounts {
+                if existing_opens.contains(account) {
+                    continue;
+                }
                 ops.push(PluginOp::Insert(DirectiveWrapper {
                     directive_type: "open".to_string(),
                     date: date.clone(),

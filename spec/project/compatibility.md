@@ -124,16 +124,27 @@ def process(entries, options_map):
 // Rust WASM plugin
 #[no_mangle]
 pub fn process(input: PluginInput) -> PluginOutput {
-    let mut directives = input.directives;
+    let mut ops = Vec::with_capacity(input.directives.len());
     let mut errors = Vec::new();
 
-    for directive in &mut directives {
-        // Transform directive
+    for (i, wrapper) in input.directives.into_iter().enumerate() {
+        // Transform: emit Modify(i, new_wrapper) for changed entries,
+        // Keep(i) for unchanged ones. Every input index MUST appear
+        // exactly once across Keep/Modify/Delete.
+        let _ = wrapper; // (your transform logic here)
+        ops.push(PluginOp::Keep(i));
     }
 
-    PluginOutput { directives, errors }
+    PluginOutput { ops, errors }
 }
 ```
+
+The output is an ordered sequence of [`PluginOp`] — `Keep(i)` reuses
+the original `input[i]` (preserving its source span), `Modify(i, w)`
+substitutes new content while inheriting `input[i]`'s identity,
+`Insert(w)` adds a fresh directive, and `Delete(i)` drops one. For
+pure passthrough plugins, `PluginOutput::passthrough(input.directives.len())`
+is the one-liner equivalent.
 
 ## BQL Compatibility
 

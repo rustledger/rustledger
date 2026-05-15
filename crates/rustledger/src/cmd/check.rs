@@ -550,7 +550,8 @@ pub fn run(args: &Args) -> Result<ExitCode> {
     // === Delegate booking, plugins, and validation to process::process() ===
     //
     // process::process() is the single source of truth for the core pipeline:
-    // sort → book → plugins (native + WASM + Python) → validate.
+    // sort → synth-plugins → Early validation → book → regular-plugins (native +
+    // WASM + Python) → Late validation → finalize.
     // check.rs handles: caching, load error reporting, JSON formatting,
     // and CLI-specified --plugin WASM files (below).
 

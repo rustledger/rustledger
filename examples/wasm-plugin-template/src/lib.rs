@@ -3,6 +3,12 @@
 //! This is a minimal template for creating rustledger WASM plugins.
 //! It demonstrates the required exports and basic structure.
 //!
+//! The plugin protocol emits an ordered list of [`PluginOp`] describing
+//! the resulting directive list. Each input index must appear in
+//! EXACTLY ONE of `Keep` / `Modify` / `Delete`; `Insert` adds fresh
+//! directives. Pure passthrough plugins can use
+//! [`PluginOutput::passthrough`].
+//!
 //! # Building
 //!
 //! ```sh
@@ -68,7 +74,7 @@ pub extern "C" fn process(input_ptr: u32, input_len: u32) -> u64 {
 /// Helper to return an error result.
 fn pack_error(message: &str) -> u64 {
     let output = PluginOutput {
-        directives: vec![],
+        ops: vec![],
         errors: vec![PluginError::error(message)],
     };
     let bytes = rmp_serde::to_vec(&output).unwrap_or_default();
@@ -86,21 +92,40 @@ fn pack_error(message: &str) -> u64 {
 /// Main processing function.
 ///
 /// This example adds a "processed" tag to all transactions.
+///
+/// Transactions are emitted as `Modify` ops (new content, inherits the
+/// input's source identity), and all other directives pass through as
+/// `Keep` ops.
 fn process_directives(input: PluginInput) -> PluginOutput {
-    let mut directives = Vec::new();
+    let mut ops = Vec::with_capacity(input.directives.len());
 
-    for mut wrapper in input.directives {
-        // Example: add a tag to all transactions
-        if let DirectiveData::Transaction(ref mut txn) = wrapper.data {
-            if !txn.tags.iter().any(|t| t == "processed") {
-                txn.tags.push("processed".to_string());
+    for (i, wrapper) in input.directives.into_iter().enumerate() {
+        match wrapper.data {
+            DirectiveData::Transaction(mut txn) => {
+                // Example: add a tag to all transactions
+                if txn.tags.iter().any(|t| t == "processed") {
+                    // Already tagged — no change, keep as-is.
+                    ops.push(PluginOp::Keep(i));
+                } else {
+                    txn.tags.push("processed".to_string());
+                    let new_wrapper = DirectiveWrapper {
+                        directive_type: wrapper.directive_type,
+                        date: wrapper.date,
+                        filename: wrapper.filename,
+                        lineno: wrapper.lineno,
+                        data: DirectiveData::Transaction(txn),
+                    };
+                    ops.push(PluginOp::Modify(i, new_wrapper));
+                }
+            }
+            _ => {
+                ops.push(PluginOp::Keep(i));
             }
         }
-        directives.push(wrapper);
     }
 
     PluginOutput {
-        directives,
+        ops,
         errors: vec![],
     }
 }

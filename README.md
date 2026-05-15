@@ -261,7 +261,7 @@ The `--balance` flag appends a balance assertion directive matching your bank st
 | `rustledger-parser` | Lexer and parser with error recovery |
 | `rustledger-loader` | File loading and includes |
 | `rustledger-booking` | Interpolation and 7 booking methods |
-| `rustledger-validate` | 28 validation error codes |
+| `rustledger-validate` | 26 validation error codes |
 | `rustledger-query` | BQL query engine |
 | `rustledger-plugin` | 30 built-in plugins + Python plugin support |
 | `rustledger-plugin-types` | Shared plugin type definitions |

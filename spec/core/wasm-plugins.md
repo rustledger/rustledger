@@ -261,41 +261,63 @@ plugin "beancount.plugins.implicit_prices"  ; recognized as built-in
 ### Rust Plugin Template
 
 ```rust
-use beancount_plugin::{Directive, Options, PluginError, PluginInput, PluginOutput};
+use rustledger_plugin_types::*;
 
 #[no_mangle]
 pub extern "C" fn process(input_ptr: *const u8, input_len: usize) -> *mut u8 {
     let input: PluginInput = deserialize(input_ptr, input_len);
 
-    let mut directives = input.directives;
+    let mut ops = Vec::with_capacity(input.directives.len());
     let mut errors = Vec::new();
 
-    // Transform directives
-    for directive in &mut directives {
-        if let Directive::Transaction(ref mut txn) = directive {
-            // Plugin logic here
+    // Emit one PluginOp per input directive (Keep / Modify / Delete),
+    // plus any Insert ops for fresh directives. Every input index must
+    // appear in EXACTLY ONE of {Keep, Modify, Delete}.
+    for (i, wrapper) in input.directives.into_iter().enumerate() {
+        match wrapper.data {
+            DirectiveData::Transaction(mut txn) => {
+                // Plugin logic here — mutate `txn` then emit Modify
+                // (substitutes content while keeping input[i]'s source span)
+                // or Keep(i) if you didn't change anything.
+                let new_wrapper = DirectiveWrapper {
+                    directive_type: wrapper.directive_type,
+                    date: wrapper.date,
+                    filename: wrapper.filename,
+                    lineno: wrapper.lineno,
+                    data: DirectiveData::Transaction(txn),
+                };
+                ops.push(PluginOp::Modify(i, new_wrapper));
+            }
+            _ => ops.push(PluginOp::Keep(i)),
         }
     }
 
-    let output = PluginOutput { directives, errors };
+    let output = PluginOutput { ops, errors };
     serialize_to_ptr(output)
 }
 ```
 
+For pure passthrough plugins (e.g. validators that only emit errors),
+use the one-liner `PluginOutput::passthrough(input.directives.len())`
+instead of building the op list by hand.
+
 ### AssemblyScript Plugin Template
 
 ```typescript
-import { Directive, PluginInput, PluginOutput, Error } from "rustledger-plugin-sdk";
+import { PluginInput, PluginOutput, PluginOp, Error } from "rustledger-plugin-sdk";
 
 export function process(input: PluginInput): PluginOutput {
-    const directives = input.directives;
+    const ops: PluginOp[] = [];
     const errors: Error[] = [];
 
-    for (let i = 0; i < directives.length; i++) {
-        // Plugin logic
+    for (let i = 0; i < input.directives.length; i++) {
+        // Plugin logic — push Keep(i) for unchanged, Modify(i, wrapper)
+        // for transformed, Delete(i) to drop, or push Insert(wrapper)
+        // anywhere in the sequence to add fresh directives.
+        ops.push({ kind: "Keep", index: i });
     }
 
-    return { directives, errors };
+    return { ops, errors };
 }
 ```
 

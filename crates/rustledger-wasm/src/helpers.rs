@@ -71,8 +71,11 @@ pub fn load_and_book(source: &str) -> ProcessedLedger {
     // Extract options before process() consumes raw
     let options = extract_loader_options(&raw.options);
 
-    // Run the shared processing pipeline: sort → book → plugins
-    // Skip validation here - callers that need it will call run_validation()
+    // Run the shared processing pipeline:
+    // sort → synth-plugins → book → regular-plugins → finalize
+    // Skip validation here — callers that need it will call run_validation()
+    // (the validation pass itself is split into Early — before booking — and
+    // Late — after regular plugins; both are invoked when `validate: true`).
     let load_options = LoadOptions {
         validate: false,
         ..Default::default()

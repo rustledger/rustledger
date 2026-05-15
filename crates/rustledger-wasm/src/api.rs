@@ -573,7 +573,8 @@ pub fn validate_multi_file(files: JsValue, entry_point: &str) -> Result<JsValue,
         return to_js(&result);
     }
 
-    // Run the shared processing pipeline: sort → book → plugins → validate
+    // Run the shared processing pipeline:
+    // sort → synth-plugins → Early validation → book → regular-plugins → Late validation → finalize
     let options = LoadOptions {
         validate: true,
         ..Default::default()
@@ -660,7 +661,8 @@ pub fn query_multi_file(
         return to_js(&result);
     }
 
-    // Run the shared processing pipeline: sort → book → plugins (no validation for queries)
+    // Run the shared processing pipeline (queries skip validation):
+    // sort → synth-plugins → book → regular-plugins → finalize
     let options = LoadOptions {
         validate: false,
         ..Default::default()

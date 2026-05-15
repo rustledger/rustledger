@@ -479,8 +479,8 @@ pub struct Ledger {
 impl Ledger {
     /// Create a `Ledger` from multiple files with include resolution.
     ///
-    /// Loads, sorts, books, runs plugins, and validates the ledger using the
-    /// same processing pipeline as the CLI.
+    /// Loads and runs the same processing pipeline as the CLI:
+    /// sort → synth-plugins → Early validation → book → regular-plugins → Late validation → finalize.
     ///
     /// # Arguments
     ///

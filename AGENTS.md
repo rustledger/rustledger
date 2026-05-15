@@ -16,9 +16,9 @@ The project is a Cargo workspace with these crates:
 | `rustledger-parser` | Lexer and parser with error recovery |
 | `rustledger-loader` | File loading, includes, options |
 | `rustledger-booking` | Interpolation and booking engine (7 methods) |
-| `rustledger-validate` | Validation with 27 error codes |
+| `rustledger-validate` | Validation with 26 error codes |
 | `rustledger-query` | BQL query engine |
-| `rustledger-plugin` | Native and WASM plugin system (20 plugins) |
+| `rustledger-plugin` | Native and WASM plugin system (30 plugins) |
 | `rustledger-importer` | Import framework for bank statements |
 | `rustledger` | CLI tool (`rledger check`, `rledger query`, etc.) |
 | `rustledger-wasm` | WebAssembly library target |

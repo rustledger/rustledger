@@ -76,7 +76,7 @@ The project is a Cargo workspace with 14 crates plus editor extensions:
 | `rustledger-parser` | Lexer and parser with error recovery |
 | `rustledger-loader` | File loading, includes, options |
 | `rustledger-booking` | Interpolation and booking engine (7 methods) |
-| `rustledger-validate` | Validation with 28 error codes |
+| `rustledger-validate` | Validation with 26 error codes |
 | `rustledger-query` | BQL query engine |
 | `rustledger-plugin` | Native and WASM plugin system (30 plugins) |
 | `rustledger-plugin-types` | Shared plugin type definitions |

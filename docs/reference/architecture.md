@@ -76,7 +76,7 @@ This document describes rustledger's crate structure and data flow.
 |-------|---------|-----------|
 | `rustledger-loader` | File loading, includes, caching | `Loader`, `LoadedLedger`, `Options` |
 | `rustledger-booking` | Cost basis and lot matching | `BookingMethod` (FIFO, LIFO, HIFO, etc.) |
-| `rustledger-validate` | Validation rules | `ValidationError`, 28 error codes (E1001-E10002) |
+| `rustledger-validate` | Validation rules | `ValidationError`, 26 error codes (E1001-E10002) |
 
 ### Feature Layer
 
@@ -106,7 +106,7 @@ Input File
     │
     ▼
 ┌─────────────────────────────────────┐
-│ 1. PARSE (rustledger-parser)        │
+│ PARSE (rustledger-parser)           │
 │    - Lexer tokenizes input          │
 │    - Parser builds AST              │
 │    - Recovers from syntax errors    │
@@ -114,7 +114,7 @@ Input File
     │
     ▼
 ┌─────────────────────────────────────┐
-│ 2. LOAD (rustledger-loader)         │
+│ LOAD (rustledger-loader)            │
 │    - Process includes               │
 │    - Parse options                  │
 │    - Cache compiled directives      │
@@ -122,31 +122,77 @@ Input File
     │
     ▼
 ┌─────────────────────────────────────┐
-│ 3. SORT (rustledger-loader) +       │
-│    BOOK (rustledger-booking)        │
-│    - Loader sorts by                │
-│      date/type/cost-reduce          │
-│    - Booking interpolates amounts   │
-│    - Booking matches lots           │
-│      (FIFO/LIFO/etc)                │
-│    - Booking computes cost basis    │
+│ 1. SORT (rustledger-loader)         │
+│    - Sort by date/type/lineno       │
+│      (matches Python's              │
+│      entry_sortkey())               │
 └─────────────────────────────────────┘
     │
     ▼
 ┌─────────────────────────────────────┐
-│ 4. PLUGINS (rustledger-plugin)      │
-│    - Run native plugins (30+)       │
-│    - Run WASM plugins (sandboxed)   │
-│    - Run Python plugins (via WASI)  │
-│    - Transform directives           │
+│ 2. SYNTH PLUGINS                    │
+│    (rustledger-plugin)              │
+│    - Account-injecting plugins      │
+│      run BEFORE Early validation    │
+│    - e.g. auto_accounts,            │
+│      document_discovery             │
+│    - Selected via                   │
+│      NativePlugin::is_synth()       │
+│      → PluginPass::Synth            │
 └─────────────────────────────────────┘
     │
     ▼
 ┌─────────────────────────────────────┐
-│ 5. VALIDATE (rustledger-validate)   │
-│    - Check balance assertions       │
-│    - Verify account opens/closes    │
-│    - Validate commodities           │
+│ 3. EARLY VALIDATION                 │
+│    (rustledger-validate)            │
+│    - Account-presence checks        │
+│      (Open before use, etc.) —      │
+│      sees Opens synthesized by      │
+│      synth plugins above            │
+│    - Catches issues that would      │
+│      otherwise be hidden by         │
+│      booking interpolation          │
+│      (see Python beancount #877)    │
+└─────────────────────────────────────┘
+    │
+    ▼
+┌─────────────────────────────────────┐
+│ 4. BOOK (rustledger-booking)        │
+│    - Interpolate elided amounts     │
+│    - Match lots (FIFO/LIFO/HIFO/…)  │
+│    - Compute cost basis             │
+│    - Fill in cost.number_per from   │
+│      total cost specs               │
+└─────────────────────────────────────┘
+    │
+    ▼
+┌─────────────────────────────────────┐
+│ 5. PARTITION + REGULAR PLUGINS      │
+│    (rustledger-plugin)              │
+│    - All non-synth plugins run      │
+│      AFTER booking, so cost-spec-   │
+│      reading plugins see filled-in  │
+│      number_per                     │
+│    - Native + WASM + Python         │
+└─────────────────────────────────────┘
+    │
+    ▼
+┌─────────────────────────────────────┐
+│ 6. LATE VALIDATION                  │
+│    (rustledger-validate)            │
+│    - Balance assertions             │
+│    - Commodity / currency checks    │
+│    - Post-booking invariants        │
+└─────────────────────────────────────┘
+    │
+    ▼
+┌─────────────────────────────────────┐
+│ 7. FINALIZE + RE-MERGE              │
+│    (rustledger-loader)              │
+│    - Re-merge plugin-emitted        │
+│      directives back into the       │
+│      sorted stream                  │
+│    - Build the final LoadedLedger   │
 └─────────────────────────────────────┘
     │
     ▼
@@ -217,7 +263,13 @@ Plugins are executed by `run_plugins()` in `rustledger-loader`, the single sourc
 - **WASM plugins**: Any language compiled to WASM, sandboxed via wasmtime
 - **Python plugins**: CPython compiled to WASI, runs existing beancount plugins
 
-Plugin execution order within the pipeline: after booking, before validation. This ensures plugins see fully-interpolated directives and validation checks plugin output.
+Plugin execution is **split across two passes** of the pipeline (see the seven-step diagram above). Plugins declare which pass they belong to via `NativePlugin::is_synth()`, which selects between the two `PluginPass` variants:
+
+- **Synth plugins** (`PluginPass::Synth`) run **before Early validation**. These are account- or directive-injecting plugins like `auto_accounts` and `document_discovery`. Running them first means the Early validator's account-presence checks (Open-before-use) see the directives synth plugins inject — preventing false positives that would otherwise occur when a plugin is responsible for opening an account that subsequent transactions reference.
+
+- **Regular plugins** (`PluginPass::Regular`) — every plugin where `is_synth()` returns `false` — run **after booking**. This is the right phase for plugins that consume booked output, particularly cost-spec readers that need `cost.number_per` filled in from a total cost spec (the booking engine computes this). Validators that need post-interpolation amounts also belong here.
+
+After the regular pass, **Late validation** runs (balance assertions, commodity checks, post-booking invariants), then the loader finalizes the ledger by re-merging plugin-emitted directives into the sorted stream.
 
 ### 5. Binary Cache
 

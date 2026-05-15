@@ -3,7 +3,8 @@
 //! This plugin demonstrates how to create a WASM plugin that:
 //! 1. Receives directives from the host
 //! 2. Processes them (adds tags, validates, generates new directives)
-//! 3. Returns modified directives and any errors
+//! 3. Returns an ordered list of `PluginOp` describing the resulting
+//!    directive list, plus any errors
 //!
 //! # Building
 //!
@@ -70,7 +71,7 @@ pub extern "C" fn process(input_ptr: u32, input_len: u32) -> u64 {
 
 fn pack_error(message: &str) -> u64 {
     let output = PluginOutput {
-        directives: Vec::new(),
+        ops: Vec::new(),
         errors: vec![PluginError::error(message)],
     };
     let bytes = rmp_serde::to_vec(&output).unwrap_or_default();
@@ -88,11 +89,13 @@ fn pack_error(message: &str) -> u64 {
 /// Main plugin processing logic.
 ///
 /// This example plugin:
-/// 1. Adds a "processed" tag to all transactions
-/// 2. Validates that expense accounts have expense tags
+/// 1. Adds a "processed" tag to all transactions (emits `Modify`)
+/// 2. Validates that expense accounts have expense tags (emits warnings)
 /// 3. Generates warnings for large transactions
+///
+/// Non-transaction directives pass through unchanged (emits `Keep`).
 fn process_directives(input: PluginInput) -> PluginOutput {
-    let mut directives = Vec::new();
+    let mut ops = Vec::with_capacity(input.directives.len());
     let mut errors = Vec::new();
 
     // Parse config (example: "threshold=1000")
@@ -102,46 +105,67 @@ fn process_directives(input: PluginInput) -> PluginOutput {
         .and_then(|c| c.strip_prefix("threshold=").and_then(|s| s.parse().ok()))
         .unwrap_or(1000.0);
 
-    for mut wrapper in input.directives {
-        if let DirectiveData::Transaction(ref mut txn) = wrapper.data {
-            // Add "processed" tag
-            if !txn.tags.contains(&"processed".to_string()) {
-                txn.tags.push("processed".to_string());
-            }
+    for (i, wrapper) in input.directives.into_iter().enumerate() {
+        match wrapper.data {
+            DirectiveData::Transaction(mut txn) => {
+                let mut modified = false;
 
-            // Check for large transactions
-            for posting in &txn.postings {
-                if let Some(ref units) = posting.units {
-                    if let Ok(amount) = units.number.parse::<f64>() {
-                        if amount.abs() > threshold {
+                // Add "processed" tag
+                if !txn.tags.contains(&"processed".to_string()) {
+                    txn.tags.push("processed".to_string());
+                    modified = true;
+                }
+
+                // Check for large transactions and missing expense tags
+                for posting in &txn.postings {
+                    if let Some(ref units) = posting.units {
+                        if let Ok(amount) = units.number.parse::<f64>() {
+                            if amount.abs() > threshold {
+                                errors.push(PluginError::warning(format!(
+                                    "Large transaction: {} {} in {} (threshold: {})",
+                                    units.number, units.currency, posting.account, threshold
+                                )));
+                            }
+                        }
+                    }
+
+                    // Check expense accounts have expense-related tags
+                    if posting.account.starts_with("Expenses:") {
+                        let has_expense_tag = txn
+                            .tags
+                            .iter()
+                            .any(|t| t == "expense" || t == "deductible" || t == "business");
+                        if !has_expense_tag && txn.tags.len() <= 1 {
                             errors.push(PluginError::warning(format!(
-                                "Large transaction: {} {} in {} (threshold: {})",
-                                units.number, units.currency, posting.account, threshold
+                                "Expense transaction without category tag: {}",
+                                txn.narration
                             )));
                         }
                     }
                 }
 
-                // Check expense accounts have expense-related tags
-                if posting.account.starts_with("Expenses:") {
-                    let has_expense_tag = txn
-                        .tags
-                        .iter()
-                        .any(|t| t == "expense" || t == "deductible" || t == "business");
-                    if !has_expense_tag && txn.tags.len() <= 1 {
-                        errors.push(PluginError::warning(format!(
-                            "Expense transaction without category tag: {}",
-                            txn.narration
-                        )));
-                    }
+                if modified {
+                    let new_wrapper = DirectiveWrapper {
+                        directive_type: wrapper.directive_type,
+                        date: wrapper.date,
+                        filename: wrapper.filename,
+                        lineno: wrapper.lineno,
+                        data: DirectiveData::Transaction(txn),
+                    };
+                    ops.push(PluginOp::Modify(i, new_wrapper));
+                } else {
+                    // No change — preserve original identity with Keep.
+                    ops.push(PluginOp::Keep(i));
                 }
             }
+            _ => {
+                // Non-transaction directives: pass through unchanged.
+                ops.push(PluginOp::Keep(i));
+            }
         }
-
-        directives.push(wrapper);
     }
 
-    PluginOutput { directives, errors }
+    PluginOutput { ops, errors }
 }
 
 // ============================================================================
@@ -186,16 +210,33 @@ mod tests {
         }
     }
 
+    /// Materialize the output's ops against the original input to recover
+    /// the resulting directive list. Mirrors what the host does — useful
+    /// in tests so we can assert on the post-processed content.
+    fn materialize(input: &[DirectiveWrapper], ops: &[PluginOp]) -> Vec<DirectiveWrapper> {
+        let mut out = Vec::with_capacity(ops.len());
+        for op in ops {
+            match op {
+                PluginOp::Keep(i) => out.push(input[*i].clone()),
+                PluginOp::Modify(_i, w) => out.push(w.clone()),
+                PluginOp::Insert(w) => out.push(w.clone()),
+                PluginOp::Delete(_) => {} // dropped
+            }
+        }
+        out
+    }
+
     #[test]
     fn test_process_adds_tag() {
+        let directives = vec![make_transaction(
+            "2024-01-15",
+            Some("Coffee Shop"),
+            "Morning coffee",
+            "Expenses:Food:Coffee",
+            "5.00",
+        )];
         let input = PluginInput {
-            directives: vec![make_transaction(
-                "2024-01-15",
-                Some("Coffee Shop"),
-                "Morning coffee",
-                "Expenses:Food:Coffee",
-                "5.00",
-            )],
+            directives: directives.clone(),
             options: PluginOptions {
                 operating_currencies: vec!["USD".to_string()],
                 title: None,
@@ -205,8 +246,14 @@ mod tests {
 
         let output = process_directives(input);
 
-        assert_eq!(output.directives.len(), 1);
-        if let DirectiveData::Transaction(txn) = &output.directives[0].data {
+        // One op for the one input directive — and since we added a tag,
+        // it must be a Modify (not Keep).
+        assert_eq!(output.ops.len(), 1);
+        assert!(matches!(output.ops[0], PluginOp::Modify(0, _)));
+
+        let materialized = materialize(&directives, &output.ops);
+        assert_eq!(materialized.len(), 1);
+        if let DirectiveData::Transaction(txn) = &materialized[0].data {
             assert!(txn.tags.contains(&"processed".to_string()));
         } else {
             panic!("Expected transaction");

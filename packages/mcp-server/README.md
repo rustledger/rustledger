@@ -110,7 +110,7 @@ The server exposes documentation resources:
 | Resource | Description |
 |----------|-------------|
 | `rustledger://docs/bql` | BQL Query Language Reference |
-| `rustledger://docs/validation-errors` | All 27 validation error codes |
+| `rustledger://docs/validation-errors` | All 26 validation error codes |
 | `rustledger://docs/bql-functions` | Complete BQL function reference |
 | `rustledger://docs/directives` | Beancount directive syntax |
 

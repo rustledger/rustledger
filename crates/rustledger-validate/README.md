@@ -1,6 +1,6 @@
 # rustledger-validate
 
-Beancount validation with 27 error codes for ledger correctness.
+Beancount validation with 26 error codes for ledger correctness.
 
 ## Error Categories
 

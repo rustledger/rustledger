@@ -47,7 +47,7 @@ rustledger/
 │   ├── rustledger-parser/       # Logos lexer + Winnow parser
 │   ├── rustledger-loader/       # File loading, includes, processing pipeline
 │   ├── rustledger-booking/      # Interpolation and booking engine (7 methods)
-│   ├── rustledger-validate/     # Validation rules (28 error codes)
+│   ├── rustledger-validate/     # Validation rules (26 error codes)
 │   ├── rustledger-query/        # BQL query engine
 │   ├── rustledger-plugin/       # Native + WASM + Python plugin system
 │   ├── rustledger-plugin-types/ # WASM plugin interface types

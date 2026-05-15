@@ -6,6 +6,10 @@
 //! - Same amount
 //!
 //! Configure with: "days=N" to look for duplicates within N days (default 3)
+//!
+//! This is a **pure validator** — it never modifies, inserts, or
+//! deletes directives. All inputs pass through unchanged via
+//! [`PluginOutput::passthrough`]; only warnings are emitted.
 
 use rustledger_plugin_types::*;
 use std::collections::HashSet;
@@ -47,7 +51,7 @@ pub extern "C" fn process(input_ptr: u32, input_len: u32) -> u64 {
 
 fn pack_error(message: &str) -> u64 {
     let output = PluginOutput {
-        directives: Vec::new(),
+        ops: Vec::new(),
         errors: vec![PluginError::error(message)],
     };
     let bytes = rmp_serde::to_vec(&output).unwrap_or_default();
@@ -156,10 +160,10 @@ fn detect_duplicates(input: PluginInput) -> PluginOutput {
         }
     }
 
-    PluginOutput {
-        directives: input.directives,
-        errors,
-    }
+    // Pure validator: pass every input through unchanged.
+    let mut output = PluginOutput::passthrough(input.directives.len());
+    output.errors = errors;
+    output
 }
 
 // ============================================================================
@@ -218,6 +222,11 @@ mod tests {
         };
 
         let output = detect_duplicates(input);
+
+        // Pure validator — both inputs pass through as Keep.
+        assert_eq!(output.ops.len(), 2);
+        assert!(matches!(output.ops[0], PluginOp::Keep(0)));
+        assert!(matches!(output.ops[1], PluginOp::Keep(1)));
 
         assert!(!output.errors.is_empty(), "Should detect duplicate");
         assert!(output.errors[0].message.contains("Potential duplicate"));

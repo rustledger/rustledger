@@ -33,7 +33,11 @@ pub mod executor;
 pub mod parser;
 pub mod price;
 
-pub use ast::*;
+// AST types are accessed via `rustledger_query::ast::*` rather than re-exported
+// at the crate root. The previous `pub use ast::*;` glob exposed 22 names —
+// none used by external crates, and one (`Query`) collided with
+// `rustledger_core::Directive::Query`. Power users still reach AST types via
+// the `ast` module.
 pub use error::{ParseError, QueryError};
 pub use executor::{Executor, Interval, IntervalUnit, QueryResult, Value};
 pub use parser::parse;

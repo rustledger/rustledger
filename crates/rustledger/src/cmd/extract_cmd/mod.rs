@@ -349,7 +349,6 @@ pub fn run(args: &Args, file: &Path) -> Result<()> {
             ImporterConfig {
                 account: args.account.clone(),
                 currency: Some(args.currency.clone()),
-                amount_format: rustledger_importer::config::AmountFormat::default(),
                 importer_type: rustledger_importer::config::ImporterType::Csv(csv_config),
             }
         } else {

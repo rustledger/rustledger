@@ -13,42 +13,21 @@ use std::path::Path;
 
 /// CSV file importer.
 ///
-/// Carries an [`ImporterConfig`] for parser state (specifically the
-/// compiled [`AmountFormat`], which is locale-derived and lives on
-/// `ImporterConfig` for historical reasons — moving it to `CsvConfig`
-/// is a follow-up). The trait [`Importer`] impl rebuilds a configured
-/// instance per call from the supplied config, so the registry-
-/// dispatched path is effectively stateless.
+/// True unit struct — all parser state derives from the [`CsvConfig`]
+/// passed to each helper or to [`Importer::extract`]. The compiled
+/// [`AmountFormat`] (locale-and-pattern derived) is produced on the
+/// fly from `CsvConfig::compile_amount_format()` at the start of each
+/// extract call; per-row parse uses that compiled value.
 ///
 /// The trait's [`Importer::extract_enriched`] is overridden here to
 /// produce real categorization confidence via the rules engine, rather
 /// than the cheap-default enrichment from the trait fallback.
-///
-/// FIXME(wave 2.2): relocate `amount_format` from `ImporterConfig` to
-/// `CsvConfig` so this struct can become a true unit struct.
-pub struct CsvImporter {
-    /// Per-importer config. The trait impl rebuilds an instance per
-    /// call; the standalone helpers (`extract_file` et al.) use this
-    /// stored value.
-    config: ImporterConfig,
-}
-
-impl Default for CsvImporter {
-    fn default() -> Self {
-        // Placeholder config used when registered in `with_builtins()`.
-        // The trait impl always rebuilds a configured instance, so this
-        // stored config is only meaningful if a caller constructs via
-        // `::new(config)` and uses the standalone helpers directly.
-        Self {
-            config: ImporterConfig {
-                account: String::new(),
-                currency: None,
-                amount_format: AmountFormat::default(),
-                importer_type: ImporterType::Csv(CsvConfig::default()),
-            },
-        }
-    }
-}
+// `Copy` is intentionally NOT derived: the trait `Importer` takes
+// `&self` and clippy's `trivially_copy_pass_by_ref` would fire on
+// every method. The struct has no fields anyway, so `Clone` is the
+// useful capability.
+#[derive(Debug, Default, Clone)]
+pub struct CsvImporter;
 
 impl Importer for CsvImporter {
     fn name(&self) -> &'static str {
@@ -65,17 +44,7 @@ impl Importer for CsvImporter {
     }
 
     fn extract(&self, path: &Path, config: &ImporterConfig) -> Result<ImportResult> {
-        // Irrefutable today because `ImporterType` has a single variant.
-        // If a new variant is ever added, the compiler will surface this
-        // as a refutable pattern — that's intentional load-bearing safety,
-        // please do NOT "fix" it with `unreachable!()`. Either match
-        // exhaustively or return a typed error explaining why this
-        // importer needs CSV-shaped config.
-        let ImporterType::Csv(csv_config) = &config.importer_type;
-        // Build a configured instance per call so `parse_row`'s read of
-        // `self.config.amount_format` uses the caller's value, not the
-        // registry's placeholder default.
-        Self::new(config.clone()).extract_file(path, csv_config)
+        self.extract_file(path, config)
     }
 
     fn extract_enriched(
@@ -83,32 +52,34 @@ impl Importer for CsvImporter {
         path: &Path,
         config: &ImporterConfig,
     ) -> Result<EnrichedImportResult> {
-        let ImporterType::Csv(csv_config) = &config.importer_type;
-        Self::new(config.clone()).extract_file_enriched(path, csv_config)
+        self.extract_file_enriched(path, config)
     }
 }
 
 impl CsvImporter {
-    /// Construct a CSV importer with a baked-in configuration. Used by
-    /// the standalone helpers (`extract_file`, `extract_string`, et al.)
-    /// where the caller wants to skip the registry. The registry-
-    /// dispatched path rebuilds an instance per call instead.
-    pub const fn new(config: ImporterConfig) -> Self {
-        Self { config }
-    }
-
-    /// Extract transactions from a file.
-    pub fn extract_file(&self, path: &Path, csv_config: &CsvConfig) -> Result<ImportResult> {
+    /// Extract transactions from a file using the given importer config.
+    pub fn extract_file(&self, path: &Path, config: &ImporterConfig) -> Result<ImportResult> {
         let file =
             File::open(path).with_context(|| format!("Failed to open file: {}", path.display()))?;
         let mut reader = BufReader::new(file);
         let mut content = String::new();
         reader.read_to_string(&mut content)?;
-        self.extract_string(&content, csv_config)
+        self.extract_string(&content, config)
     }
 
-    /// Extract transactions from string content.
-    pub fn extract_string(&self, content: &str, csv_config: &CsvConfig) -> Result<ImportResult> {
+    /// Extract transactions from string content using the given importer config.
+    pub fn extract_string(&self, content: &str, config: &ImporterConfig) -> Result<ImportResult> {
+        // Irrefutable today because `ImporterType` has a single variant.
+        // If a new variant is added the compiler will catch this as
+        // refutable — that's intentional load-bearing safety; do NOT
+        // "fix" it with `unreachable!()`. Return a typed error or
+        // exhaustive match instead.
+        let ImporterType::Csv(csv_config) = &config.importer_type;
+        // Compile the amount parser once for the whole file. `NumberFormat::new`
+        // is non-trivial and parse_row runs per row, so we'd repeat the
+        // compile thousands of times if we did it inside the loop.
+        let amount_format = csv_config.compile_amount_format()?;
+
         let mut reader = csv::ReaderBuilder::new()
             .has_headers(csv_config.has_header)
             .delimiter(csv_config.delimiter as u8)
@@ -140,7 +111,14 @@ impl CsvImporter {
                 }
             };
 
-            match self.parse_row(&record, csv_config, &header_map, row_num) {
+            match self.parse_row(
+                &record,
+                config,
+                csv_config,
+                &amount_format,
+                &header_map,
+                row_num,
+            ) {
                 Ok(Some(txn)) => directives.push(Directive::Transaction(txn)),
                 Ok(None) => {} // Skip empty rows
                 Err(e) => {
@@ -163,14 +141,14 @@ impl CsvImporter {
     pub fn extract_file_enriched(
         &self,
         path: &Path,
-        csv_config: &CsvConfig,
+        config: &ImporterConfig,
     ) -> Result<EnrichedImportResult> {
         let file =
             File::open(path).with_context(|| format!("Failed to open file: {}", path.display()))?;
         let mut reader = BufReader::new(file);
         let mut content = String::new();
         reader.read_to_string(&mut content)?;
-        self.extract_string_enriched(&content, csv_config)
+        self.extract_string_enriched(&content, config)
     }
 
     /// Extract transactions from string content with enrichment metadata.
@@ -181,9 +159,10 @@ impl CsvImporter {
     pub fn extract_string_enriched(
         &self,
         content: &str,
-        csv_config: &CsvConfig,
+        config: &ImporterConfig,
     ) -> Result<EnrichedImportResult> {
-        let result = self.extract_string(content, csv_config)?;
+        let ImporterType::Csv(csv_config) = &config.importer_type;
+        let result = self.extract_string(content, config)?;
 
         // Build the rules engine once for all directives
         let mut engine = rustledger_ops::categorize::RulesEngine::new();
@@ -243,7 +222,9 @@ impl CsvImporter {
     fn parse_row(
         &self,
         record: &csv::StringRecord,
+        config: &ImporterConfig,
         csv_config: &CsvConfig,
+        amount_format: &AmountFormat,
         header_map: &HashMap<String, usize>,
         row_num: usize,
     ) -> Result<Option<Transaction>> {
@@ -282,7 +263,7 @@ impl CsvImporter {
             .filter(|s| !s.is_empty());
 
         // Get amount
-        let amount = self.parse_amount(record, csv_config, header_map)?;
+        let amount = self.parse_amount(record, csv_config, amount_format, header_map)?;
 
         // Skip zero-amount rows by default. Users can opt out via
         // `skip_zero_amounts(false)` to preserve every source row (issue #972).
@@ -296,15 +277,11 @@ impl CsvImporter {
             amount
         };
 
-        let currency = self
-            .config
-            .currency
-            .clone()
-            .unwrap_or_else(|| "USD".to_string());
+        let currency = config.currency.clone().unwrap_or_else(|| "USD".to_string());
 
         // Create the transaction posting
         let amount = Amount::new(final_amount, &currency);
-        let posting = Posting::new(&self.config.account, amount);
+        let posting = Posting::new(&config.account, amount);
 
         // Create balancing posting (auto-interpolated)
         // Negative amounts = money leaving account = expenses
@@ -392,6 +369,7 @@ impl CsvImporter {
         &self,
         record: &csv::StringRecord,
         csv_config: &CsvConfig,
+        amount_format: &AmountFormat,
         header_map: &HashMap<String, usize>,
     ) -> Result<Decimal> {
         // If we have separate debit/credit columns
@@ -408,7 +386,7 @@ impl CsvImporter {
                 && let Ok(debit_str) = self.get_column(record, debit_col, header_map)
                 && !debit_str.trim().is_empty()
             {
-                match self.config.amount_format.parse(debit_str) {
+                match amount_format.parse(debit_str) {
                     Ok(val) => amount -= val, // Debits are negative
                     Err(_) => any_parse_failure = true,
                 }
@@ -418,7 +396,7 @@ impl CsvImporter {
                 && let Ok(credit_str) = self.get_column(record, credit_col, header_map)
                 && !credit_str.trim().is_empty()
             {
-                match self.config.amount_format.parse(credit_str) {
+                match amount_format.parse(credit_str) {
                     Ok(val) => amount += val, // Credits are positive
                     Err(_) => any_parse_failure = true,
                 }
@@ -444,8 +422,7 @@ impl CsvImporter {
 
         let amount_str = self.get_column(record, amount_col, header_map)?;
 
-        self.config
-            .amount_format
+        amount_format
             .parse(amount_str)
             .context("Failed to parse amount")
     }
@@ -826,9 +803,9 @@ More info
             .account("Assets:Bank")
             .build()
             .unwrap();
-        let importer = CsvImporter::new(config);
+        let importer = CsvImporter;
         // Verify construction succeeds by using the importer
-        let empty_result = importer.extract_string("Date,Amount\n", &CsvConfig::default());
+        let empty_result = importer.extract_string("Date,Amount\n", &config);
         assert!(empty_result.is_ok());
     }
 
@@ -1101,18 +1078,18 @@ not-a-date,Coffee,-5.00
             skip_zero_amounts: true,
         };
 
-        let importer = CsvImporter::new(ImporterConfig {
+        let importer = CsvImporter;
+        let config = ImporterConfig {
             account: "Assets:Bank".to_string(),
-            amount_format: AmountFormat::default(),
             currency: Some("USD".to_string()),
-            importer_type: ImporterType::Csv(csv_config.clone()),
-        });
+            importer_type: ImporterType::Csv(csv_config),
+        };
 
         let csv_content = r"Date,Description
 2024-01-15,Coffee
 ";
 
-        let result = importer.extract_string(csv_content, &csv_config).unwrap();
+        let result = importer.extract_string(csv_content, &config).unwrap();
         // Should have warning about no amount column
         assert!(result.directives.is_empty());
         assert_eq!(result.warnings.len(), 1);
@@ -1380,16 +1357,13 @@ not-a-date,Coffee,-5.00
             .amount_column("Amount")
             .build()
             .unwrap();
-
-        let ImporterType::Csv(csv_config) = &config.importer_type;
-        let csv_config = csv_config.clone();
-        let importer = CsvImporter::new(config.clone());
+        let importer = CsvImporter;
 
         let csv_content =
             "Date,Description,Amount\n2024-01-15,Coffee Shop,-5.00\n2024-01-16,Salary,2500.00\n";
 
         let result = importer
-            .extract_string_enriched(csv_content, &csv_config)
+            .extract_string_enriched(csv_content, &config)
             .unwrap();
         assert_eq!(result.entries.len(), 2);
 
@@ -1415,15 +1389,12 @@ not-a-date,Coffee,-5.00
             .mappings(vec![("coffee".to_string(), "Expenses:Dining".to_string())])
             .build()
             .unwrap();
-
-        let ImporterType::Csv(csv_config) = &config.importer_type;
-        let csv_config = csv_config.clone();
-        let importer = CsvImporter::new(config.clone());
+        let importer = CsvImporter;
 
         let csv_content = "Date,Description,Amount\n2024-01-15,Coffee Shop,-5.00\n2024-01-16,Random Store,-10.00\n";
 
         let result = importer
-            .extract_string_enriched(csv_content, &csv_config)
+            .extract_string_enriched(csv_content, &config)
             .unwrap();
         assert_eq!(result.entries.len(), 2);
 
@@ -1455,16 +1426,13 @@ not-a-date,Coffee,-5.00
             .use_merchant_dict(true)
             .build()
             .unwrap();
-
-        let ImporterType::Csv(csv_config) = &config.importer_type;
-        let csv_config = csv_config.clone();
-        let importer = CsvImporter::new(config.clone());
+        let importer = CsvImporter;
 
         // Use a well-known merchant name that should be in the merchant dict
         let csv_content = "Date,Description,Amount\n2024-01-15,AMAZON,-50.00\n";
 
         let result = importer
-            .extract_string_enriched(csv_content, &csv_config)
+            .extract_string_enriched(csv_content, &config)
             .unwrap();
         assert_eq!(result.entries.len(), 1);
 
@@ -1485,16 +1453,13 @@ not-a-date,Coffee,-5.00
             .amount_column("Amount")
             .build()
             .unwrap();
-
-        let ImporterType::Csv(csv_config) = &config.importer_type;
-        let csv_config = csv_config.clone();
-        let importer = CsvImporter::new(config.clone());
+        let importer = CsvImporter;
 
         let csv_content =
             "Date,Description,Amount\nnot-a-date,Coffee,-5.00\n2024-01-15,Valid,-10.00\n";
 
         let result = importer
-            .extract_string_enriched(csv_content, &csv_config)
+            .extract_string_enriched(csv_content, &config)
             .unwrap();
         // One valid entry, one warning
         assert_eq!(result.entries.len(), 1);

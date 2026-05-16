@@ -32,7 +32,7 @@ impl ImporterRegistry {
     pub fn with_builtins() -> Self {
         let mut r = Self::new();
         r.register(OfxImporter::default());
-        r.register(CsvImporter::default());
+        r.register(CsvImporter);
         r
     }
 
@@ -205,13 +205,12 @@ mod tests {
 
     #[test]
     fn test_registry_extract_unknown_file() {
-        use crate::config::{AmountFormat, CsvConfig, ImporterType};
+        use crate::config::{CsvConfig, ImporterType};
         let registry = ImporterRegistry::new();
         let unknown_path = Path::new("document.pdf");
         let config = ImporterConfig {
             account: "Assets:Bank".into(),
             currency: None,
-            amount_format: AmountFormat::default(),
             importer_type: ImporterType::Csv(CsvConfig::default()),
         };
         let result = registry.extract(unknown_path, &config);

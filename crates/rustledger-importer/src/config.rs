@@ -8,14 +8,17 @@ use rust_decimal::Decimal;
 use std::{fmt::Display, ops::Neg, path::Path, str::FromStr};
 
 /// Configuration for an importer.
+///
+/// Carries the common config (target account, currency) plus a
+/// format-specific carrier in `importer_type`. Format-specific
+/// configuration (CSV column mappings, amount parser locale, etc.)
+/// lives inside `importer_type` so the parent struct stays minimal.
 #[derive(Debug, Clone)]
 pub struct ImporterConfig {
     /// The target account for imported transactions.
     pub account: String,
     /// The currency for amounts (if not specified in the file).
     pub currency: Option<String>,
-    /// Amount parser
-    pub amount_format: AmountFormat,
     /// The importer type and its specific configuration.
     pub importer_type: ImporterType,
 }
@@ -111,6 +114,32 @@ impl Default for CsvConfig {
             use_merchant_dict: false,
             skip_zero_amounts: true,
         }
+    }
+}
+
+impl CsvConfig {
+    /// Compile the user's `amount_format` pattern and `amount_locale`
+    /// into a runtime [`AmountFormat`] suitable for `AmountFormat::parse`.
+    ///
+    /// CSV parsing is locale- and format-sensitive (`"1.234,56"` vs
+    /// `"1,234.56"` etc.); this builds the parser from the user's
+    /// declarative inputs. Compile once per extract call, not per row.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `amount_format` is set to an invalid pattern.
+    pub fn compile_amount_format(&self) -> Result<AmountFormat> {
+        Ok(match (&self.amount_format, &self.amount_locale) {
+            (None, None) => AmountFormat::Symbols(NumberSymbols::monetary(Locale::POSIX)),
+            (None, Some(locale)) => AmountFormat::Symbols(NumberSymbols::monetary(*locale)),
+            (Some(fmt), None) => AmountFormat::Format(
+                NumberFormat::new(fmt).with_context(|| "invalid amount_format")?,
+            ),
+            (Some(fmt), Some(locale)) => AmountFormat::Format(
+                NumberFormat::news(fmt, NumberSymbols::monetary(*locale))
+                    .with_context(|| "invalid number format")?,
+            ),
+        })
     }
 }
 
@@ -216,22 +245,18 @@ impl ImporterConfig {
 
     /// Extract transactions from a file.
     pub fn extract(&self, path: &Path) -> Result<ImportResult> {
-        match &self.importer_type {
-            ImporterType::Csv(csv_config) => {
-                let importer = CsvImporter::new(self.clone());
-                importer.extract_file(path, csv_config)
-            }
-        }
+        // Dispatch by format. `_` binding (instead of unused match arm)
+        // intentional: the irrefutable pattern below is the load-bearing
+        // safety net — a new ImporterType variant will surface here at
+        // compile time.
+        let ImporterType::Csv(_) = &self.importer_type;
+        CsvImporter.extract_file(path, self)
     }
 
     /// Extract transactions from string content.
     pub fn extract_from_string(&self, content: &str) -> Result<ImportResult> {
-        match &self.importer_type {
-            ImporterType::Csv(csv_config) => {
-                let importer = CsvImporter::new(self.clone());
-                importer.extract_string(content, csv_config)
-            }
-        }
+        let ImporterType::Csv(_) = &self.importer_type;
+        CsvImporter.extract_string(content, self)
     }
 }
 
@@ -411,23 +436,18 @@ impl CsvConfigBuilder {
         self
     }
 
-    /// Build the importer configuration.
+    /// Build the importer configuration. Validates the amount-format
+    /// pattern eagerly so misconfigured patterns surface at config
+    /// build time rather than per-row at extract time.
     pub fn build(self) -> Result<ImporterConfig> {
+        // Validate the amount-format pattern by attempting to compile it.
+        // Discard the result; the importer recomputes it at extract time
+        // from the CsvConfig inputs.
+        let _ = self.config.compile_amount_format()?;
         Ok(ImporterConfig {
             account: self
                 .account
                 .unwrap_or_else(|| "Expenses:Unknown".to_string()),
-            amount_format: match (&self.config.amount_format, &self.config.amount_locale) {
-                (None, None) => AmountFormat::Symbols(NumberSymbols::monetary(Locale::POSIX)),
-                (None, Some(locale)) => AmountFormat::Symbols(NumberSymbols::monetary(*locale)),
-                (Some(fmt), None) => AmountFormat::Format(
-                    NumberFormat::new(fmt).with_context(|| "invalid amount_format")?,
-                ),
-                (Some(fmt), Some(locale)) => AmountFormat::Format(
-                    NumberFormat::news(fmt, NumberSymbols::monetary(*locale))
-                        .with_context(|| "invalid number format")?,
-                ),
-            },
             currency: self.currency,
             importer_type: ImporterType::Csv(self.config),
         })

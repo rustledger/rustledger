@@ -290,11 +290,9 @@ pub fn auto_extract(
     let importer_config = config::ImporterConfig {
         account: account.to_string(),
         currency: Some(currency.to_string()),
-        amount_format: config::AmountFormat::default(),
-        importer_type: config::ImporterType::Csv(csv_config.clone()),
+        importer_type: config::ImporterType::Csv(csv_config),
     };
-    let importer = csv_importer::CsvImporter::new(importer_config);
-    importer.extract_string_enriched(&content, &csv_config)
+    csv_importer::CsvImporter.extract_string_enriched(&content, &importer_config)
 }
 
 #[cfg(test)]

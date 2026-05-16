@@ -499,12 +499,11 @@ NEWFILEUID:NONE
 
     #[test]
     fn test_ofx_importer_extract_nonexistent_file() {
-        use crate::config::{AmountFormat, CsvConfig, ImporterType};
+        use crate::config::{CsvConfig, ImporterType};
         let importer = OfxImporter::default();
         let config = ImporterConfig {
             account: "Assets:Bank".into(),
             currency: Some("USD".into()),
-            amount_format: AmountFormat::default(),
             importer_type: ImporterType::Csv(CsvConfig::default()),
         };
         let result = importer.extract(Path::new("/nonexistent/file.ofx"), &config);

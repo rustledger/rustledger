@@ -53,6 +53,16 @@ use crate::{EnrichedImportResult, ImportResult, Importer, ImporterConfig};
 /// well above any realistic importer output for a single statement.
 const MAX_OUTPUT_BYTES: usize = 64 * 1024 * 1024;
 
+/// Hard cap on the number of elements in any single WASM table.
+/// Importers don't typically need indirect-call tables at all, let
+/// alone large ones. Each ref-typed slot is pointer-sized (8 bytes on
+/// 64-bit), so 1M elements = ~8 MiB worst case — well under the
+/// memory cap but enough headroom for any plausible indirect-dispatch
+/// pattern. Without this cap, `table.grow` would bypass the memory
+/// limiter (`Memory` and `Table` are separate resource classes in
+/// wasmtime's accounting).
+const MAX_TABLE_ELEMENTS: usize = 1024 * 1024;
+
 /// Configuration for the WASM importer runtime.
 #[derive(Debug, Clone, Copy)]
 pub struct WasmRuntimeConfig {
@@ -152,13 +162,14 @@ impl ResourceLimiter for MemoryLimiter {
     fn table_growing(
         &mut self,
         _current: usize,
-        _desired: usize,
+        desired: usize,
         _maximum: Option<usize>,
     ) -> wasmtime::Result<bool> {
-        // No per-table cap — importers don't typically need indirect
-        // call tables, and memory is the resource we actually care
-        // about for DoS.
-        Ok(true)
+        // wasmtime accounts memory and tables separately — without
+        // this cap, `table.grow` would bypass the memory limiter.
+        // [`MAX_TABLE_ELEMENTS`] is conservative; bump it if a
+        // legitimate importer ever needs more.
+        Ok(desired <= MAX_TABLE_ELEMENTS)
     }
 }
 
@@ -566,73 +577,88 @@ impl Importer for WasmImporter {
             .map_err(|e| anyhow::anyhow!("failed to read {}: {e}", path.display()))?;
         let input = build_wasm_input(path, content, config);
         let output: EnrichedImporterOutput = self.call_msgpack("extract_enriched", &input)?;
-
-        // Bridge from wire-format EnrichedImporterOutput to the
-        // host-side EnrichedImportResult. We collect warnings as we
-        // go for the lossy paths (unknown method strings, malformed
-        // fingerprint hex) — these are recoverable but worth
-        // surfacing rather than silently degrading.
-        let mut entries = Vec::with_capacity(output.entries.len());
-        let mut bridge_warnings: Vec<String> = Vec::new();
-        for (wrapper, enr) in output.entries {
-            let dir = rustledger_plugin::convert::wrapper_to_directive(&wrapper)
-                .map_err(|e| anyhow::anyhow!("WASM importer returned invalid directive: {e:?}"))?;
-            let method = parse_method(&enr.method).unwrap_or_else(|unknown| {
-                bridge_warnings.push(format!(
-                    "warning: WASM importer used unknown categorization method `{unknown}`, falling back to Default"
-                ));
-                rustledger_ops::enrichment::CategorizationMethod::Default
-            });
-            let alternatives = enr
-                .alternatives
-                .into_iter()
-                .map(|a| {
-                    let alt_method = parse_method(&a.method).unwrap_or_else(|unknown| {
-                        bridge_warnings.push(format!(
-                            "warning: WASM importer used unknown categorization method `{unknown}` in alternative, falling back to Default"
-                        ));
-                        rustledger_ops::enrichment::CategorizationMethod::Default
-                    });
-                    rustledger_ops::enrichment::Alternative {
-                        account: a.account,
-                        confidence: a.confidence,
-                        method: alt_method,
-                    }
-                })
-                .collect();
-            let fingerprint = match enr.fingerprint {
-                Some(hex) => match Fingerprint::from_hex(&hex) {
-                    Ok(fp) => Some(fp),
-                    Err(e) => {
-                        bridge_warnings.push(format!(
-                            "warning: WASM importer returned malformed fingerprint hex `{hex}`: {e}"
-                        ));
-                        None
-                    }
-                },
-                None => None,
-            };
-            let enrichment = rustledger_ops::enrichment::Enrichment {
-                directive_index: enr.directive_index,
-                confidence: enr.confidence,
-                method,
-                alternatives,
-                fingerprint,
-            };
-            entries.push((dir, enrichment));
-        }
-        let mut enriched = EnrichedImportResult::new(entries);
-        for w in bridge_warnings {
-            enriched = enriched.with_warning(w);
-        }
-        for w in output.warnings {
-            enriched = enriched.with_warning(w);
-        }
-        for e in &output.errors {
-            enriched = enriched.with_warning(format_plugin_error(e));
-        }
-        Ok(enriched)
+        bridge_enriched_output(output)
     }
+}
+
+/// Bridge a wire-format [`EnrichedImporterOutput`] into the host's
+/// [`EnrichedImportResult`]. Extracted as a free function so the lossy
+/// paths (unknown method strings, malformed fingerprint hex) can be
+/// unit-tested without standing up wasmtime.
+///
+/// # Warning ordering
+///
+/// Warnings are emitted in this order, which is part of the contract
+/// for any downstream consumer that filters or surfaces them:
+///
+/// 1. **Bridge warnings** (per-entry lossy paths: unknown method,
+///    malformed fingerprint hex) — host-side issues with the wire
+///    data, surface first so the importer author sees them prominently.
+/// 2. **Output warnings** (importer's own informational warnings),
+///    forwarded verbatim from `output.warnings`.
+/// 3. **Output errors** (importer's structured errors), formatted via
+///    [`format_plugin_error`] which preserves severity prefix.
+fn bridge_enriched_output(output: EnrichedImporterOutput) -> anyhow::Result<EnrichedImportResult> {
+    let mut entries = Vec::with_capacity(output.entries.len());
+    let mut bridge_warnings: Vec<String> = Vec::new();
+    for (wrapper, enr) in output.entries {
+        let dir = rustledger_plugin::convert::wrapper_to_directive(&wrapper)
+            .map_err(|e| anyhow::anyhow!("WASM importer returned invalid directive: {e:?}"))?;
+        let method = parse_method(&enr.method).unwrap_or_else(|unknown| {
+            bridge_warnings.push(format!(
+                "warning: WASM importer used unknown categorization method `{unknown}`, falling back to Default"
+            ));
+            rustledger_ops::enrichment::CategorizationMethod::Default
+        });
+        let alternatives = enr
+            .alternatives
+            .into_iter()
+            .map(|a| {
+                let alt_method = parse_method(&a.method).unwrap_or_else(|unknown| {
+                    bridge_warnings.push(format!(
+                        "warning: WASM importer used unknown categorization method `{unknown}` in alternative, falling back to Default"
+                    ));
+                    rustledger_ops::enrichment::CategorizationMethod::Default
+                });
+                rustledger_ops::enrichment::Alternative {
+                    account: a.account,
+                    confidence: a.confidence,
+                    method: alt_method,
+                }
+            })
+            .collect();
+        let fingerprint = match enr.fingerprint {
+            Some(hex) => match Fingerprint::from_hex(&hex) {
+                Ok(fp) => Some(fp),
+                Err(e) => {
+                    bridge_warnings.push(format!(
+                        "warning: WASM importer returned malformed fingerprint hex `{hex}`: {e}"
+                    ));
+                    None
+                }
+            },
+            None => None,
+        };
+        let enrichment = rustledger_ops::enrichment::Enrichment {
+            directive_index: enr.directive_index,
+            confidence: enr.confidence,
+            method,
+            alternatives,
+            fingerprint,
+        };
+        entries.push((dir, enrichment));
+    }
+    let mut enriched = EnrichedImportResult::new(entries);
+    for w in bridge_warnings {
+        enriched = enriched.with_warning(w);
+    }
+    for w in output.warnings {
+        enriched = enriched.with_warning(w);
+    }
+    for e in &output.errors {
+        enriched = enriched.with_warning(format_plugin_error(e));
+    }
+    Ok(enriched)
 }
 
 /// Convert the wire-format method string (as emitted by
@@ -750,11 +776,7 @@ mod tests {
             let s = m.as_meta_value();
             let parsed = parse_method(s)
                 .unwrap_or_else(|u| panic!("as_meta_value `{u}` not handled by parse_method"));
-            assert_eq!(
-                std::mem::discriminant(&parsed),
-                std::mem::discriminant(&m),
-                "round-trip failed for {m:?}"
-            );
+            assert_eq!(parsed, m, "round-trip failed for {m:?}");
         }
     }
 
@@ -838,7 +860,13 @@ mod tests {
             ;; EnrichedImporterOutput { entries: [], warnings: [], errors: [] }
             (data (i32.const 32) "\93\90\90\90")
 
-            ;; bump allocator: hand out at $bump, advance by $size
+            ;; bump allocator: hand out at $bump, advance by $size.
+            ;; NOTE: real importers MUST bounds-check $bump+$size
+            ;; against current memory and call `memory.grow` (subject
+            ;; to MemoryLimiter approval). This test fixture skips
+            ;; that — inputs in the test are small and we declare 1
+            ;; full page (64 KiB), so the bump never crosses the
+            ;; boundary.
             (global $bump (mut i32) (i32.const 1024))
             (func (export "alloc") (param $size i32) (result i32)
                 (local $ret i32)
@@ -988,5 +1016,241 @@ mod tests {
         let importer = WasmImporter::load_from_bytes(PathBuf::from("test.wasm"), &bytes, config)
             .expect("zero max_time_secs is clamped, not starved");
         assert_eq!(importer.name(), "tst");
+    }
+
+    #[test]
+    fn table_limiter_rejects_grow_above_max() {
+        let mut limiter = MemoryLimiter {
+            max_memory: usize::MAX,
+        };
+        assert!(
+            limiter
+                .table_growing(0, MAX_TABLE_ELEMENTS, None)
+                .expect("at cap is Ok")
+        );
+        assert!(
+            !limiter
+                .table_growing(0, MAX_TABLE_ELEMENTS + 1, None)
+                .expect("over cap is Ok(false)")
+        );
+    }
+
+    #[test]
+    fn initial_memory_above_cap_is_rejected_via_limiter_wiring() {
+        // Pins the `store.limiter(|s| &mut s.limiter)` wiring against
+        // refactor regression. wasmtime calls `memory_growing` for
+        // both initial allocation and grow — a module declaring 5000
+        // pages (320 MiB) initial memory with a 64 MiB cap should
+        // fail to instantiate. If the limiter wiring breaks, this
+        // test catches it (the direct trait-method test above does
+        // not).
+        let wat = r#"
+            (module
+                (memory (export "memory") 5000)
+                (func (export "alloc") (param i32) (result i32) i32.const 0)
+                (func (export "metadata") (result i64) i64.const 0)
+                (func (export "identify") (param i32 i32) (result i64) i64.const 0)
+                (func (export "extract") (param i32 i32) (result i64) i64.const 0)
+                (func (export "extract_enriched") (param i32 i32) (result i64) i64.const 0)
+            )
+        "#;
+        let bytes = wat::parse_str(wat).expect("WAT parses");
+        let config = WasmRuntimeConfig {
+            max_memory: 64 * 1024 * 1024,
+            max_time_secs: 30,
+        };
+        let Err(err) = WasmImporter::load_from_bytes(PathBuf::from("bigmem.wasm"), &bytes, config)
+        else {
+            panic!("module declaring 320 MiB initial memory should be rejected with 64 MiB cap");
+        };
+        // wasmtime turns Ok(false) at instantiation into an instantiate
+        // error, which the host maps to Runtime.
+        assert!(
+            matches!(err, WasmImporterError::Runtime(_)),
+            "expected Runtime (instantiate failed via limiter), got {err:?}"
+        );
+    }
+
+    // ===== bridge_enriched_output direct tests =====
+    //
+    // These exercise the lossy paths (unknown method, malformed
+    // fingerprint hex, valid fingerprint round-trip) without standing
+    // up wasmtime — the bridge logic is the testable piece, the
+    // wasmtime round-trip is covered by the end-to-end WAT test.
+
+    use rustledger_plugin_types::{
+        AlternativeWrapper, DirectiveData, DirectiveWrapper, EnrichmentWrapper, OpenData,
+    };
+
+    fn open_wrapper(account: &str) -> DirectiveWrapper {
+        DirectiveWrapper {
+            directive_type: String::new(),
+            date: "2024-01-01".to_string(),
+            filename: None,
+            lineno: None,
+            data: DirectiveData::Open(OpenData {
+                account: account.to_string(),
+                currencies: vec![],
+                booking: None,
+                metadata: vec![],
+            }),
+        }
+    }
+
+    fn enrichment_wrapper(method: &str, fingerprint: Option<String>) -> EnrichmentWrapper {
+        EnrichmentWrapper {
+            directive_index: 0,
+            confidence: 1.0,
+            method: method.to_string(),
+            alternatives: vec![],
+            fingerprint,
+        }
+    }
+
+    #[test]
+    fn bridge_round_trips_valid_fingerprint_hex() {
+        let fp = Fingerprint::compute("2024-01-01", Some("100"), "coffee");
+        let hex = fp.to_hex();
+        let out = EnrichedImporterOutput {
+            entries: vec![(
+                open_wrapper("Assets:Bank"),
+                enrichment_wrapper("rule", Some(hex)),
+            )],
+            warnings: vec![],
+            errors: vec![],
+        };
+        let bridged = bridge_enriched_output(out).expect("bridge succeeds");
+        assert_eq!(bridged.entries.len(), 1);
+        assert_eq!(
+            bridged.entries[0].1.fingerprint,
+            Some(fp),
+            "fingerprint should round-trip"
+        );
+        assert!(bridged.warnings.is_empty(), "no warnings expected");
+    }
+
+    #[test]
+    fn bridge_warns_on_malformed_fingerprint_hex_and_drops_to_none() {
+        let out = EnrichedImporterOutput {
+            entries: vec![(
+                open_wrapper("Assets:Bank"),
+                enrichment_wrapper("rule", Some("not-a-valid-hex".to_string())),
+            )],
+            warnings: vec![],
+            errors: vec![],
+        };
+        let bridged = bridge_enriched_output(out).expect("bridge succeeds");
+        assert_eq!(bridged.entries.len(), 1);
+        assert_eq!(bridged.entries[0].1.fingerprint, None);
+        // Warning text names the bad hex so the importer author can
+        // find the bug quickly.
+        assert_eq!(bridged.warnings.len(), 1);
+        assert!(
+            bridged.warnings[0].contains("not-a-valid-hex"),
+            "warning should name the bad hex: {}",
+            bridged.warnings[0]
+        );
+    }
+
+    #[test]
+    fn bridge_warns_on_unknown_method_and_falls_back_to_default() {
+        use rustledger_ops::enrichment::CategorizationMethod;
+        let out = EnrichedImporterOutput {
+            entries: vec![(
+                open_wrapper("Assets:Bank"),
+                enrichment_wrapper("merchant_dict", None), // underscore typo, exact #1130 bug shape
+            )],
+            warnings: vec![],
+            errors: vec![],
+        };
+        let bridged = bridge_enriched_output(out).expect("bridge succeeds");
+        assert_eq!(bridged.entries[0].1.method, CategorizationMethod::Default);
+        assert_eq!(bridged.warnings.len(), 1);
+        assert!(
+            bridged.warnings[0].contains("merchant_dict"),
+            "warning should name the unknown method: {}",
+            bridged.warnings[0]
+        );
+    }
+
+    #[test]
+    fn bridge_warns_on_unknown_method_in_alternative() {
+        use rustledger_ops::enrichment::CategorizationMethod;
+        let mut enr = enrichment_wrapper("rule", None);
+        enr.alternatives = vec![AlternativeWrapper {
+            account: "Expenses:Other".to_string(),
+            confidence: 0.3,
+            method: "future-method".to_string(),
+        }];
+        let out = EnrichedImporterOutput {
+            entries: vec![(open_wrapper("Assets:Bank"), enr)],
+            warnings: vec![],
+            errors: vec![],
+        };
+        let bridged = bridge_enriched_output(out).expect("bridge succeeds");
+        let alt = &bridged.entries[0].1.alternatives[0];
+        assert_eq!(alt.method, CategorizationMethod::Default);
+        assert_eq!(bridged.warnings.len(), 1);
+        assert!(bridged.warnings[0].contains("future-method"));
+        assert!(
+            bridged.warnings[0].contains("alternative"),
+            "warning should distinguish the alternative slot: {}",
+            bridged.warnings[0]
+        );
+    }
+
+    #[test]
+    fn bridge_warning_ordering_is_bridge_then_output_warnings_then_errors() {
+        // Pins the warning-emission order documented on
+        // `bridge_enriched_output`. Order matters for downstream
+        // consumers that filter or surface them.
+        let out = EnrichedImporterOutput {
+            entries: vec![(
+                open_wrapper("Assets:Bank"),
+                enrichment_wrapper("nonsense", None),
+            )],
+            warnings: vec!["informational warning".to_string()],
+            errors: vec![PluginError::error("structured error").at("foo.csv", 7)],
+        };
+        let bridged = bridge_enriched_output(out).expect("bridge succeeds");
+        assert_eq!(bridged.warnings.len(), 3);
+        assert!(
+            bridged.warnings[0].contains("nonsense"),
+            "first: bridge warning, got {}",
+            bridged.warnings[0]
+        );
+        assert_eq!(
+            bridged.warnings[1], "informational warning",
+            "second: output.warnings forwarded verbatim"
+        );
+        assert_eq!(
+            bridged.warnings[2], "error foo.csv:7: structured error",
+            "third: output.errors via format_plugin_error"
+        );
+    }
+
+    #[test]
+    fn output_to_import_result_uses_severity_aware_formatter() {
+        // Integration test: proves format_plugin_error is actually
+        // wired into the production path, not just unit-tested in
+        // isolation. A refactor that switches back to raw format!()
+        // would regress this.
+        let out = ImporterOutput {
+            directives: vec![],
+            warnings: vec!["plain warning".to_string()],
+            errors: vec![
+                PluginError::error("bad row").at("foo.csv", 42),
+                PluginError::warning("weird value"),
+            ],
+        };
+        let result = output_to_import_result(out).expect("succeeds");
+        assert_eq!(
+            result.warnings,
+            vec![
+                "plain warning".to_string(),
+                "error foo.csv:42: bad row".to_string(),
+                "warning: weird value".to_string(),
+            ]
+        );
     }
 }

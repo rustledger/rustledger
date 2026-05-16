@@ -11,20 +11,22 @@
 //! # Example
 //!
 //! ```rust,no_run
-//! use rustledger_importer::{Importer, ImporterConfig, extract_from_file};
-//! use rustledger_core::Directive;
+//! use rustledger_importer::{ImporterConfig, ImporterRegistry};
 //! use std::path::Path;
 //!
-//! // Create a CSV importer configuration
+//! // Build the per-call config (CSV in this example).
 //! let config = ImporterConfig::csv()
 //!     .account("Assets:Bank:Checking")
 //!     .date_column("Date")
 //!     .narration_column("Description")
 //!     .amount_column("Amount")
-//!     .build();
+//!     .build()
+//!     .unwrap();
 //!
-//! // Extract transactions from a file
-//! // let directives = extract_from_file(Path::new("bank.csv"), &config)?;
+//! // Dispatch through the registry — picks OfxImporter for .ofx/.qfx,
+//! // CsvImporter for .csv. Returns an error for unknown extensions.
+//! let registry = ImporterRegistry::with_builtins();
+//! // let result = registry.extract(Path::new("bank.csv"), &config)?;
 //! ```
 
 #![forbid(unsafe_code)]
@@ -245,22 +247,6 @@ pub trait Importer: Send + Sync {
     }
 }
 
-/// Extract transactions from a file using the given configuration.
-///
-/// Convenience wrapper around [`ImporterRegistry::with_builtins`] +
-/// [`ImporterRegistry::extract`]. For more control over importer
-/// selection, instantiate the registry directly.
-pub fn extract_from_file(path: &Path, config: &ImporterConfig) -> Result<ImportResult> {
-    ImporterRegistry::with_builtins().extract(path, config)
-}
-
-/// Extract transactions from CSV file contents (useful for testing).
-/// CSV-only because OFX/QFX are binary-ish formats not well suited to
-/// in-memory string testing through the same entry point.
-pub fn extract_from_string(content: &str, config: &ImporterConfig) -> Result<ImportResult> {
-    csv_importer::CsvImporter.extract_string(content, config)
-}
-
 /// Auto-extract transactions from a file by inferring its format.
 ///
 /// If the file is OFX/QFX, uses the OFX importer directly. Otherwise,
@@ -378,7 +364,9 @@ mod tests {
             .unwrap();
 
         let csv_content = "Date,Description,Amount\n2024-01-15,Coffee,-5.00\n";
-        let result = extract_from_string(csv_content, &config).unwrap();
+        let result = csv_importer::CsvImporter
+            .extract_string(csv_content, &config)
+            .unwrap();
         assert_eq!(result.directives.len(), 1);
     }
 
@@ -394,7 +382,9 @@ mod tests {
             .unwrap();
 
         let csv_content = "Date,Description,Amount\n";
-        let result = extract_from_string(csv_content, &config).unwrap();
+        let result = csv_importer::CsvImporter
+            .extract_string(csv_content, &config)
+            .unwrap();
         assert!(result.directives.is_empty());
     }
 

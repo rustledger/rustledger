@@ -252,8 +252,15 @@ pub fn run(args: &Args, file: &Path) -> Result<()> {
                 rustledger_importer::config::CsvConfig::default(),
             ),
         };
-        // OFX importer's contra-account is hardcoded to Expenses:Unknown.
-        (cfg, vec!["Expenses:Unknown".to_string()])
+        // OFX importer routes negative amounts to `Expenses:Unknown` and
+        // positive amounts to `Income:Unknown` (ofx_importer.rs's
+        // `parse_transaction`). Both must be in the fallback list so
+        // `--suggest-categories` re-categorizes income as well as expense
+        // transactions.
+        (
+            cfg,
+            vec!["Expenses:Unknown".to_string(), "Income:Unknown".to_string()],
+        )
     } else {
         // CSV branch: determine import config from --importer flag,
         // explicit --config, --auto, or raw CLI args.

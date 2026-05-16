@@ -2,6 +2,15 @@
 //!
 //! This module implements importing transactions from OFX (Open Financial Exchange)
 //! and QFX (Quicken Financial Exchange) files commonly exported by banks.
+//!
+//! # Chrono boundary
+//!
+//! `ofxy::body::Transaction::date_posted` returns `chrono::DateTime<Utc>`, but
+//! the rest of the workspace uses `jiff::civil::Date`. The chrono → jiff
+//! conversion happens inside `extract_transaction` via a `format("%Y-%m-%d")
+//! .parse()` round-trip. No `chrono` type appears in any `pub` signature in
+//! this crate — `chrono` is an internal, ofxy-only seal. If we ever drop or
+//! replace ofxy, the chrono dependency can go away with it.
 
 use crate::{EnrichedImportResult, ImportResult, Importer};
 use anyhow::{Context, Result};

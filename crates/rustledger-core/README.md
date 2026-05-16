@@ -17,15 +17,14 @@ Core types for the rustledger Beancount implementation.
 ## Example
 
 ```rust
-use rustledger_core::{Amount, Cost, Position, Inventory, BookingMethod};
+use rustledger_core::{Amount, Cost, Position, Inventory, BookingMethod, naive_date};
 use rust_decimal_macros::dec;
-use chrono::NaiveDate;
 
 let mut inv = Inventory::new();
 
 // Add a stock position
 let cost = Cost::new(dec!(150.00), "USD")
-    .with_date(NaiveDate::from_ymd_opt(2024, 1, 15).unwrap());
+    .with_date(naive_date(2024, 1, 15).unwrap());
 inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost));
 
 // Sell using FIFO

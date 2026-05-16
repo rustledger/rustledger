@@ -101,43 +101,43 @@ fn execute_query(query_str: &str, directives: &[Directive]) -> QueryResult {
 #[test]
 fn test_parse_simple_select() {
     let query = parse("SELECT account, number").expect("should parse");
-    assert!(matches!(query, rustledger_query::Query::Select(_)));
+    assert!(matches!(query, rustledger_query::ast::Query::Select(_)));
 }
 
 #[test]
 fn test_parse_select_with_where() {
     let query = parse(r#"SELECT account WHERE account ~ "Expenses""#).expect("should parse");
-    assert!(matches!(query, rustledger_query::Query::Select(_)));
+    assert!(matches!(query, rustledger_query::ast::Query::Select(_)));
 }
 
 #[test]
 fn test_parse_select_with_group_by() {
     let query = parse("SELECT account, SUM(number) GROUP BY account").expect("should parse");
-    assert!(matches!(query, rustledger_query::Query::Select(_)));
+    assert!(matches!(query, rustledger_query::ast::Query::Select(_)));
 }
 
 #[test]
 fn test_parse_select_with_order_by() {
     let query = parse("SELECT account, number ORDER BY number DESC").expect("should parse");
-    assert!(matches!(query, rustledger_query::Query::Select(_)));
+    assert!(matches!(query, rustledger_query::ast::Query::Select(_)));
 }
 
 #[test]
 fn test_parse_journal_query() {
     let query = parse(r#"JOURNAL "Assets:Bank""#).expect("should parse");
-    assert!(matches!(query, rustledger_query::Query::Journal(_)));
+    assert!(matches!(query, rustledger_query::ast::Query::Journal(_)));
 }
 
 #[test]
 fn test_parse_balances_query() {
     let query = parse("BALANCES").expect("should parse");
-    assert!(matches!(query, rustledger_query::Query::Balances(_)));
+    assert!(matches!(query, rustledger_query::ast::Query::Balances(_)));
 }
 
 #[test]
 fn test_parse_balances_where_query() {
     let query = parse(r#"BALANCES WHERE account ~ "Assets:""#).expect("should parse");
-    if let rustledger_query::Query::Balances(b) = query {
+    if let rustledger_query::ast::Query::Balances(b) = query {
         assert!(b.where_clause.is_some());
     } else {
         panic!("Expected BALANCES query");
@@ -147,7 +147,7 @@ fn test_parse_balances_where_query() {
 #[test]
 fn test_parse_balances_at_cost_where_query() {
     let query = parse(r#"BALANCES AT cost WHERE account ~ "Assets:""#).expect("should parse");
-    if let rustledger_query::Query::Balances(b) = query {
+    if let rustledger_query::ast::Query::Balances(b) = query {
         assert_eq!(b.at_function, Some("cost".to_string()));
         assert!(b.where_clause.is_some());
     } else {
@@ -173,7 +173,7 @@ fn test_execute_balances_where() {
 #[test]
 fn test_parse_print_query() {
     let query = parse("PRINT").expect("should parse");
-    assert!(matches!(query, rustledger_query::Query::Print(_)));
+    assert!(matches!(query, rustledger_query::ast::Query::Print(_)));
 }
 
 #[test]
@@ -1669,7 +1669,7 @@ fn test_parse_pivot_by_two_columns() {
          ORDER BY account PIVOT BY YEAR(date), account",
     )
     .expect("should parse");
-    assert!(matches!(query, rustledger_query::Query::Select(_)));
+    assert!(matches!(query, rustledger_query::ast::Query::Select(_)));
 }
 
 #[test]
@@ -1930,14 +1930,14 @@ fn test_pivot_by_with_order_by_on_hidden_column_works() {
 #[test]
 fn test_parse_window_function_row_number() {
     let query = parse("SELECT account, ROW_NUMBER() OVER (ORDER BY date)").expect("should parse");
-    assert!(matches!(query, rustledger_query::Query::Select(_)));
+    assert!(matches!(query, rustledger_query::ast::Query::Select(_)));
 }
 
 #[test]
 fn test_parse_window_function_with_partition() {
     let query = parse("SELECT account, ROW_NUMBER() OVER (PARTITION BY account ORDER BY date)")
         .expect("should parse");
-    assert!(matches!(query, rustledger_query::Query::Select(_)));
+    assert!(matches!(query, rustledger_query::ast::Query::Select(_)));
 }
 
 #[test]

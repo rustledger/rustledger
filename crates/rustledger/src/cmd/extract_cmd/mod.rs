@@ -46,7 +46,7 @@ use config::{
 use duplicate::{is_duplicate, is_ofx_file, load_existing_transactions};
 use format_num_pattern::Locale;
 use rustledger_core::{Directive, FormatConfig, format_directive};
-use rustledger_importer::{ImporterConfig, OfxImporter};
+use rustledger_importer::ImporterConfig;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -211,17 +211,13 @@ pub fn list_importers(args: &Args) -> Result<()> {
 
 /// Run the extract command with the given arguments.
 pub fn run(args: &Args, file: &Path) -> Result<()> {
-    // Detect OFX files and use appropriate importer. Also captures the
-    // fallback contra-accounts (Expenses:Unknown / Income:Unknown by default,
-    // or `default_expense` / `default_income` from CsvConfig) so the
-    // optional --suggest-categories ML step knows which accounts to
-    // re-categorize.
-    let (result, fallback_accounts) = if is_ofx_file(file) && args.importer.is_none() {
-        // Stateless OFX importer; per-call config carries account+currency.
-        // Wave 2.2 will route this through `ImporterRegistry`. OFX doesn't
-        // read `importer_type` so the inert Csv variant is fine.
-        let content = fs::read_to_string(file)
-            .with_context(|| format!("Failed to read: {}", file.display()))?;
+    let registry = rustledger_importer::ImporterRegistry::with_builtins();
+
+    // Build the per-call ImporterConfig + fallback-account list. The OFX
+    // branch produces a minimal CSV-variant carrier (OfxImporter ignores
+    // `importer_type`); the CSV branch builds the full CsvConfig from
+    // --importer/--config/--auto/raw-args sources.
+    let (config, fallback_accounts) = if is_ofx_file(file) && args.importer.is_none() {
         let cfg = rustledger_importer::ImporterConfig {
             account: args.account.clone(),
             currency: Some(args.currency.clone()),
@@ -229,13 +225,11 @@ pub fn run(args: &Args, file: &Path) -> Result<()> {
                 rustledger_importer::config::CsvConfig::default(),
             ),
         };
-        // OFX importer hardcodes Expenses:Unknown as the only contra-account.
-        (
-            OfxImporter.extract_from_string(&content, &cfg)?,
-            vec!["Expenses:Unknown".to_string()],
-        )
+        // OFX importer's contra-account is hardcoded to Expenses:Unknown.
+        (cfg, vec!["Expenses:Unknown".to_string()])
     } else {
-        // Determine import config: --importer flag, explicit --config, or CLI args
+        // CSV branch: determine import config from --importer flag,
+        // explicit --config, --auto, or raw CLI args.
         let config = if let Some(ref importer_name) = args.importer {
             // Explicit --importer: require config file, find named entry
             let config_path = find_importers_config(args.config.as_deref())?
@@ -421,8 +415,18 @@ pub fn run(args: &Args, file: &Path) -> Result<()> {
                 .clone()
                 .unwrap_or_else(|| "Income:Unknown".to_string()),
         ];
-        (config.extract(file)?, fallbacks)
+        (config, fallbacks)
     };
+
+    // Dispatch through the registry. `identify()` picks OfxImporter for
+    // .ofx/.qfx and CsvImporter for .csv. For any other extension
+    // (custom-extension TOML entries, e.g. `.qbo`), fall back to CsvImporter
+    // since TOML entries can only carry CSV-shaped config.
+    let importer = registry.identify(file).unwrap_or_else(|| {
+        std::sync::Arc::new(rustledger_importer::csv_importer::CsvImporter)
+            as std::sync::Arc<dyn rustledger_importer::Importer>
+    });
+    let result = importer.extract(file, &config)?;
 
     // Print warnings
     for warning in &result.warnings {
@@ -832,7 +836,9 @@ default_expense = "Expenses:Uncategorized"
             .find(|e| e.name == "mybank")
             .unwrap();
         let config = build_config_from_entry(entry).unwrap();
-        let result = config.extract(&csv_path).unwrap();
+        let result = rustledger_importer::csv_importer::CsvImporter
+            .extract_file(&csv_path, &config)
+            .unwrap();
 
         assert_eq!(result.directives.len(), 2);
 

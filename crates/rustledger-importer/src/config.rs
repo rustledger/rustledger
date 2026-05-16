@@ -1,11 +1,9 @@
 //! Configuration for importers.
 
-use crate::ImportResult;
-use crate::csv_importer::CsvImporter;
 use anyhow::{Context, Result};
 use format_num_pattern::{Locale, NumberFormat, NumberSymbols, fmt_to, parse_fmt};
 use rust_decimal::Decimal;
-use std::{fmt::Display, ops::Neg, path::Path, str::FromStr};
+use std::{fmt::Display, ops::Neg, str::FromStr};
 
 /// Configuration for an importer.
 ///
@@ -241,22 +239,6 @@ impl ImporterConfig {
     /// Start building a CSV importer configuration.
     pub fn csv() -> CsvConfigBuilder {
         CsvConfigBuilder::new()
-    }
-
-    /// Extract transactions from a file.
-    pub fn extract(&self, path: &Path) -> Result<ImportResult> {
-        // Dispatch by format. `_` binding (instead of unused match arm)
-        // intentional: the irrefutable pattern below is the load-bearing
-        // safety net — a new ImporterType variant will surface here at
-        // compile time.
-        let ImporterType::Csv(_) = &self.importer_type;
-        CsvImporter.extract_file(path, self)
-    }
-
-    /// Extract transactions from string content.
-    pub fn extract_from_string(&self, content: &str) -> Result<ImportResult> {
-        let ImporterType::Csv(_) = &self.importer_type;
-        CsvImporter.extract_string(content, self)
     }
 }
 
@@ -714,7 +696,9 @@ mod tests {
             .unwrap();
 
         let csv = "Date,Description,Amount\n2024-01-15,Test,-10.00\n";
-        let result = config.extract_from_string(csv).unwrap();
+        let result = crate::csv_importer::CsvImporter
+            .extract_string(csv, &config)
+            .unwrap();
         assert_eq!(result.directives.len(), 1);
     }
 

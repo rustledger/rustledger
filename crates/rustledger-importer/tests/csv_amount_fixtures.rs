@@ -1,7 +1,7 @@
 //! Regression for issue #972: sub-cent CSV amounts (e.g. `0.01`) used to silently parse as `0.1`.
 
 use rust_decimal::Decimal;
-use rustledger_importer::ImporterConfig;
+use rustledger_importer::{ImporterConfig, csv_importer::CsvImporter};
 use std::str::FromStr;
 
 const FIXTURE: &str = "\
@@ -28,7 +28,7 @@ fn realistic_bank_export_parses_every_amount_correctly() {
         .build()
         .unwrap();
 
-    let result = config.extract_from_string(FIXTURE).unwrap();
+    let result = CsvImporter.extract_string(FIXTURE, &config).unwrap();
 
     // The zero-amount row must parse cleanly (no warning). It's then dropped downstream
     // by the importer's intentional zero-skip — covered by csv_importer's own tests.

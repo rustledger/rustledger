@@ -246,13 +246,19 @@ pub trait Importer: Send + Sync {
 }
 
 /// Extract transactions from a file using the given configuration.
+///
+/// Convenience wrapper around [`ImporterRegistry::with_builtins`] +
+/// [`ImporterRegistry::extract`]. For more control over importer
+/// selection, instantiate the registry directly.
 pub fn extract_from_file(path: &Path, config: &ImporterConfig) -> Result<ImportResult> {
-    config.extract(path)
+    ImporterRegistry::with_builtins().extract(path, config)
 }
 
-/// Extract transactions from file contents (useful for testing).
+/// Extract transactions from CSV file contents (useful for testing).
+/// CSV-only because OFX/QFX are binary-ish formats not well suited to
+/// in-memory string testing through the same entry point.
 pub fn extract_from_string(content: &str, config: &ImporterConfig) -> Result<ImportResult> {
-    config.extract_from_string(content)
+    csv_importer::CsvImporter.extract_string(content, config)
 }
 
 /// Auto-extract transactions from a file by inferring its format.

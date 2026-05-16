@@ -46,20 +46,64 @@ expression = "MIT AND ISC AND OpenSSL"
 license-files = [{ path = "LICENSE", hash = 0xbd0eed23 }]
 
 [bans]
-multiple-versions = "warn"
-wildcards = "allow"
+# Fail CI on new duplicate-version dependencies. Existing dups are in `skip`
+# below; this prevents new ones from sneaking in unnoticed.
+multiple-versions = "deny"
+# Forbid `version = "*"` specs in published crates — they bind to whatever
+# happens to resolve at publish time, with no SemVer guard.
+wildcards = "deny"
 highlight = "all"
 
-# Deny specific crates
-deny = []
+# Crates we never want to depend on, even transitively. We use rustls
+# everywhere (e.g. `ureq` is wired to rustls in our deps). Denying
+# native-tls and openssl makes any accidental pull-through fail CI loudly
+# instead of silently shipping a different TLS stack — a vector for
+# platform-specific build breakage (system openssl-dev required) and a
+# different threat surface than the rest of the workspace.
+deny = [
+  { name = "openssl" },
+  { name = "openssl-sys" },
+  { name = "native-tls" },
+]
 
-# Skip specific crate versions
-skip = []
+# Current unavoidable duplicates. These are upstream version skews (mostly
+# the wasmtime/cranelift stack pulling different versions of small util
+# crates). Each entry is documented in passing — when the duplicate goes
+# away (upstream aligns), the entry can be removed. cargo-deny will fail
+# if a skipped crate no longer has multiple versions.
+#
+# Audited 2026-05 via `cargo deny check bans`.
+skip = [
+  { crate = "addr2line" },        # gimli's, vs backtrace's
+  { crate = "bitflags" },         # 1.x via wasmtime stack, 2.x elsewhere
+  { crate = "block-buffer" },     # digest 0.9 vs 0.10
+  { crate = "cpufeatures" },      # transitive sha2 skew
+  { crate = "crypto-common" },    # digest 0.9 vs 0.10
+  { crate = "digest" },           # 0.9 vs 0.10 in the tree
+  { crate = "foldhash" },         # hashbrown skew
+  { crate = "getrandom" },        # 0.2 vs 0.3 (wasmtime + downstream)
+  { crate = "gimli" },            # addr2line / object skew
+  { crate = "hashbrown" },        # 3 versions: stdlib's, wasmtime's, our deps
+  { crate = "itertools" },        # 0.10 vs 0.13
+  { crate = "linux-raw-sys" },    # rustix skew
+  { crate = "object" },           # backtrace vs gimli
+  { crate = "rustix" },           # 0.38 vs 1.x
+  { crate = "sha2" },             # 0.9 vs 0.10
+  { crate = "thiserror" },        # 1.x vs 2.x — workspace is 2.x; transitives drag 1.x
+  { crate = "thiserror-impl" },   # paired with thiserror
+  { crate = "toml" },             # wasmtime cache vs our config parsing
+  { crate = "toml_datetime" },    # paired with toml
+  { crate = "unicode-width" },    # transitive skew
+  { crate = "wasm-encoder" },     # wasmtime stack versioning
+  { crate = "wast" },             # wasmtime stack versioning
+  { crate = "winnow" },           # toml parser version skew
+]
 
 # Skip entire dependency trees
 skip-tree = []
 
 [sources]
 unknown-registry = "deny"
-unknown-git = "warn"
+# Forbid shadow git deps. Every git dep should be explicitly approved here.
+unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]

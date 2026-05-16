@@ -35,6 +35,7 @@
 
 mod config;
 mod duplicate;
+mod suggest;
 
 use crate::cmd::completions::ShellType;
 use anyhow::{Context, Result, anyhow};
@@ -158,6 +159,15 @@ pub struct Args {
     #[arg(long, value_name = "FILE")]
     existing: Option<PathBuf>,
 
+    /// Use ML to suggest accounts for transactions the rules engine didn't
+    /// categorize. Trains a Naive Bayes model on the `--existing` ledger and
+    /// replaces the configured fallback contra-accounts (the importer's
+    /// `default_expense` and `default_income`, defaulting to
+    /// `Expenses:Unknown` / `Income:Unknown`) with the prediction.
+    /// Requires `--existing`.
+    #[arg(long, requires = "existing")]
+    suggest_categories: bool,
+
     /// Append a balance assertion with the given amount (e.g., "1234.56")
     #[arg(long, value_name = "AMOUNT")]
     balance: Option<String>,
@@ -201,10 +211,15 @@ pub fn list_importers(args: &Args) -> Result<()> {
 
 /// Run the extract command with the given arguments.
 pub fn run(args: &Args, file: &Path) -> Result<()> {
-    // Detect OFX files and use appropriate importer
-    let result = if is_ofx_file(file) && args.importer.is_none() {
+    // Detect OFX files and use appropriate importer. Also captures the
+    // fallback contra-accounts (Expenses:Unknown / Income:Unknown by default,
+    // or `default_expense` / `default_income` from CsvConfig) so the
+    // optional --suggest-categories ML step knows which accounts to
+    // re-categorize.
+    let (result, fallback_accounts) = if is_ofx_file(file) && args.importer.is_none() {
         let ofx = OfxImporter::new(&args.account, &args.currency);
-        ofx.extract(file)?
+        // OFX importer hardcodes Expenses:Unknown as the only contra-account.
+        (ofx.extract(file)?, vec!["Expenses:Unknown".to_string()])
     } else {
         // Determine import config: --importer flag, explicit --config, or CLI args
         let config = if let Some(ref importer_name) = args.importer {
@@ -384,7 +399,16 @@ pub fn run(args: &Args, file: &Path) -> Result<()> {
             config
         };
 
-        config.extract(file)?
+        let rustledger_importer::config::ImporterType::Csv(csv) = &config.importer_type;
+        let fallbacks = vec![
+            csv.default_expense
+                .clone()
+                .unwrap_or_else(|| "Expenses:Unknown".to_string()),
+            csv.default_income
+                .clone()
+                .unwrap_or_else(|| "Income:Unknown".to_string()),
+        ];
+        (config.extract(file)?, fallbacks)
     };
 
     // Print warnings
@@ -392,11 +416,13 @@ pub fn run(args: &Args, file: &Path) -> Result<()> {
         eprintln!("warning: {warning}");
     }
 
-    // Filter duplicates if --existing is specified
+    // Filter duplicates if --existing is specified, and optionally apply
+    // ML-based account suggestions for transactions the rules engine left
+    // pointing at a fallback account.
     let directives = if let Some(ref existing_path) = args.existing {
         let existing_txns = load_existing_transactions(existing_path)?;
         let before_count = result.directives.len();
-        let filtered: Vec<_> = result
+        let mut filtered: Vec<_> = result
             .directives
             .into_iter()
             .filter(|d| {
@@ -410,6 +436,13 @@ pub fn run(args: &Args, file: &Path) -> Result<()> {
         let dupes = before_count - filtered.len();
         if dupes > 0 {
             eprintln!("Filtered {dupes} duplicate transaction(s)");
+        }
+        if args.suggest_categories {
+            suggest::apply_ml_suggestions_with_summary(
+                &mut filtered,
+                &existing_txns,
+                &fallback_accounts,
+            )?;
         }
         filtered
     } else {

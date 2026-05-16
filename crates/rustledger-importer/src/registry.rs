@@ -31,7 +31,7 @@ impl ImporterRegistry {
     /// CSV). This is the standard entry point for the CLI and embedders.
     pub fn with_builtins() -> Self {
         let mut r = Self::new();
-        r.register(OfxImporter::default());
+        r.register(OfxImporter);
         r.register(CsvImporter);
         r
     }

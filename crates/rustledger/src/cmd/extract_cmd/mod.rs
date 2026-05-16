@@ -217,15 +217,21 @@ pub fn run(args: &Args, file: &Path) -> Result<()> {
     // optional --suggest-categories ML step knows which accounts to
     // re-categorize.
     let (result, fallback_accounts) = if is_ofx_file(file) && args.importer.is_none() {
-        // Use the legacy standalone helper for now. Wave 2.2 (the CLI rewire
-        // to dispatch through `ImporterRegistry`) replaces this with a
-        // trait-based call.
-        let ofx = OfxImporter::new(&args.account, &args.currency);
+        // Stateless OFX importer; per-call config carries account+currency.
+        // Wave 2.2 will route this through `ImporterRegistry`. OFX doesn't
+        // read `importer_type` so the inert Csv variant is fine.
         let content = fs::read_to_string(file)
             .with_context(|| format!("Failed to read: {}", file.display()))?;
+        let cfg = rustledger_importer::ImporterConfig {
+            account: args.account.clone(),
+            currency: Some(args.currency.clone()),
+            importer_type: rustledger_importer::config::ImporterType::Csv(
+                rustledger_importer::config::CsvConfig::default(),
+            ),
+        };
         // OFX importer hardcodes Expenses:Unknown as the only contra-account.
         (
-            ofx.extract_from_string(&content)?,
+            OfxImporter.extract_from_string(&content, &cfg)?,
             vec!["Expenses:Unknown".to_string()],
         )
     } else {

@@ -6,8 +6,19 @@
 //! corruption by `ofxy` would surface here, the same way #972 surfaced for CSV.
 
 use rust_decimal::Decimal;
-use rustledger_importer::OfxImporter;
+use rustledger_importer::{
+    OfxImporter,
+    config::{CsvConfig, ImporterConfig, ImporterType},
+};
 use std::str::FromStr;
+
+fn ofx_cfg(account: &str, currency: &str) -> ImporterConfig {
+    ImporterConfig {
+        account: account.to_string(),
+        currency: Some(currency.to_string()),
+        importer_type: ImporterType::Csv(CsvConfig::default()),
+    }
+}
 
 fn ofx_with_transactions(txns: &str) -> String {
     format!(
@@ -39,9 +50,8 @@ fn assert_ofx_amounts(amounts: &[&str]) {
         .collect();
     let content = ofx_with_transactions(&txns);
 
-    let importer = OfxImporter::new("Assets:Bank:Checking", "USD");
-    let result = importer
-        .extract_from_string(&content)
+    let result = OfxImporter
+        .extract_from_string(&content, &ofx_cfg("Assets:Bank:Checking", "USD"))
         .expect("OFX content should parse");
 
     assert!(
@@ -92,9 +102,8 @@ fn ofx_preserves_sub_cent_amounts() {
 fn ofx_preserves_zero_amount() {
     // Non-zero is the common case but a $0.00 fee/marker line should still parse.
     let content = ofx_with_transactions(&stmttrn("txn-zero", "0.00", "Marker"));
-    let importer = OfxImporter::new("Assets:Bank:Checking", "USD");
-    let result = importer
-        .extract_from_string(&content)
+    let result = OfxImporter
+        .extract_from_string(&content, &ofx_cfg("Assets:Bank:Checking", "USD"))
         .expect("OFX should parse");
     assert!(
         result.warnings.is_empty(),
@@ -120,8 +129,9 @@ fn ofx_negative_routes_to_expenses_positive_to_income() {
         stmttrn("cr", "98.76", "Inflow"),
     );
     let content = ofx_with_transactions(&txns);
-    let importer = OfxImporter::new("Assets:Bank:Checking", "USD");
-    let result = importer.extract_from_string(&content).unwrap();
+    let result = OfxImporter
+        .extract_from_string(&content, &ofx_cfg("Assets:Bank:Checking", "USD"))
+        .unwrap();
     assert!(
         result.warnings.is_empty(),
         "warnings: {:?}",

@@ -270,29 +270,34 @@ pub fn auto_extract(
     account: &str,
     currency: &str,
 ) -> Result<EnrichedImportResult> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| anyhow::anyhow!("Failed to read file {}: {e}", path.display()))?;
+
     // Check for OFX first
     if path
         .extension()
         .is_some_and(|ext| ext.eq_ignore_ascii_case("ofx") || ext.eq_ignore_ascii_case("qfx"))
     {
-        let ofx = ofx_importer::OfxImporter::new(account, currency);
-        return ofx.extract_from_string_enriched(&std::fs::read_to_string(path)?);
+        // OFX doesn't care about `importer_type` (its impl doesn't read
+        // it); inert Csv variant satisfies the type.
+        let cfg = config::ImporterConfig {
+            account: account.to_string(),
+            currency: Some(currency.to_string()),
+            importer_type: config::ImporterType::Csv(config::CsvConfig::default()),
+        };
+        return ofx_importer::OfxImporter.extract_from_string_enriched(&content, &cfg);
     }
 
     // Try CSV auto-inference
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| anyhow::anyhow!("Failed to read file {}: {e}", path.display()))?;
-
     let inferred = csv_inference::infer_csv_config(&content)
         .ok_or_else(|| anyhow::anyhow!("Could not infer CSV format from {}", path.display()))?;
 
-    let csv_config = inferred.to_csv_config();
-    let importer_config = config::ImporterConfig {
+    let cfg = config::ImporterConfig {
         account: account.to_string(),
         currency: Some(currency.to_string()),
-        importer_type: config::ImporterType::Csv(csv_config),
+        importer_type: config::ImporterType::Csv(inferred.to_csv_config()),
     };
-    csv_importer::CsvImporter.extract_string_enriched(&content, &importer_config)
+    csv_importer::CsvImporter.extract_string_enriched(&content, &cfg)
 }
 
 #[cfg(test)]

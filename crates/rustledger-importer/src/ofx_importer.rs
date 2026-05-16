@@ -23,40 +23,39 @@ use std::path::Path;
 
 /// OFX/QFX file importer.
 ///
-/// Two ways to use this:
+/// True unit struct — all per-call state flows in via the
+/// [`ImporterConfig`] passed to [`Importer::extract`] or to the
+/// standalone helpers ([`Self::extract_from_string`] et al.).
 ///
-/// 1. **As an [`Importer`] trait implementor** — stateless. Register a
-///    `OfxImporter::default()` in [`crate::ImporterRegistry`] and let
-///    the per-call [`ImporterConfig`] supply the target account and
-///    currency. This is the plugin-protocol path; recommended.
-///
-/// 2. **As a standalone helper** — construct via [`OfxImporter::new`]
-///    with `(account, currency)` baked in, then call
-///    [`OfxImporter::extract_from_string`] directly. Used by the
-///    pre-registry call sites and the test suite. The two APIs coexist
-///    so existing tests keep working through the protocol migration.
+/// OFX semantics:
+/// - `config.account` is the target account for every transaction.
+/// - `config.currency` is **required** (an OFX file may not declare a
+///   currency at the transaction or statement level; we refuse to
+///   guess and produce empty-string-currency `Amount`s).
+// `Copy` intentionally NOT derived — see `CsvImporter` for the rationale.
 #[derive(Debug, Default, Clone)]
-pub struct OfxImporter {
-    /// Target account for imported transactions. Only used by the
-    /// standalone helper methods; the [`Importer`] trait impl reads
-    /// from the supplied [`ImporterConfig`] instead.
-    account: String,
-    /// Currency for amounts (if not specified in the file). Same
-    /// caveat as `account`.
-    default_currency: String,
-}
+pub struct OfxImporter;
 
 impl OfxImporter {
-    /// Create a new OFX importer.
-    pub fn new(account: impl Into<String>, default_currency: impl Into<String>) -> Self {
-        Self {
-            account: account.into(),
-            default_currency: default_currency.into(),
-        }
-    }
+    /// Extract transactions from OFX content using the given importer
+    /// config. Stateless — pass account + currency via `config`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `config.currency` is `None` and the OFX
+    /// content has no transaction-level or statement-level currency.
+    pub fn extract_from_string(
+        &self,
+        content: &str,
+        config: &ImporterConfig,
+    ) -> Result<ImportResult> {
+        let default_currency = config.currency.as_deref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "OFX import requires a default currency \
+                 (set `ImporterConfig.currency = Some(...)`)"
+            )
+        })?;
 
-    /// Extract transactions from OFX content.
-    pub fn extract_from_string(&self, content: &str) -> Result<ImportResult> {
         let ofx: ofxy::Ofx = content
             .parse()
             .with_context(|| "Failed to parse OFX content")?;
@@ -71,7 +70,8 @@ impl OfxImporter {
 
             if let Some(txn_list) = &stmt.bank_transactions {
                 for txn in &txn_list.transactions {
-                    match self.parse_transaction(txn, currency) {
+                    match Self::parse_transaction(txn, currency, &config.account, default_currency)
+                    {
                         Ok(t) => directives.push(Directive::Transaction(t)),
                         Err(e) => warnings.push(format!("Skipped transaction: {e}")),
                     }
@@ -86,7 +86,8 @@ impl OfxImporter {
 
             if let Some(txn_list) = &stmt.bank_transactions {
                 for txn in &txn_list.transactions {
-                    match self.parse_transaction(txn, currency) {
+                    match Self::parse_transaction(txn, currency, &config.account, default_currency)
+                    {
                         Ok(t) => directives.push(Directive::Transaction(t)),
                         Err(e) => warnings.push(format!("Skipped transaction: {e}")),
                     }
@@ -102,8 +103,16 @@ impl OfxImporter {
     }
 
     /// Extract transactions from OFX content with enrichment metadata.
-    pub fn extract_from_string_enriched(&self, content: &str) -> Result<EnrichedImportResult> {
-        let result = self.extract_from_string(content)?;
+    ///
+    /// OFX has no categorization signal, so every enrichment is the
+    /// cheap-default (confidence 0.0, `Default` method). The fingerprint
+    /// is computed per directive for dedup purposes.
+    pub fn extract_from_string_enriched(
+        &self,
+        content: &str,
+        config: &ImporterConfig,
+    ) -> Result<EnrichedImportResult> {
+        let result = self.extract_from_string(content, config)?;
         let entries = result
             .directives
             .into_iter()
@@ -113,7 +122,7 @@ impl OfxImporter {
 
                 let enrichment = Enrichment {
                     directive_index: i,
-                    confidence: 0.0, // OFX has no categorization
+                    confidence: 0.0,
                     method: CategorizationMethod::Default,
                     alternatives: vec![],
                     fingerprint,
@@ -130,11 +139,13 @@ impl OfxImporter {
     }
 
     fn parse_transaction(
-        &self,
         txn: &ofxy::body::Transaction,
-        currency: &str,
+        statement_currency: &str,
+        account: &str,
+        default_currency: &str,
     ) -> Result<Transaction> {
-        // Get date from ofxy's DateTime<Utc> via formatted string roundtrip
+        // Get date from ofxy's DateTime<Utc> via formatted string roundtrip.
+        // See module docstring re: the chrono boundary.
         let date: NaiveDate = txn
             .date_posted
             .format("%Y-%m-%d")
@@ -156,13 +167,13 @@ impl OfxImporter {
             format!("{name} - {memo}")
         };
 
-        // Use currency from transaction if available, otherwise from statement
+        // Currency precedence: transaction → statement → config default.
         let curr = txn.currency.as_ref().map_or_else(
             || {
-                if currency.is_empty() {
-                    self.default_currency.clone()
+                if statement_currency.is_empty() {
+                    default_currency.to_string()
                 } else {
-                    currency.to_string()
+                    statement_currency.to_string()
                 }
             },
             |c| c.symbol.clone(),
@@ -170,7 +181,7 @@ impl OfxImporter {
 
         // Create posting
         let units = Amount::new(amount, &curr);
-        let posting = Posting::new(&self.account, units);
+        let posting = Posting::new(account, units);
 
         // Create balancing posting
         let contra_account = if amount < rust_decimal::Decimal::ZERO {
@@ -208,25 +219,17 @@ impl Importer for OfxImporter {
     fn extract(&self, path: &Path, config: &ImporterConfig) -> Result<ImportResult> {
         let content = fs::read_to_string(path)
             .with_context(|| format!("Failed to read: {}", path.display()))?;
-        // The protocol path: build a configured-per-call instance from
-        // the supplied ImporterConfig, ignoring self's stored state.
-        // The standalone helper methods (extract_from_string et al.)
-        // still use self's state for backward compatibility.
-        //
-        // Fail loudly on a missing currency rather than silently
-        // emitting empty-string-currency Amounts (the prior
-        // `unwrap_or_default()` produced `Amount::new(n, "")` for OFX
-        // files where neither the transaction nor the statement
-        // specified a currency).
-        let currency = config.currency.as_deref().ok_or_else(|| {
-            anyhow::anyhow!(
-                "OFX import for {} requires a default currency \
-                 (set `ImporterConfig.currency = Some(...)`)",
-                path.display()
-            )
-        })?;
-        let configured = Self::new(&config.account, currency);
-        configured.extract_from_string(&content)
+        self.extract_from_string(&content, config)
+    }
+
+    fn extract_enriched(
+        &self,
+        path: &Path,
+        config: &ImporterConfig,
+    ) -> Result<EnrichedImportResult> {
+        let content = fs::read_to_string(path)
+            .with_context(|| format!("Failed to read: {}", path.display()))?;
+        self.extract_from_string_enriched(&content, config)
     }
 
     fn description(&self) -> &'static str {
@@ -237,23 +240,28 @@ impl Importer for OfxImporter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{CsvConfig, ImporterType};
 
-    #[test]
-    fn test_ofx_importer_new() {
-        let importer = OfxImporter::new("Assets:Bank", "USD");
-        assert_eq!(importer.account, "Assets:Bank");
-        assert_eq!(importer.default_currency, "USD");
+    /// Build an `ImporterConfig` for OFX tests. OFX only needs
+    /// `account` + `currency`; the `importer_type` Csv variant is
+    /// inert (the OFX impl never touches it).
+    fn ofx_cfg(account: &str, currency: &str) -> ImporterConfig {
+        ImporterConfig {
+            account: account.to_string(),
+            currency: Some(currency.to_string()),
+            importer_type: ImporterType::Csv(CsvConfig::default()),
+        }
     }
 
     #[test]
     fn test_ofx_importer_name() {
-        let importer = OfxImporter::new("Assets:Bank", "USD");
+        let importer = OfxImporter;
         assert_eq!(importer.name(), "OFX/QFX");
     }
 
     #[test]
     fn test_ofx_importer_description() {
-        let importer = OfxImporter::new("Assets:Bank", "USD");
+        let importer = OfxImporter;
         assert_eq!(
             importer.description(),
             "Open Financial Exchange (OFX/QFX) file importer"
@@ -262,7 +270,7 @@ mod tests {
 
     #[test]
     fn test_ofx_importer_identify() {
-        let importer = OfxImporter::new("Assets:Bank", "USD");
+        let importer = OfxImporter;
         assert!(importer.identify(Path::new("statement.ofx")));
         assert!(importer.identify(Path::new("statement.OFX")));
         assert!(importer.identify(Path::new("statement.qfx")));
@@ -274,7 +282,7 @@ mod tests {
 
     #[test]
     fn test_ofx_importer_identify_no_extension() {
-        let importer = OfxImporter::new("Assets:Bank", "USD");
+        let importer = OfxImporter;
         assert!(!importer.identify(Path::new("statement")));
     }
 
@@ -345,8 +353,8 @@ NEWFILEUID:NONE
 </BANKMSGSRSV1>
 </OFX>";
 
-        let importer = OfxImporter::new("Assets:Bank:Checking", "USD");
-        let result = importer.extract_from_string(ofx_content);
+        let result =
+            OfxImporter.extract_from_string(ofx_content, &ofx_cfg("Assets:Bank:Checking", "USD"));
 
         match &result {
             Ok(import_result) => {
@@ -417,8 +425,8 @@ NEWFILEUID:NONE
 </CREDITCARDMSGSRSV1>
 </OFX>";
 
-        let importer = OfxImporter::new("Liabilities:CreditCard", "USD");
-        let result = importer.extract_from_string(ofx_content);
+        let result =
+            OfxImporter.extract_from_string(ofx_content, &ofx_cfg("Liabilities:CreditCard", "USD"));
 
         match &result {
             Ok(import_result) => {
@@ -477,8 +485,8 @@ NEWFILEUID:NONE
 </BANKMSGSRSV1>
 </OFX>";
 
-        let importer = OfxImporter::new("Assets:Bank:Checking", "USD");
-        let result = importer.extract_from_string(ofx_content);
+        let result =
+            OfxImporter.extract_from_string(ofx_content, &ofx_cfg("Assets:Bank:Checking", "USD"));
 
         match &result {
             Ok(import_result) => {
@@ -492,15 +500,15 @@ NEWFILEUID:NONE
 
     #[test]
     fn test_ofx_importer_invalid_content() {
-        let importer = OfxImporter::new("Assets:Bank", "USD");
-        let result = importer.extract_from_string("not valid ofx");
+        let importer = OfxImporter;
+        let result = importer.extract_from_string("not valid ofx", &ofx_cfg("Assets:Bank", "USD"));
         assert!(result.is_err());
     }
 
     #[test]
     fn test_ofx_importer_extract_nonexistent_file() {
         use crate::config::{CsvConfig, ImporterType};
-        let importer = OfxImporter::default();
+        let importer = OfxImporter;
         let config = ImporterConfig {
             account: "Assets:Bank".into(),
             currency: Some("USD".into()),
@@ -568,8 +576,8 @@ NEWFILEUID:NONE
 </BANKMSGSRSV1>
 </OFX>";
 
-        let importer = OfxImporter::new("Assets:Bank:Checking", "USD");
-        let result = importer.extract_from_string(ofx_content);
+        let result =
+            OfxImporter.extract_from_string(ofx_content, &ofx_cfg("Assets:Bank:Checking", "USD"));
 
         match &result {
             Ok(import_result) => {
@@ -639,8 +647,8 @@ NEWFILEUID:NONE
 </BANKMSGSRSV1>
 </OFX>";
 
-        let importer = OfxImporter::new("Assets:Bank:Checking", "USD");
-        let result = importer.extract_from_string(ofx_content);
+        let result =
+            OfxImporter.extract_from_string(ofx_content, &ofx_cfg("Assets:Bank:Checking", "USD"));
 
         match &result {
             Ok(import_result) => {
@@ -710,8 +718,8 @@ NEWFILEUID:NONE
 </BANKMSGSRSV1>
 </OFX>";
 
-        let importer = OfxImporter::new("Assets:Bank:Checking", "USD");
-        let result = importer.extract_from_string(ofx_content);
+        let result =
+            OfxImporter.extract_from_string(ofx_content, &ofx_cfg("Assets:Bank:Checking", "USD"));
 
         match &result {
             Ok(import_result) => {
@@ -724,9 +732,21 @@ NEWFILEUID:NONE
     }
 
     #[test]
-    fn test_ofx_importer_default_currency_fallback() {
-        // When statement currency is empty, use default
-        let importer = OfxImporter::new("Assets:Bank", "EUR");
-        assert_eq!(importer.default_currency, "EUR");
+    fn test_ofx_importer_missing_currency_errors() {
+        // A call-time config without `currency` should produce a typed error
+        // rather than silently emitting empty-string-currency Amounts.
+        let cfg = ImporterConfig {
+            account: "Assets:Bank".into(),
+            currency: None,
+            importer_type: crate::config::ImporterType::Csv(crate::config::CsvConfig::default()),
+        };
+        let result =
+            OfxImporter.extract_from_string("not OFX, but the currency check runs first", &cfg);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("requires a default currency"),
+            "expected currency error, got: {msg}"
+        );
     }
 }

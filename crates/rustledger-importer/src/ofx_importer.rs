@@ -212,7 +212,20 @@ impl Importer for OfxImporter {
         // the supplied ImporterConfig, ignoring self's stored state.
         // The standalone helper methods (extract_from_string et al.)
         // still use self's state for backward compatibility.
-        let configured = Self::new(&config.account, config.currency.clone().unwrap_or_default());
+        //
+        // Fail loudly on a missing currency rather than silently
+        // emitting empty-string-currency Amounts (the prior
+        // `unwrap_or_default()` produced `Amount::new(n, "")` for OFX
+        // files where neither the transaction nor the statement
+        // specified a currency).
+        let currency = config.currency.as_deref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "OFX import for {} requires a default currency \
+                 (set `ImporterConfig.currency = Some(...)`)",
+                path.display()
+            )
+        })?;
+        let configured = Self::new(&config.account, currency);
         configured.extract_from_string(&content)
     }
 

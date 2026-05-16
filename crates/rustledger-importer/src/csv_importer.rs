@@ -13,27 +13,32 @@ use std::path::Path;
 
 /// CSV file importer.
 ///
-/// Like [`crate::OfxImporter`], `CsvImporter` has two usage shapes:
+/// Carries an [`ImporterConfig`] for parser state (specifically the
+/// compiled [`AmountFormat`], which is locale-derived and lives on
+/// `ImporterConfig` for historical reasons — moving it to `CsvConfig`
+/// is a follow-up). The trait [`Importer`] impl rebuilds a configured
+/// instance per call from the supplied config, so the registry-
+/// dispatched path is effectively stateless.
 ///
-/// 1. **As an [`Importer`] trait implementor** — stateless. Register a
-///    `CsvImporter::default()` in [`crate::ImporterRegistry`] and let
-///    the per-call [`ImporterConfig`] supply every detail. Recommended.
+/// The trait's [`Importer::extract_enriched`] is overridden here to
+/// produce real categorization confidence via the rules engine, rather
+/// than the cheap-default enrichment from the trait fallback.
 ///
-/// 2. **As a standalone helper** — construct via [`CsvImporter::new`]
-///    with a baked-in [`ImporterConfig`], then call helper methods like
-///    [`CsvImporter::extract_file`] directly. Pre-registry call sites
-///    and the test suite use this path.
+/// FIXME(wave 2.2): relocate `amount_format` from `ImporterConfig` to
+/// `CsvConfig` so this struct can become a true unit struct.
 pub struct CsvImporter {
-    /// Per-importer config. Only used by the standalone helper methods;
-    /// the [`Importer`] trait impl reads from the call-time
-    /// `ImporterConfig` instead.
+    /// Per-importer config. The trait impl rebuilds an instance per
+    /// call; the standalone helpers (`extract_file` et al.) use this
+    /// stored value.
     config: ImporterConfig,
 }
 
 impl Default for CsvImporter {
     fn default() -> Self {
-        // Placeholder config used only by standalone helpers; the
-        // protocol path supplies its own via Importer::extract.
+        // Placeholder config used when registered in `with_builtins()`.
+        // The trait impl always rebuilds a configured instance, so this
+        // stored config is only meaningful if a caller constructs via
+        // `::new(config)` and uses the standalone helpers directly.
         Self {
             config: ImporterConfig {
                 account: String::new(),
@@ -60,13 +65,34 @@ impl Importer for CsvImporter {
     }
 
     fn extract(&self, path: &Path, config: &ImporterConfig) -> Result<ImportResult> {
+        // Irrefutable today because `ImporterType` has a single variant.
+        // If a new variant is ever added, the compiler will surface this
+        // as a refutable pattern — that's intentional load-bearing safety,
+        // please do NOT "fix" it with `unreachable!()`. Either match
+        // exhaustively or return a typed error explaining why this
+        // importer needs CSV-shaped config.
         let ImporterType::Csv(csv_config) = &config.importer_type;
-        self.extract_file(path, csv_config)
+        // Build a configured instance per call so `parse_row`'s read of
+        // `self.config.amount_format` uses the caller's value, not the
+        // registry's placeholder default.
+        Self::new(config.clone()).extract_file(path, csv_config)
+    }
+
+    fn extract_enriched(
+        &self,
+        path: &Path,
+        config: &ImporterConfig,
+    ) -> Result<EnrichedImportResult> {
+        let ImporterType::Csv(csv_config) = &config.importer_type;
+        Self::new(config.clone()).extract_file_enriched(path, csv_config)
     }
 }
 
 impl CsvImporter {
-    /// Create a new CSV importer with the given configuration.
+    /// Construct a CSV importer with a baked-in configuration. Used by
+    /// the standalone helpers (`extract_file`, `extract_string`, et al.)
+    /// where the caller wants to skip the registry. The registry-
+    /// dispatched path rebuilds an instance per call instead.
     pub const fn new(config: ImporterConfig) -> Self {
         Self { config }
     }
@@ -1357,7 +1383,7 @@ not-a-date,Coffee,-5.00
 
         let ImporterType::Csv(csv_config) = &config.importer_type;
         let csv_config = csv_config.clone();
-        let importer = CsvImporter::new(config);
+        let importer = CsvImporter::new(config.clone());
 
         let csv_content =
             "Date,Description,Amount\n2024-01-15,Coffee Shop,-5.00\n2024-01-16,Salary,2500.00\n";
@@ -1392,7 +1418,7 @@ not-a-date,Coffee,-5.00
 
         let ImporterType::Csv(csv_config) = &config.importer_type;
         let csv_config = csv_config.clone();
-        let importer = CsvImporter::new(config);
+        let importer = CsvImporter::new(config.clone());
 
         let csv_content = "Date,Description,Amount\n2024-01-15,Coffee Shop,-5.00\n2024-01-16,Random Store,-10.00\n";
 
@@ -1432,7 +1458,7 @@ not-a-date,Coffee,-5.00
 
         let ImporterType::Csv(csv_config) = &config.importer_type;
         let csv_config = csv_config.clone();
-        let importer = CsvImporter::new(config);
+        let importer = CsvImporter::new(config.clone());
 
         // Use a well-known merchant name that should be in the merchant dict
         let csv_content = "Date,Description,Amount\n2024-01-15,AMAZON,-50.00\n";
@@ -1462,7 +1488,7 @@ not-a-date,Coffee,-5.00
 
         let ImporterType::Csv(csv_config) = &config.importer_type;
         let csv_config = csv_config.clone();
-        let importer = CsvImporter::new(config);
+        let importer = CsvImporter::new(config.clone());
 
         let csv_content =
             "Date,Description,Amount\nnot-a-date,Coffee,-5.00\n2024-01-15,Valid,-10.00\n";

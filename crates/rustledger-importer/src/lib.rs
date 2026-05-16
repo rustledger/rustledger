@@ -158,6 +158,37 @@ impl From<EnrichedImportResult> for ImportResult {
     }
 }
 
+impl From<ImportResult> for EnrichedImportResult {
+    /// Promote an [`ImportResult`] into an [`EnrichedImportResult`] by
+    /// attaching a default (uncategorized, no-fingerprint) [`Enrichment`]
+    /// to each directive. This is the cheap-default impl used by
+    /// [`Importer::extract_enriched`] when an importer does not provide
+    /// a custom enrichment path; format-specific importers should
+    /// override `extract_enriched` to produce real metadata.
+    fn from(result: ImportResult) -> Self {
+        let entries = result
+            .directives
+            .into_iter()
+            .enumerate()
+            .map(|(i, directive)| {
+                let enrichment = Enrichment {
+                    directive_index: i,
+                    confidence: 0.0,
+                    method: rustledger_ops::enrichment::CategorizationMethod::Default,
+                    alternatives: vec![],
+                    fingerprint: directive_fingerprint(&directive),
+                };
+                (directive, enrichment)
+            })
+            .collect();
+        let mut enriched = Self::new(entries);
+        for warning in result.warnings {
+            enriched = enriched.with_warning(warning);
+        }
+        enriched
+    }
+}
+
 /// Trait for file importers.
 ///
 /// Implementors of this trait are **stateless** — they describe a file
@@ -186,6 +217,27 @@ pub trait Importer: Send + Sync {
     /// formats; format-specific configuration lives in
     /// `config.importer_type` (e.g. `ImporterType::Csv(CsvConfig)`).
     fn extract(&self, path: &Path, config: &ImporterConfig) -> Result<ImportResult>;
+
+    /// Extract directives with per-directive enrichment metadata
+    /// (categorization confidence, method, alternatives, fingerprint).
+    ///
+    /// Default impl wraps [`Importer::extract`] and produces default
+    /// (uncategorized, no-alternative) enrichments with a computed
+    /// fingerprint. Importers that know how to produce *real*
+    /// categorization confidence (e.g. CSV via its mappings/regex/
+    /// merchant-dict rules engine) should override this method.
+    ///
+    /// Critical: this method exists on the trait — not just as a
+    /// concrete-type helper — so that WASM-loaded importers in wave
+    /// 2.3 can participate in the enriched pipeline (dedup, import-
+    /// suggestion confidence, etc.) without being downcast.
+    fn extract_enriched(
+        &self,
+        path: &Path,
+        config: &ImporterConfig,
+    ) -> Result<EnrichedImportResult> {
+        Ok(EnrichedImportResult::from(self.extract(path, config)?))
+    }
 
     /// Returns a description of what this importer handles.
     fn description(&self) -> &str {

@@ -707,6 +707,135 @@ pub struct CustomData {
 }
 
 // ============================================================================
+// Importer ABI (wave 2.3: WASM-loaded importers)
+// ============================================================================
+//
+// These types are the wire format spoken between the rustledger host and
+// a WASM-loaded importer plugin (e.g. `rustledger-importer-mt940.wasm`).
+//
+// # Sandbox model
+//
+// WASM importers run in the same locked-down sandbox as directive plugins
+// (no filesystem, no network, no environment, no syscalls). The host reads
+// the source file and passes its bytes via [`ImporterInput::content`] —
+// the WASM importer does NOT open the file itself.
+//
+// # MessagePack contract
+//
+// Both [`ImporterInput`] and [`ImporterOutput`] are `Serialize +
+// Deserialize` and travel between host and guest as MessagePack-encoded
+// byte slices. The WASM module exports a single byte-buffer entry point
+// for each operation; see `rustledger-importer::WasmImporter` for the
+// host side and `rustledger-plugin`'s reference implementation for the
+// guest side.
+//
+// # Versioning
+//
+// Field additions are backward-compatible (msgpack ignores unknown
+// fields). Field removals or shape changes are major-version breaks
+// for the WASM ABI.
+
+/// Wire-format input passed from the host to a WASM importer's
+/// `extract` / `extract_enriched` entry point.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImporterInput {
+    /// Source file path. Informational only — the WASM sandbox cannot
+    /// open this. Used for diagnostics and fingerprint generation.
+    pub path: String,
+    /// File content bytes. The host reads the file and forwards the
+    /// bytes here so the WASM importer doesn't need filesystem access.
+    pub content: Vec<u8>,
+    /// Target account for imported transactions
+    /// (from `ImporterConfig.account`).
+    pub account: String,
+    /// Currency for amounts (from `ImporterConfig.currency`).
+    pub currency: Option<String>,
+    /// Free-form importer-specific options. The host serializes
+    /// `importers.toml` entries' arbitrary fields into this map; the
+    /// WASM importer reads the keys it knows about. Keeps the
+    /// wire format independent of any host-side config struct shape.
+    #[serde(default)]
+    pub options: std::collections::HashMap<String, String>,
+}
+
+/// Wire-format output returned from a WASM importer's `extract`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImporterOutput {
+    /// Extracted directives.
+    pub directives: Vec<DirectiveWrapper>,
+    /// Warnings encountered during extraction (non-fatal).
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
+impl ImporterOutput {
+    /// Create an output with no warnings.
+    #[must_use]
+    pub const fn new(directives: Vec<DirectiveWrapper>) -> Self {
+        Self {
+            directives,
+            warnings: Vec::new(),
+        }
+    }
+
+    /// Empty result with no directives and no warnings.
+    #[must_use]
+    pub const fn empty() -> Self {
+        Self {
+            directives: Vec::new(),
+            warnings: Vec::new(),
+        }
+    }
+}
+
+/// Wire-format output returned from a WASM importer's
+/// `extract_enriched`. Each directive is paired with per-directive
+/// categorization metadata.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnrichedImporterOutput {
+    /// Directive–enrichment pairs, parallel to `ImporterOutput.directives`.
+    pub entries: Vec<(DirectiveWrapper, EnrichmentWrapper)>,
+    /// Warnings encountered during extraction (non-fatal).
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
+/// Wire-format counterpart to `rustledger_ops::enrichment::Enrichment`.
+///
+/// Kept here (rather than in `rustledger-ops`) so the importer ABI is
+/// self-contained — WASM importers depend on `rustledger-plugin-types`
+/// and shouldn't pull in the larger `rustledger-ops` graph just for an
+/// enrichment definition. The host converts between the two shapes at
+/// the trait boundary.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnrichmentWrapper {
+    /// Index of the directive this enrichment applies to (parallel to
+    /// `EnrichedImporterOutput.entries`).
+    pub directive_index: usize,
+    /// Confidence score for the primary categorization (0.0 to 1.0).
+    pub confidence: f64,
+    /// How the primary categorization was determined. String-encoded
+    /// (e.g. `"rule"`, `"merchant_dict"`, `"ml"`, `"llm"`, `"default"`,
+    /// `"manual"`) to avoid pinning the `CategorizationMethod` enum's
+    /// exact variant set into the wire format.
+    pub method: String,
+    /// Other possible categorizations, sorted by confidence descending.
+    #[serde(default)]
+    pub alternatives: Vec<AlternativeWrapper>,
+    /// Stable fingerprint for deduplication, serialized as a hex string.
+    pub fingerprint: Option<String>,
+}
+
+/// Wire-format counterpart to `rustledger_ops::enrichment::Alternative`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AlternativeWrapper {
+    /// Account this alternative would assign.
+    pub account: String,
+    /// Confidence score for this alternative (0.0 to 1.0).
+    pub confidence: f64,
+}
+
+// ============================================================================
 // Utility Functions
 // ============================================================================
 
@@ -994,5 +1123,101 @@ mod tests {
             }
             other => panic!("expected Unit, got {other:?}"),
         }
+    }
+
+    // ===== Importer ABI round-trip tests =====
+    //
+    // Pin the MessagePack-roundtrip shape of the WASM importer wire
+    // format. If any field is renamed, removed, or its type changes,
+    // these tests catch it — that's a v1.0 ABI breakage we want to
+    // notice at code-change time.
+
+    #[test]
+    fn importer_input_msgpack_roundtrip() {
+        let mut options = std::collections::HashMap::new();
+        options.insert("date_column".to_string(), "Date".to_string());
+        options.insert("delimiter".to_string(), ",".to_string());
+
+        let original = ImporterInput {
+            path: "/path/to/foo.csv".to_string(),
+            content: vec![0xDE, 0xAD, 0xBE, 0xEF],
+            account: "Assets:Bank".to_string(),
+            currency: Some("USD".to_string()),
+            options,
+        };
+        let bytes = rmp_serde::to_vec(&original).unwrap();
+        let decoded: ImporterInput = rmp_serde::from_slice(&bytes).unwrap();
+        assert_eq!(decoded.path, original.path);
+        assert_eq!(decoded.content, original.content);
+        assert_eq!(decoded.account, original.account);
+        assert_eq!(decoded.currency, original.currency);
+        assert_eq!(decoded.options, original.options);
+    }
+
+    #[test]
+    fn importer_output_msgpack_roundtrip_empty() {
+        let original = ImporterOutput::empty();
+        let bytes = rmp_serde::to_vec(&original).unwrap();
+        let decoded: ImporterOutput = rmp_serde::from_slice(&bytes).unwrap();
+        assert!(decoded.directives.is_empty());
+        assert!(decoded.warnings.is_empty());
+    }
+
+    #[test]
+    fn importer_output_msgpack_roundtrip_with_warning() {
+        let mut out = ImporterOutput::new(vec![]);
+        out.warnings.push("Skipped row 3: bad date".to_string());
+        let bytes = rmp_serde::to_vec(&out).unwrap();
+        let decoded: ImporterOutput = rmp_serde::from_slice(&bytes).unwrap();
+        assert_eq!(decoded.warnings.len(), 1);
+        assert!(decoded.warnings[0].contains("bad date"));
+    }
+
+    #[test]
+    fn enrichment_wrapper_msgpack_roundtrip() {
+        let original = EnrichmentWrapper {
+            directive_index: 7,
+            confidence: 0.85,
+            method: "rule".to_string(),
+            alternatives: vec![AlternativeWrapper {
+                account: "Expenses:Groceries".to_string(),
+                confidence: 0.75,
+            }],
+            fingerprint: Some("abc123def456".to_string()),
+        };
+        let bytes = rmp_serde::to_vec(&original).unwrap();
+        let decoded: EnrichmentWrapper = rmp_serde::from_slice(&bytes).unwrap();
+        assert_eq!(decoded.directive_index, original.directive_index);
+        assert!((decoded.confidence - original.confidence).abs() < f64::EPSILON);
+        assert_eq!(decoded.method, original.method);
+        assert_eq!(decoded.alternatives.len(), 1);
+        assert_eq!(decoded.alternatives[0].account, "Expenses:Groceries");
+        assert_eq!(decoded.fingerprint, original.fingerprint);
+    }
+
+    #[test]
+    fn importer_input_default_options_field_is_backward_compatible() {
+        // The `options` field has `#[serde(default)]` so an older WASM
+        // importer that doesn't include the field in its serialized
+        // output can still be deserialized. Pin this with a synthetic
+        // partial-shape blob.
+        #[derive(serde::Serialize)]
+        struct OldShape {
+            path: String,
+            content: Vec<u8>,
+            account: String,
+            currency: Option<String>,
+            // intentionally no `options`
+        }
+        let old = OldShape {
+            path: "/x.csv".into(),
+            content: vec![1, 2, 3],
+            account: "Assets:Bank".into(),
+            currency: Some("USD".into()),
+        };
+        let bytes = rmp_serde::to_vec(&old).unwrap();
+        let decoded: ImporterInput = rmp_serde::from_slice(&bytes).unwrap();
+        assert!(decoded.options.is_empty());
+        assert_eq!(decoded.path, "/x.csv");
     }
 }

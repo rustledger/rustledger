@@ -35,6 +35,7 @@
 
 mod config;
 mod duplicate;
+mod suggest;
 
 use crate::cmd::completions::ShellType;
 use anyhow::{Context, Result, anyhow};
@@ -157,6 +158,13 @@ pub struct Args {
     /// Existing ledger file for duplicate detection
     #[arg(long, value_name = "FILE")]
     existing: Option<PathBuf>,
+
+    /// Use ML to suggest accounts for transactions the rules engine didn't
+    /// categorize. Trains a Naive Bayes model on the `--existing` ledger and
+    /// replaces `Expenses:Unknown` / `Income:Unknown` with the prediction.
+    /// Requires `--existing`.
+    #[arg(long, requires = "existing")]
+    suggest_categories: bool,
 
     /// Append a balance assertion with the given amount (e.g., "1234.56")
     #[arg(long, value_name = "AMOUNT")]
@@ -392,11 +400,13 @@ pub fn run(args: &Args, file: &Path) -> Result<()> {
         eprintln!("warning: {warning}");
     }
 
-    // Filter duplicates if --existing is specified
+    // Filter duplicates if --existing is specified, and optionally apply
+    // ML-based account suggestions for transactions the rules engine left
+    // pointing at a fallback account.
     let directives = if let Some(ref existing_path) = args.existing {
         let existing_txns = load_existing_transactions(existing_path)?;
         let before_count = result.directives.len();
-        let filtered: Vec<_> = result
+        let mut filtered: Vec<_> = result
             .directives
             .into_iter()
             .filter(|d| {
@@ -410,6 +420,9 @@ pub fn run(args: &Args, file: &Path) -> Result<()> {
         let dupes = before_count - filtered.len();
         if dupes > 0 {
             eprintln!("Filtered {dupes} duplicate transaction(s)");
+        }
+        if args.suggest_categories {
+            suggest::apply_ml_suggestions_with_summary(&mut filtered, &existing_txns)?;
         }
         filtered
     } else {

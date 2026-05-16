@@ -1,16 +1,22 @@
 //! Baseline benchmarks for the v0.16.0 perf-sensitive paths.
 //!
-//! Specifically targets the `loader::process` pipeline with the native-plugin
-//! pass enabled. This is the path that PR #1 (DirectiveWrapper redesign) will
-//! optimize: the N×M wrapper-rebuild loop in `run_plugins` is the dominant
-//! cost at scale.
+//! Targets the `load_raw + process` pipeline with the native-plugin pass
+//! enabled. This is the path that the v0.16.0 `DirectiveWrapper` redesign
+//! will optimize: the N×M wrapper-rebuild loop in `run_plugins` dominates
+//! at scale.
+//!
+//! Each timed iteration calls `load_raw(path) + process(raw, opts)` —
+//! `LoadResult` is not `Clone`, so hoisting `load_raw` out of the closure
+//! would require a non-trivial public-API change. Parse cost is included
+//! in every measurement as a constant, so the *delta* before/after the
+//! refactor still reflects the wrapper-rebuild speedup correctly.
 //!
 //! The matrix is (size: 1k, 10k, 100k) × (plugin count: 0, 1, 5).
 //!
-//! The 100k row is intentionally heavier than the standard `pipeline_bench` —
-//! the N×M cost is invisible below ~10k directives. This bench is NOT wired
-//! into PR CI (it would blow the 15-minute budget); run it locally before
-//! and after structural changes:
+//! The 100k row is intentionally heavier than the standard `pipeline_bench`
+//! — the N×M cost is invisible below ~10k directives. This bench is NOT
+//! wired into PR CI (it would blow the 15-minute budget); run it locally
+//! before and after structural changes:
 //!
 //! ```sh
 //! cargo bench --bench v016_baseline -- --save-baseline pre
@@ -18,7 +24,8 @@
 //! cargo bench --bench v016_baseline -- --baseline pre
 //! ```
 //!
-//! The exit criterion for v0.16.0 Wave 3 is ≥3x speedup on `process_100k_5plugins`.
+//! The exit criterion for v0.16.0 Wave 3 is ≥3x speedup on
+//! `v016_load_process/100k_5plugins`.
 
 #![allow(missing_docs)]
 
@@ -41,10 +48,13 @@ const PLUGINS_5: &[&str] = &[
     "check_closing",
 ];
 
-/// Generate a realistic ledger with `num_transactions` postings. Each
-/// transaction has two postings (one expense, one bank), uses one of five
-/// currencies, and references one of ten accounts — enough variety to
-/// exercise the plugin validators without pathological collisions.
+/// Generate a USD-only ledger with `num_transactions` transactions. Each
+/// transaction is one of 5 expense categories, signed against the single
+/// `Assets:Bank:Checking` account. Single currency keeps the booking step
+/// simple and the plugin validators focused on the wrapper cost rather
+/// than on currency interactions. Every opened account is referenced —
+/// the `nounused` plugin is in the active set, and stale opens would
+/// throw a warning on every iteration.
 fn generate_ledger(num_transactions: usize) -> String {
     let mut s = String::with_capacity(num_transactions * 120);
 
@@ -53,13 +63,11 @@ fn generate_ledger(num_transactions: usize) -> String {
 
     for acct in [
         "Assets:Bank:Checking",
-        "Assets:Bank:Savings",
         "Expenses:Food",
         "Expenses:Coffee",
         "Expenses:Groceries",
         "Expenses:Transport",
         "Expenses:Utilities",
-        "Income:Salary",
         "Equity:Opening",
     ] {
         s.push_str(&format!("2020-01-01 open {acct} USD\n"));
@@ -111,15 +119,17 @@ fn write_tempfile(content: &str) -> (tempfile::TempDir, std::path::PathBuf) {
 
 fn run_process(path: &std::path::Path, plugin_names: &[&str]) {
     let raw = load_raw(path).expect("load_raw");
-    let mut opts = LoadOptions::default();
-    opts.extra_plugins = plugin_names.iter().map(|s| (*s).to_string()).collect();
-    opts.extra_plugin_configs = vec![None; plugin_names.len()];
+    let opts = LoadOptions {
+        extra_plugins: plugin_names.iter().map(|s| (*s).to_string()).collect(),
+        extra_plugin_configs: vec![None; plugin_names.len()],
+        ..LoadOptions::default()
+    };
     let ledger = process(raw, &opts).expect("process");
     std::hint::black_box(ledger);
 }
 
 fn bench_process_matrix(c: &mut Criterion) {
-    let mut group = c.benchmark_group("v016_process");
+    let mut group = c.benchmark_group("v016_load_process");
 
     // (label, size, sample_size, measurement_secs)
     let sizes: &[(&str, usize, usize, u64)] = &[

@@ -737,6 +737,17 @@ pub struct CustomData {
 
 /// Wire-format input passed from the host to a WASM importer's
 /// `extract` / `extract_enriched` entry point.
+///
+/// # `options` design note
+///
+/// The `options` map is `String -> String`. Values that are
+/// semantically numbers, booleans, or other types (e.g.
+/// `skip_rows = 5`, `has_header = true`, `delimiter = ","`) are
+/// string-encoded on the host side and parsed by the WASM importer.
+/// This keeps the WASM ABI minimal (no `serde_json::Value` or `rmpv`
+/// dep in the guest crate) at the cost of pushing string parsing into
+/// every importer. A future additive field (`options_typed`) could
+/// carry typed values if needed; not in v1.0 scope.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImporterInput {
     /// Source file path. Informational only — the WASM sandbox cannot
@@ -754,8 +765,40 @@ pub struct ImporterInput {
     /// `importers.toml` entries' arbitrary fields into this map; the
     /// WASM importer reads the keys it knows about. Keeps the
     /// wire format independent of any host-side config struct shape.
+    /// See the type-level doc for the string-encoding trade-off.
     #[serde(default)]
     pub options: std::collections::HashMap<String, String>,
+}
+
+/// Wire-format input to a WASM importer's `identify` entry point.
+///
+/// The WASM importer answers "do I handle this file?" based on the
+/// path (typically extension) alone — `extract` is the path that
+/// gets file content.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IdentifyInput {
+    /// Source file path. Same lossy-utf8 caveat as
+    /// [`ImporterInput::path`].
+    pub path: String,
+}
+
+/// Wire-format output from a WASM importer's `identify`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IdentifyOutput {
+    /// True if this importer handles the file at `IdentifyInput.path`.
+    pub matches: bool,
+}
+
+/// Wire-format output from a WASM importer's `metadata` entry point.
+/// Returned once at load time and cached by the host registry — used
+/// for `Importer::name()` and `Importer::description()` on the wrapper.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetadataOutput {
+    /// Importer name (e.g. `"MT940"`, `"FinTS"`). Used by the registry
+    /// for `find_by_name` lookups.
+    pub name: String,
+    /// Human-readable description for `--list-importers` and similar.
+    pub description: String,
 }
 
 /// Wire-format output returned from a WASM importer's `extract`.
@@ -766,24 +809,34 @@ pub struct ImporterOutput {
     /// Warnings encountered during extraction (non-fatal).
     #[serde(default)]
     pub warnings: Vec<String>,
+    /// Fatal-but-recoverable errors (e.g. malformed individual rows
+    /// the importer chose to skip rather than abort on). Distinct from
+    /// `warnings` (informational) and from a WASM trap (which the host
+    /// surfaces as an `anyhow::Error`). Reuses the existing
+    /// [`PluginError`] shape so importer errors flow into the same
+    /// `LedgerError::location` path as plugin errors.
+    #[serde(default)]
+    pub errors: Vec<PluginError>,
 }
 
 impl ImporterOutput {
-    /// Create an output with no warnings.
+    /// Create an output with no warnings or errors.
     #[must_use]
     pub const fn new(directives: Vec<DirectiveWrapper>) -> Self {
         Self {
             directives,
             warnings: Vec::new(),
+            errors: Vec::new(),
         }
     }
 
-    /// Empty result with no directives and no warnings.
+    /// Empty result with no directives, no warnings, no errors.
     #[must_use]
     pub const fn empty() -> Self {
         Self {
             directives: Vec::new(),
             warnings: Vec::new(),
+            errors: Vec::new(),
         }
     }
 }
@@ -798,6 +851,10 @@ pub struct EnrichedImporterOutput {
     /// Warnings encountered during extraction (non-fatal).
     #[serde(default)]
     pub warnings: Vec<String>,
+    /// Fatal-but-recoverable errors. Same semantics as
+    /// [`ImporterOutput::errors`].
+    #[serde(default)]
+    pub errors: Vec<PluginError>,
 }
 
 /// Wire-format counterpart to `rustledger_ops::enrichment::Enrichment`.
@@ -1219,5 +1276,95 @@ mod tests {
         let decoded: ImporterInput = rmp_serde::from_slice(&bytes).unwrap();
         assert!(decoded.options.is_empty());
         assert_eq!(decoded.path, "/x.csv");
+    }
+
+    #[test]
+    fn enriched_importer_output_msgpack_roundtrip() {
+        // Cover the more complex enriched variant — pair of
+        // (DirectiveWrapper, EnrichmentWrapper) with metadata,
+        // plus warnings + errors.
+        let dir = DirectiveWrapper {
+            directive_type: "transaction".to_string(),
+            date: "2024-01-15".to_string(),
+            filename: Some("/tmp/foo.csv".to_string()),
+            lineno: Some(7),
+            data: DirectiveData::Transaction(TransactionData {
+                flag: "*".to_string(),
+                payee: Some("Whole Foods".to_string()),
+                narration: "Groceries".to_string(),
+                tags: vec![],
+                links: vec![],
+                metadata: vec![],
+                postings: vec![],
+            }),
+        };
+        let enr = EnrichmentWrapper {
+            directive_index: 0,
+            confidence: 0.92,
+            method: "rule".to_string(),
+            alternatives: vec![],
+            fingerprint: Some("dead-beef".to_string()),
+        };
+        let original = EnrichedImporterOutput {
+            entries: vec![(dir, enr)],
+            warnings: vec!["row 3 skipped".to_string()],
+            errors: vec![PluginError::error("row 4 unparsable").at("/tmp/foo.csv", 4)],
+        };
+        let bytes = rmp_serde::to_vec(&original).unwrap();
+        let decoded: EnrichedImporterOutput = rmp_serde::from_slice(&bytes).unwrap();
+        assert_eq!(decoded.entries.len(), 1);
+        assert_eq!(decoded.entries[0].1.method, "rule");
+        assert_eq!(decoded.warnings.len(), 1);
+        assert_eq!(decoded.errors.len(), 1);
+        assert_eq!(decoded.errors[0].line_number, Some(4));
+    }
+
+    #[test]
+    fn identify_input_output_msgpack_roundtrip() {
+        let input = IdentifyInput {
+            path: "/tmp/statement.mt940".to_string(),
+        };
+        let input_bytes = rmp_serde::to_vec(&input).unwrap();
+        let decoded_input: IdentifyInput = rmp_serde::from_slice(&input_bytes).unwrap();
+        assert_eq!(decoded_input.path, input.path);
+
+        let output = IdentifyOutput { matches: true };
+        let output_bytes = rmp_serde::to_vec(&output).unwrap();
+        let decoded_output: IdentifyOutput = rmp_serde::from_slice(&output_bytes).unwrap();
+        assert!(decoded_output.matches);
+    }
+
+    #[test]
+    fn metadata_output_msgpack_roundtrip() {
+        let original = MetadataOutput {
+            name: "MT940".to_string(),
+            description: "SWIFT MT940 bank statement importer".to_string(),
+        };
+        let bytes = rmp_serde::to_vec(&original).unwrap();
+        let decoded: MetadataOutput = rmp_serde::from_slice(&bytes).unwrap();
+        assert_eq!(decoded.name, original.name);
+        assert_eq!(decoded.description, original.description);
+    }
+
+    #[test]
+    fn importer_output_errors_field_is_backward_compatible() {
+        // Like the `options` field on input, the `errors` field on
+        // output has `#[serde(default)]`. An older WASM importer that
+        // emits only `directives` + `warnings` deserializes cleanly
+        // with an empty errors vec.
+        #[derive(serde::Serialize)]
+        struct OldShape {
+            directives: Vec<DirectiveWrapper>,
+            warnings: Vec<String>,
+            // intentionally no `errors`
+        }
+        let old = OldShape {
+            directives: vec![],
+            warnings: vec!["w".to_string()],
+        };
+        let bytes = rmp_serde::to_vec(&old).unwrap();
+        let decoded: ImporterOutput = rmp_serde::from_slice(&bytes).unwrap();
+        assert!(decoded.errors.is_empty());
+        assert_eq!(decoded.warnings.len(), 1);
     }
 }

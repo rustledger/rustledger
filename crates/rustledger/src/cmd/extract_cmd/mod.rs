@@ -161,7 +161,9 @@ pub struct Args {
 
     /// Use ML to suggest accounts for transactions the rules engine didn't
     /// categorize. Trains a Naive Bayes model on the `--existing` ledger and
-    /// replaces `Expenses:Unknown` / `Income:Unknown` with the prediction.
+    /// replaces the configured fallback contra-accounts (the importer's
+    /// `default_expense` and `default_income`, defaulting to
+    /// `Expenses:Unknown` / `Income:Unknown`) with the prediction.
     /// Requires `--existing`.
     #[arg(long, requires = "existing")]
     suggest_categories: bool,
@@ -209,10 +211,15 @@ pub fn list_importers(args: &Args) -> Result<()> {
 
 /// Run the extract command with the given arguments.
 pub fn run(args: &Args, file: &Path) -> Result<()> {
-    // Detect OFX files and use appropriate importer
-    let result = if is_ofx_file(file) && args.importer.is_none() {
+    // Detect OFX files and use appropriate importer. Also captures the
+    // fallback contra-accounts (Expenses:Unknown / Income:Unknown by default,
+    // or `default_expense` / `default_income` from CsvConfig) so the
+    // optional --suggest-categories ML step knows which accounts to
+    // re-categorize.
+    let (result, fallback_accounts) = if is_ofx_file(file) && args.importer.is_none() {
         let ofx = OfxImporter::new(&args.account, &args.currency);
-        ofx.extract(file)?
+        // OFX importer hardcodes Expenses:Unknown as the only contra-account.
+        (ofx.extract(file)?, vec!["Expenses:Unknown".to_string()])
     } else {
         // Determine import config: --importer flag, explicit --config, or CLI args
         let config = if let Some(ref importer_name) = args.importer {
@@ -392,7 +399,16 @@ pub fn run(args: &Args, file: &Path) -> Result<()> {
             config
         };
 
-        config.extract(file)?
+        let rustledger_importer::config::ImporterType::Csv(csv) = &config.importer_type;
+        let fallbacks = vec![
+            csv.default_expense
+                .clone()
+                .unwrap_or_else(|| "Expenses:Unknown".to_string()),
+            csv.default_income
+                .clone()
+                .unwrap_or_else(|| "Income:Unknown".to_string()),
+        ];
+        (config.extract(file)?, fallbacks)
     };
 
     // Print warnings
@@ -422,7 +438,11 @@ pub fn run(args: &Args, file: &Path) -> Result<()> {
             eprintln!("Filtered {dupes} duplicate transaction(s)");
         }
         if args.suggest_categories {
-            suggest::apply_ml_suggestions_with_summary(&mut filtered, &existing_txns)?;
+            suggest::apply_ml_suggestions_with_summary(
+                &mut filtered,
+                &existing_txns,
+                &fallback_accounts,
+            )?;
         }
         filtered
     } else {

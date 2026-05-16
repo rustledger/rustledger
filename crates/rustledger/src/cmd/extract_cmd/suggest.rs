@@ -15,11 +15,6 @@ use rustledger_core::{Directive, InternedStr, Transaction};
 use rustledger_ops::ml::CategorizationModel;
 use rustledger_plugin::convert::directives_to_wrappers;
 
-/// Default contra-accounts the CSV/OFX importers emit for unmatched rows.
-/// Transactions whose second posting matches one of these are candidates for
-/// ML re-categorization.
-const DEFAULT_FALLBACK_ACCOUNTS: &[&str] = &["Expenses:Unknown", "Income:Unknown"];
-
 /// Outcome of running ML suggestion over a batch of imported directives.
 #[derive(Debug, Default)]
 pub(super) struct SuggestStats {
@@ -30,7 +25,11 @@ pub(super) struct SuggestStats {
 }
 
 /// Train a model from `existing_txns` and rewrite the contra-account on any
-/// transaction in `directives` whose second posting matches a fallback.
+/// transaction in `directives` whose second posting matches one of the
+/// `fallback_accounts`. The caller supplies the fallback list — for CSV
+/// imports this comes from `CsvConfig::default_expense` /
+/// `default_income` (defaulting to `Expenses:Unknown` / `Income:Unknown`);
+/// for OFX it's the importer's hardcoded `Expenses:Unknown`.
 ///
 /// Returns counts of inspected / modified transactions. The caller is expected
 /// to print a summary line.
@@ -41,6 +40,7 @@ pub(super) struct SuggestStats {
 pub(super) fn apply_ml_suggestions(
     directives: &mut [Directive],
     existing_txns: &[Transaction],
+    fallback_accounts: &[String],
 ) -> Result<SuggestStats> {
     // Wrap existing transactions as Directives for the wrapper-based ML API.
     // Clone is unavoidable here — `existing_txns` is also used for duplicate
@@ -76,9 +76,9 @@ pub(super) fn apply_ml_suggestions(
         let Some(contra) = txn.postings.get(1) else {
             continue;
         };
-        if !DEFAULT_FALLBACK_ACCOUNTS
+        if !fallback_accounts
             .iter()
-            .any(|&fb| contra.account.as_str() == fb)
+            .any(|fb| contra.account.as_str() == fb)
         {
             continue;
         }
@@ -106,8 +106,9 @@ pub(super) fn apply_ml_suggestions(
 pub(super) fn apply_ml_suggestions_with_summary(
     directives: &mut [Directive],
     existing_txns: &[Transaction],
+    fallback_accounts: &[String],
 ) -> Result<()> {
-    let stats = apply_ml_suggestions(directives, existing_txns)
+    let stats = apply_ml_suggestions(directives, existing_txns, fallback_accounts)
         .context("applying ML category suggestions")?;
     if stats.inspected > 0 {
         eprintln!(
@@ -149,6 +150,10 @@ mod tests {
         ]
     }
 
+    fn default_fallbacks() -> Vec<String> {
+        vec!["Expenses:Unknown".to_string(), "Income:Unknown".to_string()]
+    }
+
     #[test]
     fn rewrites_fallback_account() {
         let existing = training_set();
@@ -158,7 +163,8 @@ mod tests {
             "Expenses:Unknown",
             55,
         ))];
-        let stats = apply_ml_suggestions(&mut new_directives, &existing).unwrap();
+        let stats =
+            apply_ml_suggestions(&mut new_directives, &existing, &default_fallbacks()).unwrap();
         assert_eq!(stats.inspected, 1);
         assert_eq!(stats.modified, 1);
         let Directive::Transaction(t) = &new_directives[0] else {
@@ -176,7 +182,8 @@ mod tests {
             "Expenses:Groceries", // already categorized; should not touch
             55,
         ))];
-        let stats = apply_ml_suggestions(&mut new_directives, &existing).unwrap();
+        let stats =
+            apply_ml_suggestions(&mut new_directives, &existing, &default_fallbacks()).unwrap();
         assert_eq!(stats.inspected, 0);
         assert_eq!(stats.modified, 0);
         let Directive::Transaction(t) = &new_directives[0] else {
@@ -195,12 +202,34 @@ mod tests {
             "Expenses:Unknown",
             55,
         ))];
-        let stats = apply_ml_suggestions(&mut new_directives, &existing).unwrap();
+        let stats =
+            apply_ml_suggestions(&mut new_directives, &existing, &default_fallbacks()).unwrap();
         assert_eq!(stats.modified, 0);
         // Untouched.
         let Directive::Transaction(t) = &new_directives[0] else {
             panic!()
         };
         assert_eq!(t.postings[1].account.as_str(), "Expenses:Unknown");
+    }
+
+    #[test]
+    fn honors_custom_fallback() {
+        // A user configured `default_expense = "Expenses:Uncategorized"`.
+        // ML should re-categorize that account, not the hardcoded default.
+        let existing = training_set();
+        let mut new_directives = vec![Directive::Transaction(txn(
+            "Whole Foods",
+            "Groceries",
+            "Expenses:Uncategorized",
+            55,
+        ))];
+        let custom = vec!["Expenses:Uncategorized".to_string()];
+        let stats = apply_ml_suggestions(&mut new_directives, &existing, &custom).unwrap();
+        assert_eq!(stats.inspected, 1);
+        assert_eq!(stats.modified, 1);
+        let Directive::Transaction(t) = &new_directives[0] else {
+            panic!()
+        };
+        assert_eq!(t.postings[1].account.as_str(), "Expenses:Groceries");
     }
 }

@@ -51,13 +51,19 @@ impl ImporterRegistry {
         None
     }
 
-    /// Find an importer by a substring of its `name()`, case-insensitively.
-    /// `"ofx"`, `"OFX"`, `"OFX/QFX"` all match the OFX importer.
+    /// Find an importer by exact case-insensitive name match, with one
+    /// ergonomic concession: slash-separated alternates in the importer's
+    /// `name()` are split and each part is matched independently. So an
+    /// importer named `"OFX/QFX"` is findable by `"ofx"`, `"OFX"`,
+    /// `"qfx"`, or `"OFX/QFX"` — but **not** by `"o"` or `"x"`.
     pub fn find_by_name(&self, name: &str) -> Option<Arc<dyn Importer>> {
-        let needle = name.to_ascii_lowercase();
         self.importers
             .iter()
-            .find(|i| i.name().to_ascii_lowercase().contains(&needle))
+            .find(|i| {
+                let full = i.name();
+                full.eq_ignore_ascii_case(name)
+                    || full.split('/').any(|part| part.eq_ignore_ascii_case(name))
+            })
             .map(Arc::clone)
     }
 
@@ -232,11 +238,22 @@ mod tests {
     }
 
     #[test]
-    fn test_find_by_name_case_insensitive() {
+    fn test_find_by_name_case_insensitive_exact_or_slash_part() {
         let registry = ImporterRegistry::with_builtins();
+        // Exact, case-insensitive
+        assert!(registry.find_by_name("OFX/QFX").is_some());
+        assert!(registry.find_by_name("ofx/qfx").is_some());
+        assert!(registry.find_by_name("Csv").is_some());
+        assert!(registry.find_by_name("CSV").is_some());
+        // Slash-separated alternates match independently
         assert!(registry.find_by_name("ofx").is_some());
         assert!(registry.find_by_name("OFX").is_some());
-        assert!(registry.find_by_name("Csv").is_some());
+        assert!(registry.find_by_name("qfx").is_some());
+        assert!(registry.find_by_name("QFX").is_some());
+        // Substring matches are NOT honored (no longer "contains")
+        assert!(registry.find_by_name("f").is_none());
+        assert!(registry.find_by_name("o").is_none());
+        // Unknown
         assert!(registry.find_by_name("nonexistent").is_none());
     }
 

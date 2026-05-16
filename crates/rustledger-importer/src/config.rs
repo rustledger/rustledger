@@ -25,7 +25,7 @@ pub struct ImporterConfig {
 /// `ImporterType` carries *format-specific* configuration. OFX/QFX
 /// extraction doesn't need any format-specific config beyond what's
 /// already in [`ImporterConfig`] (target account, currency), so OFX
-/// has no variant here — it's identified by [`Importer::identify`] on
+/// has no variant here — it's identified by `Importer::identify` on
 /// path extension and dispatched via the trait. If OFX ever grows
 /// format-specific knobs (e.g., balance-assertion emission), add an
 /// `Ofx(OfxConfig)` variant.

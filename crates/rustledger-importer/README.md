@@ -83,7 +83,7 @@ let config = CsvConfigBuilder::new()
 Implement the `Importer` trait to add support for new file formats:
 
 ```rust
-use rustledger_importer::{Importer, ImportResult};
+use rustledger_importer::{Importer, ImportResult, ImporterConfig};
 use std::path::Path;
 use anyhow::Result;
 
@@ -96,8 +96,10 @@ impl Importer for MyImporter {
         path.extension().is_some_and(|e| e == "myext")
     }
 
-    fn extract(&self, path: &Path) -> Result<ImportResult> {
-        // Parse file and return directives
+    fn extract(&self, _path: &Path, _config: &ImporterConfig) -> Result<ImportResult> {
+        // Parse the file using `_config.account` / `_config.currency` and
+        // return directives. Implementors should be stateless; per-call
+        // configuration flows in via the `_config` parameter.
         Ok(ImportResult::empty())
     }
 }

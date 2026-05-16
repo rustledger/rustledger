@@ -535,7 +535,8 @@ mod rkyv_decimal {
     }
 }
 
-// rkyv wrapper for chrono::NaiveDate - serialize as i32 (days from CE)
+// rkyv wrapper for jiff::civil::Date (re-exported as NaiveDate) - serialize
+// as i32 (days since Unix epoch). 4 bytes instead of 10+ for ISO string.
 #[cfg(feature = "rkyv")]
 pub use rkyv_date::AsNaiveDate;
 

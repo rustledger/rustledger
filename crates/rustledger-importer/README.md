@@ -16,20 +16,22 @@ This crate provides infrastructure for extracting Beancount transactions from ba
 ## Example
 
 ```rust
-use rustledger_importer::{ImporterConfig, extract_from_file};
+use rustledger_importer::{ImporterConfig, ImporterRegistry};
 use std::path::Path;
 
-// Create a CSV importer configuration
+// Build the per-call config (CSV in this example).
 let config = ImporterConfig::csv()
     .account("Assets:Bank:Checking")
     .currency("USD")
     .date_column("Date")
     .narration_column("Description")
     .amount_column("Amount")
-    .build();
+    .build()?;
 
-// Extract transactions from a file
-let result = extract_from_file(Path::new("bank.csv"), &config)?;
+// Dispatch through the registry — `identify()` picks OfxImporter for
+// .ofx/.qfx and CsvImporter for .csv.
+let registry = ImporterRegistry::with_builtins();
+let result = registry.extract(Path::new("bank.csv"), &config)?;
 
 for directive in result.directives {
     println!("{:?}", directive);

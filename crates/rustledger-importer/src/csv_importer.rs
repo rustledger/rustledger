@@ -484,7 +484,7 @@ mod tests {
 01/17/2024,Grocery Store,-85.23
 ";
 
-        let result = config.extract_from_string(csv_content).unwrap();
+        let result = CsvImporter.extract_string(csv_content, &config).unwrap();
         assert_eq!(result.directives.len(), 3);
         assert!(result.warnings.is_empty());
     }
@@ -507,7 +507,7 @@ mod tests {
 2024-01-16,Salary Deposit,,2500.00
 ";
 
-        let result = config.extract_from_string(csv_content).unwrap();
+        let result = CsvImporter.extract_string(csv_content, &config).unwrap();
         assert_eq!(result.directives.len(), 2);
 
         // First transaction should be a debit (negative)
@@ -542,7 +542,7 @@ mod tests {
         // path would silently import +100 and drop the typo'd debit; we want
         // the row rejected with a warning instead.
         let csv = "Date,Description,Debit,Credit\n2024-01-15,Bad debit,abc,100.00\n";
-        let result = config.extract_from_string(csv).unwrap();
+        let result = CsvImporter.extract_string(csv, &config).unwrap();
         assert!(
             result.directives.is_empty(),
             "malformed debit must not produce a transaction"
@@ -556,7 +556,7 @@ mod tests {
 
         // Both blank: no warning (skipped as zero by default).
         let csv_blank = "Date,Description,Debit,Credit\n2024-01-15,Empty,,\n";
-        let result = config.extract_from_string(csv_blank).unwrap();
+        let result = CsvImporter.extract_string(csv_blank, &config).unwrap();
         assert!(result.directives.is_empty());
         assert!(result.warnings.is_empty(), "blank cells must not warn");
     }
@@ -580,7 +580,7 @@ More info
 2024-01-16,Lunch,-10.00
 ";
 
-        let result = config.extract_from_string(csv_content).unwrap();
+        let result = CsvImporter.extract_string(csv_content, &config).unwrap();
         assert_eq!(result.directives.len(), 2);
     }
 
@@ -600,7 +600,7 @@ More info
 2024-01-15,Purchase,50.00
 ";
 
-        let result = config.extract_from_string(csv_content).unwrap();
+        let result = CsvImporter.extract_string(csv_content, &config).unwrap();
         assert_eq!(result.directives.len(), 1);
 
         if let Directive::Transaction(txn) = &result.directives[0] {
@@ -625,7 +625,7 @@ More info
 2024-01-15;Coffee;-5.00
 ";
 
-        let result = config.extract_from_string(csv_content).unwrap();
+        let result = CsvImporter.extract_string(csv_content, &config).unwrap();
         assert_eq!(result.directives.len(), 1);
     }
 
@@ -645,7 +645,7 @@ More info
 2024-01-16,Lunch,-10.00
 ";
 
-        let result = config.extract_from_string(csv_content).unwrap();
+        let result = CsvImporter.extract_string(csv_content, &config).unwrap();
         assert_eq!(result.directives.len(), 2);
     }
 
@@ -665,7 +665,7 @@ More info
 2024-01-15,Coffee Shop,Morning coffee,-5.00
 ";
 
-        let result = config.extract_from_string(csv_content).unwrap();
+        let result = CsvImporter.extract_string(csv_content, &config).unwrap();
         assert_eq!(result.directives.len(), 1);
 
         if let Directive::Transaction(txn) = &result.directives[0] {
@@ -687,7 +687,7 @@ More info
 
         let csv_content = "Date,Description,Amount\n";
 
-        let result = config.extract_from_string(csv_content).unwrap();
+        let result = CsvImporter.extract_string(csv_content, &config).unwrap();
         assert!(result.directives.is_empty());
     }
 
@@ -707,7 +707,7 @@ More info
 2024-01-16,Refund,-$25.00
 ";
 
-        let result = config.extract_from_string(csv_content).unwrap();
+        let result = CsvImporter.extract_string(csv_content, &config).unwrap();
         assert_eq!(result.directives.len(), 2);
 
         if let Directive::Transaction(txn) = &result.directives[0] {
@@ -735,7 +735,7 @@ More info
 2024-01-16;Refund;-25.000.000,00
 ";
 
-        let result = config.extract_from_string(csv_content).unwrap();
+        let result = CsvImporter.extract_string(csv_content, &config).unwrap();
         assert_eq!(result.directives.len(), 2);
 
         if let Directive::Transaction(txn) = &result.directives[0] {
@@ -764,7 +764,7 @@ More info
 2024-01-15,Withdrawal,(50.00)
 ";
 
-        let result = config.extract_from_string(csv_content).unwrap();
+        let result = CsvImporter.extract_string(csv_content, &config).unwrap();
         assert_eq!(result.directives.len(), 1);
 
         if let Directive::Transaction(txn) = &result.directives[0] {
@@ -788,7 +788,7 @@ More info
 2024-01-15,Large deposit,"1,234.56"
 "#;
 
-        let result = config.extract_from_string(csv_content).unwrap();
+        let result = CsvImporter.extract_string(csv_content, &config).unwrap();
         assert_eq!(result.directives.len(), 1);
 
         if let Directive::Transaction(txn) = &result.directives[0] {
@@ -844,7 +844,7 @@ not-a-date,Coffee,-5.00
 2024-01-15,Valid,-10.00
 ";
 
-        let result = config.extract_from_string(csv_content).unwrap();
+        let result = CsvImporter.extract_string(csv_content, &config).unwrap();
         // Only the valid row should be imported
         assert_eq!(result.directives.len(), 1);
         // Should have a warning about the invalid date
@@ -868,7 +868,7 @@ not-a-date,Coffee,-5.00
 2024-01-15,Valid,-10.00
 ";
 
-        let result = config.extract_from_string(csv_content).unwrap();
+        let result = CsvImporter.extract_string(csv_content, &config).unwrap();
         // Empty date row should be silently skipped
         assert_eq!(result.directives.len(), 1);
         assert!(result.warnings.is_empty());
@@ -890,7 +890,7 @@ not-a-date,Coffee,-5.00
 2024-01-16,Valid,-10.00
 ";
 
-        let result = config.extract_from_string(csv_content).unwrap();
+        let result = CsvImporter.extract_string(csv_content, &config).unwrap();
         // Zero amount row should be skipped
         assert_eq!(result.directives.len(), 1);
         if let Directive::Transaction(txn) = &result.directives[0] {
@@ -916,7 +916,7 @@ not-a-date,Coffee,-5.00
 2024-01-16,Normal,-10.00
 ";
 
-        let result = config.extract_from_string(csv_content).unwrap();
+        let result = CsvImporter.extract_string(csv_content, &config).unwrap();
         assert_eq!(result.directives.len(), 2, "both rows should be kept");
         if let Directive::Transaction(txn) = &result.directives[0] {
             assert_eq!(txn.narration.as_str(), "Zero balance marker");
@@ -938,7 +938,7 @@ not-a-date,Coffee,-5.00
 2024-01-15,Coffee,-5.00
 ";
 
-        let result = config.extract_from_string(csv_content).unwrap();
+        let result = CsvImporter.extract_string(csv_content, &config).unwrap();
         assert_eq!(result.directives.len(), 1);
 
         if let Directive::Transaction(txn) = &result.directives[0] {
@@ -964,7 +964,7 @@ not-a-date,Coffee,-5.00
 2024-01-16,Coffee,-5.00
 ";
 
-        let result = config.extract_from_string(csv_content).unwrap();
+        let result = CsvImporter.extract_string(csv_content, &config).unwrap();
         assert_eq!(result.directives.len(), 2);
 
         // Positive amount (money in) -> Income:Unknown contra
@@ -995,7 +995,7 @@ not-a-date,Coffee,-5.00
 2024-01-16,  ,Whitespace payee,-10.00
 ";
 
-        let result = config.extract_from_string(csv_content).unwrap();
+        let result = CsvImporter.extract_string(csv_content, &config).unwrap();
         assert_eq!(result.directives.len(), 2);
 
         // Empty payee should be None
@@ -1024,7 +1024,7 @@ not-a-date,Coffee,-5.00
 2024-01-15,Coffee,-5.00
 ";
 
-        let result = config.extract_from_string(csv_content).unwrap();
+        let result = CsvImporter.extract_string(csv_content, &config).unwrap();
         // Row should fail with a warning
         assert!(result.directives.is_empty());
         assert_eq!(result.warnings.len(), 1);
@@ -1046,7 +1046,7 @@ not-a-date,Coffee,-5.00
         let csv_content = r"2024-01-15,Coffee,-5.00
 ";
 
-        let result = config.extract_from_string(csv_content).unwrap();
+        let result = CsvImporter.extract_string(csv_content, &config).unwrap();
         // Row should fail with a warning
         assert!(result.directives.is_empty());
         assert_eq!(result.warnings.len(), 1);
@@ -1111,7 +1111,7 @@ not-a-date,Coffee,-5.00
 2024-01-15,Withdrawal,100.00
 ";
 
-        let result = config.extract_from_string(csv_content).unwrap();
+        let result = CsvImporter.extract_string(csv_content, &config).unwrap();
         assert_eq!(result.directives.len(), 1);
 
         if let Directive::Transaction(txn) = &result.directives[0] {
@@ -1136,7 +1136,7 @@ not-a-date,Coffee,-5.00
 2024-01-15,Deposit,100.00
 ";
 
-        let result = config.extract_from_string(csv_content).unwrap();
+        let result = CsvImporter.extract_string(csv_content, &config).unwrap();
         assert_eq!(result.directives.len(), 1);
 
         if let Directive::Transaction(txn) = &result.directives[0] {
@@ -1162,7 +1162,7 @@ not-a-date,Coffee,-5.00
 2024-01-15,Empty both,,
 ";
 
-        let result = config.extract_from_string(csv_content).unwrap();
+        let result = CsvImporter.extract_string(csv_content, &config).unwrap();
         // Zero amount should be skipped
         assert!(result.directives.is_empty());
     }
@@ -1182,7 +1182,7 @@ not-a-date,Coffee,-5.00
 2024-01-15,Deposit,+100.00
 ";
 
-        let result = config.extract_from_string(csv_content).unwrap();
+        let result = CsvImporter.extract_string(csv_content, &config).unwrap();
         assert_eq!(result.directives.len(), 1);
 
         if let Directive::Transaction(txn) = &result.directives[0] {
@@ -1211,7 +1211,7 @@ not-a-date,Coffee,-5.00
             2024-01-16,NETFLIX SUBSCRIPTION,-15.99\n\
             2024-01-17,RANDOM STORE,-25.00\n";
 
-        let result = config.extract_from_string(csv_content).unwrap();
+        let result = CsvImporter.extract_string(csv_content, &config).unwrap();
         assert_eq!(result.directives.len(), 3);
 
         // First transaction should map to Expenses:Groceries
@@ -1254,7 +1254,7 @@ not-a-date,Coffee,-5.00
         let csv_content = "Date,Description,Amount\n\
             2024-01-15,AMAZON MARKETPLACE,-30.00\n";
 
-        let result = config.extract_from_string(csv_content).unwrap();
+        let result = CsvImporter.extract_string(csv_content, &config).unwrap();
         assert_eq!(result.directives.len(), 1);
 
         if let Directive::Transaction(txn) = &result.directives[0] {
@@ -1283,7 +1283,7 @@ not-a-date,Coffee,-5.00
         let csv_content = "Date,Payee,Description,Amount\n\
             2024-01-15,Walmart,STORE #1234 PURCHASE,-75.00\n";
 
-        let result = config.extract_from_string(csv_content).unwrap();
+        let result = CsvImporter.extract_string(csv_content, &config).unwrap();
         assert_eq!(result.directives.len(), 1);
 
         if let Directive::Transaction(txn) = &result.directives[0] {
@@ -1308,7 +1308,7 @@ not-a-date,Coffee,-5.00
         let csv_content = "Date,Description,Amount\n\
             2024-01-15,Coffee Shop,-5.00\n";
 
-        let result = config.extract_from_string(csv_content).unwrap();
+        let result = CsvImporter.extract_string(csv_content, &config).unwrap();
         assert_eq!(result.directives.len(), 1);
 
         // Negative amount (money out) → expense side → should use custom default_expense
@@ -1334,7 +1334,7 @@ not-a-date,Coffee,-5.00
         let csv_content = "Date,Description,Amount\n\
             2024-01-15,Deposit,100.00\n";
 
-        let result = config.extract_from_string(csv_content).unwrap();
+        let result = CsvImporter.extract_string(csv_content, &config).unwrap();
         assert_eq!(result.directives.len(), 1);
 
         // Positive amount (money in) → income side → should use custom default_income
@@ -1482,7 +1482,7 @@ not-a-date,Coffee,-5.00
         let csv_content = "Date,Description,Amount\n\
             2024-01-15,Test,-10.00\n";
 
-        let result = config.extract_from_string(csv_content).unwrap();
+        let result = CsvImporter.extract_string(csv_content, &config).unwrap();
         assert_eq!(result.directives.len(), 1);
 
         // Should fall back to default (negative = expense)

@@ -3271,10 +3271,17 @@ dependencies = [
  "jiff",
  "ofxy",
  "proptest",
+ "rmp-serde",
  "rust_decimal",
  "rustledger-core",
  "rustledger-ops",
+ "rustledger-plugin",
+ "rustledger-plugin-types",
+ "serde",
  "tempfile",
+ "thiserror 2.0.18",
+ "wasmtime",
+ "wat",
 ]
 
 [[package]]

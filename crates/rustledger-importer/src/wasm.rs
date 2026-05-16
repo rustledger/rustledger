@@ -36,15 +36,22 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use rustledger_ops::fingerprint::Fingerprint;
 use rustledger_plugin_types::{
     EnrichedImporterOutput, IdentifyInput, IdentifyOutput, ImporterInput, ImporterOutput,
-    MetadataOutput,
+    MetadataOutput, PluginError, PluginErrorSeverity,
 };
 use serde::{Serialize, de::DeserializeOwned};
-use wasmtime::{Config, Engine, Linker, Module, Store};
+use wasmtime::{Config, Engine, Linker, Module, ResourceLimiter, Store};
 
 use crate::config::{CsvConfig, ImporterType};
 use crate::{EnrichedImportResult, ImportResult, Importer, ImporterConfig};
+
+/// Hard cap on the byte length a WASM importer can return from any
+/// entry point. Prevents a malicious or buggy module from triggering a
+/// 4 GiB host allocation by returning `(any_ptr, u32::MAX)`. 64 MiB is
+/// well above any realistic importer output for a single statement.
+const MAX_OUTPUT_BYTES: usize = 64 * 1024 * 1024;
 
 /// Configuration for the WASM importer runtime.
 #[derive(Debug, Clone, Copy)]
@@ -110,6 +117,57 @@ pub enum WasmImporterError {
     /// non-serializable state, which shouldn't.
     #[error("failed to encode input for WASM importer: {0}")]
     Encode(#[source] rmp_serde::encode::Error),
+    /// The WASM importer returned an `out_len` larger than the host's
+    /// allocation cap ([`MAX_OUTPUT_BYTES`]). Either the module is
+    /// buggy/malicious or `MAX_OUTPUT_BYTES` needs raising for a
+    /// genuinely huge import.
+    #[error("WASM importer returned output of {len} bytes, exceeds cap of {max} bytes")]
+    OutputTooLarge {
+        /// Length the module reported.
+        len: usize,
+        /// Host's enforced cap (`MAX_OUTPUT_BYTES`).
+        max: usize,
+    },
+}
+
+/// Per-store memory limiter. Wired into [`Store::limiter`] so wasmtime
+/// rejects `memory.grow` past `max_memory`. Without this, the
+/// [`WasmRuntimeConfig::max_memory`] field would be silently ignored —
+/// the sandbox would have unbounded heap, which defeats the
+/// "self-contained importer" guarantee.
+struct MemoryLimiter {
+    max_memory: usize,
+}
+
+impl ResourceLimiter for MemoryLimiter {
+    fn memory_growing(
+        &mut self,
+        _current: usize,
+        desired: usize,
+        _maximum: Option<usize>,
+    ) -> wasmtime::Result<bool> {
+        Ok(desired <= self.max_memory)
+    }
+
+    fn table_growing(
+        &mut self,
+        _current: usize,
+        _desired: usize,
+        _maximum: Option<usize>,
+    ) -> wasmtime::Result<bool> {
+        // No per-table cap — importers don't typically need indirect
+        // call tables, and memory is the resource we actually care
+        // about for DoS.
+        Ok(true)
+    }
+}
+
+/// Store user-data — just the [`MemoryLimiter`] today. Kept in a named
+/// struct so `Store::limiter`'s closure can return a stable reference
+/// and future additions (e.g. a host-side metrics counter) can land
+/// without changing the `Store<T>` type.
+struct StoreState {
+    limiter: MemoryLimiter,
 }
 
 // Note: no manual `impl From<WasmImporterError> for anyhow::Error` — `anyhow`
@@ -252,6 +310,56 @@ impl WasmImporter {
     }
 }
 
+/// Create + configure a [`Store`] with both the memory limiter (so
+/// `WasmRuntimeConfig::max_memory` is actually enforced) and the fuel
+/// budget (so `max_time_secs` actually bounds execution).
+///
+/// `max_time_secs` is clamped to at least 1 so `max_time_secs = 0`
+/// doesn't immediately trap the WASM call on no-fuel.
+fn make_store(
+    engine: &Engine,
+    config: WasmRuntimeConfig,
+) -> Result<Store<StoreState>, WasmImporterError> {
+    let state = StoreState {
+        limiter: MemoryLimiter {
+            max_memory: config.max_memory,
+        },
+    };
+    let mut store = Store::new(engine, state);
+    store.limiter(|s| &mut s.limiter);
+    // 1M instructions per second is the same rough budget used by the
+    // directive-plugin runtime.
+    let fuel = config.max_time_secs.max(1) * 1_000_000;
+    store.set_fuel(fuel).map_err(runtime_err)?;
+    Ok(store)
+}
+
+/// Read a packed `(out_ptr, out_len)` u64 from a WASM entry-point
+/// return, validate `out_len` against [`MAX_OUTPUT_BYTES`], and copy
+/// the bytes out of WASM memory.
+///
+/// Centralized so the cap is enforced uniformly across `metadata`,
+/// `identify`, `extract`, and `extract_enriched`.
+fn read_packed_output(
+    store: &Store<StoreState>,
+    memory: &wasmtime::Memory,
+    packed: u64,
+) -> Result<Vec<u8>, WasmImporterError> {
+    let out_ptr = (packed >> 32) as u32;
+    let out_len = (packed & 0xFFFF_FFFF) as u32 as usize;
+    if out_len > MAX_OUTPUT_BYTES {
+        return Err(WasmImporterError::OutputTooLarge {
+            len: out_len,
+            max: MAX_OUTPUT_BYTES,
+        });
+    }
+    let mut out_bytes = vec![0u8; out_len];
+    memory
+        .read(store, out_ptr as usize, &mut out_bytes)
+        .map_err(|e| WasmImporterError::Runtime(e.into()))?;
+    Ok(out_bytes)
+}
+
 /// Free-form wasmtime call helper. Extracted from `WasmImporter`'s
 /// methods so the load-time `metadata` call can use it before `self`
 /// is fully constructed.
@@ -264,11 +372,7 @@ fn call_msgpack_with<I: Serialize, O: DeserializeOwned>(
 ) -> Result<O, WasmImporterError> {
     let input_bytes = rmp_serde::to_vec(input).map_err(WasmImporterError::Encode)?;
 
-    let mut store = Store::new(engine, ());
-    // 1M instructions per second is the same rough budget used by the
-    // directive-plugin runtime.
-    let fuel = config.max_time_secs * 1_000_000;
-    store.set_fuel(fuel).map_err(runtime_err)?;
+    let mut store = make_store(engine, config)?;
 
     // No imports at all — full sandbox.
     let linker = Linker::new(engine);
@@ -299,14 +403,7 @@ fn call_msgpack_with<I: Serialize, O: DeserializeOwned>(
         .call(&mut store, (input_ptr, input_bytes.len() as u32))
         .map_err(runtime_err)?;
 
-    let out_ptr = (packed >> 32) as u32;
-    let out_len = (packed & 0xFFFF_FFFF) as u32;
-
-    let mut out_bytes = vec![0u8; out_len as usize];
-    memory
-        .read(&store, out_ptr as usize, &mut out_bytes)
-        .map_err(|e| WasmImporterError::Runtime(e.into()))?;
-
+    let out_bytes = read_packed_output(&store, &memory, packed)?;
     rmp_serde::from_slice(&out_bytes).map_err(WasmImporterError::Decode)
 }
 
@@ -318,9 +415,7 @@ fn call_metadata(
     module: &Module,
     config: WasmRuntimeConfig,
 ) -> Result<MetadataOutput, WasmImporterError> {
-    let mut store = Store::new(engine, ());
-    let fuel = config.max_time_secs * 1_000_000;
-    store.set_fuel(fuel).map_err(runtime_err)?;
+    let mut store = make_store(engine, config)?;
 
     let linker = Linker::new(engine);
     let instance = linker
@@ -336,15 +431,7 @@ fn call_metadata(
         .map_err(|_| WasmImporterError::MissingExport("metadata"))?;
 
     let packed = metadata.call(&mut store, ()).map_err(runtime_err)?;
-
-    let out_ptr = (packed >> 32) as u32;
-    let out_len = (packed & 0xFFFF_FFFF) as u32;
-
-    let mut out_bytes = vec![0u8; out_len as usize];
-    memory
-        .read(&store, out_ptr as usize, &mut out_bytes)
-        .map_err(|e| WasmImporterError::Runtime(e.into()))?;
-
+    let out_bytes = read_packed_output(&store, &memory, packed)?;
     rmp_serde::from_slice(&out_bytes).map_err(WasmImporterError::Decode)
 }
 
@@ -387,6 +474,29 @@ fn project_csv_config_into_options(
     }
 }
 
+/// Format a [`PluginError`] into a single human-readable line that
+/// preserves the severity ("error" vs "warning") and avoids orphan
+/// colons when location fields are absent.
+///
+/// Examples:
+/// - severity=Error, file="foo.csv", line=42 → `"error foo.csv:42: bad row"`
+/// - severity=Warning, file="foo.csv", line=None → `"warning foo.csv: weird value"`
+/// - severity=Warning, file=None, line=Some(7) → `"warning line 7: weird value"`
+/// - severity=Error, file=None, line=None → `"error: parser bug"`
+fn format_plugin_error(e: &PluginError) -> String {
+    let severity = match e.severity {
+        PluginErrorSeverity::Error => "error",
+        PluginErrorSeverity::Warning => "warning",
+    };
+    let location = match (&e.source_file, e.line_number) {
+        (Some(f), Some(n)) => format!(" {f}:{n}"),
+        (Some(f), None) => format!(" {f}"),
+        (None, Some(n)) => format!(" line {n}"),
+        (None, None) => String::new(),
+    };
+    format!("{severity}{location}: {}", e.message)
+}
+
 /// Materialize an [`ImporterOutput`] wire-format value back to the
 /// host-side [`ImportResult`]. Reuses
 /// `rustledger_plugin::convert::wrapper_to_directive` semantics —
@@ -406,16 +516,13 @@ fn output_to_import_result(out: ImporterOutput) -> anyhow::Result<ImportResult> 
     for w in out.warnings {
         result = result.with_warning(w);
     }
-    // Errors are non-fatal at this layer — surface them as warnings so
-    // the existing extract pipeline doesn't need a new error channel.
-    // The structured error path goes through LedgerError in the loader.
-    for e in out.errors {
-        result = result.with_warning(format!(
-            "{}{}: {}",
-            e.source_file.unwrap_or_default(),
-            e.line_number.map(|n| format!(":{n}")).unwrap_or_default(),
-            e.message
-        ));
+    // Errors and warnings flow through the same `warnings` channel,
+    // but the formatted string preserves the severity prefix so a
+    // fatal-but-recoverable importer error is still distinguishable
+    // from informational chatter. The structured error path
+    // (`LedgerError::location`) is reserved for the loader layer.
+    for e in &out.errors {
+        result = result.with_warning(format_plugin_error(e));
     }
     Ok(result)
 }
@@ -461,42 +568,68 @@ impl Importer for WasmImporter {
         let output: EnrichedImporterOutput = self.call_msgpack("extract_enriched", &input)?;
 
         // Bridge from wire-format EnrichedImporterOutput to the
-        // host-side EnrichedImportResult. The enrichment-wrapper →
-        // host-Enrichment conversion is intentionally lossy on
-        // `method` (string → enum): unknown methods fall back to
-        // `Default` rather than failing the whole import.
+        // host-side EnrichedImportResult. We collect warnings as we
+        // go for the lossy paths (unknown method strings, malformed
+        // fingerprint hex) — these are recoverable but worth
+        // surfacing rather than silently degrading.
         let mut entries = Vec::with_capacity(output.entries.len());
+        let mut bridge_warnings: Vec<String> = Vec::new();
         for (wrapper, enr) in output.entries {
             let dir = rustledger_plugin::convert::wrapper_to_directive(&wrapper)
                 .map_err(|e| anyhow::anyhow!("WASM importer returned invalid directive: {e:?}"))?;
+            let method = parse_method(&enr.method).unwrap_or_else(|unknown| {
+                bridge_warnings.push(format!(
+                    "warning: WASM importer used unknown categorization method `{unknown}`, falling back to Default"
+                ));
+                rustledger_ops::enrichment::CategorizationMethod::Default
+            });
+            let alternatives = enr
+                .alternatives
+                .into_iter()
+                .map(|a| {
+                    let alt_method = parse_method(&a.method).unwrap_or_else(|unknown| {
+                        bridge_warnings.push(format!(
+                            "warning: WASM importer used unknown categorization method `{unknown}` in alternative, falling back to Default"
+                        ));
+                        rustledger_ops::enrichment::CategorizationMethod::Default
+                    });
+                    rustledger_ops::enrichment::Alternative {
+                        account: a.account,
+                        confidence: a.confidence,
+                        method: alt_method,
+                    }
+                })
+                .collect();
+            let fingerprint = match enr.fingerprint {
+                Some(hex) => match Fingerprint::from_hex(&hex) {
+                    Ok(fp) => Some(fp),
+                    Err(e) => {
+                        bridge_warnings.push(format!(
+                            "warning: WASM importer returned malformed fingerprint hex `{hex}`: {e}"
+                        ));
+                        None
+                    }
+                },
+                None => None,
+            };
             let enrichment = rustledger_ops::enrichment::Enrichment {
                 directive_index: enr.directive_index,
                 confidence: enr.confidence,
-                method: parse_method(&enr.method),
-                alternatives: enr
-                    .alternatives
-                    .into_iter()
-                    .map(|a| rustledger_ops::enrichment::Alternative {
-                        account: a.account,
-                        confidence: a.confidence,
-                        method: parse_method(&a.method),
-                    })
-                    .collect(),
-                fingerprint: None, // Fingerprint round-trip via hex string is wave 2.3+
+                method,
+                alternatives,
+                fingerprint,
             };
             entries.push((dir, enrichment));
         }
         let mut enriched = EnrichedImportResult::new(entries);
+        for w in bridge_warnings {
+            enriched = enriched.with_warning(w);
+        }
         for w in output.warnings {
             enriched = enriched.with_warning(w);
         }
-        for e in output.errors {
-            enriched = enriched.with_warning(format!(
-                "{}{}: {}",
-                e.source_file.unwrap_or_default(),
-                e.line_number.map(|n| format!(":{n}")).unwrap_or_default(),
-                e.message
-            ));
+        for e in &output.errors {
+            enriched = enriched.with_warning(format_plugin_error(e));
         }
         Ok(enriched)
     }
@@ -504,17 +637,23 @@ impl Importer for WasmImporter {
 
 /// Convert the wire-format method string (as emitted by
 /// `CategorizationMethod::as_meta_value`) back into the host enum.
-/// Unknown strings fall back to `Default` so a future addition to the
-/// host enum doesn't break older WASM importers.
-fn parse_method(s: &str) -> rustledger_ops::enrichment::CategorizationMethod {
+///
+/// Returns `Err(unknown)` for strings the host doesn't recognize — the
+/// caller is expected to surface a warning and fall back to
+/// [`CategorizationMethod::Default`]. We don't silently absorb unknown
+/// strings here: a typo like `"merchant_dict"` vs `"merchant-dict"`
+/// (the exact Copilot-flagged bug from #1130) would otherwise degrade
+/// data without any signal to the user.
+fn parse_method(s: &str) -> Result<rustledger_ops::enrichment::CategorizationMethod, &str> {
     use rustledger_ops::enrichment::CategorizationMethod;
     match s {
-        "rule" => CategorizationMethod::Rule,
-        "merchant-dict" => CategorizationMethod::MerchantDict,
-        "ml" => CategorizationMethod::Ml,
-        "llm" => CategorizationMethod::Llm,
-        "manual" => CategorizationMethod::Manual,
-        _ => CategorizationMethod::Default,
+        "rule" => Ok(CategorizationMethod::Rule),
+        "merchant-dict" => Ok(CategorizationMethod::MerchantDict),
+        "ml" => Ok(CategorizationMethod::Ml),
+        "llm" => Ok(CategorizationMethod::Llm),
+        "manual" => Ok(CategorizationMethod::Manual),
+        "default" => Ok(CategorizationMethod::Default),
+        unknown => Err(unknown),
     }
 }
 
@@ -572,18 +711,282 @@ mod tests {
     }
 
     #[test]
-    fn parse_method_unknown_falls_back_to_default() {
+    fn parse_method_round_trips_known_values() {
         use rustledger_ops::enrichment::CategorizationMethod;
-        assert!(matches!(parse_method("rule"), CategorizationMethod::Rule));
+        assert!(matches!(
+            parse_method("rule"),
+            Ok(CategorizationMethod::Rule)
+        ));
         assert!(matches!(
             parse_method("merchant-dict"),
-            CategorizationMethod::MerchantDict
+            Ok(CategorizationMethod::MerchantDict)
         ));
-        // Forward-compat: a WASM importer emitting a method this host
-        // doesn't know about gets Default rather than a failed import.
+        assert!(matches!(parse_method("ml"), Ok(CategorizationMethod::Ml)));
+        assert!(matches!(parse_method("llm"), Ok(CategorizationMethod::Llm)));
         assert!(matches!(
-            parse_method("future-method"),
-            CategorizationMethod::Default
+            parse_method("manual"),
+            Ok(CategorizationMethod::Manual)
         ));
+        assert!(matches!(
+            parse_method("default"),
+            Ok(CategorizationMethod::Default)
+        ));
+    }
+
+    #[test]
+    fn parse_method_round_trips_via_as_meta_value() {
+        // Pin the contract: every `CategorizationMethod` round-trips
+        // through its `as_meta_value()` string. If a host variant is
+        // added without updating `parse_method`, this test fails.
+        use rustledger_ops::enrichment::CategorizationMethod;
+        for m in [
+            CategorizationMethod::Rule,
+            CategorizationMethod::MerchantDict,
+            CategorizationMethod::Ml,
+            CategorizationMethod::Llm,
+            CategorizationMethod::Manual,
+            CategorizationMethod::Default,
+        ] {
+            let s = m.as_meta_value();
+            let parsed = parse_method(s)
+                .unwrap_or_else(|u| panic!("as_meta_value `{u}` not handled by parse_method"));
+            assert_eq!(
+                std::mem::discriminant(&parsed),
+                std::mem::discriminant(&m),
+                "round-trip failed for {m:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_method_unknown_surfaces_the_unknown_string() {
+        // Previously: silently fell back to Default. Now: returns
+        // Err(unknown) so the caller can warn — protects against
+        // typos like `merchant_dict` (underscore) vs `merchant-dict`
+        // (hyphen, the actual wire encoding from
+        // `CategorizationMethod::as_meta_value`).
+        assert_eq!(parse_method("future-method"), Err("future-method"));
+        assert_eq!(parse_method("merchant_dict"), Err("merchant_dict"));
+        assert_eq!(parse_method(""), Err(""));
+    }
+
+    #[test]
+    fn format_plugin_error_with_full_location() {
+        let e = PluginError::error("bad row").at("foo.csv", 42);
+        assert_eq!(format_plugin_error(&e), "error foo.csv:42: bad row");
+    }
+
+    #[test]
+    fn format_plugin_error_warning_severity() {
+        let e = PluginError::warning("weird value").at("foo.csv", 42);
+        assert_eq!(format_plugin_error(&e), "warning foo.csv:42: weird value");
+    }
+
+    #[test]
+    fn format_plugin_error_no_location_no_orphan_colon() {
+        let e = PluginError::error("parser bug");
+        // Previously: ": parser bug" (orphan colon). Now: "error: parser bug".
+        assert_eq!(format_plugin_error(&e), "error: parser bug");
+    }
+
+    #[test]
+    fn format_plugin_error_file_only() {
+        let e = PluginError::warning("weird value");
+        let e = PluginError {
+            source_file: Some("foo.csv".to_string()),
+            ..e
+        };
+        assert_eq!(format_plugin_error(&e), "warning foo.csv: weird value");
+    }
+
+    #[test]
+    fn format_plugin_error_line_only_uses_human_phrasing() {
+        // Previously: ":42: weird" (orphan colon). Now: "warning line 42: weird".
+        let e = PluginError::warning("weird");
+        let e = PluginError {
+            line_number: Some(42),
+            ..e
+        };
+        assert_eq!(format_plugin_error(&e), "warning line 42: weird");
+    }
+
+    /// Build a WAT module that pre-loads `MessagePack` outputs for every
+    /// entry point in low memory and returns hardcoded packed
+    /// `(ptr, len)` u64s. `alloc` is a bump allocator starting at
+    /// offset 1024, so host-allocated input never overlaps the
+    /// pre-loaded data.
+    ///
+    /// Wire-format bytes are rmp-serde's default positional encoding
+    /// (struct → fixarray-N, fields in declaration order).
+    fn roundtrip_wat() -> &'static str {
+        r#"
+        (module
+            (memory (export "memory") 1)
+
+            ;; MetadataOutput { name: "tst", description: "tst" }
+            ;; 0x92 fixarray-2, 0xa3 fixstr-3 "tst", 0xa3 fixstr-3 "tst"
+            (data (i32.const 0) "\92\a3tst\a3tst")
+
+            ;; IdentifyOutput { matches: true }
+            ;; 0x91 fixarray-1, 0xc3 true
+            (data (i32.const 16) "\91\c3")
+
+            ;; ImporterOutput { directives: [], warnings: [], errors: [] }
+            ;; 0x93 fixarray-3, then three 0x90 fixarray-0
+            (data (i32.const 24) "\93\90\90\90")
+
+            ;; EnrichedImporterOutput { entries: [], warnings: [], errors: [] }
+            (data (i32.const 32) "\93\90\90\90")
+
+            ;; bump allocator: hand out at $bump, advance by $size
+            (global $bump (mut i32) (i32.const 1024))
+            (func (export "alloc") (param $size i32) (result i32)
+                (local $ret i32)
+                global.get $bump
+                local.set $ret
+                global.get $bump
+                local.get $size
+                i32.add
+                global.set $bump
+                local.get $ret)
+
+            ;; metadata: ptr=0, len=9 → (0<<32) | 9 = 9
+            (func (export "metadata") (result i64)
+                i64.const 9)
+
+            ;; identify: ptr=16, len=2 → (16<<32) | 2
+            (func (export "identify") (param i32 i32) (result i64)
+                i64.const 0x10_0000_0002)
+
+            ;; extract: ptr=24, len=4 → (24<<32) | 4
+            (func (export "extract") (param i32 i32) (result i64)
+                i64.const 0x18_0000_0004)
+
+            ;; extract_enriched: ptr=32, len=4 → (32<<32) | 4
+            (func (export "extract_enriched") (param i32 i32) (result i64)
+                i64.const 0x20_0000_0004)
+        )
+        "#
+    }
+
+    fn minimal_config() -> ImporterConfig {
+        ImporterConfig {
+            account: "Assets:Bank:Checking".to_string(),
+            currency: Some("USD".to_string()),
+            importer_type: ImporterType::Csv(CsvConfig::default()),
+        }
+    }
+
+    #[test]
+    fn end_to_end_wat_module_round_trips_all_entry_points() {
+        let bytes = wat::parse_str(roundtrip_wat()).expect("WAT parses");
+        let importer = WasmImporter::load_from_bytes(
+            PathBuf::from("test.wasm"),
+            &bytes,
+            WasmRuntimeConfig::default(),
+        )
+        .expect("module loads + metadata round-trips");
+
+        // metadata was decoded once at load and cached for these
+        // accessors — proves the MetadataOutput msgpack flowed end to
+        // end through the host.
+        assert_eq!(importer.name(), "tst");
+        assert_eq!(importer.description(), "tst");
+
+        // identify round-trip — input ignored, module hardcodes true.
+        assert!(importer.identify(Path::new("anything.csv")));
+
+        // extract + extract_enriched need a real file for std::fs::read.
+        let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        let config = minimal_config();
+
+        let result = importer
+            .extract(tmp.path(), &config)
+            .expect("extract round-trip");
+        assert!(result.directives.is_empty());
+        assert!(result.warnings.is_empty());
+
+        let enriched = importer
+            .extract_enriched(tmp.path(), &config)
+            .expect("extract_enriched round-trip");
+        assert!(enriched.entries.is_empty());
+        assert!(enriched.warnings.is_empty());
+    }
+
+    #[test]
+    fn oversized_output_is_rejected_before_allocation() {
+        // Module's metadata() returns out_len = u32::MAX. Without the
+        // MAX_OUTPUT_BYTES check, the host would attempt a ~4 GiB Vec
+        // allocation. The check should catch it during load.
+        let wat = r#"
+            (module
+                (memory (export "memory") 1)
+                (func (export "alloc") (param i32) (result i32) i32.const 0)
+                ;; metadata: ptr=0, len=u32::MAX
+                (func (export "metadata") (result i64)
+                    i64.const 0x0000_0000_ffff_ffff)
+                (func (export "identify") (param i32 i32) (result i64) i64.const 0)
+                (func (export "extract") (param i32 i32) (result i64) i64.const 0)
+                (func (export "extract_enriched") (param i32 i32) (result i64) i64.const 0)
+            )
+        "#;
+        let bytes = wat::parse_str(wat).expect("WAT parses");
+        // Can't use `.expect_err(...)` here — `WasmImporter` doesn't
+        // implement `Debug` (the wasmtime `Module`/`Engine` it holds
+        // aren't trivially debuggable), so we destructure manually.
+        let Err(err) = WasmImporter::load_from_bytes(
+            PathBuf::from("oversized.wasm"),
+            &bytes,
+            WasmRuntimeConfig::default(),
+        ) else {
+            panic!("oversized metadata output should have been rejected at load");
+        };
+        assert!(
+            matches!(
+                err,
+                WasmImporterError::OutputTooLarge { len, max }
+                    if len == u32::MAX as usize && max == MAX_OUTPUT_BYTES
+            ),
+            "expected OutputTooLarge, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn memory_limiter_rejects_grow_above_max() {
+        // Pin the ResourceLimiter behavior directly. The full
+        // wasm.grow → trap path is wasmtime-internal and hard to
+        // observe without a custom module, so this test guards the
+        // bit we own: that memory_growing returns Ok(false) past the
+        // cap.
+        let mut limiter = MemoryLimiter { max_memory: 1024 };
+        assert!(
+            limiter
+                .memory_growing(0, 512, None)
+                .expect("under cap is Ok")
+        ); // under cap
+        assert!(limiter.memory_growing(0, 1024, None).expect("at cap is Ok")); // exactly at cap
+        assert!(
+            !limiter
+                .memory_growing(0, 1025, None)
+                .expect("over cap is Ok(false)")
+        ); // over cap
+    }
+
+    #[test]
+    fn zero_max_time_secs_does_not_starve_fuel() {
+        // Regression: previously fuel = 0 * 1_000_000 = 0, causing
+        // immediate trap on first instruction. Now clamped via
+        // .max(1) so a 0 config still gets enough fuel to complete a
+        // trivial call.
+        let config = WasmRuntimeConfig {
+            max_memory: 256 * 1024 * 1024,
+            max_time_secs: 0,
+        };
+        let bytes = wat::parse_str(roundtrip_wat()).expect("WAT parses");
+        // Loading calls metadata(), which is a single i64.const +
+        // return — well under 1M instructions.
+        let importer = WasmImporter::load_from_bytes(PathBuf::from("test.wasm"), &bytes, config)
+            .expect("zero max_time_secs is clamped, not starved");
+        assert_eq!(importer.name(), "tst");
     }
 }

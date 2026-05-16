@@ -722,18 +722,25 @@ pub struct CustomData {
 //
 // # MessagePack contract
 //
-// Both [`ImporterInput`] and [`ImporterOutput`] are `Serialize +
-// Deserialize` and travel between host and guest as MessagePack-encoded
-// byte slices. The WASM module exports a single byte-buffer entry point
-// for each operation; see `rustledger-importer::WasmImporter` for the
-// host side and `rustledger-plugin`'s reference implementation for the
-// guest side.
+// All ABI types travel between host and guest as MessagePack-encoded byte
+// slices via `rmp_serde`. We use rmp-serde's **default positional struct
+// encoding** (compact arrays of values, no field names on the wire). This
+// is faster and smaller than map encoding at the cost of being strict
+// about field order.
 //
 // # Versioning
 //
-// Field additions are backward-compatible (msgpack ignores unknown
-// fields). Field removals or shape changes are major-version breaks
-// for the WASM ABI.
+// We do not maintain wire-format backward compatibility. Any field
+// addition, removal, reorder, or type change is a major-version break
+// for the WASM ABI. Users of WASM importer modules are expected to
+// rebuild their importer against the host version they're targeting —
+// the host's ABI version (exposed via `wave-2.3 release notes`) is the
+// authoritative reference.
+//
+// Rationale: pre-v1.0 we ship structural changes freely; locking serde
+// `default`-tolerance into v1.0 would force every future ABI evolution
+// to be additive and live with a growing tail of compat shims. We'd
+// rather bump majors.
 
 /// Wire-format input passed from the host to a WASM importer's
 /// `extract` / `extract_enriched` entry point.
@@ -766,7 +773,6 @@ pub struct ImporterInput {
     /// WASM importer reads the keys it knows about. Keeps the
     /// wire format independent of any host-side config struct shape.
     /// See the type-level doc for the string-encoding trade-off.
-    #[serde(default)]
     pub options: std::collections::HashMap<String, String>,
 }
 
@@ -807,7 +813,6 @@ pub struct ImporterOutput {
     /// Extracted directives.
     pub directives: Vec<DirectiveWrapper>,
     /// Warnings encountered during extraction (non-fatal).
-    #[serde(default)]
     pub warnings: Vec<String>,
     /// Fatal-but-recoverable errors (e.g. malformed individual rows
     /// the importer chose to skip rather than abort on). Distinct from
@@ -815,7 +820,6 @@ pub struct ImporterOutput {
     /// surfaces as an `anyhow::Error`). Reuses the existing
     /// [`PluginError`] shape so importer errors flow into the same
     /// `LedgerError::location` path as plugin errors.
-    #[serde(default)]
     pub errors: Vec<PluginError>,
 }
 
@@ -849,11 +853,9 @@ pub struct EnrichedImporterOutput {
     /// Directive–enrichment pairs, parallel to `ImporterOutput.directives`.
     pub entries: Vec<(DirectiveWrapper, EnrichmentWrapper)>,
     /// Warnings encountered during extraction (non-fatal).
-    #[serde(default)]
     pub warnings: Vec<String>,
     /// Fatal-but-recoverable errors. Same semantics as
     /// [`ImporterOutput::errors`].
-    #[serde(default)]
     pub errors: Vec<PluginError>,
 }
 
@@ -872,12 +874,15 @@ pub struct EnrichmentWrapper {
     /// Confidence score for the primary categorization (0.0 to 1.0).
     pub confidence: f64,
     /// How the primary categorization was determined. String-encoded
-    /// (e.g. `"rule"`, `"merchant_dict"`, `"ml"`, `"llm"`, `"default"`,
-    /// `"manual"`) to avoid pinning the `CategorizationMethod` enum's
-    /// exact variant set into the wire format.
+    /// to avoid pinning the `CategorizationMethod` enum's exact variant
+    /// set into the wire format. Must match
+    /// `CategorizationMethod::as_meta_value()` in `rustledger-ops`:
+    /// `"rule"`, `"merchant-dict"`, `"ml"`, `"llm"`, `"default"`,
+    /// `"manual"`. (Note: `merchant-dict` uses a hyphen, not an
+    /// underscore — the host string-matches against
+    /// `as_meta_value()`'s output, so the wire format must agree.)
     pub method: String,
     /// Other possible categorizations, sorted by confidence descending.
-    #[serde(default)]
     pub alternatives: Vec<AlternativeWrapper>,
     /// Stable fingerprint for deduplication, serialized as a hex string.
     pub fingerprint: Option<String>,
@@ -890,6 +895,9 @@ pub struct AlternativeWrapper {
     pub account: String,
     /// Confidence score for this alternative (0.0 to 1.0).
     pub confidence: f64,
+    /// How this alternative was determined. Same encoding rules as
+    /// [`EnrichmentWrapper::method`].
+    pub method: String,
 }
 
 // ============================================================================
@@ -1239,6 +1247,7 @@ mod tests {
             alternatives: vec![AlternativeWrapper {
                 account: "Expenses:Groceries".to_string(),
                 confidence: 0.75,
+                method: "merchant-dict".to_string(),
             }],
             fingerprint: Some("abc123def456".to_string()),
         };
@@ -1249,40 +1258,22 @@ mod tests {
         assert_eq!(decoded.method, original.method);
         assert_eq!(decoded.alternatives.len(), 1);
         assert_eq!(decoded.alternatives[0].account, "Expenses:Groceries");
+        // Every field on AlternativeWrapper must round-trip — if any drift
+        // silently (renamed / dropped / type-changed) we want to catch it
+        // here, not at the WASM boundary where it'd corrupt enriched results.
+        assert!(
+            (decoded.alternatives[0].confidence - 0.75).abs() < f64::EPSILON,
+            "alternative confidence must round-trip exactly"
+        );
+        assert_eq!(decoded.alternatives[0].method, "merchant-dict");
         assert_eq!(decoded.fingerprint, original.fingerprint);
-    }
-
-    #[test]
-    fn importer_input_default_options_field_is_backward_compatible() {
-        // The `options` field has `#[serde(default)]` so an older WASM
-        // importer that doesn't include the field in its serialized
-        // output can still be deserialized. Pin this with a synthetic
-        // partial-shape blob.
-        #[derive(serde::Serialize)]
-        struct OldShape {
-            path: String,
-            content: Vec<u8>,
-            account: String,
-            currency: Option<String>,
-            // intentionally no `options`
-        }
-        let old = OldShape {
-            path: "/x.csv".into(),
-            content: vec![1, 2, 3],
-            account: "Assets:Bank".into(),
-            currency: Some("USD".into()),
-        };
-        let bytes = rmp_serde::to_vec(&old).unwrap();
-        let decoded: ImporterInput = rmp_serde::from_slice(&bytes).unwrap();
-        assert!(decoded.options.is_empty());
-        assert_eq!(decoded.path, "/x.csv");
     }
 
     #[test]
     fn enriched_importer_output_msgpack_roundtrip() {
         // Cover the more complex enriched variant — pair of
         // (DirectiveWrapper, EnrichmentWrapper) with metadata,
-        // plus warnings + errors.
+        // plus warnings + errors. Asserts every field individually.
         let dir = DirectiveWrapper {
             directive_type: "transaction".to_string(),
             date: "2024-01-15".to_string(),
@@ -1302,7 +1293,11 @@ mod tests {
             directive_index: 0,
             confidence: 0.92,
             method: "rule".to_string(),
-            alternatives: vec![],
+            alternatives: vec![AlternativeWrapper {
+                account: "Expenses:Other".to_string(),
+                confidence: 0.10,
+                method: "default".to_string(),
+            }],
             fingerprint: Some("dead-beef".to_string()),
         };
         let original = EnrichedImporterOutput {
@@ -1313,9 +1308,31 @@ mod tests {
         let bytes = rmp_serde::to_vec(&original).unwrap();
         let decoded: EnrichedImporterOutput = rmp_serde::from_slice(&bytes).unwrap();
         assert_eq!(decoded.entries.len(), 1);
-        assert_eq!(decoded.entries[0].1.method, "rule");
-        assert_eq!(decoded.warnings.len(), 1);
+        let (dir, enr) = &decoded.entries[0];
+        // `directive_type` is intentionally `#[serde(skip_serializing, default)]`
+        // on `DirectiveWrapper` — derived from the `data` variant, not on the
+        // wire. Don't assert it here.
+        assert_eq!(dir.date, "2024-01-15");
+        match &dir.data {
+            DirectiveData::Transaction(t) => {
+                assert_eq!(t.payee.as_deref(), Some("Whole Foods"));
+                assert_eq!(t.narration, "Groceries");
+            }
+            other => panic!("expected Transaction, got {other:?}"),
+        }
+        assert_eq!(enr.directive_index, 0);
+        assert!((enr.confidence - 0.92).abs() < f64::EPSILON);
+        assert_eq!(enr.method, "rule");
+        assert_eq!(enr.alternatives.len(), 1);
+        assert_eq!(enr.alternatives[0].method, "default");
+        assert_eq!(enr.fingerprint, Some("dead-beef".to_string()));
+        assert_eq!(decoded.warnings, vec!["row 3 skipped".to_string()]);
         assert_eq!(decoded.errors.len(), 1);
+        assert_eq!(decoded.errors[0].message, "row 4 unparsable");
+        assert_eq!(
+            decoded.errors[0].source_file,
+            Some("/tmp/foo.csv".to_string())
+        );
         assert_eq!(decoded.errors[0].line_number, Some(4));
     }
 
@@ -1344,27 +1361,5 @@ mod tests {
         let decoded: MetadataOutput = rmp_serde::from_slice(&bytes).unwrap();
         assert_eq!(decoded.name, original.name);
         assert_eq!(decoded.description, original.description);
-    }
-
-    #[test]
-    fn importer_output_errors_field_is_backward_compatible() {
-        // Like the `options` field on input, the `errors` field on
-        // output has `#[serde(default)]`. An older WASM importer that
-        // emits only `directives` + `warnings` deserializes cleanly
-        // with an empty errors vec.
-        #[derive(serde::Serialize)]
-        struct OldShape {
-            directives: Vec<DirectiveWrapper>,
-            warnings: Vec<String>,
-            // intentionally no `errors`
-        }
-        let old = OldShape {
-            directives: vec![],
-            warnings: vec!["w".to_string()],
-        };
-        let bytes = rmp_serde::to_vec(&old).unwrap();
-        let decoded: ImporterOutput = rmp_serde::from_slice(&bytes).unwrap();
-        assert!(decoded.errors.is_empty());
-        assert_eq!(decoded.warnings.len(), 1);
     }
 }

@@ -46,7 +46,7 @@ use config::{
 use duplicate::{is_duplicate, is_ofx_file, load_existing_transactions};
 use format_num_pattern::Locale;
 use rustledger_core::{Directive, FormatConfig, format_directive};
-use rustledger_importer::{ImporterConfig, ImporterRegistry, csv_importer::CsvImporter};
+use rustledger_importer::{Importer, ImporterConfig, ImporterRegistry, csv_importer::CsvImporter};
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -222,17 +222,13 @@ pub fn list_importers(args: &Args) -> Result<()> {
 /// - Fall back to [`CsvImporter`] for unknown extensions (e.g. `.qbo`
 ///   Quicken exports) so users with custom-extension TOML entries keep
 ///   working.
-fn select_importer(
-    registry: &ImporterRegistry,
-    file: &Path,
-    args: &Args,
-) -> Arc<dyn rustledger_importer::Importer> {
+fn select_importer(registry: &ImporterRegistry, file: &Path, args: &Args) -> Arc<dyn Importer> {
     if args.importer.is_some() || args.config.is_some() {
         Arc::new(CsvImporter)
     } else {
         registry
             .identify(file)
-            .unwrap_or_else(|| Arc::new(CsvImporter) as Arc<dyn rustledger_importer::Importer>)
+            .unwrap_or_else(|| Arc::new(CsvImporter) as Arc<dyn Importer>)
     }
 }
 

@@ -66,6 +66,12 @@ insta.workspace = true
 name = "pipeline_bench"
 harness = false
 
+# Baseline for the v0.16.0 perf-sensitive paths. Not wired into PR CI — too
+# heavy at 100k. Run locally before/after structural changes.
+[[bench]]
+name = "v016_baseline"
+harness = false
+
 [lints]
 workspace = true
 

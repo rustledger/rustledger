@@ -12,6 +12,7 @@
 //! this crate — `chrono` is an internal, ofxy-only seal. If we ever drop or
 //! replace ofxy, the chrono dependency can go away with it.
 
+use crate::config::ImporterConfig;
 use crate::{EnrichedImportResult, ImportResult, Importer};
 use anyhow::{Context, Result};
 use rustledger_core::NaiveDate;
@@ -21,10 +22,27 @@ use std::fs;
 use std::path::Path;
 
 /// OFX/QFX file importer.
+///
+/// Two ways to use this:
+///
+/// 1. **As an [`Importer`] trait implementor** — stateless. Register a
+///    `OfxImporter::default()` in [`crate::ImporterRegistry`] and let
+///    the per-call [`ImporterConfig`] supply the target account and
+///    currency. This is the plugin-protocol path; recommended.
+///
+/// 2. **As a standalone helper** — construct via [`OfxImporter::new`]
+///    with `(account, currency)` baked in, then call
+///    [`OfxImporter::extract_from_string`] directly. Used by the
+///    pre-registry call sites and the test suite. The two APIs coexist
+///    so existing tests keep working through the protocol migration.
+#[derive(Debug, Default, Clone)]
 pub struct OfxImporter {
-    /// Target account for imported transactions.
+    /// Target account for imported transactions. Only used by the
+    /// standalone helper methods; the [`Importer`] trait impl reads
+    /// from the supplied [`ImporterConfig`] instead.
     account: String,
-    /// Currency for amounts (if not specified in the file).
+    /// Currency for amounts (if not specified in the file). Same
+    /// caveat as `account`.
     default_currency: String,
 }
 
@@ -187,10 +205,15 @@ impl Importer for OfxImporter {
             .is_some_and(|ext| ext.eq_ignore_ascii_case("ofx") || ext.eq_ignore_ascii_case("qfx"))
     }
 
-    fn extract(&self, path: &Path) -> Result<ImportResult> {
+    fn extract(&self, path: &Path, config: &ImporterConfig) -> Result<ImportResult> {
         let content = fs::read_to_string(path)
             .with_context(|| format!("Failed to read: {}", path.display()))?;
-        self.extract_from_string(&content)
+        // The protocol path: build a configured-per-call instance from
+        // the supplied ImporterConfig, ignoring self's stored state.
+        // The standalone helper methods (extract_from_string et al.)
+        // still use self's state for backward compatibility.
+        let configured = Self::new(&config.account, config.currency.clone().unwrap_or_default());
+        configured.extract_from_string(&content)
     }
 
     fn description(&self) -> &'static str {
@@ -463,8 +486,15 @@ NEWFILEUID:NONE
 
     #[test]
     fn test_ofx_importer_extract_nonexistent_file() {
-        let importer = OfxImporter::new("Assets:Bank", "USD");
-        let result = importer.extract(Path::new("/nonexistent/file.ofx"));
+        use crate::config::{AmountFormat, CsvConfig, ImporterType};
+        let importer = OfxImporter::default();
+        let config = ImporterConfig {
+            account: "Assets:Bank".into(),
+            currency: Some("USD".into()),
+            amount_format: AmountFormat::default(),
+            importer_type: ImporterType::Csv(CsvConfig::default()),
+        };
+        let result = importer.extract(Path::new("/nonexistent/file.ofx"), &config);
         assert!(result.is_err());
     }
 

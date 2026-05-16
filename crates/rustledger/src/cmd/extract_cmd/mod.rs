@@ -46,7 +46,7 @@ use config::{
 use duplicate::{is_duplicate, is_ofx_file, load_existing_transactions};
 use format_num_pattern::Locale;
 use rustledger_core::{Directive, FormatConfig, format_directive};
-use rustledger_importer::{Importer, ImporterConfig, OfxImporter};
+use rustledger_importer::{ImporterConfig, OfxImporter};
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -217,9 +217,17 @@ pub fn run(args: &Args, file: &Path) -> Result<()> {
     // optional --suggest-categories ML step knows which accounts to
     // re-categorize.
     let (result, fallback_accounts) = if is_ofx_file(file) && args.importer.is_none() {
+        // Use the legacy standalone helper for now. Wave 2.2 (the CLI rewire
+        // to dispatch through `ImporterRegistry`) replaces this with a
+        // trait-based call.
         let ofx = OfxImporter::new(&args.account, &args.currency);
+        let content = fs::read_to_string(file)
+            .with_context(|| format!("Failed to read: {}", file.display()))?;
         // OFX importer hardcodes Expenses:Unknown as the only contra-account.
-        (ofx.extract(file)?, vec!["Expenses:Unknown".to_string()])
+        (
+            ofx.extract_from_string(&content)?,
+            vec!["Expenses:Unknown".to_string()],
+        )
     } else {
         // Determine import config: --importer flag, explicit --config, or CLI args
         let config = if let Some(ref importer_name) = args.importer {

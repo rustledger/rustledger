@@ -160,8 +160,16 @@ impl From<EnrichedImportResult> for ImportResult {
 
 /// Trait for file importers.
 ///
-/// Implementors of this trait can extract beancount directives from various
-/// file formats (CSV, OFX, QFX, etc.).
+/// Implementors of this trait are **stateless** — they describe a file
+/// format (OFX, CSV, ...), not a particular import job. Per-call
+/// configuration (target account, currency, column mappings) flows in
+/// via [`ImporterConfig`]. This lets a single instance live in
+/// [`ImporterRegistry`] and serve many imports without per-job
+/// construction.
+///
+/// Implementors should match on `config.importer_type` if they require
+/// format-specific config (e.g. `CsvImporter` needs `CsvConfig`), and
+/// return an error if the config variant doesn't match what they handle.
 pub trait Importer: Send + Sync {
     /// Returns the name of this importer.
     fn name(&self) -> &str;
@@ -172,8 +180,12 @@ pub trait Importer: Send + Sync {
     /// header patterns, or other quick heuristics.
     fn identify(&self, path: &Path) -> bool;
 
-    /// Extract directives from the given file.
-    fn extract(&self, path: &Path) -> Result<ImportResult>;
+    /// Extract directives from the given file using `config`.
+    ///
+    /// `config.account` and `config.currency` are common across all
+    /// formats; format-specific configuration lives in
+    /// `config.importer_type` (e.g. `ImporterType::Csv(CsvConfig)`).
+    fn extract(&self, path: &Path, config: &ImporterConfig) -> Result<ImportResult>;
 
     /// Returns a description of what this importer handles.
     fn description(&self) -> &str {

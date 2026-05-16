@@ -1,7 +1,7 @@
 //! CSV file importer.
 
-use crate::config::{ColumnSpec, CsvConfig, ImporterConfig};
-use crate::{EnrichedImportResult, ImportResult};
+use crate::config::{AmountFormat, ColumnSpec, CsvConfig, ImporterConfig, ImporterType};
+use crate::{EnrichedImportResult, ImportResult, Importer};
 use anyhow::{Context, Result};
 use rust_decimal::Decimal;
 use rustledger_core::{Amount, Directive, Posting, Transaction};
@@ -12,8 +12,57 @@ use std::io::{BufReader, Read};
 use std::path::Path;
 
 /// CSV file importer.
+///
+/// Like [`crate::OfxImporter`], `CsvImporter` has two usage shapes:
+///
+/// 1. **As an [`Importer`] trait implementor** — stateless. Register a
+///    `CsvImporter::default()` in [`crate::ImporterRegistry`] and let
+///    the per-call [`ImporterConfig`] supply every detail. Recommended.
+///
+/// 2. **As a standalone helper** — construct via [`CsvImporter::new`]
+///    with a baked-in [`ImporterConfig`], then call helper methods like
+///    [`CsvImporter::extract_file`] directly. Pre-registry call sites
+///    and the test suite use this path.
 pub struct CsvImporter {
+    /// Per-importer config. Only used by the standalone helper methods;
+    /// the [`Importer`] trait impl reads from the call-time
+    /// `ImporterConfig` instead.
     config: ImporterConfig,
+}
+
+impl Default for CsvImporter {
+    fn default() -> Self {
+        // Placeholder config used only by standalone helpers; the
+        // protocol path supplies its own via Importer::extract.
+        Self {
+            config: ImporterConfig {
+                account: String::new(),
+                currency: None,
+                amount_format: AmountFormat::default(),
+                importer_type: ImporterType::Csv(CsvConfig::default()),
+            },
+        }
+    }
+}
+
+impl Importer for CsvImporter {
+    fn name(&self) -> &'static str {
+        "CSV"
+    }
+
+    fn description(&self) -> &'static str {
+        "Comma-separated values (CSV) file importer with configurable column mappings"
+    }
+
+    fn identify(&self, path: &Path) -> bool {
+        path.extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("csv"))
+    }
+
+    fn extract(&self, path: &Path, config: &ImporterConfig) -> Result<ImportResult> {
+        let ImporterType::Csv(csv_config) = &config.importer_type;
+        self.extract_file(path, csv_config)
+    }
 }
 
 impl CsvImporter {

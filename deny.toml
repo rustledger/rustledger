@@ -54,9 +54,12 @@ multiple-versions = "deny"
 wildcards = "deny"
 highlight = "all"
 
-# Crates we never want to depend on, even transitively. Force resolution to
-# the rustls-based TLS stack — see RELEASING.md trusted publishing notes for
-# why we avoid native-tls/openssl across the board.
+# Crates we never want to depend on, even transitively. We use rustls
+# everywhere (e.g. `ureq` is wired to rustls in our deps). Denying
+# native-tls and openssl makes any accidental pull-through fail CI loudly
+# instead of silently shipping a different TLS stack — a vector for
+# platform-specific build breakage (system openssl-dev required) and a
+# different threat surface than the rest of the workspace.
 deny = [
   { name = "openssl" },
   { name = "openssl-sys" },

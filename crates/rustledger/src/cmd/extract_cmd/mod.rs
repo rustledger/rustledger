@@ -46,11 +46,12 @@ use config::{
 use duplicate::{is_duplicate, is_ofx_file, load_existing_transactions};
 use format_num_pattern::Locale;
 use rustledger_core::{Directive, FormatConfig, format_directive};
-use rustledger_importer::ImporterConfig;
+use rustledger_importer::{ImporterConfig, ImporterRegistry, csv_importer::CsvImporter};
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::sync::Arc;
 
 /// Extract transactions from bank files.
 #[derive(Parser, Debug)]
@@ -209,9 +210,35 @@ pub fn list_importers(args: &Args) -> Result<()> {
     Ok(())
 }
 
+/// Pick the importer for a given file + CLI args.
+///
+/// - If the user explicitly chose a TOML entry (`--importer`) or a TOML
+///   path (`--config`), force [`CsvImporter`]: TOML entries are
+///   CSV-only by definition of [`rustledger_importer::config::ImporterType`]
+///   today, and forcing this prevents a regression where a CSV-shaped
+///   TOML entry applied to a `.ofx`-named file would silently dispatch
+///   to `OfxImporter` and drop the user's column mappings.
+/// - Otherwise let the registry identify by extension.
+/// - Fall back to [`CsvImporter`] for unknown extensions (e.g. `.qbo`
+///   Quicken exports) so users with custom-extension TOML entries keep
+///   working.
+fn select_importer(
+    registry: &ImporterRegistry,
+    file: &Path,
+    args: &Args,
+) -> Arc<dyn rustledger_importer::Importer> {
+    if args.importer.is_some() || args.config.is_some() {
+        Arc::new(CsvImporter)
+    } else {
+        registry
+            .identify(file)
+            .unwrap_or_else(|| Arc::new(CsvImporter) as Arc<dyn rustledger_importer::Importer>)
+    }
+}
+
 /// Run the extract command with the given arguments.
 pub fn run(args: &Args, file: &Path) -> Result<()> {
-    let registry = rustledger_importer::ImporterRegistry::with_builtins();
+    let registry = ImporterRegistry::with_builtins();
 
     // Build the per-call ImporterConfig + fallback-account list. The OFX
     // branch produces a minimal CSV-variant carrier (OfxImporter ignores
@@ -418,14 +445,9 @@ pub fn run(args: &Args, file: &Path) -> Result<()> {
         (config, fallbacks)
     };
 
-    // Dispatch through the registry. `identify()` picks OfxImporter for
-    // .ofx/.qfx and CsvImporter for .csv. For any other extension
-    // (custom-extension TOML entries, e.g. `.qbo`), fall back to CsvImporter
-    // since TOML entries can only carry CSV-shaped config.
-    let importer = registry.identify(file).unwrap_or_else(|| {
-        std::sync::Arc::new(rustledger_importer::csv_importer::CsvImporter)
-            as std::sync::Arc<dyn rustledger_importer::Importer>
-    });
+    // Dispatch through the registry with explicit-flag override (see
+    // `select_importer` doc).
+    let importer = select_importer(&registry, file, args);
     let result = importer.extract(file, &config)?;
 
     // Print warnings
@@ -866,6 +888,58 @@ default_expense = "Expenses:Uncategorized"
         assert!(is_ofx_file(Path::new("statement.QFX")));
         assert!(!is_ofx_file(Path::new("statement.csv")));
         assert!(!is_ofx_file(Path::new("statement.txt")));
+    }
+
+    // ===== Importer dispatch (select_importer) =====
+    //
+    // These pin the four interesting cases for which Importer the CLI
+    // selects for a given (file, args) combination. The bug they guard
+    // against is the regression where `--importer <toml-csv-entry>` on a
+    // `.ofx`-named file would silently dispatch to `OfxImporter` and drop
+    // the user's column mappings.
+
+    #[test]
+    fn test_select_importer_csv_extension_picks_csv() {
+        let registry = ImporterRegistry::with_builtins();
+        let args = Args::parse_from(["extract", "ignored.csv"]);
+        let imp = select_importer(&registry, Path::new("foo.csv"), &args);
+        assert_eq!(imp.name(), "CSV");
+    }
+
+    #[test]
+    fn test_select_importer_ofx_extension_picks_ofx() {
+        let registry = ImporterRegistry::with_builtins();
+        let args = Args::parse_from(["extract", "ignored.ofx"]);
+        let imp = select_importer(&registry, Path::new("foo.ofx"), &args);
+        assert_eq!(imp.name(), "OFX/QFX");
+    }
+
+    #[test]
+    fn test_select_importer_explicit_importer_flag_forces_csv_even_on_ofx_file() {
+        // Regression guard: prior to this PR, `--importer chase` on a
+        // `.ofx`-named file took the CSV path correctly. After Wave 2.2,
+        // registry.identify() picks OfxImporter from the extension — which
+        // would silently drop the CSV column mappings. select_importer
+        // must override this case.
+        let registry = ImporterRegistry::with_builtins();
+        let args = Args::parse_from(["extract", "ignored.ofx", "--importer", "chase"]);
+        let imp = select_importer(&registry, Path::new("foo.ofx"), &args);
+        assert_eq!(
+            imp.name(),
+            "CSV",
+            "TOML --importer entries must force CSV dispatch regardless of file extension"
+        );
+    }
+
+    #[test]
+    fn test_select_importer_unknown_extension_falls_back_to_csv() {
+        // .qbo Quicken exports are a common case: user has a TOML CSV
+        // entry to parse them. Even without --importer, the fallback
+        // path should choose CSV rather than erroring.
+        let registry = ImporterRegistry::with_builtins();
+        let args = Args::parse_from(["extract", "ignored.qbo"]);
+        let imp = select_importer(&registry, Path::new("foo.qbo"), &args);
+        assert_eq!(imp.name(), "CSV");
     }
 
     #[test]

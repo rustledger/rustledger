@@ -24,7 +24,13 @@ anyhow.workspace = true
 format_num_pattern.workspace = true
 csv.workspace = true
 ofxy.workspace = true
-chrono = "0.4"                      # ofxy exposes chrono::DateTime; needed for DateTime::format()
+# `ofxy::body::Transaction::date_posted` returns `chrono::DateTime<Utc>`, so
+# we need chrono in the dep tree to call its inherent `.format()` method.
+# IMPORTANT: chrono types must NOT leak into this crate's public API — they
+# are converted to `jiff::civil::Date` inside ofx_importer.rs at the boundary.
+# When v1.0 ships, dropping ofxy or replacing it with a jiff-native OFX
+# parser would let us remove chrono entirely.
+chrono = "0.4"
 
 [dev-dependencies]
 tempfile.workspace = true

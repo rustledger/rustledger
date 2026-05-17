@@ -135,8 +135,8 @@ pub enum WasmImporterError {
     #[error("failed to encode input for WASM importer: {0}")]
     Encode(#[source] rmp_serde::encode::Error),
     /// The WASM importer returned an `out_len` larger than the host's
-    /// allocation cap ([`MAX_OUTPUT_BYTES`]). Either the module is
-    /// buggy/malicious or `MAX_OUTPUT_BYTES` needs raising for a
+    /// allocation cap (`MAX_OUTPUT_BYTES`, currently 64 MiB). Either
+    /// the module is buggy/malicious or the cap needs raising for a
     /// genuinely huge import.
     #[error("WASM importer returned output of {len} bytes, exceeds cap of {max} bytes")]
     OutputTooLarge {
@@ -145,10 +145,10 @@ pub enum WasmImporterError {
         /// Host's enforced cap (`MAX_OUTPUT_BYTES`).
         max: usize,
     },
-    /// The input the host tried to marshal exceeds
-    /// [`MAX_INPUT_BYTES`]. The host caps before a lossy
-    /// `as u32` cast (wasm32 memory is `u32`-addressed, so >4 GiB
-    /// input would silently truncate).
+    /// The input the host tried to marshal exceeds the host's input
+    /// cap (`MAX_INPUT_BYTES`, currently 64 MiB). The host caps
+    /// before a lossy `as u32` cast (wasm32 memory is `u32`-addressed,
+    /// so >4 GiB input would silently truncate).
     #[error("input of {len} bytes exceeds cap of {max} bytes for WASM importer")]
     InputTooLarge {
         /// Length the host attempted to send.
@@ -534,7 +534,7 @@ fn build_wasm_input(path: &Path, content: Vec<u8>, config: &ImporterConfig) -> I
 ///
 /// - `date_format`, `delimiter`, `has_header`, `skip_rows`,
 ///   `invert_sign`, `skip_zero_amounts` — simple String/bool/number
-/// - `default_expense`, `default_income` — Option<String>
+/// - `default_expense`, `default_income` — `Option<String>`
 ///
 /// # Deferred to wave 2.3e+
 ///
@@ -750,7 +750,7 @@ fn bridge_enriched_output(output: EnrichedImporterOutput) -> anyhow::Result<Enri
 ///
 /// Returns `Err(unknown)` for strings the host doesn't recognize — the
 /// caller is expected to surface a warning and fall back to
-/// [`CategorizationMethod::Default`]. We don't silently absorb unknown
+/// `CategorizationMethod::Default`. We don't silently absorb unknown
 /// strings here: a typo like `"merchant_dict"` vs `"merchant-dict"`
 /// (the exact Copilot-flagged bug from #1130) would otherwise degrade
 /// data without any signal to the user.

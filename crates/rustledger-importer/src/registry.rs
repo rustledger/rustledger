@@ -126,10 +126,14 @@ impl ImporterRegistry {
                     }
                 }
                 Err(source) => {
+                    // `read_dir().next()` can return Err for a
+                    // single entry without us knowing its name —
+                    // surface as `DirEntry` (typed for this case)
+                    // tagged with the dir path.
                     report.failures.push((
                         dir.to_path_buf(),
-                        WasmImporterError::Io {
-                            path: dir.to_path_buf(),
+                        WasmImporterError::DirEntry {
+                            dir: dir.to_path_buf(),
                             source,
                         },
                     ));

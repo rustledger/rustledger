@@ -3,18 +3,8 @@
 use anyhow::{Context, Result};
 use rust_decimal::Decimal;
 use rustledger_core::{Directive, Transaction};
-use rustledger_importer::{Importer, OfxImporter};
 use std::fs;
 use std::path::Path;
-
-/// Check if a file is an OFX/QFX file by delegating to
-/// [`OfxImporter::identify`]. Single source of truth: the extension
-/// list lives on the importer impl. Adding a new OFX-like extension
-/// (`.qif` if we ever support it) only requires updating
-/// `OfxImporter::identify`, not separately in two places.
-pub(super) fn is_ofx_file(path: &Path) -> bool {
-    OfxImporter.identify(path)
-}
 
 /// Load existing transactions from a beancount file for duplicate detection.
 pub(super) fn load_existing_transactions(path: &Path) -> Result<Vec<Transaction>> {

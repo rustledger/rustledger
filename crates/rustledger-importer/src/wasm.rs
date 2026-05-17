@@ -98,6 +98,18 @@ pub enum WasmImporterError {
         /// Underlying I/O error.
         source: std::io::Error,
     },
+    /// Failed to enumerate an entry while scanning a directory for
+    /// `.wasm` files. Distinct from [`Self::Io`] because the entry's
+    /// name is unknown when read fails — only the dir is named.
+    /// Typically permission-denied on a single inode or a broken
+    /// symlink.
+    #[error("failed to enumerate entry in WASM importer directory {dir}: {source}")]
+    DirEntry {
+        /// Directory being scanned.
+        dir: PathBuf,
+        /// Underlying I/O error from `read_dir().next()`.
+        source: std::io::Error,
+    },
     /// The WASM module is malformed or uses unsupported features.
     #[error("failed to compile WASM module {path}: {source}")]
     Compile {

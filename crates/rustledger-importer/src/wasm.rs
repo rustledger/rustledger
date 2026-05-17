@@ -53,6 +53,13 @@ use crate::{EnrichedImportResult, ImportResult, Importer, ImporterConfig};
 /// well above any realistic importer output for a single statement.
 const MAX_OUTPUT_BYTES: usize = 64 * 1024 * 1024;
 
+/// Hard cap on the byte length of input the host will marshal into the
+/// WASM module. Mirrors [`MAX_OUTPUT_BYTES`] on the input side:
+/// `wasm32` memory is `u32`-addressed, so anything over 4 GiB is
+/// fundamentally not addressable, but we cap much lower to avoid
+/// runaway allocations from accidentally-huge source files.
+const MAX_INPUT_BYTES: usize = 64 * 1024 * 1024;
+
 /// Hard cap on the number of elements in any single WASM table.
 /// Importers don't typically need indirect-call tables at all, let
 /// alone large ones. Each ref-typed slot is pointer-sized (8 bytes on
@@ -137,6 +144,28 @@ pub enum WasmImporterError {
         len: usize,
         /// Host's enforced cap (`MAX_OUTPUT_BYTES`).
         max: usize,
+    },
+    /// The input the host tried to marshal exceeds
+    /// [`MAX_INPUT_BYTES`]. The host caps before a lossy
+    /// `as u32` cast (wasm32 memory is `u32`-addressed, so >4 GiB
+    /// input would silently truncate).
+    #[error("input of {len} bytes exceeds cap of {max} bytes for WASM importer")]
+    InputTooLarge {
+        /// Length the host attempted to send.
+        len: usize,
+        /// Host's enforced cap (`MAX_INPUT_BYTES`).
+        max: usize,
+    },
+    /// A required export exists but has the wrong signature. Distinct
+    /// from [`Self::MissingExport`] because `validate_module` already
+    /// proved presence at load time — a `get_typed_func` failure
+    /// thereafter is always a type mismatch, not absence.
+    #[error("WASM importer export `{name}` has wrong signature: {source}")]
+    ExportSignatureMismatch {
+        /// Name of the export.
+        name: &'static str,
+        /// Underlying wasmtime type-mismatch error.
+        source: anyhow::Error,
     },
 }
 
@@ -339,10 +368,28 @@ fn make_store(
     let mut store = Store::new(engine, state);
     store.limiter(|s| &mut s.limiter);
     // 1M instructions per second is the same rough budget used by the
-    // directive-plugin runtime.
-    let fuel = config.max_time_secs.max(1) * 1_000_000;
+    // directive-plugin runtime. `.max(1)` prevents zero-fuel starvation;
+    // `.saturating_mul` prevents u64 overflow on huge `max_time_secs`
+    // (panic in debug, silent wrap to a tiny number in release — both
+    // wrong, both prevented here).
+    let fuel = config.max_time_secs.max(1).saturating_mul(1_000_000);
     store.set_fuel(fuel).map_err(runtime_err)?;
     Ok(store)
+}
+
+/// Cap input length before the lossy `as u32` cast — wasm32 memory
+/// is u32-addressed, so >4 GiB input would silently truncate and
+/// corrupt the import. Returns the validated length as `u32` so
+/// callers don't need to repeat the cast.
+const fn validate_input_size(len: usize) -> Result<u32, WasmImporterError> {
+    if len > MAX_INPUT_BYTES {
+        return Err(WasmImporterError::InputTooLarge {
+            len,
+            max: MAX_INPUT_BYTES,
+        });
+    }
+    // Safe: `MAX_INPUT_BYTES` (64 MiB) fits in u32, and `len <= MAX_INPUT_BYTES`.
+    Ok(len as u32)
 }
 
 /// Read a packed `(out_ptr, out_len)` u64 from a WASM entry-point
@@ -382,6 +429,7 @@ fn call_msgpack_with<I: Serialize, O: DeserializeOwned>(
     input: &I,
 ) -> Result<O, WasmImporterError> {
     let input_bytes = rmp_serde::to_vec(input).map_err(WasmImporterError::Encode)?;
+    let input_len = validate_input_size(input_bytes.len())?;
 
     let mut store = make_store(engine, config)?;
 
@@ -391,27 +439,37 @@ fn call_msgpack_with<I: Serialize, O: DeserializeOwned>(
         .instantiate(&mut store, module)
         .map_err(runtime_err)?;
 
+    // For each `get_typed_func` below: `validate_module` already
+    // verified that the export exists at load time, so any error here
+    // is necessarily a signature mismatch (not absence). Surfacing it
+    // as `ExportSignatureMismatch` rather than `MissingExport` saves
+    // guest authors from chasing a misleading "export not found"
+    // error message.
     let memory = instance
         .get_memory(&mut store, "memory")
         .ok_or(WasmImporterError::MissingExport("memory"))?;
 
     let alloc = instance
         .get_typed_func::<u32, u32>(&mut store, "alloc")
-        .map_err(|_| WasmImporterError::MissingExport("alloc"))?;
+        .map_err(|e| WasmImporterError::ExportSignatureMismatch {
+            name: "alloc",
+            source: anyhow::Error::from(e),
+        })?;
 
-    let input_ptr = alloc
-        .call(&mut store, input_bytes.len() as u32)
-        .map_err(runtime_err)?;
+    let input_ptr = alloc.call(&mut store, input_len).map_err(runtime_err)?;
     memory
         .write(&mut store, input_ptr as usize, &input_bytes)
         .map_err(|e| WasmImporterError::Runtime(e.into()))?;
 
     let func = instance
         .get_typed_func::<(u32, u32), u64>(&mut store, entry)
-        .map_err(|_| WasmImporterError::MissingExport(entry))?;
+        .map_err(|e| WasmImporterError::ExportSignatureMismatch {
+            name: entry,
+            source: anyhow::Error::from(e),
+        })?;
 
     let packed = func
-        .call(&mut store, (input_ptr, input_bytes.len() as u32))
+        .call(&mut store, (input_ptr, input_len))
         .map_err(runtime_err)?;
 
     let out_bytes = read_packed_output(&store, &memory, packed)?;
@@ -437,9 +495,14 @@ fn call_metadata(
         .get_memory(&mut store, "memory")
         .ok_or(WasmImporterError::MissingExport("memory"))?;
 
+    // Same reasoning as in `call_msgpack_with`: validate_module
+    // proved presence, so a typed_func error is a signature mismatch.
     let metadata = instance
         .get_typed_func::<(), u64>(&mut store, "metadata")
-        .map_err(|_| WasmImporterError::MissingExport("metadata"))?;
+        .map_err(|e| WasmImporterError::ExportSignatureMismatch {
+            name: "metadata",
+            source: anyhow::Error::from(e),
+        })?;
 
     let packed = metadata.call(&mut store, ()).map_err(runtime_err)?;
     let out_bytes = read_packed_output(&store, &memory, packed)?;
@@ -447,8 +510,10 @@ fn call_metadata(
 }
 
 /// Flatten the host's [`ImporterConfig`] into the wire-format
-/// [`ImporterInput`] expected by the WASM module. CSV-specific config
-/// fields are serialized into the free-form `options` map.
+/// [`ImporterInput`] expected by the WASM module. A *subset* of
+/// CSV-specific config fields is serialized into the free-form
+/// `options` map — see [`project_csv_config_into_options`] for the
+/// list and what's deferred.
 fn build_wasm_input(path: &Path, content: Vec<u8>, config: &ImporterConfig) -> ImporterInput {
     let mut options = std::collections::HashMap::new();
     let ImporterType::Csv(csv) = &config.importer_type;
@@ -462,8 +527,30 @@ fn build_wasm_input(path: &Path, content: Vec<u8>, config: &ImporterConfig) -> I
     }
 }
 
-/// Project CSV-specific config into the wire-format `options` map.
-/// String-encoded per the ABI's String→String contract.
+/// Project a *subset* of [`CsvConfig`] into the wire-format `options`
+/// map. String-encoded per the ABI's String→String contract.
+///
+/// # Currently projected
+///
+/// - `date_format`, `delimiter`, `has_header`, `skip_rows`,
+///   `invert_sign`, `skip_zero_amounts` — simple String/bool/number
+/// - `default_expense`, `default_income` — Option<String>
+///
+/// # Deferred to wave 2.3e+
+///
+/// The richer fields — `date_column` / `narration_column` /
+/// `payee_column` / `amount_column` / `debit_column` /
+/// `credit_column` (`ColumnSpec` enum: name OR index), `amount_locale`
+/// / `amount_format`, `mappings` / `regex_mappings` (`Vec<(String,
+/// String)>`), `use_merchant_dict` — are not yet projected. Encoding
+/// them in a String→String map needs design decisions (key prefixes,
+/// JSON-in-string, parallel collections?) that are best driven by a
+/// real WASM CSV importer in wave 2.3e rather than guessed now.
+///
+/// A WASM importer in 2.3b can still extract from CSV files; it just
+/// has to implement its own column-spec discovery rather than
+/// inheriting the host's. Most non-CSV importers (OFX, MT940, …)
+/// don't need any of the deferred fields.
 fn project_csv_config_into_options(
     csv: &CsvConfig,
     options: &mut std::collections::HashMap<String, String>,
@@ -509,16 +596,13 @@ fn format_plugin_error(e: &PluginError) -> String {
 }
 
 /// Materialize an [`ImporterOutput`] wire-format value back to the
-/// host-side [`ImportResult`]. Reuses
-/// `rustledger_plugin::convert::wrapper_to_directive` semantics —
-/// duplicated here so this crate doesn't need to depend on the full
-/// `rustledger-plugin` graph just for the converter.
+/// host-side [`ImportResult`]. Delegates wrapper→directive conversion
+/// to `rustledger_plugin::convert::wrapper_to_directive` so the WASM
+/// importer path and the directive-plugin path share a single
+/// converter — improvements there land here for free.
 fn output_to_import_result(out: ImporterOutput) -> anyhow::Result<ImportResult> {
     let mut directives = Vec::with_capacity(out.directives.len());
     for w in out.directives {
-        // Reuse the canonical conversion path. NOTE: this is the same
-        // converter the directive plugins use, so any improvements
-        // there land here too.
         let d = rustledger_plugin::convert::wrapper_to_directive(&w)
             .map_err(|e| anyhow::anyhow!("WASM importer returned invalid directive: {e:?}"))?;
         directives.push(d);
@@ -1032,6 +1116,86 @@ mod tests {
             !limiter
                 .table_growing(0, MAX_TABLE_ELEMENTS + 1, None)
                 .expect("over cap is Ok(false)")
+        );
+    }
+
+    #[test]
+    fn validate_input_size_accepts_at_cap_and_rejects_above() {
+        // Exactly at the cap is fine.
+        assert_eq!(
+            validate_input_size(MAX_INPUT_BYTES).unwrap(),
+            MAX_INPUT_BYTES as u32
+        );
+        // One byte over is rejected, with the offending length surfaced
+        // in the error so the user can see how much they overshot.
+        let err = validate_input_size(MAX_INPUT_BYTES + 1).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                WasmImporterError::InputTooLarge { len, max }
+                    if len == MAX_INPUT_BYTES + 1 && max == MAX_INPUT_BYTES
+            ),
+            "got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn fuel_calc_saturates_instead_of_overflowing() {
+        // Regression for Copilot #2: u64::MAX max_time_secs would have
+        // overflowed in release (silent wrap to a tiny number ⇒ fuel
+        // starvation) and panicked in debug. Saturating_mul caps at
+        // u64::MAX which set_fuel accepts.
+        let bytes = wat::parse_str(roundtrip_wat()).expect("WAT parses");
+        let config = WasmRuntimeConfig {
+            max_memory: 256 * 1024 * 1024,
+            max_time_secs: u64::MAX,
+        };
+        // Successful load proves the fuel calc didn't panic and the
+        // resulting saturated value is acceptable to set_fuel.
+        let importer = WasmImporter::load_from_bytes(PathBuf::from("test.wasm"), &bytes, config)
+            .expect("u64::MAX max_time_secs saturates, doesn't overflow");
+        assert_eq!(importer.name(), "tst");
+    }
+
+    #[test]
+    fn wrong_signature_export_surfaces_export_signature_mismatch() {
+        // `metadata` is declared but with the wrong signature
+        // (returns i32 instead of i64). `validate_module` checks
+        // presence-by-name only, so this passes validate. The
+        // signature error surfaces when `call_metadata` tries
+        // `get_typed_func::<(), u64>`.
+        let wat = r#"
+            (module
+                (memory (export "memory") 1)
+                (func (export "alloc") (param i32) (result i32) i32.const 0)
+                ;; WRONG: should be (result i64), declared as (result i32)
+                (func (export "metadata") (result i32) i32.const 0)
+                (func (export "identify") (param i32 i32) (result i64) i64.const 0)
+                (func (export "extract") (param i32 i32) (result i64) i64.const 0)
+                (func (export "extract_enriched") (param i32 i32) (result i64) i64.const 0)
+            )
+        "#;
+        let bytes = wat::parse_str(wat).expect("WAT parses");
+        let Err(err) = WasmImporter::load_from_bytes(
+            PathBuf::from("badsig.wasm"),
+            &bytes,
+            WasmRuntimeConfig::default(),
+        ) else {
+            panic!("metadata with wrong signature should be rejected");
+        };
+        // Previously: silently surfaced as MissingExport("metadata"),
+        // which is misleading because the export DOES exist. Now:
+        // ExportSignatureMismatch names the export and includes the
+        // wasmtime type-mismatch error in the source chain.
+        assert!(
+            matches!(
+                err,
+                WasmImporterError::ExportSignatureMismatch {
+                    name: "metadata",
+                    ..
+                }
+            ),
+            "expected ExportSignatureMismatch for metadata, got {err:?}"
         );
     }
 

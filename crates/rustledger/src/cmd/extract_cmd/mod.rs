@@ -272,24 +272,70 @@ pub fn list_importers(args: &Args) -> Result<()> {
 
 /// Pick the importer for a given file + CLI args.
 ///
-/// - If the user explicitly chose a TOML entry (`--importer`) or a TOML
-///   path (`--config`), force [`CsvImporter`]: TOML entries are
-///   CSV-only by definition of [`rustledger_importer::config::ImporterType`]
-///   today, and forcing this prevents a regression where a CSV-shaped
-///   TOML entry applied to a `.ofx`-named file would silently dispatch
-///   to `OfxImporter` and drop the user's column mappings.
-/// - Otherwise let the registry identify by extension.
+/// - If the user explicitly chose a TOML entry (`--importer <name>`),
+///   force [`CsvImporter`]: TOML profiles are CSV-only by definition
+///   of [`rustledger_importer::config::ImporterType`] today, and the
+///   profile's column mappings would be lost if registry-identify
+///   silently routed the file to a different engine (e.g. a
+///   `.ofx`-named file picked up by `OfxImporter`).
+/// - Otherwise let the registry identify by extension. This is the
+///   path WASM importers reach via `--wasm-importer` /
+///   `--wasm-importer-dir` — including when combined with
+///   `--config` for pattern-matched TOML profiles. (Earlier this
+///   function also force-CSV'd when `--config` was set alone; that
+///   meant `--wasm-importer my.wasm --config x.toml` silently
+///   ignored the WASM module. Fixed by limiting the force-CSV path
+///   to `--importer`.)
 /// - Fall back to [`CsvImporter`] for unknown extensions (e.g. `.qbo`
-///   Quicken exports) so users with custom-extension TOML entries keep
-///   working.
+///   Quicken exports) so users with custom-extension TOML entries
+///   keep working.
 fn select_importer(registry: &ImporterRegistry, file: &Path, args: &Args) -> Arc<dyn Importer> {
-    if args.importer.is_some() || args.config.is_some() {
+    if args.importer.is_some() {
         Arc::new(CsvImporter)
     } else {
         registry
             .identify(file)
             .unwrap_or_else(|| Arc::new(CsvImporter) as Arc<dyn Importer>)
     }
+}
+
+/// Resolve the list of directories to scan for WASM importers.
+///
+/// Precedence + error semantics:
+///
+/// - CLI `--wasm-importer-dir` flag(s) → use those, ignore toml.
+/// - No CLI flag, no `--config` → soft-discover `importers.toml` in
+///   the usual locations. If a file is found but malformed, treat
+///   it as "no scan dirs" rather than failing the whole extract —
+///   the user didn't explicitly ask for that file, so silently
+///   degrading is appropriate.
+/// - No CLI flag, `--config <path>` given → propagate errors. If
+///   the user explicitly named a config file and it's
+///   missing/malformed, that's a real problem they want to know
+///   about; the previous behavior of silently degrading via
+///   `.ok().flatten()` would hide the bug.
+fn resolve_scan_dirs(args: &Args) -> Result<Vec<PathBuf>> {
+    if !args.wasm_importer_dir.is_empty() {
+        return Ok(args.wasm_importer_dir.clone());
+    }
+    let explicit_config = args.config.is_some();
+    let cfg_path = match find_importers_config(args.config.as_deref()) {
+        Ok(Some(p)) => p,
+        Ok(None) => return Ok(Vec::new()),
+        Err(e) if explicit_config => return Err(e),
+        Err(_) => return Ok(Vec::new()),
+    };
+    let cfg = match load_importers_config(&cfg_path) {
+        Ok(c) => c,
+        Err(e) if explicit_config => return Err(e),
+        Err(_) => return Ok(Vec::new()),
+    };
+    Ok(cfg
+        .wasm_importer_dir
+        .into_vec()
+        .into_iter()
+        .map(|p| expand_tilde(&p))
+        .collect())
 }
 
 /// Build an [`ImporterRegistry`] with WASM importers registered ahead
@@ -323,22 +369,7 @@ fn build_registry(args: &Args) -> Result<ImporterRegistry> {
     // 2. Directory scan(s): CLI flags override toml entirely.
     //    Multiple dirs are scanned in order. `~` is expanded for
     //    toml-supplied paths (CLI paths get shell expansion).
-    let scan_dirs: Vec<PathBuf> = if args.wasm_importer_dir.is_empty() {
-        find_importers_config(args.config.as_deref())
-            .ok()
-            .flatten()
-            .and_then(|path| load_importers_config(&path).ok())
-            .map(|cfg| {
-                cfg.wasm_importer_dir
-                    .into_vec()
-                    .into_iter()
-                    .map(|p| expand_tilde(&p))
-                    .collect()
-            })
-            .unwrap_or_default()
-    } else {
-        args.wasm_importer_dir.clone()
-    };
+    let scan_dirs: Vec<PathBuf> = resolve_scan_dirs(args)?;
     for dir in &scan_dirs {
         let report = registry
             .register_wasm_dir(dir)
@@ -1075,6 +1106,77 @@ default_expense = "Expenses:Uncategorized"
         let args = Args::parse_from(["extract", "ignored.qbo"]);
         let imp = select_importer(&registry, Path::new("foo.qbo"), &args);
         assert_eq!(imp.name(), "CSV");
+    }
+
+    #[test]
+    fn test_select_importer_config_alone_does_not_force_csv() {
+        // Regression: `--config x.toml` alone (no --importer) used to
+        // force CSV dispatch, which silently broke combinations like
+        // `--config x.toml --wasm-importer my-mt940.wasm foo.mt940`
+        // (registered WASM was never consulted). With the fix,
+        // --config alone consults the registry so WASM importers stay
+        // reachable. A .csv file still resolves to CSV via
+        // registry.identify, not via the force-CSV path.
+        use rustledger_importer::test_fixtures::identifying_wat;
+        let tmp = tempfile::tempdir().unwrap();
+        let wasm_path = tmp.path().join("mt.wasm");
+        std::fs::write(
+            &wasm_path,
+            wat::parse_str(identifying_wat("mt9")).expect("WAT parses"),
+        )
+        .unwrap();
+        let cfg_dir = tempfile::tempdir().unwrap();
+        let cfg_path = cfg_dir.path().join("importers.toml");
+        std::fs::write(&cfg_path, "").unwrap(); // empty but valid toml
+
+        let args = Args::parse_from([
+            "extract",
+            "foo.mt940",
+            "--config",
+            cfg_path.to_str().unwrap(),
+            "--wasm-importer",
+            wasm_path.to_str().unwrap(),
+        ]);
+        let registry = build_registry(&args).expect("builds");
+        let imp = select_importer(&registry, Path::new("foo.mt940"), &args);
+        assert_eq!(
+            imp.name(),
+            "mt9",
+            "WASM importer should win when --config is set alone (no --importer)"
+        );
+    }
+
+    #[test]
+    fn resolve_scan_dirs_propagates_error_for_explicit_missing_config() {
+        // --config /missing.toml should error loudly, not silently
+        // degrade to "no WASM scan dirs".
+        let args = Args::parse_from([
+            "extract",
+            "--config",
+            "/this/path/does/not/exist/importers.toml",
+        ]);
+        let result = resolve_scan_dirs(&args);
+        let Err(err) = result else {
+            panic!("explicit missing --config should error");
+        };
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("does/not/exist"),
+            "error should name the missing path: {msg}"
+        );
+    }
+
+    #[test]
+    fn resolve_scan_dirs_soft_fails_for_implicit_missing_config() {
+        // No --config provided, no importers.toml in cwd/XDG → empty
+        // scan dirs, no error. This is the right behavior because
+        // the user didn't ask for any config; absence is expected.
+        let args = Args::parse_from(["extract"]);
+        let dirs = resolve_scan_dirs(&args).expect("implicit missing is soft-fail");
+        // Could be empty or non-empty depending on whether a real
+        // ~/.config/rledger/importers.toml exists in this test env.
+        // What we're asserting is that it didn't error.
+        let _ = dirs;
     }
 
     #[test]
@@ -1904,27 +2006,13 @@ filename_pattern = "statement*"
 
     // ===== build_registry / WASM discovery integration tests =====
 
-    /// Inline WAT for a minimal WASM importer module with a baked-in
-    /// 3-char `metadata.name`. Identical shape to the registry tests'
-    /// fixture; kept independent so CLI tests don't depend on
-    /// importer-crate test code.
+    /// Wrapper around the shared
+    /// [`rustledger_importer::test_fixtures::metadata_wat`] helper so
+    /// tests below can write WAT bytes in one call. Single source of
+    /// truth for the WAT shape lives in `rustledger-importer`; the
+    /// CLI tests just consume it.
     fn wasm_importer_with_name(name: &str) -> Vec<u8> {
-        assert_eq!(name.len(), 3, "test fixture only supports 3-char names");
-        let wat = format!(
-            r#"
-            (module
-                (memory (export "memory") 1)
-                ;; 0x92 fixarray-2, 0xa3 fixstr-3 "<name>", 0xa3 fixstr-3 "tst"
-                (data (i32.const 0) "\92\a3{name}\a3tst")
-                (global $bump (mut i32) (i32.const 1024))
-                (func (export "alloc") (param i32) (result i32) global.get $bump)
-                (func (export "metadata") (result i64) i64.const 9)
-                (func (export "identify") (param i32 i32) (result i64) i64.const 0)
-                (func (export "extract") (param i32 i32) (result i64) i64.const 0)
-                (func (export "extract_enriched") (param i32 i32) (result i64) i64.const 0)
-            )
-            "#
-        );
+        let wat = rustledger_importer::test_fixtures::metadata_wat(name);
         wat::parse_str(&wat).expect("WAT parses")
     }
 

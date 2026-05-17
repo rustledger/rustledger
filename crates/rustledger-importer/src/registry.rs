@@ -79,8 +79,9 @@ impl ImporterRegistry {
     ///
     /// Non-`.wasm` files (a `README.md` or `.gitignore`) and
     /// subdirectories are silently skipped. Per-entry I/O errors
-    /// (rare — permission denied on a single inode) are also silently
-    /// skipped to keep discovery resilient.
+    /// (rare — permission denied on a single inode, broken symlinks)
+    /// are surfaced in [`WasmDirScanReport::failures`] tagged with the
+    /// dir path (the entry's name is unavailable when read fails).
     ///
     /// # Duplicate names
     ///
@@ -104,17 +105,38 @@ impl ImporterRegistry {
             path: dir.to_path_buf(),
             source,
         })?;
-        let mut wasm_paths: Vec<PathBuf> = entries
-            .filter_map(std::result::Result::ok)
-            .map(|e| e.path())
-            .filter(|p| {
-                p.is_file()
-                    && p.extension()
-                        .is_some_and(|ext| ext.eq_ignore_ascii_case("wasm"))
-            })
-            .collect();
-        wasm_paths.sort();
         let mut report = WasmDirScanReport::default();
+        let mut wasm_paths: Vec<PathBuf> = Vec::new();
+        for entry in entries {
+            // Per-entry I/O errors (rare — permission denied on a
+            // single inode, broken symlink) flow into `failures` so
+            // a user debugging a missing importer can see they
+            // existed but couldn't be enumerated. The dir path
+            // itself is used as the failure path since we don't
+            // know the inode's name.
+            match entry {
+                Ok(e) => {
+                    let path = e.path();
+                    if path.is_file()
+                        && path
+                            .extension()
+                            .is_some_and(|ext| ext.eq_ignore_ascii_case("wasm"))
+                    {
+                        wasm_paths.push(path);
+                    }
+                }
+                Err(source) => {
+                    report.failures.push((
+                        dir.to_path_buf(),
+                        WasmImporterError::Io {
+                            path: dir.to_path_buf(),
+                            source,
+                        },
+                    ));
+                }
+            }
+        }
+        wasm_paths.sort();
         for path in wasm_paths {
             match self.register_wasm_from_path(&path) {
                 Ok(name) => report.loaded.push(name),
@@ -383,30 +405,7 @@ mod tests {
 
     // ===== WASM discovery tests =====
 
-    /// Minimal WAT module that exports the WASM importer ABI:
-    /// `memory`, `alloc`, `metadata`, `identify`, `extract`,
-    /// `extract_enriched`. `metadata` returns `(ptr=0, len=9)` →
-    /// pre-baked msgpack for `MetadataOutput { name: "<name>",
-    /// description: "tst" }`. The `name` argument is baked into the
-    /// data section so each fixture gets a distinct importer name.
-    fn metadata_wat(name: &str) -> String {
-        assert_eq!(name.len(), 3, "test fixture only supports 3-char names");
-        format!(
-            r#"
-            (module
-                (memory (export "memory") 1)
-                ;; 0x92 fixarray-2, 0xa3 fixstr-3 "<name>", 0xa3 fixstr-3 "tst"
-                (data (i32.const 0) "\92\a3{name}\a3tst")
-                (global $bump (mut i32) (i32.const 1024))
-                (func (export "alloc") (param i32) (result i32) global.get $bump)
-                (func (export "metadata") (result i64) i64.const 9)
-                (func (export "identify") (param i32 i32) (result i64) i64.const 0)
-                (func (export "extract") (param i32 i32) (result i64) i64.const 0)
-                (func (export "extract_enriched") (param i32 i32) (result i64) i64.const 0)
-            )
-            "#
-        )
-    }
+    use crate::test_fixtures::metadata_wat;
 
     fn write_wat_to(dir: &Path, file_name: &str, importer_name: &str) -> PathBuf {
         let bytes = wat::parse_str(metadata_wat(importer_name)).expect("WAT parses");
@@ -531,26 +530,51 @@ mod tests {
     }
 
     #[test]
-    fn register_wasm_keeps_user_priority_before_builtins() {
-        // Builtins come last in the build-registry helper used by the
-        // CLI, so user-loaded WASM should win identify() against built-
-        // ins. This tests the relative ordering primitive that the
-        // CLI helper relies on.
+    fn register_wasm_wins_identify_collision_when_registered_before_builtins() {
+        // The actual precedence guarantee the CLI helper relies on:
+        // when a WASM importer's `identify()` returns true for the
+        // SAME file a builtin would also accept, the one registered
+        // first wins. Uses `identifying_wat` (identify always true)
+        // so the collision is real — without it, the test would only
+        // exercise fallthrough order, not the collision path.
+        use crate::test_fixtures::identifying_wat;
         let tmp = tempfile::tempdir().expect("tempdir");
-        let user_wasm = write_wat_to(tmp.path(), "usr.wasm", "usr");
+        let bytes = wat::parse_str(identifying_wat("usr")).expect("WAT parses");
+        let user_wasm = tmp.path().join("usr.wasm");
+        std::fs::write(&user_wasm, &bytes).expect("write fixture");
 
         let mut registry = ImporterRegistry::new();
         registry.register_wasm_from_path(&user_wasm).expect("loads");
         registry.register(OfxImporter);
         registry.register(CsvImporter);
 
-        // Order: user-WASM first, then builtins. The user WASM's
-        // identify() returns false (test fixture's identify always
-        // returns 0/false), so a .csv path should still fall through
-        // to CSV. This confirms identify() iterates in registration
-        // order, the basis of the CLI's priority guarantee.
+        // .csv path that the CSV builtin would also accept. The user
+        // WASM is registered first AND returns true for identify, so
+        // it must win the dispatch. This test would FAIL if
+        // registration order were reversed — which `metadata_wat`'s
+        // always-false identify can't catch.
         let csv_path = Path::new("statement.csv");
-        let importer = registry.identify(csv_path).expect("CSV builtin handles it");
-        assert_eq!(importer.name(), "CSV");
+        let importer = registry.identify(csv_path).expect("WASM handles it");
+        assert_eq!(
+            importer.name(),
+            "usr",
+            "user WASM should win over CSV builtin on identify collision"
+        );
+
+        // Sanity: swap registration order, builtin wins instead.
+        let bytes2 = wat::parse_str(identifying_wat("usr")).expect("WAT parses");
+        let user_wasm2 = tmp.path().join("usr2.wasm");
+        std::fs::write(&user_wasm2, &bytes2).expect("write fixture");
+        let mut reversed = ImporterRegistry::new();
+        reversed.register(CsvImporter);
+        reversed
+            .register_wasm_from_path(&user_wasm2)
+            .expect("loads");
+        let importer = reversed.identify(csv_path).expect("CSV handles it");
+        assert_eq!(
+            importer.name(),
+            "CSV",
+            "CSV builtin should win when registered first — confirms order matters"
+        );
     }
 }

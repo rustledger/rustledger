@@ -37,16 +37,23 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use rustledger_ops::fingerprint::Fingerprint;
-use rustledger_plugin::sandbox;
+use rustledger_plugin::sandbox::{self, StoreState};
 use rustledger_plugin_types::{
     EnrichedImporterOutput, IdentifyInput, IdentifyOutput, ImporterInput, ImporterOutput,
     MetadataOutput, PluginError, PluginErrorSeverity,
 };
 use serde::{Serialize, de::DeserializeOwned};
-use wasmtime::{Engine, Linker, Module, ResourceLimiter, Store};
+use wasmtime::{Engine, Linker, Module, Store};
 
 use crate::config::{CsvConfig, ImporterType};
 use crate::{EnrichedImportResult, ImportResult, Importer, ImporterConfig};
+
+// NOTE on hardcoded caps below: `MAX_OUTPUT_BYTES` and `MAX_INPUT_BYTES`
+// are per-process constants, not per-importer config. They're sized
+// generously (64 MiB each) for any realistic bank-statement import.
+// Per-importer tunability is a v1.0 surface decision; for v0.16-pre the
+// caps are intentionally fixed so the security contract is uniform
+// across all loaded importers regardless of who configured them.
 
 /// Hard cap on the byte length a WASM importer can return from any
 /// entry point. Prevents a malicious or buggy module from triggering a
@@ -55,21 +62,11 @@ use crate::{EnrichedImportResult, ImportResult, Importer, ImporterConfig};
 const MAX_OUTPUT_BYTES: usize = 64 * 1024 * 1024;
 
 /// Hard cap on the byte length of input the host will marshal into the
-/// WASM module. Mirrors [`MAX_OUTPUT_BYTES`] on the input side:
+/// WASM module. Mirrors `MAX_OUTPUT_BYTES` on the input side:
 /// `wasm32` memory is `u32`-addressed, so anything over 4 GiB is
 /// fundamentally not addressable, but we cap much lower to avoid
 /// runaway allocations from accidentally-huge source files.
 const MAX_INPUT_BYTES: usize = 64 * 1024 * 1024;
-
-/// Hard cap on the number of elements in any single WASM table.
-/// Importers don't typically need indirect-call tables at all, let
-/// alone large ones. Each ref-typed slot is pointer-sized (8 bytes on
-/// 64-bit), so 1M elements = ~8 MiB worst case — well under the
-/// memory cap but enough headroom for any plausible indirect-dispatch
-/// pattern. Without this cap, `table.grow` would bypass the memory
-/// limiter (`Memory` and `Table` are separate resource classes in
-/// wasmtime's accounting).
-const MAX_TABLE_ELEMENTS: usize = 1024 * 1024;
 
 /// Configuration for the WASM importer runtime.
 #[derive(Debug, Clone, Copy)]
@@ -170,46 +167,11 @@ pub enum WasmImporterError {
     },
 }
 
-/// Per-store memory limiter. Wired into [`Store::limiter`] so wasmtime
-/// rejects `memory.grow` past `max_memory`. Without this, the
-/// [`WasmRuntimeConfig::max_memory`] field would be silently ignored —
-/// the sandbox would have unbounded heap, which defeats the
-/// "self-contained importer" guarantee.
-struct MemoryLimiter {
-    max_memory: usize,
-}
-
-impl ResourceLimiter for MemoryLimiter {
-    fn memory_growing(
-        &mut self,
-        _current: usize,
-        desired: usize,
-        _maximum: Option<usize>,
-    ) -> wasmtime::Result<bool> {
-        Ok(desired <= self.max_memory)
-    }
-
-    fn table_growing(
-        &mut self,
-        _current: usize,
-        desired: usize,
-        _maximum: Option<usize>,
-    ) -> wasmtime::Result<bool> {
-        // wasmtime accounts memory and tables separately — without
-        // this cap, `table.grow` would bypass the memory limiter.
-        // [`MAX_TABLE_ELEMENTS`] is conservative; bump it if a
-        // legitimate importer ever needs more.
-        Ok(desired <= MAX_TABLE_ELEMENTS)
-    }
-}
-
-/// Store user-data — just the [`MemoryLimiter`] today. Kept in a named
-/// struct so `Store::limiter`'s closure can return a stable reference
-/// and future additions (e.g. a host-side metrics counter) can land
-/// without changing the `Store<T>` type.
-struct StoreState {
-    limiter: MemoryLimiter,
-}
+// `MemoryLimiter`, `StoreState`, `MAX_TABLE_ELEMENTS`, and the
+// `make_sandboxed_store` helper live in `rustledger_plugin::sandbox`
+// so the per-call enforcement is identical between the WASM importer
+// host and the directive-plugin runtime. See sandbox.rs for the
+// rationale + tests.
 
 // Note: no manual `impl From<WasmImporterError> for anyhow::Error` — `anyhow`
 // has a blanket impl for any `std::error::Error + Send + Sync + 'static`,
@@ -244,6 +206,20 @@ pub struct WasmImporter {
     engine: Arc<Engine>,
     /// Per-call runtime limits.
     config: WasmRuntimeConfig,
+}
+
+impl std::fmt::Debug for WasmImporter {
+    /// Hand-rolled to avoid wasmtime's `Module`/`Engine` (whose `Debug`
+    /// outputs are noisy and version-dependent). Prints just the
+    /// host-side metadata that's useful for assertions and logging.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WasmImporter")
+            .field("path", &self.path)
+            .field("name", &self.name)
+            .field("description", &self.description)
+            .field("config", &self.config)
+            .finish_non_exhaustive()
+    }
 }
 
 impl WasmImporter {
@@ -378,35 +354,16 @@ impl WasmImporter {
     }
 }
 
-/// Create + configure a [`Store`] with both the memory limiter (so
-/// `WasmRuntimeConfig::max_memory` is actually enforced) and the fuel
-/// budget (so `max_time_secs` actually bounds execution).
-///
-/// `max_time_secs` is clamped to at least 1 so `max_time_secs = 0`
-/// doesn't immediately trap the WASM call on no-fuel.
+/// Build a [`Store`] with the workspace-shared sandbox enforcement
+/// (memory limiter + fuel budget). Thin wrapper over
+/// [`sandbox::make_sandboxed_store`] that adapts the wasmtime error
+/// to [`WasmImporterError`].
 fn make_store(
     engine: &Engine,
     config: WasmRuntimeConfig,
 ) -> Result<Store<StoreState>, WasmImporterError> {
-    let state = StoreState {
-        limiter: MemoryLimiter {
-            max_memory: config.max_memory,
-        },
-    };
-    let mut store = Store::new(engine, state);
-    store.limiter(|s| &mut s.limiter);
-    // 1M instructions per second is the same rough budget used by the
-    // directive-plugin runtime. `.max(1)` prevents zero-fuel starvation;
-    // `.saturating_mul` prevents u64 overflow on huge `max_time_secs`
-    // (panic in debug, silent wrap to a tiny number in release — both
-    // wrong, both prevented here).
-    let fuel = config.max_time_secs.max(1).saturating_mul(1_000_000);
-    // `set_fuel` only fails when `consume_fuel(false)` is configured
-    // on the Engine, and `sandbox::sandbox_config` always sets it true.
-    // The `?` propagation is defensive — if a future refactor flips
-    // that flag, we'd want to surface the error rather than panic.
-    store.set_fuel(fuel).map_err(runtime_err)?;
-    Ok(store)
+    sandbox::make_sandboxed_store(engine, config.max_memory, config.max_time_secs)
+        .map_err(runtime_err)
 }
 
 /// Cap input length before the lossy `as u32` cast — wasm32 memory
@@ -1126,26 +1083,12 @@ mod tests {
         );
     }
 
-    #[test]
-    fn memory_limiter_rejects_grow_above_max() {
-        // Pin the ResourceLimiter behavior directly. The full
-        // wasm.grow → trap path is wasmtime-internal and hard to
-        // observe without a custom module, so this test guards the
-        // bit we own: that memory_growing returns Ok(false) past the
-        // cap.
-        let mut limiter = MemoryLimiter { max_memory: 1024 };
-        assert!(
-            limiter
-                .memory_growing(0, 512, None)
-                .expect("under cap is Ok")
-        ); // under cap
-        assert!(limiter.memory_growing(0, 1024, None).expect("at cap is Ok")); // exactly at cap
-        assert!(
-            !limiter
-                .memory_growing(0, 1025, None)
-                .expect("over cap is Ok(false)")
-        ); // over cap
-    }
+    // Note: `memory_limiter_rejects_grow_above_max` and
+    // `table_limiter_rejects_grow_above_max` live in
+    // `rustledger_plugin::sandbox::tests` now that the limiter
+    // itself was hoisted there. The integration test below
+    // (`initial_memory_above_cap_is_rejected_via_limiter_wiring`)
+    // still proves the importer's load path wires it correctly.
 
     #[test]
     fn zero_max_time_secs_does_not_starve_fuel() {
@@ -1163,23 +1106,6 @@ mod tests {
         let importer = WasmImporter::load_from_bytes(PathBuf::from("test.wasm"), &bytes, config)
             .expect("zero max_time_secs is clamped, not starved");
         assert_eq!(importer.name(), "tst");
-    }
-
-    #[test]
-    fn table_limiter_rejects_grow_above_max() {
-        let mut limiter = MemoryLimiter {
-            max_memory: usize::MAX,
-        };
-        assert!(
-            limiter
-                .table_growing(0, MAX_TABLE_ELEMENTS, None)
-                .expect("at cap is Ok")
-        );
-        assert!(
-            !limiter
-                .table_growing(0, MAX_TABLE_ELEMENTS + 1, None)
-                .expect("over cap is Ok(false)")
-        );
     }
 
     #[test]
@@ -1478,6 +1404,55 @@ mod tests {
                 "error foo.csv:42: bad row".to_string(),
                 "warning: weird value".to_string(),
             ]
+        );
+    }
+
+    // ===== Accessor / constructor tests =====
+
+    #[test]
+    fn load_embedded_uses_name_as_path_and_default_config() {
+        let bytes = wat::parse_str(roundtrip_wat()).expect("WAT parses");
+        let importer =
+            WasmImporter::load_embedded("inline-test", &bytes).expect("embedded load succeeds");
+        // The diagnostic name flows through to `path()` so error
+        // messages and logs identify the embedded module.
+        assert_eq!(importer.path(), Path::new("inline-test"));
+        // Default config is used — caller didn't pass one.
+        assert_eq!(importer.runtime_config().max_memory, 256 * 1024 * 1024);
+        assert_eq!(importer.runtime_config().max_time_secs, 30);
+        // Metadata still cached as in the standard load path.
+        assert_eq!(importer.name(), "tst");
+    }
+
+    #[test]
+    fn runtime_config_returns_the_loaded_config() {
+        let custom = WasmRuntimeConfig {
+            max_memory: 128 * 1024 * 1024,
+            max_time_secs: 60,
+        };
+        let bytes = wat::parse_str(roundtrip_wat()).expect("WAT parses");
+        let importer = WasmImporter::load_from_bytes(PathBuf::from("custom.wasm"), &bytes, custom)
+            .expect("custom-config load succeeds");
+        assert_eq!(importer.runtime_config().max_memory, custom.max_memory);
+        assert_eq!(
+            importer.runtime_config().max_time_secs,
+            custom.max_time_secs
+        );
+    }
+
+    #[test]
+    fn debug_impl_does_not_panic_and_redacts_wasmtime_types() {
+        let bytes = wat::parse_str(roundtrip_wat()).expect("WAT parses");
+        let importer = WasmImporter::load_embedded("dbg-test", &bytes).expect("load succeeds");
+        let s = format!("{importer:?}");
+        // Includes host metadata...
+        assert!(s.contains("WasmImporter"));
+        assert!(s.contains("dbg-test"));
+        assert!(s.contains("tst")); // name + description
+        // ...but doesn't leak wasmtime Module/Engine internals.
+        assert!(
+            !s.contains("Module {"),
+            "Debug should not expand the wasmtime Module: {s}"
         );
     }
 }

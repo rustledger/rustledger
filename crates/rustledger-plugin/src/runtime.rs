@@ -28,7 +28,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use anyhow::{Context, Result};
-use wasmtime::{Engine, Linker, Module, Store};
+use wasmtime::{Engine, Linker, Module};
 
 use crate::sandbox;
 use crate::types::{DirectiveWrapper, PluginInput, PluginOp, PluginOutput};
@@ -178,12 +178,14 @@ impl Plugin {
 
     /// Execute the plugin with the given input.
     pub fn execute(&self, input: &PluginInput, config: &RuntimeConfig) -> Result<PluginOutput> {
-        // Create a store with fuel limit
-        let mut store = Store::new(&self.engine, ());
-
-        // Set fuel limit based on time (rough approximation: 1M instructions per second)
-        let fuel = config.max_time_secs * 1_000_000;
-        store.set_fuel(fuel)?;
+        // Workspace-shared sandboxed store: wires the MemoryLimiter
+        // (enforcing `config.max_memory` on initial allocation +
+        // `memory.grow`) and the fuel budget (clamped ≥1 + saturating
+        // to avoid zero-fuel starvation and u64 overflow). Mirrors the
+        // WASM importer host so per-call enforcement is consistent
+        // across the workspace.
+        let mut store =
+            sandbox::make_sandboxed_store(&self.engine, config.max_memory, config.max_time_secs)?;
 
         // Create linker with NO imports for full sandboxing
         // Plugins have no access to filesystem, network, or any system calls

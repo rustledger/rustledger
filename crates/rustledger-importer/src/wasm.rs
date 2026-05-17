@@ -354,18 +354,6 @@ impl WasmImporter {
     }
 }
 
-/// Build a [`Store`] with the workspace-shared sandbox enforcement
-/// (memory limiter + fuel budget). Thin wrapper over
-/// [`sandbox::make_sandboxed_store`] that adapts the wasmtime error
-/// to [`WasmImporterError`].
-fn make_store(
-    engine: &Engine,
-    config: WasmRuntimeConfig,
-) -> Result<Store<StoreState>, WasmImporterError> {
-    sandbox::make_sandboxed_store(engine, config.max_memory, config.max_time_secs)
-        .map_err(runtime_err)
-}
-
 /// Cap input length before the lossy `as u32` cast — wasm32 memory
 /// is u32-addressed, so >4 GiB input would silently truncate and
 /// corrupt the import. Returns the validated length as `u32` so
@@ -420,7 +408,8 @@ fn call_msgpack_with<I: Serialize, O: DeserializeOwned>(
     let input_bytes = rmp_serde::to_vec(input).map_err(WasmImporterError::Encode)?;
     let input_len = validate_input_size(input_bytes.len())?;
 
-    let mut store = make_store(engine, config)?;
+    let mut store = sandbox::make_sandboxed_store(engine, config.max_memory, config.max_time_secs)
+        .map_err(runtime_err)?;
 
     // No imports at all — full sandbox.
     let linker = Linker::new(engine);
@@ -477,7 +466,8 @@ fn call_metadata(
     module: &Module,
     config: WasmRuntimeConfig,
 ) -> Result<MetadataOutput, WasmImporterError> {
-    let mut store = make_store(engine, config)?;
+    let mut store = sandbox::make_sandboxed_store(engine, config.max_memory, config.max_time_secs)
+        .map_err(runtime_err)?;
 
     let linker = Linker::new(engine);
     let instance = linker

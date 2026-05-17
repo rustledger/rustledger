@@ -86,9 +86,21 @@ impl Default for RuntimeConfig {
 /// Returns an error if the module has forbidden imports or is missing
 /// required exports.
 pub fn validate_plugin_module(bytes: &[u8]) -> Result<()> {
-    let engine = Engine::default();
+    // Use the workspace sandbox config — same feature flags the
+    // runtime applies at load. Otherwise `validate_plugin_module`
+    // could say "Ok" against vanilla wasmtime features but the
+    // actual `Plugin::load_bytes` would reject the same module
+    // because (e.g.) it uses `wasm_threads`.
+    let engine = Engine::new(&sandbox::sandbox_config())?;
     let module = Module::new(&engine, bytes)?;
+    validate_loaded_module(&module)
+}
 
+/// Inner validator that operates on an already-compiled [`Module`].
+/// Used by both [`validate_plugin_module`] (the public bytes-taking
+/// helper) and `Plugin::load`/`load_bytes` so the module is only
+/// compiled once during load instead of twice.
+fn validate_loaded_module(module: &Module) -> Result<()> {
     // Check for forbidden imports (any imports are forbidden)
     if let Some(import) = module.imports().next() {
         anyhow::bail!(
@@ -147,6 +159,12 @@ impl Plugin {
             .map_err(anyhow::Error::from)
             .with_context(|| format!("failed to compile {}", path.display()))?;
 
+        // Validate imports + required exports at load time so failures
+        // surface here (with a clear "must export" message) rather than
+        // deeper in `execute()` where they look like signature mismatches.
+        validate_loaded_module(&module)
+            .with_context(|| format!("invalid plugin {}", path.display()))?;
+
         Ok(Self {
             name,
             module,
@@ -163,6 +181,9 @@ impl Plugin {
         let name = name.into();
         let engine = sandbox::shared_engine();
         let module = Module::new(&engine, bytes)?;
+        // Same load-time validation as `load` — see that method's
+        // comment for rationale.
+        validate_loaded_module(&module).with_context(|| format!("invalid plugin `{name}`"))?;
 
         Ok(Self {
             name,
@@ -197,16 +218,20 @@ impl Plugin {
         // Serialize input
         let input_bytes = rmp_serde::to_vec(input)?;
 
-        // Get memory and allocate space for input
+        // `validate_loaded_module` proved `memory` presence at load
+        // time — an absent export here is unreachable in practice.
         let memory = instance
             .get_memory(&mut store, "memory")
-            .ok_or_else(|| anyhow::anyhow!("plugin must export 'memory'"))?;
+            .expect("validate_loaded_module verified `memory` export at load");
 
-        // Get the alloc function to allocate space in WASM memory
+        // Same reasoning: presence is guaranteed by load-time
+        // validation, so any `get_typed_func` failure here is a
+        // signature mismatch (e.g. plugin declared `alloc(i64) -> i64`
+        // instead of `alloc(u32) -> u32`), not absence.
         let alloc = instance
             .get_typed_func::<u32, u32>(&mut store, "alloc")
             .map_err(anyhow::Error::from)
-            .context("plugin must export 'alloc' function")?;
+            .context("plugin export `alloc` has wrong signature (expected fn(u32) -> u32)")?;
 
         // Allocate space for input
         let input_ptr = alloc.call(&mut store, input_bytes.len() as u32)?;
@@ -218,7 +243,9 @@ impl Plugin {
         let process = instance
             .get_typed_func::<(u32, u32), u64>(&mut store, "process")
             .map_err(anyhow::Error::from)
-            .context("plugin must export 'process' function")?;
+            .context(
+                "plugin export `process` has wrong signature (expected fn(u32, u32) -> u64)",
+            )?;
 
         let result = process.call(&mut store, (input_ptr, input_bytes.len() as u32))?;
 
@@ -988,5 +1015,51 @@ mod tests {
         let empty: &[u8] = &[];
         let result = validate_plugin_module(empty);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn execute_rejects_initial_memory_above_max_memory_cap() {
+        // Plugin declares 5000 pages (320 MiB) initial memory.
+        // With max_memory = 64 MiB, instantiation inside execute()
+        // must fail via the MemoryLimiter wired by
+        // `sandbox::make_sandboxed_store`. Pins the equivalent of
+        // the importer's `initial_memory_above_cap_is_rejected_via_limiter_wiring`
+        // test for the plugin runtime path — proves the per-Store
+        // limiter is actually applied here, not just in the importer.
+        let wasm = wat::parse_str(
+            r#"
+            (module
+                (memory (export "memory") 5000)
+                (func (export "alloc") (param i32) (result i32) i32.const 0)
+                (func (export "process") (param i32 i32) (result i64) i64.const 0)
+            )
+            "#,
+        )
+        .expect("WAT parses");
+        let plugin = Plugin::load_bytes("bigmem", &wasm, &RuntimeConfig::default())
+            .expect("module loads (declared memory size is checked at instantiate, not compile)");
+        let tight_config = RuntimeConfig {
+            max_memory: 64 * 1024 * 1024,
+            max_time_secs: 30,
+        };
+        let input = PluginInput {
+            directives: vec![],
+            options: crate::types::PluginOptions {
+                operating_currencies: vec![],
+                title: None,
+            },
+            config: None,
+        };
+        let err = plugin
+            .execute(&input, &tight_config)
+            .expect_err("instantiation should fail when initial memory > cap");
+        // We don't pin the exact error message (wasmtime's wording
+        // varies across versions), just that it's an error and
+        // execution didn't silently succeed.
+        let msg = format!("{err:#}");
+        assert!(
+            !msg.is_empty(),
+            "expected non-empty error from over-cap instantiate"
+        );
     }
 }

@@ -14,8 +14,7 @@
 //!
 //! ```ignore
 //! use rustledger_plugin_types::{
-//!     wasm_importer_main, EnrichedImporterOutput, ImporterInput,
-//!     ImporterOutput,
+//!     wasm_importer_main, ImporterInput, ImporterOutput,
 //! };
 //!
 //! fn identify(path: &str) -> bool {
@@ -27,22 +26,68 @@
 //!     ImporterOutput::empty()
 //! }
 //!
-//! fn extract_enriched(input: ImporterInput) -> EnrichedImporterOutput {
-//!     // optional: produce enrichments inline, or wrap extract output
-//!     let _ = extract(input);
-//!     EnrichedImporterOutput {
-//!         entries: vec![],
-//!         warnings: vec![],
-//!         errors: vec![],
-//!     }
-//! }
-//!
+//! // No `extract_enriched` — the macro generates a default
+//! // passthrough that wraps each directive with a default
+//! // (uncategorized) enrichment. Provide one explicitly only when
+//! // the importer produces real categorization data.
 //! wasm_importer_main! {
 //!     name: "MT940",
 //!     description: "MT940 bank statement importer",
 //!     identify: identify,
 //!     extract: extract,
-//!     extract_enriched: extract_enriched,
+//! }
+//! ```
+//!
+//! # Required `Cargo.toml` setup
+//!
+//! A WASM importer crate needs:
+//!
+//! ```toml
+//! [lib]
+//! crate-type = ["cdylib"]
+//!
+//! [dependencies]
+//! rustledger-plugin-types = { version = "0.15", features = ["guest"] }
+//! ```
+//!
+//! Build with:
+//!
+//! ```bash
+//! cargo build --target wasm32-unknown-unknown --release
+//! ```
+//!
+//! The output `.wasm` is in `target/wasm32-unknown-unknown/release/`.
+//!
+//! # `std` is required
+//!
+//! The macro expansion uses `Vec`, `String`, and Rust's default
+//! panic handler — all of which come from `std`. A `no_std` guest
+//! would need to hand-roll the exports without this macro.
+//!
+//! # No `stdio` inside the guest
+//!
+//! The host sandbox doesn't grant WASI, so `println!` /
+//! `eprintln!` from guest code are no-ops (or traps, depending on
+//! the panic handler). Surface diagnostics through the wire format
+//! instead: push messages onto [`ImporterOutput::warnings`] or
+//! construct typed [`PluginError`]s into [`ImporterOutput::errors`].
+//! The host renders both into the user-visible extract output.
+//!
+//! # Sharing state across exports
+//!
+//! The macro takes three free functions, so there's no `&self` to
+//! cache parser state on. If a guest needs shared state (a
+//! pre-compiled regex, a CSV column-spec cache), use a `OnceLock`
+//! at module scope:
+//!
+//! ```ignore
+//! use std::sync::OnceLock;
+//!
+//! static PARSER: OnceLock<MyParser> = OnceLock::new();
+//!
+//! fn extract(input: ImporterInput) -> ImporterOutput {
+//!     let parser = PARSER.get_or_init(|| MyParser::compile());
+//!     parser.parse(&input.content)
 //! }
 //! ```
 //!
@@ -75,10 +120,15 @@
 
 #![allow(unsafe_code)]
 
-// The macro uses helpers from this module, which uses rmp_serde
-// internally. Re-export rmp_serde so the guest crate doesn't need to
-// add its own dep — `features = ["guest"]` is enough.
-pub use rmp_serde;
+use crate::{AlternativeWrapper, EnrichedImporterOutput, EnrichmentWrapper, ImporterOutput};
+
+// Narrow `rmp_serde` re-export: just the two functions the macro
+// expansion needs, plus the decode error type for users who handle
+// `decode_input`'s Result directly. The full crate isn't re-exported
+// so a future `rmp_serde` major bump doesn't break our public API
+// surface — guests that want non-default Serializer config can
+// still add `rmp-serde` to their own deps explicitly.
+pub use rmp_serde::{decode::Error as DecodeError, from_slice, to_vec};
 
 /// Pack a Vec of msgpack bytes into the host-expected u64 return.
 ///
@@ -86,10 +136,16 @@ pub use rmp_serde;
 /// buffer so its memory survives the function return; the host
 /// reads the bytes back through `ptr`/`len`.
 ///
-/// The leak is intentional: the buffer must outlive this WASM call
-/// so the host can read it. wasmtime's per-call `Store` is dropped
-/// after the extract call, which frees the entire linear memory at
-/// once — so we don't actually leak anything beyond a single call.
+/// # Why the leak is safe
+///
+/// The host runs each `extract`/`identify`/etc. call inside a
+/// fresh wasmtime `Store`. After the host reads the output bytes
+/// and the entry-point returns, the host drops the Store — which
+/// reclaims the entire guest linear memory in one shot. The leaked
+/// `Vec` lives in that linear memory, so it gets reclaimed
+/// implicitly without growing across calls. The guest doesn't see
+/// the Store at all; this fact is purely an artifact of how the
+/// host invokes us.
 ///
 /// # `wasm32`-only contract
 ///
@@ -130,10 +186,10 @@ pub fn pack_output(bytes: Vec<u8>) -> u64 {
 ///
 /// # Errors
 ///
-/// Returns [`rmp_serde::decode::Error`] if the bytes don't decode
-/// as `T`. In the macro's call sites, this triggers a panic-trap
-/// which the host surfaces as a `WasmImporterError::Runtime`.
-pub fn decode_input<T>(ptr: u32, len: u32) -> Result<T, rmp_serde::decode::Error>
+/// Returns [`DecodeError`] if the bytes don't decode as `T`. In the
+/// macro's call sites, this triggers a panic-trap which the host
+/// surfaces as a `WasmImporterError::Runtime`.
+pub fn decode_input<T>(ptr: u32, len: u32) -> Result<T, DecodeError>
 where
     T: serde::de::DeserializeOwned,
 {
@@ -145,28 +201,124 @@ where
     rmp_serde::from_slice(bytes)
 }
 
+/// Promote an [`ImporterOutput`] into an [`EnrichedImporterOutput`]
+/// by attaching a default (uncategorized, no-alternative)
+/// enrichment to each directive.
+///
+/// Used by the macro to auto-generate `extract_enriched` when the
+/// user only supplies `extract`. Matches the host-side
+/// `EnrichedImportResult::from(ImportResult)` shape so the round-
+/// trip is consistent across guest and host.
+#[must_use]
+pub fn default_enriched_from(out: ImporterOutput) -> EnrichedImporterOutput {
+    let entries = out
+        .directives
+        .into_iter()
+        .enumerate()
+        .map(|(i, directive)| {
+            let enrichment = EnrichmentWrapper {
+                directive_index: i,
+                confidence: 0.0,
+                // Matches `CategorizationMethod::Default::as_meta_value()`
+                // on the host side — keeps the wire format consistent
+                // so the host's `parse_method` accepts it.
+                method: "default".to_string(),
+                alternatives: Vec::<AlternativeWrapper>::new(),
+                fingerprint: None,
+            };
+            (directive, enrichment)
+        })
+        .collect();
+    EnrichedImporterOutput {
+        entries,
+        warnings: out.warnings,
+        errors: out.errors,
+    }
+}
+
 /// Emit the five `#[no_mangle] pub extern "C"` exports that a
 /// rustledger-host-loaded `.wasm` importer must provide.
 ///
-/// See the module-level docs for the full example. The macro takes
-/// four required fields:
+/// See the module-level docs for the full example. The macro has
+/// two arms:
 ///
-/// - `name:` — string constant for `MetadataOutput::name`
-/// - `description:` — string constant for `MetadataOutput::description`
-/// - `identify:` — `fn(&str) -> bool` (path-by-extension check, etc.)
-/// - `extract:` — `fn(ImporterInput) -> ImporterOutput`
-/// - `extract_enriched:` — `fn(ImporterInput) -> EnrichedImporterOutput`
+/// **Without `extract_enriched`** (the common case):
 ///
-/// The expansion generates `alloc`, `metadata`, `identify`, `extract`,
-/// and `extract_enriched` exports. The required `memory` export is
-/// implicit — every Rust `wasm32-unknown-unknown` binary exports its
-/// linear memory by default.
+/// ```ignore
+/// wasm_importer_main! {
+///     name: "MT940",
+///     description: "MT940 bank statements",
+///     identify: identify,
+///     extract: extract,
+/// }
+/// ```
 ///
-/// Failures in the macro-generated path (msgpack decode/encode
-/// errors) panic, which traps the WASM module. The host surfaces
-/// traps as `WasmImporterError::Runtime`.
+/// This generates an `extract_enriched` that calls the user's
+/// `extract` and wraps each directive with a default (uncategorized)
+/// enrichment via [`default_enriched_from`].
+///
+/// **With `extract_enriched`** (when the importer produces real
+/// categorization data):
+///
+/// ```ignore
+/// wasm_importer_main! {
+///     name: "MT940",
+///     description: "MT940 bank statements",
+///     identify: identify,
+///     extract: extract,
+///     extract_enriched: extract_enriched,
+/// }
+/// ```
+///
+/// # Compile-time signature checks
+///
+/// The macro expansion type-annotates each user fn binding so a
+/// wrong signature surfaces at the user's fn definition rather
+/// than inside the macro guts. For example, writing
+/// `fn identify(path: String) -> bool` gives an "expected
+/// `fn(&str) -> bool`" error at the `fn` line, not at the macro
+/// invocation. Closures with captures that don't coerce to
+/// function pointers will produce a less precise error — use a
+/// free function for the cleanest experience.
+///
+/// # Required user-fn signatures
+///
+/// - `identify`: `fn(&str) -> bool`
+/// - `extract`: `fn(ImporterInput) -> ImporterOutput`
+/// - `extract_enriched` (optional): `fn(ImporterInput) -> EnrichedImporterOutput`
+///
+/// # Failure handling
+///
+/// msgpack decode/encode errors in the macro-generated path panic,
+/// which traps the WASM module. The host surfaces traps as
+/// `WasmImporterError::Runtime`. Guest-domain errors should flow
+/// through `ImporterOutput::warnings` / `ImporterOutput::errors`
+/// instead of panicking — see the module-level "No `stdio` inside
+/// the guest" section.
 #[macro_export]
 macro_rules! wasm_importer_main {
+    // Form WITHOUT `extract_enriched` — auto-generates a default
+    // passthrough that promotes each ImporterOutput directive into
+    // an EnrichedImporterOutput entry with default enrichment.
+    (
+        name: $name:expr,
+        description: $desc:expr,
+        identify: $identify:expr,
+        extract: $extract:expr $(,)?
+    ) => {
+        $crate::wasm_importer_main! {
+            name: $name,
+            description: $desc,
+            identify: $identify,
+            extract: $extract,
+            extract_enriched: |input: $crate::ImporterInput| -> $crate::EnrichedImporterOutput {
+                let extract_fn: fn($crate::ImporterInput) -> $crate::ImporterOutput = $extract;
+                $crate::guest::default_enriched_from(extract_fn(input))
+            },
+        }
+    };
+
+    // Full form with explicit `extract_enriched`.
     (
         name: $name:expr,
         description: $desc:expr,
@@ -193,20 +345,24 @@ macro_rules! wasm_importer_main {
                 name: ($name).to_string(),
                 description: ($desc).to_string(),
             };
-            let bytes = $crate::guest::rmp_serde::to_vec(&out).expect("metadata encode");
+            let bytes = $crate::guest::to_vec(&out).expect("metadata encode");
             $crate::guest::pack_output(bytes)
         }
 
         /// Decodes `IdentifyInput` from host memory, calls the
-        /// user-provided identify fn, returns packed
-        /// `IdentifyOutput`.
+        /// user-provided identify fn, returns packed `IdentifyOutput`.
         #[no_mangle]
         pub extern "C" fn identify(ptr: u32, len: u32) -> u64 {
+            // Type-annotated binding: a signature mismatch at the
+            // user's `fn identify(...)` definition surfaces here
+            // with a clean "expected fn(&str) -> bool" error,
+            // instead of an opaque error pointing into this macro.
+            let identify_fn: fn(&str) -> bool = $identify;
             let input: $crate::IdentifyInput =
                 $crate::guest::decode_input(ptr, len).expect("identify input decode");
-            let matches: bool = ($identify)(input.path.as_str());
+            let matches: bool = identify_fn(input.path.as_str());
             let out = $crate::IdentifyOutput { matches };
-            let bytes = $crate::guest::rmp_serde::to_vec(&out).expect("identify output encode");
+            let bytes = $crate::guest::to_vec(&out).expect("identify output encode");
             $crate::guest::pack_output(bytes)
         }
 
@@ -214,23 +370,29 @@ macro_rules! wasm_importer_main {
         /// fn, returns packed `ImporterOutput`.
         #[no_mangle]
         pub extern "C" fn extract(ptr: u32, len: u32) -> u64 {
+            let extract_fn: fn($crate::ImporterInput) -> $crate::ImporterOutput = $extract;
             let input: $crate::ImporterInput =
                 $crate::guest::decode_input(ptr, len).expect("extract input decode");
-            let output: $crate::ImporterOutput = ($extract)(input);
-            let bytes = $crate::guest::rmp_serde::to_vec(&output).expect("extract output encode");
+            let output: $crate::ImporterOutput = extract_fn(input);
+            let bytes = $crate::guest::to_vec(&output).expect("extract output encode");
             $crate::guest::pack_output(bytes)
         }
 
         /// Decodes `ImporterInput`, calls the user-provided
-        /// extract_enriched fn, returns packed
+        /// extract_enriched fn (or the default passthrough emitted
+        /// by the no-extract_enriched macro arm), returns packed
         /// `EnrichedImporterOutput`.
         #[no_mangle]
         pub extern "C" fn extract_enriched(ptr: u32, len: u32) -> u64 {
+            // Note: the default-arm passes a closure here, not a
+            // free fn. We accept any Fn(ImporterInput) ->
+            // EnrichedImporterOutput rather than coercing to a fn
+            // pointer (closures-with-captures wouldn't coerce).
+            let extract_enriched_fn = $extract_enriched;
             let input: $crate::ImporterInput =
                 $crate::guest::decode_input(ptr, len).expect("extract_enriched input decode");
-            let output: $crate::EnrichedImporterOutput = ($extract_enriched)(input);
-            let bytes =
-                $crate::guest::rmp_serde::to_vec(&output).expect("extract_enriched output encode");
+            let output: $crate::EnrichedImporterOutput = (extract_enriched_fn)(input);
+            let bytes = $crate::guest::to_vec(&output).expect("extract_enriched output encode");
             $crate::guest::pack_output(bytes)
         }
     };
@@ -244,19 +406,19 @@ mod tests {
     //
     // - Pure-math packing/unpacking (synthetic ptr+len values, no
     //   real allocation).
-    // - `decode_input` on bytes we own here, so the addresses fit
-    //   in `usize` and `as u32` is lossless on a stack-local Vec
-    //   (Rust's heap on Linux x86_64 typically returns addresses
-    //   that exceed u32, so this only works for buffers happening
-    //   to land in low memory — which is unreliable. So we test
-    //   decode via `from_slice` directly instead).
+    // - msgpack encoding stability for wire-format types.
+    // - `default_enriched_from` shape (data conversion, no FFI).
     //
     // The full leak-and-recover pack_output round-trip is wasm32-
-    // only by construction; end-to-end validation lives in wave
-    // 2.3e (a real `.wasm` module loaded through `WasmImporter`).
+    // only by construction; end-to-end validation of the
+    // macro-generated exports lives in wave 2.3e (a real `.wasm`
+    // module loaded through `WasmImporter`).
 
     use super::*;
-    use crate::{IdentifyInput, IdentifyOutput, MetadataOutput};
+    use crate::{
+        DirectiveData, DirectiveWrapper, IdentifyInput, IdentifyOutput, MetadataOutput, OpenData,
+        PluginError,
+    };
 
     /// Pin the packed layout: `(ptr << 32) | len`. Reverses to
     /// `ptr = packed >> 32`, `len = packed & 0xFFFF_FFFF`. The host
@@ -282,14 +444,9 @@ mod tests {
         assert_eq!(packed_max, u64::MAX);
     }
 
-    /// `decode_input` is testable on native because we can construct
-    /// a Vec, encode into it, and pass its address as `u32` — but
-    /// only safe for buffers small enough that the address truncates
-    /// without underflowing into another allocation. We sidestep the
-    /// truncation by skipping `decode_input` and calling
-    /// `rmp_serde::from_slice` directly to verify the type encoding;
-    /// the unsafe pointer-cast layer is exercised in wave 2.3e via
-    /// real WASM modules.
+    /// msgpack encoding stability for `IdentifyInput`. The byte
+    /// layout is the wire contract between host and guest; if
+    /// rmp-serde ever changes its struct encoding, this catches it.
     #[test]
     fn identify_input_msgpack_encoding_is_stable() {
         let original = IdentifyInput {
@@ -334,5 +491,70 @@ mod tests {
         // this and panics, preventing the SIGSEGV that the naive
         // `as u32` cast would have caused.
         let _ = pack_output(bytes);
+    }
+
+    fn open_wrapper() -> DirectiveWrapper {
+        DirectiveWrapper {
+            directive_type: String::new(),
+            date: "2024-01-01".to_string(),
+            filename: None,
+            lineno: None,
+            data: DirectiveData::Open(OpenData {
+                account: "Assets:Bank".to_string(),
+                currencies: vec![],
+                booking: None,
+                metadata: vec![],
+            }),
+        }
+    }
+
+    #[test]
+    fn default_enriched_from_empty_passes_through() {
+        let out = ImporterOutput {
+            directives: vec![],
+            warnings: vec!["a warning".to_string()],
+            errors: vec![PluginError::warning("some warning")],
+        };
+        let enriched = default_enriched_from(out);
+        assert!(enriched.entries.is_empty());
+        assert_eq!(enriched.warnings, vec!["a warning".to_string()]);
+        assert_eq!(enriched.errors.len(), 1);
+    }
+
+    #[test]
+    fn default_enriched_from_attaches_default_enrichment_per_directive() {
+        let out = ImporterOutput {
+            directives: vec![open_wrapper(), open_wrapper(), open_wrapper()],
+            warnings: vec![],
+            errors: vec![],
+        };
+        let enriched = default_enriched_from(out);
+        assert_eq!(enriched.entries.len(), 3);
+        // Each entry gets sequential directive_index, "default"
+        // method, no alternatives or fingerprint.
+        for (i, (_, enr)) in enriched.entries.iter().enumerate() {
+            assert_eq!(enr.directive_index, i);
+            assert!((enr.confidence - 0.0).abs() < f64::EPSILON);
+            assert_eq!(enr.method, "default");
+            assert!(enr.alternatives.is_empty());
+            assert!(enr.fingerprint.is_none());
+        }
+    }
+
+    /// Default method must match `CategorizationMethod::Default::as_meta_value()`
+    /// on the host side. If the host enum's wire string ever changes,
+    /// this test reminds us to update both ends.
+    #[test]
+    fn default_enriched_uses_host_compatible_method_string() {
+        let out = ImporterOutput {
+            directives: vec![open_wrapper()],
+            warnings: vec![],
+            errors: vec![],
+        };
+        let enriched = default_enriched_from(out);
+        // The host's `parse_method` accepts "default" and maps to
+        // `CategorizationMethod::Default`. If we emit anything else,
+        // the host's bridge code logs an "unknown method" warning.
+        assert_eq!(enriched.entries[0].1.method, "default");
     }
 }

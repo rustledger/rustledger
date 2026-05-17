@@ -61,6 +61,10 @@ rust_decimal_macros.workspace = true
 criterion.workspace = true
 tempfile.workspace = true
 insta.workspace = true
+# WAT (WebAssembly text format) — used by extract_cmd integration
+# tests to author tiny .wasm fixtures for build_registry coverage
+# without checking compiled binaries into the repo.
+wat = { workspace = true }
 
 [[bench]]
 name = "pipeline_bench"

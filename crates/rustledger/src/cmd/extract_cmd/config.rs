@@ -4,11 +4,19 @@ use anyhow::{Context, Result, anyhow};
 use rustledger_importer::ImporterConfig;
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Top-level importers configuration file.
 #[derive(Debug, Deserialize)]
 pub(super) struct ImportersFile {
+    /// Optional directory to scan for WASM importer modules at startup.
+    /// Every `*.wasm` file in the directory is loaded via
+    /// `WasmImporter::load` and added to the registry. The CLI
+    /// `--wasm-importer-dir` flag overrides this setting when both are
+    /// present.
+    #[serde(default)]
+    pub(super) wasm_importer_dir: Option<PathBuf>,
+    #[serde(default)]
     pub(super) importers: Vec<ImporterEntry>,
 }
 

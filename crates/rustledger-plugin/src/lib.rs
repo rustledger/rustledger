@@ -45,6 +45,8 @@ pub mod native;
 pub mod python;
 #[cfg(feature = "wasm-runtime")]
 pub mod runtime;
+#[cfg(feature = "wasm-runtime")]
+pub mod sandbox;
 pub mod test_helpers;
 pub mod types;
 

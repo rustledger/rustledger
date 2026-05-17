@@ -37,12 +37,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use rustledger_ops::fingerprint::Fingerprint;
+use rustledger_plugin::sandbox;
 use rustledger_plugin_types::{
     EnrichedImporterOutput, IdentifyInput, IdentifyOutput, ImporterInput, ImporterOutput,
     MetadataOutput, PluginError, PluginErrorSeverity,
 };
 use serde::{Serialize, de::DeserializeOwned};
-use wasmtime::{Config, Engine, Linker, Module, ResourceLimiter, Store};
+use wasmtime::{Engine, Linker, Module, ResourceLimiter, Store};
 
 use crate::config::{CsvConfig, ImporterType};
 use crate::{EnrichedImportResult, ImportResult, Importer, ImporterConfig};
@@ -224,9 +225,10 @@ fn runtime_err(e: wasmtime::Error) -> WasmImporterError {
 /// A WASM-loaded importer. Implements [`Importer`] by dispatching to
 /// the loaded module's `extract` / `extract_enriched` entry points.
 ///
-/// Cheap to clone — the underlying [`Engine`] and [`Module`] are
-/// shared via `Arc`. A fresh wasmtime [`Store`] is created per call,
-/// so concurrent extract calls don't share state.
+/// Cheap to clone — the [`Module`] is shared via `Arc` and the
+/// [`Engine`] is process-wide (see [`rustledger_plugin::sandbox`]).
+/// A fresh wasmtime [`Store`] is created per call, so concurrent
+/// extract calls don't share state.
 #[derive(Clone)]
 pub struct WasmImporter {
     /// Filesystem path the module was loaded from (for diagnostics).
@@ -237,7 +239,8 @@ pub struct WasmImporter {
     description: String,
     /// Compiled module.
     module: Arc<Module>,
-    /// Shared wasmtime engine.
+    /// Shared wasmtime engine — one per process, sourced from the
+    /// workspace's shared sandbox config in `rustledger_plugin`.
     engine: Arc<Engine>,
     /// Per-call runtime limits.
     config: WasmRuntimeConfig,
@@ -263,8 +266,26 @@ impl WasmImporter {
         Self::load_from_bytes(path, &bytes, config)
     }
 
+    /// Load a WASM importer from in-memory bytes that aren't backed by
+    /// a real file. Use this when shipping `.wasm` modules embedded in
+    /// a binary or generated at runtime — `name_for_diagnostics`
+    /// surfaces in error messages and [`Self::path`] but doesn't have
+    /// to correspond to anything on disk.
+    pub fn load_embedded(
+        name_for_diagnostics: &str,
+        bytes: &[u8],
+    ) -> Result<Self, WasmImporterError> {
+        Self::load_from_bytes(
+            PathBuf::from(name_for_diagnostics),
+            bytes,
+            WasmRuntimeConfig::default(),
+        )
+    }
+
     /// Load from in-memory WASM bytes — useful for tests and embedders
-    /// that ship the module inside their binary.
+    /// that ship the module inside their binary. The `path` is used
+    /// only for diagnostics; see [`Self::load_embedded`] for an
+    /// embedder-friendly wrapper.
     pub fn load_from_bytes(
         path: impl Into<PathBuf>,
         bytes: &[u8],
@@ -272,15 +293,11 @@ impl WasmImporter {
     ) -> Result<Self, WasmImporterError> {
         let path = path.into();
 
-        let mut engine_config = Config::new();
-        engine_config.consume_fuel(true);
-        let engine =
-            Arc::new(
-                Engine::new(&engine_config).map_err(|e| WasmImporterError::Compile {
-                    path: path.clone(),
-                    source: anyhow::Error::from(e),
-                })?,
-            );
+        // Process-wide shared engine — amortizes the JIT/cache cost
+        // across all WASM-loaded modules in the workspace, and
+        // applies the same security-locked-down `Config` as the
+        // directive-plugin runtime.
+        let engine = sandbox::shared_engine();
 
         let module = Module::new(&engine, bytes).map_err(|e| WasmImporterError::Compile {
             path: path.clone(),
@@ -306,10 +323,21 @@ impl WasmImporter {
         })
     }
 
-    /// The path the module was loaded from.
+    /// The path the module was loaded from (or the
+    /// `name_for_diagnostics` passed to [`Self::load_embedded`]).
     #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// The per-call runtime caps this importer was loaded with. Useful
+    /// for diagnostics ("did I hit the host's cap?") — the values
+    /// surfaced in error variants like
+    /// [`WasmImporterError::InputTooLarge::max`] are the same ones
+    /// returned here.
+    #[must_use]
+    pub const fn runtime_config(&self) -> WasmRuntimeConfig {
+        self.config
     }
 
     /// Reject imports (sandbox requirement) and check required exports.
@@ -373,6 +401,10 @@ fn make_store(
     // (panic in debug, silent wrap to a tiny number in release — both
     // wrong, both prevented here).
     let fuel = config.max_time_secs.max(1).saturating_mul(1_000_000);
+    // `set_fuel` only fails when `consume_fuel(false)` is configured
+    // on the Engine, and `sandbox::sandbox_config` always sets it true.
+    // The `?` propagation is defensive — if a future refactor flips
+    // that flag, we'd want to surface the error rather than panic.
     store.set_fuel(fuel).map_err(runtime_err)?;
     Ok(store)
 }
@@ -445,9 +477,13 @@ fn call_msgpack_with<I: Serialize, O: DeserializeOwned>(
     // as `ExportSignatureMismatch` rather than `MissingExport` saves
     // guest authors from chasing a misleading "export not found"
     // error message.
+    // `validate_module` proved `memory` export presence at load time,
+    // so this `expect` documents an invariant rather than guarding a
+    // real failure path. (The variant `MissingExport("memory")` is
+    // reachable only via `validate_module` itself.)
     let memory = instance
         .get_memory(&mut store, "memory")
-        .ok_or(WasmImporterError::MissingExport("memory"))?;
+        .expect("validate_module verified `memory` export at load");
 
     let alloc = instance
         .get_typed_func::<u32, u32>(&mut store, "alloc")
@@ -491,9 +527,10 @@ fn call_metadata(
         .instantiate(&mut store, module)
         .map_err(runtime_err)?;
 
+    // Invariant: `validate_module` verified `memory` at load time.
     let memory = instance
         .get_memory(&mut store, "memory")
-        .ok_or(WasmImporterError::MissingExport("memory"))?;
+        .expect("validate_module verified `memory` export at load");
 
     // Same reasoning as in `call_msgpack_with`: validate_module
     // proved presence, so a typed_func error is a signature mismatch.
@@ -600,6 +637,18 @@ fn format_plugin_error(e: &PluginError) -> String {
 /// to `rustledger_plugin::convert::wrapper_to_directive` so the WASM
 /// importer path and the directive-plugin path share a single
 /// converter — improvements there land here for free.
+///
+/// # Warning ordering
+///
+/// Warnings are appended in this order:
+///
+/// 1. **Output warnings** — `output.warnings` forwarded verbatim.
+/// 2. **Output errors** — `output.errors`, formatted via
+///    [`format_plugin_error`] so the severity prefix is preserved.
+///
+/// (The enriched analogue [`bridge_enriched_output`] additionally
+/// emits *bridge warnings* first, for per-entry lossy paths that have
+/// no analogue here.)
 fn output_to_import_result(out: ImporterOutput) -> anyhow::Result<ImportResult> {
     let mut directives = Vec::with_capacity(out.directives.len());
     for w in out.directives {
@@ -635,18 +684,34 @@ impl Importer for WasmImporter {
         let input = IdentifyInput {
             path: path.to_string_lossy().into_owned(),
         };
-        // identify() failures (trap, decode error) conservatively return
-        // false — the registry treats this as "this importer doesn't
-        // handle the file" and falls back to the next candidate.
+        // The trait contract is `-> bool` (matches OFX/CSV), so we
+        // can't surface a structured error. But "wrong signature on
+        // `identify`" or "module trapped" are real bugs the guest
+        // author needs to see — emit to stderr so they get a signal
+        // instead of silently never matching. Successful identify
+        // calls are quiet.
         match self.call_msgpack::<_, IdentifyOutput>("identify", &input) {
             Ok(out) => out.matches,
-            Err(_) => false,
+            Err(e) => {
+                eprintln!(
+                    "warning: WASM importer `{}` identify({}) failed: {e}",
+                    self.name,
+                    path.display()
+                );
+                false
+            }
         }
     }
 
     fn extract(&self, path: &Path, config: &ImporterConfig) -> anyhow::Result<ImportResult> {
-        let content = std::fs::read(path)
-            .map_err(|e| anyhow::anyhow!("failed to read {}: {e}", path.display()))?;
+        // Use the typed `Io` variant before erasing to anyhow at the
+        // trait boundary — keeps load and extract symmetric on file-
+        // read failures, even though only the typed-error name is
+        // observable to crate-internal callers.
+        let content = std::fs::read(path).map_err(|source| WasmImporterError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
         let input = build_wasm_input(path, content, config);
         let output: ImporterOutput = self.call_msgpack("extract", &input)?;
         output_to_import_result(output)
@@ -657,8 +722,10 @@ impl Importer for WasmImporter {
         path: &Path,
         config: &ImporterConfig,
     ) -> anyhow::Result<EnrichedImportResult> {
-        let content = std::fs::read(path)
-            .map_err(|e| anyhow::anyhow!("failed to read {}: {e}", path.display()))?;
+        let content = std::fs::read(path).map_err(|source| WasmImporterError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
         let input = build_wasm_input(path, content, config);
         let output: EnrichedImporterOutput = self.call_msgpack("extract_enriched", &input)?;
         bridge_enriched_output(output)
@@ -793,9 +860,7 @@ mod tests {
             )
         "#;
         let bytes = wat::parse_str(wat).expect("WAT parses");
-        let mut engine_config = Config::new();
-        engine_config.consume_fuel(true);
-        let engine = Engine::new(&engine_config).unwrap();
+        let engine = sandbox::shared_engine();
         let module = Module::new(&engine, &bytes).unwrap();
         let err = WasmImporter::validate_module(&module).unwrap_err();
         assert!(matches!(err, WasmImporterError::ForbiddenImport { .. }));
@@ -812,9 +877,7 @@ mod tests {
             )
         "#;
         let bytes = wat::parse_str(wat).expect("WAT parses");
-        let mut engine_config = Config::new();
-        engine_config.consume_fuel(true);
-        let engine = Engine::new(&engine_config).unwrap();
+        let engine = sandbox::shared_engine();
         let module = Module::new(&engine, &bytes).unwrap();
         let err = WasmImporter::validate_module(&module).unwrap_err();
         assert!(matches!(err, WasmImporterError::MissingExport(_)));

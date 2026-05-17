@@ -28,8 +28,9 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use anyhow::{Context, Result};
-use wasmtime::{Config, Engine, Linker, Module, Store};
+use wasmtime::{Engine, Linker, Module, Store};
 
+use crate::sandbox;
 use crate::types::{DirectiveWrapper, PluginInput, PluginOp, PluginOutput};
 
 /// Materialize a plugin's `ops` against its input directive list,
@@ -132,11 +133,11 @@ impl Plugin {
             .unwrap_or("unknown")
             .to_string();
 
-        // Create engine with configuration
-        let mut engine_config = Config::new();
-        engine_config.consume_fuel(true); // Enable fuel for execution limits
-
-        let engine = Arc::new(Engine::new(&engine_config)?);
+        // Process-wide shared engine with the workspace's locked-down
+        // wasm-feature config (see `sandbox::sandbox_config` for the
+        // list). One Engine per process amortizes JIT/cache cost
+        // across all loaded plugins.
+        let engine = sandbox::shared_engine();
 
         // Load and compile the module
         let wasm_bytes =
@@ -160,11 +161,7 @@ impl Plugin {
         _config: &RuntimeConfig,
     ) -> Result<Self> {
         let name = name.into();
-
-        let mut engine_config = Config::new();
-        engine_config.consume_fuel(true);
-
-        let engine = Arc::new(Engine::new(&engine_config)?);
+        let engine = sandbox::shared_engine();
         let module = Module::new(&engine, bytes)?;
 
         Ok(Self {

@@ -18,7 +18,7 @@ bench = false
 [dependencies]
 rustledger-core.workspace = true
 rustledger-ops.workspace = true
-rustledger-plugin.workspace = true
+rustledger-plugin = { workspace = true, features = ["wasm-runtime"] }
 rustledger-plugin-types.workspace = true
 jiff.workspace = true
 rust_decimal.workspace = true

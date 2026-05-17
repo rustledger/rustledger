@@ -58,11 +58,20 @@ fn materialize_ops(input: &[DirectiveWrapper], output: &PluginOutput) -> Vec<Dir
 }
 
 /// Configuration for the plugin runtime.
+///
+/// **Applied at `Plugin::execute` time, not at load.** `Plugin::load`
+/// and `Plugin::load_bytes` accept a `&RuntimeConfig` for API
+/// symmetry but ignore it — only the per-call execution caps
+/// (`max_memory`, `max_time_secs`) are meaningful, and those flow
+/// into the per-`Store` setup that `execute` builds.
 #[derive(Debug, Clone)]
 pub struct RuntimeConfig {
-    /// Maximum memory in bytes (default: 256MB).
+    /// Maximum memory in bytes (default: 256MB). Enforced at
+    /// `Plugin::execute` via [`crate::sandbox::make_sandboxed_store`].
     pub max_memory: usize,
-    /// Maximum execution time in seconds (default: 30).
+    /// Maximum execution time in seconds (default: 30). Clamped to
+    /// `≥1` and `saturating_mul`'d to fuel units; see
+    /// [`crate::sandbox::make_sandboxed_store`].
     pub max_time_secs: u64,
 }
 
@@ -157,7 +166,7 @@ impl Plugin {
 
         let module = Module::new(&engine, &wasm_bytes)
             .map_err(anyhow::Error::from)
-            .with_context(|| format!("failed to compile {}", path.display()))?;
+            .with_context(|| format!("invalid plugin {}", path.display()))?;
 
         // Validate imports + required exports at load time so failures
         // surface here (with a clear "must export" message) rather than
@@ -180,7 +189,9 @@ impl Plugin {
     ) -> Result<Self> {
         let name = name.into();
         let engine = sandbox::shared_engine();
-        let module = Module::new(&engine, bytes)?;
+        let module = Module::new(&engine, bytes)
+            .map_err(anyhow::Error::from)
+            .with_context(|| format!("invalid plugin `{name}`"))?;
         // Same load-time validation as `load` — see that method's
         // comment for rationale.
         validate_loaded_module(&module).with_context(|| format!("invalid plugin `{name}`"))?;
@@ -231,7 +242,10 @@ impl Plugin {
         let alloc = instance
             .get_typed_func::<u32, u32>(&mut store, "alloc")
             .map_err(anyhow::Error::from)
-            .context("plugin export `alloc` has wrong signature (expected fn(u32) -> u32)")?;
+            // wasmtime's error already names the expected vs found
+            // signature — our context just labels what was being
+            // looked up. Avoids drift if the ABI ever changes.
+            .context("plugin export `alloc` has wrong signature")?;
 
         // Allocate space for input
         let input_ptr = alloc.call(&mut store, input_bytes.len() as u32)?;
@@ -243,9 +257,7 @@ impl Plugin {
         let process = instance
             .get_typed_func::<(u32, u32), u64>(&mut store, "process")
             .map_err(anyhow::Error::from)
-            .context(
-                "plugin export `process` has wrong signature (expected fn(u32, u32) -> u64)",
-            )?;
+            .context("plugin export `process` has wrong signature")?;
 
         let result = process.call(&mut store, (input_ptr, input_bytes.len() as u32))?;
 
@@ -1053,13 +1065,54 @@ mod tests {
         let err = plugin
             .execute(&input, &tight_config)
             .expect_err("instantiation should fail when initial memory > cap");
-        // We don't pin the exact error message (wasmtime's wording
-        // varies across versions), just that it's an error and
-        // execution didn't silently succeed.
+        // Check for one of the keywords wasmtime uses when a
+        // ResourceLimiter rejects allocation. Wording varies across
+        // versions, but at least one of these tokens has appeared
+        // in every release we've targeted, so this catches a
+        // truly-silent failure (e.g. limiter not wired) while
+        // tolerating message rephrasings.
+        let msg = format!("{err:#}").to_ascii_lowercase();
+        assert!(
+            msg.contains("memory") || msg.contains("limit"),
+            "expected memory-limit error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn execute_surfaces_wrong_signature_on_alloc() {
+        // Plugin has `alloc(i64) -> i64` instead of the required
+        // `alloc(u32) -> u32`. Presence check (validate_loaded_module)
+        // passes — the export is there. The signature mismatch
+        // surfaces inside `execute()` with the new "wrong signature"
+        // context. Pre-PR this would have read "plugin must export
+        // 'alloc' function" — misleading, since it DOES export it.
+        let wasm = wat::parse_str(
+            r#"
+            (module
+                (memory (export "memory") 1)
+                (func (export "alloc") (param i64) (result i64) i64.const 0)
+                (func (export "process") (param i32 i32) (result i64) i64.const 0)
+            )
+            "#,
+        )
+        .expect("WAT parses");
+        let plugin = Plugin::load_bytes("bad-alloc-sig", &wasm, &RuntimeConfig::default())
+            .expect("module loads (validate only checks presence by name)");
+        let input = PluginInput {
+            directives: vec![],
+            options: crate::types::PluginOptions {
+                operating_currencies: vec![],
+                title: None,
+            },
+            config: None,
+        };
+        let err = plugin
+            .execute(&input, &RuntimeConfig::default())
+            .expect_err("wrong-sig alloc should fail execute");
         let msg = format!("{err:#}");
         assert!(
-            !msg.is_empty(),
-            "expected non-empty error from over-cap instantiate"
+            msg.contains("alloc") && msg.contains("wrong signature"),
+            "expected `alloc` + `wrong signature` in error, got: {msg}"
         );
     }
 }

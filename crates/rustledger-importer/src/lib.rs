@@ -46,7 +46,7 @@ use std::path::Path;
 
 pub use config::ImporterConfig;
 pub use ofx_importer::OfxImporter;
-pub use registry::ImporterRegistry;
+pub use registry::{ImporterRegistry, WasmDirScanReport};
 pub use wasm::{WasmImporter, WasmImporterError, WasmRuntimeConfig};
 
 use rustledger_ops::fingerprint::Fingerprint;

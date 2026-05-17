@@ -9,15 +9,61 @@ use std::path::{Path, PathBuf};
 /// Top-level importers configuration file.
 #[derive(Debug, Deserialize)]
 pub(super) struct ImportersFile {
-    /// Optional directory to scan for WASM importer modules at startup.
-    /// Every `*.wasm` file in the directory is loaded via
-    /// `WasmImporter::load` and added to the registry. The CLI
-    /// `--wasm-importer-dir` flag overrides this setting when both are
-    /// present.
+    /// Director(ies) to scan for WASM importer modules at startup.
+    /// Accepts either a single string for the common case
+    /// (`wasm_importer_dir = "~/imp"`) or a list
+    /// (`wasm_importer_dir = ["a", "b"]`). The CLI
+    /// `--wasm-importer-dir` flag(s) override this setting entirely
+    /// when present.
     #[serde(default)]
-    pub(super) wasm_importer_dir: Option<PathBuf>,
+    pub(super) wasm_importer_dir: WasmDirSetting,
     #[serde(default)]
     pub(super) importers: Vec<ImporterEntry>,
+}
+
+/// TOML-side representation of `wasm_importer_dir` — accepts a
+/// bare string or a list of strings so the common single-dir case
+/// stays ergonomic while multi-dir is also expressible.
+#[derive(Debug, Default, Deserialize)]
+#[serde(untagged)]
+pub(super) enum WasmDirSetting {
+    #[default]
+    None,
+    Single(PathBuf),
+    Many(Vec<PathBuf>),
+}
+
+impl WasmDirSetting {
+    /// Normalize into a flat `Vec<PathBuf>` for the registry-build
+    /// pipeline. Empty for [`Self::None`].
+    pub(super) fn into_vec(self) -> Vec<PathBuf> {
+        match self {
+            Self::None => Vec::new(),
+            Self::Single(p) => vec![p],
+            Self::Many(v) => v,
+        }
+    }
+}
+
+/// Expand a leading `~` in a path to the user's home directory.
+/// Without this, `wasm_importer_dir = "~/imp"` in `importers.toml`
+/// would be read as a literal `~/imp` path that doesn't exist — a
+/// real footgun for a config setting where shell expansion isn't
+/// available.
+///
+/// Only handles `~` and `~/...` (no `~user/...`); falls through to
+/// the original path if the home directory can't be determined.
+pub(super) fn expand_tilde(path: &Path) -> PathBuf {
+    let s = path.to_string_lossy();
+    if s == "~" {
+        return dirs::home_dir().unwrap_or_else(|| path.to_path_buf());
+    }
+    if let Some(rest) = s.strip_prefix("~/")
+        && let Some(home) = dirs::home_dir()
+    {
+        return home.join(rest);
+    }
+    path.to_path_buf()
 }
 
 /// A single importer entry in importers.toml.

@@ -63,24 +63,42 @@ impl ImporterRegistry {
     }
 
     /// Scan `dir` for `*.wasm` files (one level only — no recursion)
-    /// and register each as a [`WasmImporter`]. Files are loaded in
-    /// sorted order so `identify()` behavior is deterministic across
-    /// filesystems and platforms.
+    /// and register each as a [`WasmImporter`].
     ///
-    /// Non-`.wasm` files in the directory are silently skipped (so a
-    /// `README.md` or `.gitignore` next to the modules doesn't blow
-    /// up discovery).
+    /// Files are loaded in sorted order so `identify()` behavior is
+    /// deterministic across filesystems and platforms. Extension
+    /// matching is case-insensitive — both `foo.wasm` and `BAR.WASM`
+    /// are picked up.
+    ///
+    /// Loading is **skip-and-collect**: every loadable module is
+    /// registered; failures are accumulated in
+    /// [`WasmDirScanReport::failures`] so the caller can decide
+    /// whether to log them, abort, or ignore. A single broken module
+    /// in a dir with 19 good ones doesn't prevent the 19 from
+    /// loading.
+    ///
+    /// Non-`.wasm` files (a `README.md` or `.gitignore`) and
+    /// subdirectories are silently skipped. Per-entry I/O errors
+    /// (rare — permission denied on a single inode) are also silently
+    /// skipped to keep discovery resilient.
+    ///
+    /// # Duplicate names
+    ///
+    /// If two `.wasm` modules export the same `metadata.name`, both
+    /// are registered. [`Self::find_by_name`] returns the first match
+    /// — which, given the sorted load order, is the file with the
+    /// lexicographically-earlier filename.
     ///
     /// # Errors
     ///
-    /// - I/O error reading the directory itself ([`WasmImporterError::Io`]).
-    /// - Any underlying [`WasmImporterError`] from loading an
-    ///   individual `.wasm` file. Loading stops at the first error;
-    ///   importers loaded before the failure remain registered.
+    /// The outer `Result` reports an I/O error reading `dir` itself
+    /// (e.g. dir doesn't exist) — without that, the scan can't even
+    /// start. Per-file failures land inside
+    /// [`WasmDirScanReport::failures`].
     pub fn register_wasm_dir(
         &mut self,
         dir: impl AsRef<Path>,
-    ) -> Result<Vec<String>, WasmImporterError> {
+    ) -> Result<WasmDirScanReport, WasmImporterError> {
         let dir = dir.as_ref();
         let entries = std::fs::read_dir(dir).map_err(|source| WasmImporterError::Io {
             path: dir.to_path_buf(),
@@ -89,15 +107,21 @@ impl ImporterRegistry {
         let mut wasm_paths: Vec<PathBuf> = entries
             .filter_map(std::result::Result::ok)
             .map(|e| e.path())
-            .filter(|p| p.is_file() && p.extension().is_some_and(|ext| ext == "wasm"))
+            .filter(|p| {
+                p.is_file()
+                    && p.extension()
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("wasm"))
+            })
             .collect();
         wasm_paths.sort();
-        let mut loaded = Vec::with_capacity(wasm_paths.len());
+        let mut report = WasmDirScanReport::default();
         for path in wasm_paths {
-            let name = self.register_wasm_from_path(path)?;
-            loaded.push(name);
+            match self.register_wasm_from_path(&path) {
+                Ok(name) => report.loaded.push(name),
+                Err(e) => report.failures.push((path, e)),
+            }
         }
-        Ok(loaded)
+        Ok(report)
     }
 
     /// Find an importer that can handle the given file.
@@ -161,6 +185,22 @@ impl Default for ImporterRegistry {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Outcome of [`ImporterRegistry::register_wasm_dir`].
+///
+/// Splits the successfully-loaded importer names from the per-file
+/// failures so callers can log/report both. A single broken module
+/// in a dir with 19 good ones leaves the 19 registered; the broken
+/// one's path + error land in [`Self::failures`].
+#[derive(Debug, Default)]
+pub struct WasmDirScanReport {
+    /// `metadata.name` of each successfully-loaded module, in load
+    /// order (lexicographic by file path).
+    pub loaded: Vec<String>,
+    /// Per-file load failures. Each entry is the `.wasm` path plus
+    /// the underlying error.
+    pub failures: Vec<(PathBuf, WasmImporterError)>,
 }
 
 #[cfg(test)]
@@ -402,11 +442,12 @@ mod tests {
         std::fs::write(tmp.path().join(".gitignore"), "*.tmp").unwrap();
 
         let mut registry = ImporterRegistry::new();
-        let loaded = registry.register_wasm_dir(tmp.path()).expect("scan works");
+        let report = registry.register_wasm_dir(tmp.path()).expect("scan works");
 
         // Sorted load order means identify()/find_by_name behavior is
         // deterministic across platforms.
-        assert_eq!(loaded, vec!["aaa", "mmm", "zzz"]);
+        assert_eq!(report.loaded, vec!["aaa", "mmm", "zzz"]);
+        assert!(report.failures.is_empty());
         assert_eq!(registry.len(), 3);
         // Non-wasm files were not registered.
         assert!(registry.find_by_name("README").is_none());
@@ -418,9 +459,26 @@ mod tests {
         std::fs::write(tmp.path().join("README.md"), "just docs").unwrap();
 
         let mut registry = ImporterRegistry::new();
-        let loaded = registry.register_wasm_dir(tmp.path()).expect("scan works");
-        assert!(loaded.is_empty());
+        let report = registry.register_wasm_dir(tmp.path()).expect("scan works");
+        assert!(report.loaded.is_empty());
+        assert!(report.failures.is_empty());
         assert!(registry.is_empty());
+    }
+
+    #[test]
+    fn register_wasm_dir_matches_uppercase_extension_too() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        // Mixed case extensions: all should be picked up.
+        let bytes = wat::parse_str(metadata_wat("low")).expect("WAT parses");
+        std::fs::write(tmp.path().join("low.wasm"), &bytes).unwrap();
+        let bytes = wat::parse_str(metadata_wat("upp")).expect("WAT parses");
+        std::fs::write(tmp.path().join("UPP.WASM"), &bytes).unwrap();
+        let bytes = wat::parse_str(metadata_wat("mix")).expect("WAT parses");
+        std::fs::write(tmp.path().join("MiX.WasM"), &bytes).unwrap();
+
+        let mut registry = ImporterRegistry::new();
+        let report = registry.register_wasm_dir(tmp.path()).expect("scan works");
+        assert_eq!(report.loaded.len(), 3, "all three case variants load");
     }
 
     #[test]
@@ -442,22 +500,34 @@ mod tests {
     }
 
     #[test]
-    fn register_wasm_dir_stops_at_first_load_failure_but_keeps_prior_loads() {
+    fn register_wasm_dir_skip_and_collect_keeps_loading_past_failures() {
+        // Skip-and-collect semantics: one broken module doesn't
+        // prevent the others from loading. The good modules end up
+        // in `report.loaded`; the bad one ends up in `report.failures`
+        // with its path. This is critical for a discovery dir with
+        // dozens of community-shipped importers — a single broken
+        // one shouldn't take down the rest.
         let tmp = tempfile::tempdir().expect("tempdir");
-        // Sorted load order means `aaa.wasm` loads before `zzz.wasm`.
-        // We want the good one to load first, then the bad one to fail.
         write_wat_to(tmp.path(), "aaa.wasm", "aaa");
-        // Garbage that won't parse as wasm — register_wasm_dir should
-        // fail on it but earlier files stay registered.
-        std::fs::write(tmp.path().join("zzz.wasm"), b"this is not wasm").unwrap();
+        // Bracket the bad file between two good ones so we exercise
+        // continuation in both directions.
+        std::fs::write(tmp.path().join("mmm.wasm"), b"this is not wasm").unwrap();
+        write_wat_to(tmp.path(), "zzz.wasm", "zzz");
 
         let mut registry = ImporterRegistry::new();
-        let err = registry
+        let report = registry
             .register_wasm_dir(tmp.path())
-            .expect_err("malformed wasm fails");
-        let _ = err;
-        assert_eq!(registry.len(), 1, "earlier successful load is kept");
-        assert!(registry.find_by_name("aaa").is_some());
+            .expect("scan itself works; per-file failure is in `failures`");
+        // Both good ones loaded despite the bad one in the middle.
+        assert_eq!(report.loaded, vec!["aaa", "zzz"]);
+        assert_eq!(registry.len(), 2);
+        // The bad one is surfaced with its path so the user can fix it.
+        assert_eq!(report.failures.len(), 1);
+        assert!(
+            report.failures[0].0.ends_with("mmm.wasm"),
+            "failure entry should name the bad file: {:?}",
+            report.failures[0].0
+        );
     }
 
     #[test]

@@ -32,6 +32,26 @@
 //! 1. Path specified via `--importers-config`
 //! 2. `importers.toml` in the current directory
 //! 3. `~/.config/rledger/importers.toml`
+//!
+//! # WASM importers (wave 2.3c+)
+//!
+//! Beyond the built-in CSV and OFX importers, `rledger extract` can
+//! load `.wasm` modules that implement the import ABI defined in
+//! `rustledger-plugin-types`. Two flags control discovery:
+//!
+//! - `--wasm-importer <PATH>` (repeatable) — register one specific
+//!   module. Right tool for ad-hoc usage.
+//! - `--wasm-importer-dir <DIR>` (repeatable) — scan a directory for
+//!   `*.wasm` files. Overrides `wasm_importer_dir` from
+//!   `importers.toml` entirely when any CLI flag is set.
+//!
+//! Priority (highest wins `identify()` collisions): CLI single-file
+//! > directory scan > built-ins.
+//!
+//! ```toml
+//! # Persistent multi-dir discovery in importers.toml:
+//! wasm_importer_dir = ["~/wasm-importers", "/opt/shared-importers"]
+//! ```
 
 mod config;
 mod duplicate;
@@ -41,7 +61,8 @@ use crate::cmd::completions::ShellType;
 use anyhow::{Context, Result, anyhow};
 use clap::Parser;
 use config::{
-    build_config_from_entry, find_importers_config, find_matching_importers, load_importers_config,
+    build_config_from_entry, expand_tilde, find_importers_config, find_matching_importers,
+    load_importers_config,
 };
 use duplicate::{is_duplicate, is_ofx_file, load_existing_transactions};
 use format_num_pattern::Locale;
@@ -177,50 +198,73 @@ pub struct Args {
     #[arg(long, value_name = "DATE")]
     balance_date: Option<String>,
 
-    /// Register one or more WASM importer modules ahead of the built-in
-    /// CSV/OFX importers. Each `<PATH>` must be a `.wasm` file.
-    /// User-specified modules take precedence over discovered ones and
-    /// over built-ins, so this is the right flag for ad-hoc one-off
-    /// usage.
+    /// Register a specific WASM importer module ahead of the built-in
+    /// CSV/OFX importers. May be specified multiple times. Each
+    /// `<PATH>` must be a `.wasm` file. User-specified modules take
+    /// precedence over discovered ones and over built-ins — this is
+    /// the right flag for ad-hoc one-off usage.
     #[arg(long, value_name = "PATH")]
     wasm_importer: Vec<PathBuf>,
 
-    /// Scan a directory for `*.wasm` importer modules at startup and
-    /// register each. Overrides `wasm_importer_dir` from
-    /// `importers.toml` when both are set. Non-`.wasm` files in the
-    /// directory are silently skipped. Subdirectories are not recursed
-    /// into.
+    /// Scan a directory for `*.wasm` importer modules at startup. May
+    /// be specified multiple times for multi-dir setups. Overrides
+    /// `wasm_importer_dir` from `importers.toml` entirely when any
+    /// `--wasm-importer-dir` flag is present. Non-`.wasm` files are
+    /// silently skipped; subdirectories are not recursed into.
     #[arg(long, value_name = "DIR")]
-    wasm_importer_dir: Option<PathBuf>,
+    wasm_importer_dir: Vec<PathBuf>,
 }
 
-/// List available importers from a config file.
+/// List available importers — both TOML profiles and engines.
+///
+/// TOML profiles (for `--importer <name>`) and registered engines
+/// (built-in CSV/OFX plus any `--wasm-importer`/scanned modules) are
+/// orthogonal concepts: a TOML profile is a pre-configured
+/// [`ImporterConfig`] driven by `CsvImporter`; an engine is the actual
+/// trait implementation that consumes a config.
 pub fn list_importers(args: &Args) -> Result<()> {
-    let config_path = find_importers_config(args.config.as_deref())?
-        .context("--list-importers requires --config or an importers.toml in the current directory or ~/.config/rledger/")?;
-
-    let config = load_importers_config(&config_path)?;
-
-    if config.importers.is_empty() {
-        println!("No importers defined in {}", config_path.display());
-    } else {
-        println!("Available importers in {}:", config_path.display());
-        for imp in &config.importers {
-            if let Some(pattern) = &imp.filename_pattern {
-                println!(
-                    "  {} (pattern: {}) -> {}",
-                    imp.name,
-                    pattern,
-                    imp.account.as_deref().unwrap_or("(default)")
-                );
-            } else {
-                println!(
-                    "  {} -> {}",
-                    imp.name,
-                    imp.account.as_deref().unwrap_or("(default)")
-                );
+    // ===== TOML profiles =====
+    //
+    // Optional: if no config file is present we still want to list
+    // the registered engines, so this is a soft find rather than the
+    // hard "must have config" error the original code had.
+    if let Some(config_path) = find_importers_config(args.config.as_deref())? {
+        let config = load_importers_config(&config_path)?;
+        if config.importers.is_empty() {
+            println!("No TOML profiles in {}", config_path.display());
+        } else {
+            println!("TOML profiles in {}:", config_path.display());
+            for imp in &config.importers {
+                if let Some(pattern) = &imp.filename_pattern {
+                    println!(
+                        "  {} (pattern: {}) -> {}",
+                        imp.name,
+                        pattern,
+                        imp.account.as_deref().unwrap_or("(default)")
+                    );
+                } else {
+                    println!(
+                        "  {} -> {}",
+                        imp.name,
+                        imp.account.as_deref().unwrap_or("(default)")
+                    );
+                }
             }
         }
+    } else {
+        println!("(no importers.toml found — listing registered engines only)");
+    }
+    println!();
+
+    // ===== Registered importer engines =====
+    //
+    // Always shown — at minimum CSV + OFX, plus any WASM-discovered
+    // modules. Build a fresh registry from args so users see exactly
+    // what this invocation would dispatch through.
+    let registry = build_registry(args)?;
+    println!("Registered importer engines:");
+    for (name, description) in registry.list_importers() {
+        println!("  {name} - {description}");
     }
 
     Ok(())
@@ -252,34 +296,64 @@ fn select_importer(registry: &ImporterRegistry, file: &Path, args: &Args) -> Arc
 /// of the built-in CSV/OFX importers, so user-discovered modules win
 /// the `identify()` race. Priority (highest first):
 ///
-/// 1. CLI `--wasm-importer <PATH>` (explicit per-invocation)
-/// 2. CLI `--wasm-importer-dir <DIR>` OR `wasm_importer_dir` from
-///    `importers.toml` (CLI flag wins when both are set)
+/// 1. CLI `--wasm-importer <PATH>` (explicit per-invocation,
+///    repeatable)
+/// 2. CLI `--wasm-importer-dir <DIR>` (repeatable) OR
+///    `wasm_importer_dir` from `importers.toml` (CLI flags win
+///    entirely — they're not merged with the toml setting)
 /// 3. Built-in CSV + OFX importers (always present, registered last)
+///
+/// Per-dir scan failures (a single malformed `.wasm` among many) are
+/// logged to stderr but don't abort startup — see [`register_wasm_dir`]'s
+/// skip-and-collect semantics.
 fn build_registry(args: &Args) -> Result<ImporterRegistry> {
     let mut registry = ImporterRegistry::new();
 
     // 1. CLI --wasm-importer paths (explicit precedence — registered
-    //    first so they win identify()).
+    //    first so they win identify()). Single-file failures abort
+    //    because the user explicitly named this path; if it's wrong,
+    //    silently skipping would be worse than erroring out.
     for path in &args.wasm_importer {
-        registry
+        let name = registry
             .register_wasm_from_path(path)
             .with_context(|| format!("failed to load WASM importer {}", path.display()))?;
+        eprintln!("loaded WASM importer `{name}` from {}", path.display());
     }
 
-    // 2. Directory scan: CLI override > importers.toml setting.
-    let scan_dir = match &args.wasm_importer_dir {
-        Some(dir) => Some(dir.clone()),
-        None => find_importers_config(args.config.as_deref())
+    // 2. Directory scan(s): CLI flags override toml entirely.
+    //    Multiple dirs are scanned in order. `~` is expanded for
+    //    toml-supplied paths (CLI paths get shell expansion).
+    let scan_dirs: Vec<PathBuf> = if args.wasm_importer_dir.is_empty() {
+        find_importers_config(args.config.as_deref())
             .ok()
             .flatten()
             .and_then(|path| load_importers_config(&path).ok())
-            .and_then(|cfg| cfg.wasm_importer_dir),
+            .map(|cfg| {
+                cfg.wasm_importer_dir
+                    .into_vec()
+                    .into_iter()
+                    .map(|p| expand_tilde(&p))
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        args.wasm_importer_dir.clone()
     };
-    if let Some(dir) = scan_dir {
-        registry
-            .register_wasm_dir(&dir)
+    for dir in &scan_dirs {
+        let report = registry
+            .register_wasm_dir(dir)
             .with_context(|| format!("failed to scan WASM importer directory {}", dir.display()))?;
+        if !report.loaded.is_empty() || !report.failures.is_empty() {
+            eprintln!(
+                "WASM importer scan {}: loaded {}, failed {}",
+                dir.display(),
+                report.loaded.len(),
+                report.failures.len(),
+            );
+        }
+        for (failed_path, err) in &report.failures {
+            eprintln!("  warning: failed to load {}: {err}", failed_path.display());
+        }
     }
 
     // 3. Built-ins last so any user importer takes precedence on
@@ -1990,6 +2064,149 @@ filename_pattern = "statement*"
         assert!(
             msg.contains("bogus.wasm"),
             "error should name the failing path: {msg}"
+        );
+    }
+
+    #[test]
+    fn build_registry_scans_multiple_cli_dirs_in_order() {
+        // --wasm-importer-dir is repeatable; both dirs should be
+        // scanned, with registration order = arg order.
+        let dir_a = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir_a.path().join("aaa.wasm"),
+            wasm_importer_with_name("aaa"),
+        )
+        .unwrap();
+        let dir_b = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir_b.path().join("bbb.wasm"),
+            wasm_importer_with_name("bbb"),
+        )
+        .unwrap();
+
+        let args = Args::parse_from([
+            "extract",
+            "--wasm-importer-dir",
+            dir_a.path().to_str().unwrap(),
+            "--wasm-importer-dir",
+            dir_b.path().to_str().unwrap(),
+        ]);
+        let registry = build_registry(&args).expect("builds");
+        assert!(registry.find_by_name("aaa").is_some(), "first dir loaded");
+        assert!(registry.find_by_name("bbb").is_some(), "second dir loaded");
+    }
+
+    #[test]
+    fn build_registry_accepts_toml_dir_as_list() {
+        // wasm_importer_dir = ["a", "b"] in importers.toml.
+        let dir_a = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir_a.path().join("one.wasm"),
+            wasm_importer_with_name("one"),
+        )
+        .unwrap();
+        let dir_b = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir_b.path().join("two.wasm"),
+            wasm_importer_with_name("two"),
+        )
+        .unwrap();
+
+        let cfg_dir = tempfile::tempdir().unwrap();
+        let cfg_path = cfg_dir.path().join("importers.toml");
+        std::fs::write(
+            &cfg_path,
+            format!(
+                "wasm_importer_dir = [\"{}\", \"{}\"]\n",
+                dir_a.path().display(),
+                dir_b.path().display()
+            ),
+        )
+        .unwrap();
+
+        let args = Args::parse_from(["extract", "--config", cfg_path.to_str().unwrap()]);
+        let registry = build_registry(&args).expect("builds");
+        assert!(registry.find_by_name("one").is_some());
+        assert!(registry.find_by_name("two").is_some());
+    }
+
+    #[test]
+    fn build_registry_skip_and_collect_loads_good_modules_past_failures() {
+        // Mix one valid and one invalid .wasm in a scanned dir. The
+        // valid one should still register; the failure is logged to
+        // stderr (not asserted here — we just check the registry
+        // didn't abort).
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("good.wasm"), wasm_importer_with_name("aaa")).unwrap();
+        std::fs::write(tmp.path().join("bad-zzz.wasm"), b"not valid wasm").unwrap();
+
+        let args = Args::parse_from([
+            "extract",
+            "--wasm-importer-dir",
+            tmp.path().to_str().unwrap(),
+        ]);
+        let registry = build_registry(&args).expect("scan continues past failure");
+        assert!(
+            registry.find_by_name("aaa").is_some(),
+            "good module loaded despite sibling failure"
+        );
+    }
+
+    #[test]
+    fn build_registry_cli_wasm_importer_wins_over_dir_scanned_same_name() {
+        // Duplicate metadata.name from a CLI flag vs a scanned dir.
+        // CLI registration is first, so find_by_name returns it. The
+        // dir-scanned same-named module is also registered (both
+        // exist in the list) but unreachable via find_by_name.
+        let cli_dir = tempfile::tempdir().unwrap();
+        let cli_path = cli_dir.path().join("cli.wasm");
+        std::fs::write(&cli_path, wasm_importer_with_name("dup")).unwrap();
+
+        let scan_dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            scan_dir.path().join("scanned.wasm"),
+            wasm_importer_with_name("dup"),
+        )
+        .unwrap();
+
+        let args = Args::parse_from([
+            "extract",
+            "--wasm-importer",
+            cli_path.to_str().unwrap(),
+            "--wasm-importer-dir",
+            scan_dir.path().to_str().unwrap(),
+        ]);
+        let registry = build_registry(&args).expect("builds");
+        // Both registered.
+        assert_eq!(registry.len(), 4, "1 CLI + 1 dir-scanned + 2 builtins");
+        // CLI one wins find_by_name because it's first.
+        assert!(registry.find_by_name("dup").is_some());
+        // Two entries with the same name in list_importers.
+        let dup_count = registry
+            .list_importers()
+            .iter()
+            .filter(|(name, _)| *name == "dup")
+            .count();
+        assert_eq!(dup_count, 2, "both same-named modules are registered");
+    }
+
+    #[test]
+    fn expand_tilde_resolves_tilde_prefix() {
+        use super::config::expand_tilde;
+        if let Some(home) = dirs::home_dir() {
+            assert_eq!(expand_tilde(Path::new("~")), home);
+            assert_eq!(
+                expand_tilde(Path::new("~/foo/bar")),
+                home.join("foo").join("bar")
+            );
+        }
+        // No leading tilde → identity.
+        assert_eq!(expand_tilde(Path::new("/abs/path")), Path::new("/abs/path"));
+        assert_eq!(expand_tilde(Path::new("rel/path")), Path::new("rel/path"));
+        // ~user is not supported — left as-is.
+        assert_eq!(
+            expand_tilde(Path::new("~other/foo")),
+            Path::new("~other/foo")
         );
     }
 }

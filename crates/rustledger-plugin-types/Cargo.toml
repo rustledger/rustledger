@@ -17,6 +17,22 @@ readme = "README.md"
 
 [dependencies]
 serde = { workspace = true }
+# `rmp-serde` is an optional dep so this crate stays minimal on the
+# host (where `rustledger-importer` brings its own copy). The `guest`
+# feature pulls it in for WASM-guest authors who consume the
+# `wasm_importer_main!` macro — they need msgpack encode/decode at
+# runtime to produce the exports the host expects.
+rmp-serde = { workspace = true, optional = true }
+
+[features]
+default = []
+# Enables the `guest` module + `wasm_importer_main!` macro. Add to
+# your WASM importer crate's `Cargo.toml`:
+#
+# ```toml
+# rustledger-plugin-types = { version = "0.15", features = ["guest"] }
+# ```
+guest = ["dep:rmp-serde"]
 
 [dev-dependencies]
 serde_json = { workspace = true }

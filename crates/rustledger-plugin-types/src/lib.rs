@@ -86,6 +86,9 @@
 
 #![warn(missing_docs)]
 
+#[cfg(feature = "guest")]
+pub mod guest;
+
 use serde::{Deserialize, Serialize};
 
 // ============================================================================

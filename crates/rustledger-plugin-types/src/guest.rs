@@ -242,6 +242,25 @@ pub fn default_enriched_from(out: ImporterOutput) -> EnrichedImporterOutput {
 /// Emit the five `#[no_mangle] pub extern "C"` exports that a
 /// rustledger-host-loaded `.wasm` importer must provide.
 ///
+/// # Invocation constraint
+///
+/// **Invoke at most once per crate.** Each call generates Rust
+/// items named `__wasm_importer_alloc`/`metadata`/`identify`/
+/// `extract`/`extract_enriched` and (on `wasm32`) wasm exports
+/// named `alloc`/`metadata`/etc. — two invocations in one crate
+/// collide on both. Each WASM importer should be its own
+/// `cdylib` crate.
+///
+/// # Native vs `wasm32` symbol names
+///
+/// On `wasm32`, the macro emits exports named
+/// `alloc`/`metadata`/etc. via `#[unsafe(export_name = "...")]`.
+/// On native targets, the `export_name` attribute is gated off
+/// (it would conflict with multiple compile-test invocations in
+/// the same binary) — the Rust identifiers `__wasm_importer_*`
+/// are the only symbols emitted. `objdump`/`nm` on a native
+/// build won't show `alloc` etc.; that's expected.
+///
 /// See the module-level docs for the full example. The macro has
 /// two arms:
 ///
@@ -289,6 +308,14 @@ pub fn default_enriched_from(out: ImporterOutput) -> EnrichedImporterOutput {
 /// - `identify`: `fn(&str) -> bool`
 /// - `extract`: `fn(ImporterInput) -> ImporterOutput`
 /// - `extract_enriched` (optional): `fn(ImporterInput) -> EnrichedImporterOutput`
+///
+/// The signatures use `fn(...)` *pointer* types — fn items and
+/// non-capturing closures coerce in, but **capturing closures
+/// don't**. This applies to both macro arms; the short form's
+/// auto-generated `extract_enriched` internally requires
+/// `extract` to coerce to a fn pointer. Use free fns (the
+/// pattern shown in the module-level example) for the cleanest
+/// experience.
 ///
 /// # Failure handling
 ///
@@ -571,8 +598,22 @@ mod tests {
     }
 
     /// Default method must match `CategorizationMethod::Default::as_meta_value()`
-    /// on the host side. If the host enum's wire string ever changes,
-    /// this test reminds us to update both ends.
+    /// on the host side.
+    ///
+    /// # Cross-crate symmetry
+    ///
+    /// The literal `"default"` is asserted on BOTH sides of the
+    /// wire:
+    ///
+    /// - Host (`rustledger-ops`'s `enrichment::tests`):
+    ///   `CategorizationMethod::Default.as_meta_value() == "default"`
+    /// - Guest (this test): `default_enriched_from` emits `"default"`
+    ///
+    /// If a future change renames the host variant or its
+    /// `as_meta_value()` output, ONE of the two tests has to be
+    /// updated — and the reviewer will see the asymmetry. The
+    /// guest emission would otherwise drift silently and the host's
+    /// `parse_method` would log "unknown method" warnings.
     #[test]
     fn default_enriched_uses_host_compatible_method_string() {
         let out = ImporterOutput {
@@ -581,9 +622,6 @@ mod tests {
             errors: vec![],
         };
         let enriched = default_enriched_from(out);
-        // The host's `parse_method` accepts "default" and maps to
-        // `CategorizationMethod::Default`. If we emit anything else,
-        // the host's bridge code logs an "unknown method" warning.
         assert_eq!(enriched.entries[0].1.method, "default");
     }
 }

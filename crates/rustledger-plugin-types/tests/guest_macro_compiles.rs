@@ -114,6 +114,26 @@ mod with_closures {
     }
 }
 
+mod all_closures {
+    use super::*;
+
+    // Verify all three positions accept non-capturing closures
+    // simultaneously — `with_closures` only proves it for identify.
+    // If the macro's fn-pointer type bounds ever break closure
+    // coercion, this test fails to compile.
+    wasm_importer_main! {
+        name: "all-closures",
+        description: "every callback as a non-capturing closure",
+        identify: |path: &str| !path.is_empty(),
+        extract: |_input: ImporterInput| ImporterOutput::empty(),
+        extract_enriched: |_input: ImporterInput| EnrichedImporterOutput {
+            entries: Vec::<(_, EnrichmentWrapper)>::new(),
+            warnings: vec![],
+            errors: vec![],
+        },
+    }
+}
+
 // The mere act of cargo test compiling this crate validates the
 // three macro-invocation modules above. Symbol-shape verification
 // is done via function-pointer coercion below — which checks the
@@ -153,4 +173,13 @@ fn closures_emit_expected_signatures() {
     let _: extern "C" fn(u32, u32) -> u64 = with_closures::__wasm_importer_identify;
     let _: extern "C" fn(u32, u32) -> u64 = with_closures::__wasm_importer_extract;
     let _: extern "C" fn(u32, u32) -> u64 = with_closures::__wasm_importer_extract_enriched;
+}
+
+#[test]
+fn all_closures_emit_expected_signatures() {
+    let _: extern "C" fn(u32) -> *mut u8 = all_closures::__wasm_importer_alloc;
+    let _: extern "C" fn() -> u64 = all_closures::__wasm_importer_metadata;
+    let _: extern "C" fn(u32, u32) -> u64 = all_closures::__wasm_importer_identify;
+    let _: extern "C" fn(u32, u32) -> u64 = all_closures::__wasm_importer_extract;
+    let _: extern "C" fn(u32, u32) -> u64 = all_closures::__wasm_importer_extract_enriched;
 }

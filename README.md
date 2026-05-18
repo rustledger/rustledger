@@ -237,7 +237,7 @@ Config is searched in: current directory, `~/.config/rledger/importers.toml`, or
 A 3-tier pipeline automatically categorizes transactions:
 
 1. **Rules engine** — substring, regex, and exact match patterns from `importers.toml`
-2. **Merchant dictionary** — ~80 built-in patterns across 10 categories (grocery, dining, transport, subscriptions, etc.)
+2. **Merchant dictionary** — ~150 built-in patterns across 10 categories (grocery, dining, transport, subscriptions, etc.)
 3. **ML categorization** — TF-IDF + Naive Bayes classification via `linfa`
 
 ### Transfer Detection
@@ -252,6 +252,20 @@ Fuzzy matching on date + amount + payee/narration prevents importing the same tr
 
 The `--balance` flag appends a balance assertion directive matching your bank statement's ending balance, helping verify import accuracy.
 
+### Custom WASM Importers
+
+Beyond the built-in CSV and OFX importers, third parties can ship importers as sandboxed `.wasm` modules — no need to fork the workspace:
+
+```bash
+# Single file
+rledger extract --wasm-importer ./my-bank.wasm statement.dat -a Assets:Bank
+
+# Or scan a directory of .wasm modules (also configurable via importers.toml)
+rledger extract --wasm-importer-dir /etc/rledger/importers.d statement.dat -a Assets:Bank
+```
+
+WASM importers implement the same `Importer` trait as the built-ins via the [`wasm_importer_main!`](crates/rustledger-plugin-types/src/guest.rs) macro and run inside the same wasmtime sandbox as directive plugins (no FS / network / WASI; configurable memory + fuel caps). See [`examples/wasm-importer-csv-example`](examples/wasm-importer-csv-example/) for a reference implementation.
+
 ## Crates
 
 | Crate | Description |
@@ -265,7 +279,7 @@ The `--balance` flag appends a balance assertion directive matching your bank st
 | `rustledger-query` | BQL query engine |
 | `rustledger-plugin` | 30 built-in plugins + Python plugin support |
 | `rustledger-plugin-types` | Shared plugin type definitions |
-| `rustledger-importer` | CSV/OFX import framework with auto-detection, enrichment, and configurable importers |
+| `rustledger-importer` | Import framework: built-in CSV/OFX, plus a `WasmImporter` host loader for third-party `.wasm` importers |
 | `rustledger-ops` | Pure operations — ML categorization, LLM prompts, dedup, transfer detection, balance reconciliation, merchant dictionary |
 | `rustledger-lsp` | Language Server Protocol for editor integration |
 | `rustledger-wasm` | WebAssembly bindings for JavaScript/TypeScript |

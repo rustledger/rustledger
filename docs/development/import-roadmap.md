@@ -10,7 +10,7 @@
 | CSV Auto-Inference | ✅ Done | Delimiter, date format, column role detection (`--auto` flag) |
 | Ops Crate (`rustledger-ops`) | ✅ Done | Pure operations: dedup, categorize, fingerprint, reconcile, merchants, transfer |
 | Rules Engine | ✅ Done | Substring, regex, and exact match rules with priority ordering |
-| Merchant Dictionary | ✅ Done | ~60 built-in patterns (groceries, dining, transport, subscriptions, etc.) |
+| Merchant Dictionary | ✅ Done | ~150 built-in patterns (groceries, dining, transport, subscriptions, etc.) |
 | Transaction Fingerprinting | ✅ Done | Structural hashing via blake3 for stable dedup |
 | Enriched Import Results | ✅ Done | `EnrichedImportResult` with confidence scores and categorization method |
 | Institution Profiles | 🔮 Future | YAML-based bank definitions |
@@ -20,8 +20,12 @@
 | API Integration | 🔮 Future | SimpleFIN, Plaid |
 | ML Categorization | 🔮 Future | Learn from user's existing ledger |
 | LLM/MCP Categorization | 🔮 Future | LLM-assisted via MCP |
-| WASM Import Plugins | 🔮 Future | Custom importers as WASM plugins |
+| WASM Import Plugins | ✅ Done | Third-party importers as sandboxed `.wasm` modules ([`WasmImporter`][wasm-importer], [`wasm_importer_main!`][wasm-macro], [example][wasm-csv-example]) |
 | Source Archive | 🔮 Future | SQLite append-only store |
+
+[wasm-importer]: ../../crates/rustledger-importer/src/wasm.rs
+[wasm-macro]: ../../crates/rustledger-plugin-types/src/guest.rs
+[wasm-csv-example]: ../../examples/wasm-importer-csv-example/
 
 **Current version**: Enrichment pipeline (Phase 1 complete, Phase 4.1 partial)
 

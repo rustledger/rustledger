@@ -4,7 +4,7 @@ ______________________________________________________________________
 
 # rledger extract
 
-Import transactions from CSV and OFX bank statements.
+Import transactions from bank statements. Handles CSV and OFX/QFX out of the box; can also load third-party importers as sandboxed WASM modules via `--wasm-importer` / `--wasm-importer-dir`.
 
 ## Usage
 
@@ -53,6 +53,7 @@ rledger extract [OPTIONS] [FILE]
 | `--skip-rows <N>` | Number of header rows to skip [default: 0] |
 | `--invert-sign` | Invert sign of amounts |
 | `--no-header` | CSV has no header row |
+| `--include-zero-amounts` | Preserve rows whose amount is exactly zero (default drops them; bank "status filler" rows) |
 
 ### Output Options
 
@@ -60,7 +61,18 @@ rledger extract [OPTIONS] [FILE]
 |--------|-------------|
 | `-o, --output <FILE>` | Write output to file instead of stdout |
 | `--existing <FILE>` | Existing ledger file for duplicate detection |
-| `-P, --profile <PROFILE>` | Use a profile from config |
+| `--suggest-categories` | Use ML (Naive Bayes on the `--existing` ledger) to suggest accounts for transactions the rules engine didn't categorize. Requires `--existing`. |
+| `--balance <AMOUNT>` | Append a balance assertion directive with the given amount (e.g., `1234.56`) |
+| `--balance-date <DATE>` | Date for the balance assertion (defaults to today) |
+
+### WASM Importers
+
+Third-party importers ship as sandboxed `.wasm` modules. Flags below override `wasm_importer_dir` from `importers.toml`.
+
+| Option | Description |
+|--------|-------------|
+| `--wasm-importer <PATH>` | Register a specific `.wasm` importer ahead of built-ins. Repeatable. User-specified modules take precedence over discovered ones and built-ins. |
+| `--wasm-importer-dir <DIR>` | Scan a directory for `*.wasm` importer modules at startup. Repeatable. Subdirectories are not recursed into; non-`.wasm` files are silently skipped. |
 
 ## Examples
 
@@ -168,7 +180,7 @@ The importer library supports additional enrichment features via the
 
 | Builder Method | Description |
 |----------------|-------------|
-| `use_merchant_dict(true)` | Enable the built-in merchant dictionary (~60 common patterns) as a low-priority fallback for account categorization |
+| `use_merchant_dict(true)` | Enable the built-in merchant dictionary (~150 common patterns) as a low-priority fallback for account categorization |
 | `regex_mappings(vec)` | Add regex-based account mappings (case-insensitive, compiled at load time) |
 
 These options are available in the Rust library API but are not yet exposed as
@@ -204,9 +216,29 @@ rledger extract --config path/to/importers.toml --importer checking statement.cs
 
 ### List Available Importers
 
+Lists both TOML profiles (for `--importer <name>`) and registered importer engines (built-in CSV/OFX plus any WASM modules from `--wasm-importer`/`--wasm-importer-dir`):
+
 ```bash
 rledger extract --config importers.toml --list-importers
 ```
+
+### Using a WASM Importer
+
+```bash
+# One-off: register a single .wasm file
+rledger extract --wasm-importer ./my-bank.wasm statement.dat -a Assets:Bank
+
+# Or scan a whole directory at startup
+rledger extract --wasm-importer-dir ~/.config/rledger/importers.d statement.dat -a Assets:Bank
+```
+
+Persistent setup goes in `importers.toml`:
+
+```toml
+wasm_importer_dir = "/etc/rledger/importers.d"
+```
+
+WASM importers participate in the same `identify`-then-`extract` dispatch as the built-ins. See [`examples/wasm-importer-csv-example`](../../examples/wasm-importer-csv-example/) for how to write one.
 
 ### Direct CLI Import (No Config)
 

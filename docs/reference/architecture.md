@@ -84,10 +84,10 @@ This document describes rustledger's crate structure and data flow.
 |-------|---------|-----------|
 | `rustledger-query` | BQL query engine | `Query`, `Executor`, `Table`, `Row` |
 | `rustledger-plugin` | Native + WASM + Python plugins | `NativePlugin`, `NativePluginRegistry`, `PluginManager` |
-| `rustledger-plugin-types` | WASM plugin interface types | `PluginInput`, `PluginOutput`, `DirectiveWrapper` |
+| `rustledger-plugin-types` | WASM plugin interface types (directive plugins **and** WASM importers) | `PluginInput`, `PluginOutput`, `DirectiveWrapper`, `ImporterInput`, `ImporterOutput`, `EnrichedImporterOutput`, `wasm_importer_main!` |
 | `rustledger-ops` | Pure operations on directives | `RulesEngine`, `find_structural_duplicates`, `structural_hash`, `Enrichment` |
 | `rustledger-lsp` | Language Server Protocol | LSP handlers for all standard features |
-| `rustledger-importer` | Bank statement import | `CsvImporter`, `OfxImporter`, `auto_extract`, `EnrichedImportResult` |
+| `rustledger-importer` | Bank statement import | `Importer` trait, `ImporterRegistry`, `CsvImporter`, `OfxImporter`, `WasmImporter`, `WasmRuntimeConfig`, `WasmDirScanReport`, `auto_extract`, `EnrichedImportResult` |
 
 ### Distribution Layer
 

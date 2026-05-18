@@ -2,7 +2,22 @@
 
 WASM plugin interface types for [rustledger](https://github.com/rustledger/rustledger).
 
-This crate provides the canonical type definitions that plugins must use to communicate with the rustledger host. Using this crate ensures your plugin's types are always compatible with the host.
+This crate provides the canonical type definitions that plugins must use to
+communicate with the rustledger host. Using this crate ensures your plugin's
+types are always compatible with the host.
+
+There are **two distinct WASM plugin subsystems**, and this crate hosts the
+shared types for both:
+
+- **Directive plugins** transform the directive stream *after* parsing
+  (tagging, dedup, categorization). Required export: `process`. Host loader:
+  `rustledger-plugin`. See the "Directive Plugin Quick Start" section below.
+- **WASM importers** turn bank-statement files *into* directives (CSV, OFX,
+  custom formats). Required exports: `metadata`, `identify`, `extract`,
+  `extract_enriched`. Host loader: `rustledger-importer::WasmImporter`. See
+  the "WASM Importer Quick Start" section below, and use the
+  `wasm_importer_main!` macro (behind the `guest` feature) to skip writing
+  the export boilerplate yourself.
 
 ## Installation
 
@@ -17,13 +32,13 @@ edition = "2021"
 crate-type = ["cdylib"]
 
 [dependencies]
-rustledger-plugin-types = "0.10"
+rustledger-plugin-types = "0.15"
 rmp-serde = "1"
 ```
 
-**Version compatibility**: Use the same minor version as your target rustledger host (e.g., `0.10.x` types for rustledger `0.10.x`).
+**Version compatibility**: Use the same minor version as your target rustledger host (e.g., `0.15.x` types for rustledger `0.15.x`).
 
-## Quick Start
+## Directive Plugin Quick Start
 
 ```rust
 use rustledger_plugin_types::*;
@@ -172,6 +187,91 @@ Plugins must export:
 Plugins may optionally export:
 
 - `dealloc(ptr: *mut u8, size: u32)` - Optional. For freeing memory within the plugin.
+
+## WASM Importer Quick Start
+
+Importers read source files (CSV, OFX, …) and emit directives. The host
+loader is in `rustledger-importer` (`WasmImporter::load`); the wire format
+lives in this crate.
+
+Use the `wasm_importer_main!` macro to generate the required exports.
+Enable it with the `guest` feature:
+
+```toml
+[dependencies]
+rustledger-plugin-types = { version = "0.15", features = ["guest"] }
+```
+
+```rust,ignore
+use rustledger_plugin_types::{
+    DirectiveData, DirectiveWrapper, ImporterInput, ImporterOutput,
+    OpenData, wasm_importer_main,
+};
+
+fn identify(path: &str) -> bool {
+    path.ends_with(".mybank")
+}
+
+fn extract(input: ImporterInput) -> ImporterOutput {
+    // Parse input.content (Vec<u8>) and emit DirectiveWrapper values.
+    // input.account / input.currency / input.options carry per-call config.
+    ImporterOutput::new(vec![DirectiveWrapper {
+        directive_type: String::new(),
+        date: "2024-01-01".into(),
+        filename: None,
+        lineno: None,
+        data: DirectiveData::Open(OpenData {
+            account: input.account,
+            currencies: input.currency.into_iter().collect(),
+            booking: None,
+            metadata: vec![],
+        }),
+    }])
+}
+
+wasm_importer_main! {
+    name: "my-bank",
+    description: "Importer for MyBank CSV statements",
+    identify: identify,
+    extract: extract,
+    // `extract_enriched` is auto-generated as a passthrough that wraps
+    // each directive with `CategorizationMethod::Default`. Add an
+    // `extract_enriched:` entry to override (and provide real
+    // categorization confidence + fingerprints).
+}
+```
+
+The macro emits the required exports (`memory`, `alloc`, `metadata`,
+`identify`, `extract`, `extract_enriched`) gated on
+`#[cfg_attr(target_arch = "wasm32", ...)]` so the host-target build of
+your crate (used by tests) doesn't collide with the WASM linker's symbol
+namespace.
+
+See [`examples/wasm-importer-csv-example`][csv-example] in the rustledger
+repo for a complete reference implementation.
+
+[csv-example]: https://github.com/rustledger/rustledger/tree/main/examples/wasm-importer-csv-example
+
+### Importer ABI types
+
+| Type | Description |
+|------|-------------|
+| `ImporterInput` | Input to `extract`/`extract_enriched`: path, content bytes, account, currency, options map |
+| `IdentifyInput` | Input to `identify`: path only (content isn't read until extract) |
+| `ImporterOutput` | Result of `extract`: directives + warnings + structured errors |
+| `EnrichedImporterOutput` | Result of `extract_enriched`: `(DirectiveWrapper, EnrichmentWrapper)` pairs |
+| `IdentifyOutput` | Result of `identify`: `bool` |
+| `MetadataOutput` | Result of `metadata`: name + description, called once at load |
+| `EnrichmentWrapper` | Per-directive categorization metadata (method, confidence, fingerprint, alternatives) |
+| `AlternativeWrapper` | Alternative account categorization with confidence |
+
+### Categorization method strings
+
+`EnrichmentWrapper::method` is a wire-format string that must match one of:
+`"rule"`, `"merchant-dict"` (hyphen, not underscore!), `"ml"`, `"llm"`,
+`"manual"`, `"default"`. Unknown strings cause the host to emit a warning
+and fall back to `Default`. The host pinning lives in
+`rustledger_ops::enrichment::CategorizationMethod::as_meta_value`.
 
 ## License
 

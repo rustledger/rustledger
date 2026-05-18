@@ -65,7 +65,7 @@ rledger extract --importer chase chase-statement.csv
 
 The `importers.toml` file is searched for automatically in these locations (first found wins):
 
-1. Path specified via `--importers-config path/to/importers.toml`
+1. Path specified via `--config path/to/importers.toml` (the legacy spelling `--importers-config` is still accepted as an alias)
 1. `importers.toml` in the current directory
 1. `~/.config/rledger/importers.toml`
 
@@ -101,6 +101,28 @@ rledger extract statement.ofx -a Assets:Bank:Checking
 ```
 
 OFX files contain structured data, so no column mapping is needed.
+
+## WASM Importers (custom formats)
+
+For bank formats CSV and OFX don't cover — proprietary `.dat` files, PDF, MT940, FinTS, vendor-specific JSON — you can load a sandboxed `.wasm` module that implements the `Importer` trait. WASM importers participate in the same `identify`-then-`extract` dispatch as the built-ins; they're indistinguishable to the CLI once loaded.
+
+```bash
+# Single .wasm file (highest precedence — overrides discovered + built-in)
+rledger extract --wasm-importer ./my-bank.wasm statement.dat -a Assets:Bank
+
+# Or scan a directory at startup
+rledger extract --wasm-importer-dir ~/.config/rledger/importers.d statement.dat -a Assets:Bank
+```
+
+Persistent setup goes in `importers.toml`:
+
+```toml
+# All `.wasm` files in this dir are loaded at startup. Subdirectories are
+# not recursed into. Override on the CLI with --wasm-importer-dir.
+wasm_importer_dir = "/etc/rledger/importers.d"
+```
+
+The sandbox is the same one used for directive plugins: no filesystem, no network, no WASI, with configurable memory (256 MiB default) and fuel (30 s default) caps. To **author** a WASM importer, depend on `rustledger-plugin-types` with the `guest` feature and use the `wasm_importer_main!` macro — see [`examples/wasm-importer-csv-example`](../../examples/wasm-importer-csv-example/) for a reference implementation.
 
 ## Multiple Accounts
 
@@ -139,7 +161,7 @@ rledger extract --importer credit_card chase-card.csv
 Or specify a custom config path:
 
 ```bash
-rledger extract --importers-config path/to/importers.toml --importer credit_card chase-card.csv
+rledger extract --config path/to/importers.toml --importer credit_card chase-card.csv
 ```
 
 ## Enriched Imports
@@ -148,7 +170,7 @@ The import pipeline can automatically enrich transactions beyond basic CSV/OFX
 extraction:
 
 - **Auto-inference**: Automatically detect CSV delimiter, date format, and column roles
-- **Merchant dictionary**: ~60 built-in merchant patterns (grocery, dining, transport, subscriptions, etc.) for automatic account categorization
+- **Merchant dictionary**: ~150 built-in merchant patterns (grocery, dining, transport, subscriptions, etc.) for automatic account categorization
 - **Transaction fingerprinting**: Stable structural hashes for deduplication against existing ledger entries
 - **Confidence scores**: Every enrichment decision carries a confidence value
 

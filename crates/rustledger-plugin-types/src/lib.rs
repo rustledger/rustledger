@@ -4,13 +4,27 @@
 //! Use it as a dependency in your plugin crate to ensure type compatibility with
 //! the rustledger host.
 //!
-//! # Quick Start
+//! # Two subsystems
+//!
+//! Rustledger has two distinct WASM plugin subsystems, and this crate hosts
+//! the shared types for both:
+//!
+//! - **Directive plugins** transform the directive stream *after* parsing
+//!   (tagging, dedup, categorization). Required export: `process`. Host
+//!   loader: `rustledger-plugin`. The Quick Start below covers this case.
+//! - **WASM importers** turn bank-statement files *into* directives.
+//!   Required exports: `metadata`, `identify`, `extract`, `extract_enriched`.
+//!   Host loader: `rustledger-importer::WasmImporter`. Use the
+//!   `wasm_importer_main!` macro (behind the `guest` feature) to generate
+//!   the boilerplate. See the [`guest`] module for details.
+//!
+//! # Directive-Plugin Quick Start
 //!
 //! Add this to your plugin's `Cargo.toml`:
 //!
 //! ```toml
 //! [dependencies]
-//! rustledger-plugin-types = "0.10"
+//! rustledger-plugin-types = "0.15"
 //! rmp-serde = "1"
 //! ```
 //!
@@ -71,7 +85,7 @@
 //!
 //! Plugin types are versioned with rustledger. For best compatibility, use the
 //! same minor version of `rustledger-plugin-types` as the rustledger host you're
-//! targeting (e.g., `0.10.x` for rustledger `0.10.x`).
+//! targeting (e.g., `0.15.x` for rustledger `0.15.x`).
 //!
 //! # Building
 //!
@@ -83,6 +97,54 @@
 //! ```
 //!
 //! The output will be in `target/wasm32-unknown-unknown/release/your_plugin.wasm`
+//!
+//! # WASM-Importer Quick Start
+//!
+//! Importers read source files (CSV, OFX, …) and emit directives. The host
+//! loader lives in `rustledger-importer`; the wire format and a
+//! boilerplate-eliminating macro live here.
+//!
+//! Enable the `guest` feature, then use `wasm_importer_main!`:
+//!
+//! ```toml
+//! [dependencies]
+//! rustledger-plugin-types = { version = "0.15", features = ["guest"] }
+//! ```
+//!
+//! ```rust,ignore
+//! use rustledger_plugin_types::{
+//!     DirectiveData, DirectiveWrapper, ImporterInput, ImporterOutput,
+//!     OpenData, wasm_importer_main,
+//! };
+//!
+//! fn identify(path: &str) -> bool {
+//!     path.ends_with(".mybank")
+//! }
+//!
+//! fn extract(input: ImporterInput) -> ImporterOutput {
+//!     // Parse input.content; emit DirectiveWrapper values.
+//!     ImporterOutput::new(vec![/* … */])
+//! }
+//!
+//! wasm_importer_main! {
+//!     name: "my-bank",
+//!     description: "MyBank CSV statements",
+//!     identify: identify,
+//!     extract: extract,
+//!     // `extract_enriched` is auto-generated as a Default-categorization
+//!     // passthrough. Add `extract_enriched: my_fn` to override.
+//! }
+//! ```
+//!
+//! Importer ABI types defined in this crate: [`ImporterInput`],
+//! [`IdentifyInput`], [`IdentifyOutput`], [`ImporterOutput`],
+//! [`EnrichedImporterOutput`], [`MetadataOutput`], [`EnrichmentWrapper`],
+//! [`AlternativeWrapper`].
+//!
+//! Wire-format method strings for `EnrichmentWrapper::method`: `"rule"`,
+//! `"merchant-dict"` (hyphen, not underscore), `"ml"`, `"llm"`, `"manual"`,
+//! `"default"`. Unknown values trigger a host warning and fall back to
+//! `Default`.
 
 #![warn(missing_docs)]
 

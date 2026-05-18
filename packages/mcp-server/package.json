@@ -35,12 +35,12 @@
     "@rustledger/wasm": "^0.15.0"
   },
   "devDependencies": {
-    "@types/node": "^22.0.0",
+    "@types/node": "^24.0.0",
     "typescript": "^5.7.0",
     "vitest": "^4.0.17"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=24"
   },
   "publishConfig": {
     "access": "public"

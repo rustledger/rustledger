@@ -122,7 +122,7 @@ Persistent setup goes in `importers.toml`:
 wasm_importer_dir = "/etc/rledger/importers.d"
 ```
 
-The sandbox is the same one used for directive plugins: no filesystem, no network, no WASI, with configurable memory (256 MiB default) and fuel (30 s default) caps. To **author** a WASM importer, depend on `rustledger-plugin-types` with the `guest` feature and use the `wasm_importer_main!` macro — see [`examples/wasm-importer-csv-example`](../../examples/wasm-importer-csv-example/) for a reference implementation.
+The sandbox is the same one used for directive plugins: no filesystem, no network, no WASI, with configurable memory (256 MiB default) and fuel (30 s default) caps. To **author** a WASM importer, depend on `rustledger-plugin-types` with the `guest` feature and use the `wasm_importer_main!` macro — see [`examples/wasm-importer-csv-example`](https://github.com/rustledger/rustledger/tree/main/examples/wasm-importer-csv-example) for a reference implementation.
 
 ## Multiple Accounts
 

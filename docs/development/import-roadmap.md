@@ -23,9 +23,9 @@
 | WASM Import Plugins | ✅ Done | Third-party importers as sandboxed `.wasm` modules ([`WasmImporter`][wasm-importer], [`wasm_importer_main!`][wasm-macro], [example][wasm-csv-example]) |
 | Source Archive | 🔮 Future | SQLite append-only store |
 
-[wasm-importer]: ../../crates/rustledger-importer/src/wasm.rs
-[wasm-macro]: ../../crates/rustledger-plugin-types/src/guest.rs
-[wasm-csv-example]: ../../examples/wasm-importer-csv-example/
+[wasm-importer]: https://github.com/rustledger/rustledger/blob/main/crates/rustledger-importer/src/wasm.rs
+[wasm-macro]: https://github.com/rustledger/rustledger/blob/main/crates/rustledger-plugin-types/src/guest.rs
+[wasm-csv-example]: https://github.com/rustledger/rustledger/tree/main/examples/wasm-importer-csv-example
 
 **Current version**: Enrichment pipeline (Phase 1 complete, Phase 4.1 partial)
 

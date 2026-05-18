@@ -238,7 +238,7 @@ Persistent setup goes in `importers.toml`:
 wasm_importer_dir = "/etc/rledger/importers.d"
 ```
 
-WASM importers participate in the same `identify`-then-`extract` dispatch as the built-ins. See [`examples/wasm-importer-csv-example`](../../examples/wasm-importer-csv-example/) for how to write one.
+WASM importers participate in the same `identify`-then-`extract` dispatch as the built-ins. See [`examples/wasm-importer-csv-example`](https://github.com/rustledger/rustledger/tree/main/examples/wasm-importer-csv-example) for how to write one.
 
 ### Direct CLI Import (No Config)
 

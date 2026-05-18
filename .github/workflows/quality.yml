@@ -44,6 +44,11 @@ jobs:
         with:
           toolchain: stable
           components: llvm-tools-preview
+          # wasm32 needed by rustledger-importer's build.rs for the
+          # wasm_importer_e2e fixture. Without it, the test detects the
+          # missing sentinel and panics under CI=true. Same rationale
+          # as the `ci` matrix in ci.yml.
+          targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@fb03c6692ef8fff8e8e84e2aa701f168d7ed3811 # cargo-llvm-cov

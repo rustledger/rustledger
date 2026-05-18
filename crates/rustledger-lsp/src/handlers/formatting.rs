@@ -1,18 +1,28 @@
 //! Document formatting handler for Beancount files.
 //!
-//! Provides formatting for:
-//! - Consistent indentation (2 spaces for postings)
-//! - Aligned amounts in transactions
-//! - Consistent spacing around operators
-
+//! Defers all directive formatting to
+//! [`rustledger_core::format::format_directive`] — the same code path
+//! that powers `rledger format` on the CLI. This is the only place
+//! the LSP should ever decide *how* a directive looks: any
+//! "beancount-canonical formatting" logic lives in `rustledger-core`,
+//! the LSP just emits text edits that replace each directive's source
+//! span with the canonical rendering.
+//!
+//! This handler additionally cleans up non-directive lines:
+//! - tabs → two spaces
+//! - trailing whitespace stripped
+//!
+//! Closes #1142: previously the LSP shipped its own line-based
+//! formatter that drifted out of sync with the AST-based core
+//! formatter; with posting-level metadata it would overwrite
+//! metadata lines with posting content (data loss). Delegating to
+//! `format_directive` makes LSP and CLI output identical by
+//! construction.
 use lsp_types::{DocumentFormattingParams, Position, Range, TextEdit};
-use rustledger_core::Directive;
+use rustledger_core::format::{FormatConfig, format_directive};
 use rustledger_parser::ParseResult;
 
 use super::utils::byte_offset_to_position;
-
-/// Default column for amount alignment.
-const AMOUNT_COLUMN: usize = 50;
 
 /// Handle a document formatting request.
 pub fn handle_formatting(
@@ -20,43 +30,83 @@ pub fn handle_formatting(
     source: &str,
     parse_result: &ParseResult,
 ) -> Option<Vec<TextEdit>> {
+    let mut edits = directive_format_edits(source, parse_result);
+    edits.extend(non_directive_cleanup_edits(source));
+    finalize_edits(edits)
+}
+
+/// One [`TextEdit`] per directive whose canonical rendering differs
+/// from the source span. The edit replaces the directive's full
+/// source span (start..end byte offsets from the parser) with the
+/// output of [`format_directive`].
+///
+/// Per-posting line indexing is **deliberately avoided** — that was
+/// the bug in #1142. Postings can have their own metadata lines, so
+/// `start_line + 1 + i` doesn't reliably point at posting `i`'s
+/// source line.
+fn directive_format_edits(source: &str, parse_result: &ParseResult) -> Vec<TextEdit> {
+    let config = FormatConfig::default();
     let mut edits = Vec::new();
-    let lines: Vec<&str> = source.lines().collect();
 
     for spanned in &parse_result.directives {
-        if let Directive::Transaction(txn) = &spanned.value {
-            let (start_line, _) = byte_offset_to_position(source, spanned.span.start);
-
-            // Format each posting
-            for (i, posting) in txn.postings.iter().enumerate() {
-                let posting_line = start_line + 1 + i as u32;
-
-                if let Some(line) = lines.get(posting_line as usize)
-                    && let Some(edit) = format_posting_line(line, posting_line, posting)
-                {
-                    edits.push(edit);
-                }
-            }
+        let start = spanned.span.start;
+        let end = spanned.span.end;
+        if start > source.len() || end > source.len() || start > end {
+            // Malformed span — skip rather than panic.
+            continue;
         }
+        let original = &source[start..end];
+        let formatted = format_directive(&spanned.value, &config);
+
+        // The core formatter always appends a trailing newline; the
+        // source span may or may not include the directive's own
+        // newline depending on the parser. Compare trim_end'd forms
+        // to avoid spurious edits for newline-only differences.
+        if original.trim_end() == formatted.trim_end() {
+            continue;
+        }
+
+        let (start_line, start_col) = byte_offset_to_position(source, start);
+        let (end_line, end_col) = byte_offset_to_position(source, end);
+
+        // Preserve whatever trailing newline the source had (or
+        // didn't) so we don't churn line counts on files without a
+        // final newline.
+        let new_text = if original.ends_with('\n') {
+            formatted
+        } else {
+            formatted.trim_end_matches('\n').to_string()
+        };
+
+        edits.push(TextEdit {
+            range: Range {
+                start: Position::new(start_line, start_col),
+                end: Position::new(end_line, end_col),
+            },
+            new_text,
+        });
     }
 
-    // Also format standalone lines (non-directive lines that might need cleanup)
-    for (line_num, line) in lines.iter().enumerate() {
-        // Fix tabs to spaces
+    edits
+}
+
+/// Whole-line tab→spaces and trailing-whitespace cleanup for lines
+/// that aren't subsumed by a directive edit. Cheap, line-local, and
+/// doesn't depend on the AST.
+fn non_directive_cleanup_edits(source: &str) -> Vec<TextEdit> {
+    let mut edits = Vec::new();
+    for (line_num, line) in source.lines().enumerate() {
         if line.contains('\t') {
             let new_line = line.replace('\t', "  ");
-            if new_line != *line {
-                edits.push(TextEdit {
-                    range: Range {
-                        start: Position::new(line_num as u32, 0),
-                        end: Position::new(line_num as u32, line.len() as u32),
-                    },
-                    new_text: new_line,
-                });
-            }
+            edits.push(TextEdit {
+                range: Range {
+                    start: Position::new(line_num as u32, 0),
+                    end: Position::new(line_num as u32, line.len() as u32),
+                },
+                new_text: new_line,
+            });
+            continue;
         }
-
-        // Trim trailing whitespace
         let trimmed = line.trim_end();
         if trimmed.len() < line.len() {
             edits.push(TextEdit {
@@ -68,8 +118,18 @@ pub fn handle_formatting(
             });
         }
     }
+    edits
+}
 
-    // Remove duplicate edits and sort
+/// Sort edits, drop edits subsumed by an earlier edit's range, return
+/// `None` if empty. LSP requires non-overlapping edits.
+///
+/// Directive edits cover a multi-line range; the per-line cleanup
+/// edits target specific positions on individual lines. When a
+/// directive's span includes a line that also has trailing
+/// whitespace, the directive edit's `new_text` (which is canonical
+/// formatter output and therefore has no trailing whitespace) wins.
+fn finalize_edits(mut edits: Vec<TextEdit>) -> Option<Vec<TextEdit>> {
     edits.sort_by(|a, b| {
         a.range
             .start
@@ -77,85 +137,23 @@ pub fn handle_formatting(
             .cmp(&b.range.start.line)
             .then(a.range.start.character.cmp(&b.range.start.character))
     });
-    edits.dedup_by(|a, b| a.range == b.range);
-
-    if edits.is_empty() { None } else { Some(edits) }
+    // After sorting by start, walk forward and keep an edit only if it
+    // starts strictly after the previous kept edit's end. This drops
+    // line-cleanup edits that fall inside a directive edit's span.
+    let mut kept: Vec<TextEdit> = Vec::with_capacity(edits.len());
+    for e in edits {
+        if let Some(last) = kept.last()
+            && !position_lt(last.range.end, e.range.start)
+        {
+            continue;
+        }
+        kept.push(e);
+    }
+    if kept.is_empty() { None } else { Some(kept) }
 }
 
-/// Format a posting line for alignment.
-fn format_posting_line(
-    line: &str,
-    line_num: u32,
-    posting: &rustledger_core::Posting,
-) -> Option<TextEdit> {
-    let trimmed = line.trim();
-
-    // Skip if empty or comment
-    if trimmed.is_empty() || trimmed.starts_with(';') {
-        return None;
-    }
-
-    // Parse the line to find account and amount positions
-    let account = posting.account.to_string();
-
-    // Check if line starts with proper indentation
-    let current_indent = line.len() - line.trim_start().len();
-    let expected_indent = 2;
-
-    // Build the formatted line
-    let mut formatted = String::new();
-
-    // Add indentation
-    formatted.push_str(&" ".repeat(expected_indent));
-
-    // Add account
-    formatted.push_str(&account);
-
-    // Add amount if present
-    if let Some(ref units) = posting.units
-        && let (Some(num), Some(curr)) = (units.number(), units.currency())
-    {
-        let num_str = num.to_string();
-        let curr_str = curr.to_string();
-        let amount_str = format!("{} {}", num_str, curr_str);
-
-        // Calculate padding to align amount at AMOUNT_COLUMN
-        let current_len = expected_indent + account.len();
-        let padding = if current_len < AMOUNT_COLUMN - amount_str.len() {
-            AMOUNT_COLUMN - amount_str.len() - current_len
-        } else {
-            2 // Minimum 2 spaces
-        };
-
-        formatted.push_str(&" ".repeat(padding));
-        formatted.push_str(&amount_str);
-    }
-
-    // Check if formatting changed anything significant
-    let line_trimmed_end = line.trim_end();
-    if formatted.trim_end() != line_trimmed_end
-        && (current_indent != expected_indent || needs_alignment(line, &formatted))
-    {
-        Some(TextEdit {
-            range: Range {
-                start: Position::new(line_num, 0),
-                end: Position::new(line_num, line.len() as u32),
-            },
-            new_text: formatted,
-        })
-    } else {
-        None
-    }
-}
-
-/// Check if line needs amount alignment.
-fn needs_alignment(original: &str, formatted: &str) -> bool {
-    // Simple heuristic: if the formatted version has different spacing, align
-    let orig_parts: Vec<&str> = original.split_whitespace().collect();
-    let fmt_parts: Vec<&str> = formatted.split_whitespace().collect();
-
-    // If content is the same but spacing is different, we need alignment
-    orig_parts == fmt_parts && original.trim() != formatted.trim()
+fn position_lt(a: Position, b: Position) -> bool {
+    (a.line, a.character) < (b.line, b.character)
 }
 
 #[cfg(test)]
@@ -163,9 +161,7 @@ mod tests {
     use super::*;
     use rustledger_parser::parse;
 
-    #[test]
-    fn test_formatting_removes_trailing_whitespace() {
-        let source = "2024-01-01 open Assets:Bank USD   \n";
+    fn format(source: &str) -> Option<Vec<TextEdit>> {
         let result = parse(source);
         let params = DocumentFormattingParams {
             text_document: lsp_types::TextDocumentIdentifier {
@@ -174,28 +170,125 @@ mod tests {
             options: Default::default(),
             work_done_progress_params: Default::default(),
         };
+        handle_formatting(&params, source, &result)
+    }
 
-        let edits = handle_formatting(&params, source, &result);
-        assert!(edits.is_some());
+    /// Apply an LSP edit set to source for assertion purposes. Edits
+    /// are non-overlapping after finalize_edits; we apply in reverse
+    /// position order so earlier offsets stay valid as we splice.
+    fn apply(source: &str, edits: &[TextEdit]) -> String {
+        let line_starts: Vec<usize> = std::iter::once(0)
+            .chain(
+                source
+                    .char_indices()
+                    .filter(|(_, c)| *c == '\n')
+                    .map(|(i, _)| i + 1),
+            )
+            .collect();
+        let pos_to_offset = |p: Position| -> usize {
+            let line = p.line as usize;
+            let base = *line_starts.get(line).unwrap_or(&source.len());
+            (base + p.character as usize).min(source.len())
+        };
+        let mut out = source.to_string();
+        let mut applied: Vec<(usize, usize, String)> = edits
+            .iter()
+            .map(|e| {
+                (
+                    pos_to_offset(e.range.start),
+                    pos_to_offset(e.range.end),
+                    e.new_text.clone(),
+                )
+            })
+            .collect();
+        applied.sort_by_key(|(start, _, _)| std::cmp::Reverse(*start));
+        for (start, end, text) in applied {
+            out.replace_range(start..end, &text);
+        }
+        out
+    }
+
+    #[test]
+    fn test_formatting_removes_trailing_whitespace() {
+        let source = "2024-01-01 open Assets:Bank USD   \n";
+        let edits = format(source).expect("expected edits");
+        assert!(!edits.is_empty());
     }
 
     #[test]
     fn test_formatting_converts_tabs() {
         let source = "2024-01-01 * \"Test\"\n\tAssets:Bank\n";
-        let result = parse(source);
-        let params = DocumentFormattingParams {
-            text_document: lsp_types::TextDocumentIdentifier {
-                uri: "file:///test.beancount".parse().unwrap(),
-            },
-            options: Default::default(),
-            work_done_progress_params: Default::default(),
+        let edits = format(source).expect("expected edits");
+        assert!(edits.iter().any(|e| e.new_text.contains("  ")));
+    }
+
+    /// Regression for #1142: posting-level metadata must be
+    /// preserved. The previous line-based formatter used
+    /// `posting_line = start_line + 1 + i` and clobbered metadata
+    /// lines when postings had their own `meta:` entries.
+    #[test]
+    fn issue_1142_posting_metadata_is_preserved() {
+        // Already canonically formatted (amount_column = 60).
+        let source = "\
+2024-07-20 * \"Purchase with multipart returns\"
+  Assets:Joint:Revolut:EUR                           -26 EUR
+  Assets:Ohad:Amazon-Gift-Card                      9.00 EUR
+    effective_date: 2024-07-25
+  Assets:Ohad:Amazon-Gift-Card                     17.00 EUR
+    effective_date: 2024-07-27
+";
+
+        let edits = format(source);
+        let result = match edits {
+            None => source.to_string(),
+            Some(ref edits) => apply(source, edits),
         };
 
-        let edits = handle_formatting(&params, source, &result);
-        assert!(edits.is_some());
+        // Round-trip must preserve BOTH effective_date metadata lines.
+        assert!(
+            result.contains("effective_date: 2024-07-25"),
+            "first posting metadata was clobbered; got:\n{result}",
+        );
+        assert!(
+            result.contains("effective_date: 2024-07-27"),
+            "second posting metadata was clobbered; got:\n{result}",
+        );
+        // And there must be exactly three posting lines, not the
+        // four-line duplicated output the bug produced.
+        let posting_line_count = result
+            .lines()
+            .filter(|l| l.starts_with("  Assets:"))
+            .count();
+        assert_eq!(
+            posting_line_count, 3,
+            "expected 3 posting lines, got {posting_line_count}:\n{result}",
+        );
+    }
 
-        let edits = edits.unwrap();
-        // Should have edit to replace tab
-        assert!(edits.iter().any(|e| e.new_text.contains("  ")));
+    /// LSP and CLI must produce byte-identical output for the same
+    /// directive — the whole point of #1142's "expected behavior".
+    #[test]
+    fn lsp_output_matches_rledger_format() {
+        let source = "\
+2024-07-20 * \"Purchase\"
+  Assets:Bank             -26 EUR
+  Expenses:Food            26 EUR
+";
+        let parse_result = parse(source);
+        let txn = &parse_result.directives[0].value;
+        let cli_output = format_directive(txn, &FormatConfig::default());
+
+        let lsp_result = match format(source) {
+            None => source.to_string(),
+            Some(edits) => apply(source, &edits),
+        };
+
+        // Strip trailing newline differences (the CLI's format_directive
+        // always appends one; the source span may or may not).
+        assert_eq!(
+            lsp_result.trim_end(),
+            cli_output.trim_end(),
+            "LSP and CLI output diverged"
+        );
     }
 }

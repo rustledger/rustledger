@@ -155,6 +155,12 @@ jobs:
         with:
           toolchain: stable
           components: ${{ matrix.components }}
+          # wasm32 needed by rustledger-importer's build.rs (which
+          # compiles the sample_stub fixture for the wasm_importer_e2e
+          # test). Without it, build.rs gracefully skips and the e2e
+          # test silently passes without doing anything — see PR #1135
+          # commit history.
+          targets: wasm32-unknown-unknown
       - uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2
       - name: Install nextest

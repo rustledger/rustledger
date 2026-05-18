@@ -26,15 +26,22 @@
 //!    tests for their half; the `extract_enriched` assertion below
 //!    is the only place the symmetry is actually proven end to end.
 //!
-//! # Skip when wasm32 unavailable
+//! # Skip when wasm32 unavailable (local dev only)
 //!
 //! `build.rs` writes the compiled fixture to `OUT_DIR/sample_stub.wasm`.
 //! On dev machines without the `wasm32-unknown-unknown` target it
 //! emits a `cargo:warning=` and skips writing the file. This test
-//! detects the missing sentinel via `Path::exists()` and bails with a
-//! `println!` rather than failing — matches the build.rs design that
+//! detects the missing sentinel via `Path::exists()` and bails with an
+//! `eprintln!` rather than failing — matches the build.rs design that
 //! prefers "no signal" to "compile error" for the common case where
 //! someone runs `cargo test` without the wasm32 target installed.
+//!
+//! **In CI we refuse to skip.** GitHub Actions sets `CI=true`; if the
+//! sentinel is missing under CI we panic with an actionable message,
+//! because a silent skip there means the wave 2.3e value (real wasm32
+//! round-trip) was never exercised. The first revision of this PR fell
+//! into exactly that trap — the test passed in 180 ms because cargo
+//! couldn't find the wasm32 target and the graceful-skip path ran.
 
 use std::path::{Path, PathBuf};
 
@@ -62,7 +69,20 @@ fn minimal_config() -> ImporterConfig {
 #[test]
 fn stub_wasm_module_round_trips_every_entry_point() {
     let Some(wasm_path) = fixture_wasm_path() else {
-        println!("skip: sample_stub.wasm sentinel missing — wasm32-unknown-unknown not installed?");
+        // CI must actually exercise the wasm32 path — silent skip there
+        // defeats the whole point of the e2e test. Detect GitHub
+        // Actions' `CI=true` and panic with an actionable message.
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "sample_stub.wasm sentinel missing in CI — wasm32-unknown-unknown \
+             target not installed, build.rs gracefully skipped. Install it via \
+             `targets: wasm32-unknown-unknown` on the rust-toolchain step in \
+             .github/workflows/ci.yml (already done for the `ci` matrix; add to \
+             any new job that runs `cargo test -p rustledger-importer`)."
+        );
+        eprintln!(
+            "skip: sample_stub.wasm sentinel missing — wasm32-unknown-unknown not installed?"
+        );
         return;
     };
 

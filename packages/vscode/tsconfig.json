@@ -2,13 +2,25 @@
   "compilerOptions": {
     "target": "ES2020",
     "module": "commonjs",
+    // Explicit `node10` (the historical default for `module: commonjs`).
+    // TS 6 deprecates this name but still accepts it under
+    // `ignoreDeprecations: "6.0"` — kept here because VS Code's extension
+    // publisher tooling (`@vscode/vsce`) hasn't sanctioned the
+    // `nodenext`/`bundler` migration path for extensions yet. Revisit
+    // before adopting TS 7.
+    "moduleResolution": "node10",
+    "ignoreDeprecations": "6.0",
     "lib": ["ES2020"],
     "outDir": "./out",
     "rootDir": "./src",
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
-    "forceConsistentCasingInFileNames": true
+    "forceConsistentCasingInFileNames": true,
+    // Lock in what was previously auto-included. TS 6 changes the
+    // default to `[]`; pinning explicitly avoids a silent regression
+    // when we eventually drop `ignoreDeprecations`.
+    "types": ["node"]
   },
   "include": ["src"],
   "exclude": ["node_modules", "out"]

@@ -178,25 +178,28 @@ pub fn pack_output(bytes: Vec<u8>) -> u64 {
 ///
 /// # Safety
 ///
-/// The host writes input bytes into our linear memory via the
-/// `alloc` export then passes the offset + length. Reading those
-/// bytes back is safe under that contract — but only the host
-/// should call into the macro-generated exports that route here.
-/// Direct calls from guest code are a misuse.
+/// The caller MUST guarantee that `ptr..ptr+len` is a valid byte
+/// range in the guest's linear memory. The macro-generated entry
+/// points satisfy this because the host wrote the bytes via our
+/// `alloc` export immediately before invoking us. Calling this
+/// helper from any other context — e.g. unit tests or guest-side
+/// utility code — is a misuse and can read uninitialized memory
+/// or trigger a wasmtime trap.
 ///
 /// # Errors
 ///
 /// Returns [`DecodeError`] if the bytes don't decode as `T`. In the
 /// macro's call sites, this triggers a panic-trap which the host
 /// surfaces as a `WasmImporterError::Runtime`.
-pub fn decode_input<T>(ptr: u32, len: u32) -> Result<T, DecodeError>
+pub unsafe fn decode_input<T>(ptr: u32, len: u32) -> Result<T, DecodeError>
 where
     T: serde::de::DeserializeOwned,
 {
-    // SAFETY: the host wrote `len` bytes at `ptr` via our `alloc`
-    // export immediately before invoking the entry point that
-    // forwards here. The memory is valid for the duration of this
-    // call (wasmtime doesn't reclaim guest linear memory mid-call).
+    // SAFETY: the caller asserted (via the unsafe fn signature)
+    // that `ptr..ptr+len` is a valid byte range. The macro path
+    // gets this guarantee from the host's `alloc` + entry-point
+    // protocol; wasmtime doesn't reclaim guest linear memory
+    // mid-call.
     let bytes = unsafe { std::slice::from_raw_parts(ptr as *const u8, len as usize) };
     rmp_serde::from_slice(bytes)
 }
@@ -319,6 +322,27 @@ macro_rules! wasm_importer_main {
     };
 
     // Full form with explicit `extract_enriched`.
+    //
+    // # Why generated fns have `__wasm_importer_*` Rust identifiers
+    //
+    // The WASM ABI requires exports literally named `alloc`,
+    // `metadata`, `identify`, `extract`, `extract_enriched`. But
+    // the user's example also defines `fn identify(...)`,
+    // `fn extract(...)` etc. at the same module scope — if the
+    // macro generated those Rust names, the items collide and the
+    // crate doesn't compile.
+    //
+    // Fix: give the generated fns prefixed Rust identifiers and
+    // use `#[cfg_attr(target_arch = "wasm32", unsafe(export_name = "..."))]`
+    // to set the WASM linker symbol explicitly — but only on
+    // wasm32 builds. On native targets (where these fns are
+    // unreachable anyway), the export_name is omitted so test
+    // crates can invoke the macro multiple times without symbol
+    // collisions at link time.
+    //
+    // `#[unsafe(...)]` wrapping is required because the workspace
+    // is on Rust 2024, where attributes affecting linkage are now
+    // unsafe by default.
     (
         name: $name:expr,
         description: $desc:expr,
@@ -329,8 +353,8 @@ macro_rules! wasm_importer_main {
         /// Host-callable allocator. Returns a raw pointer into linear
         /// memory; the host writes `size` bytes there before calling
         /// the entry-point export that consumes them.
-        #[no_mangle]
-        pub extern "C" fn alloc(size: u32) -> *mut u8 {
+        #[cfg_attr(target_arch = "wasm32", unsafe(export_name = "alloc"))]
+        pub extern "C" fn __wasm_importer_alloc(size: u32) -> *mut u8 {
             let mut buf = ::std::vec::Vec::<u8>::with_capacity(size as usize);
             let ptr = buf.as_mut_ptr();
             ::std::mem::forget(buf);
@@ -339,8 +363,8 @@ macro_rules! wasm_importer_main {
 
         /// Returns msgpack-encoded `MetadataOutput` packed as
         /// `(ptr << 32) | len`. Called once by the host at load time.
-        #[no_mangle]
-        pub extern "C" fn metadata() -> u64 {
+        #[cfg_attr(target_arch = "wasm32", unsafe(export_name = "metadata"))]
+        pub extern "C" fn __wasm_importer_metadata() -> u64 {
             let out = $crate::MetadataOutput {
                 name: ($name).to_string(),
                 description: ($desc).to_string(),
@@ -351,15 +375,18 @@ macro_rules! wasm_importer_main {
 
         /// Decodes `IdentifyInput` from host memory, calls the
         /// user-provided identify fn, returns packed `IdentifyOutput`.
-        #[no_mangle]
-        pub extern "C" fn identify(ptr: u32, len: u32) -> u64 {
+        #[cfg_attr(target_arch = "wasm32", unsafe(export_name = "identify"))]
+        pub extern "C" fn __wasm_importer_identify(ptr: u32, len: u32) -> u64 {
             // Type-annotated binding: a signature mismatch at the
             // user's `fn identify(...)` definition surfaces here
             // with a clean "expected fn(&str) -> bool" error,
             // instead of an opaque error pointing into this macro.
             let identify_fn: fn(&str) -> bool = $identify;
+            // SAFETY: host wrote `len` bytes at `ptr` via our
+            // `alloc` export immediately before this call. The
+            // wasmtime Store doesn't reclaim guest memory mid-call.
             let input: $crate::IdentifyInput =
-                $crate::guest::decode_input(ptr, len).expect("identify input decode");
+                unsafe { $crate::guest::decode_input(ptr, len) }.expect("identify input decode");
             let matches: bool = identify_fn(input.path.as_str());
             let out = $crate::IdentifyOutput { matches };
             let bytes = $crate::guest::to_vec(&out).expect("identify output encode");
@@ -368,11 +395,12 @@ macro_rules! wasm_importer_main {
 
         /// Decodes `ImporterInput`, calls the user-provided extract
         /// fn, returns packed `ImporterOutput`.
-        #[no_mangle]
-        pub extern "C" fn extract(ptr: u32, len: u32) -> u64 {
+        #[cfg_attr(target_arch = "wasm32", unsafe(export_name = "extract"))]
+        pub extern "C" fn __wasm_importer_extract(ptr: u32, len: u32) -> u64 {
             let extract_fn: fn($crate::ImporterInput) -> $crate::ImporterOutput = $extract;
+            // SAFETY: see __wasm_importer_identify.
             let input: $crate::ImporterInput =
-                $crate::guest::decode_input(ptr, len).expect("extract input decode");
+                unsafe { $crate::guest::decode_input(ptr, len) }.expect("extract input decode");
             let output: $crate::ImporterOutput = extract_fn(input);
             let bytes = $crate::guest::to_vec(&output).expect("extract output encode");
             $crate::guest::pack_output(bytes)
@@ -382,15 +410,16 @@ macro_rules! wasm_importer_main {
         /// extract_enriched fn (or the default passthrough emitted
         /// by the no-extract_enriched macro arm), returns packed
         /// `EnrichedImporterOutput`.
-        #[no_mangle]
-        pub extern "C" fn extract_enriched(ptr: u32, len: u32) -> u64 {
+        #[cfg_attr(target_arch = "wasm32", unsafe(export_name = "extract_enriched"))]
+        pub extern "C" fn __wasm_importer_extract_enriched(ptr: u32, len: u32) -> u64 {
             // Note: the default-arm passes a closure here, not a
             // free fn. We accept any Fn(ImporterInput) ->
             // EnrichedImporterOutput rather than coercing to a fn
             // pointer (closures-with-captures wouldn't coerce).
             let extract_enriched_fn = $extract_enriched;
-            let input: $crate::ImporterInput =
-                $crate::guest::decode_input(ptr, len).expect("extract_enriched input decode");
+            // SAFETY: see __wasm_importer_identify.
+            let input: $crate::ImporterInput = unsafe { $crate::guest::decode_input(ptr, len) }
+                .expect("extract_enriched input decode");
             let output: $crate::EnrichedImporterOutput = (extract_enriched_fn)(input);
             let bytes = $crate::guest::to_vec(&output).expect("extract_enriched output encode");
             $crate::guest::pack_output(bytes)

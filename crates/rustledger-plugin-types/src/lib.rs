@@ -20,49 +20,37 @@
 //!
 //! # Directive-Plugin Quick Start
 //!
-//! Add this to your plugin's `Cargo.toml`:
+//! Use the [`wasm_plugin_main!`] macro (behind the `guest` feature) to
+//! generate the required `alloc` + `process` exports from a single
+//! user fn. Add this to your plugin's `Cargo.toml`:
 //!
 //! ```toml
 //! [dependencies]
-//! rustledger-plugin-types = "0.15"
-//! rmp-serde = "1"
+//! rustledger-plugin-types = { version = "0.15", features = ["guest"] }
 //! ```
 //!
 //! Then in your plugin:
 //!
 //! ```rust,ignore
-//! use rustledger_plugin_types::*;
+//! use rustledger_plugin_types::{
+//!     PluginInput, PluginOutput, wasm_plugin_main,
+//! };
 //!
-//! #[no_mangle]
-//! pub extern "C" fn process(input_ptr: u32, input_len: u32) -> u64 {
-//!     let input_bytes = unsafe {
-//!         std::slice::from_raw_parts(input_ptr as *const u8, input_len as usize)
-//!     };
-//!
-//!     let input: PluginInput = rmp_serde::from_slice(input_bytes).unwrap();
-//!
-//!     // Process directives — emit ops describing the output list.
+//! fn process(input: PluginInput) -> PluginOutput {
 //!     // Simplest case: keep every input unchanged.
-//!     let output = PluginOutput::passthrough(input.directives.len());
-//!
-//!     let output_bytes = rmp_serde::to_vec(&output).unwrap();
-//!     let output_ptr = alloc(output_bytes.len() as u32);
-//!     unsafe {
-//!         std::ptr::copy_nonoverlapping(
-//!             output_bytes.as_ptr(),
-//!             output_ptr,
-//!             output_bytes.len(),
-//!         );
-//!     }
-//!     ((output_ptr as u64) << 32) | (output_bytes.len() as u64)
+//!     PluginOutput::passthrough(input.directives.len())
 //! }
 //!
-//! #[no_mangle]
-//! pub extern "C" fn alloc(size: u32) -> *mut u8 {
-//!     let layout = std::alloc::Layout::from_size_align(size as usize, 1).unwrap();
-//!     unsafe { std::alloc::alloc(layout) }
+//! wasm_plugin_main! {
+//!     process: process,
 //! }
 //! ```
+//!
+//! See the [`guest`] module for the full macro reference (including
+//! the once-per-crate constraint on the `wasm32` target). If you need
+//! to write the `extern "C"` exports manually — for finer control or
+//! to avoid the `guest` feature — see the "Without the macro" section
+//! in the crate README.
 //!
 //! # Serialization Format
 //!

@@ -2,6 +2,15 @@
 
 This is a template for creating WASM plugins for rustledger.
 
+> **Most authors want the `wasm_plugin_main!` macro instead.** This
+> template hand-rolls `alloc` + `process` exports to show the
+> underlying mechanism. For new plugins, the macro in
+> `rustledger-plugin-types` (behind the `guest` feature) collapses the
+> same boilerplate to a 5-line invocation — see
+> [`docs/guides/custom-plugins.md`](../../docs/guides/custom-plugins.md)
+> for the macro form. Keep reading if you want finer control or to
+> understand what the macro expands to.
+
 ## Building
 
 ```bash

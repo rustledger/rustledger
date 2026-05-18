@@ -40,16 +40,81 @@ rmp-serde = "1"
 
 ## Directive Plugin Quick Start
 
+The `wasm_plugin_main!` macro (behind the `guest` feature) generates
+the required `alloc` + `process` exports from a single user
+`fn(PluginInput) -> PluginOutput`. This is the recommended path —
+collapses what used to be ~50 lines of `#[unsafe(no_mangle)] extern
+"C"` boilerplate down to a 5-line invocation. Add the feature to
+your `Cargo.toml`:
+
+```toml
+[dependencies]
+rustledger-plugin-types = { version = "0.15", features = ["guest"] }
+```
+
+Then:
+
+```rust,ignore
+use rustledger_plugin_types::{
+    DirectiveData, PluginInput, PluginOp, PluginOutput,
+    wasm_plugin_main,
+};
+
+fn process(input: PluginInput) -> PluginOutput {
+    // Emit one op per input directive:
+    //   Keep(i)        — unchanged (preserves span)
+    //   Modify(i, w)   — transformed content, inherits input[i]'s span
+    //   Delete(i)      — drop input[i]
+    //   Insert(w)      — fresh directive (synthesized location)
+    let mut ops = Vec::with_capacity(input.directives.len());
+    for (i, mut wrapper) in input.directives.into_iter().enumerate() {
+        if let DirectiveData::Transaction(ref mut txn) = wrapper.data {
+            txn.tags.push("processed".to_string());
+            ops.push(PluginOp::Modify(i, wrapper));
+        } else {
+            ops.push(PluginOp::Keep(i));
+        }
+    }
+    PluginOutput { ops, errors: vec![] }
+}
+
+wasm_plugin_main! {
+    process: process,
+}
+```
+
+Pure-passthrough validators that emit no transformations can short-circuit
+with the convenience constructor:
+
+```rust,ignore
+fn process(input: PluginInput) -> PluginOutput {
+    PluginOutput::passthrough(input.directives.len())
+}
+```
+
+> **Invoke `wasm_plugin_main!` once per cdylib crate.** It emits
+> exports named `alloc` and `process` — symbols the host loader looks
+> up by name. Two invocations cause a duplicate-symbol linker error on
+> `wasm32`. If you need multiple plugins, build them as separate
+> cdylib crates.
+
+<details>
+<summary>Without the macro (manual exports)</summary>
+
+The macro saves you from writing this, but if you need finer control —
+or you want to understand what the wire format looks like — here's the
+expansion in raw `extern "C"` form:
+
 ```rust
 use rustledger_plugin_types::*;
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn alloc(size: u32) -> *mut u8 {
     let layout = std::alloc::Layout::from_size_align(size as usize, 1).unwrap();
     unsafe { std::alloc::alloc(layout) }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn process(input_ptr: u32, input_len: u32) -> u64 {
     // Read input
     let input_bytes = unsafe {
@@ -62,11 +127,7 @@ pub extern "C" fn process(input_ptr: u32, input_len: u32) -> u64 {
         Err(e) => return error_response(&format!("Deserialize failed: {}", e)),
     };
 
-    // Process directives. Emit one op per input directive:
-    //   Keep(i)        — unchanged (preserves span)
-    //   Modify(i, w)   — transformed content, inherits input[i]'s span
-    //   Delete(i)      — drop input[i]
-    //   Insert(w)      — fresh directive (synthesized location)
+    // (process logic — see the macro example above)
     let mut ops = Vec::with_capacity(input.directives.len());
     for (i, mut wrapper) in input.directives.into_iter().enumerate() {
         if let DirectiveData::Transaction(ref mut txn) = wrapper.data {
@@ -96,7 +157,6 @@ pub extern "C" fn process(input_ptr: u32, input_len: u32) -> u64 {
     ((output_ptr as u64) << 32) | (output_bytes.len() as u64)
 }
 
-/// Helper to return an error response
 fn error_response(message: &str) -> u64 {
     let output = PluginOutput {
         ops: vec![],
@@ -111,12 +171,7 @@ fn error_response(message: &str) -> u64 {
 }
 ```
 
-Pure pass-through validators that emit no transformations can build the
-op list with the convenience constructor:
-
-```rust
-let output = PluginOutput::passthrough(input.directives.len());
-```
+</details>
 
 ## Building
 

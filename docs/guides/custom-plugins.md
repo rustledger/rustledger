@@ -22,7 +22,70 @@ WASM plugins let you extend rustledger without modifying its source code. You wr
 - Rust toolchain (`rustup`)
 - WASM target: `rustup target add wasm32-unknown-unknown`
 
-## Quick Start
+## Recommended: use `wasm_plugin_main!`
+
+The shortest path to a working plugin is the `wasm_plugin_main!` macro
+in `rustledger-plugin-types` (behind the `guest` feature). It generates
+the `alloc` + `process` exports from a single user function, eliminating
+the ~50 lines of boilerplate the long-form walkthrough below covers.
+
+```toml
+# Cargo.toml
+[package]
+name = "my_plugin"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+rustledger-plugin-types = { version = "0.15", features = ["guest"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
+```
+
+```rust,ignore
+// src/lib.rs
+use rustledger_plugin_types::{
+    DirectiveData, PluginInput, PluginOp, PluginOutput,
+    wasm_plugin_main,
+};
+
+fn process(input: PluginInput) -> PluginOutput {
+    let mut ops = Vec::with_capacity(input.directives.len());
+    for (i, mut wrapper) in input.directives.into_iter().enumerate() {
+        if let DirectiveData::Transaction(ref mut txn) = wrapper.data {
+            txn.tags.push("processed".to_string());
+            ops.push(PluginOp::Modify(i, wrapper));
+        } else {
+            ops.push(PluginOp::Keep(i));
+        }
+    }
+    PluginOutput { ops, errors: vec![] }
+}
+
+wasm_plugin_main! {
+    process: process,
+}
+```
+
+Then build and load as in steps 4–5 of the long-form walkthrough below.
+
+> **Invoke the macro once per cdylib crate.** It emits the host-expected
+> `alloc` and `process` exports — two invocations cause a duplicate-symbol
+> linker error on `wasm32`. Build separate cdylib crates if you need
+> multiple plugins.
+
+The walkthrough below shows what the macro expands to and is useful if
+you want finer control (custom allocator, hand-rolled msgpack codec,
+non-`std` builds). For 95% of plugins, the macro is the right starting
+point.
+
+## Quick Start (long form — what the macro expands to)
 
 ### 1. Create a New Plugin Project
 

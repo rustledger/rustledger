@@ -1,0 +1,29 @@
+[package]
+name = "wasm-importer-csv-example"
+version = "0.1.0"
+edition = "2024"
+description = "Example WASM importer for rustledger — minimal CSV bank statement parser"
+publish = false
+
+# Standalone — not part of the rustledger workspace. We don't want
+# `cargo build --workspace` to compile this for the host target every
+# time; this builds on demand via:
+#   cargo build --target wasm32-unknown-unknown --release
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# Path-dep so the example always tracks the parent's wire-format types.
+# When the example ships as standalone documentation, switch this to a
+# version-pinned crates.io dep — `rustledger-plugin-types = "0.16"`.
+rustledger-plugin-types = { path = "../../crates/rustledger-plugin-types", features = ["guest"] }
+
+[profile.release]
+# Smallest possible .wasm — the host loads it as bytes, debuginfo is
+# wasted space inside the sandbox.
+opt-level = "z"
+lto = true
+strip = true
+codegen-units = 1

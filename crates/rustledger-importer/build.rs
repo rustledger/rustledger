@@ -71,6 +71,30 @@ fn main() {
         std::fs::remove_file(&sentinel).expect("remove stale sample_stub.wasm sentinel");
     }
 
+    // Skip the sub-cargo entirely under `cargo-llvm-cov`. It injects
+    // coverage rustflags via cargo's `--config 'build.rustflags=[...]'`
+    // which cannot be overridden by a child cargo invocation (cargo's
+    // `--config` array semantics MERGE rather than replace). The
+    // wasm32 stable toolchain ships no `profiler_builtins`, so
+    // `-Cinstrument-coverage` leaking through fails with
+    // `error[E0463]: can't find crate for 'profiler_builtins'`.
+    //
+    // The Test / Doctests / Regression CI jobs all exercise the e2e
+    // test for real (they don't run under cargo-llvm-cov). Coverage
+    // alone skipping this one test is an acceptable trade — the test
+    // file itself also checks `CARGO_LLVM_COV` and short-circuits
+    // without panicking, so this skip doesn't cause a CI red.
+    //
+    // `CARGO_LLVM_COV=1` is set by cargo-llvm-cov for every cargo
+    // invocation it spawns; it's the documented sentinel for tooling
+    // to opt out of coverage-incompatible work.
+    if std::env::var_os("CARGO_LLVM_COV").is_some() {
+        println!(
+            "cargo:warning=skipping sample_stub wasm32 fixture build under cargo-llvm-cov (incompatible with -Cinstrument-coverage); Test job exercises e2e for real"
+        );
+        return;
+    }
+
     // Use a target dir under OUT_DIR so we don't pollute the
     // workspace target/ and so concurrent test runs don't fight.
     let target_dir = out_dir.join("sample_stub_target");

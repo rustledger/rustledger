@@ -80,6 +80,16 @@ fn open_wrapper(account: &str) -> DirectiveWrapper {
 
 #[test]
 fn stub_wasm_plugin_round_trips_process() {
+    // cargo-llvm-cov can't be overridden in our wasm32 sub-cargo (see
+    // build.rs). The Test job exercises this test for real; coverage
+    // skips it.
+    if std::env::var_os("CARGO_LLVM_COV").is_some() {
+        eprintln!(
+            "skip: running under cargo-llvm-cov; wasm32 fixture skipped by build.rs (Test job covers e2e)"
+        );
+        return;
+    }
+
     let Some(wasm_path) = fixture_wasm_path() else {
         assert!(
             std::env::var_os("CI").is_none(),

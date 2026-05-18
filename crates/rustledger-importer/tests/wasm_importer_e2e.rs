@@ -72,8 +72,10 @@ fn stub_wasm_module_round_trips_every_entry_point() {
     // `--config` which can't be overridden in the wasm32 sub-cargo
     // build that our build.rs runs. build.rs detects `CARGO_LLVM_COV`
     // and skips the fixture compile; we mirror that here so the
-    // CI-panic guard below doesn't fire on coverage runs. The Test /
-    // Doctests / Regression jobs exercise this test for real.
+    // CI-panic guard below doesn't fire on coverage runs. The Test
+    // job (`cargo nextest run --all-features`) exercises this test
+    // for real — Doctests runs only doctests, Regression runs a shell
+    // script, so neither covers integration tests.
     if std::env::var_os("CARGO_LLVM_COV").is_some() {
         eprintln!(
             "skip: running under cargo-llvm-cov; wasm32 fixture skipped by build.rs (Test job covers e2e)"

@@ -58,6 +58,11 @@ fn main() {
     println!("cargo:rerun-if-changed=../rustledger-plugin-types/src");
     println!("cargo:rerun-if-changed=../rustledger-plugin-types/Cargo.toml");
     println!("cargo:rerun-if-changed=build.rs");
+    // Re-run build.rs when `CARGO_LLVM_COV` is set or unset, so the
+    // skip-vs-build decision below is re-evaluated on a coverage →
+    // normal transition. Without this, the previous (skipped) build
+    // is reused and the sentinel stays missing.
+    println!("cargo:rerun-if-env-changed=CARGO_LLVM_COV");
 
     let out_dir = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR set by cargo"));
     let sentinel = out_dir.join("sample_stub.wasm");
@@ -79,11 +84,13 @@ fn main() {
     // `-Cinstrument-coverage` leaking through fails with
     // `error[E0463]: can't find crate for 'profiler_builtins'`.
     //
-    // The Test / Doctests / Regression CI jobs all exercise the e2e
-    // test for real (they don't run under cargo-llvm-cov). Coverage
-    // alone skipping this one test is an acceptable trade — the test
-    // file itself also checks `CARGO_LLVM_COV` and short-circuits
-    // without panicking, so this skip doesn't cause a CI red.
+    // The Test CI job (`cargo nextest run --all-features`) exercises
+    // the e2e test for real — it doesn't run under cargo-llvm-cov.
+    // (Doctests runs `cargo test --doc` only; Regression runs a shell
+    // script — neither runs integration tests.) Coverage alone
+    // skipping this one test is an acceptable trade — the test file
+    // itself also checks `CARGO_LLVM_COV` and short-circuits without
+    // panicking, so this skip doesn't cause a CI red.
     //
     // `CARGO_LLVM_COV=1` is set by cargo-llvm-cov for every cargo
     // invocation it spawns; it's the documented sentinel for tooling

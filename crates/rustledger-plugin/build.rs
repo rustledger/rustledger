@@ -52,6 +52,8 @@ fn main() {
     println!("cargo:rerun-if-changed=../rustledger-plugin-types/src");
     println!("cargo:rerun-if-changed=../rustledger-plugin-types/Cargo.toml");
     println!("cargo:rerun-if-changed=build.rs");
+    // See importer's build.rs for rationale.
+    println!("cargo:rerun-if-env-changed=CARGO_LLVM_COV");
 
     let out_dir = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR set by cargo"));
     let sentinel = out_dir.join("sample_stub.wasm");

@@ -81,7 +81,13 @@ fn main() {
         .env_remove("RUSTDOCFLAGS")
         .env_remove("CARGO_INCREMENTAL")
         .env_remove("LLVM_PROFILE_FILE")
+        // See `rustledger-importer/build.rs` for the full rationale:
+        // cargo-llvm-cov injects coverage rustflags via cargo's
+        // `--config` which propagates to sub-cargos. Override it
+        // explicitly at command-line priority.
         .args([
+            "--config",
+            "target.wasm32-unknown-unknown.rustflags=[]",
             "build",
             "--release",
             "--target",

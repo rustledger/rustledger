@@ -106,7 +106,19 @@ fn main() {
         .env_remove("RUSTDOCFLAGS")
         .env_remove("CARGO_INCREMENTAL")
         .env_remove("LLVM_PROFILE_FILE")
+        // `cargo-llvm-cov` v0.6+ injects coverage rustflags via cargo's
+        // `--config 'build.rustflags=[...]'` arg, which propagates to
+        // sub-cargos through cargo's config merging (NOT via env vars
+        // we scrubbed above). The wasm32 stable toolchain ships no
+        // `profiler_builtins` crate, so `-Cinstrument-coverage` leaking
+        // through produces `error[E0463]: can't find crate for
+        // 'profiler_builtins'`. Counter it at maximum priority: pass
+        // our own `--config` that empties the rustflags for the wasm32
+        // target. Command-line `--config` beats env beats config file
+        // in cargo's merge order.
         .args([
+            "--config",
+            "target.wasm32-unknown-unknown.rustflags=[]",
             "build",
             "--release",
             "--target",

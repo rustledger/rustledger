@@ -20,7 +20,9 @@ cargo build --release --target wasm32-unknown-unknown
 ## Using it from the host
 
 ```rust
-use rustledger_importer::{WasmImporter, ImporterConfig};
+// `Importer` is the trait that provides `extract` / `extract_enriched`
+// / `identify`; without it the WasmImporter methods don't resolve.
+use rustledger_importer::{Importer, ImporterConfig, WasmImporter};
 
 let importer = WasmImporter::load(
     "target/wasm32-unknown-unknown/release/wasm_importer_csv_example.wasm",

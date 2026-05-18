@@ -1,0 +1,27 @@
+[package]
+name = "sample-stub-wasm-plugin"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Standalone — not part of the rustledger workspace. We don't want
+# `cargo build --workspace` to compile this for the host target every
+# time; the wasm32 build happens via the parent crate's build.rs only
+# when integration tests need it.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# Path-dep so this fixture always tracks the parent's wire-format
+# types and macro. If the ABI ever drifts, this build fails immediately.
+rustledger-plugin-types = { path = "../../../../rustledger-plugin-types", features = ["guest"] }
+
+[profile.release]
+# Smallest possible .wasm — the integration test loads it as bytes
+# and the host doesn't care about debuginfo.
+opt-level = "z"
+lto = true
+strip = true
+codegen-units = 1

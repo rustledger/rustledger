@@ -276,6 +276,25 @@ impl Plugin {
     }
 }
 
+/// Result of [`PluginManager::register_wasm_dir`].
+///
+/// Splits successfully-loaded plugin names from per-file failures so
+/// callers can log/report both. A single broken module in a dir with
+/// 19 good ones leaves the 19 registered; the broken one's path + error
+/// land in [`Self::failures`]. Mirrors `rustledger_importer::WasmDirScanReport`.
+#[derive(Debug, Default)]
+pub struct WasmPluginDirScanReport {
+    /// Plugin names of each successfully-loaded module, in load order
+    /// (lexicographic by file path). Name is the file stem — the path's
+    /// final component without the `.wasm` extension.
+    pub loaded: Vec<String>,
+    /// Per-file load failures. Each entry is the `.wasm` path plus the
+    /// underlying error. Per-entry I/O errors (rare — broken symlinks,
+    /// permission denied on a single inode) appear here tagged with
+    /// the dir path since the inode's name isn't known.
+    pub failures: Vec<(PathBuf, anyhow::Error)>,
+}
+
 /// Plugin manager that caches loaded plugins.
 pub struct PluginManager {
     /// Runtime configuration.
@@ -312,6 +331,78 @@ impl PluginManager {
         let index = self.plugins.len();
         self.plugins.push(plugin);
         Ok(index)
+    }
+
+    /// Scan `dir` for `*.wasm` files (one level only — no recursion)
+    /// and register each as a plugin.
+    ///
+    /// Files are loaded in sorted order so multi-plugin pipelines have
+    /// deterministic ordering across filesystems and platforms.
+    /// Extension matching is case-insensitive — `foo.wasm` and
+    /// `BAR.WASM` are both picked up.
+    ///
+    /// Loading is **skip-and-collect**: every loadable module is
+    /// registered; failures are accumulated in
+    /// [`WasmPluginDirScanReport::failures`] so the caller can decide
+    /// whether to log them, abort, or ignore. A single broken module
+    /// in a dir with 19 good ones doesn't prevent the 19 from
+    /// loading. Mirrors `ImporterRegistry::register_wasm_dir` in
+    /// `rustledger-importer`.
+    ///
+    /// Non-`.wasm` files (a `README.md` or `.gitignore`) and
+    /// subdirectories are silently skipped.
+    ///
+    /// # Errors
+    ///
+    /// The outer `Result` reports an I/O error reading `dir` itself
+    /// (dir doesn't exist, permission denied on the dir). Per-file
+    /// load failures land inside the report's `failures` vec so the
+    /// caller can surface them without aborting the rest of the scan.
+    pub fn register_wasm_dir(&mut self, dir: impl AsRef<Path>) -> Result<WasmPluginDirScanReport> {
+        let dir = dir.as_ref();
+        let entries = std::fs::read_dir(dir)
+            .with_context(|| format!("failed to read plugin dir {}", dir.display()))?;
+        let mut report = WasmPluginDirScanReport::default();
+        let mut wasm_paths: Vec<PathBuf> = Vec::new();
+        for entry in entries {
+            match entry {
+                Ok(e) => {
+                    let path = e.path();
+                    if path.is_file()
+                        && path
+                            .extension()
+                            .is_some_and(|ext| ext.eq_ignore_ascii_case("wasm"))
+                    {
+                        wasm_paths.push(path);
+                    }
+                }
+                Err(source) => {
+                    // Per-entry I/O error without a known inode name —
+                    // tag with the dir path so the user can debug.
+                    report
+                        .failures
+                        .push((dir.to_path_buf(), anyhow::Error::new(source)));
+                }
+            }
+        }
+        wasm_paths.sort();
+        for path in wasm_paths {
+            match self.load(&path) {
+                Ok(_index) => {
+                    // Plugin::load derives the name from the filename
+                    // (`load_bytes` is what takes a name explicitly).
+                    // Track the path stem so the report is useful for
+                    // `--list-plugins`-style output.
+                    let name = path.file_stem().map_or_else(
+                        || path.display().to_string(),
+                        |s| s.to_string_lossy().into_owned(),
+                    );
+                    report.loaded.push(name);
+                }
+                Err(e) => report.failures.push((path, e)),
+            }
+        }
+        Ok(report)
     }
 
     /// Execute a plugin by index.
@@ -1230,5 +1321,87 @@ mod tests {
             .execute(&empty_input(), &max_secs)
             .expect_err("passthrough WAT decode-fails by design");
         assert_not_fuel_trap(&err);
+    }
+
+    // ===== register_wasm_dir =====
+    //
+    // Mirrors `ImporterRegistry::register_wasm_dir`'s skip-and-collect
+    // contract. Build a tempdir holding a mix of valid `.wasm`, invalid
+    // `.wasm`, non-wasm files, and a subdirectory; assert the loader
+    // picks only the top-level `.wasm` files, loads what's valid,
+    // collects failures for what isn't, and never aborts the scan.
+
+    fn valid_plugin_wasm() -> Vec<u8> {
+        wat::parse_str(
+            r#"
+            (module
+                (memory (export "memory") 1)
+                (func (export "alloc") (param i32) (result i32) i32.const 0)
+                (func (export "process") (param i32 i32) (result i64) i64.const 0)
+            )
+            "#,
+        )
+        .expect("valid wat")
+    }
+
+    #[test]
+    fn register_wasm_dir_loads_valid_skips_broken_and_non_wasm() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let dir_path = dir.path();
+
+        // Two valid plugins — load in sorted order: `a_first`, `b_second`.
+        std::fs::write(dir_path.join("b_second.wasm"), valid_plugin_wasm()).unwrap();
+        std::fs::write(dir_path.join("a_first.wasm"), valid_plugin_wasm()).unwrap();
+
+        // A broken `.wasm` — failure lands in `failures`, doesn't abort.
+        std::fs::write(dir_path.join("broken.wasm"), b"not a wasm module").unwrap();
+
+        // Non-wasm files — silently ignored.
+        std::fs::write(dir_path.join("README.md"), "ignore me").unwrap();
+        std::fs::write(dir_path.join(".gitignore"), "ignore me too").unwrap();
+
+        // Subdirectory — not recursed into. Even with a `.wasm` inside.
+        let subdir = dir_path.join("sub");
+        std::fs::create_dir(&subdir).unwrap();
+        std::fs::write(subdir.join("recursed.wasm"), valid_plugin_wasm()).unwrap();
+
+        let mut manager = PluginManager::new();
+        let report = manager
+            .register_wasm_dir(dir_path)
+            .expect("dir-level read succeeds");
+
+        // Sorted load order — `a_first` before `b_second`.
+        assert_eq!(report.loaded, vec!["a_first", "b_second"]);
+        assert_eq!(manager.len(), 2);
+
+        // `broken.wasm` is the only failure.
+        assert_eq!(report.failures.len(), 1);
+        assert_eq!(
+            report.failures[0].0.file_name().and_then(|s| s.to_str()),
+            Some("broken.wasm"),
+        );
+    }
+
+    #[test]
+    fn register_wasm_dir_propagates_dir_level_io_error() {
+        let mut manager = PluginManager::new();
+        let err = manager
+            .register_wasm_dir("/this/dir/does/not/exist")
+            .expect_err("nonexistent dir should error at read_dir, not in failures");
+        assert!(err.to_string().contains("failed to read plugin dir"));
+    }
+
+    #[test]
+    fn register_wasm_dir_is_case_insensitive_on_extension() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("upper.WASM"), valid_plugin_wasm()).unwrap();
+        std::fs::write(dir.path().join("mixed.Wasm"), valid_plugin_wasm()).unwrap();
+
+        let mut manager = PluginManager::new();
+        let report = manager
+            .register_wasm_dir(dir.path())
+            .expect("scan succeeds");
+        assert_eq!(report.loaded.len(), 2, "both case variants should load");
+        assert!(report.failures.is_empty());
     }
 }

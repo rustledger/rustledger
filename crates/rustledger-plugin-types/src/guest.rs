@@ -454,6 +454,106 @@ macro_rules! wasm_importer_main {
     };
 }
 
+/// Generate the WASM directive-plugin entry points from a single
+/// user `process` function.
+///
+/// The directive-plugin ABI is simpler than the importer ABI: just
+/// two exports (`alloc` + `process`), one user fn signature
+/// (`fn(PluginInput) -> PluginOutput`), and no separate `metadata` /
+/// `identify` / enrichment paths. Host loader: `rustledger-plugin`'s
+/// `Plugin::load`.
+///
+/// # Example
+///
+/// ```ignore
+/// use rustledger_plugin_types::{
+///     DirectiveData, PluginInput, PluginOp, PluginOutput,
+///     wasm_plugin_main,
+/// };
+///
+/// fn process(input: PluginInput) -> PluginOutput {
+///     let mut ops = Vec::with_capacity(input.directives.len());
+///     for (i, mut wrapper) in input.directives.into_iter().enumerate() {
+///         if let DirectiveData::Transaction(ref mut txn) = wrapper.data {
+///             txn.tags.push("processed".to_string());
+///             ops.push(PluginOp::Modify(i, wrapper));
+///         } else {
+///             ops.push(PluginOp::Keep(i));
+///         }
+///     }
+///     PluginOutput { ops, errors: vec![] }
+/// }
+///
+/// wasm_plugin_main! {
+///     process: process,
+/// }
+/// ```
+///
+/// For pure-passthrough validators that emit no transformations, the
+/// user fn can return `PluginOutput::passthrough(input.directives.len())`.
+///
+/// # Required user-fn signature
+///
+/// - `process`: `fn(PluginInput) -> PluginOutput`
+///
+/// Fn items and non-capturing closures coerce in; capturing closures
+/// don't. Use a free fn for the cleanest error messages on signature
+/// mismatch.
+///
+/// # Failure handling
+///
+/// msgpack decode/encode errors in the macro-generated path panic,
+/// which traps the WASM module. The host (`rustledger-plugin`)
+/// surfaces traps as runtime errors. Guest-domain errors should flow
+/// through `PluginOutput::errors` (which carries [`crate::PluginError`]s
+/// with optional source-location) instead of panicking — same
+/// philosophy as `wasm_importer_main!`.
+///
+/// # Identifier naming + cfg-gated `export_name`
+///
+/// Generated fns use `__wasm_plugin_*` Rust idents so a user `fn
+/// process(...)` in the same module doesn't collide. The WASM linker
+/// symbol is set via
+/// `#[cfg_attr(target_arch = "wasm32", unsafe(export_name = "..."))]`
+/// so it only applies to the `wasm32` build — test crates can invoke
+/// the macro multiple times on the host target without symbol
+/// collisions at link time.
+#[macro_export]
+macro_rules! wasm_plugin_main {
+    (
+        process: $process:expr $(,)?
+    ) => {
+        /// Host-callable allocator. Returns a raw pointer into linear
+        /// memory; the host writes `size` bytes there before calling
+        /// `process`.
+        #[cfg_attr(target_arch = "wasm32", unsafe(export_name = "alloc"))]
+        pub extern "C" fn __wasm_plugin_alloc(size: u32) -> *mut u8 {
+            let mut buf = ::std::vec::Vec::<u8>::with_capacity(size as usize);
+            let ptr = buf.as_mut_ptr();
+            ::std::mem::forget(buf);
+            ptr
+        }
+
+        /// Decodes `PluginInput` from host memory, calls the
+        /// user-provided process fn, returns packed `PluginOutput`.
+        #[cfg_attr(target_arch = "wasm32", unsafe(export_name = "process"))]
+        pub extern "C" fn __wasm_plugin_process(ptr: u32, len: u32) -> u64 {
+            // Type-annotated binding surfaces a signature mismatch
+            // on the user's `process` fn at the macro arg site
+            // instead of opaque-pointing into the macro expansion.
+            let process_fn: fn($crate::PluginInput) -> $crate::PluginOutput = $process;
+            // SAFETY: host wrote `len` bytes at `ptr` via our `alloc`
+            // export immediately before this call. wasmtime doesn't
+            // reclaim guest linear memory mid-call.
+            let input: $crate::PluginInput =
+                unsafe { $crate::guest::decode_input(ptr, len) }.expect("process input decode");
+            let output: $crate::PluginOutput = process_fn(input);
+            let bytes = $crate::guest::to_vec(&output).expect("process output encode");
+            $crate::guest::pack_output(bytes)
+        }
+    };
+}
+
 #[cfg(test)]
 mod tests {
     // These tests run on the host (64-bit native in CI) — they

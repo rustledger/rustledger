@@ -57,7 +57,8 @@ pub use convert::{
 pub use native::{DocumentDiscoveryPlugin, NativePlugin, NativePluginRegistry};
 #[cfg(feature = "wasm-runtime")]
 pub use runtime::{
-    Plugin, PluginManager, RuntimeConfig, WatchingPluginManager, validate_plugin_module,
+    Plugin, PluginManager, RuntimeConfig, WasmPluginDirScanReport, WatchingPluginManager,
+    validate_plugin_module,
 };
 pub use types::{
     DirectiveWrapper, PluginError, PluginErrorSeverity, PluginInput, PluginOp, PluginOptions,

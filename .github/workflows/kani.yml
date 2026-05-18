@@ -41,10 +41,23 @@ jobs:
 
     steps:
       - uses: actions/checkout@900f2210b1d28bbbd0bd22d17926b9e224e8f231 # v6
-      - name: Install Kani
-        uses: model-checking/kani-github-action@f838096619a707b0f6b2118cf435eaccfa33e51f # v1.1
+      # Install Kani inline rather than via `model-checking/kani-github-action`.
+      # That action's repo HEAD hasn't moved since 2024-01-10 (~16 months at
+      # time of writing); its internal `action.yml` pulls in
+      # `actions/checkout@v3` and an unversioned `dtolnay/rust-toolchain@stable`,
+      # which is exactly the kind of unpinned/legacy dependency we audit out
+      # of every other workflow. The action's actual install step is just
+      # `cargo install --locked kani-verifier && cargo-kani setup` — inlining
+      # it lets us pin the toolchain explicitly and drop the third-party
+      # wrapper. Upstream Kani itself is healthy (latest 0.67.0 in
+      # 2026-01-16); only the action wrapper is dormant.
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # stable
         with:
-          kani-version: 'latest'
+          toolchain: stable
+      - name: Install Kani
+        run: |
+          cargo install --locked kani-verifier
+          cargo-kani setup
       - name: Determine packages to verify
         id: packages
         run: |

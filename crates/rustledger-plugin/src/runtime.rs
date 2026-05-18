@@ -350,7 +350,13 @@ impl PluginManager {
     /// `rustledger-importer`.
     ///
     /// Non-`.wasm` files (a `README.md` or `.gitignore`) and
-    /// subdirectories are silently skipped.
+    /// subdirectories are silently skipped. Entries whose metadata
+    /// can't be read at all (broken symlinks; the file existed in
+    /// `read_dir`'s listing but `path.is_file()` returns false) are
+    /// also silently skipped — `std::fs::DirEntry::path().is_file()`
+    /// swallows the underlying I/O error. If that matters for your
+    /// use case, walk the dir yourself with explicit
+    /// `symlink_metadata` checks.
     ///
     /// # Errors
     ///
@@ -388,15 +394,13 @@ impl PluginManager {
         wasm_paths.sort();
         for path in wasm_paths {
             match self.load(&path) {
-                Ok(_index) => {
-                    // Plugin::load derives the name from the filename
-                    // (`load_bytes` is what takes a name explicitly).
-                    // Track the path stem so the report is useful for
-                    // `--list-plugins`-style output.
-                    let name = path.file_stem().map_or_else(
-                        || path.display().to_string(),
-                        |s| s.to_string_lossy().into_owned(),
-                    );
+                Ok(index) => {
+                    // Read the name back from the registered Plugin so
+                    // `report.loaded` exactly matches `Plugin::name()`
+                    // for all subsequent calls — including the
+                    // non-UTF-8-filename edge case where `Plugin::load`
+                    // falls back to `"unknown"`.
+                    let name = self.plugins[index].name().to_string();
                     report.loaded.push(name);
                 }
                 Err(e) => report.failures.push((path, e)),
@@ -1384,9 +1388,16 @@ mod tests {
 
     #[test]
     fn register_wasm_dir_propagates_dir_level_io_error() {
+        // Use a tempdir-relative path that's guaranteed not to exist
+        // — hard-coding `/this/dir/does/not/exist` could pass on a
+        // weird machine where that path happens to be a real dir,
+        // and would fail with a different error class on platforms
+        // where the syscall behaves differently.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let nonexistent = tmp.path().join("does-not-exist");
         let mut manager = PluginManager::new();
         let err = manager
-            .register_wasm_dir("/this/dir/does/not/exist")
+            .register_wasm_dir(&nonexistent)
             .expect_err("nonexistent dir should error at read_dir, not in failures");
         assert!(err.to_string().contains("failed to read plugin dir"));
     }

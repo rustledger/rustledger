@@ -51,6 +51,12 @@ tempfile = { workspace = true, optional = true }
 rust_decimal_macros.workspace = true
 wat.workspace = true
 proptest.workspace = true
+# `tempfile` is *also* an optional dep above (under `python-plugins`),
+# but unit tests in `runtime.rs` use it unconditionally and would
+# otherwise fail to compile under `cargo test --no-default-features
+# --features wasm-runtime`. Declaring it again here ensures the dev
+# build always has it regardless of feature selection.
+tempfile.workspace = true
 
 [lints]
 workspace = true

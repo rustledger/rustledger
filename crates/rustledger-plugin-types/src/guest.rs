@@ -518,6 +518,19 @@ macro_rules! wasm_importer_main {
 /// so it only applies to the `wasm32` build — test crates can invoke
 /// the macro multiple times on the host target without symbol
 /// collisions at link time.
+///
+/// # Invoke once per crate on `wasm32`
+///
+/// On the actual `wasm32` build target, the macro emits exports named
+/// `alloc` and `process` — symbols the host loader looks up by name.
+/// **Invoking the macro twice in the same cdylib crate causes a
+/// duplicate-symbol linker error.** This is by ABI design: a single
+/// `.wasm` plugin module exposes exactly one `process` entry point.
+/// The compile-test crate in `tests/plugin_macro_compiles.rs`
+/// invokes it three times only because the `export_name` attribute
+/// is cfg-gated off on the host target (which is where `cargo test`
+/// runs). If you need multiple plugins, build them as separate
+/// cdylib crates.
 #[macro_export]
 macro_rules! wasm_plugin_main {
     (

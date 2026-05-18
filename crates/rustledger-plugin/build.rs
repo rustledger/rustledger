@@ -18,6 +18,20 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn main() {
+    // The e2e test that consumes the sentinel is `#[cfg(feature =
+    // "wasm-runtime")]`, so under `--no-default-features` (or any
+    // feature selection without `wasm-runtime`) the fixture can't be
+    // used. Skip the nested cargo build entirely in that case —
+    // native-only consumers shouldn't pay for a wasm32 compile or
+    // see a `cargo:warning=` for a missing target they don't need.
+    //
+    // Cargo sets `CARGO_FEATURE_<NAME_UPPERCASED>` env vars for every
+    // active feature of the package being built.
+    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_WASM_RUNTIME");
+    if std::env::var_os("CARGO_FEATURE_WASM_RUNTIME").is_none() {
+        return;
+    }
+
     let fixture_dir = PathBuf::from("tests/fixtures/sample_stub");
     println!(
         "cargo:rerun-if-changed={}/src/lib.rs",

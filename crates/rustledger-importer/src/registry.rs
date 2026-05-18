@@ -101,47 +101,34 @@ impl ImporterRegistry {
         dir: impl AsRef<Path>,
     ) -> Result<WasmDirScanReport, WasmImporterError> {
         let dir = dir.as_ref();
-        let entries = std::fs::read_dir(dir).map_err(|source| WasmImporterError::Io {
-            path: dir.to_path_buf(),
-            source,
+        // Listing/filtering/sorting is shared with
+        // `PluginManager::register_wasm_dir` — see
+        // `rustledger_plugin::wasm_dir_scan` for the common helper.
+        // Caller-side: dir-level error wrapping + per-file load fn +
+        // per-entry error wrapping (importer uses the typed `DirEntry`
+        // variant, plugin uses `anyhow::Error::new`).
+        let scan = rustledger_plugin::wasm_dir_scan::collect_wasm_paths(dir).map_err(|source| {
+            WasmImporterError::Io {
+                path: dir.to_path_buf(),
+                source,
+            }
         })?;
         let mut report = WasmDirScanReport::default();
-        let mut wasm_paths: Vec<PathBuf> = Vec::new();
-        for entry in entries {
-            // Per-entry I/O errors (rare — permission denied on a
-            // single inode, broken symlink) flow into `failures` so
-            // a user debugging a missing importer can see they
-            // existed but couldn't be enumerated. The dir path
-            // itself is used as the failure path since we don't
-            // know the inode's name.
-            match entry {
-                Ok(e) => {
-                    let path = e.path();
-                    if path.is_file()
-                        && path
-                            .extension()
-                            .is_some_and(|ext| ext.eq_ignore_ascii_case("wasm"))
-                    {
-                        wasm_paths.push(path);
-                    }
-                }
-                Err(source) => {
-                    // `read_dir().next()` can return Err for a
-                    // single entry without us knowing its name —
-                    // surface as `DirEntry` (typed for this case)
-                    // tagged with the dir path.
-                    report.failures.push((
-                        dir.to_path_buf(),
-                        WasmImporterError::DirEntry {
-                            dir: dir.to_path_buf(),
-                            source,
-                        },
-                    ));
-                }
-            }
+        // Per-entry I/O errors → the typed `DirEntry` variant so a
+        // user debugging a missing importer can distinguish them from
+        // file-read errors. The path on the report entry is the dir
+        // itself because the per-entry error doesn't expose the
+        // offending inode's name.
+        for (entry_path, source) in scan.entry_failures {
+            report.failures.push((
+                entry_path,
+                WasmImporterError::DirEntry {
+                    dir: dir.to_path_buf(),
+                    source,
+                },
+            ));
         }
-        wasm_paths.sort();
-        for path in wasm_paths {
+        for path in scan.sorted_paths {
             match self.register_wasm_from_path(&path) {
                 Ok(name) => report.loaded.push(name),
                 Err(e) => report.failures.push((path, e)),

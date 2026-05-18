@@ -366,33 +366,18 @@ impl PluginManager {
     /// caller can surface them without aborting the rest of the scan.
     pub fn register_wasm_dir(&mut self, dir: impl AsRef<Path>) -> Result<WasmPluginDirScanReport> {
         let dir = dir.as_ref();
-        let entries = std::fs::read_dir(dir)
+        // Listing/filtering/sorting is shared with `ImporterRegistry::register_wasm_dir`
+        // in `rustledger-importer` — see `crate::wasm_dir_scan` for the
+        // common helper. Caller-side: dir-level error context + the
+        // per-file load fn + the per-entry error wrapping.
+        let scan = crate::wasm_dir_scan::collect_wasm_paths(dir)
             .with_context(|| format!("failed to read plugin dir {}", dir.display()))?;
         let mut report = WasmPluginDirScanReport::default();
-        let mut wasm_paths: Vec<PathBuf> = Vec::new();
-        for entry in entries {
-            match entry {
-                Ok(e) => {
-                    let path = e.path();
-                    if path.is_file()
-                        && path
-                            .extension()
-                            .is_some_and(|ext| ext.eq_ignore_ascii_case("wasm"))
-                    {
-                        wasm_paths.push(path);
-                    }
-                }
-                Err(source) => {
-                    // Per-entry I/O error without a known inode name —
-                    // tag with the dir path so the user can debug.
-                    report
-                        .failures
-                        .push((dir.to_path_buf(), anyhow::Error::new(source)));
-                }
-            }
+        // Forward per-entry I/O failures wrapped in anyhow.
+        for (path, source) in scan.entry_failures {
+            report.failures.push((path, anyhow::Error::new(source)));
         }
-        wasm_paths.sort();
-        for path in wasm_paths {
+        for path in scan.sorted_paths {
             match self.load(&path) {
                 Ok(index) => {
                     // Read the name back from the registered Plugin so

@@ -29,7 +29,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@900f2210b1d28bbbd0bd22d17926b9e224e8f231 # v6
-      - uses: taiki-e/install-action@7be9fd86bd1707236395105d6e9329dd1511a7e1 # cargo-deny
+      - uses: taiki-e/install-action@7be9fd86bd1707236395105d6e9329dd1511a7e1 # v2.79.0
+        with:
+          tool: cargo-deny
       - name: Check advisories, licenses, and bans
         run: cargo deny check
   # Code coverage
@@ -51,7 +53,9 @@ jobs:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@7be9fd86bd1707236395105d6e9329dd1511a7e1 # cargo-llvm-cov
+        uses: taiki-e/install-action@7be9fd86bd1707236395105d6e9329dd1511a7e1 # v2.79.0
+        with:
+          tool: cargo-llvm-cov
       - name: Generate coverage report
         run: |
           cargo llvm-cov --all-features --lcov --output-path lcov.info \

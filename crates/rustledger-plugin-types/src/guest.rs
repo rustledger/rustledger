@@ -1,4 +1,4 @@
-//! WASM-guest helpers + the [`wasm_importer_main!`] macro.
+//! WASM-guest helpers + the [`crate::wasm_importer_main!`] macro.
 //!
 //! This module is **only available with the `guest` feature**:
 //!
@@ -70,7 +70,7 @@
 //! `eprintln!` from guest code are no-ops (or traps, depending on
 //! the panic handler). Surface diagnostics through the wire format
 //! instead: push messages onto [`ImporterOutput::warnings`] or
-//! construct typed [`PluginError`]s into [`ImporterOutput::errors`].
+//! construct typed [`crate::PluginError`]s into [`ImporterOutput::errors`].
 //! The host renders both into the user-visible extract output.
 //!
 //! # Sharing state across exports

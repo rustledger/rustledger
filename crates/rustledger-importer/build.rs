@@ -82,19 +82,43 @@ fn main() {
     //   wasm32 runtime support and aborts the fixture compile with a
     //   linker error. Scrubbing also prevents the host's `-Dwarnings`
     //   from breaking the fixture on a future plugin-types deprecation.
-    // - `CARGO_BUILD_TARGET`: would override `--target` (rare, but
-    //   propagates from `cargo-llvm-cov` and from some Nix shells).
-    // - `CARGO_BUILD_RUSTFLAGS`: same shape, same risk.
+    // - `CARGO_BUILD_TARGET` / `CARGO_BUILD_RUSTFLAGS`: same shape, same risk.
+    // - `RUSTDOCFLAGS`: cargo-llvm-cov sets this in tandem with
+    //   `RUSTFLAGS`; harmless for `cargo build` but cleaner not to inherit.
+    // - `CARGO_INCREMENTAL`: cargo-llvm-cov forces 0; we want the
+    //   fixture's own default.
+    // - `LLVM_PROFILE_FILE`: runtime profile output path; doesn't apply
+    //   to compilation, but scrubbing keeps the sub-build deterministic.
     //
     // Don't scrub `CARGO_TARGET_DIR` — `--target-dir` on the command
     // line takes precedence anyway, and clearing it would defeat
     // caching.
-    let status = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
+    //
+    // Capture (rather than inherit) stdout/stderr so the actual
+    // compile errors from the sub-cargo surface as `cargo:warning=`
+    // lines on failure. Cargo's default build-script protocol swallows
+    // inherited stderr; we explicitly re-emit it below.
+    let output = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
         .env_remove("RUSTFLAGS")
         .env_remove("CARGO_ENCODED_RUSTFLAGS")
         .env_remove("CARGO_BUILD_RUSTFLAGS")
         .env_remove("CARGO_BUILD_TARGET")
+        .env_remove("RUSTDOCFLAGS")
+        .env_remove("CARGO_INCREMENTAL")
+        .env_remove("LLVM_PROFILE_FILE")
+        // `cargo-llvm-cov` v0.6+ injects coverage rustflags via cargo's
+        // `--config 'build.rustflags=[...]'` arg, which propagates to
+        // sub-cargos through cargo's config merging (NOT via env vars
+        // we scrubbed above). The wasm32 stable toolchain ships no
+        // `profiler_builtins` crate, so `-Cinstrument-coverage` leaking
+        // through produces `error[E0463]: can't find crate for
+        // 'profiler_builtins'`. Counter it at maximum priority: pass
+        // our own `--config` that empties the rustflags for the wasm32
+        // target. Command-line `--config` beats env beats config file
+        // in cargo's merge order.
         .args([
+            "--config",
+            "target.wasm32-unknown-unknown.rustflags=[]",
             "build",
             "--release",
             "--target",
@@ -104,10 +128,10 @@ fn main() {
         .arg(fixture_dir.join("Cargo.toml"))
         .arg("--target-dir")
         .arg(&target_dir)
-        .status();
+        .output();
 
-    match status {
-        Ok(s) if s.success() => {
+    match output {
+        Ok(out) if out.status.success() => {
             let built = target_dir
                 .join("wasm32-unknown-unknown")
                 .join("release")
@@ -121,13 +145,18 @@ fn main() {
             }
             std::fs::copy(&built, &sentinel).expect("copy stub wasm to OUT_DIR");
         }
-        Ok(s) => {
+        Ok(out) => {
             // Non-zero exit. Common cause locally: wasm32 target not
-            // installed. Other causes (compile error, ABI break) are
-            // real bugs — surfaced to the user via CI's panic path
-            // when the e2e test sees a missing sentinel.
+            // installed. Other causes (compile error, ABI break,
+            // env-leak from coverage tooling) are real bugs — surface
+            // the sub-cargo's actual stderr so reviewers can debug
+            // without re-running locally.
+            for line in String::from_utf8_lossy(&out.stderr).lines() {
+                println!("cargo:warning=sample_stub stderr: {line}");
+            }
             println!(
-                "cargo:warning=cargo build for sample_stub fixture exited {s}; e2e test will skip (local) or panic (CI)"
+                "cargo:warning=cargo build for sample_stub fixture exited {}; e2e test will skip (local) or panic (CI)",
+                out.status
             );
         }
         Err(e) => {

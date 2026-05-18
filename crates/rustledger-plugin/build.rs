@@ -66,24 +66,28 @@ fn main() {
 
     let target_dir = out_dir.join("sample_stub_target");
 
-    // Scrub env vars that don't make sense for the inner wasm32 build:
+    // Scrub env vars that don't make sense for the inner wasm32 build.
+    // Mirrors `rustledger-importer/build.rs`; see that file for the
+    // full rationale.
     //
-    // - `RUSTFLAGS` / `CARGO_ENCODED_RUSTFLAGS`: under `cargo-llvm-cov`
-    //   the outer build sets `-C instrument-coverage`, which has no
-    //   wasm32 runtime support and aborts the fixture compile with a
-    //   linker error.
-    // - `CARGO_BUILD_TARGET` / `CARGO_BUILD_RUSTFLAGS`: same shape,
-    //   same risk.
-    //
-    // Don't scrub `CARGO_TARGET_DIR` — `--target-dir` on the command
-    // line takes precedence anyway, and clearing it would defeat
-    // caching.
-    let status = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
+    // Capture (rather than inherit) stdout/stderr so the actual
+    // compile errors from the sub-cargo surface as `cargo:warning=`
+    // lines on failure.
+    let output = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
         .env_remove("RUSTFLAGS")
         .env_remove("CARGO_ENCODED_RUSTFLAGS")
         .env_remove("CARGO_BUILD_RUSTFLAGS")
         .env_remove("CARGO_BUILD_TARGET")
+        .env_remove("RUSTDOCFLAGS")
+        .env_remove("CARGO_INCREMENTAL")
+        .env_remove("LLVM_PROFILE_FILE")
+        // See `rustledger-importer/build.rs` for the full rationale:
+        // cargo-llvm-cov injects coverage rustflags via cargo's
+        // `--config` which propagates to sub-cargos. Override it
+        // explicitly at command-line priority.
         .args([
+            "--config",
+            "target.wasm32-unknown-unknown.rustflags=[]",
             "build",
             "--release",
             "--target",
@@ -93,10 +97,10 @@ fn main() {
         .arg(fixture_dir.join("Cargo.toml"))
         .arg("--target-dir")
         .arg(&target_dir)
-        .status();
+        .output();
 
-    match status {
-        Ok(s) if s.success() => {
+    match output {
+        Ok(out) if out.status.success() => {
             let built = target_dir
                 .join("wasm32-unknown-unknown")
                 .join("release")
@@ -110,9 +114,13 @@ fn main() {
             }
             std::fs::copy(&built, &sentinel).expect("copy stub wasm to OUT_DIR");
         }
-        Ok(s) => {
+        Ok(out) => {
+            for line in String::from_utf8_lossy(&out.stderr).lines() {
+                println!("cargo:warning=sample_stub plugin stderr: {line}");
+            }
             println!(
-                "cargo:warning=cargo build for sample_stub plugin fixture exited {s}; e2e test will skip (local) or panic (CI)"
+                "cargo:warning=cargo build for sample_stub plugin fixture exited {}; e2e test will skip (local) or panic (CI)",
+                out.status
             );
         }
         Err(e) => {

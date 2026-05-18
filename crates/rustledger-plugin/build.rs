@@ -52,9 +52,23 @@ fn main() {
     println!("cargo:rerun-if-changed=../rustledger-plugin-types/src");
     println!("cargo:rerun-if-changed=../rustledger-plugin-types/Cargo.toml");
     println!("cargo:rerun-if-changed=build.rs");
+    // See importer's build.rs for rationale.
+    println!("cargo:rerun-if-env-changed=CARGO_LLVM_COV");
 
     let out_dir = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR set by cargo"));
     let sentinel = out_dir.join("sample_stub.wasm");
+
+    // Skip under cargo-llvm-cov — see rustledger-importer/build.rs
+    // for full rationale. tl;dr: cargo-llvm-cov injects
+    // `-Cinstrument-coverage` via `--config` which we can't override
+    // for the wasm32 sub-cargo; wasm32 has no `profiler_builtins`.
+    // The non-coverage Test job exercises the e2e for real.
+    if std::env::var_os("CARGO_LLVM_COV").is_some() {
+        println!(
+            "cargo:warning=skipping sample_stub wasm32 plugin fixture build under cargo-llvm-cov (incompatible with -Cinstrument-coverage); Test job exercises e2e for real"
+        );
+        return;
+    }
 
     // Stale-sentinel guard: remove any prior copy before invoking
     // cargo. If the build fails for any reason — wasm32 target

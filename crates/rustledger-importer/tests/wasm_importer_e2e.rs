@@ -68,6 +68,21 @@ fn minimal_config() -> ImporterConfig {
 
 #[test]
 fn stub_wasm_module_round_trips_every_entry_point() {
+    // `cargo-llvm-cov` injects `-Cinstrument-coverage` via cargo's
+    // `--config` which can't be overridden in the wasm32 sub-cargo
+    // build that our build.rs runs. build.rs detects `CARGO_LLVM_COV`
+    // and skips the fixture compile; we mirror that here so the
+    // CI-panic guard below doesn't fire on coverage runs. The Test
+    // job (`cargo nextest run --all-features`) exercises this test
+    // for real — Doctests runs only doctests, Regression runs a shell
+    // script, so neither covers integration tests.
+    if std::env::var_os("CARGO_LLVM_COV").is_some() {
+        eprintln!(
+            "skip: running under cargo-llvm-cov; wasm32 fixture skipped by build.rs (Test job covers e2e)"
+        );
+        return;
+    }
+
     let Some(wasm_path) = fixture_wasm_path() else {
         // CI must actually exercise the wasm32 path — silent skip there
         // defeats the whole point of the e2e test. Detect GitHub

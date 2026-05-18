@@ -75,7 +75,25 @@ fn main() {
     // workspace target/ and so concurrent test runs don't fight.
     let target_dir = out_dir.join("sample_stub_target");
 
+    // Scrub env vars that don't make sense for the inner wasm32 build:
+    //
+    // - `RUSTFLAGS` / `CARGO_ENCODED_RUSTFLAGS`: under `cargo-llvm-cov`
+    //   the outer build sets `-C instrument-coverage`, which has no
+    //   wasm32 runtime support and aborts the fixture compile with a
+    //   linker error. Scrubbing also prevents the host's `-Dwarnings`
+    //   from breaking the fixture on a future plugin-types deprecation.
+    // - `CARGO_BUILD_TARGET`: would override `--target` (rare, but
+    //   propagates from `cargo-llvm-cov` and from some Nix shells).
+    // - `CARGO_BUILD_RUSTFLAGS`: same shape, same risk.
+    //
+    // Don't scrub `CARGO_TARGET_DIR` — `--target-dir` on the command
+    // line takes precedence anyway, and clearing it would defeat
+    // caching.
     let status = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
+        .env_remove("RUSTFLAGS")
+        .env_remove("CARGO_ENCODED_RUSTFLAGS")
+        .env_remove("CARGO_BUILD_RUSTFLAGS")
+        .env_remove("CARGO_BUILD_TARGET")
         .args([
             "build",
             "--release",

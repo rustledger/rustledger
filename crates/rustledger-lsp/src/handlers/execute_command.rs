@@ -138,11 +138,19 @@ fn handle_align_amounts(
     parse_result: &ParseResult,
     uri: &Uri,
 ) -> Option<serde_json::Value> {
-    // Synthesize the formatting params. `handle_formatting` ignores
-    // its `_params` argument today (everything it needs comes from
-    // `source` + `parse_result`), but we still construct a real
-    // `DocumentFormattingParams` so future option-driven behavior
-    // (e.g. tab size, alignment column) lands automatically.
+    // Synthesize the formatting params. Today `handle_formatting`
+    // ignores its `_params` argument (everything it needs comes from
+    // `source` + `parse_result`) so the placeholder is harmless.
+    //
+    // Note: `workspace/executeCommand` does NOT carry the client's
+    // formatting preferences (tab size, insert-spaces, etc.) — those
+    // only travel with `textDocument/formatting`. If `handle_formatting`
+    // ever starts honoring `params.options`, this command will keep
+    // using server defaults and silently diverge from
+    // `textDocument/formatting`. When that day comes, plumb a
+    // server-wide `FormatConfig` through both handlers (or accept the
+    // options as command arguments) — don't paper over it by mirroring
+    // a client value we don't have.
     let params = DocumentFormattingParams {
         text_document: TextDocumentIdentifier { uri: uri.clone() },
         options: Default::default(),

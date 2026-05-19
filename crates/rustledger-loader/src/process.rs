@@ -1105,13 +1105,10 @@ fn apply_plugin_ops(
 /// Everything else collapses to `Spanned::synthesized(posting)`. As a
 /// final pass, synthesized postings that arrived with a non-zero span
 /// are normalized to `Span::ZERO` so the in-memory state matches the
-/// `Spanned::synthesized` constructor's contract (file_id +
+/// `Spanned::synthesized` constructor's contract (`file_id` +
 /// `Span::ZERO`).
-///
-/// Visible at `pub(crate)` so the same-module tests below can drive it
-/// directly; not part of the public API.
 #[cfg(feature = "plugins")]
-pub(crate) fn sanitize_inner_posting_spans(directive: &mut Directive, source_map: &SourceMap) {
+fn sanitize_inner_posting_spans(directive: &mut Directive, source_map: &SourceMap) {
     use rustledger_core::Span;
     use rustledger_parser::SYNTHESIZED_FILE_ID;
     if let Directive::Transaction(txn) = directive {
@@ -1454,6 +1451,7 @@ mod sanitize_tests {
             unreachable!()
         };
         assert_eq!(t.postings[0].file_id, SYNTHESIZED_FILE_ID);
+        assert_eq!(t.postings[0].span, Span::ZERO);
     }
 
     #[test]

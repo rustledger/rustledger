@@ -202,6 +202,7 @@ mod tests {
                     price: None,
                     flag: None,
                     metadata: vec![],
+                                    span: None,
                 }],
             }),
         }

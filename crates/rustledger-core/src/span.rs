@@ -18,6 +18,12 @@ pub struct Span {
 }
 
 impl Span {
+    /// The zero span (`0..0`). Used as the location for programmatically
+    /// synthesized values that have no source representation. Pair with
+    /// [`SYNTHESIZED_FILE_ID`] on the containing [`Spanned`] to make the
+    /// "no source" intent unambiguous.
+    pub const ZERO: Self = Self { start: 0, end: 0 };
+
     /// Create a new span.
     #[must_use]
     pub const fn new(start: usize, end: usize) -> Self {
@@ -126,6 +132,23 @@ impl<T> Spanned<T> {
         }
     }
 
+    /// Wrap a value that was programmatically synthesized (no source
+    /// representation). Uses [`Span::ZERO`] and [`SYNTHESIZED_FILE_ID`]
+    /// so downstream consumers can detect "no source" without sentinel
+    /// checks on the inner value's fields.
+    ///
+    /// Used by plugin-synthesized AST nodes, test fixtures, CLI commands
+    /// that build directives in-memory, and any other producer that does
+    /// not parse from source bytes.
+    #[must_use]
+    pub const fn synthesized(value: T) -> Self {
+        Self {
+            value,
+            span: Span::ZERO,
+            file_id: SYNTHESIZED_FILE_ID,
+        }
+    }
+
     /// Set the file ID for this spanned value.
     ///
     /// Accepts `usize` for API convenience but stores as `u16` internally.
@@ -171,6 +194,27 @@ impl<T> Spanned<T> {
 impl<T: fmt::Display> fmt::Display for Spanned<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.value)
+    }
+}
+
+/// `Spanned<T>` is a transparent wrapper that adds source location to a
+/// value. Following the convention used by other transparent wrappers in
+/// the standard library (`Box<T>`, `Rc<T>`, `Cow<'_, T>`, `MutexGuard<T>`),
+/// it implements `Deref` so callers can read inner fields and call inner
+/// methods without spelling `.value` everywhere. Consumers that genuinely
+/// need to inspect the source location reach for `.span`, `.file_id`, or
+/// `.value` (for ownership) explicitly.
+impl<T> std::ops::Deref for Spanned<T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        &self.value
+    }
+}
+
+impl<T> std::ops::DerefMut for Spanned<T> {
+    fn deref_mut(&mut self) -> &mut T {
+        &mut self.value
     }
 }
 

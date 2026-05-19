@@ -8,6 +8,7 @@
 use proptest::prelude::*;
 use rust_decimal::Decimal;
 use rustledger_core::NaiveDate;
+use rustledger_core::Spanned;
 use rustledger_core::{Amount, Balance, Directive, IncompleteAmount, Open, Posting, Transaction};
 use rustledger_validate::ErrorCode;
 
@@ -91,7 +92,7 @@ proptest! {
                 tags: vec![],
                 links: vec![],
                 postings: vec![
-                    Posting {
+                    Spanned::synthesized(Posting {
                         account: account.clone().into(),
                         units: complete(Decimal::from(actual_balance), "USD"),
                         cost: None,
@@ -100,8 +101,8 @@ proptest! {
                         meta: Default::default(),
                         comments: Vec::new(),
                         trailing_comments: Vec::new(),
-                    },
-                    Posting {
+                    }),
+                    Spanned::synthesized(Posting {
                         account: "Equity:Opening".into(),
                         units: complete(Decimal::from(-actual_balance), "USD"),
                         cost: None,
@@ -110,7 +111,7 @@ proptest! {
                         meta: Default::default(),
                         comments: Vec::new(),
                         trailing_comments: Vec::new(),
-                    },
+                    }),
                 ],
                 meta: Default::default(),
                 trailing_comments: Vec::new(),
@@ -172,7 +173,7 @@ proptest! {
                 tags: vec![],
                 links: vec![],
                 postings: vec![
-                    Posting {
+                    Spanned::synthesized(Posting {
                         account: account.clone().into(),
                         units: complete(Decimal::from(balance_amount), "USD"),
                         cost: None,
@@ -181,8 +182,8 @@ proptest! {
                         meta: Default::default(),
                         comments: Vec::new(),
                         trailing_comments: Vec::new(),
-                    },
-                    Posting {
+                    }),
+                    Spanned::synthesized(Posting {
                         account: "Equity:Opening".into(),
                         units: complete(Decimal::from(-balance_amount), "USD"),
                         cost: None,
@@ -191,7 +192,7 @@ proptest! {
                         meta: Default::default(),
                         comments: Vec::new(),
                         trailing_comments: Vec::new(),
-                    },
+                    }),
                 ],
                 meta: Default::default(),
                 trailing_comments: Vec::new(),
@@ -249,7 +250,7 @@ proptest! {
                 tags: vec![],
                 links: vec![],
                 postings: vec![
-                    Posting {
+                    Spanned::synthesized(Posting {
                         account: account.clone().into(),
                         units: complete(Decimal::from(*deposit), "USD"),
                         cost: None,
@@ -258,8 +259,8 @@ proptest! {
                         meta: Default::default(),
                         comments: Vec::new(),
                         trailing_comments: Vec::new(),
-                    },
-                    Posting {
+                    }),
+                    Spanned::synthesized(Posting {
                         account: "Income:Salary".into(),
                         units: complete(Decimal::from(-*deposit), "USD"),
                         cost: None,
@@ -268,7 +269,7 @@ proptest! {
                         meta: Default::default(),
                         comments: Vec::new(),
                         trailing_comments: Vec::new(),
-                    },
+                    }),
                 ],
                 meta: Default::default(),
                 trailing_comments: Vec::new(),
@@ -321,7 +322,7 @@ proptest! {
                 tags: vec![],
                 links: vec![],
                 postings: vec![
-                    Posting {
+                    Spanned::synthesized(Posting {
                         account: account.clone().into(),
                         units: complete(Decimal::from(100), "USD"),
                         cost: None,
@@ -330,8 +331,8 @@ proptest! {
                         meta: Default::default(),
                         comments: Vec::new(),
                         trailing_comments: Vec::new(),
-                    },
-                    Posting {
+                    }),
+                    Spanned::synthesized(Posting {
                         account: "Equity:Opening".into(),
                         units: complete(Decimal::from(-100), "USD"),
                         cost: None,
@@ -340,7 +341,7 @@ proptest! {
                         meta: Default::default(),
                         comments: Vec::new(),
                         trailing_comments: Vec::new(),
-                    },
+                    }),
                 ],
                 meta: Default::default(),
                 trailing_comments: Vec::new(),
@@ -431,7 +432,7 @@ proptest! {
                 tags: vec![],
                 links: vec![],
                 postings: vec![
-                    Posting {
+                    Spanned::synthesized(Posting {
                         account: account.into(),
                         units: complete(Decimal::from(balance_amount), "USD"),
                         cost: None,
@@ -440,8 +441,8 @@ proptest! {
                         meta: Default::default(),
                         comments: Vec::new(),
                         trailing_comments: Vec::new(),
-                    },
-                    Posting {
+                    }),
+                    Spanned::synthesized(Posting {
                         account: "Equity:Opening".into(),
                         units: complete(Decimal::from(-balance_amount), "USD"),
                         cost: None,
@@ -450,7 +451,7 @@ proptest! {
                         meta: Default::default(),
                         comments: Vec::new(),
                         trailing_comments: Vec::new(),
-                    },
+                    }),
                 ],
                 meta: Default::default(),
                 trailing_comments: Vec::new(),
@@ -511,7 +512,7 @@ proptest! {
                 tags: vec![],
                 links: vec![],
                 postings: vec![
-                    Posting {
+                    Spanned::synthesized(Posting {
                         account: account.clone().into(),
                         units: Some(IncompleteAmount::Complete(Amount::new(actual_dec, "USD"))),
                         cost: None,
@@ -520,8 +521,8 @@ proptest! {
                         meta: Default::default(),
                         comments: Vec::new(),
                         trailing_comments: Vec::new(),
-                    },
-                    Posting {
+                    }),
+                    Spanned::synthesized(Posting {
                         account: "Equity:Opening".into(),
                         units: Some(IncompleteAmount::Complete(Amount::new(-actual_dec, "USD"))),
                         cost: None,
@@ -530,7 +531,7 @@ proptest! {
                         meta: Default::default(),
                         comments: Vec::new(),
                         trailing_comments: Vec::new(),
-                    },
+                    }),
                 ],
                 meta: Default::default(),
                 trailing_comments: Vec::new(),
@@ -570,7 +571,7 @@ proptest! {
                 tags: vec![],
                 links: vec![],
                 postings: vec![
-                    Posting {
+                    Spanned::synthesized(Posting {
                         account: account.clone().into(),
                         units: Some(IncompleteAmount::Complete(Amount::new(actual_dec, "USD"))),
                         cost: None,
@@ -579,8 +580,8 @@ proptest! {
                         meta: Default::default(),
                         comments: Vec::new(),
                         trailing_comments: Vec::new(),
-                    },
-                    Posting {
+                    }),
+                    Spanned::synthesized(Posting {
                         account: "Equity:Opening".into(),
                         units: Some(IncompleteAmount::Complete(Amount::new(-actual_dec, "USD"))),
                         cost: None,
@@ -589,7 +590,7 @@ proptest! {
                         meta: Default::default(),
                         comments: Vec::new(),
                         trailing_comments: Vec::new(),
-                    },
+                    }),
                 ],
                 meta: Default::default(),
                 trailing_comments: Vec::new(),
@@ -653,7 +654,7 @@ proptest! {
                 tags: vec![],
                 links: vec![],
                 postings: vec![
-                    Posting {
+                    Spanned::synthesized(Posting {
                         account: account1.clone().into(),
                         units: complete(Decimal::from(actual_balance), "USD"),
                         cost: None,
@@ -662,8 +663,8 @@ proptest! {
                         meta: Default::default(),
                         comments: Vec::new(),
                         trailing_comments: Vec::new(),
-                    },
-                    Posting {
+                    }),
+                    Spanned::synthesized(Posting {
                         account: account2.clone().into(),
                         units: complete(Decimal::from(actual_balance), "USD"),
                         cost: None,
@@ -672,8 +673,8 @@ proptest! {
                         meta: Default::default(),
                         comments: Vec::new(),
                         trailing_comments: Vec::new(),
-                    },
-                    Posting {
+                    }),
+                    Spanned::synthesized(Posting {
                         account: "Equity:Opening".into(),
                         units: complete(Decimal::from(-actual_balance * 2), "USD"),
                         cost: None,
@@ -682,7 +683,7 @@ proptest! {
                         meta: Default::default(),
                         comments: Vec::new(),
                         trailing_comments: Vec::new(),
-                    },
+                    }),
                 ],
                 meta: Default::default(),
                 trailing_comments: Vec::new(),

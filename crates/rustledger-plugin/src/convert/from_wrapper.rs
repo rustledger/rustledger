@@ -3,7 +3,7 @@
 use rustledger_core::{
     Amount, Balance, Close, Commodity, CostSpec, Custom, Decimal, Document, Event,
     IncompleteAmount, MetaValue, NaiveDate, Note, Open, Pad, Posting, Price, PriceAnnotation,
-    Query, Transaction,
+    Query, Span, Spanned, Transaction,
 };
 
 use crate::types::{
@@ -34,7 +34,7 @@ pub(super) fn data_to_transaction(
     let postings = data
         .postings
         .iter()
-        .map(data_to_posting)
+        .map(data_to_spanned_posting)
         .collect::<Result<Vec<_>, _>>()?;
 
     let meta = data
@@ -86,6 +86,23 @@ pub(super) fn data_to_posting(data: &PostingData) -> Result<Posting, ConversionE
         comments: Vec::new(),
         trailing_comments: Vec::new(),
     })
+}
+
+/// Convert plugin wire-format data into a [`Spanned<Posting>`], preserving
+/// the source span the host attached on input. Postings the plugin
+/// synthesized (with `data.span == None`) round-trip as
+/// [`Spanned::synthesized`].
+pub(super) fn data_to_spanned_posting(
+    data: &PostingData,
+) -> Result<Spanned<Posting>, ConversionError> {
+    let posting = data_to_posting(data)?;
+    match data.span {
+        Some(s) => Ok(
+            Spanned::new(posting, Span::new(s.start as usize, s.end as usize))
+                .with_file_id(s.file_id as usize),
+        ),
+        None => Ok(Spanned::synthesized(posting)),
+    }
 }
 
 pub(super) fn data_to_incomplete_amount(

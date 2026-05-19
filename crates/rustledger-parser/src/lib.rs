@@ -32,10 +32,9 @@
 mod error;
 pub mod logos_lexer;
 mod parser;
-mod span;
 
 pub use error::{ParseError, ParseErrorKind};
-pub use span::{SYNTHESIZED_FILE_ID, Span, Spanned};
+pub use rustledger_core::{SYNTHESIZED_FILE_ID, Span, Spanned};
 
 use rustledger_core::Directive;
 

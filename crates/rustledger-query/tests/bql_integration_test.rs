@@ -8841,8 +8841,14 @@ fn test_entry_meta_from_postings_table() {
                 rustledger_core::MetaValue::String("dining".to_string()),
             );
             txn.postings = vec![
-                Posting::new("Expenses:Food", Amount::new(dec!(10), "USD")),
-                Posting::new("Assets:Bank", Amount::new(dec!(-10), "USD")),
+                rustledger_core::Spanned::synthesized(Posting::new(
+                    "Expenses:Food",
+                    Amount::new(dec!(10), "USD"),
+                )),
+                rustledger_core::Spanned::synthesized(Posting::new(
+                    "Assets:Bank",
+                    Amount::new(dec!(-10), "USD"),
+                )),
             ];
             txn
         }),
@@ -8869,8 +8875,11 @@ fn test_entry_meta_from_entries_table() {
                 rustledger_core::MetaValue::String("employer".to_string()),
             );
             txn.postings = vec![
-                Posting::new("Assets:Bank", Amount::new(dec!(1000), "USD")),
-                Posting::auto("Income:Salary"),
+                rustledger_core::Spanned::synthesized(Posting::new(
+                    "Assets:Bank",
+                    Amount::new(dec!(1000), "USD"),
+                )),
+                rustledger_core::Spanned::synthesized(Posting::auto("Income:Salary")),
             ];
             txn
         }),

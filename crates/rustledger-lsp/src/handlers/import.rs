@@ -300,14 +300,14 @@ mod tests {
             links: vec![],
             meta,
             postings: vec![
-                Posting::new(
+                rustledger_core::Spanned::synthesized(Posting::new(
                     "Assets:Bank",
                     rustledger_core::Amount::new(Decimal::from_str("-50").unwrap(), "USD"),
-                ),
-                Posting::new(
+                )),
+                rustledger_core::Spanned::synthesized(Posting::new(
                     account,
                     rustledger_core::Amount::new(Decimal::from_str("50").unwrap(), "USD"),
-                ),
+                )),
             ],
             trailing_comments: vec![],
         };
@@ -433,14 +433,14 @@ mod tests {
             links: vec![],
             meta,
             postings: vec![
-                Posting::new(
+                rustledger_core::Spanned::synthesized(Posting::new(
                     "Assets:Bank",
                     rustledger_core::Amount::new(Decimal::from_str("-50").unwrap(), "USD"),
-                ),
-                Posting::new(
+                )),
+                rustledger_core::Spanned::synthesized(Posting::new(
                     account,
                     rustledger_core::Amount::new(Decimal::from_str("50").unwrap(), "USD"),
-                ),
+                )),
             ],
             trailing_comments: vec![],
         };

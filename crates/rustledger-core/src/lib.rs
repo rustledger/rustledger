@@ -51,6 +51,7 @@ pub mod implicit_prices;
 pub mod intern;
 pub mod inventory;
 pub mod position;
+pub mod span;
 pub mod synthetic;
 
 // Kani formal verification proofs (only compiled with Kani)
@@ -76,6 +77,7 @@ pub use inventory::{
     AccountedBookingError, BookingError, BookingMethod, BookingResult, Inventory, ReductionScope,
 };
 pub use position::Position;
+pub use span::{SYNTHESIZED_FILE_ID, Span, Spanned};
 
 // Re-export commonly used external types
 /// Calendar date without timezone. Alias for `jiff::civil::Date`.

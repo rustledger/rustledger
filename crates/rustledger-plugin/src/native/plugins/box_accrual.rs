@@ -164,6 +164,7 @@ impl NativePlugin for BoxAccrualPlugin {
                             "effective_date".to_string(),
                             MetaValueData::Date(seg_end.to_string()),
                         )],
+                        span: None,
                     });
                 }
 
@@ -253,6 +254,7 @@ mod tests {
                             price: None,
                             flag: None,
                             metadata: vec![],
+                            span: None,
                         },
                         PostingData {
                             account: "Income:Capital-Losses".to_string(),
@@ -264,6 +266,7 @@ mod tests {
                             price: None,
                             flag: None,
                             metadata: vec![],
+                            span: None,
                         },
                     ],
                 }),
@@ -334,6 +337,7 @@ mod tests {
                         price: None,
                         flag: None,
                         metadata: vec![],
+                        span: None,
                     }],
                 }),
             }],

@@ -161,7 +161,7 @@ mod tests {
                 links: vec![],
                 meta: Default::default(),
                 postings: vec![
-                    Posting {
+                    crate::Spanned::synthesized(Posting {
                         account: "Expenses:Food".into(),
                         units: Some(crate::IncompleteAmount::from(Amount::new(
                             rust_decimal_macros::dec!(25),
@@ -173,8 +173,8 @@ mod tests {
                         meta: Default::default(),
                         comments: vec![],
                         trailing_comments: vec![],
-                    },
-                    Posting {
+                    }),
+                    crate::Spanned::synthesized(Posting {
                         account: "Assets:Cash".into(),
                         units: None,
                         cost: None,
@@ -183,7 +183,7 @@ mod tests {
                         meta: Default::default(),
                         comments: vec![],
                         trailing_comments: vec![],
-                    },
+                    }),
                 ],
                 trailing_comments: vec![],
             }),

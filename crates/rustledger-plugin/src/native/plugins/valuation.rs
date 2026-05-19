@@ -330,6 +330,7 @@ fn transform_transaction(
                     price: None,
                     flag: posting.flag.clone(),
                     metadata: posting.metadata.clone(),
+                    span: None,
                 });
             } else {
                 // OUTFLOW: FIFO sell from lots
@@ -355,6 +356,7 @@ fn transform_transaction(
                         price: None,
                         flag: None,
                         metadata: vec![],
+                        span: None,
                     });
                 }
 
@@ -436,6 +438,7 @@ fn handle_total_price_posting(
         }),
         flag: posting.flag.clone(),
         metadata: posting.metadata.clone(),
+        span: None,
     });
 
     // 2. Reversal posting
@@ -449,6 +452,7 @@ fn handle_total_price_posting(
         price: None,
         flag: None,
         metadata: vec![],
+        span: None,
     });
 
     // 3. Synthetic currency posting
@@ -479,6 +483,7 @@ fn handle_total_price_posting(
         price: None,
         flag: None,
         metadata: vec![],
+        span: None,
     });
 
     (postings, None)
@@ -540,6 +545,7 @@ fn process_fifo_sell(
                 } else {
                     vec![]
                 },
+                span: None,
             });
 
             state.total_units -= lot.units;
@@ -582,6 +588,7 @@ fn process_fifo_sell(
                 } else {
                     vec![]
                 },
+                span: None,
             });
 
             lot.units -= units_to_sell;

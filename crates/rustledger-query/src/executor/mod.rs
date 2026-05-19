@@ -3502,7 +3502,7 @@ mod tests {
             links: vec![],
             meta: txn_meta,
             postings: vec![
-                Posting {
+                rustledger_core::Spanned::synthesized(Posting {
                     account: "Expenses:Food".into(),
                     units: Some(rustledger_core::IncompleteAmount::Complete(Amount::new(
                         dec!(5),
@@ -3514,8 +3514,11 @@ mod tests {
                     meta: posting_meta,
                     comments: Vec::new(),
                     trailing_comments: Vec::new(),
-                },
-                Posting::new("Assets:Cash", Amount::new(dec!(-5), "USD")),
+                }),
+                rustledger_core::Spanned::synthesized(Posting::new(
+                    "Assets:Cash",
+                    Amount::new(dec!(-5), "USD"),
+                )),
             ],
             trailing_comments: Vec::new(),
         };
@@ -3833,8 +3836,14 @@ mod tests {
             links: vec![],
             meta: Metadata::default(),
             postings: vec![
-                Posting::new("Assets:Bank", Amount::new(dec!(100), "USD")),
-                Posting::new("Expenses:Food", Amount::new(dec!(-100), "USD")),
+                rustledger_core::Spanned::synthesized(Posting::new(
+                    "Assets:Bank",
+                    Amount::new(dec!(100), "USD"),
+                )),
+                rustledger_core::Spanned::synthesized(Posting::new(
+                    "Expenses:Food",
+                    Amount::new(dec!(-100), "USD"),
+                )),
             ],
             trailing_comments: Vec::new(),
         })];
@@ -3879,8 +3888,14 @@ mod tests {
             links: vec![],
             meta: Metadata::default(),
             postings: vec![
-                Posting::new("Assets:Bank", Amount::new(dec!(100), "USD")),
-                Posting::new("Expenses:Food", Amount::new(dec!(-100), "USD")),
+                rustledger_core::Spanned::synthesized(Posting::new(
+                    "Assets:Bank",
+                    Amount::new(dec!(100), "USD"),
+                )),
+                rustledger_core::Spanned::synthesized(Posting::new(
+                    "Expenses:Food",
+                    Amount::new(dec!(-100), "USD"),
+                )),
             ],
             trailing_comments: Vec::new(),
         };

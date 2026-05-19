@@ -212,7 +212,7 @@ pub fn input_entry_to_directive(entry: &InputEntry) -> Result<Directive, String>
                 other => other.chars().next().unwrap_or('*'),
             };
 
-            let postings: Vec<rustledger_core::Posting> = postings
+            let postings: Vec<rustledger_core::Spanned<rustledger_core::Posting>> = postings
                 .iter()
                 .map(|p| {
                     let units = p.units.as_ref().map(|u| {
@@ -246,7 +246,7 @@ pub fn input_entry_to_directive(entry: &InputEntry) -> Result<Directive, String>
                         })
                     });
 
-                    rustledger_core::Posting {
+                    rustledger_core::Spanned::synthesized(rustledger_core::Posting {
                         account: p.account.clone().into(),
                         units,
                         cost,
@@ -255,7 +255,7 @@ pub fn input_entry_to_directive(entry: &InputEntry) -> Result<Directive, String>
                         meta: json_map_to_metadata(&p.meta),
                         comments: Vec::new(),
                         trailing_comments: Vec::new(),
-                    }
+                    })
                 })
                 .collect();
 

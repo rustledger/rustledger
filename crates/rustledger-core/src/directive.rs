@@ -546,8 +546,13 @@ pub struct Transaction {
     pub links: Vec<InternedStr>,
     /// Transaction metadata
     pub meta: Metadata,
-    /// Postings (account entries)
-    pub postings: Vec<Posting>,
+    /// Postings (account entries), each wrapped with its source span and
+    /// file ID. Parser-emitted postings carry the byte range of the
+    /// posting line (from leading indent through trailing same-line
+    /// comment, not including following metadata lines); programmatically
+    /// constructed postings use [`Spanned::synthesized`] which pairs
+    /// [`Span::ZERO`] with [`SYNTHESIZED_FILE_ID`].
+    pub postings: Vec<crate::Spanned<Posting>>,
     /// Comments that appear after all postings
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub trailing_comments: Vec<String>,
@@ -598,10 +603,13 @@ impl Transaction {
         self
     }
 
-    /// Add a posting.
+    /// Add a posting. Convenience for programmatically-constructed
+    /// transactions: wraps the posting with [`Spanned::synthesized`]
+    /// before appending. Parser-emitted transactions push real spans
+    /// directly into `postings`.
     #[must_use]
     pub fn with_posting(mut self, posting: Posting) -> Self {
-        self.postings.push(posting);
+        self.postings.push(crate::Spanned::synthesized(posting));
         self
     }
 
@@ -1651,8 +1659,11 @@ mod tests {
             links: vec![],
             meta,
             postings: vec![
-                Posting::new("Assets:Bank", Amount::new(dec!(-2), "USD")),
-                Posting::auto("Expenses:Example"),
+                crate::Spanned::synthesized(Posting::new(
+                    "Assets:Bank",
+                    Amount::new(dec!(-2), "USD"),
+                )),
+                crate::Spanned::synthesized(Posting::auto("Expenses:Example")),
             ],
             trailing_comments: Vec::new(),
         };

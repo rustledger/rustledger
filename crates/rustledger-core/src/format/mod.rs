@@ -1072,7 +1072,10 @@ mod tests {
             narration: "my expense".into(),
             tags: vec![],
             links: vec![],
-            postings: vec![posting, Posting::auto("Assets:Wallet")],
+            postings: vec![
+                crate::Spanned::synthesized(posting),
+                crate::Spanned::synthesized(Posting::auto("Assets:Wallet")),
+            ],
             meta: Metadata::default(),
             trailing_comments: Vec::new(),
         };

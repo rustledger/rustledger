@@ -355,6 +355,7 @@ mod tests {
                         price: None,
                         flag: None,
                         metadata: vec![],
+                        span: None,
                     },
                     PostingData {
                         account: "Expenses:Food".to_string(),
@@ -369,6 +370,7 @@ mod tests {
                             "effective_date".to_string(),
                             MetaValueData::Date(effective_date.to_string()),
                         )],
+                        span: None,
                     },
                 ],
             }),
@@ -464,6 +466,7 @@ mod tests {
                             price: None,
                             flag: None,
                             metadata: vec![],
+                            span: None,
                         },
                         PostingData {
                             account: "Expenses:Food".to_string(),
@@ -475,6 +478,7 @@ mod tests {
                             price: None,
                             flag: None,
                             metadata: vec![],
+                            span: None,
                         },
                     ],
                 }),

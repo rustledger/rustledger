@@ -203,7 +203,7 @@ mod tests {
             links: vec!["grocery-2024".into()],
             meta: Metadata::default(),
             postings: vec![
-                Posting {
+                rustledger_core::Spanned::synthesized(Posting {
                     account: "Expenses:Food".into(),
                     units: Some(IncompleteAmount::Complete(Amount::new(dec("50.00"), "USD"))),
                     cost: None,
@@ -212,8 +212,8 @@ mod tests {
                     meta: Metadata::default(),
                     comments: Vec::new(),
                     trailing_comments: Vec::new(),
-                },
-                Posting {
+                }),
+                rustledger_core::Spanned::synthesized(Posting {
                     account: "Assets:Checking".into(),
                     units: None,
                     cost: None,
@@ -222,7 +222,7 @@ mod tests {
                     meta: Metadata::default(),
                     comments: Vec::new(),
                     trailing_comments: Vec::new(),
-                },
+                }),
             ],
             trailing_comments: Vec::new(),
         };

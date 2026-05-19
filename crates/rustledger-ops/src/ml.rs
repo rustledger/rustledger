@@ -305,6 +305,7 @@ mod tests {
                         price: None,
                         flag: None,
                         metadata: vec![],
+                        span: None,
                     },
                     PostingData {
                         account: to_account.to_string(),
@@ -313,6 +314,7 @@ mod tests {
                         price: None,
                         flag: None,
                         metadata: vec![],
+                        span: None,
                     },
                 ],
             }),

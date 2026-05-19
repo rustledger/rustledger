@@ -178,7 +178,8 @@ impl BookingEngine {
         let mut gains = Vec::new();
         let mut booked_indices = std::collections::HashSet::with_capacity(txn.postings.len());
         // Track posting expansions: (original_idx, expanded_postings)
-        let mut expansions: Vec<(usize, Vec<Posting>)> = Vec::with_capacity(txn.postings.len());
+        let mut expansions: Vec<(usize, Vec<rustledger_core::Spanned<Posting>>)> =
+            Vec::with_capacity(txn.postings.len());
 
         // Create working copies of inventories for this transaction.
         // This allows us to track inventory changes across multiple postings

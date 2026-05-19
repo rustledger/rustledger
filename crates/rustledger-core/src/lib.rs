@@ -70,7 +70,7 @@ pub use extract::{
     DEFAULT_CURRENCIES, extract_accounts, extract_accounts_iter, extract_currencies,
     extract_currencies_iter, extract_payees, extract_payees_iter,
 };
-pub use format::{FormatConfig, format_directive};
+pub use format::{FormatConfig, format_directive, format_posting};
 pub use implicit_prices::extract_per_unit_price;
 pub use intern::{InternedStr, StringInterner};
 pub use inventory::{

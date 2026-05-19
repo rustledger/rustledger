@@ -124,15 +124,14 @@ fn handle_sort_transactions(
 /// Align amounts in the document by delegating to the document
 /// formatter ([`handle_formatting`]).
 ///
-/// The formatting handler is now the canonical alignment path: it
-/// looks up each posting's source line via its `Spanned<Posting>` span
-/// (so interleaved metadata is preserved — see #1142), aligns amounts
-/// to `AMOUNT_COLUMN`, and uses a single shared `LineIndex` for
-/// O(log lines) offset lookups. The previous bespoke logic here
-/// duplicated that pipeline with a regex-style line scanner and its
-/// own "max-existing-column" alignment heuristic, which produced
-/// different output than `rledger format` and the LSP's own
-/// `textDocument/formatting` request — exactly the kind of duplicate
+/// The formatting handler is the canonical alignment path now and it
+/// delegates further to [`rustledger_core::format_posting`], the same
+/// formatter `rledger format` uses on disk. So this command, the LSP's
+/// `textDocument/formatting` request, and the CLI all produce
+/// identical output for a given `FormatConfig`. The previous bespoke
+/// logic here ran its own regex-style line scanner with a
+/// "max-existing-column" alignment heuristic, which produced output
+/// that matched none of the canonical paths — the kind of duplicate
 /// code path #1142 warned about.
 fn handle_align_amounts(
     source: &str,
@@ -255,26 +254,49 @@ mod tests {
     }
 
     #[test]
-    fn test_align_amounts_delegates_to_formatter() {
-        // The command now reuses `handle_formatting`, so it inherits
-        // every fix the formatter has (per-posting span lookup,
-        // metadata preservation, etc.). Smoke-test the delegation
-        // returns a WorkspaceEdit shape on a misaligned source and the
-        // "no work" shape on already-aligned input.
+    fn test_align_amounts_produces_canonical_alignment() {
+        // Goes beyond a shape-only smoke test: applies the emitted
+        // edits to the source and asserts the resulting amount column
+        // matches `FormatConfig::default().amount_column` (the same
+        // value `rledger format` uses on disk). Pins the contract that
+        // `rledger.alignAmounts`, `textDocument/formatting`, and
+        // `rledger format` agree on the canonical alignment.
         use lsp_types::Uri;
+        use rustledger_core::FormatConfig;
 
         let misaligned = "2024-01-15 * \"Coffee\"\n  Assets:Bank  -5.00 USD\n  Expenses:Food\n";
         let result = parse(misaligned);
         let uri: Uri = "file:///test.beancount".parse().unwrap();
         let out =
             handle_align_amounts(misaligned, &result, &uri).expect("align should return a value");
-        assert!(
-            out.get("changes").is_some(),
-            "misaligned input should produce a WorkspaceEdit with changes, got {out:?}"
+
+        // The first posting line is misaligned (2-space gap between
+        // account and amount). After applying the edits, the amount
+        // number should start exactly at config.amount_column.
+        let changes = out.get("changes").and_then(|v| v.as_object()).unwrap();
+        let edits = changes.values().next().unwrap().as_array().unwrap();
+        assert!(!edits.is_empty(), "misaligned input must produce edits");
+
+        let expected_col = FormatConfig::default().amount_column;
+        let applied = apply_lsp_text_edits(misaligned, edits);
+        let bank_line = applied
+            .lines()
+            .find(|l| l.contains("Assets:Bank"))
+            .expect("Assets:Bank line should still exist after edit");
+        let dash_pos = bank_line.find("-5.00").expect("amount survived the edit");
+        // `amount_column` is the column the number starts at; in the
+        // formatter's math, "Assets:Bank" + indent ends at col 13, and
+        // padding fills out to (amount_column - amount.len()).
+        let amount_len = "-5.00 USD".len();
+        assert_eq!(
+            dash_pos,
+            expected_col - amount_len,
+            "amount should be aligned to FormatConfig::default().amount_column ({expected_col}); \
+             got line {bank_line:?}"
         );
 
-        // A canonically-aligned source should produce the "no edits"
-        // shape (the formatter sees nothing to change).
+        // No-op shape: a canonically-aligned source should return the
+        // "no work" message.
         let aligned = "2024-01-15 open Assets:Bank USD\n";
         let aligned_parsed = parse(aligned);
         let out2 = handle_align_amounts(aligned, &aligned_parsed, &uri)
@@ -283,5 +305,44 @@ mod tests {
             out2.get("message").is_some(),
             "no-op input should return a message-only shape, got {out2:?}"
         );
+    }
+
+    /// Apply a JSON array of LSP `TextEdit` objects to `source`,
+    /// returning the resulting text. Test-local helper — the LSP
+    /// production path applies edits client-side, so this just
+    /// mirrors what an editor would do, sorted bottom-to-top so each
+    /// replacement's offsets stay valid.
+    fn apply_lsp_text_edits(source: &str, edits: &[serde_json::Value]) -> String {
+        let mut typed: Vec<(u32, u32, u32, u32, String)> = edits
+            .iter()
+            .map(|e| {
+                let r = e.get("range").unwrap();
+                let s = r.get("start").unwrap();
+                let n = r.get("end").unwrap();
+                (
+                    s.get("line").and_then(|v| v.as_u64()).unwrap() as u32,
+                    s.get("character").and_then(|v| v.as_u64()).unwrap() as u32,
+                    n.get("line").and_then(|v| v.as_u64()).unwrap() as u32,
+                    n.get("character").and_then(|v| v.as_u64()).unwrap() as u32,
+                    e.get("newText")
+                        .and_then(|v| v.as_str())
+                        .unwrap()
+                        .to_string(),
+                )
+            })
+            .collect();
+        // Apply from the end so earlier edits' offsets don't shift.
+        typed.sort_by_key(|t| std::cmp::Reverse((t.0, t.1)));
+
+        let lines: Vec<String> = source.lines().map(str::to_string).collect();
+        let mut out = lines.clone();
+        for (sl, sc, el, ec, new_text) in typed {
+            // Only single-line edits exercised by this test.
+            assert_eq!(sl, el, "test helper only handles single-line edits");
+            let line = &mut out[sl as usize];
+            let (s, e) = (sc as usize, ec as usize);
+            line.replace_range(s..e, &new_text);
+        }
+        out.join("\n") + "\n"
     }
 }

@@ -6,13 +6,10 @@
 //! - Consistent spacing around operators
 
 use lsp_types::{DocumentFormattingParams, Position, Range, TextEdit};
-use rustledger_core::{Directive, SYNTHESIZED_FILE_ID};
+use rustledger_core::{Directive, FormatConfig, SYNTHESIZED_FILE_ID, format_posting};
 use rustledger_parser::ParseResult;
 
 use super::utils::LineIndex;
-
-/// Default column for amount alignment.
-const AMOUNT_COLUMN: usize = 50;
 
 /// Handle a document formatting request.
 pub fn handle_formatting(
@@ -26,6 +23,12 @@ pub fn handle_formatting(
     // offset lookup. Without it, calling the naive O(n) scanner per
     // posting per transaction is quadratic on large files.
     let line_index = LineIndex::new(source);
+    // One canonical FormatConfig for the whole document, shared with
+    // `rledger format` (CLI) and `format_directive` (core). Previously
+    // the LSP had its own hardcoded `AMOUNT_COLUMN = 50` constant —
+    // amounts the user saw in the editor were one column shy of what
+    // `rledger format` produced on disk.
+    let config = FormatConfig::default();
 
     for spanned in &parse_result.directives {
         if let Directive::Transaction(txn) = &spanned.value {
@@ -45,7 +48,8 @@ pub fn handle_formatting(
                 }
                 let (posting_line, _) = line_index.offset_to_position(spanned_posting.span.start);
                 if let Some(line) = lines.get(posting_line as usize)
-                    && let Some(edit) = format_posting_line(line, posting_line, spanned_posting)
+                    && let Some(edit) =
+                        format_posting_line(line, posting_line, spanned_posting, &config)
                 {
                     edits.push(edit);
                 }
@@ -95,11 +99,27 @@ pub fn handle_formatting(
     if edits.is_empty() { None } else { Some(edits) }
 }
 
-/// Format a posting line for alignment.
+/// Compute a posting-line edit by delegating to the canonical core
+/// formatter ([`rustledger_core::format_posting`]). The previous
+/// hand-rolled implementation lived here for historical reasons:
+///
+/// - It hardcoded `AMOUNT_COLUMN = 50`, so the LSP's "Format Document"
+///   produced output one column shy of `rledger format`'s default 60.
+/// - It only formatted the account + units, silently dropping cost
+///   specs (`{...}`) and price annotations (`@`/`@@`) from the
+///   formatted line. The mismatch caused the surrounding heuristic to
+///   refuse to emit an edit for such postings, so the LSP never
+///   realigned them.
+///
+/// Routing through the core formatter fixes both, and means a future
+/// option-driven `FormatConfig` (tab size, column, indent) reaches
+/// `rledger format`, `textDocument/formatting`, and `rledger.alignAmounts`
+/// from a single place.
 fn format_posting_line(
     line: &str,
     line_num: u32,
     posting: &rustledger_core::Posting,
+    config: &FormatConfig,
 ) -> Option<TextEdit> {
     let trimmed = line.trim();
 
@@ -108,67 +128,21 @@ fn format_posting_line(
         return None;
     }
 
-    // Parse the line to find account and amount positions
-    let account = posting.account.to_string();
+    let formatted = format_posting(posting, config);
 
-    // Check if line starts with proper indentation
-    let current_indent = line.len() - line.trim_start().len();
-    let expected_indent = 2;
-
-    // Build the formatted line
-    let mut formatted = String::new();
-
-    // Add indentation
-    formatted.push_str(&" ".repeat(expected_indent));
-
-    // Add account
-    formatted.push_str(&account);
-
-    // Add amount if present
-    if let Some(ref units) = posting.units
-        && let (Some(num), Some(curr)) = (units.number(), units.currency())
-    {
-        let num_str = num.to_string();
-        let curr_str = curr.to_string();
-        let amount_str = format!("{} {}", num_str, curr_str);
-
-        // Calculate padding to align amount at AMOUNT_COLUMN
-        let current_len = expected_indent + account.len();
-        let padding = if current_len < AMOUNT_COLUMN - amount_str.len() {
-            AMOUNT_COLUMN - amount_str.len() - current_len
-        } else {
-            2 // Minimum 2 spaces
-        };
-
-        formatted.push_str(&" ".repeat(padding));
-        formatted.push_str(&amount_str);
+    // No edit needed when the source line already matches the canonical
+    // form (ignoring trailing whitespace, which a separate pass strips).
+    if formatted.trim_end() == line.trim_end() {
+        return None;
     }
 
-    // Check if formatting changed anything significant
-    let line_trimmed_end = line.trim_end();
-    if formatted.trim_end() != line_trimmed_end
-        && (current_indent != expected_indent || needs_alignment(line, &formatted))
-    {
-        Some(TextEdit {
-            range: Range {
-                start: Position::new(line_num, 0),
-                end: Position::new(line_num, line.len() as u32),
-            },
-            new_text: formatted,
-        })
-    } else {
-        None
-    }
-}
-
-/// Check if line needs amount alignment.
-fn needs_alignment(original: &str, formatted: &str) -> bool {
-    // Simple heuristic: if the formatted version has different spacing, align
-    let orig_parts: Vec<&str> = original.split_whitespace().collect();
-    let fmt_parts: Vec<&str> = formatted.split_whitespace().collect();
-
-    // If content is the same but spacing is different, we need alignment
-    orig_parts == fmt_parts && original.trim() != formatted.trim()
+    Some(TextEdit {
+        range: Range {
+            start: Position::new(line_num, 0),
+            end: Position::new(line_num, line.len() as u32),
+        },
+        new_text: formatted,
+    })
 }
 
 #[cfg(test)]

@@ -6,7 +6,7 @@
 //! - Consistent spacing around operators
 
 use lsp_types::{DocumentFormattingParams, Position, Range, TextEdit};
-use rustledger_core::{Directive, FormatConfig, SYNTHESIZED_FILE_ID, format_posting};
+use rustledger_core::{Directive, FormatConfig, SYNTHESIZED_FILE_ID, format_posting_line};
 use rustledger_parser::ParseResult;
 
 use super::utils::LineIndex;
@@ -49,7 +49,7 @@ pub fn handle_formatting(
                 let (posting_line, _) = line_index.offset_to_position(spanned_posting.span.start);
                 if let Some(line) = lines.get(posting_line as usize)
                     && let Some(edit) =
-                        format_posting_line(line, posting_line, spanned_posting, &config)
+                        posting_text_edit(line, posting_line, spanned_posting, &config)
                 {
                     edits.push(edit);
                 }
@@ -99,23 +99,23 @@ pub fn handle_formatting(
     if edits.is_empty() { None } else { Some(edits) }
 }
 
-/// Compute a posting-line edit by delegating to the canonical core
-/// formatter ([`rustledger_core::format_posting`]). The previous
-/// hand-rolled implementation lived here for historical reasons:
+/// Compute a posting-line `TextEdit` by delegating to the canonical
+/// core formatter ([`rustledger_core::format_posting_line`]). The
+/// previous hand-rolled implementation here had two latent problems
+/// fixed by the unification:
 ///
-/// - It hardcoded `AMOUNT_COLUMN = 50`, so the LSP's "Format Document"
-///   produced output one column shy of `rledger format`'s default 60.
-/// - It only formatted the account + units, silently dropping cost
-///   specs (`{...}`) and price annotations (`@`/`@@`) from the
-///   formatted line. The mismatch caused the surrounding heuristic to
-///   refuse to emit an edit for such postings, so the LSP never
-///   realigned them.
+/// - It hardcoded `AMOUNT_COLUMN = 50`, so the LSP produced output one
+///   column shy of `rledger format`'s default 60.
+/// - It only formatted account + units, silently dropping cost specs
+///   (`{...}`) and price annotations (`@`/`@@`).
 ///
-/// Routing through the core formatter fixes both, and means a future
-/// option-driven `FormatConfig` (tab size, column, indent) reaches
-/// `rledger format`, `textDocument/formatting`, and `rledger.alignAmounts`
-/// from a single place.
-fn format_posting_line(
+/// `format_posting_line` is also the unit the on-disk formatter emits
+/// (it's reused inside `format_transaction`), so any TextEdit we emit
+/// matches exactly what `rledger format` would write to disk —
+/// **including the first same-line trailing comment**. An earlier
+/// draft delegated to the lower-level `format_posting`, which omitted
+/// the comment and would have produced edits that silently dropped it.
+fn posting_text_edit(
     line: &str,
     line_num: u32,
     posting: &rustledger_core::Posting,
@@ -128,7 +128,7 @@ fn format_posting_line(
         return None;
     }
 
-    let formatted = format_posting(posting, config);
+    let formatted = format_posting_line(posting, config);
 
     // No edit needed when the source line already matches the canonical
     // form (ignoring trailing whitespace, which a separate pass strips).
@@ -257,6 +257,53 @@ mod tests {
                 .iter()
                 .any(|e| posting_lines.contains(&e.range.start.line)),
             "formatter emitted no edits for posting lines — alignment broken"
+        );
+    }
+
+    /// Regression test: the formatter must preserve a same-line
+    /// trailing comment on a posting. An earlier draft of the
+    /// unification (PR #1158, commit `e537755f`) delegated to
+    /// `format_posting`, which omits trailing comments — so the
+    /// formatter emitted edits that silently dropped them. The fix
+    /// is to route through `format_posting_line` (the helper that
+    /// `format_transaction` also uses on the on-disk path), which
+    /// appends `posting.trailing_comments[0]` to the line.
+    #[test]
+    fn test_formatting_preserves_trailing_comment_on_posting() {
+        // Indent is intentionally wrong (4-space) so the formatter
+        // *must* emit an edit; otherwise we'd be testing nothing.
+        let source = "\
+2024-01-15 * \"Coffee\"
+    Assets:Bank  -5.00 USD ; my comment
+    Expenses:Food
+";
+        let result = parse(source);
+        assert!(
+            result.errors.is_empty(),
+            "parse errors: {:?}",
+            result.errors
+        );
+
+        let params = DocumentFormattingParams {
+            text_document: lsp_types::TextDocumentIdentifier {
+                uri: "file:///test.beancount".parse().unwrap(),
+            },
+            options: Default::default(),
+            work_done_progress_params: Default::default(),
+        };
+        let edits = handle_formatting(&params, source, &result).unwrap_or_default();
+
+        // Apply edits to the source and check the comment is still
+        // present on its original line.
+        let line1_edit = edits
+            .iter()
+            .find(|e| e.range.start.line == 1)
+            .expect("expected an edit on line 1 (the Assets:Bank posting)");
+        assert!(
+            line1_edit.new_text.contains("; my comment"),
+            "trailing comment dropped from canonical-formatted posting line; \
+             got new_text = {:?}",
+            line1_edit.new_text
         );
     }
 }

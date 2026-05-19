@@ -15,8 +15,8 @@ pub(crate) use directives::{
 };
 pub use helpers::escape_string;
 pub(crate) use helpers::format_meta_value;
-pub use transaction::format_posting;
 pub(crate) use transaction::{format_incomplete_amount, format_transaction};
+pub use transaction::{format_posting, format_posting_line};
 
 use crate::Directive;
 

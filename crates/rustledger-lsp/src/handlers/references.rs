@@ -75,8 +75,6 @@ fn collect_account_references(
     locations: &mut Vec<Location>,
 ) {
     for spanned in &parse_result.directives {
-        let (start_line, _) = byte_offset_to_position(source, spanned.span.start);
-
         match &spanned.value {
             Directive::Open(open) => {
                 if open.account.as_ref() == account

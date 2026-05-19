@@ -11,7 +11,7 @@ use rustledger_core::{Decimal, Directive, SYNTHESIZED_FILE_ID};
 use rustledger_parser::ParseResult;
 use std::collections::HashMap;
 
-use super::utils::byte_offset_to_position;
+use super::utils::LineIndex;
 
 /// Handle an inlay hints request.
 pub fn handle_inlay_hints(
@@ -23,10 +23,14 @@ pub fn handle_inlay_hints(
     let uri = params.text_document.uri.as_str();
     let mut hints = Vec::new();
     let lines: Vec<&str> = source.lines().collect();
+    // Build the line index once: O(n) up front, O(log lines) per
+    // offset lookup. Without it the per-directive + per-posting
+    // lookups below scale quadratically with file size.
+    let line_index = LineIndex::new(source);
 
     for spanned in &parse_result.directives {
         if let Directive::Transaction(txn) = &spanned.value {
-            let (start_line, _) = byte_offset_to_position(source, spanned.span.start);
+            let (start_line, _) = line_index.offset_to_position(spanned.span.start);
 
             // Skip if transaction is outside the requested range
             if start_line > range.end.line {
@@ -44,7 +48,7 @@ pub fn handle_inlay_hints(
                     continue;
                 }
                 let posting = &**spanned_posting;
-                let (posting_line, _) = byte_offset_to_position(source, spanned_posting.span.start);
+                let (posting_line, _) = line_index.offset_to_position(spanned_posting.span.start);
 
                 // Skip if outside range
                 if posting_line < range.start.line || posting_line > range.end.line {

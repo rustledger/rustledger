@@ -132,7 +132,19 @@ pub fn handle_incoming_calls(
             // `txn_line + postings.len() + 1` under-counted lines
             // whenever the transaction had interleaved metadata or
             // pre-posting comments (same root cause as #1142).
-            let (txn_end_line, _) = byte_offset_to_position(source, spanned.span.end);
+            //
+            // `spanned.span.end` is an *exclusive* byte offset that
+            // typically already points at the start of the next line
+            // (the parser consumes the trailing newline). Use the
+            // resulting (line, col) directly; only normalize to the
+            // next line when the end column is non-zero (i.e. the
+            // span ends mid-line and the LSP range needs to round up).
+            let (txn_end_line, txn_end_col) = byte_offset_to_position(source, spanned.span.end);
+            let normalized_end_line = if txn_end_col == 0 {
+                txn_end_line
+            } else {
+                txn_end_line.saturating_add(1)
+            };
             let txn_item = CallHierarchyItem {
                 name: description,
                 kind: SymbolKind::EVENT, // Use Event for transactions
@@ -141,7 +153,7 @@ pub fn handle_incoming_calls(
                 uri: uri.clone(),
                 range: Range {
                     start: Position::new(txn_line, 0),
-                    end: Position::new(txn_end_line.saturating_add(1), 0),
+                    end: Position::new(normalized_end_line, 0),
                 },
                 selection_range: Range {
                     start: Position::new(txn_line, 0),
@@ -229,7 +241,6 @@ pub fn handle_outgoing_calls(
 
                     // Ranges where this account is "called" from the
                     // transaction (per-posting span lookup, see #1142).
-                    let _ = line; // formerly used in the arithmetic
                     let from_ranges: Vec<Range> = indices
                         .iter()
                         .filter_map(|&idx| {

@@ -77,7 +77,6 @@ fn compute_selection_range(
             // the prior `dir_start_line + 1 + i` arithmetic broke
             // whenever a transaction had interleaved posting-level
             // metadata, putting the cursor-test on the wrong row.
-            let _ = dir_range;
             for spanned_posting in &txn.postings {
                 if spanned_posting.file_id == SYNTHESIZED_FILE_ID {
                     continue;

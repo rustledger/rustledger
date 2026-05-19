@@ -11,9 +11,7 @@ use lsp_types::{
 use rustledger_core::{Directive, SYNTHESIZED_FILE_ID};
 use rustledger_parser::ParseResult;
 
-use super::utils::{
-    byte_offset_to_position, get_word_at_position, is_account_like, is_currency_like,
-};
+use super::utils::{LineIndex, get_word_at_position, is_account_like, is_currency_like};
 
 /// Handle a document highlight request.
 pub fn handle_document_highlight(
@@ -30,18 +28,22 @@ pub fn handle_document_highlight(
     let (word, _, _) = get_word_at_position(line, position.character as usize)?;
 
     let mut highlights = Vec::new();
+    // Build the line index once and share it across collectors: each
+    // directive (and posting) used to trigger an O(n) byte→line scan,
+    // which scales quadratically on large files.
+    let line_index = LineIndex::new(source);
 
     // Check if it's an account
     if is_account_like(&word) {
-        collect_account_highlights(source, parse_result, &word, &mut highlights);
+        collect_account_highlights(source, parse_result, &line_index, &word, &mut highlights);
     }
     // Check if it's a currency
     else if is_currency_like(&word, parse_result) {
-        collect_currency_highlights(source, parse_result, &word, &mut highlights);
+        collect_currency_highlights(source, parse_result, &line_index, &word, &mut highlights);
     }
     // Check if it's a payee (inside quotes)
     else if is_in_quotes(line, position.character as usize) {
-        collect_payee_highlights(source, parse_result, &word, &mut highlights);
+        collect_payee_highlights(source, parse_result, &line_index, &word, &mut highlights);
     }
 
     if highlights.is_empty() {
@@ -55,11 +57,12 @@ pub fn handle_document_highlight(
 fn collect_account_highlights(
     source: &str,
     parse_result: &ParseResult,
+    line_index: &LineIndex,
     account: &str,
     highlights: &mut Vec<DocumentHighlight>,
 ) {
     for spanned in &parse_result.directives {
-        let (start_line, _) = byte_offset_to_position(source, spanned.span.start);
+        let (start_line, _) = line_index.offset_to_position(spanned.span.start);
 
         match &spanned.value {
             Directive::Open(open) => {
@@ -152,7 +155,7 @@ fn collect_account_highlights(
                     }
                     if spanned_posting.account.as_ref() == account {
                         let (posting_line, _) =
-                            byte_offset_to_position(source, spanned_posting.span.start);
+                            line_index.offset_to_position(spanned_posting.span.start);
                         if let Some(range) = find_in_line(source, posting_line, account) {
                             highlights.push(DocumentHighlight {
                                 range,
@@ -171,12 +174,13 @@ fn collect_account_highlights(
 fn collect_currency_highlights(
     source: &str,
     parse_result: &ParseResult,
+    line_index: &LineIndex,
     currency: &str,
     highlights: &mut Vec<DocumentHighlight>,
 ) {
     for spanned in &parse_result.directives {
         let directive_text = &source[spanned.span.start..spanned.span.end];
-        let (start_line, _) = byte_offset_to_position(source, spanned.span.start);
+        let (start_line, _) = line_index.offset_to_position(spanned.span.start);
 
         let is_declaration =
             matches!(&spanned.value, Directive::Commodity(c) if c.currency.as_ref() == currency);
@@ -236,6 +240,7 @@ fn collect_currency_highlights(
 fn collect_payee_highlights(
     source: &str,
     parse_result: &ParseResult,
+    line_index: &LineIndex,
     payee: &str,
     highlights: &mut Vec<DocumentHighlight>,
 ) {
@@ -244,7 +249,7 @@ fn collect_payee_highlights(
             && let Some(ref txn_payee) = txn.payee
             && txn_payee.as_ref() == payee
         {
-            let (line, _) = byte_offset_to_position(source, spanned.span.start);
+            let (line, _) = line_index.offset_to_position(spanned.span.start);
             let line_text = source.lines().nth(line as usize).unwrap_or("");
 
             if let Some(start) = line_text.find(&format!("\"{}\"", payee)) {

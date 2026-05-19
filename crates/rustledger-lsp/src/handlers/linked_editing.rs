@@ -8,9 +8,7 @@ use lsp_types::{LinkedEditingRangeParams, LinkedEditingRanges, Position, Range};
 use rustledger_core::{Directive, SYNTHESIZED_FILE_ID};
 use rustledger_parser::ParseResult;
 
-use super::utils::{
-    byte_offset_to_position, get_word_at_position, is_account_like, is_currency_like,
-};
+use super::utils::{LineIndex, get_word_at_position, is_account_like, is_currency_like};
 
 /// Handle a linked editing range request.
 pub fn handle_linked_editing_range(
@@ -27,14 +25,17 @@ pub fn handle_linked_editing_range(
     let (word, _, _) = get_word_at_position(line, position.character as usize)?;
 
     let mut ranges = Vec::new();
+    // Build the line index once and share it across collectors —
+    // otherwise each posting/directive lookup is an O(n) scan.
+    let line_index = LineIndex::new(source);
 
     // Check if it's an account
     if is_account_like(&word) {
-        collect_account_ranges(source, parse_result, &word, &mut ranges);
+        collect_account_ranges(source, parse_result, &line_index, &word, &mut ranges);
     }
     // Check if it's a currency
     else if is_currency_like(&word, parse_result) {
-        collect_currency_ranges(source, parse_result, &word, &mut ranges);
+        collect_currency_ranges(source, parse_result, &line_index, &word, &mut ranges);
     }
 
     if ranges.is_empty() {
@@ -58,11 +59,12 @@ pub fn handle_linked_editing_range(
 fn collect_account_ranges(
     source: &str,
     parse_result: &ParseResult,
+    line_index: &LineIndex,
     account: &str,
     ranges: &mut Vec<Range>,
 ) {
     for spanned in &parse_result.directives {
-        let (start_line, _) = byte_offset_to_position(source, spanned.span.start);
+        let (start_line, _) = line_index.offset_to_position(spanned.span.start);
 
         match &spanned.value {
             Directive::Open(open) => {
@@ -130,7 +132,7 @@ fn collect_account_ranges(
                     }
                     if spanned_posting.account.as_ref() == account {
                         let (posting_line, _) =
-                            byte_offset_to_position(source, spanned_posting.span.start);
+                            line_index.offset_to_position(spanned_posting.span.start);
                         if let Some(range) = find_in_line(source, posting_line, account) {
                             ranges.push(range);
                         }
@@ -146,12 +148,13 @@ fn collect_account_ranges(
 fn collect_currency_ranges(
     source: &str,
     parse_result: &ParseResult,
+    line_index: &LineIndex,
     currency: &str,
     ranges: &mut Vec<Range>,
 ) {
     for spanned in &parse_result.directives {
         let directive_text = &source[spanned.span.start..spanned.span.end];
-        let (start_line, _) = byte_offset_to_position(source, spanned.span.start);
+        let (start_line, _) = line_index.offset_to_position(spanned.span.start);
 
         for (line_offset, line) in directive_text.lines().enumerate() {
             let mut search_start = 0;

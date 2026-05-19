@@ -5,9 +5,7 @@
 //! - Currency names (all usages across directives)
 //! - Payees (all transactions with same payee)
 
-use super::utils::{
-    byte_offset_to_position, get_word_at_position, is_account_like, is_currency_like,
-};
+use super::utils::{LineIndex, get_word_at_position, is_account_like, is_currency_like};
 use lsp_types::{Location, Position, Range, ReferenceParams, Uri};
 use rustledger_core::{Directive, SYNTHESIZED_FILE_ID};
 use rustledger_parser::ParseResult;
@@ -30,12 +28,16 @@ pub fn handle_references(
     let (word, _, _) = get_word_at_position(line, position.character as usize)?;
 
     let mut locations = Vec::new();
+    // Build the line index once and share it across collectors —
+    // otherwise each posting/directive lookup is an O(n) scan.
+    let line_index = LineIndex::new(source);
 
     // Check if it's an account
     if is_account_like(&word) {
         collect_account_references(
             source,
             parse_result,
+            &line_index,
             &word,
             uri,
             include_declaration,
@@ -47,6 +49,7 @@ pub fn handle_references(
         collect_currency_references(
             source,
             parse_result,
+            &line_index,
             &word,
             uri,
             include_declaration,
@@ -55,7 +58,14 @@ pub fn handle_references(
     }
     // Check if it's a payee (inside quotes on a transaction line)
     else if is_in_quotes(line, position.character as usize) {
-        collect_payee_references(source, parse_result, &word, uri, &mut locations);
+        collect_payee_references(
+            source,
+            parse_result,
+            &line_index,
+            &word,
+            uri,
+            &mut locations,
+        );
     }
 
     if locations.is_empty() {
@@ -69,6 +79,7 @@ pub fn handle_references(
 fn collect_account_references(
     source: &str,
     parse_result: &ParseResult,
+    line_index: &LineIndex,
     account: &str,
     uri: &Uri,
     include_declaration: bool,
@@ -81,6 +92,7 @@ fn collect_account_references(
                     && include_declaration
                     && let Some(loc) = find_in_directive(
                         source,
+                        line_index,
                         spanned.span.start,
                         spanned.span.end,
                         account,
@@ -94,6 +106,7 @@ fn collect_account_references(
                 if close.account.as_ref() == account
                     && let Some(loc) = find_in_directive(
                         source,
+                        line_index,
                         spanned.span.start,
                         spanned.span.end,
                         account,
@@ -107,6 +120,7 @@ fn collect_account_references(
                 if bal.account.as_ref() == account
                     && let Some(loc) = find_in_directive(
                         source,
+                        line_index,
                         spanned.span.start,
                         spanned.span.end,
                         account,
@@ -120,6 +134,7 @@ fn collect_account_references(
                 if pad.account.as_ref() == account
                     && let Some(loc) = find_in_directive(
                         source,
+                        line_index,
                         spanned.span.start,
                         spanned.span.end,
                         account,
@@ -135,7 +150,7 @@ fn collect_account_references(
                         let after_first = first_pos + account.len();
                         if let Some(second_pos) = directive_text[after_first..].find(account) {
                             let actual_pos = after_first + second_pos;
-                            let (line, _) = byte_offset_to_position(source, spanned.span.start);
+                            let (line, _) = line_index.offset_to_position(spanned.span.start);
                             locations.push(Location {
                                 uri: uri.clone(),
                                 range: Range {
@@ -151,6 +166,7 @@ fn collect_account_references(
                 if note.account.as_ref() == account
                     && let Some(loc) = find_in_directive(
                         source,
+                        line_index,
                         spanned.span.start,
                         spanned.span.end,
                         account,
@@ -164,6 +180,7 @@ fn collect_account_references(
                 if doc.account.as_ref() == account
                     && let Some(loc) = find_in_directive(
                         source,
+                        line_index,
                         spanned.span.start,
                         spanned.span.end,
                         account,
@@ -183,7 +200,7 @@ fn collect_account_references(
                     }
                     if spanned_posting.account.as_ref() == account {
                         let (posting_line, _) =
-                            byte_offset_to_position(source, spanned_posting.span.start);
+                            line_index.offset_to_position(spanned_posting.span.start);
                         if let Some(line_text) = source.lines().nth(posting_line as usize)
                             && let Some(col) = line_text.find(account)
                         {
@@ -207,6 +224,7 @@ fn collect_account_references(
 fn collect_currency_references(
     source: &str,
     parse_result: &ParseResult,
+    line_index: &LineIndex,
     currency: &str,
     uri: &Uri,
     include_declaration: bool,
@@ -214,7 +232,7 @@ fn collect_currency_references(
 ) {
     for spanned in &parse_result.directives {
         let directive_text = &source[spanned.span.start..spanned.span.end];
-        let (start_line, _) = byte_offset_to_position(source, spanned.span.start);
+        let (start_line, _) = line_index.offset_to_position(spanned.span.start);
 
         // Check if directive contains this currency
         let is_declaration =
@@ -275,6 +293,7 @@ fn collect_currency_references(
 fn collect_payee_references(
     source: &str,
     parse_result: &ParseResult,
+    line_index: &LineIndex,
     payee: &str,
     uri: &Uri,
     locations: &mut Vec<Location>,
@@ -284,7 +303,7 @@ fn collect_payee_references(
             && let Some(ref txn_payee) = txn.payee
             && txn_payee.as_ref() == payee
         {
-            let (line, _) = byte_offset_to_position(source, spanned.span.start);
+            let (line, _) = line_index.offset_to_position(spanned.span.start);
             let line_text = source.lines().nth(line as usize).unwrap_or("");
 
             // Find the payee in quotes
@@ -304,13 +323,14 @@ fn collect_payee_references(
 /// Find a string in a directive and create a location.
 fn find_in_directive(
     source: &str,
+    line_index: &LineIndex,
     start_offset: usize,
     end_offset: usize,
     needle: &str,
     uri: &Uri,
 ) -> Option<Location> {
     let directive_text = &source[start_offset..end_offset];
-    let (start_line, start_col) = byte_offset_to_position(source, start_offset);
+    let (start_line, start_col) = line_index.offset_to_position(start_offset);
 
     for (line_offset, line) in directive_text.lines().enumerate() {
         if let Some(col) = line.find(needle) {

@@ -65,6 +65,10 @@ pub fn handle_range_formatting(
             }
 
             for spanned_posting in &txn.postings {
+                // Defensive: the LSP formats parser-derived directives,
+                // which always carry real spans. Guard against
+                // `Spanned::synthesized` entries in case a future
+                // integration feeds loader/plugin output through here.
                 if spanned_posting.file_id == SYNTHESIZED_FILE_ID {
                     continue;
                 }
@@ -213,5 +217,60 @@ mod tests {
                 "edit targets a metadata line — issue #1142 regressed: {edit:?}"
             );
         }
+        // No positive "must produce an edit" assertion here: range
+        // formatting only emits edits when something actually needs
+        // changing, and this source is already correctly formatted.
+        // Emitting zero edits IS the right outcome — see the
+        // `_misindented` variant below for the positive case.
+    }
+
+    /// Companion to the regression test above: with a *misindented*
+    /// posting interleaved with metadata, range formatting should
+    /// produce a fix for the posting and still leave the metadata
+    /// alone. Catches a future regression that silently short-circuits
+    /// the formatter (the all-correct test above can't tell those
+    /// apart from a working fix).
+    #[test]
+    fn test_range_formatting_fixes_misindented_posting_without_touching_metadata() {
+        // Note: posting 1 has 4-space indent (should be 2).
+        let source = "\
+2024-01-15 * \"Test\"
+  Assets:Bank  -50.00 USD
+    effective_date: 2024-01-20
+    Expenses:Food  50.00 USD
+    effective_date: 2024-01-21
+";
+        let result = parse(source);
+        assert!(
+            result.errors.is_empty(),
+            "parse errors: {:?}",
+            result.errors
+        );
+
+        let params = DocumentRangeFormattingParams {
+            text_document: lsp_types::TextDocumentIdentifier {
+                uri: "file:///test.beancount".parse().unwrap(),
+            },
+            range: Range {
+                start: Position::new(0, 0),
+                end: Position::new(5, 0),
+            },
+            options: Default::default(),
+            work_done_progress_params: Default::default(),
+        };
+
+        let edits = handle_range_formatting(&params, source, &result).unwrap_or_default();
+        let metadata_lines = [2u32, 4u32];
+
+        for edit in &edits {
+            assert!(
+                !metadata_lines.contains(&edit.range.start.line),
+                "edit targets a metadata line — issue #1142 regressed: {edit:?}"
+            );
+        }
+        assert!(
+            edits.iter().any(|e| e.range.start.line == 3),
+            "expected an edit at the misindented posting (line 3); got {edits:?}"
+        );
     }
 }

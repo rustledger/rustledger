@@ -32,8 +32,10 @@ pub fn handle_formatting(
             // the formatter then overwrote with posting content — see
             // issue #1142.
             for spanned_posting in &txn.postings {
-                // Skip plugin-synthesized postings: they have no source
-                // location to format.
+                // Defensive: the LSP formats parser-derived directives,
+                // which always carry real spans. Guard against
+                // `Spanned::synthesized` entries in case a future
+                // integration feeds loader/plugin output through here.
                 if spanned_posting.file_id == SYNTHESIZED_FILE_ID {
                     continue;
                 }
@@ -255,6 +257,7 @@ mod tests {
             })
             .collect();
         assert_eq!(metadata_lines, vec![2, 4], "test source layout assumption");
+        let posting_lines: [u32; 2] = [1, 3];
 
         // No emitted edit should touch a metadata line. Pre-fix, the
         // line-arithmetic bug produced a posting-shaped edit at line 2
@@ -265,5 +268,14 @@ mod tests {
                 "edit targets a metadata line — issue #1142 regressed: {edit:?}"
             );
         }
+        // Positive assertion: the formatter must still do its job on
+        // the real posting lines (otherwise a degenerate "emit zero
+        // edits" implementation would silently pass the test).
+        assert!(
+            edits
+                .iter()
+                .any(|e| posting_lines.contains(&e.range.start.line)),
+            "formatter emitted no edits for posting lines — alignment broken"
+        );
     }
 }

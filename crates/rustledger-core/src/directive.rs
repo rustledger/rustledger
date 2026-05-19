@@ -569,8 +569,8 @@ pub struct Transaction {
     /// file ID. Parser-emitted postings carry the byte range of the
     /// posting line (from leading indent through trailing same-line
     /// comment, not including following metadata lines); programmatically
-    /// constructed postings use [`Spanned::synthesized`] which pairs
-    /// [`Span::ZERO`] with [`SYNTHESIZED_FILE_ID`].
+    /// constructed postings use [`crate::Spanned::synthesized`] which
+    /// pairs [`crate::Span::ZERO`] with [`crate::SYNTHESIZED_FILE_ID`].
     pub postings: Vec<crate::Spanned<Posting>>,
     /// Comments that appear after all postings
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

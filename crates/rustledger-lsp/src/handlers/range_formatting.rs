@@ -6,7 +6,7 @@ use lsp_types::{DocumentRangeFormattingParams, Position, Range, TextEdit};
 use rustledger_core::{Directive, SYNTHESIZED_FILE_ID};
 use rustledger_parser::ParseResult;
 
-use super::utils::byte_offset_to_position;
+use super::utils::LineIndex;
 
 /// Handle a range formatting request.
 pub fn handle_range_formatting(
@@ -17,6 +17,10 @@ pub fn handle_range_formatting(
     let range = params.range;
     let mut edits = Vec::new();
     let lines: Vec<&str> = source.lines().collect();
+    // Build the line index once so per-posting offset→line lookups are
+    // O(log lines) instead of O(n). On a large file with many
+    // transactions, the naive scanner would otherwise dominate.
+    let line_index = LineIndex::new(source);
 
     // Process lines within the range
     for line_num in range.start.line..=range.end.line {
@@ -57,7 +61,7 @@ pub fn handle_range_formatting(
     // assumption and caused #1142.
     for spanned in &parse_result.directives {
         if let Directive::Transaction(txn) = &spanned.value {
-            let (start_line, _) = byte_offset_to_position(source, spanned.span.start);
+            let (start_line, _) = line_index.offset_to_position(spanned.span.start);
 
             // Check if transaction overlaps with range
             if start_line > range.end.line {
@@ -72,7 +76,7 @@ pub fn handle_range_formatting(
                 if spanned_posting.file_id == SYNTHESIZED_FILE_ID {
                     continue;
                 }
-                let (posting_line, _) = byte_offset_to_position(source, spanned_posting.span.start);
+                let (posting_line, _) = line_index.offset_to_position(spanned_posting.span.start);
 
                 // Check if posting is within range
                 if posting_line >= range.start.line

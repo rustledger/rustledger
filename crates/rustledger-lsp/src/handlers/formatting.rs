@@ -9,7 +9,7 @@ use lsp_types::{DocumentFormattingParams, Position, Range, TextEdit};
 use rustledger_core::{Directive, SYNTHESIZED_FILE_ID};
 use rustledger_parser::ParseResult;
 
-use super::utils::byte_offset_to_position;
+use super::utils::LineIndex;
 
 /// Default column for amount alignment.
 const AMOUNT_COLUMN: usize = 50;
@@ -22,6 +22,10 @@ pub fn handle_formatting(
 ) -> Option<Vec<TextEdit>> {
     let mut edits = Vec::new();
     let lines: Vec<&str> = source.lines().collect();
+    // Build the line index once: O(n) up front, O(log lines) per
+    // offset lookup. Without it, calling the naive O(n) scanner per
+    // posting per transaction is quadratic on large files.
+    let line_index = LineIndex::new(source);
 
     for spanned in &parse_result.directives {
         if let Directive::Transaction(txn) = &spanned.value {
@@ -39,7 +43,7 @@ pub fn handle_formatting(
                 if spanned_posting.file_id == SYNTHESIZED_FILE_ID {
                     continue;
                 }
-                let (posting_line, _) = byte_offset_to_position(source, spanned_posting.span.start);
+                let (posting_line, _) = line_index.offset_to_position(spanned_posting.span.start);
                 if let Some(line) = lines.get(posting_line as usize)
                     && let Some(edit) = format_posting_line(line, posting_line, spanned_posting)
                 {
@@ -245,8 +249,11 @@ mod tests {
 
         let edits = handle_formatting(&params, source, &result).unwrap_or_default();
 
-        // Identify the metadata-line indices in the source: lines that
-        // start with the `effective_date:` key after four-space indent.
+        // Identify the metadata-line indices in the source: lines whose
+        // first non-whitespace content is the `effective_date:` key.
+        // (The canonical form uses four-space indent, but the check
+        // accepts any indentation so a future test fixture variation
+        // doesn't silently start matching the wrong lines.)
         let metadata_lines: Vec<u32> = source
             .lines()
             .enumerate()

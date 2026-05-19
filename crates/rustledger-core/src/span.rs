@@ -22,6 +22,12 @@ impl Span {
     /// synthesized values that have no source representation. Pair with
     /// [`SYNTHESIZED_FILE_ID`] on the containing [`Spanned`] to make the
     /// "no source" intent unambiguous.
+    ///
+    /// ```
+    /// use rustledger_core::Span;
+    /// assert_eq!(Span::ZERO, Span::new(0, 0));
+    /// assert!(Span::ZERO.is_empty());
+    /// ```
     pub const ZERO: Self = Self { start: 0, end: 0 };
 
     /// Create a new span.
@@ -112,6 +118,12 @@ pub const SYNTHESIZED_FILE_ID: u16 = u16::MAX;
 /// not depend on where it lives. Consumers that genuinely need
 /// location-sensitive equality compare `.span` and `.file_id`
 /// explicitly.
+///
+/// Note: the rkyv-archived form (`ArchivedSpanned<T>`, present under the
+/// `rkyv` feature) does **not** automatically receive `PartialEq` /
+/// `Eq`. The host doesn't compare archived values today; if a future
+/// code path needs to, add `rkyv(compare = (PartialEq))` to the derive
+/// attribute below or hand-roll a manual impl on the archived type.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(
     feature = "rkyv",

@@ -32,8 +32,12 @@ pub enum ConversionError {
     #[error("invalid flag: {0}")]
     InvalidFlag(String),
     /// A `SourceSpan` byte offset from the plugin wire format does not
-    /// fit in `usize` on the host. Should only ever surface on 32-bit
-    /// hosts processing source files larger than 4 GiB.
+    /// fit in `usize` on the host. This is effectively impossible in
+    /// practice — `SourceSpan` is `u64` and the host is 64-bit on every
+    /// platform rustledger supports today, so the only way to surface
+    /// this variant is to run the host on a 32-bit target with source
+    /// files larger than 4 GiB. If you see it: please file a bug
+    /// report; the offset is almost certainly corrupt.
     #[error("source span overflow: {0}")]
     SpanOverflow(String),
 }

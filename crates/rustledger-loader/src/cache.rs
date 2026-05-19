@@ -820,6 +820,42 @@ mod tests {
         let _ = fs::remove_dir(&temp_dir);
     }
 
+    /// Bumping `CACHE_VERSION` must short-circuit at the header so we
+    /// never feed an older payload to rkyv with the newer schema. Writes
+    /// a header with the correct magic but `version = CACHE_VERSION - 1`
+    /// (e.g., v4 from before #1151's `Vec<Spanned<Posting>>` shape
+    /// change) and asserts the loader refuses it.
+    #[test]
+    fn test_load_cache_rejects_older_version() {
+        use std::io::Write;
+
+        assert_clean_cache_env();
+
+        let temp_dir = std::env::temp_dir().join("rustledger_old_version_test");
+        let _ = fs::create_dir_all(&temp_dir);
+
+        let beancount_file = temp_dir.join("test.beancount");
+        let cache_file = cache_path(&beancount_file);
+        let mut f = fs::File::create(&cache_file).unwrap();
+
+        // Valid magic + previous CACHE_VERSION. The version check at
+        // `load_cache_header` should refuse before any payload is
+        // touched, no matter what the tail bytes look like.
+        let stale_version: u32 = CACHE_VERSION.checked_sub(1).expect("CACHE_VERSION >= 1");
+        f.write_all(CACHE_MAGIC).unwrap();
+        f.write_all(&stale_version.to_le_bytes()).unwrap();
+        f.write_all(&[0u8; CacheHeader::SIZE - 8 - 4]).unwrap();
+        drop(f);
+
+        assert!(
+            load_cache_entry(&beancount_file).is_none(),
+            "loader must reject cache files with an older CACHE_VERSION"
+        );
+
+        let _ = fs::remove_file(&cache_file);
+        let _ = fs::remove_dir(&temp_dir);
+    }
+
     #[test]
     fn test_reintern_directives_deduplication() {
         let date = rustledger_core::naive_date(2024, 1, 15).unwrap();

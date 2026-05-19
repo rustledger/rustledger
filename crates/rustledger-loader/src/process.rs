@@ -959,7 +959,7 @@ fn record_plugin_errors(
 /// inherits `directives[i]`'s span and `file_id` — this is the core of
 /// the ops protocol's correctness guarantee (plugin-transformed
 /// directives keep their original source identity for error reporting).
-/// `Insert(w)` directives get `(Span::new(0, 0), SYNTHESIZED_FILE_ID)`.
+/// `Insert(w)` directives get `(Span::ZERO, SYNTHESIZED_FILE_ID)`.
 ///
 /// Inner posting spans returned by plugins are sanitized against the
 /// host's `SourceMap` (see [`sanitize_inner_posting_spans`]) so a
@@ -1102,9 +1102,17 @@ fn apply_plugin_ops(
 /// - the `file_id` resolves in `SourceMap` AND `0 <= start <= end <= len`
 ///   for that file's source.
 ///
-/// Everything else collapses to `Spanned::synthesized(posting)`.
+/// Everything else collapses to `Spanned::synthesized(posting)`. As a
+/// final pass, synthesized postings that arrived with a non-zero span
+/// are normalized to `Span::ZERO` so the in-memory state matches the
+/// `Spanned::synthesized` constructor's contract (file_id +
+/// `Span::ZERO`).
+///
+/// Visible at `pub(crate)` so the same-module tests below can drive it
+/// directly; not part of the public API.
 #[cfg(feature = "plugins")]
-fn sanitize_inner_posting_spans(directive: &mut Directive, source_map: &SourceMap) {
+pub(crate) fn sanitize_inner_posting_spans(directive: &mut Directive, source_map: &SourceMap) {
+    use rustledger_core::Span;
     use rustledger_parser::SYNTHESIZED_FILE_ID;
     if let Directive::Transaction(txn) = directive {
         for p in &mut txn.postings {
@@ -1121,6 +1129,10 @@ fn sanitize_inner_posting_spans(directive: &mut Directive, source_map: &SourceMa
                     rustledger_core::Posting::auto(rustledger_core::InternedStr::from("")),
                 );
                 *p = rustledger_core::Spanned::synthesized(inner);
+            } else if p.file_id == SYNTHESIZED_FILE_ID && p.span != Span::ZERO {
+                // Synthesized → span is meaningless; normalize so the
+                // state is consistent with `Spanned::synthesized`.
+                p.span = Span::ZERO;
             }
         }
     }
@@ -1358,4 +1370,134 @@ fn run_python_plugin(
     }
 
     Ok((output.ops, errors))
+}
+
+#[cfg(all(test, feature = "plugins"))]
+mod sanitize_tests {
+    use super::sanitize_inner_posting_spans;
+    use crate::source_map::SourceMap;
+    use rust_decimal_macros::dec;
+    use rustledger_core::{
+        Amount, Directive, IncompleteAmount, Posting, SYNTHESIZED_FILE_ID, Span, Spanned,
+        Transaction,
+    };
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    fn txn_with_postings(postings: Vec<Spanned<Posting>>) -> Directive {
+        let date = rustledger_core::naive_date(2024, 1, 15).unwrap();
+        let mut txn = Transaction::new(date, "x");
+        txn.postings = postings;
+        Directive::Transaction(txn)
+    }
+
+    fn posting_at(file_id: u16, span: Span) -> Spanned<Posting> {
+        let p = Posting::with_incomplete(
+            "Assets:Cash",
+            IncompleteAmount::Complete(Amount::new(dec!(1), "USD")),
+        );
+        Spanned::new(p, span).with_file_id(file_id as usize)
+    }
+
+    fn source_map_with_one_file(source: &str) -> (SourceMap, u16) {
+        let mut sm = SourceMap::new();
+        let id = sm.add_file(PathBuf::from("test.bean"), Arc::from(source));
+        (sm, id as u16)
+    }
+
+    #[test]
+    fn span_within_real_file_is_preserved() {
+        let (sm, fid) = source_map_with_one_file("0123456789");
+        let mut d = txn_with_postings(vec![posting_at(fid, Span::new(2, 6))]);
+        sanitize_inner_posting_spans(&mut d, &sm);
+        let Directive::Transaction(t) = &d else {
+            unreachable!()
+        };
+        assert_eq!(t.postings[0].file_id, fid);
+        assert_eq!(t.postings[0].span, Span::new(2, 6));
+    }
+
+    #[test]
+    fn span_past_eof_is_reset_to_synthesized() {
+        // Bug case: a misbehaving plugin claims the posting extends past
+        // the file's actual length. The sanitizer must reject it so the
+        // LSP can't be tricked into producing an out-of-bounds TextEdit.
+        let (sm, fid) = source_map_with_one_file("0123456789"); // 10 bytes
+        let mut d = txn_with_postings(vec![posting_at(fid, Span::new(0, 9999))]);
+        sanitize_inner_posting_spans(&mut d, &sm);
+        let Directive::Transaction(t) = &d else {
+            unreachable!()
+        };
+        assert_eq!(t.postings[0].file_id, SYNTHESIZED_FILE_ID);
+        assert_eq!(t.postings[0].span, Span::ZERO);
+    }
+
+    #[test]
+    fn unknown_file_id_is_reset_to_synthesized() {
+        // Plugin claims a file_id that the host's SourceMap doesn't know.
+        let (sm, _real) = source_map_with_one_file("hello");
+        let mut d = txn_with_postings(vec![posting_at(123, Span::new(0, 5))]);
+        sanitize_inner_posting_spans(&mut d, &sm);
+        let Directive::Transaction(t) = &d else {
+            unreachable!()
+        };
+        assert_eq!(t.postings[0].file_id, SYNTHESIZED_FILE_ID);
+        assert_eq!(t.postings[0].span, Span::ZERO);
+    }
+
+    #[test]
+    fn start_after_end_is_reset_to_synthesized() {
+        let (sm, fid) = source_map_with_one_file("abcdef");
+        let mut d = txn_with_postings(vec![posting_at(fid, Span::new(5, 2))]);
+        sanitize_inner_posting_spans(&mut d, &sm);
+        let Directive::Transaction(t) = &d else {
+            unreachable!()
+        };
+        assert_eq!(t.postings[0].file_id, SYNTHESIZED_FILE_ID);
+    }
+
+    #[test]
+    fn synthesized_file_id_is_left_alone_but_span_normalized() {
+        // file_id == SYNTHESIZED_FILE_ID with a non-zero span: the
+        // sanitizer leaves it synthesized (span is meaningless for
+        // synth postings) but normalizes to Span::ZERO for tidy state.
+        let (sm, _fid) = source_map_with_one_file("x");
+        let mut d = txn_with_postings(vec![posting_at(SYNTHESIZED_FILE_ID, Span::new(100, 200))]);
+        sanitize_inner_posting_spans(&mut d, &sm);
+        let Directive::Transaction(t) = &d else {
+            unreachable!()
+        };
+        assert_eq!(t.postings[0].file_id, SYNTHESIZED_FILE_ID);
+        assert_eq!(t.postings[0].span, Span::ZERO, "synth span normalized");
+    }
+
+    #[test]
+    fn boundary_span_eq_source_len_is_valid() {
+        // end == source.len() is the canonical "to-end-of-file" span;
+        // must not be rejected.
+        let (sm, fid) = source_map_with_one_file("abcd");
+        let mut d = txn_with_postings(vec![posting_at(fid, Span::new(0, 4))]);
+        sanitize_inner_posting_spans(&mut d, &sm);
+        let Directive::Transaction(t) = &d else {
+            unreachable!()
+        };
+        assert_eq!(t.postings[0].file_id, fid);
+        assert_eq!(t.postings[0].span, Span::new(0, 4));
+    }
+
+    #[test]
+    fn non_transaction_directive_is_left_alone() {
+        // Sanitizer only walks transactions; other directive types have
+        // no inner posting spans.
+        let (sm, _fid) = source_map_with_one_file("x");
+        let mut d = Directive::Open(rustledger_core::Open {
+            date: rustledger_core::naive_date(2024, 1, 1).unwrap(),
+            account: "Assets:Bank".into(),
+            currencies: vec![],
+            booking: None,
+            meta: Default::default(),
+        });
+        sanitize_inner_posting_spans(&mut d, &sm); // no panic, no change
+        assert!(matches!(d, Directive::Open(_)));
+    }
 }

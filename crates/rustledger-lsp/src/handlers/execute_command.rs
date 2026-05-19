@@ -5,11 +5,15 @@
 //! - rledger.sortTransactions: Sort transactions by date
 //! - rledger.alignAmounts: Align amounts in a region
 
-use lsp_types::{ExecuteCommandParams, TextEdit, Uri, WorkspaceEdit};
+use lsp_types::{
+    DocumentFormattingParams, ExecuteCommandParams, TextDocumentIdentifier, TextEdit, Uri,
+    WorkspaceEdit,
+};
 use rustledger_core::Directive;
 use rustledger_parser::ParseResult;
 use std::collections::HashMap;
 
+use super::formatting::handle_formatting;
 use super::utils::byte_offset_to_position;
 
 /// Available commands.
@@ -30,7 +34,7 @@ pub fn handle_execute_command(
     match params.command.as_str() {
         "rledger.insertDate" => handle_insert_date(),
         "rledger.sortTransactions" => handle_sort_transactions(source, parse_result, uri),
-        "rledger.alignAmounts" => handle_align_amounts(source, uri),
+        "rledger.alignAmounts" => handle_align_amounts(source, parse_result, uri),
         "rledger.showAccountBalance" => {
             handle_show_account_balance(&params.arguments, parse_result)
         }
@@ -117,65 +121,35 @@ fn handle_sort_transactions(
     serde_json::to_value(workspace_edit).ok()
 }
 
-/// Align amounts in the document.
-fn handle_align_amounts(source: &str, uri: &Uri) -> Option<serde_json::Value> {
-    let lines: Vec<&str> = source.lines().collect();
-    let mut edits: Vec<TextEdit> = Vec::new();
-
-    // Find posting lines and their amount positions
-    let mut posting_groups: Vec<Vec<(usize, usize, usize)>> = Vec::new(); // (line_idx, amount_start, amount_end)
-    let mut current_group: Vec<(usize, usize, usize)> = Vec::new();
-
-    for (line_idx, line) in lines.iter().enumerate() {
-        let trimmed = line.trim_start();
-
-        // Check if this is a posting line (indented, starts with account)
-        if (line.starts_with("  ") || line.starts_with('\t')) && is_posting_line(trimmed) {
-            if let Some((amount_start, amount_end)) = find_amount_position(line) {
-                current_group.push((line_idx, amount_start, amount_end));
-            }
-        } else if !current_group.is_empty() {
-            // End of transaction, save group
-            posting_groups.push(std::mem::take(&mut current_group));
-        }
-    }
-
-    // Don't forget the last group
-    if !current_group.is_empty() {
-        posting_groups.push(current_group);
-    }
-
-    // Process each group - align amounts to the rightmost position
-    for group in posting_groups {
-        if group.len() < 2 {
-            continue;
-        }
-
-        // Find the maximum column where amounts should start
-        let max_amount_col = group.iter().map(|(_, start, _)| *start).max().unwrap_or(0);
-
-        // Create edits to align
-        for (line_idx, amount_start, _amount_end) in group {
-            if amount_start < max_amount_col {
-                let padding = max_amount_col - amount_start;
-                let line = lines[line_idx];
-
-                // Find where the amount number starts (skip leading spaces)
-                if let Some(num_start) = line[..amount_start]
-                    .rfind(|c: char| !c.is_whitespace())
-                    .map(|i| i + 1)
-                {
-                    edits.push(TextEdit {
-                        range: lsp_types::Range {
-                            start: lsp_types::Position::new(line_idx as u32, num_start as u32),
-                            end: lsp_types::Position::new(line_idx as u32, amount_start as u32),
-                        },
-                        new_text: " ".repeat(padding + (amount_start - num_start)),
-                    });
-                }
-            }
-        }
-    }
+/// Align amounts in the document by delegating to the document
+/// formatter ([`handle_formatting`]).
+///
+/// The formatting handler is now the canonical alignment path: it
+/// looks up each posting's source line via its `Spanned<Posting>` span
+/// (so interleaved metadata is preserved — see #1142), aligns amounts
+/// to `AMOUNT_COLUMN`, and uses a single shared `LineIndex` for
+/// O(log lines) offset lookups. The previous bespoke logic here
+/// duplicated that pipeline with a regex-style line scanner and its
+/// own "max-existing-column" alignment heuristic, which produced
+/// different output than `rledger format` and the LSP's own
+/// `textDocument/formatting` request — exactly the kind of duplicate
+/// code path #1142 warned about.
+fn handle_align_amounts(
+    source: &str,
+    parse_result: &ParseResult,
+    uri: &Uri,
+) -> Option<serde_json::Value> {
+    // Synthesize the formatting params. `handle_formatting` ignores
+    // its `_params` argument today (everything it needs comes from
+    // `source` + `parse_result`), but we still construct a real
+    // `DocumentFormattingParams` so future option-driven behavior
+    // (e.g. tab size, alignment column) lands automatically.
+    let params = DocumentFormattingParams {
+        text_document: TextDocumentIdentifier { uri: uri.clone() },
+        options: Default::default(),
+        work_done_progress_params: Default::default(),
+    };
+    let edits: Vec<TextEdit> = handle_formatting(&params, source, parse_result).unwrap_or_default();
 
     if edits.is_empty() {
         return Some(serde_json::json!({
@@ -240,40 +214,6 @@ fn handle_show_account_balance(
     }))
 }
 
-/// Check if a line looks like a posting.
-fn is_posting_line(trimmed: &str) -> bool {
-    trimmed.starts_with("Assets")
-        || trimmed.starts_with("Liabilities")
-        || trimmed.starts_with("Equity")
-        || trimmed.starts_with("Income")
-        || trimmed.starts_with("Expenses")
-}
-
-/// Find the position of an amount in a posting line.
-fn find_amount_position(line: &str) -> Option<(usize, usize)> {
-    // Look for a number pattern (possibly negative)
-    let mut in_number = false;
-    let mut number_start = 0;
-
-    for (i, c) in line.char_indices() {
-        if !in_number {
-            if c == '-' || c.is_ascii_digit() {
-                in_number = true;
-                number_start = i;
-            }
-        } else if !c.is_ascii_digit() && c != '.' && c != ',' {
-            // End of number
-            return Some((number_start, i));
-        }
-    }
-
-    if in_number {
-        Some((number_start, line.len()))
-    } else {
-        None
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -315,19 +255,33 @@ mod tests {
     }
 
     #[test]
-    fn test_is_posting_line() {
-        assert!(is_posting_line("Assets:Bank  100 USD"));
-        assert!(is_posting_line("Expenses:Food"));
-        assert!(!is_posting_line("2024-01-15 * \"Coffee\""));
-        assert!(!is_posting_line("open Assets:Bank"));
-    }
+    fn test_align_amounts_delegates_to_formatter() {
+        // The command now reuses `handle_formatting`, so it inherits
+        // every fix the formatter has (per-posting span lookup,
+        // metadata preservation, etc.). Smoke-test the delegation
+        // returns a WorkspaceEdit shape on a misaligned source and the
+        // "no work" shape on already-aligned input.
+        use lsp_types::Uri;
 
-    #[test]
-    fn test_find_amount_position() {
-        let line = "  Assets:Bank  100.00 USD";
-        let pos = find_amount_position(line);
-        assert!(pos.is_some());
-        let (start, _end) = pos.unwrap();
-        assert!(line[start..].starts_with("100"));
+        let misaligned = "2024-01-15 * \"Coffee\"\n  Assets:Bank  -5.00 USD\n  Expenses:Food\n";
+        let result = parse(misaligned);
+        let uri: Uri = "file:///test.beancount".parse().unwrap();
+        let out =
+            handle_align_amounts(misaligned, &result, &uri).expect("align should return a value");
+        assert!(
+            out.get("changes").is_some(),
+            "misaligned input should produce a WorkspaceEdit with changes, got {out:?}"
+        );
+
+        // A canonically-aligned source should produce the "no edits"
+        // shape (the formatter sees nothing to change).
+        let aligned = "2024-01-15 open Assets:Bank USD\n";
+        let aligned_parsed = parse(aligned);
+        let out2 = handle_align_amounts(aligned, &aligned_parsed, &uri)
+            .expect("align should always return some value");
+        assert!(
+            out2.get("message").is_some(),
+            "no-op input should return a message-only shape, got {out2:?}"
+        );
     }
 }

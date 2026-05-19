@@ -3,7 +3,7 @@
 //! Formats only the selected range of the document.
 
 use lsp_types::{DocumentRangeFormattingParams, Position, Range, TextEdit};
-use rustledger_core::Directive;
+use rustledger_core::{Directive, SYNTHESIZED_FILE_ID};
 use rustledger_parser::ParseResult;
 
 use super::utils::byte_offset_to_position;
@@ -50,7 +50,11 @@ pub fn handle_range_formatting(
         }
     }
 
-    // Format postings within transactions in the range
+    // Format postings within transactions in the range. Look up each
+    // posting's line from its own source span, not via line arithmetic
+    // off the transaction header — interleaved posting-level metadata
+    // (e.g., `effective_date:`) breaks the `start_line + 1 + i`
+    // assumption and caused #1142.
     for spanned in &parse_result.directives {
         if let Directive::Transaction(txn) = &spanned.value {
             let (start_line, _) = byte_offset_to_position(source, spanned.span.start);
@@ -60,14 +64,17 @@ pub fn handle_range_formatting(
                 continue;
             }
 
-            for (i, posting) in txn.postings.iter().enumerate() {
-                let posting_line = start_line + 1 + i as u32;
+            for spanned_posting in &txn.postings {
+                if spanned_posting.file_id == SYNTHESIZED_FILE_ID {
+                    continue;
+                }
+                let (posting_line, _) = byte_offset_to_position(source, spanned_posting.span.start);
 
                 // Check if posting is within range
                 if posting_line >= range.start.line
                     && posting_line <= range.end.line
                     && let Some(line) = lines.get(posting_line as usize)
-                    && let Some(edit) = format_posting_line(line, posting_line, posting)
+                    && let Some(edit) = format_posting_line(line, posting_line, spanned_posting)
                 {
                     // Don't duplicate edits
                     if !edits.iter().any(|e| e.range.start.line == posting_line) {
@@ -150,5 +157,61 @@ mod tests {
 
         let edits = handle_range_formatting(&params, source, &result);
         assert!(edits.is_some());
+    }
+
+    /// Regression test for issue #1142 (range-formatting variant).
+    ///
+    /// Pre-fix, `posting_line = start_line + 1 + i` pointed at the
+    /// metadata lines between postings, and the formatter emitted
+    /// posting-shaped edits that overwrote them. See the matching test
+    /// on `formatting.rs` for the full reasoning.
+    #[test]
+    fn test_range_formatting_preserves_interleaved_metadata_1142() {
+        let source = "\
+2024-01-15 * \"Test\"
+  Assets:Bank  -50.00 USD
+    effective_date: 2024-01-20
+  Expenses:Food  50.00 USD
+    effective_date: 2024-01-21
+";
+        let result = parse(source);
+        assert!(
+            result.errors.is_empty(),
+            "parse errors: {:?}",
+            result.errors
+        );
+
+        let params = DocumentRangeFormattingParams {
+            text_document: lsp_types::TextDocumentIdentifier {
+                uri: "file:///test.beancount".parse().unwrap(),
+            },
+            // Cover the full transaction.
+            range: Range {
+                start: Position::new(0, 0),
+                end: Position::new(5, 0),
+            },
+            options: Default::default(),
+            work_done_progress_params: Default::default(),
+        };
+
+        let edits = handle_range_formatting(&params, source, &result).unwrap_or_default();
+
+        let metadata_lines: Vec<u32> = source
+            .lines()
+            .enumerate()
+            .filter_map(|(i, line)| {
+                line.trim_start()
+                    .starts_with("effective_date:")
+                    .then_some(i as u32)
+            })
+            .collect();
+        assert_eq!(metadata_lines, vec![2, 4], "test source layout assumption");
+
+        for edit in &edits {
+            assert!(
+                !metadata_lines.contains(&edit.range.start.line),
+                "edit targets a metadata line — issue #1142 regressed: {edit:?}"
+            );
+        }
     }
 }

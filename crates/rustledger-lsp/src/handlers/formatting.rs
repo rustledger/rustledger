@@ -6,7 +6,7 @@
 //! - Consistent spacing around operators
 
 use lsp_types::{DocumentFormattingParams, Position, Range, TextEdit};
-use rustledger_core::Directive;
+use rustledger_core::{Directive, SYNTHESIZED_FILE_ID};
 use rustledger_parser::ParseResult;
 
 use super::utils::byte_offset_to_position;
@@ -25,14 +25,21 @@ pub fn handle_formatting(
 
     for spanned in &parse_result.directives {
         if let Directive::Transaction(txn) = &spanned.value {
-            let (start_line, _) = byte_offset_to_position(source, spanned.span.start);
-
-            // Format each posting
-            for (i, posting) in txn.postings.iter().enumerate() {
-                let posting_line = start_line + 1 + i as u32;
-
+            // Format each posting using its own source span, not a
+            // line-arithmetic guess from the directive's start_line.
+            // Interleaved posting-level metadata (e.g., `effective_date:`)
+            // makes `start_line + 1 + i` point at metadata lines, which
+            // the formatter then overwrote with posting content — see
+            // issue #1142.
+            for spanned_posting in &txn.postings {
+                // Skip plugin-synthesized postings: they have no source
+                // location to format.
+                if spanned_posting.file_id == SYNTHESIZED_FILE_ID {
+                    continue;
+                }
+                let (posting_line, _) = byte_offset_to_position(source, spanned_posting.span.start);
                 if let Some(line) = lines.get(posting_line as usize)
-                    && let Some(edit) = format_posting_line(line, posting_line, posting)
+                    && let Some(edit) = format_posting_line(line, posting_line, spanned_posting)
                 {
                     edits.push(edit);
                 }
@@ -197,5 +204,66 @@ mod tests {
         let edits = edits.unwrap();
         // Should have edit to replace tab
         assert!(edits.iter().any(|e| e.new_text.contains("  ")));
+    }
+
+    /// Regression test for issue #1142.
+    ///
+    /// When a transaction has posting-level metadata interleaved between
+    /// postings (e.g., `effective_date:`), the previous formatter
+    /// computed each posting's line as `txn_start_line + 1 + posting_idx`
+    /// and so produced TextEdits targeting metadata lines instead of
+    /// posting lines. Applying those edits overwrote the metadata. This
+    /// test pins the post-fix behavior: emitted edits target only the
+    /// posting lines and never the metadata lines between them.
+    #[test]
+    fn test_formatting_preserves_interleaved_metadata_1142() {
+        // Note the two-space indentation on postings vs four-space on
+        // metadata — this is the canonical effective_date format.
+        let source = "\
+2024-01-15 * \"Test\"
+  Assets:Bank  -50.00 USD
+    effective_date: 2024-01-20
+  Expenses:Food  50.00 USD
+    effective_date: 2024-01-21
+";
+        let result = parse(source);
+        assert!(
+            result.errors.is_empty(),
+            "parse errors: {:?}",
+            result.errors
+        );
+
+        let params = DocumentFormattingParams {
+            text_document: lsp_types::TextDocumentIdentifier {
+                uri: "file:///test.beancount".parse().unwrap(),
+            },
+            options: Default::default(),
+            work_done_progress_params: Default::default(),
+        };
+
+        let edits = handle_formatting(&params, source, &result).unwrap_or_default();
+
+        // Identify the metadata-line indices in the source: lines that
+        // start with the `effective_date:` key after four-space indent.
+        let metadata_lines: Vec<u32> = source
+            .lines()
+            .enumerate()
+            .filter_map(|(i, line)| {
+                line.trim_start()
+                    .starts_with("effective_date:")
+                    .then_some(i as u32)
+            })
+            .collect();
+        assert_eq!(metadata_lines, vec![2, 4], "test source layout assumption");
+
+        // No emitted edit should touch a metadata line. Pre-fix, the
+        // line-arithmetic bug produced a posting-shaped edit at line 2
+        // (the first metadata line), overwriting it.
+        for edit in &edits {
+            assert!(
+                !metadata_lines.contains(&edit.range.start.line),
+                "edit targets a metadata line — issue #1142 regressed: {edit:?}"
+            );
+        }
     }
 }

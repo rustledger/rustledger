@@ -1212,21 +1212,27 @@ mod tests {
             Directive::Transaction(
                 Transaction::new(date(2024, 1, 15), "Coffee")
                     .with_flag('*')
-                    .with_posting(Posting::new(
+                    .with_synthesized_posting(Posting::new(
                         "Expenses:Food",
                         Amount::new(dec!(5.00), "USD"),
                     ))
-                    .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(-5.00), "USD"))),
+                    .with_synthesized_posting(Posting::new(
+                        "Assets:Bank",
+                        Amount::new(dec!(-5.00), "USD"),
+                    )),
             ),
             // A scale-3 input that bumps SUM's natural scale to 3.
             Directive::Transaction(
                 Transaction::new(date(2024, 1, 16), "Refund")
                     .with_flag('*')
-                    .with_posting(Posting::new(
+                    .with_synthesized_posting(Posting::new(
                         "Expenses:Food",
                         Amount::new(dec!(0.000), "USD"),
                     ))
-                    .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(0.0), "USD"))),
+                    .with_synthesized_posting(Posting::new(
+                        "Assets:Bank",
+                        Amount::new(dec!(0.0), "USD"),
+                    )),
             ),
         ];
 
@@ -1294,20 +1300,26 @@ mod tests {
             Directive::Transaction(
                 Transaction::new(date(2024, 1, 15), "T1")
                     .with_flag('*')
-                    .with_posting(Posting::new(
+                    .with_synthesized_posting(Posting::new(
                         "Expenses:Food",
                         Amount::new(dec!(5.00), "USD"),
                     ))
-                    .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(-5.00), "USD"))),
+                    .with_synthesized_posting(Posting::new(
+                        "Assets:Bank",
+                        Amount::new(dec!(-5.00), "USD"),
+                    )),
             ),
             Directive::Transaction(
                 Transaction::new(date(2024, 1, 16), "T2")
                     .with_flag('*')
-                    .with_posting(Posting::new(
+                    .with_synthesized_posting(Posting::new(
                         "Expenses:Food",
                         Amount::new(dec!(0.000), "USD"),
                     ))
-                    .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(0.0), "USD"))),
+                    .with_synthesized_posting(Posting::new(
+                        "Assets:Bank",
+                        Amount::new(dec!(0.0), "USD"),
+                    )),
             ),
         ];
 
@@ -1590,20 +1602,26 @@ mod tests {
             Directive::Transaction(
                 Transaction::new(date(2024, 1, 15), "Coffee")
                     .with_flag('*')
-                    .with_posting(Posting::new(
+                    .with_synthesized_posting(Posting::new(
                         "Expenses:Food",
                         Amount::new(dec!(5.00), "USD"),
                     ))
-                    .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(-5.00), "USD"))),
+                    .with_synthesized_posting(Posting::new(
+                        "Assets:Bank",
+                        Amount::new(dec!(-5.00), "USD"),
+                    )),
             ),
             Directive::Transaction(
                 Transaction::new(date(2024, 1, 16), "Refund")
                     .with_flag('*')
-                    .with_posting(Posting::new(
+                    .with_synthesized_posting(Posting::new(
                         "Expenses:Food",
                         Amount::new(dec!(0.000), "USD"),
                     ))
-                    .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(0.0), "USD"))),
+                    .with_synthesized_posting(Posting::new(
+                        "Assets:Bank",
+                        Amount::new(dec!(0.0), "USD"),
+                    )),
             ),
         ];
 

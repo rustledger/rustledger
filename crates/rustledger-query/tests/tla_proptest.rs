@@ -209,8 +209,8 @@ proptest! {
             directives.push(Directive::Transaction(
                 Transaction::new(date, format!("Txn {i}"))
                     .with_flag('*')
-                    .with_posting(Posting::new(account, Amount::new(Decimal::from(amount), "USD")))
-                    .with_posting(Posting::new("Equity:Opening", Amount::new(Decimal::from(-amount), "USD")))
+                    .with_synthesized_posting(Posting::new(account, Amount::new(Decimal::from(amount), "USD")))
+                    .with_synthesized_posting(Posting::new("Equity:Opening", Amount::new(Decimal::from(-amount), "USD")))
             ));
         }
 
@@ -246,8 +246,8 @@ proptest! {
                 Directive::Transaction(
                     Transaction::new(date, format!("Txn {i}"))
                         .with_flag('*')
-                        .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(10), "USD")))
-                        .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(-10), "USD")))
+                        .with_synthesized_posting(Posting::new("Expenses:Food", Amount::new(dec!(10), "USD")))
+                        .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(-10), "USD")))
                 )
             })
             .collect();
@@ -285,8 +285,8 @@ proptest! {
                 Directive::Transaction(
                     Transaction::new(date, format!("Txn {i}"))
                         .with_flag('*')
-                        .with_posting(Posting::new("Expenses:Food", Amount::new(Decimal::from(amount), "USD")))
-                        .with_posting(Posting::new("Assets:Cash", Amount::new(Decimal::from(-amount), "USD")))
+                        .with_synthesized_posting(Posting::new("Expenses:Food", Amount::new(Decimal::from(amount), "USD")))
+                        .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(Decimal::from(-amount), "USD")))
                 )
             })
             .collect();
@@ -322,14 +322,14 @@ proptest! {
             Directive::Transaction(
                 Transaction::new(date, "Coffee")
                     .with_flag('*')
-                    .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(5), "USD")))
-                    .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(-5), "USD")))
+                    .with_synthesized_posting(Posting::new("Expenses:Food", Amount::new(dec!(5), "USD")))
+                    .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(-5), "USD")))
             ),
             Directive::Transaction(
                 Transaction::new(date, "Salary")
                     .with_flag('*')
-                    .with_posting(Posting::new("Income:Salary", Amount::new(dec!(-1000), "USD")))
-                    .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(1000), "USD")))
+                    .with_synthesized_posting(Posting::new("Income:Salary", Amount::new(dec!(-1000), "USD")))
+                    .with_synthesized_posting(Posting::new("Assets:Bank", Amount::new(dec!(1000), "USD")))
             ),
         ];
 
@@ -364,8 +364,8 @@ proptest! {
             Directive::Transaction(
                 Transaction::new(date, "Test")
                     .with_flag('*')
-                    .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(10), "USD")))
-                    .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(-10), "USD")))
+                    .with_synthesized_posting(Posting::new("Expenses:Food", Amount::new(dec!(10), "USD")))
+                    .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(-10), "USD")))
             ),
         ];
 
@@ -394,8 +394,8 @@ proptest! {
                 Directive::Transaction(
                     Transaction::new(d, format!("Txn {i}"))
                         .with_flag('*')
-                        .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(10), "USD")))
-                        .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(-10), "USD")))
+                        .with_synthesized_posting(Posting::new("Expenses:Food", Amount::new(dec!(10), "USD")))
+                        .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(-10), "USD")))
                 )
             })
             .collect();
@@ -432,8 +432,8 @@ proptest! {
                 Directive::Transaction(
                     Transaction::new(date, format!("Txn {i}"))
                         .with_flag('*') // Same flag for all
-                        .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(10), "USD")))
-                        .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(-10), "USD")))
+                        .with_synthesized_posting(Posting::new("Expenses:Food", Amount::new(dec!(10), "USD")))
+                        .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(-10), "USD")))
                 )
             })
             .collect();
@@ -480,8 +480,8 @@ proptest! {
             Directive::Transaction(
                 Transaction::new(date, "Test")
                     .with_flag('*')
-                    .with_posting(Posting::new("Expenses:Food", Amount::new(Decimal::from(amount), "USD")))
-                    .with_posting(Posting::new("Assets:Cash", Amount::new(Decimal::from(-amount), "USD")))
+                    .with_synthesized_posting(Posting::new("Expenses:Food", Amount::new(Decimal::from(amount), "USD")))
+                    .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(Decimal::from(-amount), "USD")))
             ),
         ];
 
@@ -516,8 +516,8 @@ proptest! {
                 Directive::Transaction(
                     Transaction::new(date, format!("Txn {i}"))
                         .with_flag('*')
-                        .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(10), "USD")))
-                        .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(-10), "USD")))
+                        .with_synthesized_posting(Posting::new("Expenses:Food", Amount::new(dec!(10), "USD")))
+                        .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(-10), "USD")))
                 )
             })
             .collect();

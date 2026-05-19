@@ -97,10 +97,27 @@ pub(super) fn data_to_spanned_posting(
 ) -> Result<Spanned<Posting>, ConversionError> {
     let posting = data_to_posting(data)?;
     match data.span {
-        Some(s) => Ok(
-            Spanned::new(posting, Span::new(s.start as usize, s.end as usize))
-                .with_file_id(s.file_id as usize),
-        ),
+        Some(s) => {
+            // u64-to-usize is a no-op on 64-bit hosts, which is every
+            // platform rustledger runs the host on. The wasm-plugin
+            // guest never calls this function — it manipulates
+            // PostingData directly. Surface a clear error on the
+            // (hypothetical) 32-bit-host overflow rather than
+            // silently truncating to a wrong span.
+            let start = usize::try_from(s.start).map_err(|_| {
+                ConversionError::SpanOverflow(format!(
+                    "PostingData.span.start ({}) exceeds usize::MAX on this target",
+                    s.start
+                ))
+            })?;
+            let end = usize::try_from(s.end).map_err(|_| {
+                ConversionError::SpanOverflow(format!(
+                    "PostingData.span.end ({}) exceeds usize::MAX on this target",
+                    s.end
+                ))
+            })?;
+            Ok(Spanned::new(posting, Span::new(start, end)).with_file_id(s.file_id as usize))
+        }
         None => Ok(Spanned::synthesized(posting)),
     }
 }

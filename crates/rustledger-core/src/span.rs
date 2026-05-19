@@ -104,7 +104,15 @@ impl fmt::Display for Span {
 pub const SYNTHESIZED_FILE_ID: u16 = u16::MAX;
 
 /// A value with an associated source location (span and file).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `PartialEq` / `Eq` / `Hash` are implemented manually to delegate to
+/// the inner value only — two `Spanned<T>` values are considered equal
+/// when their `T`s are equal, regardless of where they came from in
+/// source. This matches the principle that "what" a value is should
+/// not depend on where it lives. Consumers that genuinely need
+/// location-sensitive equality compare `.span` and `.file_id`
+/// explicitly.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(
     feature = "rkyv",
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
@@ -194,6 +202,20 @@ impl<T> Spanned<T> {
 impl<T: fmt::Display> fmt::Display for Spanned<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.value)
+    }
+}
+
+impl<T: PartialEq> PartialEq for Spanned<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.value == other.value
+    }
+}
+
+impl<T: Eq> Eq for Spanned<T> {}
+
+impl<T: std::hash::Hash> std::hash::Hash for Spanned<T> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.value.hash(state);
     }
 }
 
@@ -342,5 +364,39 @@ mod tests {
         assert_eq!(spanned.value, "value");
         assert_eq!(spanned.span, Span::new(0, 5));
         assert_eq!(spanned.file_id, 3);
+    }
+
+    #[test]
+    fn test_spanned_eq_ignores_location() {
+        // PartialEq/Eq/Hash on Spanned<T> delegate to the inner value:
+        // two values with the same content but different source
+        // locations are equal. Anyone who needs location-sensitive
+        // equality compares .span / .file_id explicitly.
+        use std::collections::HashSet;
+        let a = Spanned::new("x", Span::new(0, 1)).with_file_id(0);
+        let b = Spanned::new("x", Span::new(100, 200)).with_file_id(7);
+        let c = Spanned::new("y", Span::new(0, 1)).with_file_id(0);
+        assert_eq!(a, b, "different locations, same value → equal");
+        assert_ne!(a, c, "same location, different value → not equal");
+        let mut set: HashSet<Spanned<&str>> = HashSet::new();
+        set.insert(a);
+        set.insert(b);
+        assert_eq!(set.len(), 1, "Hash also delegates to inner value");
+    }
+
+    #[test]
+    fn test_span_zero_constant() {
+        assert_eq!(Span::ZERO, Span::new(0, 0));
+        assert!(Span::ZERO.is_empty());
+    }
+
+    #[test]
+    fn test_spanned_synthesized_uses_synth_file_id_and_zero_span() {
+        // Programmatically-built values get Span::ZERO + SYNTHESIZED_FILE_ID
+        // so consumers can detect "no source" without sentinel checks on
+        // the inner value.
+        let s = Spanned::synthesized("anything");
+        assert_eq!(s.span, Span::ZERO);
+        assert_eq!(s.file_id, SYNTHESIZED_FILE_ID);
     }
 }

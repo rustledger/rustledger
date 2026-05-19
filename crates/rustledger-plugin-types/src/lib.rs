@@ -444,16 +444,17 @@ pub struct TransactionData {
 /// brand-new posting, leave [`PostingData::span`] as `None` and the host
 /// will mark it `SYNTHESIZED_FILE_ID`.
 ///
-/// Byte offsets are stored as `u32` so the wire format is stable across
-/// 32-bit (WASM) and 64-bit (host) targets — beancount files >4 GiB do
-/// not exist in practice. The contents are otherwise opaque to plugin
-/// code: do not synthesize spans by guessing offsets.
+/// Byte offsets are stored as `u64` so the wire format is stable
+/// across 32-bit (WASM) and 64-bit (host) targets, and so very large
+/// concatenated source trees (includes-of-includes) cannot silently
+/// overflow. The contents are otherwise opaque to plugin code: do
+/// not synthesize spans by guessing offsets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceSpan {
     /// Start byte offset within the file (inclusive).
-    pub start: u32,
+    pub start: u64,
     /// End byte offset within the file (exclusive).
-    pub end: u32,
+    pub end: u64,
     /// Source file index in the host's source map.
     pub file_id: u16,
 }

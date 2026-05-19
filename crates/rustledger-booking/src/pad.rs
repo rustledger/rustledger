@@ -245,8 +245,8 @@ fn create_padding_transaction(
     );
     Transaction::new(date, &narration)
         .with_flag('P')
-        .with_posting(Posting::new(target_account, difference.clone()))
-        .with_posting(Posting::new(source_account, difference.neg()))
+        .with_synthesized_posting(Posting::new(target_account, difference.clone()))
+        .with_synthesized_posting(Posting::new(source_account, difference.neg()))
 }
 
 /// Expand a ledger by replacing pad directives with synthetic transactions.
@@ -374,11 +374,11 @@ mod tests {
             Directive::Open(Open::new(date(2024, 1, 1), "Income:Salary")),
             Directive::Transaction(
                 Transaction::new(date(2024, 1, 5), "Deposit")
-                    .with_posting(Posting::new(
+                    .with_synthesized_posting(Posting::new(
                         "Assets:Bank",
                         Amount::new(dec!(500.00), "USD"),
                     ))
-                    .with_posting(Posting::new(
+                    .with_synthesized_posting(Posting::new(
                         "Income:Salary",
                         Amount::new(dec!(-500.00), "USD"),
                     )),
@@ -412,11 +412,11 @@ mod tests {
             Directive::Open(Open::new(date(2024, 1, 1), "Income:Salary")),
             Directive::Transaction(
                 Transaction::new(date(2024, 1, 5), "Big deposit")
-                    .with_posting(Posting::new(
+                    .with_synthesized_posting(Posting::new(
                         "Assets:Bank",
                         Amount::new(dec!(2000.00), "USD"),
                     ))
-                    .with_posting(Posting::new(
+                    .with_synthesized_posting(Posting::new(
                         "Income:Salary",
                         Amount::new(dec!(-2000.00), "USD"),
                     )),
@@ -450,11 +450,11 @@ mod tests {
             Directive::Open(Open::new(date(2024, 1, 1), "Income:Salary")),
             Directive::Transaction(
                 Transaction::new(date(2024, 1, 5), "Exact deposit")
-                    .with_posting(Posting::new(
+                    .with_synthesized_posting(Posting::new(
                         "Assets:Bank",
                         Amount::new(dec!(1000.00), "USD"),
                     ))
-                    .with_posting(Posting::new(
+                    .with_synthesized_posting(Posting::new(
                         "Income:Salary",
                         Amount::new(dec!(-1000.00), "USD"),
                     )),
@@ -639,8 +639,14 @@ mod tests {
             // Transaction after balance - this "consumes" the pad
             Directive::Transaction(
                 Transaction::new(date(2024, 1, 3), "Spending")
-                    .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(-100), "USD")))
-                    .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(100), "USD"))),
+                    .with_synthesized_posting(Posting::new(
+                        "Assets:Bank",
+                        Amount::new(dec!(-100), "USD"),
+                    ))
+                    .with_synthesized_posting(Posting::new(
+                        "Expenses:Food",
+                        Amount::new(dec!(100), "USD"),
+                    )),
             ),
             // This balance should NOT use the pad (too late)
             Directive::Balance(Balance::new(

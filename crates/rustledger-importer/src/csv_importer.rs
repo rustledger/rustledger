@@ -305,8 +305,8 @@ impl CsvImporter {
         // Build the transaction
         let mut txn = Transaction::new(date, &narration)
             .with_flag('*')
-            .with_posting(posting)
-            .with_posting(contra_posting);
+            .with_synthesized_posting(posting)
+            .with_synthesized_posting(contra_posting);
 
         if let Some(p) = payee {
             txn = txn.with_payee(p);

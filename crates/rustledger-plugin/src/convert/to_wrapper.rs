@@ -34,9 +34,12 @@ pub(super) fn transaction_to_data(txn: &Transaction) -> TransactionData {
 pub(super) fn spanned_posting_to_data(spanned: &Spanned<Posting>) -> PostingData {
     let mut data = posting_to_data(&spanned.value);
     if spanned.file_id != SYNTHESIZED_FILE_ID {
+        // `usize as u64` is a widening cast on every supported target
+        // (32-bit host or wasm32 → u64, 64-bit host → u64) so no
+        // saturation or check is required.
         data.span = Some(SourceSpan {
-            start: u32::try_from(spanned.span.start).unwrap_or(u32::MAX),
-            end: u32::try_from(spanned.span.end).unwrap_or(u32::MAX),
+            start: spanned.span.start as u64,
+            end: spanned.span.end as u64,
             file_id: spanned.file_id,
         });
     }

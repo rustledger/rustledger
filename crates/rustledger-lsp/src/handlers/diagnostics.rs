@@ -1715,7 +1715,7 @@ include "credit_card.beancount"
         let plugins = vec![Plugin {
             name: "auto_accounts".to_string(),
             config: None,
-            span: Span::new(0, 0),
+            span: Span::ZERO,
             file_id: 0,
             force_python: false,
         }];

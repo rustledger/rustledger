@@ -113,8 +113,8 @@ fn round_interpolated(residual: Decimal, existing_scale: Option<u32>) -> Decimal
 ///
 /// ```ignore
 /// let txn = Transaction::new(date, "Test")
-///     .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(50.00), "USD")))
-///     .with_posting(Posting::auto("Assets:Cash"));
+///     .with_synthesized_posting(Posting::new("Expenses:Food", Amount::new(dec!(50.00), "USD")))
+///     .with_synthesized_posting(Posting::auto("Assets:Cash"));
 ///
 /// let result = interpolate(&txn)?;
 /// // Assets:Cash now has -50.00 USD
@@ -618,11 +618,11 @@ mod tests {
     #[test]
     fn test_interpolate_simple() {
         let txn = Transaction::new(date(2024, 1, 15), "Test")
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Expenses:Food",
                 Amount::new(dec!(50.00), "USD"),
             ))
-            .with_posting(Posting::auto("Assets:Cash"));
+            .with_synthesized_posting(Posting::auto("Assets:Cash"));
 
         let result = interpolate(&txn).unwrap();
 
@@ -637,15 +637,15 @@ mod tests {
     #[test]
     fn test_interpolate_multiple_postings() {
         let txn = Transaction::new(date(2024, 1, 15), "Test")
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Expenses:Food",
                 Amount::new(dec!(30.00), "USD"),
             ))
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Expenses:Drink",
                 Amount::new(dec!(20.00), "USD"),
             ))
-            .with_posting(Posting::auto("Assets:Cash"));
+            .with_synthesized_posting(Posting::auto("Assets:Cash"));
 
         let result = interpolate(&txn).unwrap();
 
@@ -657,11 +657,11 @@ mod tests {
     #[test]
     fn test_interpolate_no_missing() {
         let txn = Transaction::new(date(2024, 1, 15), "Test")
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Expenses:Food",
                 Amount::new(dec!(50.00), "USD"),
             ))
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Assets:Cash",
                 Amount::new(dec!(-50.00), "USD"),
             ));
@@ -674,19 +674,19 @@ mod tests {
     #[test]
     fn test_interpolate_multiple_currencies() {
         let txn = Transaction::new(date(2024, 1, 15), "Test")
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Expenses:Food",
                 Amount::new(dec!(50.00), "USD"),
             ))
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Expenses:Travel",
                 Amount::new(dec!(100.00), "EUR"),
             ))
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Assets:Cash:USD",
                 Amount::new(dec!(-50.00), "USD"),
             ))
-            .with_posting(Posting::auto("Assets:Cash:EUR"));
+            .with_synthesized_posting(Posting::auto("Assets:Cash:EUR"));
 
         let result = interpolate(&txn).unwrap();
 
@@ -699,12 +699,12 @@ mod tests {
     #[test]
     fn test_interpolate_error_multiple_missing_same_currency() {
         let txn = Transaction::new(date(2024, 1, 15), "Test")
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Expenses:Food",
                 Amount::new(dec!(50.00), "USD"),
             ))
-            .with_posting(Posting::auto("Assets:Cash"))
-            .with_posting(Posting::auto("Assets:Bank"));
+            .with_synthesized_posting(Posting::auto("Assets:Cash"))
+            .with_synthesized_posting(Posting::auto("Assets:Bank"));
 
         // Multiple unassigned missing postings with a single residual currency
         // is ambiguous and should return MultipleMissing error.
@@ -719,10 +719,10 @@ mod tests {
     fn test_interpolate_multiple_missing_different_currencies_ok() {
         // Two elided postings but two residual currencies - each gets one
         let txn = Transaction::new(date(2024, 1, 15), "Multi-currency")
-            .with_posting(Posting::new("Assets:USD", Amount::new(dec!(100.00), "USD")))
-            .with_posting(Posting::new("Assets:EUR", Amount::new(dec!(85.00), "EUR")))
-            .with_posting(Posting::auto("Liabilities:CreditCard"))
-            .with_posting(Posting::auto("Equity:Exchange"));
+            .with_synthesized_posting(Posting::new("Assets:USD", Amount::new(dec!(100.00), "USD")))
+            .with_synthesized_posting(Posting::new("Assets:EUR", Amount::new(dec!(85.00), "EUR")))
+            .with_synthesized_posting(Posting::auto("Liabilities:CreditCard"))
+            .with_synthesized_posting(Posting::auto("Equity:Exchange"));
 
         // Two unassigned missing, two non-zero residuals - this is unambiguous
         let result = interpolate(&txn);
@@ -740,14 +740,14 @@ mod tests {
         //
         // Expected: Assets:Cash should be interpolated to -1000.00 USD
         let txn = Transaction::new(date(2015, 10, 2), "Buy stock")
-            .with_posting(
+            .with_synthesized_posting(
                 Posting::new("Assets:Stock", Amount::new(dec!(10), "HOOL")).with_cost(
                     rustledger_core::CostSpec::empty()
                         .with_number_per(dec!(100.00))
                         .with_currency("USD"),
                 ),
             )
-            .with_posting(Posting::auto("Assets:Cash"));
+            .with_synthesized_posting(Posting::auto("Assets:Cash"));
 
         let result = interpolate(&txn).expect("interpolation should succeed");
 
@@ -792,14 +792,14 @@ mod tests {
         //
         // Expected: Assets:Cash should be interpolated to -1000.00 USD
         let txn = Transaction::new(date(2015, 10, 2), "Buy stock")
-            .with_posting(
+            .with_synthesized_posting(
                 Posting::new("Assets:Stock", Amount::new(dec!(10), "HOOL")).with_cost(
                     rustledger_core::CostSpec::empty()
                         .with_number_total(dec!(1000.00))
                         .with_currency("USD"),
                 ),
             )
-            .with_posting(Posting::auto("Assets:Cash"));
+            .with_synthesized_posting(Posting::auto("Assets:Cash"));
 
         let result = interpolate(&txn).expect("interpolation should succeed");
 
@@ -819,18 +819,18 @@ mod tests {
         //
         // Expected: Cash = -(8 * 701.20 + 7.95) = -5617.55 USD
         let txn = Transaction::new(date(2013, 2, 3), "Bought some stock")
-            .with_posting(
+            .with_synthesized_posting(
                 Posting::new("Assets:Stock", Amount::new(dec!(8), "HOOL")).with_cost(
                     rustledger_core::CostSpec::empty()
                         .with_number_per(dec!(701.20))
                         .with_currency("USD"),
                 ),
             )
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Expenses:Commission",
                 Amount::new(dec!(7.95), "USD"),
             ))
-            .with_posting(Posting::auto("Assets:Cash"));
+            .with_synthesized_posting(Posting::auto("Assets:Cash"));
 
         let result = interpolate(&txn).expect("interpolation should succeed");
 
@@ -854,7 +854,7 @@ mod tests {
         // Cash should receive: 10 * 120 = 1200 USD (at price)
         // Gains: -200 USD
         let txn = Transaction::new(date(2015, 10, 2), "Sell stock")
-            .with_posting(
+            .with_synthesized_posting(
                 Posting::new("Assets:Stock", Amount::new(dec!(-10), "HOOL"))
                     .with_cost(
                         rustledger_core::CostSpec::empty()
@@ -866,11 +866,11 @@ mod tests {
                         "USD",
                     ))),
             )
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Assets:Cash",
                 Amount::new(dec!(1200.00), "USD"),
             ))
-            .with_posting(Posting::auto("Income:Gains"));
+            .with_synthesized_posting(Posting::auto("Income:Gains"));
 
         let result = interpolate(&txn).expect("interpolation should succeed");
 
@@ -888,14 +888,14 @@ mod tests {
         //   Assets:Stock   10 HOOL {100.00 USD}
         //   Assets:Cash   -1000.00 USD
         let txn = Transaction::new(date(2015, 10, 2), "Buy stock")
-            .with_posting(
+            .with_synthesized_posting(
                 Posting::new("Assets:Stock", Amount::new(dec!(10), "HOOL")).with_cost(
                     rustledger_core::CostSpec::empty()
                         .with_number_per(dec!(100.00))
                         .with_currency("USD"),
                 ),
             )
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Assets:Cash",
                 Amount::new(dec!(-1000.00), "USD"),
             ));
@@ -923,14 +923,14 @@ mod tests {
         //
         // Expected: Cash = 500.00 USD (proceeds from sale at cost)
         let txn = Transaction::new(date(2015, 10, 2), "Sell stock")
-            .with_posting(
+            .with_synthesized_posting(
                 Posting::new("Assets:Stock", Amount::new(dec!(-5), "HOOL")).with_cost(
                     rustledger_core::CostSpec::empty()
                         .with_number_per(dec!(100.00))
                         .with_currency("USD"),
                 ),
             )
-            .with_posting(Posting::auto("Assets:Cash"));
+            .with_synthesized_posting(Posting::auto("Assets:Cash"));
 
         let result = interpolate(&txn).expect("interpolation should succeed");
 
@@ -956,15 +956,15 @@ mod tests {
         //   Assets:Cash: -440.00 CAD
         //   Assets:Cash: 431.92 USD
         let txn = Transaction::new(date(2008, 4, 2), "Gilbert paid back for iPhone")
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Assets:Cash",
                 Amount::new(dec!(440.00), "CAD"),
             ))
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Assets:AccountsReceivable",
                 Amount::new(dec!(-431.92), "USD"),
             ))
-            .with_posting(Posting::auto("Assets:Cash"));
+            .with_synthesized_posting(Posting::auto("Assets:Cash"));
 
         let result = interpolate(&txn).expect("interpolation should succeed");
 
@@ -1005,10 +1005,10 @@ mod tests {
     fn test_interpolate_multi_currency_three_currencies() {
         // Three currencies with one elided posting
         let txn = Transaction::new(date(2024, 1, 15), "Multi-currency test")
-            .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(100), "USD")))
-            .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(200), "EUR")))
-            .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(300), "GBP")))
-            .with_posting(Posting::auto("Equity:Opening"));
+            .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(100), "USD")))
+            .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(200), "EUR")))
+            .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(300), "GBP")))
+            .with_synthesized_posting(Posting::auto("Equity:Opening"));
 
         let result = interpolate(&txn).expect("interpolation should succeed");
 
@@ -1039,14 +1039,14 @@ mod tests {
         // The cost currency should be inferred, and the elided posting should
         // be filled with -1000 USD.
         let txn = Transaction::new(date(2026, 1, 1), "Opening balance")
-            .with_posting(
+            .with_synthesized_posting(
                 Posting::new(
                     "Assets:Vanguard:IRA:Trad:VFIFX",
                     Amount::new(dec!(10), "VFIFX"),
                 )
                 .with_cost(rustledger_core::CostSpec::empty().with_number_per(dec!(100))),
             )
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Equity:Opening-Balances",
                 Amount::new(dec!(-1000), "USD"),
             ));
@@ -1075,14 +1075,14 @@ mod tests {
         //
         // Both postings are complete, should just balance.
         let txn = Transaction::new(date(2026, 1, 1), "Opening balance")
-            .with_posting(
+            .with_synthesized_posting(
                 Posting::new(
                     "Assets:Vanguard:IRA:Trad:VFIFX",
                     Amount::new(dec!(10), "VFIFX"),
                 )
                 .with_cost(rustledger_core::CostSpec::empty().with_number_per(dec!(100))),
             )
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Equity:Opening-Balances",
                 Amount::new(dec!(-1000), "USD"),
             ));
@@ -1125,15 +1125,15 @@ mod tests {
         // Python rounds Cash to -1727.00 (2 decimal places from -0.01 USD)
         // Residual: 1727.006680 - 0.01 - 1727.00 = -0.003320 USD (within 0.005 tolerance)
         let txn = Transaction::new(date(2026, 1, 2), "Test")
-            .with_posting(Posting::auto("Assets:Cash"))
-            .with_posting(
+            .with_synthesized_posting(Posting::auto("Assets:Cash"))
+            .with_synthesized_posting(
                 Posting::new("Assets:Abc", Amount::new(dec!(12.3340), "ABC")).with_cost(
                     rustledger_core::CostSpec::empty()
                         .with_number_per(dec!(140.02))
                         .with_currency("USD"),
                 ),
             )
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Expenses:Abc",
                 Amount::new(dec!(-0.01), "USD"),
             ));
@@ -1173,9 +1173,9 @@ mod tests {
         // When we have amounts with different scales, use the maximum.
         // 0.1 USD (scale 1) and 0.001 USD (scale 3) -> interpolate to scale 3
         let txn = Transaction::new(date(2024, 1, 15), "Test")
-            .with_posting(Posting::new("Expenses:A", Amount::new(dec!(0.1), "USD")))
-            .with_posting(Posting::new("Expenses:B", Amount::new(dec!(0.001), "USD")))
-            .with_posting(Posting::auto("Assets:Cash"));
+            .with_synthesized_posting(Posting::new("Expenses:A", Amount::new(dec!(0.1), "USD")))
+            .with_synthesized_posting(Posting::new("Expenses:B", Amount::new(dec!(0.001), "USD")))
+            .with_synthesized_posting(Posting::auto("Assets:Cash"));
 
         let result = interpolate(&txn).expect("interpolation should succeed");
 
@@ -1211,18 +1211,18 @@ mod tests {
         // Without fix: Cash rounds to -2801.00 (scale 0), leaving 0.01 residual
         // With fix: Cash is -2801.01 (scale 2), transaction balances
         let txn = Transaction::new(date(2026, 1, 19), "Buy stock")
-            .with_posting(
+            .with_synthesized_posting(
                 Posting::new("Assets:Stock", Amount::new(dec!(1), "CSU")).with_cost(
                     rustledger_core::CostSpec::empty()
                         .with_number_per(dec!(2800.01))
                         .with_currency("CAD"),
                 ),
             )
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Expenses:Commission",
                 Amount::new(dec!(1), "CAD"),
             ))
-            .with_posting(Posting::auto("Assets:Cash"));
+            .with_synthesized_posting(Posting::auto("Assets:Cash"));
 
         let result = interpolate(&txn).expect("interpolation should succeed");
 
@@ -1277,15 +1277,15 @@ mod tests {
     #[test]
     fn test_interpolate_balanced_cost_prunes_zero_posting() {
         let txn = Transaction::new(date(2022, 4, 16), "Trade")
-            .with_posting(
+            .with_synthesized_posting(
                 Posting::new("Assets:Crypto", Amount::new(dec!(100), "USDC")).with_cost(
                     rustledger_core::CostSpec::empty()
                         .with_number_per(dec!(1.0))
                         .with_currency("USD"),
                 ),
             )
-            .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(-100), "USD")))
-            .with_posting(Posting::auto("Income:Trading"));
+            .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(-100), "USD")))
+            .with_synthesized_posting(Posting::auto("Income:Trading"));
 
         let result = interpolate(&txn).expect("interpolation should succeed");
 
@@ -1318,14 +1318,14 @@ mod tests {
     #[test]
     fn test_interpolate_zero_cost_prunes_zero_posting() {
         let txn = Transaction::new(date(2022, 4, 16), "Free tokens")
-            .with_posting(
+            .with_synthesized_posting(
                 Posting::new("Assets:Crypto", Amount::new(dec!(100), "TOKEN")).with_cost(
                     rustledger_core::CostSpec::empty()
                         .with_number_per(dec!(0))
                         .with_currency("USD"),
                 ),
             )
-            .with_posting(Posting::auto("Income:Bonus"));
+            .with_synthesized_posting(Posting::auto("Income:Bonus"));
 
         let result = interpolate(&txn).expect("interpolation should succeed");
 
@@ -1346,14 +1346,14 @@ mod tests {
     #[test]
     fn test_interpolate_zero_total_cost_prunes_zero_posting() {
         let txn = Transaction::new(date(2022, 4, 16), "Free tokens")
-            .with_posting(
+            .with_synthesized_posting(
                 Posting::new("Assets:Crypto", Amount::new(dec!(100), "TOKEN")).with_cost(
                     rustledger_core::CostSpec::empty()
                         .with_number_total(dec!(0))
                         .with_currency("USD"),
                 ),
             )
-            .with_posting(Posting::auto("Income:Bonus"));
+            .with_synthesized_posting(Posting::auto("Income:Bonus"));
 
         let result = interpolate(&txn).expect("interpolation should succeed");
 
@@ -1383,7 +1383,7 @@ mod tests {
         use rustledger_core::CostSpec;
 
         let txn = Transaction::new(date(2022, 1, 12), "sell what was never bought")
-            .with_posting(
+            .with_synthesized_posting(
                 Posting::new(
                     "Assets:Htsec:Positions",
                     Amount::new(dec!(-13000.00), "SH513050"),
@@ -1394,19 +1394,19 @@ mod tests {
                     "CNY",
                 ))),
             )
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Assets:Htsec:Cash",
                 Amount::new(dec!(16900.00), "CNY"),
             ))
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Assets:Htsec:Cash",
                 Amount::new(dec!(-0.85), "CNY"),
             ))
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Expenses:Htsec:Commission",
                 Amount::new(dec!(0.85), "CNY"),
             ))
-            .with_posting(Posting::auto("Income:Htsec:PnL"));
+            .with_synthesized_posting(Posting::auto("Income:Htsec:PnL"));
 
         let result = interpolate(&txn);
         assert!(
@@ -1430,7 +1430,7 @@ mod tests {
         use rustledger_core::CostSpec;
 
         let txn = Transaction::new(date(2022, 1, 12), "Sell HOOL")
-            .with_posting(
+            .with_synthesized_posting(
                 Posting::new("Assets:Stock", Amount::new(dec!(-10), "HOOL"))
                     .with_cost(CostSpec::empty())
                     .with_price(rustledger_core::PriceAnnotation::Unit(Amount::new(
@@ -1438,7 +1438,7 @@ mod tests {
                         "USD",
                     ))),
             )
-            .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(1500), "USD")));
+            .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(1500), "USD")));
 
         let result = interpolate(&txn);
         assert!(
@@ -1454,7 +1454,7 @@ mod tests {
         use rustledger_core::CostSpec;
 
         let txn = Transaction::new(date(2022, 1, 12), "Two unknown-cost sells")
-            .with_posting(
+            .with_synthesized_posting(
                 Posting::new("Assets:StockA", Amount::new(dec!(-10), "AAPL"))
                     .with_cost(CostSpec::empty())
                     .with_price(rustledger_core::PriceAnnotation::Unit(Amount::new(
@@ -1462,7 +1462,7 @@ mod tests {
                         "USD",
                     ))),
             )
-            .with_posting(
+            .with_synthesized_posting(
                 Posting::new("Assets:StockB", Amount::new(dec!(-5), "GOOG"))
                     .with_cost(CostSpec::empty())
                     .with_price(rustledger_core::PriceAnnotation::Unit(Amount::new(
@@ -1470,7 +1470,7 @@ mod tests {
                         "USD",
                     ))),
             )
-            .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(11500), "USD")));
+            .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(11500), "USD")));
 
         let result = interpolate(&txn);
         assert!(
@@ -1488,7 +1488,7 @@ mod tests {
         use rustledger_core::CostSpec;
 
         let txn = Transaction::new(date(2022, 1, 12), "Sale + currency-known absorber")
-            .with_posting(
+            .with_synthesized_posting(
                 Posting::new("Assets:Stock", Amount::new(dec!(-10), "HOOL"))
                     .with_cost(CostSpec::empty()) // cost-unknown in USD
                     .with_price(rustledger_core::PriceAnnotation::Unit(Amount::new(
@@ -1496,9 +1496,9 @@ mod tests {
                         "USD",
                     ))),
             )
-            .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(1500), "USD")))
-            .with_posting(Posting::new("Expenses:Fee", Amount::new(dec!(5), "EUR")))
-            .with_posting(Posting {
+            .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(1500), "USD")))
+            .with_synthesized_posting(Posting::new("Expenses:Fee", Amount::new(dec!(5), "EUR")))
+            .with_synthesized_posting(Posting {
                 // Missing amount, currency known via CurrencyOnly: lands in EUR.
                 units: Some(IncompleteAmount::CurrencyOnly("EUR".into())),
                 ..Posting::auto("Income:Misc")
@@ -1537,11 +1537,11 @@ mod tests {
         };
 
         let txn = Transaction::new(date(2016, 2, 12), "Sell")
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Assets:Cash",
                 Amount::new(dec!(336.73), "USD"),
             ))
-            .with_posting(
+            .with_synthesized_posting(
                 Posting::new("Assets:Brokerage", Amount::new(dec!(-1.763), "STOCK"))
                     .with_cost(cost_spec)
                     .with_price(rustledger_core::PriceAnnotation::Unit(Amount::new(
@@ -1549,7 +1549,7 @@ mod tests {
                         "USD",
                     ))),
             )
-            .with_posting(Posting::auto("Income:Capital-Gains"));
+            .with_synthesized_posting(Posting::auto("Income:Capital-Gains"));
 
         let result = interpolate(&txn).expect("interpolation should succeed");
         let filled = &result.transaction.postings[2];
@@ -1594,7 +1594,7 @@ mod tests {
         // Buy: 1.763 STOCK {{300.00 USD}} → booking derives
         // per_unit = 300.00 / 1.763 = ~170.16449... at 26-digit scale.
         let buy = Transaction::new(date(2016, 1, 1), "Buy")
-            .with_posting(
+            .with_synthesized_posting(
                 Posting::new("Assets:Brokerage", Amount::new(dec!(1.763), "STOCK")).with_cost(
                     CostSpec {
                         number_per: None,
@@ -1606,7 +1606,7 @@ mod tests {
                     },
                 ),
             )
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Assets:Cash",
                 Amount::new(dec!(-300.00), "USD"),
             ));
@@ -1615,16 +1615,16 @@ mod tests {
         // lot-matches against the previous buy, filling the high-scale
         // derived per_unit. Income is missing, must be interpolated.
         let sell = Transaction::new(date(2016, 2, 12), "Sell")
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Assets:Cash",
                 Amount::new(dec!(336.73), "USD"),
             ))
-            .with_posting(
+            .with_synthesized_posting(
                 Posting::new("Assets:Brokerage", Amount::new(dec!(-1.763), "STOCK"))
                     .with_cost(CostSpec::empty())
                     .with_price(PriceAnnotation::Unit(Amount::new(dec!(191.00), "USD"))),
             )
-            .with_posting(Posting::auto("Income:Capital-Gains"));
+            .with_synthesized_posting(Posting::auto("Income:Capital-Gains"));
 
         let mut engine = BookingEngine::new();
         engine.apply(&buy);
@@ -1666,7 +1666,7 @@ mod tests {
         use rustledger_core::CostSpec;
 
         let txn = Transaction::new(date(2022, 1, 12), "Sale + unassigned absorber")
-            .with_posting(
+            .with_synthesized_posting(
                 Posting::new("Assets:Stock", Amount::new(dec!(-10), "HOOL"))
                     .with_cost(CostSpec::empty())
                     .with_price(rustledger_core::PriceAnnotation::Unit(Amount::new(
@@ -1674,9 +1674,9 @@ mod tests {
                         "USD",
                     ))),
             )
-            .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(1500), "USD")))
-            .with_posting(Posting::new("Expenses:Fee", Amount::new(dec!(5), "EUR")))
-            .with_posting(Posting::auto("Income:Misc"));
+            .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(1500), "USD")))
+            .with_synthesized_posting(Posting::new("Expenses:Fee", Amount::new(dec!(5), "EUR")))
+            .with_synthesized_posting(Posting::auto("Income:Misc"));
 
         let result = interpolate(&txn);
         assert!(

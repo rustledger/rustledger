@@ -340,11 +340,11 @@ mod tests {
     fn test_import_result_with_directives() {
         let date = rustledger_core::naive_date(2024, 1, 15).unwrap();
         let txn = Transaction::new(date, "Test transaction")
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Assets:Bank",
                 Amount::new(Decimal::from_str("100").unwrap(), "USD"),
             ))
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Expenses:Food",
                 Amount::new(Decimal::from_str("-100").unwrap(), "USD"),
             ));
@@ -422,11 +422,11 @@ mod tests {
     fn make_test_txn_directive() -> Directive {
         let date = rustledger_core::naive_date(2024, 1, 15).unwrap();
         let txn = Transaction::new(date, "Test")
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Assets:Bank",
                 Amount::new(Decimal::from_str("-50").unwrap(), "USD"),
             ))
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Expenses:Food",
                 Amount::new(Decimal::from_str("50").unwrap(), "USD"),
             ));

@@ -224,7 +224,7 @@ pub fn run(args: &Args) -> Result<ExitCode> {
             .map(|p| rustledger_loader::Plugin {
                 name: p.name.clone(),
                 config: p.config.clone(),
-                span: rustledger_parser::Span::new(0, 0),
+                span: rustledger_parser::Span::ZERO,
                 file_id: 0,
                 force_python: p.force_python,
             })

@@ -779,7 +779,7 @@ mod tests {
         use rustledger_core::{CostSpec, Posting, PriceAnnotation, Transaction};
 
         let txn = Transaction::new(date(2024, 1, 15), "Sell stock")
-            .with_posting(
+            .with_synthesized_posting(
                 Posting::new("Assets:Stocks", Amount::new(dec!(-5), "ABC"))
                     .with_cost(
                         CostSpec::default()
@@ -788,7 +788,7 @@ mod tests {
                     )
                     .with_price(PriceAnnotation::Unit(Amount::new(dec!(1.40), "EUR"))),
             )
-            .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(7.00), "EUR")));
+            .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(7.00), "EUR")));
 
         let db = PriceDatabase::from_directives(&[Directive::Transaction(txn)]);
         assert_eq!(
@@ -803,14 +803,14 @@ mod tests {
         use rustledger_core::{CostSpec, Posting, Transaction};
 
         let txn = Transaction::new(date(2024, 1, 10), "Buy stock")
-            .with_posting(
+            .with_synthesized_posting(
                 Posting::new("Assets:Stocks", Amount::new(dec!(10), "XYZ")).with_cost(
                     CostSpec::default()
                         .with_number_per(dec!(50.00))
                         .with_currency("USD"),
                 ),
             )
-            .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(-500), "USD")));
+            .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(-500), "USD")));
 
         let db = PriceDatabase::from_directives(&[Directive::Transaction(txn)]);
         assert_eq!(
@@ -826,11 +826,11 @@ mod tests {
         use rustledger_core::{Posting, PriceAnnotation, Transaction};
 
         let txn = Transaction::new(date(2024, 1, 15), "Sell")
-            .with_posting(
+            .with_synthesized_posting(
                 Posting::new("Assets:Stocks", Amount::new(dec!(-10), "ABC"))
                     .with_price(PriceAnnotation::Total(Amount::new(dec!(1500), "USD"))),
             )
-            .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(1500), "USD")));
+            .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(1500), "USD")));
 
         let db = PriceDatabase::from_directives(&[Directive::Transaction(txn)]);
         // 1500 USD / 10 = 150 USD per unit
@@ -846,7 +846,7 @@ mod tests {
         use rustledger_core::{CostSpec, Posting, PriceAnnotation, Transaction};
 
         let txn = Transaction::new(date(2024, 1, 15), "Sell")
-            .with_posting(
+            .with_synthesized_posting(
                 Posting::new("Assets:Stocks", Amount::new(dec!(-5), "ABC"))
                     .with_cost(
                         CostSpec::default()
@@ -855,7 +855,7 @@ mod tests {
                     )
                     .with_price(PriceAnnotation::Unit(Amount::new(dec!(1.40), "EUR"))),
             )
-            .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(7.00), "EUR")));
+            .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(7.00), "EUR")));
 
         let db = PriceDatabase::from_directives(&[Directive::Transaction(txn)]);
         assert_eq!(
@@ -870,7 +870,7 @@ mod tests {
     fn test_implicit_price_zero_units_total_annotation_uses_cost_currency() {
         use rustledger_core::{CostSpec, Posting, PriceAnnotation, Transaction};
 
-        let txn = Transaction::new(date(2024, 1, 15), "Close position").with_posting(
+        let txn = Transaction::new(date(2024, 1, 15), "Close position").with_synthesized_posting(
             Posting::new("Assets:Stocks", Amount::new(dec!(0), "ABC"))
                 .with_cost(
                     CostSpec::default()
@@ -903,7 +903,7 @@ mod tests {
             meta: Default::default(),
         };
         let txn = Transaction::new(date(2024, 1, 15), "Sell")
-            .with_posting(
+            .with_synthesized_posting(
                 Posting::new("Assets:Stocks", Amount::new(dec!(-5), "ABC"))
                     .with_cost(
                         CostSpec::default()
@@ -912,7 +912,7 @@ mod tests {
                     )
                     .with_price(PriceAnnotation::Unit(Amount::new(dec!(1.40), "EUR"))),
             )
-            .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(7.00), "EUR")));
+            .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(7.00), "EUR")));
 
         let directives = vec![Directive::Price(explicit), Directive::Transaction(txn)];
         let db = PriceDatabase::from_directives(&directives);
@@ -948,7 +948,7 @@ mod tests {
             // replace.
             Directive::Transaction(
                 Transaction::new(date(2024, 1, 15), "Sell stock")
-                    .with_posting(
+                    .with_synthesized_posting(
                         Posting::new("Assets:Stocks", Amount::new(dec!(-5), "ABC"))
                             .with_cost(
                                 CostSpec::default()
@@ -957,7 +957,10 @@ mod tests {
                             )
                             .with_price(PriceAnnotation::Unit(Amount::new(dec!(1.40), "EUR"))),
                     )
-                    .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(7.00), "EUR"))),
+                    .with_synthesized_posting(Posting::new(
+                        "Assets:Cash",
+                        Amount::new(dec!(7.00), "EUR"),
+                    )),
             ),
         ];
         let db = PriceDatabase::from_directives(&directives);
@@ -984,25 +987,28 @@ mod tests {
         let directives = vec![
             Directive::Transaction(
                 Transaction::new(date(2017, 12, 15), "Sale 1")
-                    .with_posting(
+                    .with_synthesized_posting(
                         Posting::new("Assets:Stock", Amount::new(dec!(-10), "BAM")).with_cost(
                             CostSpec::default()
                                 .with_number_per(dec!(0.5113))
                                 .with_currency("EUR"),
                         ),
                     )
-                    .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(5.113), "EUR"))),
+                    .with_synthesized_posting(Posting::new(
+                        "Assets:Cash",
+                        Amount::new(dec!(5.113), "EUR"),
+                    )),
             ),
             Directive::Transaction(
                 Transaction::new(date(2017, 12, 15), "Sale 2")
-                    .with_posting(
+                    .with_synthesized_posting(
                         Posting::new("Assets:Stock", Amount::new(dec!(-20), "BAM")).with_cost(
                             CostSpec::default()
                                 .with_number_per(dec!(0.5113))
                                 .with_currency("EUR"),
                         ),
                     )
-                    .with_posting(Posting::new(
+                    .with_synthesized_posting(Posting::new(
                         "Assets:Cash",
                         Amount::new(dec!(10.226), "EUR"),
                     )),
@@ -1054,25 +1060,28 @@ mod tests {
             // is already in `explicit` from pass 1's first add).
             Directive::Transaction(
                 Transaction::new(date(2017, 12, 15), "Sale 1")
-                    .with_posting(
+                    .with_synthesized_posting(
                         Posting::new("Assets:Stock", Amount::new(dec!(-10), "BAM")).with_cost(
                             CostSpec::default()
                                 .with_number_per(dec!(0.5113))
                                 .with_currency("EUR"),
                         ),
                     )
-                    .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(5.113), "EUR"))),
+                    .with_synthesized_posting(Posting::new(
+                        "Assets:Cash",
+                        Amount::new(dec!(5.113), "EUR"),
+                    )),
             ),
             Directive::Transaction(
                 Transaction::new(date(2017, 12, 15), "Sale 2")
-                    .with_posting(
+                    .with_synthesized_posting(
                         Posting::new("Assets:Stock", Amount::new(dec!(-20), "BAM")).with_cost(
                             CostSpec::default()
                                 .with_number_per(dec!(0.5113))
                                 .with_currency("EUR"),
                         ),
                     )
-                    .with_posting(Posting::new(
+                    .with_synthesized_posting(Posting::new(
                         "Assets:Cash",
                         Amount::new(dec!(10.226), "EUR"),
                     )),

@@ -282,7 +282,8 @@ fn arb_transaction() -> impl Strategy<Value = Transaction> {
                 let debit = Posting::new(&to_account, amount.clone());
                 let credit = Posting::new(&from_account, -amount);
 
-                txn.with_posting(debit).with_posting(credit)
+                txn.with_synthesized_posting(debit)
+                    .with_synthesized_posting(credit)
             },
         )
 }
@@ -420,8 +421,8 @@ fn arb_synthetic_ledger() -> impl Strategy<Value = SyntheticLedger> {
                     let amt = Amount::new(amount, &currency);
 
                     let txn = Transaction::new(txn_date, &narration)
-                        .with_posting(Posting::new(to_account, amt.clone()))
-                        .with_posting(Posting::new(from_account, -amt));
+                        .with_synthesized_posting(Posting::new(to_account, amt.clone()))
+                        .with_synthesized_posting(Posting::new(from_account, -amt));
 
                     directives.push(Directive::Transaction(txn));
                 }
@@ -519,11 +520,11 @@ mod tests {
             Directive::Open(Open::new(date, "Expenses:Food")),
             Directive::Transaction(
                 Transaction::new(date, "Test transaction")
-                    .with_posting(Posting::new(
+                    .with_synthesized_posting(Posting::new(
                         "Expenses:Food",
                         Amount::new(Decimal::new(5000, 2), "USD"),
                     ))
-                    .with_posting(Posting::new(
+                    .with_synthesized_posting(Posting::new(
                         "Assets:Bank",
                         Amount::new(Decimal::new(-5000, 2), "USD"),
                     )),
@@ -565,11 +566,11 @@ mod tests {
             Directive::Pad(Pad::new(date, "Assets:Bank", "Equity:Opening-Balances")),
             Directive::Transaction(
                 Transaction::new(date, "Test")
-                    .with_posting(Posting::new(
+                    .with_synthesized_posting(Posting::new(
                         "Assets:Bank",
                         Amount::new(Decimal::new(100, 0), "USD"),
                     ))
-                    .with_posting(Posting::auto("Expenses:Food")),
+                    .with_synthesized_posting(Posting::auto("Expenses:Food")),
             ),
             Directive::Event(Event::new(date, "location", "New York")),
             Directive::Query(Query::new(date, "test", "SELECT *")),
@@ -622,11 +623,11 @@ mod tests {
                 Transaction::new(date, "Paycheck")
                     .with_flag('*')
                     .with_payee("Employer Inc")
-                    .with_posting(Posting::new(
+                    .with_synthesized_posting(Posting::new(
                         "Assets:Bank:Checking",
                         Amount::new(Decimal::new(100_000, 2), "USD"),
                     ))
-                    .with_posting(Posting::auto("Income:Salary")),
+                    .with_synthesized_posting(Posting::auto("Income:Salary")),
             ),
             Directive::Transaction(
                 Transaction::new(
@@ -634,11 +635,11 @@ mod tests {
                     "Groceries",
                 )
                 .with_flag('*')
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
                     "Expenses:Food",
                     Amount::new(Decimal::new(5000, 2), "USD"),
                 ))
-                .with_posting(Posting::auto("Assets:Bank:Checking")),
+                .with_synthesized_posting(Posting::auto("Assets:Bank:Checking")),
             ),
         ];
 

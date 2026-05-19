@@ -457,11 +457,11 @@ mod tests {
     #[test]
     fn test_calculate_residual_balanced() {
         let txn = Transaction::new(date(2024, 1, 15), "Test")
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Expenses:Food",
                 Amount::new(dec!(50.00), "USD"),
             ))
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Assets:Cash",
                 Amount::new(dec!(-50.00), "USD"),
             ));
@@ -473,11 +473,11 @@ mod tests {
     #[test]
     fn test_calculate_residual_unbalanced() {
         let txn = Transaction::new(date(2024, 1, 15), "Test")
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Expenses:Food",
                 Amount::new(dec!(50.00), "USD"),
             ))
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Assets:Cash",
                 Amount::new(dec!(-45.00), "USD"),
             ));
@@ -489,11 +489,11 @@ mod tests {
     #[test]
     fn test_is_balanced() {
         let txn = Transaction::new(date(2024, 1, 15), "Test")
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Expenses:Food",
                 Amount::new(dec!(50.00), "USD"),
             ))
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Assets:Cash",
                 Amount::new(dec!(-50.00), "USD"),
             ));
@@ -509,11 +509,11 @@ mod tests {
     #[test]
     fn test_is_balanced_within_tolerance() {
         let txn = Transaction::new(date(2024, 1, 15), "Test")
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Expenses:Food",
                 Amount::new(dec!(50.004), "USD"),
             ))
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Assets:Cash",
                 Amount::new(dec!(-50.00), "USD"),
             ));
@@ -552,14 +552,14 @@ mod tests {
     #[test]
     fn test_calculate_residual_with_per_unit_cost() {
         let txn = Transaction::new(date(2024, 1, 15), "Buy stock")
-            .with_posting(
+            .with_synthesized_posting(
                 Posting::new("Assets:Stock", Amount::new(dec!(10), "AAPL")).with_cost(
                     CostSpec::empty()
                         .with_number_per(dec!(150.00))
                         .with_currency("USD"),
                 ),
             )
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Assets:Cash",
                 Amount::new(dec!(-1500.00), "USD"),
             ));
@@ -578,14 +578,14 @@ mod tests {
     #[test]
     fn test_calculate_residual_with_total_cost() {
         let txn = Transaction::new(date(2024, 1, 15), "Buy stock")
-            .with_posting(
+            .with_synthesized_posting(
                 Posting::new("Assets:Stock", Amount::new(dec!(10), "AAPL")).with_cost(
                     CostSpec::empty()
                         .with_number_total(dec!(1500.00))
                         .with_currency("USD"),
                 ),
             )
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Assets:Cash",
                 Amount::new(dec!(-1500.00), "USD"),
             ));
@@ -600,14 +600,14 @@ mod tests {
     #[test]
     fn test_calculate_residual_with_total_cost_negative_units() {
         let txn = Transaction::new(date(2024, 1, 15), "Sell stock")
-            .with_posting(
+            .with_synthesized_posting(
                 Posting::new("Assets:Stock", Amount::new(dec!(-10), "AAPL")).with_cost(
                     CostSpec::empty()
                         .with_number_total(dec!(1500.00))
                         .with_currency("USD"),
                 ),
             )
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Assets:Cash",
                 Amount::new(dec!(1500.00), "USD"),
             ));
@@ -625,11 +625,11 @@ mod tests {
         // it doesn't contribute to the residual because the cost will be determined
         // by lot matching during booking. This matches Python beancount behavior.
         let txn = Transaction::new(date(2024, 1, 15), "Test")
-            .with_posting(
+            .with_synthesized_posting(
                 Posting::new("Assets:Stock", Amount::new(dec!(10), "AAPL"))
                     .with_cost(CostSpec::empty()), // Empty cost spec - doesn't contribute
             )
-            .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(-10), "AAPL")));
+            .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(-10), "AAPL")));
 
         let residual = calculate_residual(&txn);
         // Empty cost spec posting doesn't contribute, only the second posting does
@@ -650,7 +650,7 @@ mod tests {
     #[test]
     fn test_calculate_residual_empty_cost_spec_with_price_skips_not_uses_price() {
         let txn = Transaction::new(date(2024, 1, 15), "Sale, empty cost + price")
-            .with_posting(
+            .with_synthesized_posting(
                 Posting::new("Assets:Stock", Amount::new(dec!(-10), "HOOL"))
                     .with_cost(CostSpec::empty())
                     .with_price(rustledger_core::PriceAnnotation::Unit(Amount::new(
@@ -658,7 +658,7 @@ mod tests {
                         "USD",
                     ))),
             )
-            .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(1500), "USD")));
+            .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(1500), "USD")));
 
         let residual = calculate_residual(&txn);
         // Pre-fix: residual[USD] = 0 (price-as-weight contributed
@@ -677,7 +677,7 @@ mod tests {
         use std::str::FromStr;
 
         let txn = Transaction::new(date(2024, 1, 15), "Sale, empty cost + price")
-            .with_posting(
+            .with_synthesized_posting(
                 Posting::new("Assets:Stock", Amount::new(dec!(-10), "HOOL"))
                     .with_cost(CostSpec::empty())
                     .with_price(rustledger_core::PriceAnnotation::Unit(Amount::new(
@@ -685,7 +685,7 @@ mod tests {
                         "USD",
                     ))),
             )
-            .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(1500), "USD")));
+            .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(1500), "USD")));
 
         let residual = calculate_residual_precise(&txn);
         assert_eq!(
@@ -703,11 +703,11 @@ mod tests {
     #[test]
     fn test_calculate_residual_with_unit_price() {
         let txn = Transaction::new(date(2024, 1, 15), "Currency exchange")
-            .with_posting(
+            .with_synthesized_posting(
                 Posting::new("Assets:USD", Amount::new(dec!(-100.00), "USD"))
                     .with_price(PriceAnnotation::Unit(Amount::new(dec!(0.85), "EUR"))),
             )
-            .with_posting(Posting::new("Assets:EUR", Amount::new(dec!(85.00), "EUR")));
+            .with_synthesized_posting(Posting::new("Assets:EUR", Amount::new(dec!(85.00), "EUR")));
 
         let residual = calculate_residual(&txn);
         // Price posting: |-100| * 0.85 * signum(-100) = -85 EUR
@@ -722,11 +722,11 @@ mod tests {
     #[test]
     fn test_calculate_residual_with_total_price() {
         let txn = Transaction::new(date(2024, 1, 15), "Currency exchange")
-            .with_posting(
+            .with_synthesized_posting(
                 Posting::new("Assets:USD", Amount::new(dec!(-100.00), "USD"))
                     .with_price(PriceAnnotation::Total(Amount::new(dec!(85.00), "EUR"))),
             )
-            .with_posting(Posting::new("Assets:EUR", Amount::new(dec!(85.00), "EUR")));
+            .with_synthesized_posting(Posting::new("Assets:EUR", Amount::new(dec!(85.00), "EUR")));
 
         let residual = calculate_residual(&txn);
         // Total price: 85 * signum(-100) = -85 EUR
@@ -738,11 +738,11 @@ mod tests {
     #[test]
     fn test_calculate_residual_with_unit_price_positive() {
         let txn = Transaction::new(date(2024, 1, 15), "Buy EUR")
-            .with_posting(
+            .with_synthesized_posting(
                 Posting::new("Assets:EUR", Amount::new(dec!(85.00), "EUR"))
                     .with_price(PriceAnnotation::Unit(Amount::new(dec!(1.18), "USD"))),
             )
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Assets:USD",
                 Amount::new(dec!(-100.30), "USD"),
             ));
@@ -757,7 +757,7 @@ mod tests {
     #[test]
     fn test_calculate_residual_unit_incomplete_with_amount() {
         let txn = Transaction::new(date(2024, 1, 15), "Exchange")
-            .with_posting(
+            .with_synthesized_posting(
                 Posting::new("Assets:USD", Amount::new(dec!(-100.00), "USD")).with_price(
                     PriceAnnotation::UnitIncomplete(IncompleteAmount::Complete(Amount::new(
                         dec!(0.85),
@@ -765,7 +765,7 @@ mod tests {
                     ))),
                 ),
             )
-            .with_posting(Posting::new("Assets:EUR", Amount::new(dec!(85.00), "EUR")));
+            .with_synthesized_posting(Posting::new("Assets:EUR", Amount::new(dec!(85.00), "EUR")));
 
         let residual = calculate_residual(&txn);
         assert_eq!(residual.get("EUR"), Some(&dec!(0)));
@@ -775,7 +775,7 @@ mod tests {
     #[test]
     fn test_calculate_residual_total_incomplete_with_amount() {
         let txn = Transaction::new(date(2024, 1, 15), "Exchange")
-            .with_posting(
+            .with_synthesized_posting(
                 Posting::new("Assets:USD", Amount::new(dec!(-100.00), "USD")).with_price(
                     PriceAnnotation::TotalIncomplete(IncompleteAmount::Complete(Amount::new(
                         dec!(85.00),
@@ -783,7 +783,7 @@ mod tests {
                     ))),
                 ),
             )
-            .with_posting(Posting::new("Assets:EUR", Amount::new(dec!(85.00), "EUR")));
+            .with_synthesized_posting(Posting::new("Assets:EUR", Amount::new(dec!(85.00), "EUR")));
 
         let residual = calculate_residual(&txn);
         assert_eq!(residual.get("EUR"), Some(&dec!(0)));
@@ -793,12 +793,12 @@ mod tests {
     #[test]
     fn test_calculate_residual_unit_incomplete_no_amount_fallback() {
         let txn = Transaction::new(date(2024, 1, 15), "Test")
-            .with_posting(
+            .with_synthesized_posting(
                 Posting::new("Assets:USD", Amount::new(dec!(100.00), "USD")).with_price(
                     PriceAnnotation::UnitIncomplete(IncompleteAmount::NumberOnly(dec!(0.85))),
                 ),
             )
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Assets:USD",
                 Amount::new(dec!(-100.00), "USD"),
             ));
@@ -812,12 +812,12 @@ mod tests {
     #[test]
     fn test_calculate_residual_total_incomplete_no_amount_fallback() {
         let txn = Transaction::new(date(2024, 1, 15), "Test")
-            .with_posting(
+            .with_synthesized_posting(
                 Posting::new("Assets:USD", Amount::new(dec!(100.00), "USD")).with_price(
                     PriceAnnotation::TotalIncomplete(IncompleteAmount::NumberOnly(dec!(85.00))),
                 ),
             )
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Assets:USD",
                 Amount::new(dec!(-100.00), "USD"),
             ));
@@ -830,11 +830,11 @@ mod tests {
     #[test]
     fn test_calculate_residual_unit_empty_fallback() {
         let txn = Transaction::new(date(2024, 1, 15), "Test")
-            .with_posting(
+            .with_synthesized_posting(
                 Posting::new("Assets:USD", Amount::new(dec!(100.00), "USD"))
                     .with_price(PriceAnnotation::UnitEmpty),
             )
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Assets:USD",
                 Amount::new(dec!(-100.00), "USD"),
             ));
@@ -848,11 +848,11 @@ mod tests {
     #[test]
     fn test_calculate_residual_total_empty_fallback() {
         let txn = Transaction::new(date(2024, 1, 15), "Test")
-            .with_posting(
+            .with_synthesized_posting(
                 Posting::new("Assets:USD", Amount::new(dec!(100.00), "USD"))
                     .with_price(PriceAnnotation::TotalEmpty),
             )
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Assets:USD",
                 Amount::new(dec!(-100.00), "USD"),
             ));
@@ -869,18 +869,18 @@ mod tests {
     #[test]
     fn test_calculate_residual_mixed_cost_and_simple() {
         let txn = Transaction::new(date(2024, 1, 15), "Buy with fee")
-            .with_posting(
+            .with_synthesized_posting(
                 Posting::new("Assets:Stock", Amount::new(dec!(10), "AAPL")).with_cost(
                     CostSpec::empty()
                         .with_number_per(dec!(150.00))
                         .with_currency("USD"),
                 ),
             )
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Expenses:Fees",
                 Amount::new(dec!(10.00), "USD"),
             ))
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Assets:Cash",
                 Amount::new(dec!(-1510.00), "USD"),
             ));
@@ -894,7 +894,7 @@ mod tests {
     #[test]
     fn test_calculate_residual_sell_with_gains() {
         let txn = Transaction::new(date(2024, 6, 15), "Sell stock")
-            .with_posting(
+            .with_synthesized_posting(
                 Posting::new("Assets:Stock", Amount::new(dec!(-10), "AAPL"))
                     .with_cost(
                         CostSpec::empty()
@@ -903,11 +903,11 @@ mod tests {
                     )
                     .with_price(PriceAnnotation::Unit(Amount::new(dec!(175.00), "USD"))),
             )
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Assets:Cash",
                 Amount::new(dec!(1750.00), "USD"),
             ))
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Income:CapitalGains",
                 Amount::new(dec!(-250.00), "USD"),
             ));
@@ -924,25 +924,25 @@ mod tests {
     #[test]
     fn test_calculate_residual_multi_currency_with_cost() {
         let txn = Transaction::new(date(2024, 1, 15), "Multi-currency")
-            .with_posting(
+            .with_synthesized_posting(
                 Posting::new("Assets:Stock:US", Amount::new(dec!(10), "AAPL")).with_cost(
                     CostSpec::empty()
                         .with_number_per(dec!(150.00))
                         .with_currency("USD"),
                 ),
             )
-            .with_posting(
+            .with_synthesized_posting(
                 Posting::new("Assets:Stock:EU", Amount::new(dec!(5), "SAP")).with_cost(
                     CostSpec::empty()
                         .with_number_per(dec!(100.00))
                         .with_currency("EUR"),
                 ),
             )
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Assets:Cash:USD",
                 Amount::new(dec!(-1500.00), "USD"),
             ))
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Assets:Cash:EUR",
                 Amount::new(dec!(-500.00), "EUR"),
             ));
@@ -956,11 +956,11 @@ mod tests {
     #[test]
     fn test_calculate_residual_skips_incomplete_units() {
         let txn = Transaction::new(date(2024, 1, 15), "Test")
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Expenses:Food",
                 Amount::new(dec!(50.00), "USD"),
             ))
-            .with_posting(Posting::auto("Assets:Cash")); // No units
+            .with_synthesized_posting(Posting::auto("Assets:Cash")); // No units
 
         let residual = calculate_residual(&txn);
         // Only the complete posting is counted
@@ -981,14 +981,14 @@ mod tests {
         //
         // Python beancount infers the cost currency as USD from the second posting.
         let txn = Transaction::new(date(2026, 1, 1), "Opening balance")
-            .with_posting(
+            .with_synthesized_posting(
                 Posting::new(
                     "Assets:Vanguard:IRA:Trad:VFIFX",
                     Amount::new(dec!(10), "VFIFX"),
                 )
                 .with_cost(CostSpec::empty().with_number_per(dec!(100))),
             )
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Equity:Opening-Balances",
                 Amount::new(dec!(-1000), "USD"),
             ));
@@ -1011,11 +1011,11 @@ mod tests {
     fn test_calculate_residual_infers_cost_currency_total_cost() {
         // 10 VFIFX {{1000}} with -1000 USD posting
         let txn = Transaction::new(date(2026, 1, 1), "Test")
-            .with_posting(
+            .with_synthesized_posting(
                 Posting::new("Assets:Stock", Amount::new(dec!(10), "VFIFX"))
                     .with_cost(CostSpec::empty().with_number_total(dec!(1000))),
             )
-            .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(-1000), "USD")));
+            .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(-1000), "USD")));
 
         let residual = calculate_residual(&txn);
         assert_eq!(residual.get("USD"), Some(&dec!(0)));
@@ -1026,14 +1026,14 @@ mod tests {
     fn test_calculate_residual_explicit_cost_currency_takes_precedence() {
         // If cost has explicit currency, don't infer from other postings
         let txn = Transaction::new(date(2026, 1, 1), "Test")
-            .with_posting(
+            .with_synthesized_posting(
                 Posting::new("Assets:Stock", Amount::new(dec!(10), "AAPL")).with_cost(
                     CostSpec::empty()
                         .with_number_per(dec!(100))
                         .with_currency("EUR"), // Explicit EUR
                 ),
             )
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Assets:Cash",
                 Amount::new(dec!(-1000), "USD"), // USD posting
             ));
@@ -1049,12 +1049,12 @@ mod tests {
     fn test_calculate_residual_price_annotation_takes_precedence() {
         // If cost has price annotation, use that currency
         let txn = Transaction::new(date(2026, 1, 1), "Test")
-            .with_posting(
+            .with_synthesized_posting(
                 Posting::new("Assets:Stock", Amount::new(dec!(10), "AAPL"))
                     .with_cost(CostSpec::empty().with_number_per(dec!(100)))
                     .with_price(PriceAnnotation::Unit(Amount::new(dec!(105), "EUR"))),
             )
-            .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(-1000), "USD")));
+            .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(-1000), "USD")));
 
         let residual = calculate_residual(&txn);
         // Should use EUR (from price annotation) not USD (from other posting)
@@ -1071,14 +1071,14 @@ mod tests {
     fn test_infer_cost_currency_from_cost_spec() {
         // Transaction with only cost-spec posting - should get currency from cost spec
         let txn = Transaction::new(date(2022, 4, 16), "Free tokens")
-            .with_posting(
+            .with_synthesized_posting(
                 Posting::new("Assets:Crypto", Amount::new(dec!(100), "TOKEN")).with_cost(
                     CostSpec::empty()
                         .with_number_per(dec!(0))
                         .with_currency("USD"),
                 ),
             )
-            .with_posting(Posting::auto("Income:Bonus"));
+            .with_synthesized_posting(Posting::auto("Income:Bonus"));
 
         let inferred = infer_cost_currency_from_postings(&txn);
         assert_eq!(inferred.as_deref(), Some("USD"));
@@ -1089,14 +1089,14 @@ mod tests {
     fn test_infer_cost_currency_simple_takes_precedence() {
         // Transaction with both simple posting and cost spec - simple should win
         let txn = Transaction::new(date(2022, 4, 16), "Trade")
-            .with_posting(
+            .with_synthesized_posting(
                 Posting::new("Assets:Crypto", Amount::new(dec!(100), "TOKEN")).with_cost(
                     CostSpec::empty()
                         .with_number_per(dec!(10))
                         .with_currency("EUR"),
                 ),
             )
-            .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(-1000), "USD")));
+            .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(-1000), "USD")));
 
         let inferred = infer_cost_currency_from_postings(&txn);
         // Should get USD from the simple posting, not EUR from cost spec
@@ -1108,14 +1108,14 @@ mod tests {
     fn test_infer_cost_currency_zero_cost() {
         // Zero cost should still provide the currency
         let txn = Transaction::new(date(2022, 4, 16), "Airdrop")
-            .with_posting(
+            .with_synthesized_posting(
                 Posting::new("Assets:Crypto", Amount::new(dec!(1000), "SHIB")).with_cost(
                     CostSpec::empty()
                         .with_number_per(dec!(0))
                         .with_currency("JPY"),
                 ),
             )
-            .with_posting(Posting::auto("Income:Airdrop"));
+            .with_synthesized_posting(Posting::auto("Income:Airdrop"));
 
         let inferred = infer_cost_currency_from_postings(&txn);
         assert_eq!(inferred.as_deref(), Some("JPY"));

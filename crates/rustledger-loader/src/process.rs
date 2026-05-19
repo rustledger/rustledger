@@ -960,6 +960,10 @@ fn record_plugin_errors(
 /// the ops protocol's correctness guarantee (plugin-transformed
 /// directives keep their original source identity for error reporting).
 /// `Insert(w)` directives get `(Span::new(0, 0), SYNTHESIZED_FILE_ID)`.
+///
+/// Inner posting spans returned by plugins are sanitized against the
+/// host's `SourceMap` (see [`sanitize_inner_posting_spans`]) so a
+/// misbehaving plugin cannot smuggle out-of-bounds spans into the LSP.
 #[cfg(feature = "plugins")]
 fn apply_plugin_ops(
     directives: &mut Vec<Spanned<Directive>>,
@@ -1028,8 +1032,17 @@ fn apply_plugin_ops(
                 new_directives.push(directives[i].clone());
             }
             PluginOp::Modify(i, wrapper) => {
-                let directive = wrapper_to_directive(&wrapper)
+                let mut directive = wrapper_to_directive(&wrapper)
                     .map_err(|e| ProcessError::PluginConversion(e.to_string()))?;
+                // Plugins are not trusted to return well-formed inner
+                // posting spans — a misbehaving plugin can synthesize a
+                // file_id pointing at a nonexistent source or a span
+                // that runs past EOF. The LSP later builds TextEdits
+                // from these spans, so an out-of-bounds posting span
+                // would produce a corrupt edit. Reset any inner posting
+                // span that doesn't refer to a real loaded file or that
+                // exceeds the file's length to `Spanned::synthesized`.
+                sanitize_inner_posting_spans(&mut directive, source_map);
                 new_directives.push(Spanned {
                     value: directive,
                     span: directives[i].span,
@@ -1037,6 +1050,9 @@ fn apply_plugin_ops(
                 });
             }
             PluginOp::Insert(wrapper) => {
+                // Same trust caveat as Modify: don't let an Insert smuggle
+                // bogus inner-posting spans through.
+                // (Wrapper-derived outer span is validated below.)
                 // Resolve the wrapper's filename + line number, if set,
                 // into a real (file_id, span) when the filename
                 // corresponds to a loaded source file. Falls back to
@@ -1053,18 +1069,19 @@ fn apply_plugin_ops(
                             )
                         } else {
                             (
-                                rustledger_parser::Span::new(0, 0),
+                                rustledger_parser::Span::ZERO,
                                 rustledger_parser::SYNTHESIZED_FILE_ID,
                             )
                         }
                     }
                     _ => (
-                        rustledger_parser::Span::new(0, 0),
+                        rustledger_parser::Span::ZERO,
                         rustledger_parser::SYNTHESIZED_FILE_ID,
                     ),
                 };
-                let directive = wrapper_to_directive(&wrapper)
+                let mut directive = wrapper_to_directive(&wrapper)
                     .map_err(|e| ProcessError::PluginConversion(e.to_string()))?;
+                sanitize_inner_posting_spans(&mut directive, source_map);
                 new_directives.push(Spanned::new(directive, span).with_file_id(file_id as usize));
             }
             PluginOp::Delete(_) => {}
@@ -1073,6 +1090,40 @@ fn apply_plugin_ops(
 
     *directives = new_directives;
     Ok(())
+}
+
+/// Reset any inner `Spanned<Posting>` whose location does not refer to a
+/// real loaded source range to [`Spanned::synthesized`]. Plugins are not
+/// trusted to return well-formed `file_id` + byte ranges; without this,
+/// a misbehaving plugin could induce out-of-bounds LSP text edits.
+///
+/// A span is considered valid when:
+/// - `file_id == SYNTHESIZED_FILE_ID` (genuine synthesis), OR
+/// - the `file_id` resolves in `SourceMap` AND `0 <= start <= end <= len`
+///   for that file's source.
+///
+/// Everything else collapses to `Spanned::synthesized(posting)`.
+#[cfg(feature = "plugins")]
+fn sanitize_inner_posting_spans(directive: &mut Directive, source_map: &SourceMap) {
+    use rustledger_parser::SYNTHESIZED_FILE_ID;
+    if let Directive::Transaction(txn) = directive {
+        for p in &mut txn.postings {
+            let ok = if p.file_id == SYNTHESIZED_FILE_ID {
+                true
+            } else {
+                source_map
+                    .get(p.file_id as usize)
+                    .is_some_and(|f| p.span.start <= p.span.end && p.span.end <= f.source.len())
+            };
+            if !ok {
+                let inner = std::mem::replace(
+                    &mut p.value,
+                    rustledger_core::Posting::auto(rustledger_core::InternedStr::from("")),
+                );
+                *p = rustledger_core::Spanned::synthesized(inner);
+            }
+        }
+    }
 }
 
 /// Build a [`ValidationOptions`] from loader-level file options.

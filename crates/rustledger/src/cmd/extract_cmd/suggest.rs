@@ -128,11 +128,11 @@ mod tests {
     fn txn(payee: &str, narration: &str, contra_account: &str, amount: i64) -> Transaction {
         let mut t = Transaction::new(naive_date(2025, 1, 15).unwrap(), narration);
         t.payee = Some(payee.into());
-        t.with_posting(Posting::new(
+        t.with_synthesized_posting(Posting::new(
             "Assets:Bank",
             Amount::new(Decimal::from(-amount), "USD"),
         ))
-        .with_posting(Posting::auto(contra_account))
+        .with_synthesized_posting(Posting::auto(contra_account))
     }
 
     fn training_set() -> Vec<Transaction> {

@@ -275,7 +275,7 @@ fn run_quick_mode(args: &Args, file: &PathBuf, date: NaiveDate) -> Result<()> {
     }
 
     for posting in postings {
-        txn = txn.with_posting(posting);
+        txn = txn.with_synthesized_posting(posting);
     }
 
     // Format and display
@@ -511,7 +511,7 @@ fn run_interactive_mode(args: &Args, file: &PathBuf, date: NaiveDate) -> Result<
     }
 
     for posting in postings {
-        txn = txn.with_posting(posting);
+        txn = txn.with_synthesized_posting(posting);
     }
 
     // Format and display preview

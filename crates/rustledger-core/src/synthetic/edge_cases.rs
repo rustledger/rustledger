@@ -88,64 +88,64 @@ pub fn generate_unicode_edge_cases() -> EdgeCaseCollection {
             Transaction::new(base_date, "Café Purchase")
                 .with_flag('*')
                 .with_payee("Bäckerei München")
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
                     "Expenses:Food:Cafe",
                     Amount::new(dec("5.50"), "EUR"),
                 ))
-                .with_posting(Posting::auto("Assets:Bank:Checking")),
+                .with_synthesized_posting(Posting::auto("Assets:Bank:Checking")),
         ),
         // Japanese characters
         Directive::Transaction(
             Transaction::new(base_date, "東京での買い物")
                 .with_flag('*')
                 .with_payee("コンビニ")
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
                     "Expenses:Food",
                     Amount::new(dec("1000"), "JPY"),
                 ))
-                .with_posting(Posting::auto("Assets:Cash")),
+                .with_synthesized_posting(Posting::auto("Assets:Cash")),
         ),
         // Russian Cyrillic
         Directive::Transaction(
             Transaction::new(base_date, "Покупка продуктов")
                 .with_flag('*')
                 .with_payee("Магазин")
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
                     "Expenses:Food",
                     Amount::new(dec("500"), "RUB"),
                 ))
-                .with_posting(Posting::auto("Assets:Cash")),
+                .with_synthesized_posting(Posting::auto("Assets:Cash")),
         ),
         // Arabic
         Directive::Transaction(
             Transaction::new(base_date, "شراء طعام")
                 .with_flag('*')
                 .with_payee("متجر")
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
                     "Expenses:Food",
                     Amount::new(dec("100"), "SAR"),
                 ))
-                .with_posting(Posting::auto("Assets:Cash")),
+                .with_synthesized_posting(Posting::auto("Assets:Cash")),
         ),
         // Emoji in narration
         Directive::Transaction(
             Transaction::new(base_date, "Grocery run with emoji")
                 .with_flag('*')
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
                     "Expenses:Food:Groceries",
                     Amount::new(dec("45.99"), "USD"),
                 ))
-                .with_posting(Posting::auto("Assets:Bank:Checking")),
+                .with_synthesized_posting(Posting::auto("Assets:Bank:Checking")),
         ),
         // Mixed scripts
         Directive::Transaction(
             Transaction::new(base_date, "International trip")
                 .with_flag('*')
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
                     "Expenses:Travel",
                     Amount::new(dec("2500"), "USD"),
                 ))
-                .with_posting(Posting::auto("Assets:Bank:Savings")),
+                .with_synthesized_posting(Posting::auto("Assets:Bank:Savings")),
         ),
         // Note with Unicode
         Directive::Note(Note::new(
@@ -182,11 +182,11 @@ pub fn generate_decimal_edge_cases() -> EdgeCaseCollection {
         Directive::Transaction(
             Transaction::new(base_date, "Bitcoin purchase")
                 .with_flag('*')
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
                     "Assets:Crypto:BTC",
                     Amount::new(dec("0.00012345"), "BTC"),
                 ))
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
                     "Assets:Bank:Checking",
                     Amount::new(dec("-5.00"), "USD"),
                 )),
@@ -195,51 +195,51 @@ pub fn generate_decimal_edge_cases() -> EdgeCaseCollection {
         Directive::Transaction(
             Transaction::new(base_date, "High precision test")
                 .with_flag('*')
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
                     "Assets:Investments:Stock",
                     Amount::new(dec("1.1234567890123456"), "MICRO"),
                 ))
-                .with_posting(Posting::auto("Equity:Opening")),
+                .with_synthesized_posting(Posting::auto("Equity:Opening")),
         ),
         // Very large number
         Directive::Transaction(
             Transaction::new(base_date, "Large number test")
                 .with_flag('*')
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
                     "Assets:Bank:Checking",
                     Amount::new(dec("999999999999.99"), "USD"),
                 ))
-                .with_posting(Posting::auto("Equity:Opening")),
+                .with_synthesized_posting(Posting::auto("Equity:Opening")),
         ),
         // Very small fractional amount
         Directive::Transaction(
             Transaction::new(base_date, "Tiny amount")
                 .with_flag('*')
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
                     "Expenses:Test",
                     Amount::new(dec("0.00000001"), "USD"),
                 ))
-                .with_posting(Posting::auto("Assets:Bank:Checking")),
+                .with_synthesized_posting(Posting::auto("Assets:Bank:Checking")),
         ),
         // Trailing zeros (should preserve precision)
         Directive::Transaction(
             Transaction::new(base_date, "Trailing zeros")
                 .with_flag('*')
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
                     "Expenses:Test",
                     Amount::new(dec("100.10000"), "USD"),
                 ))
-                .with_posting(Posting::auto("Assets:Bank:Checking")),
+                .with_synthesized_posting(Posting::auto("Assets:Bank:Checking")),
         ),
         // Negative with high precision
         Directive::Transaction(
             Transaction::new(base_date, "Negative high precision")
                 .with_flag('*')
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
                     "Expenses:Test",
                     Amount::new(dec("-0.12345678"), "USD"),
                 ))
-                .with_posting(Posting::auto("Assets:Bank:Checking")),
+                .with_synthesized_posting(Posting::auto("Assets:Bank:Checking")),
         ),
         // Price with high precision
         Directive::Price(Price::new(
@@ -277,11 +277,11 @@ pub fn generate_hierarchy_edge_cases() -> EdgeCaseCollection {
         Directive::Transaction(
             Transaction::new(base_date, "Deep hierarchy transfer")
                 .with_flag('*')
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
                     deep_expense,
                     Amount::new(dec("100.00"), "USD"),
                 ))
-                .with_posting(Posting::auto(deep_asset)),
+                .with_synthesized_posting(Posting::auto(deep_asset)),
         ),
         // Balance assertion on deep account
         Directive::Balance(Balance::new(
@@ -320,14 +320,14 @@ pub fn generate_large_transaction_edge_cases() -> EdgeCaseCollection {
         Transaction::new(base_date, "Expense allocation with 20 categories").with_flag('*');
 
     for i in 0..20 {
-        txn = txn.with_posting(Posting::new(
+        txn = txn.with_synthesized_posting(Posting::new(
             format!("Expenses:Category{i}"),
             Amount::new(dec("10.00"), "USD"),
         ));
     }
 
     // Add the balancing posting
-    txn = txn.with_posting(Posting::new(
+    txn = txn.with_synthesized_posting(Posting::new(
         "Assets:Bank:Checking",
         Amount::new(dec("-200.00"), "USD"),
     ));
@@ -337,11 +337,11 @@ pub fn generate_large_transaction_edge_cases() -> EdgeCaseCollection {
     // Transaction with many tags and links
     let mut txn2 = Transaction::new(base_date, "Tagged transaction")
         .with_flag('*')
-        .with_posting(Posting::new(
+        .with_synthesized_posting(Posting::new(
             "Expenses:Category0",
             Amount::new(dec("50.00"), "USD"),
         ))
-        .with_posting(Posting::auto("Assets:Bank:Checking"));
+        .with_synthesized_posting(Posting::auto("Assets:Bank:Checking"));
 
     for i in 0..10 {
         txn2 = txn2.with_tag(format!("tag{i}"));
@@ -381,50 +381,50 @@ pub fn generate_boundary_date_edge_cases() -> EdgeCaseCollection {
         Directive::Transaction(
             Transaction::new(early_date, "Historical transaction from 1900")
                 .with_flag('*')
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
                     "Assets:Historical:Account",
                     Amount::new(dec("1.00"), "USD"),
                 ))
-                .with_posting(Posting::auto("Equity:Opening")),
+                .with_synthesized_posting(Posting::auto("Equity:Opening")),
         ),
         // Late date transaction
         Directive::Transaction(
             Transaction::new(late_date, "Far future transaction")
                 .with_flag('*')
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
                     "Assets:Historical:Account",
                     Amount::new(dec("1000000.00"), "USD"),
                 ))
-                .with_posting(Posting::auto("Equity:Opening")),
+                .with_synthesized_posting(Posting::auto("Equity:Opening")),
         ),
         // Leap year
         Directive::Transaction(
             Transaction::new(leap_date, "Leap day transaction")
                 .with_flag('*')
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
                     "Assets:Historical:Account",
                     Amount::new(dec("29.02"), "USD"),
                 ))
-                .with_posting(Posting::auto("Equity:Opening")),
+                .with_synthesized_posting(Posting::auto("Equity:Opening")),
         ),
         // End of month
         Directive::Transaction(
             Transaction::new(end_jan, "End of January")
                 .with_flag('*')
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
                     "Assets:Historical:Account",
                     Amount::new(dec("31.00"), "USD"),
                 ))
-                .with_posting(Posting::auto("Equity:Opening")),
+                .with_synthesized_posting(Posting::auto("Equity:Opening")),
         ),
         Directive::Transaction(
             Transaction::new(end_apr, "End of April")
                 .with_flag('*')
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
                     "Assets:Historical:Account",
                     Amount::new(dec("30.00"), "USD"),
                 ))
-                .with_posting(Posting::auto("Equity:Opening")),
+                .with_synthesized_posting(Posting::auto("Equity:Opening")),
         ),
     ];
 
@@ -445,52 +445,52 @@ pub fn generate_special_character_edge_cases() -> EdgeCaseCollection {
         Directive::Transaction(
             Transaction::new(base_date, "Purchase at Joe's Diner")
                 .with_flag('*')
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
                     "Expenses:Test",
                     Amount::new(dec("25.00"), "USD"),
                 ))
-                .with_posting(Posting::auto("Assets:Bank:Checking")),
+                .with_synthesized_posting(Posting::auto("Assets:Bank:Checking")),
         ),
         // Backslash in narration
         Directive::Transaction(
             Transaction::new(base_date, r"Path: C:\Users\Documents\file.txt")
                 .with_flag('*')
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
                     "Expenses:Test",
                     Amount::new(dec("10.00"), "USD"),
                 ))
-                .with_posting(Posting::auto("Assets:Bank:Checking")),
+                .with_synthesized_posting(Posting::auto("Assets:Bank:Checking")),
         ),
         // Multi-line description split across text
         Directive::Transaction(
             Transaction::new(base_date, "Multi-line description split across text")
                 .with_flag('*')
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
                     "Expenses:Test",
                     Amount::new(dec("5.00"), "USD"),
                 ))
-                .with_posting(Posting::auto("Assets:Bank:Checking")),
+                .with_synthesized_posting(Posting::auto("Assets:Bank:Checking")),
         ),
         // Long narration (200 characters)
         Directive::Transaction(
             Transaction::new(base_date, "A".repeat(200))
                 .with_flag('*')
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
                     "Expenses:Test",
                     Amount::new(dec("1.00"), "USD"),
                 ))
-                .with_posting(Posting::auto("Assets:Bank:Checking")),
+                .with_synthesized_posting(Posting::auto("Assets:Bank:Checking")),
         ),
         // Special whitespace in payee
         Directive::Transaction(
             Transaction::new(base_date, "Regular narration")
                 .with_flag('*')
                 .with_payee("Company Name") // No tab - tabs are invalid in beancount
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
                     "Expenses:Test",
                     Amount::new(dec("15.00"), "USD"),
                 ))
-                .with_posting(Posting::auto("Assets:Bank:Checking")),
+                .with_synthesized_posting(Posting::auto("Assets:Bank:Checking")),
         ),
     ];
 
@@ -528,18 +528,23 @@ pub fn generate_minimal_edge_cases() -> EdgeCaseCollection {
         // Minimal event
         Directive::Event(Event::new(base_date, "type", "value")),
         // Transaction with empty narration
-        Directive::Transaction(Transaction::new(base_date, "").with_flag('*').with_posting(
-            Posting::new("Assets:WithCurrency", Amount::new(dec("0.00"), "USD")),
-        )),
+        Directive::Transaction(
+            Transaction::new(base_date, "")
+                .with_flag('*')
+                .with_synthesized_posting(Posting::new(
+                    "Assets:WithCurrency",
+                    Amount::new(dec("0.00"), "USD"),
+                )),
+        ),
         // Transaction with only auto-balanced postings
         Directive::Transaction(
             Transaction::new(base_date, "Auto-balanced")
                 .with_flag('*')
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
                     "Assets:WithCurrency",
                     Amount::new(dec("100.00"), "USD"),
                 ))
-                .with_posting(Posting::auto("Assets:WithCurrency")),
+                .with_synthesized_posting(Posting::auto("Assets:WithCurrency")),
         ),
     ];
 

@@ -141,8 +141,8 @@ fuzz_target!(|input: FuzzTransaction| {
         let counter = Posting::new("Assets:Cash", Amount::new(-units * cost, "USD"));
 
         let txn = Transaction::new(buy_date, format!("Buy {i}"))
-            .with_posting(posting)
-            .with_posting(counter);
+            .with_synthesized_posting(posting)
+            .with_synthesized_posting(counter);
 
         // Ignore errors — we're building up state, some combos may fail
         if let Ok(result) = engine.book_and_interpolate(&txn) {
@@ -161,7 +161,7 @@ fuzz_target!(|input: FuzzTransaction| {
             // Posting with missing amount (for interpolation)
             let posting =
                 Posting::with_incomplete(account, IncompleteAmount::CurrencyOnly(currency.into()));
-            txn = txn.with_posting(posting);
+            txn = txn.with_synthesized_posting(posting);
         } else {
             let amount = Amount::new(make_decimal(fuzz_posting.amount_cents), currency);
             let mut posting = Posting::new(account, amount);
@@ -183,7 +183,7 @@ fuzz_target!(|input: FuzzTransaction| {
                 posting = posting.with_cost(spec);
             }
 
-            txn = txn.with_posting(posting);
+            txn = txn.with_synthesized_posting(posting);
         }
     }
 

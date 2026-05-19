@@ -200,7 +200,12 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 ///     match new files. Bumping the version short-circuits stale
 ///     caches at the header check instead of paying the rkyv
 ///     deserialize cost only to fail the hash compare.
-const CACHE_VERSION: u32 = 4;
+/// v5: `Transaction.postings: Vec<Posting>` became
+///     `Vec<Spanned<Posting>>` (#1151). The inner posting bytes
+///     gained a `Span + file_id` per entry, so old cache files
+///     would rkyv-deserialize into the new type as junk. Header
+///     check forces a rebuild instead.
+const CACHE_VERSION: u32 = 5;
 
 /// Cache header stored at the start of cache files.
 #[derive(Debug, Clone)]
@@ -540,11 +545,11 @@ mod tests {
 
         let txn = Transaction::new(date, "Test transaction")
             .with_payee("Test Payee")
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Expenses:Test",
                 Amount::new(dec!(100.00), "USD"),
             ))
-            .with_posting(Posting::auto("Assets:Checking"));
+            .with_synthesized_posting(Posting::auto("Assets:Checking"));
 
         let directives = vec![Spanned::new(Directive::Transaction(txn), Span::new(0, 100))];
 
@@ -579,11 +584,11 @@ mod tests {
         for i in 0..10000 {
             let txn = Transaction::new(date, format!("Transaction {i}"))
                 .with_payee("Store")
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
                     "Expenses:Food",
                     Amount::new(dec!(25.00), "USD"),
                 ))
-                .with_posting(Posting::auto("Assets:Checking"));
+                .with_synthesized_posting(Posting::auto("Assets:Checking"));
 
             directives.push(Spanned::new(Directive::Transaction(txn), Span::new(0, 100)));
         }
@@ -688,7 +693,8 @@ mod tests {
 
         // Create a cache entry
         let date = rustledger_core::naive_date(2024, 1, 15).unwrap();
-        let txn = Transaction::new(date, "Test").with_posting(Posting::auto("Assets:Test"));
+        let txn =
+            Transaction::new(date, "Test").with_synthesized_posting(Posting::auto("Assets:Test"));
         let directives = vec![Spanned::new(Directive::Transaction(txn), Span::new(0, 50))];
 
         let entry = CacheEntry {
@@ -822,11 +828,11 @@ mod tests {
         let mut directives = vec![];
         for i in 0..5 {
             let txn = Transaction::new(date, format!("Txn {i}"))
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
                     "Expenses:Food",
                     Amount::new(dec!(10.00), "USD"),
                 ))
-                .with_posting(Posting::auto("Assets:Checking"));
+                .with_synthesized_posting(Posting::auto("Assets:Checking"));
             directives.push(Spanned::new(Directive::Transaction(txn), Span::new(0, 50)));
         }
 

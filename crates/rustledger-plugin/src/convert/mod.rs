@@ -31,6 +31,11 @@ pub enum ConversionError {
     /// Invalid flag format.
     #[error("invalid flag: {0}")]
     InvalidFlag(String),
+    /// A `SourceSpan` byte offset from the plugin wire format does not
+    /// fit in `usize` on the host. Should only ever surface on 32-bit
+    /// hosts processing source files larger than 4 GiB.
+    #[error("source span overflow: {0}")]
+    SpanOverflow(String),
 }
 
 /// Convert a directive to its serializable wrapper with source location.

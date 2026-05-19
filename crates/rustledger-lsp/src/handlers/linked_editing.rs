@@ -5,7 +5,7 @@
 //! - Currency names: edit all occurrences simultaneously
 
 use lsp_types::{LinkedEditingRangeParams, LinkedEditingRanges, Position, Range};
-use rustledger_core::Directive;
+use rustledger_core::{Directive, SYNTHESIZED_FILE_ID};
 use rustledger_parser::ParseResult;
 
 use super::utils::{
@@ -121,9 +121,16 @@ fn collect_account_ranges(
                 }
             }
             Directive::Transaction(txn) => {
-                for (i, posting) in txn.postings.iter().enumerate() {
-                    if posting.account.as_ref() == account {
-                        let posting_line = start_line + 1 + i as u32;
+                // Per-posting span lookup (see #1142): the prior
+                // `start_line + 1 + i` arithmetic broke whenever a
+                // transaction had interleaved posting-level metadata.
+                for spanned_posting in &txn.postings {
+                    if spanned_posting.file_id == SYNTHESIZED_FILE_ID {
+                        continue;
+                    }
+                    if spanned_posting.account.as_ref() == account {
+                        let (posting_line, _) =
+                            byte_offset_to_position(source, spanned_posting.span.start);
                         if let Some(range) = find_in_line(source, posting_line, account) {
                             ranges.push(range);
                         }

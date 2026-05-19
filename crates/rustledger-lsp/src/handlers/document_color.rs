@@ -9,10 +9,10 @@ use lsp_types::{
     Color, ColorInformation, ColorPresentation, ColorPresentationParams, DocumentColorParams,
     Position, Range,
 };
-use rustledger_core::Directive;
+use rustledger_core::{Directive, SYNTHESIZED_FILE_ID};
 use rustledger_parser::ParseResult;
 
-use super::utils::byte_offset_to_position;
+use super::utils::LineIndex;
 
 /// Red color for negative amounts.
 const COLOR_NEGATIVE: Color = Color {
@@ -45,18 +45,26 @@ pub fn handle_document_color(
     parse_result: &ParseResult,
 ) -> Option<Vec<ColorInformation>> {
     let mut colors = Vec::new();
+    let line_index = LineIndex::new(source);
+    let lines: Vec<&str> = source.lines().collect();
 
     for spanned in &parse_result.directives {
         match &spanned.value {
             Directive::Transaction(txn) => {
-                let (start_line, _) = byte_offset_to_position(source, spanned.span.start);
-
-                for (i, posting) in txn.postings.iter().enumerate() {
+                // Per-posting span lookup (see #1142): the prior
+                // `start_line + 1 + i` arithmetic broke whenever a
+                // transaction had interleaved posting-level metadata.
+                for spanned_posting in &txn.postings {
+                    if spanned_posting.file_id == SYNTHESIZED_FILE_ID {
+                        continue;
+                    }
+                    let posting = &**spanned_posting;
                     if let Some(units) = &posting.units
                         && let Some(number) = units.number()
                     {
-                        let posting_line = start_line + 1 + i as u32;
-                        let line_text = source.lines().nth(posting_line as usize).unwrap_or("");
+                        let (posting_line, _) =
+                            line_index.offset_to_position(spanned_posting.span.start);
+                        let line_text = lines.get(posting_line as usize).copied().unwrap_or("");
 
                         // Find the amount in the line
                         let amount_str = number.to_string();
@@ -76,7 +84,7 @@ pub fn handle_document_color(
                 }
             }
             Directive::Balance(bal) => {
-                let (line, _) = byte_offset_to_position(source, spanned.span.start);
+                let (line, _) = line_index.offset_to_position(spanned.span.start);
                 let line_text = source.lines().nth(line as usize).unwrap_or("");
 
                 let amount_str = bal.amount.number.to_string();
@@ -93,7 +101,7 @@ pub fn handle_document_color(
                 }
             }
             Directive::Price(price) => {
-                let (line, _) = byte_offset_to_position(source, spanned.span.start);
+                let (line, _) = line_index.offset_to_position(spanned.span.start);
                 let line_text = source.lines().nth(line as usize).unwrap_or("");
 
                 let amount_str = price.amount.number.to_string();

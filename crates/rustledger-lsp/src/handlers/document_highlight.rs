@@ -8,7 +8,7 @@
 use lsp_types::{
     DocumentHighlight, DocumentHighlightKind, DocumentHighlightParams, Position, Range,
 };
-use rustledger_core::Directive;
+use rustledger_core::{Directive, SYNTHESIZED_FILE_ID};
 use rustledger_parser::ParseResult;
 
 use super::utils::{
@@ -143,9 +143,16 @@ fn collect_account_highlights(
                 }
             }
             Directive::Transaction(txn) => {
-                for (i, posting) in txn.postings.iter().enumerate() {
-                    if posting.account.as_ref() == account {
-                        let posting_line = start_line + 1 + i as u32;
+                // Per-posting span lookup (see #1142): the prior
+                // `start_line + 1 + i` arithmetic broke whenever a
+                // transaction had interleaved posting-level metadata.
+                for spanned_posting in &txn.postings {
+                    if spanned_posting.file_id == SYNTHESIZED_FILE_ID {
+                        continue;
+                    }
+                    if spanned_posting.account.as_ref() == account {
+                        let (posting_line, _) =
+                            byte_offset_to_position(source, spanned_posting.span.start);
                         if let Some(range) = find_in_line(source, posting_line, account) {
                             highlights.push(DocumentHighlight {
                                 range,
@@ -340,5 +347,59 @@ mod tests {
         let highlights = highlights.unwrap();
         // Should find USD in: open, posting 1, posting 2 = 3
         assert_eq!(highlights.len(), 3);
+    }
+
+    /// Regression test for the read-only sibling of #1142.
+    ///
+    /// Pre-fix, `posting_line = txn_start_line + 1 + i` put the second
+    /// posting's highlight on the metadata line between the postings.
+    /// Per-posting span lookup must put each highlight on the actual
+    /// posting line.
+    #[test]
+    fn test_highlight_account_with_interleaved_metadata_1142() {
+        let source = "\
+2024-01-01 open Assets:Bank USD
+2024-01-15 * \"Test\"
+  Assets:Bank  -5.00 USD
+    effective_date: 2024-01-20
+  Expenses:Food  5.00 USD
+    effective_date: 2024-01-21
+";
+        let result = parse(source);
+        assert!(
+            result.errors.is_empty(),
+            "parse errors: {:?}",
+            result.errors
+        );
+
+        let uri: lsp_types::Uri = "file:///test.beancount".parse().unwrap();
+        let params = DocumentHighlightParams {
+            text_document_position_params: lsp_types::TextDocumentPositionParams {
+                text_document: lsp_types::TextDocumentIdentifier { uri },
+                position: Position::new(0, 16), // on "Assets:Bank" in open
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        };
+
+        let highlights = handle_document_highlight(&params, source, &result)
+            .expect("Assets:Bank has at least the Open + 1 posting");
+
+        // Lines 3 and 5 contain `effective_date:`; the posting is on
+        // line 2 (after the Open + transaction header). No highlight
+        // should land on a metadata line.
+        let metadata_lines = [3u32, 5u32];
+        for h in &highlights {
+            assert!(
+                !metadata_lines.contains(&h.range.start.line),
+                "highlight landed on metadata line: {h:?}"
+            );
+        }
+        // Positive assertion: the Assets:Bank posting on line 2 must be
+        // highlighted (the bug used to point at line 3 instead).
+        assert!(
+            highlights.iter().any(|h| h.range.start.line == 2),
+            "Assets:Bank posting on line 2 should be highlighted; got {highlights:?}"
+        );
     }
 }

@@ -9,7 +9,7 @@
 use lsp_types::{
     DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse, Position, Range, SymbolKind,
 };
-use rustledger_core::Directive;
+use rustledger_core::{Directive, SYNTHESIZED_FILE_ID};
 use rustledger_parser::ParseResult;
 
 use super::utils::LineIndex;
@@ -77,12 +77,17 @@ fn directive_to_symbol(
                 Some(txn.narration.to_string())
             };
 
-            // Create child symbols for postings
+            // Create child symbols for postings. Look up each posting's
+            // line from its own source span instead of the prior
+            // `start_line + 1 + i` arithmetic (see #1142): with
+            // interleaved metadata, that pointed at metadata lines and
+            // produced wrong symbol ranges in the outline view.
             let children: Vec<DocumentSymbol> = txn
                 .postings
                 .iter()
-                .enumerate()
-                .map(|(i, posting)| {
+                .filter(|spanned_posting| spanned_posting.file_id != SYNTHESIZED_FILE_ID)
+                .map(|spanned_posting| {
+                    let posting = &**spanned_posting;
                     let posting_name = posting.account.to_string();
                     let posting_detail = posting.units.as_ref().map(|u| {
                         if let (Some(num), Some(curr)) = (u.number(), u.currency()) {
@@ -94,8 +99,8 @@ fn directive_to_symbol(
                         }
                     });
 
-                    // Estimate posting position (simplified)
-                    let posting_line = start_line + 1 + i as u32;
+                    let (posting_line, _) =
+                        line_index.offset_to_position(spanned_posting.span.start);
                     let posting_range = Range {
                         start: Position::new(posting_line, 2),
                         end: Position::new(posting_line, 50),

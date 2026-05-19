@@ -9,7 +9,7 @@ use super::utils::{
     byte_offset_to_position, get_word_at_position, is_account_like, is_currency_like,
 };
 use lsp_types::{Location, Position, Range, ReferenceParams, Uri};
-use rustledger_core::Directive;
+use rustledger_core::{Directive, SYNTHESIZED_FILE_ID};
 use rustledger_parser::ParseResult;
 
 /// Handle a find references request.
@@ -176,9 +176,16 @@ fn collect_account_references(
                 }
             }
             Directive::Transaction(txn) => {
-                for (i, posting) in txn.postings.iter().enumerate() {
-                    if posting.account.as_ref() == account {
-                        let posting_line = start_line + 1 + i as u32;
+                // Per-posting span lookup (see #1142): the prior
+                // `start_line + 1 + i` arithmetic broke whenever a
+                // transaction had interleaved posting-level metadata.
+                for spanned_posting in &txn.postings {
+                    if spanned_posting.file_id == SYNTHESIZED_FILE_ID {
+                        continue;
+                    }
+                    if spanned_posting.account.as_ref() == account {
+                        let (posting_line, _) =
+                            byte_offset_to_position(source, spanned_posting.span.start);
                         if let Some(line_text) = source.lines().nth(posting_line as usize)
                             && let Some(col) = line_text.find(account)
                         {
@@ -410,5 +417,60 @@ mod tests {
         let refs = refs.unwrap();
         // Should find USD in: open, posting 1, posting 2 = 3 references
         assert_eq!(refs.len(), 3);
+    }
+
+    /// Regression test for the read-only sibling of #1142.
+    ///
+    /// Pre-fix, the reference range for the second posting landed on
+    /// the metadata line between postings. With per-posting span
+    /// lookup, every reference points at its actual posting line.
+    #[test]
+    fn test_find_account_references_with_interleaved_metadata_1142() {
+        let source = "\
+2024-01-01 open Assets:Bank USD
+2024-01-15 * \"Test\"
+  Assets:Bank  -5.00 USD
+    effective_date: 2024-01-20
+  Expenses:Food  5.00 USD
+    effective_date: 2024-01-21
+";
+        let result = parse(source);
+        assert!(
+            result.errors.is_empty(),
+            "parse errors: {:?}",
+            result.errors
+        );
+
+        let uri: Uri = "file:///test.beancount".parse().unwrap();
+        let params = ReferenceParams {
+            text_document_position: lsp_types::TextDocumentPositionParams {
+                text_document: lsp_types::TextDocumentIdentifier { uri: uri.clone() },
+                position: Position::new(0, 16), // on "Assets:Bank" in open
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+            context: lsp_types::ReferenceContext {
+                include_declaration: true,
+            },
+        };
+
+        let refs = handle_references(&params, source, &result, &uri)
+            .expect("at least the Open definition + 1 posting reference");
+
+        let metadata_lines = [3u32, 5u32];
+        for r in &refs {
+            assert!(
+                !metadata_lines.contains(&r.range.start.line),
+                "reference range landed on a metadata line: {r:?}"
+            );
+        }
+        // The Assets:Bank posting is on line 2 (the second posting,
+        // Expenses:Food, is on line 4 and isn't a reference to
+        // Assets:Bank, so we only verify the positive lines we expect).
+        let lines: Vec<u32> = refs.iter().map(|r| r.range.start.line).collect();
+        assert!(
+            lines.contains(&2),
+            "Assets:Bank posting on line 2 should appear in refs; got {lines:?}"
+        );
     }
 }

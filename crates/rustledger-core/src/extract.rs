@@ -18,30 +18,96 @@ pub fn extract_accounts(directives: &[Directive]) -> Vec<String> {
 /// ```ignore
 /// extract_accounts_iter(parse_result.directives.iter().map(|s| &s.value))
 /// ```
+/// Extract unique account names from an iterator of directive references.
+///
+/// Covers every position an account name can appear in source:
+/// - `Open.account` / `Close.account`
+/// - `Balance.account`
+/// - `Pad.account` and `Pad.source_account`
+/// - `Note.account`
+/// - `Document.account`
+/// - `Posting.account` (transactions)
+/// - `MetaValue::Account` values inside the metadata block of any
+///   directive or posting
+/// - `MetaValue::Account` inside `Custom.values`
+///
+/// Earlier iterations of this function covered only Open / Close /
+/// Balance / Pad / Transaction.postings — accounts mentioned only
+/// on a Note, Document, in metadata, or in a Custom directive were
+/// silently absent from completion suggestions in both the LSP and
+/// the WASM editor.
 pub fn extract_accounts_iter<'a>(directives: impl Iterator<Item = &'a Directive>) -> Vec<String> {
     let mut accounts = Vec::new();
 
     for directive in directives {
         match directive {
-            Directive::Open(open) => accounts.push(open.account.to_string()),
-            Directive::Close(close) => accounts.push(close.account.to_string()),
-            Directive::Balance(bal) => accounts.push(bal.account.to_string()),
+            Directive::Open(open) => {
+                accounts.push(open.account.to_string());
+                extract_meta_accounts(&open.meta, &mut accounts);
+            }
+            Directive::Close(close) => {
+                accounts.push(close.account.to_string());
+                extract_meta_accounts(&close.meta, &mut accounts);
+            }
+            Directive::Balance(bal) => {
+                accounts.push(bal.account.to_string());
+                extract_meta_accounts(&bal.meta, &mut accounts);
+            }
             Directive::Pad(pad) => {
                 accounts.push(pad.account.to_string());
                 accounts.push(pad.source_account.to_string());
+                extract_meta_accounts(&pad.meta, &mut accounts);
+            }
+            Directive::Note(note) => {
+                accounts.push(note.account.to_string());
+                extract_meta_accounts(&note.meta, &mut accounts);
+            }
+            Directive::Document(doc) => {
+                accounts.push(doc.account.to_string());
+                extract_meta_accounts(&doc.meta, &mut accounts);
             }
             Directive::Transaction(txn) => {
+                extract_meta_accounts(&txn.meta, &mut accounts);
                 for posting in &txn.postings {
                     accounts.push(posting.account.to_string());
+                    extract_meta_accounts(&posting.meta, &mut accounts);
                 }
             }
-            _ => {}
+            Directive::Custom(custom) => {
+                for v in &custom.values {
+                    if let MetaValue::Account(a) = v {
+                        accounts.push(a.clone());
+                    }
+                }
+                extract_meta_accounts(&custom.meta, &mut accounts);
+            }
+            Directive::Commodity(comm) => {
+                extract_meta_accounts(&comm.meta, &mut accounts);
+            }
+            Directive::Price(price) => {
+                extract_meta_accounts(&price.meta, &mut accounts);
+            }
+            Directive::Event(event) => {
+                extract_meta_accounts(&event.meta, &mut accounts);
+            }
+            Directive::Query(query) => {
+                extract_meta_accounts(&query.meta, &mut accounts);
+            }
         }
     }
 
     accounts.sort();
     accounts.dedup();
     accounts
+}
+
+/// Push any account literal embedded in a metadata block onto `out`.
+fn extract_meta_accounts(meta: &Metadata, out: &mut Vec<String>) {
+    for v in meta.values() {
+        if let MetaValue::Account(a) = v {
+            out.push(a.clone());
+        }
+    }
 }
 
 /// Extract unique currencies from directives (sorted, deduplicated).
@@ -112,7 +178,34 @@ pub fn extract_currencies_iter<'a>(directives: impl Iterator<Item = &'a Directiv
                     extract_meta_currencies(&posting.meta, &mut currencies);
                 }
             }
-            _ => {}
+            Directive::Custom(custom) => {
+                for v in &custom.values {
+                    match v {
+                        MetaValue::Currency(s) => currencies.push(s.clone()),
+                        MetaValue::Amount(a) => currencies.push(a.currency.to_string()),
+                        _ => {}
+                    }
+                }
+                extract_meta_currencies(&custom.meta, &mut currencies);
+            }
+            Directive::Note(note) => {
+                extract_meta_currencies(&note.meta, &mut currencies);
+            }
+            Directive::Document(doc) => {
+                extract_meta_currencies(&doc.meta, &mut currencies);
+            }
+            Directive::Close(close) => {
+                extract_meta_currencies(&close.meta, &mut currencies);
+            }
+            Directive::Pad(pad) => {
+                extract_meta_currencies(&pad.meta, &mut currencies);
+            }
+            Directive::Event(event) => {
+                extract_meta_currencies(&event.meta, &mut currencies);
+            }
+            Directive::Query(query) => {
+                extract_meta_currencies(&query.meta, &mut currencies);
+            }
         }
     }
 
@@ -423,6 +516,77 @@ mod tests {
             assert!(
                 currencies.contains(&expected.to_string()),
                 "expected {expected} in extracted currencies (covers cost/price/Price-directive arms); got {currencies:?}"
+            );
+        }
+    }
+
+    /// Regression test: account names that reach the parser via
+    /// positions OTHER than `Open` / `Close` / `Balance` / `Pad` /
+    /// `Posting.account` must still appear in the extraction list.
+    ///
+    /// The pre-fix walk missed `Note.account`, `Document.account`,
+    /// `MetaValue::Account` in metadata blocks, and `Custom.values`
+    /// account entries — meaning completion suggestions in both the
+    /// LSP and WASM editor were missing real accounts the user had
+    /// referenced.
+    #[test]
+    fn test_extract_accounts_covers_note_document_meta_custom() {
+        use crate::{Custom, Document, Note};
+        let mut txn_meta: Metadata = Default::default();
+        txn_meta.insert(
+            "partner".to_string(),
+            MetaValue::Account("Assets:JointAccount".into()),
+        );
+
+        let directives = vec![
+            // Note carrying an account the user has never opened elsewhere.
+            Directive::Note(Note {
+                date: date(2024, 1, 1),
+                account: "Assets:OldCheckingArchive".into(),
+                comment: "reconcile end of year".to_string(),
+                meta: Default::default(),
+            }),
+            // Document carrying another fresh account.
+            Directive::Document(Document {
+                date: date(2024, 1, 2),
+                account: "Liabilities:CreditCard:CitiBank".into(),
+                path: "statement.pdf".to_string(),
+                tags: vec![],
+                links: vec![],
+                meta: Default::default(),
+            }),
+            // Transaction whose metadata carries an account reference.
+            Directive::Transaction(Transaction {
+                date: date(2024, 1, 3),
+                flag: '*',
+                payee: None,
+                narration: "".into(),
+                tags: vec![],
+                links: vec![],
+                meta: txn_meta,
+                postings: vec![],
+                trailing_comments: vec![],
+            }),
+            // Custom directive whose values include an Account.
+            Directive::Custom(Custom {
+                date: date(2024, 1, 4),
+                custom_type: "budget".to_string(),
+                values: vec![MetaValue::Account("Expenses:Groceries:Whole".into())],
+                meta: Default::default(),
+            }),
+        ];
+
+        let accounts = extract_accounts(&directives);
+
+        for expected in [
+            "Assets:OldCheckingArchive",
+            "Liabilities:CreditCard:CitiBank",
+            "Assets:JointAccount",
+            "Expenses:Groceries:Whole",
+        ] {
+            assert!(
+                accounts.contains(&expected.to_string()),
+                "expected {expected} in extracted accounts (covers Note/Document/meta/Custom arms); got {accounts:?}"
             );
         }
     }

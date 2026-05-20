@@ -41,16 +41,23 @@
 //!
 //! # When to use which
 //!
-//! - [`Account`]: `Open.account`, `Close.account`, `Balance.account`,
-//!   `Pad.account` / `source_account`, `Note.account`,
-//!   `Document.account`, `Posting.account`, and `MetaValue::Account`.
-//! - [`Currency`]: `Commodity.currency`, `Open.currencies` entries,
-//!   `Amount.currency`, `CostSpec.currency`, `Price.currency`,
-//!   `IncompleteAmount::CurrencyOnly`, and `MetaValue::Currency`.
-//! - [`Tag`]: `Transaction.tags` entries, `pushtag`/`poptag`,
-//!   `Document.tags`, and `MetaValue::Tag`.
-//! - [`Link`]: `Transaction.links` entries, `Document.links`, and
-//!   `MetaValue::Link`.
+//! [`Currency`] is fully plumbed through the AST; the other three
+//! are defined but not yet wired up (planned slices of #1163):
+//!
+//! - [`Currency`] *(in use)*: `Commodity.currency`, `Open.currencies`
+//!   entries, `Amount.currency`, `CostSpec.currency`, `Price.currency`,
+//!   `IncompleteAmount::CurrencyOnly`.
+//! - [`Account`] *(planned)*: `Open.account`, `Close.account`,
+//!   `Balance.account`, `Pad.account` / `source_account`,
+//!   `Note.account`, `Document.account`, `Posting.account`.
+//! - [`Tag`] *(planned)*: `Transaction.tags` entries,
+//!   `pushtag`/`poptag`, `Document.tags`.
+//! - [`Link`] *(planned)*: `Transaction.links` entries,
+//!   `Document.links`.
+//!
+//! `MetaValue::{Account, Currency, Tag, Link}` are still `String`
+//! pending a separate decision on how meta values cross the typed
+//! boundary.
 
 use crate::InternedStr;
 #[cfg(feature = "rkyv")]
@@ -64,6 +71,7 @@ macro_rules! domain_newtype {
             feature = "rkyv",
             derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
         )]
+        #[repr(transparent)]
         pub struct $name(
             #[cfg_attr(feature = "rkyv", rkyv(with = AsInternedStr))] InternedStr,
         );

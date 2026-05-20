@@ -9,7 +9,10 @@ use lsp_types::{Hover, HoverContents, HoverParams, MarkupContent, MarkupKind};
 use rustledger_core::Directive;
 use rustledger_parser::ParseResult;
 
-use super::utils::{get_word_at_source_position, is_account_type, is_currency_like_simple};
+use super::utils::{
+    commodity_declaration_spans, get_word_at_source_position, is_account_type,
+    is_currency_like_simple,
+};
 
 /// Handle a hover request.
 pub fn handle_hover(
@@ -151,27 +154,23 @@ fn get_currency_info(currency: &str, parse_result: &ParseResult) -> Option<Strin
 
 /// Count how many times a currency is used.
 #[allow(clippy::cmp_owned)]
+/// Count how many times `currency` is used (excluding its own
+/// `Commodity` declaration). Consults the parser's
+/// `currency_occurrences` index, so the count is exhaustive across
+/// every position that produces a `Currency` token — `Amount`
+/// (Transaction.units, Balance.amount, Price.amount, etc.),
+/// `CostSpec.currency`, `PriceAnnotation.amount.currency`,
+/// `Open.currencies` constraint lists, and `Currency`/`Amount`
+/// metadata values. The previous implementation walked only
+/// `Transaction.posting.units` and `Balance.amount`, silently
+/// undercounting every other position.
 fn count_currency_usages(currency: &str, parse_result: &ParseResult) -> usize {
-    let mut count = 0;
-    for spanned_directive in &parse_result.directives {
-        match &spanned_directive.value {
-            Directive::Transaction(txn) => {
-                for posting in &txn.postings {
-                    if let Some(ref units) = posting.units
-                        && let Some(c) = units.currency()
-                        && c.to_string() == currency
-                    {
-                        count += 1;
-                    }
-                }
-            }
-            Directive::Balance(bal) if bal.amount.currency.as_ref() == currency => {
-                count += 1;
-            }
-            _ => {}
-        }
-    }
-    count
+    let declaration_spans = commodity_declaration_spans(parse_result);
+    parse_result
+        .currency_occurrences
+        .iter()
+        .filter(|o| o.value == currency && !declaration_spans.contains(&o.span))
+        .count()
 }
 
 /// Get information about a directive keyword.
@@ -243,5 +242,53 @@ mod tests {
         assert!(get_directive_info("unknown").is_none());
     }
 
-    // Tests for shared utilities removed - they are tested in utils module
+    /// Regression test for the previous undercounting bug in
+    /// `count_currency_usages`. The old implementation only walked
+    /// `Transaction.posting.units` and `Balance.amount`, so it
+    /// silently missed every other position that can carry a
+    /// currency. This test exercises a transaction whose currency
+    /// only appears in a `CostSpec`, plus an `Open.currencies`
+    /// constraint list — both positions the old walk missed.
+    #[test]
+    fn test_count_currency_usages_exhaustive() {
+        use rustledger_parser::parse;
+
+        // USD appears in: Commodity declaration (excluded);
+        // Open.currencies; Balance.amount; Posting.units;
+        // CostSpec.currency; Price directive (currency + amount.currency).
+        let source = r#"2024-01-01 commodity USD
+2024-01-01 open Assets:Bank USD
+2024-01-15 * "Buy stock"
+  Assets:Stock  10 AAPL {150 USD}
+  Assets:Bank
+2024-01-20 balance Assets:Bank -1500 USD
+2024-01-21 price AAPL  155 USD
+"#;
+        let parse_result = parse(source);
+        assert!(
+            parse_result.errors.is_empty(),
+            "parse errors: {:?}",
+            parse_result.errors
+        );
+
+        let count = count_currency_usages("USD", &parse_result);
+
+        // Hand-counted uses (excluding the Commodity declaration):
+        //   1. Open.currencies USD
+        //   2. CostSpec {150 USD}
+        //   3. Balance amount USD
+        //   4. Price amount USD (the quote currency in `155 USD`)
+        //
+        // (The Price directive's *base* currency is `AAPL`, not
+        // USD, so it doesn't contribute.)
+        //
+        // The pre-fix walk would have returned 1 (just the
+        // Balance — Transaction.posting.units.currency() returns
+        // the units side, not the cost side, and the missing
+        // `Assets:Bank` posting has no units).
+        assert_eq!(
+            count, 4,
+            "expected 4 USD usages (Open + CostSpec + Balance + Price.amount); got {count}"
+        );
+    }
 }

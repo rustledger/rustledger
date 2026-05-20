@@ -294,8 +294,13 @@ pub fn is_currency_like_simple(s: &str) -> bool {
 /// declared one because the parser is strictly forward-advancing
 /// and the declared currency is parsed before the indented
 /// metadata block.
+///
+/// Returns a `HashSet` so callers can ask "is this occurrence a
+/// declaration?" in O(1).
 #[must_use]
-pub fn commodity_declaration_spans(parse_result: &ParseResult) -> Vec<rustledger_parser::Span> {
+pub fn commodity_declaration_spans(
+    parse_result: &ParseResult,
+) -> std::collections::HashSet<rustledger_parser::Span> {
     parse_result
         .directives
         .iter()

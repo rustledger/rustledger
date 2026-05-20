@@ -2,7 +2,7 @@
 //!
 //! These functions are used by both the WASM editor and LSP for completions.
 
-use crate::Directive;
+use crate::{Directive, MetaValue, Metadata, PriceAnnotation};
 
 /// Common default currencies included in completions.
 pub const DEFAULT_CURRENCIES: &[&str] = &["USD", "EUR", "GBP"];
@@ -52,6 +52,23 @@ pub fn extract_currencies(directives: &[Directive]) -> Vec<String> {
 }
 
 /// Extract unique currencies from an iterator of directive references.
+///
+/// Covers every position a `Currency` token can appear in source:
+/// - `Open.currencies` (constraint list)
+/// - `Commodity.currency` (declaration)
+/// - `Balance.amount.currency`
+/// - `Price` directive (both base `currency` and `amount.currency`)
+/// - `Posting.units.currency()` (units side, incl. `CurrencyOnly`)
+/// - `Posting.cost.currency` (cost spec)
+/// - `Posting.price` (`@`/`@@` annotation, all 6 variants)
+/// - `MetaValue::Currency` / `MetaValue::Amount` values inside the
+///   metadata block of any directive or posting
+///
+/// Earlier iterations of this function covered only `Open`,
+/// `Commodity`, `Balance`, and `Posting.units` — any currency that
+/// reached the parser through the other positions silently
+/// disappeared from completion suggestions in both the LSP and
+/// the WASM editor.
 pub fn extract_currencies_iter<'a>(directives: impl Iterator<Item = &'a Directive>) -> Vec<String> {
     let mut currencies = Vec::new();
 
@@ -61,16 +78,38 @@ pub fn extract_currencies_iter<'a>(directives: impl Iterator<Item = &'a Directiv
                 for currency in &open.currencies {
                     currencies.push(currency.to_string());
                 }
+                extract_meta_currencies(&open.meta, &mut currencies);
             }
-            Directive::Commodity(comm) => currencies.push(comm.currency.to_string()),
-            Directive::Balance(bal) => currencies.push(bal.amount.currency.to_string()),
+            Directive::Commodity(comm) => {
+                currencies.push(comm.currency.to_string());
+                extract_meta_currencies(&comm.meta, &mut currencies);
+            }
+            Directive::Balance(bal) => {
+                currencies.push(bal.amount.currency.to_string());
+                extract_meta_currencies(&bal.meta, &mut currencies);
+            }
+            Directive::Price(price) => {
+                currencies.push(price.currency.to_string());
+                currencies.push(price.amount.currency.to_string());
+                extract_meta_currencies(&price.meta, &mut currencies);
+            }
             Directive::Transaction(txn) => {
+                extract_meta_currencies(&txn.meta, &mut currencies);
                 for posting in &txn.postings {
                     if let Some(ref units) = posting.units
                         && let Some(currency) = units.currency()
                     {
                         currencies.push(currency.to_string());
                     }
+                    if let Some(ref cost) = posting.cost
+                        && let Some(ref c) = cost.currency
+                    {
+                        currencies.push(c.to_string());
+                    }
+                    if let Some(ref price) = posting.price {
+                        extract_price_currency(price, &mut currencies);
+                    }
+                    extract_meta_currencies(&posting.meta, &mut currencies);
                 }
             }
             _ => {}
@@ -84,6 +123,34 @@ pub fn extract_currencies_iter<'a>(directives: impl Iterator<Item = &'a Directiv
     currencies.sort();
     currencies.dedup();
     currencies
+}
+
+/// Push any currency literal embedded in a metadata block onto `out`.
+fn extract_meta_currencies(meta: &Metadata, out: &mut Vec<String>) {
+    for v in meta.values() {
+        match v {
+            MetaValue::Currency(s) => out.push(s.clone()),
+            MetaValue::Amount(a) => out.push(a.currency.to_string()),
+            _ => {}
+        }
+    }
+}
+
+/// Push the currency carried by a `PriceAnnotation` (`@` or `@@`)
+/// onto `out`, if it has one. `UnitEmpty` / `TotalEmpty` annotations
+/// (the user typed `@`/`@@` without an amount) have no currency.
+fn extract_price_currency(price: &PriceAnnotation, out: &mut Vec<String>) {
+    match price {
+        PriceAnnotation::Unit(a) | PriceAnnotation::Total(a) => {
+            out.push(a.currency.to_string());
+        }
+        PriceAnnotation::UnitIncomplete(ia) | PriceAnnotation::TotalIncomplete(ia) => {
+            if let Some(c) = ia.currency() {
+                out.push(c.to_string());
+            }
+        }
+        PriceAnnotation::UnitEmpty | PriceAnnotation::TotalEmpty => {}
+    }
 }
 
 /// Extract unique payees from transactions (sorted, deduplicated).
@@ -272,5 +339,91 @@ mod tests {
             extract_payees(&directives),
             extract_payees_iter(directives.iter())
         );
+    }
+
+    /// Regression test: currencies that reach the parser via
+    /// positions OTHER than `Open` / `Commodity` / `Balance` /
+    /// `Posting.units` must still appear in the extraction list.
+    ///
+    /// The earlier implementation walked only those four positions
+    /// and silently dropped currencies from cost specs, price
+    /// annotations, `Price` directives, and metadata values —
+    /// which meant completion suggestions in both the LSP and WASM
+    /// editor were missing real currencies the user had typed.
+    #[test]
+    fn test_extract_currencies_covers_cost_price_meta() {
+        use crate::{CostSpec, Price, PriceAnnotation};
+        use rust_decimal_macros::dec;
+        let directives = vec![
+            // Posting with cost spec carrying JPY (not present in
+            // units or anywhere else).
+            Directive::Transaction(Transaction {
+                date: date(2024, 1, 1),
+                flag: '*',
+                payee: None,
+                narration: "".into(),
+                tags: vec![],
+                links: vec![],
+                meta: Default::default(),
+                postings: vec![crate::Spanned::synthesized(Posting {
+                    account: "Assets:Stock".into(),
+                    units: Some(crate::IncompleteAmount::from(Amount::new(dec!(10), "AAPL"))),
+                    cost: Some(CostSpec {
+                        number_per: Some(dec!(150)),
+                        number_total: None,
+                        currency: Some("JPY".into()),
+                        date: None,
+                        label: None,
+                        merge: false,
+                    }),
+                    price: None,
+                    flag: None,
+                    meta: Default::default(),
+                    comments: vec![],
+                    trailing_comments: vec![],
+                })],
+                trailing_comments: vec![],
+            }),
+            // Posting with `@` price annotation carrying CHF.
+            Directive::Transaction(Transaction {
+                date: date(2024, 1, 2),
+                flag: '*',
+                payee: None,
+                narration: "".into(),
+                tags: vec![],
+                links: vec![],
+                meta: Default::default(),
+                postings: vec![crate::Spanned::synthesized(Posting {
+                    account: "Assets:FX".into(),
+                    units: Some(crate::IncompleteAmount::from(Amount::new(
+                        dec!(100),
+                        "AAPL",
+                    ))),
+                    cost: None,
+                    price: Some(PriceAnnotation::Unit(Amount::new(dec!(1.1), "CHF"))),
+                    flag: None,
+                    meta: Default::default(),
+                    comments: vec![],
+                    trailing_comments: vec![],
+                })],
+                trailing_comments: vec![],
+            }),
+            // Price directive carrying both AAPL (base) and SGD (amount).
+            Directive::Price(Price {
+                date: date(2024, 1, 3),
+                currency: "AAPL".into(),
+                amount: Amount::new(dec!(200), "SGD"),
+                meta: Default::default(),
+            }),
+        ];
+
+        let currencies = extract_currencies(&directives);
+
+        for expected in ["JPY", "CHF", "SGD", "AAPL"] {
+            assert!(
+                currencies.contains(&expected.to_string()),
+                "expected {expected} in extracted currencies (covers cost/price/Price-directive arms); got {currencies:?}"
+            );
+        }
     }
 }

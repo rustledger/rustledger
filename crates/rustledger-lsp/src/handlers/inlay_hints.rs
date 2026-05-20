@@ -8,7 +8,7 @@
 
 use lsp_types::{InlayHint, InlayHintKind, InlayHintLabel, InlayHintParams, Position};
 use rustledger_booking::interpolate;
-use rustledger_core::{Decimal, Directive, SYNTHESIZED_FILE_ID};
+use rustledger_core::{Decimal, Directive, IncompleteAmount, SYNTHESIZED_FILE_ID};
 use rustledger_parser::ParseResult;
 use std::collections::HashMap;
 
@@ -30,93 +30,134 @@ pub fn handle_inlay_hints(
     let line_index = LineIndex::new(source);
 
     for spanned in &parse_result.directives {
-        if let Directive::Transaction(txn) = &spanned.value {
-            let (start_line, _) = line_index.offset_to_position(spanned.span.start);
+        let Directive::Transaction(txn) = &spanned.value else {
+            continue;
+        };
+        let (start_line, _) = line_index.offset_to_position(spanned.span.start);
+        if start_line > range.end.line {
+            continue;
+        }
 
-            // Skip if transaction is outside the requested range
-            if start_line > range.end.line {
+        // Fast path: a transaction with no fully-missing postings
+        // has no inferred-amount hint to emit, and there's no point
+        // running the interpolator (which clones the transaction
+        // internally). The common case is fully-explicit
+        // transactions, so this gate is a meaningful win on large
+        // files where inlay hints are recomputed on every keystroke.
+        //
+        // We gate on `units.is_none()` rather than "any non-Complete"
+        // because the inlay-hint UX only renders for fully-missing
+        // postings — see the filter further down.
+        if !txn.postings.iter().any(|p| p.units.is_none()) {
+            continue;
+        }
+
+        // Delegate inference to the canonical booking interpolator.
+        // The previous bespoke implementation (`calculate_inferred_amount`)
+        // only handled the simplest case (exactly one missing posting,
+        // exactly one currency) — multi-currency transactions and
+        // postings with cost specs silently emitted zero hints.
+        //
+        // `InterpolationError` (e.g. MultipleMissing, unbalanced) is
+        // silently dropped: no hints for an under-specified
+        // transaction is the right outcome.
+        let Ok(filled) = interpolate(txn) else {
+            continue;
+        };
+
+        // Walk SOURCE postings (not `filled.filled_indices`) and
+        // locate each fill by matching span. Three properties fall
+        // out of this design:
+        //
+        // 1. **Source-order, deterministic output.** The
+        //    interpolator's `filled_indices` is built from
+        //    HashMap-driven iteration whose order is unspecified;
+        //    walking source postings gives a stable order the
+        //    client can rely on.
+        //
+        // 2. **Naturally restricts to fully-missing postings.**
+        //    `NumberOnly`/`CurrencyOnly` source postings already
+        //    display one half on screen, so appending the other
+        //    half at line-end would visually duplicate the typed
+        //    text (`Assets:Cash USD  -50.00 USD`) or wrongly order
+        //    number-then-currency. The bespoke pre-refactor
+        //    implementation only emitted hints for fully-missing
+        //    postings, and we deliberately preserve that UX.
+        //
+        // 3. **Sidesteps prune-shift bugs.** Interpolate's prune
+        //    step removes zero-amount fills from
+        //    `result.postings`, which shifts subsequent fills'
+        //    positions; `filled_indices` is then result-relative,
+        //    not source-relative. Matching by span — preserved
+        //    across `interpolate`'s clone — sidesteps that issue
+        //    entirely. (In current code paths the zero-fill case is
+        //    structurally unreachable, but the design is robust to
+        //    future changes.)
+        for source_posting in &txn.postings {
+            if source_posting.units.is_some() {
+                continue;
+            }
+            if source_posting.file_id == SYNTHESIZED_FILE_ID {
                 continue;
             }
 
-            // Delegate inference to the canonical booking interpolator.
-            // The previous bespoke implementation (`calculate_inferred_amount`)
-            // only handled the simplest case (exactly one missing posting,
-            // exactly one currency) — multi-currency transactions and
-            // postings with cost specs were silently skipped. The booking
-            // interpolator handles all of them.
-            //
-            // `interpolate` returns the filled-in transaction plus
-            // `filled_indices` telling us which posting slots it
-            // populated. If interpolation fails (e.g., MultipleMissing,
-            // unbalanced amounts) we silently skip — no hints is the
-            // right outcome for an under-specified transaction.
-            let Ok(filled) = interpolate(txn) else {
+            let (posting_line, _) = line_index.offset_to_position(source_posting.span.start);
+            if posting_line < range.start.line || posting_line > range.end.line {
+                continue;
+            }
+
+            // Match the filled version of this source posting by
+            // span. `interpolate` clones source postings and
+            // preserves their spans, so byte-offset equality
+            // identifies the same posting reliably. If no match —
+            // the slot filled to zero and got pruned — emit no
+            // hint.
+            let Some(filled_posting) = filled
+                .transaction
+                .postings
+                .iter()
+                .find(|p| p.span.start == source_posting.span.start)
+            else {
                 continue;
             };
 
-            // Per-posting span lookup (see #1142): the prior
-            // `start_line + 1 + i` arithmetic put hints on the wrong
-            // line for transactions with interleaved metadata.
-            for &idx in &filled.filled_indices {
-                let Some(spanned_posting) = txn.postings.get(idx) else {
-                    continue;
-                };
-                if spanned_posting.file_id == SYNTHESIZED_FILE_ID {
-                    continue;
-                }
-                let (posting_line, _) = line_index.offset_to_position(spanned_posting.span.start);
+            let Some(IncompleteAmount::Complete(amount)) = &filled_posting.units else {
+                debug_assert!(
+                    false,
+                    "interpolate: fully-missing source posting did not fill to Complete: {:?}",
+                    filled_posting.units
+                );
+                continue;
+            };
 
-                // Skip if outside range
-                if posting_line < range.start.line || posting_line > range.end.line {
-                    continue;
-                }
+            let Some(line) = lines.get(posting_line as usize) else {
+                continue;
+            };
 
-                // Pull the filled amount out of the interpolated
-                // transaction. `interpolate` only adds a posting to
-                // `filled_indices` when it produced a `Complete`
-                // amount, so this unwrap-chain is total in practice;
-                // bail defensively if a future change ever changes
-                // that.
-                let Some(filled_posting) = filled.transaction.postings.get(idx) else {
-                    continue;
-                };
-                let Some(rustledger_core::IncompleteAmount::Complete(amount)) =
-                    &filled_posting.units
-                else {
-                    continue;
-                };
-                let Some(line) = lines.get(posting_line as usize) else {
-                    continue;
-                };
+            // Position hint at the end of the account name
+            let trimmed = line.trim();
+            let indent = line.len() - line.trim_start().len();
+            let end_col = indent + trimmed.len();
 
-                // Position hint at the end of the account name
-                let trimmed = line.trim();
-                let indent = line.len() - line.trim_start().len();
-                let end_col = indent + trimmed.len();
+            // Store data for resolve - include account for rich tooltip
+            let data = serde_json::json!({
+                "uri": uri,
+                "kind": "inferred_amount",
+                "account": source_posting.account.to_string(),
+                "amount": amount.number.to_string(),
+                "currency": amount.currency.to_string(),
+            });
 
-                // Store data for resolve - include account for rich tooltip
-                let data = serde_json::json!({
-                    "uri": uri,
-                    "kind": "inferred_amount",
-                    "account": spanned_posting.account.to_string(),
-                    "amount": amount.number.to_string(),
-                    "currency": amount.currency.to_string(),
-                });
-
-                hints.push(InlayHint {
-                    position: Position::new(posting_line, end_col as u32),
-                    label: InlayHintLabel::String(format!(
-                        "  {} {}",
-                        amount.number, amount.currency
-                    )),
-                    kind: Some(InlayHintKind::TYPE),
-                    text_edits: None,
-                    tooltip: None, // Resolved lazily
-                    padding_left: Some(true),
-                    padding_right: None,
-                    data: Some(data),
-                });
-            }
+            hints.push(InlayHint {
+                position: Position::new(posting_line, end_col as u32),
+                label: InlayHintLabel::String(format!("  {} {}", amount.number, amount.currency)),
+                kind: Some(InlayHintKind::TYPE),
+                text_edits: None,
+                tooltip: None, // Resolved lazily
+                padding_left: Some(true),
+                padding_right: None,
+                data: Some(data),
+            });
         }
     }
 
@@ -435,6 +476,53 @@ mod tests {
         assert!(
             labels.iter().any(|l| l.contains("90") && l.contains("EUR")),
             "expected a hint showing 90 EUR; got labels = {labels:?}"
+        );
+    }
+
+    /// `NumberOnly`/`CurrencyOnly` source postings already display
+    /// one half (the typed digits or the typed currency) on the
+    /// posting line. Appending the inferred other-half at line-end
+    /// would visually duplicate the typed text or wrongly order
+    /// number-then-currency (e.g. `Assets:Cash USD  -50.00 USD`).
+    /// The interpolator fills these slots correctly, but the LSP
+    /// deliberately suppresses hints for them — the bespoke
+    /// pre-refactor implementation only emitted hints for fully-
+    /// missing postings, and we preserve that UX.
+    #[test]
+    fn test_inlay_hints_skip_partial_amounts() {
+        // First posting is `CurrencyOnly` ("USD"), second is
+        // `NumberOnly` ("-50.00"). The interpolator fills both, but
+        // neither should produce a hint.
+        let source = "\
+2024-01-15 * \"Test\"
+  Assets:Bank   50.00 USD
+  Expenses:A    USD
+  Income:B     -100.00
+  Equity:Pad   -50 EUR
+  Expenses:Tax  50 EUR
+";
+        let result = parse(source);
+        assert!(
+            result.errors.is_empty(),
+            "parse errors: {:?}",
+            result.errors
+        );
+
+        let params = InlayHintParams {
+            text_document: lsp_types::TextDocumentIdentifier {
+                uri: "file:///test.beancount".parse().unwrap(),
+            },
+            range: lsp_types::Range {
+                start: Position::new(0, 0),
+                end: Position::new(20, 0),
+            },
+            work_done_progress_params: Default::default(),
+        };
+
+        let hints = handle_inlay_hints(&params, source, &result);
+        assert!(
+            hints.is_none() || hints.as_ref().unwrap().is_empty(),
+            "no hints expected for partial-amount postings; got {hints:?}"
         );
     }
 }

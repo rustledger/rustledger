@@ -19,7 +19,7 @@ use rustledger_parser::ParseResult;
 use rustledger_parser::logos_lexer::{Token, tokenize};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use super::utils::byte_offset_to_position;
+use super::utils::LineIndex;
 
 /// Token types we support.
 pub const TOKEN_TYPES: &[SemanticTokenType] = &[
@@ -253,10 +253,11 @@ fn collect_lexer_tokens_in_range(source: &str, range: &Range) -> Vec<RawToken> {
 fn apply_directive_modifiers(
     raw_tokens: &mut [RawToken],
     source: &str,
+    line_index: &LineIndex,
     parse_result: &ParseResult,
 ) {
     for spanned in &parse_result.directives {
-        let (dir_line, _) = byte_offset_to_position(source, spanned.span.start);
+        let (dir_line, _) = line_index.offset_to_position(spanned.span.start);
 
         match &spanned.value {
             Directive::Open(open) => {
@@ -344,7 +345,8 @@ pub fn handle_semantic_tokens(
     parse_result: &ParseResult,
 ) -> Option<SemanticTokensResult> {
     let mut raw_tokens = collect_lexer_tokens(source);
-    apply_directive_modifiers(&mut raw_tokens, source, parse_result);
+    let line_index = LineIndex::new(source);
+    apply_directive_modifiers(&mut raw_tokens, source, &line_index, parse_result);
 
     // Tokens are already in source order from the lexer
     let tokens = encode_tokens(&raw_tokens);
@@ -367,7 +369,8 @@ pub fn handle_semantic_tokens_delta(
     previous_tokens: Option<&[SemanticToken]>,
 ) -> Option<SemanticTokensFullDeltaResult> {
     let mut raw_tokens = collect_lexer_tokens(source);
-    apply_directive_modifiers(&mut raw_tokens, source, parse_result);
+    let line_index = LineIndex::new(source);
+    apply_directive_modifiers(&mut raw_tokens, source, &line_index, parse_result);
     let current_tokens = encode_tokens(&raw_tokens);
 
     // If tokens unchanged, return empty delta
@@ -429,7 +432,8 @@ pub fn handle_semantic_tokens_range(
     let range = params.range;
 
     let mut raw_tokens = collect_lexer_tokens_in_range(source, &range);
-    apply_directive_modifiers(&mut raw_tokens, source, parse_result);
+    let line_index = LineIndex::new(source);
+    apply_directive_modifiers(&mut raw_tokens, source, &line_index, parse_result);
 
     let tokens = encode_tokens(&raw_tokens);
 

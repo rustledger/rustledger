@@ -15,7 +15,7 @@ use rustledger_core::Directive;
 use rustledger_parser::ParseResult;
 use std::collections::{HashMap, HashSet};
 
-use super::utils::byte_offset_to_position;
+use super::utils::LineIndex;
 
 /// Handle a code action request.
 pub fn handle_code_actions(
@@ -27,6 +27,7 @@ pub fn handle_code_actions(
 
     let range = params.range;
     let uri = params.text_document.uri.clone();
+    let line_index = LineIndex::new(source);
 
     // Collect all defined accounts
     let defined_accounts = collect_defined_accounts(parse_result);
@@ -43,14 +44,14 @@ pub fn handle_code_actions(
     // If there are undefined accounts, offer to create open directives
     for account in undefined_accounts {
         // Check if this account is on or near the selected range
-        if is_account_in_range(source, &account, range, parse_result) {
+        if is_account_in_range(source, &line_index, &account, range, parse_result) {
             let action = create_open_directive_action(&uri, &account);
             actions.push(action);
         }
     }
 
     // Check for unbalanced transactions in range
-    if let Some(action) = check_unbalanced_transactions(params, source, parse_result) {
+    if let Some(action) = check_unbalanced_transactions(params, &line_index, parse_result) {
         actions.push(action);
     }
 
@@ -118,6 +119,7 @@ fn collect_used_accounts(parse_result: &ParseResult) -> HashSet<String> {
 /// Check if an account is mentioned in or near the given range.
 fn is_account_in_range(
     source: &str,
+    line_index: &LineIndex,
     account: &str,
     range: Range,
     parse_result: &ParseResult,
@@ -138,8 +140,8 @@ fn is_account_in_range(
     // Also check if we're inside a transaction that uses this account
     for spanned in &parse_result.directives {
         if let Directive::Transaction(txn) = &spanned.value {
-            let (dir_line, _) = byte_offset_to_position(source, spanned.span.start);
-            let (end_line, _) = byte_offset_to_position(source, spanned.span.end);
+            let (dir_line, _) = line_index.offset_to_position(spanned.span.start);
+            let (end_line, _) = line_index.offset_to_position(spanned.span.end);
 
             // Check if range overlaps with transaction
             if (range.start.line <= end_line) && (range.end.line >= dir_line) {
@@ -192,9 +194,10 @@ pub fn handle_code_action_resolve(
         && data.get("kind").and_then(|v| v.as_str()) == Some("add_open_directive")
         && let Some(account) = data.get("account").and_then(|v| v.as_str())
     {
+        let line_index = LineIndex::new(source);
         resolved.edit = Some(compute_open_directive_edit(
             uri,
-            source,
+            &line_index,
             account,
             parse_result,
         ));
@@ -207,7 +210,7 @@ pub fn handle_code_action_resolve(
 #[allow(clippy::mutable_key_type)] // Uri is required as key by LSP WorkspaceEdit API
 fn compute_open_directive_edit(
     uri: &Uri,
-    source: &str,
+    line_index: &LineIndex,
     account: &str,
     parse_result: &ParseResult,
 ) -> WorkspaceEdit {
@@ -216,7 +219,7 @@ fn compute_open_directive_edit(
         find_earliest_date(parse_result).unwrap_or_else(|| "2000-01-01".to_string());
 
     // Find where to insert the open directive
-    let insert_position = find_open_directive_position(source, parse_result);
+    let insert_position = find_open_directive_position(line_index, parse_result);
 
     let new_text = format!("{} open {}\n", earliest_date, account);
 
@@ -268,7 +271,7 @@ fn find_earliest_date(parse_result: &ParseResult) -> Option<String> {
 }
 
 /// Find the position to insert new open directives.
-fn find_open_directive_position(source: &str, parse_result: &ParseResult) -> Position {
+fn find_open_directive_position(line_index: &LineIndex, parse_result: &ParseResult) -> Position {
     // Find the last open directive and insert after it
     let mut last_open_end: Option<usize> = None;
 
@@ -279,7 +282,7 @@ fn find_open_directive_position(source: &str, parse_result: &ParseResult) -> Pos
     }
 
     if let Some(offset) = last_open_end {
-        let (line, _) = byte_offset_to_position(source, offset);
+        let (line, _) = line_index.offset_to_position(offset);
         // Insert on the next line
         Position::new(line + 1, 0)
     } else {
@@ -291,15 +294,15 @@ fn find_open_directive_position(source: &str, parse_result: &ParseResult) -> Pos
 /// Check for unbalanced transactions and offer to add a balancing posting.
 fn check_unbalanced_transactions(
     params: &CodeActionParams,
-    source: &str,
+    line_index: &LineIndex,
     parse_result: &ParseResult,
 ) -> Option<CodeAction> {
     let range = params.range;
 
     for spanned in &parse_result.directives {
         if let Directive::Transaction(txn) = &spanned.value {
-            let (start_line, _) = byte_offset_to_position(source, spanned.span.start);
-            let (end_line, _) = byte_offset_to_position(source, spanned.span.end);
+            let (start_line, _) = line_index.offset_to_position(spanned.span.start);
+            let (end_line, _) = line_index.offset_to_position(spanned.span.end);
 
             // Check if selection is within this transaction
             if range.start.line >= start_line && range.start.line <= end_line {

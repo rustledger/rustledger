@@ -11,7 +11,7 @@ use rustledger_parser::ParseResult;
 use std::collections::HashMap;
 
 use super::formatting::format_document;
-use super::utils::{byte_offset_to_position, document_format_config};
+use super::utils::{LineIndex, document_format_config};
 
 /// Available commands.
 pub const COMMANDS: &[&str] = &[
@@ -94,8 +94,9 @@ fn handle_sort_transactions(
         .join("\n\n");
 
     // Create workspace edit
-    let (start_line, start_col) = byte_offset_to_position(source, first_start);
-    let (end_line, end_col) = byte_offset_to_position(source, last_end);
+    let line_index = LineIndex::new(source);
+    let (start_line, start_col) = line_index.offset_to_position(first_start);
+    let (end_line, end_col) = line_index.offset_to_position(last_end);
 
     let edit = TextEdit {
         range: lsp_types::Range {

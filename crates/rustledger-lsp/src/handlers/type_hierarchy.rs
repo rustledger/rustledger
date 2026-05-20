@@ -12,7 +12,7 @@ use rustledger_core::Directive;
 use rustledger_parser::ParseResult;
 use std::collections::HashSet;
 
-use super::utils::{byte_offset_to_position, get_word_at_position, is_account_like};
+use super::utils::{LineIndex, get_word_at_position, is_account_like};
 
 /// Handle a prepare type hierarchy request.
 /// Returns the account at the cursor position as a TypeHierarchyItem.
@@ -79,7 +79,8 @@ pub fn handle_supertypes(
     let parent = get_parent_account(account)?;
 
     // Find where this parent account is defined or used
-    let location = find_account_location(source, parse_result, &parent)?;
+    let line_index = LineIndex::new(source);
+    let location = find_account_location(source, &line_index, parse_result, &parent)?;
 
     let item = TypeHierarchyItem {
         name: parent.clone(),
@@ -117,10 +118,11 @@ pub fn handle_subtypes(
         return None;
     }
 
+    let line_index = LineIndex::new(source);
     let items: Vec<TypeHierarchyItem> = children
         .into_iter()
         .filter_map(|child| {
-            let location = find_account_location(source, parse_result, &child)?;
+            let location = find_account_location(source, &line_index, parse_result, &child)?;
             Some(TypeHierarchyItem {
                 name: child.clone(),
                 kind: SymbolKind::CLASS,
@@ -204,14 +206,19 @@ fn account_exists(account: &str, parse_result: &ParseResult) -> bool {
 }
 
 /// Find the location where an account is defined or first used.
-fn find_account_location(source: &str, parse_result: &ParseResult, account: &str) -> Option<Range> {
+fn find_account_location(
+    source: &str,
+    line_index: &LineIndex,
+    parse_result: &ParseResult,
+    account: &str,
+) -> Option<Range> {
     // First try to find an open directive
     for spanned in &parse_result.directives {
         if let Directive::Open(open) = &spanned.value
             && open.account.as_ref() == account
         {
-            let (line, _) = byte_offset_to_position(source, spanned.span.start);
-            let line_text = source.lines().nth(line as usize)?;
+            let (line, _) = line_index.offset_to_position(spanned.span.start);
+            let line_text = line_index.line_text(source, line)?;
             if let Some(col) = line_text.find(account) {
                 return Some(Range {
                     start: Position::new(line, col as u32),
@@ -225,7 +232,7 @@ fn find_account_location(source: &str, parse_result: &ParseResult, account: &str
     for spanned in &parse_result.directives {
         let accounts = get_accounts_from_directive(&spanned.value);
         if accounts.iter().any(|a| a == account) {
-            let (line, _) = byte_offset_to_position(source, spanned.span.start);
+            let (line, _) = line_index.offset_to_position(spanned.span.start);
             let directive_text = &source[spanned.span.start..spanned.span.end];
 
             for (line_offset, line_content) in directive_text.lines().enumerate() {

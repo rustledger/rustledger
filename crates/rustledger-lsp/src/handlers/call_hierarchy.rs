@@ -15,7 +15,7 @@ use rustledger_core::{Directive, SYNTHESIZED_FILE_ID};
 use rustledger_parser::ParseResult;
 use std::collections::HashMap;
 
-use super::utils::{byte_offset_to_position, get_word_at_position, is_account_like};
+use super::utils::{LineIndex, get_word_at_position, is_account_like};
 
 /// Handle a prepare call hierarchy request.
 /// Returns the account at the cursor position as a CallHierarchyItem.
@@ -80,6 +80,7 @@ pub fn handle_incoming_calls(
         .unwrap_or(&params.item.name);
 
     let mut calls: Vec<CallHierarchyIncomingCall> = Vec::new();
+    let line_index = LineIndex::new(source);
 
     // Find all transactions that reference this account
     for spanned in &parse_result.directives {
@@ -97,7 +98,7 @@ pub fn handle_incoming_calls(
             }
 
             // Get transaction location
-            let (txn_line, _) = byte_offset_to_position(source, spanned.span.start);
+            let (txn_line, _) = line_index.offset_to_position(spanned.span.start);
 
             // Build transaction description
             let description = format!("{} {} \"{}\"", txn.date, txn.flag, txn.narration.as_ref());
@@ -113,8 +114,8 @@ pub fn handle_incoming_calls(
                     if sp.file_id == SYNTHESIZED_FILE_ID {
                         return None;
                     }
-                    let (posting_line, _) = byte_offset_to_position(source, sp.span.start);
-                    let line_text = source.lines().nth(posting_line as usize)?;
+                    let (posting_line, _) = line_index.offset_to_position(sp.span.start);
+                    let line_text = line_index.line_text(source, posting_line)?;
                     let col = line_text.find(account)?;
                     Some(Range {
                         start: Position::new(posting_line, col as u32),
@@ -139,7 +140,7 @@ pub fn handle_incoming_calls(
             // resulting (line, col) directly; only normalize to the
             // next line when the end column is non-zero (i.e. the
             // span ends mid-line and the LSP range needs to round up).
-            let (txn_end_line, txn_end_col) = byte_offset_to_position(source, spanned.span.end);
+            let (txn_end_line, txn_end_col) = line_index.offset_to_position(spanned.span.end);
             let normalized_end_line = if txn_end_col == 0 {
                 txn_end_line
             } else {
@@ -194,11 +195,12 @@ pub fn handle_outgoing_calls(
     }
 
     let txn_line = data.get("line").and_then(|v| v.as_u64())? as u32;
+    let line_index = LineIndex::new(source);
 
     // Find the transaction at this line
     for spanned in &parse_result.directives {
         if let Directive::Transaction(txn) = &spanned.value {
-            let (line, _) = byte_offset_to_position(source, spanned.span.start);
+            let (line, _) = line_index.offset_to_position(spanned.span.start);
 
             if line != txn_line {
                 continue;
@@ -216,7 +218,8 @@ pub fn handle_outgoing_calls(
                 .into_iter()
                 .filter_map(|(account, indices)| {
                     // Find where this account is defined (open directive)
-                    let account_location = find_account_definition(source, parse_result, &account);
+                    let account_location =
+                        find_account_definition(source, parse_result, &line_index, &account);
                     let (_acc_line, acc_range) = match account_location {
                         Some(loc) => loc,
                         None => {
@@ -226,8 +229,8 @@ pub fn handle_outgoing_calls(
                             if sp.file_id == SYNTHESIZED_FILE_ID {
                                 return None;
                             }
-                            let (posting_line, _) = byte_offset_to_position(source, sp.span.start);
-                            let line_text = source.lines().nth(posting_line as usize)?;
+                            let (posting_line, _) = line_index.offset_to_position(sp.span.start);
+                            let line_text = line_index.line_text(source, posting_line)?;
                             let col = line_text.find(&account)?;
                             (
                                 posting_line,
@@ -248,8 +251,8 @@ pub fn handle_outgoing_calls(
                             if sp.file_id == SYNTHESIZED_FILE_ID {
                                 return None;
                             }
-                            let (posting_line, _) = byte_offset_to_position(source, sp.span.start);
-                            let line_text = source.lines().nth(posting_line as usize)?;
+                            let (posting_line, _) = line_index.offset_to_position(sp.span.start);
+                            let line_text = line_index.line_text(source, posting_line)?;
                             let col = line_text.find(&account)?;
                             Some(Range {
                                 start: Position::new(posting_line, col as u32),
@@ -287,14 +290,15 @@ pub fn handle_outgoing_calls(
 fn find_account_definition(
     source: &str,
     parse_result: &ParseResult,
+    line_index: &LineIndex,
     account: &str,
 ) -> Option<(u32, Range)> {
     for spanned in &parse_result.directives {
         if let Directive::Open(open) = &spanned.value
             && open.account.as_ref() == account
         {
-            let (line, _) = byte_offset_to_position(source, spanned.span.start);
-            let line_text = source.lines().nth(line as usize)?;
+            let (line, _) = line_index.offset_to_position(spanned.span.start);
+            let line_text = line_index.line_text(source, line)?;
             let col = line_text.find(account)?;
             return Some((
                 line,

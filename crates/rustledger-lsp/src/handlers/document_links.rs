@@ -11,7 +11,7 @@ use rustledger_core::Directive;
 use rustledger_parser::ParseResult;
 use std::path::Path;
 
-use super::utils::byte_offset_to_position;
+use super::utils::LineIndex;
 
 /// Handle a document links request.
 pub fn handle_document_links(
@@ -24,14 +24,19 @@ pub fn handle_document_links(
 
     // Get the base directory from the document URI
     let base_dir = get_base_directory(base_uri);
+    let line_index = LineIndex::new(source);
 
     for spanned in &parse_result.directives {
         if let Directive::Document(doc) = &spanned.value {
             // Create link for document path
             let path_str = doc.path.to_string();
-            if let Some(link) =
-                create_document_link(source, spanned.span.start, &path_str, &base_dir)
-            {
+            if let Some(link) = create_document_link(
+                source,
+                &line_index,
+                spanned.span.start,
+                &path_str,
+                &base_dir,
+            ) {
                 links.push(link);
             }
         }
@@ -123,15 +128,15 @@ fn get_base_directory(uri: &Uri) -> Option<String> {
 /// The target is deferred to the resolve phase for lazy verification.
 fn create_document_link(
     source: &str,
+    line_index: &LineIndex,
     directive_start: usize,
     path: &str,
     base_dir: &Option<String>,
 ) -> Option<DocumentLink> {
-    let (start_line, _) = byte_offset_to_position(source, directive_start);
+    let (start_line, _) = line_index.offset_to_position(directive_start);
 
     // Find the path in the directive line
-    let lines: Vec<&str> = source.lines().collect();
-    let line = lines.get(start_line as usize)?;
+    let line = line_index.line_text(source, start_line)?;
 
     // Find the quoted path
     let quote_start = line.find('"')?;

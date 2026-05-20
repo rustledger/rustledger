@@ -14,7 +14,7 @@ use rustledger_parser::ParseResult;
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use super::utils::byte_offset_to_position;
+use super::utils::LineIndex;
 
 /// Handle a workspace symbol request.
 pub fn handle_workspace_symbols(
@@ -57,8 +57,9 @@ fn collect_symbols_from_document(
     seen_accounts: &mut HashSet<String>,
     seen_currencies: &mut HashSet<String>,
 ) {
+    let line_index = LineIndex::new(source);
     for spanned in &parse_result.directives {
-        let (line, col) = byte_offset_to_position(source, spanned.span.start);
+        let (line, col) = line_index.offset_to_position(spanned.span.start);
         let location = Location {
             uri: uri.clone(),
             range: Range {

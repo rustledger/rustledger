@@ -21,7 +21,6 @@ pub fn handle_inlay_hints(
     parse_result: &ParseResult,
 ) -> Option<Vec<InlayHint>> {
     let range = params.range;
-    let uri = params.text_document.uri.as_str();
     let mut hints = Vec::new();
     let lines: Vec<&str> = source.lines().collect();
     // Build the line index once: O(n) up front, O(log lines) per
@@ -33,8 +32,14 @@ pub fn handle_inlay_hints(
         let Directive::Transaction(txn) = &spanned.value else {
             continue;
         };
+        // Skip transactions that fall entirely outside the
+        // requested range, in either direction. `span.end` is
+        // exclusive (byte after the directive), so an `end_line <
+        // range.start.line` test cleanly excludes "directive ended
+        // before the visible range started".
         let (start_line, _) = line_index.offset_to_position(spanned.span.start);
-        if start_line > range.end.line {
+        let (end_line, _) = line_index.offset_to_position(spanned.span.end);
+        if start_line > range.end.line || end_line < range.start.line {
             continue;
         }
 
@@ -88,11 +93,12 @@ pub fn handle_inlay_hints(
         //    step removes zero-amount fills from
         //    `result.postings`, which shifts subsequent fills'
         //    positions; `filled_indices` is then result-relative,
-        //    not source-relative. Matching by span — preserved
-        //    across `interpolate`'s clone — sidesteps that issue
-        //    entirely. (In current code paths the zero-fill case is
-        //    structurally unreachable, but the design is robust to
-        //    future changes.)
+        //    not source-relative. A reachable case is e.g. a
+        //    `CurrencyOnly` posting whose currency's residual is
+        //    already zero — interpolate fills with 0 and prunes,
+        //    shifting later fills. Matching by span — preserved
+        //    across `interpolate`'s clone — works regardless of
+        //    pruning and shifting.
         for source_posting in &txn.postings {
             if source_posting.units.is_some() {
                 continue;
@@ -141,7 +147,6 @@ pub fn handle_inlay_hints(
 
             // Store data for resolve - include account for rich tooltip
             let data = serde_json::json!({
-                "uri": uri,
                 "kind": "inferred_amount",
                 "account": source_posting.account.to_string(),
                 "amount": amount.number.to_string(),
@@ -479,27 +484,22 @@ mod tests {
         );
     }
 
-    /// `NumberOnly`/`CurrencyOnly` source postings already display
-    /// one half (the typed digits or the typed currency) on the
-    /// posting line. Appending the inferred other-half at line-end
-    /// would visually duplicate the typed text or wrongly order
-    /// number-then-currency (e.g. `Assets:Cash USD  -50.00 USD`).
-    /// The interpolator fills these slots correctly, but the LSP
-    /// deliberately suppresses hints for them — the bespoke
-    /// pre-refactor implementation only emitted hints for fully-
-    /// missing postings, and we preserve that UX.
+    /// `NumberOnly` source postings already display the typed
+    /// digits on the posting line. The interpolator can still fill
+    /// the currency (e.g., from another posting's units residual),
+    /// but appending `  -5000.00 USD` after `-5000.00` would
+    /// duplicate the number on screen. The LSP suppresses the
+    /// hint; the bespoke pre-refactor implementation did the same.
+    ///
+    /// This test specifically exercises a transaction where
+    /// `interpolate` SUCCEEDS and fills the `NumberOnly` slot —
+    /// pinning the filter (not bypass-by-error).
     #[test]
-    fn test_inlay_hints_skip_partial_amounts() {
-        // First posting is `CurrencyOnly` ("USD"), second is
-        // `NumberOnly` ("-50.00"). The interpolator fills both, but
-        // neither should produce a hint.
+    fn test_inlay_hints_skip_number_only_posting() {
         let source = "\
-2024-01-15 * \"Test\"
-  Assets:Bank   50.00 USD
-  Expenses:A    USD
-  Income:B     -100.00
-  Equity:Pad   -50 EUR
-  Expenses:Tax  50 EUR
+2024-01-15 * \"Paycheck\"
+  Assets:Bank  5000 USD
+  Income:Salary  -5000
 ";
         let result = parse(source);
         assert!(
@@ -508,13 +508,34 @@ mod tests {
             result.errors
         );
 
+        // Verify the precondition: `interpolate` succeeds and fills
+        // the `NumberOnly` slot. Without this, the no-hints assertion
+        // below could pass via bypass-by-Err (a non-issue for THIS
+        // input, but documenting the requirement).
+        let txn = match &result.directives[0].value {
+            Directive::Transaction(t) => t,
+            _ => unreachable!(),
+        };
+        let interp = interpolate(txn).expect("interpolate should succeed");
+        let salary_posting = interp
+            .transaction
+            .postings
+            .iter()
+            .find(|p| p.account.as_ref() == "Income:Salary")
+            .expect("Income:Salary should be present after interpolation");
+        assert!(
+            matches!(&salary_posting.units, Some(IncompleteAmount::Complete(_))),
+            "interpolate must have filled NumberOnly to Complete; got {:?}",
+            salary_posting.units
+        );
+
         let params = InlayHintParams {
             text_document: lsp_types::TextDocumentIdentifier {
                 uri: "file:///test.beancount".parse().unwrap(),
             },
             range: lsp_types::Range {
                 start: Position::new(0, 0),
-                end: Position::new(20, 0),
+                end: Position::new(10, 0),
             },
             work_done_progress_params: Default::default(),
         };
@@ -522,7 +543,62 @@ mod tests {
         let hints = handle_inlay_hints(&params, source, &result);
         assert!(
             hints.is_none() || hints.as_ref().unwrap().is_empty(),
-            "no hints expected for partial-amount postings; got {hints:?}"
+            "no hint expected for NumberOnly source posting; got {hints:?}"
+        );
+    }
+
+    /// Same UX invariant as the `NumberOnly` test above, applied to
+    /// `CurrencyOnly` (typed `USD`, missing number). Appending the
+    /// inferred amount at line-end would render as
+    /// `Assets:Cash USD  -50.00 USD` — duplicate currency, wrong
+    /// number-then-currency order. The LSP suppresses the hint.
+    #[test]
+    fn test_inlay_hints_skip_currency_only_posting() {
+        let source = "\
+2024-01-15 * \"Coffee\"
+  Assets:Bank  -5.00 USD
+  Expenses:Food USD
+";
+        let result = parse(source);
+        assert!(
+            result.errors.is_empty(),
+            "parse errors: {:?}",
+            result.errors
+        );
+
+        // Precondition: interpolate succeeds and fills CurrencyOnly.
+        let txn = match &result.directives[0].value {
+            Directive::Transaction(t) => t,
+            _ => unreachable!(),
+        };
+        let interp = interpolate(txn).expect("interpolate should succeed");
+        let food_posting = interp
+            .transaction
+            .postings
+            .iter()
+            .find(|p| p.account.as_ref() == "Expenses:Food")
+            .expect("Expenses:Food should be present after interpolation");
+        assert!(
+            matches!(&food_posting.units, Some(IncompleteAmount::Complete(_))),
+            "interpolate must have filled CurrencyOnly to Complete; got {:?}",
+            food_posting.units
+        );
+
+        let params = InlayHintParams {
+            text_document: lsp_types::TextDocumentIdentifier {
+                uri: "file:///test.beancount".parse().unwrap(),
+            },
+            range: lsp_types::Range {
+                start: Position::new(0, 0),
+                end: Position::new(10, 0),
+            },
+            work_done_progress_params: Default::default(),
+        };
+
+        let hints = handle_inlay_hints(&params, source, &result);
+        assert!(
+            hints.is_none() || hints.as_ref().unwrap().is_empty(),
+            "no hint expected for CurrencyOnly source posting; got {hints:?}"
         );
     }
 }

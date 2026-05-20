@@ -146,8 +146,26 @@ pub fn start_stdio() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (id, params) = connection.initialize_start()?;
     let init_params: InitializeParams = serde_json::from_value(params)?;
 
+    // Negotiate position encoding. Our handler stack emits LSP
+    // positions as UTF-8 byte offsets, so prefer UTF-8 if the
+    // client advertises it (LSP 3.17+; VS Code, neovim, helix, and
+    // most modern clients do). If the client doesn't advertise
+    // UTF-8, the LSP spec requires the server to use UTF-16 (the
+    // default), in which case our byte-based positions are wrong
+    // for non-ASCII content — a server-wide latent bug tracked
+    // separately. The negotiation here at least makes us correct
+    // for modern clients without any handler-side conversion.
+    let position_encoding = init_params
+        .capabilities
+        .general
+        .as_ref()
+        .and_then(|g| g.position_encodings.as_ref())
+        .filter(|encs| encs.contains(&lsp_types::PositionEncodingKind::UTF8))
+        .map(|_| lsp_types::PositionEncodingKind::UTF8);
+
     // Build server capabilities
     let capabilities = lsp_types::ServerCapabilities {
+        position_encoding,
         text_document_sync: Some(lsp_types::TextDocumentSyncCapability::Kind(
             lsp_types::TextDocumentSyncKind::FULL,
         )),

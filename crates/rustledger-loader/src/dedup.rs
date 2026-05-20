@@ -83,6 +83,22 @@ fn intern_vec(v: &mut [InternedStr], interner: &mut StringInterner, dedup_count:
     }
 }
 
+/// Same as [`intern_vec`] but for slices of domain-typed identifiers
+/// (e.g., `Currency`, `Account`, `Tag`, `Link`). Calls
+/// `.as_interned_mut()` to reach the underlying `InternedStr`.
+fn intern_typed_vec<T>(
+    v: &mut [T],
+    interner: &mut StringInterner,
+    dedup_count: &mut usize,
+    get_inner: fn(&mut T) -> &mut InternedStr,
+) {
+    for s in v.iter_mut() {
+        if do_intern(get_inner(s), interner) {
+            *dedup_count += 1;
+        }
+    }
+}
+
 /// Re-intern all `InternedStr` fields in a single directive,
 /// deduplicating identical strings to share a single `Arc<str>`
 /// allocation. Returns the count of strings that were already present
@@ -115,12 +131,12 @@ fn reintern_directive(directive: &mut Directive, interner: &mut StringInterner) 
                 if let Some(ref mut units) = posting.units {
                     match units {
                         IncompleteAmount::Complete(amt) => {
-                            if do_intern(&mut amt.currency, interner) {
+                            if do_intern(amt.currency.as_interned_mut(), interner) {
                                 dedup_count += 1;
                             }
                         }
                         IncompleteAmount::CurrencyOnly(cur) => {
-                            if do_intern(cur, interner) {
+                            if do_intern(cur.as_interned_mut(), interner) {
                                 dedup_count += 1;
                             }
                         }
@@ -130,7 +146,7 @@ fn reintern_directive(directive: &mut Directive, interner: &mut StringInterner) 
                 // Cost spec
                 if let Some(ref mut cost) = posting.cost
                     && let Some(ref mut cur) = cost.currency
-                    && do_intern(cur, interner)
+                    && do_intern(cur.as_interned_mut(), interner)
                 {
                     dedup_count += 1;
                 }
@@ -138,19 +154,19 @@ fn reintern_directive(directive: &mut Directive, interner: &mut StringInterner) 
                 if let Some(ref mut price) = posting.price {
                     match price {
                         PriceAnnotation::Unit(amt) | PriceAnnotation::Total(amt) => {
-                            if do_intern(&mut amt.currency, interner) {
+                            if do_intern(amt.currency.as_interned_mut(), interner) {
                                 dedup_count += 1;
                             }
                         }
                         PriceAnnotation::UnitIncomplete(inc)
                         | PriceAnnotation::TotalIncomplete(inc) => match inc {
                             IncompleteAmount::Complete(amt) => {
-                                if do_intern(&mut amt.currency, interner) {
+                                if do_intern(amt.currency.as_interned_mut(), interner) {
                                     dedup_count += 1;
                                 }
                             }
                             IncompleteAmount::CurrencyOnly(cur) => {
-                                if do_intern(cur, interner) {
+                                if do_intern(cur.as_interned_mut(), interner) {
                                     dedup_count += 1;
                                 }
                             }
@@ -165,7 +181,7 @@ fn reintern_directive(directive: &mut Directive, interner: &mut StringInterner) 
             if do_intern(&mut bal.account, interner) {
                 dedup_count += 1;
             }
-            if do_intern(&mut bal.amount.currency, interner) {
+            if do_intern(bal.amount.currency.as_interned_mut(), interner) {
                 dedup_count += 1;
             }
         }
@@ -173,7 +189,12 @@ fn reintern_directive(directive: &mut Directive, interner: &mut StringInterner) 
             if do_intern(&mut open.account, interner) {
                 dedup_count += 1;
             }
-            intern_vec(&mut open.currencies, interner, &mut dedup_count);
+            intern_typed_vec(
+                &mut open.currencies,
+                interner,
+                &mut dedup_count,
+                rustledger_core::Currency::as_interned_mut,
+            );
         }
         Directive::Close(close) => {
             if do_intern(&mut close.account, interner) {
@@ -181,7 +202,7 @@ fn reintern_directive(directive: &mut Directive, interner: &mut StringInterner) 
             }
         }
         Directive::Commodity(comm) => {
-            if do_intern(&mut comm.currency, interner) {
+            if do_intern(comm.currency.as_interned_mut(), interner) {
                 dedup_count += 1;
             }
         }
@@ -207,10 +228,10 @@ fn reintern_directive(directive: &mut Directive, interner: &mut StringInterner) 
             intern_vec(&mut doc.links, interner, &mut dedup_count);
         }
         Directive::Price(price) => {
-            if do_intern(&mut price.currency, interner) {
+            if do_intern(price.currency.as_interned_mut(), interner) {
                 dedup_count += 1;
             }
-            if do_intern(&mut price.amount.currency, interner) {
+            if do_intern(price.amount.currency.as_interned_mut(), interner) {
                 dedup_count += 1;
             }
         }

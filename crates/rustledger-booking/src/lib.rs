@@ -33,17 +33,16 @@ pub use pad::{PadError, PadResult, expand_pads, merge_with_padding, process_pads
 use bigdecimal::BigDecimal;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::Signed;
-use rustledger_core::{Amount, IncompleteAmount, InternedStr, Transaction};
+use rustledger_core::{Amount, Currency, IncompleteAmount, Transaction};
 use std::collections::HashMap;
 
 /// Calculate the tolerance for a set of amounts.
 ///
 /// Tolerance is the maximum of all individual amount tolerances.
 #[must_use]
-pub fn calculate_tolerance(amounts: &[&Amount]) -> HashMap<InternedStr, Decimal> {
+pub fn calculate_tolerance(amounts: &[&Amount]) -> HashMap<Currency, Decimal> {
     // Pre-allocate for typical case (1-3 currencies per transaction)
-    let mut tolerances: HashMap<InternedStr, Decimal> =
-        HashMap::with_capacity(amounts.len().min(4));
+    let mut tolerances: HashMap<Currency, Decimal> = HashMap::with_capacity(amounts.len().min(4));
 
     for amount in amounts {
         let tol = amount.inferred_tolerance();
@@ -64,7 +63,7 @@ pub fn calculate_tolerance(amounts: &[&Amount]) -> HashMap<InternedStr, Decimal>
 /// interpolation to look up a posting's price-side currency without
 /// duplicating the match in three places.
 #[must_use]
-pub(crate) fn price_currency_of(posting: &rustledger_core::Posting) -> Option<InternedStr> {
+pub(crate) fn price_currency_of(posting: &rustledger_core::Posting) -> Option<Currency> {
     posting.price.as_ref().and_then(|p| match p {
         rustledger_core::PriceAnnotation::Unit(a) | rustledger_core::PriceAnnotation::Total(a) => {
             Some(a.currency.clone())
@@ -89,7 +88,7 @@ pub(crate) fn price_currency_of(posting: &rustledger_core::Posting) -> Option<In
 /// 3. The currency of other simple postings (units or currency-only amounts).
 /// 4. The currency from a cost spec (e.g., `{0 USD}` for zero-cost items).
 #[must_use]
-pub(crate) fn infer_cost_currency_from_postings(transaction: &Transaction) -> Option<InternedStr> {
+pub(crate) fn infer_cost_currency_from_postings(transaction: &Transaction) -> Option<Currency> {
     // First pass: look for simple postings (no cost spec) - these take priority
     for posting in &transaction.postings {
         // Skip postings with cost specs in first pass
@@ -156,14 +155,14 @@ pub(crate) fn infer_cost_currency_from_postings(transaction: &Transaction) -> Op
 ///
 /// See: `spec/tla/DoubleEntry.tla`
 #[must_use]
-pub fn calculate_residual(transaction: &Transaction) -> HashMap<InternedStr, Decimal> {
+pub fn calculate_residual(transaction: &Transaction) -> HashMap<Currency, Decimal> {
     // Pre-allocate for typical case (1-2 currencies per transaction)
-    let mut residuals: HashMap<InternedStr, Decimal> =
+    let mut residuals: HashMap<Currency, Decimal> =
         HashMap::with_capacity(transaction.postings.len().min(4));
 
     // Lazily compute inferred currency only when needed (most transactions don't need it)
-    let mut inferred_cost_currency: Option<Option<InternedStr>> = None;
-    let get_inferred_currency = |cache: &mut Option<Option<InternedStr>>| -> Option<InternedStr> {
+    let mut inferred_cost_currency: Option<Option<Currency>> = None;
+    let get_inferred_currency = |cache: &mut Option<Option<Currency>>| -> Option<Currency> {
         cache
             .get_or_insert_with(|| infer_cost_currency_from_postings(transaction))
             .clone()
@@ -285,12 +284,12 @@ fn to_big(d: Decimal) -> BigDecimal {
 /// when amounts have near-28-digit precision. `rust_decimal` is limited to 28-29
 /// significant digits; this function handles arbitrary precision correctly.
 #[must_use]
-pub fn calculate_residual_precise(transaction: &Transaction) -> HashMap<InternedStr, BigDecimal> {
-    let mut residuals: HashMap<InternedStr, BigDecimal> =
+pub fn calculate_residual_precise(transaction: &Transaction) -> HashMap<Currency, BigDecimal> {
+    let mut residuals: HashMap<Currency, BigDecimal> =
         HashMap::with_capacity(transaction.postings.len().min(4));
 
-    let mut inferred_cost_currency: Option<Option<InternedStr>> = None;
-    let get_inferred_currency = |cache: &mut Option<Option<InternedStr>>| -> Option<InternedStr> {
+    let mut inferred_cost_currency: Option<Option<Currency>> = None;
+    let get_inferred_currency = |cache: &mut Option<Option<Currency>>| -> Option<Currency> {
         cache
             .get_or_insert_with(|| infer_cost_currency_from_postings(transaction))
             .clone()
@@ -383,7 +382,7 @@ pub fn calculate_residual_precise(transaction: &Transaction) -> HashMap<Interned
 /// Check if a transaction is balanced within tolerance.
 #[must_use]
 #[allow(clippy::implicit_hasher)]
-pub fn is_balanced(transaction: &Transaction, tolerances: &HashMap<InternedStr, Decimal>) -> bool {
+pub fn is_balanced(transaction: &Transaction, tolerances: &HashMap<Currency, Decimal>) -> bool {
     let residuals = calculate_residual(transaction);
 
     for (currency, residual) in residuals {

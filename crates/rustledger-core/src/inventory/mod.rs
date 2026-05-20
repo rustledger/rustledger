@@ -136,19 +136,19 @@ pub enum BookingError {
         /// Number of lots that matched.
         num_matches: usize,
         /// The currency being reduced.
-        currency: InternedStr,
+        currency: crate::Currency,
     },
     /// No lots match the cost specification.
     NoMatchingLot {
         /// The currency being reduced.
-        currency: InternedStr,
+        currency: crate::Currency,
         /// The cost spec that didn't match.
         cost_spec: CostSpec,
     },
     /// Not enough units in matching lots.
     InsufficientUnits {
         /// The currency being reduced.
-        currency: InternedStr,
+        currency: crate::Currency,
         /// Units requested.
         requested: Decimal,
         /// Units available.
@@ -157,9 +157,9 @@ pub enum BookingError {
     /// Currency mismatch between reduction and inventory.
     CurrencyMismatch {
         /// Expected currency.
-        expected: InternedStr,
+        expected: crate::Currency,
         /// Got currency.
-        got: InternedStr,
+        got: crate::Currency,
     },
 }
 
@@ -326,12 +326,12 @@ pub struct Inventory {
     /// Maps currency to position index in the `positions` vector.
     /// Not serialized - rebuilt on demand.
     #[serde(skip)]
-    simple_index: FxHashMap<InternedStr, usize>,
+    simple_index: FxHashMap<crate::Currency, usize>,
     /// Cache of total units per currency for O(1) `units()` lookups.
     /// Updated incrementally on `add()` and `reduce()`.
     /// Not serialized - rebuilt on demand.
     #[serde(skip)]
-    units_cache: FxHashMap<InternedStr, Decimal>,
+    units_cache: FxHashMap<crate::Currency, Decimal>,
 }
 
 impl PartialEq for Inventory {
@@ -462,8 +462,8 @@ impl Inventory {
     ///
     /// Returns the sum of all cost bases for positions of the given currency.
     #[must_use]
-    pub fn book_value(&self, units_currency: &str) -> FxHashMap<InternedStr, Decimal> {
-        let mut totals: FxHashMap<InternedStr, Decimal> = FxHashMap::default();
+    pub fn book_value(&self, units_currency: &str) -> FxHashMap<crate::Currency, Decimal> {
+        let mut totals: FxHashMap<crate::Currency, Decimal> = FxHashMap::default();
 
         for pos in &self.positions {
             if pos.units.currency == units_currency

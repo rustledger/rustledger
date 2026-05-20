@@ -2,9 +2,7 @@
 
 use rust_decimal::Decimal;
 use rustc_hash::FxHashMap;
-use rustledger_core::{
-    Amount, BookingMethod, InternedStr, Inventory, Posting, ReductionScope, Transaction,
-};
+use rustledger_core::{Amount, BookingMethod, Inventory, Posting, ReductionScope, Transaction};
 use std::collections::HashMap;
 
 use crate::error::{ErrorCode, ValidationError};
@@ -115,7 +113,8 @@ pub fn validate_transaction_structure(
     // is ambiguous. We detect this by looking at postings where `amount()` is
     // None AND the posting has no units at all (fully elided amount).
     {
-        let mut missing_count: FxHashMap<Option<&InternedStr>, u32> = FxHashMap::default();
+        let mut missing_count: FxHashMap<Option<&rustledger_core::Currency>, u32> =
+            FxHashMap::default();
         for posting in &txn.postings {
             if posting.amount().is_none() {
                 // Group by the currency hint from partial units, or None for fully elided
@@ -252,7 +251,7 @@ pub fn validate_posting_currency(
 ///    `tolerance = units_quantum * cost_per_unit * tolerance_multiplier`
 pub fn validate_transaction_balance(
     txn: &Transaction,
-    tolerances: &HashMap<InternedStr, Decimal>,
+    tolerances: &HashMap<rustledger_core::Currency, Decimal>,
     errors: &mut Vec<ValidationError>,
 ) {
     // Skip balance checking if there are any empty cost specs (e.g., `{}`).
@@ -331,9 +330,9 @@ pub fn decimal_quantum(value: Decimal) -> Decimal {
 pub fn calculate_tolerances(
     txn: &Transaction,
     options: &ValidationOptions,
-) -> HashMap<InternedStr, Decimal> {
+) -> HashMap<rustledger_core::Currency, Decimal> {
     // Pre-allocate for typical case (1-2 currencies)
-    let mut tolerances: HashMap<InternedStr, Decimal> =
+    let mut tolerances: HashMap<rustledger_core::Currency, Decimal> =
         HashMap::with_capacity(txn.postings.len().min(4));
 
     // Default tolerance based on quantum of amounts in postings.
@@ -361,7 +360,7 @@ pub fn calculate_tolerances(
     // across postings, then max'd with the existing tolerance per currency.
     if options.infer_tolerance_from_cost {
         // Accumulated cost/price tolerances per currency
-        let mut cost_tolerances: HashMap<InternedStr, Decimal> = HashMap::new();
+        let mut cost_tolerances: HashMap<rustledger_core::Currency, Decimal> = HashMap::new();
 
         for posting in &txn.postings {
             if let Some(units) = posting.amount() {
@@ -433,7 +432,7 @@ pub fn calculate_tolerances(
             if currency_str == "*" {
                 continue;
             }
-            let currency = InternedStr::new(currency_str.as_str());
+            let currency = rustledger_core::Currency::from(currency_str.as_str());
             tolerances
                 .entry(currency)
                 .and_modify(|t| *t = (*t).max(*default_tol))

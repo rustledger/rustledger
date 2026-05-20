@@ -74,7 +74,7 @@ struct TokenStream<'src> {
     /// `file_id` is left at the default (0) and overwritten later
     /// when a `SourceMap` assigns each file an id — same pattern
     /// as `Spanned<Directive>` produced by this parser.
-    currency_occurrences: Vec<Spanned<InternedStr>>,
+    currency_occurrences: Vec<Spanned<rustledger_core::Currency>>,
 }
 
 impl<'src> TokenStream<'src> {
@@ -384,7 +384,7 @@ fn parse_currency(stream: &mut TokenStream<'_>) -> ParseRes<InternedStr> {
         // for the rationale.
         stream
             .currency_occurrences
-            .push(Spanned::new(result.clone(), span));
+            .push(Spanned::new(result.clone().into(), span));
         stream.advance();
         return Ok(result);
     }
@@ -650,7 +650,7 @@ fn parse_incomplete_amount(stream: &mut TokenStream<'_>) -> ParseRes<IncompleteA
     // Reset and try just currency
     stream.pos = start_pos;
     if let Ok(currency) = parse_currency(stream) {
-        return Ok(IncompleteAmount::CurrencyOnly(currency));
+        return Ok(IncompleteAmount::CurrencyOnly(currency.into()));
     }
 
     Err(())
@@ -746,7 +746,7 @@ fn parse_cost_spec(stream: &mut TokenStream<'_>) -> ParseRes<CostSpec> {
                 if let Ok(total) = parse_expr(stream) {
                     spec.number_total = Some(total);
                     if let Ok(c) = parse_currency(stream) {
-                        spec.currency = Some(c);
+                        spec.currency = Some(c.into());
                     }
                     continue;
                 }
@@ -760,7 +760,7 @@ fn parse_cost_spec(stream: &mut TokenStream<'_>) -> ParseRes<CostSpec> {
 
             // Optional currency
             if let Ok(c) = parse_currency(stream) {
-                spec.currency = Some(c);
+                spec.currency = Some(c.into());
             }
         } else {
             // Unknown component, skip
@@ -805,7 +805,7 @@ fn parse_price_annotation(stream: &mut TokenStream<'_>) -> ParseRes<PriceAnnotat
 
     // Try just currency (incomplete price - number missing)
     if let Ok(currency) = parse_currency(stream) {
-        let incomplete = IncompleteAmount::CurrencyOnly(currency);
+        let incomplete = IncompleteAmount::CurrencyOnly(currency.into());
         return Ok(if is_total {
             PriceAnnotation::TotalIncomplete(incomplete)
         } else {
@@ -1412,7 +1412,7 @@ fn parse_open_directive(stream: &mut TokenStream<'_>) -> ParseRes<ParsedItem> {
     let open = Open {
         date,
         account,
-        currencies,
+        currencies: currencies.into_iter().map(Into::into).collect(),
         booking,
         meta,
     };
@@ -1452,7 +1452,7 @@ fn parse_commodity_directive(stream: &mut TokenStream<'_>) -> ParseRes<ParsedIte
 
     let commodity = Commodity {
         date,
-        currency,
+        currency: currency.into(),
         meta,
     };
 
@@ -1598,7 +1598,7 @@ fn parse_price_directive(stream: &mut TokenStream<'_>) -> ParseRes<ParsedItem> {
 
     let price = Price {
         date,
-        currency,
+        currency: currency.into(),
         amount,
         meta,
     };

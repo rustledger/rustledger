@@ -1,7 +1,7 @@
 //! Position and inventory function implementations for the BQL executor.
 
 use rust_decimal::Decimal;
-use rustledger_core::{Amount, InternedStr, Inventory, Position};
+use rustledger_core::{Amount, Inventory, Position};
 
 use crate::ast::FunctionCall;
 use crate::error::QueryError;
@@ -211,7 +211,7 @@ impl Executor<'_> {
             Value::Amount(a) => Ok(Value::Amount(a)),
             Value::Inventory(inv) => {
                 let mut total = Decimal::ZERO;
-                let mut currency: Option<InternedStr> = None;
+                let mut currency: Option<rustledger_core::Currency> = None;
                 for pos in inv.positions() {
                     if let Some(cost) = &pos.cost {
                         total += pos.units.number * cost.number;

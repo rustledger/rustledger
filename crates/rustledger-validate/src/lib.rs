@@ -116,7 +116,7 @@ struct AccountState {
     /// Date closed (if closed).
     closed: Option<NaiveDate>,
     /// Allowed currencies (empty = any).
-    currencies: FxHashSet<InternedStr>,
+    currencies: FxHashSet<rustledger_core::Currency>,
     /// Booking method for this account (from `open` directive).
     /// Used by `update_inventories()` for lot matching during validation.
     booking: BookingMethod,
@@ -246,7 +246,7 @@ struct PendingPad {
     /// → balance EUR`), so we track per-currency rather than a single
     /// `used` flag. Empty set = no balance has consumed this pad yet
     /// (drives E2003 in `check_unused_pads`).
-    padded_currencies: FxHashSet<InternedStr>,
+    padded_currencies: FxHashSet<rustledger_core::Currency>,
 }
 
 /// Ledger state for validation.
@@ -257,7 +257,7 @@ pub struct LedgerState {
     /// Account inventories.
     inventories: FxHashMap<InternedStr, Inventory>,
     /// Declared commodities.
-    commodities: FxHashSet<InternedStr>,
+    commodities: FxHashSet<rustledger_core::Currency>,
     /// Pending pad directives (account -> list of pads).
     pending_pads: FxHashMap<InternedStr, Vec<PendingPad>>,
     /// Validation options.

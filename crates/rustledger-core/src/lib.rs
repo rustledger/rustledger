@@ -47,12 +47,14 @@ pub mod directive;
 pub mod display_context;
 pub mod extract;
 pub mod format;
+pub mod identifiers;
 pub mod implicit_prices;
 pub mod intern;
 pub mod inventory;
 pub mod position;
 pub mod span;
 pub mod synthetic;
+pub mod visit;
 
 // Kani formal verification proofs (only compiled with Kani)
 #[cfg(kani)]
@@ -71,6 +73,7 @@ pub use extract::{
     extract_currencies_iter, extract_payees, extract_payees_iter,
 };
 pub use format::{FormatConfig, format_directive, format_posting, format_posting_line};
+pub use identifiers::{Account, Currency, Link, Tag};
 pub use implicit_prices::extract_per_unit_price;
 pub use intern::{InternedStr, StringInterner};
 pub use inventory::{
@@ -78,6 +81,7 @@ pub use inventory::{
 };
 pub use position::Position;
 pub use span::{SYNTHESIZED_FILE_ID, Span, Spanned};
+pub use visit::{visit_accounts, visit_currencies};
 
 // Re-export commonly used external types
 /// Calendar date without timezone. Alias for `jiff::civil::Date`.

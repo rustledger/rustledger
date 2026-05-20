@@ -4,7 +4,7 @@
 
 use rust_decimal::Decimal;
 use rust_decimal::prelude::Signed;
-use rustledger_core::{Amount, IncompleteAmount, InternedStr, Transaction};
+use rustledger_core::{Amount, Currency, IncompleteAmount, InternedStr, Transaction};
 use std::collections::HashMap;
 use thiserror::Error;
 
@@ -26,7 +26,7 @@ pub enum InterpolationError {
     )]
     MultipleMissing {
         /// The currency group with too many unknowns.
-        currency: InternedStr,
+        currency: Currency,
         /// Total count of unknowns: missing-amount postings plus
         /// empty-cost-spec postings whose weight is deferred to
         /// booking-time lot matching.
@@ -36,7 +36,8 @@ pub enum InterpolationError {
     /// Cannot infer currency for a posting.
     #[error("cannot infer currency for posting to account {account}")]
     CannotInferCurrency {
-        /// The account of the posting.
+        /// The account of the posting. Account migration is a
+        /// follow-up — see issue #1163.
         account: InternedStr,
     },
 
@@ -44,7 +45,7 @@ pub enum InterpolationError {
     #[error("transaction does not balance: residual {residual} {currency}")]
     DoesNotBalance {
         /// The unbalanced currency.
-        currency: InternedStr,
+        currency: Currency,
         /// The residual amount.
         residual: Decimal,
     },
@@ -58,7 +59,7 @@ pub struct InterpolationResult {
     /// Which posting indices were filled in.
     pub filled_indices: Vec<usize>,
     /// Residuals after interpolation (should all be near zero).
-    pub residuals: HashMap<InternedStr, Decimal>,
+    pub residuals: HashMap<Currency, Decimal>,
 }
 
 /// Round an interpolated amount to match existing scale, but never round
@@ -125,8 +126,8 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
     let mut filled_indices = Vec::new();
 
     // Lazily compute inferred currency only when needed (most transactions don't need it)
-    let mut inferred_cost_currency: Option<Option<InternedStr>> = None;
-    let get_inferred_currency = |cache: &mut Option<Option<InternedStr>>| -> Option<InternedStr> {
+    let mut inferred_cost_currency: Option<Option<Currency>> = None;
+    let get_inferred_currency = |cache: &mut Option<Option<Currency>>| -> Option<Currency> {
         cache
             .get_or_insert_with(|| crate::infer_cost_currency_from_postings(transaction))
             .clone()
@@ -135,8 +136,8 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
     // Calculate initial residuals from postings with amounts
     // Pre-allocate for typical case (1-2 currencies per transaction)
     let num_postings = transaction.postings.len();
-    let mut residuals: HashMap<InternedStr, Decimal> = HashMap::with_capacity(num_postings.min(4));
-    let mut missing_by_currency: HashMap<InternedStr, Vec<usize>> = HashMap::with_capacity(2);
+    let mut residuals: HashMap<Currency, Decimal> = HashMap::with_capacity(num_postings.min(4));
+    let mut missing_by_currency: HashMap<Currency, Vec<usize>> = HashMap::with_capacity(2);
     let mut unassigned_missing: Vec<usize> = Vec::with_capacity(2);
 
     // Track maximum scale (decimal places) per currency for rounding interpolated amounts.
@@ -166,7 +167,7 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
     //   the cash side `336.73 USD` gives USD scale=2; the residual gets
     //   quantized to 2dp instead of inheriting the lot's derived 26-digit
     //   per_unit precision.
-    let mut max_scale_by_currency: HashMap<InternedStr, u32> = HashMap::with_capacity(4);
+    let mut max_scale_by_currency: HashMap<Currency, u32> = HashMap::with_capacity(4);
 
     // Track per-currency count of postings whose weight contribution is unknown
     // because the cost spec is empty (e.g., `{}`) and resolution is deferred to
@@ -176,7 +177,7 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
     // rledger would silently use a fallback weight (price annotation, if
     // present) and accept transactions with more unknowns than the
     // interpolation rule allows.
-    let mut cost_unknowns_by_currency: HashMap<InternedStr, usize> = HashMap::with_capacity(2);
+    let mut cost_unknowns_by_currency: HashMap<Currency, usize> = HashMap::with_capacity(2);
 
     for (i, posting) in transaction.postings.iter().enumerate() {
         match &posting.units {
@@ -384,7 +385,7 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
     // deterministic for the same input. HashMap iteration order is
     // unspecified, so picking "the first failing currency" without
     // sorting would produce non-reproducible test output.
-    let mut currencies_with_unknowns: Vec<&InternedStr> = missing_by_currency
+    let mut currencies_with_unknowns: Vec<&Currency> = missing_by_currency
         .keys()
         .chain(cost_unknowns_by_currency.keys())
         .collect();
@@ -424,7 +425,7 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
     // Pick the lexicographically-smallest cost-unknown currency for the
     // error so the message is reproducible across runs.
     if !unassigned_missing.is_empty() {
-        let mut cost_unknown_keys: Vec<&InternedStr> = cost_unknowns_by_currency.keys().collect();
+        let mut cost_unknown_keys: Vec<&Currency> = cost_unknowns_by_currency.keys().collect();
         cost_unknown_keys.sort_by(|a, b| a.as_str().cmp(b.as_str()));
         if let Some(curr) = cost_unknown_keys.first() {
             let count = cost_unknowns_by_currency.get(*curr).copied().unwrap_or(0);
@@ -457,7 +458,7 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
     // Each one absorbs one or more currencies' residuals
     if !unassigned_missing.is_empty() {
         // Get currencies with non-zero residuals
-        let non_zero_residuals: Vec<(InternedStr, Decimal)> = residuals
+        let non_zero_residuals: Vec<(Currency, Decimal)> = residuals
             .iter()
             .filter(|&(_, v)| !v.is_zero())
             .map(|(k, v)| (k.clone(), *v))
@@ -1530,7 +1531,7 @@ mod tests {
         let cost_spec = CostSpec {
             number_per: Some(dec!(170.16734)),
             number_total: None,
-            currency: Some(InternedStr::from("USD")),
+            currency: Some(Currency::from("USD")),
             date: None,
             label: None,
             merge: false,
@@ -1599,7 +1600,7 @@ mod tests {
                     CostSpec {
                         number_per: None,
                         number_total: Some(dec!(300.00)),
-                        currency: Some(InternedStr::from("USD")),
+                        currency: Some(Currency::from("USD")),
                         date: None,
                         label: None,
                         merge: false,

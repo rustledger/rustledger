@@ -39,8 +39,8 @@ pub(super) fn report_income<W: Write>(
 
     fn sum_by_currency(
         balances: &BTreeMap<InternedStr, Inventory>,
-    ) -> BTreeMap<InternedStr, Decimal> {
-        let mut totals: BTreeMap<InternedStr, Decimal> = BTreeMap::new();
+    ) -> BTreeMap<rustledger_core::Currency, Decimal> {
+        let mut totals: BTreeMap<rustledger_core::Currency, Decimal> = BTreeMap::new();
         for inv in balances.values() {
             for pos in inv.positions() {
                 *totals.entry(pos.units.currency.clone()).or_default() += pos.units.number;
@@ -77,7 +77,7 @@ pub(super) fn report_income<W: Write>(
     // Net income = -(Income) - Expenses (income is negative in double-entry)
     let income_totals = sum_by_currency(&income);
     let expense_totals = sum_by_currency(&expenses);
-    let mut net_income: BTreeMap<InternedStr, Decimal> = BTreeMap::new();
+    let mut net_income: BTreeMap<rustledger_core::Currency, Decimal> = BTreeMap::new();
     for (currency, amount) in &income_totals {
         *net_income.entry(currency.clone()).or_default() -= amount;
     }
@@ -132,7 +132,7 @@ pub(super) fn report_income<W: Write>(
                 writer: &mut W,
                 title: &str,
                 balances: &BTreeMap<InternedStr, Inventory>,
-            ) -> Result<BTreeMap<InternedStr, Decimal>> {
+            ) -> Result<BTreeMap<rustledger_core::Currency, Decimal>> {
                 writeln!(writer, "{title}")?;
                 writeln!(writer, "{}", "-".repeat(60))?;
                 for (account, inventory) in balances {
@@ -147,7 +147,7 @@ pub(super) fn report_income<W: Write>(
                         )?;
                     }
                 }
-                let mut totals: BTreeMap<InternedStr, Decimal> = BTreeMap::new();
+                let mut totals: BTreeMap<rustledger_core::Currency, Decimal> = BTreeMap::new();
                 for inv in balances.values() {
                     for pos in inv.positions() {
                         *totals.entry(pos.units.currency.clone()).or_default() += pos.units.number;

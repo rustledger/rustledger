@@ -3,7 +3,7 @@
 use super::OutputFormat;
 use anyhow::Result;
 use rust_decimal::Decimal;
-use rustledger_core::{Directive, InternedStr};
+use rustledger_core::Directive;
 use std::collections::BTreeMap;
 use std::io::Write;
 
@@ -48,9 +48,10 @@ pub(super) fn report_networth<W: Write>(
         return Ok(());
     }
 
-    let mut asset_balance: BTreeMap<InternedStr, Decimal> = BTreeMap::new();
-    let mut liability_balance: BTreeMap<InternedStr, Decimal> = BTreeMap::new();
-    let mut period_results: Vec<(String, BTreeMap<InternedStr, Decimal>)> = Vec::new();
+    let mut asset_balance: BTreeMap<rustledger_core::Currency, Decimal> = BTreeMap::new();
+    let mut liability_balance: BTreeMap<rustledger_core::Currency, Decimal> = BTreeMap::new();
+    let mut period_results: Vec<(String, BTreeMap<rustledger_core::Currency, Decimal>)> =
+        Vec::new();
 
     let format_period = |date: rustledger_core::NaiveDate, period: &str| -> String {
         match period {
@@ -83,7 +84,7 @@ pub(super) fn report_networth<W: Write>(
         let txn_period = format_period(txn.date, period);
 
         if txn_period != current_period && !current_period.is_empty() {
-            let mut net_worth: BTreeMap<InternedStr, Decimal> = asset_balance.clone();
+            let mut net_worth: BTreeMap<rustledger_core::Currency, Decimal> = asset_balance.clone();
             for (currency, amount) in &liability_balance {
                 *net_worth.entry(currency.clone()).or_default() += amount;
             }
@@ -115,7 +116,7 @@ pub(super) fn report_networth<W: Write>(
     }
 
     if !current_period.is_empty() {
-        let mut net_worth: BTreeMap<InternedStr, Decimal> = asset_balance.clone();
+        let mut net_worth: BTreeMap<rustledger_core::Currency, Decimal> = asset_balance.clone();
         for (currency, amount) in &liability_balance {
             *net_worth.entry(currency.clone()).or_default() += amount;
         }

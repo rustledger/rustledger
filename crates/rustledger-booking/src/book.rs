@@ -63,7 +63,7 @@ pub struct CapitalGain {
     /// The account holding the asset.
     pub account: InternedStr,
     /// The currency of the asset.
-    pub currency: InternedStr,
+    pub currency: rustledger_core::Currency,
     /// The gain amount (positive) or loss (negative).
     pub amount: Amount,
     /// Cost basis of the sold lot.

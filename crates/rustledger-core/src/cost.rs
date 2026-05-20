@@ -12,7 +12,6 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use crate::Amount;
-use crate::intern::InternedStr;
 
 // Note: We no longer auto-quantize calculated values during cost storage.
 // Python beancount preserves full precision during booking and only rounds
@@ -21,7 +20,7 @@ use crate::intern::InternedStr;
 // For example: 300.00 / 1.763 = 170.16505... should NOT be rounded to 170.17,
 // because 1.763 * 170.17 = 300.00971 ≠ 300.00.
 #[cfg(feature = "rkyv")]
-use crate::intern::{AsDecimal, AsInternedStr, AsNaiveDate};
+use crate::intern::{AsDecimal, AsNaiveDate};
 
 /// A cost represents the acquisition cost of a position (lot).
 ///
@@ -54,8 +53,7 @@ pub struct Cost {
     #[cfg_attr(feature = "rkyv", rkyv(with = AsDecimal))]
     pub number: Decimal,
     /// Currency of the cost
-    #[cfg_attr(feature = "rkyv", rkyv(with = AsInternedStr))]
-    pub currency: InternedStr,
+    pub currency: crate::Currency,
     /// Acquisition date (optional, for lot identification)
     #[cfg_attr(feature = "rkyv", rkyv(with = rkyv::with::Map<AsNaiveDate>))]
     pub date: Option<NaiveDate>,
@@ -69,7 +67,7 @@ impl Cost {
     /// Create a new cost with exact precision.
     /// Use this for user-specified values that should preserve their precision.
     #[must_use]
-    pub fn new(number: Decimal, currency: impl Into<InternedStr>) -> Self {
+    pub fn new(number: Decimal, currency: impl Into<crate::Currency>) -> Self {
         Self {
             number,
             currency: currency.into(),
@@ -83,7 +81,7 @@ impl Cost {
     /// Previously this auto-quantized, but we now preserve full precision
     /// to avoid cost basis errors. Rounding should only happen at display time.
     #[must_use]
-    pub fn new_calculated(number: Decimal, currency: impl Into<InternedStr>) -> Self {
+    pub fn new_calculated(number: Decimal, currency: impl Into<crate::Currency>) -> Self {
         Self::new(number, currency)
     }
 
@@ -202,8 +200,7 @@ pub struct CostSpec {
     #[cfg_attr(feature = "rkyv", rkyv(with = rkyv::with::Map<AsDecimal>))]
     pub number_total: Option<Decimal>,
     /// Currency of the cost (if specified)
-    #[cfg_attr(feature = "rkyv", rkyv(with = rkyv::with::Map<AsInternedStr>))]
-    pub currency: Option<InternedStr>,
+    pub currency: Option<crate::Currency>,
     /// Acquisition date (if specified)
     #[cfg_attr(feature = "rkyv", rkyv(with = rkyv::with::Map<AsNaiveDate>))]
     pub date: Option<NaiveDate>,
@@ -236,7 +233,7 @@ impl CostSpec {
 
     /// Set the currency.
     #[must_use]
-    pub fn with_currency(mut self, currency: impl Into<InternedStr>) -> Self {
+    pub fn with_currency(mut self, currency: impl Into<crate::Currency>) -> Self {
         self.currency = Some(currency.into());
         self
     }

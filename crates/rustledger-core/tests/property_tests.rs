@@ -7,7 +7,7 @@
 use proptest::prelude::*;
 use rust_decimal::Decimal;
 use rustledger_core::NaiveDate;
-use rustledger_core::{Amount, BookingMethod, Cost, CostSpec, InternedStr, Inventory, Position};
+use rustledger_core::{Amount, BookingMethod, Cost, CostSpec, Inventory, Position};
 
 // ============================================================================
 // Arbitrary generators
@@ -208,7 +208,7 @@ proptest! {
     #[test]
     fn prop_inventory_units_consistency(positions in prop::collection::vec(arb_position(), 1..5)) {
         let mut inv = Inventory::new();
-        let mut expected_units: std::collections::HashMap<InternedStr, Decimal> = std::collections::HashMap::new();
+        let mut expected_units: std::collections::HashMap<rustledger_core::Currency, Decimal> = std::collections::HashMap::new();
 
         for pos in &positions {
             inv.add(pos.clone());

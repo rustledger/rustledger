@@ -830,8 +830,7 @@ pub struct Open {
     #[cfg_attr(feature = "rkyv", rkyv(with = AsInternedStr))]
     pub account: InternedStr,
     /// Allowed currencies (empty = any currency allowed)
-    #[cfg_attr(feature = "rkyv", rkyv(with = rkyv::with::Map<AsInternedStr>))]
-    pub currencies: Vec<InternedStr>,
+    pub currencies: Vec<crate::Currency>,
     /// Booking method for this account
     pub booking: Option<String>,
     /// Metadata
@@ -853,7 +852,7 @@ impl Open {
 
     /// Set allowed currencies.
     #[must_use]
-    pub fn with_currencies(mut self, currencies: Vec<InternedStr>) -> Self {
+    pub fn with_currencies(mut self, currencies: Vec<crate::Currency>) -> Self {
         self.currencies = currencies;
         self
     }
@@ -877,7 +876,11 @@ impl fmt::Display for Open {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{} open {}", self.date, self.account)?;
         if !self.currencies.is_empty() {
-            let currencies: Vec<&str> = self.currencies.iter().map(InternedStr::as_str).collect();
+            let currencies: Vec<&str> = self
+                .currencies
+                .iter()
+                .map(crate::Currency::as_str)
+                .collect();
             write!(f, " {}", currencies.join(","))?;
         }
         if let Some(booking) = &self.booking {
@@ -944,8 +947,7 @@ pub struct Commodity {
     #[cfg_attr(feature = "rkyv", rkyv(with = AsNaiveDate))]
     pub date: NaiveDate,
     /// Currency/commodity code (e.g., "USD", "AAPL")
-    #[cfg_attr(feature = "rkyv", rkyv(with = AsInternedStr))]
-    pub currency: InternedStr,
+    pub currency: crate::Currency,
     /// Metadata
     pub meta: Metadata,
 }
@@ -953,7 +955,7 @@ pub struct Commodity {
 impl Commodity {
     /// Create a new commodity declaration.
     #[must_use]
-    pub fn new(date: NaiveDate, currency: impl Into<InternedStr>) -> Self {
+    pub fn new(date: NaiveDate, currency: impl Into<crate::Currency>) -> Self {
         Self {
             date,
             currency: currency.into(),
@@ -1273,8 +1275,7 @@ pub struct Price {
     #[cfg_attr(feature = "rkyv", rkyv(with = AsNaiveDate))]
     pub date: NaiveDate,
     /// Currency being priced
-    #[cfg_attr(feature = "rkyv", rkyv(with = AsInternedStr))]
-    pub currency: InternedStr,
+    pub currency: crate::Currency,
     /// Price amount (in another currency)
     pub amount: Amount,
     /// Metadata
@@ -1284,7 +1285,7 @@ pub struct Price {
 impl Price {
     /// Create a new price directive.
     #[must_use]
-    pub fn new(date: NaiveDate, currency: impl Into<InternedStr>, amount: Amount) -> Self {
+    pub fn new(date: NaiveDate, currency: impl Into<crate::Currency>, amount: Amount) -> Self {
         Self {
             date,
             currency: currency.into(),

@@ -9,7 +9,7 @@ use rust_decimal::prelude::Signed;
 use smallvec::{SmallVec, smallvec};
 
 use super::{BookingError, BookingMethod, BookingResult, Inventory, MatchedLots};
-use crate::{Amount, Cost, CostSpec, InternedStr, Position};
+use crate::{Amount, Cost, CostSpec, Currency, Position};
 
 /// Compute weighted-average cost from a set of positions.
 ///
@@ -18,9 +18,9 @@ use crate::{Amount, Cost, CostSpec, InternedStr, Position};
 fn average_cost_from_positions(
     positions: &[&Position],
     total_units: Decimal,
-) -> Result<Option<(Decimal, InternedStr)>, BookingError> {
+) -> Result<Option<(Decimal, Currency)>, BookingError> {
     let mut total_cost = Decimal::ZERO;
-    let mut cost_currency: Option<InternedStr> = None;
+    let mut cost_currency: Option<Currency> = None;
     let mut has_any_cost = false;
 
     for pos in positions {

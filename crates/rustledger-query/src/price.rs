@@ -4,9 +4,7 @@
 //! and allows looking up prices for currency conversions.
 
 use rust_decimal::Decimal;
-use rustledger_core::{
-    Amount, Directive, InternedStr, NaiveDate, Price as PriceDirective, Transaction,
-};
+use rustledger_core::{Amount, Directive, NaiveDate, Price as PriceDirective, Transaction};
 use std::collections::HashMap;
 
 /// A price entry.
@@ -22,7 +20,7 @@ pub struct PriceEntry {
     /// Price amount.
     pub price: Decimal,
     /// Quote currency.
-    pub currency: InternedStr,
+    pub currency: rustledger_core::Currency,
     /// `true` if sourced from an explicit `Price` directive (or a
     /// plugin-emitted one — same shape after plugin runs); `false` if
     /// derived from a transaction posting in the executor's pass-2
@@ -43,7 +41,7 @@ pub struct PriceEntry {
 pub struct PriceDatabase {
     /// Prices indexed by base currency.
     /// Each base currency maps to a list of price entries sorted by date.
-    prices: HashMap<InternedStr, Vec<PriceEntry>>,
+    prices: HashMap<rustledger_core::Currency, Vec<PriceEntry>>,
 }
 
 impl PriceDatabase {
@@ -159,7 +157,11 @@ impl PriceDatabase {
     /// [`from_directives`] for the protocol.
     pub(crate) fn snapshot_keys(
         &self,
-    ) -> std::collections::HashSet<(InternedStr, InternedStr, NaiveDate)> {
+    ) -> std::collections::HashSet<(
+        rustledger_core::Currency,
+        rustledger_core::Currency,
+        NaiveDate,
+    )> {
         self.prices
             .iter()
             .flat_map(|(base, entries)| {
@@ -190,7 +192,11 @@ impl PriceDatabase {
     pub(crate) fn add_implicit_prices_from_transaction(
         &mut self,
         txn: &Transaction,
-        explicit: &std::collections::HashSet<(InternedStr, InternedStr, NaiveDate)>,
+        explicit: &std::collections::HashSet<(
+            rustledger_core::Currency,
+            rustledger_core::Currency,
+            NaiveDate,
+        )>,
     ) {
         for posting in &txn.postings {
             let Some(units) = posting.amount() else {
@@ -242,9 +248,9 @@ impl PriceDatabase {
     fn add_implicit_price(
         &mut self,
         date: NaiveDate,
-        base_currency: &InternedStr,
+        base_currency: &rustledger_core::Currency,
         price: Decimal,
-        quote_currency: &InternedStr,
+        quote_currency: &rustledger_core::Currency,
     ) {
         let entry = PriceEntry {
             date,
@@ -301,15 +307,16 @@ impl PriceDatabase {
     /// For A→C, try to find A→B and B→C for some intermediate B.
     fn get_chained_price(&self, base: &str, quote: &str, date: NaiveDate) -> Option<Decimal> {
         // Collect all currencies that have prices from 'base'
-        let intermediates: Vec<InternedStr> = if let Some(entries) = self.prices.get(base) {
-            entries
-                .iter()
-                .filter(|e| e.date <= date)
-                .map(|e| e.currency.clone())
-                .collect()
-        } else {
-            Vec::new()
-        };
+        let intermediates: Vec<rustledger_core::Currency> =
+            if let Some(entries) = self.prices.get(base) {
+                entries
+                    .iter()
+                    .filter(|e| e.date <= date)
+                    .map(|e| e.currency.clone())
+                    .collect()
+            } else {
+                Vec::new()
+            };
 
         // Try each intermediate currency
         for intermediate in intermediates {
@@ -397,11 +404,12 @@ impl PriceDatabase {
     /// For A→C, try to find A→B and B→C for some intermediate B.
     fn get_chained_latest_price(&self, base: &str, quote: &str) -> Option<Decimal> {
         // Collect all currencies that have prices from 'base'
-        let intermediates: Vec<InternedStr> = if let Some(entries) = self.prices.get(base) {
-            entries.iter().map(|e| e.currency.clone()).collect()
-        } else {
-            Vec::new()
-        };
+        let intermediates: Vec<rustledger_core::Currency> =
+            if let Some(entries) = self.prices.get(base) {
+                entries.iter().map(|e| e.currency.clone()).collect()
+            } else {
+                Vec::new()
+            };
 
         // Try each intermediate currency
         for intermediate in intermediates {
@@ -471,7 +479,7 @@ impl PriceDatabase {
 
     /// Get all currencies that have prices defined.
     pub fn currencies(&self) -> impl Iterator<Item = &str> {
-        self.prices.keys().map(InternedStr::as_str)
+        self.prices.keys().map(rustledger_core::Currency::as_str)
     }
 
     /// Check if a currency has any prices defined.

@@ -124,13 +124,14 @@ fn is_account_in_range(
     range: Range,
     parse_result: &ParseResult,
 ) -> bool {
-    // Find the line at the range start
-    let lines: Vec<&str> = source.lines().collect();
-    let start_line = range.start.line as usize;
-
-    // Check a few lines around the selection
-    for line_idx in start_line.saturating_sub(3)..=(start_line + 10).min(lines.len() - 1) {
-        if let Some(line) = lines.get(line_idx)
+    // Check a few lines around the selection. Fetch each line via
+    // LineIndex so we don't re-split the whole source on every
+    // undefined-account check (called once per undefined account).
+    let start_line = range.start.line;
+    let window_start = start_line.saturating_sub(3);
+    let window_end = start_line.saturating_add(10);
+    for line_idx in window_start..=window_end {
+        if let Some(line) = line_index.line_text(source, line_idx)
             && line.contains(account)
         {
             return true;

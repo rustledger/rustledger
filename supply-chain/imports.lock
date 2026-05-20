@@ -766,8 +766,8 @@ when = "2026-04-03"
 trusted-publisher = "github:bytecodealliance/wasm-tools"
 
 [[publisher.wasm-encoder]]
-version = "0.248.0"
-when = "2026-04-28"
+version = "0.249.0"
+when = "2026-05-15"
 trusted-publisher = "github:bytecodealliance/wasm-tools"
 
 [[publisher.wasm-metadata]]
@@ -787,8 +787,8 @@ when = "2026-04-03"
 trusted-publisher = "github:bytecodealliance/wasm-tools"
 
 [[publisher.wasmparser]]
-version = "0.248.0"
-when = "2026-04-28"
+version = "0.249.0"
+when = "2026-05-15"
 trusted-publisher = "github:bytecodealliance/wasm-tools"
 
 [[publisher.wasmprinter]]
@@ -877,13 +877,13 @@ when = "2026-04-30"
 trusted-publisher = "github:bytecodealliance/wasmtime"
 
 [[publisher.wast]]
-version = "248.0.0"
-when = "2026-04-28"
+version = "249.0.0"
+when = "2026-05-15"
 trusted-publisher = "github:bytecodealliance/wasm-tools"
 
 [[publisher.wat]]
-version = "1.248.0"
-when = "2026-04-28"
+version = "1.249.0"
+when = "2026-05-15"
 trusted-publisher = "github:bytecodealliance/wasm-tools"
 
 [[publisher.wiggle]]

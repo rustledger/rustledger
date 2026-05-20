@@ -59,6 +59,22 @@ struct TokenStream<'src> {
     /// String interner for deduplicating repeated strings (accounts, currencies).
     /// Typical ledger: ~10 unique accounts × 1000 txns = 10K lookups vs 10K allocations.
     interner: rustledger_core::intern::StringInterner,
+    /// Byte-position record of every Currency token the parser
+    /// consumed, paired with its interned value.
+    ///
+    /// The AST stores currencies as `InternedStr` values stripped of
+    /// their source positions because currencies are pervasively
+    /// reused in computed contexts (booking arithmetic, residual
+    /// aggregation, query results) where a source span would be
+    /// meaningless or actively wrong. Source-position queries — LSP
+    /// rename / references / document-highlight — instead consume
+    /// this parallel index. The parser is the canonical owner of
+    /// source-token positions, so this is its natural home.
+    ///
+    /// `file_id` is left at the default (0) and overwritten later
+    /// when a `SourceMap` assigns each file an id — same pattern
+    /// as `Spanned<Directive>` produced by this parser.
+    currency_occurrences: Vec<Spanned<InternedStr>>,
 }
 
 impl<'src> TokenStream<'src> {
@@ -68,6 +84,7 @@ impl<'src> TokenStream<'src> {
             pos: 0,
             deferred_error: None,
             interner: rustledger_core::intern::StringInterner::new(),
+            currency_occurrences: Vec::new(),
         }
     }
 
@@ -359,7 +376,15 @@ fn parse_currency(stream: &mut TokenStream<'_>) -> ParseRes<InternedStr> {
     if let Some(t) = stream.peek()
         && let Token::Currency(s) = &t.token
     {
+        let span = Span::new(t.span.0, t.span.1);
         let result = stream.interner.intern(s);
+        // Record the source-token position for downstream
+        // span-aware consumers (LSP rename / references /
+        // document-highlight). See `TokenStream::currency_occurrences`
+        // for the rationale.
+        stream
+            .currency_occurrences
+            .push(Spanned::new(result.clone(), span));
         stream.advance();
         return Ok(result);
     }
@@ -1921,6 +1946,7 @@ pub fn parse(source: &str) -> ParseResult {
         comments,
         errors,
         warnings: Vec::new(),
+        currency_occurrences: stream.currency_occurrences,
     }
 }
 

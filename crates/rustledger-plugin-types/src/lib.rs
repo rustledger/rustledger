@@ -16,11 +16,11 @@
 //!   Required exports: `metadata`, `identify`, `extract`, `extract_enriched`.
 //!   Host loader: `rustledger-importer::WasmImporter`. Use the
 //!   `wasm_importer_main!` macro (behind the `guest` feature) to generate
-//!   the boilerplate. See the [`guest`] module for details.
+//!   the boilerplate. See the `guest` module for details.
 //!
 //! # Directive-Plugin Quick Start
 //!
-//! Use the [`wasm_plugin_main!`] macro (behind the `guest` feature) to
+//! Use the `wasm_plugin_main!` macro (behind the `guest` feature) to
 //! generate the required `alloc` + `process` exports from a single
 //! user fn. Add this to your plugin's `Cargo.toml`:
 //!
@@ -46,7 +46,7 @@
 //! }
 //! ```
 //!
-//! See the [`guest`] module for the full macro reference (including
+//! See the `guest` module for the full macro reference (including
 //! the once-per-crate constraint on the `wasm32` target). If you need
 //! to write the `extern "C"` exports manually — for finer control or
 //! to avoid the `guest` feature — see the "Without the macro" section

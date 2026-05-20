@@ -34,7 +34,7 @@ pub mod logos_lexer;
 mod parser;
 
 pub use error::{ParseError, ParseErrorKind};
-pub use rustledger_core::{SYNTHESIZED_FILE_ID, Span, Spanned};
+pub use rustledger_core::{InternedStr, SYNTHESIZED_FILE_ID, Span, Spanned};
 
 use rustledger_core::Directive;
 
@@ -55,6 +55,19 @@ pub struct ParseResult {
     pub errors: Vec<ParseError>,
     /// Deprecation warnings.
     pub warnings: Vec<ParseWarning>,
+    /// Every `Currency` token the parser consumed, paired with its
+    /// interned value and source-byte range.
+    ///
+    /// Source-position-aware tooling (LSP rename / references /
+    /// document-highlight) walks this list to produce edits, locations,
+    /// and highlights without resorting to string search of the source
+    /// — which produces false positives in comments, payee strings,
+    /// account-name segments, etc. The order matches source order
+    /// because the parser fills it as tokens are consumed.
+    ///
+    /// `file_id` defaults to 0; the loader can set it via
+    /// `.with_file_id(n)` per element once a `SourceMap` assigns ids.
+    pub currency_occurrences: Vec<Spanned<InternedStr>>,
 }
 
 /// A warning from the parser (non-fatal).

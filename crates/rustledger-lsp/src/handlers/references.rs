@@ -221,8 +221,21 @@ fn collect_account_references(
 }
 
 /// Collect all references to a currency.
+///
+/// Walks the parser's `currency_occurrences` index (every `Currency`
+/// token with exact source spans) and emits one `Location` per
+/// occurrence matching `currency`. The previous implementation
+/// string-searched the source within each directive, which produced
+/// false positives in payee strings, comments, and account-name
+/// segments containing the currency code.
+///
+/// To honor `include_declaration`, we pre-build a set of byte
+/// ranges of every `Commodity` directive in this file — an
+/// occurrence is a "declaration" iff its span falls inside one. A
+/// `Commodity` directive contains exactly one `Currency` token (the
+/// declared one), so the within-range check is unambiguous.
 fn collect_currency_references(
-    source: &str,
+    _source: &str,
     parse_result: &ParseResult,
     line_index: &LineIndex,
     currency: &str,
@@ -230,55 +243,38 @@ fn collect_currency_references(
     include_declaration: bool,
     locations: &mut Vec<Location>,
 ) {
-    for spanned in &parse_result.directives {
-        let directive_text = &source[spanned.span.start..spanned.span.end];
-        let (start_line, _) = line_index.offset_to_position(spanned.span.start);
+    let commodity_spans: Vec<rustledger_parser::Span> = parse_result
+        .directives
+        .iter()
+        .filter(|d| matches!(&d.value, Directive::Commodity(_)))
+        .map(|d| d.span)
+        .collect();
+    let is_declaration = |span: rustledger_parser::Span| {
+        commodity_spans
+            .iter()
+            .any(|cs| cs.start <= span.start && span.end <= cs.end)
+    };
 
-        // Check if directive contains this currency
-        let is_declaration =
-            matches!(&spanned.value, Directive::Commodity(c) if c.currency.as_ref() == currency);
-
-        if is_declaration && !include_declaration {
+    for occurrence in &parse_result.currency_occurrences {
+        if occurrence.value != currency {
             continue;
         }
-
-        // Find all occurrences of the currency in this directive
-        for (line_offset, line) in directive_text.lines().enumerate() {
-            let mut search_start = 0;
-            while let Some(pos) = line[search_start..].find(currency) {
-                let actual_pos = search_start + pos;
-
-                // Verify it's a word boundary
-                let before_ok = actual_pos == 0
-                    || !line
-                        .chars()
-                        .nth(actual_pos - 1)
-                        .unwrap_or(' ')
-                        .is_alphanumeric();
-                let after_ok = actual_pos + currency.len() >= line.len()
-                    || !line
-                        .chars()
-                        .nth(actual_pos + currency.len())
-                        .unwrap_or(' ')
-                        .is_alphanumeric();
-
-                if before_ok && after_ok {
-                    let ref_line = start_line + line_offset as u32;
-                    locations.push(Location {
-                        uri: uri.clone(),
-                        range: Range {
-                            start: Position::new(ref_line, actual_pos as u32),
-                            end: Position::new(ref_line, (actual_pos + currency.len()) as u32),
-                        },
-                    });
-                }
-
-                search_start = actual_pos + currency.len();
-            }
+        if is_declaration(occurrence.span) && !include_declaration {
+            continue;
         }
+        let (start_line, start_col) = line_index.offset_to_position(occurrence.span.start);
+        let (end_line, end_col) = line_index.offset_to_position(occurrence.span.end);
+        locations.push(Location {
+            uri: uri.clone(),
+            range: Range {
+                start: Position::new(start_line, start_col),
+                end: Position::new(end_line, end_col),
+            },
+        });
     }
 
-    // Deduplicate by range
+    // Deduplicate by range — see `collect_currency_rename_edits` for
+    // why this guard is here.
     locations.sort_by(|a, b| {
         a.range
             .start
@@ -435,6 +431,71 @@ mod tests {
         let refs = refs.unwrap();
         // Should find USD in: open, posting 1, posting 2 = 3 references
         assert_eq!(refs.len(), 3);
+    }
+
+    /// Regression test for currency-reference false positives. See
+    /// `rename.rs::test_rename_currency_no_false_positives` for the
+    /// fuller rationale. Same source shape; the AST-driven
+    /// references walker should report exactly the legitimate
+    /// `Currency`-token occurrences.
+    #[test]
+    fn test_find_currency_references_no_false_positives() {
+        let source = r#"2024-01-01 open Assets:USD-Reserve
+2024-01-01 commodity USD
+2024-01-15 * "USD-to-EUR transfer"
+  Assets:USD-Reserve  -100 USD
+  Assets:Bank          100 USD
+"#;
+        let result = parse(source);
+        assert!(
+            result.errors.is_empty(),
+            "parse errors: {:?}",
+            result.errors
+        );
+        let uri: Uri = "file:///test.beancount".parse().unwrap();
+
+        // Position cursor on the `USD` of `commodity USD`.
+        let params = ReferenceParams {
+            text_document_position: lsp_types::TextDocumentPositionParams {
+                text_document: lsp_types::TextDocumentIdentifier { uri: uri.clone() },
+                position: Position::new(1, 21),
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+            context: lsp_types::ReferenceContext {
+                include_declaration: true,
+            },
+        };
+
+        let refs =
+            handle_references(&params, source, &result, &uri).expect("references returns Some");
+
+        // Expected: 3 references — `commodity USD`, `-100 USD`,
+        // `100 USD`. Bespoke string-search would have reported the
+        // payee string and the account-name substrings too.
+        assert_eq!(
+            refs.len(),
+            3,
+            "expected 3 currency references, got {}: {refs:#?}",
+            refs.len()
+        );
+
+        // With `include_declaration: false`, the commodity-directive
+        // occurrence should drop out.
+        let params_no_decl = ReferenceParams {
+            context: lsp_types::ReferenceContext {
+                include_declaration: false,
+            },
+            ..params
+        };
+        let refs_no_decl = handle_references(&params_no_decl, source, &result, &uri)
+            .expect("references returns Some");
+        assert_eq!(
+            refs_no_decl.len(),
+            2,
+            "expected 2 non-declaration references, got {}: {refs_no_decl:#?}",
+            refs_no_decl.len()
+        );
     }
 
     /// Regression test for the read-only sibling of #1142.

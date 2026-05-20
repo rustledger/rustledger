@@ -171,61 +171,50 @@ fn collect_account_highlights(
 }
 
 /// Collect all highlights for a currency.
+///
+/// Walks the parser's `currency_occurrences` index for exact spans;
+/// see `rename.rs::collect_currency_rename_edits` for the rationale.
+/// Occurrences whose span sits inside a `Commodity` directive
+/// declaration are surfaced as `WRITE`, all others as `READ`.
 fn collect_currency_highlights(
-    source: &str,
+    _source: &str,
     parse_result: &ParseResult,
     line_index: &LineIndex,
     currency: &str,
     highlights: &mut Vec<DocumentHighlight>,
 ) {
-    for spanned in &parse_result.directives {
-        let directive_text = &source[spanned.span.start..spanned.span.end];
-        let (start_line, _) = line_index.offset_to_position(spanned.span.start);
+    let commodity_spans: Vec<rustledger_parser::Span> = parse_result
+        .directives
+        .iter()
+        .filter(|d| matches!(&d.value, Directive::Commodity(_)))
+        .map(|d| d.span)
+        .collect();
+    let is_declaration = |span: rustledger_parser::Span| {
+        commodity_spans
+            .iter()
+            .any(|cs| cs.start <= span.start && span.end <= cs.end)
+    };
 
-        let is_declaration =
-            matches!(&spanned.value, Directive::Commodity(c) if c.currency.as_ref() == currency);
-
-        // Find all occurrences of the currency in this directive
-        for (line_offset, line) in directive_text.lines().enumerate() {
-            let mut search_start = 0;
-            while let Some(pos) = line[search_start..].find(currency) {
-                let actual_pos = search_start + pos;
-
-                // Verify word boundaries
-                let before_ok = actual_pos == 0
-                    || !line
-                        .chars()
-                        .nth(actual_pos - 1)
-                        .unwrap_or(' ')
-                        .is_alphanumeric();
-                let after_ok = actual_pos + currency.len() >= line.len()
-                    || !line
-                        .chars()
-                        .nth(actual_pos + currency.len())
-                        .unwrap_or(' ')
-                        .is_alphanumeric();
-
-                if before_ok && after_ok {
-                    let ref_line = start_line + line_offset as u32;
-                    highlights.push(DocumentHighlight {
-                        range: Range {
-                            start: Position::new(ref_line, actual_pos as u32),
-                            end: Position::new(ref_line, (actual_pos + currency.len()) as u32),
-                        },
-                        kind: Some(if is_declaration && line_offset == 0 {
-                            DocumentHighlightKind::WRITE
-                        } else {
-                            DocumentHighlightKind::READ
-                        }),
-                    });
-                }
-
-                search_start = actual_pos + currency.len();
-            }
+    for occurrence in &parse_result.currency_occurrences {
+        if occurrence.value != currency {
+            continue;
         }
+        let (start_line, start_col) = line_index.offset_to_position(occurrence.span.start);
+        let (end_line, end_col) = line_index.offset_to_position(occurrence.span.end);
+        highlights.push(DocumentHighlight {
+            range: Range {
+                start: Position::new(start_line, start_col),
+                end: Position::new(end_line, end_col),
+            },
+            kind: Some(if is_declaration(occurrence.span) {
+                DocumentHighlightKind::WRITE
+            } else {
+                DocumentHighlightKind::READ
+            }),
+        });
     }
 
-    // Deduplicate
+    // Deduplicate by range.
     highlights.sort_by(|a, b| {
         a.range
             .start
@@ -352,6 +341,58 @@ mod tests {
         let highlights = highlights.unwrap();
         // Should find USD in: open, posting 1, posting 2 = 3
         assert_eq!(highlights.len(), 3);
+    }
+
+    /// Regression test for currency-highlight false positives. See
+    /// `rename.rs::test_rename_currency_no_false_positives` for the
+    /// fuller rationale.
+    #[test]
+    fn test_highlight_currency_no_false_positives() {
+        let source = r#"2024-01-01 open Assets:USD-Reserve
+2024-01-01 commodity USD
+2024-01-15 * "USD-to-EUR transfer"
+  Assets:USD-Reserve  -100 USD
+  Assets:Bank          100 USD
+"#;
+        let result = parse(source);
+        assert!(
+            result.errors.is_empty(),
+            "parse errors: {:?}",
+            result.errors
+        );
+        let uri: lsp_types::Uri = "file:///test.beancount".parse().unwrap();
+
+        let params = DocumentHighlightParams {
+            text_document_position_params: lsp_types::TextDocumentPositionParams {
+                text_document: lsp_types::TextDocumentIdentifier { uri },
+                position: Position::new(1, 21), // on the `USD` of `commodity USD`
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        };
+
+        let highlights =
+            handle_document_highlight(&params, source, &result).expect("highlights returns Some");
+
+        // Expected: 3 highlights — declaration + 2 postings. Bespoke
+        // string-search would have produced 5 (payee + 2 account
+        // substrings + 2 postings + 1 declaration ... and the
+        // account-substring highlights would have visually
+        // corrupted the rendered highlight overlay on screen).
+        assert_eq!(
+            highlights.len(),
+            3,
+            "expected 3 currency highlights, got {}: {highlights:#?}",
+            highlights.len()
+        );
+
+        // Exactly one highlight should be WRITE (the commodity
+        // declaration); the other two should be READ.
+        let write_count = highlights
+            .iter()
+            .filter(|h| h.kind == Some(DocumentHighlightKind::WRITE))
+            .count();
+        assert_eq!(write_count, 1, "expected exactly one WRITE highlight");
     }
 
     /// Regression test for the read-only sibling of #1142.

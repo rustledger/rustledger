@@ -54,6 +54,7 @@ pub mod inventory;
 pub mod position;
 pub mod span;
 pub mod synthetic;
+pub mod visit;
 
 // Kani formal verification proofs (only compiled with Kani)
 #[cfg(kani)]
@@ -80,6 +81,7 @@ pub use inventory::{
 };
 pub use position::Position;
 pub use span::{SYNTHESIZED_FILE_ID, Span, Spanned};
+pub use visit::{visit_accounts, visit_currencies};
 
 // Re-export commonly used external types
 /// Calendar date without timezone. Alias for `jiff::civil::Date`.

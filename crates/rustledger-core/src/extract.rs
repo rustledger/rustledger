@@ -1,8 +1,14 @@
 //! Extract unique accounts, currencies, and payees from directives.
 //!
 //! These functions are used by both the WASM editor and LSP for completions.
+//! The currency and account walks delegate to [`crate::visit`] for
+//! exhaustive position coverage; that module is the single
+//! enumeration point — any new directive variant or new currency/
+//! account-bearing position is added there and every consumer
+//! (extract, hover, completion, …) benefits.
 
-use crate::{Directive, MetaValue, Metadata, PriceAnnotation};
+use crate::Directive;
+use crate::visit::{visit_accounts, visit_currencies};
 
 /// Common default currencies included in completions.
 pub const DEFAULT_CURRENCIES: &[&str] = &["USD", "EUR", "GBP"];
@@ -20,94 +26,18 @@ pub fn extract_accounts(directives: &[Directive]) -> Vec<String> {
 /// ```
 /// Extract unique account names from an iterator of directive references.
 ///
-/// Covers every position an account name can appear in source:
-/// - `Open.account` / `Close.account`
-/// - `Balance.account`
-/// - `Pad.account` and `Pad.source_account`
-/// - `Note.account`
-/// - `Document.account`
-/// - `Posting.account` (transactions)
-/// - `MetaValue::Account` values inside the metadata block of any
-///   directive or posting
-/// - `MetaValue::Account` inside `Custom.values`
-///
-/// Earlier iterations of this function covered only Open / Close /
-/// Balance / Pad / Transaction.postings — accounts mentioned only
-/// on a Note, Document, in metadata, or in a Custom directive were
-/// silently absent from completion suggestions in both the LSP and
-/// the WASM editor.
+/// Delegates to [`visit_accounts`] for exhaustive position coverage
+/// (Open / Close / Balance / Pad / Note / Document / Posting,
+/// metadata, Custom values, …). See that function for the
+/// authoritative position list.
 pub fn extract_accounts_iter<'a>(directives: impl Iterator<Item = &'a Directive>) -> Vec<String> {
     let mut accounts = Vec::new();
-
     for directive in directives {
-        match directive {
-            Directive::Open(open) => {
-                accounts.push(open.account.to_string());
-                extract_meta_accounts(&open.meta, &mut accounts);
-            }
-            Directive::Close(close) => {
-                accounts.push(close.account.to_string());
-                extract_meta_accounts(&close.meta, &mut accounts);
-            }
-            Directive::Balance(bal) => {
-                accounts.push(bal.account.to_string());
-                extract_meta_accounts(&bal.meta, &mut accounts);
-            }
-            Directive::Pad(pad) => {
-                accounts.push(pad.account.to_string());
-                accounts.push(pad.source_account.to_string());
-                extract_meta_accounts(&pad.meta, &mut accounts);
-            }
-            Directive::Note(note) => {
-                accounts.push(note.account.to_string());
-                extract_meta_accounts(&note.meta, &mut accounts);
-            }
-            Directive::Document(doc) => {
-                accounts.push(doc.account.to_string());
-                extract_meta_accounts(&doc.meta, &mut accounts);
-            }
-            Directive::Transaction(txn) => {
-                extract_meta_accounts(&txn.meta, &mut accounts);
-                for posting in &txn.postings {
-                    accounts.push(posting.account.to_string());
-                    extract_meta_accounts(&posting.meta, &mut accounts);
-                }
-            }
-            Directive::Custom(custom) => {
-                for v in &custom.values {
-                    if let MetaValue::Account(a) = v {
-                        accounts.push(a.clone());
-                    }
-                }
-                extract_meta_accounts(&custom.meta, &mut accounts);
-            }
-            Directive::Commodity(comm) => {
-                extract_meta_accounts(&comm.meta, &mut accounts);
-            }
-            Directive::Price(price) => {
-                extract_meta_accounts(&price.meta, &mut accounts);
-            }
-            Directive::Event(event) => {
-                extract_meta_accounts(&event.meta, &mut accounts);
-            }
-            Directive::Query(query) => {
-                extract_meta_accounts(&query.meta, &mut accounts);
-            }
-        }
+        visit_accounts(directive, &mut |a| accounts.push(a.to_string()));
     }
-
     accounts.sort();
     accounts.dedup();
     accounts
-}
-
-/// Push any account literal embedded in a metadata block onto `out`.
-fn extract_meta_accounts(meta: &Metadata, out: &mut Vec<String>) {
-    for v in meta.values() {
-        if let MetaValue::Account(a) = v {
-            out.push(a.clone());
-        }
-    }
 }
 
 /// Extract unique currencies from directives (sorted, deduplicated).
@@ -119,134 +49,24 @@ pub fn extract_currencies(directives: &[Directive]) -> Vec<String> {
 
 /// Extract unique currencies from an iterator of directive references.
 ///
-/// Covers every position a `Currency` token can appear in source:
-/// - `Open.currencies` (constraint list)
-/// - `Commodity.currency` (declaration)
-/// - `Balance.amount.currency`
-/// - `Price` directive (both base `currency` and `amount.currency`)
-/// - `Posting.units.currency()` (units side, incl. `CurrencyOnly`)
-/// - `Posting.cost.currency` (cost spec)
-/// - `Posting.price` (`@`/`@@` annotation, all 6 variants)
-/// - `MetaValue::Currency` / `MetaValue::Amount` values inside the
-///   metadata block of any directive or posting
-/// - `Custom.values` entries that are `MetaValue::Currency` or
-///   `MetaValue::Amount` (Custom directives can carry arbitrary
-///   `MetaValue`s as positional arguments)
+/// Delegates to [`visit_currencies`] for exhaustive position coverage
+/// (Open / Commodity / Balance / Price / Posting units+cost+price,
+/// metadata `Currency`/`Amount` values, Custom values, …). See that
+/// function for the authoritative position list.
 ///
-/// Earlier iterations of this function covered only `Open`,
-/// `Commodity`, `Balance`, and `Posting.units` — any currency that
-/// reached the parser through the other positions silently
-/// disappeared from completion suggestions in both the LSP and
-/// the WASM editor.
+/// Always appends [`DEFAULT_CURRENCIES`] so completion can suggest
+/// the common codes even in a fresh document with nothing typed yet.
 pub fn extract_currencies_iter<'a>(directives: impl Iterator<Item = &'a Directive>) -> Vec<String> {
     let mut currencies = Vec::new();
-
     for directive in directives {
-        match directive {
-            Directive::Open(open) => {
-                for currency in &open.currencies {
-                    currencies.push(currency.to_string());
-                }
-                extract_meta_currencies(&open.meta, &mut currencies);
-            }
-            Directive::Commodity(comm) => {
-                currencies.push(comm.currency.to_string());
-                extract_meta_currencies(&comm.meta, &mut currencies);
-            }
-            Directive::Balance(bal) => {
-                currencies.push(bal.amount.currency.to_string());
-                extract_meta_currencies(&bal.meta, &mut currencies);
-            }
-            Directive::Price(price) => {
-                currencies.push(price.currency.to_string());
-                currencies.push(price.amount.currency.to_string());
-                extract_meta_currencies(&price.meta, &mut currencies);
-            }
-            Directive::Transaction(txn) => {
-                extract_meta_currencies(&txn.meta, &mut currencies);
-                for posting in &txn.postings {
-                    if let Some(ref units) = posting.units
-                        && let Some(currency) = units.currency()
-                    {
-                        currencies.push(currency.to_string());
-                    }
-                    if let Some(ref cost) = posting.cost
-                        && let Some(ref c) = cost.currency
-                    {
-                        currencies.push(c.to_string());
-                    }
-                    if let Some(ref price) = posting.price {
-                        extract_price_currency(price, &mut currencies);
-                    }
-                    extract_meta_currencies(&posting.meta, &mut currencies);
-                }
-            }
-            Directive::Custom(custom) => {
-                for v in &custom.values {
-                    match v {
-                        MetaValue::Currency(s) => currencies.push(s.clone()),
-                        MetaValue::Amount(a) => currencies.push(a.currency.to_string()),
-                        _ => {}
-                    }
-                }
-                extract_meta_currencies(&custom.meta, &mut currencies);
-            }
-            Directive::Note(note) => {
-                extract_meta_currencies(&note.meta, &mut currencies);
-            }
-            Directive::Document(doc) => {
-                extract_meta_currencies(&doc.meta, &mut currencies);
-            }
-            Directive::Close(close) => {
-                extract_meta_currencies(&close.meta, &mut currencies);
-            }
-            Directive::Pad(pad) => {
-                extract_meta_currencies(&pad.meta, &mut currencies);
-            }
-            Directive::Event(event) => {
-                extract_meta_currencies(&event.meta, &mut currencies);
-            }
-            Directive::Query(query) => {
-                extract_meta_currencies(&query.meta, &mut currencies);
-            }
-        }
+        visit_currencies(directive, &mut |c| currencies.push(c.to_string()));
     }
-
     for currency in DEFAULT_CURRENCIES {
         currencies.push((*currency).to_string());
     }
-
     currencies.sort();
     currencies.dedup();
     currencies
-}
-
-/// Push any currency literal embedded in a metadata block onto `out`.
-fn extract_meta_currencies(meta: &Metadata, out: &mut Vec<String>) {
-    for v in meta.values() {
-        match v {
-            MetaValue::Currency(s) => out.push(s.clone()),
-            MetaValue::Amount(a) => out.push(a.currency.to_string()),
-            _ => {}
-        }
-    }
-}
-
-/// Push the currency carried by a `PriceAnnotation` (`@` or `@@`)
-/// onto `out`, if it has one. `UnitEmpty` / `TotalEmpty` annotations
-/// (the user typed `@`/`@@` without an amount) have no currency.
-fn extract_price_currency(price: &PriceAnnotation, out: &mut Vec<String>) {
-    match price {
-        PriceAnnotation::Unit(a) | PriceAnnotation::Total(a) => {
-            out.push(a.currency.to_string());
-        }
-        PriceAnnotation::UnitIncomplete(ia) | PriceAnnotation::TotalIncomplete(ia) => {
-            if let Some(c) = ia.currency() {
-                out.push(c.to_string());
-            }
-        }
-        PriceAnnotation::UnitEmpty | PriceAnnotation::TotalEmpty => {}
-    }
 }
 
 /// Extract unique payees from transactions (sorted, deduplicated).
@@ -275,7 +95,7 @@ pub fn extract_payees_iter<'a>(directives: impl Iterator<Item = &'a Directive>) 
 mod tests {
     use super::*;
     use crate::NaiveDate;
-    use crate::{Amount, Balance, Commodity, Open, Pad, Posting, Transaction};
+    use crate::{Amount, Balance, Commodity, MetaValue, Metadata, Open, Pad, Posting, Transaction};
 
     fn date(y: i32, m: u32, d: u32) -> NaiveDate {
         crate::naive_date(y, m, d).unwrap()

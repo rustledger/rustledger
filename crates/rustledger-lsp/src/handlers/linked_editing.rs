@@ -35,7 +35,7 @@ pub fn handle_linked_editing_range(
     }
     // Check if it's a currency
     else if is_currency_like(&word, parse_result) {
-        collect_currency_ranges(source, parse_result, &line_index, &word, &mut ranges);
+        collect_currency_ranges(parse_result, &line_index, &word, &mut ranges);
     }
 
     if ranges.is_empty() {
@@ -145,50 +145,37 @@ fn collect_account_ranges(
 }
 
 /// Collect all ranges for a currency.
+/// Collect linked-edit ranges for a currency.
+///
+/// Walks the parser's `currency_occurrences` index for exact spans
+/// — same pattern as `rename::collect_currency_rename_edits` and
+/// siblings. The previous string-search implementation matched
+/// currency-code substrings in payee strings, account-name segments,
+/// and comments, then included them in the linked-edit range set —
+/// so as the user typed, the unrelated text would mutate alongside
+/// the real currency tokens.
 fn collect_currency_ranges(
-    source: &str,
     parse_result: &ParseResult,
     line_index: &LineIndex,
     currency: &str,
     ranges: &mut Vec<Range>,
 ) {
-    for spanned in &parse_result.directives {
-        let directive_text = &source[spanned.span.start..spanned.span.end];
-        let (start_line, _) = line_index.offset_to_position(spanned.span.start);
-
-        for (line_offset, line) in directive_text.lines().enumerate() {
-            let mut search_start = 0;
-            while let Some(pos) = line[search_start..].find(currency) {
-                let actual_pos = search_start + pos;
-
-                // Verify word boundaries
-                let before_ok = actual_pos == 0
-                    || !line
-                        .chars()
-                        .nth(actual_pos - 1)
-                        .unwrap_or(' ')
-                        .is_alphanumeric();
-                let after_ok = actual_pos + currency.len() >= line.len()
-                    || !line
-                        .chars()
-                        .nth(actual_pos + currency.len())
-                        .unwrap_or(' ')
-                        .is_alphanumeric();
-
-                if before_ok && after_ok {
-                    let ref_line = start_line + line_offset as u32;
-                    ranges.push(Range {
-                        start: Position::new(ref_line, actual_pos as u32),
-                        end: Position::new(ref_line, (actual_pos + currency.len()) as u32),
-                    });
-                }
-
-                search_start = actual_pos + currency.len();
-            }
+    for occurrence in &parse_result.currency_occurrences {
+        if occurrence.value != currency {
+            continue;
         }
+        let (start_line, start_col) = line_index.offset_to_position(occurrence.span.start);
+        let (end_line, end_col) = line_index.offset_to_position(occurrence.span.end);
+        ranges.push(Range {
+            start: Position::new(start_line, start_col),
+            end: Position::new(end_line, end_col),
+        });
     }
 
-    // Deduplicate and sort
+    // Defensive dedup — see `rename::collect_currency_rename_edits`
+    // for the rationale; the parser is forward-advancing so today
+    // every occurrence is unique, but the dedup costs nothing and
+    // protects against future parser refactors.
     ranges.sort_by(|a, b| {
         a.start
             .line
@@ -266,5 +253,55 @@ mod tests {
         let ranges = result.unwrap();
         // Should find USD in: open, posting 1, posting 2 = 3 ranges
         assert_eq!(ranges.ranges.len(), 3);
+    }
+
+    /// Regression test for currency linked-editing false positives.
+    /// See `rename::test_rename_currency_no_false_positives` for the
+    /// fuller rationale.
+    ///
+    /// Linked editing is especially sensitive to false positives:
+    /// each range gets mutated *together* as the user types, so a
+    /// false-positive range inside an account name or a payee
+    /// string would silently corrupt that text. The AST-driven
+    /// `currency_occurrences` walk makes that impossible.
+    #[test]
+    fn test_linked_editing_currency_no_false_positives() {
+        let source = r#"2024-01-01 open Assets:USD-Reserve
+2024-01-01 commodity USD
+2024-01-15 * "USD-to-EUR transfer"
+  Assets:USD-Reserve  -100 USD
+  Assets:Bank          100 USD
+"#;
+        let result = parse(source);
+        assert!(
+            result.errors.is_empty(),
+            "parse errors: {:?}",
+            result.errors
+        );
+        let uri: lsp_types::Uri = "file:///test.beancount".parse().unwrap();
+
+        let params = LinkedEditingRangeParams {
+            text_document_position_params: lsp_types::TextDocumentPositionParams {
+                text_document: lsp_types::TextDocumentIdentifier { uri },
+                position: Position::new(1, 21), // on `USD` of `commodity USD`
+            },
+            work_done_progress_params: Default::default(),
+        };
+
+        let ranges = handle_linked_editing_range(&params, source, &result)
+            .expect("linked editing returns Some");
+
+        // Expected: 3 ranges — `commodity USD`, `-100 USD`,
+        // `100 USD`. Bespoke string-search would have produced 5
+        // (the payee substring and the account-name substring
+        // would have been mutated alongside, corrupting unrelated
+        // text as the user typed).
+        assert_eq!(
+            ranges.ranges.len(),
+            3,
+            "expected 3 linked-edit ranges, got {}: {:#?}",
+            ranges.ranges.len(),
+            ranges.ranges
+        );
     }
 }

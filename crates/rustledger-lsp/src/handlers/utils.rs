@@ -440,6 +440,51 @@ mod tests {
         assert!(!is_currency_like_simple("TOOLONGCURRENCY"));
     }
 
+    /// `is_currency_like` validates format AND confirms the string
+    /// actually appears as a parsed `Currency` token in the
+    /// document. This test pins both behaviors.
+    ///
+    /// Includes a coverage case for the latent gap the previous
+    /// manual-AST-walk implementation had: a currency mentioned
+    /// only in a `Price` directive returns true. (Whether the old
+    /// walk happened to cover `Price` doesn't matter for the new
+    /// implementation — it queries `currency_occurrences`, which
+    /// is exhaustive by construction.)
+    #[test]
+    fn test_is_currency_like() {
+        use rustledger_parser::parse;
+
+        let source = r#"2024-01-01 commodity USD
+2024-01-01 open Assets:Bank USD
+2024-01-15 * "Coffee"
+  Assets:Bank  -5.00 USD
+  Expenses:Food  5.00 USD
+2024-01-20 price GBP  1.27 USD
+"#;
+        let parse_result = parse(source);
+
+        // Format check: must be uppercase/digits, length 2-24.
+        assert!(
+            !is_currency_like("usd", &parse_result),
+            "lowercase rejected"
+        );
+        assert!(!is_currency_like("U", &parse_result), "too short rejected");
+
+        // Format-valid but not present in document.
+        assert!(
+            !is_currency_like("XYZ", &parse_result),
+            "unknown currency rejected"
+        );
+
+        // Format-valid and present as Currency token.
+        assert!(is_currency_like("USD", &parse_result));
+
+        // Currency that appears ONLY in a Price directive (the
+        // latent gap of the previous manual AST walk if it had
+        // missed Price). `currency_occurrences` is exhaustive.
+        assert!(is_currency_like("GBP", &parse_result));
+    }
+
     #[test]
     fn test_is_word_char() {
         assert!(is_word_char('a'));

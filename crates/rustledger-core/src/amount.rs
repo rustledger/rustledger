@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::ops::{Add, AddAssign, Neg, Sub, SubAssign};
 
+use crate::Currency;
 use crate::intern::InternedStr;
 #[cfg(feature = "rkyv")]
 use crate::intern::{AsDecimal, AsInternedStr};
@@ -40,14 +41,13 @@ pub struct Amount {
     #[cfg_attr(feature = "rkyv", rkyv(with = AsDecimal))]
     pub number: Decimal,
     /// The currency code (e.g., "USD", "EUR", "AAPL")
-    #[cfg_attr(feature = "rkyv", rkyv(with = AsInternedStr))]
-    pub currency: InternedStr,
+    pub currency: Currency,
 }
 
 impl Amount {
     /// Create a new amount.
     #[must_use]
-    pub fn new(number: Decimal, currency: impl Into<InternedStr>) -> Self {
+    pub fn new(number: Decimal, currency: impl Into<Currency>) -> Self {
         Self {
             number,
             currency: currency.into(),
@@ -56,7 +56,7 @@ impl Amount {
 
     /// Create a zero amount with the given currency.
     #[must_use]
-    pub fn zero(currency: impl Into<InternedStr>) -> Self {
+    pub fn zero(currency: impl Into<Currency>) -> Self {
         Self {
             number: Decimal::ZERO,
             currency: currency.into(),
@@ -300,13 +300,13 @@ pub enum IncompleteAmount {
     /// Only number specified, currency to be inferred from context (cost, price, or other postings)
     NumberOnly(#[cfg_attr(feature = "rkyv", rkyv(with = AsDecimal))] Decimal),
     /// Only currency specified, number to be interpolated to balance the transaction
-    CurrencyOnly(#[cfg_attr(feature = "rkyv", rkyv(with = AsInternedStr))] InternedStr),
+    CurrencyOnly(Currency),
 }
 
 impl IncompleteAmount {
     /// Create a complete amount.
     #[must_use]
-    pub fn complete(number: Decimal, currency: impl Into<InternedStr>) -> Self {
+    pub fn complete(number: Decimal, currency: impl Into<Currency>) -> Self {
         Self::Complete(Amount::new(number, currency))
     }
 
@@ -318,7 +318,7 @@ impl IncompleteAmount {
 
     /// Create a currency-only incomplete amount.
     #[must_use]
-    pub fn currency_only(currency: impl Into<InternedStr>) -> Self {
+    pub fn currency_only(currency: impl Into<Currency>) -> Self {
         Self::CurrencyOnly(currency.into())
     }
 

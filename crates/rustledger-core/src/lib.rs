@@ -47,6 +47,7 @@ pub mod directive;
 pub mod display_context;
 pub mod extract;
 pub mod format;
+pub mod identifiers;
 pub mod implicit_prices;
 pub mod intern;
 pub mod inventory;
@@ -71,6 +72,7 @@ pub use extract::{
     extract_currencies_iter, extract_payees, extract_payees_iter,
 };
 pub use format::{FormatConfig, format_directive, format_posting, format_posting_line};
+pub use identifiers::{Account, Currency, Link, Tag};
 pub use implicit_prices::extract_per_unit_price;
 pub use intern::{InternedStr, StringInterner};
 pub use inventory::{

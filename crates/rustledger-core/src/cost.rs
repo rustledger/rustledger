@@ -54,8 +54,7 @@ pub struct Cost {
     #[cfg_attr(feature = "rkyv", rkyv(with = AsDecimal))]
     pub number: Decimal,
     /// Currency of the cost
-    #[cfg_attr(feature = "rkyv", rkyv(with = AsInternedStr))]
-    pub currency: InternedStr,
+    pub currency: crate::Currency,
     /// Acquisition date (optional, for lot identification)
     #[cfg_attr(feature = "rkyv", rkyv(with = rkyv::with::Map<AsNaiveDate>))]
     pub date: Option<NaiveDate>,
@@ -69,7 +68,7 @@ impl Cost {
     /// Create a new cost with exact precision.
     /// Use this for user-specified values that should preserve their precision.
     #[must_use]
-    pub fn new(number: Decimal, currency: impl Into<InternedStr>) -> Self {
+    pub fn new(number: Decimal, currency: impl Into<crate::Currency>) -> Self {
         Self {
             number,
             currency: currency.into(),
@@ -83,7 +82,7 @@ impl Cost {
     /// Previously this auto-quantized, but we now preserve full precision
     /// to avoid cost basis errors. Rounding should only happen at display time.
     #[must_use]
-    pub fn new_calculated(number: Decimal, currency: impl Into<InternedStr>) -> Self {
+    pub fn new_calculated(number: Decimal, currency: impl Into<crate::Currency>) -> Self {
         Self::new(number, currency)
     }
 
@@ -202,8 +201,7 @@ pub struct CostSpec {
     #[cfg_attr(feature = "rkyv", rkyv(with = rkyv::with::Map<AsDecimal>))]
     pub number_total: Option<Decimal>,
     /// Currency of the cost (if specified)
-    #[cfg_attr(feature = "rkyv", rkyv(with = rkyv::with::Map<AsInternedStr>))]
-    pub currency: Option<InternedStr>,
+    pub currency: Option<crate::Currency>,
     /// Acquisition date (if specified)
     #[cfg_attr(feature = "rkyv", rkyv(with = rkyv::with::Map<AsNaiveDate>))]
     pub date: Option<NaiveDate>,
@@ -236,7 +234,7 @@ impl CostSpec {
 
     /// Set the currency.
     #[must_use]
-    pub fn with_currency(mut self, currency: impl Into<InternedStr>) -> Self {
+    pub fn with_currency(mut self, currency: impl Into<crate::Currency>) -> Self {
         self.currency = Some(currency.into());
         self
     }

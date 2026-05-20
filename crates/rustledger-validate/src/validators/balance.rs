@@ -21,7 +21,7 @@ const BALANCE_TOLERANCE_MULTIPLIER: Decimal = Decimal::TWO;
 fn sum_account_and_subaccounts(
     inventories: &FxHashMap<InternedStr, Inventory>,
     account: &InternedStr,
-    currency: &InternedStr,
+    currency: &rustledger_core::Currency,
 ) -> Decimal {
     let account_str = account.as_str();
     let mut total = Decimal::ZERO;

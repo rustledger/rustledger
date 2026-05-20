@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use rustledger_core::{Directive, InternedStr, NaiveDate};
+use rustledger_core::{Currency, Directive, NaiveDate};
 use rustledger_loader::Loader;
 use std::collections::BTreeSet;
 use std::io::Write;
@@ -14,7 +14,7 @@ pub(super) fn cmd_stats<W: Write>(file: &PathBuf, writer: &mut W) -> Result<()> 
     let mut transactions = 0;
     let mut postings = 0;
     let mut accounts = 0;
-    let mut commodities_set: BTreeSet<InternedStr> = BTreeSet::new();
+    let mut commodities_set: BTreeSet<Currency> = BTreeSet::new();
     let mut balance_assertions = 0;
     let mut prices = 0;
     let mut first_date: Option<NaiveDate> = None;

@@ -84,7 +84,7 @@ pub struct ParseResult {
     /// the same way it does for `directives`. Per-file consumers
     /// (today: every LSP handler) can ignore `file_id`; future
     /// multi-file consumers must remember to thread it through.
-    pub currency_occurrences: Vec<Spanned<InternedStr>>,
+    pub currency_occurrences: Vec<Spanned<rustledger_core::Currency>>,
 }
 
 /// A warning from the parser (non-fatal).

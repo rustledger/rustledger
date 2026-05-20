@@ -51,8 +51,8 @@ pub(super) fn report_balsheet<W: Write>(
     // Helper to sum inventory by currency (uses InternedStr to avoid allocations)
     fn sum_by_currency(
         balances: &BTreeMap<InternedStr, Inventory>,
-    ) -> BTreeMap<InternedStr, Decimal> {
-        let mut totals: BTreeMap<InternedStr, Decimal> = BTreeMap::new();
+    ) -> BTreeMap<rustledger_core::Currency, Decimal> {
+        let mut totals: BTreeMap<rustledger_core::Currency, Decimal> = BTreeMap::new();
         for inv in balances.values() {
             for pos in inv.positions() {
                 *totals.entry(pos.units.currency.clone()).or_default() += pos.units.number;
@@ -91,7 +91,7 @@ pub(super) fn report_balsheet<W: Write>(
     // Net worth = Assets - Liabilities
     let asset_totals = sum_by_currency(&assets);
     let liability_totals = sum_by_currency(&liabilities);
-    let mut net_worth: BTreeMap<InternedStr, Decimal> = asset_totals;
+    let mut net_worth: BTreeMap<rustledger_core::Currency, Decimal> = asset_totals;
     for (currency, amount) in &liability_totals {
         *net_worth.entry(currency.clone()).or_default() += amount;
     }
@@ -144,7 +144,7 @@ pub(super) fn report_balsheet<W: Write>(
                 writer: &mut W,
                 title: &str,
                 balances: &BTreeMap<InternedStr, Inventory>,
-            ) -> Result<BTreeMap<InternedStr, Decimal>> {
+            ) -> Result<BTreeMap<rustledger_core::Currency, Decimal>> {
                 writeln!(writer, "{title}")?;
                 writeln!(writer, "{}", "-".repeat(60))?;
                 for (account, inventory) in balances {
@@ -159,7 +159,7 @@ pub(super) fn report_balsheet<W: Write>(
                         )?;
                     }
                 }
-                let mut totals: BTreeMap<InternedStr, Decimal> = BTreeMap::new();
+                let mut totals: BTreeMap<rustledger_core::Currency, Decimal> = BTreeMap::new();
                 for inv in balances.values() {
                     for pos in inv.positions() {
                         *totals.entry(pos.units.currency.clone()).or_default() += pos.units.number;

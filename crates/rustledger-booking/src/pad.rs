@@ -24,7 +24,8 @@
 
 use rust_decimal::Decimal;
 use rustledger_core::{
-    Amount, Directive, InternedStr, Inventory, NaiveDate, Pad, Position, Posting, Transaction,
+    Amount, Currency, Directive, InternedStr, Inventory, NaiveDate, Pad, Position, Posting,
+    Transaction,
 };
 use std::collections::HashMap;
 use std::ops::Neg;
@@ -76,7 +77,7 @@ struct PendingPad {
     /// Whether this pad has been used (has at least one balance assertion).
     used: bool,
     /// Currencies that have already been padded (each currency can only be padded once per pad).
-    padded_currencies: std::collections::HashSet<InternedStr>,
+    padded_currencies: std::collections::HashSet<Currency>,
 }
 
 /// Process pad directives and generate synthetic transactions.

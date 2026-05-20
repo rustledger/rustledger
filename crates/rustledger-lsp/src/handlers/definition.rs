@@ -8,9 +8,7 @@ use lsp_types::{GotoDefinitionParams, GotoDefinitionResponse, Location, Position
 use rustledger_core::Directive;
 use rustledger_parser::ParseResult;
 
-use super::utils::{
-    LineIndex, get_word_at_source_position, is_account_type, is_currency_like_simple,
-};
+use super::utils::{LineIndex, get_word_at_source_position, is_account_type, is_currency_like};
 
 /// Handle a go-to-definition request.
 pub fn handle_goto_definition(
@@ -39,8 +37,12 @@ pub fn handle_goto_definition(
         return Some(GotoDefinitionResponse::Scalar(location));
     }
 
-    // Check if it's a currency
-    if is_currency_like_simple(&word)
+    // Check if it's a currency. Use the AST-validating
+    // `is_currency_like` (not `_simple`) so words that look like
+    // currencies but don't actually appear as `Currency` tokens
+    // anywhere in the document short-circuit here instead of falling
+    // through to `find_currency_definition` and then returning None.
+    if is_currency_like(&word, parse_result)
         && let Some(location) = find_currency_definition(&word, parse_result, &line_index, uri)
     {
         return Some(GotoDefinitionResponse::Scalar(location));
@@ -64,9 +66,17 @@ fn find_account_definition(
 ) -> Option<Location> {
     for spanned_directive in &parse_result.directives {
         if let Directive::Open(open) = &spanned_directive.value {
-            let open_account = open.account.to_string();
-            // Match exact account or account prefix
-            if open_account == account || account.starts_with(&format!("{}:", open_account)) {
+            let open_account = open.account.as_ref();
+            // Match exact account or `Open:account:Sub`-style prefix.
+            // Pre-fix this branch did
+            // `account.starts_with(&format!("{}:", open_account))`,
+            // which allocated a new `String` per iteration. Using
+            // `strip_prefix` + a `b':'` check keeps it allocation-
+            // free.
+            let prefix_match = account
+                .strip_prefix(open_account)
+                .is_some_and(|rest| rest.starts_with(':'));
+            if account == open_account || prefix_match {
                 let (start_line, start_col) =
                     line_index.offset_to_position(spanned_directive.span.start);
                 let (end_line, end_col) = line_index.offset_to_position(spanned_directive.span.end);

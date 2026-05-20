@@ -160,8 +160,10 @@ pub fn start_stdio() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .general
         .as_ref()
         .and_then(|g| g.position_encodings.as_ref())
-        .filter(|encs| encs.contains(&lsp_types::PositionEncodingKind::UTF8))
-        .map(|_| lsp_types::PositionEncodingKind::UTF8);
+        .and_then(|encs| {
+            encs.contains(&lsp_types::PositionEncodingKind::UTF8)
+                .then_some(lsp_types::PositionEncodingKind::UTF8)
+        });
 
     // Build server capabilities
     let capabilities = lsp_types::ServerCapabilities {

@@ -22,10 +22,12 @@ pub fn handle_inlay_hints(
 ) -> Option<Vec<InlayHint>> {
     let range = params.range;
     let mut hints = Vec::new();
-    let lines: Vec<&str> = source.lines().collect();
     // Build the line index once: O(n) up front, O(log lines) per
     // offset lookup. Without it the per-directive + per-posting
-    // lookups below scale quadratically with file size.
+    // lookups below scale quadratically with file size. We also
+    // use `line_index.line_text(...)` further down instead of
+    // pre-collecting `Vec<&str>` of all lines, so a large fully-
+    // explicit ledger pays neither allocation.
     let line_index = LineIndex::new(source);
 
     for spanned in &parse_result.directives {
@@ -118,6 +120,18 @@ pub fn handle_inlay_hints(
             // identifies the same posting reliably. If no match —
             // the slot filled to zero and got pruned — emit no
             // hint.
+            //
+            // Note on the multi-currency single-missing case:
+            // `interpolate` fills the source posting with the FIRST
+            // residual currency in place, then appends additional
+            // posting clones (one per remaining currency, each
+            // carrying the SAME span as the template). `find()`
+            // returns the in-place fill — so we emit one hint
+            // covering only the first currency. Surfacing the
+            // others would require either a multi-line hint layout
+            // or stacking hints at the same screen position; we
+            // accept the single-currency rendering to match the
+            // pre-refactor bespoke implementation.
             let Some(filled_posting) = filled
                 .transaction
                 .postings
@@ -136,7 +150,7 @@ pub fn handle_inlay_hints(
                 continue;
             };
 
-            let Some(line) = lines.get(posting_line as usize) else {
+            let Some(line) = line_index.line_text(source, posting_line) else {
                 continue;
             };
 
@@ -314,13 +328,15 @@ mod tests {
 
         let resolved = handle_inlay_hint_resolve(hint, &result);
 
-        // Should now have a tooltip
-        assert!(resolved.tooltip.is_some());
-
-        if let Some(lsp_types::InlayHintTooltip::MarkupContent(content)) = resolved.tooltip {
-            assert!(content.value.contains("Expenses:Food"));
-            assert!(content.value.contains("2 transactions"));
-        }
+        // Pattern-match the variant explicitly: a `String` tooltip
+        // (the other variant) would silently pass the prior
+        // `if let Some(MarkupContent(_))` pattern.
+        let content = match resolved.tooltip {
+            Some(lsp_types::InlayHintTooltip::MarkupContent(c)) => c,
+            other => panic!("expected MarkupContent tooltip; got {other:?}"),
+        };
+        assert!(content.value.contains("Expenses:Food"));
+        assert!(content.value.contains("2 transactions"));
     }
 
     #[test]

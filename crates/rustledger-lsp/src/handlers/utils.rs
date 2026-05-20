@@ -114,6 +114,25 @@ impl LineIndex {
     pub fn line_count(&self) -> usize {
         self.line_starts.len()
     }
+
+    /// Get the text of a single line (0-indexed), excluding the
+    /// terminating newline. Returns None if `line` is out of bounds.
+    ///
+    /// Cheaper than `source.lines().collect::<Vec<_>>()` for handlers
+    /// that only need a few specific lines.
+    pub fn line_text<'a>(&self, source: &'a str, line: u32) -> Option<&'a str> {
+        let line = line as usize;
+        let start = *self.line_starts.get(line)?;
+        let end = self.line_starts.get(line + 1).copied().unwrap_or(self.len);
+        // `start..end` includes any trailing `\n` (and `\r` if CRLF);
+        // strip both so the returned slice mirrors `str::lines()`.
+        Some(
+            source
+                .get(start..end)?
+                .trim_end_matches('\n')
+                .trim_end_matches('\r'),
+        )
+    }
 }
 
 /// Convert a byte offset to a line/column position (0-based for LSP).

@@ -214,6 +214,21 @@ impl Posting {
     }
 
     /// Add a cost specification.
+    ///
+    /// Consuming builder — takes `self` by value and returns `Posting`.
+    /// To apply this to a `Spanned<Posting>` while preserving its source
+    /// location, use [`crate::Spanned::map`]:
+    ///
+    /// ```no_run
+    /// # use rustledger_core::{Posting, Amount, CostSpec, Spanned};
+    /// # use rust_decimal_macros::dec;
+    /// # let cost = CostSpec { number_per: Some(dec!(150)), number_total: None,
+    /// #     currency: Some("USD".into()), date: None, label: None, merge: false };
+    /// let spanned: Spanned<Posting> = Spanned::synthesized(
+    ///     Posting::new("Assets:Stock", Amount::new(dec!(10), "AAPL"))
+    /// );
+    /// let with_cost: Spanned<Posting> = spanned.map(|p| p.with_cost(cost));
+    /// ```
     #[must_use]
     pub fn with_cost(mut self, cost: CostSpec) -> Self {
         self.cost = Some(cost);
@@ -221,6 +236,8 @@ impl Posting {
     }
 
     /// Add a price annotation.
+    ///
+    /// See [`Self::with_cost`] for the `Spanned<Posting>` pattern.
     #[must_use]
     pub fn with_price(mut self, price: PriceAnnotation) -> Self {
         self.price = Some(price);
@@ -228,6 +245,8 @@ impl Posting {
     }
 
     /// Add a flag.
+    ///
+    /// See [`Self::with_cost`] for the `Spanned<Posting>` pattern.
     #[must_use]
     pub const fn with_flag(mut self, flag: char) -> Self {
         self.flag = Some(flag);
@@ -546,8 +565,13 @@ pub struct Transaction {
     pub links: Vec<InternedStr>,
     /// Transaction metadata
     pub meta: Metadata,
-    /// Postings (account entries)
-    pub postings: Vec<Posting>,
+    /// Postings (account entries), each wrapped with its source span and
+    /// file ID. Parser-emitted postings carry the byte range of the
+    /// posting line (from leading indent through trailing same-line
+    /// comment, not including following metadata lines); programmatically
+    /// constructed postings use [`crate::Spanned::synthesized`] which
+    /// pairs [`crate::Span::ZERO`] with [`crate::SYNTHESIZED_FILE_ID`].
+    pub postings: Vec<crate::Spanned<Posting>>,
     /// Comments that appear after all postings
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub trailing_comments: Vec<String>,
@@ -598,10 +622,26 @@ impl Transaction {
         self
     }
 
-    /// Add a posting.
+    /// Add a posting that already carries source location metadata.
+    /// Use this when constructing transactions from source (e.g.
+    /// a parser implementation) or when round-tripping through a
+    /// plugin that preserves spans.
     #[must_use]
-    pub fn with_posting(mut self, posting: Posting) -> Self {
+    pub fn with_posting(mut self, posting: crate::Spanned<Posting>) -> Self {
         self.postings.push(posting);
+        self
+    }
+
+    /// Add a programmatically-built posting (no source representation),
+    /// wrapping it with [`crate::Spanned::synthesized`]. Use this from
+    /// test fixtures, CLI commands, and importers that build directives
+    /// in memory rather than parsing them. The name is intentionally
+    /// longer than [`Self::with_posting`] so that synthesis is visible
+    /// at the call site — silently dropping a real span is the foot-gun
+    /// this rename prevents.
+    #[must_use]
+    pub fn with_synthesized_posting(mut self, posting: Posting) -> Self {
+        self.postings.push(crate::Spanned::synthesized(posting));
         self
     }
 
@@ -1358,11 +1398,11 @@ mod tests {
             .with_payee("Whole Foods")
             .with_flag('*')
             .with_tag("food")
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Expenses:Food",
                 Amount::new(dec!(50.00), "USD"),
             ))
-            .with_posting(Posting::auto("Assets:Checking"));
+            .with_synthesized_posting(Posting::auto("Assets:Checking"));
 
         assert_eq!(txn.flag, '*');
         assert_eq!(txn.payee.as_deref(), Some("Whole Foods"));
@@ -1414,11 +1454,11 @@ mod tests {
     fn test_transaction_display() {
         let txn = Transaction::new(date(2024, 1, 15), "Test transaction")
             .with_payee("Test Payee")
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Expenses:Test",
                 Amount::new(dec!(50.00), "USD"),
             ))
-            .with_posting(Posting::auto("Assets:Cash"));
+            .with_synthesized_posting(Posting::auto("Assets:Cash"));
 
         let s = format!("{txn}");
         assert!(s.contains("2024-01-15"));
@@ -1502,14 +1542,14 @@ mod tests {
         // when they're matched.
         let reduction = Directive::Transaction(
             Transaction::new(date(2024, 9, 1), "Transfer Received")
-                .with_posting(
+                .with_synthesized_posting(
                     Posting::new("Assets:AccountB", Amount::new(dec!(11.11), "USD")).with_cost(
                         CostSpec::empty()
                             .with_number_per(dec!(0.90))
                             .with_currency("EUR"),
                     ),
                 )
-                .with_posting(
+                .with_synthesized_posting(
                     Posting::new("Assets:Transit", Amount::new(dec!(-11.11), "USD")).with_cost(
                         CostSpec::empty()
                             .with_number_per(dec!(0.90))
@@ -1520,11 +1560,11 @@ mod tests {
 
         let augmentation = Directive::Transaction(
             Transaction::new(date(2024, 9, 1), "Transfer Sent")
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
                     "Assets:AccountA",
                     Amount::new(dec!(-10.00), "EUR"),
                 ))
-                .with_posting(
+                .with_synthesized_posting(
                     Posting::new("Assets:Transit", Amount::new(dec!(11.11), "USD")).with_cost(
                         CostSpec::empty()
                             .with_number_per(dec!(0.90))
@@ -1553,36 +1593,48 @@ mod tests {
         // Transaction with negative units + cost = reduction
         let reduction = Directive::Transaction(
             Transaction::new(date(2024, 1, 1), "Sell")
-                .with_posting(
+                .with_synthesized_posting(
                     Posting::new("Assets:Stock", Amount::new(dec!(-10), "AAPL")).with_cost(
                         CostSpec::empty()
                             .with_number_per(dec!(150))
                             .with_currency("USD"),
                     ),
                 )
-                .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(1500), "USD"))),
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Cash",
+                    Amount::new(dec!(1500), "USD"),
+                )),
         );
         assert!(reduction.has_cost_reduction());
 
         // Transaction with positive units + cost = augmentation
         let augmentation = Directive::Transaction(
             Transaction::new(date(2024, 1, 1), "Buy")
-                .with_posting(
+                .with_synthesized_posting(
                     Posting::new("Assets:Stock", Amount::new(dec!(10), "AAPL")).with_cost(
                         CostSpec::empty()
                             .with_number_per(dec!(150))
                             .with_currency("USD"),
                     ),
                 )
-                .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(-1500), "USD"))),
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Cash",
+                    Amount::new(dec!(-1500), "USD"),
+                )),
         );
         assert!(!augmentation.has_cost_reduction());
 
         // Transaction without cost = not a reduction
         let simple = Directive::Transaction(
             Transaction::new(date(2024, 1, 1), "Payment")
-                .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(50), "USD")))
-                .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(-50), "USD"))),
+                .with_synthesized_posting(Posting::new(
+                    "Expenses:Food",
+                    Amount::new(dec!(50), "USD"),
+                ))
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Cash",
+                    Amount::new(dec!(-50), "USD"),
+                )),
         );
         assert!(!simple.has_cost_reduction());
     }
@@ -1651,8 +1703,11 @@ mod tests {
             links: vec![],
             meta,
             postings: vec![
-                Posting::new("Assets:Bank", Amount::new(dec!(-2), "USD")),
-                Posting::auto("Expenses:Example"),
+                crate::Spanned::synthesized(Posting::new(
+                    "Assets:Bank",
+                    Amount::new(dec!(-2), "USD"),
+                )),
+                crate::Spanned::synthesized(Posting::auto("Expenses:Example")),
             ],
             trailing_comments: Vec::new(),
         };

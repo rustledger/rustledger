@@ -56,8 +56,8 @@ fn generate_valid_ledger(num_transactions: usize) -> Vec<Directive> {
 
         let txn = Transaction::new(date(2024, month, day), format!("Transaction {i}"))
             .with_flag('*')
-            .with_posting(Posting::new(expense, Amount::new(amount, "USD")))
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(expense, Amount::new(amount, "USD")))
+            .with_synthesized_posting(Posting::new(
                 "Assets:Bank:Checking",
                 Amount::new(-amount, "USD"),
             ));
@@ -98,8 +98,8 @@ fn generate_ledger_with_errors(num_transactions: usize) -> Vec<Directive> {
 
         let txn = Transaction::new(date(2024, 1, 15), format!("Transaction {i}"))
             .with_flag('*')
-            .with_posting(Posting::new(expense, Amount::new(dec!(50.00), "USD")))
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(expense, Amount::new(dec!(50.00), "USD")))
+            .with_synthesized_posting(Posting::new(
                 "Assets:Bank:Checking",
                 Amount::new(dec!(-50.00), "USD"),
             ));
@@ -175,11 +175,14 @@ fn bench_validate_balance_assertions(c: &mut Criterion) {
 
             let txn = Transaction::new(date(2024, 1, day), format!("Deposit {i}"))
                 .with_flag('*')
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
                     "Assets:Bank:Checking",
                     Amount::new(amount, "USD"),
                 ))
-                .with_posting(Posting::new("Income:Salary", Amount::new(-amount, "USD")));
+                .with_synthesized_posting(Posting::new(
+                    "Income:Salary",
+                    Amount::new(-amount, "USD"),
+                ));
 
             directives.push(Directive::Transaction(txn));
         }

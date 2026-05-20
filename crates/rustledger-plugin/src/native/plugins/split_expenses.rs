@@ -133,6 +133,7 @@ impl NativePlugin for SplitExpensesPlugin {
                                         price: posting.price.clone(),
                                         flag: posting.flag.clone(),
                                         metadata: new_metadata,
+                                        span: None,
                                     });
                                 }
                                 changed = true;
@@ -233,6 +234,7 @@ mod tests {
                     price: None,
                     flag: None,
                     metadata: vec![],
+                    span: None,
                 },
                 PostingData {
                     account: "Expenses:Accommodation".to_string(),
@@ -244,6 +246,7 @@ mod tests {
                     price: None,
                     flag: None,
                     metadata: vec![],
+                    span: None,
                 },
             ])],
             options: PluginOptions {
@@ -317,6 +320,7 @@ mod tests {
                     price: None,
                     flag: None,
                     metadata: vec![],
+                    span: None,
                 },
                 PostingData {
                     account: "Expenses:Food:Martin".to_string(),
@@ -328,6 +332,7 @@ mod tests {
                     price: None,
                     flag: None,
                     metadata: vec![],
+                    span: None,
                 },
             ])],
             options: PluginOptions {
@@ -373,6 +378,7 @@ mod tests {
                 price: None,
                 flag: None,
                 metadata: vec![],
+                span: None,
             }])],
             options: PluginOptions {
                 operating_currencies: vec!["USD".to_string()],

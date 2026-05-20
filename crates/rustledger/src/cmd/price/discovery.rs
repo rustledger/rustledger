@@ -691,7 +691,7 @@ mod tests {
     fn directives(items: Vec<Directive>) -> Vec<Spanned<Directive>> {
         items
             .into_iter()
-            .map(|d| Spanned::new(d, Span::new(0, 0)))
+            .map(|d| Spanned::new(d, Span::ZERO))
             .collect()
     }
 
@@ -863,35 +863,44 @@ mod tests {
             Directive::Commodity(Commodity::new(date(2024, 1, 1), "EUR")),
             Directive::Transaction(
                 Transaction::new(date(2024, 2, 1), "Buy AAPL")
-                    .with_posting(Posting::new(
+                    .with_synthesized_posting(Posting::new(
                         "Assets:Brokerage",
                         Amount::new(dec!(100), "AAPL"),
                     ))
-                    .with_posting(Posting::new(
+                    .with_synthesized_posting(Posting::new(
                         "Equity:Opening",
                         Amount::new(dec!(-100), "AAPL"),
                     )),
             ),
             Directive::Transaction(
                 Transaction::new(date(2024, 3, 1), "Buy BTC")
-                    .with_posting(Posting::new(
+                    .with_synthesized_posting(Posting::new(
                         "Assets:Brokerage",
                         Amount::new(dec!(1), "BTC"),
                     ))
-                    .with_posting(Posting::new("Equity:Opening", Amount::new(dec!(-1), "BTC"))),
+                    .with_synthesized_posting(Posting::new(
+                        "Equity:Opening",
+                        Amount::new(dec!(-1), "BTC"),
+                    )),
             ),
             Directive::Transaction(
                 Transaction::new(date(2024, 4, 1), "Sell BTC")
-                    .with_posting(Posting::new(
+                    .with_synthesized_posting(Posting::new(
                         "Assets:Brokerage",
                         Amount::new(dec!(-1), "BTC"),
                     ))
-                    .with_posting(Posting::new("Equity:Opening", Amount::new(dec!(1), "BTC"))),
+                    .with_synthesized_posting(Posting::new(
+                        "Equity:Opening",
+                        Amount::new(dec!(1), "BTC"),
+                    )),
             ),
             Directive::Transaction(
                 Transaction::new(date(2024, 5, 1), "Receive EUR")
-                    .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(500), "EUR")))
-                    .with_posting(Posting::new(
+                    .with_synthesized_posting(Posting::new(
+                        "Assets:Cash",
+                        Amount::new(dec!(500), "EUR"),
+                    ))
+                    .with_synthesized_posting(Posting::new(
                         "Equity:Opening",
                         Amount::new(dec!(-500), "EUR"),
                     )),
@@ -916,22 +925,22 @@ mod tests {
             Directive::Open(Open::new(date(2024, 1, 1), "Equity:Opening")),
             Directive::Transaction(
                 Transaction::new(date(2024, 2, 1), "buy SHIB")
-                    .with_posting(Posting::new(
+                    .with_synthesized_posting(Posting::new(
                         "Assets:Brokerage",
                         Amount::new(dec!(100), "SHIB"),
                     ))
-                    .with_posting(Posting::new(
+                    .with_synthesized_posting(Posting::new(
                         "Equity:Opening",
                         Amount::new(dec!(-100), "SHIB"),
                     )),
             ),
             Directive::Transaction(
                 Transaction::new(date(2024, 6, 1), "sell SHIB")
-                    .with_posting(Posting::new(
+                    .with_synthesized_posting(Posting::new(
                         "Assets:Brokerage",
                         Amount::new(dec!(-100), "SHIB"),
                     ))
-                    .with_posting(Posting::new(
+                    .with_synthesized_posting(Posting::new(
                         "Equity:Opening",
                         Amount::new(dec!(100), "SHIB"),
                     )),
@@ -971,11 +980,11 @@ mod tests {
             Directive::Open(Open::new(date(2024, 1, 1), "Equity:Opening")),
             Directive::Transaction(
                 Transaction::new(date(2024, 2, 1), "buy")
-                    .with_posting(Posting::new(
+                    .with_synthesized_posting(Posting::new(
                         "Assets:Brokerage",
                         Amount::new(dec!(10), "DOGE"),
                     ))
-                    .with_posting(Posting::new(
+                    .with_synthesized_posting(Posting::new(
                         "Equity:Opening",
                         Amount::new(dec!(-10), "DOGE"),
                     )),
@@ -1072,11 +1081,11 @@ mod tests {
             Directive::Open(Open::new(date(2024, 1, 1), "Equity:Opening")),
             Directive::Transaction(
                 Transaction::new(date(2024, 2, 1), "Buy stale token")
-                    .with_posting(Posting::new(
+                    .with_synthesized_posting(Posting::new(
                         "Assets:Brokerage",
                         Amount::new(dec!(10), "DEFUNCT"),
                     ))
-                    .with_posting(Posting::new(
+                    .with_synthesized_posting(Posting::new(
                         "Equity:Opening",
                         Amount::new(dec!(-10), "DEFUNCT"),
                     )),
@@ -1101,19 +1110,19 @@ mod tests {
             Directive::Open(Open::new(date(2024, 1, 1), "Equity:Opening")),
             Directive::Transaction(
                 Transaction::new(date(2024, 2, 1), "Buy SHIB and BAM")
-                    .with_posting(Posting::new(
+                    .with_synthesized_posting(Posting::new(
                         "Assets:Brokerage",
                         Amount::new(dec!(100), "SHIB"),
                     ))
-                    .with_posting(Posting::new(
+                    .with_synthesized_posting(Posting::new(
                         "Equity:Opening",
                         Amount::new(dec!(-100), "SHIB"),
                     ))
-                    .with_posting(Posting::new(
+                    .with_synthesized_posting(Posting::new(
                         "Assets:Brokerage",
                         Amount::new(dec!(50), "BAM"),
                     ))
-                    .with_posting(Posting::new(
+                    .with_synthesized_posting(Posting::new(
                         "Equity:Opening",
                         Amount::new(dec!(-50), "BAM"),
                     )),
@@ -1153,11 +1162,11 @@ mod tests {
             Directive::Open(Open::new(date(2024, 1, 1), "Equity:Opening")),
             Directive::Transaction(
                 Transaction::new(date(2024, 2, 1), "Buy ETH with BTC")
-                    .with_posting(
+                    .with_synthesized_posting(
                         Posting::new("Assets:Wallet", Amount::new(dec!(1), "ETH"))
                             .with_cost(rustledger_core::CostSpec::empty().with_currency("BTC-USD")),
                     )
-                    .with_posting(Posting::new(
+                    .with_synthesized_posting(Posting::new(
                         "Equity:Opening",
                         Amount::new(dec!(-50000), "USD"),
                     )),
@@ -1193,11 +1202,11 @@ mod tests {
             Directive::Open(Open::new(date(2024, 1, 1), "Equity:Opening")),
             Directive::Transaction(
                 Transaction::new(date(2024, 3, 1), "boundary day SHIB buy")
-                    .with_posting(Posting::new(
+                    .with_synthesized_posting(Posting::new(
                         "Assets:Brokerage",
                         Amount::new(dec!(100), "SHIB"),
                     ))
-                    .with_posting(Posting::new(
+                    .with_synthesized_posting(Posting::new(
                         "Equity:Opening",
                         Amount::new(dec!(-100), "SHIB"),
                     )),
@@ -1240,8 +1249,14 @@ mod tests {
             Directive::Open(Open::new(date(2024, 1, 1), "Equity:Y")),
             Directive::Transaction(
                 Transaction::new(date(2024, 2, 1), "use weird names")
-                    .with_posting(Posting::new("Assets:X", Amount::new(dec!(1), "Vanguard")))
-                    .with_posting(Posting::new("Equity:Y", Amount::new(dec!(-1), "Vanguard"))),
+                    .with_synthesized_posting(Posting::new(
+                        "Assets:X",
+                        Amount::new(dec!(1), "Vanguard"),
+                    ))
+                    .with_synthesized_posting(Posting::new(
+                        "Equity:Y",
+                        Amount::new(dec!(-1), "Vanguard"),
+                    )),
             ),
         ]);
         let discovered =
@@ -1265,11 +1280,11 @@ mod tests {
             Directive::Commodity(comm),
             Directive::Transaction(
                 Transaction::new(date(2024, 2, 1), "Buy VTI")
-                    .with_posting(Posting::new(
+                    .with_synthesized_posting(Posting::new(
                         "Assets:Brokerage",
                         Amount::new(dec!(10), "Vanguard_VTI"),
                     ))
-                    .with_posting(Posting::new(
+                    .with_synthesized_posting(Posting::new(
                         "Equity:Opening",
                         Amount::new(dec!(-10), "Vanguard_VTI"),
                     )),
@@ -1307,11 +1322,11 @@ mod tests {
             Directive::Commodity(comm),
             Directive::Transaction(
                 Transaction::new(date(2024, 2, 1), "Buy AAPL")
-                    .with_posting(Posting::new(
+                    .with_synthesized_posting(Posting::new(
                         "Assets:Brokerage",
                         Amount::new(dec!(10), "AAPL"),
                     ))
-                    .with_posting(Posting::new(
+                    .with_synthesized_posting(Posting::new(
                         "Equity:Opening",
                         Amount::new(dec!(-10), "AAPL"),
                     )),
@@ -1397,8 +1412,11 @@ mod tests {
             Directive::Commodity(Commodity::new(date(2024, 1, 1), "BAM")),
             Directive::Transaction(
                 Transaction::new(date(2024, 2, 1), "Receive BAM")
-                    .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(100), "BAM")))
-                    .with_posting(Posting::new(
+                    .with_synthesized_posting(Posting::new(
+                        "Assets:Cash",
+                        Amount::new(dec!(100), "BAM"),
+                    ))
+                    .with_synthesized_posting(Posting::new(
                         "Equity:Opening",
                         Amount::new(dec!(-100), "BAM"),
                     )),
@@ -1431,8 +1449,11 @@ mod tests {
             Directive::Commodity(comm),
             Directive::Transaction(
                 Transaction::new(date(2024, 2, 1), "Receive BAM")
-                    .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(100), "BAM")))
-                    .with_posting(Posting::new(
+                    .with_synthesized_posting(Posting::new(
+                        "Assets:Cash",
+                        Amount::new(dec!(100), "BAM"),
+                    ))
+                    .with_synthesized_posting(Posting::new(
                         "Equity:Opening",
                         Amount::new(dec!(-100), "BAM"),
                     )),
@@ -1461,11 +1482,11 @@ mod tests {
             Directive::Commodity(comm),
             Directive::Transaction(
                 Transaction::new(date(2024, 2, 1), "Buy GOVT_EU")
-                    .with_posting(Posting::new(
+                    .with_synthesized_posting(Posting::new(
                         "Assets:Brokerage",
                         Amount::new(dec!(10), "GOVT_EU"),
                     ))
-                    .with_posting(Posting::new(
+                    .with_synthesized_posting(Posting::new(
                         "Equity:Opening",
                         Amount::new(dec!(-10), "GOVT_EU"),
                     )),
@@ -1510,11 +1531,11 @@ mod tests {
             // shouldn't reject it.
             Directive::Transaction(
                 Transaction::new(date(2024, 2, 1), "buy")
-                    .with_posting(Posting::new(
+                    .with_synthesized_posting(Posting::new(
                         "Assets:Brokerage",
                         Amount::new(dec!(10), "PSK"),
                     ))
-                    .with_posting(Posting::new(
+                    .with_synthesized_posting(Posting::new(
                         "Equity:Opening",
                         Amount::new(dec!(-10), "PSK"),
                     )),
@@ -1576,22 +1597,25 @@ mod tests {
             // Buy + sell same amount → zero balance → inactive.
             Directive::Transaction(
                 Transaction::new(date(2024, 2, 1), "buy")
-                    .with_posting(Posting::new(
+                    .with_synthesized_posting(Posting::new(
                         "Assets:Brokerage",
                         Amount::new(dec!(10), "PSK"),
                     ))
-                    .with_posting(Posting::new(
+                    .with_synthesized_posting(Posting::new(
                         "Equity:Opening",
                         Amount::new(dec!(-10), "PSK"),
                     )),
             ),
             Directive::Transaction(
                 Transaction::new(date(2024, 3, 1), "sell")
-                    .with_posting(Posting::new(
+                    .with_synthesized_posting(Posting::new(
                         "Assets:Brokerage",
                         Amount::new(dec!(-10), "PSK"),
                     ))
-                    .with_posting(Posting::new("Equity:Opening", Amount::new(dec!(10), "PSK"))),
+                    .with_synthesized_posting(Posting::new(
+                        "Equity:Opening",
+                        Amount::new(dec!(10), "PSK"),
+                    )),
             ),
         ]);
         let mut config_mapping = HashMap::new();
@@ -1632,11 +1656,11 @@ mod tests {
             Directive::Commodity(comm),
             Directive::Transaction(
                 Transaction::new(date(2024, 2, 1), "buy")
-                    .with_posting(Posting::new(
+                    .with_synthesized_posting(Posting::new(
                         "Assets:Brokerage",
                         Amount::new(dec!(10), "PSK"),
                     ))
-                    .with_posting(Posting::new(
+                    .with_synthesized_posting(Posting::new(
                         "Equity:Opening",
                         Amount::new(dec!(-10), "PSK"),
                     )),
@@ -1675,11 +1699,11 @@ mod tests {
             Directive::Commodity(comm),
             Directive::Transaction(
                 Transaction::new(date(2024, 2, 1), "buy")
-                    .with_posting(Posting::new(
+                    .with_synthesized_posting(Posting::new(
                         "Assets:Brokerage",
                         Amount::new(dec!(10), "PSK"),
                     ))
-                    .with_posting(Posting::new(
+                    .with_synthesized_posting(Posting::new(
                         "Equity:Opening",
                         Amount::new(dec!(-10), "PSK"),
                     )),
@@ -1771,8 +1795,11 @@ mod tests {
             Directive::Commodity(comm),
             Directive::Transaction(
                 Transaction::new(date(2024, 2, 1), "Receive BAM")
-                    .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(100), "BAM")))
-                    .with_posting(Posting::new(
+                    .with_synthesized_posting(Posting::new(
+                        "Assets:Cash",
+                        Amount::new(dec!(100), "BAM"),
+                    ))
+                    .with_synthesized_posting(Posting::new(
                         "Equity:Opening",
                         Amount::new(dec!(-100), "BAM"),
                     )),
@@ -1797,11 +1824,11 @@ mod tests {
             Directive::Open(Open::new(date(2024, 1, 1), "Equity:Opening")),
             Directive::Transaction(
                 Transaction::new(date(2024, 2, 1), "Buy AAPL")
-                    .with_posting(Posting::new(
+                    .with_synthesized_posting(Posting::new(
                         "Assets:Brokerage",
                         Amount::new(dec!(100), "AAPL"),
                     ))
-                    .with_posting(Posting::new(
+                    .with_synthesized_posting(Posting::new(
                         "Equity:Opening",
                         Amount::new(dec!(-100), "AAPL"),
                     )),

@@ -31,6 +31,15 @@ pub enum ConversionError {
     /// Invalid flag format.
     #[error("invalid flag: {0}")]
     InvalidFlag(String),
+    /// A `SourceSpan` byte offset from the plugin wire format does not
+    /// fit in `usize` on the host. This is effectively impossible in
+    /// practice — `SourceSpan` is `u64` and the host is 64-bit on every
+    /// platform rustledger supports today, so the only way to surface
+    /// this variant is to run the host on a 32-bit target with source
+    /// files larger than 4 GiB. If you see it: please file a bug
+    /// report; the offset is almost certainly corrupt.
+    #[error("source span overflow: {0}")]
+    SpanOverflow(String),
 }
 
 /// Convert a directive to its serializable wrapper with source location.
@@ -203,7 +212,7 @@ mod tests {
             links: vec!["grocery-2024".into()],
             meta: Metadata::default(),
             postings: vec![
-                Posting {
+                rustledger_core::Spanned::synthesized(Posting {
                     account: "Expenses:Food".into(),
                     units: Some(IncompleteAmount::Complete(Amount::new(dec("50.00"), "USD"))),
                     cost: None,
@@ -212,8 +221,8 @@ mod tests {
                     meta: Metadata::default(),
                     comments: Vec::new(),
                     trailing_comments: Vec::new(),
-                },
-                Posting {
+                }),
+                rustledger_core::Spanned::synthesized(Posting {
                     account: "Assets:Checking".into(),
                     units: None,
                     cost: None,
@@ -222,7 +231,7 @@ mod tests {
                     meta: Metadata::default(),
                     comments: Vec::new(),
                     trailing_comments: Vec::new(),
-                },
+                }),
             ],
             trailing_comments: Vec::new(),
         };

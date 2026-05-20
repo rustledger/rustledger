@@ -92,6 +92,7 @@ fn hash_posting<H: Hasher>(posting: &PostingData, hasher: &mut H) {
         price,
         flag,
         metadata: _, // Intentionally excluded
+        span: _,     // Source location is not part of structural identity
     } = posting;
 
     account.hash(hasher);
@@ -317,6 +318,7 @@ mod tests {
                 price: None,
                 flag: None,
                 metadata: vec![],
+                span: None,
             }],
         }
     }
@@ -524,6 +526,7 @@ mod tests {
             price: None,
             flag: None,
             metadata: vec![],
+            span: None,
         };
         let posting_b = PostingData {
             account: "Expenses:Food".to_string(),
@@ -535,6 +538,7 @@ mod tests {
             price: None,
             flag: None,
             metadata: vec![],
+            span: None,
         };
 
         let txn1 = TransactionData {
@@ -581,6 +585,7 @@ mod tests {
                 price: None,
                 flag: None,
                 metadata: vec![],
+                span: None,
             }],
         };
         assert_ne!(
@@ -610,6 +615,7 @@ mod tests {
                 price: None,
                 flag: None,
                 metadata: vec![],
+                span: None,
             }],
         };
         assert_eq!(
@@ -639,6 +645,7 @@ mod tests {
                     price: None,
                     flag: None,
                     metadata: vec![],
+                    span: None,
                 },
                 PostingData {
                     account: "Expenses:Food".to_string(),
@@ -650,6 +657,7 @@ mod tests {
                     price: None,
                     flag: None,
                     metadata: vec![],
+                    span: None,
                 },
             ],
         };

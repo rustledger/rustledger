@@ -435,6 +435,30 @@ pub struct TransactionData {
     pub postings: Vec<PostingData>,
 }
 
+/// Source-location metadata for a posting that the host parsed from a
+/// beancount file.
+///
+/// Plugins receive this on every parser-derived posting and **must**
+/// preserve it unchanged when modifying an existing posting (the default
+/// for a typical "edit one field" plugin). When a plugin synthesizes a
+/// brand-new posting, leave [`PostingData::span`] as `None` and the host
+/// will mark it `SYNTHESIZED_FILE_ID`.
+///
+/// Byte offsets are stored as `u64` so the wire format is stable
+/// across 32-bit (WASM) and 64-bit (host) targets, and so very large
+/// concatenated source trees (includes-of-includes) cannot silently
+/// overflow. The contents are otherwise opaque to plugin code: do
+/// not synthesize spans by guessing offsets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceSpan {
+    /// Start byte offset within the file (inclusive).
+    pub start: u64,
+    /// End byte offset within the file (exclusive).
+    pub end: u64,
+    /// Source file index in the host's source map.
+    pub file_id: u16,
+}
+
 /// Posting data for serialization.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PostingData {
@@ -450,6 +474,12 @@ pub struct PostingData {
     pub flag: Option<String>,
     /// Posting metadata.
     pub metadata: Vec<(String, MetaValueData)>,
+    /// Source location of the posting line in the file the host parsed
+    /// from, if any. Plugins **must preserve** this unchanged when
+    /// modifying an existing posting; set to `None` only for postings
+    /// the plugin itself synthesizes. See [`SourceSpan`] for details.
+    #[serde(default)]
+    pub span: Option<SourceSpan>,
 }
 
 /// Amount data for serialization.
@@ -1040,6 +1070,7 @@ mod tests {
                         price: None,
                         flag: None,
                         metadata: vec![],
+                        span: None,
                     }],
                 }),
             }],

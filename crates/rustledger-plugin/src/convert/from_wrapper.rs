@@ -3,7 +3,7 @@
 use rustledger_core::{
     Amount, Balance, Close, Commodity, CostSpec, Custom, Decimal, Document, Event,
     IncompleteAmount, MetaValue, NaiveDate, Note, Open, Pad, Posting, Price, PriceAnnotation,
-    Query, Transaction,
+    Query, Span, Spanned, Transaction,
 };
 
 use crate::types::{
@@ -34,7 +34,7 @@ pub(super) fn data_to_transaction(
     let postings = data
         .postings
         .iter()
-        .map(data_to_posting)
+        .map(data_to_spanned_posting)
         .collect::<Result<Vec<_>, _>>()?;
 
     let meta = data
@@ -86,6 +86,40 @@ pub(super) fn data_to_posting(data: &PostingData) -> Result<Posting, ConversionE
         comments: Vec::new(),
         trailing_comments: Vec::new(),
     })
+}
+
+/// Convert plugin wire-format data into a [`Spanned<Posting>`], preserving
+/// the source span the host attached on input. Postings the plugin
+/// synthesized (with `data.span == None`) round-trip as
+/// [`Spanned::synthesized`].
+pub(super) fn data_to_spanned_posting(
+    data: &PostingData,
+) -> Result<Spanned<Posting>, ConversionError> {
+    let posting = data_to_posting(data)?;
+    match data.span {
+        Some(s) => {
+            // u64-to-usize is a no-op on 64-bit hosts, which is every
+            // platform rustledger runs the host on. The wasm-plugin
+            // guest never calls this function — it manipulates
+            // PostingData directly. Surface a clear error on the
+            // (hypothetical) 32-bit-host overflow rather than
+            // silently truncating to a wrong span.
+            let start = usize::try_from(s.start).map_err(|_| {
+                ConversionError::SpanOverflow(format!(
+                    "PostingData.span.start ({}) exceeds usize::MAX on this target",
+                    s.start
+                ))
+            })?;
+            let end = usize::try_from(s.end).map_err(|_| {
+                ConversionError::SpanOverflow(format!(
+                    "PostingData.span.end ({}) exceeds usize::MAX on this target",
+                    s.end
+                ))
+            })?;
+            Ok(Spanned::new(posting, Span::new(start, end)).with_file_id(s.file_id as usize))
+        }
+        None => Ok(Spanned::synthesized(posting)),
+    }
 }
 
 pub(super) fn data_to_incomplete_amount(

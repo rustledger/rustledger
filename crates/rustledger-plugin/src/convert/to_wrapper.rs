@@ -2,13 +2,14 @@
 
 use rustledger_core::{
     Amount, Balance, Close, Commodity, CostSpec, Custom, Document, Event, IncompleteAmount,
-    MetaValue, Note, Open, Pad, Posting, Price, PriceAnnotation, Query, Transaction,
+    MetaValue, Note, Open, Pad, Posting, Price, PriceAnnotation, Query, SYNTHESIZED_FILE_ID,
+    Spanned, Transaction,
 };
 
 use crate::types::{
     AmountData, BalanceData, CloseData, CommodityData, CostData, CustomData, DocumentData,
     EventData, MetaValueData, NoteData, OpenData, PadData, PostingData, PriceAnnotationData,
-    PriceData, QueryData, TransactionData,
+    PriceData, QueryData, SourceSpan, TransactionData,
 };
 
 pub(super) fn transaction_to_data(txn: &Transaction) -> TransactionData {
@@ -23,8 +24,26 @@ pub(super) fn transaction_to_data(txn: &Transaction) -> TransactionData {
             .iter()
             .map(|(k, v)| (k.clone(), meta_value_to_data(v)))
             .collect(),
-        postings: txn.postings.iter().map(posting_to_data).collect(),
+        postings: txn.postings.iter().map(spanned_posting_to_data).collect(),
     }
+}
+
+/// Convert a parser-derived (or synthesized) [`Spanned<Posting>`] to the
+/// plugin wire format, preserving its source location so plugins can
+/// round-trip the location without writing code that handles it.
+pub(super) fn spanned_posting_to_data(spanned: &Spanned<Posting>) -> PostingData {
+    let mut data = posting_to_data(&spanned.value);
+    if spanned.file_id != SYNTHESIZED_FILE_ID {
+        // `usize as u64` is a widening cast on every supported target
+        // (32-bit host or wasm32 → u64, 64-bit host → u64) so no
+        // saturation or check is required.
+        data.span = Some(SourceSpan {
+            start: spanned.span.start as u64,
+            end: spanned.span.end as u64,
+            file_id: spanned.file_id,
+        });
+    }
+    data
 }
 
 pub(super) fn posting_to_data(posting: &Posting) -> PostingData {
@@ -39,6 +58,7 @@ pub(super) fn posting_to_data(posting: &Posting) -> PostingData {
             .iter()
             .map(|(k, v)| (k.clone(), meta_value_to_data(v)))
             .collect(),
+        span: None,
     }
 }
 

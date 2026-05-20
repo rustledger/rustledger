@@ -55,12 +55,12 @@ proptest! {
     ) {
         // Create transaction with two missing USD amounts
         let txn = Transaction::new(date, "Test")
-            .with_posting(Posting::new("Expenses:Food", amount1))
-            .with_posting(Posting::with_incomplete(
+            .with_synthesized_posting(Posting::new("Expenses:Food", amount1))
+            .with_synthesized_posting(Posting::with_incomplete(
                 "Assets:Cash1",
                 IncompleteAmount::CurrencyOnly("USD".into()),
             ))
-            .with_posting(Posting::with_incomplete(
+            .with_synthesized_posting(Posting::with_incomplete(
                 "Assets:Cash2",
                 IncompleteAmount::CurrencyOnly("USD".into()),
             ));
@@ -86,8 +86,8 @@ proptest! {
     ) {
         // Create transaction with one explicit amount and one missing
         let txn = Transaction::new(date, "Test")
-            .with_posting(Posting::new("Expenses:Food", amount))
-            .with_posting(Posting::auto("Assets:Cash"));
+            .with_synthesized_posting(Posting::new("Expenses:Food", amount))
+            .with_synthesized_posting(Posting::auto("Assets:Cash"));
 
         let result = interpolate(&txn);
 
@@ -116,8 +116,8 @@ proptest! {
         date in date_strategy(),
     ) {
         let txn = Transaction::new(date, "Test")
-            .with_posting(Posting::new("Expenses:Food", amount))
-            .with_posting(Posting::auto("Assets:Cash")); // Index 1 is missing
+            .with_synthesized_posting(Posting::new("Expenses:Food", amount))
+            .with_synthesized_posting(Posting::auto("Assets:Cash")); // Index 1 is missing
 
         let result = interpolate(&txn);
 
@@ -150,9 +150,9 @@ proptest! {
         date in date_strategy(),
     ) {
         let txn = Transaction::new(date, "Test")
-            .with_posting(Posting::new("Expenses:Food", amount1.clone()))
-            .with_posting(Posting::new("Expenses:Travel", amount2.clone()))
-            .with_posting(Posting::auto("Assets:Cash")); // Missing - will absorb both
+            .with_synthesized_posting(Posting::new("Expenses:Food", amount1.clone()))
+            .with_synthesized_posting(Posting::new("Expenses:Travel", amount2.clone()))
+            .with_synthesized_posting(Posting::auto("Assets:Cash")); // Missing - will absorb both
 
         let result = interpolate(&txn);
 
@@ -186,7 +186,7 @@ proptest! {
     ) {
         let mut txn = Transaction::new(date, "Test");
         for (i, amount) in amounts.iter().enumerate() {
-            txn = txn.with_posting(Posting::new(format!("Account:{i}"), amount.clone()));
+            txn = txn.with_synthesized_posting(Posting::new(format!("Account:{i}"), amount.clone()));
         }
 
         let residual1 = calculate_residual(&txn);
@@ -212,9 +212,9 @@ proptest! {
         date in date_strategy(),
     ) {
         let txn = Transaction::new(date, "Test")
-            .with_posting(Posting::new("Expenses:USD", amount_usd))
-            .with_posting(Posting::new("Expenses:EUR", amount_eur))
-            .with_posting(Posting::auto("Assets:Cash")); // Single auto posting
+            .with_synthesized_posting(Posting::new("Expenses:USD", amount_usd))
+            .with_synthesized_posting(Posting::new("Expenses:EUR", amount_eur))
+            .with_synthesized_posting(Posting::auto("Assets:Cash")); // Single auto posting
 
         let result = interpolate(&txn);
 
@@ -253,8 +253,8 @@ proptest! {
         date in date_strategy(),
     ) {
         let txn = Transaction::new(date, "Test")
-            .with_posting(Posting::new("Expenses:Food", Amount::new(Decimal::from(amount), "USD")))
-            .with_posting(Posting::new("Assets:Cash", Amount::new(Decimal::from(-amount), "USD")));
+            .with_synthesized_posting(Posting::new("Expenses:Food", Amount::new(Decimal::from(amount), "USD")))
+            .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(Decimal::from(-amount), "USD")));
 
         let result = interpolate(&txn).unwrap();
 
@@ -279,9 +279,9 @@ proptest! {
     ) {
         // Transaction where residual is already zero
         let txn = Transaction::new(date, "Test")
-            .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(100), "USD")))
-            .with_posting(Posting::new("Expenses:Drink", Amount::new(dec!(-100), "USD")))
-            .with_posting(Posting::auto("Assets:Cash")); // Will be filled with 0
+            .with_synthesized_posting(Posting::new("Expenses:Food", Amount::new(dec!(100), "USD")))
+            .with_synthesized_posting(Posting::new("Expenses:Drink", Amount::new(dec!(-100), "USD")))
+            .with_synthesized_posting(Posting::auto("Assets:Cash")); // Will be filled with 0
 
         let result = interpolate(&txn);
 

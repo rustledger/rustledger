@@ -52,8 +52,14 @@ fn test_e1001_account_not_open() {
         // No open directive, but transaction uses account
         Directive::Transaction(
             Transaction::new(date(2024, 1, 15), "Test")
-                .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(100), "USD")))
-                .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(-100), "USD"))),
+                .with_synthesized_posting(Posting::new(
+                    "Expenses:Food",
+                    Amount::new(dec!(100), "USD"),
+                ))
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Cash",
+                    Amount::new(dec!(-100), "USD"),
+                )),
         ),
     ];
 
@@ -87,8 +93,11 @@ fn test_e1003_account_closed() {
         // Transaction after close
         Directive::Transaction(
             Transaction::new(date(2024, 7, 1), "After close")
-                .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(100), "USD")))
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Bank",
+                    Amount::new(dec!(100), "USD"),
+                ))
+                .with_synthesized_posting(Posting::new(
                     "Income:Salary",
                     Amount::new(dec!(-100), "USD"),
                 )),
@@ -109,8 +118,14 @@ fn test_valid_account_lifecycle() {
         Directive::Open(Open::new(date(2024, 1, 1), "Expenses:Food")),
         Directive::Transaction(
             Transaction::new(date(2024, 1, 15), "Purchase")
-                .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(50), "USD")))
-                .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(-50), "USD"))),
+                .with_synthesized_posting(Posting::new(
+                    "Expenses:Food",
+                    Amount::new(dec!(50), "USD"),
+                ))
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Bank",
+                    Amount::new(dec!(-50), "USD"),
+                )),
         ),
         Directive::Close(Close::new(date(2024, 12, 31), "Expenses:Food")),
     ];
@@ -145,8 +160,14 @@ fn test_e2001_balance_assertion_failed() {
         Directive::Open(Open::new(date(2024, 1, 1), "Expenses:Food")),
         Directive::Transaction(
             Transaction::new(date(2024, 1, 15), "Groceries")
-                .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(50), "USD")))
-                .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(-50), "USD"))),
+                .with_synthesized_posting(Posting::new(
+                    "Expenses:Food",
+                    Amount::new(dec!(50), "USD"),
+                ))
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Bank",
+                    Amount::new(dec!(-50), "USD"),
+                )),
         ),
         // Balance assertion with wrong amount
         Directive::Balance(Balance::new(
@@ -170,8 +191,14 @@ fn test_valid_balance_assertion() {
         Directive::Open(Open::new(date(2024, 1, 1), "Expenses:Food")),
         Directive::Transaction(
             Transaction::new(date(2024, 1, 15), "Groceries")
-                .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(50), "USD")))
-                .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(-50), "USD"))),
+                .with_synthesized_posting(Posting::new(
+                    "Expenses:Food",
+                    Amount::new(dec!(50), "USD"),
+                ))
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Bank",
+                    Amount::new(dec!(-50), "USD"),
+                )),
         ),
         // Correct balance assertion
         Directive::Balance(Balance::new(
@@ -200,8 +227,14 @@ fn test_e3001_transaction_unbalanced() {
         // Transaction doesn't balance
         Directive::Transaction(
             Transaction::new(date(2024, 1, 15), "Unbalanced")
-                .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(100), "USD")))
-                .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(-50), "USD"))), // Missing 50
+                .with_synthesized_posting(Posting::new(
+                    "Expenses:Food",
+                    Amount::new(dec!(100), "USD"),
+                ))
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Bank",
+                    Amount::new(dec!(-50), "USD"),
+                )), // Missing 50
         ),
     ];
 
@@ -235,8 +268,9 @@ fn test_e3004_single_posting() {
         Directive::Open(Open::new(date(2024, 1, 1), "Assets:Bank")),
         // Transaction with single posting (warning)
         Directive::Transaction(
-            Transaction::new(date(2024, 1, 15), "Single posting")
-                .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(100), "USD"))),
+            Transaction::new(date(2024, 1, 15), "Single posting").with_synthesized_posting(
+                Posting::new("Assets:Bank", Amount::new(dec!(100), "USD")),
+            ),
         ),
     ];
 
@@ -254,14 +288,14 @@ fn test_e4005_negative_cost_per_unit() {
         Directive::Open(Open::new(date(2024, 1, 1), "Assets:Checking")),
         Directive::Transaction(
             Transaction::new(date(2024, 1, 15), "Buy with negative cost")
-                .with_posting(
+                .with_synthesized_posting(
                     Posting::new("Assets:Stock", Amount::new(dec!(10), "AAPL")).with_cost(
                         rustledger_core::CostSpec::empty()
                             .with_number_per(dec!(-150))
                             .with_currency("USD"),
                     ),
                 )
-                .with_posting(Posting::auto("Assets:Checking")),
+                .with_synthesized_posting(Posting::auto("Assets:Checking")),
         ),
     ];
 
@@ -279,14 +313,14 @@ fn test_e4005_negative_total_cost() {
         Directive::Open(Open::new(date(2024, 1, 1), "Assets:Checking")),
         Directive::Transaction(
             Transaction::new(date(2024, 1, 15), "Buy with negative total cost")
-                .with_posting(
+                .with_synthesized_posting(
                     Posting::new("Assets:Stock", Amount::new(dec!(10), "AAPL")).with_cost(
                         rustledger_core::CostSpec::empty()
                             .with_number_total(dec!(-1500))
                             .with_currency("USD"),
                     ),
                 )
-                .with_posting(Posting::auto("Assets:Checking")),
+                .with_synthesized_posting(Posting::auto("Assets:Checking")),
         ),
     ];
 
@@ -304,14 +338,14 @@ fn test_e4005_positive_cost_ok() {
         Directive::Open(Open::new(date(2024, 1, 1), "Assets:Checking")),
         Directive::Transaction(
             Transaction::new(date(2024, 1, 15), "Buy with positive cost")
-                .with_posting(
+                .with_synthesized_posting(
                     Posting::new("Assets:Stock", Amount::new(dec!(10), "AAPL")).with_cost(
                         rustledger_core::CostSpec::empty()
                             .with_number_per(dec!(150))
                             .with_currency("USD"),
                     ),
                 )
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
                     "Assets:Checking",
                     Amount::new(dec!(-1500), "USD"),
                 )),
@@ -332,8 +366,14 @@ fn test_valid_balanced_transaction() {
         Directive::Open(Open::new(date(2024, 1, 1), "Expenses:Food")),
         Directive::Transaction(
             Transaction::new(date(2024, 1, 15), "Balanced")
-                .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(100), "USD")))
-                .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(-100), "USD"))),
+                .with_synthesized_posting(Posting::new(
+                    "Expenses:Food",
+                    Amount::new(dec!(100), "USD"),
+                ))
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Bank",
+                    Amount::new(dec!(-100), "USD"),
+                )),
         ),
     ];
 
@@ -383,11 +423,14 @@ fn test_valid_multi_currency_with_price() {
         // Exchange with price annotation
         Directive::Transaction(
             Transaction::new(date(2024, 1, 15), "Currency exchange")
-                .with_posting(
+                .with_synthesized_posting(
                     Posting::new("Assets:USD", Amount::new(dec!(100), "USD"))
                         .with_price(PriceAnnotation::Unit(Amount::new(dec!(0.85), "EUR"))),
                 )
-                .with_posting(Posting::new("Assets:EUR", Amount::new(dec!(-85), "EUR"))),
+                .with_synthesized_posting(Posting::new(
+                    "Assets:EUR",
+                    Amount::new(dec!(-85), "EUR"),
+                )),
         ),
     ];
 
@@ -427,11 +470,11 @@ fn test_complete_ledger_validation() {
         Directive::Transaction(
             Transaction::new(date(2024, 1, 15), "Monthly salary")
                 .with_payee("Employer")
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
                     "Income:Salary",
                     Amount::new(dec!(-3000), "USD"),
                 ))
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
                     "Assets:Bank:Checking",
                     Amount::new(dec!(3000), "USD"),
                 )),
@@ -439,19 +482,22 @@ fn test_complete_ledger_validation() {
         // Expenses
         Directive::Transaction(
             Transaction::new(date(2024, 1, 20), "Groceries")
-                .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(150), "USD")))
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
+                    "Expenses:Food",
+                    Amount::new(dec!(150), "USD"),
+                ))
+                .with_synthesized_posting(Posting::new(
                     "Assets:Bank:Checking",
                     Amount::new(dec!(-150), "USD"),
                 )),
         ),
         Directive::Transaction(
             Transaction::new(date(2024, 1, 22), "Gas")
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
                     "Expenses:Transport",
                     Amount::new(dec!(45), "USD"),
                 ))
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
                     "Assets:Bank:Checking",
                     Amount::new(dec!(-45), "USD"),
                 )),
@@ -459,11 +505,11 @@ fn test_complete_ledger_validation() {
         // Transfer
         Directive::Transaction(
             Transaction::new(date(2024, 1, 25), "Transfer to savings")
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
                     "Assets:Bank:Savings",
                     Amount::new(dec!(1000), "USD"),
                 ))
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
                     "Assets:Bank:Checking",
                     Amount::new(dec!(-1000), "USD"),
                 )),
@@ -504,8 +550,14 @@ fn test_basic_validation() {
         Directive::Open(Open::new(date(2024, 1, 1), "Expenses:Food")),
         Directive::Transaction(
             Transaction::new(date(2024, 1, 15), "Test")
-                .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(100), "USD")))
-                .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(-100), "USD"))),
+                .with_synthesized_posting(Posting::new(
+                    "Expenses:Food",
+                    Amount::new(dec!(100), "USD"),
+                ))
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Bank",
+                    Amount::new(dec!(-100), "USD"),
+                )),
         ),
     ];
 
@@ -531,8 +583,14 @@ fn test_spanned_validation_preserves_location_for_account_not_open() {
         spanned_directive(
             Directive::Transaction(
                 Transaction::new(date(2024, 1, 15), "Test")
-                    .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(100), "USD")))
-                    .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(-100), "USD"))),
+                    .with_synthesized_posting(Posting::new(
+                        "Expenses:Food",
+                        Amount::new(dec!(100), "USD"),
+                    ))
+                    .with_synthesized_posting(Posting::new(
+                        "Assets:Cash",
+                        Amount::new(dec!(-100), "USD"),
+                    )),
             ),
             100,
             200, // span: bytes 100-200
@@ -570,8 +628,14 @@ fn test_spanned_validation_preserves_location_for_unbalanced_transaction() {
         spanned_directive(
             Directive::Transaction(
                 Transaction::new(date(2024, 1, 15), "Unbalanced")
-                    .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(100), "USD")))
-                    .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(-50), "USD"))), // Missing 50
+                    .with_synthesized_posting(Posting::new(
+                        "Expenses:Food",
+                        Amount::new(dec!(100), "USD"),
+                    ))
+                    .with_synthesized_posting(Posting::new(
+                        "Assets:Bank",
+                        Amount::new(dec!(-50), "USD"),
+                    )), // Missing 50
             ),
             100,
             250, // span: bytes 100-250
@@ -609,8 +673,14 @@ fn test_spanned_validation_preserves_location_for_balance_error() {
         spanned_directive(
             Directive::Transaction(
                 Transaction::new(date(2024, 1, 15), "Purchase")
-                    .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(50), "USD")))
-                    .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(-50), "USD"))),
+                    .with_synthesized_posting(Posting::new(
+                        "Expenses:Food",
+                        Amount::new(dec!(50), "USD"),
+                    ))
+                    .with_synthesized_posting(Posting::new(
+                        "Assets:Bank",
+                        Amount::new(dec!(-50), "USD"),
+                    )),
             ),
             100,
             200,
@@ -694,8 +764,11 @@ fn test_spanned_validation_preserves_location_for_account_closed() {
         spanned_directive(
             Directive::Transaction(
                 Transaction::new(date(2024, 7, 1), "After close")
-                    .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(100), "USD")))
-                    .with_posting(Posting::new(
+                    .with_synthesized_posting(Posting::new(
+                        "Assets:Bank",
+                        Amount::new(dec!(100), "USD"),
+                    ))
+                    .with_synthesized_posting(Posting::new(
                         "Income:Salary",
                         Amount::new(dec!(-100), "USD"),
                     )),
@@ -728,8 +801,9 @@ fn test_spanned_validation_single_posting_warning_has_location() {
         ),
         spanned_directive(
             Directive::Transaction(
-                Transaction::new(date(2024, 1, 15), "Single posting")
-                    .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(100), "USD"))),
+                Transaction::new(date(2024, 1, 15), "Single posting").with_synthesized_posting(
+                    Posting::new("Assets:Bank", Amount::new(dec!(100), "USD")),
+                ),
             ),
             50,
             150, // span: bytes 50-150
@@ -756,8 +830,14 @@ fn test_spanned_validation_multiple_errors_have_correct_locations() {
         spanned_directive(
             Directive::Transaction(
                 Transaction::new(date(2024, 1, 15), "First error")
-                    .with_posting(Posting::new("Expenses:A", Amount::new(dec!(100), "USD")))
-                    .with_posting(Posting::new("Assets:A", Amount::new(dec!(-100), "USD"))),
+                    .with_synthesized_posting(Posting::new(
+                        "Expenses:A",
+                        Amount::new(dec!(100), "USD"),
+                    ))
+                    .with_synthesized_posting(Posting::new(
+                        "Assets:A",
+                        Amount::new(dec!(-100), "USD"),
+                    )),
             ),
             0,
             100, // First location
@@ -767,8 +847,14 @@ fn test_spanned_validation_multiple_errors_have_correct_locations() {
         spanned_directive(
             Directive::Transaction(
                 Transaction::new(date(2024, 1, 16), "Second error")
-                    .with_posting(Posting::new("Expenses:B", Amount::new(dec!(50), "USD")))
-                    .with_posting(Posting::new("Assets:B", Amount::new(dec!(-50), "USD"))),
+                    .with_synthesized_posting(Posting::new(
+                        "Expenses:B",
+                        Amount::new(dec!(50), "USD"),
+                    ))
+                    .with_synthesized_posting(Posting::new(
+                        "Assets:B",
+                        Amount::new(dec!(-50), "USD"),
+                    )),
             ),
             100,
             200, // Second location
@@ -813,8 +899,14 @@ fn test_spanned_validation_valid_ledger_no_errors() {
         spanned_directive(
             Directive::Transaction(
                 Transaction::new(date(2024, 1, 15), "Valid")
-                    .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(100), "USD")))
-                    .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(-100), "USD"))),
+                    .with_synthesized_posting(Posting::new(
+                        "Expenses:Food",
+                        Amount::new(dec!(100), "USD"),
+                    ))
+                    .with_synthesized_posting(Posting::new(
+                        "Assets:Bank",
+                        Amount::new(dec!(-100), "USD"),
+                    )),
             ),
             100,
             250,

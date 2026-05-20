@@ -10,7 +10,8 @@ use rustledger_core::Directive;
 use rustledger_parser::ParseResult;
 use std::collections::HashMap;
 
-use super::utils::byte_offset_to_position;
+use super::formatting::format_document;
+use super::utils::{byte_offset_to_position, document_format_config};
 
 /// Available commands.
 pub const COMMANDS: &[&str] = &[
@@ -30,7 +31,7 @@ pub fn handle_execute_command(
     match params.command.as_str() {
         "rledger.insertDate" => handle_insert_date(),
         "rledger.sortTransactions" => handle_sort_transactions(source, parse_result, uri),
-        "rledger.alignAmounts" => handle_align_amounts(source, uri),
+        "rledger.alignAmounts" => handle_align_amounts(source, parse_result, uri),
         "rledger.showAccountBalance" => {
             handle_show_account_balance(&params.arguments, parse_result)
         }
@@ -117,65 +118,32 @@ fn handle_sort_transactions(
     serde_json::to_value(workspace_edit).ok()
 }
 
-/// Align amounts in the document.
-fn handle_align_amounts(source: &str, uri: &Uri) -> Option<serde_json::Value> {
-    let lines: Vec<&str> = source.lines().collect();
-    let mut edits: Vec<TextEdit> = Vec::new();
-
-    // Find posting lines and their amount positions
-    let mut posting_groups: Vec<Vec<(usize, usize, usize)>> = Vec::new(); // (line_idx, amount_start, amount_end)
-    let mut current_group: Vec<(usize, usize, usize)> = Vec::new();
-
-    for (line_idx, line) in lines.iter().enumerate() {
-        let trimmed = line.trim_start();
-
-        // Check if this is a posting line (indented, starts with account)
-        if (line.starts_with("  ") || line.starts_with('\t')) && is_posting_line(trimmed) {
-            if let Some((amount_start, amount_end)) = find_amount_position(line) {
-                current_group.push((line_idx, amount_start, amount_end));
-            }
-        } else if !current_group.is_empty() {
-            // End of transaction, save group
-            posting_groups.push(std::mem::take(&mut current_group));
-        }
-    }
-
-    // Don't forget the last group
-    if !current_group.is_empty() {
-        posting_groups.push(current_group);
-    }
-
-    // Process each group - align amounts to the rightmost position
-    for group in posting_groups {
-        if group.len() < 2 {
-            continue;
-        }
-
-        // Find the maximum column where amounts should start
-        let max_amount_col = group.iter().map(|(_, start, _)| *start).max().unwrap_or(0);
-
-        // Create edits to align
-        for (line_idx, amount_start, _amount_end) in group {
-            if amount_start < max_amount_col {
-                let padding = max_amount_col - amount_start;
-                let line = lines[line_idx];
-
-                // Find where the amount number starts (skip leading spaces)
-                if let Some(num_start) = line[..amount_start]
-                    .rfind(|c: char| !c.is_whitespace())
-                    .map(|i| i + 1)
-                {
-                    edits.push(TextEdit {
-                        range: lsp_types::Range {
-                            start: lsp_types::Position::new(line_idx as u32, num_start as u32),
-                            end: lsp_types::Position::new(line_idx as u32, amount_start as u32),
-                        },
-                        new_text: " ".repeat(padding + (amount_start - num_start)),
-                    });
-                }
-            }
-        }
-    }
+/// Align amounts in the document by delegating to the shared
+/// document formatter ([`format_document`]).
+///
+/// The formatting handler is the canonical alignment path now and it
+/// delegates further to [`rustledger_core::format_posting`], the same
+/// formatter `rledger format` uses on disk. So this command, the LSP's
+/// `textDocument/formatting` request, and the CLI all produce
+/// identical output for a given `FormatConfig`. The previous bespoke
+/// logic here ran its own regex-style line scanner with a
+/// "max-existing-column" alignment heuristic, which produced output
+/// that matched none of the canonical paths — the kind of duplicate
+/// code path #1142 warned about.
+fn handle_align_amounts(
+    source: &str,
+    parse_result: &ParseResult,
+    uri: &Uri,
+) -> Option<serde_json::Value> {
+    // `workspace/executeCommand` does NOT carry the client's
+    // formatting preferences — those only travel with
+    // `textDocument/formatting`. Express that explicitly by passing
+    // `None` to `document_format_config`: when that helper grows
+    // real options handling, the executeCommand path will fall back
+    // to server defaults rather than silently mirroring an absent
+    // client value.
+    let config = document_format_config(None);
+    let edits: Vec<TextEdit> = format_document(source, parse_result, &config).unwrap_or_default();
 
     if edits.is_empty() {
         return Some(serde_json::json!({
@@ -240,40 +208,6 @@ fn handle_show_account_balance(
     }))
 }
 
-/// Check if a line looks like a posting.
-fn is_posting_line(trimmed: &str) -> bool {
-    trimmed.starts_with("Assets")
-        || trimmed.starts_with("Liabilities")
-        || trimmed.starts_with("Equity")
-        || trimmed.starts_with("Income")
-        || trimmed.starts_with("Expenses")
-}
-
-/// Find the position of an amount in a posting line.
-fn find_amount_position(line: &str) -> Option<(usize, usize)> {
-    // Look for a number pattern (possibly negative)
-    let mut in_number = false;
-    let mut number_start = 0;
-
-    for (i, c) in line.char_indices() {
-        if !in_number {
-            if c == '-' || c.is_ascii_digit() {
-                in_number = true;
-                number_start = i;
-            }
-        } else if !c.is_ascii_digit() && c != '.' && c != ',' {
-            // End of number
-            return Some((number_start, i));
-        }
-    }
-
-    if in_number {
-        Some((number_start, line.len()))
-    } else {
-        None
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -315,19 +249,95 @@ mod tests {
     }
 
     #[test]
-    fn test_is_posting_line() {
-        assert!(is_posting_line("Assets:Bank  100 USD"));
-        assert!(is_posting_line("Expenses:Food"));
-        assert!(!is_posting_line("2024-01-15 * \"Coffee\""));
-        assert!(!is_posting_line("open Assets:Bank"));
+    fn test_align_amounts_produces_canonical_alignment() {
+        // Goes beyond a shape-only smoke test: applies the emitted
+        // edits to the source and asserts the resulting amount column
+        // matches `FormatConfig::default().amount_column` (the same
+        // value `rledger format` uses on disk). Pins the contract that
+        // `rledger.alignAmounts`, `textDocument/formatting`, and
+        // `rledger format` agree on the canonical alignment.
+        use lsp_types::Uri;
+        use rustledger_core::FormatConfig;
+
+        let misaligned = "2024-01-15 * \"Coffee\"\n  Assets:Bank  -5.00 USD\n  Expenses:Food\n";
+        let result = parse(misaligned);
+        let uri: Uri = "file:///test.beancount".parse().unwrap();
+        let out =
+            handle_align_amounts(misaligned, &result, &uri).expect("align should return a value");
+
+        // The first posting line is misaligned (2-space gap between
+        // account and amount). After applying the edits, the amount
+        // number should start exactly at config.amount_column.
+        let changes = out.get("changes").and_then(|v| v.as_object()).unwrap();
+        let edits = changes.values().next().unwrap().as_array().unwrap();
+        assert!(!edits.is_empty(), "misaligned input must produce edits");
+
+        let expected_col = FormatConfig::default().amount_column;
+        let applied = apply_lsp_text_edits(misaligned, edits);
+        let bank_line = applied
+            .lines()
+            .find(|l| l.contains("Assets:Bank"))
+            .expect("Assets:Bank line should still exist after edit");
+        let dash_pos = bank_line.find("-5.00").expect("amount survived the edit");
+        // `amount_column` is the column the number starts at; in the
+        // formatter's math, "Assets:Bank" + indent ends at col 13, and
+        // padding fills out to (amount_column - amount.len()).
+        let amount_len = "-5.00 USD".len();
+        assert_eq!(
+            dash_pos,
+            expected_col - amount_len,
+            "amount should be aligned to FormatConfig::default().amount_column ({expected_col}); \
+             got line {bank_line:?}"
+        );
+
+        // No-op shape: a canonically-aligned source should return the
+        // "no work" message.
+        let aligned = "2024-01-15 open Assets:Bank USD\n";
+        let aligned_parsed = parse(aligned);
+        let out2 = handle_align_amounts(aligned, &aligned_parsed, &uri)
+            .expect("align should always return some value");
+        assert!(
+            out2.get("message").is_some(),
+            "no-op input should return a message-only shape, got {out2:?}"
+        );
     }
 
-    #[test]
-    fn test_find_amount_position() {
-        let line = "  Assets:Bank  100.00 USD";
-        let pos = find_amount_position(line);
-        assert!(pos.is_some());
-        let (start, _end) = pos.unwrap();
-        assert!(line[start..].starts_with("100"));
+    /// Apply a JSON array of LSP `TextEdit` objects to `source`,
+    /// returning the resulting text. Test-local helper — the LSP
+    /// production path applies edits client-side, so this just
+    /// mirrors what an editor would do, sorted bottom-to-top so each
+    /// replacement's offsets stay valid.
+    fn apply_lsp_text_edits(source: &str, edits: &[serde_json::Value]) -> String {
+        let mut typed: Vec<(u32, u32, u32, u32, String)> = edits
+            .iter()
+            .map(|e| {
+                let r = e.get("range").unwrap();
+                let s = r.get("start").unwrap();
+                let n = r.get("end").unwrap();
+                (
+                    s.get("line").and_then(|v| v.as_u64()).unwrap() as u32,
+                    s.get("character").and_then(|v| v.as_u64()).unwrap() as u32,
+                    n.get("line").and_then(|v| v.as_u64()).unwrap() as u32,
+                    n.get("character").and_then(|v| v.as_u64()).unwrap() as u32,
+                    e.get("newText")
+                        .and_then(|v| v.as_str())
+                        .unwrap()
+                        .to_string(),
+                )
+            })
+            .collect();
+        // Apply from the end so earlier edits' offsets don't shift.
+        typed.sort_by_key(|t| std::cmp::Reverse((t.0, t.1)));
+
+        let lines: Vec<String> = source.lines().map(str::to_string).collect();
+        let mut out = lines.clone();
+        for (sl, sc, el, ec, new_text) in typed {
+            // Only single-line edits exercised by this test.
+            assert_eq!(sl, el, "test helper only handles single-line edits");
+            let line = &mut out[sl as usize];
+            let (s, e) = (sc as usize, ec as usize);
+            line.replace_range(s..e, &new_text);
+        }
+        out.join("\n") + "\n"
     }
 }

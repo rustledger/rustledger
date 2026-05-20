@@ -84,6 +84,7 @@ fn make_transaction(
                     price: None,
                     flag: None,
                     metadata: vec![],
+                    span: None,
                 },
                 PostingData {
                     account: "Assets:Bank:Checking".to_string(),
@@ -95,6 +96,7 @@ fn make_transaction(
                     price: None,
                     flag: None,
                     metadata: vec![],
+                    span: None,
                 },
             ],
         }),

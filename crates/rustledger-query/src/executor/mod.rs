@@ -2826,11 +2826,11 @@ mod tests {
                 Transaction::new(date(2024, 1, 15), "Coffee")
                     .with_flag('*')
                     .with_payee("Coffee Shop")
-                    .with_posting(Posting::new(
+                    .with_synthesized_posting(Posting::new(
                         "Expenses:Food:Coffee",
                         Amount::new(dec!(5.00), "USD"),
                     ))
-                    .with_posting(Posting::new(
+                    .with_synthesized_posting(Posting::new(
                         "Assets:Bank:Checking",
                         Amount::new(dec!(-5.00), "USD"),
                     )),
@@ -2839,11 +2839,11 @@ mod tests {
                 Transaction::new(date(2024, 1, 16), "Groceries")
                     .with_flag('*')
                     .with_payee("Supermarket")
-                    .with_posting(Posting::new(
+                    .with_synthesized_posting(Posting::new(
                         "Expenses:Food:Groceries",
                         Amount::new(dec!(50.00), "USD"),
                     ))
-                    .with_posting(Posting::new(
+                    .with_synthesized_posting(Posting::new(
                         "Assets:Bank:Checking",
                         Amount::new(dec!(-50.00), "USD"),
                     )),
@@ -3378,13 +3378,13 @@ mod tests {
     fn test_type_casting_in_aggregate_context() {
         let txn1 = Transaction::new(date(2024, 1, 15), "Item 1")
             .with_flag('*')
-            .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(10), "USD")))
-            .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(-10), "USD")));
+            .with_synthesized_posting(Posting::new("Expenses:Food", Amount::new(dec!(10), "USD")))
+            .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(-10), "USD")));
 
         let txn2 = Transaction::new(date(2024, 1, 16), "Item 2")
             .with_flag('*')
-            .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(20), "USD")))
-            .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(-20), "USD")));
+            .with_synthesized_posting(Posting::new("Expenses:Food", Amount::new(dec!(20), "USD")))
+            .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(-20), "USD")));
 
         let directives = vec![Directive::Transaction(txn1), Directive::Transaction(txn2)];
         let mut executor = Executor::new(&directives);
@@ -3502,7 +3502,7 @@ mod tests {
             links: vec![],
             meta: txn_meta,
             postings: vec![
-                Posting {
+                rustledger_core::Spanned::synthesized(Posting {
                     account: "Expenses:Food".into(),
                     units: Some(rustledger_core::IncompleteAmount::Complete(Amount::new(
                         dec!(5),
@@ -3514,8 +3514,11 @@ mod tests {
                     meta: posting_meta,
                     comments: Vec::new(),
                     trailing_comments: Vec::new(),
-                },
-                Posting::new("Assets:Cash", Amount::new(dec!(-5), "USD")),
+                }),
+                rustledger_core::Spanned::synthesized(Posting::new(
+                    "Assets:Cash",
+                    Amount::new(dec!(-5), "USD"),
+                )),
             ],
             trailing_comments: Vec::new(),
         };
@@ -3561,8 +3564,8 @@ mod tests {
 
         let txn = Transaction::new(date(2024, 1, 15), "Test")
             .with_flag('*')
-            .with_posting(Posting::new("Assets:Euro", Amount::new(dec!(100), "EUR")))
-            .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(-110), "USD")));
+            .with_synthesized_posting(Posting::new("Assets:Euro", Amount::new(dec!(100), "EUR")))
+            .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(-110), "USD")));
 
         let directives = vec![Directive::Price(price), Directive::Transaction(txn)];
         let mut executor = Executor::new(&directives);
@@ -3776,11 +3779,11 @@ mod tests {
             // A transaction to have postings for the query context
             Directive::Transaction(
                 Transaction::new(date(2024, 1, 15), "Coffee")
-                    .with_posting(Posting::new(
+                    .with_synthesized_posting(Posting::new(
                         "Expenses:Food",
                         Amount::new(dec!(5.00), "USD"),
                     ))
-                    .with_posting(Posting::new(
+                    .with_synthesized_posting(Posting::new(
                         "Assets:Bank:Checking",
                         Amount::new(dec!(-5.00), "USD"),
                     )),
@@ -3833,8 +3836,14 @@ mod tests {
             links: vec![],
             meta: Metadata::default(),
             postings: vec![
-                Posting::new("Assets:Bank", Amount::new(dec!(100), "USD")),
-                Posting::new("Expenses:Food", Amount::new(dec!(-100), "USD")),
+                rustledger_core::Spanned::synthesized(Posting::new(
+                    "Assets:Bank",
+                    Amount::new(dec!(100), "USD"),
+                )),
+                rustledger_core::Spanned::synthesized(Posting::new(
+                    "Expenses:Food",
+                    Amount::new(dec!(-100), "USD"),
+                )),
             ],
             trailing_comments: Vec::new(),
         })];
@@ -3879,8 +3888,14 @@ mod tests {
             links: vec![],
             meta: Metadata::default(),
             postings: vec![
-                Posting::new("Assets:Bank", Amount::new(dec!(100), "USD")),
-                Posting::new("Expenses:Food", Amount::new(dec!(-100), "USD")),
+                rustledger_core::Spanned::synthesized(Posting::new(
+                    "Assets:Bank",
+                    Amount::new(dec!(100), "USD"),
+                )),
+                rustledger_core::Spanned::synthesized(Posting::new(
+                    "Expenses:Food",
+                    Amount::new(dec!(-100), "USD"),
+                )),
             ],
             trailing_comments: Vec::new(),
         };

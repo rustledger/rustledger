@@ -1314,18 +1314,21 @@ default_expense = "Expenses:Uncategorized"
     #[test]
     fn test_is_duplicate_matching() {
         let date = rustledger_core::naive_date(2024, 1, 15).unwrap();
-        let new_txn =
-            Transaction::new(date, "GROCERY STORE").with_posting(rustledger_core::Posting::new(
-                "Assets:Bank",
-                rustledger_core::Amount::new(rust_decimal::Decimal::new(-5000, 2), "USD"),
-            ));
-
-        let existing = vec![Transaction::new(date, "GROCERY STORE #123").with_posting(
+        let new_txn = Transaction::new(date, "GROCERY STORE").with_synthesized_posting(
             rustledger_core::Posting::new(
                 "Assets:Bank",
                 rustledger_core::Amount::new(rust_decimal::Decimal::new(-5000, 2), "USD"),
             ),
-        )];
+        );
+
+        let existing = vec![
+            Transaction::new(date, "GROCERY STORE #123").with_synthesized_posting(
+                rustledger_core::Posting::new(
+                    "Assets:Bank",
+                    rustledger_core::Amount::new(rust_decimal::Decimal::new(-5000, 2), "USD"),
+                ),
+            ),
+        ];
 
         assert!(is_duplicate(&new_txn, &existing));
     }
@@ -1336,7 +1339,7 @@ default_expense = "Expenses:Uncategorized"
             rustledger_core::naive_date(2024, 1, 15).unwrap(),
             "GROCERY STORE",
         )
-        .with_posting(rustledger_core::Posting::new(
+        .with_synthesized_posting(rustledger_core::Posting::new(
             "Assets:Bank",
             rustledger_core::Amount::new(rust_decimal::Decimal::new(-5000, 2), "USD"),
         ));
@@ -1346,7 +1349,7 @@ default_expense = "Expenses:Uncategorized"
                 rustledger_core::naive_date(2024, 1, 16).unwrap(),
                 "GROCERY STORE",
             )
-            .with_posting(rustledger_core::Posting::new(
+            .with_synthesized_posting(rustledger_core::Posting::new(
                 "Assets:Bank",
                 rustledger_core::Amount::new(rust_decimal::Decimal::new(-5000, 2), "USD"),
             )),
@@ -1358,18 +1361,21 @@ default_expense = "Expenses:Uncategorized"
     #[test]
     fn test_is_duplicate_different_amount() {
         let date = rustledger_core::naive_date(2024, 1, 15).unwrap();
-        let new_txn =
-            Transaction::new(date, "GROCERY STORE").with_posting(rustledger_core::Posting::new(
-                "Assets:Bank",
-                rustledger_core::Amount::new(rust_decimal::Decimal::new(-5000, 2), "USD"),
-            ));
-
-        let existing = vec![Transaction::new(date, "GROCERY STORE").with_posting(
+        let new_txn = Transaction::new(date, "GROCERY STORE").with_synthesized_posting(
             rustledger_core::Posting::new(
                 "Assets:Bank",
-                rustledger_core::Amount::new(rust_decimal::Decimal::new(-7500, 2), "USD"),
+                rustledger_core::Amount::new(rust_decimal::Decimal::new(-5000, 2), "USD"),
             ),
-        )];
+        );
+
+        let existing = vec![
+            Transaction::new(date, "GROCERY STORE").with_synthesized_posting(
+                rustledger_core::Posting::new(
+                    "Assets:Bank",
+                    rustledger_core::Amount::new(rust_decimal::Decimal::new(-7500, 2), "USD"),
+                ),
+            ),
+        ];
 
         assert!(!is_duplicate(&new_txn, &existing));
     }
@@ -1642,7 +1648,7 @@ amount_column = "Amount"
     fn test_first_posting_amount_auto_posting() {
         let date = rustledger_core::naive_date(2024, 1, 15).unwrap();
         let txn = Transaction::new(date, "Test")
-            .with_posting(rustledger_core::Posting::auto("Expenses:Unknown"));
+            .with_synthesized_posting(rustledger_core::Posting::auto("Expenses:Unknown"));
         assert_eq!(first_posting_amount(&txn), None);
     }
 
@@ -1666,10 +1672,12 @@ amount_column = "Amount"
     #[test]
     fn test_is_duplicate_no_existing() {
         let date = rustledger_core::naive_date(2024, 1, 15).unwrap();
-        let txn = Transaction::new(date, "Coffee").with_posting(rustledger_core::Posting::new(
-            "Assets:Bank",
-            rustledger_core::Amount::new(rust_decimal::Decimal::new(-500, 2), "USD"),
-        ));
+        let txn = Transaction::new(date, "Coffee").with_synthesized_posting(
+            rustledger_core::Posting::new(
+                "Assets:Bank",
+                rustledger_core::Amount::new(rust_decimal::Decimal::new(-500, 2), "USD"),
+            ),
+        );
         assert!(!is_duplicate(&txn, &[]));
     }
 
@@ -1678,7 +1686,7 @@ amount_column = "Amount"
         let date = rustledger_core::naive_date(2024, 1, 15).unwrap();
         let new_txn = Transaction::new(date, "Weekly groceries")
             .with_payee("WHOLE FOODS")
-            .with_posting(rustledger_core::Posting::new(
+            .with_synthesized_posting(rustledger_core::Posting::new(
                 "Assets:Bank",
                 rustledger_core::Amount::new(rust_decimal::Decimal::new(-5000, 2), "USD"),
             ));
@@ -1686,7 +1694,7 @@ amount_column = "Amount"
         let existing = vec![
             Transaction::new(date, "Weekly groceries")
                 .with_payee("Whole Foods Market")
-                .with_posting(rustledger_core::Posting::new(
+                .with_synthesized_posting(rustledger_core::Posting::new(
                     "Assets:Bank",
                     rustledger_core::Amount::new(rust_decimal::Decimal::new(-5000, 2), "USD"),
                 )),

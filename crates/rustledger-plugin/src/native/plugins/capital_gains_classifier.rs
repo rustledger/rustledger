@@ -288,6 +288,7 @@ fn process_long_short(input: PluginInput) -> PluginOutput {
                     price: None,
                     flag: template.flag.clone(),
                     metadata: vec![],
+                    span: None,
                 });
             }
 
@@ -306,6 +307,7 @@ fn process_long_short(input: PluginInput) -> PluginOutput {
                     price: None,
                     flag: template.flag.clone(),
                     metadata: vec![],
+                    span: None,
                 });
             }
 
@@ -433,6 +435,7 @@ fn process_gain_loss(input: PluginInput) -> PluginOutput {
                         price: posting.price.clone(),
                         flag: posting.flag.clone(),
                         metadata: posting.metadata.clone(),
+                        span: None,
                     });
                     modified = true;
                     continue;
@@ -595,6 +598,7 @@ mod tests {
                             price: None,
                             flag: None,
                             metadata: vec![],
+                            span: None,
                         },
                         PostingData {
                             account: "Income:Capital-Gains:Long".to_string(),
@@ -606,6 +610,7 @@ mod tests {
                             price: None,
                             flag: None,
                             metadata: vec![],
+                            span: None,
                         },
                     ],
                 }),

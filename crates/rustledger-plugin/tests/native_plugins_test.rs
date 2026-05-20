@@ -95,6 +95,7 @@ fn make_transaction(
                     price: None,
                     flag: None,
                     metadata: vec![],
+                    span: None,
                 })
                 .collect(),
         }),
@@ -139,6 +140,7 @@ fn make_transaction_with_cost(
                     price: None,
                     flag: None,
                     metadata: vec![],
+                    span: None,
                 },
                 PostingData {
                     account: other_account.to_string(),
@@ -147,6 +149,7 @@ fn make_transaction_with_cost(
                     price: None,
                     flag: None,
                     metadata: vec![],
+                    span: None,
                 },
             ],
         }),
@@ -220,6 +223,7 @@ fn make_transaction_with_cost_and_price_total(
                     }),
                     flag: None,
                     metadata: vec![],
+                    span: None,
                 },
                 PostingData {
                     account: other_account.to_string(),
@@ -228,6 +232,7 @@ fn make_transaction_with_cost_and_price_total(
                     price: None,
                     flag: None,
                     metadata: vec![],
+                    span: None,
                 },
             ],
         }),
@@ -282,6 +287,7 @@ fn make_transaction_with_cost_and_price(
                     }),
                     flag: None,
                     metadata: vec![],
+                    span: None,
                 },
                 PostingData {
                     account: other_account.to_string(),
@@ -290,6 +296,7 @@ fn make_transaction_with_cost_and_price(
                     price: None,
                     flag: None,
                     metadata: vec![],
+                    span: None,
                 },
             ],
         }),
@@ -1797,6 +1804,7 @@ fn test_onecommodity_skips_auto_balanced_posting() {
                     price: None,
                     flag: None,
                     metadata: vec![],
+                    span: None,
                 },
                 PostingData {
                     // units = None → must hit the skip branch.
@@ -1806,6 +1814,7 @@ fn test_onecommodity_skips_auto_balanced_posting() {
                     price: None,
                     flag: None,
                     metadata: vec![],
+                    span: None,
                 },
             ],
         }),
@@ -2084,6 +2093,7 @@ fn test_check_commodity_undeclared_cost_currency() {
                         price: None,
                         flag: None,
                         metadata: vec![],
+                        span: None,
                     },
                     PostingData {
                         account: "Equity:Open".to_string(),
@@ -2092,6 +2102,7 @@ fn test_check_commodity_undeclared_cost_currency() {
                         price: None,
                         flag: None,
                         metadata: vec![],
+                        span: None,
                     },
                 ],
             }),
@@ -2144,6 +2155,7 @@ fn test_check_commodity_cost_with_none_currency_skipped() {
                         price: None,
                         flag: None,
                         metadata: vec![],
+                        span: None,
                     },
                     PostingData {
                         account: "Equity:Open".to_string(),
@@ -2152,6 +2164,7 @@ fn test_check_commodity_cost_with_none_currency_skipped() {
                         price: None,
                         flag: None,
                         metadata: vec![],
+                        span: None,
                     },
                 ],
             }),
@@ -2406,6 +2419,7 @@ fn make_txn_with_price_annotation(
                     }),
                     flag: None,
                     metadata: vec![],
+                    span: None,
                 },
                 PostingData {
                     account: "Assets:Cash".to_string(),
@@ -2414,6 +2428,7 @@ fn make_txn_with_price_annotation(
                     price: None,
                     flag: None,
                     metadata: vec![],
+                    span: None,
                 },
             ],
         }),
@@ -2487,6 +2502,7 @@ fn test_implicit_prices_from_cost_total() {
                         price: None,
                         flag: None,
                         metadata: vec![],
+                        span: None,
                     },
                     PostingData {
                         account: "Assets:Cash".to_string(),
@@ -2495,6 +2511,7 @@ fn test_implicit_prices_from_cost_total() {
                         price: None,
                         flag: None,
                         metadata: vec![],
+                        span: None,
                     },
                 ],
             }),
@@ -3087,6 +3104,7 @@ fn test_auto_accounts_generates_opens() {
                         price: None,
                         metadata: vec![],
                         flag: None,
+                        span: None,
                     },
                     PostingData {
                         account: "Assets:Cash".to_string(),
@@ -3098,6 +3116,7 @@ fn test_auto_accounts_generates_opens() {
                         price: None,
                         metadata: vec![],
                         flag: None,
+                        span: None,
                     },
                 ],
                 metadata: vec![],
@@ -3198,6 +3217,7 @@ fn test_auto_accounts_same_date_ordering() {
                             price: None,
                             metadata: vec![],
                             flag: None,
+                            span: None,
                         },
                         PostingData {
                             account: "Liabilities:Credit-Card".to_string(),
@@ -3209,6 +3229,7 @@ fn test_auto_accounts_same_date_ordering() {
                             price: None,
                             metadata: vec![],
                             flag: None,
+                            span: None,
                         },
                     ],
                     metadata: vec![],
@@ -3334,6 +3355,7 @@ fn make_transaction_with_closing_metadata(
                     price: None,
                     flag: None,
                     metadata: vec![("closing".to_string(), MetaValueData::Bool(true))],
+                    span: None,
                 },
                 PostingData {
                     account: other_account.to_string(),
@@ -3342,6 +3364,7 @@ fn make_transaction_with_closing_metadata(
                     price: None,
                     flag: None,
                     metadata: vec![],
+                    span: None,
                 },
             ],
         }),
@@ -3461,6 +3484,7 @@ fn test_check_closing_false_value_no_emission() {
                         price: None,
                         flag: None,
                         metadata: vec![("closing".to_string(), MetaValueData::Bool(false))],
+                        span: None,
                     },
                     PostingData {
                         account: "Expenses:Final".to_string(),
@@ -3469,6 +3493,7 @@ fn test_check_closing_false_value_no_emission() {
                         price: None,
                         flag: None,
                         metadata: vec![],
+                        span: None,
                     },
                 ],
             }),
@@ -3518,6 +3543,7 @@ fn test_check_closing_non_bool_metadata_no_emission() {
                             "closing".to_string(),
                             MetaValueData::String("yes".to_string()),
                         )],
+                        span: None,
                     },
                     PostingData {
                         account: "Expenses:Final".to_string(),
@@ -3526,6 +3552,7 @@ fn test_check_closing_non_bool_metadata_no_emission() {
                         price: None,
                         flag: None,
                         metadata: vec![],
+                        span: None,
                     },
                 ],
             }),
@@ -3570,6 +3597,7 @@ fn test_check_closing_units_none_uses_operating_currency_usd() {
                         price: None,
                         flag: None,
                         metadata: vec![("closing".to_string(), MetaValueData::Bool(true))],
+                        span: None,
                     },
                     PostingData {
                         account: "Expenses:Final".to_string(),
@@ -3581,6 +3609,7 @@ fn test_check_closing_units_none_uses_operating_currency_usd() {
                         price: None,
                         flag: None,
                         metadata: vec![],
+                        span: None,
                     },
                 ],
             }),
@@ -3633,6 +3662,7 @@ fn test_check_closing_units_none_uses_operating_currency_eur() {
                             price: None,
                             flag: None,
                             metadata: vec![("closing".to_string(), MetaValueData::Bool(true))],
+                            span: None,
                         },
                         PostingData {
                             account: "Expenses:Final".to_string(),
@@ -3644,6 +3674,7 @@ fn test_check_closing_units_none_uses_operating_currency_eur() {
                             price: None,
                             flag: None,
                             metadata: vec![],
+                            span: None,
                         },
                     ],
                 }),
@@ -3701,6 +3732,7 @@ fn test_check_closing_units_none_falls_back_to_usd_when_no_operating_ccy() {
                         price: None,
                         flag: None,
                         metadata: vec![("closing".to_string(), MetaValueData::Bool(true))],
+                        span: None,
                     }],
                 }),
             },
@@ -3756,6 +3788,7 @@ fn test_check_closing_multiple_closings_in_one_txn() {
                         price: None,
                         flag: None,
                         metadata: vec![("closing".to_string(), MetaValueData::Bool(true))],
+                        span: None,
                     },
                     PostingData {
                         account: "Assets:EUR".to_string(),
@@ -3767,6 +3800,7 @@ fn test_check_closing_multiple_closings_in_one_txn() {
                         price: None,
                         flag: None,
                         metadata: vec![("closing".to_string(), MetaValueData::Bool(true))],
+                        span: None,
                     },
                     PostingData {
                         account: "Equity:Close".to_string(),
@@ -3775,6 +3809,7 @@ fn test_check_closing_multiple_closings_in_one_txn() {
                         price: None,
                         flag: None,
                         metadata: vec![],
+                        span: None,
                     },
                 ],
             }),
@@ -3858,6 +3893,7 @@ fn test_check_closing_invalid_date_skips_emission() {
                 price: None,
                 flag: None,
                 metadata: vec![("closing".to_string(), MetaValueData::Bool(true))],
+                span: None,
             }],
         }),
     }]);
@@ -3914,6 +3950,7 @@ fn test_check_closing_unrelated_metadata_doesnt_trigger() {
                         price: None,
                         flag: None,
                         metadata: vec![("closing".to_string(), MetaValueData::Bool(true))],
+                        span: None,
                     },
                     PostingData {
                         // Non-`closing` metadata key — should NOT trigger emission.
@@ -3926,6 +3963,7 @@ fn test_check_closing_unrelated_metadata_doesnt_trigger() {
                         price: None,
                         flag: None,
                         metadata: vec![("note".to_string(), MetaValueData::Bool(true))],
+                        span: None,
                     },
                 ],
             }),
@@ -4091,6 +4129,7 @@ fn make_transaction_with_price(
                     }),
                     flag: None,
                     metadata: vec![],
+                    span: None,
                 },
                 PostingData {
                     account: other_account.to_string(),
@@ -4099,6 +4138,7 @@ fn make_transaction_with_price(
                     price: None,
                     flag: None,
                     metadata: vec![],
+                    span: None,
                 },
             ],
         }),
@@ -4295,6 +4335,7 @@ fn make_transaction_with_tag(
                     price: None,
                     flag: None,
                     metadata: vec![],
+                    span: None,
                 })
                 .collect(),
         }),
@@ -4334,6 +4375,7 @@ fn make_transaction_with_metadata(
                     price: None,
                     flag: None,
                     metadata: vec![],
+                    span: None,
                 })
                 .collect(),
         }),
@@ -4437,6 +4479,7 @@ proptest::proptest! {
                         },
                         flag: None,
                         metadata: vec![],
+                                            span: None,
                     }],
                 }),
             });
@@ -4933,6 +4976,7 @@ fn make_sale_with_gain_posting(
                     }),
                     flag: None,
                     metadata: vec![],
+                    span: None,
                 },
                 PostingData {
                     account: "Assets:Cash".to_string(),
@@ -4941,6 +4985,7 @@ fn make_sale_with_gain_posting(
                     price: None,
                     flag: None,
                     metadata: vec![],
+                    span: None,
                 },
                 PostingData {
                     account: gain_account.to_string(),
@@ -4952,6 +4997,7 @@ fn make_sale_with_gain_posting(
                     price: None,
                     flag: None,
                     metadata: vec![],
+                    span: None,
                 },
             ],
         }),
@@ -5173,6 +5219,7 @@ fn test_sell_gains_two_sales_share_one_income_posting() {
                     }),
                     flag: None,
                     metadata: vec![],
+                    span: None,
                 },
                 // Second sale (loss)
                 PostingData {
@@ -5200,6 +5247,7 @@ fn test_sell_gains_two_sales_share_one_income_posting() {
                     }),
                     flag: None,
                     metadata: vec![],
+                    span: None,
                 },
                 PostingData {
                     account: "Income:Capital-Gains".to_string(),
@@ -5211,6 +5259,7 @@ fn test_sell_gains_two_sales_share_one_income_posting() {
                     price: None,
                     flag: None,
                     metadata: vec![],
+                    span: None,
                 },
                 PostingData {
                     account: "Assets:Cash".to_string(),
@@ -5219,6 +5268,7 @@ fn test_sell_gains_two_sales_share_one_income_posting() {
                     price: None,
                     flag: None,
                     metadata: vec![],
+                    span: None,
                 },
             ],
         }),
@@ -5291,6 +5341,7 @@ proptest::proptest! {
             }),
             flag: None,
             metadata: vec![],
+                    span: None,
         };
         // Balancing posting — auto-balanced (units=None) so it doesn't
         // introduce a second sale leg the plugin would also analyze.
@@ -5301,6 +5352,7 @@ proptest::proptest! {
             price: None,
             flag: None,
             metadata: vec![],
+            span: None,
         };
         // Optional Income posting that satisfies the gain-coverage
         // condition. The plugin only checks for the prefix, not the
@@ -5312,6 +5364,7 @@ proptest::proptest! {
             price: None,
             flag: None,
             metadata: vec![],
+            span: None,
         };
         let mut postings = vec![sale_posting, cash_posting];
         if with_income_posting {
@@ -5797,6 +5850,7 @@ fn make_forecast_txn(date: &str, narration: &str) -> DirectiveWrapper {
                     price: None,
                     flag: None,
                     metadata: vec![],
+                    span: None,
                 },
                 PostingData {
                     account: "Assets:Cash".to_string(),
@@ -5808,6 +5862,7 @@ fn make_forecast_txn(date: &str, narration: &str) -> DirectiveWrapper {
                     price: None,
                     flag: None,
                     metadata: vec![],
+                    span: None,
                 },
             ],
         }),
@@ -7910,6 +7965,7 @@ fn make_long_short_sale(
                     }),
                     flag: None,
                     metadata: vec![],
+                    span: None,
                 },
                 PostingData {
                     account: "Assets:Cash".to_string(),
@@ -7918,6 +7974,7 @@ fn make_long_short_sale(
                     price: None,
                     flag: None,
                     metadata: vec![],
+                    span: None,
                 },
                 PostingData {
                     account: gain_account.to_string(),
@@ -7929,6 +7986,7 @@ fn make_long_short_sale(
                     price: None,
                     flag: None,
                     metadata: vec![],
+                    span: None,
                 },
             ],
         }),
@@ -8201,6 +8259,7 @@ fn test_capital_gains_long_short_no_cost_date_passes_through_unchanged() {
                     }),
                     flag: None,
                     metadata: vec![],
+                    span: None,
                 },
                 PostingData {
                     account: "Assets:Cash".to_string(),
@@ -8209,6 +8268,7 @@ fn test_capital_gains_long_short_no_cost_date_passes_through_unchanged() {
                     price: None,
                     flag: None,
                     metadata: vec![],
+                    span: None,
                 },
                 PostingData {
                     account: "Income:Capital-Gains".to_string(),
@@ -8220,6 +8280,7 @@ fn test_capital_gains_long_short_no_cost_date_passes_through_unchanged() {
                     price: None,
                     flag: None,
                     metadata: vec![],
+                    span: None,
                 },
             ],
         }),

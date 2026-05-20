@@ -5,7 +5,7 @@
 //! - Word -> Amount -> Posting -> Transaction
 
 use lsp_types::{Position, Range, SelectionRange, SelectionRangeParams};
-use rustledger_core::Directive;
+use rustledger_core::{Directive, SYNTHESIZED_FILE_ID};
 use rustledger_parser::ParseResult;
 
 use super::utils::{LineIndex, is_word_char};
@@ -73,11 +73,16 @@ fn compute_selection_range(
     // Build the selection hierarchy
     match containing_directive {
         Some((dir_range, Directive::Transaction(txn))) => {
-            // Check if we're in a posting
-            let (dir_start_line, _) = (dir_range.start.line, dir_range.start.character);
-
-            for (i, posting) in txn.postings.iter().enumerate() {
-                let posting_line = dir_start_line + 1 + i as u32;
+            // Resolve each posting's line from its own span (see #1142):
+            // the prior `dir_start_line + 1 + i` arithmetic broke
+            // whenever a transaction had interleaved posting-level
+            // metadata, putting the cursor-test on the wrong row.
+            for spanned_posting in &txn.postings {
+                if spanned_posting.file_id == SYNTHESIZED_FILE_ID {
+                    continue;
+                }
+                let posting = &**spanned_posting;
+                let (posting_line, _) = line_index.offset_to_position(spanned_posting.span.start);
 
                 if position.line == posting_line {
                     // We're in a posting line

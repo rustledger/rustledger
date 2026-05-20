@@ -100,6 +100,7 @@ mod tests {
                         price: None,
                         flag: None,
                         metadata: vec![],
+                        span: None,
                     },
                     PostingData {
                         account: "Expenses:Test".to_string(),
@@ -111,6 +112,7 @@ mod tests {
                         price: None,
                         flag: None,
                         metadata: vec![],
+                        span: None,
                     },
                 ],
             }),

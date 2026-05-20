@@ -118,6 +118,14 @@ export interface TransactionDirective extends BaseDirective {
     narration?: string;
     tags: string[];
     links: string[];
+    /**
+     * Postings on this transaction. The host stores each posting in a
+     * `Spanned<Posting>` wrapper internally (with byte-offset source
+     * location), but the JS-facing shape is intentionally flattened to
+     * plain `Posting` — JS callers do not need source location for the
+     * current API surface. If source spans are ever exposed to JS, this
+     * type should change to `(Posting & { span?: ... })[]`.
+     */
     postings: Posting[];
 }
 

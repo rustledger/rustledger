@@ -147,6 +147,7 @@ fn extract(input: ImporterInput) -> ImporterOutput {
                         price: None,
                         flag: None,
                         metadata: vec![],
+                                            span: None,
                     },
                     PostingData {
                         account: counter_account.to_string(),
@@ -158,6 +159,7 @@ fn extract(input: ImporterInput) -> ImporterOutput {
                         price: None,
                         flag: None,
                         metadata: vec![],
+                                            span: None,
                     },
                 ],
             }),

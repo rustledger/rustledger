@@ -194,8 +194,8 @@ impl OfxImporter {
         // Build transaction
         let mut txn_builder = Transaction::new(date, &narration)
             .with_flag('*')
-            .with_posting(posting)
-            .with_posting(contra_posting);
+            .with_synthesized_posting(posting)
+            .with_synthesized_posting(contra_posting);
 
         // Add payee if name is available
         if !name.is_empty() && !memo.is_empty() {

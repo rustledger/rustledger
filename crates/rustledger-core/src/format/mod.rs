@@ -16,6 +16,7 @@ pub(crate) use directives::{
 pub use helpers::escape_string;
 pub(crate) use helpers::format_meta_value;
 pub(crate) use transaction::{format_incomplete_amount, format_transaction};
+pub use transaction::{format_posting, format_posting_line};
 
 use crate::Directive;
 
@@ -106,11 +107,11 @@ mod tests {
         let txn = Transaction::new(date(2024, 1, 15), "Morning coffee")
             .with_flag('*')
             .with_payee("Coffee Shop")
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Expenses:Food:Coffee",
                 Amount::new(dec!(5.00), "USD"),
             ))
-            .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(-5.00), "USD")));
+            .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(-5.00), "USD")));
 
         let config = FormatConfig::with_column(50);
         let formatted = format_transaction(&txn, &config);
@@ -641,11 +642,11 @@ mod tests {
             .with_flag('*')
             .with_tag("trip-2024")
             .with_tag("food")
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Expenses:Food",
                 Amount::new(dec!(50.00), "USD"),
             ))
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Assets:Cash",
                 Amount::new(dec!(-50.00), "USD"),
             ));
@@ -662,11 +663,11 @@ mod tests {
         let txn = Transaction::new(date(2024, 1, 15), "Invoice payment")
             .with_flag('*')
             .with_link("invoice-123")
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Income:Freelance",
                 Amount::new(dec!(-1000.00), "USD"),
             ))
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Assets:Bank",
                 Amount::new(dec!(1000.00), "USD"),
             ));
@@ -806,8 +807,8 @@ mod tests {
         // Transaction
         let txn = Transaction::new(date(2024, 1, 1), "Test")
             .with_flag('*')
-            .with_posting(Posting::new("Expenses:Test", Amount::new(dec!(1), "USD")))
-            .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(-1), "USD")));
+            .with_synthesized_posting(Posting::new("Expenses:Test", Amount::new(dec!(1), "USD")))
+            .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(-1), "USD")));
         let formatted = format_directive(&Directive::Transaction(txn), &config);
         assert!(formatted.contains("2024-01-01"));
 
@@ -956,8 +957,8 @@ mod tests {
 
         let txn = Transaction::new(date(2024, 1, 15), "Test transaction")
             .with_flag('*')
-            .with_posting(posting)
-            .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(-50), "USD")));
+            .with_synthesized_posting(posting)
+            .with_synthesized_posting(Posting::new("Assets:Bank", Amount::new(dec!(-50), "USD")));
 
         let formatted = format_transaction(&txn, &config);
 
@@ -992,8 +993,8 @@ mod tests {
         // Create transaction with trailing comments
         let mut txn = Transaction::new(date(2024, 1, 15), "Test transaction")
             .with_flag('*')
-            .with_posting(posting1)
-            .with_posting(posting2);
+            .with_synthesized_posting(posting1)
+            .with_synthesized_posting(posting2);
         txn.trailing_comments = vec![
             "; Transaction trailing 1".to_string(),
             "; Transaction trailing 2".to_string(),
@@ -1036,8 +1037,8 @@ mod tests {
 
         let txn = Transaction::new(date(2024, 1, 15), "Test")
             .with_flag('*')
-            .with_posting(posting)
-            .with_posting(Posting::auto("Assets:Bank"));
+            .with_synthesized_posting(posting)
+            .with_synthesized_posting(Posting::auto("Assets:Bank"));
 
         let formatted = format_transaction(&txn, &config);
 
@@ -1072,7 +1073,10 @@ mod tests {
             narration: "my expense".into(),
             tags: vec![],
             links: vec![],
-            postings: vec![posting, Posting::auto("Assets:Wallet")],
+            postings: vec![
+                crate::Spanned::synthesized(posting),
+                crate::Spanned::synthesized(Posting::auto("Assets:Wallet")),
+            ],
             meta: Metadata::default(),
             trailing_comments: Vec::new(),
         };

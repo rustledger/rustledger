@@ -29,11 +29,11 @@ fn make_test_directives() -> Vec<Directive> {
         Directive::Transaction(
             Transaction::new(date(2024, 1, 15), "Monthly salary")
                 .with_payee("Employer")
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
                     "Income:Salary",
                     Amount::new(dec!(-5000), "USD"),
                 ))
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
                     "Assets:Bank:Checking",
                     Amount::new(dec!(5000), "USD"),
                 )),
@@ -43,8 +43,11 @@ fn make_test_directives() -> Vec<Directive> {
             Transaction::new(date(2024, 1, 20), "Weekly groceries")
                 .with_payee("Grocery Store")
                 .with_tag("food")
-                .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(150), "USD")))
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
+                    "Expenses:Food",
+                    Amount::new(dec!(150), "USD"),
+                ))
+                .with_synthesized_posting(Posting::new(
                     "Assets:Bank:Checking",
                     Amount::new(dec!(-150), "USD"),
                 )),
@@ -53,11 +56,11 @@ fn make_test_directives() -> Vec<Directive> {
         Directive::Transaction(
             Transaction::new(date(2024, 1, 22), "Fill up")
                 .with_payee("Gas Station")
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
                     "Expenses:Transport",
                     Amount::new(dec!(45), "USD"),
                 ))
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
                     "Assets:Bank:Checking",
                     Amount::new(dec!(-45), "USD"),
                 )),
@@ -65,11 +68,11 @@ fn make_test_directives() -> Vec<Directive> {
         // Transaction 4: Transfer to savings
         Directive::Transaction(
             Transaction::new(date(2024, 1, 25), "Transfer to savings")
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
                     "Assets:Bank:Savings",
                     Amount::new(dec!(1000), "USD"),
                 ))
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
                     "Assets:Bank:Checking",
                     Amount::new(dec!(-1000), "USD"),
                 )),
@@ -79,8 +82,11 @@ fn make_test_directives() -> Vec<Directive> {
             Transaction::new(date(2024, 1, 27), "More groceries")
                 .with_payee("Grocery Store")
                 .with_tag("food")
-                .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(80), "USD")))
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
+                    "Expenses:Food",
+                    Amount::new(dec!(80), "USD"),
+                ))
+                .with_synthesized_posting(Posting::new(
                     "Assets:Bank:Checking",
                     Amount::new(dec!(-80), "USD"),
                 )),
@@ -572,8 +578,11 @@ fn test_journal_balance_is_cumulative_across_matched_accounts() {
         // Row 0: deposit USD into Assets:Cash.
         Directive::Transaction(
             Transaction::new(date(2024, 2, 1), "Deposit")
-                .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(1000), "USD")))
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Cash",
+                    Amount::new(dec!(1000), "USD"),
+                ))
+                .with_synthesized_posting(Posting::new(
                     "Equity:Opening",
                     Amount::new(dec!(-1000), "USD"),
                 )),
@@ -583,11 +592,11 @@ fn test_journal_balance_is_cumulative_across_matched_accounts() {
         // the USD held in Assets:Cash AND the new AAPL.
         Directive::Transaction(
             Transaction::new(date(2024, 3, 1), "Buy AAPL")
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
                     "Assets:Brokerage",
                     Amount::new(dec!(10), "AAPL"),
                 ))
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
                     "Equity:Opening",
                     Amount::new(dec!(-1500), "USD"),
                 )),
@@ -640,14 +649,14 @@ fn test_journal_position_column_preserves_cost() {
         Directive::Open(Open::new(date(2024, 1, 1), "Equity:Opening")),
         Directive::Transaction(
             Transaction::new(date(2024, 2, 1), "Buy AAPL")
-                .with_posting(
+                .with_synthesized_posting(
                     Posting::new("Assets:Brokerage", Amount::new(dec!(10), "AAPL")).with_cost(
                         CostSpec::empty()
                             .with_number_per(dec!(150))
                             .with_currency("USD"),
                     ),
                 )
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
                     "Equity:Opening",
                     Amount::new(dec!(-1500), "USD"),
                 )),
@@ -688,8 +697,11 @@ fn test_journal_from_clause_filters_cumulative_balance() {
         // 2024 transaction — should pass `FROM year = 2024` filter.
         Directive::Transaction(
             Transaction::new(date(2024, 6, 1), "Deposit 2024")
-                .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(100), "USD")))
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Cash",
+                    Amount::new(dec!(100), "USD"),
+                ))
+                .with_synthesized_posting(Posting::new(
                     "Equity:Opening",
                     Amount::new(dec!(-100), "USD"),
                 )),
@@ -697,8 +709,11 @@ fn test_journal_from_clause_filters_cumulative_balance() {
         // 2025 transaction — should NOT pass the filter.
         Directive::Transaction(
             Transaction::new(date(2025, 6, 1), "Deposit 2025")
-                .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(500), "USD")))
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Cash",
+                    Amount::new(dec!(500), "USD"),
+                ))
+                .with_synthesized_posting(Posting::new(
                     "Equity:Opening",
                     Amount::new(dec!(-500), "USD"),
                 )),
@@ -737,14 +752,14 @@ fn test_journal_at_cost_position_is_amount_not_position() {
         Directive::Open(Open::new(date(2024, 1, 1), "Equity:Opening")),
         Directive::Transaction(
             Transaction::new(date(2024, 2, 1), "Buy AAPL")
-                .with_posting(
+                .with_synthesized_posting(
                     Posting::new("Assets:Brokerage", Amount::new(dec!(10), "AAPL")).with_cost(
                         CostSpec::empty()
                             .with_number_per(dec!(150))
                             .with_currency("USD"),
                     ),
                 )
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
                     "Equity:Opening",
                     Amount::new(dec!(-1500), "USD"),
                 )),
@@ -773,14 +788,14 @@ fn test_journal_at_units_position_is_amount_not_position() {
         Directive::Open(Open::new(date(2024, 1, 1), "Equity:Opening")),
         Directive::Transaction(
             Transaction::new(date(2024, 2, 1), "Buy AAPL")
-                .with_posting(
+                .with_synthesized_posting(
                     Posting::new("Assets:Brokerage", Amount::new(dec!(10), "AAPL")).with_cost(
                         CostSpec::empty()
                             .with_number_per(dec!(150))
                             .with_currency("USD"),
                     ),
                 )
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
                     "Equity:Opening",
                     Amount::new(dec!(-1500), "USD"),
                 )),
@@ -813,14 +828,14 @@ fn test_journal_at_cost_collapses_balance_to_cost_currency() {
         Directive::Open(Open::new(date(2024, 1, 1), "Equity:Opening")),
         Directive::Transaction(
             Transaction::new(date(2024, 2, 1), "Buy AAPL")
-                .with_posting(
+                .with_synthesized_posting(
                     Posting::new("Assets:Brokerage", Amount::new(dec!(10), "AAPL")).with_cost(
                         CostSpec::empty()
                             .with_number_per(dec!(150))
                             .with_currency("USD"),
                     ),
                 )
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
                     "Equity:Opening",
                     Amount::new(dec!(-1500), "USD"),
                 )),
@@ -862,14 +877,14 @@ fn test_journal_at_cost_with_from_clause_filters_then_collapses() {
         // 2024 transaction — should pass `FROM year = 2024` filter.
         Directive::Transaction(
             Transaction::new(date(2024, 6, 1), "Buy AAPL")
-                .with_posting(
+                .with_synthesized_posting(
                     Posting::new("Assets:Brokerage", Amount::new(dec!(10), "AAPL")).with_cost(
                         CostSpec::empty()
                             .with_number_per(dec!(150))
                             .with_currency("USD"),
                     ),
                 )
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
                     "Equity:Opening",
                     Amount::new(dec!(-1500), "USD"),
                 )),
@@ -877,14 +892,14 @@ fn test_journal_at_cost_with_from_clause_filters_then_collapses() {
         // 2025 transaction — should be filtered out, not contribute to balance.
         Directive::Transaction(
             Transaction::new(date(2025, 6, 1), "Buy MSFT")
-                .with_posting(
+                .with_synthesized_posting(
                     Posting::new("Assets:Brokerage", Amount::new(dec!(20), "MSFT")).with_cost(
                         CostSpec::empty()
                             .with_number_per(dec!(300))
                             .with_currency("USD"),
                     ),
                 )
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
                     "Equity:Opening",
                     Amount::new(dec!(-6000), "USD"),
                 )),
@@ -920,14 +935,14 @@ fn test_journal_at_units_strips_cost_from_balance() {
         Directive::Open(Open::new(date(2024, 1, 1), "Equity:Opening")),
         Directive::Transaction(
             Transaction::new(date(2024, 2, 1), "Buy AAPL")
-                .with_posting(
+                .with_synthesized_posting(
                     Posting::new("Assets:Brokerage", Amount::new(dec!(10), "AAPL")).with_cost(
                         CostSpec::empty()
                             .with_number_per(dec!(150))
                             .with_currency("USD"),
                     ),
                 )
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
                     "Equity:Opening",
                     Amount::new(dec!(-1500), "USD"),
                 )),
@@ -964,8 +979,11 @@ fn test_journal_at_cost_balance_preserves_no_cost_positions() {
         Directive::Open(Open::new(date(2024, 1, 1), "Equity:Opening")),
         Directive::Transaction(
             Transaction::new(date(2024, 2, 1), "Deposit")
-                .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(100), "USD")))
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Cash",
+                    Amount::new(dec!(100), "USD"),
+                ))
+                .with_synthesized_posting(Posting::new(
                     "Equity:Opening",
                     Amount::new(dec!(-100), "USD"),
                 )),
@@ -996,14 +1014,14 @@ fn test_journal_at_cost_balance_keeps_mixed_cost_currencies() {
         // Lot 1: 10 AAPL @ 150 USD = 1500 USD cost basis.
         Directive::Transaction(
             Transaction::new(date(2024, 2, 1), "Buy AAPL USD lot")
-                .with_posting(
+                .with_synthesized_posting(
                     Posting::new("Assets:Brokerage", Amount::new(dec!(10), "AAPL")).with_cost(
                         CostSpec::empty()
                             .with_number_per(dec!(150))
                             .with_currency("USD"),
                     ),
                 )
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
                     "Equity:Opening",
                     Amount::new(dec!(-1500), "USD"),
                 )),
@@ -1012,14 +1030,14 @@ fn test_journal_at_cost_balance_keeps_mixed_cost_currencies() {
         // different cost currency — atypical but legal.)
         Directive::Transaction(
             Transaction::new(date(2024, 3, 1), "Buy AAPL EUR lot")
-                .with_posting(
+                .with_synthesized_posting(
                     Posting::new("Assets:Brokerage", Amount::new(dec!(5), "AAPL")).with_cost(
                         CostSpec::empty()
                             .with_number_per(dec!(130))
                             .with_currency("EUR"),
                     ),
                 )
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
                     "Equity:Opening",
                     Amount::new(dec!(-650), "EUR"),
                 )),
@@ -1140,16 +1158,22 @@ fn test_balances_with_different_from_filters_are_independent() {
         Directive::Open(Open::new(date(2024, 1, 1), "Equity:Opening")),
         Directive::Transaction(
             Transaction::new(date(2024, 6, 1), "2024 deposit")
-                .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(100), "USD")))
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Cash",
+                    Amount::new(dec!(100), "USD"),
+                ))
+                .with_synthesized_posting(Posting::new(
                     "Equity:Opening",
                     Amount::new(dec!(-100), "USD"),
                 )),
         ),
         Directive::Transaction(
             Transaction::new(date(2025, 6, 1), "2025 deposit")
-                .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(500), "USD")))
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Cash",
+                    Amount::new(dec!(500), "USD"),
+                ))
+                .with_synthesized_posting(Posting::new(
                     "Equity:Opening",
                     Amount::new(dec!(-500), "USD"),
                 )),
@@ -2044,8 +2068,14 @@ fn test_select_links() {
         Directive::Transaction(
             Transaction::new(date(2024, 1, 15), "Linked transaction")
                 .with_link("invoice-123")
-                .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(100), "USD")))
-                .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(-100), "USD"))),
+                .with_synthesized_posting(Posting::new(
+                    "Expenses:Food",
+                    Amount::new(dec!(100), "USD"),
+                ))
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Bank",
+                    Amount::new(dec!(-100), "USD"),
+                )),
         ),
     ];
 
@@ -3534,24 +3564,33 @@ fn test_issue_580_in_operator_with_set_literal() {
         Directive::Open(Open::new(date(2024, 1, 1), "Expenses:Food")),
         Directive::Transaction(
             Transaction::new(date(2024, 1, 15), "EUR expense")
-                .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(100), "EUR")))
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
+                    "Expenses:Food",
+                    Amount::new(dec!(100), "EUR"),
+                ))
+                .with_synthesized_posting(Posting::new(
                     "Assets:Bank:EUR",
                     Amount::new(dec!(-100), "EUR"),
                 )),
         ),
         Directive::Transaction(
             Transaction::new(date(2024, 1, 16), "USD expense")
-                .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(50), "USD")))
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
+                    "Expenses:Food",
+                    Amount::new(dec!(50), "USD"),
+                ))
+                .with_synthesized_posting(Posting::new(
                     "Assets:Bank:USD",
                     Amount::new(dec!(-50), "USD"),
                 )),
         ),
         Directive::Transaction(
             Transaction::new(date(2024, 1, 17), "GBP expense")
-                .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(30), "GBP")))
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
+                    "Expenses:Food",
+                    Amount::new(dec!(30), "GBP"),
+                ))
+                .with_synthesized_posting(Posting::new(
                     "Assets:Bank:GBP",
                     Amount::new(dec!(-30), "GBP"),
                 )),
@@ -3588,18 +3627,36 @@ fn test_not_in_operator_with_set_literal() {
         Directive::Open(Open::new(date(2024, 1, 1), "Expenses:Food")),
         Directive::Transaction(
             Transaction::new(date(2024, 1, 15), "EUR expense")
-                .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(100), "EUR")))
-                .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(-100), "EUR"))),
+                .with_synthesized_posting(Posting::new(
+                    "Expenses:Food",
+                    Amount::new(dec!(100), "EUR"),
+                ))
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Bank",
+                    Amount::new(dec!(-100), "EUR"),
+                )),
         ),
         Directive::Transaction(
             Transaction::new(date(2024, 1, 16), "USD expense")
-                .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(50), "USD")))
-                .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(-50), "USD"))),
+                .with_synthesized_posting(Posting::new(
+                    "Expenses:Food",
+                    Amount::new(dec!(50), "USD"),
+                ))
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Bank",
+                    Amount::new(dec!(-50), "USD"),
+                )),
         ),
         Directive::Transaction(
             Transaction::new(date(2024, 1, 17), "GBP expense")
-                .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(30), "GBP")))
-                .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(-30), "GBP"))),
+                .with_synthesized_posting(Posting::new(
+                    "Expenses:Food",
+                    Amount::new(dec!(30), "GBP"),
+                ))
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Bank",
+                    Amount::new(dec!(-30), "GBP"),
+                )),
         ),
     ];
 
@@ -3629,13 +3686,25 @@ fn test_in_operator_single_element_set() {
         Directive::Open(Open::new(date(2024, 1, 1), "Expenses:Food")),
         Directive::Transaction(
             Transaction::new(date(2024, 1, 15), "EUR expense")
-                .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(100), "EUR")))
-                .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(-100), "EUR"))),
+                .with_synthesized_posting(Posting::new(
+                    "Expenses:Food",
+                    Amount::new(dec!(100), "EUR"),
+                ))
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Bank",
+                    Amount::new(dec!(-100), "EUR"),
+                )),
         ),
         Directive::Transaction(
             Transaction::new(date(2024, 1, 16), "USD expense")
-                .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(50), "USD")))
-                .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(-50), "USD"))),
+                .with_synthesized_posting(Posting::new(
+                    "Expenses:Food",
+                    Amount::new(dec!(50), "USD"),
+                ))
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Bank",
+                    Amount::new(dec!(-50), "USD"),
+                )),
         ),
     ];
 
@@ -3663,13 +3732,25 @@ fn test_in_operator_single_element_no_trailing_comma() {
         Directive::Open(Open::new(date(2024, 1, 1), "Expenses:Food")),
         Directive::Transaction(
             Transaction::new(date(2024, 1, 15), "EUR expense")
-                .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(100), "EUR")))
-                .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(-100), "EUR"))),
+                .with_synthesized_posting(Posting::new(
+                    "Expenses:Food",
+                    Amount::new(dec!(100), "EUR"),
+                ))
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Bank",
+                    Amount::new(dec!(-100), "EUR"),
+                )),
         ),
         Directive::Transaction(
             Transaction::new(date(2024, 1, 16), "USD expense")
-                .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(50), "USD")))
-                .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(-50), "USD"))),
+                .with_synthesized_posting(Posting::new(
+                    "Expenses:Food",
+                    Amount::new(dec!(50), "USD"),
+                ))
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Bank",
+                    Amount::new(dec!(-50), "USD"),
+                )),
         ),
     ];
 
@@ -3724,13 +3805,25 @@ fn test_in_operator_parenthesized_column() {
         Directive::Transaction(
             Transaction::new(date(2024, 1, 15), "Tagged expense")
                 .with_tag("food")
-                .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(100), "EUR")))
-                .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(-100), "EUR"))),
+                .with_synthesized_posting(Posting::new(
+                    "Expenses:Food",
+                    Amount::new(dec!(100), "EUR"),
+                ))
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Bank",
+                    Amount::new(dec!(-100), "EUR"),
+                )),
         ),
         Directive::Transaction(
             Transaction::new(date(2024, 1, 16), "Untagged expense")
-                .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(50), "EUR")))
-                .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(-50), "EUR"))),
+                .with_synthesized_posting(Posting::new(
+                    "Expenses:Food",
+                    Amount::new(dec!(50), "EUR"),
+                ))
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Bank",
+                    Amount::new(dec!(-50), "EUR"),
+                )),
         ),
     ];
 
@@ -3757,18 +3850,36 @@ fn test_in_operator_numeric_set() {
         Directive::Open(Open::new(date(2023, 1, 1), "Expenses:Food")),
         Directive::Transaction(
             Transaction::new(date(2023, 6, 15), "2023 expense")
-                .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(100), "EUR")))
-                .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(-100), "EUR"))),
+                .with_synthesized_posting(Posting::new(
+                    "Expenses:Food",
+                    Amount::new(dec!(100), "EUR"),
+                ))
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Bank",
+                    Amount::new(dec!(-100), "EUR"),
+                )),
         ),
         Directive::Transaction(
             Transaction::new(date(2024, 3, 20), "2024 expense")
-                .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(50), "EUR")))
-                .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(-50), "EUR"))),
+                .with_synthesized_posting(Posting::new(
+                    "Expenses:Food",
+                    Amount::new(dec!(50), "EUR"),
+                ))
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Bank",
+                    Amount::new(dec!(-50), "EUR"),
+                )),
         ),
         Directive::Transaction(
             Transaction::new(date(2025, 9, 10), "2025 expense")
-                .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(30), "EUR")))
-                .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(-30), "EUR"))),
+                .with_synthesized_posting(Posting::new(
+                    "Expenses:Food",
+                    Amount::new(dec!(30), "EUR"),
+                ))
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Bank",
+                    Amount::new(dec!(-30), "EUR"),
+                )),
         ),
     ];
 
@@ -3806,18 +3917,36 @@ fn test_not_in_operator_numeric_set() {
         Directive::Open(Open::new(date(2023, 1, 1), "Expenses:Food")),
         Directive::Transaction(
             Transaction::new(date(2023, 6, 15), "2023 expense")
-                .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(100), "EUR")))
-                .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(-100), "EUR"))),
+                .with_synthesized_posting(Posting::new(
+                    "Expenses:Food",
+                    Amount::new(dec!(100), "EUR"),
+                ))
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Bank",
+                    Amount::new(dec!(-100), "EUR"),
+                )),
         ),
         Directive::Transaction(
             Transaction::new(date(2024, 3, 20), "2024 expense")
-                .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(50), "EUR")))
-                .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(-50), "EUR"))),
+                .with_synthesized_posting(Posting::new(
+                    "Expenses:Food",
+                    Amount::new(dec!(50), "EUR"),
+                ))
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Bank",
+                    Amount::new(dec!(-50), "EUR"),
+                )),
         ),
         Directive::Transaction(
             Transaction::new(date(2025, 9, 10), "2025 expense")
-                .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(30), "EUR")))
-                .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(-30), "EUR"))),
+                .with_synthesized_posting(Posting::new(
+                    "Expenses:Food",
+                    Amount::new(dec!(30), "EUR"),
+                ))
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Bank",
+                    Amount::new(dec!(-30), "EUR"),
+                )),
         ),
     ];
 
@@ -3880,7 +4009,7 @@ fn make_holdings_directives() -> Vec<Directive> {
         // Buy 10 AAPL at $100
         Directive::Transaction(
             Transaction::new(date(2024, 1, 15), "Buy AAPL")
-                .with_posting(
+                .with_synthesized_posting(
                     Posting::new("Assets:Brokerage", Amount::new(dec!(10), "AAPL")).with_cost(
                         CostSpec::empty()
                             .with_number_per(dec!(100))
@@ -3888,12 +4017,15 @@ fn make_holdings_directives() -> Vec<Directive> {
                             .with_date(date(2024, 1, 15)),
                     ),
                 )
-                .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(-1000), "USD"))),
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Cash",
+                    Amount::new(dec!(-1000), "USD"),
+                )),
         ),
         // Buy 5 more AAPL at $120
         Directive::Transaction(
             Transaction::new(date(2024, 3, 20), "Buy more AAPL")
-                .with_posting(
+                .with_synthesized_posting(
                     Posting::new("Assets:Brokerage", Amount::new(dec!(5), "AAPL")).with_cost(
                         CostSpec::empty()
                             .with_number_per(dec!(120))
@@ -3901,7 +4033,10 @@ fn make_holdings_directives() -> Vec<Directive> {
                             .with_date(date(2024, 3, 20)),
                     ),
                 )
-                .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(-600), "USD"))),
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Cash",
+                    Amount::new(dec!(-600), "USD"),
+                )),
         ),
     ]
 }
@@ -4133,11 +4268,14 @@ fn test_number_cost_position_without_cost() {
         Directive::Open(Open::new(date(2020, 1, 1), "Expenses:Food")),
         Directive::Transaction(
             Transaction::new(date(2020, 1, 2), "Grocery")
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
                     "Assets:Checking",
                     Amount::new(dec!(-10), "USD"),
                 ))
-                .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(10), "USD"))),
+                .with_synthesized_posting(Posting::new(
+                    "Expenses:Food",
+                    Amount::new(dec!(10), "USD"),
+                )),
         ),
     ];
     let result = execute_query("SELECT number(cost(position))", &directives);
@@ -4164,14 +4302,17 @@ fn test_cost_mixed_inventory_with_and_without_cost() {
         Directive::Open(Open::new(date(2024, 1, 1), "Assets:Cash")),
         Directive::Transaction(
             Transaction::new(date(2024, 1, 15), "Buy AAPL")
-                .with_posting(
+                .with_synthesized_posting(
                     Posting::new("Assets:Brokerage", Amount::new(dec!(10), "AAPL")).with_cost(
                         CostSpec::empty()
                             .with_number_per(dec!(100))
                             .with_currency("USD"),
                     ),
                 )
-                .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(-1000), "USD"))),
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Cash",
+                    Amount::new(dec!(-1000), "USD"),
+                )),
         ),
     ];
     // cost(sum(position)) for Cash: no cost basis, returns units = -1000 USD
@@ -4235,7 +4376,7 @@ fn make_multi_currency_holdings() -> Vec<Directive> {
         // Buy 10 AAPL
         Directive::Transaction(
             Transaction::new(date(2024, 1, 15), "Buy AAPL")
-                .with_posting(
+                .with_synthesized_posting(
                     Posting::new("Assets:Brokerage", Amount::new(dec!(10), "AAPL")).with_cost(
                         CostSpec::empty()
                             .with_number_per(dec!(100))
@@ -4243,12 +4384,15 @@ fn make_multi_currency_holdings() -> Vec<Directive> {
                             .with_date(date(2024, 1, 15)),
                     ),
                 )
-                .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(-1000), "USD"))),
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Cash",
+                    Amount::new(dec!(-1000), "USD"),
+                )),
         ),
         // Buy 5 GOOG (different currency/stock)
         Directive::Transaction(
             Transaction::new(date(2024, 2, 10), "Buy GOOG")
-                .with_posting(
+                .with_synthesized_posting(
                     Posting::new("Assets:Brokerage", Amount::new(dec!(5), "GOOG")).with_cost(
                         CostSpec::empty()
                             .with_number_per(dec!(150))
@@ -4256,7 +4400,10 @@ fn make_multi_currency_holdings() -> Vec<Directive> {
                             .with_date(date(2024, 2, 10)),
                     ),
                 )
-                .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(-750), "USD"))),
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Cash",
+                    Amount::new(dec!(-750), "USD"),
+                )),
         ),
     ]
 }
@@ -4797,11 +4944,11 @@ fn make_large_directives() -> Vec<Directive> {
     for i in 0u32..510 {
         let day = (i % 28) + 1; // Day 1-28
         let txn = Transaction::new(date(2024, 1, day), format!("Transaction {i}"))
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Expenses:Test",
                 Amount::new(dec!(10) + rust_decimal::Decimal::from(i64::from(i)), "USD"),
             ))
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Assets:Bank",
                 Amount::new(dec!(-10) - rust_decimal::Decimal::from(i64::from(i)), "USD"),
             ));
@@ -5090,7 +5237,7 @@ fn make_chained_price_directives() -> Vec<Directive> {
         // Buy 5 GOOG at 80 EUR cost
         Directive::Transaction(
             Transaction::new(date(2024, 2, 15), "Buy GOOG")
-                .with_posting(
+                .with_synthesized_posting(
                     Posting::new("Assets:Stocks", Amount::new(dec!(5), "GOOG")).with_cost(
                         CostSpec::empty()
                             .with_number_per(dec!(80))
@@ -5098,7 +5245,10 @@ fn make_chained_price_directives() -> Vec<Directive> {
                             .with_date(date(2024, 2, 15)),
                     ),
                 )
-                .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(-400), "EUR"))),
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Cash",
+                    Amount::new(dec!(-400), "EUR"),
+                )),
         ),
     ]
 }
@@ -5120,8 +5270,14 @@ fn test_value_no_currency_returns_as_is() {
         Directive::Open(Open::new(date(2024, 1, 1), "Expenses:Food")),
         Directive::Transaction(
             Transaction::new(date(2024, 1, 15), "Grocery store")
-                .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(50), "USD")))
-                .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(-50), "USD"))),
+                .with_synthesized_posting(Posting::new(
+                    "Expenses:Food",
+                    Amount::new(dec!(50), "USD"),
+                ))
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Cash",
+                    Amount::new(dec!(-50), "USD"),
+                )),
         ),
     ];
 
@@ -5156,13 +5312,25 @@ fn test_value_no_currency_aggregated_returns_as_is() {
         Directive::Open(Open::new(date(2024, 1, 1), "Expenses:Food")),
         Directive::Transaction(
             Transaction::new(date(2024, 1, 15), "Grocery store")
-                .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(50), "USD")))
-                .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(-50), "USD"))),
+                .with_synthesized_posting(Posting::new(
+                    "Expenses:Food",
+                    Amount::new(dec!(50), "USD"),
+                ))
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Cash",
+                    Amount::new(dec!(-50), "USD"),
+                )),
         ),
         Directive::Transaction(
             Transaction::new(date(2024, 2, 10), "Restaurant")
-                .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(30), "USD")))
-                .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(-30), "USD"))),
+                .with_synthesized_posting(Posting::new(
+                    "Expenses:Food",
+                    Amount::new(dec!(30), "USD"),
+                ))
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Cash",
+                    Amount::new(dec!(-30), "USD"),
+                )),
         ),
     ];
 
@@ -5229,7 +5397,7 @@ fn make_issue_892_directives() -> Vec<Directive> {
             Amount::new(dec!(9999), "USD"),
         )),
         Directive::Transaction(
-            Transaction::new(date(2020, 1, 1), "Buy stock").with_posting(
+            Transaction::new(date(2020, 1, 1), "Buy stock").with_synthesized_posting(
                 Posting::new("Assets:Brokerage", Amount::new(dec!(4), "SP")).with_cost(
                     CostSpec::empty()
                         .with_number_per(dec!(250))
@@ -5443,14 +5611,17 @@ fn test_prices_table_excludes_transaction_derived_implicit_prices() {
         Directive::Open(Open::new(date(2024, 1, 1), "Assets:Cash")),
         Directive::Transaction(
             Transaction::new(date(2024, 1, 10), "Buy")
-                .with_posting(
+                .with_synthesized_posting(
                     Posting::new("Assets:Stock", Amount::new(dec!(10), "HOOL")).with_cost(
                         CostSpec::empty()
                             .with_number_per(dec!(520))
                             .with_currency("USD"),
                     ),
                 )
-                .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(-5200), "USD"))),
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Cash",
+                    Amount::new(dec!(-5200), "USD"),
+                )),
         ),
     ];
 
@@ -5477,14 +5648,17 @@ fn test_value_works_without_explicit_price_directive() {
         Directive::Open(Open::new(date(2024, 1, 1), "Assets:Cash")),
         Directive::Transaction(
             Transaction::new(date(2024, 1, 10), "Buy")
-                .with_posting(
+                .with_synthesized_posting(
                     Posting::new("Assets:Stock", Amount::new(dec!(10), "HOOL")).with_cost(
                         CostSpec::empty()
                             .with_number_per(dec!(520))
                             .with_currency("USD"),
                     ),
                 )
-                .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(-5200), "USD"))),
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Cash",
+                    Amount::new(dec!(-5200), "USD"),
+                )),
         ),
     ];
 
@@ -6499,7 +6673,10 @@ fn make_entries_test_directives() -> Vec<Directive> {
             Transaction::new(date(2024, 1, 15), "Test transaction")
                 .with_payee("Test Payee")
                 .with_tag("testtag")
-                .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(100), "USD"))),
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Bank",
+                    Amount::new(dec!(100), "USD"),
+                )),
         ),
         Directive::Note(Note::new(date(2024, 2, 1), "Assets:Bank", "A note")),
         Directive::Event(Event::new(date(2024, 3, 1), "location", "NYC")),
@@ -6627,13 +6804,25 @@ fn make_postings_test_directives() -> Vec<Directive> {
         Directive::Transaction(
             Transaction::new(date(2024, 1, 15), "Groceries")
                 .with_payee("Store")
-                .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(50), "USD")))
-                .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(-50), "USD"))),
+                .with_synthesized_posting(Posting::new(
+                    "Expenses:Food",
+                    Amount::new(dec!(50), "USD"),
+                ))
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Bank",
+                    Amount::new(dec!(-50), "USD"),
+                )),
         ),
         Directive::Transaction(
             Transaction::new(date(2024, 1, 20), "More food")
-                .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(30), "USD")))
-                .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(-30), "USD"))),
+                .with_synthesized_posting(Posting::new(
+                    "Expenses:Food",
+                    Amount::new(dec!(30), "USD"),
+                ))
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Bank",
+                    Amount::new(dec!(-30), "USD"),
+                )),
         ),
     ]
 }
@@ -6779,7 +6968,7 @@ fn test_postings_table_cost_columns() {
         Directive::Open(Open::new(date(2024, 1, 1), "Assets:Cash")),
         Directive::Transaction(
             Transaction::new(date(2024, 1, 15), "Buy stock")
-                .with_posting(
+                .with_synthesized_posting(
                     Posting::new("Assets:Brokerage", Amount::new(dec!(10), "AAPL")).with_cost(
                         CostSpec::empty()
                             .with_number_per(dec!(150))
@@ -6788,7 +6977,10 @@ fn test_postings_table_cost_columns() {
                             .with_label("lot1"),
                     ),
                 )
-                .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(-1500), "USD"))),
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Cash",
+                    Amount::new(dec!(-1500), "USD"),
+                )),
         ),
     ];
 
@@ -6822,8 +7014,14 @@ fn test_postings_table_cost_columns_null_when_no_cost() {
         Directive::Open(Open::new(date(2024, 1, 1), "Expenses:Food")),
         Directive::Transaction(
             Transaction::new(date(2024, 1, 15), "Groceries")
-                .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(50), "USD")))
-                .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(-50), "USD"))),
+                .with_synthesized_posting(Posting::new(
+                    "Expenses:Food",
+                    Amount::new(dec!(50), "USD"),
+                ))
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Bank",
+                    Amount::new(dec!(-50), "USD"),
+                )),
         ),
     ];
 
@@ -6852,11 +7050,14 @@ fn test_postings_table_price_column() {
         Directive::Open(Open::new(date(2024, 1, 1), "Assets:Cash")),
         Directive::Transaction(
             Transaction::new(date(2024, 1, 15), "Buy at price")
-                .with_posting(
+                .with_synthesized_posting(
                     Posting::new("Assets:Brokerage", Amount::new(dec!(10), "AAPL"))
                         .with_price(PriceAnnotation::Unit(Amount::new(dec!(150), "USD"))),
                 )
-                .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(-1500), "USD"))),
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Cash",
+                    Amount::new(dec!(-1500), "USD"),
+                )),
         ),
     ];
 
@@ -6887,13 +7088,25 @@ fn test_aggregate_context_non_aggregate_function_short_circuit() {
         Directive::Open(Open::new(date(2024, 1, 1), "Assets:Cash")),
         Directive::Transaction(
             Transaction::new(date(2024, 1, 15), "Q1")
-                .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(10), "USD")))
-                .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(-10), "USD"))),
+                .with_synthesized_posting(Posting::new(
+                    "Expenses:Food",
+                    Amount::new(dec!(10), "USD"),
+                ))
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Cash",
+                    Amount::new(dec!(-10), "USD"),
+                )),
         ),
         Directive::Transaction(
             Transaction::new(date(2024, 4, 15), "Q2")
-                .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(20), "USD")))
-                .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(-20), "USD"))),
+                .with_synthesized_posting(Posting::new(
+                    "Expenses:Food",
+                    Amount::new(dec!(20), "USD"),
+                ))
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Cash",
+                    Amount::new(dec!(-20), "USD"),
+                )),
         ),
     ];
 
@@ -6919,13 +7132,25 @@ fn test_aggregate_context_function_wrapping_aggregate() {
         Directive::Open(Open::new(date(2024, 1, 1), "Assets:Cash")),
         Directive::Transaction(
             Transaction::new(date(2024, 1, 15), "Jan")
-                .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(10), "USD")))
-                .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(-10), "USD"))),
+                .with_synthesized_posting(Posting::new(
+                    "Expenses:Food",
+                    Amount::new(dec!(10), "USD"),
+                ))
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Cash",
+                    Amount::new(dec!(-10), "USD"),
+                )),
         ),
         Directive::Transaction(
             Transaction::new(date(2024, 3, 20), "Mar")
-                .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(20), "USD")))
-                .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(-20), "USD"))),
+                .with_synthesized_posting(Posting::new(
+                    "Expenses:Food",
+                    Amount::new(dec!(20), "USD"),
+                ))
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Cash",
+                    Amount::new(dec!(-20), "USD"),
+                )),
         ),
     ];
 
@@ -6947,11 +7172,14 @@ fn test_aggregate_context_account_depth() {
         Directive::Open(Open::new(date(2024, 1, 1), "Assets:Cash")),
         Directive::Transaction(
             Transaction::new(date(2024, 1, 15), "Lunch")
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
                     "Expenses:Food:Restaurant",
                     Amount::new(dec!(25), "USD"),
                 ))
-                .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(-25), "USD"))),
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Cash",
+                    Amount::new(dec!(-25), "USD"),
+                )),
         ),
     ];
 
@@ -6972,14 +7200,17 @@ fn test_aggregate_context_weight_on_values() {
         Directive::Open(Open::new(date(2024, 1, 1), "Assets:Cash")),
         Directive::Transaction(
             Transaction::new(date(2024, 1, 15), "Buy")
-                .with_posting(
+                .with_synthesized_posting(
                     Posting::new("Assets:Stock", Amount::new(dec!(10), "AAPL")).with_cost(
                         CostSpec::empty()
                             .with_number_per(dec!(150))
                             .with_currency("USD"),
                     ),
                 )
-                .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(-1500), "USD"))),
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Cash",
+                    Amount::new(dec!(-1500), "USD"),
+                )),
         ),
     ];
 
@@ -7005,8 +7236,14 @@ fn test_postings_table_position_column_simple() {
         Directive::Open(Open::new(date(2024, 1, 1), "Expenses:Food")),
         Directive::Transaction(
             Transaction::new(date(2024, 1, 15), "Groceries")
-                .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(50), "USD")))
-                .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(-50), "USD"))),
+                .with_synthesized_posting(Posting::new(
+                    "Expenses:Food",
+                    Amount::new(dec!(50), "USD"),
+                ))
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Bank",
+                    Amount::new(dec!(-50), "USD"),
+                )),
         ),
     ];
 
@@ -7033,14 +7270,17 @@ fn test_postings_table_position_column_with_cost() {
         Directive::Open(Open::new(date(2024, 1, 1), "Assets:Cash")),
         Directive::Transaction(
             Transaction::new(date(2024, 1, 15), "Buy stock")
-                .with_posting(
+                .with_synthesized_posting(
                     Posting::new("Assets:Brokerage", Amount::new(dec!(10), "AAPL")).with_cost(
                         CostSpec::empty()
                             .with_number_per(dec!(150))
                             .with_currency("USD"),
                     ),
                 )
-                .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(-1500), "USD"))),
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Cash",
+                    Amount::new(dec!(-1500), "USD"),
+                )),
         ),
     ];
 
@@ -7126,10 +7366,13 @@ fn test_postings_table_posting_flag_column() {
         Directive::Open(Open::new(date(2024, 1, 1), "Expenses:Food")),
         Directive::Transaction(
             Transaction::new(date(2024, 1, 15), "Test")
-                .with_posting(
+                .with_synthesized_posting(
                     Posting::new("Expenses:Food", Amount::new(dec!(50), "USD")).with_flag('!'),
                 )
-                .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(-50), "USD"))),
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Bank",
+                    Amount::new(dec!(-50), "USD"),
+                )),
         ),
     ];
     let result = execute_query(
@@ -7174,8 +7417,14 @@ fn test_postings_table_tags_links_columns() {
             Transaction::new(date(2024, 1, 15), "Tagged")
                 .with_tag("trip")
                 .with_link("receipt-123")
-                .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(50), "USD")))
-                .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(-50), "USD"))),
+                .with_synthesized_posting(Posting::new(
+                    "Expenses:Food",
+                    Amount::new(dec!(50), "USD"),
+                ))
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Bank",
+                    Amount::new(dec!(-50), "USD"),
+                )),
         ),
     ];
     let result = execute_query("SELECT tags, links FROM #postings LIMIT 1", &directives);
@@ -7197,14 +7446,17 @@ fn test_postings_table_weight_column() {
         Directive::Open(Open::new(date(2024, 1, 1), "Assets:Brokerage")),
         Directive::Transaction(
             Transaction::new(date(2024, 1, 15), "Buy stock")
-                .with_posting(
+                .with_synthesized_posting(
                     Posting::new("Assets:Brokerage", Amount::new(dec!(10), "AAPL")).with_cost(
                         CostSpec::empty()
                             .with_number_per(dec!(150))
                             .with_currency("USD"),
                     ),
                 )
-                .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(-1500), "USD"))),
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Bank",
+                    Amount::new(dec!(-1500), "USD"),
+                )),
         ),
     ];
     let result = execute_query(
@@ -7240,11 +7492,14 @@ fn test_postings_table_weight_per_unit_price() {
         Directive::Open(Open::new(date(2024, 1, 1), "Assets:Foreign")),
         Directive::Transaction(
             Transaction::new(date(2024, 1, 15), "Buy euros")
-                .with_posting(
+                .with_synthesized_posting(
                     Posting::new("Assets:Foreign", Amount::new(dec!(100), "EUR"))
                         .with_price(PriceAnnotation::Unit(Amount::new(dec!(1.10), "USD"))),
                 )
-                .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(-110), "USD"))),
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Bank",
+                    Amount::new(dec!(-110), "USD"),
+                )),
         ),
     ];
     let result = execute_query(
@@ -7266,11 +7521,14 @@ fn test_postings_table_weight_total_price() {
         Directive::Open(Open::new(date(2024, 1, 1), "Assets:Foreign")),
         Directive::Transaction(
             Transaction::new(date(2024, 1, 15), "Buy euros")
-                .with_posting(
+                .with_synthesized_posting(
                     Posting::new("Assets:Foreign", Amount::new(dec!(100), "EUR"))
                         .with_price(PriceAnnotation::Total(Amount::new(dec!(110), "USD"))),
                 )
-                .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(-110), "USD"))),
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Bank",
+                    Amount::new(dec!(-110), "USD"),
+                )),
         ),
     ];
     let result = execute_query(
@@ -7293,11 +7551,14 @@ fn test_weight_column_total_price_default_from() {
         Directive::Open(Open::new(date(2024, 1, 1), "Assets:Foreign")),
         Directive::Transaction(
             Transaction::new(date(2024, 1, 15), "Buy euros")
-                .with_posting(
+                .with_synthesized_posting(
                     Posting::new("Assets:Foreign", Amount::new(dec!(100), "EUR"))
                         .with_price(PriceAnnotation::Total(Amount::new(dec!(110), "USD"))),
                 )
-                .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(-110), "USD"))),
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Bank",
+                    Amount::new(dec!(-110), "USD"),
+                )),
         ),
     ];
     // Default FROM (uses evaluate_column)
@@ -7324,11 +7585,11 @@ fn test_weight_total_price_credit_side_flips_sign() {
         Directive::Open(Open::new(date(2024, 1, 1), "Assets:Cash")),
         Directive::Transaction(
             Transaction::new(date(2025, 1, 23), "insurance matured")
-                .with_posting(
+                .with_synthesized_posting(
                     Posting::new("Assets:Insurance", Amount::new(dec!(-27204.53), "BAM"))
                         .with_price(PriceAnnotation::Total(Amount::new(dec!(15152.07), "EUR"))),
                 )
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
                     "Assets:Cash",
                     Amount::new(dec!(15152.07), "EUR"),
                 )),
@@ -7482,11 +7743,11 @@ fn make_convert_test_directives() -> Vec<Directive> {
         // Incoming transfer of 3000 CHF
         Directive::Transaction(
             Transaction::new(date(2025, 7, 15), "Incoming transfer")
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
                     "Assets:Bank:CHF",
                     Amount::new(dec!(3000), "CHF"),
                 ))
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
                     "Income:Other",
                     Amount::new(dec!(-3000), "CHF"),
                 )),
@@ -7557,8 +7818,11 @@ fn test_convert_with_explicit_date() {
         )),
         Directive::Transaction(
             Transaction::new(date(2024, 3, 15), "Deposit")
-                .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(1000), "USD")))
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Bank",
+                    Amount::new(dec!(1000), "USD"),
+                ))
+                .with_synthesized_posting(Posting::new(
                     "Income:Other",
                     Amount::new(dec!(-1000), "USD"),
                 )),
@@ -7600,8 +7864,11 @@ fn test_convert_multiple_currencies_in_inventory() {
         // USD deposit
         Directive::Transaction(
             Transaction::new(date(2024, 1, 15), "USD Deposit")
-                .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(1000), "USD")))
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Bank",
+                    Amount::new(dec!(1000), "USD"),
+                ))
+                .with_synthesized_posting(Posting::new(
                     "Income:Other",
                     Amount::new(dec!(-1000), "USD"),
                 )),
@@ -7609,8 +7876,14 @@ fn test_convert_multiple_currencies_in_inventory() {
         // GBP deposit
         Directive::Transaction(
             Transaction::new(date(2024, 1, 20), "GBP Deposit")
-                .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(500), "GBP")))
-                .with_posting(Posting::new("Income:Other", Amount::new(dec!(-500), "GBP"))),
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Bank",
+                    Amount::new(dec!(500), "GBP"),
+                ))
+                .with_synthesized_posting(Posting::new(
+                    "Income:Other",
+                    Amount::new(dec!(-500), "GBP"),
+                )),
         ),
     ];
 
@@ -7643,8 +7916,14 @@ fn test_convert_basic_amount() {
         )),
         Directive::Transaction(
             Transaction::new(date(2024, 1, 15), "Groceries")
-                .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(100), "USD")))
-                .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(-100), "USD"))),
+                .with_synthesized_posting(Posting::new(
+                    "Expenses:Food",
+                    Amount::new(dec!(100), "USD"),
+                ))
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Bank",
+                    Amount::new(dec!(-100), "USD"),
+                )),
         ),
     ];
 
@@ -7671,8 +7950,14 @@ fn test_convert_number_to_currency() {
         Directive::Open(Open::new(date(2024, 1, 1), "Expenses:Food")),
         Directive::Transaction(
             Transaction::new(date(2024, 1, 15), "Groceries")
-                .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(100), "USD")))
-                .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(-100), "USD"))),
+                .with_synthesized_posting(Posting::new(
+                    "Expenses:Food",
+                    Amount::new(dec!(100), "USD"),
+                ))
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Bank",
+                    Amount::new(dec!(-100), "USD"),
+                )),
         ),
     ];
 
@@ -7703,11 +7988,11 @@ fn test_convert_unconvertible_currency_kept_original() {
         // EUR account - will be kept as-is (target currency)
         Directive::Transaction(
             Transaction::new(date(2024, 1, 1), "Opening EUR")
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
                     "Assets:Bank:EUR",
                     Amount::new(dec!(1000), "EUR"),
                 ))
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
                     "Equity:Opening",
                     Amount::new(dec!(-1000), "EUR"),
                 )),
@@ -7715,11 +8000,11 @@ fn test_convert_unconvertible_currency_kept_original() {
         // JPY account - NO price defined, should be kept as JPY
         Directive::Transaction(
             Transaction::new(date(2024, 1, 1), "Opening JPY")
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
                     "Assets:Bank:JPY",
                     Amount::new(dec!(50000), "JPY"),
                 ))
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
                     "Equity:Opening",
                     Amount::new(dec!(-50000), "JPY"),
                 )),
@@ -7772,7 +8057,7 @@ fn test_issue_567_value_uses_implicit_price_from_annotation() {
         // Buy 5 ABC at cost 1.25 EUR each
         Directive::Transaction(
             Transaction::new(date(2024, 1, 10), "Buy stock")
-                .with_posting(
+                .with_synthesized_posting(
                     Posting::new("Assets:Stocks", Amount::new(dec!(5), "ABC")).with_cost(
                         CostSpec::empty()
                             .with_number_per(dec!(1.25))
@@ -7780,12 +8065,15 @@ fn test_issue_567_value_uses_implicit_price_from_annotation() {
                             .with_date(date(2024, 1, 10)),
                     ),
                 )
-                .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(-6.25), "EUR"))),
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Cash",
+                    Amount::new(dec!(-6.25), "EUR"),
+                )),
         ),
         // Sell with @ 1.40 EUR price annotation (creates implicit price)
         Directive::Transaction(
             Transaction::new(date(2024, 1, 15), "Sell stock")
-                .with_posting(
+                .with_synthesized_posting(
                     Posting::new("Assets:Stocks", Amount::new(dec!(-5), "ABC"))
                         .with_cost(
                             CostSpec::empty()
@@ -7795,7 +8083,10 @@ fn test_issue_567_value_uses_implicit_price_from_annotation() {
                         )
                         .with_price(PriceAnnotation::Unit(Amount::new(dec!(1.40), "EUR"))),
                 )
-                .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(7.00), "EUR"))),
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Cash",
+                    Amount::new(dec!(7.00), "EUR"),
+                )),
         ),
     ];
 
@@ -7845,19 +8136,22 @@ fn test_issue_567_value_sum_position_with_implicit_price() {
         // Buy 10 XYZ at cost 50 USD each
         Directive::Transaction(
             Transaction::new(date(2024, 1, 10), "Buy XYZ")
-                .with_posting(
+                .with_synthesized_posting(
                     Posting::new("Assets:Stocks", Amount::new(dec!(10), "XYZ")).with_cost(
                         CostSpec::empty()
                             .with_number_per(dec!(50))
                             .with_currency("USD"),
                     ),
                 )
-                .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(-500), "USD"))),
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Cash",
+                    Amount::new(dec!(-500), "USD"),
+                )),
         ),
         // Price goes up - sell some with @ 60 USD annotation
         Directive::Transaction(
             Transaction::new(date(2024, 2, 15), "Sell XYZ")
-                .with_posting(
+                .with_synthesized_posting(
                     Posting::new("Assets:Stocks", Amount::new(dec!(-5), "XYZ"))
                         .with_cost(
                             CostSpec::empty()
@@ -7866,7 +8160,10 @@ fn test_issue_567_value_sum_position_with_implicit_price() {
                         )
                         .with_price(PriceAnnotation::Unit(Amount::new(dec!(60), "USD"))),
                 )
-                .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(300), "USD"))),
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Cash",
+                    Amount::new(dec!(300), "USD"),
+                )),
         ),
     ];
 
@@ -8017,20 +8314,29 @@ fn make_issue_575_directives() -> Vec<Directive> {
         Directive::Transaction(
             Transaction::new(date(2026, 3, 26), "Grocery shopping")
                 .with_payee("Grocery Store")
-                .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(50), "EUR")))
-                .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(-50), "EUR"))),
+                .with_synthesized_posting(Posting::new(
+                    "Expenses:Food",
+                    Amount::new(dec!(50), "EUR"),
+                ))
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Bank",
+                    Amount::new(dec!(-50), "EUR"),
+                )),
         ),
         // Transaction 2: Buy stock (5 ABC @ 100 EUR each = 500 EUR)
         Directive::Transaction(
             Transaction::new(date(2026, 3, 27), "Buy Stock")
-                .with_posting(
+                .with_synthesized_posting(
                     Posting::new("Assets:Investment", Amount::new(dec!(5), "ABC")).with_cost(
                         CostSpec::empty()
                             .with_number_per(dec!(100))
                             .with_currency("EUR"),
                     ),
                 )
-                .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(-500), "EUR"))),
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Bank",
+                    Amount::new(dec!(-500), "EUR"),
+                )),
         ),
     ]
 }
@@ -8068,28 +8374,37 @@ fn test_issue_586_convert_null_returns_zero() {
         // Transaction on WithBalance account
         Directive::Transaction(
             Transaction::new(date(2024, 1, 15), "Groceries")
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
                     "Liabilities:CreditCards:WithBalance",
                     Amount::new(dec!(-100), "EUR"),
                 ))
-                .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(100), "EUR"))),
+                .with_synthesized_posting(Posting::new(
+                    "Expenses:Food",
+                    Amount::new(dec!(100), "EUR"),
+                )),
         ),
         // Two transactions on ZeroBalance that cancel each other out
         Directive::Transaction(
             Transaction::new(date(2024, 1, 16), "Purchase")
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
                     "Liabilities:CreditCards:ZeroBalance",
                     Amount::new(dec!(-50), "EUR"),
                 ))
-                .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(50), "EUR"))),
+                .with_synthesized_posting(Posting::new(
+                    "Expenses:Food",
+                    Amount::new(dec!(50), "EUR"),
+                )),
         ),
         Directive::Transaction(
             Transaction::new(date(2024, 1, 17), "Refund")
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
                     "Liabilities:CreditCards:ZeroBalance",
                     Amount::new(dec!(50), "EUR"),
                 ))
-                .with_posting(Posting::new("Income:Refund", Amount::new(dec!(-50), "EUR"))),
+                .with_synthesized_posting(Posting::new(
+                    "Income:Refund",
+                    Amount::new(dec!(-50), "EUR"),
+                )),
         ),
     ];
 
@@ -8148,8 +8463,11 @@ fn test_convert_no_price_fallback() {
         Directive::Open(Open::new(date(2024, 1, 1), "Assets:Bank")),
         Directive::Transaction(
             Transaction::new(date(2024, 1, 15), "Deposit")
-                .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(100), "USD")))
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Bank",
+                    Amount::new(dec!(100), "USD"),
+                ))
+                .with_synthesized_posting(Posting::new(
                     "Income:Salary",
                     Amount::new(dec!(-100), "USD"),
                 )),
@@ -8210,14 +8528,14 @@ fn test_issue_593_cost_preserves_sign_for_sells() {
         // Buy 5 ABC at cost 1.25 EUR
         Directive::Transaction(
             Transaction::new(date(2025, 4, 1), "Buy Stocks")
-                .with_posting(
+                .with_synthesized_posting(
                     Posting::new("Equity:Stocks", Amount::new(dec!(5), "ABC")).with_cost(
                         CostSpec::empty()
                             .with_number_per(dec!(1.25))
                             .with_currency("EUR"),
                     ),
                 )
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
                     "Assets:Bank:Checking",
                     Amount::new(dec!(-6.25), "EUR"),
                 )),
@@ -8225,14 +8543,14 @@ fn test_issue_593_cost_preserves_sign_for_sells() {
         // Buy 7 more ABC at cost 1.30 EUR
         Directive::Transaction(
             Transaction::new(date(2025, 4, 2), "Buy more stocks")
-                .with_posting(
+                .with_synthesized_posting(
                     Posting::new("Equity:Stocks", Amount::new(dec!(7), "ABC")).with_cost(
                         CostSpec::empty()
                             .with_number_per(dec!(1.30))
                             .with_currency("EUR"),
                     ),
                 )
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
                     "Assets:Bank:Checking",
                     Amount::new(dec!(-9.10), "EUR"),
                 )),
@@ -8240,7 +8558,7 @@ fn test_issue_593_cost_preserves_sign_for_sells() {
         // Sell 5 ABC (the first lot)
         Directive::Transaction(
             Transaction::new(date(2025, 9, 9), "Sell complete lot")
-                .with_posting(
+                .with_synthesized_posting(
                     Posting::new("Equity:Stocks", Amount::new(dec!(-5), "ABC"))
                         .with_cost(
                             CostSpec::empty()
@@ -8250,7 +8568,7 @@ fn test_issue_593_cost_preserves_sign_for_sells() {
                         )
                         .with_price(PriceAnnotation::Unit(Amount::new(dec!(1.35), "EUR"))),
                 )
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
                     "Assets:Bank:Checking",
                     Amount::new(dec!(6.75), "EUR"),
                 )),
@@ -8258,7 +8576,7 @@ fn test_issue_593_cost_preserves_sign_for_sells() {
         // Sell 3 ABC (partial from second lot)
         Directive::Transaction(
             Transaction::new(date(2025, 9, 10), "Sell some stock")
-                .with_posting(
+                .with_synthesized_posting(
                     Posting::new("Equity:Stocks", Amount::new(dec!(-3), "ABC"))
                         .with_cost(
                             CostSpec::empty()
@@ -8268,7 +8586,7 @@ fn test_issue_593_cost_preserves_sign_for_sells() {
                         )
                         .with_price(PriceAnnotation::Unit(Amount::new(dec!(1.40), "EUR"))),
                 )
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
                     "Assets:Bank:Checking",
                     Amount::new(dec!(4.20), "EUR"),
                 )),
@@ -8380,14 +8698,14 @@ fn test_issue_593_value_uses_latest_implicit_price() {
         // Buy 5 ABC at cost 1.25 EUR
         Directive::Transaction(
             Transaction::new(date(2025, 4, 1), "Buy Stocks")
-                .with_posting(
+                .with_synthesized_posting(
                     Posting::new("Equity:Stocks", Amount::new(dec!(5), "ABC")).with_cost(
                         CostSpec::empty()
                             .with_number_per(dec!(1.25))
                             .with_currency("EUR"),
                     ),
                 )
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
                     "Assets:Bank:Checking",
                     Amount::new(dec!(-6.25), "EUR"),
                 )),
@@ -8395,14 +8713,14 @@ fn test_issue_593_value_uses_latest_implicit_price() {
         // Buy 7 more ABC at cost 1.30 EUR
         Directive::Transaction(
             Transaction::new(date(2025, 4, 2), "Buy more stocks")
-                .with_posting(
+                .with_synthesized_posting(
                     Posting::new("Equity:Stocks", Amount::new(dec!(7), "ABC")).with_cost(
                         CostSpec::empty()
                             .with_number_per(dec!(1.30))
                             .with_currency("EUR"),
                     ),
                 )
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
                     "Assets:Bank:Checking",
                     Amount::new(dec!(-9.10), "EUR"),
                 )),
@@ -8410,7 +8728,7 @@ fn test_issue_593_value_uses_latest_implicit_price() {
         // Sell with @ 1.35 EUR (creates implicit price for ABC)
         Directive::Transaction(
             Transaction::new(date(2025, 9, 9), "Sell at 1.35")
-                .with_posting(
+                .with_synthesized_posting(
                     Posting::new("Equity:Stocks", Amount::new(dec!(-5), "ABC"))
                         .with_cost(
                             CostSpec::empty()
@@ -8420,7 +8738,7 @@ fn test_issue_593_value_uses_latest_implicit_price() {
                         )
                         .with_price(PriceAnnotation::Unit(Amount::new(dec!(1.35), "EUR"))),
                 )
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
                     "Assets:Bank:Checking",
                     Amount::new(dec!(6.75), "EUR"),
                 )),
@@ -8428,7 +8746,7 @@ fn test_issue_593_value_uses_latest_implicit_price() {
         // Sell with @ 1.40 EUR (creates NEWER implicit price for ABC)
         Directive::Transaction(
             Transaction::new(date(2025, 9, 10), "Sell at 1.40")
-                .with_posting(
+                .with_synthesized_posting(
                     Posting::new("Equity:Stocks", Amount::new(dec!(-3), "ABC"))
                         .with_cost(
                             CostSpec::empty()
@@ -8438,7 +8756,7 @@ fn test_issue_593_value_uses_latest_implicit_price() {
                         )
                         .with_price(PriceAnnotation::Unit(Amount::new(dec!(1.40), "EUR"))),
                 )
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
                     "Assets:Bank:Checking",
                     Amount::new(dec!(4.20), "EUR"),
                 )),
@@ -8595,16 +8913,25 @@ fn test_order_by_expression_not_in_select() {
         Directive::Open(Open::new(date(2024, 1, 1), "Assets:Cash")),
         Directive::Transaction(
             Transaction::new(date(2024, 1, 15), "Lunch")
-                .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(10), "USD")))
-                .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(-10), "USD"))),
+                .with_synthesized_posting(Posting::new(
+                    "Expenses:Food",
+                    Amount::new(dec!(10), "USD"),
+                ))
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Cash",
+                    Amount::new(dec!(-10), "USD"),
+                )),
         ),
         Directive::Transaction(
             Transaction::new(date(2024, 1, 20), "Pay")
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
                     "Income:Salary",
                     Amount::new(dec!(-1000), "USD"),
                 ))
-                .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(1000), "USD"))),
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Cash",
+                    Amount::new(dec!(1000), "USD"),
+                )),
         ),
     ];
 
@@ -8659,11 +8986,14 @@ fn test_order_by_function_not_in_select_simple() {
         Directive::Open(Open::new(date(2024, 1, 1), "Assets:Cash")),
         Directive::Transaction(
             Transaction::new(date(2024, 1, 15), "t1")
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
                     "Expenses:FoodAndDrink",
                     Amount::new(dec!(10), "USD"),
                 ))
-                .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(-10), "USD"))),
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Cash",
+                    Amount::new(dec!(-10), "USD"),
+                )),
         ),
     ];
 
@@ -8699,8 +9029,14 @@ fn test_open_date_from_postings_table() {
         Directive::Open(Open::new(date(2024, 2, 1), "Expenses:Food")),
         Directive::Transaction(
             Transaction::new(date(2024, 3, 15), "Lunch")
-                .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(10), "USD")))
-                .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(-10), "USD"))),
+                .with_synthesized_posting(Posting::new(
+                    "Expenses:Food",
+                    Amount::new(dec!(10), "USD"),
+                ))
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Bank",
+                    Amount::new(dec!(-10), "USD"),
+                )),
         ),
     ];
 
@@ -8722,8 +9058,14 @@ fn test_close_date_from_postings_table() {
         Directive::Open(Open::new(date(2024, 1, 1), "Expenses:Food")),
         Directive::Transaction(
             Transaction::new(date(2024, 3, 15), "Lunch")
-                .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(10), "USD")))
-                .with_posting(Posting::new("Assets:Old", Amount::new(dec!(-10), "USD"))),
+                .with_synthesized_posting(Posting::new(
+                    "Expenses:Food",
+                    Amount::new(dec!(10), "USD"),
+                ))
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Old",
+                    Amount::new(dec!(-10), "USD"),
+                )),
         ),
     ];
 
@@ -8743,8 +9085,11 @@ fn test_grep_with_null_narration() {
         Directive::Open(Open::new(date(2024, 1, 1), "Assets:Bank")),
         Directive::Transaction(
             Transaction::new(date(2024, 3, 15), "Salary Payment")
-                .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(1000), "USD")))
-                .with_posting(Posting::auto("Income:Salary")),
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Bank",
+                    Amount::new(dec!(1000), "USD"),
+                ))
+                .with_synthesized_posting(Posting::auto("Income:Salary")),
         ),
     ];
 
@@ -8770,13 +9115,19 @@ fn test_grep_in_where_clause_truthy() {
         Directive::Open(Open::new(date(2024, 1, 1), "Expenses:Coffee")),
         Directive::Transaction(
             Transaction::new(date(2024, 3, 15), "Salary Payment")
-                .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(1000), "USD")))
-                .with_posting(Posting::auto("Income:Salary")),
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Bank",
+                    Amount::new(dec!(1000), "USD"),
+                ))
+                .with_synthesized_posting(Posting::auto("Income:Salary")),
         ),
         Directive::Transaction(
             Transaction::new(date(2024, 3, 16), "Coffee shop")
-                .with_posting(Posting::new("Expenses:Coffee", Amount::new(dec!(5), "USD")))
-                .with_posting(Posting::auto("Assets:Bank")),
+                .with_synthesized_posting(Posting::new(
+                    "Expenses:Coffee",
+                    Amount::new(dec!(5), "USD"),
+                ))
+                .with_synthesized_posting(Posting::auto("Assets:Bank")),
         ),
     ];
 
@@ -8812,8 +9163,14 @@ fn test_open_meta_from_postings_table() {
         Directive::Open(Open::new(date(2024, 1, 1), "Expenses:Food")),
         Directive::Transaction(
             Transaction::new(date(2024, 3, 15), "Lunch")
-                .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(10), "USD")))
-                .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(-10), "USD"))),
+                .with_synthesized_posting(Posting::new(
+                    "Expenses:Food",
+                    Amount::new(dec!(10), "USD"),
+                ))
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Bank",
+                    Amount::new(dec!(-10), "USD"),
+                )),
         ),
     ];
 
@@ -8841,8 +9198,14 @@ fn test_entry_meta_from_postings_table() {
                 rustledger_core::MetaValue::String("dining".to_string()),
             );
             txn.postings = vec![
-                Posting::new("Expenses:Food", Amount::new(dec!(10), "USD")),
-                Posting::new("Assets:Bank", Amount::new(dec!(-10), "USD")),
+                rustledger_core::Spanned::synthesized(Posting::new(
+                    "Expenses:Food",
+                    Amount::new(dec!(10), "USD"),
+                )),
+                rustledger_core::Spanned::synthesized(Posting::new(
+                    "Assets:Bank",
+                    Amount::new(dec!(-10), "USD"),
+                )),
             ];
             txn
         }),
@@ -8869,8 +9232,11 @@ fn test_entry_meta_from_entries_table() {
                 rustledger_core::MetaValue::String("employer".to_string()),
             );
             txn.postings = vec![
-                Posting::new("Assets:Bank", Amount::new(dec!(1000), "USD")),
-                Posting::auto("Income:Salary"),
+                rustledger_core::Spanned::synthesized(Posting::new(
+                    "Assets:Bank",
+                    Amount::new(dec!(1000), "USD"),
+                )),
+                rustledger_core::Spanned::synthesized(Posting::auto("Income:Salary")),
             ];
             txn
         }),
@@ -8944,8 +9310,14 @@ fn test_convert_with_null_second_arg_has_helpful_error_message() {
         Directive::Open(Open::new(date(2024, 1, 1), "Expenses:Food")),
         Directive::Transaction(
             Transaction::new(date(2024, 1, 15), "Lunch")
-                .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(10), "USD")))
-                .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(-10), "USD"))),
+                .with_synthesized_posting(Posting::new(
+                    "Expenses:Food",
+                    Amount::new(dec!(10), "USD"),
+                ))
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Bank",
+                    Amount::new(dec!(-10), "USD"),
+                )),
         ),
     ];
     let query = parse("SELECT convert(position, meta('nonexistent_key'))").expect("should parse");

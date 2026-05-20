@@ -178,7 +178,8 @@ impl BookingEngine {
         let mut gains = Vec::new();
         let mut booked_indices = std::collections::HashSet::with_capacity(txn.postings.len());
         // Track posting expansions: (original_idx, expanded_postings)
-        let mut expansions: Vec<(usize, Vec<Posting>)> = Vec::with_capacity(txn.postings.len());
+        let mut expansions: Vec<(usize, Vec<rustledger_core::Spanned<Posting>>)> =
+            Vec::with_capacity(txn.postings.len());
 
         // Create working copies of inventories for this transaction.
         // This allows us to track inventory changes across multiple postings
@@ -578,14 +579,14 @@ mod tests {
 
         // Buy 10 AAPL at $150
         let buy = Transaction::new(date(2024, 1, 15), "Buy stock")
-            .with_posting(
+            .with_synthesized_posting(
                 Posting::new("Assets:Stock", Amount::new(dec!(10), "AAPL")).with_cost(
                     CostSpec::empty()
                         .with_number_per(dec!(150.00))
                         .with_currency("USD"),
                 ),
             )
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Assets:Cash",
                 Amount::new(dec!(-1500.00), "USD"),
             ));
@@ -603,14 +604,14 @@ mod tests {
 
         // Buy 10 AAPL at $150
         let buy = Transaction::new(date(2024, 1, 15), "Buy stock")
-            .with_posting(
+            .with_synthesized_posting(
                 Posting::new("Assets:Stock", Amount::new(dec!(10), "AAPL")).with_cost(
                     CostSpec::empty()
                         .with_number_per(dec!(150.00))
                         .with_currency("USD"),
                 ),
             )
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Assets:Cash",
                 Amount::new(dec!(-1500.00), "USD"),
             ));
@@ -619,16 +620,16 @@ mod tests {
 
         // Sell 5 AAPL at $175 with empty cost (needs lot matching)
         let sell = Transaction::new(date(2024, 6, 15), "Sell stock")
-            .with_posting(
+            .with_synthesized_posting(
                 Posting::new("Assets:Stock", Amount::new(dec!(-5), "AAPL"))
                     .with_cost(CostSpec::empty()) // Empty - needs lot matching
                     .with_price(PriceAnnotation::Unit(Amount::new(dec!(175.00), "USD"))),
             )
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Assets:Cash",
                 Amount::new(dec!(875.00), "USD"),
             ))
-            .with_posting(Posting::auto("Income:CapitalGains")); // Elided
+            .with_synthesized_posting(Posting::auto("Income:CapitalGains")); // Elided
 
         // Check inventory before sell
         let inv = engine.inventory(&"Assets:Stock".into()).unwrap();
@@ -659,14 +660,14 @@ mod tests {
 
         // Buy 1.763 VIIIX with total cost of 300 USD (like healthequity file)
         let buy = Transaction::new(date(2016, 1, 16), "Buy stock")
-            .with_posting(
+            .with_synthesized_posting(
                 Posting::new("Assets:Stock", Amount::new(dec!(1.763), "VIIIX")).with_cost(
                     CostSpec::empty()
                         .with_number_total(dec!(300.00))
                         .with_currency("USD"),
                 ),
             )
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Assets:Cash",
                 Amount::new(dec!(-300.00), "USD"),
             ));
@@ -692,14 +693,14 @@ mod tests {
 
         // Buy 1.763 VIIIX with total cost {{300.00 USD}}
         let buy = Transaction::new(date(2016, 1, 16), "Buy stock")
-            .with_posting(
+            .with_synthesized_posting(
                 Posting::new("Assets:Stock", Amount::new(dec!(1.763), "VIIIX")).with_cost(
                     CostSpec::empty()
                         .with_number_total(dec!(300.00))
                         .with_currency("USD"),
                 ),
             )
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Assets:Cash",
                 Amount::new(dec!(-300.00), "USD"),
             ));
@@ -718,16 +719,16 @@ mod tests {
 
         // Sell all shares at $191 per unit
         let sell = Transaction::new(date(2016, 6, 15), "Sell stock")
-            .with_posting(
+            .with_synthesized_posting(
                 Posting::new("Assets:Stock", Amount::new(dec!(-1.763), "VIIIX"))
                     .with_cost(CostSpec::empty())
                     .with_price(PriceAnnotation::Unit(Amount::new(dec!(191.00), "USD"))),
             )
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Assets:Cash",
                 Amount::new(dec!(336.73), "USD"), // 1.763 * 191 = 336.733
             ))
-            .with_posting(Posting::auto("Income:CapitalGains"));
+            .with_synthesized_posting(Posting::auto("Income:CapitalGains"));
 
         let booked_sell = engine.book(&sell).unwrap();
 
@@ -747,12 +748,12 @@ mod tests {
         // Create SELLOPT: -1 AAPL {40.0} @ 0.4 USD
         // This has cost number (40.0) but NO cost currency - should infer from price
         let sell = Transaction::new(date(2022, 6, 17), "SELLOPT")
-            .with_posting(
+            .with_synthesized_posting(
                 Posting::new("Assets:Stock", Amount::new(dec!(-1), "AAPL"))
                     .with_cost(CostSpec::empty().with_number_per(dec!(40.0)))
                     .with_price(PriceAnnotation::Unit(Amount::new(dec!(0.4), "USD"))),
             )
-            .with_posting(Posting::new("Assets:Stock", Amount::new(dec!(40.0), "USD")));
+            .with_synthesized_posting(Posting::new("Assets:Stock", Amount::new(dec!(40.0), "USD")));
 
         eprintln!("SELLOPT posting.cost = {:?}", sell.postings[0].cost);
         eprintln!("SELLOPT posting.price = {:?}", sell.postings[0].price);
@@ -793,14 +794,14 @@ mod tests {
 
         // Buy 10 AAPL at $150
         let buy = Transaction::new(date(2024, 1, 15), "Buy stock")
-            .with_posting(
+            .with_synthesized_posting(
                 Posting::new("Assets:Stock", Amount::new(dec!(10), "AAPL")).with_cost(
                     CostSpec::empty()
                         .with_number_per(dec!(150.00))
                         .with_currency("USD"),
                 ),
             )
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Assets:Cash",
                 Amount::new(dec!(-1500.00), "USD"),
             ));
@@ -810,16 +811,16 @@ mod tests {
         // Sell 5 AAPL with total price annotation (not per-unit)
         // Total price = $875 for 5 shares = $175/share
         let sell = Transaction::new(date(2024, 6, 15), "Sell stock")
-            .with_posting(
+            .with_synthesized_posting(
                 Posting::new("Assets:Stock", Amount::new(dec!(-5), "AAPL"))
                     .with_cost(CostSpec::empty())
                     .with_price(PriceAnnotation::Total(Amount::new(dec!(875.00), "USD"))),
             )
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Assets:Cash",
                 Amount::new(dec!(875.00), "USD"),
             ))
-            .with_posting(Posting::auto("Income:CapitalGains"));
+            .with_synthesized_posting(Posting::auto("Income:CapitalGains"));
 
         let booked = engine.book(&sell).unwrap();
 
@@ -834,30 +835,30 @@ mod tests {
     fn test_book_transactions_multiple() {
         // Buy 10 AAPL at $150
         let buy = Transaction::new(date(2024, 1, 15), "Buy stock")
-            .with_posting(
+            .with_synthesized_posting(
                 Posting::new("Assets:Stock", Amount::new(dec!(10), "AAPL")).with_cost(
                     CostSpec::empty()
                         .with_number_per(dec!(150.00))
                         .with_currency("USD"),
                 ),
             )
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Assets:Cash",
                 Amount::new(dec!(-1500.00), "USD"),
             ));
 
         // Sell 5 AAPL
         let sell = Transaction::new(date(2024, 6, 15), "Sell stock")
-            .with_posting(
+            .with_synthesized_posting(
                 Posting::new("Assets:Stock", Amount::new(dec!(-5), "AAPL"))
                     .with_cost(CostSpec::empty())
                     .with_price(PriceAnnotation::Unit(Amount::new(dec!(175.00), "USD"))),
             )
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Assets:Cash",
                 Amount::new(dec!(875.00), "USD"),
             ))
-            .with_posting(Posting::auto("Income:CapitalGains"));
+            .with_synthesized_posting(Posting::auto("Income:CapitalGains"));
 
         let transactions = vec![buy, sell];
         let results = book_transactions(&transactions, BookingMethod::Fifo);
@@ -873,14 +874,14 @@ mod tests {
 
         // First, add existing inventory with positive AAPL
         let buy = Transaction::new(date(2024, 1, 15), "Buy stock")
-            .with_posting(
+            .with_synthesized_posting(
                 Posting::new("Assets:Stock", Amount::new(dec!(10), "AAPL")).with_cost(
                     CostSpec::empty()
                         .with_number_per(dec!(150.00))
                         .with_currency("USD"),
                 ),
             )
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Assets:Cash",
                 Amount::new(dec!(-1500.00), "USD"),
             ));
@@ -890,11 +891,11 @@ mod tests {
         // Now try to book another buy (augmentation, not reduction)
         // This has empty cost but same sign as inventory, so it's not a reduction
         let another_buy = Transaction::new(date(2024, 2, 15), "Buy more")
-            .with_posting(
+            .with_synthesized_posting(
                 Posting::new("Assets:Stock", Amount::new(dec!(5), "AAPL"))
                     .with_cost(CostSpec::empty()), // Empty cost but augmentation
             )
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Assets:Cash",
                 Amount::new(dec!(-750.00), "USD"),
             ));
@@ -913,11 +914,11 @@ mod tests {
 
         // Try to book a sell without any prior inventory
         let sell = Transaction::new(date(2024, 6, 15), "Sell stock")
-            .with_posting(
+            .with_synthesized_posting(
                 Posting::new("Assets:Stock", Amount::new(dec!(-5), "AAPL"))
                     .with_cost(CostSpec::empty()),
             )
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Assets:Cash",
                 Amount::new(dec!(875.00), "USD"),
             ));
@@ -936,14 +937,14 @@ mod tests {
 
         // Buy 10 AAPL at $150
         let buy = Transaction::new(date(2024, 1, 15), "Buy stock")
-            .with_posting(
+            .with_synthesized_posting(
                 Posting::new("Assets:Stock", Amount::new(dec!(10), "AAPL")).with_cost(
                     CostSpec::empty()
                         .with_number_per(dec!(150.00))
                         .with_currency("USD"),
                 ),
             )
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Assets:Cash",
                 Amount::new(dec!(-1500.00), "USD"),
             ));
@@ -952,12 +953,12 @@ mod tests {
 
         // Sell at same price - zero gain
         let sell = Transaction::new(date(2024, 6, 15), "Sell stock")
-            .with_posting(
+            .with_synthesized_posting(
                 Posting::new("Assets:Stock", Amount::new(dec!(-5), "AAPL"))
                     .with_cost(CostSpec::empty())
                     .with_price(PriceAnnotation::Unit(Amount::new(dec!(150.00), "USD"))),
             )
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Assets:Cash",
                 Amount::new(dec!(750.00), "USD"),
             ));
@@ -981,11 +982,11 @@ mod tests {
         //   Assets:Abc   1 ABC {1}           <- no currency, should infer USD
         //   Equity:Opening-Balances -1 USD
         let open = Transaction::new(date(2026, 1, 1), "Opening balance")
-            .with_posting(
+            .with_synthesized_posting(
                 Posting::new("Assets:Abc", Amount::new(dec!(1), "ABC"))
                     .with_cost(CostSpec::empty().with_number_per(dec!(1))), // No currency!
             )
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Equity:Opening-Balances",
                 Amount::new(dec!(-1), "USD"),
             ));
@@ -1015,14 +1016,14 @@ mod tests {
         //   Assets:Abc  -1 ABC {1 USD}
         //   Expenses:Abc
         let sell = Transaction::new(date(2026, 1, 2), "Sale")
-            .with_posting(
+            .with_synthesized_posting(
                 Posting::new("Assets:Abc", Amount::new(dec!(-1), "ABC")).with_cost(
                     CostSpec::empty()
                         .with_number_per(dec!(1))
                         .with_currency("USD"),
                 ),
             )
-            .with_posting(Posting::auto("Expenses:Abc"));
+            .with_synthesized_posting(Posting::auto("Expenses:Abc"));
 
         // This should succeed - the lot with {1 USD} should be found
         let booked_sell = engine.book(&sell).unwrap();
@@ -1046,7 +1047,7 @@ mod tests {
         // Create two lots of ADA with different costs
         // Lot 1: 100 ADA at $0.50 (2021-01-01)
         let buy1 = Transaction::new(date(2021, 1, 1), "Buy lot 1")
-            .with_posting(
+            .with_synthesized_posting(
                 Posting::new("Assets:Crypto", Amount::new(dec!(100), "ADA")).with_cost(
                     CostSpec::empty()
                         .with_number_per(dec!(0.50))
@@ -1054,12 +1055,12 @@ mod tests {
                         .with_date(date(2021, 1, 1)),
                 ),
             )
-            .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(-50), "USD")));
+            .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(-50), "USD")));
         engine.apply(&buy1);
 
         // Lot 2: 100 ADA at $0.52 (2022-05-19)
         let buy2 = Transaction::new(date(2022, 5, 19), "Buy lot 2")
-            .with_posting(
+            .with_synthesized_posting(
                 Posting::new("Assets:Crypto", Amount::new(dec!(100), "ADA")).with_cost(
                     CostSpec::empty()
                         .with_number_per(dec!(0.52))
@@ -1067,7 +1068,7 @@ mod tests {
                         .with_date(date(2022, 5, 19)),
                 ),
             )
-            .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(-52), "USD")));
+            .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(-52), "USD")));
         engine.apply(&buy2);
 
         // Verify initial inventory: 200 ADA total
@@ -1076,11 +1077,11 @@ mod tests {
 
         // Consume half of lot 1 first
         let sell1 = Transaction::new(date(2022, 5, 20), "Sell 50 ADA")
-            .with_posting(
+            .with_synthesized_posting(
                 Posting::new("Assets:Crypto", Amount::new(dec!(-50), "ADA"))
                     .with_cost(CostSpec::empty()),
             )
-            .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(25), "USD")));
+            .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(25), "USD")));
         let booked1 = engine.book(&sell1).unwrap();
         engine.apply(&booked1.transaction);
 
@@ -1093,15 +1094,15 @@ mod tests {
         // - Posting 1: -75 ADA {} → takes 50 from lot 1 + 25 from lot 2
         // - Posting 2: -5 ADA {} → should take from lot 2 (continuing)
         let sell2 = Transaction::new(date(2022, 5, 22), "Sell 80 ADA (multi-posting)")
-            .with_posting(
+            .with_synthesized_posting(
                 Posting::new("Assets:Crypto", Amount::new(dec!(-75), "ADA"))
                     .with_cost(CostSpec::empty()),
             )
-            .with_posting(
+            .with_synthesized_posting(
                 Posting::new("Assets:Crypto", Amount::new(dec!(-5), "ADA"))
                     .with_cost(CostSpec::empty()),
             )
-            .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(42), "USD")));
+            .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(42), "USD")));
 
         // This should succeed - the bug was that the second posting would fail
         // with "No matching lot" because it was trying to match against lot 1
@@ -1131,8 +1132,8 @@ mod tests {
 
         // Simple expense transaction with no cost specs
         let txn = Transaction::new(date(2024, 1, 15), "Groceries")
-            .with_posting(Posting::new("Expenses:Food", Amount::new(dec!(50), "USD")))
-            .with_posting(Posting::new("Assets:Cash", Amount::new(dec!(-50), "USD")));
+            .with_synthesized_posting(Posting::new("Expenses:Food", Amount::new(dec!(50), "USD")))
+            .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(-50), "USD")));
 
         let result = engine.book(&txn).unwrap();
 
@@ -1186,37 +1187,37 @@ mod tests {
 
         // 2024-01-10: Buy 100 HOOG {1.50 EUR}
         let buy1 = Transaction::new(date(2024, 1, 10), "Buy 100 HOOG")
-            .with_posting(
+            .with_synthesized_posting(
                 Posting::new("Assets:Stocks", Amount::new(dec!(100), "HOOG")).with_cost(
                     CostSpec::empty()
                         .with_number_per(dec!(1.50))
                         .with_currency("EUR"),
                 ),
             )
-            .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(-150), "EUR")));
+            .with_synthesized_posting(Posting::new("Assets:Bank", Amount::new(dec!(-150), "EUR")));
 
         engine.apply(&buy1);
 
         // 2024-01-15: Sell 25 HOOG without cost spec (price-only)
         let sell = Transaction::new(date(2024, 1, 15), "Sell 25 HOOG without cost spec")
-            .with_posting(
+            .with_synthesized_posting(
                 Posting::new("Assets:Stocks", Amount::new(dec!(-25), "HOOG"))
                     .with_price(PriceAnnotation::Unit(Amount::new(dec!(1.60), "EUR"))),
             )
-            .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(40), "EUR")));
+            .with_synthesized_posting(Posting::new("Assets:Bank", Amount::new(dec!(40), "EUR")));
 
         engine.apply(&sell);
 
         // 2024-01-20: Buy 50 more HOOG {1.70 EUR} - this MUST succeed
         let buy2 = Transaction::new(date(2024, 1, 20), "Buy 50 more HOOG - should succeed")
-            .with_posting(
+            .with_synthesized_posting(
                 Posting::new("Assets:Stocks", Amount::new(dec!(50), "HOOG")).with_cost(
                     CostSpec::empty()
                         .with_number_per(dec!(1.70))
                         .with_currency("EUR"),
                 ),
             )
-            .with_posting(Posting::new("Assets:Bank", Amount::new(dec!(-85), "EUR")));
+            .with_synthesized_posting(Posting::new("Assets:Bank", Amount::new(dec!(-85), "EUR")));
 
         // This should NOT fail. Before the fix, the engine would see the
         // -25 HOOG simple position and try to reduce, which would fail

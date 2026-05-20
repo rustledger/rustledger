@@ -31,11 +31,11 @@ fn generate_directives(num_transactions: usize) -> Vec<Directive> {
         let txn = Transaction::new(date, format!("Transaction {i}"))
             .with_flag('*')
             .with_payee(payee)
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 format!("Expenses:{category}"),
                 Amount::new(amount, "USD"),
             ))
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Assets:Bank:Checking",
                 Amount::new(-amount, "USD"),
             ));

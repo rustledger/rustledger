@@ -248,6 +248,7 @@ impl NativePlugin for CurrencyAccountsPlugin {
                     price: None,
                     flag: None,
                     metadata: vec![],
+                    span: None,
                 });
             }
 
@@ -329,6 +330,7 @@ mod currency_accounts_tests {
             price: None,
             flag: None,
             metadata: vec![],
+            span: None,
         }
     }
 

@@ -11,7 +11,7 @@ use lsp_types::{
     CallHierarchyOutgoingCall, CallHierarchyOutgoingCallsParams, CallHierarchyPrepareParams,
     Position, Range, SymbolKind, Uri,
 };
-use rustledger_core::Directive;
+use rustledger_core::{Directive, SYNTHESIZED_FILE_ID};
 use rustledger_parser::ParseResult;
 use std::collections::HashMap;
 
@@ -102,11 +102,18 @@ pub fn handle_incoming_calls(
             // Build transaction description
             let description = format!("{} {} \"{}\"", txn.date, txn.flag, txn.narration.as_ref());
 
-            // Find the ranges where this account appears in the transaction
+            // Find the ranges where this account appears in the
+            // transaction. Per-posting span lookup (see #1142): the
+            // prior `txn_line + 1 + idx` arithmetic broke for
+            // transactions with interleaved posting-level metadata.
             let from_ranges: Vec<Range> = posting_indices
                 .iter()
                 .filter_map(|&idx| {
-                    let posting_line = txn_line + 1 + idx as u32;
+                    let sp = txn.postings.get(idx)?;
+                    if sp.file_id == SYNTHESIZED_FILE_ID {
+                        return None;
+                    }
+                    let (posting_line, _) = byte_offset_to_position(source, sp.span.start);
                     let line_text = source.lines().nth(posting_line as usize)?;
                     let col = line_text.find(account)?;
                     Some(Range {
@@ -120,6 +127,24 @@ pub fn handle_incoming_calls(
                 continue;
             }
 
+            // Compute the transaction's full source range from the
+            // outer directive span. The prior heuristic of
+            // `txn_line + postings.len() + 1` under-counted lines
+            // whenever the transaction had interleaved metadata or
+            // pre-posting comments (same root cause as #1142).
+            //
+            // `spanned.span.end` is an *exclusive* byte offset that
+            // typically already points at the start of the next line
+            // (the parser consumes the trailing newline). Use the
+            // resulting (line, col) directly; only normalize to the
+            // next line when the end column is non-zero (i.e. the
+            // span ends mid-line and the LSP range needs to round up).
+            let (txn_end_line, txn_end_col) = byte_offset_to_position(source, spanned.span.end);
+            let normalized_end_line = if txn_end_col == 0 {
+                txn_end_line
+            } else {
+                txn_end_line.saturating_add(1)
+            };
             let txn_item = CallHierarchyItem {
                 name: description,
                 kind: SymbolKind::EVENT, // Use Event for transactions
@@ -128,7 +153,7 @@ pub fn handle_incoming_calls(
                 uri: uri.clone(),
                 range: Range {
                     start: Position::new(txn_line, 0),
-                    end: Position::new(txn_line + txn.postings.len() as u32 + 1, 0),
+                    end: Position::new(normalized_end_line, 0),
                 },
                 selection_range: Range {
                     start: Position::new(txn_line, 0),
@@ -195,8 +220,13 @@ pub fn handle_outgoing_calls(
                     let (_acc_line, acc_range) = match account_location {
                         Some(loc) => loc,
                         None => {
-                            // Fallback: use first posting location
-                            let posting_line = line + 1 + indices[0] as u32;
+                            // Fallback: use first posting location, looked
+                            // up via its span (see #1142).
+                            let sp = txn.postings.get(indices[0])?;
+                            if sp.file_id == SYNTHESIZED_FILE_ID {
+                                return None;
+                            }
+                            let (posting_line, _) = byte_offset_to_position(source, sp.span.start);
                             let line_text = source.lines().nth(posting_line as usize)?;
                             let col = line_text.find(&account)?;
                             (
@@ -209,11 +239,16 @@ pub fn handle_outgoing_calls(
                         }
                     };
 
-                    // Ranges where this account is "called" from the transaction
+                    // Ranges where this account is "called" from the
+                    // transaction (per-posting span lookup, see #1142).
                     let from_ranges: Vec<Range> = indices
                         .iter()
                         .filter_map(|&idx| {
-                            let posting_line = line + 1 + idx as u32;
+                            let sp = txn.postings.get(idx)?;
+                            if sp.file_id == SYNTHESIZED_FILE_ID {
+                                return None;
+                            }
+                            let (posting_line, _) = byte_offset_to_position(source, sp.span.start);
                             let line_text = source.lines().nth(posting_line as usize)?;
                             let col = line_text.find(&account)?;
                             Some(Range {

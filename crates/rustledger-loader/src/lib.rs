@@ -641,13 +641,27 @@ impl Loader {
             }
         }
 
-        // Add directives from this file, setting the file_id
-        directives.extend(
-            result
-                .directives
-                .into_iter()
-                .map(|d| d.with_file_id(file_id)),
-        );
+        // Add directives from this file, setting the file_id on the outer
+        // Spanned<Directive> and on each inner Spanned<Posting> inside
+        // transactions. Postings inside an included file share that file's
+        // ID; this keeps inner spans consistent with their containing
+        // directive so consumers don't need to traverse parent pointers.
+        //
+        // file_id is `u16` everywhere (see `Spanned::file_id` rustdoc).
+        // `with_file_id` debug-asserts on overflow; we use the same
+        // expect here so release builds also fail loudly instead of
+        // silently mapping the 65,537th file onto `SYNTHESIZED_FILE_ID`.
+        let fid_u16 = u16::try_from(file_id)
+            .expect("file_id exceeds u16::MAX; SourceMap supports at most 65,535 files");
+        directives.extend(result.directives.into_iter().map(|d| {
+            let mut d = d.with_file_id(file_id);
+            if let rustledger_core::Directive::Transaction(ref mut txn) = d.value {
+                for p in &mut txn.postings {
+                    p.file_id = fid_u16;
+                }
+            }
+            d
+        }));
 
         // Pop from stack and set
         if let Some(popped) = self.include_stack.pop() {

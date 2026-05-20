@@ -3,9 +3,36 @@
 //! This module contains common utilities used across multiple handlers,
 //! including position conversion, word extraction, and type checking.
 
-use lsp_types::Position;
-use rustledger_core::Directive;
+use lsp_types::{FormattingOptions, Position};
+use rustledger_core::{Directive, FormatConfig};
 use rustledger_parser::ParseResult;
+
+/// Resolve the `FormatConfig` the LSP server uses for a given request.
+///
+/// Today both `textDocument/formatting` (which has client-supplied
+/// `FormattingOptions`) and the `rledger.alignAmounts`
+/// `workspace/executeCommand` (which does NOT — the LSP protocol
+/// doesn't pass formatting preferences with commands) come through
+/// this single function. That keeps the two paths producing identical
+/// edits even though their inputs differ.
+///
+/// When the LSP server gains real config plumbing (server-wide
+/// settings via initializationOptions, or per-document settings via
+/// `workspace/configuration`), update this one function: derive
+/// `amount_column` / `indent` from the client `tab_size`,
+/// `insert_spaces`, and any `properties.amount_column` extension; for
+/// the executeCommand path (`opts == None`), fall back to the
+/// server-wide configured value rather than `FormatConfig::default()`.
+/// Both call sites then benefit automatically.
+#[must_use]
+pub fn document_format_config(_opts: Option<&FormattingOptions>) -> FormatConfig {
+    // Intentionally ignores the supplied options for now: the LSP
+    // server has no config layer yet, so honoring `tab_size` /
+    // `insert_spaces` would mean the executeCommand path (which
+    // can't see them) diverged from `textDocument/formatting` for
+    // no upside. Wire both at once when the config layer lands.
+    FormatConfig::default()
+}
 
 /// A line index for efficient offset-to-position conversion.
 ///

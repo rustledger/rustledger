@@ -51,6 +51,7 @@ pub mod implicit_prices;
 pub mod intern;
 pub mod inventory;
 pub mod position;
+pub mod span;
 pub mod synthetic;
 
 // Kani formal verification proofs (only compiled with Kani)
@@ -69,13 +70,14 @@ pub use extract::{
     DEFAULT_CURRENCIES, extract_accounts, extract_accounts_iter, extract_currencies,
     extract_currencies_iter, extract_payees, extract_payees_iter,
 };
-pub use format::{FormatConfig, format_directive};
+pub use format::{FormatConfig, format_directive, format_posting, format_posting_line};
 pub use implicit_prices::extract_per_unit_price;
 pub use intern::{InternedStr, StringInterner};
 pub use inventory::{
     AccountedBookingError, BookingError, BookingMethod, BookingResult, Inventory, ReductionScope,
 };
 pub use position::Position;
+pub use span::{SYNTHESIZED_FILE_ID, Span, Spanned};
 
 // Re-export commonly used external types
 /// Calendar date without timezone. Alias for `jiff::civil::Date`.

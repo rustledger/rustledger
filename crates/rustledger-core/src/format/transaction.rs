@@ -44,15 +44,12 @@ pub fn format_transaction(txn: &Transaction, config: &FormatConfig) -> String {
         for comment in &posting.comments {
             writeln!(out, "{}{}", &config.indent, comment).expect("write to String is infallible");
         }
-        // Output the posting line
-        let posting_line = format_posting(posting, config);
-        // Append trailing comment on same line if present (only first one)
-        if let Some(trailing) = posting.trailing_comments.first() {
-            writeln!(out, "{posting_line} {trailing}").expect("write to String is infallible");
-        } else {
-            out.push_str(&posting_line);
-            out.push('\n');
-        }
+        // Output the posting line (account + amount + first
+        // trailing comment, via the shared helper so the LSP path
+        // and on-disk output stay in lockstep).
+        let line_text = format_posting_line(posting, config);
+        out.push_str(&line_text);
+        out.push('\n');
         // Output any additional trailing comments on their own lines
         for trailing in posting.trailing_comments.iter().skip(1) {
             writeln!(out, "{}{}", &config.indent, trailing).expect("write to String is infallible");
@@ -69,6 +66,28 @@ pub fn format_transaction(txn: &Transaction, config: &FormatConfig) -> String {
     }
 
     out
+}
+
+/// Format the single-line representation of a posting.
+///
+/// Produces account + amount + cost + price + the first same-line
+/// trailing comment, if any. This is the unit `format_transaction`
+/// emits as one line, and it's also the unit the LSP edits when
+/// re-aligning a posting in place. Both call sites must agree on the
+/// canonical form, otherwise `rledger format` (on disk) and
+/// `textDocument/formatting` (in the editor) silently disagree.
+///
+/// Pre-line comments and subsequent trailing comments live on
+/// separate lines and are emitted by `format_transaction`; the LSP's
+/// per-line edit path doesn't touch them.
+#[must_use]
+pub fn format_posting_line(posting: &Posting, config: &FormatConfig) -> String {
+    let mut line = format_posting(posting, config);
+    if let Some(trailing) = posting.trailing_comments.first() {
+        line.push(' ');
+        line.push_str(trailing);
+    }
+    line
 }
 
 /// Format a posting with amount alignment.

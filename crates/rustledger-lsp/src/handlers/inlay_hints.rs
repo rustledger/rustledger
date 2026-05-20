@@ -7,11 +7,11 @@
 //! Supports resolve for lazy-loading rich tooltips with account details.
 
 use lsp_types::{InlayHint, InlayHintKind, InlayHintLabel, InlayHintParams, Position};
-use rustledger_core::{Decimal, Directive};
+use rustledger_core::{Decimal, Directive, SYNTHESIZED_FILE_ID};
 use rustledger_parser::ParseResult;
 use std::collections::HashMap;
 
-use super::utils::byte_offset_to_position;
+use super::utils::LineIndex;
 
 /// Handle an inlay hints request.
 pub fn handle_inlay_hints(
@@ -23,10 +23,14 @@ pub fn handle_inlay_hints(
     let uri = params.text_document.uri.as_str();
     let mut hints = Vec::new();
     let lines: Vec<&str> = source.lines().collect();
+    // Build the line index once: O(n) up front, O(log lines) per
+    // offset lookup. Without it the per-directive + per-posting
+    // lookups below scale quadratically with file size.
+    let line_index = LineIndex::new(source);
 
     for spanned in &parse_result.directives {
         if let Directive::Transaction(txn) = &spanned.value {
-            let (start_line, _) = byte_offset_to_position(source, spanned.span.start);
+            let (start_line, _) = line_index.offset_to_position(spanned.span.start);
 
             // Skip if transaction is outside the requested range
             if start_line > range.end.line {
@@ -36,8 +40,15 @@ pub fn handle_inlay_hints(
             // Calculate the inferred amount for postings without amounts
             let inferred = calculate_inferred_amount(txn);
 
-            for (i, posting) in txn.postings.iter().enumerate() {
-                let posting_line = start_line + 1 + i as u32;
+            // Per-posting span lookup (see #1142): the prior
+            // `start_line + 1 + i` arithmetic put hints on the wrong
+            // line for transactions with interleaved metadata.
+            for spanned_posting in &txn.postings {
+                if spanned_posting.file_id == SYNTHESIZED_FILE_ID {
+                    continue;
+                }
+                let posting = &**spanned_posting;
+                let (posting_line, _) = line_index.offset_to_position(spanned_posting.span.start);
 
                 // Skip if outside range
                 if posting_line < range.start.line || posting_line > range.end.line {
@@ -329,5 +340,50 @@ mod tests {
         // This proves server logic is correct.
         // If hints linger in editor after typing, it's a CLIENT issue
         // (client not re-requesting textDocument/inlayHint after didChange)
+    }
+
+    /// Regression test for the read-only sibling of #1142.
+    ///
+    /// Pre-fix, the inferred-amount hint for the amountless posting
+    /// landed on the wrong line whenever the prior posting had
+    /// `effective_date:` (or any other) metadata between them. With
+    /// per-posting span lookup, the hint sits on the posting line
+    /// itself.
+    #[test]
+    fn test_inlay_hint_lands_on_correct_line_with_interleaved_metadata_1142() {
+        let source = "\
+2024-01-15 * \"Test\"
+  Assets:Bank  -5.00 USD
+    effective_date: 2024-01-20
+  Expenses:Food
+";
+        let result = parse(source);
+        assert!(
+            result.errors.is_empty(),
+            "parse errors: {:?}",
+            result.errors
+        );
+
+        let params = InlayHintParams {
+            text_document: lsp_types::TextDocumentIdentifier {
+                uri: "file:///test.beancount".parse().unwrap(),
+            },
+            range: lsp_types::Range {
+                start: Position::new(0, 0),
+                end: Position::new(10, 0),
+            },
+            work_done_progress_params: Default::default(),
+        };
+
+        let hints = handle_inlay_hints(&params, source, &result).unwrap_or_default();
+        assert_eq!(hints.len(), 1, "exactly one inferred-amount hint expected");
+
+        // Expenses:Food is on line 3 (after Assets:Bank on line 1 and
+        // its metadata on line 2). Pre-fix arithmetic would have put
+        // the hint on line 2 (the metadata line).
+        assert_eq!(
+            hints[0].position.line, 3,
+            "inferred-amount hint should be on the posting line, not the metadata line"
+        );
     }
 }

@@ -35,7 +35,7 @@ const MAX_PREALLOC_COMMENTS: usize = 8_192;
 use crate::ParseResult;
 use crate::error::{ParseError, ParseErrorKind};
 use crate::logos_lexer::{Token, tokenize};
-use crate::span::{Span, Spanned};
+use rustledger_core::span::{Span, Spanned};
 
 // ============================================================================
 // Token Stream
@@ -807,7 +807,15 @@ fn parse_price_annotation(stream: &mut TokenStream<'_>) -> ParseRes<PriceAnnotat
 // Posting Parser
 // ============================================================================
 
-fn parse_posting(stream: &mut TokenStream<'_>) -> ParseRes<Posting> {
+fn parse_posting(stream: &mut TokenStream<'_>) -> ParseRes<Spanned<Posting>> {
+    // Remember the starting token index so we can build a span covering
+    // the posting line itself (indent → trailing comment) once parsing
+    // succeeds. The span deliberately excludes following posting-level
+    // metadata lines so consumers can replace a posting line without
+    // disturbing its metadata. See `Transaction.postings` rustdoc and
+    // issue #1142.
+    let start_tok = stream.pos;
+
     // Expect indent (regular or deep - some files use 4-space indentation for postings)
     if let Some(t) = stream.peek() {
         if !matches!(t.token, Token::Indent(_) | Token::DeepIndent(_)) {
@@ -845,6 +853,10 @@ fn parse_posting(stream: &mut TokenStream<'_>) -> ParseRes<Posting> {
     // Capture optional trailing comment on this line
     let trailing_comment = capture_comment(stream);
 
+    // Snapshot the span end *before* descending into metadata so the span
+    // covers only the posting line itself (incl. its trailing comment).
+    let line_span = stream.span_from(start_tok);
+
     // Parse posting-level metadata (lines with DeepIndent)
     let posting_meta = parse_posting_metadata(stream);
 
@@ -869,7 +881,7 @@ fn parse_posting(stream: &mut TokenStream<'_>) -> ParseRes<Posting> {
         posting.trailing_comments.push(c);
     }
 
-    Ok(posting)
+    Ok(Spanned::new(posting, line_span))
 }
 
 /// Parse a single posting-level metadata line (deep indent + key: value).
@@ -1143,7 +1155,7 @@ fn parse_transaction_directive(stream: &mut TokenStream<'_>) -> ParseRes<ParsedI
 
     // Parse transaction-level metadata, tags/links, and postings
     let mut txn_meta: Metadata = Metadata::default();
-    let mut postings = Vec::with_capacity(4);
+    let mut postings: Vec<Spanned<Posting>> = Vec::with_capacity(4);
     // Track comments between postings. Vec::new() avoids allocation
     // when no inter-posting comments are present.
     let mut pending_comments: Vec<String> = Vec::new();
@@ -1210,12 +1222,12 @@ fn parse_transaction_directive(stream: &mut TokenStream<'_>) -> ParseRes<ParsedI
         }
 
         // Try to parse a posting (needs fresh start with indent check)
-        if let Ok(mut posting) = parse_posting(stream) {
+        if let Ok(mut spanned_posting) = parse_posting(stream) {
             // Attach any pending comments to this posting
             if !pending_comments.is_empty() {
-                posting.comments = std::mem::take(&mut pending_comments);
+                spanned_posting.value.comments = std::mem::take(&mut pending_comments);
             }
-            postings.push(posting);
+            postings.push(spanned_posting);
         } else {
             // If the posting failed with a deferred error (e.g. an unclosed
             // cost brace), propagate the failure so the top-level error
@@ -1261,9 +1273,9 @@ fn parse_transaction_directive(stream: &mut TokenStream<'_>) -> ParseRes<ParsedI
     for l in links {
         txn = txn.with_link(l);
     }
-    for p in postings {
-        txn = txn.with_posting(p);
-    }
+    // Push parser-derived `Spanned<Posting>`s directly; `with_posting`
+    // would wrap with `Spanned::synthesized` and discard the real span.
+    txn.postings = postings;
     // Apply transaction-level metadata and trailing comments
     txn.meta = txn_meta;
     txn.trailing_comments = txn_trailing_comments;
@@ -1947,6 +1959,110 @@ mod tests {
         let result = parse(source);
         assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
         assert_eq!(result.directives.len(), 1);
+    }
+
+    #[test]
+    fn test_posting_span_covers_line_only() {
+        // The Spanned<Posting>.span covers the posting line itself —
+        // not surrounding newlines, not following metadata. This pins
+        // the contract the LSP relies on to fix issue #1142.
+        let source = "\
+2024-01-15 * \"Coffee\"
+  Expenses:Food  5.00 USD
+  Assets:Cash
+";
+        let result = parse(source);
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let Directive::Transaction(txn) = &result.directives[0].value else {
+            panic!("expected transaction");
+        };
+        let slice0 = &source[txn.postings[0].span.start..txn.postings[0].span.end];
+        assert!(
+            slice0.contains("Expenses:Food") && slice0.contains("5.00 USD"),
+            "span0 slice: {slice0:?}"
+        );
+        assert!(!slice0.contains("Assets:Cash"), "span0 slice: {slice0:?}");
+        assert!(
+            txn.postings[0].span.end <= txn.postings[1].span.start,
+            "spans overlap"
+        );
+    }
+
+    #[test]
+    fn test_posting_span_excludes_following_metadata() {
+        // Posting-level metadata lines (e.g. `effective_date:`) must sit
+        // *outside* the posting span — this is the precise scenario behind
+        // issue #1142 where LSP formatting overwrote metadata lines.
+        let source = "\
+2024-01-15 * \"Test\"
+  Expenses:Food  5.00 USD
+    effective_date: 2024-01-20
+  Assets:Cash  -5.00 USD
+    effective_date: 2024-01-21
+";
+        let result = parse(source);
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let Directive::Transaction(txn) = &result.directives[0].value else {
+            panic!("expected transaction");
+        };
+        for spanned in &txn.postings {
+            let slice = &source[spanned.span.start..spanned.span.end];
+            assert!(
+                !slice.contains("effective_date"),
+                "posting span leaked into metadata: {slice:?}"
+            );
+        }
+        assert_eq!(txn.postings[0].meta.len(), 1);
+        assert_eq!(txn.postings[1].meta.len(), 1);
+    }
+
+    #[test]
+    fn test_posting_span_includes_trailing_comment() {
+        // A same-line trailing comment is part of the posting line and
+        // belongs inside the span so an LSP edit replaces it atomically.
+        let source = "\
+2024-01-15 * \"Test\"
+  Expenses:Food  5.00 USD  ; lunch
+  Assets:Cash
+";
+        let result = parse(source);
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let Directive::Transaction(txn) = &result.directives[0].value else {
+            panic!("expected transaction");
+        };
+        let span = txn.postings[0].span;
+        let slice = &source[span.start..span.end];
+        assert!(
+            slice.contains("; lunch"),
+            "trailing comment not in span: {slice:?}"
+        );
+    }
+
+    #[test]
+    fn test_posting_span_handles_unicode_account() {
+        // Span end is a byte offset; multi-byte UTF-8 in the account
+        // must not slip out of the span.
+        let source = "2024-01-15 * \"x\"\n  Expenses:Café  1 EUR\n  Assets:Cash\n";
+        let result = parse(source);
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let Directive::Transaction(txn) = &result.directives[0].value else {
+            panic!("expected transaction");
+        };
+        let slice = &source[txn.postings[0].span.start..txn.postings[0].span.end];
+        assert!(
+            slice.contains("Expenses:Café") && slice.contains("1 EUR"),
+            "unicode account not fully covered: {slice:?}"
+        );
+    }
+
+    #[test]
+    fn test_synthesized_posting_carries_zero_span_and_synth_file_id() {
+        // Programmatically-constructed postings (plugins, tests, CLI) wrap
+        // with Spanned::synthesized so consumers can distinguish
+        // source-derived from synthesized at the per-posting level.
+        let p = rustledger_core::Spanned::synthesized(Posting::auto("Assets:Cash"));
+        assert_eq!(p.span, rustledger_core::Span::ZERO);
+        assert_eq!(p.file_id, rustledger_core::SYNTHESIZED_FILE_ID);
     }
 
     #[test]

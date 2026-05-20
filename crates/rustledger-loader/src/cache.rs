@@ -200,7 +200,12 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 ///     match new files. Bumping the version short-circuits stale
 ///     caches at the header check instead of paying the rkyv
 ///     deserialize cost only to fail the hash compare.
-const CACHE_VERSION: u32 = 4;
+/// v5: `Transaction.postings: Vec<Posting>` became
+///     `Vec<Spanned<Posting>>` (#1151). The inner posting bytes
+///     gained a `Span + file_id` per entry, so old cache files
+///     would rkyv-deserialize into the new type as junk. Header
+///     check forces a rebuild instead.
+const CACHE_VERSION: u32 = 5;
 
 /// Cache header stored at the start of cache files.
 #[derive(Debug, Clone)]
@@ -540,11 +545,11 @@ mod tests {
 
         let txn = Transaction::new(date, "Test transaction")
             .with_payee("Test Payee")
-            .with_posting(Posting::new(
+            .with_synthesized_posting(Posting::new(
                 "Expenses:Test",
                 Amount::new(dec!(100.00), "USD"),
             ))
-            .with_posting(Posting::auto("Assets:Checking"));
+            .with_synthesized_posting(Posting::auto("Assets:Checking"));
 
         let directives = vec![Spanned::new(Directive::Transaction(txn), Span::new(0, 100))];
 
@@ -579,11 +584,11 @@ mod tests {
         for i in 0..10000 {
             let txn = Transaction::new(date, format!("Transaction {i}"))
                 .with_payee("Store")
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
                     "Expenses:Food",
                     Amount::new(dec!(25.00), "USD"),
                 ))
-                .with_posting(Posting::auto("Assets:Checking"));
+                .with_synthesized_posting(Posting::auto("Assets:Checking"));
 
             directives.push(Spanned::new(Directive::Transaction(txn), Span::new(0, 100)));
         }
@@ -688,7 +693,8 @@ mod tests {
 
         // Create a cache entry
         let date = rustledger_core::naive_date(2024, 1, 15).unwrap();
-        let txn = Transaction::new(date, "Test").with_posting(Posting::auto("Assets:Test"));
+        let txn =
+            Transaction::new(date, "Test").with_synthesized_posting(Posting::auto("Assets:Test"));
         let directives = vec![Spanned::new(Directive::Transaction(txn), Span::new(0, 50))];
 
         let entry = CacheEntry {
@@ -814,6 +820,42 @@ mod tests {
         let _ = fs::remove_dir(&temp_dir);
     }
 
+    /// Bumping `CACHE_VERSION` must short-circuit at the header so we
+    /// never feed an older payload to rkyv with the newer schema. Writes
+    /// a header with the correct magic but `version = CACHE_VERSION - 1`
+    /// (e.g., v4 from before #1151's `Vec<Spanned<Posting>>` shape
+    /// change) and asserts the loader refuses it.
+    #[test]
+    fn test_load_cache_rejects_older_version() {
+        use std::io::Write;
+
+        assert_clean_cache_env();
+
+        let temp_dir = std::env::temp_dir().join("rustledger_old_version_test");
+        let _ = fs::create_dir_all(&temp_dir);
+
+        let beancount_file = temp_dir.join("test.beancount");
+        let cache_file = cache_path(&beancount_file);
+        let mut f = fs::File::create(&cache_file).unwrap();
+
+        // Valid magic + previous CACHE_VERSION. The version check at
+        // `load_cache_header` should refuse before any payload is
+        // touched, no matter what the tail bytes look like.
+        let stale_version: u32 = CACHE_VERSION.checked_sub(1).expect("CACHE_VERSION >= 1");
+        f.write_all(CACHE_MAGIC).unwrap();
+        f.write_all(&stale_version.to_le_bytes()).unwrap();
+        f.write_all(&[0u8; CacheHeader::SIZE - 8 - 4]).unwrap();
+        drop(f);
+
+        assert!(
+            load_cache_entry(&beancount_file).is_none(),
+            "loader must reject cache files with an older CACHE_VERSION"
+        );
+
+        let _ = fs::remove_file(&cache_file);
+        let _ = fs::remove_dir(&temp_dir);
+    }
+
     #[test]
     fn test_reintern_directives_deduplication() {
         let date = rustledger_core::naive_date(2024, 1, 15).unwrap();
@@ -822,11 +864,11 @@ mod tests {
         let mut directives = vec![];
         for i in 0..5 {
             let txn = Transaction::new(date, format!("Txn {i}"))
-                .with_posting(Posting::new(
+                .with_synthesized_posting(Posting::new(
                     "Expenses:Food",
                     Amount::new(dec!(10.00), "USD"),
                 ))
-                .with_posting(Posting::auto("Assets:Checking"));
+                .with_synthesized_posting(Posting::auto("Assets:Checking"));
             directives.push(Spanned::new(Directive::Transaction(txn), Span::new(0, 50)));
         }
 

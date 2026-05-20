@@ -5,7 +5,9 @@
 //! - Currency names (all usages across directives)
 //! - Payees (all transactions with same payee)
 
-use super::utils::{LineIndex, get_word_at_position, is_account_like, is_currency_like};
+use super::utils::{
+    LineIndex, commodity_declaration_spans, get_word_at_position, is_account_like, is_currency_like,
+};
 use lsp_types::{Location, Position, Range, ReferenceParams, Uri};
 use rustledger_core::{Directive, SYNTHESIZED_FILE_ID};
 use rustledger_parser::ParseResult;
@@ -228,11 +230,15 @@ fn collect_account_references(
 /// false positives in payee strings, comments, and account-name
 /// segments containing the currency code.
 ///
-/// To honor `include_declaration`, we pre-build a set of byte
-/// ranges of every `Commodity` directive in this file — an
-/// occurrence is a "declaration" iff its span falls inside one. A
-/// `Commodity` directive contains exactly one `Currency` token (the
-/// declared one), so the within-range check is unambiguous.
+/// To honor `include_declaration`, we look up the *declared*
+/// currency token in each `Commodity` directive via
+/// `commodity_declaration_spans` — which returns the first
+/// `Currency` token within each Commodity's source span. A
+/// containment check ("occurrence span ⊆ Commodity directive
+/// span") is NOT sufficient here, because Commodity directives can
+/// have metadata whose values tokenize as `Currency` (e.g.
+/// `alias: EUR`); a containment check would misclassify those as
+/// declarations.
 fn collect_currency_references(
     parse_result: &ParseResult,
     line_index: &LineIndex,
@@ -241,23 +247,14 @@ fn collect_currency_references(
     include_declaration: bool,
     locations: &mut Vec<Location>,
 ) {
-    let commodity_spans: Vec<rustledger_parser::Span> = parse_result
-        .directives
-        .iter()
-        .filter(|d| matches!(&d.value, Directive::Commodity(_)))
-        .map(|d| d.span)
-        .collect();
-    let is_declaration = |span: rustledger_parser::Span| {
-        commodity_spans
-            .iter()
-            .any(|cs| cs.start <= span.start && span.end <= cs.end)
-    };
+    let declaration_spans = commodity_declaration_spans(parse_result);
 
     for occurrence in &parse_result.currency_occurrences {
         if occurrence.value != currency {
             continue;
         }
-        if is_declaration(occurrence.span) && !include_declaration {
+        let is_declaration = declaration_spans.contains(&occurrence.span);
+        if is_declaration && !include_declaration {
             continue;
         }
         let (start_line, start_col) = line_index.offset_to_position(occurrence.span.start);
@@ -493,6 +490,69 @@ mod tests {
             2,
             "expected 2 non-declaration references, got {}: {refs_no_decl:#?}",
             refs_no_decl.len()
+        );
+    }
+
+    /// Regression test for the metadata-currency misclassification
+    /// bug (Copilot #3270929987).
+    ///
+    /// Commodity directives can carry indented metadata whose values
+    /// tokenize as `Currency` (e.g., `parent: USD`). A naive
+    /// "occurrence span ⊆ Commodity directive span" check would
+    /// classify those metadata-value currency tokens as
+    /// declarations. With `include_declaration = false`, the
+    /// metadata reference would then be incorrectly filtered out of
+    /// the results — a silent false negative.
+    ///
+    /// The fix is to identify the *first* currency token within
+    /// each Commodity span as the declaration (the parser is
+    /// forward-advancing and the declared currency is parsed
+    /// before the metadata block), via
+    /// `commodity_declaration_spans`.
+    #[test]
+    fn test_currency_in_commodity_metadata_is_not_a_declaration() {
+        // `commodity USD\n  parent: USD` — the second USD is a
+        // metadata reference, not a declaration. Renaming with
+        // `include_declaration = false` must surface it.
+        let source = r#"2024-01-01 commodity USD
+  parent: USD
+2024-01-15 * "Coffee"
+  Assets:Bank  -5.00 USD
+"#;
+        let result = parse(source);
+        assert!(
+            result.errors.is_empty(),
+            "parse errors: {:?}",
+            result.errors
+        );
+        let uri: Uri = "file:///test.beancount".parse().unwrap();
+
+        let params = ReferenceParams {
+            text_document_position: lsp_types::TextDocumentPositionParams {
+                text_document: lsp_types::TextDocumentIdentifier { uri: uri.clone() },
+                position: Position::new(0, 21), // on `USD` of `commodity USD`
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+            context: lsp_types::ReferenceContext {
+                include_declaration: false,
+            },
+        };
+
+        let refs =
+            handle_references(&params, source, &result, &uri).expect("references returns Some");
+
+        // Expected: 2 non-declaration references — the metadata
+        // `parent: USD` and the posting `-5.00 USD`. The
+        // declaration on line 0 is filtered out. A buggy
+        // containment-only check would have returned 1 (only the
+        // posting) because both line-0-USD and line-1-USD would
+        // be considered declarations.
+        assert_eq!(
+            refs.len(),
+            2,
+            "expected 2 references (metadata + posting); got {}: {refs:#?}",
+            refs.len()
         );
     }
 

@@ -11,7 +11,9 @@ use lsp_types::{
 use rustledger_core::{Directive, SYNTHESIZED_FILE_ID};
 use rustledger_parser::ParseResult;
 
-use super::utils::{LineIndex, get_word_at_position, is_account_like, is_currency_like};
+use super::utils::{
+    LineIndex, commodity_declaration_spans, get_word_at_position, is_account_like, is_currency_like,
+};
 
 /// Handle a document highlight request.
 pub fn handle_document_highlight(
@@ -174,25 +176,20 @@ fn collect_account_highlights(
 ///
 /// Walks the parser's `currency_occurrences` index for exact spans;
 /// see `rename.rs::collect_currency_rename_edits` for the rationale.
-/// Occurrences whose span sits inside a `Commodity` directive
-/// declaration are surfaced as `WRITE`, all others as `READ`.
+///
+/// Occurrences whose span equals a `Commodity`-declaration span
+/// (see `commodity_declaration_spans` for the precise definition;
+/// importantly, *not* just "any currency token inside a Commodity
+/// directive span" — that would misclassify metadata-value currency
+/// tokens as declarations) are surfaced as `WRITE`, all others as
+/// `READ`.
 fn collect_currency_highlights(
     parse_result: &ParseResult,
     line_index: &LineIndex,
     currency: &str,
     highlights: &mut Vec<DocumentHighlight>,
 ) {
-    let commodity_spans: Vec<rustledger_parser::Span> = parse_result
-        .directives
-        .iter()
-        .filter(|d| matches!(&d.value, Directive::Commodity(_)))
-        .map(|d| d.span)
-        .collect();
-    let is_declaration = |span: rustledger_parser::Span| {
-        commodity_spans
-            .iter()
-            .any(|cs| cs.start <= span.start && span.end <= cs.end)
-    };
+    let declaration_spans = commodity_declaration_spans(parse_result);
 
     for occurrence in &parse_result.currency_occurrences {
         if occurrence.value != currency {
@@ -200,12 +197,13 @@ fn collect_currency_highlights(
         }
         let (start_line, start_col) = line_index.offset_to_position(occurrence.span.start);
         let (end_line, end_col) = line_index.offset_to_position(occurrence.span.end);
+        let is_declaration = declaration_spans.contains(&occurrence.span);
         highlights.push(DocumentHighlight {
             range: Range {
                 start: Position::new(start_line, start_col),
                 end: Position::new(end_line, end_col),
             },
-            kind: Some(if is_declaration(occurrence.span) {
+            kind: Some(if is_declaration {
                 DocumentHighlightKind::WRITE
             } else {
                 DocumentHighlightKind::READ
@@ -392,6 +390,53 @@ mod tests {
             .filter(|h| h.kind == Some(DocumentHighlightKind::WRITE))
             .count();
         assert_eq!(write_count, 1, "expected exactly one WRITE highlight");
+    }
+
+    /// Regression test for the metadata-currency misclassification
+    /// bug (Copilot #3270930001). A `Currency`-typed metadata value
+    /// inside a Commodity directive must not be classified as a
+    /// declaration.
+    #[test]
+    fn test_currency_in_commodity_metadata_is_read_not_write() {
+        let source = r#"2024-01-01 commodity USD
+  parent: USD
+2024-01-15 * "Coffee"
+  Assets:Bank  -5.00 USD
+"#;
+        let result = parse(source);
+        assert!(
+            result.errors.is_empty(),
+            "parse errors: {:?}",
+            result.errors
+        );
+        let uri: lsp_types::Uri = "file:///test.beancount".parse().unwrap();
+
+        let params = DocumentHighlightParams {
+            text_document_position_params: lsp_types::TextDocumentPositionParams {
+                text_document: lsp_types::TextDocumentIdentifier { uri },
+                position: Position::new(0, 21), // on `USD` of `commodity USD`
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        };
+
+        let highlights =
+            handle_document_highlight(&params, source, &result).expect("highlights returns Some");
+
+        // 3 highlights total: declaration + metadata reference + posting.
+        assert_eq!(highlights.len(), 3, "{highlights:#?}");
+
+        // Exactly ONE should be WRITE — the declaration on line 0.
+        // A buggy containment-only check would also mark
+        // `parent: USD` (line 1) as WRITE, giving us 2.
+        let write_count = highlights
+            .iter()
+            .filter(|h| h.kind == Some(DocumentHighlightKind::WRITE))
+            .count();
+        assert_eq!(
+            write_count, 1,
+            "expected exactly one WRITE (the declaration); got {write_count} in {highlights:#?}"
+        );
     }
 
     /// Regression test for the read-only sibling of #1142.

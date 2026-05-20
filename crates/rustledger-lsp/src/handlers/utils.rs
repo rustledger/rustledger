@@ -278,6 +278,40 @@ pub fn is_currency_like_simple(s: &str) -> bool {
             .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
 }
 
+/// Spans of the actual *declared* currency token in each
+/// `Commodity` directive — exactly one per Commodity directive,
+/// namely the first `Currency` token within that directive's
+/// source span.
+///
+/// Used to disambiguate "declaration" from "use" in the LSP
+/// references and document-highlight handlers. A naive
+/// "occurrence span is contained within a Commodity directive
+/// span" check is wrong because Commodity directives can carry
+/// metadata whose values tokenize as `Currency` or `Amount`
+/// (e.g. `2024-01-01 commodity USD\n  alias: EUR` — `EUR` here
+/// is a metadata reference, not a declaration). The first
+/// currency within each Commodity span is unambiguously the
+/// declared one because the parser is strictly forward-advancing
+/// and the declared currency is parsed before the indented
+/// metadata block.
+#[must_use]
+pub fn commodity_declaration_spans(parse_result: &ParseResult) -> Vec<rustledger_parser::Span> {
+    parse_result
+        .directives
+        .iter()
+        .filter_map(|d| {
+            if !matches!(&d.value, rustledger_core::Directive::Commodity(_)) {
+                return None;
+            }
+            parse_result
+                .currency_occurrences
+                .iter()
+                .find(|o| o.span.start >= d.span.start && o.span.end <= d.span.end)
+                .map(|o| o.span)
+        })
+        .collect()
+}
+
 /// Check if a string looks like a currency, validating against known currencies.
 ///
 /// Validates the format (uppercase-and-digits, 2-24 chars) and then

@@ -7,7 +7,7 @@
 use proptest::prelude::*;
 use rust_decimal::Decimal;
 use rustledger_core::NaiveDate;
-use rustledger_core::{Amount, BookingMethod, Cost, CostSpec, InternedStr, Inventory, Position};
+use rustledger_core::{Amount, BookingMethod, Cost, CostSpec, Inventory, Position};
 
 // ============================================================================
 // Arbitrary generators

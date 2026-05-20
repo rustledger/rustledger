@@ -3,7 +3,7 @@
 use super::OutputFormat;
 use anyhow::Result;
 use rust_decimal::Decimal;
-use rustledger_core::{Directive, InternedStr};
+use rustledger_core::Directive;
 use std::collections::BTreeMap;
 use std::io::Write;
 

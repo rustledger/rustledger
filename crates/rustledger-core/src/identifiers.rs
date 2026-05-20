@@ -102,7 +102,7 @@ macro_rules! domain_newtype {
             /// `Arc` after merging directives from multiple files —
             /// the value semantics don't change, but the storage is
             /// re-pointed at the workspace-wide interner's copy.
-            pub fn as_interned_mut(&mut self) -> &mut InternedStr {
+            pub const fn as_interned_mut(&mut self) -> &mut InternedStr {
                 &mut self.0
             }
         }

@@ -12,7 +12,6 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use crate::Amount;
-use crate::intern::InternedStr;
 
 // Note: We no longer auto-quantize calculated values during cost storage.
 // Python beancount preserves full precision during booking and only rounds
@@ -21,7 +20,7 @@ use crate::intern::InternedStr;
 // For example: 300.00 / 1.763 = 170.16505... should NOT be rounded to 170.17,
 // because 1.763 * 170.17 = 300.00971 ≠ 300.00.
 #[cfg(feature = "rkyv")]
-use crate::intern::{AsDecimal, AsInternedStr, AsNaiveDate};
+use crate::intern::{AsDecimal, AsNaiveDate};
 
 /// A cost represents the acquisition cost of a position (lot).
 ///

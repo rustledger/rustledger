@@ -2,9 +2,7 @@
 
 use rust_decimal::Decimal;
 use rustc_hash::FxHashMap;
-use rustledger_core::{
-    Amount, BookingMethod, InternedStr, Inventory, Posting, ReductionScope, Transaction,
-};
+use rustledger_core::{Amount, BookingMethod, Inventory, Posting, ReductionScope, Transaction};
 use std::collections::HashMap;
 
 use crate::error::{ErrorCode, ValidationError};

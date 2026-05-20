@@ -1,7 +1,7 @@
 //! Position and inventory function implementations for the BQL executor.
 
 use rust_decimal::Decimal;
-use rustledger_core::{Amount, InternedStr, Inventory, Position};
+use rustledger_core::{Amount, Inventory, Position};
 
 use crate::ast::FunctionCall;
 use crate::error::QueryError;

@@ -10,9 +10,8 @@ use std::fmt;
 use std::ops::{Add, AddAssign, Neg, Sub, SubAssign};
 
 use crate::Currency;
-use crate::intern::InternedStr;
 #[cfg(feature = "rkyv")]
-use crate::intern::{AsDecimal, AsInternedStr};
+use crate::intern::AsDecimal;
 
 /// An amount is a quantity paired with a currency.
 ///

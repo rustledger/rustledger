@@ -4,9 +4,7 @@
 //! and allows looking up prices for currency conversions.
 
 use rust_decimal::Decimal;
-use rustledger_core::{
-    Amount, Directive, InternedStr, NaiveDate, Price as PriceDirective, Transaction,
-};
+use rustledger_core::{Amount, Directive, NaiveDate, Price as PriceDirective, Transaction};
 use std::collections::HashMap;
 
 /// A price entry.

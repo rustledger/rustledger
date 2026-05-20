@@ -33,7 +33,7 @@ pub use pad::{PadError, PadResult, expand_pads, merge_with_padding, process_pads
 use bigdecimal::BigDecimal;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::Signed;
-use rustledger_core::{Amount, Currency, IncompleteAmount, InternedStr, Transaction};
+use rustledger_core::{Amount, Currency, IncompleteAmount, Transaction};
 use std::collections::HashMap;
 
 /// Calculate the tolerance for a set of amounts.

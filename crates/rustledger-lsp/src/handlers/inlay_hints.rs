@@ -140,7 +140,13 @@ pub fn handle_inlay_hints(
                 continue;
             };
 
-            // Position hint at the end of the account name
+            // Position the hint at the end of the trimmed line
+            // content. We only reach this point for fully-missing
+            // source postings (the filter above), so a well-formed
+            // posting line is `[indent][flag ]account[trailing ws]`
+            // — `indent + trimmed.len()` lands right after the
+            // account (or `flag account` if a flag is present),
+            // which is where the inferred amount visually belongs.
             let trimmed = line.trim();
             let indent = line.len() - line.trim_start().len();
             let end_col = indent + trimmed.len();

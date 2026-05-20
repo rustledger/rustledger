@@ -13,11 +13,19 @@
 //!
 //! These visitors are the canonical answer. Every position that
 //! carries a currency or an account name is enumerated exactly once
-//! here, with no `_ => {}` catch-all on the `Directive` match — so
-//! a future `Directive` variant added to the enum forces a compile
-//! error at THIS file, which is the only place that needs to be
-//! updated. Downstream consumers calling `visit_*` benefit
-//! automatically.
+//! here, with no `_ => {}` catch-all — at any layer of the match.
+//! That means:
+//!
+//! - A future `Directive` variant added to the enum forces a
+//!   compile error at the top-level `visit_*` match.
+//! - A future `MetaValue` variant forces a compile error at
+//!   `visit_meta_value_currency` and `visit_meta_value_account`.
+//! - A future `PriceAnnotation` variant forces a compile error at
+//!   `visit_price_currency`.
+//!
+//! This file is the ONE place that needs to be updated when new
+//! variants are added to any of those enums. Downstream consumers
+//! calling `visit_*` benefit automatically.
 //!
 //! Spans of source tokens are intentionally NOT exposed here:
 //! source positions are parser-only metadata published via
@@ -92,11 +100,7 @@ pub fn visit_currencies<'a>(directive: &'a Directive, visit: &mut impl FnMut(&'a
         }
         Directive::Custom(custom) => {
             for v in &custom.values {
-                match v {
-                    MetaValue::Currency(s) => visit(s.as_str()),
-                    MetaValue::Amount(a) => visit(a.currency.as_str()),
-                    _ => {}
-                }
+                visit_meta_value_currency(v, visit);
             }
             visit_meta_currencies(&custom.meta, visit);
         }
@@ -159,9 +163,7 @@ pub fn visit_accounts<'a>(directive: &'a Directive, visit: &mut impl FnMut(&'a s
         }
         Directive::Custom(custom) => {
             for v in &custom.values {
-                if let MetaValue::Account(a) = v {
-                    visit(a.as_str());
-                }
+                visit_meta_value_account(v, visit);
             }
             visit_meta_accounts(&custom.meta, visit);
         }
@@ -174,19 +176,56 @@ pub fn visit_accounts<'a>(directive: &'a Directive, visit: &mut impl FnMut(&'a s
 
 fn visit_meta_currencies<'a>(meta: &'a Metadata, visit: &mut impl FnMut(&'a str)) {
     for v in meta.values() {
-        match v {
-            MetaValue::Currency(s) => visit(s.as_str()),
-            MetaValue::Amount(a) => visit(a.currency.as_str()),
-            _ => {}
-        }
+        visit_meta_value_currency(v, visit);
     }
 }
 
 fn visit_meta_accounts<'a>(meta: &'a Metadata, visit: &mut impl FnMut(&'a str)) {
     for v in meta.values() {
-        if let MetaValue::Account(a) = v {
-            visit(a.as_str());
-        }
+        visit_meta_value_account(v, visit);
+    }
+}
+
+/// Per-`MetaValue` currency extractor. Used both by metadata-block
+/// walks and by `Custom.values` walks (Custom directives carry a
+/// `Vec<MetaValue>` as positional args; the same per-variant logic
+/// applies). The match is exhaustive with no `_ => {}` catch-all —
+/// a future `MetaValue` variant added to the enum forces a compile
+/// error here and at `visit_meta_value_account`, so the visitor
+/// stays in lockstep with the type definition. Mirrors the no-
+/// catch-all guarantee already enforced on the `Directive` match
+/// at the top of this module.
+fn visit_meta_value_currency<'a>(v: &'a MetaValue, visit: &mut impl FnMut(&'a str)) {
+    match v {
+        MetaValue::Currency(s) => visit(s.as_str()),
+        MetaValue::Amount(a) => visit(a.currency.as_str()),
+        // Variants that cannot carry a currency.
+        MetaValue::String(_)
+        | MetaValue::Account(_)
+        | MetaValue::Tag(_)
+        | MetaValue::Link(_)
+        | MetaValue::Date(_)
+        | MetaValue::Number(_)
+        | MetaValue::Bool(_)
+        | MetaValue::None => {}
+    }
+}
+
+/// Per-`MetaValue` account extractor. See `visit_meta_value_currency`
+/// for the no-`_ => {}`-catch-all rationale.
+fn visit_meta_value_account<'a>(v: &'a MetaValue, visit: &mut impl FnMut(&'a str)) {
+    match v {
+        MetaValue::Account(a) => visit(a.as_str()),
+        // Variants that cannot carry an account name.
+        MetaValue::String(_)
+        | MetaValue::Currency(_)
+        | MetaValue::Tag(_)
+        | MetaValue::Link(_)
+        | MetaValue::Date(_)
+        | MetaValue::Number(_)
+        | MetaValue::Bool(_)
+        | MetaValue::Amount(_)
+        | MetaValue::None => {}
     }
 }
 

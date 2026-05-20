@@ -4,7 +4,7 @@
 //! including position conversion, word extraction, and type checking.
 
 use lsp_types::{FormattingOptions, Position};
-use rustledger_core::{Directive, FormatConfig};
+use rustledger_core::FormatConfig;
 use rustledger_parser::ParseResult;
 
 /// Resolve the `FormatConfig` the LSP server uses for a given request.
@@ -280,61 +280,33 @@ pub fn is_currency_like_simple(s: &str) -> bool {
 
 /// Check if a string looks like a currency, validating against known currencies.
 ///
-/// This checks the format AND verifies the currency exists in the document.
+/// Validates the format (uppercase-and-digits, 2-24 chars) and then
+/// confirms the string actually appears as a parsed `Currency` token
+/// in the document by looking it up in `parse_result.currency_occurrences`.
+///
+/// The previous implementation manually walked the AST testing each
+/// position that can carry a currency (Commodity.currency,
+/// Open.currencies, Balance.amount, Posting.units / cost / price,
+/// Price directive). That had two problems:
+///
+/// 1. Any position the walk forgot — or any future directive type
+///    that carries a currency — would silently be excluded, and
+///    rename / references / document-highlight would refuse to fire
+///    on a real currency only mentioned there.
+/// 2. Code duplication: the parser already records every `Currency`
+///    token in `currency_occurrences`; the walk was a parallel and
+///    necessarily-incomplete reimplementation.
+///
+/// Consulting the parser's index makes the check exact by
+/// construction and shrinks the function from ~50 lines to ~5.
 pub fn is_currency_like(s: &str, parse_result: &ParseResult) -> bool {
-    // First check format: uppercase letters/numbers, 2-24 chars
     if !s.chars().all(|c| c.is_uppercase() || c.is_numeric()) || s.len() < 2 || s.len() > 24 {
         return false;
     }
-
-    // Then verify it's a known currency in the document
-    for spanned in &parse_result.directives {
-        match &spanned.value {
-            Directive::Commodity(comm) if comm.currency.as_ref() == s => {
-                return true;
-            }
-            Directive::Open(open) => {
-                for curr in &open.currencies {
-                    if curr.as_ref() == s {
-                        return true;
-                    }
-                }
-            }
-            Directive::Balance(bal) if bal.amount.currency.as_ref() == s => {
-                return true;
-            }
-            Directive::Transaction(txn) => {
-                for posting in &txn.postings {
-                    if let Some(units) = &posting.units
-                        && let Some(currency) = units.currency()
-                        && currency == s
-                    {
-                        return true;
-                    }
-                    if let Some(cost) = &posting.cost
-                        && let Some(currency) = &cost.currency
-                        && currency.as_ref() == s
-                    {
-                        return true;
-                    }
-                    if let Some(price) = &posting.price
-                        && let Some(amount) = price.amount()
-                        && amount.currency.as_ref() == s
-                    {
-                        return true;
-                    }
-                }
-            }
-            Directive::Price(price)
-                if price.currency.as_ref() == s || price.amount.currency.as_ref() == s =>
-            {
-                return true;
-            }
-            _ => {}
-        }
-    }
-
-    false
+    parse_result
+        .currency_occurrences
+        .iter()
+        .any(|occ| occ.value == s)
 }
 
 #[cfg(test)]

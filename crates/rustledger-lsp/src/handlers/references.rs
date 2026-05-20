@@ -47,7 +47,6 @@ pub fn handle_references(
     // Check if it's a currency
     else if is_currency_like(&word, parse_result) {
         collect_currency_references(
-            source,
             parse_result,
             &line_index,
             &word,
@@ -235,7 +234,6 @@ fn collect_account_references(
 /// `Commodity` directive contains exactly one `Currency` token (the
 /// declared one), so the within-range check is unambiguous.
 fn collect_currency_references(
-    _source: &str,
     parse_result: &ParseResult,
     line_index: &LineIndex,
     currency: &str,

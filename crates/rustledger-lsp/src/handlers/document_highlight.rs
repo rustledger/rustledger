@@ -39,7 +39,7 @@ pub fn handle_document_highlight(
     }
     // Check if it's a currency
     else if is_currency_like(&word, parse_result) {
-        collect_currency_highlights(source, parse_result, &line_index, &word, &mut highlights);
+        collect_currency_highlights(parse_result, &line_index, &word, &mut highlights);
     }
     // Check if it's a payee (inside quotes)
     else if is_in_quotes(line, position.character as usize) {
@@ -177,7 +177,6 @@ fn collect_account_highlights(
 /// Occurrences whose span sits inside a `Commodity` directive
 /// declaration are surfaced as `WRITE`, all others as `READ`.
 fn collect_currency_highlights(
-    _source: &str,
     parse_result: &ParseResult,
     line_index: &LineIndex,
     currency: &str,

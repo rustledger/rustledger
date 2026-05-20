@@ -12,9 +12,7 @@ use rustledger_core::Directive;
 use rustledger_parser::ParseResult;
 use std::collections::HashMap;
 
-use super::utils::{
-    byte_offset_to_position, get_word_at_position, is_account_like, is_currency_like,
-};
+use super::utils::{LineIndex, get_word_at_position, is_account_like, is_currency_like};
 
 /// Handle a prepare rename request (check if rename is valid at position).
 pub fn handle_prepare_rename(
@@ -62,13 +60,26 @@ pub fn handle_rename(
 
     // Collect all edits
     let mut edits = Vec::new();
+    // Build the line index once and share across collectors. The
+    // previous code went through `byte_offset_to_position`, which is
+    // O(n) per call (linear scan from byte 0); for a large ledger
+    // with many account / currency occurrences, that scaled
+    // quadratically with file size.
+    let line_index = LineIndex::new(source);
 
     if is_account_like(&old_name) {
         // Rename account
-        collect_account_rename_edits(source, parse_result, &old_name, new_name, &mut edits);
+        collect_account_rename_edits(
+            source,
+            parse_result,
+            &line_index,
+            &old_name,
+            new_name,
+            &mut edits,
+        );
     } else if is_currency_like(&old_name, parse_result) {
         // Rename currency
-        collect_currency_rename_edits(source, parse_result, &old_name, new_name, &mut edits);
+        collect_currency_rename_edits(parse_result, &line_index, &old_name, new_name, &mut edits);
     }
 
     if edits.is_empty() {
@@ -89,6 +100,7 @@ pub fn handle_rename(
 fn collect_account_rename_edits(
     source: &str,
     parse_result: &ParseResult,
+    line_index: &LineIndex,
     old_name: &str,
     new_name: &str,
     edits: &mut Vec<TextEdit>,
@@ -99,6 +111,7 @@ fn collect_account_rename_edits(
                 if open.account.as_ref() == old_name
                     && let Some(edit) = find_and_create_edit(
                         source,
+                        line_index,
                         spanned.span.start,
                         spanned.span.end,
                         old_name,
@@ -112,6 +125,7 @@ fn collect_account_rename_edits(
                 if close.account.as_ref() == old_name
                     && let Some(edit) = find_and_create_edit(
                         source,
+                        line_index,
                         spanned.span.start,
                         spanned.span.end,
                         old_name,
@@ -125,6 +139,7 @@ fn collect_account_rename_edits(
                 if bal.account.as_ref() == old_name
                     && let Some(edit) = find_and_create_edit(
                         source,
+                        line_index,
                         spanned.span.start,
                         spanned.span.end,
                         old_name,
@@ -138,6 +153,7 @@ fn collect_account_rename_edits(
                 if pad.account.as_ref() == old_name
                     && let Some(edit) = find_and_create_edit(
                         source,
+                        line_index,
                         spanned.span.start,
                         spanned.span.end,
                         old_name,
@@ -149,6 +165,7 @@ fn collect_account_rename_edits(
                 if pad.source_account.as_ref() == old_name
                     && let Some(edit) = find_and_create_edit(
                         source,
+                        line_index,
                         spanned.span.start,
                         spanned.span.end,
                         old_name,
@@ -162,6 +179,7 @@ fn collect_account_rename_edits(
                 if note.account.as_ref() == old_name
                     && let Some(edit) = find_and_create_edit(
                         source,
+                        line_index,
                         spanned.span.start,
                         spanned.span.end,
                         old_name,
@@ -175,6 +193,7 @@ fn collect_account_rename_edits(
                 if doc.account.as_ref() == old_name
                     && let Some(edit) = find_and_create_edit(
                         source,
+                        line_index,
                         spanned.span.start,
                         spanned.span.end,
                         old_name,
@@ -186,23 +205,18 @@ fn collect_account_rename_edits(
             }
             Directive::Transaction(txn) => {
                 for posting in &txn.postings {
-                    if posting.account.as_ref() == old_name {
-                        // Find the posting line and create edit
-                        let directive_text = &source[spanned.span.start..spanned.span.end];
-                        if let Some(edit) = find_and_create_edit(
+                    if posting.account.as_ref() == old_name
+                        && let Some(edit) = find_and_create_edit(
                             source,
+                            line_index,
                             spanned.span.start,
                             spanned.span.end,
                             old_name,
                             new_name,
-                        ) {
-                            // Check if we already have an edit for this range
-                            if !edits.iter().any(|e| e.range == edit.range) {
-                                edits.push(edit);
-                            }
-                        }
-                        // For transactions with multiple matching postings, we need all of them
-                        let _ = directive_text; // suppress unused warning
+                        )
+                        && !edits.iter().any(|e| e.range == edit.range)
+                    {
+                        edits.push(edit);
                     }
                 }
             }
@@ -226,8 +240,8 @@ fn collect_account_rename_edits(
 /// despite the alphanumeric boundary check, because `-` is non-
 /// alphanumeric).
 fn collect_currency_rename_edits(
-    source: &str,
     parse_result: &ParseResult,
+    line_index: &LineIndex,
     old_name: &str,
     new_name: &str,
     edits: &mut Vec<TextEdit>,
@@ -236,8 +250,8 @@ fn collect_currency_rename_edits(
         if occurrence.value != old_name {
             continue;
         }
-        let (start_line, start_col) = byte_offset_to_position(source, occurrence.span.start);
-        let (end_line, end_col) = byte_offset_to_position(source, occurrence.span.end);
+        let (start_line, start_col) = line_index.offset_to_position(occurrence.span.start);
+        let (end_line, end_col) = line_index.offset_to_position(occurrence.span.end);
         edits.push(TextEdit {
             range: Range {
                 start: Position::new(start_line, start_col),
@@ -247,10 +261,14 @@ fn collect_currency_rename_edits(
         });
     }
 
-    // Deduplicate edits by range. The parser may visit the same
-    // currency span twice when a token is referenced from multiple
-    // parse paths (price annotations, cost specs); guard against
-    // emitting duplicate text edits in those cases.
+    // Defensive dedup. The parser advances unidirectionally over its
+    // token stream, so today every `Currency` token is consumed
+    // exactly once — even speculative parse paths (e.g.
+    // `parse_incomplete_amount`) rewind `stream.pos` before retrying.
+    // The sort+dedup here costs essentially nothing for the typical
+    // hint count and protects against future parser refactors that
+    // might re-emit a span (e.g. a backtracking parser, or a separate
+    // resync pass).
     edits.sort_by(|a, b| {
         a.range
             .start
@@ -262,15 +280,24 @@ fn collect_currency_rename_edits(
 }
 
 /// Find a string in the source and create a text edit.
+///
+/// Used by the account-rename path (not currency: currency now goes
+/// through `parse_result.currency_occurrences` for exact AST-derived
+/// spans). Account directives don't carry per-field spans, so we
+/// fall back to a directive-scoped substring search; that's safe for
+/// account names because they cannot textually appear inside other
+/// syntactic positions a directive supports (no `:` in payee strings
+/// or in metadata keys).
 fn find_and_create_edit(
     source: &str,
+    line_index: &LineIndex,
     start_offset: usize,
     end_offset: usize,
     old_name: &str,
     new_name: &str,
 ) -> Option<TextEdit> {
     let directive_text = &source[start_offset..end_offset];
-    let (start_line, start_col) = byte_offset_to_position(source, start_offset);
+    let (start_line, start_col) = line_index.offset_to_position(start_offset);
 
     // Find the old name in the directive
     for (line_offset, line) in directive_text.lines().enumerate() {

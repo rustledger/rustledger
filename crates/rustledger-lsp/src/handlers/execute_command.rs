@@ -5,16 +5,13 @@
 //! - rledger.sortTransactions: Sort transactions by date
 //! - rledger.alignAmounts: Align amounts in a region
 
-use lsp_types::{
-    DocumentFormattingParams, ExecuteCommandParams, TextDocumentIdentifier, TextEdit, Uri,
-    WorkspaceEdit,
-};
+use lsp_types::{ExecuteCommandParams, TextEdit, Uri, WorkspaceEdit};
 use rustledger_core::Directive;
 use rustledger_parser::ParseResult;
 use std::collections::HashMap;
 
-use super::formatting::handle_formatting;
-use super::utils::byte_offset_to_position;
+use super::formatting::format_document;
+use super::utils::{byte_offset_to_position, document_format_config};
 
 /// Available commands.
 pub const COMMANDS: &[&str] = &[
@@ -121,8 +118,8 @@ fn handle_sort_transactions(
     serde_json::to_value(workspace_edit).ok()
 }
 
-/// Align amounts in the document by delegating to the document
-/// formatter ([`handle_formatting`]).
+/// Align amounts in the document by delegating to the shared
+/// document formatter ([`format_document`]).
 ///
 /// The formatting handler is the canonical alignment path now and it
 /// delegates further to [`rustledger_core::format_posting`], the same
@@ -138,25 +135,15 @@ fn handle_align_amounts(
     parse_result: &ParseResult,
     uri: &Uri,
 ) -> Option<serde_json::Value> {
-    // Synthesize the formatting params. Today `handle_formatting`
-    // ignores its `_params` argument (everything it needs comes from
-    // `source` + `parse_result`) so the placeholder is harmless.
-    //
-    // Note: `workspace/executeCommand` does NOT carry the client's
-    // formatting preferences (tab size, insert-spaces, etc.) — those
-    // only travel with `textDocument/formatting`. If `handle_formatting`
-    // ever starts honoring `params.options`, this command will keep
-    // using server defaults and silently diverge from
-    // `textDocument/formatting`. When that day comes, plumb a
-    // server-wide `FormatConfig` through both handlers (or accept the
-    // options as command arguments) — don't paper over it by mirroring
-    // a client value we don't have.
-    let params = DocumentFormattingParams {
-        text_document: TextDocumentIdentifier { uri: uri.clone() },
-        options: Default::default(),
-        work_done_progress_params: Default::default(),
-    };
-    let edits: Vec<TextEdit> = handle_formatting(&params, source, parse_result).unwrap_or_default();
+    // `workspace/executeCommand` does NOT carry the client's
+    // formatting preferences — those only travel with
+    // `textDocument/formatting`. Express that explicitly by passing
+    // `None` to `document_format_config`: when that helper grows
+    // real options handling, the executeCommand path will fall back
+    // to server defaults rather than silently mirroring an absent
+    // client value.
+    let config = document_format_config(None);
+    let edits: Vec<TextEdit> = format_document(source, parse_result, &config).unwrap_or_default();
 
     if edits.is_empty() {
         return Some(serde_json::json!({

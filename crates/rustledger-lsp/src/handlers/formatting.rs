@@ -9,13 +9,35 @@ use lsp_types::{DocumentFormattingParams, Position, Range, TextEdit};
 use rustledger_core::{Directive, FormatConfig, SYNTHESIZED_FILE_ID, format_posting_line};
 use rustledger_parser::ParseResult;
 
-use super::utils::LineIndex;
+use super::utils::{LineIndex, document_format_config};
 
-/// Handle a document formatting request.
+/// Handle a `textDocument/formatting` request.
+///
+/// Thin LSP-shaped wrapper around [`format_document`]. The protocol
+/// passes client `FormattingOptions` here; this function feeds them
+/// to [`document_format_config`] for the actual `FormatConfig`.
 pub fn handle_formatting(
-    _params: &DocumentFormattingParams,
+    params: &DocumentFormattingParams,
     source: &str,
     parse_result: &ParseResult,
+) -> Option<Vec<TextEdit>> {
+    let config = document_format_config(Some(&params.options));
+    format_document(source, parse_result, &config)
+}
+
+/// Compute the document-format edits for a parsed source with a
+/// resolved [`FormatConfig`].
+///
+/// Both `textDocument/formatting` (via [`handle_formatting`]) and
+/// `rledger.alignAmounts` (via `handle_align_amounts`) call into
+/// this — separated from the LSP-shaped wrapper so the executeCommand
+/// path can express its config source explicitly (`None` → server
+/// defaults) rather than synthesizing a fake `DocumentFormattingParams`
+/// just to reach the formatter.
+pub fn format_document(
+    source: &str,
+    parse_result: &ParseResult,
+    config: &FormatConfig,
 ) -> Option<Vec<TextEdit>> {
     let mut edits = Vec::new();
     let lines: Vec<&str> = source.lines().collect();
@@ -23,12 +45,6 @@ pub fn handle_formatting(
     // offset lookup. Without it, calling the naive O(n) scanner per
     // posting per transaction is quadratic on large files.
     let line_index = LineIndex::new(source);
-    // One canonical FormatConfig for the whole document, shared with
-    // `rledger format` (CLI) and `format_directive` (core). Previously
-    // the LSP had its own hardcoded `AMOUNT_COLUMN = 50` constant —
-    // amounts the user saw in the editor were one column shy of what
-    // `rledger format` produced on disk.
-    let config = FormatConfig::default();
 
     for spanned in &parse_result.directives {
         if let Directive::Transaction(txn) = &spanned.value {
@@ -49,7 +65,7 @@ pub fn handle_formatting(
                 let (posting_line, _) = line_index.offset_to_position(spanned_posting.span.start);
                 if let Some(line) = lines.get(posting_line as usize)
                     && let Some(edit) =
-                        posting_text_edit(line, posting_line, spanned_posting, &config)
+                        posting_text_edit(line, posting_line, spanned_posting, config)
                 {
                     edits.push(edit);
                 }

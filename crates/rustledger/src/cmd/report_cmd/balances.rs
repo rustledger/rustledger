@@ -3,7 +3,7 @@
 use super::{OutputFormat, csv_escape, json_escape};
 use anyhow::Result;
 use rust_decimal::Decimal;
-use rustledger_core::{Directive, InternedStr, Inventory};
+use rustledger_core::{Directive, Inventory};
 use std::collections::BTreeMap;
 use std::io::Write;
 
@@ -14,7 +14,7 @@ pub(super) fn report_balances<W: Write>(
     format: &OutputFormat,
     writer: &mut W,
 ) -> Result<()> {
-    let mut balances: BTreeMap<InternedStr, Inventory> = BTreeMap::new();
+    let mut balances: BTreeMap<rustledger_core::Account, Inventory> = BTreeMap::new();
 
     for directive in directives {
         match directive {

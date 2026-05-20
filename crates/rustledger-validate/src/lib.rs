@@ -105,7 +105,7 @@ const PARALLEL_SORT_THRESHOLD: usize = 5000;
 const PARALLEL_DOC_EXISTS_THRESHOLD: usize = 64;
 use rust_decimal::Decimal;
 use rustc_hash::{FxHashMap, FxHashSet};
-use rustledger_core::{BookingMethod, Commodity, Directive, InternedStr, Inventory};
+use rustledger_core::{BookingMethod, Commodity, Directive, Inventory};
 use rustledger_parser::{SYNTHESIZED_FILE_ID, Spanned};
 
 /// Account state for tracking lifecycle.
@@ -237,7 +237,7 @@ impl ValidationOptions {
 #[derive(Debug, Clone)]
 struct PendingPad {
     /// Source account for padding.
-    source_account: InternedStr,
+    source_account: rustledger_core::Account,
     /// Date of the pad directive.
     date: NaiveDate,
     /// Currencies for which this pad has already inserted padding.
@@ -253,13 +253,13 @@ struct PendingPad {
 #[derive(Debug, Default)]
 pub struct LedgerState {
     /// Account states.
-    accounts: FxHashMap<InternedStr, AccountState>,
+    accounts: FxHashMap<rustledger_core::Account, AccountState>,
     /// Account inventories.
-    inventories: FxHashMap<InternedStr, Inventory>,
+    inventories: FxHashMap<rustledger_core::Account, Inventory>,
     /// Declared commodities.
     commodities: FxHashSet<rustledger_core::Currency>,
     /// Pending pad directives (account -> list of pads).
-    pending_pads: FxHashMap<InternedStr, Vec<PendingPad>>,
+    pending_pads: FxHashMap<rustledger_core::Account, Vec<PendingPad>>,
     /// Validation options.
     options: ValidationOptions,
     /// Track previous directive date for out-of-order detection.
@@ -274,7 +274,7 @@ pub struct LedgerState {
     /// Keyed by `(account, date)` rather than account alone so that if
     /// reopen-after-close is ever supported, a legitimate later close on
     /// the same account still runs the inventory check.
-    pub(crate) late_close_processed: FxHashSet<(InternedStr, NaiveDate)>,
+    pub(crate) late_close_processed: FxHashSet<(rustledger_core::Account, NaiveDate)>,
 }
 
 impl LedgerState {
@@ -321,7 +321,7 @@ impl LedgerState {
 
     /// Get all account names.
     pub fn accounts(&self) -> impl Iterator<Item = &str> {
-        self.accounts.keys().map(InternedStr::as_str)
+        self.accounts.keys().map(rustledger_core::Account::as_str)
     }
 
     /// Import option warnings from the loader and convert them to validation errors.

@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use rustledger_core::{Directive, InternedStr, NaiveDate};
+use rustledger_core::{Account, Directive, NaiveDate};
 use rustledger_loader::Loader;
 use std::collections::{BTreeMap, HashSet};
 use std::io::Write;
@@ -12,10 +12,10 @@ pub(super) fn cmd_missing_open<W: Write>(file: &PathBuf, writer: &mut W) -> Resu
         .with_context(|| format!("failed to load {}", file.display()))?;
 
     // Collect all accounts that are opened
-    let mut opened_accounts: HashSet<InternedStr> = HashSet::new();
+    let mut opened_accounts: HashSet<Account> = HashSet::new();
 
     // Collect all accounts that are used and their first use date
-    let mut used_accounts: BTreeMap<InternedStr, NaiveDate> = BTreeMap::new();
+    let mut used_accounts: BTreeMap<Account, NaiveDate> = BTreeMap::new();
 
     for spanned in &load_result.directives {
         match &spanned.value {

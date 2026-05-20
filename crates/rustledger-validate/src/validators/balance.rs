@@ -7,7 +7,7 @@ use crate::error::{ErrorCode, ValidationError};
 use crate::{LedgerState, PendingPad};
 
 use rustc_hash::FxHashMap;
-use rustledger_core::{InternedStr, Inventory};
+use rustledger_core::Inventory;
 
 /// Multiplier for balance assertion tolerance (matches Python beancount).
 /// Balance assertions use 2x the `tolerance_multiplier` option.
@@ -19,8 +19,8 @@ const BALANCE_TOLERANCE_MULTIPLIER: Decimal = Decimal::TWO;
 /// `Assets:Bank:Savings`, etc. This function checks for exact match or
 /// sub-account prefix (account followed by `:`) without allocating.
 fn sum_account_and_subaccounts(
-    inventories: &FxHashMap<InternedStr, Inventory>,
-    account: &InternedStr,
+    inventories: &FxHashMap<rustledger_core::Account, Inventory>,
+    account: &rustledger_core::Account,
     currency: &rustledger_core::Currency,
 ) -> Decimal {
     let account_str = account.as_str();

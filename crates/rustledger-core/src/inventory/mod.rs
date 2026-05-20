@@ -12,7 +12,6 @@ use smallvec::SmallVec;
 use std::fmt;
 use std::str::FromStr;
 
-use crate::intern::InternedStr;
 use crate::{Amount, CostSpec, Position};
 
 /// Inline storage for `BookingResult::matched`.
@@ -210,7 +209,7 @@ impl BookingError {
     /// wording cannot drift between them — the failure mode that produced
     /// #748.
     #[must_use]
-    pub const fn with_account(self, account: InternedStr) -> AccountedBookingError {
+    pub const fn with_account(self, account: crate::Account) -> AccountedBookingError {
         AccountedBookingError {
             error: self,
             account,
@@ -232,7 +231,7 @@ pub struct AccountedBookingError {
     /// The underlying inventory-level error.
     pub error: BookingError,
     /// The account whose inventory produced the error.
-    pub account: InternedStr,
+    pub account: crate::Account,
 }
 
 impl fmt::Display for AccountedBookingError {

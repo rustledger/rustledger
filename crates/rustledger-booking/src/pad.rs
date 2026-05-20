@@ -24,8 +24,7 @@
 
 use rust_decimal::Decimal;
 use rustledger_core::{
-    Amount, Currency, Directive, InternedStr, Inventory, NaiveDate, Pad, Position, Posting,
-    Transaction,
+    Amount, Currency, Directive, Inventory, NaiveDate, Pad, Position, Posting, Transaction,
 };
 use std::collections::HashMap;
 use std::ops::Neg;
@@ -49,7 +48,7 @@ pub struct PadError {
     /// Error message.
     pub message: String,
     /// Account involved.
-    pub account: Option<InternedStr>,
+    pub account: Option<rustledger_core::Account>,
 }
 
 impl PadError {
@@ -63,7 +62,7 @@ impl PadError {
     }
 
     /// Add account context.
-    pub fn with_account(mut self, account: impl Into<InternedStr>) -> Self {
+    pub fn with_account(mut self, account: impl Into<rustledger_core::Account>) -> Self {
         self.account = Some(account.into());
         self
     }
@@ -101,9 +100,9 @@ struct PendingPad {
 /// - Any errors encountered
 pub fn process_pads(directives: &[Directive]) -> PadResult {
     let num_directives = directives.len();
-    let mut inventories: HashMap<InternedStr, Inventory> =
+    let mut inventories: HashMap<rustledger_core::Account, Inventory> =
         HashMap::with_capacity(num_directives.min(16));
-    let mut pending_pads: HashMap<InternedStr, PendingPad> = HashMap::with_capacity(4);
+    let mut pending_pads: HashMap<rustledger_core::Account, PendingPad> = HashMap::with_capacity(4);
     let mut padding_transactions = Vec::with_capacity(num_directives.min(16));
     let mut errors = Vec::with_capacity(4);
 

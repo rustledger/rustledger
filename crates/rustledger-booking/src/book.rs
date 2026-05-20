@@ -8,8 +8,8 @@
 
 use rustc_hash::FxHashMap;
 use rustledger_core::{
-    AccountedBookingError, Amount, BookingMethod, Cost, CostSpec, IncompleteAmount, InternedStr,
-    Inventory, Position, Posting, ReductionScope, Transaction,
+    AccountedBookingError, Amount, BookingMethod, Cost, CostSpec, IncompleteAmount, Inventory,
+    Position, Posting, ReductionScope, Transaction,
 };
 use thiserror::Error;
 
@@ -61,7 +61,7 @@ pub struct BookedTransaction {
 #[derive(Debug, Clone)]
 pub struct CapitalGain {
     /// The account holding the asset.
-    pub account: InternedStr,
+    pub account: rustledger_core::Account,
     /// The currency of the asset.
     pub currency: rustledger_core::Currency,
     /// The gain amount (positive) or loss (negative).
@@ -76,13 +76,13 @@ pub struct CapitalGain {
 #[derive(Debug, Default)]
 pub struct BookingEngine {
     /// Inventory per account.
-    inventories: FxHashMap<InternedStr, Inventory>,
+    inventories: FxHashMap<rustledger_core::Account, Inventory>,
     /// Default booking method, used for accounts without an explicit
     /// booking method on their `open` directive.
     booking_method: BookingMethod,
     /// Per-account booking method overrides (from `open` directives).
     /// Looked up first, falling back to `booking_method` if absent.
-    account_methods: FxHashMap<InternedStr, BookingMethod>,
+    account_methods: FxHashMap<rustledger_core::Account, BookingMethod>,
 }
 
 impl BookingEngine {
@@ -112,7 +112,7 @@ impl BookingEngine {
     /// that account, so the engine uses the per-account method (e.g. FIFO,
     /// LIFO, NONE) rather than the engine-wide default. Subsequent calls
     /// overwrite the previous method for the account.
-    pub fn set_account_method(&mut self, account: InternedStr, method: BookingMethod) {
+    pub fn set_account_method(&mut self, account: rustledger_core::Account, method: BookingMethod) {
         self.account_methods.insert(account, method);
     }
 
@@ -142,7 +142,7 @@ impl BookingEngine {
 
     /// Resolve the booking method for an account, falling back to the
     /// engine-wide default if not registered.
-    fn method_for(&self, account: &InternedStr) -> BookingMethod {
+    fn method_for(&self, account: &rustledger_core::Account) -> BookingMethod {
         self.account_methods
             .get(account)
             .copied()
@@ -151,7 +151,7 @@ impl BookingEngine {
 
     /// Get the inventory for an account.
     #[must_use]
-    pub fn inventory(&self, account: &InternedStr) -> Option<&Inventory> {
+    pub fn inventory(&self, account: &rustledger_core::Account) -> Option<&Inventory> {
         self.inventories.get(account)
     }
 
@@ -192,7 +192,7 @@ impl BookingEngine {
         // inventory every time it appears. Without deduping, the optimization
         // would be silently undone by transactions that list the same
         // account more than once.
-        let mut working_inventories: FxHashMap<InternedStr, Inventory> =
+        let mut working_inventories: FxHashMap<rustledger_core::Account, Inventory> =
             FxHashMap::with_capacity_and_hasher(txn.postings.len(), Default::default());
         for posting in &txn.postings {
             if let Some(inv) = self.inventories.get(&posting.account) {
@@ -535,7 +535,7 @@ impl BookingEngine {
 /// the booking layer and the validator (#748 / #750).
 fn convert_core_booking_error(
     err: rustledger_core::BookingError,
-    account: &InternedStr,
+    account: &rustledger_core::Account,
 ) -> BookingError {
     BookingError::Inventory(err.with_account(account.clone()))
 }

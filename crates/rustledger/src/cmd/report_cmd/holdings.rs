@@ -3,7 +3,7 @@
 use super::{OutputFormat, csv_escape, json_escape};
 use anyhow::Result;
 use rust_decimal::Decimal;
-use rustledger_core::{Directive, InternedStr};
+use rustledger_core::Directive;
 use std::collections::BTreeMap;
 use std::io::Write;
 
@@ -15,8 +15,10 @@ pub(super) fn report_holdings<W: Write>(
     writer: &mut W,
 ) -> Result<()> {
     // Track holdings: account -> currency -> (units, cost_basis, cost_currency)
-    let mut holdings: BTreeMap<InternedStr, BTreeMap<String, (Decimal, Decimal, String)>> =
-        BTreeMap::new();
+    let mut holdings: BTreeMap<
+        rustledger_core::Account,
+        BTreeMap<String, (Decimal, Decimal, String)>,
+    > = BTreeMap::new();
 
     for directive in directives {
         if let Directive::Transaction(txn) = directive {

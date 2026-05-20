@@ -3,7 +3,7 @@
 use super::{OutputFormat, csv_escape, json_escape};
 use anyhow::Result;
 use rust_decimal::Decimal;
-use rustledger_core::{Directive, InternedStr, Inventory};
+use rustledger_core::{Directive, Inventory};
 use std::collections::BTreeMap;
 use std::io::Write;
 
@@ -13,8 +13,8 @@ pub(super) fn report_income<W: Write>(
     format: &OutputFormat,
     writer: &mut W,
 ) -> Result<()> {
-    let mut income: BTreeMap<InternedStr, Inventory> = BTreeMap::new();
-    let mut expenses: BTreeMap<InternedStr, Inventory> = BTreeMap::new();
+    let mut income: BTreeMap<rustledger_core::Account, Inventory> = BTreeMap::new();
+    let mut expenses: BTreeMap<rustledger_core::Account, Inventory> = BTreeMap::new();
 
     for directive in directives {
         if let Directive::Transaction(txn) = directive {
@@ -38,7 +38,7 @@ pub(super) fn report_income<W: Write>(
     }
 
     fn sum_by_currency(
-        balances: &BTreeMap<InternedStr, Inventory>,
+        balances: &BTreeMap<rustledger_core::Account, Inventory>,
     ) -> BTreeMap<rustledger_core::Currency, Decimal> {
         let mut totals: BTreeMap<rustledger_core::Currency, Decimal> = BTreeMap::new();
         for inv in balances.values() {
@@ -51,7 +51,7 @@ pub(super) fn report_income<W: Write>(
 
     fn collect_rows(
         section: &str,
-        balances: &BTreeMap<InternedStr, Inventory>,
+        balances: &BTreeMap<rustledger_core::Account, Inventory>,
     ) -> Vec<(String, String, Decimal, String)> {
         let mut rows = Vec::new();
         for (account, inventory) in balances {
@@ -131,7 +131,7 @@ pub(super) fn report_income<W: Write>(
             fn write_section<W: Write>(
                 writer: &mut W,
                 title: &str,
-                balances: &BTreeMap<InternedStr, Inventory>,
+                balances: &BTreeMap<rustledger_core::Account, Inventory>,
             ) -> Result<BTreeMap<rustledger_core::Currency, Decimal>> {
                 writeln!(writer, "{title}")?;
                 writeln!(writer, "{}", "-".repeat(60))?;

@@ -361,13 +361,13 @@ fn process_string_escapes(s: &str) -> String {
     result
 }
 
-fn parse_account(stream: &mut TokenStream<'_>) -> ParseRes<InternedStr> {
+fn parse_account(stream: &mut TokenStream<'_>) -> ParseRes<rustledger_core::Account> {
     if let Some(t) = stream.peek()
         && let Token::Account(s) = &t.token
     {
         let result = stream.interner.intern(s);
         stream.advance();
-        return Ok(result);
+        return Ok(result.into());
     }
     Err(())
 }

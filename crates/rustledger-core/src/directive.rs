@@ -141,8 +141,7 @@ const fn meta_value_kind(v: &MetaValue) -> &'static str {
 )]
 pub struct Posting {
     /// The account for this posting
-    #[cfg_attr(feature = "rkyv", rkyv(with = AsInternedStr))]
-    pub account: InternedStr,
+    pub account: crate::Account,
     /// The units (may be incomplete or None for auto-calculated postings)
     pub units: Option<IncompleteAmount>,
     /// Cost specification for the position
@@ -164,7 +163,7 @@ pub struct Posting {
 impl Posting {
     /// Create a new posting with the given account and complete units.
     #[must_use]
-    pub fn new(account: impl Into<InternedStr>, units: Amount) -> Self {
+    pub fn new(account: impl Into<crate::Account>, units: Amount) -> Self {
         Self {
             account: account.into(),
             units: Some(IncompleteAmount::Complete(units)),
@@ -179,7 +178,7 @@ impl Posting {
 
     /// Create a new posting with an incomplete amount.
     #[must_use]
-    pub fn with_incomplete(account: impl Into<InternedStr>, units: IncompleteAmount) -> Self {
+    pub fn with_incomplete(account: impl Into<crate::Account>, units: IncompleteAmount) -> Self {
         Self {
             account: account.into(),
             units: Some(units),
@@ -194,7 +193,7 @@ impl Posting {
 
     /// Create a posting without any amount (to be fully interpolated).
     #[must_use]
-    pub fn auto(account: impl Into<InternedStr>) -> Self {
+    pub fn auto(account: impl Into<crate::Account>) -> Self {
         Self {
             account: account.into(),
             units: None,
@@ -765,8 +764,7 @@ pub struct Balance {
     #[cfg_attr(feature = "rkyv", rkyv(with = AsNaiveDate))]
     pub date: NaiveDate,
     /// Account to check
-    #[cfg_attr(feature = "rkyv", rkyv(with = AsInternedStr))]
-    pub account: InternedStr,
+    pub account: crate::Account,
     /// Expected amount
     pub amount: Amount,
     /// Tolerance (if explicitly specified)
@@ -779,7 +777,7 @@ pub struct Balance {
 impl Balance {
     /// Create a new balance assertion.
     #[must_use]
-    pub fn new(date: NaiveDate, account: impl Into<InternedStr>, amount: Amount) -> Self {
+    pub fn new(date: NaiveDate, account: impl Into<crate::Account>, amount: Amount) -> Self {
         Self {
             date,
             account: account.into(),
@@ -827,8 +825,7 @@ pub struct Open {
     #[cfg_attr(feature = "rkyv", rkyv(with = AsNaiveDate))]
     pub date: NaiveDate,
     /// Account name (e.g., "Assets:Bank:Checking")
-    #[cfg_attr(feature = "rkyv", rkyv(with = AsInternedStr))]
-    pub account: InternedStr,
+    pub account: crate::Account,
     /// Allowed currencies (empty = any currency allowed)
     pub currencies: Vec<crate::Currency>,
     /// Booking method for this account
@@ -840,7 +837,7 @@ pub struct Open {
 impl Open {
     /// Create a new open directive.
     #[must_use]
-    pub fn new(date: NaiveDate, account: impl Into<InternedStr>) -> Self {
+    pub fn new(date: NaiveDate, account: impl Into<crate::Account>) -> Self {
         Self {
             date,
             account: account.into(),
@@ -903,8 +900,7 @@ pub struct Close {
     #[cfg_attr(feature = "rkyv", rkyv(with = AsNaiveDate))]
     pub date: NaiveDate,
     /// Account name
-    #[cfg_attr(feature = "rkyv", rkyv(with = AsInternedStr))]
-    pub account: InternedStr,
+    pub account: crate::Account,
     /// Metadata
     pub meta: Metadata,
 }
@@ -912,7 +908,7 @@ pub struct Close {
 impl Close {
     /// Create a new close directive.
     #[must_use]
-    pub fn new(date: NaiveDate, account: impl Into<InternedStr>) -> Self {
+    pub fn new(date: NaiveDate, account: impl Into<crate::Account>) -> Self {
         Self {
             date,
             account: account.into(),
@@ -991,11 +987,9 @@ pub struct Pad {
     #[cfg_attr(feature = "rkyv", rkyv(with = AsNaiveDate))]
     pub date: NaiveDate,
     /// Account to pad
-    #[cfg_attr(feature = "rkyv", rkyv(with = AsInternedStr))]
-    pub account: InternedStr,
+    pub account: crate::Account,
     /// Source account for padding (e.g., Equity:Opening-Balances)
-    #[cfg_attr(feature = "rkyv", rkyv(with = AsInternedStr))]
-    pub source_account: InternedStr,
+    pub source_account: crate::Account,
     /// Metadata
     pub meta: Metadata,
 }
@@ -1005,8 +999,8 @@ impl Pad {
     #[must_use]
     pub fn new(
         date: NaiveDate,
-        account: impl Into<InternedStr>,
-        source_account: impl Into<InternedStr>,
+        account: impl Into<crate::Account>,
+        source_account: impl Into<crate::Account>,
     ) -> Self {
         Self {
             date,
@@ -1147,8 +1141,7 @@ pub struct Note {
     #[cfg_attr(feature = "rkyv", rkyv(with = AsNaiveDate))]
     pub date: NaiveDate,
     /// Account
-    #[cfg_attr(feature = "rkyv", rkyv(with = AsInternedStr))]
-    pub account: InternedStr,
+    pub account: crate::Account,
     /// Note text
     pub comment: String,
     /// Metadata
@@ -1160,7 +1153,7 @@ impl Note {
     #[must_use]
     pub fn new(
         date: NaiveDate,
-        account: impl Into<InternedStr>,
+        account: impl Into<crate::Account>,
         comment: impl Into<String>,
     ) -> Self {
         Self {
@@ -1202,8 +1195,7 @@ pub struct Document {
     #[cfg_attr(feature = "rkyv", rkyv(with = AsNaiveDate))]
     pub date: NaiveDate,
     /// Account
-    #[cfg_attr(feature = "rkyv", rkyv(with = AsInternedStr))]
-    pub account: InternedStr,
+    pub account: crate::Account,
     /// File path to the document
     pub path: String,
     /// Tags
@@ -1219,7 +1211,11 @@ pub struct Document {
 impl Document {
     /// Create a new document directive.
     #[must_use]
-    pub fn new(date: NaiveDate, account: impl Into<InternedStr>, path: impl Into<String>) -> Self {
+    pub fn new(
+        date: NaiveDate,
+        account: impl Into<crate::Account>,
+        path: impl Into<String>,
+    ) -> Self {
         Self {
             date,
             account: account.into(),

@@ -93,7 +93,7 @@ pub(super) fn apply_ml_suggestions(
             // confidence; if the predicted account differs from the
             // fallback, rewrite it.
             if predicted != contra.account.as_str() {
-                txn.postings[1].account = InternedStr::from(predicted);
+                txn.postings[1].account = rustledger_core::Account::from(predicted);
                 stats.modified += 1;
             }
         }

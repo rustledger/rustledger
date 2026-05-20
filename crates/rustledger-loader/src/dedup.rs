@@ -124,7 +124,7 @@ fn reintern_directive(directive: &mut Directive, interner: &mut StringInterner) 
             intern_vec(&mut txn.links, interner, &mut dedup_count);
 
             for posting in &mut txn.postings {
-                if do_intern(&mut posting.account, interner) {
+                if do_intern(posting.account.as_interned_mut(), interner) {
                     dedup_count += 1;
                 }
                 // Units
@@ -178,7 +178,7 @@ fn reintern_directive(directive: &mut Directive, interner: &mut StringInterner) 
             }
         }
         Directive::Balance(bal) => {
-            if do_intern(&mut bal.account, interner) {
+            if do_intern(bal.account.as_interned_mut(), interner) {
                 dedup_count += 1;
             }
             if do_intern(bal.amount.currency.as_interned_mut(), interner) {
@@ -186,7 +186,7 @@ fn reintern_directive(directive: &mut Directive, interner: &mut StringInterner) 
             }
         }
         Directive::Open(open) => {
-            if do_intern(&mut open.account, interner) {
+            if do_intern(open.account.as_interned_mut(), interner) {
                 dedup_count += 1;
             }
             intern_typed_vec(
@@ -197,7 +197,7 @@ fn reintern_directive(directive: &mut Directive, interner: &mut StringInterner) 
             );
         }
         Directive::Close(close) => {
-            if do_intern(&mut close.account, interner) {
+            if do_intern(close.account.as_interned_mut(), interner) {
                 dedup_count += 1;
             }
         }
@@ -207,20 +207,20 @@ fn reintern_directive(directive: &mut Directive, interner: &mut StringInterner) 
             }
         }
         Directive::Pad(pad) => {
-            if do_intern(&mut pad.account, interner) {
+            if do_intern(pad.account.as_interned_mut(), interner) {
                 dedup_count += 1;
             }
-            if do_intern(&mut pad.source_account, interner) {
+            if do_intern(pad.source_account.as_interned_mut(), interner) {
                 dedup_count += 1;
             }
         }
         Directive::Note(note) => {
-            if do_intern(&mut note.account, interner) {
+            if do_intern(note.account.as_interned_mut(), interner) {
                 dedup_count += 1;
             }
         }
         Directive::Document(doc) => {
-            if do_intern(&mut doc.account, interner) {
+            if do_intern(doc.account.as_interned_mut(), interner) {
                 dedup_count += 1;
             }
             // Pre-Copilot this skipped tags/links. They're now covered.

@@ -1143,10 +1143,10 @@ include "transactions.beancount"
             .load(Path::new("main.beancount"))
             .unwrap();
 
-        // Collect every `Assets:Bank` `InternedStr` (one from `open`,
-        // one from the posting). They originate in different files, so
+        // Collect every `Assets:Bank` `Account` (one from `open`, one
+        // from the posting). They originate in different files, so
         // pre-fix they had distinct `Arc<str>` allocations.
-        let bank_accounts: Vec<&rustledger_core::InternedStr> = result
+        let bank_accounts: Vec<&rustledger_core::Account> = result
             .directives
             .iter()
             .filter_map(|s| match &s.value {
@@ -1168,7 +1168,9 @@ include "transactions.beancount"
             "expected one Open and one posting for Assets:Bank"
         );
         assert!(
-            bank_accounts[0].ptr_eq(bank_accounts[1]),
+            bank_accounts[0]
+                .as_interned()
+                .ptr_eq(bank_accounts[1].as_interned()),
             "Assets:Bank from cross-file open/posting must share the same Arc<str> \
              after Loader::load runs reintern_directives"
         );

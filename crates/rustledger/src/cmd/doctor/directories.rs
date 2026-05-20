@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use rustledger_core::{Directive, InternedStr};
+use rustledger_core::{Account, Directive};
 use rustledger_loader::Loader;
 use std::collections::BTreeSet;
 use std::fs;
@@ -17,7 +17,7 @@ pub(super) fn cmd_directories<W: Write>(
         .with_context(|| format!("failed to load {}", file.display()))?;
 
     // Collect all account names
-    let mut accounts: BTreeSet<InternedStr> = BTreeSet::new();
+    let mut accounts: BTreeSet<Account> = BTreeSet::new();
     for spanned in &load_result.directives {
         match &spanned.value {
             Directive::Open(open) => {

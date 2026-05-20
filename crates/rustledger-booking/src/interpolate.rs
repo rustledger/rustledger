@@ -4,7 +4,7 @@
 
 use rust_decimal::Decimal;
 use rust_decimal::prelude::Signed;
-use rustledger_core::{Amount, Currency, IncompleteAmount, InternedStr, Transaction};
+use rustledger_core::{Amount, Currency, IncompleteAmount, Transaction};
 use std::collections::HashMap;
 use thiserror::Error;
 
@@ -36,9 +36,8 @@ pub enum InterpolationError {
     /// Cannot infer currency for a posting.
     #[error("cannot infer currency for posting to account {account}")]
     CannotInferCurrency {
-        /// The account of the posting. Account migration is a
-        /// follow-up — see issue #1163.
-        account: InternedStr,
+        /// The account of the posting.
+        account: rustledger_core::Account,
     },
 
     /// Transaction does not balance after interpolation.

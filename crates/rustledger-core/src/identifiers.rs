@@ -41,13 +41,14 @@
 //!
 //! # When to use which
 //!
-//! [`Currency`] is fully plumbed through the AST; the other three
-//! are defined but not yet wired up (planned slices of #1163):
+//! [`Currency`] and [`Account`] are fully plumbed through the AST;
+//! [`Tag`] and [`Link`] are defined but not yet wired up (planned
+//! slices of #1163):
 //!
 //! - [`Currency`] *(in use)*: `Commodity.currency`, `Open.currencies`
 //!   entries, `Amount.currency`, `CostSpec.currency`, `Price.currency`,
 //!   `IncompleteAmount::CurrencyOnly`.
-//! - [`Account`] *(planned)*: `Open.account`, `Close.account`,
+//! - [`Account`] *(in use)*: `Open.account`, `Close.account`,
 //!   `Balance.account`, `Pad.account` / `source_account`,
 //!   `Note.account`, `Document.account`, `Posting.account`.
 //! - [`Tag`] *(planned)*: `Transaction.tags` entries,

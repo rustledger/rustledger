@@ -17,7 +17,7 @@ use rustc_hash::FxHashMap;
 
 use regex::{Regex, RegexBuilder};
 use rust_decimal::Decimal;
-use rustledger_core::{Amount, Directive, InternedStr, Inventory, Metadata, NaiveDate, Position};
+use rustledger_core::{Amount, Directive, Inventory, Metadata, NaiveDate, Position};
 #[cfg(test)]
 use rustledger_core::{MetaValue, Transaction};
 use rustledger_loader::SourceMap;
@@ -332,8 +332,8 @@ impl<'a> Executor<'a> {
     fn build_balances_with_filter(
         &self,
         from: Option<&FromClause>,
-    ) -> Result<FxHashMap<InternedStr, Inventory>, QueryError> {
-        let mut balances: FxHashMap<InternedStr, Inventory> = FxHashMap::default();
+    ) -> Result<FxHashMap<rustledger_core::Account, Inventory>, QueryError> {
+        let mut balances: FxHashMap<rustledger_core::Account, Inventory> = FxHashMap::default();
 
         // Iterate over whichever directive source is populated. When the
         // Executor is built via `new_with_sources`, `self.directives` is empty
@@ -417,7 +417,8 @@ impl<'a> Executor<'a> {
         // Per-account running balance — accumulates every posting regardless of
         // FROM/WHERE filters, so `account_balance` always reflects the account's
         // true ledger balance at the point of the posting.
-        let mut account_balances: FxHashMap<InternedStr, Inventory> = FxHashMap::default();
+        let mut account_balances: FxHashMap<rustledger_core::Account, Inventory> =
+            FxHashMap::default();
         // Single cumulative running balance across WHERE-filtered postings in
         // iteration order. This is the bean-query `balance` semantic: a snapshot
         // of "everything selected so far" rather than a per-account view.
@@ -2512,7 +2513,8 @@ impl<'a> Executor<'a> {
         let mut table = Table::new(columns);
 
         // Per-account running balance — exposed as `account_balance`.
-        let mut account_balances: FxHashMap<InternedStr, Inventory> = FxHashMap::default();
+        let mut account_balances: FxHashMap<rustledger_core::Account, Inventory> =
+            FxHashMap::default();
         // Cumulative running balance across all postings — exposed as `balance`,
         // matching bean-query's "running sum of all postings rendered so far".
         // The #postings table has no WHERE filter at this layer, so cumulative

@@ -7,6 +7,7 @@
 //! Supports resolve for lazy-loading rich tooltips with account details.
 
 use lsp_types::{InlayHint, InlayHintKind, InlayHintLabel, InlayHintParams, Position};
+use rustledger_booking::interpolate;
 use rustledger_core::{Decimal, Directive, SYNTHESIZED_FILE_ID};
 use rustledger_parser::ParseResult;
 use std::collections::HashMap;
@@ -37,17 +38,32 @@ pub fn handle_inlay_hints(
                 continue;
             }
 
-            // Calculate the inferred amount for postings without amounts
-            let inferred = calculate_inferred_amount(txn);
+            // Delegate inference to the canonical booking interpolator.
+            // The previous bespoke implementation (`calculate_inferred_amount`)
+            // only handled the simplest case (exactly one missing posting,
+            // exactly one currency) — multi-currency transactions and
+            // postings with cost specs were silently skipped. The booking
+            // interpolator handles all of them.
+            //
+            // `interpolate` returns the filled-in transaction plus
+            // `filled_indices` telling us which posting slots it
+            // populated. If interpolation fails (e.g., MultipleMissing,
+            // unbalanced amounts) we silently skip — no hints is the
+            // right outcome for an under-specified transaction.
+            let Ok(filled) = interpolate(txn) else {
+                continue;
+            };
 
             // Per-posting span lookup (see #1142): the prior
             // `start_line + 1 + i` arithmetic put hints on the wrong
             // line for transactions with interleaved metadata.
-            for spanned_posting in &txn.postings {
+            for &idx in &filled.filled_indices {
+                let Some(spanned_posting) = txn.postings.get(idx) else {
+                    continue;
+                };
                 if spanned_posting.file_id == SYNTHESIZED_FILE_ID {
                     continue;
                 }
-                let posting = &**spanned_posting;
                 let (posting_line, _) = line_index.offset_to_position(spanned_posting.span.start);
 
                 // Skip if outside range
@@ -55,36 +71,51 @@ pub fn handle_inlay_hints(
                     continue;
                 }
 
-                // Only show hint for postings without explicit amount
-                if posting.units.is_none()
-                    && let Some((amount, currency)) = &inferred
-                    && let Some(line) = lines.get(posting_line as usize)
-                {
-                    // Position hint at the end of the account name
-                    let trimmed = line.trim();
-                    let indent = line.len() - line.trim_start().len();
-                    let end_col = indent + trimmed.len();
+                // Pull the filled amount out of the interpolated
+                // transaction. `interpolate` only adds a posting to
+                // `filled_indices` when it produced a `Complete`
+                // amount, so this unwrap-chain is total in practice;
+                // bail defensively if a future change ever changes
+                // that.
+                let Some(filled_posting) = filled.transaction.postings.get(idx) else {
+                    continue;
+                };
+                let Some(rustledger_core::IncompleteAmount::Complete(amount)) =
+                    &filled_posting.units
+                else {
+                    continue;
+                };
+                let Some(line) = lines.get(posting_line as usize) else {
+                    continue;
+                };
 
-                    // Store data for resolve - include account for rich tooltip
-                    let data = serde_json::json!({
-                        "uri": uri,
-                        "kind": "inferred_amount",
-                        "account": posting.account.to_string(),
-                        "amount": amount.to_string(),
-                        "currency": currency,
-                    });
+                // Position hint at the end of the account name
+                let trimmed = line.trim();
+                let indent = line.len() - line.trim_start().len();
+                let end_col = indent + trimmed.len();
 
-                    hints.push(InlayHint {
-                        position: Position::new(posting_line, end_col as u32),
-                        label: InlayHintLabel::String(format!("  {} {}", amount, currency)),
-                        kind: Some(InlayHintKind::TYPE),
-                        text_edits: None,
-                        tooltip: None, // Resolved lazily
-                        padding_left: Some(true),
-                        padding_right: None,
-                        data: Some(data),
-                    });
-                }
+                // Store data for resolve - include account for rich tooltip
+                let data = serde_json::json!({
+                    "uri": uri,
+                    "kind": "inferred_amount",
+                    "account": spanned_posting.account.to_string(),
+                    "amount": amount.number.to_string(),
+                    "currency": amount.currency.to_string(),
+                });
+
+                hints.push(InlayHint {
+                    position: Position::new(posting_line, end_col as u32),
+                    label: InlayHintLabel::String(format!(
+                        "  {} {}",
+                        amount.number, amount.currency
+                    )),
+                    kind: Some(InlayHintKind::TYPE),
+                    text_edits: None,
+                    tooltip: None, // Resolved lazily
+                    padding_left: Some(true),
+                    padding_right: None,
+                    data: Some(data),
+                });
             }
         }
     }
@@ -165,33 +196,6 @@ fn build_account_tooltip(
     tooltip
 }
 
-/// Calculate the inferred amount for a transaction with one empty posting.
-fn calculate_inferred_amount(txn: &rustledger_core::Transaction) -> Option<(Decimal, String)> {
-    // Count postings with and without amounts
-    let mut amounts_by_currency: HashMap<String, Decimal> = HashMap::new();
-    let mut empty_posting_count = 0;
-
-    for posting in &txn.postings {
-        if let Some(ref units) = posting.units {
-            if let (Some(num), Some(curr)) = (units.number(), units.currency()) {
-                let currency = curr.to_string();
-                *amounts_by_currency.entry(currency).or_insert(Decimal::ZERO) += num;
-            }
-        } else {
-            empty_posting_count += 1;
-        }
-    }
-
-    // Only infer if exactly one posting has no amount and we have a single currency
-    if empty_posting_count == 1 && amounts_by_currency.len() == 1 {
-        let (currency, total) = amounts_by_currency.into_iter().next()?;
-        // The inferred amount is the negation of the sum
-        Some((-total, currency))
-    } else {
-        None
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -225,26 +229,6 @@ mod tests {
         if let InlayHintLabel::String(label) = &hints[0].label {
             assert!(label.contains("5.00"));
             assert!(label.contains("USD"));
-        }
-    }
-
-    #[test]
-    fn test_calculate_inferred_amount() {
-        let source = r#"2024-01-15 * "Test"
-  Assets:Bank  -10.00 USD
-  Expenses:Food
-"#;
-        let result = parse(source);
-
-        if let Some(spanned) = result.directives.first()
-            && let Directive::Transaction(txn) = &spanned.value
-        {
-            let inferred = calculate_inferred_amount(txn);
-            assert!(inferred.is_some());
-
-            let (amount, currency) = inferred.unwrap();
-            assert_eq!(amount, Decimal::new(1000, 2)); // 10.00
-            assert_eq!(currency, "USD");
         }
     }
 
@@ -384,6 +368,73 @@ mod tests {
         assert_eq!(
             hints[0].position.line, 3,
             "inferred-amount hint should be on the posting line, not the metadata line"
+        );
+    }
+
+    /// Multi-currency transactions used to get NO inferred-amount
+    /// hints at all: the bespoke `calculate_inferred_amount` bailed
+    /// the moment more than one currency was seen, even when each
+    /// currency had exactly one missing posting (a perfectly
+    /// inferable case). Delegating to `rustledger_booking::interpolate`
+    /// produces a hint per inferred posting, including the
+    /// multi-currency case below.
+    #[test]
+    fn test_inlay_hints_multi_currency_inference() {
+        let source = "\
+2024-01-15 * \"FX swap\"
+  Assets:Bank:USD  100.00 USD
+  Assets:Bank:EUR  -90.00 EUR
+  Expenses:Fees:USD
+  Expenses:Fees:EUR
+";
+        let result = parse(source);
+        assert!(
+            result.errors.is_empty(),
+            "parse errors: {:?}",
+            result.errors
+        );
+
+        let params = InlayHintParams {
+            text_document: lsp_types::TextDocumentIdentifier {
+                uri: "file:///test.beancount".parse().unwrap(),
+            },
+            range: lsp_types::Range {
+                start: Position::new(0, 0),
+                end: Position::new(10, 0),
+            },
+            work_done_progress_params: Default::default(),
+        };
+
+        let hints = handle_inlay_hints(&params, source, &result).unwrap_or_default();
+
+        // Both empty postings should get a hint, with the correct
+        // per-currency residual. Pre-refactor: zero hints (multi-
+        // currency was bailed entirely).
+        assert_eq!(
+            hints.len(),
+            2,
+            "expected one hint per inferred posting; got {hints:?}"
+        );
+
+        // Labels carry the (sign-flipped) residual + currency. The
+        // expected residuals are -100 USD (negating the +100 USD
+        // explicit posting) and +90 EUR (negating -90 EUR).
+        let labels: Vec<String> = hints
+            .iter()
+            .map(|h| match &h.label {
+                InlayHintLabel::String(s) => s.clone(),
+                other => format!("{other:?}"),
+            })
+            .collect();
+        assert!(
+            labels
+                .iter()
+                .any(|l| l.contains("-100") && l.contains("USD")),
+            "expected a hint showing -100 USD; got labels = {labels:?}"
+        );
+        assert!(
+            labels.iter().any(|l| l.contains("90") && l.contains("EUR")),
+            "expected a hint showing 90 EUR; got labels = {labels:?}"
         );
     }
 }

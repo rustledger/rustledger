@@ -9331,3 +9331,74 @@ fn test_convert_with_null_second_arg_has_helpful_error_message() {
         "error should explicitly mention NULL + what was expected, got: {msg}"
     );
 }
+
+/// Regression test for #1175: the parallel non-DISTINCT execution
+/// path bulk-assigned `result.rows = rows` without keeping the
+/// `row_group_keys` sidecar in lockstep. Any subsequent `ORDER BY`
+/// (or the implicit GROUP BY default sort) would then hit the
+/// load-bearing `assert_eq!` in `QueryResult::sort_by` and panic.
+///
+/// The bug only triggered above `PARALLEL_THRESHOLD = 1000` postings,
+/// so this test materializes 1100 postings (550 transactions × 2
+/// postings each) before running the user's reproducer query shape
+/// (SELECT … WHERE … ORDER BY date DESC).
+#[test]
+fn test_query_with_order_by_above_parallel_threshold() {
+    // 1100 postings = 550 transactions × 2 postings each. Crosses
+    // PARALLEL_THRESHOLD (1000) so the parallel evaluation branch fires.
+    let mut directives = vec![
+        Directive::Open(Open::new(date(2024, 1, 1), "Assets:Bank")),
+        Directive::Open(Open::new(date(2024, 1, 1), "Expenses:Food")),
+    ];
+    for i in 0..550 {
+        let day = u32::try_from((i % 28) + 1).unwrap();
+        let month = u32::try_from((i % 12) + 1).unwrap();
+        directives.push(Directive::Transaction(
+            Transaction::new(date(2024, month, day), "grocery shopping")
+                .with_payee("Grocery Store")
+                .with_synthesized_posting(Posting::new(
+                    "Expenses:Food",
+                    Amount::new(dec!(10), "USD"),
+                ))
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Bank",
+                    Amount::new(dec!(-10), "USD"),
+                )),
+        ));
+    }
+
+    // The exact shape from the bug report — ORDER BY DESC + regex
+    // filter, no DISTINCT, no GROUP BY. Pre-fix this panicked at
+    // `executor/types.rs:336` with the sidecar invariant assertion.
+    let result = execute_query(
+        r#"SELECT date, payee, narration, account, number, currency
+           WHERE (payee ~ "gro" OR narration ~ "gro" OR account ~ "gro")
+           ORDER BY date DESC"#,
+        &directives,
+    );
+
+    // Every selected posting matches "gro" via narration or payee, so
+    // we expect 1100 rows back. Reaching this assertion at all is the
+    // regression — pre-fix the path panicked inside `sort_by` before
+    // returning. The sidecar invariant itself is guarded by a
+    // production-code `assert_eq!` in `QueryResult::sort_by` (crate
+    // internal; not visible from this integration test), so a future
+    // regression would surface here as a panic rather than a
+    // misordered result.
+    assert_eq!(result.rows.len(), 1100, "expected 1100 matching rows");
+
+    // Spot-check that ORDER BY DESC ran correctly — first row's date
+    // must be >= last row's date.
+    let first_date = match &result.rows[0][0] {
+        Value::Date(d) => *d,
+        v => panic!("first row[0] not a Date: {v:?}"),
+    };
+    let last_date = match &result.rows[result.rows.len() - 1][0] {
+        Value::Date(d) => *d,
+        v => panic!("last row[0] not a Date: {v:?}"),
+    };
+    assert!(
+        first_date >= last_date,
+        "ORDER BY date DESC: first={first_date}, last={last_date}"
+    );
+}

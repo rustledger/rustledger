@@ -199,25 +199,25 @@ mod tests {
 
     #[test]
     fn test_format_meta_value_account() {
-        let val = MetaValue::Account("Assets:Bank:Checking".to_string());
+        let val = MetaValue::Account("Assets:Bank:Checking".into());
         assert_eq!(format_meta_value(&val), "Assets:Bank:Checking");
     }
 
     #[test]
     fn test_format_meta_value_currency() {
-        let val = MetaValue::Currency("USD".to_string());
+        let val = MetaValue::Currency("USD".into());
         assert_eq!(format_meta_value(&val), "USD");
     }
 
     #[test]
     fn test_format_meta_value_tag() {
-        let val = MetaValue::Tag("trip-2024".to_string());
+        let val = MetaValue::Tag("trip-2024".into());
         assert_eq!(format_meta_value(&val), "#trip-2024");
     }
 
     #[test]
     fn test_format_meta_value_link() {
-        let val = MetaValue::Link("invoice-123".to_string());
+        let val = MetaValue::Link("invoice-123".into());
         assert_eq!(format_meta_value(&val), "^invoice-123");
     }
 
@@ -577,7 +577,7 @@ mod tests {
             date: date(2024, 3, 15),
             custom_type: "budget".to_string(),
             values: vec![
-                MetaValue::Account("Expenses:Food".to_string()),
+                MetaValue::Account("Expenses:Food".into()),
                 MetaValue::Amount(Amount::new(dec!(500), "USD")),
                 MetaValue::String("monthly".to_string()),
             ],

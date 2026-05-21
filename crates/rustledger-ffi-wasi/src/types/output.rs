@@ -35,10 +35,10 @@ impl Meta {
 pub fn meta_value_to_json(value: &MetaValue) -> serde_json::Value {
     match value {
         MetaValue::String(s) => serde_json::Value::String(s.clone()),
-        MetaValue::Account(a) => serde_json::Value::String(a.clone()),
-        MetaValue::Currency(c) => serde_json::Value::String(c.clone()),
-        MetaValue::Tag(t) => serde_json::Value::String(t.clone()),
-        MetaValue::Link(l) => serde_json::Value::String(l.clone()),
+        MetaValue::Account(a) => serde_json::Value::String(a.to_string()),
+        MetaValue::Currency(c) => serde_json::Value::String(c.to_string()),
+        MetaValue::Tag(t) => serde_json::Value::String(t.to_string()),
+        MetaValue::Link(l) => serde_json::Value::String(l.to_string()),
         MetaValue::Date(d) => serde_json::Value::String(d.to_string()),
         MetaValue::Number(n) => serde_json::json!(n.to_string()),
         MetaValue::Bool(b) => serde_json::Value::Bool(*b),
@@ -137,19 +137,19 @@ impl TypedValue {
             },
             MetaValue::Account(a) => Self {
                 value_type: "account",
-                value: serde_json::Value::String(a.clone()),
+                value: serde_json::Value::String(a.to_string()),
             },
             MetaValue::Currency(c) => Self {
                 value_type: "currency",
-                value: serde_json::Value::String(c.clone()),
+                value: serde_json::Value::String(c.to_string()),
             },
             MetaValue::Tag(t) => Self {
                 value_type: "tag",
-                value: serde_json::Value::String(t.clone()),
+                value: serde_json::Value::String(t.to_string()),
             },
             MetaValue::Link(l) => Self {
                 value_type: "link",
-                value: serde_json::Value::String(l.clone()),
+                value: serde_json::Value::String(l.to_string()),
             },
             MetaValue::Date(d) => Self {
                 value_type: "date",

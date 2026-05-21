@@ -275,10 +275,7 @@ mod tests {
         // CAD in transaction metadata as MetaValue::Currency.
         // KRW in posting metadata as MetaValue::Amount.
         let mut txn_meta: Metadata = Default::default();
-        txn_meta.insert(
-            "fx_pair".to_string(),
-            MetaValue::Currency("CAD".to_string()),
-        );
+        txn_meta.insert("fx_pair".to_string(), MetaValue::Currency("CAD".into()));
         let mut posting_meta: Metadata = Default::default();
         posting_meta.insert(
             "settled".to_string(),
@@ -329,7 +326,7 @@ mod tests {
                 date: date(2024, 1, 4),
                 custom_type: "fx_corridors".to_string(),
                 values: vec![
-                    MetaValue::Currency("MXN".to_string()),
+                    MetaValue::Currency("MXN".into()),
                     MetaValue::Amount(Amount::new(dec!(30), "TWD")),
                 ],
                 meta: Default::default(),

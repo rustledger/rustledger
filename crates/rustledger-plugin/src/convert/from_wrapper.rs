@@ -234,10 +234,14 @@ pub(super) fn data_to_meta_value(data: &MetaValueData) -> MetaValue {
                 MetaValue::String(s.clone())
             }
         }
-        MetaValueData::Account(s) => MetaValue::Account(s.clone()),
-        MetaValueData::Currency(s) => MetaValue::Currency(s.clone()),
-        MetaValueData::Tag(s) => MetaValue::Tag(s.clone()),
-        MetaValueData::Link(s) => MetaValue::Link(s.clone()),
+        // Bridge from String-typed wire format into the host's typed
+        // newtypes. `From<&str>` re-interns into the workspace
+        // interner, so values re-shared via dedup land on a single
+        // `Arc<str>` even when they came in from different plugins.
+        MetaValueData::Account(s) => MetaValue::Account(s.as_str().into()),
+        MetaValueData::Currency(s) => MetaValue::Currency(s.as_str().into()),
+        MetaValueData::Tag(s) => MetaValue::Tag(s.as_str().into()),
+        MetaValueData::Link(s) => MetaValue::Link(s.as_str().into()),
         MetaValueData::Amount(a) => {
             if let Ok(amount) = data_to_amount(a) {
                 MetaValue::Amount(amount)

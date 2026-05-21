@@ -58,10 +58,13 @@ impl Executor<'_> {
             Some(MetaValue::Date(d)) => Value::Date(*d),
             Some(MetaValue::Bool(b)) => Value::Boolean(*b),
             Some(MetaValue::Amount(a)) => Value::Amount(a.clone()),
-            Some(MetaValue::Account(s)) => Value::String(s.clone()),
-            Some(MetaValue::Currency(s)) => Value::String(s.clone()),
-            Some(MetaValue::Tag(s)) => Value::String(s.clone()),
-            Some(MetaValue::Link(s)) => Value::String(s.clone()),
+            // Lower typed meta values to BQL String at the query boundary
+            // (matches bean-query semantics — no first-class Account/Currency
+            // type in the SQL surface).
+            Some(MetaValue::Account(a)) => Value::String(a.to_string()),
+            Some(MetaValue::Currency(c)) => Value::String(c.to_string()),
+            Some(MetaValue::Tag(t)) => Value::String(t.to_string()),
+            Some(MetaValue::Link(l)) => Value::String(l.to_string()),
             Some(MetaValue::None) => Value::Null,
         }
     }

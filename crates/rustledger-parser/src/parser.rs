@@ -372,19 +372,19 @@ fn parse_account(stream: &mut TokenStream<'_>) -> ParseRes<rustledger_core::Acco
     Err(())
 }
 
-fn parse_currency(stream: &mut TokenStream<'_>) -> ParseRes<InternedStr> {
+fn parse_currency(stream: &mut TokenStream<'_>) -> ParseRes<rustledger_core::Currency> {
     if let Some(t) = stream.peek()
         && let Token::Currency(s) = &t.token
     {
         let span = Span::new(t.span.0, t.span.1);
-        let result = stream.interner.intern(s);
+        let result: rustledger_core::Currency = stream.interner.intern(s).into();
         // Record the source-token position for downstream
         // span-aware consumers (LSP rename / references /
         // document-highlight). See `TokenStream::currency_occurrences`
         // for the rationale.
         stream
             .currency_occurrences
-            .push(Spanned::new(result.clone().into(), span));
+            .push(Spanned::new(result.clone(), span));
         stream.advance();
         return Ok(result);
     }
@@ -650,7 +650,7 @@ fn parse_incomplete_amount(stream: &mut TokenStream<'_>) -> ParseRes<IncompleteA
     // Reset and try just currency
     stream.pos = start_pos;
     if let Ok(currency) = parse_currency(stream) {
-        return Ok(IncompleteAmount::CurrencyOnly(currency.into()));
+        return Ok(IncompleteAmount::CurrencyOnly(currency));
     }
 
     Err(())
@@ -746,7 +746,7 @@ fn parse_cost_spec(stream: &mut TokenStream<'_>) -> ParseRes<CostSpec> {
                 if let Ok(total) = parse_expr(stream) {
                     spec.number_total = Some(total);
                     if let Ok(c) = parse_currency(stream) {
-                        spec.currency = Some(c.into());
+                        spec.currency = Some(c);
                     }
                     continue;
                 }
@@ -760,7 +760,7 @@ fn parse_cost_spec(stream: &mut TokenStream<'_>) -> ParseRes<CostSpec> {
 
             // Optional currency
             if let Ok(c) = parse_currency(stream) {
-                spec.currency = Some(c.into());
+                spec.currency = Some(c);
             }
         } else {
             // Unknown component, skip
@@ -805,7 +805,7 @@ fn parse_price_annotation(stream: &mut TokenStream<'_>) -> ParseRes<PriceAnnotat
 
     // Try just currency (incomplete price - number missing)
     if let Ok(currency) = parse_currency(stream) {
-        let incomplete = IncompleteAmount::CurrencyOnly(currency.into());
+        let incomplete = IncompleteAmount::CurrencyOnly(currency);
         return Ok(if is_total {
             PriceAnnotation::TotalIncomplete(incomplete)
         } else {
@@ -963,18 +963,18 @@ fn parse_meta_value(stream: &mut TokenStream<'_>) -> ParseRes<MetaValue> {
         return Ok(MetaValue::Bool(b));
     }
     if let Ok(a) = parse_account(stream) {
-        return Ok(MetaValue::Account(a.to_string()));
+        return Ok(MetaValue::Account(a));
     }
     if let Ok(d) = parse_date(stream) {
         return Ok(MetaValue::Date(d));
     }
     // Tag value (e.g., #trip-florida)
     if let Ok(tag) = parse_tag(stream) {
-        return Ok(MetaValue::Tag(tag.to_string()));
+        return Ok(MetaValue::Tag(tag));
     }
     // Link value (e.g., ^doc-123)
     if let Ok(link) = parse_link(stream) {
-        return Ok(MetaValue::Link(link.to_string()));
+        return Ok(MetaValue::Link(link));
     }
 
     // Try amount before plain number
@@ -988,7 +988,7 @@ fn parse_meta_value(stream: &mut TokenStream<'_>) -> ParseRes<MetaValue> {
         return Ok(MetaValue::Number(n));
     }
     if let Ok(c) = parse_currency(stream) {
-        return Ok(MetaValue::Currency(c.to_string()));
+        return Ok(MetaValue::Currency(c));
     }
 
     Err(())
@@ -1366,7 +1366,7 @@ fn parse_open_directive(stream: &mut TokenStream<'_>) -> ParseRes<ParsedItem> {
     let account = parse_account(stream)?;
 
     // Parse currencies separated by commas
-    let mut currencies: Vec<InternedStr> = Vec::with_capacity(3);
+    let mut currencies: Vec<rustledger_core::Currency> = Vec::with_capacity(3);
     while let Ok(c) = parse_currency(stream) {
         currencies.push(c);
         // Consume optional comma separator
@@ -1412,7 +1412,7 @@ fn parse_open_directive(stream: &mut TokenStream<'_>) -> ParseRes<ParsedItem> {
     let open = Open {
         date,
         account,
-        currencies: currencies.into_iter().map(Into::into).collect(),
+        currencies,
         booking,
         meta,
     };
@@ -1452,7 +1452,7 @@ fn parse_commodity_directive(stream: &mut TokenStream<'_>) -> ParseRes<ParsedIte
 
     let commodity = Commodity {
         date,
-        currency: currency.into(),
+        currency,
         meta,
     };
 
@@ -1598,7 +1598,7 @@ fn parse_price_directive(stream: &mut TokenStream<'_>) -> ParseRes<ParsedItem> {
 
     let price = Price {
         date,
-        currency: currency.into(),
+        currency,
         amount,
         meta,
     };
@@ -1621,7 +1621,7 @@ fn parse_custom_directive(stream: &mut TokenStream<'_>) -> ParseRes<ParsedItem> 
         }
         // Account (try before amount since account can't be part of amount)
         if let Ok(a) = parse_account(stream) {
-            values.push(MetaValue::Account(a.to_string()));
+            values.push(MetaValue::Account(a));
             continue;
         }
         // Boolean
@@ -1648,7 +1648,7 @@ fn parse_custom_directive(stream: &mut TokenStream<'_>) -> ParseRes<ParsedItem> 
         }
         // Currency (standalone)
         if let Ok(c) = parse_currency(stream) {
-            values.push(MetaValue::Currency(c.to_string()));
+            values.push(MetaValue::Currency(c));
             continue;
         }
         break;

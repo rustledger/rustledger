@@ -387,7 +387,8 @@ fn classify_commodity_meta(meta: &rustledger_core::Metadata) -> Classification {
     let malformed_price = price_raw.is_some_and(|s| !s.trim().is_empty()) && price_specs.is_empty();
 
     let quote_currency_meta = meta.get("quote_currency").and_then(|v| match v {
-        MetaValue::String(s) | MetaValue::Currency(s) => Some(s.clone()),
+        MetaValue::String(s) => Some(s.clone()),
+        MetaValue::Currency(c) => Some(c.to_string()),
         _ => None,
     });
 
@@ -586,9 +587,10 @@ fn parse_price_metadata(raw: &str) -> Vec<PriceSpec> {
     specs
 }
 
-const fn metavalue_as_str(v: &MetaValue) -> Option<&str> {
+fn metavalue_as_str(v: &MetaValue) -> Option<&str> {
     match v {
-        MetaValue::String(s) | MetaValue::Currency(s) => Some(s.as_str()),
+        MetaValue::String(s) => Some(s.as_str()),
+        MetaValue::Currency(c) => Some(c.as_str()),
         _ => None,
     }
 }

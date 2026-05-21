@@ -7,8 +7,8 @@ use crate::MetaValue;
 pub fn format_meta_value(value: &MetaValue) -> String {
     match value {
         MetaValue::String(s) => format!("\"{}\"", escape_string(s)),
-        MetaValue::Account(a) => a.clone(),
-        MetaValue::Currency(c) => c.clone(),
+        MetaValue::Account(a) => a.to_string(),
+        MetaValue::Currency(c) => c.to_string(),
         MetaValue::Tag(t) => format!("#{t}"),
         MetaValue::Link(l) => format!("^{l}"),
         MetaValue::Date(d) => d.to_string(),

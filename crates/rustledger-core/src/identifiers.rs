@@ -42,21 +42,26 @@
 //! # When to use which
 //!
 //! All four newtypes — [`Currency`], [`Account`], [`Tag`], and
-//! [`Link`] — are fully plumbed through the AST:
+//! [`Link`] — are fully plumbed through the AST, including
+//! `MetaValue` variants:
 //!
 //! - [`Currency`]: `Commodity.currency`, `Open.currencies` entries,
 //!   `Amount.currency`, `CostSpec.currency`, `Price.currency`,
-//!   `IncompleteAmount::CurrencyOnly`.
+//!   `IncompleteAmount::CurrencyOnly`, `MetaValue::Currency`.
 //! - [`Account`]: `Open.account`, `Close.account`, `Balance.account`,
 //!   `Pad.account` / `source_account`, `Note.account`,
-//!   `Document.account`, `Posting.account`.
+//!   `Document.account`, `Posting.account`, `MetaValue::Account`.
 //! - [`Tag`]: `Transaction.tags` entries, `pushtag`/`poptag` stack,
-//!   `Document.tags`.
-//! - [`Link`]: `Transaction.links` entries, `Document.links`.
+//!   `Document.tags`, `MetaValue::Tag`.
+//! - [`Link`]: `Transaction.links` entries, `Document.links`,
+//!   `MetaValue::Link`.
 //!
-//! `MetaValue::{Account, Currency, Tag, Link}` are still `String`
-//! pending a separate decision on how meta values cross the typed
-//! boundary.
+//! The plugin wire-format type `rustledger_plugin_types::MetaValueData`
+//! deliberately keeps `String` payloads — `plugin-types` is a minimal
+//! WASM-compatible crate that does not depend on `rustledger-core`,
+//! and plugins run without access to the workspace interner anyway.
+//! The host re-interns at the convert boundary
+//! (`rustledger_plugin::convert::from_wrapper`).
 
 use crate::InternedStr;
 #[cfg(feature = "rkyv")]

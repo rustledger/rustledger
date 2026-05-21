@@ -36,13 +36,13 @@ pub enum MetaValue {
     /// String value
     String(String),
     /// Account reference
-    Account(String),
+    Account(crate::Account),
     /// Currency code
-    Currency(String),
+    Currency(crate::Currency),
     /// Tag reference
-    Tag(String),
+    Tag(crate::Tag),
     /// Link reference
-    Link(String),
+    Link(crate::Link),
     /// Date value
     Date(#[cfg_attr(feature = "rkyv", rkyv(with = AsNaiveDate))] NaiveDate),
     /// Numeric value

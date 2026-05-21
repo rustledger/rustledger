@@ -880,10 +880,6 @@ criteria = "safe-to-deploy"
 version = "1.20.0"
 criteria = "safe-to-deploy"
 
-[[exemptions.unicode-segmentation]]
-version = "1.13.2"
-criteria = "safe-to-deploy"
-
 [[exemptions.untrusted]]
 version = "0.9.0"
 criteria = "safe-to-deploy"

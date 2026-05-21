@@ -9339,8 +9339,9 @@ fn test_convert_with_null_second_arg_has_helpful_error_message() {
 /// load-bearing `assert_eq!` in `QueryResult::sort_by` and panic.
 ///
 /// The bug only triggered above `PARALLEL_THRESHOLD = 1000` postings,
-/// so this test materializes 1100 transactions before running the
-/// user's reproducer query shape (SELECT … WHERE … ORDER BY date DESC).
+/// so this test materializes 1100 postings (550 transactions × 2
+/// postings each) before running the user's reproducer query shape
+/// (SELECT … WHERE … ORDER BY date DESC).
 #[test]
 fn test_query_with_order_by_above_parallel_threshold() {
     // 1100 postings = 550 transactions × 2 postings each. Crosses

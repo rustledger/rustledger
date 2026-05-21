@@ -283,12 +283,12 @@ mod tests {
 
         // Matching spec
         let spec = CostSpec::empty()
-            .with_number_per(dec!(150.00))
+            .with_per_unit(dec!(150.00))
             .with_currency("USD");
         assert!(pos.matches_cost_spec(&spec));
 
         // Non-matching spec
-        let spec = CostSpec::empty().with_number_per(dec!(160.00));
+        let spec = CostSpec::empty().with_per_unit(dec!(160.00));
         assert!(!pos.matches_cost_spec(&spec));
     }
 

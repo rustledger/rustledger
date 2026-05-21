@@ -39,18 +39,19 @@ type LotKey = (String, String, Option<String>);
 /// anyway, but we don't assume that.
 fn cost_fingerprint(cost: &CostData, units_number: Decimal) -> Option<String> {
     let currency = cost.currency.as_deref()?;
-    let per_unit_decimal: Decimal = match &cost.number {
-        Some(rustledger_plugin_types::CostNumberData::PerUnit(per_str)) => {
-            Decimal::from_str(per_str).ok()?
+    // `per_unit()` covers both PerUnit and PerUnitFromTotal (both
+    // carry per-unit by host construction). Raw Total needs division
+    // here; bare-`{}` returns None.
+    let cn = cost.number.as_ref()?;
+    let per_unit_decimal: Decimal = if let Some(per_str) = cn.per_unit() {
+        Decimal::from_str(per_str).ok()?
+    } else {
+        let total_str = cn.total()?;
+        let total = Decimal::from_str(total_str).ok()?;
+        if units_number.is_zero() {
+            return None;
         }
-        Some(rustledger_plugin_types::CostNumberData::Total(total_str)) => {
-            let total = Decimal::from_str(total_str).ok()?;
-            if units_number.is_zero() {
-                return None;
-            }
-            total / units_number.abs()
-        }
-        None => return None,
+        total / units_number.abs()
     };
     let per_unit = per_unit_decimal.normalize().to_string();
     let date = cost.date.as_deref().unwrap_or("");
@@ -190,6 +191,15 @@ impl NativePlugin for ImplicitPricesPlugin {
                         Some(rustledger_plugin_types::CostNumberData::Total(n)) => Some(
                             rustledger_core::CostNumber::Total(Decimal::from_str(n).ok()?),
                         ),
+                        Some(rustledger_plugin_types::CostNumberData::PerUnitFromTotal {
+                            per_unit,
+                            total,
+                        }) => Some(rustledger_core::CostNumber::PerUnitFromTotal(
+                            rustledger_core::BookedCost::from_parts_unchecked(
+                                Decimal::from_str(per_unit).ok()?,
+                                Decimal::from_str(total).ok()?,
+                            ),
+                        )),
                         None => return None,
                     };
                     Some((number, currency))

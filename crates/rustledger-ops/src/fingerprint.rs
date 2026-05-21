@@ -151,6 +151,16 @@ fn hash_cost<H: Hasher>(cost: &CostData, hasher: &mut H) {
             2u8.hash(hasher);
             s.hash(hasher);
         }
+        Some(CostNumberData::PerUnitFromTotal { per_unit, total }) => {
+            // Post-booking state must hash distinctly from raw PerUnit
+            // — two transactions with the same per_unit can have
+            // different source totals (e.g. {{150}} vs {150}*units
+            // when units rounds to the same per_unit), and the
+            // fingerprint must not collapse them.
+            3u8.hash(hasher);
+            per_unit.hash(hasher);
+            total.hash(hasher);
+        }
     }
     currency.hash(hasher);
     date.hash(hasher);

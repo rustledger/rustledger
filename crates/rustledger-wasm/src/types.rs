@@ -138,12 +138,39 @@ pub struct PostingJson {
     pub price: Option<AmountValue>,
 }
 
+/// Wire-format of the numeric component of a [`PostingCostJson`].
+///
+/// Mirrors `rustledger_core::CostNumber` on the wire so JS consumers
+/// see the same mutual exclusion the host enforces. Use the `kind`
+/// field as the discriminator.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CostNumberJson {
+    /// Per-unit cost (e.g., `{100 USD}`).
+    PerUnit {
+        /// Per-unit value.
+        value: String,
+    },
+    /// Total cost as written (e.g., `{{1000 USD}}`), pre-booking.
+    Total {
+        /// Total value.
+        value: String,
+    },
+    /// Post-booking derived per-unit with preserved source total.
+    PerUnitFromTotal {
+        /// Derived per-unit.
+        per_unit: String,
+        /// Source total.
+        total: String,
+    },
+}
+
 /// A posting cost in JSON-serializable form.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PostingCostJson {
-    /// Cost per unit.
+    /// Cost number (per-unit, total, or post-booking pair).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub number_per: Option<String>,
+    pub number: Option<CostNumberJson>,
     /// Cost currency.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub currency: Option<String>,
@@ -549,4 +576,96 @@ pub struct EditorReferencesResult {
     pub kind: ReferenceKind,
     /// All references found.
     pub references: Vec<EditorReference>,
+}
+
+#[cfg(test)]
+mod cost_number_wire_tests {
+    //! Wire-format pins for #1164. Catches silent shape drift that
+    //! would break TypeScript clients.
+
+    use super::*;
+
+    #[test]
+    fn per_unit_serializes_with_kind_tag() {
+        let cn = CostNumberJson::PerUnit {
+            value: "100".into(),
+        };
+        let json = serde_json::to_value(&cn).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"kind": "per_unit", "value": "100"})
+        );
+    }
+
+    #[test]
+    fn total_serializes_with_kind_tag() {
+        let cn = CostNumberJson::Total {
+            value: "1500".into(),
+        };
+        let json = serde_json::to_value(&cn).unwrap();
+        assert_eq!(json, serde_json::json!({"kind": "total", "value": "1500"}));
+    }
+
+    #[test]
+    fn per_unit_from_total_carries_both_values() {
+        let cn = CostNumberJson::PerUnitFromTotal {
+            per_unit: "150".into(),
+            total: "300".into(),
+        };
+        let json = serde_json::to_value(&cn).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "kind": "per_unit_from_total",
+                "per_unit": "150",
+                "total": "300",
+            })
+        );
+    }
+
+    #[test]
+    fn round_trip_all_variants() {
+        for cn in [
+            CostNumberJson::PerUnit { value: "1".into() },
+            CostNumberJson::Total { value: "10".into() },
+            CostNumberJson::PerUnitFromTotal {
+                per_unit: "1".into(),
+                total: "10".into(),
+            },
+        ] {
+            let json = serde_json::to_string(&cn).unwrap();
+            let back: CostNumberJson = serde_json::from_str(&json).unwrap();
+            // Same JSON on round-trip means the wire shape is stable.
+            assert_eq!(serde_json::to_string(&back).unwrap(), json);
+        }
+    }
+
+    #[test]
+    fn posting_cost_with_total_pre_booking_distinguishes_from_bare_brace() {
+        // Pre-PR, a `Total` cost serialized as `{number: null,
+        // currency: ...}` — indistinguishable from a deliberate
+        // `{USD}` lot match. The new shape preserves the variant.
+        let with_total = PostingCostJson {
+            number: Some(CostNumberJson::Total {
+                value: "1500".into(),
+            }),
+            currency: Some("USD".into()),
+            date: None,
+            label: None,
+        };
+        let bare = PostingCostJson {
+            number: None,
+            currency: Some("USD".into()),
+            date: None,
+            label: None,
+        };
+        let with_total_json = serde_json::to_value(&with_total).unwrap();
+        let bare_json = serde_json::to_value(&bare).unwrap();
+        assert_ne!(
+            with_total_json, bare_json,
+            "pre-booking Total and bare {{}} must serialize distinctly"
+        );
+        assert!(with_total_json["number"].is_object());
+        assert!(bare_json.get("number").is_none());
+    }
 }

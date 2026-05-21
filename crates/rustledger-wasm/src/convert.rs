@@ -3,7 +3,8 @@
 use rustledger_core::Directive;
 
 use crate::types::{
-    AmountValue, CellValue, CostValue, DirectiveJson, PositionValue, PostingCostJson, PostingJson,
+    AmountValue, CellValue, CostNumberJson, CostValue, DirectiveJson, PositionValue,
+    PostingCostJson, PostingJson,
 };
 
 /// Convert a Directive to its JSON representation.
@@ -40,18 +41,22 @@ pub fn directive_to_json(directive: &Directive) -> DirectiveJson {
                         currency: u.currency().map(ToString::to_string).unwrap_or_default(),
                     }),
                     cost: p.cost.as_ref().map(|c| PostingCostJson {
-                        // The WASM wire shape only exposes per-unit;
-                        // `Total` (pre-booking) has no per-unit yet so
-                        // serializes as None. After booking, `Total`
-                        // becomes `PerUnitFromTotal` and surfaces the
-                        // derived per-unit. Callers wanting the
-                        // original total form should consume the
-                        // FFI-WASI wire shape, which keeps both.
-                        number_per: c
-                            .number
-                            .as_ref()
-                            .and_then(rustledger_core::CostNumber::per_unit)
-                            .map(|n| n.to_string()),
+                        // The wire `CostNumberJson` is a tagged enum
+                        // mirroring `CostNumber`; JS branches on `kind`.
+                        number: c.number.map(|n| match n {
+                            rustledger_core::CostNumber::PerUnit(d) => CostNumberJson::PerUnit {
+                                value: d.to_string(),
+                            },
+                            rustledger_core::CostNumber::Total(d) => CostNumberJson::Total {
+                                value: d.to_string(),
+                            },
+                            rustledger_core::CostNumber::PerUnitFromTotal(b) => {
+                                CostNumberJson::PerUnitFromTotal {
+                                    per_unit: b.per_unit.to_string(),
+                                    total: b.total.to_string(),
+                                }
+                            }
+                        }),
                         currency: c.currency.as_ref().map(ToString::to_string),
                         date: c.date.map(|d| d.to_string()),
                         label: c.label.clone(),

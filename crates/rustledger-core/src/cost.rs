@@ -261,6 +261,44 @@ pub struct BookedCost {
     pub total: Decimal,
 }
 
+impl BookedCost {
+    /// Construct from booking with a precision invariant check.
+    ///
+    /// In debug builds, asserts that `per_unit * |units| ≈ total` to
+    /// the limits of `rust_decimal` precision. Callers are the booker
+    /// (which derives `per_unit = total / |units|`) and the FFI input
+    /// bridge (which must not construct inconsistent pairs).
+    ///
+    /// # Panics
+    ///
+    /// In debug builds: if `per_unit * |units|` differs from `total` by
+    /// more than 1e-20 (a generous tolerance well inside the
+    /// `rust_decimal` 28-digit precision floor). Release builds skip
+    /// the check.
+    #[must_use]
+    pub fn new(per_unit: Decimal, total: Decimal, units: Decimal) -> Self {
+        let units_abs = units.abs();
+        debug_assert!(
+            // Zero-units booking is degenerate; the booker doesn't
+            // construct `PerUnitFromTotal` in that case (see book.rs).
+            // External constructors that pass zero get a free pass.
+            units_abs.is_zero() || (per_unit * units_abs - total).abs() < Decimal::new(1, 20),
+            "BookedCost invariant violated: per_unit ({per_unit}) * |units| ({units_abs}) != total ({total})",
+        );
+        Self { per_unit, total }
+    }
+
+    /// Construct without invariant check, for callers that have
+    /// already validated consistency (e.g. rkyv deserialization,
+    /// trusted-byte loaders).
+    ///
+    /// Prefer [`Self::new`] when the units are at hand.
+    #[must_use]
+    pub const fn from_parts_unchecked(per_unit: Decimal, total: Decimal) -> Self {
+        Self { per_unit, total }
+    }
+}
+
 impl CostNumber {
     /// Return the per-unit value if this number carries one.
     ///
@@ -335,23 +373,31 @@ impl CostSpec {
         Self::default()
     }
 
-    /// Set the per-unit cost.
+    /// Set the cost number to a per-unit value.
     ///
-    /// Overwrites any previously-set number (per-unit or total) — the
-    /// shapes are mutually exclusive by construction.
+    /// Convenience for `with_number(CostNumber::PerUnit(n))`. Use
+    /// [`Self::with_number`] when you already have a [`CostNumber`].
     #[must_use]
-    pub const fn with_number_per(mut self, number: Decimal) -> Self {
-        self.number = Some(CostNumber::PerUnit(number));
-        self
+    pub const fn with_per_unit(self, number: Decimal) -> Self {
+        self.with_number(CostNumber::PerUnit(number))
     }
 
-    /// Set the total cost.
+    /// Set the cost number to a total value.
     ///
-    /// Overwrites any previously-set number (per-unit or total) — the
-    /// shapes are mutually exclusive by construction.
+    /// Convenience for `with_number(CostNumber::Total(n))`. Use
+    /// [`Self::with_number`] when you already have a [`CostNumber`].
     #[must_use]
-    pub const fn with_number_total(mut self, number: Decimal) -> Self {
-        self.number = Some(CostNumber::Total(number));
+    pub const fn with_total(self, number: Decimal) -> Self {
+        self.with_number(CostNumber::Total(number))
+    }
+
+    /// Set the cost number directly.
+    ///
+    /// The mutual exclusion between per-unit and total is enforced by
+    /// the [`CostNumber`] enum — there is no way to set both.
+    #[must_use]
+    pub const fn with_number(mut self, number: CostNumber) -> Self {
+        self.number = Some(number);
         self
     }
 
@@ -436,7 +482,9 @@ impl CostSpec {
     /// calculated as `total / |units|`. Full precision is preserved to
     /// avoid cost basis errors when the position is later sold.
     /// `PerUnitFromTotal` already carries the derived per-unit value
-    /// from a prior booking pass — use it directly.
+    /// from a prior booking pass — using `b.per_unit` directly is
+    /// equivalent to recomputing `b.total / |units|` because
+    /// [`BookedCost::new`] enforces that invariant at construction.
     ///
     /// Returns `None` if required fields (currency, number) are missing.
     #[must_use]
@@ -447,7 +495,9 @@ impl CostSpec {
             CostNumber::PerUnit(per) => per,
             // Calculated from total — preserve full precision.
             CostNumber::Total(total) => total / units.abs(),
-            // Already booked from a total.
+            // Already booked: `b.per_unit == b.total / |units|` by
+            // `BookedCost::new`'s invariant, so this is identical to
+            // the `Total` arm above but without the redivision.
             CostNumber::PerUnitFromTotal(b) => b.per_unit,
         };
 
@@ -594,11 +644,11 @@ mod tests {
         assert!(CostSpec::empty().matches(&cost));
 
         // Match by number
-        let spec = CostSpec::empty().with_number_per(dec!(150.00));
+        let spec = CostSpec::empty().with_per_unit(dec!(150.00));
         assert!(spec.matches(&cost));
 
         // Wrong number
-        let spec = CostSpec::empty().with_number_per(dec!(160.00));
+        let spec = CostSpec::empty().with_per_unit(dec!(160.00));
         assert!(!spec.matches(&cost));
 
         // Match by currency
@@ -615,7 +665,7 @@ mod tests {
 
         // Match by all
         let spec = CostSpec::empty()
-            .with_number_per(dec!(150.00))
+            .with_per_unit(dec!(150.00))
             .with_currency("USD")
             .with_date(date(2024, 1, 15))
             .with_label("lot1");
@@ -625,7 +675,7 @@ mod tests {
     #[test]
     fn test_cost_spec_resolve() {
         let spec = CostSpec::empty()
-            .with_number_per(dec!(150.00))
+            .with_per_unit(dec!(150.00))
             .with_currency("USD");
 
         let cost = spec.resolve(dec!(10), date(2024, 1, 15)).unwrap();
@@ -637,11 +687,130 @@ mod tests {
     #[test]
     fn test_cost_spec_resolve_total() {
         let spec = CostSpec::empty()
-            .with_number_total(dec!(1500.00))
+            .with_total(dec!(1500.00))
             .with_currency("USD");
 
         let cost = spec.resolve(dec!(10), date(2024, 1, 15)).unwrap();
         assert_eq!(cost.number, dec!(150.00)); // 1500 / 10
         assert_eq!(cost.currency, "USD");
+    }
+
+    // ===== BookedCost / PerUnitFromTotal tests (#1164) =====
+
+    #[test]
+    fn booked_cost_new_accepts_consistent_pair() {
+        // 10 units of "300 total" → 30 per-unit. Constructor must
+        // accept; debug_assert sees per_unit * |units| == total.
+        let b = BookedCost::new(dec!(30), dec!(300), dec!(10));
+        assert_eq!(b.per_unit, dec!(30));
+        assert_eq!(b.total, dec!(300));
+    }
+
+    #[test]
+    fn booked_cost_new_accepts_negative_units() {
+        // Sales (negative units) still produce consistent
+        // PerUnitFromTotal: per_unit * |units| == total uses .abs().
+        let b = BookedCost::new(dec!(30), dec!(300), dec!(-10));
+        assert_eq!(b.per_unit, dec!(30));
+    }
+
+    #[test]
+    #[should_panic(expected = "BookedCost invariant violated")]
+    fn booked_cost_new_rejects_inconsistent_pair_in_debug() {
+        // per_unit (50) * |units| (10) = 500, NOT 300. Invariant must
+        // fire. Release builds would skip the check by design — this
+        // test verifies the debug-build safety net.
+        let _ = BookedCost::new(dec!(50), dec!(300), dec!(10));
+    }
+
+    #[test]
+    fn booked_cost_new_allows_zero_units() {
+        // Zero units is degenerate — the booker doesn't construct
+        // PerUnitFromTotal there, but external callers (FFI input)
+        // might. Constructor gives them a pass.
+        let b = BookedCost::new(dec!(7), dec!(99), dec!(0));
+        assert_eq!(b.per_unit, dec!(7));
+        assert_eq!(b.total, dec!(99));
+    }
+
+    #[test]
+    fn booked_cost_from_parts_unchecked_skips_invariant() {
+        // rkyv deserialization and plugin round-trip use this when
+        // units aren't at hand. Constructs the inconsistent pair
+        // without panicking — verifying it's truly unchecked.
+        let b = BookedCost::from_parts_unchecked(dec!(50), dec!(300));
+        assert_eq!(b.per_unit, dec!(50));
+        assert_eq!(b.total, dec!(300));
+    }
+
+    #[test]
+    fn cost_number_per_unit_accessor() {
+        assert_eq!(CostNumber::PerUnit(dec!(150)).per_unit(), Some(dec!(150)));
+        assert_eq!(CostNumber::Total(dec!(1500)).per_unit(), None);
+        let b = BookedCost::new(dec!(30), dec!(300), dec!(10));
+        assert_eq!(CostNumber::PerUnitFromTotal(b).per_unit(), Some(dec!(30)));
+    }
+
+    #[test]
+    fn cost_number_total_accessor() {
+        assert_eq!(CostNumber::PerUnit(dec!(150)).total(), None);
+        assert_eq!(CostNumber::Total(dec!(1500)).total(), Some(dec!(1500)));
+        let b = BookedCost::new(dec!(30), dec!(300), dec!(10));
+        assert_eq!(CostNumber::PerUnitFromTotal(b).total(), Some(dec!(300)));
+    }
+
+    #[test]
+    fn cost_spec_resolve_per_unit_from_total_uses_per_unit_directly() {
+        // Verifies the documented optimization: by `BookedCost::new`'s
+        // invariant, b.per_unit == b.total / |units|, so resolve()
+        // returns b.per_unit without redivision. The result must equal
+        // what the `Total` arm would have computed.
+        let b = BookedCost::new(dec!(30), dec!(300), dec!(10));
+        let spec = CostSpec::empty()
+            .with_number(CostNumber::PerUnitFromTotal(b))
+            .with_currency("USD");
+
+        let cost = spec.resolve(dec!(10), date(2024, 1, 15)).unwrap();
+        assert_eq!(cost.number, dec!(30));
+        assert_eq!(cost.currency, "USD");
+
+        // Same shape via raw Total → same number after division.
+        let total_spec = CostSpec::empty().with_total(dec!(300)).with_currency("USD");
+        let total_cost = total_spec.resolve(dec!(10), date(2024, 1, 15)).unwrap();
+        assert_eq!(cost.number, total_cost.number);
+    }
+
+    #[test]
+    fn cost_spec_matches_per_unit_from_total() {
+        // PerUnitFromTotal must match against a Cost by its per-unit
+        // value (the lot's canonical number) — this is what lot
+        // reduction code path needs.
+        let cost = Cost::new(dec!(150.00), "USD")
+            .with_date(date(2024, 1, 15))
+            .with_label("lot1");
+
+        let b = BookedCost::new(dec!(150), dec!(300), dec!(2));
+        let spec = CostSpec::empty().with_number(CostNumber::PerUnitFromTotal(b));
+        assert!(spec.matches(&cost));
+
+        // Wrong per-unit: must not match.
+        let wrong = BookedCost::new(dec!(160), dec!(320), dec!(2));
+        let wrong_spec = CostSpec::empty().with_number(CostNumber::PerUnitFromTotal(wrong));
+        assert!(!wrong_spec.matches(&cost));
+    }
+
+    #[test]
+    fn cost_spec_display_renders_per_unit_from_total_as_per_unit() {
+        // Python-beancount compat: post-booking display uses per-unit
+        // form even though source was `{{...}}`. This pins the
+        // documented format-amount.rs behavior.
+        let b = BookedCost::new(dec!(150), dec!(300), dec!(2));
+        let spec = CostSpec::empty()
+            .with_number(CostNumber::PerUnitFromTotal(b))
+            .with_currency("USD");
+        let s = format!("{spec}");
+        // Per-unit form: just the per_unit value, not `# total`.
+        assert!(s.contains("150"), "expected per-unit 150 in {s}");
+        assert!(!s.contains("# 300"), "must NOT render as `# total` ({s})");
     }
 }

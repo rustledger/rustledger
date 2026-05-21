@@ -86,16 +86,17 @@ pub(super) fn amount_to_data(amount: &Amount) -> AmountData {
 pub(super) fn cost_to_data(cost: &CostSpec) -> CostData {
     use crate::types::CostNumberData;
     CostData {
-        // PerUnitFromTotal is the post-booking shape — surface its
-        // per-unit value to plugins (it's what they typically want;
-        // the source total only matters for residual precision inside
-        // the booker/validator and shouldn't leak through the wire
-        // unless we add a discriminator for it later).
+        // PerUnitFromTotal preserves both the derived per-unit AND the
+        // original `{{ total }}` on the wire. Plugins that want a
+        // per-unit value use `CostNumberData::per_unit()`; those that
+        // want the precise total (e.g. cost-basis reads matching
+        // Python's `beancount.core.convert.get_cost`) use `total()`.
         number: cost.number.map(|n| match n {
             rustledger_core::CostNumber::PerUnit(d) => CostNumberData::PerUnit(d.to_string()),
-            rustledger_core::CostNumber::PerUnitFromTotal(b) => {
-                CostNumberData::PerUnit(b.per_unit.to_string())
-            }
+            rustledger_core::CostNumber::PerUnitFromTotal(b) => CostNumberData::PerUnitFromTotal {
+                per_unit: b.per_unit.to_string(),
+                total: b.total.to_string(),
+            },
             rustledger_core::CostNumber::Total(d) => CostNumberData::Total(d.to_string()),
         }),
         currency: cost.currency.as_ref().map(ToString::to_string),

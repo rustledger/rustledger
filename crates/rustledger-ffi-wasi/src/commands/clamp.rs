@@ -389,8 +389,9 @@ fn create_summary_transaction(
         };
 
         let cost = position.cost.as_ref().map(|c| PostingCost {
-            number: Some(c.number.to_string()),
-            number_total: None,
+            number: Some(crate::types::CostNumber::PerUnit {
+                value: c.number.to_string(),
+            }),
             currency: Some(c.currency.to_string()),
             date: c.date.map(|d| d.to_string()),
             label: c.label.clone(),

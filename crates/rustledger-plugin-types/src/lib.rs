@@ -500,12 +500,52 @@ pub struct AmountData {
 /// invalid both-set state on the wire and forced every plugin to write
 /// "what if both?" defensive branches. Numbers are stringly-typed for
 /// arbitrary precision across the WASM boundary.
+///
+/// `PerUnitFromTotal` is the post-booking shape that plugins see after
+/// the booker has derived a per-unit value from a `{{ total }}` spec.
+/// It carries BOTH the derived per-unit AND the original total so
+/// plugins that care about precision (e.g. `currency_accounts`, which
+/// matches Python's `beancount.core.convert.get_cost`) can use the
+/// original total rather than redividing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum CostNumberData {
     /// Per-unit cost: `{150.00 USD}`.
     PerUnit(String),
     /// Total cost for the posting's units: `{{ 1500.00 USD }}`.
     Total(String),
+    /// Post-booking derived per-unit with the original total preserved.
+    /// `per_unit == total / |units|` by host construction; preferring
+    /// `total` for cost-basis-style reads avoids the
+    /// division-then-multiplication precision loss that hits the
+    /// `rust_decimal` 28-digit ceiling on long ledgers.
+    PerUnitFromTotal {
+        /// Derived per-unit value.
+        per_unit: String,
+        /// Original `{{ total }}` as written.
+        total: String,
+    },
+}
+
+impl CostNumberData {
+    /// Per-unit value if the variant carries one ([`Self::PerUnit`] or
+    /// [`Self::PerUnitFromTotal`]); `None` for raw [`Self::Total`].
+    #[must_use]
+    pub fn per_unit(&self) -> Option<&str> {
+        match self {
+            Self::PerUnit(s) | Self::PerUnitFromTotal { per_unit: s, .. } => Some(s),
+            Self::Total(_) => None,
+        }
+    }
+
+    /// Total value if the variant carries one ([`Self::Total`] or
+    /// [`Self::PerUnitFromTotal`]); `None` for raw [`Self::PerUnit`].
+    #[must_use]
+    pub fn total(&self) -> Option<&str> {
+        match self {
+            Self::Total(s) | Self::PerUnitFromTotal { total: s, .. } => Some(s),
+            Self::PerUnit(_) => None,
+        }
+    }
 }
 
 /// Cost data for serialization.

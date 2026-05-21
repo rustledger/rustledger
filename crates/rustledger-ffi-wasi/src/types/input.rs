@@ -12,17 +12,49 @@ pub struct InputAmount {
     pub currency: String,
 }
 
+/// Input cost-number for entry creation.
+///
+/// Mirrors the host `CostNumber` enum on the wire. Consumers supply
+/// `{"kind": "per_unit", "value": "..."}` or `{"kind": "total", "value":
+/// "..."}` for unbooked specs. `per_unit_from_total` is reserved for
+/// already-booked posting input and is rejected if the per-unit and
+/// total are inconsistent with the supplied units.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum InputCostNumber {
+    /// `{value USD}` — per-unit cost.
+    PerUnit {
+        /// Per-unit value.
+        value: String,
+    },
+    /// `{{value USD}}` — total cost.
+    Total {
+        /// Total value.
+        value: String,
+    },
+    /// Post-booking: derived per-unit and preserved source total.
+    PerUnitFromTotal {
+        /// Derived per-unit.
+        per_unit: String,
+        /// Source total.
+        total: String,
+    },
+}
+
 /// Input cost for entry creation.
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct InputCost {
+    /// Cost number (per-unit, total, or post-booking pair).
+    /// `None` corresponds to a bare `{}` cost spec.
     #[serde(default)]
-    pub number: Option<String>,
-    #[serde(default)]
-    pub number_total: Option<String>,
+    pub number: Option<InputCostNumber>,
+    /// Cost currency.
     #[serde(default)]
     pub currency: Option<String>,
+    /// Acquisition date.
     #[serde(default)]
     pub date: Option<String>,
+    /// Lot label.
     #[serde(default)]
     pub label: Option<String>,
 }
@@ -224,34 +256,35 @@ pub fn input_entry_to_directive(entry: &InputEntry) -> Result<Directive, String>
                     });
 
                     let cost = p.cost.as_ref().map(|c| {
-                        // The wire shape keeps `number` (per-unit) and
-                        // `number_total` as independent optional fields
-                        // for back-compat; the new `CostNumber` enum
-                        // requires picking one. Per-unit wins when both
-                        // are sent (matches the pre-#1164 booker's
-                        // tie-break and the upstream beancount
-                        // behavior).
-                        let number_per = c
-                            .number
-                            .as_ref()
-                            .and_then(|n| rustledger_core::Decimal::from_str_exact(n).ok());
-                        let number_total = c
-                            .number_total
-                            .as_ref()
-                            .and_then(|n| rustledger_core::Decimal::from_str_exact(n).ok());
-                        let number = match (number_per, number_total) {
-                            (Some(per), Some(total)) => {
-                                Some(rustledger_core::CostNumber::PerUnitFromTotal(
-                                    rustledger_core::BookedCost {
-                                        per_unit: per,
-                                        total,
-                                    },
-                                ))
+                        // The wire `InputCostNumber` is a tagged enum
+                        // that mirrors the host `CostNumber`. Callers
+                        // pick exactly one variant; the type system
+                        // prevents constructing the both-set state.
+                        let number = c.number.as_ref().map(|n| match n {
+                            crate::types::input::InputCostNumber::PerUnit { value } => {
+                                rustledger_core::CostNumber::PerUnit(
+                                    rustledger_core::Decimal::from_str_exact(value)
+                                        .unwrap_or_else(|_| rustledger_core::Decimal::from(0)),
+                                )
                             }
-                            (Some(per), None) => Some(rustledger_core::CostNumber::PerUnit(per)),
-                            (None, Some(total)) => Some(rustledger_core::CostNumber::Total(total)),
-                            (None, None) => None,
-                        };
+                            crate::types::input::InputCostNumber::Total { value } => {
+                                rustledger_core::CostNumber::Total(
+                                    rustledger_core::Decimal::from_str_exact(value)
+                                        .unwrap_or_else(|_| rustledger_core::Decimal::from(0)),
+                                )
+                            }
+                            crate::types::input::InputCostNumber::PerUnitFromTotal {
+                                per_unit,
+                                total,
+                            } => rustledger_core::CostNumber::PerUnitFromTotal(
+                                rustledger_core::BookedCost::from_parts_unchecked(
+                                    rustledger_core::Decimal::from_str_exact(per_unit)
+                                        .unwrap_or_else(|_| rustledger_core::Decimal::from(0)),
+                                    rustledger_core::Decimal::from_str_exact(total)
+                                        .unwrap_or_else(|_| rustledger_core::Decimal::from(0)),
+                                ),
+                            ),
+                        });
                         rustledger_core::CostSpec {
                             number,
                             currency: c.currency.clone().map(Into::into),
@@ -479,5 +512,94 @@ pub fn input_entry_to_directive(entry: &InputEntry) -> Result<Directive, String>
                 meta: json_map_to_metadata(meta),
             }))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ===== Input cost-number wire-format tests (#1164) =====
+    //
+    // The wire `InputCostNumber` enum is the boundary that makes the
+    // both-set invalid state structurally unrepresentable. These tests
+    // pin that property — neither serde nor the bridge can construct
+    // a CostSpec with both per-unit AND total set unless they come in
+    // via the explicit `per_unit_from_total` variant (which carries
+    // the post-booking invariant).
+
+    #[test]
+    fn input_cost_number_per_unit_parses() {
+        let json = r#"{"kind": "per_unit", "value": "100"}"#;
+        let cn: InputCostNumber = serde_json::from_str(json).unwrap();
+        match cn {
+            InputCostNumber::PerUnit { value } => assert_eq!(value, "100"),
+            _ => panic!("expected PerUnit"),
+        }
+    }
+
+    #[test]
+    fn input_cost_number_total_parses() {
+        let json = r#"{"kind": "total", "value": "1500"}"#;
+        let cn: InputCostNumber = serde_json::from_str(json).unwrap();
+        match cn {
+            InputCostNumber::Total { value } => assert_eq!(value, "1500"),
+            _ => panic!("expected Total"),
+        }
+    }
+
+    #[test]
+    fn input_cost_number_per_unit_from_total_parses() {
+        let json = r#"{"kind": "per_unit_from_total", "per_unit": "150", "total": "300"}"#;
+        let cn: InputCostNumber = serde_json::from_str(json).unwrap();
+        match cn {
+            InputCostNumber::PerUnitFromTotal { per_unit, total } => {
+                assert_eq!(per_unit, "150");
+                assert_eq!(total, "300");
+            }
+            _ => panic!("expected PerUnitFromTotal"),
+        }
+    }
+
+    #[test]
+    fn input_cost_number_rejects_unknown_kind() {
+        // Wire shape strict: unknown discriminator is an error, not a
+        // silent fallback. Important so future variants don't get
+        // confused with mistyped input.
+        let json = r#"{"kind": "per_unit_with_total", "value": "100"}"#;
+        let result: Result<InputCostNumber, _> = serde_json::from_str(json);
+        assert!(result.is_err(), "expected error for unknown kind, got Ok");
+    }
+
+    #[test]
+    fn input_cost_number_rejects_missing_kind() {
+        // No `kind` discriminator → serde can't pick a variant.
+        let json = r#"{"value": "100"}"#;
+        let result: Result<InputCostNumber, _> = serde_json::from_str(json);
+        assert!(result.is_err(), "expected error without kind tag, got Ok");
+    }
+
+    #[test]
+    fn input_cost_number_rejects_legacy_flat_shape() {
+        // The pre-#1164 wire shape `{"number_per": "...", "number_total": null}`
+        // is gone. Sending it gets a parse error, which is the right
+        // behavior — silent coercion to `PerUnit` would mask client
+        // bugs and re-introduce the invalid both-set state through
+        // the bridge.
+        let json = r#"{"number_per": "100", "number_total": null}"#;
+        let result: Result<InputCostNumber, _> = serde_json::from_str(json);
+        assert!(
+            result.is_err(),
+            "expected error for legacy flat shape, got Ok"
+        );
+    }
+
+    #[test]
+    fn input_cost_with_no_number_parses_as_bare_brace() {
+        // `{}` lot match: the `number` field is absent or null.
+        let json = r#"{"currency": "USD"}"#;
+        let cost: InputCost = serde_json::from_str(json).unwrap();
+        assert!(cost.number.is_none());
+        assert_eq!(cost.currency.as_deref(), Some("USD"));
     }
 }

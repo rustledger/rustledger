@@ -89,9 +89,18 @@ export interface Amount {
     currency: string;
 }
 
+/**
+ * Posting cost number. Tagged enum mirroring `rustledger_core::CostNumber`.
+ * Discriminate via the `kind` field; never probe for present-but-null fields.
+ */
+export type CostNumber =
+    | { kind: 'per_unit'; value: string }
+    | { kind: 'total'; value: string }
+    | { kind: 'per_unit_from_total'; per_unit: string; total: string };
+
 /** Posting cost specification. */
 export interface PostingCost {
-    number_per?: string;
+    number?: CostNumber;
     currency?: string;
     date?: string;
     label?: string;

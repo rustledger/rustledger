@@ -103,14 +103,39 @@ pub struct Amount {
     pub currency: String,
 }
 
+/// Wire-format of the numeric component of a [`PostingCost`].
+///
+/// Mirrors the host's `rustledger_core::CostNumber` enum so JSON
+/// consumers see the same mutual exclusion the host enforces. The
+/// `kind` tag is the discriminator; consumers should switch on it
+/// rather than probing for present-but-null fields.
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CostNumber {
+    /// Per-unit cost (e.g., `{100 USD}`).
+    PerUnit {
+        /// Per-unit value.
+        value: String,
+    },
+    /// Total cost as written (e.g., `{{1000 USD}}`), pre-booking.
+    Total {
+        /// Total value.
+        value: String,
+    },
+    /// Post-booking: derived per-unit plus preserved source total.
+    PerUnitFromTotal {
+        /// Derived per-unit.
+        per_unit: String,
+        /// Original total.
+        total: String,
+    },
+}
+
 #[derive(Serialize)]
 pub struct PostingCost {
-    /// Per-unit cost (e.g., {100 USD})
+    /// Cost number (per-unit, total, or post-booking pair).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub number: Option<String>,
-    /// Total cost (e.g., {{1000 USD}})
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub number_total: Option<String>,
+    pub number: Option<CostNumber>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub currency: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -416,6 +441,67 @@ pub struct BatchOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ===== Cost-number wire-format tests (#1164) =====
+    //
+    // These pin the JSON shape FFI consumers depend on. Mirrors host
+    // `CostNumber` exactly — any silent shape change is a wire break.
+
+    #[test]
+    fn cost_number_per_unit_serializes_with_kind_tag() {
+        let cn = CostNumber::PerUnit {
+            value: "100".into(),
+        };
+        let json = serde_json::to_value(&cn).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"kind": "per_unit", "value": "100"})
+        );
+    }
+
+    #[test]
+    fn cost_number_total_serializes_with_kind_tag() {
+        let cn = CostNumber::Total {
+            value: "1500".into(),
+        };
+        let json = serde_json::to_value(&cn).unwrap();
+        assert_eq!(json, serde_json::json!({"kind": "total", "value": "1500"}));
+    }
+
+    #[test]
+    fn cost_number_per_unit_from_total_carries_both_values() {
+        let cn = CostNumber::PerUnitFromTotal {
+            per_unit: "150".into(),
+            total: "300".into(),
+        };
+        let json = serde_json::to_value(&cn).unwrap();
+        // Load-bearing: the preserved total survives serialization so
+        // downstream consumers don't have to redivide. This is what
+        // the pre-PR shape silently lost.
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "kind": "per_unit_from_total",
+                "per_unit": "150",
+                "total": "300",
+            })
+        );
+    }
+
+    #[test]
+    fn posting_cost_omits_number_when_none() {
+        let pc = PostingCost {
+            number: None,
+            currency: Some("USD".into()),
+            date: None,
+            label: None,
+        };
+        let json = serde_json::to_string(&pc).unwrap();
+        // `skip_serializing_if = "Option::is_none"` keeps the JSON
+        // shape lean — a bare `{USD}` lot match has no `number` key.
+        assert!(!json.contains("number"));
+        assert!(json.contains("currency"));
+    }
 
     #[test]
     fn test_error_default_phase_is_parse() {

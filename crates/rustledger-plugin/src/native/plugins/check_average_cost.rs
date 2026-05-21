@@ -109,17 +109,16 @@ impl NativePlugin for CheckAverageCostPlugin {
                     let key = (posting.account.clone(), units.currency.clone());
 
                     if units_num > Decimal::ZERO {
-                        // Acquisition: add to inventory
-                        // Wire-format reads only see per-unit costs
-                        // for the average-cost gate — total-only specs
-                        // are pre-booking and don't yet carry a
-                        // per-unit value.
-                        let cost_per = match &cost.number {
-                            Some(rustledger_plugin_types::CostNumberData::PerUnit(s)) => {
-                                Decimal::from_str(s).ok().unwrap_or_default()
-                            }
-                            _ => Decimal::ZERO,
-                        };
+                        // Acquisition: add to inventory. `per_unit()`
+                        // covers both PerUnit and PerUnitFromTotal;
+                        // raw Total (pre-booking) has no per-unit yet
+                        // and yields zero (gate is permissive there).
+                        let cost_per = cost
+                            .number
+                            .as_ref()
+                            .and_then(|cn| cn.per_unit())
+                            .map(|s| Decimal::from_str(s).unwrap_or_default())
+                            .unwrap_or_default();
 
                         let entry = inventory
                             .entry(key)
@@ -137,12 +136,12 @@ impl NativePlugin for CheckAverageCostPlugin {
 
                             // Get the cost used in this posting.
                             // Same per-unit-only read as above.
-                            let used_cost = match &cost.number {
-                                Some(rustledger_plugin_types::CostNumberData::PerUnit(s)) => {
-                                    Decimal::from_str(s).ok().unwrap_or_default()
-                                }
-                                _ => Decimal::ZERO,
-                            };
+                            let used_cost = cost
+                                .number
+                                .as_ref()
+                                .and_then(|cn| cn.per_unit())
+                                .map(|s| Decimal::from_str(s).unwrap_or_default())
+                                .unwrap_or_default();
 
                             // Calculate relative difference
                             let diff = (used_cost - avg_cost).abs();

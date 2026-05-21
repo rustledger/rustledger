@@ -335,7 +335,7 @@ impl BookingEngine {
                         let per_unit = total / units.number.abs();
                         result.postings[idx].cost = Some(CostSpec {
                             number: Some(rustledger_core::CostNumber::PerUnitFromTotal(
-                                rustledger_core::BookedCost { per_unit, total },
+                                rustledger_core::BookedCost::new(per_unit, total, units.number),
                             )),
                             currency: Some(currency.clone()),
                             // Fill in transaction date if no date specified
@@ -572,7 +572,7 @@ mod tests {
             .with_synthesized_posting(
                 Posting::new("Assets:Stock", Amount::new(dec!(10), "AAPL")).with_cost(
                     CostSpec::empty()
-                        .with_number_per(dec!(150.00))
+                        .with_per_unit(dec!(150.00))
                         .with_currency("USD"),
                 ),
             )
@@ -597,7 +597,7 @@ mod tests {
             .with_synthesized_posting(
                 Posting::new("Assets:Stock", Amount::new(dec!(10), "AAPL")).with_cost(
                     CostSpec::empty()
-                        .with_number_per(dec!(150.00))
+                        .with_per_unit(dec!(150.00))
                         .with_currency("USD"),
                 ),
             )
@@ -653,7 +653,7 @@ mod tests {
             .with_synthesized_posting(
                 Posting::new("Assets:Stock", Amount::new(dec!(1.763), "VIIIX")).with_cost(
                     CostSpec::empty()
-                        .with_number_total(dec!(300.00))
+                        .with_total(dec!(300.00))
                         .with_currency("USD"),
                 ),
             )
@@ -686,7 +686,7 @@ mod tests {
             .with_synthesized_posting(
                 Posting::new("Assets:Stock", Amount::new(dec!(1.763), "VIIIX")).with_cost(
                     CostSpec::empty()
-                        .with_number_total(dec!(300.00))
+                        .with_total(dec!(300.00))
                         .with_currency("USD"),
                 ),
             )
@@ -745,7 +745,7 @@ mod tests {
         let sell = Transaction::new(date(2022, 6, 17), "SELLOPT")
             .with_synthesized_posting(
                 Posting::new("Assets:Stock", Amount::new(dec!(-1), "AAPL"))
-                    .with_cost(CostSpec::empty().with_number_per(dec!(40.0)))
+                    .with_cost(CostSpec::empty().with_per_unit(dec!(40.0)))
                     .with_price(PriceAnnotation::unit(Amount::new(dec!(0.4), "USD"))),
             )
             .with_synthesized_posting(Posting::new("Assets:Stock", Amount::new(dec!(40.0), "USD")));
@@ -792,7 +792,7 @@ mod tests {
             .with_synthesized_posting(
                 Posting::new("Assets:Stock", Amount::new(dec!(10), "AAPL")).with_cost(
                     CostSpec::empty()
-                        .with_number_per(dec!(150.00))
+                        .with_per_unit(dec!(150.00))
                         .with_currency("USD"),
                 ),
             )
@@ -833,7 +833,7 @@ mod tests {
             .with_synthesized_posting(
                 Posting::new("Assets:Stock", Amount::new(dec!(10), "AAPL")).with_cost(
                     CostSpec::empty()
-                        .with_number_per(dec!(150.00))
+                        .with_per_unit(dec!(150.00))
                         .with_currency("USD"),
                 ),
             )
@@ -872,7 +872,7 @@ mod tests {
             .with_synthesized_posting(
                 Posting::new("Assets:Stock", Amount::new(dec!(10), "AAPL")).with_cost(
                     CostSpec::empty()
-                        .with_number_per(dec!(150.00))
+                        .with_per_unit(dec!(150.00))
                         .with_currency("USD"),
                 ),
             )
@@ -935,7 +935,7 @@ mod tests {
             .with_synthesized_posting(
                 Posting::new("Assets:Stock", Amount::new(dec!(10), "AAPL")).with_cost(
                     CostSpec::empty()
-                        .with_number_per(dec!(150.00))
+                        .with_per_unit(dec!(150.00))
                         .with_currency("USD"),
                 ),
             )
@@ -979,7 +979,7 @@ mod tests {
         let open = Transaction::new(date(2026, 1, 1), "Opening balance")
             .with_synthesized_posting(
                 Posting::new("Assets:Abc", Amount::new(dec!(1), "ABC"))
-                    .with_cost(CostSpec::empty().with_number_per(dec!(1))), // No currency!
+                    .with_cost(CostSpec::empty().with_per_unit(dec!(1))), // No currency!
             )
             .with_synthesized_posting(Posting::new(
                 "Equity:Opening-Balances",
@@ -1014,7 +1014,7 @@ mod tests {
             .with_synthesized_posting(
                 Posting::new("Assets:Abc", Amount::new(dec!(-1), "ABC")).with_cost(
                     CostSpec::empty()
-                        .with_number_per(dec!(1))
+                        .with_per_unit(dec!(1))
                         .with_currency("USD"),
                 ),
             )
@@ -1045,7 +1045,7 @@ mod tests {
             .with_synthesized_posting(
                 Posting::new("Assets:Crypto", Amount::new(dec!(100), "ADA")).with_cost(
                     CostSpec::empty()
-                        .with_number_per(dec!(0.50))
+                        .with_per_unit(dec!(0.50))
                         .with_currency("USD")
                         .with_date(date(2021, 1, 1)),
                 ),
@@ -1058,7 +1058,7 @@ mod tests {
             .with_synthesized_posting(
                 Posting::new("Assets:Crypto", Amount::new(dec!(100), "ADA")).with_cost(
                     CostSpec::empty()
-                        .with_number_per(dec!(0.52))
+                        .with_per_unit(dec!(0.52))
                         .with_currency("USD")
                         .with_date(date(2022, 5, 19)),
                 ),
@@ -1185,7 +1185,7 @@ mod tests {
             .with_synthesized_posting(
                 Posting::new("Assets:Stocks", Amount::new(dec!(100), "HOOG")).with_cost(
                     CostSpec::empty()
-                        .with_number_per(dec!(1.50))
+                        .with_per_unit(dec!(1.50))
                         .with_currency("EUR"),
                 ),
             )
@@ -1208,7 +1208,7 @@ mod tests {
             .with_synthesized_posting(
                 Posting::new("Assets:Stocks", Amount::new(dec!(50), "HOOG")).with_cost(
                     CostSpec::empty()
-                        .with_number_per(dec!(1.70))
+                        .with_per_unit(dec!(1.70))
                         .with_currency("EUR"),
                 ),
             )

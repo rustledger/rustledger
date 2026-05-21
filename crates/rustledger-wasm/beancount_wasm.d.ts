@@ -151,13 +151,20 @@ export interface Amount {
 }
 
 /**
+ * Cost-number tagged enum mirroring `rustledger_core::CostNumber`.
+ * Discriminate via the `kind` field.
+ */
+export type CostNumber =
+    | { kind: 'per_unit'; value: string }
+    | { kind: 'total'; value: string }
+    | { kind: 'per_unit_from_total'; per_unit: string; total: string };
+
+/**
  * A cost specification.
  */
 export interface CostSpec {
-    /** Per-unit cost */
-    number_per?: string;
-    /** Total cost */
-    number_total?: string;
+    /** Cost number (per-unit, total, or post-booking pair) */
+    number?: CostNumber;
     /** Cost currency */
     currency?: string;
     /** Acquisition date */

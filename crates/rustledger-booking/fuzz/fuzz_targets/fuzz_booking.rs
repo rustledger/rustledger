@@ -137,7 +137,7 @@ fuzz_target!(|input: FuzzTransaction| {
         let cost = make_decimal(buy.cost_cents as i32);
 
         let posting = Posting::new("Assets:Stock", Amount::new(units, "CORP"))
-            .with_cost(CostSpec::empty().with_number_per(cost).with_currency("USD"));
+            .with_cost(CostSpec::empty().with_per_unit(cost).with_currency("USD"));
         let counter = Posting::new("Assets:Cash", Amount::new(-units * cost, "USD"));
 
         let txn = Transaction::new(buy_date, format!("Buy {i}"))
@@ -169,10 +169,10 @@ fuzz_target!(|input: FuzzTransaction| {
             if let Some(ref cost) = fuzz_posting.cost {
                 let mut spec = CostSpec::empty();
                 if let Some(per) = cost.number_per {
-                    spec = spec.with_number_per(make_decimal(per));
+                    spec = spec.with_per_unit(make_decimal(per));
                 }
                 if let Some(total) = cost.number_total {
-                    spec = spec.with_number_total(make_decimal(total));
+                    spec = spec.with_total(make_decimal(total));
                 }
                 if cost.has_currency {
                     spec = spec.with_currency("USD");

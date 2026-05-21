@@ -155,22 +155,30 @@ impl NativePlugin for CurrencyAccountsPlugin {
                         .currency
                         .clone()
                         .unwrap_or_else(|| units.currency.clone());
+                    // Prefer the preserved total when the cost carries
+                    // one (matches Python's `beancount.core.convert.get_cost`,
+                    // which uses the source total exactly and avoids the
+                    // division-then-multiplication precision loss).
                     let amount = match &cost.number {
-                        Some(rustledger_plugin_types::CostNumberData::PerUnit(per)) => {
-                            let per = Decimal::from_str(per).unwrap_or_default();
-                            units_num * per
-                        }
-                        Some(rustledger_plugin_types::CostNumberData::Total(total)) => {
-                            let total = Decimal::from_str(total).unwrap_or_default();
-                            // Total cost magnitude with sign following
-                            // units (matches `beancount.core.convert.get_cost`).
+                        Some(cn) if cn.total().is_some() => {
+                            let total =
+                                Decimal::from_str(cn.total().unwrap_or("0")).unwrap_or_default();
+                            // Total cost magnitude with sign following units.
                             if units_num.is_sign_negative() {
                                 -total.abs()
                             } else {
                                 total.abs()
                             }
                         }
-                        None => units_num,
+                        Some(rustledger_plugin_types::CostNumberData::PerUnit(per)) => {
+                            let per = Decimal::from_str(per).unwrap_or_default();
+                            units_num * per
+                        }
+                        // `PerUnitFromTotal` is caught by the first arm
+                        // (its `total()` is Some); the remaining
+                        // matchable case here is unreachable but kept
+                        // exhaustive for safety against future variants.
+                        Some(_) | None => units_num,
                     };
                     Some((amount, currency))
                 } else if let Some(price) = &posting.price {

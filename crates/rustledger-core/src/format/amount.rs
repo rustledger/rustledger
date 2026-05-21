@@ -63,3 +63,57 @@ pub fn format_price_annotation(price: &PriceAnnotation) -> String {
         None => sigil,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{BookedCost, CostNumber, CostSpec};
+    use rust_decimal_macros::dec;
+
+    #[test]
+    fn cost_spec_per_unit_renders_single_braces() {
+        let spec = CostSpec::empty()
+            .with_per_unit(dec!(150))
+            .with_currency("USD");
+        assert_eq!(format_cost_spec(&spec), "{150 USD}");
+    }
+
+    #[test]
+    fn cost_spec_total_renders_double_braces() {
+        let spec = CostSpec::empty()
+            .with_total(dec!(1500))
+            .with_currency("USD");
+        assert_eq!(format_cost_spec(&spec), "{{1500 USD}}");
+    }
+
+    #[test]
+    fn cost_spec_per_unit_from_total_renders_as_per_unit() {
+        // Python-compat post-booking rendering: the source `{{...}}`
+        // becomes per-unit braces after booking derives a per_unit.
+        // This is the load-bearing assertion for matching upstream
+        // beancount's `Position.__str__` after booking — the original
+        // `{{...}}` form is gone post-booking even in upstream.
+        let b = BookedCost::new(dec!(150), dec!(300), dec!(2));
+        let spec = CostSpec::empty()
+            .with_number(CostNumber::PerUnitFromTotal(b))
+            .with_currency("USD");
+        assert_eq!(format_cost_spec(&spec), "{150 USD}");
+    }
+
+    #[test]
+    fn cost_spec_empty_renders_braces() {
+        let spec = CostSpec::empty();
+        assert_eq!(format_cost_spec(&spec), "{}");
+    }
+
+    #[test]
+    fn cost_spec_currency_only_renders_bare() {
+        // Pin the existing behavior: `format_cost_spec` only emits
+        // currency when a number is present. A currency-only spec
+        // renders as `{}` (currency is dropped). This matches Python
+        // beancount's `Position.__str__` for currency-only lot
+        // matches.
+        let spec = CostSpec::empty().with_currency("USD");
+        assert_eq!(format_cost_spec(&spec), "{}");
+    }
+}

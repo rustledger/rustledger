@@ -145,13 +145,22 @@ pub(super) fn data_to_amount(data: &AmountData) -> Result<Amount, ConversionErro
 
 pub(super) fn data_to_cost(data: &CostData) -> Result<CostSpec, ConversionError> {
     use crate::types::CostNumberData;
+    let parse = |s: &String| {
+        Decimal::from_str_exact(s).map_err(|_| ConversionError::InvalidNumber(s.clone()))
+    };
     let number = match &data.number {
-        Some(CostNumberData::PerUnit(s)) => Some(rustledger_core::CostNumber::PerUnit(
-            Decimal::from_str_exact(s).map_err(|_| ConversionError::InvalidNumber(s.clone()))?,
-        )),
-        Some(CostNumberData::Total(s)) => Some(rustledger_core::CostNumber::Total(
-            Decimal::from_str_exact(s).map_err(|_| ConversionError::InvalidNumber(s.clone()))?,
-        )),
+        Some(CostNumberData::PerUnit(s)) => Some(rustledger_core::CostNumber::PerUnit(parse(s)?)),
+        Some(CostNumberData::Total(s)) => Some(rustledger_core::CostNumber::Total(parse(s)?)),
+        Some(CostNumberData::PerUnitFromTotal { per_unit, total }) => {
+            // Plugins that mutate post-booking costs round-trip the
+            // variant intact; we use the unchecked constructor because
+            // the bridge has no access to the original units (plugins
+            // see the wire form). The booker's own construction goes
+            // through `BookedCost::new` with the invariant assertion.
+            Some(rustledger_core::CostNumber::PerUnitFromTotal(
+                rustledger_core::BookedCost::from_parts_unchecked(parse(per_unit)?, parse(total)?),
+            ))
+        }
         None => None,
     };
 

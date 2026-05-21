@@ -157,28 +157,29 @@ pub fn directive_to_json(directive: &Directive, line: u32, filename: &str) -> Di
                             })
                         });
 
-                        // Extract cost. The wire shape predates the
-                        // #1164 `CostNumber` enum and keeps the two
-                        // flat fields; the bridge below maps each
-                        // variant onto them. `PerUnitFromTotal` (post-
-                        // booking) emits both so downstream consumers
-                        // can read either form without re-deriving.
+                        // Extract cost. The wire `CostNumber` is a
+                        // tagged enum that mirrors the host shape — JSON
+                        // consumers branch on `kind` exactly like Rust
+                        // pattern matching, with no risk of constructing
+                        // the both-set invalid state.
                         let cost = p.cost.as_ref().map(|c| {
-                            let (number, number_total) = match c.number {
-                                Some(rustledger_core::CostNumber::PerUnit(d)) => {
-                                    (Some(d.to_string()), None)
+                            use crate::types::output::CostNumber as WireCN;
+                            let number = c.number.map(|n| match n {
+                                rustledger_core::CostNumber::PerUnit(d) => WireCN::PerUnit {
+                                    value: d.to_string(),
+                                },
+                                rustledger_core::CostNumber::Total(d) => WireCN::Total {
+                                    value: d.to_string(),
+                                },
+                                rustledger_core::CostNumber::PerUnitFromTotal(b) => {
+                                    WireCN::PerUnitFromTotal {
+                                        per_unit: b.per_unit.to_string(),
+                                        total: b.total.to_string(),
+                                    }
                                 }
-                                Some(rustledger_core::CostNumber::Total(d)) => {
-                                    (None, Some(d.to_string()))
-                                }
-                                Some(rustledger_core::CostNumber::PerUnitFromTotal(b)) => {
-                                    (Some(b.per_unit.to_string()), Some(b.total.to_string()))
-                                }
-                                None => (None, None),
-                            };
+                            });
                             PostingCost {
                                 number,
-                                number_total,
                                 currency: c.currency.as_ref().map(std::string::ToString::to_string),
                                 date: c.date.map(|d| d.to_string()),
                                 label: c.label.clone(),

@@ -523,7 +523,7 @@ mod tests {
             .with_synthesized_posting(
                 Posting::new("Assets:Stock", Amount::new(dec!(10), "AAPL")).with_cost(
                     CostSpec::empty()
-                        .with_number_per(dec!(150.00))
+                        .with_per_unit(dec!(150.00))
                         .with_currency("USD"),
                 ),
             )
@@ -549,7 +549,7 @@ mod tests {
             .with_synthesized_posting(
                 Posting::new("Assets:Stock", Amount::new(dec!(10), "AAPL")).with_cost(
                     CostSpec::empty()
-                        .with_number_total(dec!(1500.00))
+                        .with_total(dec!(1500.00))
                         .with_currency("USD"),
                 ),
             )
@@ -571,7 +571,7 @@ mod tests {
             .with_synthesized_posting(
                 Posting::new("Assets:Stock", Amount::new(dec!(-10), "AAPL")).with_cost(
                     CostSpec::empty()
-                        .with_number_total(dec!(1500.00))
+                        .with_total(dec!(1500.00))
                         .with_currency("USD"),
                 ),
             )
@@ -840,7 +840,7 @@ mod tests {
             .with_synthesized_posting(
                 Posting::new("Assets:Stock", Amount::new(dec!(10), "AAPL")).with_cost(
                     CostSpec::empty()
-                        .with_number_per(dec!(150.00))
+                        .with_per_unit(dec!(150.00))
                         .with_currency("USD"),
                 ),
             )
@@ -866,7 +866,7 @@ mod tests {
                 Posting::new("Assets:Stock", Amount::new(dec!(-10), "AAPL"))
                     .with_cost(
                         CostSpec::empty()
-                            .with_number_per(dec!(150.00))
+                            .with_per_unit(dec!(150.00))
                             .with_currency("USD"),
                     )
                     .with_price(PriceAnnotation::unit(Amount::new(dec!(175.00), "USD"))),
@@ -895,14 +895,14 @@ mod tests {
             .with_synthesized_posting(
                 Posting::new("Assets:Stock:US", Amount::new(dec!(10), "AAPL")).with_cost(
                     CostSpec::empty()
-                        .with_number_per(dec!(150.00))
+                        .with_per_unit(dec!(150.00))
                         .with_currency("USD"),
                 ),
             )
             .with_synthesized_posting(
                 Posting::new("Assets:Stock:EU", Amount::new(dec!(5), "SAP")).with_cost(
                     CostSpec::empty()
-                        .with_number_per(dec!(100.00))
+                        .with_per_unit(dec!(100.00))
                         .with_currency("EUR"),
                 ),
             )
@@ -954,7 +954,7 @@ mod tests {
                     "Assets:Vanguard:IRA:Trad:VFIFX",
                     Amount::new(dec!(10), "VFIFX"),
                 )
-                .with_cost(CostSpec::empty().with_number_per(dec!(100))),
+                .with_cost(CostSpec::empty().with_per_unit(dec!(100))),
             )
             .with_synthesized_posting(Posting::new(
                 "Equity:Opening-Balances",
@@ -981,7 +981,7 @@ mod tests {
         let txn = Transaction::new(date(2026, 1, 1), "Test")
             .with_synthesized_posting(
                 Posting::new("Assets:Stock", Amount::new(dec!(10), "VFIFX"))
-                    .with_cost(CostSpec::empty().with_number_total(dec!(1000))),
+                    .with_cost(CostSpec::empty().with_total(dec!(1000))),
             )
             .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(-1000), "USD")));
 
@@ -997,7 +997,7 @@ mod tests {
             .with_synthesized_posting(
                 Posting::new("Assets:Stock", Amount::new(dec!(10), "AAPL")).with_cost(
                     CostSpec::empty()
-                        .with_number_per(dec!(100))
+                        .with_per_unit(dec!(100))
                         .with_currency("EUR"), // Explicit EUR
                 ),
             )
@@ -1019,7 +1019,7 @@ mod tests {
         let txn = Transaction::new(date(2026, 1, 1), "Test")
             .with_synthesized_posting(
                 Posting::new("Assets:Stock", Amount::new(dec!(10), "AAPL"))
-                    .with_cost(CostSpec::empty().with_number_per(dec!(100)))
+                    .with_cost(CostSpec::empty().with_per_unit(dec!(100)))
                     .with_price(PriceAnnotation::unit(Amount::new(dec!(105), "EUR"))),
             )
             .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(-1000), "USD")));
@@ -1042,7 +1042,7 @@ mod tests {
             .with_synthesized_posting(
                 Posting::new("Assets:Crypto", Amount::new(dec!(100), "TOKEN")).with_cost(
                     CostSpec::empty()
-                        .with_number_per(dec!(0))
+                        .with_per_unit(dec!(0))
                         .with_currency("USD"),
                 ),
             )
@@ -1060,7 +1060,7 @@ mod tests {
             .with_synthesized_posting(
                 Posting::new("Assets:Crypto", Amount::new(dec!(100), "TOKEN")).with_cost(
                     CostSpec::empty()
-                        .with_number_per(dec!(10))
+                        .with_per_unit(dec!(10))
                         .with_currency("EUR"),
                 ),
             )
@@ -1079,7 +1079,7 @@ mod tests {
             .with_synthesized_posting(
                 Posting::new("Assets:Crypto", Amount::new(dec!(1000), "SHIB")).with_cost(
                     CostSpec::empty()
-                        .with_number_per(dec!(0))
+                        .with_per_unit(dec!(0))
                         .with_currency("JPY"),
                 ),
             )

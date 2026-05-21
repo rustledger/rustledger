@@ -1606,14 +1606,14 @@ mod tests {
                 .with_synthesized_posting(
                     Posting::new("Assets:AccountB", Amount::new(dec!(11.11), "USD")).with_cost(
                         CostSpec::empty()
-                            .with_number_per(dec!(0.90))
+                            .with_per_unit(dec!(0.90))
                             .with_currency("EUR"),
                     ),
                 )
                 .with_synthesized_posting(
                     Posting::new("Assets:Transit", Amount::new(dec!(-11.11), "USD")).with_cost(
                         CostSpec::empty()
-                            .with_number_per(dec!(0.90))
+                            .with_per_unit(dec!(0.90))
                             .with_currency("EUR"),
                     ),
                 ),
@@ -1628,7 +1628,7 @@ mod tests {
                 .with_synthesized_posting(
                     Posting::new("Assets:Transit", Amount::new(dec!(11.11), "USD")).with_cost(
                         CostSpec::empty()
-                            .with_number_per(dec!(0.90))
+                            .with_per_unit(dec!(0.90))
                             .with_currency("EUR"),
                     ),
                 ),
@@ -1657,7 +1657,7 @@ mod tests {
                 .with_synthesized_posting(
                     Posting::new("Assets:Stock", Amount::new(dec!(-10), "AAPL")).with_cost(
                         CostSpec::empty()
-                            .with_number_per(dec!(150))
+                            .with_per_unit(dec!(150))
                             .with_currency("USD"),
                     ),
                 )
@@ -1674,7 +1674,7 @@ mod tests {
                 .with_synthesized_posting(
                     Posting::new("Assets:Stock", Amount::new(dec!(10), "AAPL")).with_cost(
                         CostSpec::empty()
-                            .with_number_per(dec!(150))
+                            .with_per_unit(dec!(150))
                             .with_currency("USD"),
                     ),
                 )

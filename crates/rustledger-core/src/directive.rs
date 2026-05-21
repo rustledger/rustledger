@@ -23,7 +23,7 @@ use std::fmt;
 
 use crate::intern::InternedStr;
 #[cfg(feature = "rkyv")]
-use crate::intern::{AsDecimal, AsInternedStr, AsNaiveDate, AsOptionInternedStr, AsVecInternedStr};
+use crate::intern::{AsDecimal, AsInternedStr, AsNaiveDate, AsOptionInternedStr};
 use crate::{Amount, CostSpec, IncompleteAmount};
 
 /// Metadata value types.
@@ -559,8 +559,7 @@ pub struct Transaction {
     /// Tags attached to this transaction
     pub tags: Vec<crate::Tag>,
     /// Links attached to this transaction
-    #[cfg_attr(feature = "rkyv", rkyv(with = AsVecInternedStr))]
-    pub links: Vec<InternedStr>,
+    pub links: Vec<crate::Link>,
     /// Transaction metadata
     pub meta: Metadata,
     /// Postings (account entries), each wrapped with its source span and
@@ -615,7 +614,7 @@ impl Transaction {
 
     /// Add a link.
     #[must_use]
-    pub fn with_link(mut self, link: impl Into<InternedStr>) -> Self {
+    pub fn with_link(mut self, link: impl Into<crate::Link>) -> Self {
         self.links.push(link.into());
         self
     }
@@ -1200,8 +1199,7 @@ pub struct Document {
     /// Tags
     pub tags: Vec<crate::Tag>,
     /// Links
-    #[cfg_attr(feature = "rkyv", rkyv(with = AsVecInternedStr))]
-    pub links: Vec<InternedStr>,
+    pub links: Vec<crate::Link>,
     /// Metadata
     pub meta: Metadata,
 }
@@ -1233,7 +1231,7 @@ impl Document {
 
     /// Add a link.
     #[must_use]
-    pub fn with_link(mut self, link: impl Into<InternedStr>) -> Self {
+    pub fn with_link(mut self, link: impl Into<crate::Link>) -> Self {
         self.links.push(link.into());
         self
     }

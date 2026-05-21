@@ -41,20 +41,18 @@
 //!
 //! # When to use which
 //!
-//! [`Currency`], [`Account`], and [`Tag`] are fully plumbed through
-//! the AST; [`Link`] is defined but not yet wired up (final planned
-//! slice of #1163):
+//! All four newtypes — [`Currency`], [`Account`], [`Tag`], and
+//! [`Link`] — are fully plumbed through the AST:
 //!
-//! - [`Currency`] *(in use)*: `Commodity.currency`, `Open.currencies`
-//!   entries, `Amount.currency`, `CostSpec.currency`, `Price.currency`,
+//! - [`Currency`]: `Commodity.currency`, `Open.currencies` entries,
+//!   `Amount.currency`, `CostSpec.currency`, `Price.currency`,
 //!   `IncompleteAmount::CurrencyOnly`.
-//! - [`Account`] *(in use)*: `Open.account`, `Close.account`,
-//!   `Balance.account`, `Pad.account` / `source_account`,
-//!   `Note.account`, `Document.account`, `Posting.account`.
-//! - [`Tag`] *(in use)*: `Transaction.tags` entries,
-//!   `pushtag`/`poptag` stack, `Document.tags`.
-//! - [`Link`] *(planned)*: `Transaction.links` entries,
-//!   `Document.links`.
+//! - [`Account`]: `Open.account`, `Close.account`, `Balance.account`,
+//!   `Pad.account` / `source_account`, `Note.account`,
+//!   `Document.account`, `Posting.account`.
+//! - [`Tag`]: `Transaction.tags` entries, `pushtag`/`poptag` stack,
+//!   `Document.tags`.
+//! - [`Link`]: `Transaction.links` entries, `Document.links`.
 //!
 //! `MetaValue::{Account, Currency, Tag, Link}` are still `String`
 //! pending a separate decision on how meta values cross the typed

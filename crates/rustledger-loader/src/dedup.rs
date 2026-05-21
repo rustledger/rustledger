@@ -71,21 +71,13 @@ fn do_intern(s: &mut InternedStr, interner: &mut StringInterner) -> bool {
     !was_new
 }
 
-/// Re-intern every entry of a `Vec<InternedStr>`, tallying the dedup
-/// hits into `dedup_count`. Hoisted to module scope rather than nested
-/// inside [`reintern_directive`] so clippy's `items_after_statements`
-/// lint stays happy.
-fn intern_vec(v: &mut [InternedStr], interner: &mut StringInterner, dedup_count: &mut usize) {
-    for s in v.iter_mut() {
-        if do_intern(s, interner) {
-            *dedup_count += 1;
-        }
-    }
-}
-
-/// Same as [`intern_vec`] but for slices of domain-typed identifiers
-/// (e.g., `Currency`, `Account`, `Tag`, `Link`). Calls
-/// `.as_interned_mut()` to reach the underlying `InternedStr`.
+/// Re-intern every entry of a slice of domain-typed identifiers
+/// (e.g., [`rustledger_core::Currency`], [`rustledger_core::Account`],
+/// [`rustledger_core::Tag`], [`rustledger_core::Link`]), tallying the
+/// dedup hits into `dedup_count`. Calls `get_inner` to reach the
+/// underlying `InternedStr`. Hoisted to module scope rather than
+/// nested inside [`reintern_directive`] so clippy's
+/// `items_after_statements` lint stays happy.
 fn intern_typed_vec<T>(
     v: &mut [T],
     interner: &mut StringInterner,
@@ -126,7 +118,12 @@ fn reintern_directive(directive: &mut Directive, interner: &mut StringInterner) 
                 &mut dedup_count,
                 rustledger_core::Tag::as_interned_mut,
             );
-            intern_vec(&mut txn.links, interner, &mut dedup_count);
+            intern_typed_vec(
+                &mut txn.links,
+                interner,
+                &mut dedup_count,
+                rustledger_core::Link::as_interned_mut,
+            );
 
             for posting in &mut txn.postings {
                 if do_intern(posting.account.as_interned_mut(), interner) {
@@ -235,7 +232,12 @@ fn reintern_directive(directive: &mut Directive, interner: &mut StringInterner) 
                 &mut dedup_count,
                 rustledger_core::Tag::as_interned_mut,
             );
-            intern_vec(&mut doc.links, interner, &mut dedup_count);
+            intern_typed_vec(
+                &mut doc.links,
+                interner,
+                &mut dedup_count,
+                rustledger_core::Link::as_interned_mut,
+            );
         }
         Directive::Price(price) => {
             if do_intern(price.currency.as_interned_mut(), interner) {

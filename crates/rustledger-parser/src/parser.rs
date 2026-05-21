@@ -402,13 +402,13 @@ fn parse_tag(stream: &mut TokenStream<'_>) -> ParseRes<rustledger_core::Tag> {
     Err(())
 }
 
-fn parse_link(stream: &mut TokenStream<'_>) -> ParseRes<InternedStr> {
+fn parse_link(stream: &mut TokenStream<'_>) -> ParseRes<rustledger_core::Link> {
     if let Some(t) = stream.peek()
         && let Token::Link(s) = &t.token
     {
         let result = stream.interner.intern(&s[1..]); // Skip ^
         stream.advance();
-        return Ok(result);
+        return Ok(result.into());
     }
     Err(())
 }
@@ -1164,7 +1164,7 @@ fn parse_transaction_directive(stream: &mut TokenStream<'_>) -> ParseRes<ParsedI
     // Tags and links — Vec::new() avoids an upfront heap allocation
     // when no tags/links are present (the common case).
     let mut tags: Vec<rustledger_core::Tag> = Vec::new();
-    let mut links: Vec<InternedStr> = Vec::new();
+    let mut links: Vec<rustledger_core::Link> = Vec::new();
 
     loop {
         if let Ok(tag) = parse_tag(stream) {
@@ -1557,7 +1557,7 @@ fn parse_document_directive(stream: &mut TokenStream<'_>) -> ParseRes<ParsedItem
 
     // Optional tags and links — Vec::new() avoids allocation when absent
     let mut tags: Vec<rustledger_core::Tag> = Vec::new();
-    let mut links: Vec<InternedStr> = Vec::new();
+    let mut links: Vec<rustledger_core::Link> = Vec::new();
     loop {
         if let Ok(tag) = parse_tag(stream) {
             tags.push(tag);

@@ -587,6 +587,9 @@ fn parse_price_metadata(raw: &str) -> Vec<PriceSpec> {
     specs
 }
 
+// Not `const`: `InternedStr::as_str` (and by extension `Currency::as_str`)
+// deref through `Arc<str>`, whose `Deref` impl is not yet `const` in stable
+// Rust. The function was `const` pre-#1174 only because `String::as_str` is.
 fn metavalue_as_str(v: &MetaValue) -> Option<&str> {
     match v {
         MetaValue::String(s) => Some(s.as_str()),

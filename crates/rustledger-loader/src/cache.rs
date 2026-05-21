@@ -205,7 +205,16 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 ///     gained a `Span + file_id` per entry, so old cache files
 ///     would rkyv-deserialize into the new type as junk. Header
 ///     check forces a rebuild instead.
-const CACHE_VERSION: u32 = 5;
+/// v6: The #1163 newtype slices (#1169 `Currency`, #1171 `Account`,
+///     #1172 `Tag`, #1173 `Link`, #1174 `MetaValue`) swapped variant
+///     payload types from `InternedStr`/`String` to typed newtypes.
+///     The archived layout coincidentally matches `AsInternedStr`
+///     in most cases, but `MetaValue::{Account,Currency,Tag,Link}`
+///     and `Transaction.tags`/`links` (plus the parallel `Document`
+///     fields) changed their archive wrappers. Bumping the version
+///     forces regeneration so we don't risk rkyv reading old bytes
+///     into a structurally-different `ArchivedMetaValue`.
+const CACHE_VERSION: u32 = 6;
 
 /// Cache header stored at the start of cache files.
 #[derive(Debug, Clone)]

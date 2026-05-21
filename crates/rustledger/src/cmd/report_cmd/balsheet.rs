@@ -48,7 +48,8 @@ pub(super) fn report_balsheet<W: Write>(
         }
     }
 
-    // Helper to sum inventory by currency (uses InternedStr to avoid allocations)
+    // Helper to sum inventory by currency, keyed by the Currency newtype
+    // so the BTreeMap insert path doesn't allocate.
     fn sum_by_currency(
         balances: &BTreeMap<rustledger_core::Account, Inventory>,
     ) -> BTreeMap<rustledger_core::Currency, Decimal> {

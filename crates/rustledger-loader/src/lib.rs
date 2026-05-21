@@ -1235,4 +1235,72 @@ include "more.beancount"
             "Identical tag #morning across files must share one Arc<str>"
         );
     }
+
+    /// Regression test responding to Copilot review on PR #1174: the
+    /// dedup pass must also walk `MetaValue::{Account, Currency, Tag,
+    /// Link}` payloads inside `Metadata` maps. Before the meta walk
+    /// was added, cross-file metadata values held distinct `Arc<str>`
+    /// allocations even when they referenced identical strings.
+    #[test]
+    fn test_fresh_parse_deduplicates_metavalue_across_files() {
+        let mut vfs = VirtualFileSystem::new();
+        vfs.add_file(
+            "main.beancount",
+            r#"
+2024-01-01 open Assets:Bank USD
+2024-01-01 open Expenses:Coffee
+
+2024-01-15 * "Latte"
+  counterparty: Assets:Bank
+  Assets:Bank   -5.00 USD
+  Expenses:Coffee  5.00 USD
+
+include "more.beancount"
+"#,
+        );
+        vfs.add_file(
+            "more.beancount",
+            r#"
+2024-01-16 * "Espresso"
+  counterparty: Assets:Bank
+  Assets:Bank   -3.00 USD
+  Expenses:Coffee  3.00 USD
+"#,
+        );
+
+        let result = Loader::new()
+            .with_filesystem(Box::new(vfs))
+            .load(Path::new("main.beancount"))
+            .unwrap();
+
+        let txns: Vec<&rustledger_core::Transaction> = result
+            .directives
+            .iter()
+            .filter_map(|s| match &s.value {
+                rustledger_core::Directive::Transaction(t) => Some(t),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(txns.len(), 2);
+        let m1 = txns[0]
+            .meta
+            .get("counterparty")
+            .expect("first txn has counterparty meta");
+        let m2 = txns[1]
+            .meta
+            .get("counterparty")
+            .expect("second txn has counterparty meta");
+
+        let (rustledger_core::MetaValue::Account(a1), rustledger_core::MetaValue::Account(a2)) =
+            (m1, m2)
+        else {
+            panic!("expected MetaValue::Account in both transactions; got {m1:?} / {m2:?}");
+        };
+        assert!(
+            a1.ptr_eq(a2),
+            "Identical MetaValue::Account across files must share one Arc<str> \
+             after reintern_directives walks metadata"
+        );
+    }
 }

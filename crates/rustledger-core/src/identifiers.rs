@@ -60,8 +60,12 @@
 //! deliberately keeps `String` payloads — `plugin-types` is a minimal
 //! WASM-compatible crate that does not depend on `rustledger-core`,
 //! and plugins run without access to the workspace interner anyway.
-//! The host re-interns at the convert boundary
-//! (`rustledger_plugin::convert::from_wrapper`).
+//! The convert boundary
+//! (`rustledger_plugin::convert::from_wrapper`) wraps the incoming
+//! strings in fresh `Arc<str>`s; the cross-file canonicalization to
+//! one `Arc<str>` per identifier string happens later in
+//! `rustledger_loader::dedup::reintern_directives`, which walks both
+//! AST identifier fields and `MetaValue::*` payloads inside metadata.
 
 use crate::InternedStr;
 #[cfg(feature = "rkyv")]

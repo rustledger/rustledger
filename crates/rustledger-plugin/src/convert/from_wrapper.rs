@@ -235,9 +235,11 @@ pub(super) fn data_to_meta_value(data: &MetaValueData) -> MetaValue {
             }
         }
         // Bridge from String-typed wire format into the host's typed
-        // newtypes. `From<&str>` re-interns into the workspace
-        // interner, so values re-shared via dedup land on a single
-        // `Arc<str>` even when they came in from different plugins.
+        // newtypes. `From<&str>` wraps the string in a fresh `Arc<str>`
+        // (it does NOT consult an interner). Cross-file/cross-plugin
+        // canonicalization to a single `Arc<str>` per string happens
+        // later in `rustledger_loader::dedup::reintern_directives`,
+        // which walks meta payloads via `intern_meta`.
         MetaValueData::Account(s) => MetaValue::Account(s.as_str().into()),
         MetaValueData::Currency(s) => MetaValue::Currency(s.as_str().into()),
         MetaValueData::Tag(s) => MetaValue::Tag(s.as_str().into()),

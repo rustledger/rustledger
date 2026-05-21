@@ -27,7 +27,7 @@
 
 use rustledger_core::Directive;
 use rustledger_core::intern::{InternedStr, StringInterner};
-use rustledger_core::{IncompleteAmount, PriceAnnotation};
+use rustledger_core::{IncompleteAmount, MetaValue, Metadata, PriceAnnotation};
 use rustledger_parser::Spanned;
 
 /// Re-intern all strings in directives to deduplicate memory.
@@ -91,6 +91,51 @@ fn intern_typed_vec<T>(
     }
 }
 
+/// Re-intern the typed identifier payloads in a [`Metadata`] map.
+///
+/// `MetaValue::{Account, Currency, Tag, Link}` payloads went unwalked
+/// before this pass — meaning cross-file (and especially plugin-emitted)
+/// metadata values held distinct `Arc<str>` allocations even when they
+/// referenced identical strings. The Amount variant's currency field is
+/// also walked. Other variants (`String`, `Number`, `Date`, `Bool`,
+/// `None`) carry no interned data.
+fn intern_meta(meta: &mut Metadata, interner: &mut StringInterner, dedup_count: &mut usize) {
+    for value in meta.values_mut() {
+        match value {
+            MetaValue::Account(a) => {
+                if do_intern(a.as_interned_mut(), interner) {
+                    *dedup_count += 1;
+                }
+            }
+            MetaValue::Currency(c) => {
+                if do_intern(c.as_interned_mut(), interner) {
+                    *dedup_count += 1;
+                }
+            }
+            MetaValue::Tag(t) => {
+                if do_intern(t.as_interned_mut(), interner) {
+                    *dedup_count += 1;
+                }
+            }
+            MetaValue::Link(l) => {
+                if do_intern(l.as_interned_mut(), interner) {
+                    *dedup_count += 1;
+                }
+            }
+            MetaValue::Amount(a) => {
+                if do_intern(a.currency.as_interned_mut(), interner) {
+                    *dedup_count += 1;
+                }
+            }
+            MetaValue::String(_)
+            | MetaValue::Number(_)
+            | MetaValue::Date(_)
+            | MetaValue::Bool(_)
+            | MetaValue::None => {}
+        }
+    }
+}
+
 /// Re-intern all `InternedStr` fields in a single directive,
 /// deduplicating identical strings to share a single `Arc<str>`
 /// allocation. Returns the count of strings that were already present
@@ -124,11 +169,13 @@ fn reintern_directive(directive: &mut Directive, interner: &mut StringInterner) 
                 &mut dedup_count,
                 rustledger_core::Link::as_interned_mut,
             );
+            intern_meta(&mut txn.meta, interner, &mut dedup_count);
 
             for posting in &mut txn.postings {
                 if do_intern(posting.account.as_interned_mut(), interner) {
                     dedup_count += 1;
                 }
+                intern_meta(&mut posting.meta, interner, &mut dedup_count);
                 // Units
                 if let Some(ref mut units) = posting.units {
                     match units {
@@ -186,6 +233,7 @@ fn reintern_directive(directive: &mut Directive, interner: &mut StringInterner) 
             if do_intern(bal.amount.currency.as_interned_mut(), interner) {
                 dedup_count += 1;
             }
+            intern_meta(&mut bal.meta, interner, &mut dedup_count);
         }
         Directive::Open(open) => {
             if do_intern(open.account.as_interned_mut(), interner) {
@@ -197,16 +245,19 @@ fn reintern_directive(directive: &mut Directive, interner: &mut StringInterner) 
                 &mut dedup_count,
                 rustledger_core::Currency::as_interned_mut,
             );
+            intern_meta(&mut open.meta, interner, &mut dedup_count);
         }
         Directive::Close(close) => {
             if do_intern(close.account.as_interned_mut(), interner) {
                 dedup_count += 1;
             }
+            intern_meta(&mut close.meta, interner, &mut dedup_count);
         }
         Directive::Commodity(comm) => {
             if do_intern(comm.currency.as_interned_mut(), interner) {
                 dedup_count += 1;
             }
+            intern_meta(&mut comm.meta, interner, &mut dedup_count);
         }
         Directive::Pad(pad) => {
             if do_intern(pad.account.as_interned_mut(), interner) {
@@ -215,11 +266,13 @@ fn reintern_directive(directive: &mut Directive, interner: &mut StringInterner) 
             if do_intern(pad.source_account.as_interned_mut(), interner) {
                 dedup_count += 1;
             }
+            intern_meta(&mut pad.meta, interner, &mut dedup_count);
         }
         Directive::Note(note) => {
             if do_intern(note.account.as_interned_mut(), interner) {
                 dedup_count += 1;
             }
+            intern_meta(&mut note.meta, interner, &mut dedup_count);
         }
         Directive::Document(doc) => {
             if do_intern(doc.account.as_interned_mut(), interner) {
@@ -238,6 +291,7 @@ fn reintern_directive(directive: &mut Directive, interner: &mut StringInterner) 
                 &mut dedup_count,
                 rustledger_core::Link::as_interned_mut,
             );
+            intern_meta(&mut doc.meta, interner, &mut dedup_count);
         }
         Directive::Price(price) => {
             if do_intern(price.currency.as_interned_mut(), interner) {
@@ -246,9 +300,16 @@ fn reintern_directive(directive: &mut Directive, interner: &mut StringInterner) 
             if do_intern(price.amount.currency.as_interned_mut(), interner) {
                 dedup_count += 1;
             }
+            intern_meta(&mut price.meta, interner, &mut dedup_count);
         }
-        Directive::Event(_) | Directive::Query(_) | Directive::Custom(_) => {
-            // These don't contain InternedStr fields
+        Directive::Event(e) => {
+            intern_meta(&mut e.meta, interner, &mut dedup_count);
+        }
+        Directive::Query(q) => {
+            intern_meta(&mut q.meta, interner, &mut dedup_count);
+        }
+        Directive::Custom(c) => {
+            intern_meta(&mut c.meta, interner, &mut dedup_count);
         }
     }
 

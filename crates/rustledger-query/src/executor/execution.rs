@@ -164,7 +164,17 @@ impl Executor<'_> {
                         }
                     }
                 } else {
+                    // Bulk-assign for performance, but keep the
+                    // `row_group_keys` sidecar in lockstep with `rows`
+                    // (issue #1175). The sidecar is a load-bearing
+                    // invariant — `QueryResult::sort_by` `assert_eq!`s
+                    // the lengths because a desynced sidecar would
+                    // silently apply the wrong currency hint to a row.
+                    // Non-aggregate rows get `None` per row, matching
+                    // what `add_row` would set.
+                    let n = rows.len();
                     result.rows = rows;
+                    result.row_group_keys.resize(n, None);
                 }
             } else {
                 // Sequential evaluation for small datasets or window queries

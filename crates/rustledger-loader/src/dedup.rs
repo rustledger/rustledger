@@ -120,7 +120,12 @@ fn reintern_directive(directive: &mut Directive, interner: &mut StringInterner) 
             if do_intern(&mut txn.narration, interner) {
                 dedup_count += 1;
             }
-            intern_vec(&mut txn.tags, interner, &mut dedup_count);
+            intern_typed_vec(
+                &mut txn.tags,
+                interner,
+                &mut dedup_count,
+                rustledger_core::Tag::as_interned_mut,
+            );
             intern_vec(&mut txn.links, interner, &mut dedup_count);
 
             for posting in &mut txn.postings {
@@ -224,7 +229,12 @@ fn reintern_directive(directive: &mut Directive, interner: &mut StringInterner) 
                 dedup_count += 1;
             }
             // Pre-Copilot this skipped tags/links. They're now covered.
-            intern_vec(&mut doc.tags, interner, &mut dedup_count);
+            intern_typed_vec(
+                &mut doc.tags,
+                interner,
+                &mut dedup_count,
+                rustledger_core::Tag::as_interned_mut,
+            );
             intern_vec(&mut doc.links, interner, &mut dedup_count);
         }
         Directive::Price(price) => {

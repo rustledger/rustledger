@@ -41,9 +41,9 @@
 //!
 //! # When to use which
 //!
-//! [`Currency`] and [`Account`] are fully plumbed through the AST;
-//! [`Tag`] and [`Link`] are defined but not yet wired up (planned
-//! slices of #1163):
+//! [`Currency`], [`Account`], and [`Tag`] are fully plumbed through
+//! the AST; [`Link`] is defined but not yet wired up (final planned
+//! slice of #1163):
 //!
 //! - [`Currency`] *(in use)*: `Commodity.currency`, `Open.currencies`
 //!   entries, `Amount.currency`, `CostSpec.currency`, `Price.currency`,
@@ -51,8 +51,8 @@
 //! - [`Account`] *(in use)*: `Open.account`, `Close.account`,
 //!   `Balance.account`, `Pad.account` / `source_account`,
 //!   `Note.account`, `Document.account`, `Posting.account`.
-//! - [`Tag`] *(planned)*: `Transaction.tags` entries,
-//!   `pushtag`/`poptag`, `Document.tags`.
+//! - [`Tag`] *(in use)*: `Transaction.tags` entries,
+//!   `pushtag`/`poptag` stack, `Document.tags`.
 //! - [`Link`] *(planned)*: `Transaction.links` entries,
 //!   `Document.links`.
 //!
@@ -103,6 +103,17 @@ macro_rules! domain_newtype {
             #[must_use]
             pub fn into_interned(self) -> InternedStr {
                 self.0
+            }
+
+            /// Pointer-equality on the underlying `Arc<str>`.
+            ///
+            /// `true` iff both values point at the same interner allocation.
+            /// Used by cross-file dedup tests to assert that the loader's
+            /// re-interning pass canonicalized the storage; not a substitute
+            /// for `==` (which is the byte-equality semantics callers want).
+            #[must_use]
+            pub fn ptr_eq(&self, other: &Self) -> bool {
+                self.0.ptr_eq(&other.0)
             }
 
             /// Mutable access to the underlying `InternedStr`.

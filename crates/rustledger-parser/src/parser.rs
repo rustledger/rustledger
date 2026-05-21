@@ -391,13 +391,13 @@ fn parse_currency(stream: &mut TokenStream<'_>) -> ParseRes<InternedStr> {
     Err(())
 }
 
-fn parse_tag(stream: &mut TokenStream<'_>) -> ParseRes<InternedStr> {
+fn parse_tag(stream: &mut TokenStream<'_>) -> ParseRes<rustledger_core::Tag> {
     if let Some(t) = stream.peek()
         && let Token::Tag(s) = &t.token
     {
         let result = stream.interner.intern(&s[1..]); // Skip #
         stream.advance();
-        return Ok(result);
+        return Ok(result.into());
     }
     Err(())
 }
@@ -1058,8 +1058,8 @@ enum ParsedItem {
     Option(String, String, Span),
     Include(String, Span),
     Plugin(String, Option<String>, Span),
-    Pushtag(InternedStr, Span),
-    Poptag(InternedStr, Span),
+    Pushtag(rustledger_core::Tag, Span),
+    Poptag(rustledger_core::Tag, Span),
     Pushmeta(String, MetaValue, Span),
     Popmeta(String, Span),
     /// A standalone comment line with its text and span
@@ -1163,7 +1163,7 @@ fn parse_transaction_directive(stream: &mut TokenStream<'_>) -> ParseRes<ParsedI
 
     // Tags and links — Vec::new() avoids an upfront heap allocation
     // when no tags/links are present (the common case).
-    let mut tags: Vec<InternedStr> = Vec::new();
+    let mut tags: Vec<rustledger_core::Tag> = Vec::new();
     let mut links: Vec<InternedStr> = Vec::new();
 
     loop {
@@ -1556,7 +1556,7 @@ fn parse_document_directive(stream: &mut TokenStream<'_>) -> ParseRes<ParsedItem
     let path = parse_string_owned(stream)?;
 
     // Optional tags and links — Vec::new() avoids allocation when absent
-    let mut tags: Vec<InternedStr> = Vec::new();
+    let mut tags: Vec<rustledger_core::Tag> = Vec::new();
     let mut links: Vec<InternedStr> = Vec::new();
     loop {
         if let Ok(tag) = parse_tag(stream) {
@@ -1753,7 +1753,7 @@ fn parse_entry(stream: &mut TokenStream<'_>) -> ParseRes<ParsedItem> {
 // Push Tag/Meta Application
 // ============================================================================
 
-fn apply_pushed_tags(directive: &mut Directive, tag_stack: &[(InternedStr, Span)]) {
+fn apply_pushed_tags(directive: &mut Directive, tag_stack: &[(rustledger_core::Tag, Span)]) {
     if tag_stack.is_empty() {
         return;
     }
@@ -1827,7 +1827,7 @@ pub fn parse(source: &str) -> ParseResult {
     let mut comments = Vec::with_capacity((source.len() / 100).min(MAX_PREALLOC_COMMENTS));
     let mut errors = Vec::with_capacity(4);
 
-    let mut tag_stack: Vec<(InternedStr, Span)> = Vec::with_capacity(8);
+    let mut tag_stack: Vec<(rustledger_core::Tag, Span)> = Vec::with_capacity(8);
     let mut meta_stack: Vec<(String, MetaValue, Span)> = Vec::with_capacity(8);
 
     while !stream.is_empty() {

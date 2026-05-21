@@ -557,8 +557,7 @@ pub struct Transaction {
     #[cfg_attr(feature = "rkyv", rkyv(with = AsInternedStr))]
     pub narration: InternedStr,
     /// Tags attached to this transaction
-    #[cfg_attr(feature = "rkyv", rkyv(with = AsVecInternedStr))]
-    pub tags: Vec<InternedStr>,
+    pub tags: Vec<crate::Tag>,
     /// Links attached to this transaction
     #[cfg_attr(feature = "rkyv", rkyv(with = AsVecInternedStr))]
     pub links: Vec<InternedStr>,
@@ -609,7 +608,7 @@ impl Transaction {
 
     /// Add a tag.
     #[must_use]
-    pub fn with_tag(mut self, tag: impl Into<InternedStr>) -> Self {
+    pub fn with_tag(mut self, tag: impl Into<crate::Tag>) -> Self {
         self.tags.push(tag.into());
         self
     }
@@ -1199,8 +1198,7 @@ pub struct Document {
     /// File path to the document
     pub path: String,
     /// Tags
-    #[cfg_attr(feature = "rkyv", rkyv(with = AsVecInternedStr))]
-    pub tags: Vec<InternedStr>,
+    pub tags: Vec<crate::Tag>,
     /// Links
     #[cfg_attr(feature = "rkyv", rkyv(with = AsVecInternedStr))]
     pub links: Vec<InternedStr>,
@@ -1228,7 +1226,7 @@ impl Document {
 
     /// Add a tag.
     #[must_use]
-    pub fn with_tag(mut self, tag: impl Into<InternedStr>) -> Self {
+    pub fn with_tag(mut self, tag: impl Into<crate::Tag>) -> Self {
         self.tags.push(tag.into());
         self
     }

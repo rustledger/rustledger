@@ -7052,7 +7052,7 @@ fn test_postings_table_price_column() {
             Transaction::new(date(2024, 1, 15), "Buy at price")
                 .with_synthesized_posting(
                     Posting::new("Assets:Brokerage", Amount::new(dec!(10), "AAPL"))
-                        .with_price(PriceAnnotation::Unit(Amount::new(dec!(150), "USD"))),
+                        .with_price(PriceAnnotation::unit(Amount::new(dec!(150), "USD"))),
                 )
                 .with_synthesized_posting(Posting::new(
                     "Assets:Cash",
@@ -7494,7 +7494,7 @@ fn test_postings_table_weight_per_unit_price() {
             Transaction::new(date(2024, 1, 15), "Buy euros")
                 .with_synthesized_posting(
                     Posting::new("Assets:Foreign", Amount::new(dec!(100), "EUR"))
-                        .with_price(PriceAnnotation::Unit(Amount::new(dec!(1.10), "USD"))),
+                        .with_price(PriceAnnotation::unit(Amount::new(dec!(1.10), "USD"))),
                 )
                 .with_synthesized_posting(Posting::new(
                     "Assets:Bank",
@@ -7523,7 +7523,7 @@ fn test_postings_table_weight_total_price() {
             Transaction::new(date(2024, 1, 15), "Buy euros")
                 .with_synthesized_posting(
                     Posting::new("Assets:Foreign", Amount::new(dec!(100), "EUR"))
-                        .with_price(PriceAnnotation::Total(Amount::new(dec!(110), "USD"))),
+                        .with_price(PriceAnnotation::total(Amount::new(dec!(110), "USD"))),
                 )
                 .with_synthesized_posting(Posting::new(
                     "Assets:Bank",
@@ -7553,7 +7553,7 @@ fn test_weight_column_total_price_default_from() {
             Transaction::new(date(2024, 1, 15), "Buy euros")
                 .with_synthesized_posting(
                     Posting::new("Assets:Foreign", Amount::new(dec!(100), "EUR"))
-                        .with_price(PriceAnnotation::Total(Amount::new(dec!(110), "USD"))),
+                        .with_price(PriceAnnotation::total(Amount::new(dec!(110), "USD"))),
                 )
                 .with_synthesized_posting(Posting::new(
                     "Assets:Bank",
@@ -7587,7 +7587,7 @@ fn test_weight_total_price_credit_side_flips_sign() {
             Transaction::new(date(2025, 1, 23), "insurance matured")
                 .with_synthesized_posting(
                     Posting::new("Assets:Insurance", Amount::new(dec!(-27204.53), "BAM"))
-                        .with_price(PriceAnnotation::Total(Amount::new(dec!(15152.07), "EUR"))),
+                        .with_price(PriceAnnotation::total(Amount::new(dec!(15152.07), "EUR"))),
                 )
                 .with_synthesized_posting(Posting::new(
                     "Assets:Cash",
@@ -8081,7 +8081,7 @@ fn test_issue_567_value_uses_implicit_price_from_annotation() {
                                 .with_currency("EUR")
                                 .with_date(date(2024, 1, 10)),
                         )
-                        .with_price(PriceAnnotation::Unit(Amount::new(dec!(1.40), "EUR"))),
+                        .with_price(PriceAnnotation::unit(Amount::new(dec!(1.40), "EUR"))),
                 )
                 .with_synthesized_posting(Posting::new(
                     "Assets:Cash",
@@ -8158,7 +8158,7 @@ fn test_issue_567_value_sum_position_with_implicit_price() {
                                 .with_number_per(dec!(50))
                                 .with_currency("USD"),
                         )
-                        .with_price(PriceAnnotation::Unit(Amount::new(dec!(60), "USD"))),
+                        .with_price(PriceAnnotation::unit(Amount::new(dec!(60), "USD"))),
                 )
                 .with_synthesized_posting(Posting::new(
                     "Assets:Cash",
@@ -8566,7 +8566,7 @@ fn test_issue_593_cost_preserves_sign_for_sells() {
                                 .with_currency("EUR")
                                 .with_date(date(2025, 4, 1)),
                         )
-                        .with_price(PriceAnnotation::Unit(Amount::new(dec!(1.35), "EUR"))),
+                        .with_price(PriceAnnotation::unit(Amount::new(dec!(1.35), "EUR"))),
                 )
                 .with_synthesized_posting(Posting::new(
                     "Assets:Bank:Checking",
@@ -8584,7 +8584,7 @@ fn test_issue_593_cost_preserves_sign_for_sells() {
                                 .with_currency("EUR")
                                 .with_date(date(2025, 4, 2)),
                         )
-                        .with_price(PriceAnnotation::Unit(Amount::new(dec!(1.40), "EUR"))),
+                        .with_price(PriceAnnotation::unit(Amount::new(dec!(1.40), "EUR"))),
                 )
                 .with_synthesized_posting(Posting::new(
                     "Assets:Bank:Checking",
@@ -8736,7 +8736,7 @@ fn test_issue_593_value_uses_latest_implicit_price() {
                                 .with_currency("EUR")
                                 .with_date(date(2025, 4, 1)),
                         )
-                        .with_price(PriceAnnotation::Unit(Amount::new(dec!(1.35), "EUR"))),
+                        .with_price(PriceAnnotation::unit(Amount::new(dec!(1.35), "EUR"))),
                 )
                 .with_synthesized_posting(Posting::new(
                     "Assets:Bank:Checking",
@@ -8754,7 +8754,7 @@ fn test_issue_593_value_uses_latest_implicit_price() {
                                 .with_currency("EUR")
                                 .with_date(date(2025, 4, 2)),
                         )
-                        .with_price(PriceAnnotation::Unit(Amount::new(dec!(1.40), "EUR"))),
+                        .with_price(PriceAnnotation::unit(Amount::new(dec!(1.40), "EUR"))),
                 )
                 .with_synthesized_posting(Posting::new(
                     "Assets:Bank:Checking",

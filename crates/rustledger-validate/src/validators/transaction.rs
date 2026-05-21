@@ -380,23 +380,21 @@ pub fn calculate_tolerances(
                     *cost_tolerances.entry(cost_currency.clone()).or_default() += cost_tolerance;
                 }
 
-                // Price contribution
-                if let Some(price) = &posting.price {
-                    match price {
-                        rustledger_core::PriceAnnotation::Unit(price_amt) => {
-                            let price_tolerance = tolerance * price_amt.number;
-                            *cost_tolerances
-                                .entry(price_amt.currency.clone())
-                                .or_default() += price_tolerance;
-                        }
-                        rustledger_core::PriceAnnotation::Total(price_amt) => {
-                            let price_tolerance = tolerance * price_amt.number;
-                            *cost_tolerances
-                                .entry(price_amt.currency.clone())
-                                .or_default() += price_tolerance;
-                        }
-                        _ => {}
-                    }
+                // Price contribution: only complete amounts contribute
+                // (incomplete/empty price annotations are filled in by
+                // interpolation later). `kind` (Unit vs Total) doesn't
+                // change the tolerance math here — both use `tolerance *
+                // price_amt.number`.
+                if let Some(price) = &posting.price
+                    && let Some(price_amt) = price
+                        .amount
+                        .as_ref()
+                        .and_then(rustledger_core::IncompleteAmount::as_amount)
+                {
+                    let price_tolerance = tolerance * price_amt.number;
+                    *cost_tolerances
+                        .entry(price_amt.currency.clone())
+                        .or_default() += price_tolerance;
                 }
             }
         }

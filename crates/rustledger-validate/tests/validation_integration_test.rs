@@ -425,7 +425,7 @@ fn test_valid_multi_currency_with_price() {
             Transaction::new(date(2024, 1, 15), "Currency exchange")
                 .with_synthesized_posting(
                     Posting::new("Assets:USD", Amount::new(dec!(100), "USD"))
-                        .with_price(PriceAnnotation::Unit(Amount::new(dec!(0.85), "EUR"))),
+                        .with_price(PriceAnnotation::unit(Amount::new(dec!(0.85), "EUR"))),
                 )
                 .with_synthesized_posting(Posting::new(
                     "Assets:EUR",

@@ -183,9 +183,9 @@ pub(super) fn data_to_price_annotation(
     if let Some(amount_data) = &data.amount {
         let amount = data_to_amount(amount_data)?;
         if data.is_total {
-            Ok(PriceAnnotation::Total(amount))
+            Ok(PriceAnnotation::total(amount))
         } else {
-            Ok(PriceAnnotation::Unit(amount))
+            Ok(PriceAnnotation::unit(amount))
         }
     } else if data.number.is_some() || data.currency.is_some() {
         // Incomplete price
@@ -203,16 +203,16 @@ pub(super) fn data_to_price_annotation(
             unreachable!()
         };
         if data.is_total {
-            Ok(PriceAnnotation::TotalIncomplete(incomplete))
+            Ok(PriceAnnotation::total_incomplete(incomplete))
         } else {
-            Ok(PriceAnnotation::UnitIncomplete(incomplete))
+            Ok(PriceAnnotation::unit_incomplete(incomplete))
         }
     } else {
         // Empty price
         if data.is_total {
-            Ok(PriceAnnotation::TotalEmpty)
+            Ok(PriceAnnotation::total_empty())
         } else {
-            Ok(PriceAnnotation::UnitEmpty)
+            Ok(PriceAnnotation::unit_empty())
         }
     }
 }

@@ -57,24 +57,45 @@ pub fn calculate_tolerance(amounts: &[&Amount]) -> HashMap<Currency, Decimal> {
 
 /// Extract the currency named in a posting's price annotation, if any.
 ///
-/// Walks all `PriceAnnotation` shapes — `Unit`, `Total`, the `Incomplete`
-/// variants when they carry a complete amount, and the empty variants
-/// (which return `None`). Used by the booking residual computations and
-/// interpolation to look up a posting's price-side currency without
-/// duplicating the match in three places.
+/// Returns the currency on `IncompleteAmount::Complete`. `CurrencyOnly`,
+/// `NumberOnly`, and the bare-sigil form (`amount: None`) all return
+/// `None` — they're shapes where the currency is either missing or
+/// supplied later by interpolation. `kind` (Unit vs Total) is irrelevant
+/// at this layer.
 #[must_use]
 pub(crate) fn price_currency_of(posting: &rustledger_core::Posting) -> Option<Currency> {
-    posting.price.as_ref().and_then(|p| match p {
-        rustledger_core::PriceAnnotation::Unit(a) | rustledger_core::PriceAnnotation::Total(a) => {
-            Some(a.currency.clone())
-        }
-        rustledger_core::PriceAnnotation::UnitIncomplete(inc)
-        | rustledger_core::PriceAnnotation::TotalIncomplete(inc) => {
-            inc.as_amount().map(|a| a.currency.clone())
-        }
-        rustledger_core::PriceAnnotation::UnitEmpty
-        | rustledger_core::PriceAnnotation::TotalEmpty => None,
-    })
+    posting
+        .price
+        .as_ref()
+        .and_then(|p| p.amount.as_ref())
+        .and_then(IncompleteAmount::as_amount)
+        .map(|a| a.currency.clone())
+}
+
+/// Compute the (currency, signed contribution) a price annotation
+/// adds to a transaction's residual for the given units.
+///
+/// `kind = Unit` ⇒ contribution is `|units| * price * sign(units)`;
+/// `kind = Total` ⇒ contribution is `price * sign(units)`.
+///
+/// Returns `None` for incomplete/empty price annotations where the
+/// currency or number is missing — the caller falls back to weighing
+/// the posting in its units currency. Used by both `calculate_residual`
+/// and `calculate_residual_precise` so the Unit-vs-Total semantics
+/// live in one place.
+fn price_residual_contribution(
+    price: &rustledger_core::PriceAnnotation,
+    units: &rustledger_core::Amount,
+) -> Option<(Currency, Decimal)> {
+    let amt = price
+        .amount
+        .as_ref()
+        .and_then(IncompleteAmount::as_amount)?;
+    let signed = match price.kind {
+        rustledger_core::PriceKind::Unit => units.number.abs() * amt.number * units.number.signum(),
+        rustledger_core::PriceKind::Total => amt.number * units.number.signum(),
+    };
+    Some((amt.currency.clone(), signed))
 }
 
 /// Infer the cost currency from other postings in the transaction.
@@ -102,20 +123,8 @@ pub(crate) fn infer_cost_currency_from_postings(transaction: &Transaction) -> Op
                 IncompleteAmount::Complete(amount) => {
                     // If this posting has a price annotation, the "real" currency
                     // is the price currency, not the units currency
-                    if let Some(price) = &posting.price {
-                        match price {
-                            rustledger_core::PriceAnnotation::Unit(a)
-                            | rustledger_core::PriceAnnotation::Total(a) => {
-                                return Some(a.currency.clone());
-                            }
-                            rustledger_core::PriceAnnotation::UnitIncomplete(inc)
-                            | rustledger_core::PriceAnnotation::TotalIncomplete(inc) => {
-                                if let Some(a) = inc.as_amount() {
-                                    return Some(a.currency.clone());
-                                }
-                            }
-                            _ => {}
-                        }
+                    if let Some(c) = price_currency_of(posting) {
+                        return Some(c);
                     }
                     // Simple posting - use its currency
                     return Some(amount.currency.clone());
@@ -221,41 +230,12 @@ pub fn calculate_residual(transaction: &Transaction) -> HashMap<Currency, Decima
             } else if let Some(price) = &posting.price {
                 // Price annotation: converts units to price currency for balance purposes.
                 // The weight is in the price currency, not the units currency.
-                match price {
-                    rustledger_core::PriceAnnotation::Unit(price_amt) => {
-                        let converted = units.number.abs() * price_amt.number;
-                        *residuals.entry(price_amt.currency.clone()).or_default() +=
-                            converted * units.number.signum();
-                    }
-                    rustledger_core::PriceAnnotation::Total(price_amt) => {
-                        *residuals.entry(price_amt.currency.clone()).or_default() +=
-                            price_amt.number * units.number.signum();
-                    }
-                    // Incomplete price annotations - extract what we can
-                    rustledger_core::PriceAnnotation::UnitIncomplete(inc) => {
-                        if let Some(price_amt) = inc.as_amount() {
-                            let converted = units.number.abs() * price_amt.number;
-                            *residuals.entry(price_amt.currency.clone()).or_default() +=
-                                converted * units.number.signum();
-                        } else {
-                            // Can't calculate price conversion, fall back to units
-                            *residuals.entry(units.currency.clone()).or_default() += units.number;
-                        }
-                    }
-                    rustledger_core::PriceAnnotation::TotalIncomplete(inc) => {
-                        if let Some(price_amt) = inc.as_amount() {
-                            *residuals.entry(price_amt.currency.clone()).or_default() +=
-                                price_amt.number * units.number.signum();
-                        } else {
-                            // Can't calculate price conversion, fall back to units
-                            *residuals.entry(units.currency.clone()).or_default() += units.number;
-                        }
-                    }
-                    // Empty price annotations - fall back to units
-                    rustledger_core::PriceAnnotation::UnitEmpty
-                    | rustledger_core::PriceAnnotation::TotalEmpty => {
-                        *residuals.entry(units.currency.clone()).or_default() += units.number;
-                    }
+                if let Some((curr, contribution)) = price_residual_contribution(price, units) {
+                    *residuals.entry(curr).or_default() += contribution;
+                } else {
+                    // Incomplete or bare-sigil price annotation — can't
+                    // calculate a price-currency conversion, fall back to units.
+                    *residuals.entry(units.currency.clone()).or_default() += units.number;
                 }
             } else {
                 // Simple posting: weight is just the units
@@ -335,40 +315,23 @@ pub fn calculate_residual_precise(transaction: &Transaction) -> HashMap<Currency
                 // to the price branch produces a wrong-weight balanced
                 // residual (issue #1026).
             } else if let Some(price) = &posting.price {
-                match price {
-                    rustledger_core::PriceAnnotation::Unit(price_amt) => {
-                        let converted = units_number.abs() * to_big(price_amt.number);
-                        *residuals.entry(price_amt.currency.clone()).or_default() +=
-                            converted * to_big(units.number.signum());
-                    }
-                    rustledger_core::PriceAnnotation::Total(price_amt) => {
-                        *residuals.entry(price_amt.currency.clone()).or_default() +=
-                            to_big(price_amt.number) * to_big(units.number.signum());
-                    }
-                    rustledger_core::PriceAnnotation::UnitIncomplete(inc) => {
-                        if let Some(price_amt) = inc.as_amount() {
-                            let converted = units_number.abs() * to_big(price_amt.number);
-                            *residuals.entry(price_amt.currency.clone()).or_default() +=
-                                converted * to_big(units.number.signum());
-                        } else {
-                            *residuals.entry(units.currency.clone()).or_default() +=
-                                units_number.clone();
+                // Same Unit/Total semantics as `calculate_residual`, but
+                // running through BigDecimal to avoid 28-digit precision
+                // loss. Inline because the `BigDecimal` math doesn't fit
+                // the shared `price_residual_contribution` (which returns
+                // `Decimal`).
+                if let Some(amt) = price.amount.as_ref().and_then(IncompleteAmount::as_amount) {
+                    let signed = match price.kind {
+                        rustledger_core::PriceKind::Unit => {
+                            units_number.abs() * to_big(amt.number) * to_big(units.number.signum())
                         }
-                    }
-                    rustledger_core::PriceAnnotation::TotalIncomplete(inc) => {
-                        if let Some(price_amt) = inc.as_amount() {
-                            *residuals.entry(price_amt.currency.clone()).or_default() +=
-                                to_big(price_amt.number) * to_big(units.number.signum());
-                        } else {
-                            *residuals.entry(units.currency.clone()).or_default() +=
-                                units_number.clone();
+                        rustledger_core::PriceKind::Total => {
+                            to_big(amt.number) * to_big(units.number.signum())
                         }
-                    }
-                    rustledger_core::PriceAnnotation::UnitEmpty
-                    | rustledger_core::PriceAnnotation::TotalEmpty => {
-                        *residuals.entry(units.currency.clone()).or_default() +=
-                            units_number.clone();
-                    }
+                    };
+                    *residuals.entry(amt.currency.clone()).or_default() += signed;
+                } else {
+                    *residuals.entry(units.currency.clone()).or_default() += units_number.clone();
                 }
             } else {
                 *residuals.entry(units.currency.clone()).or_default() += units_number;
@@ -404,33 +367,32 @@ pub fn is_balanced(transaction: &Transaction, tolerances: &HashMap<Currency, Dec
 ///
 /// Matches Python beancount behavior where `@@` is converted to `@`.
 pub fn normalize_prices(txn: &mut Transaction) {
-    use rustledger_core::PriceAnnotation;
+    use rustledger_core::{PriceAnnotation, PriceKind};
 
     for posting in &mut txn.postings {
         if let (Some(IncompleteAmount::Complete(units)), Some(price)) =
             (&posting.units, &posting.price)
+            && price.kind == PriceKind::Total
         {
-            let normalized = match price {
-                PriceAnnotation::Total(total_amount) if !units.number.is_zero() => {
+            let normalized = match price.amount.as_ref().and_then(IncompleteAmount::as_amount) {
+                Some(total_amount) if !units.number.is_zero() => {
                     let per_unit = total_amount.number / units.number.abs();
-                    Some(PriceAnnotation::Unit(Amount::new(
+                    Some(PriceAnnotation::unit(Amount::new(
                         per_unit,
                         &total_amount.currency,
                     )))
                 }
-                PriceAnnotation::TotalIncomplete(inc) if !units.number.is_zero() => {
-                    if let Some(total_amount) = inc.as_amount() {
-                        let per_unit = total_amount.number / units.number.abs();
-                        Some(PriceAnnotation::Unit(Amount::new(
-                            per_unit,
-                            &total_amount.currency,
-                        )))
+                Some(_) => None, // units.number is zero — leave alone
+                None => {
+                    // Empty (`@@` with no amount) — Total → Unit sigil swap.
+                    // `total_incomplete` with no complete amount cannot be
+                    // normalized because we don't have a number to divide.
+                    if price.amount.is_none() {
+                        Some(PriceAnnotation::unit_empty())
                     } else {
                         None
                     }
                 }
-                PriceAnnotation::TotalEmpty => Some(PriceAnnotation::UnitEmpty),
-                _ => None,
             };
             if let Some(normalized_price) = normalized {
                 posting.price = Some(normalized_price);
@@ -652,7 +614,7 @@ mod tests {
             .with_synthesized_posting(
                 Posting::new("Assets:Stock", Amount::new(dec!(-10), "HOOL"))
                     .with_cost(CostSpec::empty())
-                    .with_price(rustledger_core::PriceAnnotation::Unit(Amount::new(
+                    .with_price(rustledger_core::PriceAnnotation::unit(Amount::new(
                         dec!(150),
                         "USD",
                     ))),
@@ -679,7 +641,7 @@ mod tests {
             .with_synthesized_posting(
                 Posting::new("Assets:Stock", Amount::new(dec!(-10), "HOOL"))
                     .with_cost(CostSpec::empty())
-                    .with_price(rustledger_core::PriceAnnotation::Unit(Amount::new(
+                    .with_price(rustledger_core::PriceAnnotation::unit(Amount::new(
                         dec!(150),
                         "USD",
                     ))),
@@ -704,7 +666,7 @@ mod tests {
         let txn = Transaction::new(date(2024, 1, 15), "Currency exchange")
             .with_synthesized_posting(
                 Posting::new("Assets:USD", Amount::new(dec!(-100.00), "USD"))
-                    .with_price(PriceAnnotation::Unit(Amount::new(dec!(0.85), "EUR"))),
+                    .with_price(PriceAnnotation::unit(Amount::new(dec!(0.85), "EUR"))),
             )
             .with_synthesized_posting(Posting::new("Assets:EUR", Amount::new(dec!(85.00), "EUR")));
 
@@ -723,7 +685,7 @@ mod tests {
         let txn = Transaction::new(date(2024, 1, 15), "Currency exchange")
             .with_synthesized_posting(
                 Posting::new("Assets:USD", Amount::new(dec!(-100.00), "USD"))
-                    .with_price(PriceAnnotation::Total(Amount::new(dec!(85.00), "EUR"))),
+                    .with_price(PriceAnnotation::total(Amount::new(dec!(85.00), "EUR"))),
             )
             .with_synthesized_posting(Posting::new("Assets:EUR", Amount::new(dec!(85.00), "EUR")));
 
@@ -739,7 +701,7 @@ mod tests {
         let txn = Transaction::new(date(2024, 1, 15), "Buy EUR")
             .with_synthesized_posting(
                 Posting::new("Assets:EUR", Amount::new(dec!(85.00), "EUR"))
-                    .with_price(PriceAnnotation::Unit(Amount::new(dec!(1.18), "USD"))),
+                    .with_price(PriceAnnotation::unit(Amount::new(dec!(1.18), "USD"))),
             )
             .with_synthesized_posting(Posting::new(
                 "Assets:USD",
@@ -758,7 +720,7 @@ mod tests {
         let txn = Transaction::new(date(2024, 1, 15), "Exchange")
             .with_synthesized_posting(
                 Posting::new("Assets:USD", Amount::new(dec!(-100.00), "USD")).with_price(
-                    PriceAnnotation::UnitIncomplete(IncompleteAmount::Complete(Amount::new(
+                    PriceAnnotation::unit_incomplete(IncompleteAmount::Complete(Amount::new(
                         dec!(0.85),
                         "EUR",
                     ))),
@@ -776,7 +738,7 @@ mod tests {
         let txn = Transaction::new(date(2024, 1, 15), "Exchange")
             .with_synthesized_posting(
                 Posting::new("Assets:USD", Amount::new(dec!(-100.00), "USD")).with_price(
-                    PriceAnnotation::TotalIncomplete(IncompleteAmount::Complete(Amount::new(
+                    PriceAnnotation::total_incomplete(IncompleteAmount::Complete(Amount::new(
                         dec!(85.00),
                         "EUR",
                     ))),
@@ -794,7 +756,7 @@ mod tests {
         let txn = Transaction::new(date(2024, 1, 15), "Test")
             .with_synthesized_posting(
                 Posting::new("Assets:USD", Amount::new(dec!(100.00), "USD")).with_price(
-                    PriceAnnotation::UnitIncomplete(IncompleteAmount::NumberOnly(dec!(0.85))),
+                    PriceAnnotation::unit_incomplete(IncompleteAmount::NumberOnly(dec!(0.85))),
                 ),
             )
             .with_synthesized_posting(Posting::new(
@@ -813,7 +775,7 @@ mod tests {
         let txn = Transaction::new(date(2024, 1, 15), "Test")
             .with_synthesized_posting(
                 Posting::new("Assets:USD", Amount::new(dec!(100.00), "USD")).with_price(
-                    PriceAnnotation::TotalIncomplete(IncompleteAmount::NumberOnly(dec!(85.00))),
+                    PriceAnnotation::total_incomplete(IncompleteAmount::NumberOnly(dec!(85.00))),
                 ),
             )
             .with_synthesized_posting(Posting::new(
@@ -831,7 +793,7 @@ mod tests {
         let txn = Transaction::new(date(2024, 1, 15), "Test")
             .with_synthesized_posting(
                 Posting::new("Assets:USD", Amount::new(dec!(100.00), "USD"))
-                    .with_price(PriceAnnotation::UnitEmpty),
+                    .with_price(PriceAnnotation::unit_empty()),
             )
             .with_synthesized_posting(Posting::new(
                 "Assets:USD",
@@ -849,7 +811,7 @@ mod tests {
         let txn = Transaction::new(date(2024, 1, 15), "Test")
             .with_synthesized_posting(
                 Posting::new("Assets:USD", Amount::new(dec!(100.00), "USD"))
-                    .with_price(PriceAnnotation::TotalEmpty),
+                    .with_price(PriceAnnotation::total_empty()),
             )
             .with_synthesized_posting(Posting::new(
                 "Assets:USD",
@@ -900,7 +862,7 @@ mod tests {
                             .with_number_per(dec!(150.00))
                             .with_currency("USD"),
                     )
-                    .with_price(PriceAnnotation::Unit(Amount::new(dec!(175.00), "USD"))),
+                    .with_price(PriceAnnotation::unit(Amount::new(dec!(175.00), "USD"))),
             )
             .with_synthesized_posting(Posting::new(
                 "Assets:Cash",
@@ -1051,7 +1013,7 @@ mod tests {
             .with_synthesized_posting(
                 Posting::new("Assets:Stock", Amount::new(dec!(10), "AAPL"))
                     .with_cost(CostSpec::empty().with_number_per(dec!(100)))
-                    .with_price(PriceAnnotation::Unit(Amount::new(dec!(105), "EUR"))),
+                    .with_price(PriceAnnotation::unit(Amount::new(dec!(105), "EUR"))),
             )
             .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(-1000), "USD")));
 

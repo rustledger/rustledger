@@ -353,37 +353,37 @@ mod tests {
 
     #[test]
     fn test_format_price_annotation_unit() {
-        let price = PriceAnnotation::Unit(Amount::new(dec!(150.00), "USD"));
+        let price = PriceAnnotation::unit(Amount::new(dec!(150.00), "USD"));
         assert_eq!(format_price_annotation(&price), "@ 150.00 USD");
     }
 
     #[test]
     fn test_format_price_annotation_total() {
-        let price = PriceAnnotation::Total(Amount::new(dec!(1500.00), "USD"));
+        let price = PriceAnnotation::total(Amount::new(dec!(1500.00), "USD"));
         assert_eq!(format_price_annotation(&price), "@@ 1500.00 USD");
     }
 
     #[test]
     fn test_format_price_annotation_unit_incomplete() {
-        let price = PriceAnnotation::UnitIncomplete(IncompleteAmount::NumberOnly(dec!(150.00)));
+        let price = PriceAnnotation::unit_incomplete(IncompleteAmount::NumberOnly(dec!(150.00)));
         assert_eq!(format_price_annotation(&price), "@ 150.00");
     }
 
     #[test]
     fn test_format_price_annotation_total_incomplete() {
-        let price = PriceAnnotation::TotalIncomplete(IncompleteAmount::CurrencyOnly("USD".into()));
+        let price = PriceAnnotation::total_incomplete(IncompleteAmount::CurrencyOnly("USD".into()));
         assert_eq!(format_price_annotation(&price), "@@ USD");
     }
 
     #[test]
     fn test_format_price_annotation_unit_empty() {
-        let price = PriceAnnotation::UnitEmpty;
+        let price = PriceAnnotation::unit_empty();
         assert_eq!(format_price_annotation(&price), "@");
     }
 
     #[test]
     fn test_format_price_annotation_total_empty() {
-        let price = PriceAnnotation::TotalEmpty;
+        let price = PriceAnnotation::total_empty();
         assert_eq!(format_price_annotation(&price), "@@");
     }
 
@@ -786,7 +786,7 @@ mod tests {
                 label: None,
                 merge: false,
             }),
-            price: Some(PriceAnnotation::Unit(Amount::new(dec!(155.00), "USD"))),
+            price: Some(PriceAnnotation::unit(Amount::new(dec!(155.00), "USD"))),
             meta: Default::default(),
             comments: Vec::new(),
             trailing_comments: Vec::new(),

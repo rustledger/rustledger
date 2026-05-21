@@ -794,7 +794,7 @@ mod tests {
                             .with_number_per(dec!(1.25))
                             .with_currency("EUR"),
                     )
-                    .with_price(PriceAnnotation::Unit(Amount::new(dec!(1.40), "EUR"))),
+                    .with_price(PriceAnnotation::unit(Amount::new(dec!(1.40), "EUR"))),
             )
             .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(7.00), "EUR")));
 
@@ -836,7 +836,7 @@ mod tests {
         let txn = Transaction::new(date(2024, 1, 15), "Sell")
             .with_synthesized_posting(
                 Posting::new("Assets:Stocks", Amount::new(dec!(-10), "ABC"))
-                    .with_price(PriceAnnotation::Total(Amount::new(dec!(1500), "USD"))),
+                    .with_price(PriceAnnotation::total(Amount::new(dec!(1500), "USD"))),
             )
             .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(1500), "USD")));
 
@@ -861,7 +861,7 @@ mod tests {
                             .with_number_per(dec!(1.25))
                             .with_currency("EUR"),
                     )
-                    .with_price(PriceAnnotation::Unit(Amount::new(dec!(1.40), "EUR"))),
+                    .with_price(PriceAnnotation::unit(Amount::new(dec!(1.40), "EUR"))),
             )
             .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(7.00), "EUR")));
 
@@ -885,7 +885,7 @@ mod tests {
                         .with_number_per(dec!(50))
                         .with_currency("USD"),
                 )
-                .with_price(PriceAnnotation::Total(Amount::new(dec!(100), "EUR"))),
+                .with_price(PriceAnnotation::total(Amount::new(dec!(100), "EUR"))),
         );
 
         let db = PriceDatabase::from_directives(&[Directive::Transaction(txn)]);
@@ -918,7 +918,7 @@ mod tests {
                             .with_number_per(dec!(1.25))
                             .with_currency("EUR"),
                     )
-                    .with_price(PriceAnnotation::Unit(Amount::new(dec!(1.40), "EUR"))),
+                    .with_price(PriceAnnotation::unit(Amount::new(dec!(1.40), "EUR"))),
             )
             .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(7.00), "EUR")));
 
@@ -963,7 +963,7 @@ mod tests {
                                     .with_number_per(dec!(1.25))
                                     .with_currency("EUR"),
                             )
-                            .with_price(PriceAnnotation::Unit(Amount::new(dec!(1.40), "EUR"))),
+                            .with_price(PriceAnnotation::unit(Amount::new(dec!(1.40), "EUR"))),
                     )
                     .with_synthesized_posting(Posting::new(
                         "Assets:Cash",

@@ -42,17 +42,15 @@ pub fn discover_journal_file(workspace_root: &Path) -> Option<PathBuf> {
     None
 }
 
-/// Extract currency from a price annotation if available.
+/// Extract currency from a price annotation if available. `kind`
+/// (Unit vs Total) doesn't change the currency; we just walk the
+/// underlying amount.
 fn extract_price_currency(price: &PriceAnnotation) -> Option<String> {
-    match price {
-        PriceAnnotation::Unit(amount) | PriceAnnotation::Total(amount) => {
-            Some(amount.currency.to_string())
-        }
-        PriceAnnotation::UnitIncomplete(inc) | PriceAnnotation::TotalIncomplete(inc) => {
-            inc.currency().map(|c| c.to_string())
-        }
-        PriceAnnotation::UnitEmpty | PriceAnnotation::TotalEmpty => None,
-    }
+    price
+        .amount
+        .as_ref()
+        .and_then(|inc| inc.currency())
+        .map(str::to_string)
 }
 
 /// Configuration for the LSP server, parsed from initialization options.

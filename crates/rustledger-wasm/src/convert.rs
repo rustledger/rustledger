@@ -11,13 +11,15 @@ pub fn directive_to_json(directive: &Directive) -> DirectiveJson {
     use rustledger_core::PriceAnnotation;
 
     fn price_annotation_to_amount(pr: &PriceAnnotation) -> Option<AmountValue> {
-        match pr {
-            PriceAnnotation::Unit(a) | PriceAnnotation::Total(a) => Some(AmountValue {
+        // JSON only emits the amount when it's complete; `kind` is
+        // encoded separately by callers that care.
+        pr.amount
+            .as_ref()
+            .and_then(rustledger_core::IncompleteAmount::as_amount)
+            .map(|a| AmountValue {
                 number: a.number.to_string(),
                 currency: a.currency.to_string(),
-            }),
-            _ => None,
-        }
+            })
     }
 
     match directive {

@@ -337,28 +337,18 @@ impl Executor<'_> {
                 .as_ref()
                 .and_then(|c| c.label.as_ref())
                 .map_or(Value::Null, |l| Value::String(l.clone()))),
-            // Price annotation
+            // Price annotation: return the complete amount (`kind`
+            // doesn't matter for the BQL `price` accessor — Python
+            // bean-query yields the same Amount for `@` and `@@`).
+            // Incomplete amounts or bare-sigil prices return Null.
             "price" => {
-                use rustledger_core::PriceAnnotation;
-                if let Some(price) = &posting.price {
-                    match price {
-                        PriceAnnotation::Unit(amount) | PriceAnnotation::Total(amount) => {
-                            Ok(Value::Amount(amount.clone()))
-                        }
-                        PriceAnnotation::UnitIncomplete(inc)
-                        | PriceAnnotation::TotalIncomplete(inc) => {
-                            // Try to get complete amount from incomplete
-                            if let Some(amount) = inc.as_amount().cloned() {
-                                Ok(Value::Amount(amount))
-                            } else {
-                                Ok(Value::Null)
-                            }
-                        }
-                        PriceAnnotation::UnitEmpty | PriceAnnotation::TotalEmpty => Ok(Value::Null),
-                    }
-                } else {
-                    Ok(Value::Null)
-                }
+                use rustledger_core::IncompleteAmount;
+                Ok(posting
+                    .price
+                    .as_ref()
+                    .and_then(|p| p.amount.as_ref())
+                    .and_then(IncompleteAmount::as_amount)
+                    .map_or(Value::Null, |a| Value::Amount(a.clone())))
             }
             // All accounts in the transaction
             "accounts" => Ok(Value::StringSet(

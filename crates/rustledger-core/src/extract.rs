@@ -305,7 +305,7 @@ mod tests {
                         label: None,
                         merge: false,
                     }),
-                    price: Some(PriceAnnotation::Unit(Amount::new(dec!(1.1), "CHF"))),
+                    price: Some(PriceAnnotation::unit(Amount::new(dec!(1.1), "CHF"))),
                     flag: None,
                     meta: posting_meta,
                     comments: vec![],

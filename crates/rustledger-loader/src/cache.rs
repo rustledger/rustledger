@@ -214,7 +214,11 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 ///     fields) changed their archive wrappers. Bumping the version
 ///     forces regeneration so we don't risk rkyv reading old bytes
 ///     into a structurally-different `ArchivedMetaValue`.
-const CACHE_VERSION: u32 = 6;
+/// v7: `PriceAnnotation` refactored from 6-variant enum to
+///     `{ kind: PriceKind, amount: Option<IncompleteAmount> }`
+///     (#1167). Old cache bytes for the enum's discriminant would
+///     deserialize as nonsense in the new struct layout.
+const CACHE_VERSION: u32 = 7;
 
 /// Cache header stored at the start of cache files.
 #[derive(Debug, Clone)]

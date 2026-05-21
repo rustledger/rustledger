@@ -239,7 +239,7 @@ pub fn input_entry_to_directive(entry: &InputEntry) -> Result<Directive, String>
                     });
 
                     let price = p.price.as_ref().map(|pr| {
-                        rustledger_core::PriceAnnotation::Unit(rustledger_core::Amount {
+                        rustledger_core::PriceAnnotation::unit(rustledger_core::Amount {
                             number: rustledger_core::Decimal::from_str_exact(&pr.number)
                                 .unwrap_or_else(|_| rustledger_core::Decimal::from(0)),
                             currency: pr.currency.clone().into(),

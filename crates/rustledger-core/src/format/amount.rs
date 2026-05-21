@@ -41,12 +41,12 @@ pub fn format_cost_spec(spec: &CostSpec) -> String {
 
 /// Format a price annotation.
 pub fn format_price_annotation(price: &PriceAnnotation) -> String {
-    match price {
-        PriceAnnotation::Unit(amount) => format!("@ {}", format_amount(amount)),
-        PriceAnnotation::Total(amount) => format!("@@ {}", format_amount(amount)),
-        PriceAnnotation::UnitIncomplete(inc) => format!("@ {}", format_incomplete_amount(inc)),
-        PriceAnnotation::TotalIncomplete(inc) => format!("@@ {}", format_incomplete_amount(inc)),
-        PriceAnnotation::UnitEmpty => "@".to_string(),
-        PriceAnnotation::TotalEmpty => "@@".to_string(),
+    let sigil = price.kind.to_string();
+    match &price.amount {
+        Some(crate::IncompleteAmount::Complete(amt)) => {
+            format!("{sigil} {}", format_amount(amt))
+        }
+        Some(inc) => format!("{sigil} {}", format_incomplete_amount(inc)),
+        None => sigil,
     }
 }

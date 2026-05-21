@@ -37,7 +37,7 @@
 //! the parser's index. Separating the concerns keeps the AST
 //! value types pure.
 
-use crate::{Directive, MetaValue, Metadata, PriceAnnotation};
+use crate::{Directive, IncompleteAmount, MetaValue, Metadata, PriceAnnotation};
 
 /// Walk every position a currency name can appear in this directive,
 /// invoking `visit` once per occurrence.
@@ -49,7 +49,7 @@ use crate::{Directive, MetaValue, Metadata, PriceAnnotation};
 /// - `Price` directive (base `currency` and `amount.currency`)
 /// - `Posting.units.currency()` (units side, including `CurrencyOnly`)
 /// - `Posting.cost.currency` (cost spec)
-/// - `Posting.price` (all 6 `PriceAnnotation` variants)
+/// - `Posting.price` (any `PriceAnnotation`, regardless of `kind`)
 /// - `MetaValue::Currency` / `MetaValue::Amount` in any directive's
 ///   or posting's metadata block
 /// - `Custom.values` entries that are `MetaValue::Currency` or
@@ -230,14 +230,18 @@ fn visit_meta_value_account<'a>(v: &'a MetaValue, visit: &mut impl FnMut(&'a str
 }
 
 fn visit_price_currency<'a>(price: &'a PriceAnnotation, visit: &mut impl FnMut(&'a str)) {
-    match price {
-        PriceAnnotation::Unit(a) | PriceAnnotation::Total(a) => visit(a.currency.as_str()),
-        PriceAnnotation::UnitIncomplete(ia) | PriceAnnotation::TotalIncomplete(ia) => {
-            if let Some(c) = ia.currency() {
+    // Post-#1167: PriceAnnotation factors into orthogonal kind+amount
+    // axes, so the six pre-#1167 arms collapse to one inspection of
+    // `amount`. The `kind` (Unit vs Total) is irrelevant for currency
+    // extraction.
+    match &price.amount {
+        Some(IncompleteAmount::Complete(amt)) => visit(amt.currency.as_str()),
+        Some(inc) => {
+            if let Some(c) = inc.currency() {
                 visit(c);
             }
         }
-        PriceAnnotation::UnitEmpty | PriceAnnotation::TotalEmpty => {}
+        None => {}
     }
 }
 
@@ -335,7 +339,7 @@ mod tests {
                         label: None,
                         merge: false,
                     }),
-                    price: Some(PriceAnnotation::Unit(Amount::new(dec!(1), "USD"))),
+                    price: Some(PriceAnnotation::unit(Amount::new(dec!(1), "USD"))),
                     flag: None,
                     meta: Default::default(),
                     comments: vec![],
@@ -493,23 +497,23 @@ mod tests {
         };
 
         // Unit + Total: each surface one currency.
-        let unit = Directive::Transaction(txn(PriceAnnotation::Unit(Amount::new(dec!(1), "USD"))));
+        let unit = Directive::Transaction(txn(PriceAnnotation::unit(Amount::new(dec!(1), "USD"))));
         let total =
-            Directive::Transaction(txn(PriceAnnotation::Total(Amount::new(dec!(1), "EUR"))));
+            Directive::Transaction(txn(PriceAnnotation::total(Amount::new(dec!(1), "EUR"))));
         // Incomplete-Complete + Incomplete-CurrencyOnly both have a
         // currency; Incomplete-NumberOnly does not.
-        let inc_complete = Directive::Transaction(txn(PriceAnnotation::UnitIncomplete(
+        let inc_complete = Directive::Transaction(txn(PriceAnnotation::unit_incomplete(
             crate::IncompleteAmount::Complete(Amount::new(dec!(1), "GBP")),
         )));
-        let inc_curr = Directive::Transaction(txn(PriceAnnotation::TotalIncomplete(
+        let inc_curr = Directive::Transaction(txn(PriceAnnotation::total_incomplete(
             crate::IncompleteAmount::CurrencyOnly("JPY".into()),
         )));
-        let inc_num = Directive::Transaction(txn(PriceAnnotation::UnitIncomplete(
+        let inc_num = Directive::Transaction(txn(PriceAnnotation::unit_incomplete(
             crate::IncompleteAmount::NumberOnly(dec!(1)),
         )));
         // Empty variants surface nothing.
-        let unit_empty = Directive::Transaction(txn(PriceAnnotation::UnitEmpty));
-        let total_empty = Directive::Transaction(txn(PriceAnnotation::TotalEmpty));
+        let unit_empty = Directive::Transaction(txn(PriceAnnotation::unit_empty()));
+        let total_empty = Directive::Transaction(txn(PriceAnnotation::total_empty()));
 
         let directives = vec![
             unit,

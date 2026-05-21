@@ -95,39 +95,22 @@ pub(super) fn cost_to_data(cost: &CostSpec) -> CostData {
 }
 
 pub(super) fn price_annotation_to_data(price: &PriceAnnotation) -> PriceAnnotationData {
-    match price {
-        PriceAnnotation::Unit(amount) => PriceAnnotationData {
-            is_total: false,
+    let is_total = matches!(price.kind, rustledger_core::PriceKind::Total);
+    match &price.amount {
+        Some(rustledger_core::IncompleteAmount::Complete(amount)) => PriceAnnotationData {
+            is_total,
             amount: Some(amount_to_data(amount)),
             number: None,
             currency: None,
         },
-        PriceAnnotation::Total(amount) => PriceAnnotationData {
-            is_total: true,
-            amount: Some(amount_to_data(amount)),
-            number: None,
-            currency: None,
-        },
-        PriceAnnotation::UnitIncomplete(inc) => PriceAnnotationData {
-            is_total: false,
+        Some(inc) => PriceAnnotationData {
+            is_total,
             amount: inc.as_amount().map(amount_to_data),
             number: inc.number().map(|n| n.to_string()),
             currency: inc.currency().map(String::from),
         },
-        PriceAnnotation::TotalIncomplete(inc) => PriceAnnotationData {
-            is_total: true,
-            amount: inc.as_amount().map(amount_to_data),
-            number: inc.number().map(|n| n.to_string()),
-            currency: inc.currency().map(String::from),
-        },
-        PriceAnnotation::UnitEmpty => PriceAnnotationData {
-            is_total: false,
-            amount: None,
-            number: None,
-            currency: None,
-        },
-        PriceAnnotation::TotalEmpty => PriceAnnotationData {
-            is_total: true,
+        None => PriceAnnotationData {
+            is_total,
             amount: None,
             number: None,
             currency: None,

@@ -796,9 +796,9 @@ fn parse_price_annotation(stream: &mut TokenStream<'_>) -> ParseRes<PriceAnnotat
     let save_pos = stream.pos;
     if let Ok(amount) = parse_amount(stream) {
         return Ok(if is_total {
-            PriceAnnotation::Total(amount)
+            PriceAnnotation::total(amount)
         } else {
-            PriceAnnotation::Unit(amount)
+            PriceAnnotation::unit(amount)
         });
     }
     stream.pos = save_pos;
@@ -807,9 +807,9 @@ fn parse_price_annotation(stream: &mut TokenStream<'_>) -> ParseRes<PriceAnnotat
     if let Ok(currency) = parse_currency(stream) {
         let incomplete = IncompleteAmount::CurrencyOnly(currency);
         return Ok(if is_total {
-            PriceAnnotation::TotalIncomplete(incomplete)
+            PriceAnnotation::total_incomplete(incomplete)
         } else {
-            PriceAnnotation::UnitIncomplete(incomplete)
+            PriceAnnotation::unit_incomplete(incomplete)
         });
     }
     stream.pos = save_pos;
@@ -818,9 +818,9 @@ fn parse_price_annotation(stream: &mut TokenStream<'_>) -> ParseRes<PriceAnnotat
     if let Ok(number) = parse_expr(stream) {
         let incomplete = IncompleteAmount::NumberOnly(number);
         return Ok(if is_total {
-            PriceAnnotation::TotalIncomplete(incomplete)
+            PriceAnnotation::total_incomplete(incomplete)
         } else {
-            PriceAnnotation::UnitIncomplete(incomplete)
+            PriceAnnotation::unit_incomplete(incomplete)
         });
     }
     stream.pos = save_pos;

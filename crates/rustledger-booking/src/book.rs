@@ -292,13 +292,14 @@ impl BookingEngine {
                             // Calculate capital gain if there's a price
                             if let Some(cost_basis) = &booking_result.cost_basis
                                 && let Some(price) = &posting.price
+                                && let Some(amt) =
+                                    price.amount.as_ref().and_then(IncompleteAmount::as_amount)
                             {
-                                let sale_price = match price {
-                                    rustledger_core::PriceAnnotation::Unit(a) => {
-                                        a.number * units.number.abs()
+                                let sale_price = match price.kind {
+                                    rustledger_core::PriceKind::Unit => {
+                                        amt.number * units.number.abs()
                                     }
-                                    rustledger_core::PriceAnnotation::Total(a) => a.number,
-                                    _ => continue,
+                                    rustledger_core::PriceKind::Total => amt.number,
                                 };
 
                                 let gain_amount = sale_price - cost_basis.number;
@@ -347,21 +348,15 @@ impl BookingEngine {
                     // Cost spec has a number but may be missing date or currency
                     // Fill in missing parts from price annotation, other postings, and transaction date
                     let inferred_currency = cost_spec.currency.clone().or_else(|| {
-                        // First try price annotation on this posting
+                        // First try price annotation on this posting.
+                        // `kind` (Unit vs Total) doesn't change the currency,
+                        // so it's irrelevant here — we just want whatever
+                        // currency the price names, complete or incomplete.
                         posting
                                 .price
                                 .as_ref()
-                                .and_then(|p| match p {
-                                    rustledger_core::PriceAnnotation::Unit(a)
-                                    | rustledger_core::PriceAnnotation::Total(a) => {
-                                        Some(a.currency.clone())
-                                    }
-                                    rustledger_core::PriceAnnotation::UnitIncomplete(inc)
-                                    | rustledger_core::PriceAnnotation::TotalIncomplete(inc) => {
-                                        inc.currency().map(Into::into)
-                                    }
-                                    _ => None,
-                                })
+                                .and_then(|p| p.amount.as_ref())
+                                .and_then(|inc| inc.currency().map(Into::into))
                                 // Then try inferring from other postings in the transaction
                                 .or_else(|| crate::infer_cost_currency_from_postings(txn))
                     });
@@ -469,24 +464,15 @@ impl BookingEngine {
                             None
                         };
 
-                        // Infer cost currency from price annotation or other postings
+                        // Infer cost currency from price annotation or other postings.
+                        // `kind` doesn't affect the currency — see the parallel
+                        // block above for the same pattern.
                         let cost_currency = cost_spec.currency.clone().or_else(|| {
-                            // First try price annotation on this posting
                             posting
                                 .price
                                 .as_ref()
-                                .and_then(|p| match p {
-                                    rustledger_core::PriceAnnotation::Unit(a)
-                                    | rustledger_core::PriceAnnotation::Total(a) => {
-                                        Some(a.currency.clone())
-                                    }
-                                    rustledger_core::PriceAnnotation::UnitIncomplete(inc)
-                                    | rustledger_core::PriceAnnotation::TotalIncomplete(inc) => {
-                                        inc.currency().map(Into::into)
-                                    }
-                                    _ => None,
-                                })
-                                // Then try inferring from other postings in the transaction
+                                .and_then(|p| p.amount.as_ref())
+                                .and_then(|inc| inc.currency().map(Into::into))
                                 .or_else(|| crate::infer_cost_currency_from_postings(txn))
                         });
 
@@ -623,7 +609,7 @@ mod tests {
             .with_synthesized_posting(
                 Posting::new("Assets:Stock", Amount::new(dec!(-5), "AAPL"))
                     .with_cost(CostSpec::empty()) // Empty - needs lot matching
-                    .with_price(PriceAnnotation::Unit(Amount::new(dec!(175.00), "USD"))),
+                    .with_price(PriceAnnotation::unit(Amount::new(dec!(175.00), "USD"))),
             )
             .with_synthesized_posting(Posting::new(
                 "Assets:Cash",
@@ -722,7 +708,7 @@ mod tests {
             .with_synthesized_posting(
                 Posting::new("Assets:Stock", Amount::new(dec!(-1.763), "VIIIX"))
                     .with_cost(CostSpec::empty())
-                    .with_price(PriceAnnotation::Unit(Amount::new(dec!(191.00), "USD"))),
+                    .with_price(PriceAnnotation::unit(Amount::new(dec!(191.00), "USD"))),
             )
             .with_synthesized_posting(Posting::new(
                 "Assets:Cash",
@@ -751,7 +737,7 @@ mod tests {
             .with_synthesized_posting(
                 Posting::new("Assets:Stock", Amount::new(dec!(-1), "AAPL"))
                     .with_cost(CostSpec::empty().with_number_per(dec!(40.0)))
-                    .with_price(PriceAnnotation::Unit(Amount::new(dec!(0.4), "USD"))),
+                    .with_price(PriceAnnotation::unit(Amount::new(dec!(0.4), "USD"))),
             )
             .with_synthesized_posting(Posting::new("Assets:Stock", Amount::new(dec!(40.0), "USD")));
 
@@ -814,7 +800,7 @@ mod tests {
             .with_synthesized_posting(
                 Posting::new("Assets:Stock", Amount::new(dec!(-5), "AAPL"))
                     .with_cost(CostSpec::empty())
-                    .with_price(PriceAnnotation::Total(Amount::new(dec!(875.00), "USD"))),
+                    .with_price(PriceAnnotation::total(Amount::new(dec!(875.00), "USD"))),
             )
             .with_synthesized_posting(Posting::new(
                 "Assets:Cash",
@@ -852,7 +838,7 @@ mod tests {
             .with_synthesized_posting(
                 Posting::new("Assets:Stock", Amount::new(dec!(-5), "AAPL"))
                     .with_cost(CostSpec::empty())
-                    .with_price(PriceAnnotation::Unit(Amount::new(dec!(175.00), "USD"))),
+                    .with_price(PriceAnnotation::unit(Amount::new(dec!(175.00), "USD"))),
             )
             .with_synthesized_posting(Posting::new(
                 "Assets:Cash",
@@ -956,7 +942,7 @@ mod tests {
             .with_synthesized_posting(
                 Posting::new("Assets:Stock", Amount::new(dec!(-5), "AAPL"))
                     .with_cost(CostSpec::empty())
-                    .with_price(PriceAnnotation::Unit(Amount::new(dec!(150.00), "USD"))),
+                    .with_price(PriceAnnotation::unit(Amount::new(dec!(150.00), "USD"))),
             )
             .with_synthesized_posting(Posting::new(
                 "Assets:Cash",
@@ -1202,7 +1188,7 @@ mod tests {
         let sell = Transaction::new(date(2024, 1, 15), "Sell 25 HOOG without cost spec")
             .with_synthesized_posting(
                 Posting::new("Assets:Stocks", Amount::new(dec!(-25), "HOOG"))
-                    .with_price(PriceAnnotation::Unit(Amount::new(dec!(1.60), "EUR"))),
+                    .with_price(PriceAnnotation::unit(Amount::new(dec!(1.60), "EUR"))),
             )
             .with_synthesized_posting(Posting::new("Assets:Bank", Amount::new(dec!(40), "EUR")));
 

@@ -283,60 +283,128 @@ impl fmt::Display for Posting {
     }
 }
 
-/// Price annotation for a posting (@ or @@).
+/// Whether a price annotation is per-unit (`@`) or total (`@@`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
+pub enum PriceKind {
+    /// Per-unit price (`@`).
+    Unit,
+    /// Total price for the posting (`@@`).
+    Total,
+}
+
+impl fmt::Display for PriceKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Unit => "@",
+            Self::Total => "@@",
+        })
+    }
+}
+
+/// Price annotation for a posting (`@` or `@@`).
 ///
-/// Price annotations can be incomplete (missing number or currency)
-/// before interpolation fills in the missing values.
+/// Factored along its two orthogonal axes (#1167):
+/// - `kind`: per-unit (`@`) vs total (`@@`)
+/// - `amount`: present (possibly with missing number or currency that
+///   interpolation will fill) vs absent (the bare `@`/`@@` sigil
+///   without any amount)
+///
+/// Pre-#1167 these axes were flattened into a 6-variant enum
+/// (`Unit/Total/UnitIncomplete/TotalIncomplete/UnitEmpty/TotalEmpty`),
+/// which forced every consumer to write six match arms even when only
+/// one axis mattered.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(
     feature = "rkyv",
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
 )]
-pub enum PriceAnnotation {
-    /// Per-unit price (@) with complete amount
-    Unit(Amount),
-    /// Total price (@@) with complete amount
-    Total(Amount),
-    /// Per-unit price (@) with incomplete amount
-    UnitIncomplete(IncompleteAmount),
-    /// Total price (@@) with incomplete amount
-    TotalIncomplete(IncompleteAmount),
-    /// Empty per-unit price (@ with no amount)
-    UnitEmpty,
-    /// Empty total price (@@ with no amount)
-    TotalEmpty,
+pub struct PriceAnnotation {
+    /// Per-unit (`@`) or total (`@@`).
+    pub kind: PriceKind,
+    /// The price amount, or `None` for the bare-sigil form.
+    /// `IncompleteAmount::Complete` indicates the parser saw a full
+    /// number+currency; the other variants indicate one of those
+    /// pieces was elided and will be filled by interpolation.
+    pub amount: Option<IncompleteAmount>,
 }
 
 impl PriceAnnotation {
-    /// Get the complete amount if available.
+    /// Per-unit (`@`) price with a complete amount.
     #[must_use]
-    pub const fn amount(&self) -> Option<&Amount> {
-        match self {
-            Self::Unit(a) | Self::Total(a) => Some(a),
-            Self::UnitIncomplete(ia) | Self::TotalIncomplete(ia) => ia.as_amount(),
-            Self::UnitEmpty | Self::TotalEmpty => None,
+    pub const fn unit(amount: Amount) -> Self {
+        Self {
+            kind: PriceKind::Unit,
+            amount: Some(IncompleteAmount::Complete(amount)),
         }
     }
 
-    /// Check if this is a per-unit price (@ vs @@).
+    /// Total (`@@`) price with a complete amount.
+    #[must_use]
+    pub const fn total(amount: Amount) -> Self {
+        Self {
+            kind: PriceKind::Total,
+            amount: Some(IncompleteAmount::Complete(amount)),
+        }
+    }
+
+    /// Per-unit (`@`) price with an incomplete amount.
+    #[must_use]
+    pub const fn unit_incomplete(amount: IncompleteAmount) -> Self {
+        Self {
+            kind: PriceKind::Unit,
+            amount: Some(amount),
+        }
+    }
+
+    /// Total (`@@`) price with an incomplete amount.
+    #[must_use]
+    pub const fn total_incomplete(amount: IncompleteAmount) -> Self {
+        Self {
+            kind: PriceKind::Total,
+            amount: Some(amount),
+        }
+    }
+
+    /// Bare per-unit sigil (`@`) with no amount.
+    #[must_use]
+    pub const fn unit_empty() -> Self {
+        Self {
+            kind: PriceKind::Unit,
+            amount: None,
+        }
+    }
+
+    /// Bare total sigil (`@@`) with no amount.
+    #[must_use]
+    pub const fn total_empty() -> Self {
+        Self {
+            kind: PriceKind::Total,
+            amount: None,
+        }
+    }
+
+    /// Get the complete amount if available.
+    #[must_use]
+    pub fn amount(&self) -> Option<&Amount> {
+        self.amount.as_ref().and_then(IncompleteAmount::as_amount)
+    }
+
+    /// Check if this is a per-unit price (`@` vs `@@`).
     #[must_use]
     pub const fn is_unit(&self) -> bool {
-        matches!(
-            self,
-            Self::Unit(_) | Self::UnitIncomplete(_) | Self::UnitEmpty
-        )
+        matches!(self.kind, PriceKind::Unit)
     }
 }
 
 impl fmt::Display for PriceAnnotation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Unit(a) => write!(f, "@ {a}"),
-            Self::Total(a) => write!(f, "@@ {a}"),
-            Self::UnitIncomplete(ia) => write!(f, "@ {ia}"),
-            Self::TotalIncomplete(ia) => write!(f, "@@ {ia}"),
-            Self::UnitEmpty => write!(f, "@"),
-            Self::TotalEmpty => write!(f, "@@"),
+        match &self.amount {
+            Some(amt) => write!(f, "{} {amt}", self.kind),
+            None => write!(f, "{}", self.kind),
         }
     }
 }

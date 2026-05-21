@@ -25,9 +25,8 @@
 //! cache-hit path in `rustledger`'s `check` command and the WASM
 //! parsed-ledger constructor call it explicitly.
 
-use rustledger_core::Directive;
 use rustledger_core::intern::{InternedStr, StringInterner};
-use rustledger_core::{IncompleteAmount, MetaValue, Metadata, PriceAnnotation};
+use rustledger_core::{Directive, IncompleteAmount, MetaValue, Metadata};
 use rustledger_parser::Spanned;
 
 /// Re-intern all strings in directives to deduplicate memory.
@@ -199,29 +198,22 @@ fn reintern_directive(directive: &mut Directive, interner: &mut StringInterner) 
                 {
                     dedup_count += 1;
                 }
-                // Price annotation
-                if let Some(ref mut price) = posting.price {
-                    match price {
-                        PriceAnnotation::Unit(amt) | PriceAnnotation::Total(amt) => {
+                // Price annotation: walk whichever amount shape it
+                // carries; `kind` (Unit vs Total) doesn't carry an
+                // interned string.
+                if let Some(price) = &mut posting.price {
+                    match &mut price.amount {
+                        Some(IncompleteAmount::Complete(amt)) => {
                             if do_intern(amt.currency.as_interned_mut(), interner) {
                                 dedup_count += 1;
                             }
                         }
-                        PriceAnnotation::UnitIncomplete(inc)
-                        | PriceAnnotation::TotalIncomplete(inc) => match inc {
-                            IncompleteAmount::Complete(amt) => {
-                                if do_intern(amt.currency.as_interned_mut(), interner) {
-                                    dedup_count += 1;
-                                }
+                        Some(IncompleteAmount::CurrencyOnly(cur)) => {
+                            if do_intern(cur.as_interned_mut(), interner) {
+                                dedup_count += 1;
                             }
-                            IncompleteAmount::CurrencyOnly(cur) => {
-                                if do_intern(cur.as_interned_mut(), interner) {
-                                    dedup_count += 1;
-                                }
-                            }
-                            IncompleteAmount::NumberOnly(_) => {}
-                        },
-                        PriceAnnotation::UnitEmpty | PriceAnnotation::TotalEmpty => {}
+                        }
+                        Some(IncompleteAmount::NumberOnly(_)) | None => {}
                     }
                 }
             }

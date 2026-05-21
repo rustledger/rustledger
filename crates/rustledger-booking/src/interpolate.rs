@@ -257,45 +257,21 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
                         *cost_unknowns_by_currency.entry(curr).or_default() += 1;
                     }
                 } else if let Some(price) = &posting.price {
-                    // Price annotation: converts units to price currency
-                    // Note: We do NOT track scale from per-unit prices (they're multipliers).
-                    // We DO track scale from total prices (they're explicit amounts).
-                    match price {
-                        rustledger_core::PriceAnnotation::Unit(price_amt) => {
-                            let converted = amount.number.abs() * price_amt.number;
-                            *residuals.entry(price_amt.currency.clone()).or_default() +=
-                                converted * amount.number.signum();
-                        }
-                        rustledger_core::PriceAnnotation::Total(price_amt) => {
-                            // Total price is an explicit amount — track its
-                            // scale only when non-integer, matching the
-                            // posting.units rule above. An integer `@@ 1 USD`
-                            // shouldn't quantize an elided same-currency
-                            // residual to whole units.
-                            let scale = price_amt.number.scale();
-                            if scale > 0 {
-                                max_scale_by_currency
-                                    .entry(price_amt.currency.clone())
-                                    .and_modify(|s| *s = (*s).max(scale))
-                                    .or_insert(scale);
-                            }
-                            *residuals.entry(price_amt.currency.clone()).or_default() +=
-                                price_amt.number * amount.number.signum();
-                        }
-                        rustledger_core::PriceAnnotation::UnitIncomplete(inc) => {
-                            if let Some(price_amt) = inc.as_amount() {
-                                let converted = amount.number.abs() * price_amt.number;
-                                *residuals.entry(price_amt.currency.clone()).or_default() +=
-                                    converted * amount.number.signum();
-                            } else {
-                                // Can't calculate, fall back to units
-                                *residuals.entry(amount.currency.clone()).or_default() +=
-                                    amount.number;
-                            }
-                        }
-                        rustledger_core::PriceAnnotation::TotalIncomplete(inc) => {
-                            if let Some(price_amt) = inc.as_amount() {
-                                // Same filter as the Total branch above.
+                    // Price annotation: converts units to price currency.
+                    // Scale tracking: per-unit prices are multipliers, so we
+                    // do NOT track their scale. Total prices are explicit
+                    // amounts, so we DO track theirs (non-integer scale
+                    // only — an integer `@@ 1 USD` shouldn't quantize an
+                    // elided same-currency residual to whole units).
+                    if let Some(price_amt) =
+                        price.amount.as_ref().and_then(IncompleteAmount::as_amount)
+                    {
+                        let (curr, signed) = match price.kind {
+                            rustledger_core::PriceKind::Unit => (
+                                price_amt.currency.clone(),
+                                amount.number.abs() * price_amt.number * amount.number.signum(),
+                            ),
+                            rustledger_core::PriceKind::Total => {
                                 let scale = price_amt.number.scale();
                                 if scale > 0 {
                                     max_scale_by_currency
@@ -303,19 +279,16 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
                                         .and_modify(|s| *s = (*s).max(scale))
                                         .or_insert(scale);
                                 }
-                                *residuals.entry(price_amt.currency.clone()).or_default() +=
-                                    price_amt.number * amount.number.signum();
-                            } else {
-                                // Can't calculate, fall back to units
-                                *residuals.entry(amount.currency.clone()).or_default() +=
-                                    amount.number;
+                                (
+                                    price_amt.currency.clone(),
+                                    price_amt.number * amount.number.signum(),
+                                )
                             }
-                        }
-                        // Empty price annotations - fall back to units
-                        rustledger_core::PriceAnnotation::UnitEmpty
-                        | rustledger_core::PriceAnnotation::TotalEmpty => {
-                            *residuals.entry(amount.currency.clone()).or_default() += amount.number;
-                        }
+                        };
+                        *residuals.entry(curr).or_default() += signed;
+                    } else {
+                        // Incomplete/empty price annotation — fall back to units
+                        *residuals.entry(amount.currency.clone()).or_default() += amount.number;
                     }
                 } else {
                     // Simple posting: weight is just the units
@@ -337,16 +310,15 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
                     .as_ref()
                     .and_then(|c| c.currency.clone())
                     .or_else(|| {
-                        posting.price.as_ref().and_then(|p| match p {
-                            rustledger_core::PriceAnnotation::Unit(a) => Some(a.currency.clone()),
-                            rustledger_core::PriceAnnotation::Total(a) => Some(a.currency.clone()),
-                            rustledger_core::PriceAnnotation::UnitIncomplete(inc)
-                            | rustledger_core::PriceAnnotation::TotalIncomplete(inc) => {
-                                inc.as_amount().map(|a| a.currency.clone())
-                            }
-                            rustledger_core::PriceAnnotation::UnitEmpty
-                            | rustledger_core::PriceAnnotation::TotalEmpty => None,
-                        })
+                        // Pull currency from the price's complete amount,
+                        // regardless of kind. Incomplete/empty prices
+                        // contribute nothing here.
+                        posting
+                            .price
+                            .as_ref()
+                            .and_then(|p| p.amount.as_ref())
+                            .and_then(IncompleteAmount::as_amount)
+                            .map(|a| a.currency.clone())
                     });
 
                 if let Some(curr) = currency {
@@ -861,7 +833,7 @@ mod tests {
                             .with_number_per(dec!(100.00))
                             .with_currency("USD"),
                     )
-                    .with_price(rustledger_core::PriceAnnotation::Unit(Amount::new(
+                    .with_price(rustledger_core::PriceAnnotation::unit(Amount::new(
                         dec!(120.00),
                         "USD",
                     ))),
@@ -1389,7 +1361,7 @@ mod tests {
                     Amount::new(dec!(-13000.00), "SH513050"),
                 )
                 .with_cost(CostSpec::empty()) // empty `{}` — unknown cost
-                .with_price(rustledger_core::PriceAnnotation::Unit(Amount::new(
+                .with_price(rustledger_core::PriceAnnotation::unit(Amount::new(
                     dec!(1.300),
                     "CNY",
                 ))),
@@ -1433,7 +1405,7 @@ mod tests {
             .with_synthesized_posting(
                 Posting::new("Assets:Stock", Amount::new(dec!(-10), "HOOL"))
                     .with_cost(CostSpec::empty())
-                    .with_price(rustledger_core::PriceAnnotation::Unit(Amount::new(
+                    .with_price(rustledger_core::PriceAnnotation::unit(Amount::new(
                         dec!(150),
                         "USD",
                     ))),
@@ -1457,7 +1429,7 @@ mod tests {
             .with_synthesized_posting(
                 Posting::new("Assets:StockA", Amount::new(dec!(-10), "AAPL"))
                     .with_cost(CostSpec::empty())
-                    .with_price(rustledger_core::PriceAnnotation::Unit(Amount::new(
+                    .with_price(rustledger_core::PriceAnnotation::unit(Amount::new(
                         dec!(150),
                         "USD",
                     ))),
@@ -1465,7 +1437,7 @@ mod tests {
             .with_synthesized_posting(
                 Posting::new("Assets:StockB", Amount::new(dec!(-5), "GOOG"))
                     .with_cost(CostSpec::empty())
-                    .with_price(rustledger_core::PriceAnnotation::Unit(Amount::new(
+                    .with_price(rustledger_core::PriceAnnotation::unit(Amount::new(
                         dec!(2000),
                         "USD",
                     ))),
@@ -1491,7 +1463,7 @@ mod tests {
             .with_synthesized_posting(
                 Posting::new("Assets:Stock", Amount::new(dec!(-10), "HOOL"))
                     .with_cost(CostSpec::empty()) // cost-unknown in USD
-                    .with_price(rustledger_core::PriceAnnotation::Unit(Amount::new(
+                    .with_price(rustledger_core::PriceAnnotation::unit(Amount::new(
                         dec!(150),
                         "USD",
                     ))),
@@ -1544,7 +1516,7 @@ mod tests {
             .with_synthesized_posting(
                 Posting::new("Assets:Brokerage", Amount::new(dec!(-1.763), "STOCK"))
                     .with_cost(cost_spec)
-                    .with_price(rustledger_core::PriceAnnotation::Unit(Amount::new(
+                    .with_price(rustledger_core::PriceAnnotation::unit(Amount::new(
                         dec!(191.00),
                         "USD",
                     ))),
@@ -1622,7 +1594,7 @@ mod tests {
             .with_synthesized_posting(
                 Posting::new("Assets:Brokerage", Amount::new(dec!(-1.763), "STOCK"))
                     .with_cost(CostSpec::empty())
-                    .with_price(PriceAnnotation::Unit(Amount::new(dec!(191.00), "USD"))),
+                    .with_price(PriceAnnotation::unit(Amount::new(dec!(191.00), "USD"))),
             )
             .with_synthesized_posting(Posting::auto("Income:Capital-Gains"));
 
@@ -1669,7 +1641,7 @@ mod tests {
             .with_synthesized_posting(
                 Posting::new("Assets:Stock", Amount::new(dec!(-10), "HOOL"))
                     .with_cost(CostSpec::empty())
-                    .with_price(rustledger_core::PriceAnnotation::Unit(Amount::new(
+                    .with_price(rustledger_core::PriceAnnotation::unit(Amount::new(
                         dec!(150),
                         "USD",
                     ))),

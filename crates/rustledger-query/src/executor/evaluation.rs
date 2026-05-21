@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use rustledger_core::{Amount, Position, Transaction};
+use rustledger_core::{Amount, CostNumber, Position, Transaction};
 
 use crate::ast::{Expr, Literal, Target};
 use crate::error::QueryError;
@@ -256,13 +256,17 @@ impl Executor<'_> {
                 .amount()
                 .map_or(Value::Null, |u| Value::Amount(u.clone()))),
             "cost" => {
-                // Get the cost of the posting
+                // Get the cost of the posting. Both `PerUnit` and the
+                // post-booking `PerUnitFromTotal` carry a per-unit
+                // value; `Total` is divided to derive one. The pre-
+                // booking `Total` case is unlikely here (this column
+                // sees post-booking data) but is handled for safety.
                 if let Some(units) = posting.amount()
                     && let Some(cost) = &posting.cost
-                    && let Some(number_per) = &cost.number_per
+                    && let Some(cost_num) = cost.number.as_ref().and_then(CostNumber::per_unit)
                     && let Some(currency) = &cost.currency
                 {
-                    let total = units.number.abs() * number_per;
+                    let total = units.number.abs() * cost_num;
                     return Ok(Value::Amount(Amount::new(total, currency.clone())));
                 }
                 Ok(Value::Null)
@@ -313,11 +317,16 @@ impl Executor<'_> {
                 };
                 Ok(Value::String(desc))
             }
-            // Cost number (per-unit cost)
+            // Cost number (per-unit cost). After booking, both
+            // `PerUnit` and `PerUnitFromTotal` expose a per-unit
+            // value via `per_unit()`. Pre-booking `Total` returns
+            // None — callers wanting a per-unit must compute it from
+            // units, which the booker has already done by the time
+            // this column is queried.
             "cost_number" => Ok(posting
                 .cost
                 .as_ref()
-                .and_then(|c| c.number_per)
+                .and_then(|c| c.number.as_ref().and_then(CostNumber::per_unit))
                 .map_or(Value::Null, Value::Number)),
             // Cost currency
             "cost_currency" => Ok(posting

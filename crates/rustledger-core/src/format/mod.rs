@@ -260,8 +260,7 @@ mod tests {
     #[test]
     fn test_format_cost_spec_per_unit() {
         let spec = CostSpec {
-            number_per: Some(dec!(150.00)),
-            number_total: None,
+            number: Some(crate::CostNumber::PerUnit(dec!(150.00))),
             currency: Some("USD".into()),
             date: None,
             label: None,
@@ -273,8 +272,7 @@ mod tests {
     #[test]
     fn test_format_cost_spec_total() {
         let spec = CostSpec {
-            number_per: None,
-            number_total: Some(dec!(1500.00)),
+            number: Some(crate::CostNumber::Total(dec!(1500.00))),
             currency: Some("USD".into()),
             date: None,
             label: None,
@@ -286,8 +284,7 @@ mod tests {
     #[test]
     fn test_format_cost_spec_with_date() {
         let spec = CostSpec {
-            number_per: Some(dec!(150.00)),
-            number_total: None,
+            number: Some(crate::CostNumber::PerUnit(dec!(150.00))),
             currency: Some("USD".into()),
             date: Some(date(2024, 1, 15)),
             label: None,
@@ -299,8 +296,7 @@ mod tests {
     #[test]
     fn test_format_cost_spec_with_label() {
         let spec = CostSpec {
-            number_per: Some(dec!(150.00)),
-            number_total: None,
+            number: Some(crate::CostNumber::PerUnit(dec!(150.00))),
             currency: Some("USD".into()),
             date: None,
             label: Some("lot-a".to_string()),
@@ -312,8 +308,7 @@ mod tests {
     #[test]
     fn test_format_cost_spec_with_merge() {
         let spec = CostSpec {
-            number_per: Some(dec!(150.00)),
-            number_total: None,
+            number: Some(crate::CostNumber::PerUnit(dec!(150.00))),
             currency: Some("USD".into()),
             date: None,
             label: None,
@@ -325,8 +320,7 @@ mod tests {
     #[test]
     fn test_format_cost_spec_all_fields() {
         let spec = CostSpec {
-            number_per: Some(dec!(150.00)),
-            number_total: None,
+            number: Some(crate::CostNumber::PerUnit(dec!(150.00))),
             currency: Some("USD".into()),
             date: Some(date(2024, 1, 15)),
             label: Some("lot-a".to_string()),
@@ -341,8 +335,7 @@ mod tests {
     #[test]
     fn test_format_cost_spec_empty() {
         let spec = CostSpec {
-            number_per: None,
-            number_total: None,
+            number: None,
             currency: None,
             date: None,
             label: None,
@@ -779,8 +772,7 @@ mod tests {
             account: "Assets:Brokerage".into(),
             units: Some(IncompleteAmount::Complete(Amount::new(dec!(10), "AAPL"))),
             cost: Some(CostSpec {
-                number_per: Some(dec!(150.00)),
-                number_total: None,
+                number: Some(crate::CostNumber::PerUnit(dec!(150.00))),
                 currency: Some("USD".into()),
                 date: Some(date(2024, 1, 15)),
                 label: None,

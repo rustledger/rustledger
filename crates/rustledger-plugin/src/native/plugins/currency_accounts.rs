@@ -155,20 +155,22 @@ impl NativePlugin for CurrencyAccountsPlugin {
                         .currency
                         .clone()
                         .unwrap_or_else(|| units.currency.clone());
-                    let amount = if let Some(per) = &cost.number_per {
-                        let per = Decimal::from_str(per).unwrap_or_default();
-                        units_num * per
-                    } else if let Some(total) = &cost.number_total {
-                        let total = Decimal::from_str(total).unwrap_or_default();
-                        // Total cost magnitude with sign following units
-                        // (matches beancount.core.convert.get_cost).
-                        if units_num.is_sign_negative() {
-                            -total.abs()
-                        } else {
-                            total.abs()
+                    let amount = match &cost.number {
+                        Some(rustledger_plugin_types::CostNumberData::PerUnit(per)) => {
+                            let per = Decimal::from_str(per).unwrap_or_default();
+                            units_num * per
                         }
-                    } else {
-                        units_num
+                        Some(rustledger_plugin_types::CostNumberData::Total(total)) => {
+                            let total = Decimal::from_str(total).unwrap_or_default();
+                            // Total cost magnitude with sign following
+                            // units (matches `beancount.core.convert.get_cost`).
+                            if units_num.is_sign_negative() {
+                                -total.abs()
+                            } else {
+                                total.abs()
+                            }
+                        }
+                        None => units_num,
                     };
                     Some((amount, currency))
                 } else if let Some(price) = &posting.price {
@@ -442,8 +444,9 @@ mod currency_accounts_tests {
 
         let mut p1 = posting("Assets:Shares:RING", "9", "RING");
         p1.cost = Some(CostData {
-            number_per: Some("68.55".to_string()),
-            number_total: None,
+            number: Some(rustledger_plugin_types::CostNumberData::PerUnit(
+                "68.55".to_string(),
+            )),
             currency: Some("USD".to_string()),
             date: None,
             label: None,

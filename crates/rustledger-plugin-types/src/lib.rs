@@ -491,15 +491,34 @@ pub struct AmountData {
     pub currency: String,
 }
 
+/// The numeric component of a [`CostData`].
+///
+/// Mirrors the host's `rustledger_core::CostNumber` on the wire. The
+/// per-unit vs total axes are mutually exclusive by construction —
+/// pre-#1164 they were split into independent `number_per` /
+/// `number_total` Option fields on `CostData`, which allowed the
+/// invalid both-set state on the wire and forced every plugin to write
+/// "what if both?" defensive branches. Numbers are stringly-typed for
+/// arbitrary precision across the WASM boundary.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum CostNumberData {
+    /// Per-unit cost: `{150.00 USD}`.
+    PerUnit(String),
+    /// Total cost for the posting's units: `{{ 1500.00 USD }}`.
+    Total(String),
+}
+
 /// Cost data for serialization.
 ///
 /// Represents cost specifications like `{100 USD}` or `{100 USD, 2024-01-01, "lot1"}`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CostData {
-    /// Per-unit cost number.
-    pub number_per: Option<String>,
-    /// Total cost number.
-    pub number_total: Option<String>,
+    /// The numeric component: per-unit, total, or absent (e.g. `{}`).
+    ///
+    /// Pre-#1164 this was a pair of `Option<String>` fields
+    /// (`number_per` and `number_total`); see [`CostNumberData`] for
+    /// the rationale behind the consolidation.
+    pub number: Option<CostNumberData>,
     /// Cost currency.
     pub currency: Option<String>,
     /// Acquisition date.

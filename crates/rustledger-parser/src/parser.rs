@@ -744,7 +744,7 @@ fn parse_cost_spec(stream: &mut TokenStream<'_>) -> ParseRes<CostSpec> {
                 stream.advance();
                 // The number after # is the total
                 if let Ok(total) = parse_expr(stream) {
-                    spec.number_total = Some(total);
+                    spec.number = Some(rustledger_core::CostNumber::Total(total));
                     if let Ok(c) = parse_currency(stream) {
                         spec.currency = Some(c);
                     }
@@ -752,11 +752,11 @@ fn parse_cost_spec(stream: &mut TokenStream<'_>) -> ParseRes<CostSpec> {
                 }
             }
 
-            if is_total {
-                spec.number_total = Some(number);
+            spec.number = Some(if is_total {
+                rustledger_core::CostNumber::Total(number)
             } else {
-                spec.number_per = Some(number);
-            }
+                rustledger_core::CostNumber::PerUnit(number)
+            });
 
             // Optional currency
             if let Ok(c) = parse_currency(stream) {

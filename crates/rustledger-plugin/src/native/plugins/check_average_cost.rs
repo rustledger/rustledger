@@ -110,11 +110,16 @@ impl NativePlugin for CheckAverageCostPlugin {
 
                     if units_num > Decimal::ZERO {
                         // Acquisition: add to inventory
-                        let cost_per = cost
-                            .number_per
-                            .as_ref()
-                            .and_then(|s| Decimal::from_str(s).ok())
-                            .unwrap_or_default();
+                        // Wire-format reads only see per-unit costs
+                        // for the average-cost gate — total-only specs
+                        // are pre-booking and don't yet carry a
+                        // per-unit value.
+                        let cost_per = match &cost.number {
+                            Some(rustledger_plugin_types::CostNumberData::PerUnit(s)) => {
+                                Decimal::from_str(s).ok().unwrap_or_default()
+                            }
+                            _ => Decimal::ZERO,
+                        };
 
                         let entry = inventory
                             .entry(key)
@@ -130,12 +135,14 @@ impl NativePlugin for CheckAverageCostPlugin {
                         {
                             let avg_cost = *total_cost / *total_units;
 
-                            // Get the cost used in this posting
-                            let used_cost = cost
-                                .number_per
-                                .as_ref()
-                                .and_then(|s| Decimal::from_str(s).ok())
-                                .unwrap_or_default();
+                            // Get the cost used in this posting.
+                            // Same per-unit-only read as above.
+                            let used_cost = match &cost.number {
+                                Some(rustledger_plugin_types::CostNumberData::PerUnit(s)) => {
+                                    Decimal::from_str(s).ok().unwrap_or_default()
+                                }
+                                _ => Decimal::ZERO,
+                            };
 
                             // Calculate relative difference
                             let diff = (used_cost - avg_cost).abs();
@@ -224,8 +231,9 @@ mod check_average_cost_tests {
                                 currency: "AAPL".to_string(),
                             }),
                             cost: Some(CostData {
-                                number_per: Some("100.00".to_string()),
-                                number_total: None,
+                                number: Some(rustledger_plugin_types::CostNumberData::PerUnit(
+                                    "100.00".to_string(),
+                                )),
                                 currency: Some("USD".to_string()),
                                 date: None,
                                 label: None,
@@ -257,8 +265,9 @@ mod check_average_cost_tests {
                                 currency: "AAPL".to_string(),
                             }),
                             cost: Some(CostData {
-                                number_per: Some("100.00".to_string()), // Matches average
-                                number_total: None,
+                                number: Some(rustledger_plugin_types::CostNumberData::PerUnit(
+                                    "100.00".to_string(),
+                                )), // Matches average
                                 currency: Some("USD".to_string()),
                                 date: None,
                                 label: None,
@@ -309,8 +318,9 @@ mod check_average_cost_tests {
                                 currency: "AAPL".to_string(),
                             }),
                             cost: Some(CostData {
-                                number_per: Some("100.00".to_string()),
-                                number_total: None,
+                                number: Some(rustledger_plugin_types::CostNumberData::PerUnit(
+                                    "100.00".to_string(),
+                                )),
                                 currency: Some("USD".to_string()),
                                 date: None,
                                 label: None,
@@ -342,8 +352,9 @@ mod check_average_cost_tests {
                                 currency: "AAPL".to_string(),
                             }),
                             cost: Some(CostData {
-                                number_per: Some("90.00".to_string()), // 10% different from avg
-                                number_total: None,
+                                number: Some(rustledger_plugin_types::CostNumberData::PerUnit(
+                                    "90.00".to_string(),
+                                )), // 10% different from avg
                                 currency: Some("USD".to_string()),
                                 date: None,
                                 label: None,
@@ -396,8 +407,9 @@ mod check_average_cost_tests {
                                 currency: "AAPL".to_string(),
                             }),
                             cost: Some(CostData {
-                                number_per: Some("100.00".to_string()),
-                                number_total: None,
+                                number: Some(rustledger_plugin_types::CostNumberData::PerUnit(
+                                    "100.00".to_string(),
+                                )),
                                 currency: Some("USD".to_string()),
                                 date: None,
                                 label: None,
@@ -429,8 +441,9 @@ mod check_average_cost_tests {
                                 currency: "AAPL".to_string(),
                             }),
                             cost: Some(CostData {
-                                number_per: Some("120.00".to_string()),
-                                number_total: None,
+                                number: Some(rustledger_plugin_types::CostNumberData::PerUnit(
+                                    "120.00".to_string(),
+                                )),
                                 currency: Some("USD".to_string()),
                                 date: None,
                                 label: None,
@@ -462,8 +475,9 @@ mod check_average_cost_tests {
                                 currency: "AAPL".to_string(),
                             }),
                             cost: Some(CostData {
-                                number_per: Some("110.00".to_string()), // Matches average
-                                number_total: None,
+                                number: Some(rustledger_plugin_types::CostNumberData::PerUnit(
+                                    "110.00".to_string(),
+                                )), // Matches average
                                 currency: Some("USD".to_string()),
                                 date: None,
                                 label: None,
@@ -535,8 +549,9 @@ mod check_average_cost_tests {
                                 currency: "AAPL".to_string(),
                             }),
                             cost: Some(CostData {
-                                number_per: Some("100.00".to_string()),
-                                number_total: None,
+                                number: Some(rustledger_plugin_types::CostNumberData::PerUnit(
+                                    "100.00".to_string(),
+                                )),
                                 currency: Some("USD".to_string()),
                                 date: None,
                                 label: None,
@@ -570,8 +585,9 @@ mod check_average_cost_tests {
                             cost: Some(CostData {
                                 // 50% off the average — would fire for NONE,
                                 // but must be silent for STRICT/default.
-                                number_per: Some("50.00".to_string()),
-                                number_total: None,
+                                number: Some(rustledger_plugin_types::CostNumberData::PerUnit(
+                                    "50.00".to_string(),
+                                )),
                                 currency: Some("USD".to_string()),
                                 date: None,
                                 label: None,

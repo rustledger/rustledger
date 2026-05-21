@@ -202,11 +202,18 @@ fn process_long_short(input: PluginInput) -> PluginOutput {
 
                     if let Some(cost_date) = cost_date {
                         // Calculate gain
-                        let cost_number = cost
-                            .number_per
-                            .as_ref()
-                            .and_then(|n| Decimal::from_str(n).ok())
-                            .unwrap_or(Decimal::ZERO);
+                        // Capital-gains classification operates on
+                        // post-booking transactions where the cost
+                        // carries a per-unit value (booking fills it
+                        // in for PerUnitFromTotal too).
+                        let cost_number = match &cost.number {
+                            Some(rustledger_plugin_types::CostNumberData::PerUnit(n)) => {
+                                Decimal::from_str(n).ok().unwrap_or(Decimal::ZERO)
+                            }
+                            Some(rustledger_plugin_types::CostNumberData::Total(_)) | None => {
+                                Decimal::ZERO
+                            }
+                        };
                         let price_number = price
                             .amount
                             .as_ref()

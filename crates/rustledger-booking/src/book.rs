@@ -251,8 +251,9 @@ impl BookingEngine {
                                     // Set cost from the matched lot
                                     if let Some(cost) = &matched_pos.cost {
                                         new_posting.cost = Some(CostSpec {
-                                            number_per: Some(cost.number),
-                                            number_total: None,
+                                            number: Some(rustledger_core::CostNumber::PerUnit(
+                                                cost.number,
+                                            )),
                                             currency: Some(cost.currency.clone()),
                                             date: cost.date,
                                             label: cost.label.clone(),
@@ -279,8 +280,9 @@ impl BookingEngine {
 
                                 // Update posting with filled cost
                                 result.postings[idx].cost = Some(CostSpec {
-                                    number_per: Some(matched_cost.number),
-                                    number_total: None,
+                                    number: Some(rustledger_core::CostNumber::PerUnit(
+                                        matched_cost.number,
+                                    )),
                                     currency: Some(matched_cost.currency.clone()),
                                     date: matched_cost.date,
                                     label: None,
@@ -318,19 +320,23 @@ impl BookingEngine {
                     // If not a reduction: fall through to augmentation code below
                 }
 
-                if cost_spec.number_total.is_some() && cost_spec.number_per.is_none() {
-                    // This is an augmentation with total cost - convert to per-unit
-                    // e.g., `1.763 VIIIX {{300.00 USD}}` -> `1.763 VIIIX {170.165... USD}`
-                    // Preserve full precision to avoid cost basis errors when selling.
-                    if let (Some(total), Some(currency)) =
-                        (&cost_spec.number_total, &cost_spec.currency)
+                if let Some(rustledger_core::CostNumber::Total(total)) = cost_spec.number {
+                    // Augmentation with total cost — convert to the
+                    // post-booking `PerUnitFromTotal` shape:
+                    //   `1.763 VIIIX {{300.00 USD}}` → derived per-unit
+                    //   170.165… with total 300.00 preserved.
+                    // The preserved total is load-bearing for
+                    // precision-preserving residual math (#1026) —
+                    // division-then-multiplication at the
+                    // `rust_decimal` 28-digit ceiling loses precision.
+                    if let Some(currency) = &cost_spec.currency
                         && !units.number.is_zero()
                     {
-                        // Calculate per-unit cost - preserve full precision
-                        let per_unit = *total / units.number.abs();
+                        let per_unit = total / units.number.abs();
                         result.postings[idx].cost = Some(CostSpec {
-                            number_per: Some(per_unit),
-                            number_total: cost_spec.number_total, // Preserve for precise residual calculation
+                            number: Some(rustledger_core::CostNumber::PerUnitFromTotal(
+                                rustledger_core::BookedCost { per_unit, total },
+                            )),
                             currency: Some(currency.clone()),
                             // Fill in transaction date if no date specified
                             date: cost_spec.date.or(Some(txn.date)),
@@ -342,9 +348,7 @@ impl BookingEngine {
                 }
 
                 // Fill in dates and currencies for augmentations (not already booked)
-                if !booked_indices.contains(&idx)
-                    && (cost_spec.number_per.is_some() || cost_spec.number_total.is_some())
-                {
+                if !booked_indices.contains(&idx) && cost_spec.number.is_some() {
                     // Cost spec has a number but may be missing date or currency
                     // Fill in missing parts from price annotation, other postings, and transaction date
                     let inferred_currency = cost_spec.currency.clone().or_else(|| {
@@ -377,8 +381,7 @@ impl BookingEngine {
                     // Only update if we actually inferred something
                     if inferred_currency.is_some() || inferred_date.is_some() {
                         result.postings[idx].cost = Some(CostSpec {
-                            number_per: cost_spec.number_per,
-                            number_total: cost_spec.number_total,
+                            number: cost_spec.number,
                             currency: inferred_currency.or_else(|| cost_spec.currency.clone()),
                             date: inferred_date.or(cost_spec.date),
                             label: cost_spec.label.clone(),
@@ -449,19 +452,20 @@ impl BookingEngine {
                 } else {
                     // Add to inventory
                     let position = if let Some(cost_spec) = &posting.cost {
-                        // Try per-unit cost first, then total cost
-                        let per_unit_cost = if let Some(per_unit) = &cost_spec.number_per {
-                            Some(*per_unit)
-                        } else if let Some(total) = &cost_spec.number_total {
-                            // Convert total cost to per-unit cost - preserve full precision
-                            // to avoid cost basis errors when selling
-                            if units.number.is_zero() {
-                                None
-                            } else {
-                                Some(*total / units.number.abs())
+                        // Resolve per-unit cost: PerUnit/PerUnitFromTotal
+                        // carry it directly; Total needs the
+                        // total/|units| division.
+                        let per_unit_cost = match cost_spec.number {
+                            Some(rustledger_core::CostNumber::PerUnit(per)) => Some(per),
+                            Some(rustledger_core::CostNumber::PerUnitFromTotal(b)) => {
+                                Some(b.per_unit)
                             }
-                        } else {
-                            None
+                            Some(rustledger_core::CostNumber::Total(total))
+                                if !units.number.is_zero() =>
+                            {
+                                Some(total / units.number.abs())
+                            }
+                            Some(rustledger_core::CostNumber::Total(_)) | None => None,
                         };
 
                         // Infer cost currency from price annotation or other postings.
@@ -699,9 +703,14 @@ mod tests {
         let buy_posting = &booked_buy.transaction.postings[0];
         assert!(buy_posting.cost.is_some());
         let cost_spec = buy_posting.cost.as_ref().unwrap();
-        // Both total and per-unit should be set (total preserved for precise residual calc)
-        assert!(cost_spec.number_total.is_some());
-        assert!(cost_spec.number_per.is_some());
+        // Booking should have converted the user-written Total into
+        // the post-booking PerUnitFromTotal shape — the per-unit value
+        // is computed for lot tracking and the total is preserved for
+        // exact residual math.
+        assert!(matches!(
+            cost_spec.number,
+            Some(rustledger_core::CostNumber::PerUnitFromTotal(_))
+        ));
 
         // Sell all shares at $191 per unit
         let sell = Transaction::new(date(2016, 6, 15), "Sell stock")

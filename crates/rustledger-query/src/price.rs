@@ -217,10 +217,7 @@ impl PriceDatabase {
             });
             let cost = posting.cost.as_ref().and_then(|c| {
                 let currency = c.currency.clone()?;
-                if c.number_per.is_none() && c.number_total.is_none() {
-                    return None;
-                }
-                Some((c.number_per, c.number_total, currency))
+                Some((c.number, currency))
             });
 
             let Some((per_unit, quote)) =

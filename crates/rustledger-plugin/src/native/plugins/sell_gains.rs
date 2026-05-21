@@ -38,12 +38,17 @@ impl NativePlugin for SellGainsPlugin {
                             continue;
                         }
 
-                        // Get cost basis
-                        let cost_per = cost
-                            .number_per
-                            .as_ref()
-                            .and_then(|s| Decimal::from_str(s).ok())
-                            .unwrap_or_default();
+                        // Get cost basis — sell_gains operates on
+                        // post-booking transactions where the cost
+                        // carries a per-unit value.
+                        let cost_per = match &cost.number {
+                            Some(rustledger_plugin_types::CostNumberData::PerUnit(s)) => {
+                                Decimal::from_str(s).ok().unwrap_or_default()
+                            }
+                            Some(rustledger_plugin_types::CostNumberData::Total(_)) | None => {
+                                Decimal::ZERO
+                            }
+                        };
 
                         // Get sale price
                         let sale_price = price

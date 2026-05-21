@@ -197,20 +197,26 @@ pub fn calculate_residual(transaction: &Transaction) -> HashMap<Currency, Decima
                     .or_else(|| price_currency_of(posting))
                     .or_else(|| get_inferred_currency(&mut inferred_cost_currency));
 
-                // Check number_total first: when both per-unit and total are present
-                // (booking preserves total), use the total directly for exact residual
-                // calculation. Division-then-multiplication loses precision.
-                if let (Some(total), Some(cost_curr)) =
-                    (&cost_spec.number_total, &inferred_currency)
-                {
-                    Some((cost_curr.clone(), *total * units.number.signum()))
-                } else if let (Some(per_unit), Some(cost_curr)) =
-                    (&cost_spec.number_per, &inferred_currency)
-                {
-                    let cost_amount = units.number * per_unit;
-                    Some((cost_curr.clone(), cost_amount))
-                } else {
-                    None // Cost spec without determinable amount (e.g., empty `{}`)
+                // `PerUnitFromTotal` and `Total` both carry a total
+                // that booking preserves for exact residual math —
+                // using the total avoids the
+                // division-then-multiplication precision loss that
+                // would happen if we recomputed from `per_unit`.
+                // `PerUnit` (user-written per-unit) goes through the
+                // multiplication path.
+                let cost_curr = inferred_currency.as_ref()?;
+                match cost_spec.number {
+                    Some(rustledger_core::CostNumber::Total(total)) => {
+                        Some((cost_curr.clone(), total * units.number.signum()))
+                    }
+                    Some(rustledger_core::CostNumber::PerUnitFromTotal(b)) => {
+                        Some((cost_curr.clone(), b.total * units.number.signum()))
+                    }
+                    Some(rustledger_core::CostNumber::PerUnit(per_unit)) => {
+                        let cost_amount = units.number * per_unit;
+                        Some((cost_curr.clone(), cost_amount))
+                    }
+                    None => None, // empty `{}`
                 }
             });
 
@@ -286,23 +292,24 @@ pub fn calculate_residual_precise(transaction: &Transaction) -> HashMap<Currency
                     .or_else(|| price_currency_of(posting))
                     .or_else(|| get_inferred_currency(&mut inferred_cost_currency));
 
-                // Check number_total first: when both per-unit and total are present
-                // (booking preserves total), use the total directly for exact residual
-                // calculation. Division-then-multiplication loses precision.
-                if let (Some(total), Some(cost_curr)) =
-                    (&cost_spec.number_total, &inferred_currency)
-                {
-                    Some((
+                // BigDecimal version of the same matcher as above.
+                // `PerUnitFromTotal` joins `Total` in the precision-
+                // preserving branch.
+                let cost_curr = inferred_currency.as_ref()?;
+                match cost_spec.number {
+                    Some(rustledger_core::CostNumber::Total(total)) => Some((
                         cost_curr.clone(),
-                        to_big(*total) * to_big(units.number.signum()),
-                    ))
-                } else if let (Some(per_unit), Some(cost_curr)) =
-                    (&cost_spec.number_per, &inferred_currency)
-                {
-                    let cost_amount = &units_number * to_big(*per_unit);
-                    Some((cost_curr.clone(), cost_amount))
-                } else {
-                    None
+                        to_big(total) * to_big(units.number.signum()),
+                    )),
+                    Some(rustledger_core::CostNumber::PerUnitFromTotal(b)) => Some((
+                        cost_curr.clone(),
+                        to_big(b.total) * to_big(units.number.signum()),
+                    )),
+                    Some(rustledger_core::CostNumber::PerUnit(per_unit)) => {
+                        let cost_amount = &units_number * to_big(per_unit);
+                        Some((cost_curr.clone(), cost_amount))
+                    }
+                    None => None,
                 }
             });
 

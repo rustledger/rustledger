@@ -323,7 +323,10 @@ fn test_parse_transaction_with_cost() {
         let posting = &txn.postings[0];
         assert!(posting.cost.is_some());
         let cost = posting.cost.as_ref().unwrap();
-        assert_eq!(cost.number_per.unwrap().to_string(), "185.50");
+        assert_eq!(
+            cost.number.unwrap().per_unit().unwrap().to_string(),
+            "185.50"
+        );
         assert_eq!(cost.currency.as_deref(), Some("USD"));
     } else {
         panic!("expected transaction");

@@ -98,7 +98,11 @@ pub fn validate_transaction_structure(
     // matching Python beancount behavior.
     let is_zero_cost_single = txn.postings.len() == 1
         && txn.postings[0].cost.as_ref().is_some_and(|c| {
-            c.number_per.is_some_and(|n| n.is_zero()) || c.number_total.is_some_and(|n| n.is_zero())
+            // Either per-unit or total carrying zero counts.
+            c.number.is_some_and(|cn| {
+                cn.per_unit().is_some_and(|n| n.is_zero())
+                    || cn.total().is_some_and(|n| n.is_zero())
+            })
         });
     if txn.postings.len() == 1 && !is_zero_cost_single {
         errors.push(ValidationError::new(
@@ -147,7 +151,11 @@ pub fn validate_transaction_structure(
                 |a| format!("{} {}", a.number, a.currency),
             );
             let cost_currency = cost.currency.as_ref().map_or("?", |c| c.as_str());
-            if let Some(per) = cost.number_per
+            // Check per-unit and total components independently —
+            // PerUnitFromTotal carries both, so a single spec can
+            // trigger both negative-cost errors if both values went
+            // negative.
+            if let Some(per) = cost.number.and_then(|cn| cn.per_unit())
                 && per < Decimal::ZERO
             {
                 errors.push(ValidationError::new(
@@ -159,7 +167,7 @@ pub fn validate_transaction_structure(
                     txn.date,
                 ));
             }
-            if let Some(total) = cost.number_total
+            if let Some(total) = cost.number.and_then(|cn| cn.total())
                 && total < Decimal::ZERO
             {
                 errors.push(ValidationError::new(
@@ -260,7 +268,7 @@ pub fn validate_transaction_balance(
     // This matches Python beancount behavior where booking runs before balance checking.
     let has_empty_cost_spec = txn.postings.iter().any(|p| {
         if let Some(cost) = &p.cost {
-            cost.number_per.is_none() && cost.number_total.is_none()
+            cost.number.is_none()
         } else {
             false
         }
@@ -371,9 +379,11 @@ pub fn calculate_tolerances(
                 let units_quantum = decimal_quantum(units.number);
                 let tolerance = units_quantum * options.tolerance_multiplier;
 
-                // Cost contribution
+                // Cost contribution — only per-unit cost feeds into
+                // tolerance inference. `PerUnitFromTotal` and `PerUnit`
+                // both expose a per-unit value via `per_unit()`.
                 if let Some(cost_spec) = &posting.cost
-                    && let Some(cost_per_unit) = cost_spec.number_per
+                    && let Some(cost_per_unit) = cost_spec.number.and_then(|cn| cn.per_unit())
                     && let Some(cost_currency) = &cost_spec.currency
                 {
                     let cost_tolerance = tolerance * cost_per_unit;
@@ -498,13 +508,13 @@ pub fn process_inventory_reduction(
     // `{"lot1"}`). These are unbooked postings where either:
     //   - Booking wasn't run (standalone validation), or
     //   - Booking failed and already reported the error (normal pipeline).
-    // If booking succeeded, it would have filled in number_per from the matched
-    // lot. Re-running lot matching here would double-report or diverge from the
-    // booking engine's decisions. This mirrors `validate_transaction_balance`,
-    // which also skips balance checking when a posting has an unresolved cost.
+    // If booking succeeded, it would have filled in a per-unit cost
+    // from the matched lot. Re-running lot matching here would
+    // double-report or diverge from the booking engine's decisions.
+    // This mirrors `validate_transaction_balance`, which also skips
+    // balance checking when a posting has an unresolved cost.
     if let Some(cost) = &posting.cost
-        && cost.number_per.is_none()
-        && cost.number_total.is_none()
+        && cost.number.is_none()
     {
         return;
     }

@@ -83,15 +83,28 @@ pub(super) fn cmd_region<W: Write>(
                     Some(Conversion::Cost) => {
                         // Use cost if available, otherwise fall back to units
                         if let Some(ref cost) = posting.cost {
-                            // Calculate total cost from cost spec
-                            let total_cost = if let Some(total) = cost.number_total {
-                                // Total cost was specified directly
+                            // Calculate total cost from cost spec. The
+                            // post-#1164 `CostNumber` enum keeps the
+                            // original total when booking derives a
+                            // per-unit (`PerUnitFromTotal`), so the
+                            // `total()` accessor is preferred here for
+                            // precision; the `PerUnit` fallback
+                            // multiplies by units, matching the pre-
+                            // #1164 branch order (total → per-unit →
+                            // none).
+                            let total_cost = if let Some(total) = cost
+                                .number
+                                .as_ref()
+                                .and_then(rustledger_core::CostNumber::total)
+                            {
                                 total
-                            } else if let Some(per_unit) = cost.number_per {
-                                // Calculate total from per-unit cost
+                            } else if let Some(per_unit) = cost
+                                .number
+                                .as_ref()
+                                .and_then(rustledger_core::CostNumber::per_unit)
+                            {
                                 amount.number * per_unit
                             } else {
-                                // No cost info, fall back to units
                                 amount.number
                             };
                             let currency = cost

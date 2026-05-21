@@ -61,7 +61,7 @@ pub mod visit;
 mod kani_proofs;
 
 pub use amount::{Amount, IncompleteAmount};
-pub use cost::{Cost, CostSpec};
+pub use cost::{BookedCost, Cost, CostNumber, CostSpec};
 pub use directive::{
     Balance, Close, Commodity, Custom, Directive, DirectivePriority, Document, Event, MetaValue,
     Metadata, Note, Open, Pad, Posting, Price, PriceAnnotation, PriceKind, Query, Transaction,

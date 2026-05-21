@@ -59,15 +59,19 @@ use rust_decimal::Decimal;
 ///   has a usable `@`/`@@` annotation. Callers should pass `None` for
 ///   incomplete annotations (e.g. `@ EUR` without a number) so the
 ///   helper falls through cleanly.
-/// - `cost`: `Some((number_per, number_total, currency))` if the
-///   posting has a `{...}` cost spec with at least one of `per`/`total`
-///   parsed. Both inner numbers are `Option<Decimal>` because the cost
-///   spec may have only one or the other.
+/// - `cost`: `Some((number, currency))` if the posting has a `{...}`
+///   cost spec. The number is the typed `Option<CostNumber>` from the
+///   spec — `None` means the spec carried no number at all (`{}`),
+///   `Some(CostNumber::PerUnit)` and `Some(CostNumber::Total)` carry
+///   their respective shapes. The mutual-exclusion invariant is
+///   enforced by the type — pre-#1164 this was a `(Option<Decimal>,
+///   Option<Decimal>)` pair that the helper had to defensively
+///   tie-break.
 #[must_use]
 pub fn extract_per_unit_price<T>(
     units_number: Decimal,
     annotation: Option<(bool, Decimal, T)>,
-    cost: Option<(Option<Decimal>, Option<Decimal>, T)>,
+    cost: Option<(Option<crate::CostNumber>, T)>,
 ) -> Option<(Decimal, T)> {
     // Priority 1: price annotation.
     if let Some((is_total, amount, currency)) = annotation {
@@ -83,16 +87,22 @@ pub fn extract_per_unit_price<T>(
         }
     }
 
-    // Priority 2: cost spec. number_per wins over number_total when
-    // both are set.
-    if let Some((per, total, currency)) = cost {
-        if let Some(per) = per {
-            return Some((per, currency));
-        }
-        if let Some(total) = total
-            && !units_number.is_zero()
-        {
-            return Some((total / units_number.abs(), currency));
+    // Priority 2: cost spec. The pre-#1164 per-vs-total tie-break
+    // becomes a single match: PerUnit and PerUnitFromTotal already
+    // carry the per-unit value; Total carries a magnitude that
+    // divides by `|units|` here.
+    if let Some((number, currency)) = cost {
+        match number {
+            Some(crate::CostNumber::PerUnit(per)) => {
+                return Some((per, currency));
+            }
+            Some(crate::CostNumber::PerUnitFromTotal(b)) => {
+                return Some((b.per_unit, currency));
+            }
+            Some(crate::CostNumber::Total(total)) if !units_number.is_zero() => {
+                return Some((total / units_number.abs(), currency));
+            }
+            Some(crate::CostNumber::Total(_)) | None => {}
         }
     }
 
@@ -144,7 +154,7 @@ mod tests {
         let p = extract_per_unit_price(
             dec!(0),
             Some((true, dec!(100), "EUR")),
-            Some((Some(dec!(50)), None, "USD")),
+            Some((Some(crate::CostNumber::PerUnit(dec!(50))), "USD")),
         );
         assert_eq!(p, Some((dec!(50), "USD")));
     }
@@ -160,20 +170,32 @@ mod tests {
     #[test]
     fn cost_per_unit_used_when_no_annotation() {
         // 10 ABC {50.00 USD} → 50.00.
-        let p = extract_per_unit_price(dec!(10), None, Some((Some(dec!(50.00)), None, "USD")));
+        let p = extract_per_unit_price(
+            dec!(10),
+            None,
+            Some((Some(crate::CostNumber::PerUnit(dec!(50.00))), "USD")),
+        );
         assert_eq!(p, Some((dec!(50.00), "USD")));
     }
 
     #[test]
     fn cost_total_divides_by_unit_count() {
         // 10 ABC {{500 USD}} → 500 / 10 = 50.
-        let p = extract_per_unit_price(dec!(10), None, Some((None, Some(dec!(500)), "USD")));
+        let p = extract_per_unit_price(
+            dec!(10),
+            None,
+            Some((Some(crate::CostNumber::Total(dec!(500))), "USD")),
+        );
         assert_eq!(p, Some((dec!(50), "USD")));
     }
 
     #[test]
     fn cost_total_with_zero_units_returns_none() {
-        let p = extract_per_unit_price::<&str>(dec!(0), None, Some((None, Some(dec!(500)), "USD")));
+        let p = extract_per_unit_price::<&str>(
+            dec!(0),
+            None,
+            Some((Some(crate::CostNumber::Total(dec!(500))), "USD")),
+        );
         assert_eq!(p, None);
     }
 
@@ -190,7 +212,7 @@ mod tests {
         let p = extract_per_unit_price(
             dec!(5),
             Some((false, dec!(1.40), "EUR")),
-            Some((Some(dec!(1.25)), None, "EUR")),
+            Some((Some(crate::CostNumber::PerUnit(dec!(1.25))), "EUR")),
         );
         assert_eq!(p, Some((dec!(1.40), "EUR")));
     }
@@ -201,22 +223,14 @@ mod tests {
         let p = extract_per_unit_price(
             dec!(-10),
             Some((true, dec!(14), "EUR")),
-            Some((Some(dec!(1.25)), None, "EUR")),
+            Some((Some(crate::CostNumber::PerUnit(dec!(1.25))), "EUR")),
         );
         assert_eq!(p, Some((dec!(1.4), "EUR")));
     }
 
-    #[test]
-    fn cost_per_wins_over_cost_total_when_both_present() {
-        // {50 USD, 500 USD-total} — number_per takes precedence,
-        // matching Python beancount's tie-break.
-        let p = extract_per_unit_price(
-            dec!(10),
-            None,
-            Some((Some(dec!(50)), Some(dec!(999)), "USD")),
-        );
-        assert_eq!(p, Some((dec!(50), "USD")));
-    }
+    // Note: the pre-#1164 "cost_per wins over cost_total when both are set"
+    // tie-break test is gone — the type system now forbids the both-set
+    // state at construction time, so there's nothing to tie-break.
 
     // ===== Empty cases =====
 
@@ -232,7 +246,11 @@ mod tests {
         // passes `None` for annotation → fall through. Cost present →
         // use it. The returned currency is the cost's, not anything
         // remembered from the dropped annotation.
-        let p = extract_per_unit_price(dec!(10), None, Some((Some(dec!(7)), None, "USD")));
+        let p = extract_per_unit_price(
+            dec!(10),
+            None,
+            Some((Some(crate::CostNumber::PerUnit(dec!(7))), "USD")),
+        );
         assert_eq!(p, Some((dec!(7), "USD")));
     }
 }

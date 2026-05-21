@@ -39,16 +39,18 @@ type LotKey = (String, String, Option<String>);
 /// anyway, but we don't assume that.
 fn cost_fingerprint(cost: &CostData, units_number: Decimal) -> Option<String> {
     let currency = cost.currency.as_deref()?;
-    let per_unit_decimal: Decimal = if let Some(per_str) = &cost.number_per {
-        Decimal::from_str(per_str).ok()?
-    } else if let Some(total_str) = &cost.number_total {
-        let total = Decimal::from_str(total_str).ok()?;
-        if units_number.is_zero() {
-            return None;
+    let per_unit_decimal: Decimal = match &cost.number {
+        Some(rustledger_plugin_types::CostNumberData::PerUnit(per_str)) => {
+            Decimal::from_str(per_str).ok()?
         }
-        total / units_number.abs()
-    } else {
-        return None;
+        Some(rustledger_plugin_types::CostNumberData::Total(total_str)) => {
+            let total = Decimal::from_str(total_str).ok()?;
+            if units_number.is_zero() {
+                return None;
+            }
+            total / units_number.abs()
+        }
+        None => return None,
     };
     let per_unit = per_unit_decimal.normalize().to_string();
     let date = cost.date.as_deref().unwrap_or("");
@@ -176,22 +178,21 @@ impl NativePlugin for ImplicitPricesPlugin {
                     });
 
                 // Same shape for cost: only build the descriptor when
-                // a currency is present AND at least one of per/total
-                // parses.
+                // a currency is present AND the cost number parses.
+                // Translate from wire format (CostNumberData) to core
+                // CostNumber for the shared helper.
                 let cost = posting.cost.as_ref().and_then(|c| {
                     let currency = c.currency.clone()?;
-                    let per = c
-                        .number_per
-                        .as_ref()
-                        .and_then(|n| Decimal::from_str(n).ok());
-                    let total = c
-                        .number_total
-                        .as_ref()
-                        .and_then(|n| Decimal::from_str(n).ok());
-                    if per.is_none() && total.is_none() {
-                        return None;
-                    }
-                    Some((per, total, currency))
+                    let number = match &c.number {
+                        Some(rustledger_plugin_types::CostNumberData::PerUnit(n)) => Some(
+                            rustledger_core::CostNumber::PerUnit(Decimal::from_str(n).ok()?),
+                        ),
+                        Some(rustledger_plugin_types::CostNumberData::Total(n)) => Some(
+                            rustledger_core::CostNumber::Total(Decimal::from_str(n).ok()?),
+                        ),
+                        None => return None,
+                    };
+                    Some((number, currency))
                 });
 
                 // Update the per-account lot tracker BEFORE deciding
@@ -218,8 +219,11 @@ impl NativePlugin for ImplicitPricesPlugin {
                 // cost path when the posting is augmenting (or a
                 // first-time CREATED). Calling the helper twice is
                 // cheap and avoids duplicating its priority logic.
-                let from_annotation =
-                    extract_per_unit_price(units_number, annotation, None::<(_, _, String)>);
+                let from_annotation = extract_per_unit_price(
+                    units_number,
+                    annotation,
+                    None::<(Option<rustledger_core::CostNumber>, String)>,
+                );
                 let chosen = match (from_annotation, reduced) {
                     (Some(p), _) => Some(p),
                     (None, false) => extract_per_unit_price(units_number, None, cost),

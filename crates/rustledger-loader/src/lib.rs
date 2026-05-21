@@ -694,10 +694,16 @@ fn build_display_context(directives: &[Spanned<Directive>], options: &Options) -
                     {
                         ctx.update(number, currency);
                     }
-                    // Cost (CostSpec)
+                    // Cost (CostSpec) — feed either per-unit or total
+                    // to the display-context inference, since both are
+                    // user-written amounts whose precision the context
+                    // should respect.
                     if let Some(ref cost) = posting.cost
-                        && let (Some(number), Some(currency)) =
-                            (cost.number_per.or(cost.number_total), &cost.currency)
+                        && let (Some(number), Some(currency)) = (
+                            cost.number
+                                .map(|cn| cn.per_unit().or_else(|| cn.total()).unwrap_or_default()),
+                            &cost.currency,
+                        )
                     {
                         ctx.update(number, currency.as_str());
                     }

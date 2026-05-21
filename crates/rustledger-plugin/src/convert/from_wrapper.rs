@@ -144,21 +144,16 @@ pub(super) fn data_to_amount(data: &AmountData) -> Result<Amount, ConversionErro
 }
 
 pub(super) fn data_to_cost(data: &CostData) -> Result<CostSpec, ConversionError> {
-    let number_per = data
-        .number_per
-        .as_ref()
-        .map(|s| Decimal::from_str_exact(s))
-        .transpose()
-        .map_err(|_| ConversionError::InvalidNumber(data.number_per.clone().unwrap_or_default()))?;
-
-    let number_total = data
-        .number_total
-        .as_ref()
-        .map(|s| Decimal::from_str_exact(s))
-        .transpose()
-        .map_err(|_| {
-            ConversionError::InvalidNumber(data.number_total.clone().unwrap_or_default())
-        })?;
+    use crate::types::CostNumberData;
+    let number = match &data.number {
+        Some(CostNumberData::PerUnit(s)) => Some(rustledger_core::CostNumber::PerUnit(
+            Decimal::from_str_exact(s).map_err(|_| ConversionError::InvalidNumber(s.clone()))?,
+        )),
+        Some(CostNumberData::Total(s)) => Some(rustledger_core::CostNumber::Total(
+            Decimal::from_str_exact(s).map_err(|_| ConversionError::InvalidNumber(s.clone()))?,
+        )),
+        None => None,
+    };
 
     let date = data
         .date
@@ -168,8 +163,7 @@ pub(super) fn data_to_cost(data: &CostData) -> Result<CostSpec, ConversionError>
         .map_err(|_| ConversionError::InvalidDate(data.date.clone().unwrap_or_default()))?;
 
     Ok(CostSpec {
-        number_per,
-        number_total,
+        number,
         currency: data.currency.as_ref().map(|c| c.clone().into()),
         date,
         label: data.label.clone(),

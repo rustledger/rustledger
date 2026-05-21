@@ -13,12 +13,25 @@ pub fn format_cost_spec(spec: &CostSpec) -> String {
     // Max 4 elements: amount, date, label, merge.
     let mut parts = Vec::with_capacity(4);
 
-    // Amount (per-unit or total)
-    if let (Some(num), Some(curr)) = (&spec.number_per, &spec.currency) {
-        parts.push(format!("{num} {curr}"));
-    } else if let (Some(num), Some(curr)) = (&spec.number_total, &spec.currency) {
-        // Total cost uses double braces
-        return format!("{{{{{num} {curr}}}}}");
+    // Amount (per-unit or total). Currency is required for either
+    // shape; the per-unit / total distinction comes from the typed
+    // `CostNumber` (post-#1164 the invalid both-set state is
+    // unrepresentable). `PerUnitFromTotal` renders in per-unit form
+    // to match Python beancount's post-booking output.
+    if let Some(curr) = &spec.currency {
+        match spec.number {
+            Some(crate::CostNumber::PerUnit(num)) => {
+                parts.push(format!("{num} {curr}"));
+            }
+            Some(crate::CostNumber::PerUnitFromTotal(b)) => {
+                parts.push(format!("{} {curr}", b.per_unit));
+            }
+            Some(crate::CostNumber::Total(num)) => {
+                // Total cost uses double braces.
+                return format!("{{{{{num} {curr}}}}}");
+            }
+            None => {}
+        }
     }
 
     // Date

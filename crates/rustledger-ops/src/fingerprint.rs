@@ -129,16 +129,29 @@ fn hash_amount<H: Hasher>(amount: &AmountData, hasher: &mut H) {
 
 /// Hash a cost's structural fields.
 fn hash_cost<H: Hasher>(cost: &CostData, hasher: &mut H) {
+    use rustledger_plugin_types::CostNumberData;
     let CostData {
-        number_per,
-        number_total,
+        number,
         currency,
         date,
         label,
         merge,
     } = cost;
-    number_per.hash(hasher);
-    number_total.hash(hasher);
+    // Hash the typed number variant + payload. Pre-#1164 we hashed
+    // two parallel Option<String> fields; the new shape forbids the
+    // both-set state but the hash must still distinguish PerUnit from
+    // Total (same number, different meaning) so we tag the variant.
+    match number {
+        None => 0u8.hash(hasher),
+        Some(CostNumberData::PerUnit(s)) => {
+            1u8.hash(hasher);
+            s.hash(hasher);
+        }
+        Some(CostNumberData::Total(s)) => {
+            2u8.hash(hasher);
+            s.hash(hasher);
+        }
+    }
     currency.hash(hasher);
     date.hash(hasher);
     label.hash(hasher);
@@ -462,10 +475,10 @@ mod tests {
 
     #[test]
     fn distinct_costs_produce_different_hashes() {
+        use rustledger_plugin_types::CostNumberData;
         let mut txn1 = make_txn(Some("Store"), "Buy shares", "100.00");
         txn1.postings[0].cost = Some(CostData {
-            number_per: Some("10.00".to_string()),
-            number_total: None,
+            number: Some(CostNumberData::PerUnit("10.00".to_string())),
             currency: Some("USD".to_string()),
             date: None,
             label: None,
@@ -473,8 +486,7 @@ mod tests {
         });
         let mut txn2 = make_txn(Some("Store"), "Buy shares", "100.00");
         txn2.postings[0].cost = Some(CostData {
-            number_per: Some("11.00".to_string()),
-            number_total: None,
+            number: Some(CostNumberData::PerUnit("11.00".to_string())),
             currency: Some("USD".to_string()),
             date: None,
             label: None,

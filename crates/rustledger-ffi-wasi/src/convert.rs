@@ -157,16 +157,32 @@ pub fn directive_to_json(directive: &Directive, line: u32, filename: &str) -> Di
                             })
                         });
 
-                        // Extract cost
-                        let cost = p.cost.as_ref().map(|c| PostingCost {
-                            number: c.number_per.as_ref().map(std::string::ToString::to_string),
-                            number_total: c
-                                .number_total
-                                .as_ref()
-                                .map(std::string::ToString::to_string),
-                            currency: c.currency.as_ref().map(std::string::ToString::to_string),
-                            date: c.date.map(|d| d.to_string()),
-                            label: c.label.clone(),
+                        // Extract cost. The wire shape predates the
+                        // #1164 `CostNumber` enum and keeps the two
+                        // flat fields; the bridge below maps each
+                        // variant onto them. `PerUnitFromTotal` (post-
+                        // booking) emits both so downstream consumers
+                        // can read either form without re-deriving.
+                        let cost = p.cost.as_ref().map(|c| {
+                            let (number, number_total) = match c.number {
+                                Some(rustledger_core::CostNumber::PerUnit(d)) => {
+                                    (Some(d.to_string()), None)
+                                }
+                                Some(rustledger_core::CostNumber::Total(d)) => {
+                                    (None, Some(d.to_string()))
+                                }
+                                Some(rustledger_core::CostNumber::PerUnitFromTotal(b)) => {
+                                    (Some(b.per_unit.to_string()), Some(b.total.to_string()))
+                                }
+                                None => (None, None),
+                            };
+                            PostingCost {
+                                number,
+                                number_total,
+                                currency: c.currency.as_ref().map(std::string::ToString::to_string),
+                                date: c.date.map(|d| d.to_string()),
+                                label: c.label.clone(),
+                            }
                         });
 
                         // Extract price from PriceAnnotation

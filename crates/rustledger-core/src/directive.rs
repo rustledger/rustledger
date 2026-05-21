@@ -219,9 +219,9 @@ impl Posting {
     /// location, use [`crate::Spanned::map`]:
     ///
     /// ```no_run
-    /// # use rustledger_core::{Posting, Amount, CostSpec, Spanned};
+    /// # use rustledger_core::{Posting, Amount, CostSpec, CostNumber, Spanned};
     /// # use rust_decimal_macros::dec;
-    /// # let cost = CostSpec { number_per: Some(dec!(150)), number_total: None,
+    /// # let cost = CostSpec { number: Some(CostNumber::PerUnit(dec!(150))),
     /// #     currency: Some("USD".into()), date: None, label: None, merge: false };
     /// let spanned: Spanned<Posting> = Spanned::synthesized(
     ///     Posting::new("Assets:Stock", Amount::new(dec!(10), "AAPL"))

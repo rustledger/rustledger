@@ -800,7 +800,8 @@ include "accounts.beancount"
         let load = load_and_book(source);
         assert!(load.errors.is_empty(), "errors: {:?}", load.errors);
 
-        // Find the transaction and check that cost has number_per set
+        // Find the transaction and check that the booked cost carries
+        // a per-unit value derived from the source `{{...}}` total.
         let txn = load
             .directives
             .iter()
@@ -822,8 +823,10 @@ include "accounts.beancount"
 
         let cost = prop_posting.cost.as_ref().expect("should have cost");
         let per_unit = cost
-            .number_per
-            .expect("total cost {{}} should be converted to per-unit cost, but number_per is None");
+            .number
+            .as_ref()
+            .and_then(rustledger_core::CostNumber::per_unit)
+            .expect("total cost {{}} should be booked into a CostNumber that exposes per_unit()");
 
         // 150.00 / 273.2200 ≈ 0.5490
         let expected = rustledger_core::Decimal::from_str("0.5490").unwrap();
@@ -917,10 +920,13 @@ include "accounts.beancount"
             directives
                 .iter()
                 .find_map(|d| match d {
-                    rustledger_core::Directive::Transaction(t) => t
-                        .postings
-                        .iter()
-                        .find_map(|p| p.cost.as_ref().and_then(|c| c.number_per)),
+                    rustledger_core::Directive::Transaction(t) => t.postings.iter().find_map(|p| {
+                        p.cost.as_ref().and_then(|c| {
+                            c.number
+                                .as_ref()
+                                .and_then(rustledger_core::CostNumber::per_unit)
+                        })
+                    }),
                     _ => None,
                 })
                 .expect("should have a cost")

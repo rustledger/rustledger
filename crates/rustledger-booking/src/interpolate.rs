@@ -213,18 +213,25 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
                         .or_else(|| crate::price_currency_of(posting))
                         .or_else(|| get_inferred_currency(&mut inferred_cost_currency));
 
-                    if let (Some(per_unit), Some(cost_curr)) =
-                        (&cost_spec.number_per, &inferred_currency)
-                    {
-                        let cost_amount = amount.number * per_unit;
-                        Some((cost_curr.clone(), cost_amount))
-                    } else if let (Some(total), Some(cost_curr)) =
-                        (&cost_spec.number_total, &inferred_currency)
-                    {
-                        // For total cost, sign depends on units sign
-                        Some((cost_curr.clone(), *total * amount.number.signum()))
-                    } else {
-                        None // Cost spec without determinable amount (e.g., empty `{}`)
+                    let cost_curr = inferred_currency.as_ref()?;
+                    match cost_spec.number {
+                        Some(rustledger_core::CostNumber::PerUnit(per_unit)) => {
+                            let cost_amount = amount.number * per_unit;
+                            Some((cost_curr.clone(), cost_amount))
+                        }
+                        Some(rustledger_core::CostNumber::Total(total)) => {
+                            // Sign depends on units sign — the spec
+                            // names the total magnitude, not the
+                            // direction.
+                            Some((cost_curr.clone(), total * amount.number.signum()))
+                        }
+                        Some(rustledger_core::CostNumber::PerUnitFromTotal(b)) => {
+                            // Use the preserved total for precision
+                            // (same rationale as the residual block
+                            // above).
+                            Some((cost_curr.clone(), b.total * amount.number.signum()))
+                        }
+                        None => None, // empty `{}`
                     }
                 });
 
@@ -1500,8 +1507,7 @@ mod tests {
         use rustledger_core::CostSpec;
 
         let cost_spec = CostSpec {
-            number_per: Some(dec!(170.16734)),
-            number_total: None,
+            number: Some(rustledger_core::CostNumber::PerUnit(dec!(170.16734))),
             currency: Some(Currency::from("USD")),
             date: None,
             label: None,
@@ -1569,8 +1575,7 @@ mod tests {
             .with_synthesized_posting(
                 Posting::new("Assets:Brokerage", Amount::new(dec!(1.763), "STOCK")).with_cost(
                     CostSpec {
-                        number_per: None,
-                        number_total: Some(dec!(300.00)),
+                        number: Some(rustledger_core::CostNumber::Total(dec!(300.00))),
                         currency: Some(Currency::from("USD")),
                         date: None,
                         label: None,

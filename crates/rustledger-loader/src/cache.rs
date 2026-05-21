@@ -218,7 +218,14 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 ///     `{ kind: PriceKind, amount: Option<IncompleteAmount> }`
 ///     (#1167). Old cache bytes for the enum's discriminant would
 ///     deserialize as nonsense in the new struct layout.
-const CACHE_VERSION: u32 = 7;
+/// v8: `CostSpec.{number_per,number_total}: Option<Decimal>` collapsed
+///     into `CostSpec.number: Option<CostNumber>` where `CostNumber` is
+///     a 3-variant enum (`PerUnit`, `Total`, `PerUnitFromTotal`)
+///     (#1164). The archived layout is structurally different
+///     (Option<Decimal> + Option<Decimal> → Option<discriminant +
+///     payload>); reading v7 bytes into the v8 layout would produce
+///     garbage cost numbers. Bumping forces regeneration.
+const CACHE_VERSION: u32 = 8;
 
 /// Cache header stored at the start of cache files.
 #[derive(Debug, Clone)]

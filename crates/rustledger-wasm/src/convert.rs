@@ -40,7 +40,18 @@ pub fn directive_to_json(directive: &Directive) -> DirectiveJson {
                         currency: u.currency().map(ToString::to_string).unwrap_or_default(),
                     }),
                     cost: p.cost.as_ref().map(|c| PostingCostJson {
-                        number_per: c.number_per.map(|n| n.to_string()),
+                        // The WASM wire shape only exposes per-unit;
+                        // `Total` (pre-booking) has no per-unit yet so
+                        // serializes as None. After booking, `Total`
+                        // becomes `PerUnitFromTotal` and surfaces the
+                        // derived per-unit. Callers wanting the
+                        // original total form should consume the
+                        // FFI-WASI wire shape, which keeps both.
+                        number_per: c
+                            .number
+                            .as_ref()
+                            .and_then(rustledger_core::CostNumber::per_unit)
+                            .map(|n| n.to_string()),
                         currency: c.currency.as_ref().map(ToString::to_string),
                         date: c.date.map(|d| d.to_string()),
                         label: c.label.clone(),

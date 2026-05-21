@@ -223,19 +223,42 @@ pub fn input_entry_to_directive(entry: &InputEntry) -> Result<Directive, String>
                         })
                     });
 
-                    let cost = p.cost.as_ref().map(|c| rustledger_core::CostSpec {
-                        number_per: c
+                    let cost = p.cost.as_ref().map(|c| {
+                        // The wire shape keeps `number` (per-unit) and
+                        // `number_total` as independent optional fields
+                        // for back-compat; the new `CostNumber` enum
+                        // requires picking one. Per-unit wins when both
+                        // are sent (matches the pre-#1164 booker's
+                        // tie-break and the upstream beancount
+                        // behavior).
+                        let number_per = c
                             .number
                             .as_ref()
-                            .and_then(|n| rustledger_core::Decimal::from_str_exact(n).ok()),
-                        number_total: c
+                            .and_then(|n| rustledger_core::Decimal::from_str_exact(n).ok());
+                        let number_total = c
                             .number_total
                             .as_ref()
-                            .and_then(|n| rustledger_core::Decimal::from_str_exact(n).ok()),
-                        currency: c.currency.clone().map(Into::into),
-                        date: c.date.as_ref().and_then(|d| d.parse::<NaiveDate>().ok()),
-                        label: c.label.clone(),
-                        merge: false,
+                            .and_then(|n| rustledger_core::Decimal::from_str_exact(n).ok());
+                        let number = match (number_per, number_total) {
+                            (Some(per), Some(total)) => {
+                                Some(rustledger_core::CostNumber::PerUnitFromTotal(
+                                    rustledger_core::BookedCost {
+                                        per_unit: per,
+                                        total,
+                                    },
+                                ))
+                            }
+                            (Some(per), None) => Some(rustledger_core::CostNumber::PerUnit(per)),
+                            (None, Some(total)) => Some(rustledger_core::CostNumber::Total(total)),
+                            (None, None) => None,
+                        };
+                        rustledger_core::CostSpec {
+                            number,
+                            currency: c.currency.clone().map(Into::into),
+                            date: c.date.as_ref().and_then(|d| d.parse::<NaiveDate>().ok()),
+                            label: c.label.clone(),
+                            merge: false,
+                        }
                     });
 
                     let price = p.price.as_ref().map(|pr| {

@@ -79,14 +79,17 @@ impl NativePlugin for UnrealizedPlugin {
                     if let Some(units) = &posting.units {
                         let units_num = Decimal::from_str(&units.number).unwrap_or_default();
 
-                        let cost_basis = if let Some(cost) = &posting.cost {
-                            cost.number_per
-                                .as_ref()
-                                .and_then(|s| Decimal::from_str(s).ok())
-                                .unwrap_or_default()
-                                * units_num.abs()
-                        } else {
-                            Decimal::ZERO
+                        // Unrealized-gains operates on post-booking
+                        // transactions where the cost carries a per-
+                        // unit value.
+                        let cost_basis = match posting.cost.as_ref().and_then(|c| c.number.as_ref())
+                        {
+                            Some(rustledger_plugin_types::CostNumberData::PerUnit(s)) => {
+                                Decimal::from_str(s).ok().unwrap_or_default() * units_num.abs()
+                            }
+                            Some(rustledger_plugin_types::CostNumberData::Total(_)) | None => {
+                                Decimal::ZERO
+                            }
                         };
 
                         let account_positions =

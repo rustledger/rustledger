@@ -84,9 +84,20 @@ pub(super) fn amount_to_data(amount: &Amount) -> AmountData {
 }
 
 pub(super) fn cost_to_data(cost: &CostSpec) -> CostData {
+    use crate::types::CostNumberData;
     CostData {
-        number_per: cost.number_per.map(|n| n.to_string()),
-        number_total: cost.number_total.map(|n| n.to_string()),
+        // PerUnitFromTotal is the post-booking shape — surface its
+        // per-unit value to plugins (it's what they typically want;
+        // the source total only matters for residual precision inside
+        // the booker/validator and shouldn't leak through the wire
+        // unless we add a discriminator for it later).
+        number: cost.number.map(|n| match n {
+            rustledger_core::CostNumber::PerUnit(d) => CostNumberData::PerUnit(d.to_string()),
+            rustledger_core::CostNumber::PerUnitFromTotal(b) => {
+                CostNumberData::PerUnit(b.per_unit.to_string())
+            }
+            rustledger_core::CostNumber::Total(d) => CostNumberData::Total(d.to_string()),
+        }),
         currency: cost.currency.as_ref().map(ToString::to_string),
         date: cost.date.map(|d| d.to_string()),
         label: cost.label.clone(),

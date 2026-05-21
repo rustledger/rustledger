@@ -187,18 +187,136 @@ impl fmt::Display for Cost {
 /// let spec2 = CostSpec::default().with_date(rustledger_core::naive_date(2024, 1, 16).unwrap());
 /// assert!(!spec2.matches(&cost));
 /// ```
+/// The numeric component of a [`CostSpec`].
+///
+/// Beancount cost specs name a number in one of two source-level
+/// shapes:
+///
+/// - `{150.00 USD}` — per-unit cost ([`Self::PerUnit`])
+/// - `{{ 1500.00 USD }}` — total cost for the posting's units
+///   ([`Self::Total`])
+///
+/// During booking the engine converts `Total(t)` into a third state,
+/// [`Self::PerUnitFromTotal`], carrying both the derived per-unit
+/// value (for display, lot tracking) and the original total (for
+/// precision-preserving residual math — division-then-multiplication
+/// loses precision at the `rust_decimal` 28-digit ceiling).
+///
+/// A cost spec without a number at all (e.g. `{}` for a booking-
+/// deferred lot match) is represented by `CostSpec.number: None`.
+///
+/// Pre-#1164 the per-unit and total numbers were two independent
+/// `Option<Decimal>` fields on `CostSpec`. The invalid both-set state
+/// was prevented only by parser discipline and downstream defensive
+/// branches; the "booked from total" state was modeled accidentally
+/// by setting both fields, with the meaning encoded only in code
+/// comments. Folding the axes into one enum makes both the
+/// pre-booking invalid state unrepresentable AND the post-booking
+/// derived state explicit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
+pub enum CostNumber {
+    /// Per-unit cost as written: `{150.00 USD}`. Booking leaves this
+    /// shape unchanged.
+    PerUnit(#[cfg_attr(feature = "rkyv", rkyv(with = AsDecimal))] Decimal),
+    /// Total cost as written: `{{ 1500.00 USD }}`. Booking rewrites
+    /// this to [`Self::PerUnitFromTotal`] once units are known.
+    Total(#[cfg_attr(feature = "rkyv", rkyv(with = AsDecimal))] Decimal),
+    /// Post-booking state: a per-unit value derived from a
+    /// `{{ total USD }}` spec at booking time, with the source total
+    /// preserved for exact residual math. Pre-#1164 this was modeled
+    /// implicitly by setting both `number_per` and `number_total` on
+    /// `CostSpec`. The payload is a separate [`BookedCost`] struct
+    /// rather than an inline struct variant so rkyv's per-variant
+    /// archived struct keeps `missing_docs` quiet — the wrapped
+    /// struct's fields carry the docs.
+    PerUnitFromTotal(BookedCost),
+}
+
+/// Payload of [`CostNumber::PerUnitFromTotal`].
+///
+/// Carries both the per-unit value derived at booking time and the
+/// original `{{ total }}` cost so residual math can use the exact
+/// total (avoiding the division-then-multiplication precision loss
+/// that hits the `rust_decimal` 28-digit ceiling on long ledgers).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
+pub struct BookedCost {
+    /// Per-unit cost, derived as `total / |units|` during booking.
+    /// Used by lot tracking, display (Python-compat post-booking
+    /// per-unit form), and validation reads that want a per-unit
+    /// value.
+    #[cfg_attr(feature = "rkyv", rkyv(with = AsDecimal))]
+    pub per_unit: Decimal,
+    /// Original total as written. Used by residual calculation to
+    /// avoid the division-then-multiplication precision loss that
+    /// would otherwise leak into balance checks.
+    #[cfg_attr(feature = "rkyv", rkyv(with = AsDecimal))]
+    pub total: Decimal,
+}
+
+impl CostNumber {
+    /// Return the per-unit value if this number carries one.
+    ///
+    /// - [`Self::PerUnit`] → `Some(its Decimal)`
+    /// - [`Self::PerUnitFromTotal`] → `Some(per_unit)`
+    /// - [`Self::Total`] → `None` (booking hasn't computed per-unit yet)
+    #[must_use]
+    pub const fn per_unit(&self) -> Option<Decimal> {
+        match self {
+            Self::PerUnit(n) => Some(*n),
+            Self::PerUnitFromTotal(b) => Some(b.per_unit),
+            Self::Total(_) => None,
+        }
+    }
+
+    /// Return the total value if this number carries one.
+    ///
+    /// - [`Self::Total`] → `Some(its Decimal)`
+    /// - [`Self::PerUnitFromTotal`] → `Some(total)`
+    /// - [`Self::PerUnit`] → `None`
+    #[must_use]
+    pub const fn total(&self) -> Option<Decimal> {
+        match self {
+            Self::Total(n) => Some(*n),
+            Self::PerUnitFromTotal(b) => Some(b.total),
+            Self::PerUnit(_) => None,
+        }
+    }
+}
+
+/// A cost specification on a posting (`{...}` or `{{...}}`).
+///
+/// Carries the parsed cost-spec axes: the numeric component (per-unit
+/// vs total, modeled as the mutually-exclusive [`CostNumber`] enum),
+/// currency, lot date, label, and merge flag. Any subset may be
+/// missing — `{}` corresponds to all-fields-`None` plus `merge: false`,
+/// which lets the booker do lot matching deferred to inventory.
+///
+/// Pre-#1164 this struct had two independent `Option<Decimal>` fields
+/// (`number_per`, `number_total`). The mutual-exclusion invariant was
+/// enforced only by parser discipline; the post-booking "derived per-
+/// unit from total" state was modeled accidentally by setting both
+/// fields at once. The new shape (`number: Option<CostNumber>`) makes
+/// the invalid state unrepresentable and the derived state explicit.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(
     feature = "rkyv",
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
 )]
 pub struct CostSpec {
-    /// Cost per unit (if specified)
-    #[cfg_attr(feature = "rkyv", rkyv(with = rkyv::with::Map<AsDecimal>))]
-    pub number_per: Option<Decimal>,
-    /// Total cost (if specified) - alternative to `number_per`
-    #[cfg_attr(feature = "rkyv", rkyv(with = rkyv::with::Map<AsDecimal>))]
-    pub number_total: Option<Decimal>,
+    /// The numeric component: per-unit, total, or absent.
+    ///
+    /// Replaces the pre-#1164 `number_per` / `number_total` pair, which
+    /// allowed the invalid both-set state at the type level. See
+    /// [`CostNumber`] for the per-unit vs total distinction.
+    pub number: Option<CostNumber>,
     /// Currency of the cost (if specified)
     pub currency: Option<crate::Currency>,
     /// Acquisition date (if specified)
@@ -218,16 +336,22 @@ impl CostSpec {
     }
 
     /// Set the per-unit cost.
+    ///
+    /// Overwrites any previously-set number (per-unit or total) — the
+    /// shapes are mutually exclusive by construction.
     #[must_use]
     pub const fn with_number_per(mut self, number: Decimal) -> Self {
-        self.number_per = Some(number);
+        self.number = Some(CostNumber::PerUnit(number));
         self
     }
 
     /// Set the total cost.
+    ///
+    /// Overwrites any previously-set number (per-unit or total) — the
+    /// shapes are mutually exclusive by construction.
     #[must_use]
     pub const fn with_number_total(mut self, number: Decimal) -> Self {
-        self.number_total = Some(number);
+        self.number = Some(CostNumber::Total(number));
         self
     }
 
@@ -262,8 +386,7 @@ impl CostSpec {
     /// Check if this is an empty cost spec (all fields None).
     #[must_use]
     pub const fn is_empty(&self) -> bool {
-        self.number_per.is_none()
-            && self.number_total.is_none()
+        self.number.is_none()
             && self.currency.is_none()
             && self.date.is_none()
             && self.label.is_none()
@@ -273,11 +396,16 @@ impl CostSpec {
     /// Check if this cost spec matches a cost.
     ///
     /// All specified fields must match the corresponding cost fields.
+    /// Per-unit matching uses `CostNumber::per_unit()` — a `Total`-only
+    /// spec doesn't constrain the per-unit lot value (booking hasn't
+    /// resolved it yet), but a `PerUnitFromTotal` post-booking spec
+    /// does.
     #[must_use]
     pub fn matches(&self, cost: &Cost) -> bool {
-        // Check per-unit cost
-        if let Some(n) = &self.number_per
-            && n != &cost.number
+        // Check per-unit cost — constrains the lot whenever the spec
+        // carries a per-unit value (PerUnit or PerUnitFromTotal).
+        if let Some(n) = self.number.and_then(|cn| cn.per_unit())
+            && n != cost.number
         {
             return false;
         }
@@ -304,23 +432,23 @@ impl CostSpec {
 
     /// Resolve this cost spec to a concrete cost, given the number of units.
     ///
-    /// If `number_total` is specified, the per-unit cost is calculated as
-    /// `number_total / units`. Full precision is preserved to avoid cost basis
-    /// errors when the position is later sold.
+    /// If the number is `CostNumber::Total`, the per-unit cost is
+    /// calculated as `total / |units|`. Full precision is preserved to
+    /// avoid cost basis errors when the position is later sold.
+    /// `PerUnitFromTotal` already carries the derived per-unit value
+    /// from a prior booking pass — use it directly.
     ///
-    /// Returns `None` if required fields (currency) are missing.
+    /// Returns `None` if required fields (currency, number) are missing.
     #[must_use]
     pub fn resolve(&self, units: Decimal, date: NaiveDate) -> Option<Cost> {
         let currency = self.currency.clone()?;
-
-        let number = if let Some(per) = self.number_per {
-            // User-specified per-unit cost
-            per
-        } else if let Some(total) = self.number_total {
-            // Calculated from total - preserve full precision
-            total / units.abs()
-        } else {
-            return None;
+        let number = match self.number? {
+            // User-specified per-unit cost.
+            CostNumber::PerUnit(per) => per,
+            // Calculated from total — preserve full precision.
+            CostNumber::Total(total) => total / units.abs(),
+            // Already booked from a total.
+            CostNumber::PerUnitFromTotal(b) => b.per_unit,
         };
 
         Some(Cost {
@@ -335,14 +463,14 @@ impl CostSpec {
 impl fmt::Display for CostSpec {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{{")?;
-        // Max 6 elements: number_per, number_total, currency, date, label, merge
-        let mut parts = Vec::with_capacity(6);
+        // Max 5 elements: number, currency, date, label, merge
+        let mut parts = Vec::with_capacity(5);
 
-        if let Some(n) = self.number_per {
-            parts.push(format!("{n}"));
-        }
-        if let Some(n) = self.number_total {
-            parts.push(format!("# {n}"));
+        match self.number {
+            Some(CostNumber::PerUnit(n)) => parts.push(format!("{n}")),
+            Some(CostNumber::PerUnitFromTotal(b)) => parts.push(format!("{}", b.per_unit)),
+            Some(CostNumber::Total(n)) => parts.push(format!("# {n}")),
+            None => {}
         }
         if let Some(c) = &self.currency {
             parts.push(c.to_string());

@@ -170,25 +170,26 @@ pub(super) fn data_to_cost(
         Some(CostNumberData::PerUnitFromTotal { per_unit, total }) => {
             let per_unit_d = parse(per_unit)?;
             let total_d = parse(total)?;
-            // Validate the post-booking invariant
-            // `per_unit * |units| == total` if units are known.
-            // Plugins that mutate one half without the other land in
-            // inventory with bogus state otherwise. When units are
-            // unknown (e.g. interpolation-pending posting) we trust
-            // the wire — the booker re-validates later.
-            match units_number {
-                Some(u) => match rustledger_core::BookedCost::try_new(per_unit_d, total_d, u) {
-                    Some(b) => Some(rustledger_core::CostNumber::PerUnitFromTotal(b)),
-                    None => {
-                        return Err(ConversionError::InvalidNumber(format!(
-                            "PerUnitFromTotal invariant violated: per_unit ({per_unit_d}) * |{u}| != total ({total_d})"
-                        )));
-                    }
-                },
-                None => Some(rustledger_core::CostNumber::PerUnitFromTotal(
-                    rustledger_core::BookedCost::from_parts_unchecked_trusted(per_unit_d, total_d),
-                )),
-            }
+            // `PerUnitFromTotal` is the post-booking shape by
+            // definition — a posting with it must already have units
+            // (the booker put them there). A plugin that emits this
+            // variant without units is malformed; reject rather than
+            // trust silently. The booker does NOT re-validate plugin-
+            // supplied `PerUnitFromTotal` later — pattern matches read
+            // `b.per_unit` / `b.total` without checking consistency
+            // (review B-3.2).
+            let units = units_number.ok_or_else(|| {
+                // Synthesize a units=0 error so the diagnostic
+                // explains why we rejected. `try_new` returns
+                // `tolerance: None` for zero units, which the Display
+                // impl renders as "requires non-zero units".
+                ConversionError::BookedCostInvariantViolated(
+                    rustledger_core::BookedCost::try_new(per_unit_d, total_d, Decimal::ZERO)
+                        .expect_err("zero-units invariant always fails"),
+                )
+            })?;
+            let booked = rustledger_core::BookedCost::try_new(per_unit_d, total_d, units)?;
+            Some(rustledger_core::CostNumber::PerUnitFromTotal(booked))
         }
         None => None,
     };

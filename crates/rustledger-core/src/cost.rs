@@ -6,12 +6,15 @@
 //! A [`CostSpec`] is used for matching against existing costs or specifying
 //! new costs when all fields may not be known.
 
-// rkyv 0.8's `derive(Archive)` synthesizes per-variant `Archived*`
-// structs for struct-style enum variants. The generated `pub value:
-// Archived<Decimal>` field on those structs does not inherit the
-// source variant's field docs, which would fire `missing_docs` under
-// `-D warnings`. Limited to this module so hand-written items still
-// get the lint, but the macro-generated ones don't trip it.
+// rkyv's enum derive (used on `CostNumber` below) synthesizes a
+// per-variant `Archived*` struct whose generated `pub value` field
+// doesn't inherit the source variant's field doc. Item-level
+// `#[allow(missing_docs)]` doesn't propagate into the macro-emitted
+// sibling items, so the suppression must live at module scope.
+// Limited to the `rkyv` feature so hand-written items still get the
+// lint under non-rkyv builds; reviewers should check that any new
+// rkyv-archived type added to this file has docs on its source fields
+// (review A-3.2).
 #![cfg_attr(feature = "rkyv", allow(missing_docs))]
 
 use crate::NaiveDate;
@@ -231,6 +234,9 @@ impl fmt::Display for Cost {
 // plugin-types. Pre-tag, serde defaulted to the external-tag form
 // (`{"PerUnit": "100"}`) which diverged from those boundaries —
 // downstream clients had to know which surface they were talking to.
+// (Module-level `allow(missing_docs)` at the top of this file
+// silences the rkyv-generated archived-struct field doc warnings —
+// see the file header comment.)
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CostNumber {
     /// Per-unit cost as written: `{150.00 USD}`. Booking leaves this
@@ -282,9 +288,68 @@ pub struct BookedCost {
     pub total: Decimal,
 }
 
+/// Diagnostic for a failed [`BookedCost`] consistency check.
+///
+/// Returned by [`BookedCost::try_new`] when the supplied
+/// `per_unit * |units|` does not agree with `total` to within the
+/// `rust_decimal` rounding floor (or when `units == 0`, which makes
+/// the pair structurally untrustworthy — every `per_unit` "works" by
+/// zero-multiplication, so the invariant carries no information).
+///
+/// Carries the inputs and the computed residual so trust-boundary
+/// callers can surface a meaningful error to the originating plugin
+/// or wire client ("you sent `per_unit=50, total=999` with `units=10`;
+/// derived total would be 500, off by 499 — far outside tolerance
+/// 1e-20"). Mapping this to a `ConversionError` variant gives plugin
+/// authors a typed category for the failure instead of conflating
+/// with `InvalidNumber` (parse failure).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BookedCostInvariantError {
+    /// The per-unit value the caller supplied.
+    pub per_unit: Decimal,
+    /// The total value the caller supplied.
+    pub total: Decimal,
+    /// The units value the caller supplied (caller-side sign retained
+    /// so error messages can show what came in).
+    pub units: Decimal,
+    /// `per_unit * |units|`, the value we'd expect `total` to equal.
+    pub derived_total: Decimal,
+    /// `|derived_total - total|`, the magnitude of the violation.
+    pub abs_diff: Decimal,
+    /// The tolerance threshold we tested against. `None` when units
+    /// was zero (the invariant doesn't apply; we reject anyway because
+    /// the pair is structurally meaningless for the post-booking
+    /// shape).
+    pub tolerance: Option<Decimal>,
+}
+
+impl fmt::Display for BookedCostInvariantError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.tolerance {
+            Some(tol) => write!(
+                f,
+                "BookedCost invariant violated: per_unit ({}) * |units| ({}) = {} ≠ total ({}); abs_diff {} exceeds tolerance {}",
+                self.per_unit,
+                self.units.abs(),
+                self.derived_total,
+                self.total,
+                self.abs_diff,
+                tol,
+            ),
+            None => write!(
+                f,
+                "BookedCost requires non-zero units; got per_unit ({}), total ({}), units (0)",
+                self.per_unit, self.total,
+            ),
+        }
+    }
+}
+
+impl std::error::Error for BookedCostInvariantError {}
+
 impl BookedCost {
-    /// Check that `per_unit * |units|` agrees with `total` to within
-    /// `rust_decimal`'s rounding floor.
+    /// Check `per_unit * |units| ≈ total` to within `rust_decimal`
+    /// rounding tolerance, returning the diagnostic on failure.
     ///
     /// The booker derives `per_unit = total / |units|` at 28 significant
     /// digits; back-multiplying truncates similarly. The residual can
@@ -292,29 +357,57 @@ impl BookedCost {
     /// `max(1e-20, |total| * 1e-24)` — `1e-24` is ~10000x larger than
     /// one ULP for typical magnitudes, while the absolute floor
     /// guarantees a sane window for near-zero totals.
-    fn invariant_holds(per_unit: Decimal, total: Decimal, units_abs: Decimal) -> bool {
+    ///
+    /// **`units == 0` is rejected**: the post-booking shape implies the
+    /// booker derived `per_unit` from `total / |units|`, which is
+    /// undefined for zero units. A zero-units `PerUnitFromTotal` is
+    /// structurally meaningless and the caller should use the raw
+    /// `PerUnit` / `Total` variants. Pre-fix the zero-units case
+    /// short-circuited to `true`, which defeated the trust-boundary
+    /// guard at every input bridge (review B-3.1).
+    fn check_invariant(
+        per_unit: Decimal,
+        total: Decimal,
+        units: Decimal,
+    ) -> Result<(), BookedCostInvariantError> {
+        let units_abs = units.abs();
         if units_abs.is_zero() {
-            // Zero-units booking is degenerate; the booker doesn't
-            // construct `PerUnitFromTotal` in that case (see book.rs).
-            // External constructors that pass zero get a free pass.
-            return true;
+            return Err(BookedCostInvariantError {
+                per_unit,
+                total,
+                units,
+                derived_total: Decimal::ZERO,
+                abs_diff: Decimal::ZERO,
+                tolerance: None,
+            });
         }
-        let derived = per_unit * units_abs;
-        let abs_diff = (derived - total).abs();
+        let derived_total = per_unit * units_abs;
+        let abs_diff = (derived_total - total).abs();
         let relative = total.abs() * Decimal::new(1, 24);
         let tolerance = if relative > Decimal::new(1, 20) {
             relative
         } else {
             Decimal::new(1, 20)
         };
-        abs_diff <= tolerance
+        if abs_diff <= tolerance {
+            Ok(())
+        } else {
+            Err(BookedCostInvariantError {
+                per_unit,
+                total,
+                units,
+                derived_total,
+                abs_diff,
+                tolerance: Some(tolerance),
+            })
+        }
     }
 
     /// Construct from booking with a precision invariant check.
     ///
     /// In debug builds, asserts that `per_unit * |units| ≈ total` to
     /// the limits of `rust_decimal` precision (see
-    /// [`Self::invariant_holds`] for the tolerance). Callers are the
+    /// [`Self::check_invariant`] for the tolerance). Callers are the
     /// booker (which derives `per_unit = total / |units|`) and the
     /// plugin / FFI ingress bridges (which must validate consistency
     /// before constructing).
@@ -322,42 +415,71 @@ impl BookedCost {
     /// # Panics
     ///
     /// In debug builds: if the invariant fails. Release builds skip
-    /// the check.
+    /// the check (but trust-boundary callers should use
+    /// [`Self::try_new`] for runtime validation in release too).
     #[must_use]
     pub fn new(per_unit: Decimal, total: Decimal, units: Decimal) -> Self {
-        let units_abs = units.abs();
         debug_assert!(
-            Self::invariant_holds(per_unit, total, units_abs),
-            "BookedCost invariant violated: per_unit ({per_unit}) * |units| ({units_abs}) != total ({total})",
+            Self::check_invariant(per_unit, total, units).is_ok(),
+            "{}",
+            Self::check_invariant(per_unit, total, units).unwrap_err(),
         );
         Self { per_unit, total }
     }
 
-    /// Try to construct, returning `None` if the consistency invariant
-    /// fails. Use this at trust boundaries (FFI input, plugin egress)
-    /// where the caller may have supplied inconsistent values and you
-    /// want to reject rather than panic in debug or accept silently in
-    /// release.
-    #[must_use]
-    pub fn try_new(per_unit: Decimal, total: Decimal, units: Decimal) -> Option<Self> {
-        if Self::invariant_holds(per_unit, total, units.abs()) {
-            Some(Self { per_unit, total })
-        } else {
-            None
-        }
+    /// Try to construct, returning a typed error if the consistency
+    /// invariant fails. Use this at trust boundaries (FFI input,
+    /// plugin egress) where the caller may have supplied inconsistent
+    /// values and you want to reject rather than panic in debug or
+    /// accept silently in release.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BookedCostInvariantError`] when:
+    /// - `units == 0` (the post-booking shape is structurally
+    ///   undefined for zero units; callers should send `PerUnit` or
+    ///   `Total` instead).
+    /// - `per_unit * |units|` differs from `total` by more than
+    ///   `max(1e-20, |total| * 1e-24)`.
+    pub fn try_new(
+        per_unit: Decimal,
+        total: Decimal,
+        units: Decimal,
+    ) -> Result<Self, BookedCostInvariantError> {
+        Self::check_invariant(per_unit, total, units)?;
+        Ok(Self { per_unit, total })
     }
 
-    /// Construct without invariant check.
+    /// Construct from rkyv archive bytes the host itself wrote.
     ///
-    /// Reserved for rkyv deserialization of trusted archive bytes the
-    /// host itself wrote. **Do not call from boundary code** — every
-    /// FFI / plugin / parser ingress must go through [`Self::try_new`]
-    /// or [`Self::new`] so inconsistent pairs cannot enter the host.
-    /// The bypass exists only because rkyv archives carry no units at
-    /// the deserialization site.
+    /// Bypasses the consistency invariant because rkyv archives carry
+    /// no units at the deserialization site, and the host invariant
+    /// was already enforced when the bytes were written. **Do not
+    /// call from boundary code** — every FFI / plugin / parser
+    /// ingress must go through [`Self::try_new`] (which surfaces a
+    /// typed error) so inconsistent pairs cannot enter the host.
+    ///
+    /// The name reflects the trust assumption: the caller has
+    /// verified (via cache-version checks, archive integrity, etc.)
+    /// that the bytes were produced by this host's own booker.
     #[doc(hidden)]
     #[must_use]
-    pub const fn from_parts_unchecked_trusted(per_unit: Decimal, total: Decimal) -> Self {
+    pub const fn from_archive_bytes_trusted(per_unit: Decimal, total: Decimal) -> Self {
+        Self { per_unit, total }
+    }
+
+    /// Construct an *intentionally inconsistent* `BookedCost` for
+    /// fuzzing trust-boundary code that must reject such inputs.
+    ///
+    /// Separate from [`Self::from_archive_bytes_trusted`] so the
+    /// "trusted" name doesn't lie at fuzz call sites — the fuzzer
+    /// explicitly generates pathological inputs. Both have the same
+    /// implementation but different intent in the codebase. Future
+    /// review can grep for `from_fuzz_unchecked` to find every fuzz-
+    /// path bypass without flagging the legitimate archive readers.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn from_fuzz_unchecked(per_unit: Decimal, total: Decimal) -> Self {
         Self { per_unit, total }
     }
 }
@@ -792,39 +914,77 @@ mod tests {
     }
 
     #[test]
-    fn booked_cost_new_allows_zero_units() {
-        // Zero units is degenerate — the booker doesn't construct
-        // PerUnitFromTotal there, but external callers (FFI input)
-        // might. Constructor gives them a pass.
-        let b = BookedCost::new(dec!(7), dec!(99), dec!(0));
-        assert_eq!(b.per_unit, dec!(7));
-        assert_eq!(b.total, dec!(99));
+    #[should_panic(expected = "requires non-zero units")]
+    fn booked_cost_new_rejects_zero_units_in_debug() {
+        // Post-A-3.5/B-3.1: zero units is structurally meaningless
+        // for the post-booking shape (every per_unit "works" by
+        // zero-multiplication). `new` debug-asserts and panics;
+        // `try_new` returns a typed error. The booker never
+        // constructs PerUnitFromTotal with zero units (see book.rs),
+        // so this only fires when boundary code forgets to validate.
+        let _ = BookedCost::new(dec!(7), dec!(99), dec!(0));
     }
 
     #[test]
-    fn booked_cost_from_parts_unchecked_trusted_skips_invariant() {
+    fn booked_cost_from_archive_bytes_trusted_skips_invariant() {
         // rkyv deserialization uses this when units aren't at hand.
         // Constructs the inconsistent pair without panicking —
         // verifying it's truly unchecked. Plugin / FFI ingress code
         // must NOT use this path; they get `try_new`.
-        let b = BookedCost::from_parts_unchecked_trusted(dec!(50), dec!(300));
+        let b = BookedCost::from_archive_bytes_trusted(dec!(50), dec!(300));
         assert_eq!(b.per_unit, dec!(50));
         assert_eq!(b.total, dec!(300));
     }
 
     #[test]
-    fn booked_cost_try_new_rejects_inconsistent_pair() {
-        // Trust-boundary constructor must return None for inconsistent
-        // pairs instead of either panicking (new) or accepting
-        // silently (unchecked). 10 units × 50/u = 500, not 999.
-        let result = BookedCost::try_new(dec!(50), dec!(999), dec!(10));
-        assert!(result.is_none(), "expected None for inconsistent input");
+    fn booked_cost_from_fuzz_unchecked_skips_invariant() {
+        // Fuzz harness uses this to generate pathological inputs that
+        // stress trust-boundary code in convert bridges. Distinct
+        // from the archive constructor at the source level so grep
+        // can identify each kind of bypass.
+        let b = BookedCost::from_fuzz_unchecked(dec!(999999), dec!(0.01));
+        assert_eq!(b.per_unit, dec!(999999));
+        assert_eq!(b.total, dec!(0.01));
+    }
+
+    #[test]
+    fn booked_cost_try_new_rejects_inconsistent_pair_with_diagnostic() {
+        // Trust-boundary constructor must return a typed error for
+        // inconsistent pairs. 10 units × 50/u = 500, not 999.
+        let err = BookedCost::try_new(dec!(50), dec!(999), dec!(10))
+            .expect_err("expected invariant error for inconsistent input");
+        assert_eq!(err.per_unit, dec!(50));
+        assert_eq!(err.total, dec!(999));
+        assert_eq!(err.units, dec!(10));
+        assert_eq!(err.derived_total, dec!(500));
+        assert_eq!(err.abs_diff, dec!(499));
+        assert!(err.tolerance.is_some(), "tolerance must be reported");
+
+        // Display includes both supplied and derived values for
+        // plugin-author diagnostics.
+        let msg = format!("{err}");
+        assert!(msg.contains("50") && msg.contains("999") && msg.contains("500"));
+    }
+
+    #[test]
+    fn booked_cost_try_new_rejects_zero_units() {
+        // Pre-fix the zero-units case short-circuited to "valid",
+        // defeating the trust-boundary guard at every input bridge
+        // (review B-3.1). PerUnitFromTotal is structurally
+        // meaningless for zero units — every per_unit "works" by
+        // zero-multiplication. Reject explicitly with `tolerance:
+        // None` so callers can distinguish this from a numeric
+        // mismatch.
+        let err = BookedCost::try_new(dec!(999999), dec!(0.01), dec!(0))
+            .expect_err("zero units must be rejected, not silently accepted");
+        assert!(err.tolerance.is_none(), "zero-units error has no tolerance");
+        assert!(format!("{err}").contains("non-zero units"));
     }
 
     #[test]
     fn booked_cost_try_new_accepts_consistent_pair() {
         let result = BookedCost::try_new(dec!(50), dec!(500), dec!(10));
-        assert!(result.is_some());
+        assert!(result.is_ok());
     }
 
     #[test]

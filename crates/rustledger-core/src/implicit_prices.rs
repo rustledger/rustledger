@@ -37,19 +37,21 @@ use rust_decimal::Decimal;
 ///    `units_number.abs()`. For `@` (`is_total = false`), returns the
 ///    number directly.
 /// 2. **Cost spec** — only as a fallback when no usable price
-///    annotation. Within the cost spec, `number_per` takes precedence
-///    over `number_total` when both are set (matching Python
-///    beancount's per-vs-total tie-break). `number_total` is divided
-///    by `units_number.abs()`.
+///    annotation. `CostNumber::PerUnit` and `PerUnitFromTotal` carry
+///    a per-unit value directly. `CostNumber::Total` is divided by
+///    `units_number.abs()`. (Pre-#1164 the cost spec could carry a
+///    `number_per` *and* a `number_total` simultaneously; the typed
+///    enum makes that state unrepresentable.)
 /// 3. **No price** — returns `None`.
 ///
 /// Edge cases:
 /// - Zero units with a total-form input (annotation `@@` or
-///   `cost.number_total`): can't compute per-unit, falls through to
+///   `CostNumber::Total`): can't compute per-unit, falls through to
 ///   the next priority. If nothing else is available, returns `None`.
-/// - Zero units with a per-unit-form input (annotation `@` or
-///   `cost.number_per`): the per-unit amount is returned as-is —
-///   "1 share = $X regardless of how many shares you transacted."
+/// - Zero units with a per-unit-form input (annotation `@`,
+///   `CostNumber::PerUnit`, or `PerUnitFromTotal`): the per-unit
+///   amount is returned as-is — "1 share = $X regardless of how many
+///   shares you transacted."
 ///
 /// # Parameters
 ///

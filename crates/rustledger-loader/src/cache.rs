@@ -225,6 +225,16 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 ///     (Option<Decimal> + Option<Decimal> → Option<discriminant +
 ///     payload>); reading v7 bytes into the v8 layout would produce
 ///     garbage cost numbers. Bumping forces regeneration.
+///     Subsequent #1164 follow-up commits converted `CostNumber`'s
+///     variants from tuple form (`PerUnit(Decimal)`) to struct form
+///     (`PerUnit { value: Decimal }`) so serde could apply
+///     `tag = "kind"` for cross-boundary wire unification. The rkyv-
+///     archived layout for a single-field struct variant is byte-
+///     identical to the tuple variant (both pack `Archived<Decimal>`
+///     positionally) — verified against rkyv 0.8.16 — so this change
+///     does NOT require a separate version bump. If a future rkyv
+///     version changes that encoding, OR if `CostNumber` gains
+///     additional fields, bump to v9.
 const CACHE_VERSION: u32 = 8;
 
 /// Cache header stored at the start of cache files.

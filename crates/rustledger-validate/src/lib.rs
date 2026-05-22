@@ -62,7 +62,7 @@ pub use error::{ErrorCode, Severity, ValidationError};
 /// residuals, inventory updates, balance assertions) run as
 /// [`Phase::Late`] AFTER booking AND after the regular plugin pass
 /// (so cost-spec-reading plugins like `implicit_prices` see filled
-/// `cost.number_per` values).
+/// per-unit values on the `CostNumber::PerUnitFromTotal` variant).
 ///
 /// The pipeline is therefore:
 ///     sort → synth-plugins → Early → book → regular-plugins → Late → finalize

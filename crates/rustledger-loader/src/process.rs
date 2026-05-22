@@ -257,9 +257,9 @@ pub fn process(raw: LoadResult, options: &LoadOptions) -> Result<Ledger, Process
     // Opens / Documents that Early checks depend on (E1001 account
     // presence, E5001 missing-document file). Only this narrow synth
     // subset runs here; everything else waits until after booking
-    // (step 5) so cost-spec-reading plugins see filled-in
-    // `cost.number_per` values. See `PluginPass` rustdoc for the
-    // detailed split rationale.
+    // (step 5) so cost-spec-reading plugins see filled-in per-unit
+    // values on the `CostNumber::PerUnitFromTotal` variant. See
+    // `PluginPass` rustdoc for the detailed split rationale.
     #[cfg(feature = "plugins")]
     if options.run_plugins || options.auto_accounts {
         run_plugins(
@@ -356,7 +356,8 @@ pub fn process(raw: LoadResult, options: &LoadOptions) -> Result<Ledger, Process
     // Runs AFTER booking so cost-spec-reading plugins
     // (`implicit_prices`, `capital_gains_classifier`,
     // `check_average_cost`, `sell_gains`, `unrealized`, `valuation`)
-    // see filled-in `cost.number_per` values. This matches Python
+    // see filled-in per-unit values on the
+    // `CostNumber::PerUnitFromTotal` variant. This matches Python
     // beancount's plugins-after-booking ordering and closes
     // rustledger#1117. Failed transactions were partitioned out
     // above; plugins only see successfully-booked input.
@@ -491,8 +492,8 @@ fn run_booking(
 /// depend on), and once with [`PluginPass::PostBooking`] after booking
 /// (so cost-spec-reading plugins like `implicit_prices`,
 /// `capital_gains_classifier`, `check_average_cost`, `sell_gains`,
-/// `unrealized`, and `valuation` see filled-in `cost.number_per`
-/// values).
+/// `unrealized`, and `valuation` see filled-in per-unit values on the
+/// `CostNumber::PerUnitFromTotal` variant).
 ///
 /// Standalone callers (LSP, FFI, tests) that operate on already-booked
 /// input should pass [`PluginPass::All`] for the historical single-pass

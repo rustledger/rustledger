@@ -42,10 +42,18 @@ pub enum InputCostNumber {
 }
 
 /// Input cost for entry creation.
-#[derive(Debug, Deserialize, Clone, Default)]
+///
+/// `Option` fields follow serde's standard convention: an omitted JSON
+/// field is treated as `None` (this can't be tightened without a
+/// custom `Deserialize` impl — serde's `Option` deserializer is
+/// inherently lenient). `#[serde(deny_unknown_fields)]` catches the
+/// other half of the client-bug risk: a misspelled field name will
+/// fail to parse instead of silently being dropped (review A-3.8).
+#[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct InputCost {
     /// Cost number (per-unit, total, or post-booking pair).
-    /// `None` corresponds to a bare `{}` cost spec.
+    /// `None` / absent corresponds to a bare `{}` cost spec.
     #[serde(default)]
     pub number: Option<InputCostNumber>,
     /// Cost currency.
@@ -255,66 +263,69 @@ pub fn input_entry_to_directive(entry: &InputEntry) -> Result<Directive, String>
                         })
                     });
 
-                    let cost = p.cost.as_ref().map(|c| {
-                        // The wire `InputCostNumber` is a tagged enum
-                        // mirroring the host `CostNumber`. The type
-                        // system prevents the both-set state; here we
-                        // additionally enforce the
-                        // `per_unit * |units| == total` invariant for
-                        // PerUnitFromTotal so external clients cannot
-                        // smuggle in inconsistent post-booking pairs.
-                        let parse = |s: &str| {
-                            rustledger_core::Decimal::from_str_exact(s)
-                                .unwrap_or_else(|_| rustledger_core::Decimal::from(0))
-                        };
-                        let posting_units = units
-                            .as_ref()
-                            .and_then(|u: &rustledger_core::IncompleteAmount| u.as_amount());
-                        let number = c.number.as_ref().map(|n| match n {
-                            crate::types::input::InputCostNumber::PerUnit { value } => {
-                                rustledger_core::CostNumber::PerUnit {
-                                    value: parse(value),
+                    let cost = p
+                        .cost
+                        .as_ref()
+                        .map(|c| {
+                            // The wire `InputCostNumber` is a tagged enum
+                            // mirroring the host `CostNumber`. The type
+                            // system prevents the both-set state; we
+                            // additionally enforce the
+                            // `per_unit * |units| == total` invariant for
+                            // PerUnitFromTotal so external clients cannot
+                            // smuggle in inconsistent post-booking pairs.
+                            // Inconsistent pairs become a parse error
+                            // (review B-3.1) — silently falling back to
+                            // PerUnit and dropping the supplied total
+                            // would itself be a corruption pattern.
+                            let parse = |s: &str| {
+                                rustledger_core::Decimal::from_str_exact(s).map_err(|e| {
+                                    format!("invalid cost number {s:?}: {e}")
+                                })
+                            };
+                            let posting_units = units
+                                .as_ref()
+                                .and_then(|u: &rustledger_core::IncompleteAmount| u.as_amount());
+                            let number = match c.number.as_ref() {
+                                None => None,
+                                Some(crate::types::input::InputCostNumber::PerUnit { value }) => {
+                                    Some(rustledger_core::CostNumber::PerUnit { value: parse(value)? })
                                 }
-                            }
-                            crate::types::input::InputCostNumber::Total { value } => {
-                                rustledger_core::CostNumber::Total {
-                                    value: parse(value),
+                                Some(crate::types::input::InputCostNumber::Total { value }) => {
+                                    Some(rustledger_core::CostNumber::Total { value: parse(value)? })
                                 }
-                            }
-                            crate::types::input::InputCostNumber::PerUnitFromTotal {
-                                per_unit,
-                                total,
-                            } => {
-                                let per_unit_d = parse(per_unit);
-                                let total_d = parse(total);
-                                // `try_new` returns None if the pair is
-                                // inconsistent with the posting's
-                                // units; we fall back to interpreting
-                                // as raw PerUnit so the directive still
-                                // parses but loses the bogus total
-                                // (loud truncation > silent corruption).
-                                let units_n = posting_units.as_ref().map_or_else(
-                                    || rustledger_core::Decimal::from(0),
-                                    |a| a.number,
-                                );
-                                match rustledger_core::BookedCost::try_new(
-                                    per_unit_d, total_d, units_n,
-                                ) {
-                                    Some(b) => rustledger_core::CostNumber::PerUnitFromTotal(b),
-                                    None => {
-                                        rustledger_core::CostNumber::PerUnit { value: per_unit_d }
-                                    }
+                                Some(crate::types::input::InputCostNumber::PerUnitFromTotal {
+                                    per_unit,
+                                    total,
+                                }) => {
+                                    let per_unit_d = parse(per_unit)?;
+                                    let total_d = parse(total)?;
+                                    // PerUnitFromTotal is the post-booking
+                                    // shape — the wire client MUST supply
+                                    // units. Missing units → reject (not
+                                    // "fall back to PerUnit", which would
+                                    // silently drop the supplied total).
+                                    let units_n = posting_units.as_ref().map(|a| a.number).ok_or_else(|| {
+                                        "PerUnitFromTotal cost requires units on the posting — \
+                                         this is the post-booking shape and is meaningless without units. \
+                                         Send `{kind:\"per_unit\", value:...}` or `{kind:\"total\", value:...}` for unbooked specs.".to_string()
+                                    })?;
+                                    let booked = rustledger_core::BookedCost::try_new(
+                                        per_unit_d, total_d, units_n,
+                                    )
+                                    .map_err(|e| format!("{e}"))?;
+                                    Some(rustledger_core::CostNumber::PerUnitFromTotal(booked))
                                 }
-                            }
-                        });
-                        rustledger_core::CostSpec {
-                            number,
-                            currency: c.currency.clone().map(Into::into),
-                            date: c.date.as_ref().and_then(|d| d.parse::<NaiveDate>().ok()),
-                            label: c.label.clone(),
-                            merge: false,
-                        }
-                    });
+                            };
+                            Ok::<_, String>(rustledger_core::CostSpec {
+                                number,
+                                currency: c.currency.clone().map(Into::into),
+                                date: c.date.as_ref().and_then(|d| d.parse::<NaiveDate>().ok()),
+                                label: c.label.clone(),
+                                merge: false,
+                            })
+                        })
+                        .transpose()?;
 
                     let price = p.price.as_ref().map(|pr| {
                         rustledger_core::PriceAnnotation::unit(rustledger_core::Amount {
@@ -324,7 +335,7 @@ pub fn input_entry_to_directive(entry: &InputEntry) -> Result<Directive, String>
                         })
                     });
 
-                    rustledger_core::Spanned::synthesized(rustledger_core::Posting {
+                    Ok::<_, String>(rustledger_core::Spanned::synthesized(rustledger_core::Posting {
                         account: p.account.clone().into(),
                         units,
                         cost,
@@ -333,9 +344,9 @@ pub fn input_entry_to_directive(entry: &InputEntry) -> Result<Directive, String>
                         meta: json_map_to_metadata(&p.meta),
                         comments: Vec::new(),
                         trailing_comments: Vec::new(),
-                    })
+                    }))
                 })
-                .collect();
+                .collect::<Result<_, String>>()?;
 
             Ok(Directive::Transaction(rustledger_core::Transaction {
                 date,
@@ -618,10 +629,112 @@ mod tests {
 
     #[test]
     fn input_cost_with_no_number_parses_as_bare_brace() {
-        // `{}` lot match: the `number` field is absent or null.
+        // `{}` lot match: number absent → bare cost spec. Serde's
+        // Option deserializer treats missing fields as `None` by
+        // convention; we lean on `deny_unknown_fields` for the other
+        // client-bug case (misspelled field).
         let json = r#"{"currency": "USD"}"#;
         let cost: InputCost = serde_json::from_str(json).unwrap();
         assert!(cost.number.is_none());
         assert_eq!(cost.currency.as_deref(), Some("USD"));
+    }
+
+    #[test]
+    fn input_cost_rejects_unknown_field() {
+        // `deny_unknown_fields` catches misspelled fields that would
+        // otherwise be silently dropped (review A-3.8). A client
+        // sending an unrecognized key (e.g. `cost_number` instead of
+        // `number`) gets a parse error instead of an unexpectedly
+        // bare cost spec on the directive.
+        let json = r#"{"cost_number": {"kind": "per_unit", "value": "100"}, "currency": "USD"}"#;
+        let result: Result<InputCost, _> = serde_json::from_str(json);
+        assert!(
+            result.is_err(),
+            "expected parse error for unknown field, got Ok"
+        );
+    }
+
+    #[test]
+    fn input_cost_per_unit_from_total_rejected_when_inconsistent() {
+        // Bridge-level test through the actual conversion path:
+        // PerUnitFromTotal with mismatched per_unit/total/units must
+        // produce a typed error string, not silently coerce to
+        // PerUnit. Pre-fix this fell back to `PerUnit { value:
+        // per_unit_d }`, dropping the supplied total.
+        let entry_json = r#"{
+            "type": "transaction",
+            "date": "2024-01-15",
+            "flag": "*",
+            "payee": null,
+            "narration": "Buy stock",
+            "tags": [],
+            "links": [],
+            "meta": {},
+            "postings": [
+                {
+                    "account": "Assets:Stock",
+                    "units": {"number": "10", "currency": "STK"},
+                    "cost": {
+                        "number": {"kind": "per_unit_from_total", "per_unit": "999999", "total": "0.01"},
+                        "currency": "USD",
+                        "date": null,
+                        "label": null
+                    },
+                    "price": null,
+                    "meta": {}
+                }
+            ]
+        }"#;
+        let entry: InputEntry = serde_json::from_str(entry_json).unwrap();
+        let result = input_entry_to_directive(&entry);
+        assert!(
+            result.is_err(),
+            "inconsistent PerUnitFromTotal must reject at the bridge"
+        );
+        let err = result.unwrap_err();
+        // Diagnostic mentions the invariant so plugin authors can fix
+        // their wire client.
+        assert!(
+            err.contains("invariant") || err.contains("per_unit") || err.contains("total"),
+            "error message must describe the invariant violation, got: {err}"
+        );
+    }
+
+    #[test]
+    fn input_cost_per_unit_from_total_rejected_when_units_missing() {
+        // PerUnitFromTotal is post-booking; a plugin sending it
+        // without units is malformed (review B-3.1). The bridge must
+        // reject rather than default units to 0 (which the
+        // pre-fix `invariant_holds` short-circuit accepted).
+        let entry_json = r#"{
+            "type": "transaction",
+            "date": "2024-01-15",
+            "flag": "*",
+            "payee": null,
+            "narration": "Buy stock",
+            "tags": [],
+            "links": [],
+            "meta": {},
+            "postings": [
+                {
+                    "account": "Assets:Stock",
+                    "units": null,
+                    "cost": {
+                        "number": {"kind": "per_unit_from_total", "per_unit": "999999", "total": "0.01"},
+                        "currency": "USD",
+                        "date": null,
+                        "label": null
+                    },
+                    "price": null,
+                    "meta": {}
+                }
+            ]
+        }"#;
+        let entry: InputEntry = serde_json::from_str(entry_json).unwrap();
+        let result = input_entry_to_directive(&entry);
+        assert!(
+            result.is_err(),
+            "PerUnitFromTotal without units must reject (post-booking shape requires units)"
+        );
     }
 }

@@ -101,6 +101,91 @@ fn per_unit_from_total_round_trip() {
     assert_eq!(back.total(), Some("300"));
 }
 
+// ===== MessagePack wire-format tests (review A-3.11) =====
+//
+// The *actual* WASM plugin wire transport is MessagePack, not JSON
+// (see `rustledger-plugin/src/wasm/runtime.rs` rmp_serde calls). The
+// JSON tests above pin the human-readable shape; these pin the
+// binary wire so a future change to msgpack serializer settings
+// (e.g. forcing positional struct encoding) doesn't silently break
+// cross-language plugin compat.
+
+#[test]
+fn per_unit_msgpack_round_trip() {
+    let cn = CostNumberData::PerUnit {
+        value: "100".to_string(),
+    };
+    let bytes = rmp_serde::to_vec(&cn).unwrap();
+    let back: CostNumberData = rmp_serde::from_slice(&bytes).unwrap();
+    assert_eq!(back.per_unit(), Some("100"));
+    assert_eq!(back.total(), None);
+}
+
+#[test]
+fn total_msgpack_round_trip() {
+    let cn = CostNumberData::Total {
+        value: "1500".to_string(),
+    };
+    let bytes = rmp_serde::to_vec(&cn).unwrap();
+    let back: CostNumberData = rmp_serde::from_slice(&bytes).unwrap();
+    assert_eq!(back.per_unit(), None);
+    assert_eq!(back.total(), Some("1500"));
+}
+
+#[test]
+fn per_unit_from_total_msgpack_round_trip() {
+    // Load-bearing: post-booking PerUnitFromTotal must survive the
+    // msgpack round-trip with both halves intact. If serializer
+    // settings drop the discriminator, the variant degrades silently
+    // to one half — exactly the silent-degradation pattern this PR
+    // was designed to prevent.
+    let cn = CostNumberData::PerUnitFromTotal {
+        per_unit: "150".to_string(),
+        total: "300".to_string(),
+    };
+    let bytes = rmp_serde::to_vec(&cn).unwrap();
+    let back: CostNumberData = rmp_serde::from_slice(&bytes).unwrap();
+    assert_eq!(back.per_unit(), Some("150"));
+    assert_eq!(back.total(), Some("300"));
+}
+
+#[test]
+fn cost_data_msgpack_round_trip_preserves_all_variants() {
+    use rustledger_plugin_types::CostData;
+
+    for number in [
+        Some(CostNumberData::PerUnit { value: "1".into() }),
+        Some(CostNumberData::Total { value: "10".into() }),
+        Some(CostNumberData::PerUnitFromTotal {
+            per_unit: "1".into(),
+            total: "10".into(),
+        }),
+        None,
+    ] {
+        let cost = CostData {
+            number,
+            currency: Some("USD".into()),
+            date: Some("2024-01-15".into()),
+            label: Some("lot1".into()),
+            merge: false,
+        };
+        let bytes = rmp_serde::to_vec(&cost).unwrap();
+        let back: CostData = rmp_serde::from_slice(&bytes).unwrap();
+        match (&cost.number, &back.number) {
+            (None, None) => {}
+            (Some(a), Some(b)) => {
+                assert_eq!(a.per_unit(), b.per_unit());
+                assert_eq!(a.total(), b.total());
+            }
+            _ => panic!("msgpack round trip mutated cost.number presence"),
+        }
+        assert_eq!(cost.currency, back.currency);
+        assert_eq!(cost.date, back.date);
+        assert_eq!(cost.label, back.label);
+        assert_eq!(cost.merge, back.merge);
+    }
+}
+
 #[test]
 fn accessors_exhaustively_cover_variants() {
     // Regression guard: if a future variant is added without updating

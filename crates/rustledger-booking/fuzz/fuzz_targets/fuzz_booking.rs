@@ -209,7 +209,18 @@ fuzz_target!(|input: FuzzTransaction| {
                             per_unit_cents,
                             total_cents,
                         } => CostNumber::PerUnitFromTotal(
-                            BookedCost::from_parts_unchecked_trusted(
+                            // `from_fuzz_unchecked` exists specifically
+                            // for this case — the fuzzer deliberately
+                            // generates inconsistent (per_unit, total)
+                            // pairs to stress downstream consumers
+                            // (residual math, format rendering,
+                            // fingerprint hashing) that read
+                            // `b.per_unit` and `b.total` without
+                            // re-validating. Distinct from
+                            // `from_archive_bytes_trusted` so grep
+                            // tells trusted archive readers apart
+                            // from fuzz pathological-input generators.
+                            BookedCost::from_fuzz_unchecked(
                                 make_decimal(*per_unit_cents),
                                 make_decimal(*total_cents),
                             ),

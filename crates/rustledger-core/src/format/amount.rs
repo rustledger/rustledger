@@ -17,7 +17,11 @@ pub fn format_cost_spec(spec: &CostSpec) -> String {
     // shape; the per-unit / total distinction comes from the typed
     // `CostNumber` (post-#1164 the invalid both-set state is
     // unrepresentable). `PerUnitFromTotal` renders in per-unit form
-    // to match Python beancount's post-booking output.
+    // to match Python beancount's post-booking output. `Total` uses
+    // double braces — pre-fix this short-circuit-returned without
+    // emitting date/label/merge, causing `{{1500 USD, 2024-01-15,
+    // "lot1"}}` to round-trip as `{{1500 USD}}` (review A-3.9).
+    let uses_double_braces = matches!(spec.number, Some(crate::CostNumber::Total { .. }));
     if let Some(curr) = &spec.currency {
         match spec.number {
             Some(crate::CostNumber::PerUnit { value: num }) => {
@@ -27,8 +31,7 @@ pub fn format_cost_spec(spec: &CostSpec) -> String {
                 parts.push(format!("{} {curr}", b.per_unit));
             }
             Some(crate::CostNumber::Total { value: num }) => {
-                // Total cost uses double braces.
-                return format!("{{{{{num} {curr}}}}}");
+                parts.push(format!("{num} {curr}"));
             }
             None => {}
         }
@@ -49,7 +52,11 @@ pub fn format_cost_spec(spec: &CostSpec) -> String {
         parts.push("*".to_string());
     }
 
-    format!("{{{}}}", parts.join(", "))
+    if uses_double_braces {
+        format!("{{{{{}}}}}", parts.join(", "))
+    } else {
+        format!("{{{}}}", parts.join(", "))
+    }
 }
 
 /// Format a price annotation.
@@ -115,5 +122,25 @@ mod tests {
         // matches.
         let spec = CostSpec::empty().with_currency("USD");
         assert_eq!(format_cost_spec(&spec), "{}");
+    }
+
+    #[test]
+    fn cost_spec_total_preserves_date_label_merge() {
+        // Pre-A-3.9 the Total arm short-circuited after writing the
+        // amount, dropping date/label/merge. A round-trip through the
+        // parser would silently lose those fields.
+        let spec = CostSpec::empty()
+            .with_number(CostNumber::Total { value: dec!(1500) })
+            .with_currency("USD")
+            .with_date(crate::naive_date(2024, 1, 15).unwrap())
+            .with_label("lot1")
+            .with_merge();
+        let rendered = format_cost_spec(&spec);
+        assert!(rendered.starts_with("{{"));
+        assert!(rendered.ends_with("}}"));
+        assert!(rendered.contains("1500 USD"));
+        assert!(rendered.contains("2024-01-15"));
+        assert!(rendered.contains("\"lot1\""));
+        assert!(rendered.contains('*'));
     }
 }

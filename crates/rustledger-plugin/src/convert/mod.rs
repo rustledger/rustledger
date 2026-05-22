@@ -25,12 +25,24 @@ pub enum ConversionError {
     /// Invalid date format.
     #[error("invalid date format: {0}")]
     InvalidDate(String),
-    /// Invalid number format.
+    /// Invalid number format. Use for parse failures only — for a pair
+    /// of valid numbers that fail a cross-field invariant, see
+    /// [`Self::BookedCostInvariantViolated`].
     #[error("invalid number format: {0}")]
     InvalidNumber(String),
     /// Invalid flag format.
     #[error("invalid flag: {0}")]
     InvalidFlag(String),
+    /// A `PerUnitFromTotal` cost spec carries a (`per_unit`, `total`)
+    /// pair that doesn't agree with the posting's units. Returned by
+    /// the plugin egress and FFI input bridges when a plugin author
+    /// or JSON client supplies the post-booking shape with
+    /// inconsistent values — e.g. mutates `per_unit` without updating
+    /// `total`. The inner [`BookedCostInvariantError`] carries the
+    /// supplied values, the derived total, and the tolerance for
+    /// plugin-author diagnostics.
+    #[error("cost spec invariant violated: {0}")]
+    BookedCostInvariantViolated(#[from] rustledger_core::BookedCostInvariantError),
     /// A `SourceSpan` byte offset from the plugin wire format does not
     /// fit in `usize` on the host. This is effectively impossible in
     /// practice — `SourceSpan` is `u64` and the host is 64-bit on every

@@ -75,6 +75,19 @@ Custom = namedtuple('Custom', ['meta', 'date', 'type', 'values'])
 
 Cost = namedtuple('Cost', ['number', 'currency', 'date', 'label'])
 
+# `CostSpec` shape matches upstream `beancount.core.data.CostSpec`
+# verbatim — `number_per` / `number_total` are the two flat fields
+# Python plugins read directly. The host's typed `CostNumber` enum
+# (rustledger_core::CostNumber) is flattened to these two fields by
+# `_parse_cost_spec` below.
+#
+# This is an INTENTIONAL legacy-shape match (Python compat policy
+# bucket 2: "not fixable locally" — see project CLAUDE.md). Upstream
+# beancount's Python API is what every existing Python plugin codes
+# against; presenting a different shape here would break every
+# Python plugin in the ecosystem. The host's stricter `CostNumber`
+# shape is the right model internally, but the Python compat surface
+# matches upstream's API by design.
 CostSpec = namedtuple('CostSpec', [
     'number_per', 'number_total', 'currency', 'date', 'label', 'merge'
 ])

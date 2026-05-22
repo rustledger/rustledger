@@ -142,8 +142,9 @@ impl NativePlugin for CurrencyAccountsPlugin {
             }
 
             // `weight(posting)` returns (amount, currency):
-            //   - Cost: (units * number_per, cost.currency), or total cost
-            //     with sign following units.
+            //   - Cost (PerUnit): (units * per_unit, cost.currency).
+            //   - Cost (Total / PerUnitFromTotal): preserved total
+            //     magnitude with sign following units.
             //   - Price: (units * price, price.currency). For @@ (is_total),
             //     weight magnitude is the total price, sign follows units.
             //   - Else: (units.amount, units.currency)

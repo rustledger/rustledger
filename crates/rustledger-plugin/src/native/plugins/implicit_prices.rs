@@ -32,11 +32,11 @@ type LotKey = (String, String, Option<String>);
 /// phantom price emit this gate exists to prevent would slip back in.
 /// Caught by Copilot review on PR #1061.
 ///
-/// We canonicalize `number_per` from `number_total` (dividing by
-/// `|units|`) when only the total is set — keeps the key consistent
+/// We canonicalize per-unit from total (dividing by `|units|`) when
+/// only the raw `Total` form is set — keeps the key consistent
 /// regardless of which form the cost was originally written in. After
-/// booking has run the `number_per` field is normally populated
-/// anyway, but we don't assume that.
+/// booking has run, the post-booking `PerUnitFromTotal` variant
+/// carries per-unit already, but we don't assume that.
 fn cost_fingerprint(cost: &CostData, units_number: Decimal) -> Option<String> {
     let currency = cost.currency.as_deref()?;
     // `per_unit()` covers both PerUnit and PerUnitFromTotal (both
@@ -99,8 +99,8 @@ fn cost_fingerprint(cost: &CostData, units_number: Decimal) -> Option<String> {
 /// earlier in the pipeline, the gate would over-suppress on
 /// pre-split crossing postings.
 ///
-/// Lots with a cost spec that carries neither `number_per` nor
-/// `number_total` (e.g. bare `{2024-01-01}`) aren't tracked in the
+/// Lots with a cost spec that carries no `number` at all (e.g. bare
+/// `{2024-01-01}` — `CostNumber` is `None`) aren't tracked in the
 /// inventory — `cost_fingerprint` returns `None` and the posting
 /// passes through the cost-emit branch directly. Python's
 /// `Inventory.add_amount` would still track these, but since the
@@ -186,14 +186,17 @@ impl NativePlugin for ImplicitPricesPlugin {
                     let currency = c.currency.clone()?;
                     // Plugin-side units (already-booked) are available
                     // via the posting; use them so PerUnitFromTotal
-                    // goes through `try_new` and inconsistent pairs
-                    // collapse to PerUnit (loud truncation > silent
-                    // corruption).
+                    // goes through `try_new` with a real units value.
+                    // Inconsistent pairs or missing units → drop the
+                    // descriptor entirely (this is the implicit-price
+                    // emission path, not the host's wire-ingress path
+                    // — dropping a bad descriptor here just means we
+                    // don't emit an implicit price for that posting,
+                    // which is the right conservative behavior).
                     let units_n = posting
                         .units
                         .as_ref()
-                        .and_then(|u| Decimal::from_str(&u.number).ok())
-                        .unwrap_or_default();
+                        .and_then(|u| Decimal::from_str(&u.number).ok())?;
                     let number = match &c.number {
                         Some(rustledger_plugin_types::CostNumberData::PerUnit { value: n }) => {
                             Some(rustledger_core::CostNumber::PerUnit {
@@ -211,13 +214,10 @@ impl NativePlugin for ImplicitPricesPlugin {
                         }) => {
                             let per_unit_d = Decimal::from_str(per_unit).ok()?;
                             let total_d = Decimal::from_str(total).ok()?;
-                            match rustledger_core::BookedCost::try_new(per_unit_d, total_d, units_n)
-                            {
-                                Some(b) => Some(rustledger_core::CostNumber::PerUnitFromTotal(b)),
-                                None => {
-                                    Some(rustledger_core::CostNumber::PerUnit { value: per_unit_d })
-                                }
-                            }
+                            let booked =
+                                rustledger_core::BookedCost::try_new(per_unit_d, total_d, units_n)
+                                    .ok()?;
+                            Some(rustledger_core::CostNumber::PerUnitFromTotal(booked))
                         }
                         None => return None,
                     };

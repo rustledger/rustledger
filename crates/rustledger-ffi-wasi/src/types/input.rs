@@ -5,6 +5,27 @@ use std::collections::HashMap;
 use rustledger_core::{Directive, MetaValue, Metadata, NaiveDate};
 use serde::Deserialize;
 
+/// Parse an `InputAmount` to a host `Amount`, propagating decimal parse
+/// errors instead of silently coercing them to zero.
+///
+/// Pre-fix every amount-bearing field on the wire used
+/// `unwrap_or_else(|_| Decimal::from(0))`, which meant a balance
+/// assertion like `{"amount": {"number": "garbage", "currency":
+/// "USD"}}` was accepted as `0 USD` — silently defeating balance
+/// checks (review B-4.1). All callers now propagate the parse error
+/// to the wire client.
+fn parse_input_amount(
+    field: &str,
+    amount: &InputAmount,
+) -> Result<rustledger_core::Amount, String> {
+    let number = rustledger_core::Decimal::from_str_exact(&amount.number)
+        .map_err(|e| format!("invalid {field} number {:?}: {e}", amount.number))?;
+    Ok(rustledger_core::Amount {
+        number,
+        currency: amount.currency.clone().into(),
+    })
+}
+
 /// Input amount for entry creation.
 #[derive(Debug, Deserialize, Clone)]
 pub struct InputAmount {
@@ -65,6 +86,13 @@ pub struct InputCost {
     /// Lot label.
     #[serde(default)]
     pub label: Option<String>,
+    /// Merge-into-existing-lot flag (the `*` marker on a cost spec —
+    /// triggers average-cost booking for the position). Pre-A-4.6 the
+    /// FFI bridge hard-coded `false`, which silently diverged from the
+    /// plugin egress (`from_wrapper.rs`) that does accept the field.
+    /// Both ingress surfaces now consume `merge` uniformly.
+    #[serde(default)]
+    pub merge: bool,
 }
 
 /// Input posting for entry creation.
@@ -188,6 +216,13 @@ fn default_flag() -> String {
 }
 
 /// Convert JSON metadata value to core `MetaValue`.
+///
+/// Unparsable numeric values become `MetaValue::None` (review B-4.1)
+/// rather than silently coercing to zero. Metadata is informational
+/// so a typed `MetaValue::None` is the right "I saw something but
+/// couldn't interpret it as a number" signal — preferable to either
+/// silently substituting zero (loses the original value) or panicking
+/// (heavyweight for a metadata field).
 pub fn json_to_meta_value(value: &serde_json::Value) -> MetaValue {
     match value {
         serde_json::Value::String(s) => MetaValue::String(s.clone()),
@@ -196,10 +231,10 @@ pub fn json_to_meta_value(value: &serde_json::Value) -> MetaValue {
             if let Some(i) = n.as_i64() {
                 MetaValue::Number(rustledger_core::Decimal::from(i))
             } else if let Some(f) = n.as_f64() {
-                MetaValue::Number(
-                    rustledger_core::Decimal::from_str_exact(&f.to_string())
-                        .unwrap_or_else(|_| rustledger_core::Decimal::from(0)),
-                )
+                match rustledger_core::Decimal::from_str_exact(&f.to_string()) {
+                    Ok(d) => MetaValue::Number(d),
+                    Err(_) => MetaValue::None,
+                }
             } else {
                 MetaValue::None
             }
@@ -210,11 +245,13 @@ pub fn json_to_meta_value(value: &serde_json::Value) -> MetaValue {
             if let (Some(number), Some(currency)) = (obj.get("number"), obj.get("currency"))
                 && let (Some(n), Some(c)) = (number.as_str(), currency.as_str())
             {
-                return MetaValue::Amount(rustledger_core::Amount {
-                    number: rustledger_core::Decimal::from_str_exact(n)
-                        .unwrap_or_else(|_| rustledger_core::Decimal::from(0)),
-                    currency: c.into(),
-                });
+                return match rustledger_core::Decimal::from_str_exact(n) {
+                    Ok(number) => MetaValue::Amount(rustledger_core::Amount {
+                        number,
+                        currency: c.into(),
+                    }),
+                    Err(_) => MetaValue::None,
+                };
             }
             MetaValue::None
         }
@@ -255,13 +292,12 @@ pub fn input_entry_to_directive(entry: &InputEntry) -> Result<Directive, String>
             let postings: Vec<rustledger_core::Spanned<rustledger_core::Posting>> = postings
                 .iter()
                 .map(|p| {
-                    let units = p.units.as_ref().map(|u| {
-                        rustledger_core::IncompleteAmount::Complete(rustledger_core::Amount {
-                            number: rustledger_core::Decimal::from_str_exact(&u.number)
-                                .unwrap_or_else(|_| rustledger_core::Decimal::from(0)),
-                            currency: u.currency.clone().into(),
-                        })
-                    });
+                    let units = p
+                        .units
+                        .as_ref()
+                        .map(|u| parse_input_amount("posting units", u))
+                        .transpose()?
+                        .map(rustledger_core::IncompleteAmount::Complete);
 
                     let cost = p
                         .cost
@@ -322,18 +358,17 @@ pub fn input_entry_to_directive(entry: &InputEntry) -> Result<Directive, String>
                                 currency: c.currency.clone().map(Into::into),
                                 date: c.date.as_ref().and_then(|d| d.parse::<NaiveDate>().ok()),
                                 label: c.label.clone(),
-                                merge: false,
+                                merge: c.merge,
                             })
                         })
                         .transpose()?;
 
-                    let price = p.price.as_ref().map(|pr| {
-                        rustledger_core::PriceAnnotation::unit(rustledger_core::Amount {
-                            number: rustledger_core::Decimal::from_str_exact(&pr.number)
-                                .unwrap_or_else(|_| rustledger_core::Decimal::from(0)),
-                            currency: pr.currency.clone().into(),
-                        })
-                    });
+                    let price = p
+                        .price
+                        .as_ref()
+                        .map(|pr| parse_input_amount("posting price", pr))
+                        .transpose()?
+                        .map(rustledger_core::PriceAnnotation::unit);
 
                     Ok::<_, String>(rustledger_core::Spanned::synthesized(rustledger_core::Posting {
                         account: p.account.clone().into(),
@@ -404,11 +439,7 @@ pub fn input_entry_to_directive(entry: &InputEntry) -> Result<Directive, String>
             Ok(Directive::Balance(rustledger_core::Balance {
                 date,
                 account: account.clone().into(),
-                amount: rustledger_core::Amount {
-                    number: rustledger_core::Decimal::from_str_exact(&amount.number)
-                        .unwrap_or_else(|_| rustledger_core::Decimal::from(0)),
-                    currency: amount.currency.clone().into(),
-                },
+                amount: parse_input_amount("balance amount", amount)?,
                 tolerance: None,
                 meta: json_map_to_metadata(meta),
             }))
@@ -455,11 +486,7 @@ pub fn input_entry_to_directive(entry: &InputEntry) -> Result<Directive, String>
             Ok(Directive::Price(rustledger_core::Price {
                 date,
                 currency: currency.clone().into(),
-                amount: rustledger_core::Amount {
-                    number: rustledger_core::Decimal::from_str_exact(&amount.number)
-                        .unwrap_or_else(|_| rustledger_core::Decimal::from(0)),
-                    currency: amount.currency.clone().into(),
-                },
+                amount: parse_input_amount("price amount", amount)?,
                 meta: json_map_to_metadata(meta),
             }))
         }
@@ -698,6 +725,80 @@ mod tests {
             err.contains("invariant") || err.contains("per_unit") || err.contains("total"),
             "error message must describe the invariant violation, got: {err}"
         );
+    }
+
+    #[test]
+    fn balance_with_malformed_amount_is_rejected() {
+        // The load-bearing B-4.1 regression guard: a balance
+        // assertion with a non-numeric amount field used to be
+        // silently accepted as `0 USD`, defeating balance checks.
+        // The wire bridge now propagates the parse error so the
+        // client knows their payload was malformed.
+        let entry_json = r#"{
+            "type": "balance",
+            "date": "2024-01-15",
+            "account": "Assets:Bank",
+            "amount": {"number": "garbage", "currency": "USD"},
+            "meta": {}
+        }"#;
+        let entry: InputEntry = serde_json::from_str(entry_json).unwrap();
+        let result = input_entry_to_directive(&entry);
+        assert!(
+            result.is_err(),
+            "malformed balance amount must surface a parse error, not silently coerce to 0"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("balance amount") && err.contains("garbage"),
+            "error must name both the field and the offending value, got: {err}"
+        );
+    }
+
+    #[test]
+    fn price_with_malformed_amount_is_rejected() {
+        let entry_json = r#"{
+            "type": "price",
+            "date": "2024-01-15",
+            "currency": "AAPL",
+            "amount": {"number": "abc", "currency": "USD"},
+            "meta": {}
+        }"#;
+        let entry: InputEntry = serde_json::from_str(entry_json).unwrap();
+        let result = input_entry_to_directive(&entry);
+        assert!(
+            result.is_err(),
+            "malformed price amount must surface a parse error"
+        );
+        assert!(result.unwrap_err().contains("price amount"));
+    }
+
+    #[test]
+    fn posting_with_malformed_units_is_rejected() {
+        let entry_json = r#"{
+            "type": "transaction",
+            "date": "2024-01-15",
+            "flag": "*",
+            "payee": null,
+            "narration": "Buy",
+            "tags": [], "links": [],
+            "meta": {},
+            "postings": [
+                {
+                    "account": "Assets:Stock",
+                    "units": {"number": "not-a-number", "currency": "STK"},
+                    "cost": null,
+                    "price": null,
+                    "meta": {}
+                }
+            ]
+        }"#;
+        let entry: InputEntry = serde_json::from_str(entry_json).unwrap();
+        let result = input_entry_to_directive(&entry);
+        assert!(
+            result.is_err(),
+            "malformed posting units must surface a parse error"
+        );
+        assert!(result.unwrap_err().contains("posting units"));
     }
 
     #[test]

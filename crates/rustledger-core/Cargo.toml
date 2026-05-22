@@ -19,6 +19,12 @@ bench = false
 default = ["rkyv"]
 # Enable rkyv serialization for binary cache
 rkyv = ["dep:rkyv"]
+# Enable fuzz-harness-only constructors that bypass invariants.
+# Off by default so normal builds can't call them — only fuzz targets
+# and integration tests that explicitly want to stress trust-boundary
+# code in convert bridges should opt in. The constructors are also
+# `#[doc(hidden)]` so they don't appear in rustdoc either way.
+fuzz = []
 
 [dependencies]
 rust_decimal = { workspace = true, features = ["serde", "maths"] }

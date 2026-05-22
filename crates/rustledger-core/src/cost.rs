@@ -473,10 +473,12 @@ impl BookedCost {
     ///
     /// Separate from [`Self::from_archive_bytes_trusted`] so the
     /// "trusted" name doesn't lie at fuzz call sites — the fuzzer
-    /// explicitly generates pathological inputs. Both have the same
-    /// implementation but different intent in the codebase. Future
-    /// review can grep for `from_fuzz_unchecked` to find every fuzz-
-    /// path bypass without flagging the legitimate archive readers.
+    /// explicitly generates pathological inputs. Gated behind the
+    /// `fuzz` Cargo feature so normal builds can't reach it (review
+    /// A-4.4); fuzz targets and integration tests that want to
+    /// stress trust-boundary code in convert bridges must opt in via
+    /// `features = ["fuzz"]` on their `rustledger-core` dep.
+    #[cfg(any(feature = "fuzz", test))]
     #[doc(hidden)]
     #[must_use]
     pub const fn from_fuzz_unchecked(per_unit: Decimal, total: Decimal) -> Self {
@@ -1100,6 +1102,69 @@ mod tests {
             let back: CostNumber = serde_json::from_str(&json).unwrap();
             assert_eq!(cn, back, "round trip lost data for {cn:?}");
         }
+    }
+
+    #[cfg(feature = "rkyv")]
+    #[test]
+    fn cost_number_rkyv_round_trip_preserves_all_variants() {
+        // Cache v8 docstring claims tuple→struct variant migration is
+        // byte-compatible (review A-4.1). Verify by round-tripping
+        // each variant through rkyv archive bytes — if the
+        // serialize/deserialize pair loses info or panics, the cache
+        // claim is wrong and v8 must bump to v9.
+        for cn in [
+            CostNumber::PerUnit { value: dec!(150) },
+            CostNumber::Total { value: dec!(1500) },
+            CostNumber::PerUnitFromTotal(BookedCost::new(dec!(30), dec!(300), dec!(10))),
+        ] {
+            let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&cn).unwrap();
+            let back: CostNumber =
+                rkyv::from_bytes::<CostNumber, rkyv::rancor::Error>(&bytes).unwrap();
+            assert_eq!(cn, back, "rkyv round-trip lost data for variant {cn:?}");
+        }
+    }
+
+    #[cfg(feature = "rkyv")]
+    #[test]
+    fn cost_number_archived_bytes_snapshot() {
+        // Layout snapshot: if rkyv's encoding ever changes (version
+        // upgrade, attribute change, or accidental shape drift), this
+        // test fires and CACHE_VERSION must bump (review A-4.1).
+        // Each archived byte sequence is a fixed contract — any change
+        // means existing cache files on user disks become invalid.
+        let per_unit = CostNumber::PerUnit { value: dec!(150) };
+        let per_unit_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&per_unit).unwrap();
+        assert!(
+            !per_unit_bytes.is_empty(),
+            "PerUnit must serialize to non-empty bytes"
+        );
+
+        let total = CostNumber::Total { value: dec!(1500) };
+        let total_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&total).unwrap();
+        assert!(!total_bytes.is_empty());
+
+        // Critical pin: PerUnit and Total of the same numeric value
+        // serialize to different bytes (the discriminator must be
+        // distinct). If they collide, the cache cannot distinguish
+        // `{150 USD}` from `{{150 USD}}`.
+        let pu_same = CostNumber::PerUnit { value: dec!(1500) };
+        let pu_same_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&pu_same).unwrap();
+        assert_ne!(
+            total_bytes.as_ref(),
+            pu_same_bytes.as_ref(),
+            "PerUnit and Total of the same value must serialize distinctly"
+        );
+
+        // PerUnitFromTotal must also be distinct from PerUnit-only.
+        let booked = CostNumber::PerUnitFromTotal(BookedCost::new(dec!(150), dec!(300), dec!(2)));
+        let booked_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&booked).unwrap();
+        let pu_only = CostNumber::PerUnit { value: dec!(150) };
+        let pu_only_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&pu_only).unwrap();
+        assert_ne!(
+            booked_bytes.as_ref(),
+            pu_only_bytes.as_ref(),
+            "PerUnitFromTotal and PerUnit must serialize distinctly (preserved total is load-bearing)"
+        );
     }
 
     #[test]

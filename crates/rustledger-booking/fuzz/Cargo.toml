@@ -18,6 +18,12 @@ path = ".."
 
 [dependencies.rustledger-core]
 path = "../../rustledger-core"
+# Opt into the fuzz feature so the harness can construct
+# intentionally inconsistent `BookedCost` values via
+# `from_fuzz_unchecked` (review A-4.4). The constructor is
+# `#[cfg(any(feature = "fuzz", test))]` gated, so normal builds
+# can't reach it; fuzz targets must declare the dep this way.
+features = ["fuzz"]
 
 # Prevent this from interfering with workspaces
 [workspace]

@@ -128,19 +128,33 @@ mod tests {
     fn cost_spec_total_preserves_date_label_merge() {
         // Pre-A-3.9 the Total arm short-circuited after writing the
         // amount, dropping date/label/merge. A round-trip through the
-        // parser would silently lose those fields.
+        // parser would silently lose those fields. Exact-match
+        // assertion (review A-4.2) — pins delimiter, order, and
+        // whitespace, not just field presence.
         let spec = CostSpec::empty()
             .with_number(CostNumber::Total { value: dec!(1500) })
             .with_currency("USD")
             .with_date(crate::naive_date(2024, 1, 15).unwrap())
             .with_label("lot1")
             .with_merge();
-        let rendered = format_cost_spec(&spec);
-        assert!(rendered.starts_with("{{"));
-        assert!(rendered.ends_with("}}"));
-        assert!(rendered.contains("1500 USD"));
-        assert!(rendered.contains("2024-01-15"));
-        assert!(rendered.contains("\"lot1\""));
-        assert!(rendered.contains('*'));
+        assert_eq!(
+            format_cost_spec(&spec),
+            "{{1500 USD, 2024-01-15, \"lot1\", *}}"
+        );
+    }
+
+    #[test]
+    fn cost_spec_per_unit_preserves_date_label_merge() {
+        // Symmetric coverage for the per-unit shape (single braces).
+        let spec = CostSpec::empty()
+            .with_number(CostNumber::PerUnit { value: dec!(150) })
+            .with_currency("USD")
+            .with_date(crate::naive_date(2024, 1, 15).unwrap())
+            .with_label("lot1")
+            .with_merge();
+        assert_eq!(
+            format_cost_spec(&spec),
+            "{150 USD, 2024-01-15, \"lot1\", *}"
+        );
     }
 }

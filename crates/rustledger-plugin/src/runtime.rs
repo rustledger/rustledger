@@ -226,7 +226,13 @@ impl Plugin {
         // Instantiate the module
         let instance = linker.instantiate(&mut store, &self.module)?;
 
-        // Serialize input
+        // Serialize input. The serializer choice (default-mode
+        // `to_vec`, not `to_vec_named`) is pinned by the
+        // cross-boundary wire-format tests in
+        // `rustledger-plugin-types/tests/cost_number_wire_format.rs`.
+        // If you change this call to a different rmp_serde entry
+        // point, update those tests to match — otherwise plugins
+        // built against the old wire shape silently break.
         let input_bytes = rmp_serde::to_vec(input)?;
 
         // `validate_loaded_module` proved `memory` presence at load

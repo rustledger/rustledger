@@ -101,14 +101,22 @@ fn per_unit_from_total_round_trip() {
     assert_eq!(back.total(), Some("300"));
 }
 
-// ===== MessagePack wire-format tests (review A-3.11) =====
+// ===== MessagePack wire-format tests (review A-3.11 / A-4.3) =====
 //
 // The *actual* WASM plugin wire transport is MessagePack, not JSON
-// (see `rustledger-plugin/src/wasm/runtime.rs` rmp_serde calls). The
-// JSON tests above pin the human-readable shape; these pin the
-// binary wire so a future change to msgpack serializer settings
-// (e.g. forcing positional struct encoding) doesn't silently break
-// cross-language plugin compat.
+// (see `rmp_serde::to_vec` / `from_slice` at
+// `rustledger-plugin/src/runtime.rs:230` and `:273`). The JSON
+// tests above pin the human-readable shape; these pin the binary
+// wire so a future change to msgpack serializer settings (e.g.
+// switching to `to_vec_named` for self-describing maps, or
+// `Serializer::new(buf).with_struct_map(false)` for compact
+// positional encoding) doesn't silently break cross-language plugin
+// compat.
+//
+// IMPORTANT: these tests use `rmp_serde::to_vec` and `from_slice`
+// because that's what production uses. If runtime.rs ever changes
+// to a different serializer call, update these tests to match —
+// otherwise wire-shape drift passes here while real plugins break.
 
 #[test]
 fn per_unit_msgpack_round_trip() {

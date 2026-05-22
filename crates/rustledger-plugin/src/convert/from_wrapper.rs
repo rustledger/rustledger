@@ -173,20 +173,16 @@ pub(super) fn data_to_cost(
             // `PerUnitFromTotal` is the post-booking shape by
             // definition — a posting with it must already have units
             // (the booker put them there). A plugin that emits this
-            // variant without units is malformed; reject rather than
-            // trust silently. The booker does NOT re-validate plugin-
-            // supplied `PerUnitFromTotal` later — pattern matches read
+            // variant without units is malformed; reject with a typed
+            // error that distinguishes "missing" from "inconsistent"
+            // so plugin authors get an actionable diagnostic. The
+            // booker does NOT re-validate plugin-supplied
+            // `PerUnitFromTotal` later — pattern matches read
             // `b.per_unit` / `b.total` without checking consistency
-            // (review B-3.2).
-            let units = units_number.ok_or_else(|| {
-                // Synthesize a units=0 error so the diagnostic
-                // explains why we rejected. `try_new` returns
-                // `tolerance: None` for zero units, which the Display
-                // impl renders as "requires non-zero units".
-                ConversionError::BookedCostInvariantViolated(
-                    rustledger_core::BookedCost::try_new(per_unit_d, total_d, Decimal::ZERO)
-                        .expect_err("zero-units invariant always fails"),
-                )
+            // (review B-3.2 / B-4.2).
+            let units = units_number.ok_or(ConversionError::PerUnitFromTotalMissingUnits {
+                per_unit: per_unit_d,
+                total: total_d,
             })?;
             let booked = rustledger_core::BookedCost::try_new(per_unit_d, total_d, units)?;
             Some(rustledger_core::CostNumber::PerUnitFromTotal(booked))

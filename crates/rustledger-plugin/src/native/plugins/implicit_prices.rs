@@ -1,8 +1,8 @@
 //! Plugin that generates price entries from transaction costs and prices.
 
 use crate::types::{
-    AmountData, CostData, DirectiveData, DirectiveWrapper, PluginInput, PluginOp, PluginOutput,
-    PriceAnnotationData, PriceAnnotationView, PriceData,
+    AmountData, CostData, DirectiveData, DirectiveWrapper, PluginError, PluginInput, PluginOp,
+    PluginOutput, PriceAnnotationData, PriceAnnotationView, PriceData,
 };
 use rust_decimal::Decimal;
 use rustledger_core::extract_per_unit_price;
@@ -119,6 +119,7 @@ impl NativePlugin for ImplicitPricesPlugin {
 
     fn process(&self, input: PluginInput) -> PluginOutput {
         let mut generated_prices = Vec::new();
+        let mut errors: Vec<PluginError> = Vec::new();
 
         // Per-account lot quantities, keyed identically to Python's
         // `Inventory.add_amount`. Used solely to detect REDUCED for
@@ -181,48 +182,93 @@ impl NativePlugin for ImplicitPricesPlugin {
                 // Same shape for cost: only build the descriptor when
                 // a currency is present AND the cost number parses.
                 // Translate from wire format (CostNumberData) to core
-                // CostNumber for the shared helper.
-                let cost = posting.cost.as_ref().and_then(|c| {
+                // CostNumber for the shared helper. Conversion failures
+                // (e.g. a plugin upstream emitted inconsistent
+                // `PerUnitFromTotal`) surface as plugin warnings rather
+                // than silent drops — a plugin author whose buggy
+                // emission produces zero implicit prices now gets a
+                // signal (review A-4.5). `units_number` is already
+                // parsed above (line 150); reuse it instead of
+                // re-parsing.
+                let cost_result = posting.cost.as_ref().and_then(|c| {
                     let currency = c.currency.clone()?;
-                    // Plugin-side units (already-booked) are available
-                    // via the posting; use them so PerUnitFromTotal
-                    // goes through `try_new` with a real units value.
-                    // Inconsistent pairs or missing units → drop the
-                    // descriptor entirely (this is the implicit-price
-                    // emission path, not the host's wire-ingress path
-                    // — dropping a bad descriptor here just means we
-                    // don't emit an implicit price for that posting,
-                    // which is the right conservative behavior).
-                    let units_n = posting
-                        .units
-                        .as_ref()
-                        .and_then(|u| Decimal::from_str(&u.number).ok())?;
                     let number = match &c.number {
                         Some(rustledger_plugin_types::CostNumberData::PerUnit { value: n }) => {
-                            Some(rustledger_core::CostNumber::PerUnit {
-                                value: Decimal::from_str(n).ok()?,
-                            })
+                            match Decimal::from_str(n) {
+                                Ok(d) => Some(rustledger_core::CostNumber::PerUnit { value: d }),
+                                Err(_) => {
+                                    return Some(Err(format!(
+                                        "implicit_prices: posting on account {:?} has cost \
+                                         per_unit {n:?} that doesn't parse as a decimal",
+                                        posting.account
+                                    )));
+                                }
+                            }
                         }
                         Some(rustledger_plugin_types::CostNumberData::Total { value: n }) => {
-                            Some(rustledger_core::CostNumber::Total {
-                                value: Decimal::from_str(n).ok()?,
-                            })
+                            match Decimal::from_str(n) {
+                                Ok(d) => Some(rustledger_core::CostNumber::Total { value: d }),
+                                Err(_) => {
+                                    return Some(Err(format!(
+                                        "implicit_prices: posting on account {:?} has cost \
+                                         total {n:?} that doesn't parse as a decimal",
+                                        posting.account
+                                    )));
+                                }
+                            }
                         }
                         Some(rustledger_plugin_types::CostNumberData::PerUnitFromTotal {
                             per_unit,
                             total,
                         }) => {
-                            let per_unit_d = Decimal::from_str(per_unit).ok()?;
-                            let total_d = Decimal::from_str(total).ok()?;
-                            let booked =
-                                rustledger_core::BookedCost::try_new(per_unit_d, total_d, units_n)
-                                    .ok()?;
-                            Some(rustledger_core::CostNumber::PerUnitFromTotal(booked))
+                            let per_unit_d = match Decimal::from_str(per_unit) {
+                                Ok(d) => d,
+                                Err(_) => {
+                                    return Some(Err(format!(
+                                        "implicit_prices: posting on account {:?} has \
+                                         PerUnitFromTotal per_unit {per_unit:?} that doesn't \
+                                         parse as a decimal",
+                                        posting.account
+                                    )));
+                                }
+                            };
+                            let total_d = match Decimal::from_str(total) {
+                                Ok(d) => d,
+                                Err(_) => {
+                                    return Some(Err(format!(
+                                        "implicit_prices: posting on account {:?} has \
+                                         PerUnitFromTotal total {total:?} that doesn't parse \
+                                         as a decimal",
+                                        posting.account
+                                    )));
+                                }
+                            };
+                            match rustledger_core::BookedCost::try_new(
+                                per_unit_d,
+                                total_d,
+                                units_number,
+                            ) {
+                                Ok(b) => Some(rustledger_core::CostNumber::PerUnitFromTotal(b)),
+                                Err(e) => {
+                                    return Some(Err(format!(
+                                        "implicit_prices: posting on account {:?}: {e}",
+                                        posting.account
+                                    )));
+                                }
+                            }
                         }
                         None => return None,
                     };
-                    Some((number, currency))
+                    Some(Ok((number, currency)))
                 });
+                let cost = match cost_result {
+                    Some(Ok(c)) => Some(c),
+                    Some(Err(msg)) => {
+                        errors.push(PluginError::warning(msg));
+                        None
+                    }
+                    None => None,
+                };
 
                 // Update the per-account lot tracker BEFORE deciding
                 // whether to emit. The pre-update quantity is what
@@ -308,9 +354,6 @@ impl NativePlugin for ImplicitPricesPlugin {
             ops.push(PluginOp::Insert(w));
         }
 
-        PluginOutput {
-            ops,
-            errors: Vec::new(),
-        }
+        PluginOutput { ops, errors }
     }
 }

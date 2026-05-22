@@ -7,35 +7,68 @@
 use rustledger_plugin_types::CostNumberData;
 
 #[test]
-fn per_unit_serializes_with_tag() {
-    let cn = CostNumberData::PerUnit("100".to_string());
-    let json = serde_json::to_string(&cn).unwrap();
-    assert_eq!(json, r#"{"PerUnit":"100"}"#);
+fn per_unit_serializes_with_kind_tag() {
+    let cn = CostNumberData::PerUnit {
+        value: "100".to_string(),
+    };
+    let json = serde_json::to_value(&cn).unwrap();
+    assert_eq!(
+        json,
+        serde_json::json!({"kind": "per_unit", "value": "100"})
+    );
 }
 
 #[test]
-fn total_serializes_with_tag() {
-    let cn = CostNumberData::Total("1500".to_string());
-    let json = serde_json::to_string(&cn).unwrap();
-    assert_eq!(json, r#"{"Total":"1500"}"#);
+fn total_serializes_with_kind_tag() {
+    let cn = CostNumberData::Total {
+        value: "1500".to_string(),
+    };
+    let json = serde_json::to_value(&cn).unwrap();
+    assert_eq!(json, serde_json::json!({"kind": "total", "value": "1500"}));
 }
 
 #[test]
-fn per_unit_from_total_serializes_with_nested_fields() {
+fn per_unit_from_total_serializes_with_kind_tag_and_both_fields() {
     let cn = CostNumberData::PerUnitFromTotal {
         per_unit: "150".to_string(),
         total: "300".to_string(),
     };
-    let json = serde_json::to_string(&cn).unwrap();
+    let json = serde_json::to_value(&cn).unwrap();
     assert_eq!(
         json,
-        r#"{"PerUnitFromTotal":{"per_unit":"150","total":"300"}}"#
+        serde_json::json!({
+            "kind": "per_unit_from_total",
+            "per_unit": "150",
+            "total": "300",
+        })
+    );
+}
+
+#[test]
+fn unified_wire_shape_matches_ffi_wasi_and_wasm() {
+    // Load-bearing regression guard: plugin-types, FFI-WASI, WASM,
+    // and Python compat all emit the same `kind`-tagged shape. If
+    // serde defaults ever drift here, downstream clients written
+    // against the unified shape silently break — this assertion
+    // catches it. The `kind` value uses snake_case to match the
+    // FFI-WASI/WASM convention.
+    let cn = CostNumberData::PerUnit {
+        value: "1".to_string(),
+    };
+    let json = serde_json::to_value(&cn).unwrap();
+    assert_eq!(json["kind"], "per_unit", "kind must be snake_case");
+    assert!(json.get("value").is_some(), "value field must be present");
+    assert!(
+        json.get("PerUnit").is_none(),
+        "must NOT use external-tag (pre-PR shape)"
     );
 }
 
 #[test]
 fn per_unit_round_trip() {
-    let cn = CostNumberData::PerUnit("100".to_string());
+    let cn = CostNumberData::PerUnit {
+        value: "100".to_string(),
+    };
     let json = serde_json::to_string(&cn).unwrap();
     let back: CostNumberData = serde_json::from_str(&json).unwrap();
     assert_eq!(back.per_unit(), Some("100"));
@@ -44,7 +77,9 @@ fn per_unit_round_trip() {
 
 #[test]
 fn total_round_trip() {
-    let cn = CostNumberData::Total("1500".to_string());
+    let cn = CostNumberData::Total {
+        value: "1500".to_string(),
+    };
     let json = serde_json::to_string(&cn).unwrap();
     let back: CostNumberData = serde_json::from_str(&json).unwrap();
     assert_eq!(back.per_unit(), None);
@@ -73,8 +108,8 @@ fn accessors_exhaustively_cover_variants() {
     // exhaustive match in the impl is what guarantees coverage; this
     // test is a behavioral spot-check.
     for cn in [
-        CostNumberData::PerUnit("1".into()),
-        CostNumberData::Total("2".into()),
+        CostNumberData::PerUnit { value: "1".into() },
+        CostNumberData::Total { value: "2".into() },
         CostNumberData::PerUnitFromTotal {
             per_unit: "3".into(),
             total: "30".into(),

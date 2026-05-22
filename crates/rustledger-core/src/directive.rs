@@ -221,7 +221,7 @@ impl Posting {
     /// ```no_run
     /// # use rustledger_core::{Posting, Amount, CostSpec, CostNumber, Spanned};
     /// # use rust_decimal_macros::dec;
-    /// # let cost = CostSpec { number: Some(CostNumber::PerUnit(dec!(150))),
+    /// # let cost = CostSpec { number: Some(CostNumber::PerUnit { value: dec!(150) }),
     /// #     currency: Some("USD".into()), date: None, label: None, merge: false };
     /// let spanned: Spanned<Posting> = Spanned::synthesized(
     ///     Posting::new("Assets:Stock", Amount::new(dec!(10), "AAPL"))
@@ -1606,14 +1606,14 @@ mod tests {
                 .with_synthesized_posting(
                     Posting::new("Assets:AccountB", Amount::new(dec!(11.11), "USD")).with_cost(
                         CostSpec::empty()
-                            .with_per_unit(dec!(0.90))
+                            .with_number(crate::CostNumber::PerUnit { value: dec!(0.90) })
                             .with_currency("EUR"),
                     ),
                 )
                 .with_synthesized_posting(
                     Posting::new("Assets:Transit", Amount::new(dec!(-11.11), "USD")).with_cost(
                         CostSpec::empty()
-                            .with_per_unit(dec!(0.90))
+                            .with_number(crate::CostNumber::PerUnit { value: dec!(0.90) })
                             .with_currency("EUR"),
                     ),
                 ),
@@ -1628,7 +1628,7 @@ mod tests {
                 .with_synthesized_posting(
                     Posting::new("Assets:Transit", Amount::new(dec!(11.11), "USD")).with_cost(
                         CostSpec::empty()
-                            .with_per_unit(dec!(0.90))
+                            .with_number(crate::CostNumber::PerUnit { value: dec!(0.90) })
                             .with_currency("EUR"),
                     ),
                 ),
@@ -1657,7 +1657,7 @@ mod tests {
                 .with_synthesized_posting(
                     Posting::new("Assets:Stock", Amount::new(dec!(-10), "AAPL")).with_cost(
                         CostSpec::empty()
-                            .with_per_unit(dec!(150))
+                            .with_number(crate::CostNumber::PerUnit { value: dec!(150) })
                             .with_currency("USD"),
                     ),
                 )
@@ -1674,7 +1674,7 @@ mod tests {
                 .with_synthesized_posting(
                     Posting::new("Assets:Stock", Amount::new(dec!(10), "AAPL")).with_cost(
                         CostSpec::empty()
-                            .with_per_unit(dec!(150))
+                            .with_number(crate::CostNumber::PerUnit { value: dec!(150) })
                             .with_currency("USD"),
                     ),
                 )

@@ -275,7 +275,7 @@ proptest! {
     #[test]
     fn prop_cost_spec_matches_self(cost in arb_cost()) {
         let spec = CostSpec::empty()
-            .with_per_unit(cost.number)
+            .with_number(rustledger_core::CostNumber::PerUnit { value: cost.number })
             .with_currency(&cost.currency);
 
         prop_assert!(spec.matches(&cost));

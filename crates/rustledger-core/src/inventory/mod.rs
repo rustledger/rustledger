@@ -1921,7 +1921,9 @@ mod tests {
         inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost2));
 
         // With cost spec filtering to the 200 USD lot, should find unique match
-        let spec = CostSpec::empty().with_per_unit(dec!(200.00));
+        let spec = CostSpec::empty().with_number(crate::CostNumber::PerUnit {
+            value: dec!(200.00),
+        });
         let result = inv
             .reduce(
                 &Amount::new(dec!(-5), "AAPL"),

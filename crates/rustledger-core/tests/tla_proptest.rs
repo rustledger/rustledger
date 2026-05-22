@@ -370,7 +370,7 @@ proptest! {
         // STRICT should succeed with exactly one matching lot
         // and specific cost provided
         let cost_spec = CostSpec::default()
-            .with_per_unit(cost_dec)
+            .with_number(rustledger_core::CostNumber::PerUnit { value: cost_dec })
             .with_currency("USD")
             .with_date(date);
         let result = inv.reduce(

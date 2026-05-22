@@ -143,11 +143,11 @@ fn hash_cost<H: Hasher>(cost: &CostData, hasher: &mut H) {
     // Total (same number, different meaning) so we tag the variant.
     match number {
         None => 0u8.hash(hasher),
-        Some(CostNumberData::PerUnit(s)) => {
+        Some(CostNumberData::PerUnit { value: s }) => {
             1u8.hash(hasher);
             s.hash(hasher);
         }
-        Some(CostNumberData::Total(s)) => {
+        Some(CostNumberData::Total { value: s }) => {
             2u8.hash(hasher);
             s.hash(hasher);
         }
@@ -488,7 +488,9 @@ mod tests {
         use rustledger_plugin_types::CostNumberData;
         let mut txn1 = make_txn(Some("Store"), "Buy shares", "100.00");
         txn1.postings[0].cost = Some(CostData {
-            number: Some(CostNumberData::PerUnit("10.00".to_string())),
+            number: Some(CostNumberData::PerUnit {
+                value: "10.00".to_string(),
+            }),
             currency: Some("USD".to_string()),
             date: None,
             label: None,
@@ -496,7 +498,9 @@ mod tests {
         });
         let mut txn2 = make_txn(Some("Store"), "Buy shares", "100.00");
         txn2.postings[0].cost = Some(CostData {
-            number: Some(CostNumberData::PerUnit("11.00".to_string())),
+            number: Some(CostNumberData::PerUnit {
+                value: "11.00".to_string(),
+            }),
             currency: Some("USD".to_string()),
             date: None,
             label: None,

@@ -10,7 +10,8 @@ use libfuzzer_sys::fuzz_target;
 use rust_decimal::Decimal;
 use rustledger_booking::BookingEngine;
 use rustledger_core::{
-    Amount, BookingMethod, CostSpec, IncompleteAmount, NaiveDate, Posting, Transaction,
+    Amount, BookedCost, BookingMethod, CostNumber, CostSpec, IncompleteAmount, NaiveDate, Posting,
+    Transaction,
 };
 
 /// Fuzzer-friendly booking method selector.
@@ -39,13 +40,31 @@ impl From<FuzzBookingMethod> for BookingMethod {
     }
 }
 
+/// Fuzzer-friendly cost-number variant. Single tagged enum mirroring
+/// the host `CostNumber`, so the fuzzer can only produce inputs the
+/// type system allows (no silent both-set state from parallel
+/// `Option<i32>` axes).
+#[derive(Debug, Arbitrary)]
+enum FuzzCostNumber {
+    /// `{value USD}` per-unit shape.
+    PerUnit { value_cents: i32 },
+    /// `{{value USD}}` total shape.
+    Total { value_cents: i32 },
+    /// Post-booking shape with both halves. The fuzzer can supply
+    /// inconsistent pairs (per_unit * |units| ≠ total) to stress the
+    /// trust-boundary code in `from_wrapper` / FFI input that must
+    /// reject or coerce them rather than silently inject garbage.
+    PerUnitFromTotal {
+        per_unit_cents: i32,
+        total_cents: i32,
+    },
+}
+
 /// Fuzzer-friendly cost spec configuration.
 #[derive(Debug, Arbitrary)]
 struct FuzzCostSpec {
-    /// Per-unit cost (cents, to avoid huge decimals)
-    number_per: Option<i32>,
-    /// Total cost
-    number_total: Option<i32>,
+    /// Cost number variant (none → bare `{}` cost spec).
+    number: Option<FuzzCostNumber>,
     /// Whether to use a cost currency
     has_currency: bool,
     /// Whether to merge lots (average cost)
@@ -136,8 +155,11 @@ fuzz_target!(|input: FuzzTransaction| {
         let units = Decimal::new(buy.units as i64, 0);
         let cost = make_decimal(buy.cost_cents as i32);
 
-        let posting = Posting::new("Assets:Stock", Amount::new(units, "CORP"))
-            .with_cost(CostSpec::empty().with_per_unit(cost).with_currency("USD"));
+        let posting = Posting::new("Assets:Stock", Amount::new(units, "CORP")).with_cost(
+            CostSpec::empty()
+                .with_number(CostNumber::PerUnit { value: cost })
+                .with_currency("USD"),
+        );
         let counter = Posting::new("Assets:Cash", Amount::new(-units * cost, "USD"));
 
         let txn = Transaction::new(buy_date, format!("Buy {i}"))
@@ -168,11 +190,32 @@ fuzz_target!(|input: FuzzTransaction| {
 
             if let Some(ref cost) = fuzz_posting.cost {
                 let mut spec = CostSpec::empty();
-                if let Some(per) = cost.number_per {
-                    spec = spec.with_per_unit(make_decimal(per));
-                }
-                if let Some(total) = cost.number_total {
-                    spec = spec.with_total(make_decimal(total));
+                if let Some(n) = &cost.number {
+                    // Construct via the typed enum directly — the
+                    // fuzzer's `Arbitrary` impl picks exactly one
+                    // variant, so the both-set state simply can't
+                    // appear here. PerUnitFromTotal can carry an
+                    // inconsistent pair (per_unit * |units| ≠ total);
+                    // that's intentional, to stress trust-boundary
+                    // code in other crates that consume CostSpec.
+                    let cn = match n {
+                        FuzzCostNumber::PerUnit { value_cents } => CostNumber::PerUnit {
+                            value: make_decimal(*value_cents),
+                        },
+                        FuzzCostNumber::Total { value_cents } => CostNumber::Total {
+                            value: make_decimal(*value_cents),
+                        },
+                        FuzzCostNumber::PerUnitFromTotal {
+                            per_unit_cents,
+                            total_cents,
+                        } => CostNumber::PerUnitFromTotal(
+                            BookedCost::from_parts_unchecked_trusted(
+                                make_decimal(*per_unit_cents),
+                                make_decimal(*total_cents),
+                            ),
+                        ),
+                    };
+                    spec = spec.with_number(cn);
                 }
                 if cost.has_currency {
                     spec = spec.with_currency("USD");

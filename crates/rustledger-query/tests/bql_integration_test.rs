@@ -652,7 +652,7 @@ fn test_journal_position_column_preserves_cost() {
                 .with_synthesized_posting(
                     Posting::new("Assets:Brokerage", Amount::new(dec!(10), "AAPL")).with_cost(
                         CostSpec::empty()
-                            .with_per_unit(dec!(150))
+                            .with_number(rustledger_core::CostNumber::PerUnit { value: dec!(150) })
                             .with_currency("USD"),
                     ),
                 )
@@ -755,7 +755,7 @@ fn test_journal_at_cost_position_is_amount_not_position() {
                 .with_synthesized_posting(
                     Posting::new("Assets:Brokerage", Amount::new(dec!(10), "AAPL")).with_cost(
                         CostSpec::empty()
-                            .with_per_unit(dec!(150))
+                            .with_number(rustledger_core::CostNumber::PerUnit { value: dec!(150) })
                             .with_currency("USD"),
                     ),
                 )
@@ -791,7 +791,7 @@ fn test_journal_at_units_position_is_amount_not_position() {
                 .with_synthesized_posting(
                     Posting::new("Assets:Brokerage", Amount::new(dec!(10), "AAPL")).with_cost(
                         CostSpec::empty()
-                            .with_per_unit(dec!(150))
+                            .with_number(rustledger_core::CostNumber::PerUnit { value: dec!(150) })
                             .with_currency("USD"),
                     ),
                 )
@@ -831,7 +831,7 @@ fn test_journal_at_cost_collapses_balance_to_cost_currency() {
                 .with_synthesized_posting(
                     Posting::new("Assets:Brokerage", Amount::new(dec!(10), "AAPL")).with_cost(
                         CostSpec::empty()
-                            .with_per_unit(dec!(150))
+                            .with_number(rustledger_core::CostNumber::PerUnit { value: dec!(150) })
                             .with_currency("USD"),
                     ),
                 )
@@ -880,7 +880,7 @@ fn test_journal_at_cost_with_from_clause_filters_then_collapses() {
                 .with_synthesized_posting(
                     Posting::new("Assets:Brokerage", Amount::new(dec!(10), "AAPL")).with_cost(
                         CostSpec::empty()
-                            .with_per_unit(dec!(150))
+                            .with_number(rustledger_core::CostNumber::PerUnit { value: dec!(150) })
                             .with_currency("USD"),
                     ),
                 )
@@ -895,7 +895,7 @@ fn test_journal_at_cost_with_from_clause_filters_then_collapses() {
                 .with_synthesized_posting(
                     Posting::new("Assets:Brokerage", Amount::new(dec!(20), "MSFT")).with_cost(
                         CostSpec::empty()
-                            .with_per_unit(dec!(300))
+                            .with_number(rustledger_core::CostNumber::PerUnit { value: dec!(300) })
                             .with_currency("USD"),
                     ),
                 )
@@ -938,7 +938,7 @@ fn test_journal_at_units_strips_cost_from_balance() {
                 .with_synthesized_posting(
                     Posting::new("Assets:Brokerage", Amount::new(dec!(10), "AAPL")).with_cost(
                         CostSpec::empty()
-                            .with_per_unit(dec!(150))
+                            .with_number(rustledger_core::CostNumber::PerUnit { value: dec!(150) })
                             .with_currency("USD"),
                     ),
                 )
@@ -1017,7 +1017,7 @@ fn test_journal_at_cost_balance_keeps_mixed_cost_currencies() {
                 .with_synthesized_posting(
                     Posting::new("Assets:Brokerage", Amount::new(dec!(10), "AAPL")).with_cost(
                         CostSpec::empty()
-                            .with_per_unit(dec!(150))
+                            .with_number(rustledger_core::CostNumber::PerUnit { value: dec!(150) })
                             .with_currency("USD"),
                     ),
                 )
@@ -1033,7 +1033,7 @@ fn test_journal_at_cost_balance_keeps_mixed_cost_currencies() {
                 .with_synthesized_posting(
                     Posting::new("Assets:Brokerage", Amount::new(dec!(5), "AAPL")).with_cost(
                         CostSpec::empty()
-                            .with_per_unit(dec!(130))
+                            .with_number(rustledger_core::CostNumber::PerUnit { value: dec!(130) })
                             .with_currency("EUR"),
                     ),
                 )
@@ -4012,7 +4012,7 @@ fn make_holdings_directives() -> Vec<Directive> {
                 .with_synthesized_posting(
                     Posting::new("Assets:Brokerage", Amount::new(dec!(10), "AAPL")).with_cost(
                         CostSpec::empty()
-                            .with_per_unit(dec!(100))
+                            .with_number(rustledger_core::CostNumber::PerUnit { value: dec!(100) })
                             .with_currency("USD")
                             .with_date(date(2024, 1, 15)),
                     ),
@@ -4028,7 +4028,7 @@ fn make_holdings_directives() -> Vec<Directive> {
                 .with_synthesized_posting(
                     Posting::new("Assets:Brokerage", Amount::new(dec!(5), "AAPL")).with_cost(
                         CostSpec::empty()
-                            .with_per_unit(dec!(120))
+                            .with_number(rustledger_core::CostNumber::PerUnit { value: dec!(120) })
                             .with_currency("USD")
                             .with_date(date(2024, 3, 20)),
                     ),
@@ -4305,7 +4305,7 @@ fn test_cost_mixed_inventory_with_and_without_cost() {
                 .with_synthesized_posting(
                     Posting::new("Assets:Brokerage", Amount::new(dec!(10), "AAPL")).with_cost(
                         CostSpec::empty()
-                            .with_per_unit(dec!(100))
+                            .with_number(rustledger_core::CostNumber::PerUnit { value: dec!(100) })
                             .with_currency("USD"),
                     ),
                 )
@@ -4379,7 +4379,7 @@ fn make_multi_currency_holdings() -> Vec<Directive> {
                 .with_synthesized_posting(
                     Posting::new("Assets:Brokerage", Amount::new(dec!(10), "AAPL")).with_cost(
                         CostSpec::empty()
-                            .with_per_unit(dec!(100))
+                            .with_number(rustledger_core::CostNumber::PerUnit { value: dec!(100) })
                             .with_currency("USD")
                             .with_date(date(2024, 1, 15)),
                     ),
@@ -4395,7 +4395,7 @@ fn make_multi_currency_holdings() -> Vec<Directive> {
                 .with_synthesized_posting(
                     Posting::new("Assets:Brokerage", Amount::new(dec!(5), "GOOG")).with_cost(
                         CostSpec::empty()
-                            .with_per_unit(dec!(150))
+                            .with_number(rustledger_core::CostNumber::PerUnit { value: dec!(150) })
                             .with_currency("USD")
                             .with_date(date(2024, 2, 10)),
                     ),
@@ -5240,7 +5240,7 @@ fn make_chained_price_directives() -> Vec<Directive> {
                 .with_synthesized_posting(
                     Posting::new("Assets:Stocks", Amount::new(dec!(5), "GOOG")).with_cost(
                         CostSpec::empty()
-                            .with_per_unit(dec!(80))
+                            .with_number(rustledger_core::CostNumber::PerUnit { value: dec!(80) })
                             .with_currency("EUR")
                             .with_date(date(2024, 2, 15)),
                     ),
@@ -5400,7 +5400,7 @@ fn make_issue_892_directives() -> Vec<Directive> {
             Transaction::new(date(2020, 1, 1), "Buy stock").with_synthesized_posting(
                 Posting::new("Assets:Brokerage", Amount::new(dec!(4), "SP")).with_cost(
                     CostSpec::empty()
-                        .with_per_unit(dec!(250))
+                        .with_number(rustledger_core::CostNumber::PerUnit { value: dec!(250) })
                         .with_currency("USD")
                         .with_date(date(2020, 1, 1)),
                 ),
@@ -5614,7 +5614,7 @@ fn test_prices_table_excludes_transaction_derived_implicit_prices() {
                 .with_synthesized_posting(
                     Posting::new("Assets:Stock", Amount::new(dec!(10), "HOOL")).with_cost(
                         CostSpec::empty()
-                            .with_per_unit(dec!(520))
+                            .with_number(rustledger_core::CostNumber::PerUnit { value: dec!(520) })
                             .with_currency("USD"),
                     ),
                 )
@@ -5651,7 +5651,7 @@ fn test_value_works_without_explicit_price_directive() {
                 .with_synthesized_posting(
                     Posting::new("Assets:Stock", Amount::new(dec!(10), "HOOL")).with_cost(
                         CostSpec::empty()
-                            .with_per_unit(dec!(520))
+                            .with_number(rustledger_core::CostNumber::PerUnit { value: dec!(520) })
                             .with_currency("USD"),
                     ),
                 )
@@ -6971,7 +6971,7 @@ fn test_postings_table_cost_columns() {
                 .with_synthesized_posting(
                     Posting::new("Assets:Brokerage", Amount::new(dec!(10), "AAPL")).with_cost(
                         CostSpec::empty()
-                            .with_per_unit(dec!(150))
+                            .with_number(rustledger_core::CostNumber::PerUnit { value: dec!(150) })
                             .with_currency("USD")
                             .with_date(date(2024, 1, 15))
                             .with_label("lot1"),
@@ -7203,7 +7203,7 @@ fn test_aggregate_context_weight_on_values() {
                 .with_synthesized_posting(
                     Posting::new("Assets:Stock", Amount::new(dec!(10), "AAPL")).with_cost(
                         CostSpec::empty()
-                            .with_per_unit(dec!(150))
+                            .with_number(rustledger_core::CostNumber::PerUnit { value: dec!(150) })
                             .with_currency("USD"),
                     ),
                 )
@@ -7273,7 +7273,7 @@ fn test_postings_table_position_column_with_cost() {
                 .with_synthesized_posting(
                     Posting::new("Assets:Brokerage", Amount::new(dec!(10), "AAPL")).with_cost(
                         CostSpec::empty()
-                            .with_per_unit(dec!(150))
+                            .with_number(rustledger_core::CostNumber::PerUnit { value: dec!(150) })
                             .with_currency("USD"),
                     ),
                 )
@@ -7449,7 +7449,7 @@ fn test_postings_table_weight_column() {
                 .with_synthesized_posting(
                     Posting::new("Assets:Brokerage", Amount::new(dec!(10), "AAPL")).with_cost(
                         CostSpec::empty()
-                            .with_per_unit(dec!(150))
+                            .with_number(rustledger_core::CostNumber::PerUnit { value: dec!(150) })
                             .with_currency("USD"),
                     ),
                 )
@@ -8060,7 +8060,7 @@ fn test_issue_567_value_uses_implicit_price_from_annotation() {
                 .with_synthesized_posting(
                     Posting::new("Assets:Stocks", Amount::new(dec!(5), "ABC")).with_cost(
                         CostSpec::empty()
-                            .with_per_unit(dec!(1.25))
+                            .with_number(rustledger_core::CostNumber::PerUnit { value: dec!(1.25) })
                             .with_currency("EUR")
                             .with_date(date(2024, 1, 10)),
                     ),
@@ -8077,7 +8077,9 @@ fn test_issue_567_value_uses_implicit_price_from_annotation() {
                     Posting::new("Assets:Stocks", Amount::new(dec!(-5), "ABC"))
                         .with_cost(
                             CostSpec::empty()
-                                .with_per_unit(dec!(1.25))
+                                .with_number(rustledger_core::CostNumber::PerUnit {
+                                    value: dec!(1.25),
+                                })
                                 .with_currency("EUR")
                                 .with_date(date(2024, 1, 10)),
                         )
@@ -8139,7 +8141,7 @@ fn test_issue_567_value_sum_position_with_implicit_price() {
                 .with_synthesized_posting(
                     Posting::new("Assets:Stocks", Amount::new(dec!(10), "XYZ")).with_cost(
                         CostSpec::empty()
-                            .with_per_unit(dec!(50))
+                            .with_number(rustledger_core::CostNumber::PerUnit { value: dec!(50) })
                             .with_currency("USD"),
                     ),
                 )
@@ -8155,7 +8157,9 @@ fn test_issue_567_value_sum_position_with_implicit_price() {
                     Posting::new("Assets:Stocks", Amount::new(dec!(-5), "XYZ"))
                         .with_cost(
                             CostSpec::empty()
-                                .with_per_unit(dec!(50))
+                                .with_number(rustledger_core::CostNumber::PerUnit {
+                                    value: dec!(50),
+                                })
                                 .with_currency("USD"),
                         )
                         .with_price(PriceAnnotation::unit(Amount::new(dec!(60), "USD"))),
@@ -8329,7 +8333,7 @@ fn make_issue_575_directives() -> Vec<Directive> {
                 .with_synthesized_posting(
                     Posting::new("Assets:Investment", Amount::new(dec!(5), "ABC")).with_cost(
                         CostSpec::empty()
-                            .with_per_unit(dec!(100))
+                            .with_number(rustledger_core::CostNumber::PerUnit { value: dec!(100) })
                             .with_currency("EUR"),
                     ),
                 )
@@ -8531,7 +8535,7 @@ fn test_issue_593_cost_preserves_sign_for_sells() {
                 .with_synthesized_posting(
                     Posting::new("Equity:Stocks", Amount::new(dec!(5), "ABC")).with_cost(
                         CostSpec::empty()
-                            .with_per_unit(dec!(1.25))
+                            .with_number(rustledger_core::CostNumber::PerUnit { value: dec!(1.25) })
                             .with_currency("EUR"),
                     ),
                 )
@@ -8546,7 +8550,7 @@ fn test_issue_593_cost_preserves_sign_for_sells() {
                 .with_synthesized_posting(
                     Posting::new("Equity:Stocks", Amount::new(dec!(7), "ABC")).with_cost(
                         CostSpec::empty()
-                            .with_per_unit(dec!(1.30))
+                            .with_number(rustledger_core::CostNumber::PerUnit { value: dec!(1.30) })
                             .with_currency("EUR"),
                     ),
                 )
@@ -8562,7 +8566,9 @@ fn test_issue_593_cost_preserves_sign_for_sells() {
                     Posting::new("Equity:Stocks", Amount::new(dec!(-5), "ABC"))
                         .with_cost(
                             CostSpec::empty()
-                                .with_per_unit(dec!(1.25))
+                                .with_number(rustledger_core::CostNumber::PerUnit {
+                                    value: dec!(1.25),
+                                })
                                 .with_currency("EUR")
                                 .with_date(date(2025, 4, 1)),
                         )
@@ -8580,7 +8586,9 @@ fn test_issue_593_cost_preserves_sign_for_sells() {
                     Posting::new("Equity:Stocks", Amount::new(dec!(-3), "ABC"))
                         .with_cost(
                             CostSpec::empty()
-                                .with_per_unit(dec!(1.30))
+                                .with_number(rustledger_core::CostNumber::PerUnit {
+                                    value: dec!(1.30),
+                                })
                                 .with_currency("EUR")
                                 .with_date(date(2025, 4, 2)),
                         )
@@ -8701,7 +8709,7 @@ fn test_issue_593_value_uses_latest_implicit_price() {
                 .with_synthesized_posting(
                     Posting::new("Equity:Stocks", Amount::new(dec!(5), "ABC")).with_cost(
                         CostSpec::empty()
-                            .with_per_unit(dec!(1.25))
+                            .with_number(rustledger_core::CostNumber::PerUnit { value: dec!(1.25) })
                             .with_currency("EUR"),
                     ),
                 )
@@ -8716,7 +8724,7 @@ fn test_issue_593_value_uses_latest_implicit_price() {
                 .with_synthesized_posting(
                     Posting::new("Equity:Stocks", Amount::new(dec!(7), "ABC")).with_cost(
                         CostSpec::empty()
-                            .with_per_unit(dec!(1.30))
+                            .with_number(rustledger_core::CostNumber::PerUnit { value: dec!(1.30) })
                             .with_currency("EUR"),
                     ),
                 )
@@ -8732,7 +8740,9 @@ fn test_issue_593_value_uses_latest_implicit_price() {
                     Posting::new("Equity:Stocks", Amount::new(dec!(-5), "ABC"))
                         .with_cost(
                             CostSpec::empty()
-                                .with_per_unit(dec!(1.25))
+                                .with_number(rustledger_core::CostNumber::PerUnit {
+                                    value: dec!(1.25),
+                                })
                                 .with_currency("EUR")
                                 .with_date(date(2025, 4, 1)),
                         )
@@ -8750,7 +8760,9 @@ fn test_issue_593_value_uses_latest_implicit_price() {
                     Posting::new("Equity:Stocks", Amount::new(dec!(-3), "ABC"))
                         .with_cost(
                             CostSpec::empty()
-                                .with_per_unit(dec!(1.30))
+                                .with_number(rustledger_core::CostNumber::PerUnit {
+                                    value: dec!(1.30),
+                                })
                                 .with_currency("EUR")
                                 .with_date(date(2025, 4, 2)),
                         )

@@ -184,22 +184,41 @@ impl NativePlugin for ImplicitPricesPlugin {
                 // CostNumber for the shared helper.
                 let cost = posting.cost.as_ref().and_then(|c| {
                     let currency = c.currency.clone()?;
+                    // Plugin-side units (already-booked) are available
+                    // via the posting; use them so PerUnitFromTotal
+                    // goes through `try_new` and inconsistent pairs
+                    // collapse to PerUnit (loud truncation > silent
+                    // corruption).
+                    let units_n = posting
+                        .units
+                        .as_ref()
+                        .and_then(|u| Decimal::from_str(&u.number).ok())
+                        .unwrap_or_default();
                     let number = match &c.number {
-                        Some(rustledger_plugin_types::CostNumberData::PerUnit(n)) => Some(
-                            rustledger_core::CostNumber::PerUnit(Decimal::from_str(n).ok()?),
-                        ),
-                        Some(rustledger_plugin_types::CostNumberData::Total(n)) => Some(
-                            rustledger_core::CostNumber::Total(Decimal::from_str(n).ok()?),
-                        ),
+                        Some(rustledger_plugin_types::CostNumberData::PerUnit { value: n }) => {
+                            Some(rustledger_core::CostNumber::PerUnit {
+                                value: Decimal::from_str(n).ok()?,
+                            })
+                        }
+                        Some(rustledger_plugin_types::CostNumberData::Total { value: n }) => {
+                            Some(rustledger_core::CostNumber::Total {
+                                value: Decimal::from_str(n).ok()?,
+                            })
+                        }
                         Some(rustledger_plugin_types::CostNumberData::PerUnitFromTotal {
                             per_unit,
                             total,
-                        }) => Some(rustledger_core::CostNumber::PerUnitFromTotal(
-                            rustledger_core::BookedCost::from_parts_unchecked(
-                                Decimal::from_str(per_unit).ok()?,
-                                Decimal::from_str(total).ok()?,
-                            ),
-                        )),
+                        }) => {
+                            let per_unit_d = Decimal::from_str(per_unit).ok()?;
+                            let total_d = Decimal::from_str(total).ok()?;
+                            match rustledger_core::BookedCost::try_new(per_unit_d, total_d, units_n)
+                            {
+                                Some(b) => Some(rustledger_core::CostNumber::PerUnitFromTotal(b)),
+                                None => {
+                                    Some(rustledger_core::CostNumber::PerUnit { value: per_unit_d })
+                                }
+                            }
+                        }
                         None => return None,
                     };
                     Some((number, currency))

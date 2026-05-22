@@ -20,13 +20,13 @@ pub fn format_cost_spec(spec: &CostSpec) -> String {
     // to match Python beancount's post-booking output.
     if let Some(curr) = &spec.currency {
         match spec.number {
-            Some(crate::CostNumber::PerUnit(num)) => {
+            Some(crate::CostNumber::PerUnit { value: num }) => {
                 parts.push(format!("{num} {curr}"));
             }
             Some(crate::CostNumber::PerUnitFromTotal(b)) => {
                 parts.push(format!("{} {curr}", b.per_unit));
             }
-            Some(crate::CostNumber::Total(num)) => {
+            Some(crate::CostNumber::Total { value: num }) => {
                 // Total cost uses double braces.
                 return format!("{{{{{num} {curr}}}}}");
             }
@@ -73,7 +73,7 @@ mod tests {
     #[test]
     fn cost_spec_per_unit_renders_single_braces() {
         let spec = CostSpec::empty()
-            .with_per_unit(dec!(150))
+            .with_number(crate::CostNumber::PerUnit { value: dec!(150) })
             .with_currency("USD");
         assert_eq!(format_cost_spec(&spec), "{150 USD}");
     }
@@ -81,7 +81,7 @@ mod tests {
     #[test]
     fn cost_spec_total_renders_double_braces() {
         let spec = CostSpec::empty()
-            .with_total(dec!(1500))
+            .with_number(crate::CostNumber::Total { value: dec!(1500) })
             .with_currency("USD");
         assert_eq!(format_cost_spec(&spec), "{{1500 USD}}");
     }

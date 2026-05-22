@@ -93,16 +93,16 @@ pub fn extract_per_unit_price<T>(
     // divides by `|units|` here.
     if let Some((number, currency)) = cost {
         match number {
-            Some(crate::CostNumber::PerUnit(per)) => {
+            Some(crate::CostNumber::PerUnit { value: per }) => {
                 return Some((per, currency));
             }
             Some(crate::CostNumber::PerUnitFromTotal(b)) => {
                 return Some((b.per_unit, currency));
             }
-            Some(crate::CostNumber::Total(total)) if !units_number.is_zero() => {
+            Some(crate::CostNumber::Total { value: total }) if !units_number.is_zero() => {
                 return Some((total / units_number.abs(), currency));
             }
-            Some(crate::CostNumber::Total(_)) | None => {}
+            Some(crate::CostNumber::Total { value: _ }) | None => {}
         }
     }
 
@@ -154,7 +154,7 @@ mod tests {
         let p = extract_per_unit_price(
             dec!(0),
             Some((true, dec!(100), "EUR")),
-            Some((Some(crate::CostNumber::PerUnit(dec!(50))), "USD")),
+            Some((Some(crate::CostNumber::PerUnit { value: dec!(50) }), "USD")),
         );
         assert_eq!(p, Some((dec!(50), "USD")));
     }
@@ -173,7 +173,10 @@ mod tests {
         let p = extract_per_unit_price(
             dec!(10),
             None,
-            Some((Some(crate::CostNumber::PerUnit(dec!(50.00))), "USD")),
+            Some((
+                Some(crate::CostNumber::PerUnit { value: dec!(50.00) }),
+                "USD",
+            )),
         );
         assert_eq!(p, Some((dec!(50.00), "USD")));
     }
@@ -184,7 +187,7 @@ mod tests {
         let p = extract_per_unit_price(
             dec!(10),
             None,
-            Some((Some(crate::CostNumber::Total(dec!(500))), "USD")),
+            Some((Some(crate::CostNumber::Total { value: dec!(500) }), "USD")),
         );
         assert_eq!(p, Some((dec!(50), "USD")));
     }
@@ -194,7 +197,7 @@ mod tests {
         let p = extract_per_unit_price::<&str>(
             dec!(0),
             None,
-            Some((Some(crate::CostNumber::Total(dec!(500))), "USD")),
+            Some((Some(crate::CostNumber::Total { value: dec!(500) }), "USD")),
         );
         assert_eq!(p, None);
     }
@@ -212,7 +215,10 @@ mod tests {
         let p = extract_per_unit_price(
             dec!(5),
             Some((false, dec!(1.40), "EUR")),
-            Some((Some(crate::CostNumber::PerUnit(dec!(1.25))), "EUR")),
+            Some((
+                Some(crate::CostNumber::PerUnit { value: dec!(1.25) }),
+                "EUR",
+            )),
         );
         assert_eq!(p, Some((dec!(1.40), "EUR")));
     }
@@ -223,7 +229,10 @@ mod tests {
         let p = extract_per_unit_price(
             dec!(-10),
             Some((true, dec!(14), "EUR")),
-            Some((Some(crate::CostNumber::PerUnit(dec!(1.25))), "EUR")),
+            Some((
+                Some(crate::CostNumber::PerUnit { value: dec!(1.25) }),
+                "EUR",
+            )),
         );
         assert_eq!(p, Some((dec!(1.4), "EUR")));
     }
@@ -249,7 +258,7 @@ mod tests {
         let p = extract_per_unit_price(
             dec!(10),
             None,
-            Some((Some(crate::CostNumber::PerUnit(dec!(7))), "USD")),
+            Some((Some(crate::CostNumber::PerUnit { value: dec!(7) }), "USD")),
         );
         assert_eq!(p, Some((dec!(7), "USD")));
     }

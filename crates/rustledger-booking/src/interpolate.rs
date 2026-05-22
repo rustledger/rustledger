@@ -215,11 +215,11 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
 
                     let cost_curr = inferred_currency.as_ref()?;
                     match cost_spec.number {
-                        Some(rustledger_core::CostNumber::PerUnit(per_unit)) => {
+                        Some(rustledger_core::CostNumber::PerUnit { value: per_unit }) => {
                             let cost_amount = amount.number * per_unit;
                             Some((cost_curr.clone(), cost_amount))
                         }
-                        Some(rustledger_core::CostNumber::Total(total)) => {
+                        Some(rustledger_core::CostNumber::Total { value: total }) => {
                             // Sign depends on units sign — the spec
                             // names the total magnitude, not the
                             // direction.
@@ -722,7 +722,9 @@ mod tests {
             .with_synthesized_posting(
                 Posting::new("Assets:Stock", Amount::new(dec!(10), "HOOL")).with_cost(
                     rustledger_core::CostSpec::empty()
-                        .with_per_unit(dec!(100.00))
+                        .with_number(rustledger_core::CostNumber::PerUnit {
+                            value: dec!(100.00),
+                        })
                         .with_currency("USD"),
                 ),
             )
@@ -774,7 +776,9 @@ mod tests {
             .with_synthesized_posting(
                 Posting::new("Assets:Stock", Amount::new(dec!(10), "HOOL")).with_cost(
                     rustledger_core::CostSpec::empty()
-                        .with_total(dec!(1000.00))
+                        .with_number(rustledger_core::CostNumber::Total {
+                            value: dec!(1000.00),
+                        })
                         .with_currency("USD"),
                 ),
             )
@@ -801,7 +805,9 @@ mod tests {
             .with_synthesized_posting(
                 Posting::new("Assets:Stock", Amount::new(dec!(8), "HOOL")).with_cost(
                     rustledger_core::CostSpec::empty()
-                        .with_per_unit(dec!(701.20))
+                        .with_number(rustledger_core::CostNumber::PerUnit {
+                            value: dec!(701.20),
+                        })
                         .with_currency("USD"),
                 ),
             )
@@ -837,7 +843,9 @@ mod tests {
                 Posting::new("Assets:Stock", Amount::new(dec!(-10), "HOOL"))
                     .with_cost(
                         rustledger_core::CostSpec::empty()
-                            .with_per_unit(dec!(100.00))
+                            .with_number(rustledger_core::CostNumber::PerUnit {
+                                value: dec!(100.00),
+                            })
                             .with_currency("USD"),
                     )
                     .with_price(rustledger_core::PriceAnnotation::unit(Amount::new(
@@ -870,7 +878,9 @@ mod tests {
             .with_synthesized_posting(
                 Posting::new("Assets:Stock", Amount::new(dec!(10), "HOOL")).with_cost(
                     rustledger_core::CostSpec::empty()
-                        .with_per_unit(dec!(100.00))
+                        .with_number(rustledger_core::CostNumber::PerUnit {
+                            value: dec!(100.00),
+                        })
                         .with_currency("USD"),
                 ),
             )
@@ -905,7 +915,9 @@ mod tests {
             .with_synthesized_posting(
                 Posting::new("Assets:Stock", Amount::new(dec!(-5), "HOOL")).with_cost(
                     rustledger_core::CostSpec::empty()
-                        .with_per_unit(dec!(100.00))
+                        .with_number(rustledger_core::CostNumber::PerUnit {
+                            value: dec!(100.00),
+                        })
                         .with_currency("USD"),
                 ),
             )
@@ -1023,7 +1035,10 @@ mod tests {
                     "Assets:Vanguard:IRA:Trad:VFIFX",
                     Amount::new(dec!(10), "VFIFX"),
                 )
-                .with_cost(rustledger_core::CostSpec::empty().with_per_unit(dec!(100))),
+                .with_cost(
+                    rustledger_core::CostSpec::empty()
+                        .with_number(rustledger_core::CostNumber::PerUnit { value: dec!(100) }),
+                ),
             )
             .with_synthesized_posting(Posting::new(
                 "Equity:Opening-Balances",
@@ -1059,7 +1074,10 @@ mod tests {
                     "Assets:Vanguard:IRA:Trad:VFIFX",
                     Amount::new(dec!(10), "VFIFX"),
                 )
-                .with_cost(rustledger_core::CostSpec::empty().with_per_unit(dec!(100))),
+                .with_cost(
+                    rustledger_core::CostSpec::empty()
+                        .with_number(rustledger_core::CostNumber::PerUnit { value: dec!(100) }),
+                ),
             )
             .with_synthesized_posting(Posting::new(
                 "Equity:Opening-Balances",
@@ -1108,7 +1126,9 @@ mod tests {
             .with_synthesized_posting(
                 Posting::new("Assets:Abc", Amount::new(dec!(12.3340), "ABC")).with_cost(
                     rustledger_core::CostSpec::empty()
-                        .with_per_unit(dec!(140.02))
+                        .with_number(rustledger_core::CostNumber::PerUnit {
+                            value: dec!(140.02),
+                        })
                         .with_currency("USD"),
                 ),
             )
@@ -1193,7 +1213,9 @@ mod tests {
             .with_synthesized_posting(
                 Posting::new("Assets:Stock", Amount::new(dec!(1), "CSU")).with_cost(
                     rustledger_core::CostSpec::empty()
-                        .with_per_unit(dec!(2800.01))
+                        .with_number(rustledger_core::CostNumber::PerUnit {
+                            value: dec!(2800.01),
+                        })
                         .with_currency("CAD"),
                 ),
             )
@@ -1259,7 +1281,7 @@ mod tests {
             .with_synthesized_posting(
                 Posting::new("Assets:Crypto", Amount::new(dec!(100), "USDC")).with_cost(
                     rustledger_core::CostSpec::empty()
-                        .with_per_unit(dec!(1.0))
+                        .with_number(rustledger_core::CostNumber::PerUnit { value: dec!(1.0) })
                         .with_currency("USD"),
                 ),
             )
@@ -1300,7 +1322,7 @@ mod tests {
             .with_synthesized_posting(
                 Posting::new("Assets:Crypto", Amount::new(dec!(100), "TOKEN")).with_cost(
                     rustledger_core::CostSpec::empty()
-                        .with_per_unit(dec!(0))
+                        .with_number(rustledger_core::CostNumber::PerUnit { value: dec!(0) })
                         .with_currency("USD"),
                 ),
             )
@@ -1328,7 +1350,7 @@ mod tests {
             .with_synthesized_posting(
                 Posting::new("Assets:Crypto", Amount::new(dec!(100), "TOKEN")).with_cost(
                     rustledger_core::CostSpec::empty()
-                        .with_total(dec!(0))
+                        .with_number(rustledger_core::CostNumber::Total { value: dec!(0) })
                         .with_currency("USD"),
                 ),
             )
@@ -1507,7 +1529,9 @@ mod tests {
         use rustledger_core::CostSpec;
 
         let cost_spec = CostSpec {
-            number: Some(rustledger_core::CostNumber::PerUnit(dec!(170.16734))),
+            number: Some(rustledger_core::CostNumber::PerUnit {
+                value: dec!(170.16734),
+            }),
             currency: Some(Currency::from("USD")),
             date: None,
             label: None,
@@ -1575,7 +1599,9 @@ mod tests {
             .with_synthesized_posting(
                 Posting::new("Assets:Brokerage", Amount::new(dec!(1.763), "STOCK")).with_cost(
                     CostSpec {
-                        number: Some(rustledger_core::CostNumber::Total(dec!(300.00))),
+                        number: Some(rustledger_core::CostNumber::Total {
+                            value: dec!(300.00),
+                        }),
                         currency: Some(Currency::from("USD")),
                         date: None,
                         label: None,

@@ -165,10 +165,12 @@ pub fn directive_to_json(directive: &Directive, line: u32, filename: &str) -> Di
                         let cost = p.cost.as_ref().map(|c| {
                             use crate::types::output::CostNumber as WireCN;
                             let number = c.number.map(|n| match n {
-                                rustledger_core::CostNumber::PerUnit(d) => WireCN::PerUnit {
-                                    value: d.to_string(),
-                                },
-                                rustledger_core::CostNumber::Total(d) => WireCN::Total {
+                                rustledger_core::CostNumber::PerUnit { value: d } => {
+                                    WireCN::PerUnit {
+                                        value: d.to_string(),
+                                    }
+                                }
+                                rustledger_core::CostNumber::Total { value: d } => WireCN::Total {
                                     value: d.to_string(),
                                 },
                                 rustledger_core::CostNumber::PerUnitFromTotal(b) => {

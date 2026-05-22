@@ -320,9 +320,9 @@ fn transform_transaction(
                         currency: state.config.currency.clone(),
                     }),
                     cost: Some(CostData {
-                        number: Some(rustledger_plugin_types::CostNumberData::PerUnit(
-                            format_decimal(state.last_price),
-                        )),
+                        number: Some(rustledger_plugin_types::CostNumberData::PerUnit {
+                            value: format_decimal(state.last_price),
+                        }),
                         currency: Some(units.currency.clone()),
                         date: Some(directive.date.clone()),
                         label: None,
@@ -474,9 +474,9 @@ fn handle_total_price_posting(
             currency: state.config.currency.clone(),
         }),
         cost: Some(CostData {
-            number: Some(rustledger_plugin_types::CostNumberData::PerUnit(
-                format_decimal(state.last_price),
-            )),
+            number: Some(rustledger_plugin_types::CostNumberData::PerUnit {
+                value: format_decimal(state.last_price),
+            }),
             currency: Some(units_currency.to_string()),
             date: Some(date.to_string()),
             label: None,
@@ -525,9 +525,9 @@ fn process_fifo_sell(
                     currency: state.config.currency.clone(),
                 }),
                 cost: Some(CostData {
-                    number: Some(rustledger_plugin_types::CostNumberData::PerUnit(
-                        format_decimal(lot.cost_per_unit),
-                    )),
+                    number: Some(rustledger_plugin_types::CostNumberData::PerUnit {
+                        value: format_decimal(lot.cost_per_unit),
+                    }),
                     currency: Some(currency.to_string()),
                     date: Some(lot.date.clone()),
                     label: None,
@@ -569,9 +569,9 @@ fn process_fifo_sell(
                     currency: state.config.currency.clone(),
                 }),
                 cost: Some(CostData {
-                    number: Some(rustledger_plugin_types::CostNumberData::PerUnit(
-                        format_decimal(lot.cost_per_unit),
-                    )),
+                    number: Some(rustledger_plugin_types::CostNumberData::PerUnit {
+                        value: format_decimal(lot.cost_per_unit),
+                    }),
                     currency: Some(currency.to_string()),
                     date: Some(lot.date.clone()),
                     label: None,

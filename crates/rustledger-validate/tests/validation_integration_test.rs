@@ -291,7 +291,7 @@ fn test_e4005_negative_cost_per_unit() {
                 .with_synthesized_posting(
                     Posting::new("Assets:Stock", Amount::new(dec!(10), "AAPL")).with_cost(
                         rustledger_core::CostSpec::empty()
-                            .with_per_unit(dec!(-150))
+                            .with_number(rustledger_core::CostNumber::PerUnit { value: dec!(-150) })
                             .with_currency("USD"),
                     ),
                 )
@@ -316,7 +316,7 @@ fn test_e4005_negative_total_cost() {
                 .with_synthesized_posting(
                     Posting::new("Assets:Stock", Amount::new(dec!(10), "AAPL")).with_cost(
                         rustledger_core::CostSpec::empty()
-                            .with_total(dec!(-1500))
+                            .with_number(rustledger_core::CostNumber::Total { value: dec!(-1500) })
                             .with_currency("USD"),
                     ),
                 )
@@ -341,7 +341,7 @@ fn test_e4005_positive_cost_ok() {
                 .with_synthesized_posting(
                     Posting::new("Assets:Stock", Amount::new(dec!(10), "AAPL")).with_cost(
                         rustledger_core::CostSpec::empty()
-                            .with_per_unit(dec!(150))
+                            .with_number(rustledger_core::CostNumber::PerUnit { value: dec!(150) })
                             .with_currency("USD"),
                     ),
                 )

@@ -130,9 +130,9 @@ fn make_transaction_with_cost(
                         currency: units.1.to_string(),
                     }),
                     cost: Some(CostData {
-                        number: Some(rustledger_plugin_types::CostNumberData::PerUnit(
-                            cost.0.to_string(),
-                        )),
+                        number: Some(rustledger_plugin_types::CostNumberData::PerUnit {
+                            value: cost.0.to_string(),
+                        }),
                         currency: Some(cost.1.to_string()),
                         date: None,
                         label: None,
@@ -206,9 +206,9 @@ fn make_transaction_with_cost_and_price_total(
                         currency: units.1.to_string(),
                     }),
                     cost: Some(CostData {
-                        number: Some(rustledger_plugin_types::CostNumberData::PerUnit(
-                            cost.0.to_string(),
-                        )),
+                        number: Some(rustledger_plugin_types::CostNumberData::PerUnit {
+                            value: cost.0.to_string(),
+                        }),
                         currency: Some(cost.1.to_string()),
                         date: None,
                         label: None,
@@ -271,9 +271,9 @@ fn make_transaction_with_cost_and_price(
                         currency: units.1.to_string(),
                     }),
                     cost: Some(CostData {
-                        number: Some(rustledger_plugin_types::CostNumberData::PerUnit(
-                            cost.0.to_string(),
-                        )),
+                        number: Some(rustledger_plugin_types::CostNumberData::PerUnit {
+                            value: cost.0.to_string(),
+                        }),
                         currency: Some(cost.1.to_string()),
                         date: None,
                         label: None,
@@ -1325,9 +1325,9 @@ fn test_noduplicates_total_vs_per_unit_cost_differ() {
         && let Some(cost) = &mut t.postings[0].cost
     {
         // Swap to total cost form
-        cost.number = Some(rustledger_plugin_types::CostNumberData::Total(
-            "1500.00".to_string(),
-        ));
+        cost.number = Some(rustledger_plugin_types::CostNumberData::Total {
+            value: "1500.00".to_string(),
+        });
     }
     let input = make_input(vec![
         make_open("2024-01-01", "Assets:Stock"),
@@ -2087,9 +2087,9 @@ fn test_check_commodity_undeclared_cost_currency() {
                             currency: "HOOL".to_string(),
                         }),
                         cost: Some(CostData {
-                            number: Some(rustledger_plugin_types::CostNumberData::PerUnit(
-                                "100.00".to_string(),
-                            )),
+                            number: Some(rustledger_plugin_types::CostNumberData::PerUnit {
+                                value: "100.00".to_string(),
+                            }),
                             currency: Some("USD".to_string()),
                             date: None,
                             label: None,
@@ -2150,9 +2150,9 @@ fn test_check_commodity_cost_with_none_currency_skipped() {
                         // Cost present but with currency = None — must NOT
                         // be added to the used-commodities set.
                         cost: Some(CostData {
-                            number: Some(rustledger_plugin_types::CostNumberData::PerUnit(
-                                "100.00".to_string(),
-                            )),
+                            number: Some(rustledger_plugin_types::CostNumberData::PerUnit {
+                                value: "100.00".to_string(),
+                            }),
                             currency: None,
                             date: None,
                             label: None,
@@ -2498,9 +2498,9 @@ fn test_implicit_prices_from_cost_total() {
                             currency: "ABC".to_string(),
                         }),
                         cost: Some(CostData {
-                            number: Some(rustledger_plugin_types::CostNumberData::Total(
-                                "500".to_string(),
-                            )),
+                            number: Some(rustledger_plugin_types::CostNumberData::Total {
+                                value: "500".to_string(),
+                            }),
                             currency: Some("USD".to_string()),
                             date: None,
                             label: None,
@@ -4461,7 +4461,7 @@ proptest::proptest! {
                         }),
                         cost: if has_cost {
                             Some(CostData {
-                                number: Some(rustledger_plugin_types::CostNumberData::PerUnit("100".to_string())),
+                                number: Some(rustledger_plugin_types::CostNumberData::PerUnit { value: "100".to_string() }),
                                 currency: Some("USD".to_string()),
                                 date: None,
                                 label: None,
@@ -4964,9 +4964,9 @@ fn make_sale_with_gain_posting(
                         currency: units.1.to_string(),
                     }),
                     cost: Some(CostData {
-                        number: Some(rustledger_plugin_types::CostNumberData::PerUnit(
-                            cost.0.to_string(),
-                        )),
+                        number: Some(rustledger_plugin_types::CostNumberData::PerUnit {
+                            value: cost.0.to_string(),
+                        }),
                         currency: Some(cost.1.to_string()),
                         date: None,
                         label: None,
@@ -5208,9 +5208,9 @@ fn test_sell_gains_two_sales_share_one_income_posting() {
                         currency: "AAPL".to_string(),
                     }),
                     cost: Some(CostData {
-                        number: Some(rustledger_plugin_types::CostNumberData::PerUnit(
-                            "100".to_string(),
-                        )),
+                        number: Some(rustledger_plugin_types::CostNumberData::PerUnit {
+                            value: "100".to_string(),
+                        }),
                         currency: Some("USD".to_string()),
                         date: None,
                         label: None,
@@ -5237,9 +5237,9 @@ fn test_sell_gains_two_sales_share_one_income_posting() {
                         currency: "AAPL".to_string(),
                     }),
                     cost: Some(CostData {
-                        number: Some(rustledger_plugin_types::CostNumberData::PerUnit(
-                            "200".to_string(),
-                        )),
+                        number: Some(rustledger_plugin_types::CostNumberData::PerUnit {
+                            value: "200".to_string(),
+                        }),
                         currency: Some("USD".to_string()),
                         date: None,
                         label: None,
@@ -5332,7 +5332,7 @@ proptest::proptest! {
                 currency: "AAPL".to_string(),
             }),
             cost: Some(CostData {
-                number: Some(rustledger_plugin_types::CostNumberData::PerUnit(cost_d.to_string())),
+                number: Some(rustledger_plugin_types::CostNumberData::PerUnit { value: cost_d.to_string() }),
                 currency: Some("USD".to_string()),
                 date: None,
                 label: None,
@@ -7955,9 +7955,9 @@ fn make_long_short_sale(
                         currency: asset.1.to_string(),
                     }),
                     cost: Some(CostData {
-                        number: Some(rustledger_plugin_types::CostNumberData::PerUnit(
-                            cost.0.to_string(),
-                        )),
+                        number: Some(rustledger_plugin_types::CostNumberData::PerUnit {
+                            value: cost.0.to_string(),
+                        }),
                         currency: Some(cost.1.to_string()),
                         date: Some(cost_date.to_string()),
                         label: None,
@@ -8250,9 +8250,9 @@ fn test_capital_gains_long_short_no_cost_date_passes_through_unchanged() {
                         currency: "AAPL".to_string(),
                     }),
                     cost: Some(CostData {
-                        number: Some(rustledger_plugin_types::CostNumberData::PerUnit(
-                            "100".to_string(),
-                        )),
+                        number: Some(rustledger_plugin_types::CostNumberData::PerUnit {
+                            value: "100".to_string(),
+                        }),
                         currency: Some("USD".to_string()),
                         date: None, // ← the branch under test
                         label: None,

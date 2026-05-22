@@ -64,14 +64,15 @@ fn per_unit_round_trip_through_python() {
         return;
     }
 
-    // Rust serializes `CostNumber::PerUnit(100)` as {"PerUnit": "100"}
-    // via serde's default enum encoding. The Python `_parse_cost_spec`
-    // must read that shape and populate `number_per`.
+    // Rust serializes `CostNumber::PerUnit(100)` as
+    // {"kind":"per_unit","value":"100.00"} via the unified `kind`-tag
+    // shape. The Python `_parse_cost_spec` must read that shape and
+    // populate `number_per`.
     let out = run_python(
         r"
 import json
 input_dict = {
-    'number': {'PerUnit': '100.00'},
+    'number': {'kind': 'per_unit', 'value': '100.00'},
     'currency': 'USD',
     'date': '2024-01-15',
     'label': None,
@@ -92,8 +93,8 @@ print(json.dumps(out_dict, sort_keys=True))
     let parsed: serde_json::Value = serde_json::from_str(out.trim()).expect("json");
     assert_eq!(
         parsed["number"],
-        serde_json::json!({"PerUnit": "100.00"}),
-        "Python re-serialization lost the variant tag"
+        serde_json::json!({"kind": "per_unit", "value": "100.00"}),
+        "Python re-serialization lost the unified `kind`-tag shape"
     );
 }
 
@@ -108,7 +109,7 @@ fn total_round_trip_through_python() {
         r"
 import json
 spec = _parse_cost_spec({
-    'number': {'Total': '1500.00'},
+    'number': {'kind': 'total', 'value': '1500.00'},
     'currency': 'USD',
     'date': None,
     'label': None,
@@ -121,7 +122,10 @@ print(json.dumps(_serialize_cost_spec(spec), sort_keys=True))
     );
 
     let parsed: serde_json::Value = serde_json::from_str(out.trim()).expect("json");
-    assert_eq!(parsed["number"], serde_json::json!({"Total": "1500.00"}));
+    assert_eq!(
+        parsed["number"],
+        serde_json::json!({"kind": "total", "value": "1500.00"})
+    );
 }
 
 #[test]
@@ -140,7 +144,11 @@ fn per_unit_from_total_round_trip_through_python() {
         r"
 import json
 spec = _parse_cost_spec({
-    'number': {'PerUnitFromTotal': {'per_unit': '150.00', 'total': '300.00'}},
+    'number': {
+        'kind': 'per_unit_from_total',
+        'per_unit': '150.00',
+        'total': '300.00',
+    },
     'currency': 'USD',
     'date': None,
     'label': None,
@@ -157,7 +165,11 @@ print(json.dumps(_serialize_cost_spec(spec), sort_keys=True))
     let parsed: serde_json::Value = serde_json::from_str(out.trim()).expect("json");
     assert_eq!(
         parsed["number"],
-        serde_json::json!({"PerUnitFromTotal": {"per_unit": "150.00", "total": "300.00"}}),
+        serde_json::json!({
+            "kind": "per_unit_from_total",
+            "per_unit": "150.00",
+            "total": "300.00",
+        }),
         "round-trip lost the preserved total — currency_accounts and friends would silently regress"
     );
 }
@@ -190,6 +202,37 @@ print(json.dumps(_serialize_cost_spec(spec), sort_keys=True))
     assert!(
         parsed["number"].is_null(),
         "bare-brace re-serialize must emit null number, got {parsed:?}"
+    );
+}
+
+#[test]
+fn python_emits_kind_tagged_shape_matching_ffi_wasi_and_wasm() {
+    // Pins the unification invariant: Python compat emits exactly the
+    // same shape as FFI-WASI / WASM / plugin-types. If serde defaults
+    // ever drift on the Rust side, this test catches the cross-
+    // boundary mismatch from the Python side directly.
+    if !host_python_available() {
+        eprintln!("skipping: python3 not available");
+        return;
+    }
+    let out = run_python(
+        r"
+import json
+# Construct a CostSpec namedtuple via parse, then re-serialize and
+# verify the wire shape matches what every other binding emits.
+spec = _parse_cost_spec({
+    'number': {'kind': 'per_unit', 'value': '42'},
+    'currency': 'USD', 'date': None, 'label': None, 'merge': False,
+})
+print(json.dumps(_serialize_cost_spec(spec)['number'], sort_keys=True))
+",
+    );
+    let parsed: serde_json::Value = serde_json::from_str(out.trim()).expect("json");
+    assert_eq!(parsed["kind"], "per_unit");
+    assert_eq!(parsed["value"], "42");
+    assert!(
+        parsed.get("PerUnit").is_none(),
+        "Python must NOT emit the pre-unification external-tag shape"
     );
 }
 

@@ -6,6 +6,14 @@
 //! A [`CostSpec`] is used for matching against existing costs or specifying
 //! new costs when all fields may not be known.
 
+// rkyv 0.8's `derive(Archive)` synthesizes per-variant `Archived*`
+// structs for struct-style enum variants. The generated `pub value:
+// Archived<Decimal>` field on those structs does not inherit the
+// source variant's field docs, which would fire `missing_docs` under
+// `-D warnings`. Limited to this module so hand-written items still
+// get the lint, but the macro-generated ones don't trip it.
+#![cfg_attr(feature = "rkyv", allow(missing_docs))]
+
 use crate::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -218,21 +226,34 @@ impl fmt::Display for Cost {
     feature = "rkyv",
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
 )]
+// Serde uses the `kind`-tagged internal representation so this enum
+// matches the wire shape used by FFI-WASI, WASM, Python compat, and
+// plugin-types. Pre-tag, serde defaulted to the external-tag form
+// (`{"PerUnit": "100"}`) which diverged from those boundaries —
+// downstream clients had to know which surface they were talking to.
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CostNumber {
     /// Per-unit cost as written: `{150.00 USD}`. Booking leaves this
     /// shape unchanged.
-    PerUnit(#[cfg_attr(feature = "rkyv", rkyv(with = AsDecimal))] Decimal),
+    PerUnit {
+        /// Per-unit value.
+        #[cfg_attr(feature = "rkyv", rkyv(with = AsDecimal))]
+        value: Decimal,
+    },
     /// Total cost as written: `{{ 1500.00 USD }}`. Booking rewrites
     /// this to [`Self::PerUnitFromTotal`] once units are known.
-    Total(#[cfg_attr(feature = "rkyv", rkyv(with = AsDecimal))] Decimal),
+    Total {
+        /// Total value.
+        #[cfg_attr(feature = "rkyv", rkyv(with = AsDecimal))]
+        value: Decimal,
+    },
     /// Post-booking state: a per-unit value derived from a
     /// `{{ total USD }}` spec at booking time, with the source total
     /// preserved for exact residual math. Pre-#1164 this was modeled
     /// implicitly by setting both `number_per` and `number_total` on
     /// `CostSpec`. The payload is a separate [`BookedCost`] struct
-    /// rather than an inline struct variant so rkyv's per-variant
-    /// archived struct keeps `missing_docs` quiet — the wrapped
-    /// struct's fields carry the docs.
+    /// so the booking-time invariant lives on a named type with
+    /// constructor methods that enforce it.
     PerUnitFromTotal(BookedCost),
 }
 
@@ -262,39 +283,81 @@ pub struct BookedCost {
 }
 
 impl BookedCost {
+    /// Check that `per_unit * |units|` agrees with `total` to within
+    /// `rust_decimal`'s rounding floor.
+    ///
+    /// The booker derives `per_unit = total / |units|` at 28 significant
+    /// digits; back-multiplying truncates similarly. The residual can
+    /// reach a few ULP, which scales with `|total|`. Tolerance is
+    /// `max(1e-20, |total| * 1e-24)` — `1e-24` is ~10000x larger than
+    /// one ULP for typical magnitudes, while the absolute floor
+    /// guarantees a sane window for near-zero totals.
+    fn invariant_holds(per_unit: Decimal, total: Decimal, units_abs: Decimal) -> bool {
+        if units_abs.is_zero() {
+            // Zero-units booking is degenerate; the booker doesn't
+            // construct `PerUnitFromTotal` in that case (see book.rs).
+            // External constructors that pass zero get a free pass.
+            return true;
+        }
+        let derived = per_unit * units_abs;
+        let abs_diff = (derived - total).abs();
+        let relative = total.abs() * Decimal::new(1, 24);
+        let tolerance = if relative > Decimal::new(1, 20) {
+            relative
+        } else {
+            Decimal::new(1, 20)
+        };
+        abs_diff <= tolerance
+    }
+
     /// Construct from booking with a precision invariant check.
     ///
     /// In debug builds, asserts that `per_unit * |units| ≈ total` to
-    /// the limits of `rust_decimal` precision. Callers are the booker
-    /// (which derives `per_unit = total / |units|`) and the FFI input
-    /// bridge (which must not construct inconsistent pairs).
+    /// the limits of `rust_decimal` precision (see
+    /// [`Self::invariant_holds`] for the tolerance). Callers are the
+    /// booker (which derives `per_unit = total / |units|`) and the
+    /// plugin / FFI ingress bridges (which must validate consistency
+    /// before constructing).
     ///
     /// # Panics
     ///
-    /// In debug builds: if `per_unit * |units|` differs from `total` by
-    /// more than 1e-20 (a generous tolerance well inside the
-    /// `rust_decimal` 28-digit precision floor). Release builds skip
+    /// In debug builds: if the invariant fails. Release builds skip
     /// the check.
     #[must_use]
     pub fn new(per_unit: Decimal, total: Decimal, units: Decimal) -> Self {
         let units_abs = units.abs();
         debug_assert!(
-            // Zero-units booking is degenerate; the booker doesn't
-            // construct `PerUnitFromTotal` in that case (see book.rs).
-            // External constructors that pass zero get a free pass.
-            units_abs.is_zero() || (per_unit * units_abs - total).abs() < Decimal::new(1, 20),
+            Self::invariant_holds(per_unit, total, units_abs),
             "BookedCost invariant violated: per_unit ({per_unit}) * |units| ({units_abs}) != total ({total})",
         );
         Self { per_unit, total }
     }
 
-    /// Construct without invariant check, for callers that have
-    /// already validated consistency (e.g. rkyv deserialization,
-    /// trusted-byte loaders).
-    ///
-    /// Prefer [`Self::new`] when the units are at hand.
+    /// Try to construct, returning `None` if the consistency invariant
+    /// fails. Use this at trust boundaries (FFI input, plugin egress)
+    /// where the caller may have supplied inconsistent values and you
+    /// want to reject rather than panic in debug or accept silently in
+    /// release.
     #[must_use]
-    pub const fn from_parts_unchecked(per_unit: Decimal, total: Decimal) -> Self {
+    pub fn try_new(per_unit: Decimal, total: Decimal, units: Decimal) -> Option<Self> {
+        if Self::invariant_holds(per_unit, total, units.abs()) {
+            Some(Self { per_unit, total })
+        } else {
+            None
+        }
+    }
+
+    /// Construct without invariant check.
+    ///
+    /// Reserved for rkyv deserialization of trusted archive bytes the
+    /// host itself wrote. **Do not call from boundary code** — every
+    /// FFI / plugin / parser ingress must go through [`Self::try_new`]
+    /// or [`Self::new`] so inconsistent pairs cannot enter the host.
+    /// The bypass exists only because rkyv archives carry no units at
+    /// the deserialization site.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn from_parts_unchecked_trusted(per_unit: Decimal, total: Decimal) -> Self {
         Self { per_unit, total }
     }
 }
@@ -308,9 +371,9 @@ impl CostNumber {
     #[must_use]
     pub const fn per_unit(&self) -> Option<Decimal> {
         match self {
-            Self::PerUnit(n) => Some(*n),
+            Self::PerUnit { value } => Some(*value),
             Self::PerUnitFromTotal(b) => Some(b.per_unit),
-            Self::Total(_) => None,
+            Self::Total { .. } => None,
         }
     }
 
@@ -322,9 +385,9 @@ impl CostNumber {
     #[must_use]
     pub const fn total(&self) -> Option<Decimal> {
         match self {
-            Self::Total(n) => Some(*n),
+            Self::Total { value } => Some(*value),
             Self::PerUnitFromTotal(b) => Some(b.total),
-            Self::PerUnit(_) => None,
+            Self::PerUnit { .. } => None,
         }
     }
 }
@@ -373,28 +436,23 @@ impl CostSpec {
         Self::default()
     }
 
-    /// Set the cost number to a per-unit value.
-    ///
-    /// Convenience for `with_number(CostNumber::PerUnit(n))`. Use
-    /// [`Self::with_number`] when you already have a [`CostNumber`].
-    #[must_use]
-    pub const fn with_per_unit(self, number: Decimal) -> Self {
-        self.with_number(CostNumber::PerUnit(number))
-    }
-
-    /// Set the cost number to a total value.
-    ///
-    /// Convenience for `with_number(CostNumber::Total(n))`. Use
-    /// [`Self::with_number`] when you already have a [`CostNumber`].
-    #[must_use]
-    pub const fn with_total(self, number: Decimal) -> Self {
-        self.with_number(CostNumber::Total(number))
-    }
-
     /// Set the cost number directly.
     ///
     /// The mutual exclusion between per-unit and total is enforced by
-    /// the [`CostNumber`] enum — there is no way to set both.
+    /// the [`CostNumber`] enum — there is no way to set both. Callers
+    /// construct the variant explicitly:
+    ///
+    /// ```ignore
+    /// CostSpec::empty().with_number(CostNumber::PerUnit { value: dec!(150) });
+    /// CostSpec::empty().with_number(CostNumber::Total { value: dec!(1500) });
+    /// ```
+    ///
+    /// Pre-#1164 this slot was a pair of `Option<Decimal>` fields;
+    /// pre-this-PR there were `with_per_unit` / `with_total`
+    /// convenience shims that perpetuated the two-axis mental model
+    /// in caller code and silently overwrote each other if both were
+    /// called. Both are gone — there's exactly one way to set a cost
+    /// number now.
     #[must_use]
     pub const fn with_number(mut self, number: CostNumber) -> Self {
         self.number = Some(number);
@@ -492,9 +550,9 @@ impl CostSpec {
         let currency = self.currency.clone()?;
         let number = match self.number? {
             // User-specified per-unit cost.
-            CostNumber::PerUnit(per) => per,
+            CostNumber::PerUnit { value: per } => per,
             // Calculated from total — preserve full precision.
-            CostNumber::Total(total) => total / units.abs(),
+            CostNumber::Total { value: total } => total / units.abs(),
             // Already booked: `b.per_unit == b.total / |units|` by
             // `BookedCost::new`'s invariant, so this is identical to
             // the `Total` arm above but without the redivision.
@@ -517,9 +575,9 @@ impl fmt::Display for CostSpec {
         let mut parts = Vec::with_capacity(5);
 
         match self.number {
-            Some(CostNumber::PerUnit(n)) => parts.push(format!("{n}")),
+            Some(CostNumber::PerUnit { value: n }) => parts.push(format!("{n}")),
             Some(CostNumber::PerUnitFromTotal(b)) => parts.push(format!("{}", b.per_unit)),
-            Some(CostNumber::Total(n)) => parts.push(format!("# {n}")),
+            Some(CostNumber::Total { value: n }) => parts.push(format!("# {n}")),
             None => {}
         }
         if let Some(c) = &self.currency {
@@ -644,11 +702,15 @@ mod tests {
         assert!(CostSpec::empty().matches(&cost));
 
         // Match by number
-        let spec = CostSpec::empty().with_per_unit(dec!(150.00));
+        let spec = CostSpec::empty().with_number(crate::CostNumber::PerUnit {
+            value: dec!(150.00),
+        });
         assert!(spec.matches(&cost));
 
         // Wrong number
-        let spec = CostSpec::empty().with_per_unit(dec!(160.00));
+        let spec = CostSpec::empty().with_number(crate::CostNumber::PerUnit {
+            value: dec!(160.00),
+        });
         assert!(!spec.matches(&cost));
 
         // Match by currency
@@ -665,7 +727,9 @@ mod tests {
 
         // Match by all
         let spec = CostSpec::empty()
-            .with_per_unit(dec!(150.00))
+            .with_number(crate::CostNumber::PerUnit {
+                value: dec!(150.00),
+            })
             .with_currency("USD")
             .with_date(date(2024, 1, 15))
             .with_label("lot1");
@@ -675,7 +739,9 @@ mod tests {
     #[test]
     fn test_cost_spec_resolve() {
         let spec = CostSpec::empty()
-            .with_per_unit(dec!(150.00))
+            .with_number(crate::CostNumber::PerUnit {
+                value: dec!(150.00),
+            })
             .with_currency("USD");
 
         let cost = spec.resolve(dec!(10), date(2024, 1, 15)).unwrap();
@@ -687,7 +753,9 @@ mod tests {
     #[test]
     fn test_cost_spec_resolve_total() {
         let spec = CostSpec::empty()
-            .with_total(dec!(1500.00))
+            .with_number(crate::CostNumber::Total {
+                value: dec!(1500.00),
+            })
             .with_currency("USD");
 
         let cost = spec.resolve(dec!(10), date(2024, 1, 15)).unwrap();
@@ -734,27 +802,63 @@ mod tests {
     }
 
     #[test]
-    fn booked_cost_from_parts_unchecked_skips_invariant() {
-        // rkyv deserialization and plugin round-trip use this when
-        // units aren't at hand. Constructs the inconsistent pair
-        // without panicking — verifying it's truly unchecked.
-        let b = BookedCost::from_parts_unchecked(dec!(50), dec!(300));
+    fn booked_cost_from_parts_unchecked_trusted_skips_invariant() {
+        // rkyv deserialization uses this when units aren't at hand.
+        // Constructs the inconsistent pair without panicking —
+        // verifying it's truly unchecked. Plugin / FFI ingress code
+        // must NOT use this path; they get `try_new`.
+        let b = BookedCost::from_parts_unchecked_trusted(dec!(50), dec!(300));
         assert_eq!(b.per_unit, dec!(50));
         assert_eq!(b.total, dec!(300));
     }
 
     #[test]
+    fn booked_cost_try_new_rejects_inconsistent_pair() {
+        // Trust-boundary constructor must return None for inconsistent
+        // pairs instead of either panicking (new) or accepting
+        // silently (unchecked). 10 units × 50/u = 500, not 999.
+        let result = BookedCost::try_new(dec!(50), dec!(999), dec!(10));
+        assert!(result.is_none(), "expected None for inconsistent input");
+    }
+
+    #[test]
+    fn booked_cost_try_new_accepts_consistent_pair() {
+        let result = BookedCost::try_new(dec!(50), dec!(500), dec!(10));
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn booked_cost_invariant_tolerates_rust_decimal_rounding() {
+        // The booker computes per_unit = total / |units| at 28-digit
+        // precision; back-multiplying truncates the same way. The
+        // tolerance must accommodate the ULP-scale residual that real
+        // ledgers exercise — the original tight 1e-20 floor fired
+        // spuriously on cases like 300 / 1.763.
+        let total = dec!(300);
+        let units = dec!(1.763);
+        let per_unit = total / units;
+        // This must NOT panic.
+        let _ = BookedCost::new(per_unit, total, units);
+    }
+
+    #[test]
     fn cost_number_per_unit_accessor() {
-        assert_eq!(CostNumber::PerUnit(dec!(150)).per_unit(), Some(dec!(150)));
-        assert_eq!(CostNumber::Total(dec!(1500)).per_unit(), None);
+        assert_eq!(
+            CostNumber::PerUnit { value: dec!(150) }.per_unit(),
+            Some(dec!(150))
+        );
+        assert_eq!(CostNumber::Total { value: dec!(1500) }.per_unit(), None);
         let b = BookedCost::new(dec!(30), dec!(300), dec!(10));
         assert_eq!(CostNumber::PerUnitFromTotal(b).per_unit(), Some(dec!(30)));
     }
 
     #[test]
     fn cost_number_total_accessor() {
-        assert_eq!(CostNumber::PerUnit(dec!(150)).total(), None);
-        assert_eq!(CostNumber::Total(dec!(1500)).total(), Some(dec!(1500)));
+        assert_eq!(CostNumber::PerUnit { value: dec!(150) }.total(), None);
+        assert_eq!(
+            CostNumber::Total { value: dec!(1500) }.total(),
+            Some(dec!(1500))
+        );
         let b = BookedCost::new(dec!(30), dec!(300), dec!(10));
         assert_eq!(CostNumber::PerUnitFromTotal(b).total(), Some(dec!(300)));
     }
@@ -775,7 +879,9 @@ mod tests {
         assert_eq!(cost.currency, "USD");
 
         // Same shape via raw Total → same number after division.
-        let total_spec = CostSpec::empty().with_total(dec!(300)).with_currency("USD");
+        let total_spec = CostSpec::empty()
+            .with_number(crate::CostNumber::Total { value: dec!(300) })
+            .with_currency("USD");
         let total_cost = total_spec.resolve(dec!(10), date(2024, 1, 15)).unwrap();
         assert_eq!(cost.number, total_cost.number);
     }
@@ -797,6 +903,43 @@ mod tests {
         let wrong = BookedCost::new(dec!(160), dec!(320), dec!(2));
         let wrong_spec = CostSpec::empty().with_number(CostNumber::PerUnitFromTotal(wrong));
         assert!(!wrong_spec.matches(&cost));
+    }
+
+    #[test]
+    fn cost_number_serde_emits_kind_tagged_shape() {
+        // The unified wire shape across plugin-types, FFI-WASI, WASM,
+        // and Python compat is `{"kind": "per_unit", "value": "100"}`
+        // etc. This test pins that crate::CostNumber serde
+        // matches — silent drift here breaks every downstream client.
+        let pu = CostNumber::PerUnit { value: dec!(100) };
+        let json = serde_json::to_value(pu).unwrap();
+        assert_eq!(json["kind"], "per_unit", "PerUnit must use kind tag");
+
+        let t = CostNumber::Total { value: dec!(1500) };
+        let json = serde_json::to_value(t).unwrap();
+        assert_eq!(json["kind"], "total");
+
+        let b = BookedCost::new(dec!(150), dec!(300), dec!(2));
+        let puft = CostNumber::PerUnitFromTotal(b);
+        let json = serde_json::to_value(puft).unwrap();
+        assert_eq!(json["kind"], "per_unit_from_total");
+        assert_eq!(json["per_unit"], "150");
+        assert_eq!(json["total"], "300");
+    }
+
+    #[test]
+    fn cost_number_serde_round_trip() {
+        // The cross-language wire contract is only honored if Rust
+        // can also deserialize what it serialized. Pin the round-trip.
+        for cn in [
+            CostNumber::PerUnit { value: dec!(42) },
+            CostNumber::Total { value: dec!(420) },
+            CostNumber::PerUnitFromTotal(BookedCost::new(dec!(150), dec!(300), dec!(2))),
+        ] {
+            let json = serde_json::to_string(&cn).unwrap();
+            let back: CostNumber = serde_json::from_str(&json).unwrap();
+            assert_eq!(cn, back, "round trip lost data for {cn:?}");
+        }
     }
 
     #[test]

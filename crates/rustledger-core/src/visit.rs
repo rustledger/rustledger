@@ -332,7 +332,7 @@ mod tests {
                     account: "Assets:Stock".into(),
                     units: Some(crate::IncompleteAmount::from(Amount::new(dec!(10), "USD"))),
                     cost: Some(CostSpec {
-                        number: Some(crate::CostNumber::PerUnit(dec!(1))),
+                        number: Some(crate::CostNumber::PerUnit { value: dec!(1) }),
                         currency: Some("USD".into()),
                         date: None,
                         label: None,

@@ -44,12 +44,16 @@ pub fn directive_to_json(directive: &Directive) -> DirectiveJson {
                         // The wire `CostNumberJson` is a tagged enum
                         // mirroring `CostNumber`; JS branches on `kind`.
                         number: c.number.map(|n| match n {
-                            rustledger_core::CostNumber::PerUnit(d) => CostNumberJson::PerUnit {
-                                value: d.to_string(),
-                            },
-                            rustledger_core::CostNumber::Total(d) => CostNumberJson::Total {
-                                value: d.to_string(),
-                            },
+                            rustledger_core::CostNumber::PerUnit { value: d } => {
+                                CostNumberJson::PerUnit {
+                                    value: d.to_string(),
+                                }
+                            }
+                            rustledger_core::CostNumber::Total { value: d } => {
+                                CostNumberJson::Total {
+                                    value: d.to_string(),
+                                }
+                            }
                             rustledger_core::CostNumber::PerUnitFromTotal(b) => {
                                 CostNumberJson::PerUnitFromTotal {
                                     per_unit: b.per_unit.to_string(),

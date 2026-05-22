@@ -62,7 +62,16 @@ pub(super) fn data_to_posting(data: &PostingData) -> Result<Posting, ConversionE
         .as_ref()
         .map(data_to_incomplete_amount)
         .transpose()?;
-    let cost = data.cost.as_ref().map(data_to_cost).transpose()?;
+    // Thread the parsed units into the cost bridge so PerUnitFromTotal
+    // can validate the per_unit/total/units consistency invariant. A
+    // plugin that mutates one half without the other gets caught at
+    // the boundary instead of silently corrupting inventory state.
+    let units_number = units.as_ref().and_then(IncompleteAmount::number);
+    let cost = data
+        .cost
+        .as_ref()
+        .map(|c| data_to_cost(c, units_number))
+        .transpose()?;
     let price = data
         .price
         .as_ref()
@@ -143,23 +152,43 @@ pub(super) fn data_to_amount(data: &AmountData) -> Result<Amount, ConversionErro
     Ok(Amount::new(number, &data.currency))
 }
 
-pub(super) fn data_to_cost(data: &CostData) -> Result<CostSpec, ConversionError> {
+pub(super) fn data_to_cost(
+    data: &CostData,
+    units_number: Option<Decimal>,
+) -> Result<CostSpec, ConversionError> {
     use crate::types::CostNumberData;
     let parse = |s: &String| {
         Decimal::from_str_exact(s).map_err(|_| ConversionError::InvalidNumber(s.clone()))
     };
     let number = match &data.number {
-        Some(CostNumberData::PerUnit(s)) => Some(rustledger_core::CostNumber::PerUnit(parse(s)?)),
-        Some(CostNumberData::Total(s)) => Some(rustledger_core::CostNumber::Total(parse(s)?)),
+        Some(CostNumberData::PerUnit { value: s }) => {
+            Some(rustledger_core::CostNumber::PerUnit { value: parse(s)? })
+        }
+        Some(CostNumberData::Total { value: s }) => {
+            Some(rustledger_core::CostNumber::Total { value: parse(s)? })
+        }
         Some(CostNumberData::PerUnitFromTotal { per_unit, total }) => {
-            // Plugins that mutate post-booking costs round-trip the
-            // variant intact; we use the unchecked constructor because
-            // the bridge has no access to the original units (plugins
-            // see the wire form). The booker's own construction goes
-            // through `BookedCost::new` with the invariant assertion.
-            Some(rustledger_core::CostNumber::PerUnitFromTotal(
-                rustledger_core::BookedCost::from_parts_unchecked(parse(per_unit)?, parse(total)?),
-            ))
+            let per_unit_d = parse(per_unit)?;
+            let total_d = parse(total)?;
+            // Validate the post-booking invariant
+            // `per_unit * |units| == total` if units are known.
+            // Plugins that mutate one half without the other land in
+            // inventory with bogus state otherwise. When units are
+            // unknown (e.g. interpolation-pending posting) we trust
+            // the wire — the booker re-validates later.
+            match units_number {
+                Some(u) => match rustledger_core::BookedCost::try_new(per_unit_d, total_d, u) {
+                    Some(b) => Some(rustledger_core::CostNumber::PerUnitFromTotal(b)),
+                    None => {
+                        return Err(ConversionError::InvalidNumber(format!(
+                            "PerUnitFromTotal invariant violated: per_unit ({per_unit_d}) * |{u}| != total ({total_d})"
+                        )));
+                    }
+                },
+                None => Some(rustledger_core::CostNumber::PerUnitFromTotal(
+                    rustledger_core::BookedCost::from_parts_unchecked_trusted(per_unit_d, total_d),
+                )),
+            }
         }
         None => None,
     };

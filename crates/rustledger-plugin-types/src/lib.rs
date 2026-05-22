@@ -507,12 +507,25 @@ pub struct AmountData {
 /// plugins that care about precision (e.g. `currency_accounts`, which
 /// matches Python's `beancount.core.convert.get_cost`) can use the
 /// original total rather than redividing.
+///
+/// Serializes as `{"kind": "per_unit", "value": "100"}` /
+/// `{"kind": "total", "value": "1500"}` / `{"kind":
+/// "per_unit_from_total", "per_unit": "150", "total": "300"}` — the
+/// `kind`-tagged shape is shared with FFI-WASI, WASM, and Python so
+/// every client language sees one wire contract.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CostNumberData {
     /// Per-unit cost: `{150.00 USD}`.
-    PerUnit(String),
+    PerUnit {
+        /// Per-unit value.
+        value: String,
+    },
     /// Total cost for the posting's units: `{{ 1500.00 USD }}`.
-    Total(String),
+    Total {
+        /// Total value.
+        value: String,
+    },
     /// Post-booking derived per-unit with the original total preserved.
     /// `per_unit == total / |units|` by host construction; preferring
     /// `total` for cost-basis-style reads avoids the
@@ -532,8 +545,11 @@ impl CostNumberData {
     #[must_use]
     pub fn per_unit(&self) -> Option<&str> {
         match self {
-            Self::PerUnit(s) | Self::PerUnitFromTotal { per_unit: s, .. } => Some(s),
-            Self::Total(_) => None,
+            Self::PerUnit { value }
+            | Self::PerUnitFromTotal {
+                per_unit: value, ..
+            } => Some(value),
+            Self::Total { .. } => None,
         }
     }
 
@@ -542,8 +558,8 @@ impl CostNumberData {
     #[must_use]
     pub fn total(&self) -> Option<&str> {
         match self {
-            Self::Total(s) | Self::PerUnitFromTotal { total: s, .. } => Some(s),
-            Self::PerUnit(_) => None,
+            Self::Total { value } | Self::PerUnitFromTotal { total: value, .. } => Some(value),
+            Self::PerUnit { .. } => None,
         }
     }
 }

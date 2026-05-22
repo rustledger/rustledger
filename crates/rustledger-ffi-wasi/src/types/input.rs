@@ -257,33 +257,55 @@ pub fn input_entry_to_directive(entry: &InputEntry) -> Result<Directive, String>
 
                     let cost = p.cost.as_ref().map(|c| {
                         // The wire `InputCostNumber` is a tagged enum
-                        // that mirrors the host `CostNumber`. Callers
-                        // pick exactly one variant; the type system
-                        // prevents constructing the both-set state.
+                        // mirroring the host `CostNumber`. The type
+                        // system prevents the both-set state; here we
+                        // additionally enforce the
+                        // `per_unit * |units| == total` invariant for
+                        // PerUnitFromTotal so external clients cannot
+                        // smuggle in inconsistent post-booking pairs.
+                        let parse = |s: &str| {
+                            rustledger_core::Decimal::from_str_exact(s)
+                                .unwrap_or_else(|_| rustledger_core::Decimal::from(0))
+                        };
+                        let posting_units = units
+                            .as_ref()
+                            .and_then(|u: &rustledger_core::IncompleteAmount| u.as_amount());
                         let number = c.number.as_ref().map(|n| match n {
                             crate::types::input::InputCostNumber::PerUnit { value } => {
-                                rustledger_core::CostNumber::PerUnit(
-                                    rustledger_core::Decimal::from_str_exact(value)
-                                        .unwrap_or_else(|_| rustledger_core::Decimal::from(0)),
-                                )
+                                rustledger_core::CostNumber::PerUnit {
+                                    value: parse(value),
+                                }
                             }
                             crate::types::input::InputCostNumber::Total { value } => {
-                                rustledger_core::CostNumber::Total(
-                                    rustledger_core::Decimal::from_str_exact(value)
-                                        .unwrap_or_else(|_| rustledger_core::Decimal::from(0)),
-                                )
+                                rustledger_core::CostNumber::Total {
+                                    value: parse(value),
+                                }
                             }
                             crate::types::input::InputCostNumber::PerUnitFromTotal {
                                 per_unit,
                                 total,
-                            } => rustledger_core::CostNumber::PerUnitFromTotal(
-                                rustledger_core::BookedCost::from_parts_unchecked(
-                                    rustledger_core::Decimal::from_str_exact(per_unit)
-                                        .unwrap_or_else(|_| rustledger_core::Decimal::from(0)),
-                                    rustledger_core::Decimal::from_str_exact(total)
-                                        .unwrap_or_else(|_| rustledger_core::Decimal::from(0)),
-                                ),
-                            ),
+                            } => {
+                                let per_unit_d = parse(per_unit);
+                                let total_d = parse(total);
+                                // `try_new` returns None if the pair is
+                                // inconsistent with the posting's
+                                // units; we fall back to interpreting
+                                // as raw PerUnit so the directive still
+                                // parses but loses the bogus total
+                                // (loud truncation > silent corruption).
+                                let units_n = posting_units.as_ref().map_or_else(
+                                    || rustledger_core::Decimal::from(0),
+                                    |a| a.number,
+                                );
+                                match rustledger_core::BookedCost::try_new(
+                                    per_unit_d, total_d, units_n,
+                                ) {
+                                    Some(b) => rustledger_core::CostNumber::PerUnitFromTotal(b),
+                                    None => {
+                                        rustledger_core::CostNumber::PerUnit { value: per_unit_d }
+                                    }
+                                }
+                            }
                         });
                         rustledger_core::CostSpec {
                             number,

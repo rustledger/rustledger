@@ -155,30 +155,39 @@ impl NativePlugin for CurrencyAccountsPlugin {
                         .currency
                         .clone()
                         .unwrap_or_else(|| units.currency.clone());
-                    // Prefer the preserved total when the cost carries
-                    // one (matches Python's `beancount.core.convert.get_cost`,
-                    // which uses the source total exactly and avoids the
-                    // division-then-multiplication precision loss).
+                    // Exhaustive variant match. The Total and
+                    // PerUnitFromTotal arms use the preserved total
+                    // (matching Python's `beancount.core.convert.get_cost`,
+                    // which uses the source total exactly and avoids
+                    // the division-then-multiplication precision
+                    // loss). PerUnit multiplies. Future variant
+                    // additions to `CostNumberData` will compile-fail
+                    // here, which is what we want.
                     let amount = match &cost.number {
-                        Some(cn) if cn.total().is_some() => {
-                            let total =
-                                Decimal::from_str(cn.total().unwrap_or("0")).unwrap_or_default();
-                            // Total cost magnitude with sign following units.
+                        Some(rustledger_plugin_types::CostNumberData::PerUnit { value }) => {
+                            let per = Decimal::from_str(value).unwrap_or_default();
+                            units_num * per
+                        }
+                        Some(rustledger_plugin_types::CostNumberData::Total { value }) => {
+                            let total = Decimal::from_str(value).unwrap_or_default();
                             if units_num.is_sign_negative() {
                                 -total.abs()
                             } else {
                                 total.abs()
                             }
                         }
-                        Some(rustledger_plugin_types::CostNumberData::PerUnit(per)) => {
-                            let per = Decimal::from_str(per).unwrap_or_default();
-                            units_num * per
+                        Some(rustledger_plugin_types::CostNumberData::PerUnitFromTotal {
+                            total,
+                            ..
+                        }) => {
+                            let total = Decimal::from_str(total).unwrap_or_default();
+                            if units_num.is_sign_negative() {
+                                -total.abs()
+                            } else {
+                                total.abs()
+                            }
                         }
-                        // `PerUnitFromTotal` is caught by the first arm
-                        // (its `total()` is Some); the remaining
-                        // matchable case here is unreachable but kept
-                        // exhaustive for safety against future variants.
-                        Some(_) | None => units_num,
+                        None => units_num,
                     };
                     Some((amount, currency))
                 } else if let Some(price) = &posting.price {
@@ -452,9 +461,9 @@ mod currency_accounts_tests {
 
         let mut p1 = posting("Assets:Shares:RING", "9", "RING");
         p1.cost = Some(CostData {
-            number: Some(rustledger_plugin_types::CostNumberData::PerUnit(
-                "68.55".to_string(),
-            )),
+            number: Some(rustledger_plugin_types::CostNumberData::PerUnit {
+                value: "68.55".to_string(),
+            }),
             currency: Some("USD".to_string()),
             date: None,
             label: None,

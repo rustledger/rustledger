@@ -341,12 +341,51 @@ fn parse_cost_and_create_position(
     amount: rustledger_core::Amount,
     cost: &serde_json::Value,
 ) -> Position {
-    // Get cost number - if missing or invalid, fall back to simple position
-    let Some(cost_number_str) = cost.get("number").and_then(|n| n.as_str()) else {
+    // The cost.number field is the `kind`-tagged enum produced by
+    // FFI-WASI output (mirroring `rustledger_core::CostNumber`).
+    // Parse the variant: `per_unit` and `per_unit_from_total` carry a
+    // per-unit value directly; `total` needs the back-division via
+    // amount.number. Pre-PR this read `cost.get("number").as_str()`
+    // and silently dropped every cost because the new shape is an
+    // object, not a string.
+    let Some(cost_number_obj) = cost.get("number") else {
         return Position::simple(amount);
     };
-    let Ok(cost_number) = rustledger_core::Decimal::from_str_exact(cost_number_str) else {
-        return Position::simple(amount);
+    let kind = cost_number_obj.get("kind").and_then(|k| k.as_str());
+    let cost_number = match kind {
+        Some(kind_str @ ("per_unit" | "per_unit_from_total")) => {
+            let field = if kind_str == "per_unit" {
+                "value"
+            } else {
+                "per_unit"
+            };
+            let value = cost_number_obj.get(field).and_then(|v| v.as_str());
+            let Some(s) = value else {
+                return Position::simple(amount);
+            };
+            let Ok(d) = rustledger_core::Decimal::from_str_exact(s) else {
+                return Position::simple(amount);
+            };
+            d
+        }
+        Some("total") => {
+            // Pre-booking total spec — derive per-unit from total /
+            // |units|. This branch shouldn't fire on post-booking
+            // inventory snapshots (the booker should have rewritten
+            // Total → PerUnitFromTotal) but handles the case for
+            // robustness.
+            let Some(s) = cost_number_obj.get("value").and_then(|v| v.as_str()) else {
+                return Position::simple(amount);
+            };
+            let Ok(total) = rustledger_core::Decimal::from_str_exact(s) else {
+                return Position::simple(amount);
+            };
+            if amount.number.is_zero() {
+                return Position::simple(amount);
+            }
+            total / amount.number.abs()
+        }
+        _ => return Position::simple(amount),
     };
 
     // Get cost currency - if missing or empty, fall back to simple position
@@ -708,5 +747,100 @@ mod tests {
         assert!(!is_income_statement_account("Assets:Bank"));
         assert!(!is_income_statement_account("Liabilities:CreditCard"));
         assert!(!is_income_statement_account("Equity:Opening-Balances"));
+    }
+
+    // ==========================================================================
+    // parse_cost_and_create_position — regression guard for the
+    // wire-shape silent-drop bug fixed alongside the typed-CostNumber
+    // unification. Pre-fix this function read `cost.number.as_str()`,
+    // which silently returned None for the new tagged-enum shape, so
+    // every cost-bearing position downgraded to Position::simple.
+    // ==========================================================================
+
+    #[test]
+    fn parse_cost_with_per_unit_tagged_shape_preserves_cost() {
+        let amount = rustledger_core::Amount::new(
+            rustledger_core::Decimal::from_str_exact("10").unwrap(),
+            "STK",
+        );
+        let cost = serde_json::json!({
+            "number": {"kind": "per_unit", "value": "100"},
+            "currency": "USD",
+        });
+        let pos = parse_cost_and_create_position(amount, &cost);
+        let cost = pos.cost.expect("cost must be preserved");
+        assert_eq!(
+            cost.number,
+            rustledger_core::Decimal::from_str_exact("100").unwrap()
+        );
+        assert_eq!(cost.currency.as_ref(), "USD");
+    }
+
+    #[test]
+    fn parse_cost_with_per_unit_from_total_uses_per_unit() {
+        let amount = rustledger_core::Amount::new(
+            rustledger_core::Decimal::from_str_exact("10").unwrap(),
+            "STK",
+        );
+        let cost = serde_json::json!({
+            "number": {"kind": "per_unit_from_total", "per_unit": "30", "total": "300"},
+            "currency": "USD",
+        });
+        let pos = parse_cost_and_create_position(amount, &cost);
+        let cost = pos.cost.expect("cost must be preserved");
+        assert_eq!(
+            cost.number,
+            rustledger_core::Decimal::from_str_exact("30").unwrap()
+        );
+    }
+
+    #[test]
+    fn parse_cost_with_total_tagged_shape_derives_per_unit() {
+        let amount = rustledger_core::Amount::new(
+            rustledger_core::Decimal::from_str_exact("10").unwrap(),
+            "STK",
+        );
+        let cost = serde_json::json!({
+            "number": {"kind": "total", "value": "1500"},
+            "currency": "USD",
+        });
+        let pos = parse_cost_and_create_position(amount, &cost);
+        let cost = pos.cost.expect("cost must be preserved");
+        assert_eq!(
+            cost.number,
+            rustledger_core::Decimal::from_str_exact("150").unwrap()
+        );
+    }
+
+    #[test]
+    fn parse_cost_falls_back_when_number_missing() {
+        let amount = rustledger_core::Amount::new(
+            rustledger_core::Decimal::from_str_exact("10").unwrap(),
+            "STK",
+        );
+        let cost = serde_json::json!({"currency": "USD"});
+        let pos = parse_cost_and_create_position(amount, &cost);
+        assert!(
+            pos.cost.is_none(),
+            "bare-currency cost must fall back to simple"
+        );
+    }
+
+    #[test]
+    fn parse_cost_with_legacy_string_number_falls_back() {
+        // Pre-PR shape sent number as a string. After the typed-enum
+        // migration the bridge correctly rejects this — verifying we
+        // don't silently misparse a stringly-typed value as a per-
+        // unit number.
+        let amount = rustledger_core::Amount::new(
+            rustledger_core::Decimal::from_str_exact("10").unwrap(),
+            "STK",
+        );
+        let cost = serde_json::json!({"number": "100", "currency": "USD"});
+        let pos = parse_cost_and_create_position(amount, &cost);
+        assert!(
+            pos.cost.is_none(),
+            "legacy string-number shape must fall back, not silently accept"
+        );
     }
 }

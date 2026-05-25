@@ -676,6 +676,10 @@ criteria = "safe-to-deploy"
 version = "0.1.1"
 criteria = "safe-to-deploy"
 
+[[exemptions.rand_core]]
+version = "0.10.1"
+criteria = "safe-to-deploy"
+
 [[exemptions.rand_xoshiro]]
 version = "0.6.0"
 criteria = "safe-to-deploy"
@@ -878,10 +882,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.typenum]]
 version = "1.20.0"
-criteria = "safe-to-deploy"
-
-[[exemptions.unicode-segmentation]]
-version = "1.13.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.untrusted]]

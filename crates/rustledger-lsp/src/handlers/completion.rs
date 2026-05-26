@@ -272,9 +272,20 @@ fn complete_account_start(
         })
         .collect();
 
-    // Collect known accounts from the current file and ledger state
+    // Collect known accounts from the current file and ledger state.
+    //
+    // Return every known account: the LSP client filters by the
+    // user's typed prefix, and capping server-side here defeats that
+    // filtering (the client never sees accounts past the cap, so any
+    // prefix that matches a later-sorted account silently fails to
+    // complete). The pre-fix `.take(20)` produced exactly issue
+    // #1183, where `Expenses:ExpenseType20` and later accounts
+    // wouldn't autocomplete because the alphabetical cut-off landed
+    // at `ExpenseType19`. If completion latency on enormous ledgers
+    // ever becomes a concern, switch to `isIncomplete: true` with
+    // server-side prefix filtering rather than a blind cap.
     let known_accounts = get_all_accounts(parse_result, ledger_state);
-    for account in known_accounts.iter().take(20) {
+    for account in &known_accounts {
         items.push(CompletionItem {
             label: account.clone(),
             kind: Some(CompletionItemKind::VARIABLE),
@@ -369,9 +380,12 @@ fn complete_payee(
 ) -> Vec<CompletionItem> {
     let payees = get_all_payees(parse_result, ledger_state);
 
+    // Same `.take(20)` trap as account completion (issue #1183):
+    // the LSP client filters by the user's typed prefix, so capping
+    // server-side silently drops payees that sort after the cap.
+    // Return all; the client handles the volume.
     payees
         .into_iter()
-        .take(20)
         .map(|p| CompletionItem {
             label: p.clone(),
             kind: Some(CompletionItemKind::TEXT),
@@ -517,5 +531,81 @@ mod tests {
         let pos = Position::new(0, 17);
         // Must not panic
         let _ctx = detect_context(source, pos);
+    }
+
+    /// Regression for #1183: pre-fix `complete_account_start` capped
+    /// known-account completions at the first 20 entries (alphabetically
+    /// sorted), so accounts past that cut-off would silently fail to
+    /// autocomplete on the client side — the LSP client filters the
+    /// list it's given by the user's typed prefix, so any account the
+    /// server dropped at the cap was invisible to filtering. The
+    /// reporter's exact repro: 30 `Expenses:ExpenseType01..30` opens,
+    /// of which only 01..19 made the cut.
+    #[test]
+    fn complete_account_start_returns_all_known_accounts_above_legacy_cap() {
+        let source = "\
+2024-01-01 open Assets:Bank:Checking USD
+2024-01-01 open Income:Salary
+2024-01-01 open Income:SomethingElse
+2024-01-01 open Expenses:ExpenseType01
+2024-01-01 open Expenses:ExpenseType02
+2024-01-01 open Expenses:ExpenseType03
+2024-01-01 open Expenses:ExpenseType04
+2024-01-01 open Expenses:ExpenseType05
+2024-01-01 open Expenses:ExpenseType06
+2024-01-01 open Expenses:ExpenseType07
+2024-01-01 open Expenses:ExpenseType08
+2024-01-01 open Expenses:ExpenseType09
+2024-01-01 open Expenses:ExpenseType10
+2024-01-01 open Expenses:ExpenseType11
+2024-01-01 open Expenses:ExpenseType12
+2024-01-01 open Expenses:ExpenseType13
+2024-01-01 open Expenses:ExpenseType14
+2024-01-01 open Expenses:ExpenseType15
+2024-01-01 open Expenses:ExpenseType16
+2024-01-01 open Expenses:ExpenseType17
+2024-01-01 open Expenses:ExpenseType18
+2024-01-01 open Expenses:ExpenseType19
+2024-01-01 open Expenses:ExpenseType20
+2024-01-01 open Expenses:ExpenseType21
+2024-01-01 open Expenses:ExpenseType22
+2024-01-01 open Expenses:ExpenseType23
+2024-01-01 open Expenses:ExpenseType24
+2024-01-01 open Expenses:ExpenseType25
+2024-01-01 open Expenses:ExpenseType26
+2024-01-01 open Expenses:ExpenseType27
+2024-01-01 open Expenses:ExpenseType28
+2024-01-01 open Expenses:ExpenseType29
+2024-01-01 open Expenses:ExpenseType30
+";
+        let parsed = rustledger_parser::parse(source);
+        assert!(
+            parsed.errors.is_empty(),
+            "fixture must parse cleanly: {:?}",
+            parsed.errors,
+        );
+
+        let items = complete_account_start(&parsed, None);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+
+        // The handler also returns standard account-type entries
+        // (`Assets:`, `Expenses:`, …) — those are unrelated; the bug
+        // is about the *known* account names. Spot-check the two
+        // accounts that bracket the legacy cap.
+        assert!(
+            labels.contains(&"Expenses:ExpenseType19"),
+            "ExpenseType19 must be reachable (pre-fix this was the last that worked); \
+             labels = {labels:?}"
+        );
+        assert!(
+            labels.contains(&"Expenses:ExpenseType20"),
+            "ExpenseType20 must be reachable (pre-fix this was the first that failed); \
+             labels = {labels:?}"
+        );
+        assert!(
+            labels.contains(&"Expenses:ExpenseType30"),
+            "ExpenseType30 must be reachable (pre-fix all 20+ accounts were dropped); \
+             labels = {labels:?}"
+        );
     }
 }

@@ -188,8 +188,9 @@ impl fmt::Display for Amount {
     }
 }
 
-/// Error produced by [`Amount::from_str`] when the input doesn't match
-/// the `<number> <currency>` shape that [`fmt::Display`] emits.
+/// Error produced by the [`FromStr`](std::str::FromStr) impl on
+/// [`Amount`] when the input doesn't match the `<number> <currency>`
+/// shape that [`fmt::Display`] emits.
 ///
 /// Carries the offending input so callers can surface an actionable
 /// message ("you wrote X, expected Y") rather than a generic parse
@@ -203,7 +204,8 @@ pub struct AmountParseError {
     pub reason: AmountParseErrorReason,
 }
 
-/// Distinguishes the failure modes of [`Amount::from_str`].
+/// Distinguishes the failure modes of [`Amount`]'s
+/// [`FromStr`](std::str::FromStr) impl.
 ///
 /// Separate from [`AmountParseError`] so callers can match on the
 /// category (e.g. for distinct error codes) without parsing the

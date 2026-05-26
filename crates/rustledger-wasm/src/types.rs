@@ -3,6 +3,8 @@
 //! These types provide a JavaScript-friendly representation of Beancount data,
 //! using string representations for dates and numbers.
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 /// Result of parsing a Beancount file.
@@ -34,10 +36,59 @@ pub struct LedgerOptions {
     pub title: Option<String>,
 }
 
+/// Metadata-value wire format for WASM consumers.
+///
+/// Mirrors the JSON shape that the FFI-WASI bindings emit via
+/// `meta_value_to_json` so consumers writing portable code (one
+/// frontend for both rustledger-wasm and rustledger-ffi-wasi) see
+/// identical metadata values across bindings.
+///
+/// The host's [`rustledger_core::MetaValue`] is richer than the wire
+/// type — `Account`/`Currency`/`Tag`/`Link`/`Date`/`Number` all
+/// flatten to JSON strings here, matching FFI-WASI behavior. JS
+/// consumers that need the strong type info should query the host
+/// via a typed API; this enum is the lossy-but-portable view.
+///
+/// Untagged on the wire: `"hello"` serializes as a string,
+/// `true` as a boolean, `null` as null, and an [`AmountValue`]
+/// `{number,currency}` as a plain object. This matches the
+/// `Record<string, string | number | boolean | null | Amount>`
+/// TypeScript shape (issue #1168 proposed
+/// `string | number | boolean | null`; we additionally support
+/// `Amount` so cost-bearing metadata round-trips cleanly).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum MetaValueJson {
+    /// String/Account/Currency/Tag/Link/Date/Number — anything the
+    /// host can represent as a string, including `rust_decimal::Decimal`
+    /// values stringified to preserve precision (JSON numbers can't
+    /// represent arbitrary-precision decimals losslessly).
+    String(String),
+    /// Boolean values.
+    Bool(bool),
+    /// Amount values (`{number, currency}`) — the only structured
+    /// shape that survives the round-trip. Same `{number, currency}`
+    /// envelope as [`AmountValue`] so JS consumers can branch on
+    /// shape without a discriminator tag.
+    Amount {
+        /// The decimal quantity, stringified for precision.
+        number: String,
+        /// The currency code.
+        currency: String,
+    },
+    /// Absent / null metadata value.
+    Null,
+}
+
 /// A directive in JSON-serializable form.
 ///
 /// Each variant corresponds to a Beancount directive type, with fields
 /// representing the directive's data in a JavaScript-friendly format.
+///
+/// All variants carry a `meta` field with user-defined key/value
+/// metadata from the source (issue #1168). Empty metadata serializes
+/// as an absent field, so existing consumers continue to see the
+/// pre-#1168 shape on directives without explicit metadata.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 #[allow(missing_docs)]
@@ -52,6 +103,8 @@ pub enum DirectiveJson {
         tags: Vec<String>,
         links: Vec<String>,
         postings: Vec<PostingJson>,
+        #[serde(skip_serializing_if = "HashMap::is_empty", default)]
+        meta: HashMap<String, MetaValueJson>,
     },
     /// Balance assertion.
     #[serde(rename = "balance")]
@@ -59,6 +112,8 @@ pub enum DirectiveJson {
         date: String,
         account: String,
         amount: AmountValue,
+        #[serde(skip_serializing_if = "HashMap::is_empty", default)]
+        meta: HashMap<String, MetaValueJson>,
     },
     /// Open account.
     #[serde(rename = "open")]
@@ -68,19 +123,33 @@ pub enum DirectiveJson {
         currencies: Vec<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         booking: Option<String>,
+        #[serde(skip_serializing_if = "HashMap::is_empty", default)]
+        meta: HashMap<String, MetaValueJson>,
     },
     /// Close account.
     #[serde(rename = "close")]
-    Close { date: String, account: String },
+    Close {
+        date: String,
+        account: String,
+        #[serde(skip_serializing_if = "HashMap::is_empty", default)]
+        meta: HashMap<String, MetaValueJson>,
+    },
     /// Commodity declaration.
     #[serde(rename = "commodity")]
-    Commodity { date: String, currency: String },
+    Commodity {
+        date: String,
+        currency: String,
+        #[serde(skip_serializing_if = "HashMap::is_empty", default)]
+        meta: HashMap<String, MetaValueJson>,
+    },
     /// Pad directive.
     #[serde(rename = "pad")]
     Pad {
         date: String,
         account: String,
         source_account: String,
+        #[serde(skip_serializing_if = "HashMap::is_empty", default)]
+        meta: HashMap<String, MetaValueJson>,
     },
     /// Event directive.
     #[serde(rename = "event")]
@@ -88,6 +157,8 @@ pub enum DirectiveJson {
         date: String,
         event_type: String,
         value: String,
+        #[serde(skip_serializing_if = "HashMap::is_empty", default)]
+        meta: HashMap<String, MetaValueJson>,
     },
     /// Note directive.
     #[serde(rename = "note")]
@@ -95,6 +166,8 @@ pub enum DirectiveJson {
         date: String,
         account: String,
         comment: String,
+        #[serde(skip_serializing_if = "HashMap::is_empty", default)]
+        meta: HashMap<String, MetaValueJson>,
     },
     /// Document directive.
     #[serde(rename = "document")]
@@ -102,6 +175,8 @@ pub enum DirectiveJson {
         date: String,
         account: String,
         path: String,
+        #[serde(skip_serializing_if = "HashMap::is_empty", default)]
+        meta: HashMap<String, MetaValueJson>,
     },
     /// Price directive.
     #[serde(rename = "price")]
@@ -109,6 +184,8 @@ pub enum DirectiveJson {
         date: String,
         currency: String,
         amount: AmountValue,
+        #[serde(skip_serializing_if = "HashMap::is_empty", default)]
+        meta: HashMap<String, MetaValueJson>,
     },
     /// Query directive.
     #[serde(rename = "query")]
@@ -116,10 +193,24 @@ pub enum DirectiveJson {
         date: String,
         name: String,
         query_string: String,
+        #[serde(skip_serializing_if = "HashMap::is_empty", default)]
+        meta: HashMap<String, MetaValueJson>,
     },
     /// Custom directive.
+    ///
+    /// `values` carries the positional arguments after the type
+    /// keyword (pre-#1168 these were dropped entirely from the JSON
+    /// output). Each value follows the same `MetaValueJson` shape as
+    /// metadata — strings, bools, amounts, or null.
     #[serde(rename = "custom")]
-    Custom { date: String, custom_type: String },
+    Custom {
+        date: String,
+        custom_type: String,
+        #[serde(default)]
+        values: Vec<MetaValueJson>,
+        #[serde(skip_serializing_if = "HashMap::is_empty", default)]
+        meta: HashMap<String, MetaValueJson>,
+    },
 }
 
 /// A posting in JSON-serializable form.
@@ -136,6 +227,10 @@ pub struct PostingJson {
     /// Price annotation.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub price: Option<AmountValue>,
+    /// Posting-level metadata (issue #1168). Empty when the posting
+    /// has no explicit metadata.
+    #[serde(skip_serializing_if = "HashMap::is_empty", default)]
+    pub meta: HashMap<String, MetaValueJson>,
 }
 
 /// Wire-format of the numeric component of a [`PostingCostJson`].

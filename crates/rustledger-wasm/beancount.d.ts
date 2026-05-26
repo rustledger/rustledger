@@ -46,9 +46,33 @@ export interface DirectiveJson {
   type: DirectiveType;
   /** Directive date in YYYY-MM-DD format. */
   date: string;
+  /**
+   * User-defined metadata key/value pairs (issue #1168).
+   *
+   * Absent when the directive has no explicit metadata in the source.
+   * Values are strings, booleans, `{number, currency}` Amount objects,
+   * or `null`. Strong host types — Account, Currency, Tag, Link, Date,
+   * Decimal — flatten to JSON strings; use the value's directive
+   * context to interpret them.
+   */
+  meta?: Record<string, MetaValueJson>;
   /** Additional directive-specific fields (see directive type interfaces). */
   [key: string]: unknown;
 }
+
+/**
+ * Metadata-value wire format (issue #1168).
+ *
+ * Untagged union — JS consumers branch on `typeof v` (`'string'` /
+ * `'boolean'`) or on object shape (`'number' in v` → Amount) without
+ * a discriminator field. Mirrors the FFI-WASI shape so portable
+ * clients see identical metadata values across both bindings.
+ */
+export type MetaValueJson =
+  | string
+  | boolean
+  | { number: string; currency: string }
+  | null;
 
 /**
  * Possible directive types.
@@ -85,6 +109,8 @@ export interface TransactionData {
   links: string[];
   /** Transaction postings. */
   postings: Posting[];
+  /** Transaction-level metadata (issue #1168). */
+  meta?: Record<string, MetaValueJson>;
 }
 
 /**
@@ -97,6 +123,8 @@ export interface Posting {
   units: Amount | null;
   /** Optional cost specification. */
   cost: CostSpec | null;
+  /** Posting-level metadata (issue #1168). */
+  meta?: Record<string, MetaValueJson>;
 }
 
 /**
@@ -144,6 +172,8 @@ export interface OpenData {
   currencies: string[];
   /** Booking method. */
   booking: string | null;
+  /** Open-directive metadata (issue #1168). */
+  meta?: Record<string, MetaValueJson>;
 }
 
 /**
@@ -154,6 +184,8 @@ export interface CloseData {
   date: string;
   /** Account name. */
   account: string;
+  /** Close-directive metadata (issue #1168). */
+  meta?: Record<string, MetaValueJson>;
 }
 
 /**
@@ -166,6 +198,8 @@ export interface BalanceData {
   account: string;
   /** Expected balance amount. */
   amount: Amount;
+  /** Balance-directive metadata (issue #1168). */
+  meta?: Record<string, MetaValueJson>;
 }
 
 /**
@@ -176,6 +210,8 @@ export interface CommodityData {
   date: string;
   /** Currency code. */
   currency: string;
+  /** Commodity-directive metadata (issue #1168). */
+  meta?: Record<string, MetaValueJson>;
 }
 
 /**
@@ -188,6 +224,8 @@ export interface PadData {
   account: string;
   /** Source account for padding. */
   source_account: string;
+  /** Pad-directive metadata (issue #1168). */
+  meta?: Record<string, MetaValueJson>;
 }
 
 /**
@@ -200,6 +238,8 @@ export interface EventData {
   event_type: string;
   /** Event value. */
   value: string;
+  /** Event-directive metadata (issue #1168). */
+  meta?: Record<string, MetaValueJson>;
 }
 
 /**
@@ -212,6 +252,8 @@ export interface NoteData {
   account: string;
   /** Note content. */
   comment: string;
+  /** Note-directive metadata (issue #1168). */
+  meta?: Record<string, MetaValueJson>;
 }
 
 /**
@@ -224,6 +266,8 @@ export interface DocumentData {
   account: string;
   /** Path to document file. */
   path: string;
+  /** Document-directive metadata (issue #1168). */
+  meta?: Record<string, MetaValueJson>;
 }
 
 /**
@@ -236,6 +280,8 @@ export interface PriceData {
   currency: string;
   /** Price amount. */
   amount: Amount;
+  /** Price-directive metadata (issue #1168). */
+  meta?: Record<string, MetaValueJson>;
 }
 
 /**
@@ -248,6 +294,8 @@ export interface QueryDirectiveData {
   name: string;
   /** BQL query string. */
   query: string;
+  /** Query-directive metadata (issue #1168). */
+  meta?: Record<string, MetaValueJson>;
 }
 
 /**
@@ -258,6 +306,13 @@ export interface CustomData {
   date: string;
   /** Custom type name. */
   custom_type: string;
+  /**
+   * Positional values after the custom type keyword (issue #1168).
+   * Pre-#1168 these were dropped entirely from the JSON output.
+   */
+  values?: MetaValueJson[];
+  /** Custom-directive metadata (issue #1168). */
+  meta?: Record<string, MetaValueJson>;
 }
 
 /**

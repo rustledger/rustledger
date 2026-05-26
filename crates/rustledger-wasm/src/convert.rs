@@ -1,11 +1,50 @@
 //! Conversion functions between Beancount types and JSON DTOs.
 
-use rustledger_core::Directive;
+use std::collections::HashMap;
+
+use rustledger_core::{Directive, MetaValue, Metadata};
 
 use crate::types::{
-    AmountValue, CellValue, CostNumberJson, CostValue, DirectiveJson, PositionValue,
+    AmountValue, CellValue, CostNumberJson, CostValue, DirectiveJson, MetaValueJson, PositionValue,
     PostingCostJson, PostingJson,
 };
+
+/// Lower a host [`MetaValue`] to the wire [`MetaValueJson`].
+///
+/// Mirrors `rustledger-ffi-wasi::meta_value_to_json` so the two
+/// bindings emit identical metadata across wire surfaces (issue
+/// #1168). The host's strong newtypes — `Account`, `Currency`, `Tag`,
+/// `Link`, `Date`, `Number` — all flatten to JSON strings; JS
+/// consumers that need the strong type info should query a typed API
+/// rather than rely on the wire shape.
+fn meta_value_to_json(value: &MetaValue) -> MetaValueJson {
+    match value {
+        MetaValue::String(s) => MetaValueJson::String(s.clone()),
+        MetaValue::Account(a) => MetaValueJson::String(a.to_string()),
+        MetaValue::Currency(c) => MetaValueJson::String(c.to_string()),
+        MetaValue::Tag(t) => MetaValueJson::String(t.to_string()),
+        MetaValue::Link(l) => MetaValueJson::String(l.to_string()),
+        MetaValue::Date(d) => MetaValueJson::String(d.to_string()),
+        // Numbers go through `to_string` to preserve precision — JSON
+        // numbers can't represent `rust_decimal::Decimal` losslessly,
+        // and matching FFI-WASI's behavior keeps the wire shape
+        // portable.
+        MetaValue::Number(n) => MetaValueJson::String(n.to_string()),
+        MetaValue::Bool(b) => MetaValueJson::Bool(*b),
+        MetaValue::Amount(a) => MetaValueJson::Amount {
+            number: a.number.to_string(),
+            currency: a.currency.to_string(),
+        },
+        MetaValue::None => MetaValueJson::Null,
+    }
+}
+
+/// Build the wire `meta` map from a host [`Metadata`].
+fn metadata_to_json(meta: &Metadata) -> HashMap<String, MetaValueJson> {
+    meta.iter()
+        .map(|(k, v)| (k.clone(), meta_value_to_json(v)))
+        .collect()
+}
 
 /// Convert a Directive to its JSON representation.
 pub fn directive_to_json(directive: &Directive) -> DirectiveJson {
@@ -66,8 +105,10 @@ pub fn directive_to_json(directive: &Directive) -> DirectiveJson {
                         label: c.label.clone(),
                     }),
                     price: p.price.as_ref().and_then(price_annotation_to_amount),
+                    meta: metadata_to_json(&p.meta),
                 })
                 .collect(),
+            meta: metadata_to_json(&txn.meta),
         },
         Directive::Balance(bal) => DirectiveJson::Balance {
             date: bal.date.to_string(),
@@ -76,40 +117,48 @@ pub fn directive_to_json(directive: &Directive) -> DirectiveJson {
                 number: bal.amount.number.to_string(),
                 currency: bal.amount.currency.to_string(),
             },
+            meta: metadata_to_json(&bal.meta),
         },
         Directive::Open(open) => DirectiveJson::Open {
             date: open.date.to_string(),
             account: open.account.to_string(),
             currencies: open.currencies.iter().map(ToString::to_string).collect(),
             booking: open.booking.as_ref().map(|b| format!("{b:?}")),
+            meta: metadata_to_json(&open.meta),
         },
         Directive::Close(close) => DirectiveJson::Close {
             date: close.date.to_string(),
             account: close.account.to_string(),
+            meta: metadata_to_json(&close.meta),
         },
         Directive::Commodity(comm) => DirectiveJson::Commodity {
             date: comm.date.to_string(),
             currency: comm.currency.to_string(),
+            meta: metadata_to_json(&comm.meta),
         },
         Directive::Pad(pad) => DirectiveJson::Pad {
             date: pad.date.to_string(),
             account: pad.account.to_string(),
             source_account: pad.source_account.to_string(),
+            meta: metadata_to_json(&pad.meta),
         },
         Directive::Event(event) => DirectiveJson::Event {
             date: event.date.to_string(),
             event_type: event.event_type.clone(),
             value: event.value.clone(),
+            meta: metadata_to_json(&event.meta),
         },
         Directive::Note(note) => DirectiveJson::Note {
             date: note.date.to_string(),
             account: note.account.to_string(),
             comment: note.comment.clone(),
+            meta: metadata_to_json(&note.meta),
         },
         Directive::Document(doc) => DirectiveJson::Document {
             date: doc.date.to_string(),
             account: doc.account.to_string(),
             path: doc.path.clone(),
+            meta: metadata_to_json(&doc.meta),
         },
         Directive::Price(price) => DirectiveJson::Price {
             date: price.date.to_string(),
@@ -118,15 +167,19 @@ pub fn directive_to_json(directive: &Directive) -> DirectiveJson {
                 number: price.amount.number.to_string(),
                 currency: price.amount.currency.to_string(),
             },
+            meta: metadata_to_json(&price.meta),
         },
         Directive::Query(query) => DirectiveJson::Query {
             date: query.date.to_string(),
             name: query.name.clone(),
             query_string: query.query.clone(),
+            meta: metadata_to_json(&query.meta),
         },
         Directive::Custom(custom) => DirectiveJson::Custom {
             date: custom.date.to_string(),
             custom_type: custom.custom_type.clone(),
+            values: custom.values.iter().map(meta_value_to_json).collect(),
+            meta: metadata_to_json(&custom.meta),
         },
     }
 }
@@ -203,10 +256,36 @@ pub fn value_to_cell(value: &rustledger_query::Value) -> CellValue {
     }
 }
 
-#[cfg(test)]
+// The convert.rs test module runs on the host only: the new #1168
+// tests use `serde_json` and `rust_decimal_macros`, which are gated
+// as host-only dev-deps to keep the wasm32 test build lean (see
+// `crates/rustledger-wasm/Cargo.toml`). The shape under test is
+// target-independent, so the host coverage is sufficient.
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
     use rustledger_parser::parse as parse_beancount;
+
+    /// Pull out the `meta` field from any `DirectiveJson` variant.
+    /// Test-only helper — every variant carries `meta`, but they're
+    /// behind individual struct destructures, so this avoids a
+    /// 12-arm match at each call site.
+    fn directive_meta(d: &DirectiveJson) -> &HashMap<String, MetaValueJson> {
+        match d {
+            DirectiveJson::Transaction { meta, .. }
+            | DirectiveJson::Balance { meta, .. }
+            | DirectiveJson::Open { meta, .. }
+            | DirectiveJson::Close { meta, .. }
+            | DirectiveJson::Commodity { meta, .. }
+            | DirectiveJson::Pad { meta, .. }
+            | DirectiveJson::Event { meta, .. }
+            | DirectiveJson::Note { meta, .. }
+            | DirectiveJson::Document { meta, .. }
+            | DirectiveJson::Price { meta, .. }
+            | DirectiveJson::Query { meta, .. }
+            | DirectiveJson::Custom { meta, .. } => meta,
+        }
+    }
 
     #[test]
     fn test_directive_to_json() {
@@ -246,6 +325,7 @@ mod tests {
                         date,
                         account,
                         amount,
+                        ..
                     },
                 ) => {
                     assert_eq!(&a.date.to_string(), date);
@@ -256,5 +336,201 @@ mod tests {
                 _ => panic!("directive type mismatch"),
             }
         }
+    }
+
+    /// Regression for #1168: metadata on every directive type must
+    /// survive the conversion. Pre-fix all `meta` fields were dropped
+    /// and JS consumers had no way to read user-defined key/value
+    /// data.
+    #[test]
+    fn directive_to_json_preserves_metadata_1168() {
+        let source = r#"
+2024-01-01 open Assets:Bank USD
+  description: "Main checking account"
+  source: "Bank XYZ"
+2024-01-01 commodity USD
+  precision: 2
+2024-01-15 * "Coffee Shop" "Morning coffee"
+  trip: "vacation-2024"
+  category: "food"
+  Expenses:Food:Coffee  5.00 USD
+    posting_note: "espresso"
+  Assets:Bank          -5.00 USD
+2024-01-20 balance Assets:Bank 100.00 USD
+  reconciled: TRUE
+"#;
+        let result = parse_beancount(source);
+        assert!(
+            result.errors.is_empty(),
+            "fixture must parse cleanly: {:?}",
+            result.errors
+        );
+
+        for spanned in &result.directives {
+            let json = directive_to_json(&spanned.value);
+            let meta = directive_meta(&json);
+
+            match &spanned.value {
+                Directive::Open(_) => {
+                    assert_eq!(
+                        meta.get("description"),
+                        Some(&MetaValueJson::String("Main checking account".into())),
+                        "open metadata `description` missing — got {meta:?}",
+                    );
+                    assert_eq!(
+                        meta.get("source"),
+                        Some(&MetaValueJson::String("Bank XYZ".into())),
+                    );
+                }
+                Directive::Commodity(_) => {
+                    // Numbers stringify (matches FFI-WASI; JSON
+                    // numbers can't represent Decimal losslessly).
+                    assert_eq!(
+                        meta.get("precision"),
+                        Some(&MetaValueJson::String("2".into())),
+                    );
+                }
+                Directive::Transaction(_) => {
+                    assert_eq!(
+                        meta.get("trip"),
+                        Some(&MetaValueJson::String("vacation-2024".into())),
+                    );
+                    assert_eq!(
+                        meta.get("category"),
+                        Some(&MetaValueJson::String("food".into())),
+                    );
+
+                    // Posting-level metadata too.
+                    let DirectiveJson::Transaction { postings, .. } = &json else {
+                        unreachable!()
+                    };
+                    let coffee = postings
+                        .iter()
+                        .find(|p| p.account.contains("Coffee"))
+                        .expect("Coffee posting present");
+                    assert_eq!(
+                        coffee.meta.get("posting_note"),
+                        Some(&MetaValueJson::String("espresso".into())),
+                    );
+                }
+                Directive::Balance(_) => {
+                    assert_eq!(
+                        meta.get("reconciled"),
+                        Some(&MetaValueJson::Bool(true)),
+                        "boolean metadata must serialize as Bool, not String",
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
+    fn directive_to_json_omits_meta_when_empty_1168() {
+        // The wire shape skips `meta` when empty so existing
+        // consumers don't see a new field on directives that didn't
+        // have metadata. Pin via the serialized JSON to guard
+        // against accidental `serialize_if_none` drift.
+        let source = "2024-01-01 open Assets:Bank USD\n";
+        let result = parse_beancount(source);
+        assert!(result.errors.is_empty());
+
+        let json = directive_to_json(&result.directives[0].value);
+        let serialized = serde_json::to_string(&json).expect("serializes");
+        assert!(
+            !serialized.contains("\"meta\""),
+            "empty meta must be omitted from JSON output; got: {serialized}",
+        );
+    }
+
+    #[test]
+    fn custom_directive_carries_values_1168() {
+        // Pre-fix the Custom variant dropped both `values` AND `meta`.
+        // Pin the `values` round-trip (and verify the value shape
+        // matches `MetaValueJson`).
+        let source = r#"2024-01-01 custom "budget" "monthly" 100.00 USD TRUE
+"#;
+        let result = parse_beancount(source);
+        assert!(
+            result.errors.is_empty(),
+            "fixture must parse cleanly: {:?}",
+            result.errors
+        );
+
+        let json = directive_to_json(&result.directives[0].value);
+        let DirectiveJson::Custom { values, .. } = json else {
+            panic!("expected Custom directive");
+        };
+
+        // The fixture has 4 positional values: "monthly", 100.00,
+        // USD, TRUE — types preserved via MetaValueJson.
+        assert!(!values.is_empty(), "Custom values must not be empty");
+        assert!(
+            values
+                .iter()
+                .any(|v| matches!(v, MetaValueJson::String(s) if s == "monthly")),
+            "values should include `monthly` string: {values:?}",
+        );
+        assert!(
+            values
+                .iter()
+                .any(|v| matches!(v, MetaValueJson::Bool(true))),
+            "values should include `TRUE` bool: {values:?}",
+        );
+    }
+
+    #[test]
+    fn meta_value_to_json_covers_all_variants() {
+        use rustledger_core::{Amount, Decimal};
+
+        // Pin the wire mapping for every MetaValue variant. Without
+        // this, a future variant added upstream (e.g. a new typed
+        // metadata kind) silently maps via the `_` default and
+        // confuses JS consumers. The match in `meta_value_to_json`
+        // is exhaustive, so this is a behavioral spot-check —
+        // adding a variant breaks compilation in both places.
+        assert!(matches!(
+            meta_value_to_json(&MetaValue::String("hi".into())),
+            MetaValueJson::String(s) if s == "hi",
+        ));
+        assert!(matches!(
+            meta_value_to_json(&MetaValue::Account("Assets:Bank".into())),
+            MetaValueJson::String(s) if s == "Assets:Bank",
+        ));
+        assert!(matches!(
+            meta_value_to_json(&MetaValue::Currency("USD".into())),
+            MetaValueJson::String(s) if s == "USD",
+        ));
+        assert!(matches!(
+            meta_value_to_json(&MetaValue::Tag("food".into())),
+            MetaValueJson::String(s) if s == "food",
+        ));
+        assert!(matches!(
+            meta_value_to_json(&MetaValue::Link("receipt-1".into())),
+            MetaValueJson::String(s) if s == "receipt-1",
+        ));
+        // 4250 * 10^-2 = 42.50
+        let forty_two_fifty = Decimal::new(4250, 2);
+        assert!(matches!(
+            meta_value_to_json(&MetaValue::Number(forty_two_fifty)),
+            MetaValueJson::String(s) if s == "42.50",
+        ));
+        assert!(matches!(
+            meta_value_to_json(&MetaValue::Bool(true)),
+            MetaValueJson::Bool(true),
+        ));
+        let amount_value =
+            meta_value_to_json(&MetaValue::Amount(Amount::new(Decimal::from(100), "USD")));
+        match amount_value {
+            MetaValueJson::Amount { number, currency } => {
+                assert_eq!(number, "100");
+                assert_eq!(currency, "USD");
+            }
+            other => panic!("Amount must map to Amount variant, got {other:?}"),
+        }
+        assert!(matches!(
+            meta_value_to_json(&MetaValue::None),
+            MetaValueJson::Null,
+        ));
     }
 }

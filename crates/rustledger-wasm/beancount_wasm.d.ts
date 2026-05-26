@@ -86,9 +86,31 @@ export interface Directive {
     type: DirectiveType;
     /** Date in YYYY-MM-DD format */
     date: string;
+    /**
+     * User-defined metadata key/value pairs (issue #1168).
+     *
+     * Absent when the directive has no explicit metadata. Values
+     * follow the [`MetaValueJson`] shape: strings, booleans, Amount
+     * `{number, currency}` objects, or `null`.
+     */
+    meta?: Record<string, MetaValueJson>;
     /** Directive-specific data (varies by type) */
     [key: string]: unknown;
 }
+
+/**
+ * Metadata-value wire format (issue #1168). Untagged union.
+ *
+ * Branch on `typeof v` (`'string'` / `'boolean'`) or object shape
+ * (`'number' in v` → Amount). Mirrors the FFI-WASI bindings'
+ * metadata shape so portable consumers see the same value type
+ * regardless of which binding they target.
+ */
+export type MetaValueJson =
+    | string
+    | boolean
+    | { number: string; currency: string }
+    | null;
 
 /**
  * Valid directive types.
@@ -138,6 +160,8 @@ export interface Posting {
     cost?: CostSpec | null;
     /** Posting flag */
     flag?: string;
+    /** Posting-level metadata (issue #1168) */
+    meta?: Record<string, MetaValueJson>;
 }
 
 /**

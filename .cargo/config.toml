@@ -1,0 +1,13 @@
+# `getrandom` 0.3+ requires both a Cargo feature (`wasm_js`) AND a
+# RUSTFLAGS cfg (`--cfg getrandom_backend="wasm_js"`) before it will
+# compile on `wasm32-unknown-unknown`. The transitive chain via
+# `imbl` (#1195) → `rand_xoshiro` → `rand_core 0.9` → `getrandom 0.3`
+# pulls it into every wasm build, so the cfg has to be set at the
+# workspace level rather than per-crate. Without this, any change
+# touching `crates/rustledger-{wasm,parser,core}/**` trips the WASM CI
+# workflow's `wasm-pack test --node` step.
+#
+# See https://docs.rs/getrandom/0.3/#webassembly-support for the
+# backend cfg story.
+[target.wasm32-unknown-unknown]
+rustflags = ['--cfg', 'getrandom_backend="wasm_js"']

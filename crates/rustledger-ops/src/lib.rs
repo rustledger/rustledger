@@ -14,7 +14,10 @@
 //! - [`merchants`] — built-in merchant dictionary of common patterns
 //! - [`enrichment`] — shared types for operation results (confidence, method, alternatives)
 //! - [`reconcile`] — balance reconciliation against statement ending balances
-//! - [`ml`] — ML-based categorization (TF-IDF + Naive Bayes via ferrolearn-bayes)
+//! - `ml` — ML-based categorization (TF-IDF + Naive Bayes via
+//!   ferrolearn-bayes). Host-only: `ferrolearn-bayes` pulls
+//!   `atomic-wait`, which does not compile on
+//!   `wasm32-unknown-unknown`. The module is absent on wasm targets.
 //! - [`transfer`] — inter-account transfer detection and linking
 
 #![forbid(unsafe_code)]
@@ -25,6 +28,7 @@ pub mod dedup;
 pub mod enrichment;
 pub mod fingerprint;
 pub mod merchants;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod ml;
 pub mod reconcile;
 pub mod transfer;

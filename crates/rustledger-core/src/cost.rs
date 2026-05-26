@@ -290,19 +290,26 @@ pub struct BookedCost {
 
 /// Diagnostic for a failed [`BookedCost`] consistency check.
 ///
-/// Returned by [`BookedCost::try_new`] when the supplied
-/// `per_unit * |units|` does not agree with `total` to within the
-/// `rust_decimal` rounding floor (or when `units == 0`, which makes
-/// the pair structurally untrustworthy — every `per_unit` "works" by
-/// zero-multiplication, so the invariant carries no information).
+/// Returned by [`BookedCost::try_new`] in three cases:
+/// - **Mismatch**: `per_unit * |units|` doesn't agree with `total` to
+///   within the `rust_decimal` rounding floor.
+/// - **Zero units**: every `per_unit` "works" by zero-multiplication
+///   so the invariant carries no information; the post-booking shape
+///   is structurally meaningless without units.
+/// - **Overflow**: `per_unit * |units|` would exceed `Decimal::MAX`
+///   (~7.92e28). Both operands fit in `Decimal` individually but their
+///   product doesn't. A wire client can reach this with extreme
+///   inputs; surfacing it as a typed error keeps the host from
+///   panicking on multiplication.
 ///
-/// Carries the inputs and the computed residual so trust-boundary
-/// callers can surface a meaningful error to the originating plugin
-/// or wire client ("you sent `per_unit=50, total=999` with `units=10`;
-/// derived total would be 500, off by 499 — far outside tolerance
-/// 1e-20"). Mapping this to a `ConversionError` variant gives plugin
-/// authors a typed category for the failure instead of conflating
-/// with `InvalidNumber` (parse failure).
+/// Carries the inputs and (for the mismatch case) the computed
+/// residual so trust-boundary callers can surface a meaningful error
+/// to the originating plugin or wire client ("you sent
+/// `per_unit=50, total=999` with `units=10`; derived total would be
+/// 500, off by 499 — far outside tolerance 1e-20"). Mapping this to a
+/// `ConversionError` variant gives plugin authors a typed category
+/// for the failure instead of conflating with `InvalidNumber` (parse
+/// failure).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BookedCostInvariantError {
     /// The per-unit value the caller supplied.
@@ -313,18 +320,32 @@ pub struct BookedCostInvariantError {
     /// so error messages can show what came in).
     pub units: Decimal,
     /// `per_unit * |units|`, the value we'd expect `total` to equal.
+    /// `Decimal::ZERO` when the multiplication couldn't be performed
+    /// (zero units, or overflow — see [`Self::overflow`]).
     pub derived_total: Decimal,
     /// `|derived_total - total|`, the magnitude of the violation.
+    /// `Decimal::ZERO` for the zero-units and overflow cases.
     pub abs_diff: Decimal,
     /// The tolerance threshold we tested against. `None` when units
-    /// was zero (the invariant doesn't apply; we reject anyway because
-    /// the pair is structurally meaningless for the post-booking
-    /// shape).
+    /// was zero or the multiplication overflowed — see
+    /// [`Self::overflow`] to distinguish the two.
     pub tolerance: Option<Decimal>,
+    /// `true` when `per_unit * |units|` overflowed `Decimal::MAX`
+    /// (~7.92e28). Distinguishes the overflow case from the zero-units
+    /// case, since both leave `tolerance: None`.
+    pub overflow: bool,
 }
 
 impl fmt::Display for BookedCostInvariantError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.overflow {
+            return write!(
+                f,
+                "BookedCost invariant check overflowed Decimal precision: per_unit ({}) * |units| ({}) exceeds Decimal::MAX (~7.92e28)",
+                self.per_unit,
+                self.units.abs(),
+            );
+        }
         match self.tolerance {
             Some(tol) => write!(
                 f,
@@ -379,10 +400,32 @@ impl BookedCost {
                 derived_total: Decimal::ZERO,
                 abs_diff: Decimal::ZERO,
                 tolerance: None,
+                overflow: false,
             });
         }
-        let derived_total = per_unit * units_abs;
+        // `per_unit` and `units_abs` each fit in `Decimal` individually
+        // (they came through `from_str_exact` or were constructed by
+        // the booker from values that did), but their product can
+        // exceed `Decimal::MAX` (~7.92e28). `Decimal::mul` panics on
+        // overflow — at a trust boundary that would crash the host
+        // from wire input, defeating `try_new`'s typed-error contract.
+        // Surface overflow as a typed error instead.
+        let Some(derived_total) = per_unit.checked_mul(units_abs) else {
+            return Err(BookedCostInvariantError {
+                per_unit,
+                total,
+                units,
+                derived_total: Decimal::ZERO,
+                abs_diff: Decimal::ZERO,
+                tolerance: None,
+                overflow: true,
+            });
+        };
         let abs_diff = (derived_total - total).abs();
+        // `total.abs() * 1e-24` cannot overflow: `Decimal::MAX` is
+        // ~7.92e28, so the product is bounded by ~7.92e4. The relative
+        // tolerance scales with the magnitude of `total`; the absolute
+        // floor (`1e-20`) keeps the window sane for near-zero totals.
         let relative = total.abs() * Decimal::new(1, 24);
         let tolerance = if relative > Decimal::new(1, 20) {
             relative
@@ -399,6 +442,7 @@ impl BookedCost {
                 derived_total,
                 abs_diff,
                 tolerance: Some(tolerance),
+                overflow: false,
             })
         }
     }
@@ -406,11 +450,13 @@ impl BookedCost {
     /// Construct from booking with a precision invariant check.
     ///
     /// In debug builds, asserts that `per_unit * |units| ≈ total` to
-    /// the limits of `rust_decimal` precision (see
-    /// [`Self::check_invariant`] for the tolerance). Callers are the
-    /// booker (which derives `per_unit = total / |units|`) and the
-    /// plugin / FFI ingress bridges (which must validate consistency
-    /// before constructing).
+    /// the limits of `rust_decimal` precision (tolerance:
+    /// `max(1e-20, |total| * 1e-24)`, derived from the booker's
+    /// `total / |units|` divisor truncating at 28 significant digits;
+    /// see the private `check_invariant` helper for the exact
+    /// computation). Callers are the booker (which derives
+    /// `per_unit = total / |units|`) and the plugin / FFI ingress
+    /// bridges (which must validate consistency before constructing).
     ///
     /// # Panics
     ///
@@ -961,6 +1007,7 @@ mod tests {
         assert_eq!(err.derived_total, dec!(500));
         assert_eq!(err.abs_diff, dec!(499));
         assert!(err.tolerance.is_some(), "tolerance must be reported");
+        assert!(!err.overflow, "this case is mismatch, not overflow");
 
         // Display includes both supplied and derived values for
         // plugin-author diagnostics.
@@ -980,6 +1027,7 @@ mod tests {
         let err = BookedCost::try_new(dec!(999999), dec!(0.01), dec!(0))
             .expect_err("zero units must be rejected, not silently accepted");
         assert!(err.tolerance.is_none(), "zero-units error has no tolerance");
+        assert!(!err.overflow, "this is zero-units, not overflow");
         assert!(format!("{err}").contains("non-zero units"));
     }
 
@@ -987,6 +1035,35 @@ mod tests {
     fn booked_cost_try_new_accepts_consistent_pair() {
         let result = BookedCost::try_new(dec!(50), dec!(500), dec!(10));
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn booked_cost_try_new_surfaces_overflow_instead_of_panicking() {
+        // Trust-boundary regression guard: a wire client can submit
+        // per_unit and units that each fit in Decimal but whose product
+        // exceeds Decimal::MAX (~7.92e28). Pre-fix `check_invariant`
+        // used bare `*` and panicked the host on multiplication;
+        // `try_new` now surfaces it as a typed error so FFI / plugin
+        // bridges can map it to ConversionError and propagate to the
+        // caller. Inputs: 5e15 × 5e15 = 2.5e31, well over Decimal::MAX.
+        let per_unit = Decimal::from_str_exact("5000000000000000").unwrap();
+        let units = Decimal::from_str_exact("5000000000000000").unwrap();
+        let total = Decimal::from_str_exact("0.01").unwrap();
+        let err = BookedCost::try_new(per_unit, total, units)
+            .expect_err("overflow must surface as Err, not panic");
+        assert!(err.overflow, "overflow flag must be set");
+        assert!(
+            err.tolerance.is_none(),
+            "no tolerance comparison performed for overflow",
+        );
+        assert_eq!(err.derived_total, Decimal::ZERO);
+        assert_eq!(err.abs_diff, Decimal::ZERO);
+
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("overflow") || msg.contains("Decimal::MAX"),
+            "error message must name the overflow condition, got: {msg}"
+        );
     }
 
     #[test]
@@ -1164,6 +1241,70 @@ mod tests {
             booked_bytes.as_ref(),
             pu_only_bytes.as_ref(),
             "PerUnitFromTotal and PerUnit must serialize distinctly (preserved total is load-bearing)"
+        );
+    }
+
+    /// Frozen byte fixtures for the v8 archived layout.
+    ///
+    /// The intra-build distinctness test above only catches drift
+    /// where variants collide with each other. It would NOT catch a
+    /// uniform encoding shift (e.g. a future rkyv minor bump that
+    /// changes how `Archived<Decimal>` packs, or an accidental
+    /// attribute change). When that happens, every variant moves
+    /// together so distinctness still holds, but user caches on disk
+    /// silently fail to deserialize as garbage in the new layout.
+    ///
+    /// Capturing the exact bytes here pins the on-disk contract:
+    /// any drift trips this test, forcing the developer to either
+    /// (a) revert the encoding change, or (b) bump `CACHE_VERSION` in
+    /// `rustledger-loader/src/cache.rs` so old cache files are
+    /// short-circuited at the header check.
+    ///
+    /// **If this test fails** and you intend the new encoding to be
+    /// the contract going forward: regenerate the fixtures by
+    /// printing `rkyv::to_bytes(&cn)` for each variant and bump
+    /// `CACHE_VERSION` in the same commit.
+    #[cfg(feature = "rkyv")]
+    #[test]
+    fn cost_number_archived_bytes_match_v8_fixtures() {
+        let cases: &[(&str, CostNumber, &[u8])] = &[
+            (
+                "PerUnit { value: 150 }",
+                CostNumber::PerUnit { value: dec!(150) },
+                &[
+                    0, 0, 0, 0, 0, 150, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                    0, 0, 0, 0, 0, 0, 0,
+                ],
+            ),
+            (
+                "Total { value: 1500 }",
+                CostNumber::Total { value: dec!(1500) },
+                &[
+                    1, 0, 0, 0, 0, 220, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                    0, 0, 0, 0, 0, 0, 0,
+                ],
+            ),
+            (
+                "PerUnitFromTotal { per_unit: 150, total: 300 }",
+                CostNumber::PerUnitFromTotal(BookedCost::new(dec!(150), dec!(300), dec!(2))),
+                &[
+                    2, 0, 0, 0, 0, 150, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 44, 1, 0, 0,
+                    0, 0, 0, 0, 0, 0, 0, 0,
+                ],
+            ),
+        ];
+        let mut mismatches = Vec::new();
+        for (name, cn, expected) in cases {
+            let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(cn).unwrap();
+            if bytes.as_ref() != *expected {
+                mismatches.push(format!("  `{name}` → {:?}", bytes.as_ref()));
+            }
+        }
+        assert!(
+            mismatches.is_empty(),
+            "rkyv layout drifted from v8 fixtures — bump CACHE_VERSION and \
+             update the fixtures in this test if intentional. Actual bytes:\n{}",
+            mismatches.join("\n"),
         );
     }
 

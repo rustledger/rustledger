@@ -21,13 +21,16 @@ rust_decimal.workspace = true
 jiff.workspace = true
 blake3.workspace = true
 regex.workspace = true
-# Replaced linfa-bayes 0.8 (pinned to ndarray 0.16) with ferrolearn-bayes
-# 0.4 (already on ndarray 0.17, MIT/Apache, MSRV 1.85). Same MultinomialNB
-# classifier, plus a real `predict_proba` so the ML categorizer's
-# confidence scores can be honest instead of the previous 0.8/0.0 fakery.
-# Unblocks the ndarray 0.16 -> 0.17 bump in this PR and the downstream
-# getrandom 0.2 -> 0.4 follow-up. `ferrolearn-core` is required for the
-# `Fit` trait that brings `MultinomialNB::fit` into scope.
+
+# ML stack — host-only. `ferrolearn-bayes` pulls `faer` → `spindle` →
+# `atomic-wait`, which doesn't compile on `wasm32-unknown-unknown`
+# (no `platform::wake_*` impl for the wasm target). The ML
+# categorizer doesn't run in browsers/WASI today — gate the deps off
+# wasm targets and gate the `ml` module body the same way. Same
+# MultinomialNB classifier as the linfa-bayes predecessor it replaced
+# (#1194), with a real `predict_proba`. `ferrolearn-core` brings the
+# `Fit` trait into scope for `MultinomialNB::fit`.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 ferrolearn-bayes = "0.4"
 ferrolearn-core = "0.4"
 ndarray = "0.17"

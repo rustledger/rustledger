@@ -742,7 +742,20 @@ fn parse_cost_spec(stream: &mut TokenStream<'_>) -> ParseRes<CostSpec> {
                 && matches!(t.token, Token::Hash)
             {
                 stream.advance();
-                // The number after # is the total
+                // `{ N # T USD }` source carries both a per-unit (`N`)
+                // and a total (`T`). The booker derives per-unit as
+                // `T / |units|`, so the user-written `N` is
+                // informationally redundant — Python beancount treats
+                // this form as semantically equivalent to
+                // `{{ T USD }}` and we follow suit by keeping only the
+                // total. If the user-written N ever disagrees with
+                // T / |units|, the validator's NegativeCost / balance
+                // checks operate on the booker-derived value, which is
+                // the canonical one. The pre-#1164 shape stored both
+                // numbers and required downstream code to know which
+                // one was authoritative; the new shape makes the
+                // total-wins precedence explicit at the parser site.
+                let _ = number; // Drop the user-written per-unit per the rationale above.
                 if let Ok(total) = parse_expr(stream) {
                     spec.number = Some(rustledger_core::CostNumber::Total { value: total });
                     if let Ok(c) = parse_currency(stream) {

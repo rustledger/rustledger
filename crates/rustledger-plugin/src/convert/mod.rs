@@ -38,9 +38,9 @@ pub enum ConversionError {
     /// the plugin egress and FFI input bridges when a plugin author
     /// or JSON client supplies the post-booking shape with
     /// inconsistent values — e.g. mutates `per_unit` without updating
-    /// `total`. The inner [`BookedCostInvariantError`] carries the
-    /// supplied values, the derived total, and the tolerance for
-    /// plugin-author diagnostics.
+    /// `total`. The inner [`rustledger_core::BookedCostInvariantError`]
+    /// carries the supplied values, the derived total, and the
+    /// tolerance for plugin-author diagnostics.
     #[error("cost spec invariant violated: {0}")]
     BookedCostInvariantViolated(#[from] rustledger_core::BookedCostInvariantError),
     /// A plugin emitted a `PerUnitFromTotal` cost spec without

@@ -578,7 +578,13 @@ pub struct EditorReferencesResult {
     pub references: Vec<EditorReference>,
 }
 
-#[cfg(test)]
+// Wire-format pins live in a host-only test module: they test
+// `serde_json` round-trips which are target-independent, and pulling
+// `serde_json` into the wasm32 test target activates a `getrandom`
+// transitive that fails to compile on `wasm32-unknown-unknown`
+// without the `wasm_js` backend flag. The shape we're pinning is the
+// same on every target, so running these on the host is sufficient.
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod cost_number_wire_tests {
     //! Wire-format pins for #1164. Catches silent shape drift that
     //! would break TypeScript clients.

@@ -143,37 +143,36 @@ pub fn validate_transaction_structure(
         }
     }
 
-    // Check for negative cost amounts
+    // Check for negative cost amounts. One error per posting, even
+    // when the spec is `PerUnitFromTotal` and carries both halves: by
+    // `BookedCost`'s invariant `per_unit * |units| = total`, the two
+    // values share sign, so reporting both would be two errors for
+    // one underlying problem. Prefer the user-written value
+    // (`total` for `PerUnitFromTotal`, since that's the literal
+    // `{{ total }}` the user typed and what they can fix). Fall back
+    // to per-unit for raw `PerUnit` specs.
     for posting in &txn.postings {
-        if let Some(cost) = &posting.cost {
-            let units_str = posting.amount().map_or_else(
-                || "?".to_string(),
-                |a| format!("{} {}", a.number, a.currency),
-            );
-            let cost_currency = cost.currency.as_ref().map_or("?", |c| c.as_str());
-            // Check per-unit and total components independently —
-            // PerUnitFromTotal carries both, so a single spec can
-            // trigger both negative-cost errors if both values went
-            // negative.
-            if let Some(per) = cost.number.and_then(|cn| cn.per_unit())
-                && per < Decimal::ZERO
-            {
+        if let Some(cost) = &posting.cost
+            && let Some(cn) = cost.number
+        {
+            let (label, value) = match cn {
+                rustledger_core::CostNumber::PerUnit { value } => ("per-unit", value),
+                rustledger_core::CostNumber::Total { value }
+                | rustledger_core::CostNumber::PerUnitFromTotal(rustledger_core::BookedCost {
+                    total: value,
+                    ..
+                }) => ("total", value),
+            };
+            if value < Decimal::ZERO {
+                let units_str = posting.amount().map_or_else(
+                    || "?".to_string(),
+                    |a| format!("{} {}", a.number, a.currency),
+                );
+                let cost_currency = cost.currency.as_ref().map_or("?", |c| c.as_str());
                 errors.push(ValidationError::new(
                     ErrorCode::NegativeCost,
                     format!(
-                        "Cost is negative: per-unit cost ({per} {cost_currency}) for {units_str} in posting to {}",
-                        posting.account
-                    ),
-                    txn.date,
-                ));
-            }
-            if let Some(total) = cost.number.and_then(|cn| cn.total())
-                && total < Decimal::ZERO
-            {
-                errors.push(ValidationError::new(
-                    ErrorCode::NegativeCost,
-                    format!(
-                        "Cost is negative: total cost ({total} {cost_currency}) for {units_str} in posting to {}",
+                        "Cost is negative: {label} cost ({value} {cost_currency}) for {units_str} in posting to {}",
                         posting.account
                     ),
                     txn.date,

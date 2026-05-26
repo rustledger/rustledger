@@ -44,7 +44,22 @@ console_error_panic_hook = "0.1"
 [dev-dependencies]
 wasm-bindgen-test = "0.3"
 js-sys = "0.3"
+
+# Host-only dev-dep: the wire-format tests that need it are
+# `#[cfg(not(target_arch = "wasm32"))]` since they only validate
+# target-independent JSON shape — keep `serde_json` off the wasm32
+# test compile to avoid pulling extra dep chains.
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 serde_json.workspace = true
+
+# `getrandom` 0.3 (pulled in transitively via `imbl` → `rand_xoshiro`
+# since #1195) requires both the `wasm_js` Cargo feature AND a
+# RUSTFLAGS cfg (`--cfg getrandom_backend="wasm_js"`, set in
+# `.cargo/config.toml` at the workspace root) before it will compile
+# on `wasm32-unknown-unknown`. A direct dep here forces Cargo to union
+# the feature into the transitive getrandom 0.3 instance.
+[target.wasm32-unknown-unknown.dependencies]
+getrandom_03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
 
 [package.metadata.wasm-pack.profile.release]
 # Optimize for speed (aligned with profile.wasm-release opt-level = 3)

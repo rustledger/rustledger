@@ -9,6 +9,16 @@ pub fn format_amount(amount: &Amount) -> String {
 }
 
 /// Format a cost specification.
+///
+/// **Precondition: pre-booking input.** The parser only ever emits
+/// `CostNumber::PerUnit` or `CostNumber::Total`, so source-level
+/// formatters (`rledger format`) round-trip exactly. The
+/// `PerUnitFromTotal` arm is reached only if a caller hands in a
+/// post-booking spec — in that case we emit the derived per-unit in
+/// single braces (matching Python beancount's post-booking
+/// `Position.__str__` output). That collapses the user-written
+/// `{{ total }}` source form, so do NOT call this on booked
+/// directives if you need the original `{{...}}` to survive.
 pub fn format_cost_spec(spec: &CostSpec) -> String {
     // Max 4 elements: amount, date, label, merge.
     let mut parts = Vec::with_capacity(4);

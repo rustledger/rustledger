@@ -187,8 +187,38 @@ impl Executor<'_> {
                 }
             }
             Value::Number(n) => {
-                // Just wrap the number as an amount with the target currency
+                // Just wrap the number as an amount with the target
+                // currency. Note the asymmetry with the `Value::String`
+                // arm below: `CONVERT(100, 'EUR')` returns `100 EUR`
+                // (no conversion — the bare number has no source
+                // currency), but `CONVERT('100 USD', 'EUR')` does an
+                // actual conversion.
                 Ok(Value::Amount(Amount::new(n, &target_currency)))
+            }
+            Value::String(s) => {
+                // String input is a rustledger extension (issue #1179),
+                // not present in Python beancount. Lets users write
+                // ad-hoc currency conversions like
+                // `SELECT CONVERT('100 USD', 'EUR')` without anchoring
+                // them to a posting. Strict parser (see
+                // `Amount::from_str`): malformed input surfaces as a
+                // typed `QueryError` rather than a silent zero or a
+                // panic.
+                let amt: Amount = s.parse().map_err(|e| {
+                    QueryError::Type(format!("CONVERT: first argument {e} (e.g. \"100 USD\")"))
+                })?;
+                if amt.currency == target_currency {
+                    Ok(Value::Amount(amt))
+                } else if let Some(converted) = convert_amount(&amt) {
+                    Ok(Value::Amount(converted))
+                } else {
+                    // Match the `Value::Amount` arm: no price available
+                    // → return original unchanged. Switching to an
+                    // error here would diverge from
+                    // `CONVERT(<amount>, ...)` for the same
+                    // "no rate found" case.
+                    Ok(Value::Amount(amt))
+                }
             }
             Value::Null => {
                 // For null values (e.g., empty sum), return zero in target currency
@@ -196,7 +226,8 @@ impl Executor<'_> {
                 Ok(Value::Amount(Amount::new(Decimal::ZERO, &target_currency)))
             }
             _ => Err(QueryError::Type(
-                "CONVERT expects a position, amount, inventory, or number".to_string(),
+                "CONVERT expects a position, amount, inventory, number, or amount-string"
+                    .to_string(),
             )),
         }
     }

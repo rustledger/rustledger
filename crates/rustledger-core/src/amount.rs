@@ -188,6 +188,144 @@ impl fmt::Display for Amount {
     }
 }
 
+/// Error produced by the [`FromStr`](std::str::FromStr) impl on
+/// [`Amount`] when the input doesn't match the `<number> <currency>`
+/// shape that [`fmt::Display`] emits.
+///
+/// Carries the offending input so callers can surface an actionable
+/// message ("you wrote X, expected Y") rather than a generic parse
+/// failure. The wire format is strict on purpose: see the `FromStr`
+/// docstring for the supported shape.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AmountParseError {
+    /// The original input string the caller passed.
+    pub input: String,
+    /// Why the parse failed (caller-displayable, no internal jargon).
+    pub reason: AmountParseErrorReason,
+}
+
+/// Distinguishes the failure modes of [`Amount`]'s
+/// [`FromStr`](std::str::FromStr) impl.
+///
+/// Separate from [`AmountParseError`] so callers can match on the
+/// category (e.g. for distinct error codes) without parsing the
+/// message string.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AmountParseErrorReason {
+    /// Input had fewer or more than 2 whitespace-separated tokens.
+    NotTwoTokens,
+    /// The number token didn't parse as a [`Decimal`] (carries the
+    /// offending token, not the full input).
+    InvalidNumber(String),
+    /// The currency token isn't a valid beancount commodity (must be
+    /// uppercase ASCII letters, digits, `'`, `.`, `_`, `-`, starting
+    /// with an uppercase letter; max 24 chars).
+    InvalidCurrency(String),
+}
+
+impl fmt::Display for AmountParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.reason {
+            AmountParseErrorReason::NotTwoTokens => write!(
+                f,
+                "invalid amount literal {:?}: expected `<number> <currency>` (e.g. \"100 USD\")",
+                self.input,
+            ),
+            AmountParseErrorReason::InvalidNumber(tok) => write!(
+                f,
+                "invalid amount literal {:?}: {:?} doesn't parse as a decimal number",
+                self.input, tok,
+            ),
+            AmountParseErrorReason::InvalidCurrency(tok) => write!(
+                f,
+                "invalid amount literal {:?}: {:?} isn't a valid commodity \
+                 (uppercase ASCII, may contain digits/'./_/-, max 24 chars)",
+                self.input, tok,
+            ),
+        }
+    }
+}
+
+impl std::error::Error for AmountParseError {}
+
+impl std::str::FromStr for Amount {
+    type Err = AmountParseError;
+
+    /// Parse `<number> <currency>` — the exact shape produced by
+    /// [`fmt::Display`]. Round-trip is lossless:
+    /// `Amount::from_str(&amt.to_string()) == Ok(amt)`.
+    ///
+    /// Strict by design — there is intentionally no Python beancount
+    /// equivalent of this parser, so we set the wire contract. Accepts:
+    /// - Any whitespace (one or more spaces/tabs) between the number
+    ///   and currency.
+    /// - Leading or trailing whitespace around the whole string.
+    /// - Negative numbers (`-100 USD`).
+    /// - Fractional decimals (`100.50 USD`).
+    ///
+    /// Rejects (typed error rather than silent fallback):
+    /// - Currency-first form (`"USD 100"`).
+    /// - Number-only (`"100"`) or currency-only (`"USD"`).
+    /// - Scientific notation (`"1e2 USD"`).
+    /// - Thousands separators (`"1,000 USD"`).
+    /// - Lowercase commodity (`"100 usd"`).
+    /// - Empty / whitespace-only strings.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AmountParseError`] describing which axis of the
+    /// expected shape was violated; see [`AmountParseErrorReason`].
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let mut iter = s.split_whitespace();
+        let (Some(num_tok), Some(cur_tok), None) = (iter.next(), iter.next(), iter.next()) else {
+            return Err(AmountParseError {
+                input: s.to_string(),
+                reason: AmountParseErrorReason::NotTwoTokens,
+            });
+        };
+
+        // `from_str_exact` rejects scientific notation, thousands
+        // separators, embedded whitespace — exactly what we want for
+        // strict parsing.
+        let number = Decimal::from_str_exact(num_tok).map_err(|_| AmountParseError {
+            input: s.to_string(),
+            reason: AmountParseErrorReason::InvalidNumber(num_tok.to_string()),
+        })?;
+
+        if !is_valid_commodity(cur_tok) {
+            return Err(AmountParseError {
+                input: s.to_string(),
+                reason: AmountParseErrorReason::InvalidCurrency(cur_tok.to_string()),
+            });
+        }
+
+        Ok(Self::new(number, cur_tok))
+    }
+}
+
+/// Beancount commodity validation: uppercase letter first, then
+/// uppercase letters, digits, `'`, `.`, `_`, or `-`. 1–24 chars.
+///
+/// Matches the parser's commodity-token rule (see
+/// `rustledger-parser::lexer`). Kept inline here rather than reaching
+/// into the parser to avoid a `rustledger-core → rustledger-parser`
+/// dep cycle (parser already depends on core).
+fn is_valid_commodity(s: &str) -> bool {
+    if s.is_empty() || s.len() > 24 {
+        return false;
+    }
+    let mut chars = s.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !first.is_ascii_uppercase() {
+        return false;
+    }
+    chars.all(|c| {
+        c.is_ascii_uppercase() || c.is_ascii_digit() || matches!(c, '\'' | '.' | '_' | '-')
+    })
+}
+
 // Arithmetic operations on references
 
 impl Add for &Amount {
@@ -541,5 +679,138 @@ mod tests {
         // Different currencies
         let f = Amount::new(dec!(100.00), "EUR");
         assert!(!a.eq_auto_tolerance(&f));
+    }
+
+    // ===== FromStr tests (#1179) =====
+
+    use std::str::FromStr;
+
+    #[test]
+    fn amount_from_str_round_trips_display() {
+        // Load-bearing invariant: `from_str(&amt.to_string()) == Ok(amt)`.
+        // If `Display` or `FromStr` ever drifts apart, this catches it
+        // before silent breakage. Cover positive, negative, fractional,
+        // zero, and large magnitudes.
+        for amt in [
+            Amount::new(dec!(100), "USD"),
+            Amount::new(dec!(-50.25), "EUR"),
+            Amount::new(dec!(0), "GBP"),
+            Amount::new(dec!(1234567.89), "JPY"),
+            Amount::new(dec!(0.0001), "USD"),
+        ] {
+            let displayed = amt.to_string();
+            assert_eq!(
+                Amount::from_str(&displayed),
+                Ok(amt.clone()),
+                "round-trip lost data: Display produced {displayed:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn amount_from_str_accepts_canonical_forms() {
+        assert_eq!(
+            Amount::from_str("100 USD"),
+            Ok(Amount::new(dec!(100), "USD"))
+        );
+        assert_eq!(
+            Amount::from_str("-50.25 EUR"),
+            Ok(Amount::new(dec!(-50.25), "EUR"))
+        );
+        // Extra whitespace around tokens is fine — we use
+        // split_whitespace, which collapses runs of spaces/tabs.
+        assert_eq!(
+            Amount::from_str("  100   USD  "),
+            Ok(Amount::new(dec!(100), "USD"))
+        );
+        // Single character commodity is legal.
+        assert_eq!(Amount::from_str("1 X"), Ok(Amount::new(dec!(1), "X")));
+        // Commodity with allowed special chars (`'`, `.`, `_`, `-`,
+        // digits after the first character).
+        assert_eq!(
+            Amount::from_str("100 RY-2024"),
+            Ok(Amount::new(dec!(100), "RY-2024"))
+        );
+    }
+
+    #[test]
+    fn amount_from_str_rejects_currency_first() {
+        // `"USD 100"` looks like a unit-only form to humans but isn't
+        // what Display emits. Reject so users don't get silent wrong
+        // results — `USD` would parse as the number token and fail at
+        // `Decimal::from_str_exact`.
+        let err = Amount::from_str("USD 100").expect_err("currency-first must reject");
+        assert!(matches!(
+            err.reason,
+            AmountParseErrorReason::InvalidNumber(_)
+        ));
+    }
+
+    #[test]
+    fn amount_from_str_rejects_single_token() {
+        for s in ["", "  ", "100", "USD"] {
+            let err = Amount::from_str(s).expect_err("single token must reject");
+            assert!(
+                matches!(err.reason, AmountParseErrorReason::NotTwoTokens),
+                "expected NotTwoTokens for {s:?}, got {:?}",
+                err.reason
+            );
+        }
+    }
+
+    #[test]
+    fn amount_from_str_rejects_extra_tokens() {
+        let err = Amount::from_str("100 USD extra").expect_err("trailing token must reject");
+        assert!(matches!(err.reason, AmountParseErrorReason::NotTwoTokens));
+    }
+
+    #[test]
+    fn amount_from_str_rejects_scientific_notation() {
+        // `Decimal::from_str_exact` rejects `1e2` — we want that strict
+        // behavior here so `CONVERT('1e2 USD', 'EUR')` fails loudly
+        // rather than parsing incorrectly or coercing.
+        let err = Amount::from_str("1e2 USD").expect_err("scientific must reject");
+        assert!(matches!(
+            err.reason,
+            AmountParseErrorReason::InvalidNumber(_)
+        ));
+    }
+
+    #[test]
+    fn amount_from_str_rejects_thousands_separator() {
+        let err = Amount::from_str("1,000 USD").expect_err("thousands sep must reject");
+        assert!(matches!(
+            err.reason,
+            AmountParseErrorReason::InvalidNumber(_)
+        ));
+    }
+
+    #[test]
+    fn amount_from_str_rejects_lowercase_currency() {
+        let err = Amount::from_str("100 usd").expect_err("lowercase commodity must reject");
+        assert!(matches!(
+            err.reason,
+            AmountParseErrorReason::InvalidCurrency(_)
+        ));
+    }
+
+    #[test]
+    fn amount_from_str_rejects_currency_starting_with_digit() {
+        // Beancount commodities must start with an uppercase letter.
+        let err = Amount::from_str("100 1USD").expect_err("digit-first commodity must reject");
+        assert!(matches!(
+            err.reason,
+            AmountParseErrorReason::InvalidCurrency(_)
+        ));
+    }
+
+    #[test]
+    fn amount_from_str_error_message_names_input() {
+        // Plugin/BQL callers surface this Display to users; it must
+        // name what they wrote so they can fix it without guessing.
+        let err = Amount::from_str("oopsie daisy").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("oopsie daisy"), "error must echo input: {msg}");
+        assert!(msg.contains("doesn't parse"), "error must explain: {msg}");
     }
 }

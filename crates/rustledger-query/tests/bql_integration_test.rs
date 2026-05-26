@@ -100,6 +100,21 @@ fn execute_query(query_str: &str, directives: &[Directive]) -> QueryResult {
     executor.execute(&query).expect("query should execute")
 }
 
+/// Run a query expected to fail at execution time and return the error.
+///
+/// Distinct from `execute_query` so call sites stay readable when the
+/// test is asserting the *error* shape (typed `QueryError`) rather
+/// than the result rows. Parse failures still panic — those are a
+/// different category and a different test would catch them.
+#[allow(dead_code)] // Used by the #1179 string-input tests; future test files may grow more uses.
+fn execute_query_err(query_str: &str, directives: &[Directive]) -> rustledger_query::QueryError {
+    let query = parse(query_str).expect("query should parse");
+    let mut executor = Executor::new(directives);
+    executor
+        .execute(&query)
+        .expect_err("query should fail at execution")
+}
+
 // ============================================================================
 // Query Parsing Tests
 // ============================================================================
@@ -9413,4 +9428,199 @@ fn test_query_with_order_by_above_parallel_threshold() {
         first_date >= last_date,
         "ORDER BY date DESC: first={first_date}, last={last_date}"
     );
+}
+
+// ============================================================================
+// CONVERT('<amount-string>', '<currency>') — issue #1179
+// ============================================================================
+//
+// Rustledger extension (not in Python beancount): a string literal as
+// the first argument is parsed as `<number> <currency>` and converted
+// using the price database. Mirrors the existing `convert(<amount>,
+// '<currency>')` behavior — same `convert_amount` helper, same
+// "fall back to original on missing rate" semantics.
+
+/// Build a minimal one-posting ledger so the default SELECT iterates
+/// over a single row. The reporter's actual workflow today involves
+/// "a fake book with prices and a fictional account" for the same
+/// reason — BQL's default postings table needs at least one row to
+/// project the constant CONVERT result onto. Adding postings-table
+/// independence (`SELECT … FROM #constants` or scalar queries) is a
+/// separate feature.
+fn make_convert_string_test_directives() -> Vec<Directive> {
+    vec![
+        Directive::Open(Open::new(date(2024, 1, 1), "Assets:Bank")),
+        Directive::Open(Open::new(date(2024, 1, 1), "Income:Other")),
+        Directive::Price(Price::new(
+            date(2024, 1, 10),
+            "USD",
+            Amount::new(dec!(0.85), "EUR"),
+        )),
+        // One transaction → one posting iteration target.
+        Directive::Transaction(
+            Transaction::new(date(2024, 2, 1), "Trigger")
+                .with_synthesized_posting(Posting::new("Assets:Bank", Amount::new(dec!(1), "USD")))
+                .with_synthesized_posting(Posting::new(
+                    "Income:Other",
+                    Amount::new(dec!(-1), "USD"),
+                )),
+        ),
+    ]
+}
+
+#[test]
+fn test_convert_string_input_1179_reporter_example() {
+    // Reporter's example shape from the issue:
+    //   SELECT CONVERT('100 USD', 'EUR') as conversion
+    // Filtered to one row so the constant projection is unambiguous.
+    let directives = make_convert_string_test_directives();
+    let result = execute_query(
+        "SELECT CONVERT('100 USD', 'EUR') as conversion \
+         WHERE account = 'Assets:Bank'",
+        &directives,
+    );
+
+    assert_eq!(result.len(), 1);
+    match &result.rows[0][0] {
+        Value::Amount(amt) => {
+            assert_eq!(amt.currency.as_ref(), "EUR");
+            assert_eq!(amt.number, dec!(85.00)); // 100 × 0.85
+        }
+        other => panic!("Expected Amount, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_convert_string_input_same_currency_no_op() {
+    // When source and target currencies match, the parsed amount is
+    // returned unchanged — same shortcut as the `Value::Amount` arm.
+    // No price lookup happens.
+    let directives = make_convert_string_test_directives();
+    let result = execute_query(
+        "SELECT CONVERT('250.50 USD', 'USD') WHERE account = 'Assets:Bank'",
+        &directives,
+    );
+
+    assert_eq!(result.len(), 1);
+    match &result.rows[0][0] {
+        Value::Amount(amt) => {
+            assert_eq!(amt.currency.as_ref(), "USD");
+            assert_eq!(amt.number, dec!(250.50));
+        }
+        other => panic!("Expected Amount, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_convert_string_input_no_rate_returns_original() {
+    // Match the `Value::Amount` arm: when no price is available the
+    // original is returned unchanged rather than errored. Diverging
+    // here would surprise users mixing string and amount inputs.
+    // (No USD→GBP price in the fixture.)
+    let directives = make_convert_string_test_directives();
+    let result = execute_query(
+        "SELECT CONVERT('100 USD', 'GBP') WHERE account = 'Assets:Bank'",
+        &directives,
+    );
+
+    assert_eq!(result.len(), 1);
+    match &result.rows[0][0] {
+        Value::Amount(amt) => {
+            // No rate → original amount, original currency.
+            assert_eq!(amt.currency.as_ref(), "USD");
+            assert_eq!(amt.number, dec!(100));
+        }
+        other => panic!("Expected Amount with original currency, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_convert_string_input_negative_amount() {
+    // Negative amounts are accepted by `Amount::from_str` and
+    // round-trip through the price multiply correctly. Pin so a future
+    // strictening of the parser doesn't accidentally reject signs.
+    let directives = make_convert_string_test_directives();
+    let result = execute_query(
+        "SELECT CONVERT('-100 USD', 'EUR') WHERE account = 'Assets:Bank'",
+        &directives,
+    );
+
+    assert_eq!(result.len(), 1);
+    match &result.rows[0][0] {
+        Value::Amount(amt) => {
+            assert_eq!(amt.currency.as_ref(), "EUR");
+            assert_eq!(amt.number, dec!(-85.00));
+        }
+        other => panic!("Expected Amount, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_convert_string_input_with_explicit_date() {
+    // The 3-arg form `CONVERT(value, currency, date)` works the same
+    // way for string input — picks the rate at the given date.
+    let directives = vec![
+        Directive::Open(Open::new(date(2024, 1, 1), "Assets:Bank")),
+        Directive::Open(Open::new(date(2024, 1, 1), "Income:Other")),
+        Directive::Price(Price::new(
+            date(2024, 1, 1),
+            "USD",
+            Amount::new(dec!(0.80), "EUR"),
+        )),
+        Directive::Price(Price::new(
+            date(2024, 6, 1),
+            "USD",
+            Amount::new(dec!(0.95), "EUR"),
+        )),
+        Directive::Transaction(
+            Transaction::new(date(2024, 3, 15), "Trigger")
+                .with_synthesized_posting(Posting::new("Assets:Bank", Amount::new(dec!(1), "USD")))
+                .with_synthesized_posting(Posting::new(
+                    "Income:Other",
+                    Amount::new(dec!(-1), "USD"),
+                )),
+        ),
+    ];
+    let result = execute_query(
+        "SELECT CONVERT('100 USD', 'EUR', 2024-03-15) WHERE account = 'Assets:Bank'",
+        &directives,
+    );
+
+    assert_eq!(result.len(), 1);
+    match &result.rows[0][0] {
+        Value::Amount(amt) => {
+            assert_eq!(amt.currency.as_ref(), "EUR");
+            // Latest price ≤ 2024-03-15 is the Jan 1 price (0.80).
+            assert_eq!(amt.number, dec!(80.00));
+        }
+        other => panic!("Expected Amount, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_convert_string_input_rejects_garbage() {
+    // Strict parser: malformed input becomes a typed BQL error, not
+    // a silent zero. The error message should name the offending
+    // string so users can fix it without guessing.
+    let directives = make_convert_string_test_directives();
+
+    for bad in [
+        "garbage",   // single token
+        "USD 100",   // currency-first
+        "1,000 USD", // thousands separator
+        "1e2 USD",   // scientific notation
+        "100 usd",   // lowercase commodity
+    ] {
+        let query = format!("SELECT CONVERT('{bad}', 'EUR') WHERE account = 'Assets:Bank'");
+        let err = execute_query_err(&query, &directives);
+        let msg = err.to_string();
+        assert!(
+            msg.contains("CONVERT"),
+            "input {bad:?} must surface a CONVERT-prefixed error, got: {msg}"
+        );
+        assert!(
+            msg.contains(bad),
+            "input {bad:?} must be echoed in the error, got: {msg}"
+        );
+    }
 }

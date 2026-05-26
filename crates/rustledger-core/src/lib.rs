@@ -60,7 +60,7 @@ pub mod visit;
 #[cfg(kani)]
 mod kani_proofs;
 
-pub use amount::{Amount, IncompleteAmount};
+pub use amount::{Amount, AmountParseError, AmountParseErrorReason, IncompleteAmount};
 pub use cost::{BookedCost, BookedCostInvariantError, Cost, CostNumber, CostSpec};
 pub use directive::{
     Balance, Close, Commodity, Custom, Directive, DirectivePriority, Document, Event, MetaValue,

@@ -21,9 +21,16 @@ rust_decimal.workspace = true
 jiff.workspace = true
 blake3.workspace = true
 regex.workspace = true
-linfa = "0.8"
-linfa-bayes = "0.8"
-ndarray = "0.16"
+# Replaced linfa-bayes 0.8 (pinned to ndarray 0.16) with ferrolearn-bayes
+# 0.4 (already on ndarray 0.17, MIT/Apache, MSRV 1.85). Same MultinomialNB
+# classifier, plus a real `predict_proba` so the ML categorizer's
+# confidence scores can be honest instead of the previous 0.8/0.0 fakery.
+# Unblocks the ndarray 0.16 -> 0.17 bump in this PR and the downstream
+# getrandom 0.2 -> 0.4 follow-up. `ferrolearn-core` is required for the
+# `Fit` trait that brings `MultinomialNB::fit` into scope.
+ferrolearn-bayes = "0.4"
+ferrolearn-core = "0.4"
+ndarray = "0.17"
 
 [dev-dependencies]
 proptest.workspace = true

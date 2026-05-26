@@ -4,18 +4,22 @@
 //! to predict the expense/income account for new transactions based on their
 //! payee and narration text.
 //!
-//! Uses TF-IDF vectorization with linfa-bayes for classification.
+//! Uses TF-IDF vectorization with `ferrolearn-bayes` for classification.
+//! (Previously `linfa-bayes`, but that crate pinned ndarray 0.16 and was
+//! blocking the workspace's ndarray + getrandom upgrades; `ferrolearn-bayes`
+//! gives us the same `MultinomialNB` plus a real `predict_proba` for
+//! honest confidence scores.)
 //!
 //! # Example
 //!
 //! ```rust,ignore
 //! let model = CategorizationModel::train(&existing_directives)?;
 //! let predictions = model.predict("WHOLE FOODS", Some("groceries"));
-//! // → [("Expenses:Groceries", 0.80)]
+//! // → [("Expenses:Groceries", 0.92), ("Expenses:Dining", 0.05), ...]
 //! ```
 
-use linfa::prelude::*;
-use linfa_bayes::MultinomialNb;
+use ferrolearn_bayes::multinomial::{FittedMultinomialNB, MultinomialNB};
+use ferrolearn_core::traits::Fit;
 use ndarray::{Array1, Array2};
 use rustledger_plugin_types::{DirectiveData, DirectiveWrapper};
 use std::collections::HashMap;
@@ -26,7 +30,7 @@ use std::collections::HashMap;
 /// extracted from transaction payee/narration text.
 pub struct CategorizationModel {
     /// The trained classifier.
-    model: MultinomialNb<f64, usize>,
+    model: FittedMultinomialNB<f64>,
     /// Vocabulary: word → column index in the feature matrix.
     vocabulary: HashMap<String, usize>,
     /// IDF weights for each word in the vocabulary.
@@ -174,10 +178,13 @@ impl CategorizationModel {
             targets[i] = label_to_idx[account.as_str()];
         }
 
-        // Train Multinomial Naive Bayes
-        let dataset = DatasetBase::new(features, targets);
-        let model = MultinomialNb::params()
-            .fit(&dataset)
+        // Train Multinomial Naive Bayes. ferrolearn-bayes takes
+        // features + targets directly (no Dataset wrapper) — the
+        // unfitted MultinomialNB::new() carries hyperparameters
+        // (alpha defaults to 1.0 = Laplace smoothing, matching the
+        // previous linfa-bayes default).
+        let model = MultinomialNB::new()
+            .fit(&features, &targets)
             .map_err(|e| MlError::TrainingFailed(format!("{e}")))?;
 
         Ok(Self {
@@ -190,13 +197,16 @@ impl CategorizationModel {
 
     /// Predict the account for a transaction.
     ///
-    /// Returns up to `top_n` predictions sorted by confidence (highest first).
-    /// Each prediction is an `(account, probability)` pair.
+    /// Returns predictions sorted by confidence (highest first). Each
+    /// prediction is an `(account, probability)` pair. Probabilities
+    /// come from `predict_proba` (calibrated class-conditional
+    /// posteriors that sum to 1.0 across all classes), so callers can
+    /// use them as honest scores — pre-ferrolearn-bayes this was
+    /// faked (0.8 for predicted class, 0.0 otherwise).
     ///
-    /// **Note:** Confidence scores are not calibrated. The predicted class always
-    /// receives a confidence of `0.8` and all other classes receive `0.0`.
-    /// Computing calibrated probabilities requires log-likelihood estimation,
-    /// which is a future enhancement.
+    /// Predict failures (which only happen on shape mismatches inside
+    /// the classifier — impossible here, since we built `features` to
+    /// match the trained vocabulary) collapse to an empty result.
     #[must_use]
     pub fn predict(&self, narration: &str, payee: Option<&str>) -> Vec<(String, f64)> {
         let mut text = String::new();
@@ -209,22 +219,19 @@ impl CategorizationModel {
         let features = self.vectorize(&text.to_lowercase());
         let features_2d = features.insert_axis(ndarray::Axis(0));
 
-        // Get prediction
-        let prediction = self.model.predict(&features_2d);
-        let predicted_idx = prediction[0];
-
-        // For Naive Bayes, we don't get probability scores directly from linfa.
-        // Return the predicted class with confidence 1.0 and others with 0.0.
-        // A more sophisticated approach would compute log-likelihoods.
+        // `predict_proba` returns shape (n_samples=1, n_classes); take
+        // row 0 and pair each probability with its label. Sort
+        // descending; drop zero-probability entries to keep the output
+        // compact for callers that only care about top-k.
+        let Ok(probas) = self.model.predict_proba(&features_2d) else {
+            return Vec::new();
+        };
         let mut results: Vec<(String, f64)> = self
             .labels
             .iter()
             .enumerate()
-            .map(|(i, label)| {
-                let conf = if i == predicted_idx { 0.8 } else { 0.0 };
-                (label.clone(), conf)
-            })
-            .filter(|(_, conf)| *conf > 0.0)
+            .map(|(i, label)| (label.clone(), probas[[0, i]]))
+            .filter(|(_, p)| *p > 0.0)
             .collect();
 
         results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));

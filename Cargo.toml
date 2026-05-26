@@ -35,7 +35,7 @@ default-members = [
 [workspace.package]
 version = "0.15.0"
 edition = "2024"
-rust-version = "1.94"
+rust-version = "1.95"
 license = "GPL-3.0-only"
 repository = "https://github.com/rustledger/rustledger"
 homepage = "https://rustledger.github.io"

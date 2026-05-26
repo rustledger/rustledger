@@ -32,10 +32,16 @@
 pub mod cache;
 mod dedup;
 mod options;
+mod phase;
 #[cfg(any(feature = "booking", feature = "plugins", feature = "validation"))]
 mod process;
 mod source_map;
 mod vfs;
+
+pub use phase::{
+    Booked, Directives, EarlyValidated, Finalized, LateValidated, Phase, Raw,
+    RegularPluginsApplied, Sorted, Synthed,
+};
 
 #[cfg(feature = "cache")]
 pub use cache::{

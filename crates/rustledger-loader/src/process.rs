@@ -227,83 +227,39 @@ impl LedgerError {
 ///   9. re-merge                     (booked + failed → final Ledger.directives)
 /// ```
 pub fn process(raw: LoadResult, options: &LoadOptions) -> Result<Ledger, ProcessError> {
-    let mut directives = raw.directives;
     let mut errors: Vec<LedgerError> = Vec::new();
 
-    // Convert load errors to ledger errors (parse phase)
-    for load_err in raw.errors {
+    // Convert load errors to ledger errors (parse phase). Iterate by
+    // reference so `raw` stays borrowable for the rest of the pipeline
+    // (the phase transitions and validator setup below borrow it).
+    for load_err in &raw.errors {
         errors.push(LedgerError::error("LOAD", load_err.to_string()).with_phase("parse"));
     }
 
-    // 1. Sort once into canonical display order: `(date, priority, file_id,
-    //    span.start)`. This is what BQL / JSON / format output expect and
-    //    what Python beancount produces via `(date, type_priority, lineno)`.
-    //    `span.start` is a byte offset that orders within a file the same
-    //    way line numbers would; `file_id` preserves include order across
-    //    files (issue #1049 — same rows, different tie-break would diverge
-    //    BQL output on same-date augmentation+reduction fixtures).
+    // Phase-typed pipeline (issue #1166). The phantom-typed
+    // `Directives<P>` wrapper makes the sequence
     //
-    //    Booking needs a different iteration order — augmentations BEFORE
-    //    reductions on the same `(date, priority)` so lots exist when
-    //    matched — but it doesn't need the underlying vec reordered.
-    //    `run_booking` walks the vec via a transient `Vec<usize>` index
-    //    that adds `has_cost_reduction` as an extra tiebreaker; this
-    //    avoids a second full sort of `Vec<Spanned<Directive>>` (large
-    //    structs) after booking just to put display order back.
-    directives.sort_by_key(|d| (d.value.date(), d.value.priority(), d.file_id, d.span.start));
+    //     Raw → Sorted → Synthed → EarlyValidated → Booked
+    //         → RegularPluginsApplied → LateValidated → Finalized
+    //
+    // a compile-time property of the type system. Each transition
+    // method consumes one phase and produces the next; the compiler
+    // rejects any call-site that drops a phase, swaps two, or invokes
+    // a later phase on raw input. See `crates/rustledger-loader/src/phase.rs`.
+    //
+    // The transitions themselves wrap the existing subsystem entry
+    // points (`run_booking`, `run_plugins`, validators) without
+    // changing their semantics — this PR is the structural refactor
+    // only; behavior is bit-identical to the pre-#1166 pipeline.
 
-    // 2. Synth-only plugins — run BEFORE early validation so the
-    // synthesizers (`auto_accounts` and `document_discovery`) inject
-    // Opens / Documents that Early checks depend on (E1001 account
-    // presence, E5001 missing-document file). Only this narrow synth
-    // subset runs here; everything else waits until after booking
-    // (step 5) so cost-spec-reading plugins see filled-in per-unit
-    // values on the `CostNumber::PerUnitFromTotal` variant. See
-    // `PluginPass` rustdoc for the detailed split rationale.
-    #[cfg(feature = "plugins")]
-    if options.run_plugins || options.auto_accounts {
-        run_plugins(
-            &mut directives,
-            &raw.plugins,
-            &raw.options,
-            options,
-            &raw.source_map,
-            &mut errors,
-            PluginPass::PreBookingSynth,
-        )?;
-    }
-
-    // 3. Validation (early phase) — runs on pre-booking directives,
-    // AFTER plugins so account-presence checks (E1001) see any Opens
-    // that plugins like `auto_accounts` injected.
-    //
-    // This is what lets booking match Python's "prune zero-interp
-    // postings" behavior in step 4 without losing E1001 on the
-    // elided-zero-to-unopened-account case (rustledger#877).
-    //
-    // The `ValidationSession` carries state (open accounts,
-    // commodities, pending pads, accumulated tolerances) into the late
-    // phase at step 5 so balance assertions and inventory updates see
-    // everything the early phase recorded.
-    //
-    // Resolve the effective booking method once, here, so both the
-    // validator (early/late phases — needs it to seed each opened
-    // account's per-account booking method, see issue #1182) and the
-    // booking engine at step 4 see the same value. File-level
-    // `option "booking_method"` wins when explicitly set; otherwise
-    // the API-level `LoadOptions.booking_method` is used.
+    // Resolve the effective booking method once, before the pipeline
+    // starts, so both the validator (early/late phases — needs it to
+    // seed each opened account's per-account booking method, see
+    // issue #1182) and the booking engine see the same value. File-
+    // level `option "booking_method"` wins when explicitly set;
+    // otherwise the API-level `LoadOptions.booking_method` is used.
     #[cfg(any(feature = "validation", feature = "booking"))]
-    let effective_booking_method = {
-        let file_set = raw.options.set_options.contains("booking_method");
-        if file_set {
-            raw.options
-                .booking_method
-                .parse()
-                .unwrap_or(options.booking_method)
-        } else {
-            options.booking_method
-        }
-    };
+    let effective_booking_method = resolve_effective_booking_method(&raw, options);
 
     #[cfg(feature = "validation")]
     let mut validation_session = if options.validate {
@@ -320,100 +276,312 @@ pub fn process(raw: LoadResult, options: &LoadOptions) -> Result<Ledger, Process
     #[cfg(feature = "validation")]
     let today = jiff::Zoned::now().date();
 
-    #[cfg(feature = "validation")]
-    if let Some(session) = validation_session.as_mut() {
-        let phase_errors =
-            session.run_phase_spanned(&directives, rustledger_validate::Phase::Early, today);
-        ledger_errors_extend(&mut errors, phase_errors, &raw.source_map);
-    }
-
-    // 4. Booking/interpolation
-    //
-    // The booking method comes from two sources: the API-level
-    // `LoadOptions.booking_method` and the file-level `option
-    // "booking_method"`. The file-level option takes precedence only
-    // when the file explicitly set it AND the caller hasn't overridden
-    // the API-level default. This matches Python beancount, where
-    // `option "booking_method" "FIFO"` sets the default for all accounts
-    // without an explicit method on their `open` directive.
-    //
-    // We check `set_options` (not `booking_method.is_empty()`) because
-    // `Options::new()` defaults `booking_method` to "STRICT", so the
-    // string is never empty.
-    //
-    // Booking drops zero-value interpolated postings as part of
-    // `interpolate()` — see the comment in
-    // `rustledger-booking/src/interpolate.rs`. The early validation
-    // pass above already caught E1001 on any unopened-account
-    // references, so it's safe to prune now (the now-removed
-    // `INTERPOLATED_MARKER` workaround in #1114 is obsolete).
-    // Run booking and receive the directives partitioned into
-    // `(booked, failed)`. Failed transactions are in pre-booking shape
-    // (unresolved cost specs, unfilled elided slots, possibly
-    // unbalanced); they don't flow into regular plugins or Late
-    // validation — booking already reported the root cause and the
-    // downstream checks would cascade misleading errors. They get
-    // re-merged for the final `Ledger.directives` so the user still
-    // sees their original input.
-    #[cfg(feature = "booking")]
-    let (mut booked, failed): (Vec<Spanned<Directive>>, Vec<Spanned<Directive>>) =
-        run_booking(directives, effective_booking_method, &mut errors);
-    #[cfg(not(feature = "booking"))]
-    let (mut booked, failed): (Vec<Spanned<Directive>>, Vec<Spanned<Directive>>) =
-        (directives, Vec::new());
-
-    // 5. Post-booking plugins — file-declared plugins + CLI extras.
-    // Runs AFTER booking so cost-spec-reading plugins
-    // (`implicit_prices`, `capital_gains_classifier`,
-    // `check_average_cost`, `sell_gains`, `unrealized`, `valuation`)
-    // see filled-in per-unit values on the
-    // `CostNumber::PerUnitFromTotal` variant. This matches Python
-    // beancount's plugins-after-booking ordering and closes
-    // rustledger#1117. Failed transactions were partitioned out
-    // above; plugins only see successfully-booked input.
-    #[cfg(feature = "plugins")]
-    if options.run_plugins || !options.extra_plugins.is_empty() {
-        run_plugins(
-            &mut booked,
+    let directives = crate::Directives::<crate::Raw>::from_parser(raw.directives)
+        .sort()
+        .apply_synth_plugins(
             &raw.plugins,
             &raw.options,
             options,
             &raw.source_map,
             &mut errors,
-            PluginPass::PostBooking,
-        )?;
-    }
+        )?
+        .early_validate(
+            #[cfg(feature = "validation")]
+            validation_session.as_mut(),
+            #[cfg(feature = "validation")]
+            today,
+            &raw.source_map,
+            &mut errors,
+        );
 
-    // 6. Validation (late phase) — runs on booked + plugin-processed
-    // directives. Reuses the `ValidationSession` from step 2 so
-    // account/commodity/pad bookkeeping carries forward.
-    #[cfg(feature = "validation")]
-    if let Some(mut session) = validation_session {
-        let phase_errors =
-            session.run_phase_spanned(&booked, rustledger_validate::Phase::Late, today);
-        ledger_errors_extend(&mut errors, phase_errors, &raw.source_map);
-        let finalize_errors = session.finalize();
-        ledger_errors_extend(&mut errors, finalize_errors, &raw.source_map);
-    }
+    #[cfg(feature = "booking")]
+    let (booked, failed) = directives.book(effective_booking_method, &mut errors);
+    #[cfg(not(feature = "booking"))]
+    let (booked, failed) = directives.book_disabled();
 
-    // 7. Re-merge failed transactions back into the directive list
-    // for output. The user wrote them and expects to see them in the
-    // resulting `Ledger.directives`; we just kept them isolated from
-    // post-booking processing. Re-sort to restore canonical display
-    // order (booked retained order during plugin transformation; the
-    // sort restores the failed entries' positions).
-    let mut directives = booked;
-    directives.extend(failed);
-    directives.sort_by_key(|d| (d.value.date(), d.value.priority(), d.file_id, d.span.start));
+    let finalized = booked
+        .apply_regular_plugins(
+            &raw.plugins,
+            &raw.options,
+            options,
+            &raw.source_map,
+            &mut errors,
+        )?
+        .late_validate(
+            #[cfg(feature = "validation")]
+            validation_session,
+            #[cfg(feature = "validation")]
+            today,
+            &raw.source_map,
+            &mut errors,
+        )
+        .finalize(failed);
 
     Ok(Ledger {
-        directives,
+        directives: finalized.into_inner(),
         options: raw.options,
         plugins: raw.plugins,
         source_map: raw.source_map,
         errors,
         display_context: raw.display_context,
     })
+}
+
+/// Resolve the booking method from `LoadOptions` + file-level option.
+///
+/// Factored out of `process()` so both the validator session (which
+/// needs it to seed per-account booking) and the booking engine see
+/// the same value. File-level `option "booking_method"` wins when
+/// explicitly set; otherwise the API-level default is used.
+#[cfg(any(feature = "validation", feature = "booking"))]
+fn resolve_effective_booking_method(
+    raw: &LoadResult,
+    options: &LoadOptions,
+) -> rustledger_core::BookingMethod {
+    let file_set = raw.options.set_options.contains("booking_method");
+    if file_set {
+        raw.options
+            .booking_method
+            .parse()
+            .unwrap_or(options.booking_method)
+    } else {
+        options.booking_method
+    }
+}
+
+// ============================================================================
+// Phase transitions
+// ============================================================================
+//
+// Each transition consumes a `Directives<P>` of one phase and
+// produces a `Directives<NextP>` of the next phase. Bodies wrap the
+// existing subsystem calls (`run_booking`, `run_plugins`, validators)
+// without changing their semantics — only the type-level sequencing
+// is new. See `phase.rs` for the phase markers and overall rationale.
+
+impl crate::Directives<crate::Raw> {
+    /// Sort directives into canonical display order
+    /// `(date, priority, file_id, span.start)` — what BQL / JSON /
+    /// format output expects and what Python beancount produces.
+    ///
+    /// Booking needs a different iteration order (augmentations
+    /// BEFORE reductions on the same `(date, priority)`) but doesn't
+    /// need the underlying vec reordered — `run_booking` walks via
+    /// a transient `Vec<usize>` index. This sort goes once, here,
+    /// and the display order survives the rest of the pipeline.
+    #[must_use]
+    pub(crate) fn sort(mut self) -> crate::Directives<crate::Sorted> {
+        self.as_vec_mut()
+            .sort_by_key(|d| (d.value.date(), d.value.priority(), d.file_id, d.span.start));
+        crate::Directives::new_unchecked(std::mem::take(self.as_vec_mut()))
+    }
+}
+
+impl crate::Directives<crate::Sorted> {
+    /// Run synth-only plugins (`auto_accounts`, `document_discovery`)
+    /// BEFORE early validation so the synthesizers inject Opens /
+    /// Documents that Early checks depend on (E1001 account
+    /// presence, E5001 missing-document file).
+    ///
+    /// Only this narrow synth subset runs here; everything else
+    /// waits until after booking (post-booking plugin pass) so
+    /// cost-spec-reading plugins see filled-in per-unit values on
+    /// `CostNumber::PerUnitFromTotal`. See `PluginPass` rustdoc for
+    /// the detailed split rationale.
+    pub(crate) fn apply_synth_plugins(
+        mut self,
+        plugins: &[crate::Plugin],
+        file_options: &crate::Options,
+        options: &LoadOptions,
+        source_map: &SourceMap,
+        errors: &mut Vec<LedgerError>,
+    ) -> Result<crate::Directives<crate::Synthed>, ProcessError> {
+        #[cfg(feature = "plugins")]
+        if options.run_plugins || options.auto_accounts {
+            run_plugins(
+                self.as_vec_mut(),
+                plugins,
+                file_options,
+                options,
+                source_map,
+                errors,
+                PluginPass::PreBookingSynth,
+            )?;
+        }
+        // Suppress unused-arg warnings when `plugins` feature is off.
+        #[cfg(not(feature = "plugins"))]
+        {
+            let _ = (plugins, file_options, options, source_map, errors);
+        }
+        Ok(crate::Directives::new_unchecked(std::mem::take(
+            self.as_vec_mut(),
+        )))
+    }
+}
+
+impl crate::Directives<crate::Synthed> {
+    /// Run the early-phase validators. Account-presence /
+    /// lifecycle / structural errors are collected into `errors`
+    /// (via the `LedgerError` stream); the directive list itself is
+    /// unchanged by validation.
+    ///
+    /// Runs on pre-booking directives, AFTER synth plugins so
+    /// account-presence checks (E1001) see any Opens that plugins
+    /// like `auto_accounts` injected. This is what lets booking
+    /// match Python's "prune zero-interp postings" behavior without
+    /// losing E1001 on the elided-zero-to-unopened-account case
+    /// (rustledger#877).
+    pub(crate) fn early_validate(
+        mut self,
+        #[cfg(feature = "validation")] validation_session: Option<
+            &mut rustledger_validate::ValidationSession,
+        >,
+        #[cfg(feature = "validation")] today: rustledger_core::NaiveDate,
+        source_map: &SourceMap,
+        errors: &mut Vec<LedgerError>,
+    ) -> crate::Directives<crate::EarlyValidated> {
+        #[cfg(feature = "validation")]
+        if let Some(session) = validation_session {
+            let phase_errors = session.run_phase_spanned(
+                self.as_slice(),
+                rustledger_validate::Phase::Early,
+                today,
+            );
+            ledger_errors_extend(errors, phase_errors, source_map);
+        }
+        #[cfg(not(feature = "validation"))]
+        {
+            let _ = (source_map, errors);
+        }
+        crate::Directives::new_unchecked(std::mem::take(self.as_vec_mut()))
+    }
+}
+
+impl crate::Directives<crate::EarlyValidated> {
+    /// Run booking/interpolation. Returns the successfully-booked
+    /// directives plus a parallel `Vec` of failed transactions.
+    ///
+    /// Failed transactions are in pre-booking shape (unresolved cost
+    /// specs, unfilled elided slots, possibly unbalanced); they
+    /// don't flow into regular plugins or Late validation — booking
+    /// already reported the root cause and the downstream checks
+    /// would cascade misleading errors. They get re-merged at
+    /// [`crate::Directives::<crate::LateValidated>::finalize`].
+    #[cfg(feature = "booking")]
+    pub(crate) fn book(
+        mut self,
+        effective_method: rustledger_core::BookingMethod,
+        errors: &mut Vec<LedgerError>,
+    ) -> (crate::Directives<crate::Booked>, Vec<Spanned<Directive>>) {
+        let (booked, failed) =
+            run_booking(std::mem::take(self.as_vec_mut()), effective_method, errors);
+        (crate::Directives::new_unchecked(booked), failed)
+    }
+
+    /// Identity transition when the `booking` feature is disabled.
+    /// No interpolation runs; the directive list passes through
+    /// unchanged. Failed is always empty.
+    #[cfg(not(feature = "booking"))]
+    pub(crate) fn book_disabled(
+        mut self,
+    ) -> (crate::Directives<crate::Booked>, Vec<Spanned<Directive>>) {
+        (
+            crate::Directives::new_unchecked(std::mem::take(self.as_vec_mut())),
+            Vec::new(),
+        )
+    }
+}
+
+impl crate::Directives<crate::Booked> {
+    /// Run post-booking plugins — file-declared + CLI extras.
+    /// Cost-spec-reading plugins (`implicit_prices`,
+    /// `capital_gains_classifier`, `check_average_cost`,
+    /// `sell_gains`, `unrealized`, `valuation`) see filled-in
+    /// per-unit values on `CostNumber::PerUnitFromTotal` because
+    /// booking has run.
+    ///
+    /// Matches Python beancount's plugins-after-booking ordering
+    /// and closes rustledger#1117. Failed transactions were
+    /// partitioned out by `book`; plugins only see
+    /// successfully-booked input.
+    pub(crate) fn apply_regular_plugins(
+        mut self,
+        plugins: &[crate::Plugin],
+        file_options: &crate::Options,
+        options: &LoadOptions,
+        source_map: &SourceMap,
+        errors: &mut Vec<LedgerError>,
+    ) -> Result<crate::Directives<crate::RegularPluginsApplied>, ProcessError> {
+        #[cfg(feature = "plugins")]
+        if options.run_plugins || !options.extra_plugins.is_empty() {
+            run_plugins(
+                self.as_vec_mut(),
+                plugins,
+                file_options,
+                options,
+                source_map,
+                errors,
+                PluginPass::PostBooking,
+            )?;
+        }
+        #[cfg(not(feature = "plugins"))]
+        {
+            let _ = (plugins, file_options, options, source_map, errors);
+        }
+        Ok(crate::Directives::new_unchecked(std::mem::take(
+            self.as_vec_mut(),
+        )))
+    }
+}
+
+impl crate::Directives<crate::RegularPluginsApplied> {
+    /// Run the late-phase validators on booked + plugin-processed
+    /// directives. Reuses the `ValidationSession` from
+    /// `early_validate` so account / commodity / pad bookkeeping
+    /// carries forward.
+    pub(crate) fn late_validate(
+        mut self,
+        #[cfg(feature = "validation")] validation_session: Option<
+            rustledger_validate::ValidationSession,
+        >,
+        #[cfg(feature = "validation")] today: rustledger_core::NaiveDate,
+        source_map: &SourceMap,
+        errors: &mut Vec<LedgerError>,
+    ) -> crate::Directives<crate::LateValidated> {
+        #[cfg(feature = "validation")]
+        if let Some(mut session) = validation_session {
+            let phase_errors =
+                session.run_phase_spanned(self.as_slice(), rustledger_validate::Phase::Late, today);
+            ledger_errors_extend(errors, phase_errors, source_map);
+            let finalize_errors = session.finalize();
+            ledger_errors_extend(errors, finalize_errors, source_map);
+        }
+        #[cfg(not(feature = "validation"))]
+        {
+            let _ = (source_map, errors);
+        }
+        crate::Directives::new_unchecked(std::mem::take(self.as_vec_mut()))
+    }
+}
+
+impl crate::Directives<crate::LateValidated> {
+    /// Re-merge failed (un-booked) transactions back into the
+    /// directive list for output. The user wrote them and expects
+    /// to see them in `Ledger.directives`; we kept them isolated
+    /// from post-booking processing.
+    ///
+    /// Re-sorts to restore canonical display order — `booked`
+    /// retained order during plugin transformation; the sort
+    /// restores the failed entries' positions.
+    pub(crate) fn finalize(
+        mut self,
+        failed: Vec<Spanned<Directive>>,
+    ) -> crate::Directives<crate::Finalized> {
+        let mut v = std::mem::take(self.as_vec_mut());
+        v.extend(failed);
+        v.sort_by_key(|d| (d.value.date(), d.value.priority(), d.file_id, d.span.start));
+        crate::Directives::new_unchecked(v)
+    }
 }
 
 /// Run booking and interpolation on transactions, returning the

@@ -92,6 +92,15 @@ pub fn handle_completion(
     if items.is_empty() {
         None
     } else {
+        // Visibility for the eventual `isIncomplete: true` /
+        // server-side prefix filtering work — if a future bug report
+        // says "autocomplete is slow on my N-thousand-account
+        // ledger", this log line tells you the response size without
+        // needing to instrument from scratch. Cheap because completion
+        // requests are user-driven, not hot-loop. The context is
+        // already logged above (line ~72) so the size alone here is
+        // enough to correlate.
+        tracing::debug!("Completion response: {} items", items.len());
         Some(CompletionResponse::Array(items))
     }
 }
@@ -606,6 +615,61 @@ mod tests {
             labels.contains(&"Expenses:ExpenseType30"),
             "ExpenseType30 must be reachable (pre-fix all 20+ accounts were dropped); \
              labels = {labels:?}"
+        );
+    }
+
+    /// Companion regression for #1183: the account-completion cap had
+    /// an identical `.take(20)` twin in `complete_payee`. Same shape,
+    /// same fix, same hazard for re-introduction — this test pins it
+    /// independently so a future contributor who restores the payee
+    /// cap can't ride on the account test missing it. Constructing 30
+    /// distinct payees requires 30 distinct transactions; the fixture
+    /// uses a tight `Buy<NN>` payee with one balanced posting pair.
+    #[test]
+    fn complete_payee_returns_all_known_payees_above_legacy_cap() {
+        use std::fmt::Write as _;
+
+        let mut source = String::from("2024-01-01 open Assets:Cash USD\n");
+        for n in 1..=30 {
+            // Each transaction names a unique payee so all 30 reach
+            // `extract_payees`. Pin every transaction to a real
+            // calendar date (2024-02-01) — beancount allows multiple
+            // transactions on the same day, and using `{n:02}` for
+            // the day would generate Feb 30, which isn't a valid
+            // date. Two-posting balanced form (`+1 / -1 USD` on the
+            // same account) satisfies the parser's posting-count
+            // requirement.
+            writeln!(
+                source,
+                "2024-02-01 * \"Buy{n:02}\" \"\"\n  Assets:Cash  1 USD\n  Assets:Cash  -1 USD",
+            )
+            .unwrap();
+        }
+
+        let parsed = rustledger_parser::parse(&source);
+        assert!(
+            parsed.errors.is_empty(),
+            "fixture must parse cleanly: {:?}",
+            parsed.errors,
+        );
+
+        let items = complete_payee(&parsed, None);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+
+        // Brackets across the legacy cap: pre-fix Buy01..Buy19 would
+        // show, Buy20+ would be silently dropped. The new behavior
+        // returns all 30.
+        assert!(
+            labels.contains(&"Buy19"),
+            "Buy19 must be reachable (pre-fix last that worked); labels = {labels:?}"
+        );
+        assert!(
+            labels.contains(&"Buy20"),
+            "Buy20 must be reachable (pre-fix first that failed); labels = {labels:?}"
+        );
+        assert!(
+            labels.contains(&"Buy30"),
+            "Buy30 must be reachable (pre-fix all 20+ payees were dropped); labels = {labels:?}"
         );
     }
 }

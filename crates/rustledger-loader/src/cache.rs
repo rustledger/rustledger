@@ -886,6 +886,100 @@ mod tests {
         let _ = fs::remove_dir(&temp_dir);
     }
 
+    /// Frozen byte fixtures for the v8 cache layout of
+    /// [`rustledger_core::CostNumber`].
+    ///
+    /// The intra-build distinctness test in `rustledger-core::cost`
+    /// (`cost_number_archived_bytes_snapshot`) only catches drift
+    /// where variants collide with each other. It would NOT catch a
+    /// uniform encoding shift (e.g. a future rkyv minor bump that
+    /// changes how `Archived<Decimal>` packs, or an accidental
+    /// attribute change). When that happens every variant moves
+    /// together so distinctness still holds, but user caches on disk
+    /// silently fail to deserialize as garbage in the new layout.
+    ///
+    /// Capturing the exact bytes here pins the on-disk contract:
+    /// any drift trips this test, forcing the developer to either
+    /// (a) revert the encoding change, or (b) bump
+    /// [`CACHE_VERSION`] so old cache files are short-circuited at
+    /// the header check. The companion `cache_version_matches_v8`
+    /// assertion below fires if a developer regenerates the fixtures
+    /// without bumping the version constant in the same commit.
+    ///
+    /// **If this test fails** and you intend the new encoding to be
+    /// the contract going forward: regenerate the fixtures by
+    /// printing `rkyv::to_bytes(&cn)` for each variant, bump
+    /// `CACHE_VERSION` to `9`, and update both the fixtures and the
+    /// `cache_version_matches_v8` constant below in the same commit.
+    ///
+    /// Gated to little-endian targets — `rkyv::to_bytes` uses native
+    /// endianness, so the hardcoded bytes are valid for `x86_64` /
+    /// `aarch64` but would spuriously fail on big-endian platforms
+    /// (`s390x`, `ppc64be`). `CACHE_VERSION`'s purpose is same-machine
+    /// read guarding, so non-portable bytes aren't a real defect,
+    /// just a test-portability footnote.
+    #[cfg(target_endian = "little")]
+    #[test]
+    fn cost_number_archived_bytes_match_v8_fixtures() {
+        use rust_decimal_macros::dec;
+        use rustledger_core::{BookedCost, CostNumber};
+
+        // Tripwire: regenerating the byte fixtures below without
+        // bumping CACHE_VERSION leaves users with rotten caches. The
+        // assertion fires when CACHE_VERSION advances past 8, forcing
+        // the developer to also update the fixtures (or remove this
+        // tripwire if v9's contract is identical to v8 for CostNumber
+        // — which is unusual but possible).
+        const FIXTURE_VERSION: u32 = 8;
+        assert_eq!(
+            CACHE_VERSION, FIXTURE_VERSION,
+            "CACHE_VERSION advanced past the fixture version; regenerate \
+             the byte fixtures in this test and update FIXTURE_VERSION, \
+             or remove the tripwire if v{CACHE_VERSION}'s CostNumber \
+             encoding is byte-identical to v8.",
+        );
+
+        let cases: &[(&str, CostNumber, &[u8])] = &[
+            (
+                "PerUnit { value: 150 }",
+                CostNumber::PerUnit { value: dec!(150) },
+                &[
+                    0, 0, 0, 0, 0, 150, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                    0, 0, 0, 0, 0, 0, 0,
+                ],
+            ),
+            (
+                "Total { value: 1500 }",
+                CostNumber::Total { value: dec!(1500) },
+                &[
+                    1, 0, 0, 0, 0, 220, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                    0, 0, 0, 0, 0, 0, 0,
+                ],
+            ),
+            (
+                "PerUnitFromTotal { per_unit: 150, total: 300 }",
+                CostNumber::PerUnitFromTotal(BookedCost::new(dec!(150), dec!(300), dec!(2))),
+                &[
+                    2, 0, 0, 0, 0, 150, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 44, 1, 0, 0,
+                    0, 0, 0, 0, 0, 0, 0, 0,
+                ],
+            ),
+        ];
+        let mut mismatches = Vec::new();
+        for (name, cn, expected) in cases {
+            let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(cn).unwrap();
+            if bytes.as_ref() != *expected {
+                mismatches.push(format!("  `{name}` → {:?}", bytes.as_ref()));
+            }
+        }
+        assert!(
+            mismatches.is_empty(),
+            "rkyv layout drifted from v8 fixtures — bump CACHE_VERSION and \
+             update the fixtures in this test if intentional. Actual bytes:\n{}",
+            mismatches.join("\n"),
+        );
+    }
+
     #[test]
     fn test_reintern_directives_deduplication() {
         let date = rustledger_core::naive_date(2024, 1, 15).unwrap();

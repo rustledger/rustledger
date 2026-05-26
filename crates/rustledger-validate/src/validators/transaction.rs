@@ -155,6 +155,12 @@ pub fn validate_transaction_structure(
         if let Some(cost) = &posting.cost
             && let Some(cn) = cost.number
         {
+            // Read-only destructure: the `BookedCost { total: value, .. }`
+            // pattern pulls the user-written `total` out for the negative
+            // check, but does NOT construct a new `BookedCost`. Do not
+            // copy this pattern to *build* a `BookedCost` — that would
+            // bypass the consistency invariant enforced by
+            // `BookedCost::new` / `try_new`.
             let (label, value) = match cn {
                 rustledger_core::CostNumber::PerUnit { value } => ("per-unit", value),
                 rustledger_core::CostNumber::Total { value }

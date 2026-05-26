@@ -7,7 +7,17 @@
 # touching `crates/rustledger-{wasm,parser,core}/**` trips the WASM CI
 # workflow's `wasm-pack test --node` step.
 #
+# **Env-var trap**: if the `RUSTFLAGS` environment variable is set
+# during a wasm32 build (e.g. a CI step exports
+# `RUSTFLAGS=-Dwarnings`), it takes complete precedence over these
+# rustflags — Cargo does NOT merge env and config, env wins outright.
+# The build will then break with the exact "getrandom backend not
+# configured" error this file exists to suppress. If you must set
+# `RUSTFLAGS` from CI while building wasm, append
+# `--cfg getrandom_backend="wasm_js"` to the env value.
+#
 # See https://docs.rs/getrandom/0.3/#webassembly-support for the
-# backend cfg story.
+# backend cfg story and the Cargo reference for env-vs-config
+# precedence rules.
 [target.wasm32-unknown-unknown]
 rustflags = ['--cfg', 'getrandom_backend="wasm_js"']

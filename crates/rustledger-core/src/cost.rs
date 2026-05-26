@@ -1038,6 +1038,23 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "overflow")]
+    fn booked_cost_new_panics_in_debug_on_overflow() {
+        // `BookedCost::new` debug-asserts the invariant. Overflow
+        // should reach the assertion via `check_invariant`'s Err, then
+        // panic with a message that names the failure mode — same
+        // contract as the existing zero-units / mismatch debug
+        // asserts. Without this test, a future refactor of
+        // `check_invariant`'s error path could swallow the overflow
+        // case at the `new` call site (e.g. by short-circuiting to
+        // Ok or by using a different Display) and the `new`-side
+        // contract would degrade silently. Inputs: 5e15 × 5e15 →
+        // 2.5e31, which exceeds Decimal::MAX (~7.92e28).
+        let huge = Decimal::from_str_exact("5000000000000000").unwrap();
+        let _ = BookedCost::new(huge, Decimal::from_str_exact("0.01").unwrap(), huge);
+    }
+
+    #[test]
     fn booked_cost_try_new_surfaces_overflow_instead_of_panicking() {
         // Trust-boundary regression guard: a wire client can submit
         // per_unit and units that each fit in Decimal but whose product
@@ -1244,69 +1261,10 @@ mod tests {
         );
     }
 
-    /// Frozen byte fixtures for the v8 archived layout.
-    ///
-    /// The intra-build distinctness test above only catches drift
-    /// where variants collide with each other. It would NOT catch a
-    /// uniform encoding shift (e.g. a future rkyv minor bump that
-    /// changes how `Archived<Decimal>` packs, or an accidental
-    /// attribute change). When that happens, every variant moves
-    /// together so distinctness still holds, but user caches on disk
-    /// silently fail to deserialize as garbage in the new layout.
-    ///
-    /// Capturing the exact bytes here pins the on-disk contract:
-    /// any drift trips this test, forcing the developer to either
-    /// (a) revert the encoding change, or (b) bump `CACHE_VERSION` in
-    /// `rustledger-loader/src/cache.rs` so old cache files are
-    /// short-circuited at the header check.
-    ///
-    /// **If this test fails** and you intend the new encoding to be
-    /// the contract going forward: regenerate the fixtures by
-    /// printing `rkyv::to_bytes(&cn)` for each variant and bump
-    /// `CACHE_VERSION` in the same commit.
-    #[cfg(feature = "rkyv")]
-    #[test]
-    fn cost_number_archived_bytes_match_v8_fixtures() {
-        let cases: &[(&str, CostNumber, &[u8])] = &[
-            (
-                "PerUnit { value: 150 }",
-                CostNumber::PerUnit { value: dec!(150) },
-                &[
-                    0, 0, 0, 0, 0, 150, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                    0, 0, 0, 0, 0, 0, 0,
-                ],
-            ),
-            (
-                "Total { value: 1500 }",
-                CostNumber::Total { value: dec!(1500) },
-                &[
-                    1, 0, 0, 0, 0, 220, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                    0, 0, 0, 0, 0, 0, 0,
-                ],
-            ),
-            (
-                "PerUnitFromTotal { per_unit: 150, total: 300 }",
-                CostNumber::PerUnitFromTotal(BookedCost::new(dec!(150), dec!(300), dec!(2))),
-                &[
-                    2, 0, 0, 0, 0, 150, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 44, 1, 0, 0,
-                    0, 0, 0, 0, 0, 0, 0, 0,
-                ],
-            ),
-        ];
-        let mut mismatches = Vec::new();
-        for (name, cn, expected) in cases {
-            let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(cn).unwrap();
-            if bytes.as_ref() != *expected {
-                mismatches.push(format!("  `{name}` → {:?}", bytes.as_ref()));
-            }
-        }
-        assert!(
-            mismatches.is_empty(),
-            "rkyv layout drifted from v8 fixtures — bump CACHE_VERSION and \
-             update the fixtures in this test if intentional. Actual bytes:\n{}",
-            mismatches.join("\n"),
-        );
-    }
+    // Frozen byte fixtures for the v8 cache layout live alongside
+    // CACHE_VERSION in `rustledger-loader::cache::tests` so the
+    // version constant and the on-disk byte layout sit in one place
+    // — see `cost_number_archived_bytes_match_v8_fixtures` there.
 
     #[test]
     fn cost_spec_display_renders_per_unit_from_total_as_per_unit() {

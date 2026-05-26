@@ -83,4 +83,4 @@ jobs:
           # These packages use non-SPDX "MIT/Apache-2.0" license field that
           # the dependency review action can't parse. Both MIT and Apache-2.0
           # are in our allow list; exempt these packages from the license check.
-          allow-dependencies-licenses: "pkg:cargo/bigdecimal, pkg:cargo/format_num_pattern, pkg:cargo/linfa, pkg:cargo/linfa-bayes, pkg:cargo/ndarray, pkg:cargo/semver"
+          allow-dependencies-licenses: "pkg:cargo/bigdecimal, pkg:cargo/format_num_pattern, pkg:cargo/generator, pkg:cargo/semver"

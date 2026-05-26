@@ -14,7 +14,7 @@
 //! - [`merchants`] — built-in merchant dictionary of common patterns
 //! - [`enrichment`] — shared types for operation results (confidence, method, alternatives)
 //! - [`reconcile`] — balance reconciliation against statement ending balances
-//! - [`ml`] — ML-based categorization (TF-IDF + Naive Bayes via linfa)
+//! - [`ml`] — ML-based categorization (TF-IDF + Naive Bayes via ferrolearn-bayes)
 //! - [`transfer`] — inter-account transfer detection and linking
 
 #![forbid(unsafe_code)]

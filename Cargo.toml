@@ -35,7 +35,7 @@ default-members = [
 [workspace.package]
 version = "0.15.0"
 edition = "2024"
-rust-version = "1.94"
+rust-version = "1.95"
 license = "GPL-3.0-only"
 repository = "https://github.com/rustledger/rustledger"
 homepage = "https://rustledger.github.io"
@@ -90,8 +90,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # WASM
 wasm-bindgen = "0.2"
 serde-wasm-bindgen = "0.6"
-wasmtime = "44.0.1"
-wasmtime-wasi = "44.0.1"
+wasmtime = "45.0.0"
+wasmtime-wasi = "45.0.0"
 wat = "1"
 
 # Parallelization
@@ -107,7 +107,14 @@ smallvec = "1"
 # Persistent (structurally-shared) collections — O(1) clone for tree-based
 # vectors, used by Inventory.positions so JOURNAL-style row-per-snapshot
 # patterns become O(N log N) instead of O(N²). See issue #1086.
-im = { version = "15", features = ["serde"] }
+#
+# `imbl` is the maintained fork of `im` (which is dormant — last release
+# Oct 2022 pinning `rand_core` 0.6 → `getrandom` 0.2). The Vector /
+# HashMap / OrdMap APIs we use are identical between the two. Swapping
+# removes the transitive `getrandom 0.2` pin, unblocking the upgrade to
+# getrandom 0.4 (which the WASM `getrandom_backend = "wasm_js"` story
+# requires for new browsers).
+imbl = { version = "7", features = ["serde"] }
 
 # Testing
 proptest = "1"

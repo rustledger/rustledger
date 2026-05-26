@@ -70,6 +70,16 @@ pub enum MetaValueJson {
     /// shape that survives the round-trip. Same `{number, currency}`
     /// envelope as [`AmountValue`] so JS consumers can branch on
     /// shape without a discriminator tag.
+    ///
+    /// **Deserialize note**: serde's untagged-enum matcher accepts
+    /// extra fields in a JSON object (`#[serde(deny_unknown_fields)]`
+    /// can't be applied per-variant on an untagged enum without
+    /// breaking the wider match). A JS client sending
+    /// `{number: "100", currency: "USD", extra: "x"}` deserializes as
+    /// `Amount { number: "100", currency: "USD" }` with `extra`
+    /// silently dropped. Output-side consumers (the production path)
+    /// are unaffected; treat `Deserialize` here as best-effort and
+    /// validate at the host boundary if you need stricter checks.
     Amount {
         /// The decimal quantity, stringified for precision.
         number: String,
@@ -211,6 +221,35 @@ pub enum DirectiveJson {
         #[serde(skip_serializing_if = "HashMap::is_empty", default)]
         meta: HashMap<String, MetaValueJson>,
     },
+}
+
+impl DirectiveJson {
+    /// Return the metadata map for this directive, regardless of
+    /// which variant it is.
+    ///
+    /// Every variant carries a `meta` field but the per-variant
+    /// destructure pattern means call sites that want to read meta
+    /// generically need a 12-arm match. This accessor centralizes
+    /// that match so callers don't reimplement it (and so adding a
+    /// future variant fails compilation here, not at every call
+    /// site).
+    #[must_use]
+    pub fn meta(&self) -> &HashMap<String, MetaValueJson> {
+        match self {
+            Self::Transaction { meta, .. }
+            | Self::Balance { meta, .. }
+            | Self::Open { meta, .. }
+            | Self::Close { meta, .. }
+            | Self::Commodity { meta, .. }
+            | Self::Pad { meta, .. }
+            | Self::Event { meta, .. }
+            | Self::Note { meta, .. }
+            | Self::Document { meta, .. }
+            | Self::Price { meta, .. }
+            | Self::Query { meta, .. }
+            | Self::Custom { meta, .. } => meta,
+        }
+    }
 }
 
 /// A posting in JSON-serializable form.

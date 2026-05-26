@@ -425,3 +425,11 @@ fn test_parsed_ledger_run_plugin() {
     let errors = get_field(&result, "errors");
     assert_eq!(get_array_length(&errors), 0, "should have no errors");
 }
+
+// Metadata wire-shape tests live in `tests/wasm_meta.rs` so they
+// can run under `wasm-pack test --node` (the file at hand is
+// `run_in_browser`-configured, and CI's browser test job is
+// disabled per Issue #261 — the existing tests here never actually
+// execute in CI today, which is a separate concern). The new
+// metadata tests need real CI coverage so they live in a node-
+// targeting file.

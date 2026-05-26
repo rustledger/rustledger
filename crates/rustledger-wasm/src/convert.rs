@@ -266,27 +266,6 @@ mod tests {
     use super::*;
     use rustledger_parser::parse as parse_beancount;
 
-    /// Pull out the `meta` field from any `DirectiveJson` variant.
-    /// Test-only helper — every variant carries `meta`, but they're
-    /// behind individual struct destructures, so this avoids a
-    /// 12-arm match at each call site.
-    fn directive_meta(d: &DirectiveJson) -> &HashMap<String, MetaValueJson> {
-        match d {
-            DirectiveJson::Transaction { meta, .. }
-            | DirectiveJson::Balance { meta, .. }
-            | DirectiveJson::Open { meta, .. }
-            | DirectiveJson::Close { meta, .. }
-            | DirectiveJson::Commodity { meta, .. }
-            | DirectiveJson::Pad { meta, .. }
-            | DirectiveJson::Event { meta, .. }
-            | DirectiveJson::Note { meta, .. }
-            | DirectiveJson::Document { meta, .. }
-            | DirectiveJson::Price { meta, .. }
-            | DirectiveJson::Query { meta, .. }
-            | DirectiveJson::Custom { meta, .. } => meta,
-        }
-    }
-
     #[test]
     fn test_directive_to_json() {
         let source = r#"
@@ -368,7 +347,7 @@ mod tests {
 
         for spanned in &result.directives {
             let json = directive_to_json(&spanned.value);
-            let meta = directive_meta(&json);
+            let meta = json.meta();
 
             match &spanned.value {
                 Directive::Open(_) => {
@@ -528,9 +507,63 @@ mod tests {
             }
             other => panic!("Amount must map to Amount variant, got {other:?}"),
         }
+
+        // Scale preservation: user-written `100.00 USD` (scale 2)
+        // round-trips trailing zeros. `Decimal::Display` preserves
+        // scale; `Decimal::from(100)` above is scale 0 (`"100"`).
+        // Pin both so a future tweak to either side is caught.
+        let scaled = meta_value_to_json(&MetaValue::Amount(Amount::new(
+            Decimal::new(10000, 2), // 100.00
+            "USD",
+        )));
+        match scaled {
+            MetaValueJson::Amount { number, .. } => {
+                assert_eq!(
+                    number, "100.00",
+                    "Decimal scale must survive the wire — trailing zeros lost: {number}",
+                );
+            }
+            other => panic!("Amount must map to Amount variant, got {other:?}"),
+        }
+
         assert!(matches!(
             meta_value_to_json(&MetaValue::None),
             MetaValueJson::Null,
         ));
+    }
+
+    /// `Custom.values` is a positional list — a `MetaValue::None` in
+    /// the middle of the list must keep its position so JS consumers
+    /// see `[..., null, ...]` rather than the position silently
+    /// collapsing. The plugin-types side of this is filed in #1200's
+    /// audit; pin the WASM wire shape here independently.
+    #[test]
+    fn custom_values_preserve_null_position_1168() {
+        use rustledger_core::{Custom, Decimal};
+
+        let date = rustledger_core::naive_date(2024, 1, 1).unwrap();
+        let custom = Custom {
+            date,
+            custom_type: "budget".into(),
+            values: vec![
+                MetaValue::String("monthly".into()),
+                MetaValue::None,
+                MetaValue::Number(Decimal::new(10000, 2)),
+            ],
+            meta: Default::default(),
+        };
+
+        let json = directive_to_json(&Directive::Custom(custom));
+        let DirectiveJson::Custom { values, .. } = json else {
+            panic!("expected Custom directive");
+        };
+
+        assert_eq!(values.len(), 3, "all three values must survive: {values:?}");
+        assert!(matches!(values[0], MetaValueJson::String(ref s) if s == "monthly"));
+        assert!(
+            matches!(values[1], MetaValueJson::Null),
+            "middle Null must keep position {values:?}",
+        );
+        assert!(matches!(values[2], MetaValueJson::String(ref s) if s == "100.00"));
     }
 }

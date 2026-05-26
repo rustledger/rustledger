@@ -2,7 +2,7 @@
 
 use crate::types::{DirectiveData, PluginError, PluginInput, PluginOp, PluginOutput};
 
-use super::super::NativePlugin;
+use super::super::{NativePlugin, RegularPlugin};
 
 /// Plugin that validates Commodity directives have required metadata attributes.
 ///
@@ -173,6 +173,8 @@ impl NativePlugin for CommodityAttrPlugin {
         }
     }
 }
+
+impl RegularPlugin for CommodityAttrPlugin {}
 
 #[cfg(test)]
 mod commodity_attr_tests {

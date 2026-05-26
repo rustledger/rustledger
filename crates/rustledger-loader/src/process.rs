@@ -582,24 +582,23 @@ pub fn run_plugins(
         Vec::new()
     };
 
-    // Build the native plugin registry up front so we can ask each
-    // plugin whether it's a synthesizer (via `NativePlugin::is_synth`)
-    // during the classification step below. Constructing the registry
-    // is O(n_plugins) and just instantiates the plugin structs; it's
-    // cheap to do before we know whether any plugins will actually
-    // run.
+    // Build the native plugin registry up front so we can classify each
+    // plugin by pass (synth vs regular) via typed lookups. Constructing
+    // the registry is O(n_plugins) and just instantiates the plugin
+    // structs; cheap to do before we know whether any plugins will run.
     let registry = NativePluginRegistry::new();
 
     // Collect raw plugin names first (we'll resolve them with the registry later)
     // Tuple: (name, config, force_python)
     let mut raw_plugins: Vec<(String, Option<String>, bool)> = Vec::new();
 
-    // Classify a plugin by name. Self-classification lives on the
-    // `NativePlugin::is_synth` trait method (see
-    // `rustledger-plugin/src/native/mod.rs`). Plugins not in the
-    // native registry (WASM, Python) default to non-synth — they
-    // run post-booking like file-authored beancount plugins.
-    let is_synth = |name: &str| -> bool { registry.find(name).is_some_and(NativePlugin::is_synth) };
+    // Classify a plugin by name using the typed registry. A plugin is
+    // synth iff `find_synth` returns Some — i.e. it implements the
+    // `SynthPlugin` marker trait (see `rustledger-plugin/src/native/mod.rs`).
+    // Plugins not in the native synth registry (regular natives, WASM,
+    // Python) default to non-synth — they run post-booking like
+    // file-authored beancount plugins.
+    let is_synth = |name: &str| -> bool { registry.find_synth(name).is_some() };
 
     // The API-level `options.auto_accounts` flag is a synth source.
     if options.auto_accounts && matches!(pass, PluginPass::PreBookingSynth | PluginPass::All) {
@@ -671,29 +670,56 @@ pub fn run_plugins(
         apply_plugin_ops(directives, output.ops, errors, source_map)?;
     }
 
-    // Run each plugin (registry was constructed earlier for the
-    // synth classification step).
+    // Run each plugin (registry was constructed earlier for the pass
+    // classification step).
     if !raw_plugins.is_empty() {
         for (raw_name, plugin_config, force_python) in &raw_plugins {
             // Resolve the plugin name - try direct match first, then prefixed variants.
             // Skip native resolution when force_python is set (plugin "python:..." prefix).
+            // Existence checks use `find_any` (cross-pass) because at name-resolution
+            // time we only care "is this a known native plugin?"; the pass-correct
+            // lookup happens at the invocation site below.
             let resolved_name = if *force_python {
                 None
-            } else if registry.find(raw_name).is_some() {
+            } else if registry.find_any(raw_name).is_some() {
                 Some(raw_name.as_str())
             } else if let Some(short_name) = raw_name.strip_prefix("beancount.plugins.") {
-                registry.find(short_name).is_some().then_some(short_name)
+                registry
+                    .find_any(short_name)
+                    .is_some()
+                    .then_some(short_name)
             } else if let Some(short_name) = raw_name.strip_prefix("beancount_reds_plugins.") {
-                registry.find(short_name).is_some().then_some(short_name)
+                registry
+                    .find_any(short_name)
+                    .is_some()
+                    .then_some(short_name)
             } else if let Some(short_name) = raw_name.strip_prefix("beancount_lazy_plugins.") {
-                registry.find(short_name).is_some().then_some(short_name)
+                registry
+                    .find_any(short_name)
+                    .is_some()
+                    .then_some(short_name)
             } else {
                 None
             };
 
-            if let Some(name) = resolved_name
-                && let Some(plugin) = registry.find(name)
-            {
+            // Dispatch via the typed registry: for the synth pass we look up
+            // through `find_synth` (a `RegularPlugin` won't be returned, even
+            // if it shares a name — the type system guarantees we only
+            // invoke the right kind for this pass). `All` falls back to
+            // `find_any` for standalone callers that don't care about the
+            // synth/regular split (LSP / FFI / tests on booked input).
+            let native_plugin: Option<&dyn NativePlugin> =
+                resolved_name.and_then(|name| match pass {
+                    PluginPass::PreBookingSynth => {
+                        registry.find_synth(name).map(|p| p as &dyn NativePlugin)
+                    }
+                    PluginPass::PostBooking => {
+                        registry.find_regular(name).map(|p| p as &dyn NativePlugin)
+                    }
+                    PluginPass::All => registry.find_any(name),
+                });
+
+            if let Some(plugin) = native_plugin {
                 let wrappers = build_wrappers(directives, source_map);
                 let input = PluginInput {
                     directives: wrappers,

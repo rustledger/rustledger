@@ -4,7 +4,7 @@ use crate::types::{
     DirectiveData, MetaValueData, PluginError, PluginInput, PluginOp, PluginOutput,
 };
 
-use super::super::NativePlugin;
+use super::super::{NativePlugin, RegularPlugin};
 
 /// Plugin that identifies accounts that are opened but never used.
 ///
@@ -87,6 +87,8 @@ impl NativePlugin for NoUnusedPlugin {
         }
     }
 }
+
+impl RegularPlugin for NoUnusedPlugin {}
 
 #[cfg(test)]
 mod nounused_tests {

@@ -3,7 +3,7 @@
 
 use crate::types::{DirectiveData, PluginError, PluginInput, PluginOp, PluginOutput};
 
-use super::super::NativePlugin;
+use super::super::{NativePlugin, RegularPlugin};
 
 /// Plugin that validates reducing postings against the running average cost
 /// for accounts opened with the `NONE` booking method.
@@ -183,6 +183,8 @@ impl NativePlugin for CheckAverageCostPlugin {
         }
     }
 }
+
+impl RegularPlugin for CheckAverageCostPlugin {}
 
 #[cfg(test)]
 mod check_average_cost_tests {

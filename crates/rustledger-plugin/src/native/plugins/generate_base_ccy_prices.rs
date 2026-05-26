@@ -21,7 +21,7 @@ use crate::types::{
     AmountData, DirectiveData, DirectiveWrapper, PluginInput, PluginOp, PluginOutput, PriceData,
 };
 
-use super::super::NativePlugin;
+use super::super::{NativePlugin, RegularPlugin};
 
 /// Plugin for generating base currency prices.
 pub struct GenerateBaseCcyPricesPlugin;
@@ -113,6 +113,8 @@ impl NativePlugin for GenerateBaseCcyPricesPlugin {
         }
     }
 }
+
+impl RegularPlugin for GenerateBaseCcyPricesPlugin {}
 
 /// Build a price map from directives.
 /// Returns a map from (currency, `quote_currency`) to Vec<(date, rate)>

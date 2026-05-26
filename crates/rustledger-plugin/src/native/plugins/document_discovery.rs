@@ -4,7 +4,7 @@ use crate::types::{
     DirectiveData, DirectiveWrapper, DocumentData, PluginError, PluginInput, PluginOp, PluginOutput,
 };
 
-use super::super::NativePlugin;
+use super::super::{NativePlugin, SynthPlugin};
 
 /// Maximum recursion depth for directory scanning to prevent denial-of-service from deeply nested structures.
 const MAX_SCAN_DEPTH: usize = 32;
@@ -108,6 +108,11 @@ impl NativePlugin for DocumentDiscoveryPlugin {
         PluginOutput { ops, errors }
     }
 }
+
+/// Synthesizes `Document` directives that downstream consumers expect
+/// alongside user-written ones — runs in the synth pass so the early
+/// validator sees them.
+impl SynthPlugin for DocumentDiscoveryPlugin {}
 
 /// Recursively scan a directory for document files.
 ///

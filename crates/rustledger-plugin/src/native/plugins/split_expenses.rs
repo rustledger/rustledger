@@ -32,7 +32,7 @@ use crate::types::{
     PluginOutput, PostingData,
 };
 
-use super::super::NativePlugin;
+use super::super::{NativePlugin, RegularPlugin};
 
 /// Plugin for splitting expenses between multiple people.
 pub struct SplitExpensesPlugin;
@@ -193,6 +193,8 @@ impl NativePlugin for SplitExpensesPlugin {
         }
     }
 }
+
+impl RegularPlugin for SplitExpensesPlugin {}
 
 #[cfg(test)]
 mod tests {

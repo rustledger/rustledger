@@ -99,7 +99,7 @@ fn execute_plugin(directives: &[Directive], plugin_name: &str) -> Result<JsValue
     };
 
     let registry = NativePluginRegistry::new();
-    let Some(plugin) = registry.find(plugin_name) else {
+    let Some(plugin) = registry.find_any(plugin_name) else {
         let result = PluginResult {
             directives: Vec::new(),
             errors: vec![Error::new(format!("Unknown plugin: {plugin_name}"))],

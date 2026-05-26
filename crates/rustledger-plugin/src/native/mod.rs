@@ -2,6 +2,46 @@
 //!
 //! These plugins run as native Rust code for maximum performance.
 //! They implement the same interface as WASM plugins.
+//!
+//! ## Pass discrimination (issue #1166)
+//!
+//! Plugins run in one of two passes — see the loader's `PluginPass`
+//! enum:
+//!
+//! - **Pre-booking synth pass**: synthesizers like `auto_accounts`
+//!   and `document_discovery` that inject directives the Early
+//!   validator depends on (e.g. `Open` directives so account-
+//!   presence checks see them).
+//! - **Post-booking regular pass**: transformations on already-
+//!   booked directives — most plugins, including the cost-spec-
+//!   reading ones (`implicit_prices`, `unrealized`, etc.) that need
+//!   to see filled-in per-unit values from the booker.
+//!
+//! Each native plugin declares which pass it runs in by implementing
+//! either [`SynthPlugin`] or [`RegularPlugin`] (both extend the base
+//! [`NativePlugin`] trait). Pre-#1166 this was a single-trait runtime
+//! discriminator (`fn is_synth(&self) -> bool`); now the registry
+//! holds two separately-typed `Vec`s, and the loader's runner
+//! consults the typed registry for the appropriate pass — a regular
+//! plugin can't accidentally be invoked in the synth pass because
+//! the registry lookup wouldn't find it there.
+//!
+//! ## Why a marker-trait pair rather than a single trait with a const
+//!
+//! `const PASS: PluginPass` on the base trait would be cleaner if
+//! consts were object-safe — but they aren't, and the registry uses
+//! trait objects (`Box<dyn NativePlugin>`) for heterogeneous
+//! storage. The marker-pair approach gets the same compile-time
+//! guarantee (a plugin can only fit one slot) at the cost of one
+//! extra empty `impl` line per plugin.
+//!
+//! ## Plugins not in the native registry
+//!
+//! WASM and Python plugins are loaded at runtime by name and don't
+//! carry Rust-level type information. The loader's runner treats
+//! them as regular plugins by default; pass discrimination for
+//! those is left as future work (issue #1200's audit covers the
+//! cross-binding consistency story).
 
 mod plugins;
 
@@ -10,38 +50,60 @@ pub use plugins::*;
 use crate::types::PluginInput;
 use crate::types::PluginOutput;
 
-/// Trait for native plugins.
-pub trait NativePlugin: Send + Sync {
-    /// Plugin name.
+/// Base capability for native plugins. Both [`SynthPlugin`] and
+/// [`RegularPlugin`] extend this — every native plugin has these
+/// three methods regardless of pass.
+pub trait NativePlugin: Send + Sync + 'static {
+    /// Plugin name (short form — `"implicit_prices"`, not the
+    /// fully-qualified module path).
     fn name(&self) -> &'static str;
 
-    /// Plugin description.
+    /// Plugin description for `--help` and similar UI surfaces.
     fn description(&self) -> &'static str;
 
     /// Process directives and return modified directives + errors.
     fn process(&self, input: PluginInput) -> PluginOutput;
-
-    /// Whether this plugin synthesizes directives the loader's
-    /// `Phase::Early` validation depends on (e.g. injecting `Open`
-    /// directives so account-presence checks see them).
-    ///
-    /// Plugins returning `true` run in the loader's pre-booking pass;
-    /// plugins returning `false` (the default — transformations on
-    /// already-parsed directives) run post-booking so they see
-    /// filled-in `cost.number_per` values from the booker.
-    ///
-    /// This is the trait-level analogue of the loader's `PluginPass`
-    /// enum; the loader consults this method to classify each plugin
-    /// at scheduling time, avoiding a hardcoded list of synthesizer
-    /// names.
-    fn is_synth(&self) -> bool {
-        false
-    }
 }
 
-/// Registry of built-in native plugins.
+/// Marker trait: a plugin that runs in the **pre-booking synth pass**.
+///
+/// Synth plugins inject directives the Early validator depends on —
+/// e.g. `auto_accounts` injects `Open` directives so account-
+/// presence checks (E1001) see accounts that user code references
+/// without explicitly opening. They run BEFORE booking and BEFORE
+/// validation.
+///
+/// Implement this trait (in addition to [`NativePlugin`]) for any
+/// plugin that synthesizes directives. The registry's
+/// [`NativePluginRegistry::find_synth`] lookup only returns plugins
+/// implementing this marker; a regular plugin can't accidentally
+/// be invoked in the synth pass.
+pub trait SynthPlugin: NativePlugin {}
+
+/// Marker trait: a plugin that runs in the **post-booking regular pass**.
+///
+/// Regular plugins transform already-booked directives. The
+/// cost-spec-reading ones (`implicit_prices`,
+/// `capital_gains_classifier`, `check_average_cost`, `sell_gains`,
+/// `unrealized`, `valuation`) specifically need to see filled-in
+/// per-unit values on `CostNumber::PerUnitFromTotal` — which is
+/// what booking produces. Running them pre-booking would see the
+/// raw `Total` shape and produce wrong results.
+///
+/// Implement this trait (in addition to [`NativePlugin`]) for any
+/// plugin that transforms post-booking directives. Most plugins go
+/// here.
+pub trait RegularPlugin: NativePlugin {}
+
+/// Registry of built-in native plugins, split by pass.
+///
+/// Holding synth and regular plugins in separately-typed `Vec`s
+/// means the loader's pass-dispatch site can ask for the right kind
+/// directly — no runtime classification, no special cases, no
+/// hardcoded plugin-name lists.
 pub struct NativePluginRegistry {
-    plugins: Vec<Box<dyn NativePlugin>>,
+    synth: Vec<Box<dyn SynthPlugin>>,
+    regular: Vec<Box<dyn RegularPlugin>>,
 }
 
 /// Extract the short plugin name from a potentially qualified module path.
@@ -56,69 +118,128 @@ fn plugin_short_name(name: &str) -> &str {
 }
 
 impl NativePluginRegistry {
-    /// Create a new registry with all built-in plugins.
+    /// Create a new registry with all built-in plugins, partitioned
+    /// by pass.
+    ///
+    /// Each plugin's pass is determined by which marker trait
+    /// ([`SynthPlugin`] or [`RegularPlugin`]) it implements; the
+    /// compiler enforces the slot at registration time.
     pub fn new() -> Self {
-        Self {
-            plugins: vec![
-                Box::new(ImplicitPricesPlugin),
-                Box::new(CheckCommodityPlugin),
-                Box::new(AutoTagPlugin::new()),
-                Box::new(AutoAccountsPlugin),
-                Box::new(LeafOnlyPlugin),
-                Box::new(NoDuplicatesPlugin),
-                Box::new(OneCommodityPlugin),
-                Box::new(UniquePricesPlugin),
-                Box::new(CheckClosingPlugin),
-                Box::new(CloseTreePlugin),
-                Box::new(CoherentCostPlugin),
-                Box::new(ForecastPlugin),
-                Box::new(SellGainsPlugin),
-                Box::new(PedanticPlugin),
-                Box::new(RxTxnPlugin),
-                Box::new(SplitExpensesPlugin),
-                Box::new(UnrealizedPlugin::new()),
-                Box::new(NoUnusedPlugin),
-                Box::new(CheckDrainedPlugin),
-                Box::new(CommodityAttrPlugin::new()),
-                Box::new(CheckAverageCostPlugin::new()),
-                Box::new(CurrencyAccountsPlugin::new()),
-                Box::new(ZerosumPlugin),
-                Box::new(EffectiveDatePlugin),
-                Box::new(GenerateBaseCcyPricesPlugin),
-                Box::new(RenameAccountsPlugin),
-                Box::new(ValuationPlugin),
-                Box::new(CapitalGainsLongShortPlugin),
-                Box::new(CapitalGainsGainLossPlugin),
-                Box::new(BoxAccrualPlugin),
-            ],
-        }
+        let synth: Vec<Box<dyn SynthPlugin>> = vec![
+            Box::new(AutoAccountsPlugin),
+            // `document_discovery` is *also* a synth plugin per
+            // intent, but is instantiated per-call by the loader's
+            // runner (its constructor takes `base_dir` + resolved
+            // documents). The trait impl on `DocumentDiscoveryPlugin`
+            // still marks it correctly for any direct caller.
+        ];
+        let regular: Vec<Box<dyn RegularPlugin>> = vec![
+            Box::new(ImplicitPricesPlugin),
+            Box::new(CheckCommodityPlugin),
+            Box::new(AutoTagPlugin::new()),
+            Box::new(LeafOnlyPlugin),
+            Box::new(NoDuplicatesPlugin),
+            Box::new(OneCommodityPlugin),
+            Box::new(UniquePricesPlugin),
+            Box::new(CheckClosingPlugin),
+            Box::new(CloseTreePlugin),
+            Box::new(CoherentCostPlugin),
+            Box::new(ForecastPlugin),
+            Box::new(SellGainsPlugin),
+            Box::new(PedanticPlugin),
+            Box::new(RxTxnPlugin),
+            Box::new(SplitExpensesPlugin),
+            Box::new(UnrealizedPlugin::new()),
+            Box::new(NoUnusedPlugin),
+            Box::new(CheckDrainedPlugin),
+            Box::new(CommodityAttrPlugin::new()),
+            Box::new(CheckAverageCostPlugin::new()),
+            Box::new(CurrencyAccountsPlugin::new()),
+            Box::new(ZerosumPlugin),
+            Box::new(EffectiveDatePlugin),
+            Box::new(GenerateBaseCcyPricesPlugin),
+            Box::new(RenameAccountsPlugin),
+            Box::new(ValuationPlugin),
+            Box::new(CapitalGainsLongShortPlugin),
+            Box::new(CapitalGainsGainLossPlugin),
+            Box::new(BoxAccrualPlugin),
+        ];
+        Self { synth, regular }
     }
 
-    /// Find a plugin by name.
+    /// Find a **synth-pass** plugin by name.
     ///
-    /// Accepts both short names (`"implicit_prices"`) and fully qualified
-    /// module paths (`"beancount.plugins.implicit_prices"`).
-    pub fn find(&self, name: &str) -> Option<&dyn NativePlugin> {
+    /// Returns `None` if the plugin doesn't exist OR if it exists
+    /// but is a regular-pass plugin — the type system guarantees the
+    /// returned reference is `dyn SynthPlugin`.
+    ///
+    /// Accepts both short names (`"auto_accounts"`) and fully
+    /// qualified module paths (`"beancount.plugins.auto_accounts"`).
+    pub fn find_synth(&self, name: &str) -> Option<&dyn SynthPlugin> {
         let short_name = plugin_short_name(name);
-        self.plugins
+        self.synth
             .iter()
             .find(|p| p.name() == short_name)
             .map(std::convert::AsRef::as_ref)
     }
 
-    /// List all available plugins.
-    pub fn list(&self) -> Vec<&dyn NativePlugin> {
-        self.plugins.iter().map(AsRef::as_ref).collect()
+    /// Find a **regular-pass** plugin by name.
+    ///
+    /// Returns `None` if the plugin doesn't exist OR if it exists
+    /// but is a synth-pass plugin — the type system guarantees the
+    /// returned reference is `dyn RegularPlugin`.
+    pub fn find_regular(&self, name: &str) -> Option<&dyn RegularPlugin> {
+        let short_name = plugin_short_name(name);
+        self.regular
+            .iter()
+            .find(|p| p.name() == short_name)
+            .map(std::convert::AsRef::as_ref)
     }
 
-    /// Check if a name refers to a built-in plugin.
+    /// Find a plugin by name without caring about its pass.
+    ///
+    /// Used by `is_builtin` and other queries that only need to know
+    /// "does a plugin with this name exist." The returned reference
+    /// is upcast to [`NativePlugin`] (the base trait); callers that
+    /// need pass information should use [`Self::find_synth`] /
+    /// [`Self::find_regular`] instead.
+    pub fn find_any(&self, name: &str) -> Option<&dyn NativePlugin> {
+        let short_name = plugin_short_name(name);
+        if let Some(p) = self
+            .synth
+            .iter()
+            .find(|p| p.name() == short_name)
+            .map(std::convert::AsRef::as_ref)
+        {
+            return Some(p as &dyn NativePlugin);
+        }
+        self.regular
+            .iter()
+            .find(|p| p.name() == short_name)
+            .map(|p| std::convert::AsRef::as_ref(p) as &dyn NativePlugin)
+    }
+
+    /// List all available plugins (both passes).
+    pub fn list(&self) -> Vec<&dyn NativePlugin> {
+        let mut out: Vec<&dyn NativePlugin> =
+            Vec::with_capacity(self.synth.len() + self.regular.len());
+        for p in &self.synth {
+            out.push(p.as_ref() as &dyn NativePlugin);
+        }
+        for p in &self.regular {
+            out.push(p.as_ref() as &dyn NativePlugin);
+        }
+        out
+    }
+
+    /// Check if a name refers to a built-in plugin (either pass).
     ///
     /// Accepts both short names and fully qualified module paths.
     pub fn is_builtin(name: &str) -> bool {
         let short_name = plugin_short_name(name);
-        // Check against registered plugin names
         let registry = Self::new();
-        registry.plugins.iter().any(|p| p.name() == short_name)
+        registry.synth.iter().any(|p| p.name() == short_name)
+            || registry.regular.iter().any(|p| p.name() == short_name)
     }
 }
 
@@ -188,28 +309,73 @@ mod tests {
     }
 
     #[test]
-    fn test_registry_find_short_name() {
+    fn test_registry_find_regular_short_name() {
         let registry = NativePluginRegistry::new();
-        assert!(registry.find("implicit_prices").is_some());
-        assert!(registry.find("zerosum").is_some());
-        assert!(registry.find("nonexistent").is_none());
+        assert!(registry.find_regular("implicit_prices").is_some());
+        assert!(registry.find_regular("zerosum").is_some());
+        assert!(registry.find_regular("nonexistent").is_none());
     }
 
     #[test]
-    fn test_registry_find_qualified_name() {
+    fn test_registry_find_regular_qualified_name() {
         let registry = NativePluginRegistry::new();
-        assert!(registry.find("beancount.plugins.implicit_prices").is_some());
-        assert!(registry.find("beanahead.plugins.rx_txn_plugin").is_some());
         assert!(
             registry
-                .find("beancount_reds_plugins.zerosum.zerosum")
+                .find_regular("beancount.plugins.implicit_prices")
                 .is_some()
         );
         assert!(
             registry
-                .find("beancount_reds_plugins.capital_gains_classifier.gain_loss")
+                .find_regular("beanahead.plugins.rx_txn_plugin")
                 .is_some()
         );
+        assert!(
+            registry
+                .find_regular("beancount_reds_plugins.zerosum.zerosum")
+                .is_some()
+        );
+        assert!(
+            registry
+                .find_regular("beancount_reds_plugins.capital_gains_classifier.gain_loss")
+                .is_some()
+        );
+    }
+
+    /// Pin the trait-split contract (issue #1166): synth plugins live
+    /// in the synth registry, regular plugins in the regular. Looking
+    /// up a synth plugin via `find_regular` returns `None` (and vice
+    /// versa). This is what catches "regular plugin invoked in synth
+    /// pass" at the type level — the lookup wouldn't find it.
+    #[test]
+    fn test_registry_synth_and_regular_are_disjoint() {
+        let registry = NativePluginRegistry::new();
+
+        // auto_accounts is synth — visible from find_synth, absent
+        // from find_regular.
+        assert!(
+            registry.find_synth("auto_accounts").is_some(),
+            "auto_accounts must be in the synth registry",
+        );
+        assert!(
+            registry.find_regular("auto_accounts").is_none(),
+            "auto_accounts must NOT be in the regular registry — the trait split would be defeated",
+        );
+
+        // implicit_prices is regular — visible from find_regular,
+        // absent from find_synth.
+        assert!(
+            registry.find_regular("implicit_prices").is_some(),
+            "implicit_prices must be in the regular registry",
+        );
+        assert!(
+            registry.find_synth("implicit_prices").is_none(),
+            "implicit_prices must NOT be in the synth registry",
+        );
+
+        // `find_any` is the cross-pass lookup — finds either.
+        assert!(registry.find_any("auto_accounts").is_some());
+        assert!(registry.find_any("implicit_prices").is_some());
+        assert!(registry.find_any("nonexistent").is_none());
     }
 
     #[test]

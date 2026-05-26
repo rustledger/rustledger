@@ -29,7 +29,7 @@ use crate::types::{
     PluginOutput, PostingData, TransactionData,
 };
 
-use super::super::NativePlugin;
+use super::super::{NativePlugin, RegularPlugin};
 
 /// Plugin for handling effective dates on postings.
 pub struct EffectiveDatePlugin;
@@ -219,6 +219,8 @@ impl NativePlugin for EffectiveDatePlugin {
         }
     }
 }
+
+impl RegularPlugin for EffectiveDatePlugin {}
 
 /// Check if a transaction has any posting with `effective_date` metadata.
 fn has_effective_date_posting(txn: &TransactionData) -> bool {

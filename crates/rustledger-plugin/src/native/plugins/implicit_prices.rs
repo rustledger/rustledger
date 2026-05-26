@@ -9,7 +9,7 @@ use rustledger_core::extract_per_unit_price;
 use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 
-use super::super::NativePlugin;
+use super::super::{NativePlugin, RegularPlugin};
 
 /// Canonical key for tracking lots in the per-account inventory used
 /// by the cost-only "skip on REDUCED" check. Mirrors what Python
@@ -357,3 +357,5 @@ impl NativePlugin for ImplicitPricesPlugin {
         PluginOutput { ops, errors }
     }
 }
+
+impl RegularPlugin for ImplicitPricesPlugin {}

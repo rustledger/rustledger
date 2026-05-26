@@ -253,7 +253,7 @@ pub fn validation_errors_to_diagnostics(
             {
                 continue;
             }
-            let is_native = registry.find(&plugin.name).is_some();
+            let is_native = registry.find_any(&plugin.name).is_some();
             if !is_native {
                 let (start_line, start_col) = line_index.offset_to_position(plugin.span.start);
                 let (end_line, end_col) = line_index.offset_to_position(plugin.span.end);

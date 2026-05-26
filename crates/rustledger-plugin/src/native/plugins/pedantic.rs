@@ -2,7 +2,7 @@
 
 use crate::types::{PluginInput, PluginOp, PluginOutput};
 
-use super::super::NativePlugin;
+use super::super::{NativePlugin, RegularPlugin};
 use super::check_commodity::CheckCommodityPlugin;
 use super::leaf_only::LeafOnlyPlugin;
 use super::no_duplicates::NoDuplicatesPlugin;
@@ -71,3 +71,5 @@ impl NativePlugin for PedanticPlugin {
         }
     }
 }
+
+impl RegularPlugin for PedanticPlugin {}

@@ -3055,7 +3055,10 @@ fn test_registry_finds_all_plugins() {
     ];
 
     for name in &plugin_names {
-        assert!(registry.find(name).is_some(), "should find plugin: {name}");
+        assert!(
+            registry.find_any(name).is_some(),
+            "should find plugin: {name}"
+        );
     }
 }
 
@@ -3063,8 +3066,12 @@ fn test_registry_finds_all_plugins() {
 fn test_registry_finds_with_beancount_prefix() {
     let registry = NativePluginRegistry::new();
 
-    assert!(registry.find("beancount.plugins.leafonly").is_some());
-    assert!(registry.find("beancount.plugins.noduplicates").is_some());
+    assert!(registry.find_any("beancount.plugins.leafonly").is_some());
+    assert!(
+        registry
+            .find_any("beancount.plugins.noduplicates")
+            .is_some()
+    );
 }
 
 #[test]
@@ -3085,7 +3092,7 @@ fn test_auto_accounts_generates_opens() {
     use rustledger_plugin::*;
 
     let registry = NativePluginRegistry::new();
-    let plugin: &dyn NativePlugin = registry.find("auto_accounts").unwrap();
+    let plugin: &dyn NativePlugin = registry.find_any("auto_accounts").unwrap();
 
     // Create test input with transaction using unopened accounts
     let input = PluginInput {
@@ -3185,7 +3192,7 @@ fn test_auto_accounts_same_date_ordering() {
     use rustledger_plugin::*;
 
     let registry = NativePluginRegistry::new();
-    let plugin: &dyn NativePlugin = registry.find("auto_accounts").unwrap();
+    let plugin: &dyn NativePlugin = registry.find_any("auto_accounts").unwrap();
 
     // Input: existing open + transaction that uses new account on same date as first use
     let input = PluginInput {

@@ -203,7 +203,7 @@ proptest! {
 
         // Use a simple plugin that doesn't reorder
         let registry = NativePluginRegistry::new();
-        if let Some(plugin) = registry.find("implicit_prices") {
+        if let Some(plugin) = registry.find_any("implicit_prices") {
             let input = make_input(directives);
             let input_dirs = input.directives.clone();
             let output = plugin.process(input);
@@ -247,12 +247,12 @@ proptest! {
         let registry = NativePluginRegistry::new();
 
         // First, run implicit_prices
-        let plugin1 = registry.find("implicit_prices").unwrap();
+        let plugin1 = registry.find_any("implicit_prices").unwrap();
         let input1 = make_input(directives.clone());
         let _output1 = plugin1.process(input1);
 
         // Then run a different plugin on the SAME original input
-        let plugin2 = registry.find("auto_accounts").unwrap();
+        let plugin2 = registry.find_any("auto_accounts").unwrap();
         let input2 = make_input(directives);
         let _output2 = plugin2.process(input2);
 
@@ -280,7 +280,7 @@ proptest! {
 
         // Test a few specific plugins
         for plugin_name in &["implicit_prices", "auto_accounts", "noduplicates"] {
-            if let Some(plugin) = registry.find(plugin_name) {
+            if let Some(plugin) = registry.find_any(plugin_name) {
                 let input = make_input(directives.clone());
                 let input_dirs = input.directives.clone();
                 let output = plugin.process(input);
@@ -312,7 +312,7 @@ proptest! {
             make_transaction(&date, "Test", &amount, "Expenses:Food"),
         ];
 
-        if let Some(plugin) = registry.find("implicit_prices") {
+        if let Some(plugin) = registry.find_any("implicit_prices") {
             let input = make_input(directives);
 
             let output1 = plugin.process(input.clone());
@@ -355,8 +355,8 @@ proptest! {
     ) {
         let registry = NativePluginRegistry::new();
 
-        let plugin1 = registry.find(plugin_name);
-        let plugin2 = registry.find(plugin_name);
+        let plugin1 = registry.find_any(plugin_name);
+        let plugin2 = registry.find_any(plugin_name);
 
         match (plugin1, plugin2) {
             (Some(p1), Some(p2)) => {
@@ -388,10 +388,10 @@ proptest! {
 
         // With prefix
         let prefixed = format!("beancount.plugins.{plugin_name}");
-        let with_prefix = registry.find(&prefixed);
+        let with_prefix = registry.find_any(&prefixed);
 
         // Without prefix
-        let without_prefix = registry.find(plugin_name);
+        let without_prefix = registry.find_any(plugin_name);
 
         match (with_prefix, without_prefix) {
             (Some(p1), Some(p2)) => {

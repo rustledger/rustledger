@@ -2,7 +2,7 @@
 
 use crate::types::{DirectiveData, DirectiveWrapper, PluginInput, PluginOp, PluginOutput};
 
-use super::super::NativePlugin;
+use super::super::{NativePlugin, RegularPlugin};
 
 /// Plugin that auto-generates currency trading account postings.
 ///
@@ -314,6 +314,8 @@ impl NativePlugin for CurrencyAccountsPlugin {
         }
     }
 }
+
+impl RegularPlugin for CurrencyAccountsPlugin {}
 
 #[cfg(test)]
 mod currency_accounts_tests {

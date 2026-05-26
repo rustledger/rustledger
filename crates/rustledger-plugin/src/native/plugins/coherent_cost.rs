@@ -2,7 +2,7 @@
 
 use crate::types::{DirectiveData, PluginError, PluginInput, PluginOp, PluginOutput};
 
-use super::super::NativePlugin;
+use super::super::{NativePlugin, RegularPlugin};
 
 /// Plugin that ensures currencies are tracked consistently with cost or price-only.
 ///
@@ -73,3 +73,5 @@ impl NativePlugin for CoherentCostPlugin {
         }
     }
 }
+
+impl RegularPlugin for CoherentCostPlugin {}

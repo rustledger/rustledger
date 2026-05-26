@@ -308,7 +308,7 @@ pub fn run_plugin(source: &str, plugin_name: &str) -> Result<JsValue, JsError> {
 
     // Find and run the plugin
     let registry = NativePluginRegistry::new();
-    let Some(plugin) = registry.find(plugin_name) else {
+    let Some(plugin) = registry.find_any(plugin_name) else {
         let result = PluginResult {
             directives: Vec::new(),
             errors: vec![Error::new(format!("Unknown plugin: {plugin_name}"))],

@@ -188,7 +188,7 @@ fn handle_load_file(params: &serde_json::Value) -> Result<serde_json::Value, Rpc
         let registry = NativePluginRegistry::new();
 
         for plugin_name in run_plugins {
-            if let Some(plugin) = registry.find(plugin_name) {
+            if let Some(plugin) = registry.find_any(plugin_name) {
                 let wrappers: Vec<_> = directives
                     .iter()
                     .enumerate()

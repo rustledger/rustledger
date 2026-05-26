@@ -8,7 +8,7 @@
 
 use crate::types::{PluginInput, PluginOp, PluginOutput};
 
-use super::super::NativePlugin;
+use super::super::{NativePlugin, RegularPlugin};
 
 /// Plugin that detects duplicate transactions based on structural hash.
 pub struct NoDuplicatesPlugin;
@@ -35,3 +35,5 @@ impl NativePlugin for NoDuplicatesPlugin {
         }
     }
 }
+
+impl RegularPlugin for NoDuplicatesPlugin {}

@@ -22,7 +22,7 @@ use crate::types::{
     PluginOutput, PostingData, TransactionData,
 };
 
-use super::super::NativePlugin;
+use super::super::{NativePlugin, RegularPlugin};
 
 /// Plugin for splitting capital losses across multiple years.
 pub struct BoxAccrualPlugin;
@@ -206,6 +206,8 @@ impl NativePlugin for BoxAccrualPlugin {
         }
     }
 }
+
+impl RegularPlugin for BoxAccrualPlugin {}
 
 /// Format a decimal number with 2 decimal places.
 fn format_decimal(d: Decimal) -> String {

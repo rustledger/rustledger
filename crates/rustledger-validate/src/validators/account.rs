@@ -35,11 +35,17 @@ pub fn validate_open(state: &mut LedgerState, open: &Open, errors: &mut Vec<Vali
         return;
     }
 
+    // Fall back to the file-level default booking method (set from
+    // `option "booking_method"`) rather than `BookingMethod::default()`
+    // (STRICT). Without this, opening `2000-01-01 open Assets:Foo` under
+    // `option "booking_method" "NONE"` would still validate against
+    // STRICT semantics and re-raise the lot-matching errors the booker
+    // just skipped — see issue #1182.
     let booking = open
         .booking
         .as_ref()
         .and_then(|b| b.parse::<BookingMethod>().ok())
-        .unwrap_or_default();
+        .unwrap_or(state.options.default_booking_method);
 
     state.accounts.insert(
         open.account.clone(),

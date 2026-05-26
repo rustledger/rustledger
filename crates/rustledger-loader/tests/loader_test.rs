@@ -738,6 +738,42 @@ fn test_booking_method_none() {
     );
 }
 
+/// Regression for #1182. The reporter's fixture (two `{{ total }}`
+/// buys followed by a `{{ total }}` sell against the accumulated
+/// inventory) failed end-to-end under `option "booking_method" "NONE"`:
+///
+/// 1. The booker treated the sell as a reduction (signs differ),
+///    matched FIFO across both buy lots, and rewrote the cost spec
+///    from `{{ 210 GBP }}` to `PerUnit { 10 GBP }` (first lot's
+///    per-unit). The residual calc then weighed the posting at
+///    `-10*10 + -5*12 = -160 GBP` against `Assets:Cash +210 GBP`,
+///    producing a phantom E3001 imbalance of 50 GBP.
+/// 2. After gating the booker on `BookingMethod::None`, the validator's
+///    parallel lot-match pass still ran (because `AccountState.booking`
+///    defaulted to STRICT — the file-level option wasn't plumbed
+///    through), re-raising E4001/E4003.
+///
+/// The fix gates both paths on `method != BookingMethod::None` AND
+/// plumbs the file-level default into `ValidationOptions` so opens
+/// without an explicit method inherit it.
+///
+/// Asserts no error of any kind, including E3001/E4001/E4003 — they all
+/// regress the same root cause from different angles.
+#[test]
+fn test_booking_none_total_cost_no_lot_matching_1182() {
+    let path = fixtures_path("booking_none_total_cost_1182.beancount");
+    let options = LoadOptions::default();
+
+    let ledger = load(&path, &options).expect("should load and process");
+
+    assert!(
+        ledger.errors.is_empty(),
+        "issue #1182: NONE booking with {{{{ total }}}} reductions must \
+         not raise any errors — got: {:?}",
+        ledger.errors,
+    );
+}
+
 #[test]
 fn test_booking_method_strict_with_size() {
     let path = fixtures_path("booking_strict_with_size.beancount");

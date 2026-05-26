@@ -285,10 +285,30 @@ pub fn process(raw: LoadResult, options: &LoadOptions) -> Result<Ledger, Process
     // commodities, pending pads, accumulated tolerances) into the late
     // phase at step 5 so balance assertions and inventory updates see
     // everything the early phase recorded.
+    //
+    // Resolve the effective booking method once, here, so both the
+    // validator (early/late phases — needs it to seed each opened
+    // account's per-account booking method, see issue #1182) and the
+    // booking engine at step 4 see the same value. File-level
+    // `option "booking_method"` wins when explicitly set; otherwise
+    // the API-level `LoadOptions.booking_method` is used.
+    #[cfg(any(feature = "validation", feature = "booking"))]
+    let effective_booking_method = {
+        let file_set = raw.options.set_options.contains("booking_method");
+        if file_set {
+            raw.options
+                .booking_method
+                .parse()
+                .unwrap_or(options.booking_method)
+        } else {
+            options.booking_method
+        }
+    };
+
     #[cfg(feature = "validation")]
     let mut validation_session = if options.validate {
         Some(rustledger_validate::ValidationSession::new(
-            build_validation_options(&raw.options, &raw.source_map),
+            build_validation_options(&raw.options, &raw.source_map, effective_booking_method),
         ))
     } else {
         None
@@ -336,18 +356,8 @@ pub fn process(raw: LoadResult, options: &LoadOptions) -> Result<Ledger, Process
     // re-merged for the final `Ledger.directives` so the user still
     // sees their original input.
     #[cfg(feature = "booking")]
-    let (mut booked, failed): (Vec<Spanned<Directive>>, Vec<Spanned<Directive>>) = {
-        let file_set_booking = raw.options.set_options.contains("booking_method");
-        let effective_method = if file_set_booking {
-            raw.options
-                .booking_method
-                .parse()
-                .unwrap_or(options.booking_method)
-        } else {
-            options.booking_method
-        };
-        run_booking(directives, effective_method, &mut errors)
-    };
+    let (mut booked, failed): (Vec<Spanned<Directive>>, Vec<Spanned<Directive>>) =
+        run_booking(directives, effective_booking_method, &mut errors);
     #[cfg(not(feature = "booking"))]
     let (mut booked, failed): (Vec<Spanned<Directive>>, Vec<Spanned<Directive>>) =
         (directives, Vec::new());
@@ -1146,6 +1156,7 @@ fn sanitize_inner_posting_spans(directive: &mut Directive, source_map: &SourceMa
 fn build_validation_options(
     file_options: &Options,
     source_map: &SourceMap,
+    default_booking_method: BookingMethod,
 ) -> rustledger_validate::ValidationOptions {
     use rustledger_validate::ValidationOptions;
 
@@ -1184,6 +1195,7 @@ fn build_validation_options(
         .with_infer_tolerance_from_cost(file_options.infer_tolerance_from_cost)
         .with_tolerance_multiplier(file_options.inferred_tolerance_multiplier)
         .with_inferred_tolerance_default(file_options.inferred_tolerance_default.clone())
+        .with_default_booking_method(default_booking_method)
 }
 
 /// Convert a batch of [`rustledger_validate::ValidationError`]s into

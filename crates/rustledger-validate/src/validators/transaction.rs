@@ -481,8 +481,17 @@ pub fn update_inventories(
         // the opposite sign for the same currency. Simple (no-cost) positions
         // are ignored. This correctly handles sell-to-open (selling into empty
         // inventory) as an augmentation, not a reduction.
-        let is_reduction =
-            posting.cost.is_some() && inv.is_reduced_by(units, ReductionScope::CostBearingOnly);
+        //
+        // Under `option "booking_method" "NONE"` (issue #1182), every
+        // posting is an augmentation — NONE accumulates positions
+        // without lot matching. Mirrors the parallel guards in
+        // `rustledger-booking::book::book` and `BookingEngine::apply`.
+        // Without this gate, the validator's independent lot-matching
+        // pass would re-raise the ambiguous/no-matching-lot errors
+        // the booker just decided to skip.
+        let is_reduction = booking_method != BookingMethod::None
+            && posting.cost.is_some()
+            && inv.is_reduced_by(units, ReductionScope::CostBearingOnly);
 
         if is_reduction {
             process_inventory_reduction(inv, posting, units, booking_method, txn, errors);

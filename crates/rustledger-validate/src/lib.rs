@@ -150,6 +150,16 @@ pub struct ValidationOptions {
     /// Per-currency default tolerances (matches Python beancount's `inferred_tolerance_default`).
     /// e.g., `{"GBP": 0.004}` means GBP transactions tolerate up to 0.004 residual.
     pub inferred_tolerance_default: FxHashMap<String, Decimal>,
+    /// Default booking method for accounts without an explicit method on
+    /// their `open` directive. Sourced from the file-level
+    /// `option "booking_method"` (or the API-level `LoadOptions`
+    /// default). Mirrors the resolved `effective_method` the booking
+    /// engine sees — without this, the validator's per-account
+    /// lot-matching pass falls back to `BookingMethod::default()`
+    /// (i.e., STRICT) regardless of the file's stated method,
+    /// re-raising the very `NoMatchingLot`/`AmbiguousMatch` errors
+    /// the booker just decided to skip under `NONE` (issue #1182).
+    pub default_booking_method: BookingMethod,
 }
 
 impl Default for ValidationOptions {
@@ -171,6 +181,7 @@ impl Default for ValidationOptions {
             infer_tolerance_from_cost: false,
             tolerance_multiplier: Decimal::new(5, 1), // 0.5
             inferred_tolerance_default: FxHashMap::default(),
+            default_booking_method: BookingMethod::default(),
         }
     }
 }
@@ -229,6 +240,16 @@ impl ValidationOptions {
     #[must_use]
     pub fn with_inferred_tolerance_default(mut self, defaults: FxHashMap<String, Decimal>) -> Self {
         self.inferred_tolerance_default = defaults;
+        self
+    }
+
+    /// Set the default booking method (file-level
+    /// `option "booking_method"`). Accounts without an explicit method
+    /// on their `open` directive inherit this rather than falling
+    /// through to `BookingMethod::default()`.
+    #[must_use]
+    pub const fn with_default_booking_method(mut self, method: BookingMethod) -> Self {
+        self.default_booking_method = method;
         self
     }
 }

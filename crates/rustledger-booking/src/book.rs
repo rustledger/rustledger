@@ -216,7 +216,21 @@ impl BookingEngine {
                     // Check if these units reduce existing cost-bearing inventory lots.
                     // Only positions with a cost basis are considered; simple (no-cost)
                     // positions are ignored to avoid misclassifying augmentations.
-                    let is_reduction = inv.is_reduced_by(units, ReductionScope::CostBearingOnly);
+                    //
+                    // Under `option "booking_method" "NONE"` (issue #1182),
+                    // reduction matching is skipped entirely: NONE means
+                    // "accumulate positions without booking against
+                    // existing lots." Otherwise the booker would replace
+                    // the user-written `{{ total }}` cost spec with a
+                    // FIFO-matched per-unit (line ~282 below), and the
+                    // residual calculation downstream would weigh the
+                    // posting by the matched lots' costs instead of the
+                    // user's stated total — producing a phantom
+                    // E3001 imbalance for ledgers that round-trip
+                    // cleanly through Python beancount.
+                    let method = self.method_for(&posting.account);
+                    let is_reduction = method != BookingMethod::None
+                        && inv.is_reduced_by(units, ReductionScope::CostBearingOnly);
 
                     if is_reduction {
                         // Use reduce (not try_reduce) to actually update the working inventory.
@@ -228,7 +242,7 @@ impl BookingEngine {
                         // pipeline path in `rustledger check` filters failed transactions
                         // out of the validator's input to avoid double-reporting against
                         // the validator's independent lot-matching pass.
-                        let method = self.method_for(&posting.account);
+                        // (`method` is resolved above next to the NONE-method gate.)
                         let booking_result = inv
                             .reduce(units, Some(cost_spec), method)
                             .map_err(|e| convert_core_booking_error(e, &posting.account))?;
@@ -444,7 +458,13 @@ impl BookingEngine {
                 // signs differ for the same currency. Only cost-bearing positions
                 // are considered, so simple (no-cost) positions don't trigger
                 // false reduction detection.
-                let is_reduction = posting.cost.is_some()
+                //
+                // NONE booking (issue #1182) treats every posting as an
+                // augmentation. Mixed-sign positions accumulate in the
+                // inventory — Python beancount's semantic for the NONE
+                // method, which the parallel guard in `book()` mirrors.
+                let is_reduction = method != BookingMethod::None
+                    && posting.cost.is_some()
                     && inv.is_reduced_by(units, ReductionScope::CostBearingOnly);
 
                 if is_reduction {

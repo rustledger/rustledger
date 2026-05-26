@@ -1,0 +1,27 @@
+; Regression fixture for issue #1182.
+;
+; Under `option "booking_method" "NONE"`, a sell with a `{{ total }}` cost
+; spec against existing positive-quantity inventory should NOT trigger
+; lot-matching. Pre-fix, the booker treated it as a reduction and
+; replaced the user-written total with a FIFO-derived per-unit cost,
+; producing a phantom E3001 (residual 50 GBP). The validator's parallel
+; lot-match pass independently raised E4001/E4003.
+;
+; This is the reporter's exact fixture from the GitHub issue.
+
+option "booking_method" "NONE"
+
+2000-01-01 open Assets:Cash
+2000-01-01 open Assets:Broker
+
+2024-11-01 * "Broker" "Buy"
+  Assets:Broker  10 X {{ 100 GBP }}
+  Assets:Cash  -100 GBP
+
+2024-11-01 * "Broker" "Buy"
+  Assets:Broker  10 X {{ 120 GBP }}
+  Assets:Cash  -120 GBP
+
+2024-11-01 * "Broker" "Sell"
+  Assets:Broker  -15 X {{ 210 GBP }}
+  Assets:Cash  210 GBP

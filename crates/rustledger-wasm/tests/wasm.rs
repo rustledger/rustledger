@@ -2,6 +2,16 @@
 //!
 //! These tests run in an actual WASM environment (browser or Node.js).
 //! Run with: `wasm-pack test --node` or `wasm-pack test --headless --firefox`
+//!
+//! **Configure asymmetry vs. `tests/wasm_meta.rs`**: this file uses
+//! `wasm_bindgen_test_configure!(run_in_browser)` (browser-only).
+//! CI's browser test job is disabled (Issue #261), so the tests
+//! here effectively skip on CI today. `tests/wasm_meta.rs` is
+//! node-targeting (no `run_in_browser`) so it runs under
+//! `wasm-pack test --node` and gives the metadata wire shape real
+//! CI coverage. Until #261 lands, new tests that need CI signal
+//! should go in `wasm_meta.rs` (or another node-targeting file)
+//! rather than here.
 
 #![cfg(target_arch = "wasm32")]
 

@@ -138,6 +138,138 @@ fn directive_meta_absent_when_empty_1168() {
 }
 
 #[wasm_bindgen_test]
+fn amount_metadata_exposes_as_object_in_js_1168() {
+    // The `MetaValueJson::Amount` variant must reach JS as a plain
+    // object `{number, currency}` — not as a string, not as a
+    // wrapped wasm-bindgen reference. This pins serde-wasm-bindgen's
+    // lowering of the struct-style untagged variant.
+    let source = r#"
+2024-01-01 open Assets:Bank USD
+2024-01-15 * "Stock buy"
+  cost-basis: 1500.00 USD
+  Assets:Bank   100.00 USD
+  Assets:Bank  -100.00 USD
+"#;
+
+    let result = rustledger_wasm::parse(source).expect("parse should not throw");
+    let errors = get_field(&result, "errors");
+    assert_eq!(get_array_length(&errors), 0, "fixture must parse cleanly",);
+
+    let ledger = get_field(&result, "ledger");
+    let directives = get_field(&ledger, "directives");
+    // Open at index 0, transaction at index 1.
+    let txn = js_sys::Array::from(&directives).get(1);
+    assert_eq!(get_field(&txn, "type"), JsValue::from_str("transaction"));
+
+    let txn_meta = get_field(&txn, "meta");
+    let cost_basis = get_field(&txn_meta, "cost-basis");
+    // Must be an object — not a string, not undefined.
+    assert!(
+        cost_basis.is_object(),
+        "Amount metadata must be a JS object {{number, currency}}, got {cost_basis:?}",
+    );
+    assert!(
+        cost_basis.as_string().is_none(),
+        "Amount metadata must NOT be a string (would defeat the whole point of the variant)",
+    );
+    let number = get_field(&cost_basis, "number");
+    let currency = get_field(&cost_basis, "currency");
+    assert_eq!(number.as_string().as_deref(), Some("1500.00"));
+    assert_eq!(currency.as_string().as_deref(), Some("USD"));
+}
+
+#[wasm_bindgen_test]
+fn null_metadata_exposes_as_js_null_1168() {
+    // `MetaValue::None` reaches the host when a metadata key is
+    // parsed but no value follows (`key:\n`). Per parser.rs:1043,
+    // that's the production rule. The wire side must lower this to
+    // JS `null` — not `undefined`, not the string `"null"`. JS
+    // consumers distinguish:
+    //   - `meta['key'] === null` → key was explicitly value-less
+    //   - `meta['key'] === undefined` → key was never set
+    let source = "\
+2024-01-01 open Assets:Bank USD
+  unused-flag:
+";
+
+    let result = rustledger_wasm::parse(source).expect("parse should not throw");
+    let errors = get_field(&result, "errors");
+    assert_eq!(
+        get_array_length(&errors),
+        0,
+        "fixture must parse cleanly (key-without-value produces MetaValue::None)",
+    );
+
+    let ledger = get_field(&result, "ledger");
+    let directives = get_field(&ledger, "directives");
+    let open = js_sys::Array::from(&directives).get(0);
+    let meta = get_field(&open, "meta");
+
+    let value = get_field(&meta, "unused-flag");
+    assert!(
+        value.is_null(),
+        "MetaValue::None must reach JS as null, got {value:?}",
+    );
+    // Explicit guards against the most likely degenerate mappings.
+    assert!(
+        !value.is_undefined(),
+        "null metadata must be present (null), not absent (undefined)",
+    );
+    assert_ne!(value.as_string().as_deref(), Some("null"));
+    assert_ne!(value.as_string().as_deref(), Some(""));
+}
+
+#[wasm_bindgen_test]
+fn account_metadata_flattens_to_string_in_js_1168() {
+    // Documented behavior: `MetaValue::Account` flattens to a JS
+    // string on the wire (lossy by design, mirrors FFI-WASI). Pin
+    // it so a future tightening that adds an Account variant to
+    // MetaValueJson doesn't silently change JS consumer behavior.
+    let source = r#"
+2024-01-01 open Assets:Bank USD
+  source-account: Assets:Other
+"#;
+
+    let result = rustledger_wasm::parse(source).expect("parse should not throw");
+    let errors = get_field(&result, "errors");
+    assert_eq!(get_array_length(&errors), 0);
+
+    let ledger = get_field(&result, "ledger");
+    let directives = get_field(&ledger, "directives");
+    let open = js_sys::Array::from(&directives).get(0);
+    let meta = get_field(&open, "meta");
+
+    let source_account = get_field(&meta, "source-account");
+    assert_eq!(
+        source_account.as_string().as_deref(),
+        Some("Assets:Other"),
+        "Account metadata must reach JS as a plain string",
+    );
+}
+
+#[wasm_bindgen_test]
+fn open_booking_is_clean_string_in_js() {
+    // Pre-fix the booking field was Debug-formatted, producing
+    // `"\"STRICT\""` on the JS side. Pin the clean form.
+    let source = "2024-01-01 open Assets:Bank USD \"STRICT\"\n";
+
+    let result = rustledger_wasm::parse(source).expect("parse should not throw");
+    let errors = get_field(&result, "errors");
+    assert_eq!(get_array_length(&errors), 0);
+
+    let ledger = get_field(&result, "ledger");
+    let directives = get_field(&ledger, "directives");
+    let open = js_sys::Array::from(&directives).get(0);
+
+    let booking = get_field(&open, "booking");
+    assert_eq!(
+        booking.as_string().as_deref(),
+        Some("STRICT"),
+        "booking must be the literal source token, not Debug-formatted (no leading `\\\"`)",
+    );
+}
+
+#[wasm_bindgen_test]
 fn custom_directive_values_exposed_1168() {
     // Pre-#1168 the `Custom` directive's positional values were
     // dropped entirely from JSON output. Pin the new wire shape:

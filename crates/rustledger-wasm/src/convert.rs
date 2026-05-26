@@ -123,7 +123,12 @@ pub fn directive_to_json(directive: &Directive) -> DirectiveJson {
             date: open.date.to_string(),
             account: open.account.to_string(),
             currencies: open.currencies.iter().map(ToString::to_string).collect(),
-            booking: open.booking.as_ref().map(|b| format!("{b:?}")),
+            // Pre-fix this Debug-formatted the inner String, which
+            // adds quotes — JS consumers saw `booking: "\"STRICT\""`
+            // instead of `"STRICT"`. Matches the FFI-WASI shape now
+            // (no quote-wrapping). Issue #1200 audit caught it; the
+            // glaring-bug-in-same-crate gets fixed alongside #1168.
+            booking: open.booking.clone(),
             meta: metadata_to_json(&open.meta),
         },
         Directive::Close(close) => DirectiveJson::Close {

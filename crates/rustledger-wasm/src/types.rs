@@ -38,10 +38,12 @@ pub struct LedgerOptions {
 
 /// Metadata-value wire format for WASM consumers.
 ///
-/// Mirrors the JSON shape that the FFI-WASI bindings emit via
-/// `meta_value_to_json` so consumers writing portable code (one
-/// frontend for both rustledger-wasm and rustledger-ffi-wasi) see
-/// identical metadata values across bindings.
+/// **JSON output is byte-equivalent to FFI-WASI's
+/// `meta_value_to_json`** — JS clients writing portable code see
+/// identical metadata values from both bindings. The Rust-side
+/// types are independent though: FFI-WASI emits
+/// `serde_json::Value` (untyped), this crate emits a typed enum.
+/// Unifying the source-of-truth is tracked by issue #1200 item 2.
 ///
 /// The host's [`rustledger_core::MetaValue`] is richer than the wire
 /// type — `Account`/`Currency`/`Tag`/`Link`/`Date`/`Number` all
@@ -233,6 +235,12 @@ impl DirectiveJson {
     /// that match so callers don't reimplement it (and so adding a
     /// future variant fails compilation here, not at every call
     /// site).
+    ///
+    /// **Rust-only API**: not exposed to JavaScript via
+    /// `#[wasm_bindgen]`. JS consumers read `directive.meta`
+    /// directly off the serialized object — `meta()` only serves
+    /// Rust callers (tests in this crate; downstream Rust crates
+    /// that consume the WASM-crate types directly).
     #[must_use]
     pub fn meta(&self) -> &HashMap<String, MetaValueJson> {
         match self {

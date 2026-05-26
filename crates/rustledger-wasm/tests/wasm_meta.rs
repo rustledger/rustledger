@@ -33,6 +33,23 @@ fn get_array_length(obj: &JsValue) -> u32 {
     js_sys::Array::from(obj).length()
 }
 
+/// Find the first directive whose `type` field equals `target`.
+///
+/// Index-based access (`directives[0]`) is fragile to parser
+/// ordering changes; type-filtering is robust. Tests that need a
+/// specific directive type from a multi-directive fixture should
+/// use this helper.
+fn find_directive_by_type(directives: &JsValue, target: &str) -> JsValue {
+    let arr = js_sys::Array::from(directives);
+    for i in 0..arr.length() {
+        let d = arr.get(i);
+        if get_field(&d, "type").as_string().as_deref() == Some(target) {
+            return d;
+        }
+    }
+    panic!("no directive of type `{target}` found in fixture");
+}
+
 #[wasm_bindgen_test]
 fn directive_meta_exposed_to_js_1168() {
     // Fixture covers every wire shape `MetaValueJson` emits:
@@ -60,13 +77,12 @@ fn directive_meta_exposed_to_js_1168() {
 
     let ledger = get_field(&result, "ledger");
     let directives = get_field(&ledger, "directives");
-    let directives_arr = js_sys::Array::from(&directives);
 
     // Open directive: `description: "Main account"` lands on
     // `meta.description` as a JS string (not as wrapped JSON or
-    // a Map<> entry).
-    let open = directives_arr.get(0);
-    assert_eq!(get_field(&open, "type"), JsValue::from_str("open"));
+    // a Map<> entry). Type-filter rather than index-filter so a
+    // future parser reordering doesn't break the test.
+    let open = find_directive_by_type(&directives, "open");
     let open_meta = get_field(&open, "meta");
     assert!(!open_meta.is_undefined(), "open.meta must be present");
     let description = get_field(&open_meta, "description");
@@ -79,7 +95,7 @@ fn directive_meta_exposed_to_js_1168() {
     // Commodity directive: `precision: 2` is a Number host-side;
     // the FFI-WASI-compatible wire format stringifies numbers to
     // preserve precision. Expect a string `"2"` on the JS side.
-    let commodity = directives_arr.get(1);
+    let commodity = find_directive_by_type(&directives, "commodity");
     let commodity_meta = get_field(&commodity, "meta");
     let precision = get_field(&commodity_meta, "precision");
     assert_eq!(
@@ -89,7 +105,7 @@ fn directive_meta_exposed_to_js_1168() {
     );
 
     // Transaction-level meta: string + boolean.
-    let txn = directives_arr.get(2);
+    let txn = find_directive_by_type(&directives, "transaction");
     let txn_meta = get_field(&txn, "meta");
     assert_eq!(
         get_field(&txn_meta, "trip").as_string().as_deref(),
@@ -157,9 +173,7 @@ fn amount_metadata_exposes_as_object_in_js_1168() {
 
     let ledger = get_field(&result, "ledger");
     let directives = get_field(&ledger, "directives");
-    // Open at index 0, transaction at index 1.
-    let txn = js_sys::Array::from(&directives).get(1);
-    assert_eq!(get_field(&txn, "type"), JsValue::from_str("transaction"));
+    let txn = find_directive_by_type(&directives, "transaction");
 
     let txn_meta = get_field(&txn, "meta");
     let cost_basis = get_field(&txn_meta, "cost-basis");

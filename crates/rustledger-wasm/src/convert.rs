@@ -537,6 +537,27 @@ mod tests {
         ));
     }
 
+    /// The wire contract on `MetaValue::Number` is "stringify to
+    /// preserve `Decimal` precision" — a JS client sending raw JSON
+    /// `42` (number, not string) must NOT silently deserialize as
+    /// some `MetaValueJson` variant. There's intentionally no numeric
+    /// arm; the four variants (`String`/`Bool`/`Amount`/`Null`) only
+    /// match string/bool/object/null JSON shapes. Pin the rejection
+    /// so a future "helpful" addition of a numeric arm doesn't
+    /// silently erode precision on the round-trip.
+    #[test]
+    fn meta_value_json_rejects_raw_json_number() {
+        let err = serde_json::from_str::<MetaValueJson>("42");
+        assert!(
+            err.is_err(),
+            "raw JSON number must fail deserialize (wire contract: numbers \
+             are strings to preserve Decimal precision), got {err:?}",
+        );
+
+        // Negative + fractional just for thoroughness — same rule.
+        assert!(serde_json::from_str::<MetaValueJson>("-1.5").is_err());
+    }
+
     /// `Custom.values` is a positional list — a `MetaValue::None` in
     /// the middle of the list must keep its position so JS consumers
     /// see `[..., null, ...]` rather than the position silently

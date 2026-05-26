@@ -88,7 +88,10 @@ pub enum MetaValueJson {
         /// The currency code.
         currency: String,
     },
-    /// Absent / null metadata value.
+    /// Absent / null metadata value. Deserializes from JSON `null`;
+    /// serializes to JSON `null`. (Serde supports unit variants in
+    /// untagged enums for null values specifically — a less common
+    /// pattern than struct/tuple variants but well-defined.)
     Null,
 }
 
@@ -214,11 +217,17 @@ pub enum DirectiveJson {
     /// keyword (pre-#1168 these were dropped entirely from the JSON
     /// output). Each value follows the same `MetaValueJson` shape as
     /// metadata — strings, bools, amounts, or null.
+    ///
+    /// Both `values` and `meta` use `skip_serializing_if` to omit
+    /// the field when empty (consistent shape: a Custom directive
+    /// with no positional args and no metadata serializes as
+    /// `{type, date, custom_type}`, matching what the TS shape
+    /// declares via `values?` / `meta?`).
     #[serde(rename = "custom")]
     Custom {
         date: String,
         custom_type: String,
-        #[serde(default)]
+        #[serde(skip_serializing_if = "Vec::is_empty", default)]
         values: Vec<MetaValueJson>,
         #[serde(skip_serializing_if = "HashMap::is_empty", default)]
         meta: HashMap<String, MetaValueJson>,

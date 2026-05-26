@@ -469,7 +469,7 @@ version = "0.17.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.hermit-abi]]
-version = "0.5.2"
+version = "0.3.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.hmac]]
@@ -721,7 +721,7 @@ version = "0.2.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.num_cpus]]
-version = "1.17.0"
+version = "1.13.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.ofxy]]
@@ -745,7 +745,7 @@ version = "0.9.12"
 criteria = "safe-to-deploy"
 
 [[exemptions.paste]]
-version = "1.0.15"
+version = "1.0.10"
 criteria = "safe-to-deploy"
 
 [[exemptions.pbkdf2]]

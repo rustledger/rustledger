@@ -107,7 +107,14 @@ smallvec = "1"
 # Persistent (structurally-shared) collections — O(1) clone for tree-based
 # vectors, used by Inventory.positions so JOURNAL-style row-per-snapshot
 # patterns become O(N log N) instead of O(N²). See issue #1086.
-im = { version = "15", features = ["serde"] }
+#
+# `imbl` is the maintained fork of `im` (which is dormant — last release
+# Oct 2022 pinning `rand_core` 0.6 → `getrandom` 0.2). The Vector /
+# HashMap / OrdMap APIs we use are identical between the two. Swapping
+# removes the transitive `getrandom 0.2` pin, unblocking the upgrade to
+# getrandom 0.4 (which the WASM `getrandom_backend = "wasm_js"` story
+# requires for new browsers).
+imbl = { version = "7", features = ["serde"] }
 
 # Testing
 proptest = "1"

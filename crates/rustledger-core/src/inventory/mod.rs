@@ -4,7 +4,7 @@
 //! [`Position`]s. It provides methods for adding and reducing positions
 //! using different booking methods (FIFO, LIFO, STRICT, NONE).
 
-use im::Vector;
+use imbl::Vector;
 use rust_decimal::Decimal;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
@@ -314,7 +314,7 @@ pub struct Inventory {
     /// check`; the users who feel it are users with very large inventories,
     /// the same users who hit the JOURNAL OOM today.
     ///
-    /// `rkyv` derives were dropped because (a) `im::Vector` has no `rkyv`
+    /// `rkyv` derives were dropped because (a) `imbl::Vector` has no `rkyv`
     /// impl and (b) no code path currently archives an `Inventory`
     /// (confirmed in the `SmallVec` experiment for #1069). Pre-1.0 break;
     /// downstream callers archiving `Inventory` directly will need to
@@ -353,7 +353,7 @@ impl Inventory {
     ///
     /// Previously returned `&[Position]`; now returns an iterator
     /// because the underlying storage is a tree-based persistent
-    /// vector (`im::Vector`) that doesn't expose a contiguous slice.
+    /// vector (`imbl::Vector`) that doesn't expose a contiguous slice.
     /// Most callers already iterate — for callers that need
     /// random-access / indexed / `.len()` slice semantics, see
     /// [`Self::position_list`].
@@ -374,8 +374,8 @@ impl Inventory {
 
     /// Get mutable access to the underlying positions vector.
     ///
-    /// Returns `&mut im::Vector<Position>` (was `&mut Vec<Position>`
-    /// before issue #1086). `im::Vector` supports the same surface
+    /// Returns `&mut imbl::Vector<Position>` (was `&mut Vec<Position>`
+    /// before issue #1086). `imbl::Vector` supports the same surface
     /// for `push_back`, `pop_back`, `retain`, indexed access, and
     /// iteration — but mutations are O(log N) with structural sharing
     /// instead of O(1) amortized.

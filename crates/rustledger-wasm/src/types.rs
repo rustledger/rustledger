@@ -53,11 +53,15 @@ pub struct LedgerOptions {
 ///
 /// Untagged on the wire: `"hello"` serializes as a string,
 /// `true` as a boolean, `null` as null, and an [`AmountValue`]
-/// `{number,currency}` as a plain object. This matches the
-/// `Record<string, string | number | boolean | null | Amount>`
-/// TypeScript shape (issue #1168 proposed
-/// `string | number | boolean | null`; we additionally support
-/// `Amount` so cost-bearing metadata round-trips cleanly).
+/// `{number,currency}` as a plain object. The TypeScript union is
+/// `Record<string, string | boolean | {number, currency} | null>` —
+/// no raw JSON number arm because `MetaValue::Number` (`Decimal`)
+/// stringifies to preserve precision. Issue #1168 proposed
+/// `string | number | boolean | null`; we substitute the
+/// `{number,currency}` shape for `number` so cost-bearing metadata
+/// round-trips cleanly and so JS numeric literals don't silently
+/// alias into the wire (see the `meta_value_json_rejects_raw_json_number`
+/// test).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum MetaValueJson {

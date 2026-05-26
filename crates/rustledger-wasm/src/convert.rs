@@ -262,8 +262,8 @@ pub fn value_to_cell(value: &rustledger_query::Value) -> CellValue {
 }
 
 // The convert.rs test module runs on the host only: the new #1168
-// tests use `serde_json` and `rust_decimal_macros`, which are gated
-// as host-only dev-deps to keep the wasm32 test build lean (see
+// tests use `serde_json`, which is gated as a host-only dev-dep to
+// keep the wasm32 test build lean (see
 // `crates/rustledger-wasm/Cargo.toml`). The shape under test is
 // target-independent, so the host coverage is sufficient.
 #[cfg(all(test, not(target_arch = "wasm32")))]

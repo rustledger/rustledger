@@ -47,7 +47,7 @@ Create a new file in `crates/rustledger-plugin/src/native/plugins/`:
 ````rust
 // crates/rustledger-plugin/src/native/plugins/my_plugin.rs
 
-use crate::native::NativePlugin;
+use crate::native::{NativePlugin, RegularPlugin};
 use crate::types::{PluginError, PluginErrorSeverity, PluginInput, PluginOp, PluginOutput};
 
 /// My Plugin - brief description.
@@ -88,11 +88,13 @@ impl NativePlugin for MyPlugin {
         let ops = (0..input.directives.len()).map(PluginOp::Keep).collect();
         PluginOutput { ops, errors }
     }
-
-    // Override `is_synth() -> true` if this plugin synthesizes directives
-    // (e.g. injected `Open`s) that the loader's pre-booking Early validation
-    // depends on. Defaults to false (post-booking pass).
 }
+
+// Mark the plugin's pass — runs post-booking, like most plugins.
+// If your plugin synthesizes directives (e.g. injected `Open`s) that the
+// loader's pre-booking Early validation depends on, implement `SynthPlugin`
+// instead.
+impl RegularPlugin for MyPlugin {}
 ````
 
 ### 2. Register the Plugin
@@ -107,20 +109,25 @@ mod my_plugin;
 pub use my_plugin::MyPlugin;
 ```
 
-Then register it in `crates/rustledger-plugin/src/native/mod.rs`:
+Then register it in `crates/rustledger-plugin/src/native/mod.rs`. The registry
+holds two separately-typed `Vec`s, one per pass — add your plugin to the
+`regular` Vec (or `synth`, if it implements `SynthPlugin`):
 
 ```rust
 impl NativePluginRegistry {
     pub fn new() -> Self {
-        Self {
-            plugins: vec![
-                // ... existing plugins ...
-                Box::new(ImplicitPricesPlugin),
-                Box::new(CheckCommodityPlugin),
-                // Add your plugin to the list
-                Box::new(MyPlugin),
-            ],
-        }
+        let synth: Vec<Box<dyn SynthPlugin>> = vec![
+            Box::new(AutoAccountsPlugin),
+            // ... other synth plugins ...
+        ];
+        let regular: Vec<Box<dyn RegularPlugin>> = vec![
+            // ... existing regular plugins ...
+            Box::new(ImplicitPricesPlugin),
+            Box::new(CheckCommodityPlugin),
+            // Add your plugin to the appropriate list
+            Box::new(MyPlugin),
+        ];
+        Self { synth, regular }
     }
 }
 ```
@@ -345,8 +352,15 @@ Keep every input index and append `PluginOp::Insert(wrapper)` for each
 synthesized directive. Inserted directives get `SYNTHESIZED_FILE_ID`
 and a zero span. If your plugin synthesizes `Open` or `Document`
 directives that the loader's pre-booking Early validation depends on,
-also override `is_synth(&self) -> bool { true }` so the loader runs it
-in the synth pass.
+implement `SynthPlugin` (instead of `RegularPlugin`) so the loader runs it
+in the synth pass:
+
+```rust
+impl SynthPlugin for MyPlugin {}
+```
+
+Implement exactly one of `SynthPlugin` or `RegularPlugin` — the registry's
+typed `Vec`s reject anything else at compile time.
 
 ```rust
 fn process(&self, input: PluginInput) -> PluginOutput {

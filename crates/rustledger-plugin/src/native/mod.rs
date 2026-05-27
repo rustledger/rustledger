@@ -205,18 +205,9 @@ impl NativePluginRegistry {
     /// [`Self::find_regular`] instead.
     pub fn find_any(&self, name: &str) -> Option<&dyn NativePlugin> {
         let short_name = plugin_short_name(name);
-        if let Some(p) = self
-            .synth
-            .iter()
-            .find(|p| p.name() == short_name)
-            .map(std::convert::AsRef::as_ref)
-        {
-            return Some(p as &dyn NativePlugin);
-        }
-        self.regular
-            .iter()
-            .find(|p| p.name() == short_name)
-            .map(|p| std::convert::AsRef::as_ref(p) as &dyn NativePlugin)
+        let synth = self.synth.iter().map(|p| p.as_ref() as &dyn NativePlugin);
+        let regular = self.regular.iter().map(|p| p.as_ref() as &dyn NativePlugin);
+        synth.chain(regular).find(|p| p.name() == short_name)
     }
 
     /// List all available plugins (both passes).

@@ -136,9 +136,10 @@ Input File
 │      run BEFORE Early validation    │
 │    - e.g. auto_accounts,            │
 │      document_discovery             │
-│    - Selected via                   │
-│      NativePlugin::is_synth()       │
-│      → PluginPass::Synth            │
+│    - Plugins declare their pass via │
+│      the SynthPlugin marker trait;  │
+│      the registry's typed Vec       │
+│      → PluginPass::PreBookingSynth  │
 └─────────────────────────────────────┘
     │
     ▼
@@ -263,11 +264,11 @@ Plugins are executed by `run_plugins()` in `rustledger-loader`, the single sourc
 - **WASM plugins**: Any language compiled to WASM, sandboxed via wasmtime
 - **Python plugins**: CPython compiled to WASI, runs existing beancount plugins
 
-Plugin execution is **split across two passes** of the pipeline (see the seven-step diagram above). Plugins declare which pass they belong to via `NativePlugin::is_synth()`, which selects between the two `PluginPass` variants:
+Plugin execution is **split across two passes** of the pipeline (see the seven-step diagram above). Native plugins declare which pass they belong to via marker subtraits — `SynthPlugin` or `RegularPlugin` — each of which extends the base `NativePlugin` capability. The registry stores them in two separately-typed `Vec`s, and the loader looks up the pass-appropriate kind directly through `find_synth` / `find_regular`. This selects between the two `PluginPass` variants:
 
-- **Synth plugins** (`PluginPass::Synth`) run **before Early validation**. These are account- or directive-injecting plugins like `auto_accounts` and `document_discovery`. Running them first means the Early validator's account-presence checks (Open-before-use) see the directives synth plugins inject — preventing false positives that would otherwise occur when a plugin is responsible for opening an account that subsequent transactions reference.
+- **Synth plugins** (`PluginPass::PreBookingSynth`) run **before Early validation**. These are account- or directive-injecting plugins like `auto_accounts` and `document_discovery`. Running them first means the Early validator's account-presence checks (Open-before-use) see the directives synth plugins inject — preventing false positives that would otherwise occur when a plugin is responsible for opening an account that subsequent transactions reference.
 
-- **Regular plugins** (`PluginPass::Regular`) — every plugin where `is_synth()` returns `false` — run **after booking**. This is the right phase for plugins that consume booked output, particularly cost-spec readers that need `cost.number_per` filled in from a total cost spec (the booking engine computes this). Validators that need post-interpolation amounts also belong here.
+- **Regular plugins** (`PluginPass::PostBooking`) — every plugin implementing `RegularPlugin` — run **after booking**. This is the right phase for plugins that consume booked output, particularly cost-spec readers that need `cost.number_per` filled in from a total cost spec (the booking engine computes this). Validators that need post-interpolation amounts also belong here.
 
 After the regular pass, **Late validation** runs (balance assertions, commodity checks, post-booking invariants), then the loader finalizes the ledger by re-merging plugin-emitted directives into the sorted stream.
 

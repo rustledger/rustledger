@@ -17,6 +17,18 @@ const MAX_SCAN_DEPTH: usize = 32;
 /// For example: `documents/Assets/Bank/Checking/2024-01-15.statement.pdf`
 /// generates: `2024-01-15 document Assets:Bank:Checking "documents/Assets/Bank/Checking/2024-01-15.statement.pdf"`
 ///
+/// # Registry membership
+///
+/// `DocumentDiscoveryPlugin` implements [`crate::SynthPlugin`] for type-level
+/// correctness, but it is NOT held in [`crate::NativePluginRegistry::new`]'s
+/// `synth` Vec — its constructor requires per-load context (`base_dir` +
+/// resolved document directories), so the loader instantiates it ad-hoc in
+/// its document-discovery branch rather than looking it up by name. A user-
+/// authored `plugin "document_discovery"` declaration will therefore NOT
+/// resolve through the registry; document discovery is configured via
+/// `option "documents"` instead. The marker keeps the type signature
+/// consistent for any direct caller that constructs the plugin themselves.
+///
 /// # Security
 ///
 /// - Symlinks are skipped to prevent infinite recursion from symlink cycles

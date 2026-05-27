@@ -598,7 +598,7 @@ pub fn run_plugins(
     // Plugins not in the native synth registry (regular natives, WASM,
     // Python) default to non-synth — they run post-booking like
     // file-authored beancount plugins.
-    let is_synth = |name: &str| -> bool { registry.find_synth(name).is_some() };
+    let is_synth_plugin = |name: &str| -> bool { registry.find_synth(name).is_some() };
 
     // The API-level `options.auto_accounts` flag is a synth source.
     if options.auto_accounts && matches!(pass, PluginPass::PreBookingSynth | PluginPass::All) {
@@ -611,7 +611,7 @@ pub fn run_plugins(
     // callers (LSP / FFI / tests on already-booked input).
     if options.run_plugins {
         for plugin in file_plugins {
-            let synth = is_synth(&plugin.name);
+            let synth = is_synth_plugin(&plugin.name);
             let in_pass = match pass {
                 PluginPass::PreBookingSynth => synth,
                 PluginPass::PostBooking => !synth,
@@ -629,7 +629,7 @@ pub fn run_plugins(
 
     // CLI extras: same synth/regular split as file plugins.
     for (i, plugin_name) in options.extra_plugins.iter().enumerate() {
-        let synth = is_synth(plugin_name);
+        let synth = is_synth_plugin(plugin_name);
         let in_pass = match pass {
             PluginPass::PreBookingSynth => synth,
             PluginPass::PostBooking => !synth,

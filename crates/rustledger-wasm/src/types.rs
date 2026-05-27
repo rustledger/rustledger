@@ -287,6 +287,10 @@ pub struct PostingJson {
     /// Price annotation.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub price: Option<AmountValue>,
+    /// Posting-level flag (e.g., `"!"` for pending). Mirrors
+    /// `rustledger_core::Posting::flag`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub flag: Option<String>,
     /// Posting-level metadata (issue #1168). Empty when the posting
     /// has no explicit metadata.
     #[serde(skip_serializing_if = "HashMap::is_empty", default)]

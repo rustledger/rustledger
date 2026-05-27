@@ -522,13 +522,11 @@ fn posting_with_price_annotation_equivalence() {
     );
 }
 
-/// Audit finding from issue #1200 item 3: WASM drops `Posting.flag`
-/// (the `!` flag on individual postings) entirely from its wire
-/// shape; FFI-WASI emits it. Same failure mode as the pre-#1199 meta
-/// drop — silently absent from one binding. Tracked in #1205 with a
-/// concrete fix plan for `PostingJson.flag`.
+/// Pins the fix from #1205: WASM previously dropped `Posting.flag`
+/// (the `!` flag on individual postings) from its wire shape while
+/// FFI-WASI emitted it. After #1205 both bindings emit the field as
+/// an optional stringified char (`"!"`, `"*"`).
 #[test]
-#[ignore = "WASM drops Posting.flag — tracked in #1205"]
 fn posting_with_flag_equivalence() {
     let posting = Posting::new(
         Account::new("Assets:Cash"),

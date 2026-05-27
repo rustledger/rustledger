@@ -105,6 +105,7 @@ pub fn directive_to_json(directive: &Directive) -> DirectiveJson {
                         label: c.label.clone(),
                     }),
                     price: p.price.as_ref().and_then(price_annotation_to_amount),
+                    flag: p.flag.map(|c| c.to_string()),
                     meta: metadata_to_json(&p.meta),
                 })
                 .collect(),

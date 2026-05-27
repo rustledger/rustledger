@@ -45,8 +45,9 @@
 
 use rust_decimal_macros::dec;
 use rustledger_core::{
-    Account, Amount, Currency, Directive, Link, MetaValue, Metadata, Open, Posting, Spanned, Tag,
-    Transaction, naive_date,
+    Account, Amount, Balance, Close, Commodity, CostNumber, CostSpec, Currency, Custom, Directive,
+    Document, Event, IncompleteAmount, Link, MetaValue, Metadata, Note, Open, Pad, Posting, Price,
+    PriceAnnotation, PriceKind, Query, Spanned, Tag, Transaction, naive_date,
 };
 
 // =============================================================================
@@ -193,4 +194,209 @@ fn open_directive_minimal_equivalence() {
     let open = Open::new(naive_date(2024, 1, 1).unwrap(), Account::new("Assets:Cash"))
         .with_currencies(vec![Currency::new("USD")]);
     assert_wire_equivalent("open_minimal", &Directive::Open(open));
+}
+
+#[test]
+fn open_with_booking_method_equivalence() {
+    let open = Open::new(naive_date(2024, 1, 1).unwrap(), Account::new("Assets:Cash"))
+        .with_currencies(vec![Currency::new("USD")])
+        .with_booking("STRICT");
+    assert_wire_equivalent("open_with_booking", &Directive::Open(open));
+}
+
+#[test]
+fn close_directive_equivalence() {
+    let close = Close::new(
+        naive_date(2024, 12, 31).unwrap(),
+        Account::new("Assets:Cash"),
+    );
+    assert_wire_equivalent("close_minimal", &Directive::Close(close));
+}
+
+/// Audit finding from issue #1200 item 3: WASM drops `Balance.tolerance`
+/// entirely from its wire shape; FFI-WASI emits it. Until WASM's
+/// `DirectiveJson::Balance` variant gains a `tolerance` field, this
+/// test stays `#[ignore]`d but documents the expected convergence
+/// target. Remove the `#[ignore]` once WASM is fixed.
+#[test]
+#[ignore = "WASM drops Balance.tolerance — fix in a follow-up PR; tracked in #1200"]
+fn balance_directive_with_tolerance_equivalence() {
+    let mut balance = Balance::new(
+        naive_date(2024, 6, 1).unwrap(),
+        Account::new("Assets:Cash"),
+        Amount::new(dec!(1000.00), Currency::new("USD")),
+    );
+    balance.tolerance = Some(dec!(0.01));
+    assert_wire_equivalent("balance_with_tolerance", &Directive::Balance(balance));
+}
+
+#[test]
+fn pad_directive_equivalence() {
+    let pad = Pad::new(
+        naive_date(2024, 1, 1).unwrap(),
+        Account::new("Assets:Cash"),
+        Account::new("Equity:Opening-Balances"),
+    );
+    assert_wire_equivalent("pad_basic", &Directive::Pad(pad));
+}
+
+#[test]
+fn commodity_directive_equivalence() {
+    let commodity = Commodity::new(naive_date(2024, 1, 1).unwrap(), Currency::new("USD"));
+    assert_wire_equivalent("commodity_basic", &Directive::Commodity(commodity));
+}
+
+#[test]
+fn price_directive_equivalence() {
+    let price = Price::new(
+        naive_date(2024, 1, 1).unwrap(),
+        Currency::new("AAPL"),
+        Amount::new(dec!(195.50), Currency::new("USD")),
+    );
+    assert_wire_equivalent("price_basic", &Directive::Price(price));
+}
+
+#[test]
+fn event_directive_equivalence() {
+    let event = Event::new(naive_date(2024, 6, 1).unwrap(), "location", "Tokyo");
+    assert_wire_equivalent("event_basic", &Directive::Event(event));
+}
+
+#[test]
+fn note_directive_equivalence() {
+    let note = Note::new(
+        naive_date(2024, 1, 1).unwrap(),
+        Account::new("Assets:Cash"),
+        "year-end reconciliation",
+    );
+    assert_wire_equivalent("note_basic", &Directive::Note(note));
+}
+
+/// Audit candidate from issue #1200 item 3: `Document.tags` /
+/// `Document.links` exist on the core type but were never plumbed
+/// through `plugin-types::DocumentData`. The plugin-types DTO is a
+/// separate wire shape — this test exercises the FFI-WASI/WASM
+/// JSON-RPC + JS API shapes specifically (both have `Document`
+/// variants in their `DirectiveJson` enums). If either binding
+/// drops `tags`/`links`, this fixture surfaces it.
+#[test]
+fn document_directive_with_tags_and_links_equivalence() {
+    let document = Document {
+        date: naive_date(2024, 1, 15).unwrap(),
+        account: Account::new("Assets:Bank"),
+        path: "statements/2024-01.pdf".to_string(),
+        tags: vec![Tag::new("statement"), Tag::new("bank")],
+        links: vec![Link::new("inv-2024-01")],
+        meta: Metadata::default(),
+    };
+    assert_wire_equivalent(
+        "document_with_tags_and_links",
+        &Directive::Document(document),
+    );
+}
+
+#[test]
+fn query_directive_equivalence() {
+    let query = Query::new(
+        naive_date(2024, 1, 1).unwrap(),
+        "expenses",
+        "SELECT account, sum(position)",
+    );
+    assert_wire_equivalent("query_basic", &Directive::Query(query));
+}
+
+/// Audit finding from issue #1200 item 3: `Custom.values` is present
+/// in both bindings (since #1199), but the **shape** diverges. FFI-WASI
+/// emits each value as a tagged union `{type: "...", value: ...}`,
+/// which is type-safe — a JS consumer can distinguish a `Date` value
+/// from a `String` value. WASM emits values raw (the bare string,
+/// number, or object), which is lossy. Marked `#[ignore]` until the
+/// WASM side adopts the tagged shape; tracked in #1200.
+#[test]
+#[ignore = "WASM emits Custom.values raw (lossy); FFI-WASI uses tagged union — fix in a follow-up"]
+fn custom_directive_with_all_value_variants_equivalence() {
+    let custom = Custom {
+        date: naive_date(2024, 1, 1).unwrap(),
+        custom_type: "budget".to_string(),
+        values: vec![
+            MetaValue::String("Q1".to_string()),
+            MetaValue::Account(Account::new("Expenses:Food")),
+            MetaValue::Amount(Amount::new(dec!(500.00), Currency::new("USD"))),
+            MetaValue::Date(naive_date(2024, 3, 31).unwrap()),
+            MetaValue::Number(dec!(0.85)),
+            MetaValue::Bool(true),
+        ],
+        meta: Metadata::default(),
+    };
+    assert_wire_equivalent("custom_with_all_value_variants", &Directive::Custom(custom));
+}
+
+// =============================================================================
+// Posting-level audits (issue #1200 item 3)
+// =============================================================================
+
+/// Posting with cost spec (`{...}` syntax). FFI-WASI and WASM both
+/// have to serialize the `CostSpec` shape, including the `kind`-
+/// tagged `CostNumber` enum that #1178 standardized.
+#[test]
+fn posting_with_cost_spec_equivalence() {
+    let posting = Posting::new(
+        Account::new("Assets:Stock:AAPL"),
+        Amount::new(dec!(10), Currency::new("AAPL")),
+    )
+    .with_cost(CostSpec {
+        number: Some(CostNumber::PerUnit {
+            value: dec!(150.00),
+        }),
+        currency: Some(Currency::new("USD")),
+        date: Some(naive_date(2024, 1, 15).unwrap()),
+        label: None,
+        merge: false,
+    });
+    let txn = Transaction::new(naive_date(2024, 1, 15).unwrap(), "buy")
+        .with_posting(Spanned::synthesized(posting))
+        .with_posting(fixture_posting("Assets:Cash", "-1500.00", "USD"));
+    assert_wire_equivalent("posting_with_cost_spec", &Directive::Transaction(txn));
+}
+
+/// Posting with price annotation (`@` for per-unit, `@@` for total).
+#[test]
+fn posting_with_price_annotation_equivalence() {
+    let posting = Posting::new(
+        Account::new("Assets:FX"),
+        Amount::new(dec!(100), Currency::new("EUR")),
+    )
+    .with_price(PriceAnnotation {
+        kind: PriceKind::Unit,
+        amount: Some(IncompleteAmount::Complete(Amount::new(
+            dec!(1.10),
+            Currency::new("USD"),
+        ))),
+    });
+    let txn = Transaction::new(naive_date(2024, 6, 1).unwrap(), "fx")
+        .with_posting(Spanned::synthesized(posting))
+        .with_posting(fixture_posting("Assets:Cash", "-110.00", "USD"));
+    assert_wire_equivalent(
+        "posting_with_price_annotation",
+        &Directive::Transaction(txn),
+    );
+}
+
+/// Audit finding from issue #1200 item 3: WASM drops `Posting.flag`
+/// (the `!` flag on individual postings) entirely from its wire
+/// shape; FFI-WASI emits it. Same failure mode as the pre-#1199 meta
+/// drop — silently absent from one binding. Marked `#[ignore]`
+/// until WASM is fixed; tracked in #1200.
+#[test]
+#[ignore = "WASM drops Posting.flag — fix in a follow-up PR; tracked in #1200"]
+fn posting_with_flag_equivalence() {
+    let mut posting = Posting::new(
+        Account::new("Assets:Cash"),
+        Amount::new(dec!(100), Currency::new("USD")),
+    );
+    posting.flag = Some('!');
+    let txn = Transaction::new(naive_date(2024, 1, 1).unwrap(), "pending")
+        .with_posting(Spanned::synthesized(posting))
+        .with_posting(fixture_posting("Expenses:Misc", "-100.00", "USD"));
+    assert_wire_equivalent("posting_with_flag", &Directive::Transaction(txn));
 }

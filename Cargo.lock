@@ -4038,7 +4038,7 @@ dependencies = [
 
 [[package]]
 name = "rustledger-wire-format-tests"
-version = "0.15.0"
+version = "0.0.0"
 dependencies = [
  "rust_decimal",
  "rust_decimal_macros",

@@ -1,7 +1,8 @@
 [package]
 name = "rustledger-wire-format-tests"
-description = "Cross-binding wire-format equivalence tests — pins FFI-WASI and WASM JSON shapes against shared fixtures (issue #1200)"
-version = "0.15.0"
+description = "Cross-binding wire-format equivalence tests -- pins FFI-WASI and WASM JSON shapes against shared fixtures (issue #1200)"
+# Never published — kept at 0.0.0 to make the unpublished intent explicit.
+version = "0.0.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

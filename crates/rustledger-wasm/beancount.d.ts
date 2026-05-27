@@ -123,6 +123,8 @@ export interface Posting {
   units: Amount | null;
   /** Optional cost specification. */
   cost: CostSpec | null;
+  /** Posting flag (e.g. "!" for pending). */
+  flag?: string;
   /** Posting-level metadata (issue #1168). */
   meta?: Record<string, MetaValueJson>;
 }

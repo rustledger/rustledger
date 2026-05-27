@@ -116,6 +116,8 @@ export interface Posting {
     units?: Amount;
     cost?: PostingCost;
     price?: Amount;
+    /** Posting flag (e.g. "!" for pending). */
+    flag?: string;
 }
 
 /** Base directive with date. */

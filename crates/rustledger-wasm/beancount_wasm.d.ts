@@ -300,6 +300,10 @@ export interface DocumentDirective extends Directive {
     account: string;
     /** Path to the document file */
     path: string;
+    /** Tags attached to the document (issue #1144). Absent when empty. */
+    tags?: string[];
+    /** Links attached to the document (issue #1144). Absent when empty. */
+    links?: string[];
 }
 
 /**

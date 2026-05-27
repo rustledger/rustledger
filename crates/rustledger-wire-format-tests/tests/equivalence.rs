@@ -401,14 +401,13 @@ fn note_directive_equivalence() {
     assert_wire_format("note_basic", &Directive::Note(note), &[]);
 }
 
-/// Audit finding from issue #1200 item 3 — caught by the
-/// `assert_wire_format` helper's field-presence check, not by
-/// equivalence: **both bindings** drop `Document.tags` and
-/// `Document.links` from their wire shape (lockstep-wrong, so
-/// equivalence alone would have passed silently). Tracked in #1208
-/// with a concrete fix plan for both bindings.
+/// Pins the fix from #1208. Both bindings previously dropped
+/// `Document.tags` and `Document.links` from their wire shape — a
+/// lockstep-wrong drop that equivalence alone would have missed.
+/// The harness's `assert_wire_format` field-presence check (PR #1204)
+/// was specifically designed to catch this class of bug; after #1208
+/// both bindings emit the fields and the test guards convergence.
 #[test]
-#[ignore = "Both bindings drop Document.tags and Document.links — tracked in #1208"]
 fn document_directive_with_tags_and_links_equivalence() {
     let document = Document {
         date: naive_date(2024, 1, 15).unwrap(),

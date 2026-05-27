@@ -195,7 +195,7 @@ export type Directive =
     | { type: 'pad'; date: string; account: string; source_account: string; meta?: Record<string, MetaValueJson> }
     | { type: 'event'; date: string; event_type: string; value: string; meta?: Record<string, MetaValueJson> }
     | { type: 'note'; date: string; account: string; comment: string; meta?: Record<string, MetaValueJson> }
-    | { type: 'document'; date: string; account: string; path: string; meta?: Record<string, MetaValueJson> }
+    | { type: 'document'; date: string; account: string; path: string; tags?: string[]; links?: string[]; meta?: Record<string, MetaValueJson> }
     | { type: 'price'; date: string; currency: string; amount: Amount; meta?: Record<string, MetaValueJson> }
     | { type: 'query'; date: string; name: string; query_string: string; meta?: Record<string, MetaValueJson> }
     | { type: 'custom'; date: string; custom_type: string; values?: MetaValueJson[]; meta?: Record<string, MetaValueJson> };

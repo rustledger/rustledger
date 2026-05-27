@@ -272,6 +272,10 @@ export interface DocumentData {
   account: string;
   /** Path to document file. */
   path: string;
+  /** Tags attached to the document (issue #1144). Absent when empty. */
+  tags?: string[];
+  /** Links attached to the document (issue #1144). Absent when empty. */
+  links?: string[];
   /** Document-directive metadata (issue #1168). */
   meta?: Record<string, MetaValueJson>;
 }

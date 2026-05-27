@@ -303,6 +303,8 @@ pub fn directive_to_json(directive: &Directive, line: u32, filename: &str) -> Di
                 date: d.date.to_string(),
                 account: d.account.to_string(),
                 path: d.path.clone(),
+                tags: d.tags.iter().map(ToString::to_string).collect(),
+                links: d.links.iter().map(ToString::to_string).collect(),
                 meta,
             }
         }

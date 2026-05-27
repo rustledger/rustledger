@@ -165,6 +165,8 @@ pub fn directive_to_json(directive: &Directive) -> DirectiveJson {
             date: doc.date.to_string(),
             account: doc.account.to_string(),
             path: doc.path.clone(),
+            tags: doc.tags.iter().map(ToString::to_string).collect(),
+            links: doc.links.iter().map(ToString::to_string).collect(),
             meta: metadata_to_json(&doc.meta),
         },
         Directive::Price(price) => DirectiveJson::Price {

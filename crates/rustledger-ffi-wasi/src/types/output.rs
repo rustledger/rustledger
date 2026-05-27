@@ -289,6 +289,12 @@ pub enum DirectiveJson {
         date: String,
         account: String,
         path: String,
+        /// Tags attached to the document directive (issue #1144).
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        tags: Vec<String>,
+        /// Links attached to the document directive (issue #1144).
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        links: Vec<String>,
         meta: Meta,
     },
     Query {

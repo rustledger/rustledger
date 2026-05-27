@@ -39,11 +39,16 @@
 //! ## Booking partition note
 //!
 //! `Directives<Booked>` carries only the successfully-booked
-//! transactions. Failed ones are returned as a parallel
-//! `Vec<Spanned<Directive>>` and re-merged at [`Finalized`] (see the
-//! `book` transition in `process.rs`). The phantom can't express
-//! "this Vec holds a mix of stages," so the failed branch is kept
-//! out-of-band.
+//! transactions. Failed ones are returned in a `FailedBookings`
+//! newtype (an internal `pub(crate)` wrapper around
+//! `Vec<Spanned<Directive>>`) and re-merged at [`Finalized`] (see
+//! the `book` and `finalize` transitions in `process.rs`). The
+//! newtype gives the out-of-band channel a name and a type — the
+//! `finalize` call can't accidentally receive an arbitrary
+//! `Vec<Spanned<Directive>>` (e.g. a freshly-parsed one). The
+//! phantom-typed `Directives<P>` can't express "this Vec holds a
+//! mix of stages," which is why the failed branch travels alongside
+//! the main pipeline rather than as another phase.
 //!
 //! ## Open design choices documented in #1166
 //!
@@ -73,7 +78,7 @@ mod sealed {
 /// Marker trait for pipeline phases. Sealed: only the markers in
 /// this module implement it, so downstream crates can't invent new
 /// phases (which would defeat the type-driven ordering).
-pub trait Phase: 'static + sealed::Sealed {}
+pub trait Phase: sealed::Sealed {}
 
 macro_rules! define_phase {
     ($name:ident, $doc:expr) => {
@@ -194,12 +199,14 @@ impl Directives<Raw> {
 /// and re-merged at the `finalize` transition on
 /// [`Directives<LateValidated>`].
 ///
-/// The phantom type can't express "this Vec holds a mix of stages,"
-/// so failed bookings travel out-of-band — this newtype gives the
-/// out-of-band channel a name and a type, so the `finalize` call
-/// can't accidentally receive an arbitrary `Vec<Spanned<Directive>>`
-/// (e.g. a freshly-parsed one). The contents are pre-booking shape:
-/// unresolved cost specs, unfilled elided slots, possibly unbalanced.
+/// Effectively `pub(crate)`: the only producer (`book`) and consumer
+/// (`finalize`) are both crate-internal, and the type lives in the
+/// private `mod phase` of `rustledger-loader`, so external callers
+/// can't get a value of this type. Kept as a named newtype rather
+/// than a bare `Vec` so `finalize` can't accidentally receive an
+/// arbitrary directive list at the call site. The contents are
+/// pre-booking shape: unresolved cost specs, unfilled elided slots,
+/// possibly unbalanced.
 #[derive(Debug)]
 pub struct FailedBookings {
     inner: Vec<Spanned<Directive>>,
@@ -208,14 +215,18 @@ pub struct FailedBookings {
 impl FailedBookings {
     /// **Internal**: construct from a raw `Vec`. The `book` transition
     /// is the only legitimate producer.
-    pub(crate) const fn new(inner: Vec<Spanned<Directive>>) -> Self {
+    ///
+    /// `pub` only because the type lives in a private module — there's
+    /// no path from the crate root to `FailedBookings::new`, so
+    /// external code can't call it.
+    pub const fn new(inner: Vec<Spanned<Directive>>) -> Self {
         Self { inner }
     }
 
     /// Consume and return the underlying directives.
     /// Used by `finalize` to merge them back into the display order.
     #[allow(clippy::missing_const_for_fn)] // Drop on self requires non-const fn in current Rust.
-    pub(crate) fn into_inner(self) -> Vec<Spanned<Directive>> {
+    pub fn into_inner(self) -> Vec<Spanned<Directive>> {
         self.inner
     }
 }

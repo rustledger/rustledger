@@ -361,10 +361,25 @@ fn resolve_effective_booking_method(
 // without changing their semantics — only the type-level sequencing
 // is new. See `phase.rs` for the phase markers and overall rationale.
 
+/// Canonical display-order sort key: `(date, priority, file_id, span.start)`.
+/// What BQL / JSON / format output expects and what Python beancount
+/// produces. Used by `sort` (initial ordering) and `finalize` (re-sort
+/// after merging failed bookings back in).
+type CanonicalSortKey = (
+    rustledger_core::NaiveDate,
+    rustledger_core::DirectivePriority,
+    u16,
+    usize,
+);
+
+#[inline]
+const fn canonical_sort_key(d: &Spanned<Directive>) -> CanonicalSortKey {
+    (d.value.date(), d.value.priority(), d.file_id, d.span.start)
+}
+
 impl crate::Directives<crate::Raw> {
-    /// Sort directives into canonical display order
-    /// `(date, priority, file_id, span.start)` — what BQL / JSON /
-    /// format output expects and what Python beancount produces.
+    /// Sort directives into canonical display order — see
+    /// [`canonical_sort_key`].
     ///
     /// Booking needs a different iteration order (augmentations
     /// BEFORE reductions on the same `(date, priority)`) but doesn't
@@ -373,8 +388,7 @@ impl crate::Directives<crate::Raw> {
     /// and the display order survives the rest of the pipeline.
     #[must_use]
     pub(crate) fn sort(mut self) -> crate::Directives<crate::Sorted> {
-        self.as_vec_mut()
-            .sort_by_key(|d| (d.value.date(), d.value.priority(), d.file_id, d.span.start));
+        self.as_vec_mut().sort_by_key(canonical_sort_key);
         crate::Directives::new_unchecked(std::mem::take(self.as_vec_mut()))
     }
 }
@@ -484,7 +498,10 @@ impl crate::Directives<crate::EarlyValidated> {
         mut self,
         #[cfg(feature = "booking")] effective_method: rustledger_core::BookingMethod,
         #[cfg(feature = "booking")] errors: &mut Vec<LedgerError>,
-    ) -> (crate::Directives<crate::Booked>, crate::FailedBookings) {
+    ) -> (
+        crate::Directives<crate::Booked>,
+        crate::phase::FailedBookings,
+    ) {
         #[cfg(feature = "booking")]
         let (booked, failed) =
             run_booking(std::mem::take(self.as_vec_mut()), effective_method, errors);
@@ -493,7 +510,7 @@ impl crate::Directives<crate::EarlyValidated> {
             (std::mem::take(self.as_vec_mut()), Vec::new());
         (
             crate::Directives::new_unchecked(booked),
-            crate::FailedBookings::new(failed),
+            crate::phase::FailedBookings::new(failed),
         )
     }
 }
@@ -581,11 +598,11 @@ impl crate::Directives<crate::LateValidated> {
     /// restores the failed entries' positions.
     pub(crate) fn finalize(
         mut self,
-        failed: crate::FailedBookings,
+        failed: crate::phase::FailedBookings,
     ) -> crate::Directives<crate::Finalized> {
         let mut v = std::mem::take(self.as_vec_mut());
         v.extend(failed.into_inner());
-        v.sort_by_key(|d| (d.value.date(), d.value.priority(), d.file_id, d.span.start));
+        v.sort_by_key(canonical_sort_key);
         crate::Directives::new_unchecked(v)
     }
 }

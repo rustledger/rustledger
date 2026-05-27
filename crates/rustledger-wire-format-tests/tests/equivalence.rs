@@ -82,16 +82,16 @@ fn strip_source_position_keys(json: &mut serde_json::Value) {
     }
 }
 
-/// Strip empty `meta` objects and explicit nulls from the **top level
-/// of the directive only** — never recurse into the `meta` object
-/// itself. Inside `meta`, `null` is a legitimate value: `MetaValue::None`
-/// serializes as `null` in both bindings, and the metadata-variant
-/// fixture deliberately includes a `none-key: null` entry to pin
-/// that variant's wire shape. Stripping nulls there would silently
-/// hide a future drop of the `None` variant.
+/// Strip empty `meta` objects and explicit nulls from the directive
+/// and its `postings` children. **Does not** recurse into the `meta`
+/// object itself: inside `meta`, `null` is a legitimate value —
+/// `MetaValue::None` serializes as `null` in both bindings, and the
+/// metadata-variant fixture deliberately includes a `none-key: null`
+/// entry to pin that variant's wire shape. Stripping nulls there
+/// would silently hide a future drop of the `None` variant.
 ///
 /// See divergences #2 and #3 in the module doc.
-fn strip_top_level_empty_meta_and_nulls(json: &mut serde_json::Value) {
+fn strip_empty_meta_and_directive_nulls(json: &mut serde_json::Value) {
     let Some(map) = json.as_object_mut() else {
         return;
     };
@@ -104,11 +104,12 @@ fn strip_top_level_empty_meta_and_nulls(json: &mut serde_json::Value) {
         }
         true
     });
-    // Recurse into postings (which can also carry null optional
-    // fields like `flag` per audit finding #1205) but NOT into `meta`.
+    // Descend into `postings` (each posting can also carry null
+    // optional fields like `flag` per audit finding #1205) but NOT
+    // into `meta`.
     if let Some(postings) = map.get_mut("postings").and_then(|p| p.as_array_mut()) {
         for posting in postings {
-            strip_top_level_empty_meta_and_nulls(posting);
+            strip_empty_meta_and_directive_nulls(posting);
         }
     }
 }
@@ -199,8 +200,8 @@ fn assert_wire_format(label: &str, directive: &Directive, required_fields: &[&st
 
     // Equivalence check after normalization.
     strip_source_position_keys(&mut ffi_wasi);
-    strip_top_level_empty_meta_and_nulls(&mut ffi_wasi);
-    strip_top_level_empty_meta_and_nulls(&mut wasm);
+    strip_empty_meta_and_directive_nulls(&mut ffi_wasi);
+    strip_empty_meta_and_directive_nulls(&mut wasm);
     assert_eq!(
         ffi_wasi, wasm,
         "wire-format divergence between FFI-WASI and WASM for fixture {label:?}",

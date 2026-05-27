@@ -118,6 +118,7 @@ pub fn directive_to_json(directive: &Directive) -> DirectiveJson {
                 number: bal.amount.number.to_string(),
                 currency: bal.amount.currency.to_string(),
             },
+            tolerance: bal.tolerance.map(|t| t.to_string()),
             meta: metadata_to_json(&bal.meta),
         },
         Directive::Open(open) => DirectiveJson::Open {

@@ -131,6 +131,10 @@ pub enum DirectiveJson {
         date: String,
         account: String,
         amount: AmountValue,
+        /// Explicit tolerance from the `~ 0.01` annotation, stringified.
+        /// Mirrors `rustledger_core::Balance::tolerance`.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tolerance: Option<String>,
         #[serde(skip_serializing_if = "HashMap::is_empty", default)]
         meta: HashMap<String, MetaValueJson>,
     },

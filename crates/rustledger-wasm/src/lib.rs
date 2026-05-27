@@ -163,6 +163,8 @@ export interface BalanceDirective extends BaseDirective {
     type: 'balance';
     account: string;
     amount: Amount;
+    /** Explicit tolerance (e.g. "0.01" from `~ 0.01`), stringified for precision. */
+    tolerance?: string;
 }
 
 /** Open account directive. */

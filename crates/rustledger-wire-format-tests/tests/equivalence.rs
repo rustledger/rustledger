@@ -340,12 +340,11 @@ fn close_directive_equivalence() {
     assert_wire_format("close_minimal", &Directive::Close(close), &[]);
 }
 
-/// Audit finding from issue #1200 item 3: WASM drops `Balance.tolerance`
-/// entirely from its wire shape; FFI-WASI emits it. Tracked in #1206
-/// with a concrete fix plan. Remove the `#[ignore]` once WASM emits
-/// the field — the test then pins the convergence going forward.
+/// Pins the fix from #1206: WASM previously dropped `Balance.tolerance`
+/// (the `~ 0.01` annotation on balance assertions) from its wire
+/// shape while FFI-WASI emitted it. After #1206 both bindings emit
+/// the field as an optional stringified decimal.
 #[test]
-#[ignore = "WASM drops Balance.tolerance — tracked in #1206"]
 fn balance_directive_with_tolerance_equivalence() {
     let mut balance = Balance::new(
         naive_date(2024, 6, 1).unwrap(),

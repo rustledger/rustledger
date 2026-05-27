@@ -202,6 +202,8 @@ export interface BalanceData {
   account: string;
   /** Expected balance amount. */
   amount: Amount;
+  /** Explicit tolerance (e.g. "0.01" from `~ 0.01`), stringified for precision. */
+  tolerance?: string;
   /** Balance-directive metadata (issue #1168). */
   meta?: Record<string, MetaValueJson>;
 }

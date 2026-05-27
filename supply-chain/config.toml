@@ -460,14 +460,6 @@ criteria = "safe-to-deploy"
 version = "0.15.5"
 criteria = "safe-to-deploy"
 
-[[exemptions.hashbrown]]
-version = "0.16.1"
-criteria = "safe-to-deploy"
-
-[[exemptions.hashbrown]]
-version = "0.17.1"
-criteria = "safe-to-deploy"
-
 [[exemptions.hermit-abi]]
 version = "0.3.3"
 criteria = "safe-to-deploy"

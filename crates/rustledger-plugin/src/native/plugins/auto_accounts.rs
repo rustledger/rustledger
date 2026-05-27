@@ -9,9 +9,14 @@ use super::super::{NativePlugin, SynthPlugin};
 /// Plugin that auto-generates Open directives for accounts used without explicit open.
 pub struct AutoAccountsPlugin;
 
+/// Name used by the registry, the loader (when emitting the implicit
+/// synth-pass entry for `options.auto_accounts`), and external callers.
+/// Kept as a constant so the three sites stay in sync.
+pub const AUTO_ACCOUNTS_NAME: &str = "auto_accounts";
+
 impl NativePlugin for AutoAccountsPlugin {
     fn name(&self) -> &'static str {
-        "auto_accounts"
+        AUTO_ACCOUNTS_NAME
     }
 
     fn description(&self) -> &'static str {

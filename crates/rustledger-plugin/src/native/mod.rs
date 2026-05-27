@@ -34,13 +34,13 @@
 //! guarantee (a plugin can only fit one slot) at the cost of one
 //! extra empty `impl` line per plugin.
 //!
-//! ## Plugins not in the native registry
+//! ## WASM and Python plugins
 //!
-//! WASM and Python plugins are loaded at runtime by name and don't
-//! carry Rust-level type information. The loader's runner treats
-//! them as regular plugins by default; pass discrimination for
-//! those is left as future work (issue #1200's audit covers the
-//! cross-binding consistency story).
+//! Non-native plugins don't implement `NativePlugin` and therefore
+//! aren't held in this registry. They're dispatched by the loader
+//! through path-based name resolution, run only in the post-booking
+//! regular pass, and never carry a synth/regular marker at the type
+//! level. Synth-pass semantics are a native-only concern.
 
 mod plugins;
 
@@ -121,7 +121,44 @@ fn plugin_short_name(name: &str) -> &str {
 /// Process-wide singleton registry — the registry holds no per-load
 /// state, so allocating one per call is pure waste. Use
 /// [`NativePluginRegistry::global`] to access it.
-static GLOBAL_REGISTRY: LazyLock<NativePluginRegistry> = LazyLock::new(NativePluginRegistry::new);
+static GLOBAL_REGISTRY: LazyLock<NativePluginRegistry> = LazyLock::new(|| {
+    let synth: Vec<Box<dyn SynthPlugin>> = vec![
+        Box::new(AutoAccountsPlugin),
+        Box::new(DocumentDiscoveryPlugin),
+    ];
+    let regular: Vec<Box<dyn RegularPlugin>> = vec![
+        Box::new(ImplicitPricesPlugin),
+        Box::new(CheckCommodityPlugin),
+        Box::new(AutoTagPlugin::new()),
+        Box::new(LeafOnlyPlugin),
+        Box::new(NoDuplicatesPlugin),
+        Box::new(OneCommodityPlugin),
+        Box::new(UniquePricesPlugin),
+        Box::new(CheckClosingPlugin),
+        Box::new(CloseTreePlugin),
+        Box::new(CoherentCostPlugin),
+        Box::new(ForecastPlugin),
+        Box::new(SellGainsPlugin),
+        Box::new(PedanticPlugin),
+        Box::new(RxTxnPlugin),
+        Box::new(SplitExpensesPlugin),
+        Box::new(UnrealizedPlugin::new()),
+        Box::new(NoUnusedPlugin),
+        Box::new(CheckDrainedPlugin),
+        Box::new(CommodityAttrPlugin::new()),
+        Box::new(CheckAverageCostPlugin::new()),
+        Box::new(CurrencyAccountsPlugin::new()),
+        Box::new(ZerosumPlugin),
+        Box::new(EffectiveDatePlugin),
+        Box::new(GenerateBaseCcyPricesPlugin),
+        Box::new(RenameAccountsPlugin),
+        Box::new(ValuationPlugin),
+        Box::new(CapitalGainsLongShortPlugin),
+        Box::new(CapitalGainsGainLossPlugin),
+        Box::new(BoxAccrualPlugin),
+    ];
+    NativePluginRegistry { synth, regular }
+});
 
 impl NativePluginRegistry {
     /// Access the process-wide registry singleton.
@@ -132,47 +169,6 @@ impl NativePluginRegistry {
     #[must_use]
     pub fn global() -> &'static Self {
         &GLOBAL_REGISTRY
-    }
-
-    /// Construct a new registry. Crate-internal — production code
-    /// should use [`Self::global`]. Kept for `Default` and tests.
-    pub(crate) fn new() -> Self {
-        let synth: Vec<Box<dyn SynthPlugin>> = vec![
-            Box::new(AutoAccountsPlugin),
-            Box::new(DocumentDiscoveryPlugin),
-        ];
-        let regular: Vec<Box<dyn RegularPlugin>> = vec![
-            Box::new(ImplicitPricesPlugin),
-            Box::new(CheckCommodityPlugin),
-            Box::new(AutoTagPlugin::new()),
-            Box::new(LeafOnlyPlugin),
-            Box::new(NoDuplicatesPlugin),
-            Box::new(OneCommodityPlugin),
-            Box::new(UniquePricesPlugin),
-            Box::new(CheckClosingPlugin),
-            Box::new(CloseTreePlugin),
-            Box::new(CoherentCostPlugin),
-            Box::new(ForecastPlugin),
-            Box::new(SellGainsPlugin),
-            Box::new(PedanticPlugin),
-            Box::new(RxTxnPlugin),
-            Box::new(SplitExpensesPlugin),
-            Box::new(UnrealizedPlugin::new()),
-            Box::new(NoUnusedPlugin),
-            Box::new(CheckDrainedPlugin),
-            Box::new(CommodityAttrPlugin::new()),
-            Box::new(CheckAverageCostPlugin::new()),
-            Box::new(CurrencyAccountsPlugin::new()),
-            Box::new(ZerosumPlugin),
-            Box::new(EffectiveDatePlugin),
-            Box::new(GenerateBaseCcyPricesPlugin),
-            Box::new(RenameAccountsPlugin),
-            Box::new(ValuationPlugin),
-            Box::new(CapitalGainsLongShortPlugin),
-            Box::new(CapitalGainsGainLossPlugin),
-            Box::new(BoxAccrualPlugin),
-        ];
-        Self { synth, regular }
     }
 
     /// Find a **synth-pass** plugin by name.
@@ -220,15 +216,6 @@ impl NativePluginRegistry {
         out
     }
 
-    /// Check if a name refers to a built-in plugin (either pass).
-    ///
-    /// Accepts both short names and fully qualified module paths.
-    /// Consults the global singleton — no allocation per call.
-    #[must_use]
-    pub fn is_builtin(name: &str) -> bool {
-        Self::global().has(name)
-    }
-
     /// Check if a name refers to any plugin in this registry, in
     /// either pass. Use this for existence queries; for invocation
     /// use [`Self::find_synth`] / [`Self::find_regular`] so the
@@ -238,12 +225,6 @@ impl NativePluginRegistry {
         let short_name = plugin_short_name(name);
         self.synth.iter().any(|p| p.name() == short_name)
             || self.regular.iter().any(|p| p.name() == short_name)
-    }
-}
-
-impl Default for NativePluginRegistry {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -308,7 +289,7 @@ mod tests {
 
     #[test]
     fn test_registry_find_regular_short_name() {
-        let registry = NativePluginRegistry::new();
+        let registry = NativePluginRegistry::global();
         assert!(registry.find_regular("implicit_prices").is_some());
         assert!(registry.find_regular("zerosum").is_some());
         assert!(registry.find_regular("nonexistent").is_none());
@@ -316,7 +297,7 @@ mod tests {
 
     #[test]
     fn test_registry_find_regular_qualified_name() {
-        let registry = NativePluginRegistry::new();
+        let registry = NativePluginRegistry::global();
         assert!(
             registry
                 .find_regular("beancount.plugins.implicit_prices")
@@ -346,10 +327,11 @@ mod tests {
     ///
     /// Exhaustive over `list()` so adding a new plugin without
     /// declaring a pass marker can't slip past CI as a Vec-membership
-    /// mistake.
+    /// mistake. Also covers `has` and prefix-stripping coverage that
+    /// the old separate `is_builtin_*` tests used to duplicate.
     #[test]
     fn test_registry_synth_and_regular_are_disjoint() {
-        let registry = NativePluginRegistry::new();
+        let registry = NativePluginRegistry::global();
 
         for plugin in registry.list() {
             let name = plugin.name();
@@ -359,33 +341,21 @@ mod tests {
                 in_synth ^ in_regular,
                 "plugin {name:?} must live in exactly one pass Vec (synth={in_synth}, regular={in_regular})",
             );
+            assert!(
+                registry.has(name),
+                "list() yielded {name:?} but has() disagrees"
+            );
         }
 
-        // Existence check finds plugins in either pass; a name not in
-        // either Vec returns false.
-        assert!(registry.has("auto_accounts"));
-        assert!(registry.has("implicit_prices"));
+        // Non-existent names return false from every lookup.
         assert!(!registry.has("nonexistent"));
-    }
+        assert!(registry.find_synth("nonexistent").is_none());
+        assert!(registry.find_regular("nonexistent").is_none());
 
-    #[test]
-    fn test_is_builtin_short_name() {
-        assert!(NativePluginRegistry::is_builtin("implicit_prices"));
-        assert!(NativePluginRegistry::is_builtin("zerosum"));
-        assert!(!NativePluginRegistry::is_builtin("nonexistent"));
-    }
-
-    #[test]
-    fn test_is_builtin_qualified_name() {
-        assert!(NativePluginRegistry::is_builtin(
-            "beancount.plugins.implicit_prices"
-        ));
-        assert!(NativePluginRegistry::is_builtin(
-            "beanahead.plugins.rx_txn_plugin"
-        ));
-        assert!(NativePluginRegistry::is_builtin(
-            "beancount_reds_plugins.zerosum.zerosum"
-        ));
-        assert!(!NativePluginRegistry::is_builtin("some.random.nonexistent"));
+        // Prefix-stripping works for fully-qualified module paths.
+        assert!(registry.has("beancount.plugins.implicit_prices"));
+        assert!(registry.has("beanahead.plugins.rx_txn_plugin"));
+        assert!(registry.has("beancount_reds_plugins.zerosum.zerosum"));
+        assert!(!registry.has("some.random.nonexistent"));
     }
 }

@@ -6,9 +6,9 @@
 //! Reference: spec/tla/PluginCorrect.tla
 
 use proptest::prelude::*;
-use rustledger_plugin::native::{NativePlugin, NativePluginRegistry};
 use rustledger_plugin::test_helpers::materialize_ops;
 use rustledger_plugin::types::*;
+use rustledger_plugin::{NativePlugin, NativePluginRegistry};
 
 // ============================================================================
 // Test Strategies

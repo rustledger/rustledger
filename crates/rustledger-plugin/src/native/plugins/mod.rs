@@ -33,7 +33,7 @@ mod unrealized;
 mod valuation;
 mod zerosum;
 
-pub use auto_accounts::AutoAccountsPlugin;
+pub use auto_accounts::{AUTO_ACCOUNTS_NAME, AutoAccountsPlugin};
 pub use auto_tag::AutoTagPlugin;
 pub use box_accrual::BoxAccrualPlugin;
 pub use capital_gains_classifier::{CapitalGainsGainLossPlugin, CapitalGainsLongShortPlugin};

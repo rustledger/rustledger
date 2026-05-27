@@ -539,6 +539,17 @@ pub enum PluginPass {
 /// Executes native plugins (and document discovery) on the given directives,
 /// modifying them in-place. Plugin errors are appended to `errors`.
 ///
+/// A single plugin invocation in `run_plugins`'s unified dispatch
+/// list. `force_python` ("python:..." prefix) overrides native
+/// resolution; `config` is the plugin-specific string passed to
+/// `PluginInput.config`.
+#[cfg(feature = "plugins")]
+struct PluginInvocation {
+    name: String,
+    config: Option<String>,
+    force_python: bool,
+}
+
 /// `pass` selects which subset of plugins to run — see [`PluginPass`].
 /// The loader pipeline calls this twice (synth pass before Early,
 /// regular pass after booking).
@@ -567,8 +578,7 @@ pub fn run_plugins(
     // call.
     let registry = NativePluginRegistry::global();
 
-    // Build the unified list of plugins to invoke for this pass. Each
-    // entry carries `(name, config, force_python)`. The list includes:
+    // Build the unified list of plugins to invoke for this pass:
     //   1. Implicit synth plugins triggered by `LoadOptions` /
     //      `file_options` (auto_accounts via `options.auto_accounts`;
     //      document_discovery via non-empty `file_options.documents`).
@@ -576,16 +586,16 @@ pub fn run_plugins(
     //   3. CLI `--plugin` extras.
     // Pass classification happens here — once — via `registry.find_synth`.
     // A plugin enters the list iff its pass matches the requested `pass`.
-    let mut entries: Vec<(String, Option<String>, bool)> = Vec::new();
+    let mut entries: Vec<PluginInvocation> = Vec::new();
 
     if matches!(pass, PluginPass::PreBookingSynth) {
         // Implicit synth: API-level auto_accounts flag.
         if options.auto_accounts {
-            entries.push((
-                rustledger_plugin::AUTO_ACCOUNTS_NAME.to_string(),
-                None,
-                false,
-            ));
+            entries.push(PluginInvocation {
+                name: rustledger_plugin::AUTO_ACCOUNTS_NAME.to_string(),
+                config: None,
+                force_python: false,
+            });
         }
         // Implicit synth: document_discovery, driven by `option "documents"`.
         // The plugin sits in the registry as a ZST; we hand it the
@@ -603,12 +613,13 @@ pub fn run_plugins(
                     }
                 })
                 .collect();
-            let config = rustledger_plugin::document_discovery_config(base_dir, &resolved);
-            entries.push((
-                rustledger_plugin::DOCUMENT_DISCOVERY_NAME.to_string(),
-                Some(config),
-                false,
-            ));
+            entries.push(PluginInvocation {
+                name: rustledger_plugin::DOCUMENT_DISCOVERY_NAME.to_string(),
+                config: Some(rustledger_plugin::document_discovery_config(
+                    base_dir, &resolved,
+                )),
+                force_python: false,
+            });
         }
     }
 
@@ -622,11 +633,11 @@ pub fn run_plugins(
     if options.run_plugins {
         for plugin in file_plugins {
             if registry.find_synth(&plugin.name).is_some() == want_synth {
-                entries.push((
-                    plugin.name.clone(),
-                    plugin.config.clone(),
-                    plugin.force_python,
-                ));
+                entries.push(PluginInvocation {
+                    name: plugin.name.clone(),
+                    config: plugin.config.clone(),
+                    force_python: plugin.force_python,
+                });
             }
         }
     }
@@ -634,7 +645,11 @@ pub fn run_plugins(
     // CLI extra plugins.
     for extra in &options.extra_plugins {
         if registry.find_synth(&extra.name).is_some() == want_synth {
-            entries.push((extra.name.clone(), extra.config.clone(), false));
+            entries.push(PluginInvocation {
+                name: extra.name.clone(),
+                config: extra.config.clone(),
+                force_python: false,
+            });
         }
     }
 
@@ -651,26 +666,35 @@ pub fn run_plugins(
     // registry (`find_synth` / `find_regular`) keyed on the pass — the
     // returned reference type reflects the pass. Anything that doesn't
     // resolve falls through to the WASM/Python branches.
-    for (raw_name, plugin_config, force_python) in &entries {
-        // Resolve the plugin name. `has` / `find_synth` / `find_regular`
+    for invocation in &entries {
+        let PluginInvocation {
+            name: raw_name,
+            config: plugin_config,
+            force_python,
+        } = invocation;
+
+        // Dispatch via the typed registry. `find_synth`/`find_regular`
         // internally take the short name (last `.`-separated segment),
         // so prefixed names like `"beancount.plugins.implicit_prices"`
-        // and `"beancount_reds_plugins.zerosum.zerosum"` resolve through
-        // the same single call — no explicit prefix-stripping needed.
-        // `force_python` ("python:..." prefix) skips native resolution.
-        let resolved_name = (!*force_python && registry.has(raw_name)).then_some(raw_name.as_str());
-
-        // Dispatch via the typed registry: the lookup returns
-        // `Some` only if the plugin exists AND its marker trait
-        // matches the requested pass — a `RegularPlugin` won't
-        // be returned from `find_synth` (and vice versa), even
-        // on a name collision.
-        let native_plugin: Option<&dyn NativePlugin> = resolved_name.and_then(|name| match pass {
-            PluginPass::PreBookingSynth => {
-                registry.find_synth(name).map(|p| p as &dyn NativePlugin)
+        // resolve through the same call — no explicit prefix-stripping
+        // needed. Returns `Some` only if the plugin exists AND its
+        // marker trait matches the requested pass: a `RegularPlugin`
+        // won't be returned from `find_synth` (and vice versa), even
+        // on a name collision. Anything that returns `None` (WASM,
+        // Python, unknown names, wrong-pass natives) falls through
+        // to the WASM/Python branches below.
+        let native_plugin: Option<&dyn NativePlugin> = if *force_python {
+            None
+        } else {
+            match pass {
+                PluginPass::PreBookingSynth => registry
+                    .find_synth(raw_name)
+                    .map(|p| p as &dyn NativePlugin),
+                PluginPass::PostBooking => registry
+                    .find_regular(raw_name)
+                    .map(|p| p as &dyn NativePlugin),
             }
-            PluginPass::PostBooking => registry.find_regular(name).map(|p| p as &dyn NativePlugin),
-        });
+        };
 
         if let Some(plugin) = native_plugin {
             let wrappers = build_wrappers(directives, source_map);

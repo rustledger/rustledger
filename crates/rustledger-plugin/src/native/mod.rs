@@ -208,17 +208,15 @@ impl NativePluginRegistry {
             .map(std::convert::AsRef::as_ref)
     }
 
-    /// List all available plugins (both passes).
-    pub fn list(&self) -> Vec<&dyn NativePlugin> {
-        let mut out: Vec<&dyn NativePlugin> =
-            Vec::with_capacity(self.synth.len() + self.regular.len());
-        for p in &self.synth {
-            out.push(p.as_ref() as &dyn NativePlugin);
-        }
-        for p in &self.regular {
-            out.push(p.as_ref() as &dyn NativePlugin);
-        }
-        out
+    /// Iterate every plugin in the registry, synth then regular.
+    /// Returns trait references upcast to the base [`NativePlugin`] —
+    /// callers that need pass information should use
+    /// [`Self::find_synth`] / [`Self::find_regular`] instead.
+    pub fn iter(&self) -> impl Iterator<Item = &dyn NativePlugin> {
+        self.synth
+            .iter()
+            .map(|p| p.as_ref() as &dyn NativePlugin)
+            .chain(self.regular.iter().map(|p| p.as_ref() as &dyn NativePlugin))
     }
 
     /// Check if a name refers to any plugin in this registry, in
@@ -338,7 +336,7 @@ mod tests {
     fn test_registry_synth_and_regular_are_disjoint() {
         let registry = NativePluginRegistry::global();
 
-        for plugin in registry.list() {
+        for plugin in registry.iter() {
             let name = plugin.name();
             let in_synth = registry.find_synth(name).is_some();
             let in_regular = registry.find_regular(name).is_some();

@@ -3068,15 +3068,15 @@ fn test_registry_finds_with_beancount_prefix() {
 }
 
 #[test]
-fn test_registry_list_all() {
+fn test_registry_iter_all() {
     let registry = NativePluginRegistry::global();
-    let plugins = registry.list();
+    let count = registry.iter().count();
 
     // Should have at least 13 plugins (14 minus auto_tag which might be different).
     // allow weak-count: registry-shape test — count grows as plugins are added,
     // pinning to a specific value would force every plugin addition to update
     // this test. See scripts/check-plugin-test-quality.sh.
-    assert!(plugins.len() >= 13, "should have at least 13 plugins");
+    assert!(count >= 13, "should have at least 13 plugins, got {count}");
 }
 
 #[test]

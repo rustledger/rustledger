@@ -369,7 +369,6 @@ pub fn list_plugins() -> Result<JsValue, JsError> {
 
     let registry = NativePluginRegistry::global();
     let plugins: Vec<PluginInfo> = registry
-        .list()
         .iter()
         .map(|p| PluginInfo {
             name: p.name().to_string(),

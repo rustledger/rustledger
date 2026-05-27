@@ -6,9 +6,9 @@
 //! Reference: spec/tla/PluginCorrect.tla
 
 use proptest::prelude::*;
-use rustledger_plugin::NativePluginRegistry;
 use rustledger_plugin::test_helpers::materialize_ops;
 use rustledger_plugin::types::*;
+use rustledger_plugin::{NativePlugin, NativePluginRegistry};
 
 // ============================================================================
 // Test Strategies
@@ -129,7 +129,7 @@ proptest! {
         amount in amount_strategy(),
     ) {
         let registry = NativePluginRegistry::global();
-        let plugins = registry.list();
+        let plugins: Vec<_> = registry.iter().collect();
 
         // Track execution order
         let execution_order: Vec<String> = plugins.iter().map(|p| p.name().to_string()).collect();
@@ -278,10 +278,10 @@ proptest! {
             make_transaction(&date, "Test", &amount, "Expenses:Food"),
         ];
 
-        // Iterate every plugin in the registry — `list()` yields both
+        // Iterate every plugin in the registry — `iter()` yields both
         // synth and regular plugins uniformly as `&dyn NativePlugin`,
         // so no per-name pass classification is needed at this layer.
-        for plugin in registry.list() {
+        for plugin in registry.iter() {
             let input = make_input(directives.clone());
             let input_dirs = input.directives.clone();
             let output = plugin.process(input);
@@ -380,17 +380,16 @@ proptest! {
     #[test]
     fn prop_registry_list_complete(_dummy in 0..1i32) {
         let registry = NativePluginRegistry::global();
-        let plugins = registry.list();
+        let count = registry.iter().count();
 
         // Should have at least 14 plugins
         prop_assert!(
-            plugins.len() >= 14,
-            "Registry should have at least 14 plugins, got {}",
-            plugins.len()
+            count >= 14,
+            "Registry should have at least 14 plugins, got {count}",
         );
 
         // All plugins should have unique names
-        let names: Vec<&str> = plugins.iter().map(|p| p.name()).collect();
+        let names: Vec<&str> = registry.iter().map(NativePlugin::name).collect();
         let mut sorted_names = names.clone();
         sorted_names.sort_unstable();
         sorted_names.dedup();

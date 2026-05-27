@@ -4040,7 +4040,6 @@ dependencies = [
 name = "rustledger-wire-format-tests"
 version = "0.15.0"
 dependencies = [
- "jiff",
  "rust_decimal",
  "rust_decimal_macros",
  "rustledger-core",

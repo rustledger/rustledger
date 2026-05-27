@@ -12,22 +12,22 @@ categories.workspace = true
 authors.workspace = true
 publish = false
 
+# The lib is empty — this crate exists only to host the integration
+# tests under `tests/` that depend on multiple wire-format bindings
+# (FFI-WASI + WASM). Cargo picks up `tests/` automatically given a
+# default `src/lib.rs`.
 [lib]
-# Empty lib — the test harness lives in `tests/`. A bare lib target is
-# required for integration tests to be picked up.
-path = "src/lib.rs"
-
-[dependencies]
-# (No runtime dependencies — the lib is empty.)
 
 [dev-dependencies]
 rustledger-core.workspace = true
 rustledger-ffi-wasi.workspace = true
 rustledger-wasm.workspace = true
 serde_json.workspace = true
+# `rust_decimal` is required by the `dec!` macro expansion — the
+# macro emits code that names `rust_decimal::Decimal` directly,
+# so a transitive dep through `rustledger-core` isn't enough.
 rust_decimal.workspace = true
 rust_decimal_macros.workspace = true
-jiff.workspace = true
 
 [lints]
 workspace = true

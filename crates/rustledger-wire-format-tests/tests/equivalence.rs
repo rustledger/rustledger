@@ -15,6 +15,18 @@
 //! it because each test only knew about its own DTO. See issue #1200
 //! for the broader audit/scaffold plan.
 //!
+//! ## What this catches — and what it doesn't
+//!
+//! The harness catches **drift between bindings**: if one binding
+//! starts emitting a different shape than the other, the
+//! corresponding fixture fails. It does **not** catch
+//! **wrong-in-lockstep** bugs — if both bindings emit the same buggy
+//! shape, the test passes. Treat equivalence as a necessary but not
+//! sufficient condition for correctness. For audit fixtures that care
+//! about a specific field being present (not just symmetric across
+//! bindings), use [`assert_field_present`] to additionally pin the
+//! presence in the wire output.
+//!
 //! ## Known divergences (normalized away in this test)
 //!
 //! Each divergence below should be converged in a follow-up PR (it's
@@ -98,6 +110,39 @@ fn strip_top_level_empty_meta_and_nulls(json: &mut serde_json::Value) {
     }
 }
 
+/// Assert that a field appears in **both** bindings' JSON output.
+/// Used by audit fixtures that need to verify a specific field is
+/// actually present in the wire shape — equivalence alone wouldn't
+/// catch a both-binding drop. Walks the JSON object via dot-separated
+/// `path` (e.g. `"tags"`, `"postings.0.account"`).
+#[track_caller]
+fn assert_field_present(label: &str, directive: &Directive, path: &str) {
+    let ffi_wasi = serde_json::to_value(rustledger_ffi_wasi::convert::directive_to_json(
+        directive,
+        1,
+        "test.bean",
+    ))
+    .expect("FFI-WASI DirectiveJson is always JSON-serializable");
+    let wasm = serde_json::to_value(rustledger_wasm::convert::directive_to_json(directive))
+        .expect("WASM DirectiveJson is always JSON-serializable");
+
+    for (binding, value) in [("ffi-wasi", &ffi_wasi), ("wasm", &wasm)] {
+        let mut cursor = value;
+        for segment in path.split('.') {
+            cursor = if let Ok(idx) = segment.parse::<usize>() {
+                cursor.get(idx)
+            } else {
+                cursor.get(segment)
+            }
+            .unwrap_or_else(|| {
+                panic!(
+                    "fixture {label:?}: {binding} output missing field {path:?} (at segment {segment:?})\nfull output: {value:#}",
+                )
+            });
+        }
+    }
+}
+
 /// Run a `Directive` through both bindings' `directive_to_json` and
 /// assert the JSON outputs agree after normalization.
 ///
@@ -172,22 +217,54 @@ fn fixture_metadata_all_variants() -> Metadata {
 // Tests
 // =============================================================================
 
-/// Metadata equivalence — every `MetaValue` flavor produces the
-/// same JSON shape in both bindings. This is the original #1168
-/// motivation: WASM dropped the whole `meta` field for the crate's
-/// lifetime before #1199. The exhaustive-variants fixture means
-/// any future drop of a single variant is caught.
+/// Metadata equivalence on a Transaction — every `MetaValue`
+/// flavor produces the same JSON shape in both bindings. This is
+/// the original #1168 motivation: WASM dropped the whole `meta`
+/// field for the crate's lifetime before #1199. The exhaustive-
+/// variants fixture means any future drop of a single variant is
+/// caught.
 #[test]
-fn metadata_equivalence_across_all_meta_value_variants() {
-    let txn = Transaction::new(naive_date(2024, 1, 15).unwrap(), "test")
+fn metadata_equivalence_on_transaction_directive() {
+    let mut txn = Transaction::new(naive_date(2024, 1, 15).unwrap(), "test")
         .with_posting(fixture_posting("Assets:Cash", "100.00", "USD"))
         .with_posting(fixture_posting("Expenses:Food", "-100.00", "USD"))
         .with_tag(Tag::new("trip"));
-    let mut txn = txn;
     txn.meta = fixture_metadata_all_variants();
 
     let directive = Directive::Transaction(txn);
+    assert_field_present("transaction_with_all_meta_variants", &directive, "meta");
     assert_wire_equivalent("transaction_with_all_meta_variants", &directive);
+}
+
+/// Metadata equivalence on an Open — same exhaustive `MetaValue`
+/// fixture, different directive variant. Catches a binding that
+/// handles metadata correctly on Transaction but drops it on
+/// other directive variants.
+#[test]
+fn metadata_equivalence_on_open_directive() {
+    let open = Open::new(naive_date(2024, 1, 1).unwrap(), Account::new("Assets:Cash"))
+        .with_currencies(vec![Currency::new("USD")])
+        .with_meta(fixture_metadata_all_variants());
+    let directive = Directive::Open(open);
+    assert_field_present("open_with_all_meta_variants", &directive, "meta");
+    assert_wire_equivalent("open_with_all_meta_variants", &directive);
+}
+
+/// Metadata equivalence on a Document — also covers the audit
+/// candidate fields (`tags`/`links`) when carrying metadata.
+#[test]
+fn metadata_equivalence_on_document_directive() {
+    let document = Document {
+        date: naive_date(2024, 1, 15).unwrap(),
+        account: Account::new("Assets:Bank"),
+        path: "statements/2024-01.pdf".to_string(),
+        tags: vec![Tag::new("statement")],
+        links: vec![],
+        meta: fixture_metadata_all_variants(),
+    };
+    let directive = Directive::Document(document);
+    assert_field_present("document_with_all_meta_variants", &directive, "meta");
+    assert_wire_equivalent("document_with_all_meta_variants", &directive);
 }
 
 /// Smoke test that a minimal Open directive (no metadata, no
@@ -205,7 +282,12 @@ fn open_with_booking_method_equivalence() {
     let open = Open::new(naive_date(2024, 1, 1).unwrap(), Account::new("Assets:Cash"))
         .with_currencies(vec![Currency::new("USD")])
         .with_booking("STRICT");
-    assert_wire_equivalent("open_with_booking", &Directive::Open(open));
+    let directive = Directive::Open(open);
+    // Pin `booking` is present in both wire shapes — pre-#1199 WASM
+    // emitted it as a Debug-formatted quoted string; the audit
+    // confirmed the format is now standardized.
+    assert_field_present("open_with_booking", &directive, "booking");
+    assert_wire_equivalent("open_with_booking", &directive);
 }
 
 #[test]
@@ -218,12 +300,11 @@ fn close_directive_equivalence() {
 }
 
 /// Audit finding from issue #1200 item 3: WASM drops `Balance.tolerance`
-/// entirely from its wire shape; FFI-WASI emits it. Until WASM's
-/// `DirectiveJson::Balance` variant gains a `tolerance` field, this
-/// test stays `#[ignore]`d but documents the expected convergence
-/// target. Remove the `#[ignore]` once WASM is fixed.
+/// entirely from its wire shape; FFI-WASI emits it. Tracked in #1206
+/// with a concrete fix plan. Remove the `#[ignore]` once WASM emits
+/// the field — the test then pins the convergence going forward.
 #[test]
-#[ignore = "WASM drops Balance.tolerance — fix in a follow-up PR; tracked in #1200"]
+#[ignore = "WASM drops Balance.tolerance — tracked in #1206"]
 fn balance_directive_with_tolerance_equivalence() {
     let mut balance = Balance::new(
         naive_date(2024, 6, 1).unwrap(),
@@ -276,14 +357,14 @@ fn note_directive_equivalence() {
     assert_wire_equivalent("note_basic", &Directive::Note(note));
 }
 
-/// Audit candidate from issue #1200 item 3: `Document.tags` /
-/// `Document.links` exist on the core type but were never plumbed
-/// through `plugin-types::DocumentData`. The plugin-types DTO is a
-/// separate wire shape — this test exercises the FFI-WASI/WASM
-/// JSON-RPC + JS API shapes specifically (both have `Document`
-/// variants in their `DirectiveJson` enums). If either binding
-/// drops `tags`/`links`, this fixture surfaces it.
+/// Audit finding from issue #1200 item 3 — caught by the
+/// `assert_field_present` helper, not by equivalence:
+/// **both bindings** drop `Document.tags` and `Document.links` from
+/// their wire shape (lockstep-wrong, so equivalence alone would
+/// have passed silently). Tracked in #1208 with a concrete fix
+/// plan for both bindings.
 #[test]
+#[ignore = "Both bindings drop Document.tags and Document.links — tracked in #1208"]
 fn document_directive_with_tags_and_links_equivalence() {
     let document = Document {
         date: naive_date(2024, 1, 15).unwrap(),
@@ -293,10 +374,10 @@ fn document_directive_with_tags_and_links_equivalence() {
         links: vec![Link::new("inv-2024-01")],
         meta: Metadata::default(),
     };
-    assert_wire_equivalent(
-        "document_with_tags_and_links",
-        &Directive::Document(document),
-    );
+    let directive = Directive::Document(document);
+    assert_field_present("document_with_tags_and_links", &directive, "tags");
+    assert_field_present("document_with_tags_and_links", &directive, "links");
+    assert_wire_equivalent("document_with_tags_and_links", &directive);
 }
 
 #[test]
@@ -314,10 +395,10 @@ fn query_directive_equivalence() {
 /// emits each value as a tagged union `{type: "...", value: ...}`,
 /// which is type-safe — a JS consumer can distinguish a `Date` value
 /// from a `String` value. WASM emits values raw (the bare string,
-/// number, or object), which is lossy. Marked `#[ignore]` until the
-/// WASM side adopts the tagged shape; tracked in #1200.
+/// number, or object), which is lossy. Tracked in #1207 with a fix
+/// plan to adopt the tagged shape on the WASM side.
 #[test]
-#[ignore = "WASM emits Custom.values raw (lossy); FFI-WASI uses tagged union — fix in a follow-up"]
+#[ignore = "WASM emits Custom.values raw (lossy); tagged union expected — tracked in #1207"]
 fn custom_directive_with_all_value_variants_equivalence() {
     let custom = Custom {
         date: naive_date(2024, 1, 1).unwrap(),
@@ -360,7 +441,11 @@ fn posting_with_cost_spec_equivalence() {
     let txn = Transaction::new(naive_date(2024, 1, 15).unwrap(), "buy")
         .with_posting(Spanned::synthesized(posting))
         .with_posting(fixture_posting("Assets:Cash", "-1500.00", "USD"));
-    assert_wire_equivalent("posting_with_cost_spec", &Directive::Transaction(txn));
+    let directive = Directive::Transaction(txn);
+    // Both bindings must actually emit the cost field, not just agree
+    // on dropping it.
+    assert_field_present("posting_with_cost_spec", &directive, "postings.0.cost");
+    assert_wire_equivalent("posting_with_cost_spec", &directive);
 }
 
 /// Posting with price annotation (`@` for per-unit, `@@` for total).
@@ -380,25 +465,29 @@ fn posting_with_price_annotation_equivalence() {
     let txn = Transaction::new(naive_date(2024, 6, 1).unwrap(), "fx")
         .with_posting(Spanned::synthesized(posting))
         .with_posting(fixture_posting("Assets:Cash", "-110.00", "USD"));
-    assert_wire_equivalent(
+    let directive = Directive::Transaction(txn);
+    // Both bindings must actually emit the price field.
+    assert_field_present(
         "posting_with_price_annotation",
-        &Directive::Transaction(txn),
+        &directive,
+        "postings.0.price",
     );
+    assert_wire_equivalent("posting_with_price_annotation", &directive);
 }
 
 /// Audit finding from issue #1200 item 3: WASM drops `Posting.flag`
 /// (the `!` flag on individual postings) entirely from its wire
 /// shape; FFI-WASI emits it. Same failure mode as the pre-#1199 meta
-/// drop — silently absent from one binding. Marked `#[ignore]`
-/// until WASM is fixed; tracked in #1200.
+/// drop — silently absent from one binding. Tracked in #1205 with a
+/// concrete fix plan for `PostingJson.flag`.
 #[test]
-#[ignore = "WASM drops Posting.flag — fix in a follow-up PR; tracked in #1200"]
+#[ignore = "WASM drops Posting.flag — tracked in #1205"]
 fn posting_with_flag_equivalence() {
-    let mut posting = Posting::new(
+    let posting = Posting::new(
         Account::new("Assets:Cash"),
         Amount::new(dec!(100), Currency::new("USD")),
-    );
-    posting.flag = Some('!');
+    )
+    .with_flag('!');
     let txn = Transaction::new(naive_date(2024, 1, 1).unwrap(), "pending")
         .with_posting(Spanned::synthesized(posting))
         .with_posting(fixture_posting("Expenses:Misc", "-100.00", "USD"));

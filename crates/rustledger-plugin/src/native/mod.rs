@@ -20,18 +20,41 @@
 //! Each native plugin declares which pass it runs in by implementing
 //! either [`SynthPlugin`] or [`RegularPlugin`] (both extend the base
 //! [`NativePlugin`] trait). The registry holds two separately-typed
-//! `Vec`s, and the loader's runner consults the typed registry for
-//! the appropriate pass — a regular plugin can't accidentally be
-//! invoked in the synth pass because the registry lookup wouldn't
-//! find it there.
+//! Vecs (`Vec<Box<dyn SynthPlugin>>` and `Vec<Box<dyn RegularPlugin>>`),
+//! and the loader's runner consults the typed registry for the
+//! appropriate pass via [`NativePluginRegistry::find_synth`] /
+//! [`NativePluginRegistry::find_regular`]. The returned trait
+//! reference's type matches the pass: `find_synth` can never return
+//! a `RegularPlugin` and vice versa, so the dispatch site can't
+//! accidentally invoke a wrong-pass plugin even on a name collision.
+//!
+//! ## Where the discipline is enforced
+//!
+//! The marker traits are intentionally **not mutually exclusive** at
+//! the type level — `SynthPlugin` and `RegularPlugin` are empty
+//! sub-traits of `NativePlugin`, and nothing in the type system
+//! prevents a single type from implementing both. Exclusivity is
+//! enforced by:
+//!
+//! 1. **Registry construction convention**: each plugin is pushed
+//!    into exactly one of the two Vecs in `build_global_registry`.
+//! 2. **A pinned test** (`test_registry_synth_and_regular_are_disjoint`):
+//!    iterates `registry.iter()` and asserts every plugin lives in
+//!    exactly one Vec — CI catches a wrong-pass registration or a
+//!    type that implements both markers and ends up in both Vecs.
+//!
+//! The marker pair is therefore lighter than full type-level
+//! exclusivity (which would need negative trait bounds or a sealed
+//! pass-marker pattern that breaks object safety in our registry) —
+//! the cost is one assertion in CI instead of a compile error.
 //!
 //! ## Why a marker-trait pair rather than a single trait with a const
 //!
 //! `const PASS: PluginPass` on the base trait would be cleaner if
 //! consts were object-safe — but they aren't, and the registry uses
-//! trait objects (`Box<dyn NativePlugin>`) for heterogeneous
-//! storage. The marker-pair approach gets the same compile-time
-//! guarantee (a plugin can only fit one slot) at the cost of one
+//! trait objects (`Box<dyn SynthPlugin>` / `Box<dyn RegularPlugin>`)
+//! for heterogeneous storage. The marker-pair approach gives the
+//! dispatch-site type guarantee (described above) at the cost of one
 //! extra empty `impl` line per plugin.
 //!
 //! ## WASM and Python plugins
@@ -54,7 +77,13 @@ use crate::types::PluginOutput;
 /// Base capability for native plugins. Both [`SynthPlugin`] and
 /// [`RegularPlugin`] extend this — every native plugin has these
 /// three methods regardless of pass.
-pub trait NativePlugin: Send + Sync + 'static {
+///
+/// The bounds (`Send + Sync`) are the minimum to satisfy the
+/// global singleton registry; the registry's `Box<dyn ...>` storage
+/// implicitly requires `'static`, but the trait itself doesn't add
+/// that bound so external implementors can write borrowing impls
+/// for non-registry use (testing helpers, ad-hoc adapters).
+pub trait NativePlugin: Send + Sync {
     /// Plugin name (short form — `"implicit_prices"`, not the
     /// fully-qualified module path).
     fn name(&self) -> &'static str;
@@ -98,10 +127,18 @@ pub trait RegularPlugin: NativePlugin {}
 
 /// Registry of built-in native plugins, split by pass.
 ///
-/// Holding synth and regular plugins in separately-typed `Vec`s
-/// means the loader's pass-dispatch site can ask for the right kind
-/// directly — no runtime classification, no special cases, no
-/// hardcoded plugin-name lists.
+/// Holding synth and regular plugins in separately-typed `Vec`s lets
+/// the loader's pass-dispatch site ask for the right kind directly:
+/// the returned trait reference's type matches the pass, so a
+/// regular-pass plugin can't be returned from `find_synth` even on a
+/// name collision.
+///
+/// The loader still gates two **implicit** synth-pass invocations on
+/// `LoadOptions` / `Options` flags (`options.auto_accounts` and the
+/// `option "documents"` directive that drives `document_discovery`),
+/// but those flow through the same unified dispatch loop as
+/// file-declared and CLI plugins — there's no per-plugin special
+/// case at the dispatch site.
 pub struct NativePluginRegistry {
     synth: Vec<Box<dyn SynthPlugin>>,
     regular: Vec<Box<dyn RegularPlugin>>,

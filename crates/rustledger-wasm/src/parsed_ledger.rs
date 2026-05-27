@@ -98,8 +98,11 @@ fn execute_plugin(directives: &[Directive], plugin_name: &str) -> Result<JsValue
         wrappers_to_directives,
     };
 
-    let registry = NativePluginRegistry::new();
-    let Some(plugin) = registry.find(plugin_name) else {
+    let registry = NativePluginRegistry::global();
+    // External API runs plugins on already-booked input — synth
+    // plugins are a loader-internal concern and would re-emit Opens
+    // for accounts the booking pass already opened.
+    let Some(plugin) = registry.find_regular(plugin_name) else {
         let result = PluginResult {
             directives: Vec::new(),
             errors: vec![Error::new(format!("Unknown plugin: {plugin_name}"))],

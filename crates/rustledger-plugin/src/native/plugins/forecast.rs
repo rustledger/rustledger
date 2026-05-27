@@ -25,7 +25,7 @@ use std::sync::LazyLock;
 
 use crate::types::{DirectiveData, PluginInput, PluginOp, PluginOutput};
 
-use super::super::NativePlugin;
+use super::super::{NativePlugin, RegularPlugin};
 
 /// Regex for parsing forecast patterns in narrations.
 /// Matches: `[MONTHLY]`, `[WEEKLY SKIP 2 TIMES]`, `[MONTHLY UNTIL 2025-12-31]`, etc.
@@ -147,6 +147,8 @@ impl NativePlugin for ForecastPlugin {
         }
     }
 }
+
+impl RegularPlugin for ForecastPlugin {}
 
 /// Generate dates according to the specified interval and constraints.
 fn generate_dates(

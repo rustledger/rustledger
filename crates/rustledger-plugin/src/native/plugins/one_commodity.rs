@@ -2,7 +2,7 @@
 
 use crate::types::{DirectiveData, PluginError, PluginInput, PluginOp, PluginOutput};
 
-use super::super::NativePlugin;
+use super::super::{NativePlugin, RegularPlugin};
 
 /// Plugin that enforces single commodity per account.
 pub struct OneCommodityPlugin;
@@ -49,3 +49,5 @@ impl NativePlugin for OneCommodityPlugin {
         }
     }
 }
+
+impl RegularPlugin for OneCommodityPlugin {}

@@ -9,6 +9,19 @@ use rustledger_parser::Spanned;
 use std::path::Path;
 use thiserror::Error;
 
+/// A CLI-supplied (or programmatic) extra plugin invocation.
+///
+/// Bundles the plugin name with its optional config string so the two
+/// can't drift apart — the previous parallel-Vec representation could
+/// silently misalign a config with the wrong plugin.
+#[derive(Debug, Clone)]
+pub struct ExtraPlugin {
+    /// Plugin name (short or fully-qualified module path).
+    pub name: String,
+    /// Plugin-specific config string, if any.
+    pub config: Option<String>,
+}
+
 /// Options for loading and processing a ledger.
 #[derive(Debug, Clone)]
 pub struct LoadOptions {
@@ -18,10 +31,9 @@ pub struct LoadOptions {
     pub run_plugins: bool,
     /// Run `auto_accounts` plugin (default: false).
     pub auto_accounts: bool,
-    /// Additional native plugins to run (by name).
-    pub extra_plugins: Vec<String>,
-    /// Plugin configurations for extra plugins.
-    pub extra_plugin_configs: Vec<Option<String>>,
+    /// Additional plugins to run (CLI `--plugin` or programmatic API),
+    /// each with an optional config string.
+    pub extra_plugins: Vec<ExtraPlugin>,
     /// Run validation after processing (default: true).
     pub validate: bool,
     /// Enable path security (prevent include traversal).
@@ -35,7 +47,6 @@ impl Default for LoadOptions {
             run_plugins: true,
             auto_accounts: false,
             extra_plugins: Vec::new(),
-            extra_plugin_configs: Vec::new(),
             validate: true,
             path_security: false,
         }
@@ -51,7 +62,6 @@ impl LoadOptions {
             run_plugins: false,
             auto_accounts: false,
             extra_plugins: Vec::new(),
-            extra_plugin_configs: Vec::new(),
             validate: false,
             path_security: false,
         }
@@ -696,9 +706,10 @@ fn run_booking(
 /// `unrealized`, and `valuation` see filled-in per-unit values on the
 /// `CostNumber::PerUnitFromTotal` variant).
 ///
-/// Standalone callers (LSP, FFI, tests) that operate on already-booked
-/// input should pass [`PluginPass::All`] for the historical single-pass
-/// behavior.
+/// Standalone callers (LSP / FFI / tests on already-booked input) pass
+/// [`PluginPass::PostBooking`] — synth plugins are a loader-internal
+/// concern and would re-Open already-opened accounts if run a second
+/// time.
 #[cfg(feature = "plugins")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PluginPass {
@@ -712,10 +723,6 @@ pub enum PluginPass {
     /// Includes the 28 plugins that don't depend on synth state but
     /// may depend on booked cost specs.
     PostBooking,
-    /// Every plugin — historical single-pass behavior. Used by callers
-    /// (LSP, FFI, standalone tests) that don't run booking themselves
-    /// or that work on already-booked input.
-    All,
 }
 
 /// Run plugins on directives.
@@ -723,10 +730,20 @@ pub enum PluginPass {
 /// Executes native plugins (and document discovery) on the given directives,
 /// modifying them in-place. Plugin errors are appended to `errors`.
 ///
+/// A single plugin invocation in `run_plugins`'s unified dispatch
+/// list. `force_python` ("python:..." prefix) overrides native
+/// resolution; `config` is the plugin-specific string passed to
+/// `PluginInput.config`.
+#[cfg(feature = "plugins")]
+struct PluginInvocation {
+    name: String,
+    config: Option<String>,
+    force_python: bool,
+}
+
 /// `pass` selects which subset of plugins to run — see [`PluginPass`].
 /// The loader pipeline calls this twice (synth pass before Early,
-/// regular pass after booking). LSP / FFI / standalone callers pass
-/// `PluginPass::All` for the historical behavior.
+/// regular pass after booking).
 #[cfg(feature = "plugins")]
 pub fn run_plugins(
     directives: &mut Vec<Spanned<Directive>>,
@@ -737,104 +754,97 @@ pub fn run_plugins(
     errors: &mut Vec<LedgerError>,
     pass: PluginPass,
 ) -> Result<(), ProcessError> {
-    use rustledger_plugin::{
-        DocumentDiscoveryPlugin, NativePlugin, NativePluginRegistry, PluginInput, PluginOptions,
-    };
+    use rustledger_plugin::{NativePlugin, NativePluginRegistry, PluginInput, PluginOptions};
 
-    // Resolve document directories relative to the main file's directory
-    // Document discovery only runs when run_plugins is true (respects raw mode)
+    // Resolve document directories relative to the main file's directory.
+    // Used to build doc_discovery's per-call config in the synth pass.
     let base_dir = source_map
         .files()
         .first()
         .and_then(|f| f.path.parent())
         .unwrap_or_else(|| std::path::Path::new("."));
 
-    // `document_discovery` is a synthesizer — runs in PreBookingSynth
-    // and All, skipped in PostBooking (it already injected directives
-    // during the synth pass).
-    let run_doc_discovery = matches!(pass, PluginPass::PreBookingSynth | PluginPass::All)
-        && options.run_plugins
-        && !file_options.documents.is_empty();
-    let has_document_dirs = run_doc_discovery;
-    let resolved_documents: Vec<String> = if has_document_dirs {
-        file_options
-            .documents
-            .iter()
-            .map(|d| {
-                let path = std::path::Path::new(d);
-                if path.is_absolute() {
-                    d.clone()
-                } else {
-                    base_dir.join(path).to_string_lossy().to_string()
-                }
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
+    // Access the process-wide registry singleton. The registry is
+    // immutable and stateless, so the same instance services every
+    // call.
+    let registry = NativePluginRegistry::global();
 
-    // Build the native plugin registry up front so we can ask each
-    // plugin whether it's a synthesizer (via `NativePlugin::is_synth`)
-    // during the classification step below. Constructing the registry
-    // is O(n_plugins) and just instantiates the plugin structs; it's
-    // cheap to do before we know whether any plugins will actually
-    // run.
-    let registry = NativePluginRegistry::new();
+    // Build the unified list of plugins to invoke for this pass:
+    //   1. Implicit synth plugins triggered by `LoadOptions` /
+    //      `file_options` (auto_accounts via `options.auto_accounts`;
+    //      document_discovery via non-empty `file_options.documents`).
+    //   2. File-declared plugins from `plugin "..."` directives.
+    //   3. CLI `--plugin` extras.
+    // Pass classification happens here — once — via `registry.find_synth`.
+    // A plugin enters the list iff its pass matches the requested `pass`.
+    let mut entries: Vec<PluginInvocation> = Vec::new();
 
-    // Collect raw plugin names first (we'll resolve them with the registry later)
-    // Tuple: (name, config, force_python)
-    let mut raw_plugins: Vec<(String, Option<String>, bool)> = Vec::new();
-
-    // Classify a plugin by name. Self-classification lives on the
-    // `NativePlugin::is_synth` trait method (see
-    // `rustledger-plugin/src/native/mod.rs`). Plugins not in the
-    // native registry (WASM, Python) default to non-synth — they
-    // run post-booking like file-authored beancount plugins.
-    let is_synth = |name: &str| -> bool { registry.find(name).is_some_and(NativePlugin::is_synth) };
-
-    // The API-level `options.auto_accounts` flag is a synth source.
-    if options.auto_accounts && matches!(pass, PluginPass::PreBookingSynth | PluginPass::All) {
-        raw_plugins.push(("auto_accounts".to_string(), None, false));
+    if matches!(pass, PluginPass::PreBookingSynth) {
+        // Implicit synth: API-level auto_accounts flag.
+        if options.auto_accounts {
+            entries.push(PluginInvocation {
+                name: rustledger_plugin::AUTO_ACCOUNTS_NAME.to_string(),
+                config: None,
+                force_python: false,
+            });
+        }
+        // Implicit synth: document_discovery, driven by `option "documents"`.
+        // The plugin sits in the registry as a ZST; we hand it the
+        // resolved directories + base_dir via its config JSON.
+        if options.run_plugins && !file_options.documents.is_empty() {
+            let resolved: Vec<String> = file_options
+                .documents
+                .iter()
+                .map(|d| {
+                    let path = std::path::Path::new(d);
+                    if path.is_absolute() {
+                        d.clone()
+                    } else {
+                        base_dir.join(path).to_string_lossy().to_string()
+                    }
+                })
+                .collect();
+            entries.push(PluginInvocation {
+                name: rustledger_plugin::DOCUMENT_DISCOVERY_NAME.to_string(),
+                config: Some(rustledger_plugin::document_discovery_config(
+                    base_dir, &resolved,
+                )),
+                force_python: false,
+            });
+        }
     }
 
-    // File-declared plugins: synth plugins go in PreBookingSynth,
-    // everything else (including the 6 cost-spec-reading ones) goes in
-    // PostBooking. `PluginPass::All` runs everything for standalone
-    // callers (LSP / FFI / tests on already-booked input).
+    // A plugin name belongs in the current pass iff its synth-marker
+    // membership matches `pass`. Non-native plugins (WASM/Python) are
+    // never in the synth registry and therefore always fall into the
+    // PostBooking pass.
+    let want_synth = matches!(pass, PluginPass::PreBookingSynth);
+
+    // File-declared plugins.
     if options.run_plugins {
         for plugin in file_plugins {
-            let synth = is_synth(&plugin.name);
-            let in_pass = match pass {
-                PluginPass::PreBookingSynth => synth,
-                PluginPass::PostBooking => !synth,
-                PluginPass::All => true,
-            };
-            if in_pass {
-                raw_plugins.push((
-                    plugin.name.clone(),
-                    plugin.config.clone(),
-                    plugin.force_python,
-                ));
+            if registry.find_synth(&plugin.name).is_some() == want_synth {
+                entries.push(PluginInvocation {
+                    name: plugin.name.clone(),
+                    config: plugin.config.clone(),
+                    force_python: plugin.force_python,
+                });
             }
         }
     }
 
-    // CLI extras: same synth/regular split as file plugins.
-    for (i, plugin_name) in options.extra_plugins.iter().enumerate() {
-        let synth = is_synth(plugin_name);
-        let in_pass = match pass {
-            PluginPass::PreBookingSynth => synth,
-            PluginPass::PostBooking => !synth,
-            PluginPass::All => true,
-        };
-        if in_pass {
-            let config = options.extra_plugin_configs.get(i).cloned().flatten();
-            raw_plugins.push((plugin_name.clone(), config, false));
+    // CLI extra plugins.
+    for extra in &options.extra_plugins {
+        if registry.find_synth(&extra.name).is_some() == want_synth {
+            entries.push(PluginInvocation {
+                name: extra.name.clone(),
+                config: extra.config.clone(),
+                force_python: false,
+            });
         }
     }
 
-    // Check if we have any work to do - early return before creating registry
-    if raw_plugins.is_empty() && !has_document_dirs {
+    if entries.is_empty() {
         return Ok(());
     }
 
@@ -843,203 +853,193 @@ pub fn run_plugins(
         title: file_options.title.clone(),
     };
 
-    // Run document discovery plugin if documents directories are configured.
-    // Each plugin call builds wrappers freshly from the current `directives`,
-    // sends them to the plugin, receives `PluginOp`s, and applies the ops
-    // to update `directives` — spans on `Keep` / `Modify` ops are inherited
-    // from the original `directives` entry by index, so plugin-transformed
-    // directives retain byte-precise source locations.
-    if has_document_dirs {
-        let doc_plugin = DocumentDiscoveryPlugin::new(resolved_documents, base_dir.to_path_buf());
-        let wrappers = build_wrappers(directives, source_map);
-        let input = PluginInput {
-            directives: wrappers,
-            options: plugin_options.clone(),
-            config: None,
-        };
-        let output = doc_plugin.process(input);
-        record_plugin_errors(errors, output.errors, source_map);
-        apply_plugin_ops(directives, output.ops, errors, source_map)?;
-    }
+    // Dispatch each entry. Native plugins resolve through the typed
+    // registry (`find_synth` / `find_regular`) keyed on the pass — the
+    // returned reference type reflects the pass. Anything that doesn't
+    // resolve falls through to the WASM/Python branches.
+    for invocation in &entries {
+        let PluginInvocation {
+            name: raw_name,
+            config: plugin_config,
+            force_python,
+        } = invocation;
 
-    // Run each plugin (registry was constructed earlier for the
-    // synth classification step).
-    if !raw_plugins.is_empty() {
-        for (raw_name, plugin_config, force_python) in &raw_plugins {
-            // Resolve the plugin name - try direct match first, then prefixed variants.
-            // Skip native resolution when force_python is set (plugin "python:..." prefix).
-            let resolved_name = if *force_python {
-                None
-            } else if registry.find(raw_name).is_some() {
-                Some(raw_name.as_str())
-            } else if let Some(short_name) = raw_name.strip_prefix("beancount.plugins.") {
-                registry.find(short_name).is_some().then_some(short_name)
-            } else if let Some(short_name) = raw_name.strip_prefix("beancount_reds_plugins.") {
-                registry.find(short_name).is_some().then_some(short_name)
-            } else if let Some(short_name) = raw_name.strip_prefix("beancount_lazy_plugins.") {
-                registry.find(short_name).is_some().then_some(short_name)
-            } else {
-                None
+        // Dispatch via the typed registry. `find_synth`/`find_regular`
+        // internally take the short name (last `.`-separated segment),
+        // so prefixed names like `"beancount.plugins.implicit_prices"`
+        // resolve through the same call — no explicit prefix-stripping
+        // needed. Returns `Some` only if the plugin exists AND its
+        // marker trait matches the requested pass: a `RegularPlugin`
+        // won't be returned from `find_synth` (and vice versa), even
+        // on a name collision. Anything that returns `None` (WASM,
+        // Python, unknown names, wrong-pass natives) falls through
+        // to the WASM/Python branches below.
+        let native_plugin: Option<&dyn NativePlugin> = if *force_python {
+            None
+        } else {
+            match pass {
+                PluginPass::PreBookingSynth => registry
+                    .find_synth(raw_name)
+                    .map(|p| p as &dyn NativePlugin),
+                PluginPass::PostBooking => registry
+                    .find_regular(raw_name)
+                    .map(|p| p as &dyn NativePlugin),
+            }
+        };
+
+        if let Some(plugin) = native_plugin {
+            let wrappers = build_wrappers(directives, source_map);
+            let input = PluginInput {
+                directives: wrappers,
+                options: plugin_options.clone(),
+                config: plugin_config.clone(),
+            };
+            let output = plugin.process(input);
+            record_plugin_errors(errors, output.errors, source_map);
+            apply_plugin_ops(directives, output.ops, errors, source_map)?;
+        } else {
+            // Not a native plugin — categorize and handle
+            let plugin_path = std::path::Path::new(raw_name);
+            let ext = plugin_path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_lowercase();
+
+            // The closure is only invoked from inside the wasm-plugins /
+            // python-plugins cfg blocks below. The whole function is
+            // already `#[cfg(feature = "plugins")]`, so this only matters
+            // when `plugins` is enabled but neither child feature is
+            // (e.g. `--features native-plugins`). Allow `unused_variables`
+            // for exactly that configuration. Underscore-prefixing the
+            // binding would have been the wrong fix because we DO call
+            // the closure in builds with one of the features enabled,
+            // which would trip `no_effect_underscore_binding` instead.
+            #[cfg_attr(
+                not(any(feature = "wasm-plugins", feature = "python-plugins")),
+                allow(unused_variables)
+            )]
+            let resolve_path = |name: &str| -> Result<std::path::PathBuf, String> {
+                let p = std::path::Path::new(name);
+                let resolved = if p.is_absolute() {
+                    p.to_path_buf()
+                } else {
+                    base_dir.join(name)
+                };
+
+                // Path security: prevent plugins from outside the ledger directory
+                if options.path_security
+                    && let (Ok(canon_base), Ok(canon_plugin)) =
+                        (base_dir.canonicalize(), resolved.canonicalize())
+                    && !canon_plugin.starts_with(&canon_base)
+                {
+                    return Err(format!(
+                        "plugin path '{name}' is outside the ledger directory"
+                    ));
+                }
+
+                Ok(resolved)
             };
 
-            if let Some(name) = resolved_name
-                && let Some(plugin) = registry.find(name)
-            {
-                let wrappers = build_wrappers(directives, source_map);
-                let input = PluginInput {
-                    directives: wrappers,
-                    options: plugin_options.clone(),
-                    config: plugin_config.clone(),
-                };
-                let output = plugin.process(input);
-                record_plugin_errors(errors, output.errors, source_map);
-                apply_plugin_ops(directives, output.ops, errors, source_map)?;
-            } else {
-                // Not a native plugin — categorize and handle
-                let plugin_path = std::path::Path::new(raw_name);
-                let ext = plugin_path
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .unwrap_or("")
-                    .to_lowercase();
-
-                // The closure is only invoked from inside the wasm-plugins /
-                // python-plugins cfg blocks below. The whole function is
-                // already `#[cfg(feature = "plugins")]`, so this only matters
-                // when `plugins` is enabled but neither child feature is
-                // (e.g. `--features native-plugins`). Allow `unused_variables`
-                // for exactly that configuration. Underscore-prefixing the
-                // binding would have been the wrong fix because we DO call
-                // the closure in builds with one of the features enabled,
-                // which would trip `no_effect_underscore_binding` instead.
-                #[cfg_attr(
-                    not(any(feature = "wasm-plugins", feature = "python-plugins")),
-                    allow(unused_variables)
-                )]
-                let resolve_path = |name: &str| -> Result<std::path::PathBuf, String> {
-                    let p = std::path::Path::new(name);
-                    let resolved = if p.is_absolute() {
-                        p.to_path_buf()
-                    } else {
-                        base_dir.join(name)
-                    };
-
-                    // Path security: prevent plugins from outside the ledger directory
-                    if options.path_security
-                        && let (Ok(canon_base), Ok(canon_plugin)) =
-                            (base_dir.canonicalize(), resolved.canonicalize())
-                        && !canon_plugin.starts_with(&canon_base)
-                    {
-                        return Err(format!(
-                            "plugin path '{name}' is outside the ledger directory"
-                        ));
-                    }
-
-                    Ok(resolved)
-                };
-
-                if ext == "wasm" {
-                    // WASM plugin
-                    #[cfg(feature = "wasm-plugins")]
-                    {
-                        let wasm_path = match resolve_path(raw_name) {
-                            Ok(p) => p,
-                            Err(e) => {
-                                errors.push(LedgerError::error("PLUGIN", e).with_phase("plugin"));
-                                continue;
-                            }
-                        };
-                        let wrappers = build_wrappers(directives, source_map);
-                        match run_wasm_plugin(&wasm_path, &wrappers, &plugin_options, plugin_config)
-                        {
-                            Ok((ops, plugin_errors)) => {
-                                for err in plugin_errors {
-                                    errors.push(err);
-                                }
-                                apply_plugin_ops(directives, ops, errors, source_map)?;
-                            }
-                            Err(e) => {
-                                errors.push(
-                                    LedgerError::error(
-                                        "PLUGIN",
-                                        format!("WASM plugin {} failed: {e}", wasm_path.display()),
-                                    )
-                                    .with_phase("plugin"),
-                                );
-                            }
-                        }
-                    }
-                    #[cfg(not(feature = "wasm-plugins"))]
-                    {
-                        errors.push(
-                            LedgerError::error(
-                                "PLUGIN",
-                                format!(
-                                    "WASM plugin '{raw_name}' requires the wasm-plugins feature",
-                                ),
-                            )
-                            .with_phase("plugin"),
-                        );
-                    }
-                } else if *force_python
-                    || ext == "py"
-                    || raw_name.contains(std::path::MAIN_SEPARATOR)
-                    || raw_name.contains('.')
+            if ext == "wasm" {
+                // WASM plugin
+                #[cfg(feature = "wasm-plugins")]
                 {
-                    // Python module or file-based plugin (or force_python via "python:" prefix)
-                    #[cfg(feature = "python-plugins")]
-                    {
-                        let resolved = match resolve_path(raw_name) {
-                            Ok(p) => p,
-                            Err(e) => {
-                                errors.push(LedgerError::error("PLUGIN", e).with_phase("plugin"));
-                                continue;
+                    let wasm_path = match resolve_path(raw_name) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            errors.push(LedgerError::error("PLUGIN", e).with_phase("plugin"));
+                            continue;
+                        }
+                    };
+                    let wrappers = build_wrappers(directives, source_map);
+                    match run_wasm_plugin(&wasm_path, &wrappers, &plugin_options, plugin_config) {
+                        Ok((ops, plugin_errors)) => {
+                            for err in plugin_errors {
+                                errors.push(err);
                             }
-                        };
-                        let wrappers = build_wrappers(directives, source_map);
-                        match run_python_plugin(
-                            raw_name,
-                            &resolved,
-                            base_dir,
-                            &wrappers,
-                            &plugin_options,
-                            plugin_config,
-                        ) {
-                            Ok((ops, plugin_errors)) => {
-                                for err in plugin_errors {
-                                    errors.push(err);
-                                }
-                                apply_plugin_ops(directives, ops, errors, source_map)?;
-                            }
-                            Err(e) => {
-                                errors.push(LedgerError::error("E8002", e).with_phase("plugin"));
-                            }
+                            apply_plugin_ops(directives, ops, errors, source_map)?;
+                        }
+                        Err(e) => {
+                            errors.push(
+                                LedgerError::error(
+                                    "PLUGIN",
+                                    format!("WASM plugin {} failed: {e}", wasm_path.display()),
+                                )
+                                .with_phase("plugin"),
+                            );
                         }
                     }
-                    #[cfg(not(feature = "python-plugins"))]
-                    {
-                        errors.push(
-                            LedgerError::error(
-                                "E8005",
-                                format!(
-                                    "Python plugin \"{raw_name}\" requires the python-plugins feature",
-                                ),
-                            )
-                            .with_phase("plugin"),
-                        );
+                }
+                #[cfg(not(feature = "wasm-plugins"))]
+                {
+                    errors.push(
+                        LedgerError::error(
+                            "PLUGIN",
+                            format!("WASM plugin '{raw_name}' requires the wasm-plugins feature",),
+                        )
+                        .with_phase("plugin"),
+                    );
+                }
+            } else if *force_python
+                || ext == "py"
+                || raw_name.contains(std::path::MAIN_SEPARATOR)
+                || raw_name.contains('.')
+            {
+                // Python module or file-based plugin (or force_python via "python:" prefix)
+                #[cfg(feature = "python-plugins")]
+                {
+                    let resolved = match resolve_path(raw_name) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            errors.push(LedgerError::error("PLUGIN", e).with_phase("plugin"));
+                            continue;
+                        }
+                    };
+                    let wrappers = build_wrappers(directives, source_map);
+                    match run_python_plugin(
+                        raw_name,
+                        &resolved,
+                        base_dir,
+                        &wrappers,
+                        &plugin_options,
+                        plugin_config,
+                    ) {
+                        Ok((ops, plugin_errors)) => {
+                            for err in plugin_errors {
+                                errors.push(err);
+                            }
+                            apply_plugin_ops(directives, ops, errors, source_map)?;
+                        }
+                        Err(e) => {
+                            errors.push(LedgerError::error("E8002", e).with_phase("plugin"));
+                        }
                     }
-                } else {
-                    // Completely unknown plugin name — try to suggest a module path
-                    #[cfg(feature = "python-plugins")]
-                    {
-                        use rustledger_plugin::python::{is_python_available, suggest_module_path};
-                        let suggestion = if is_python_available() {
-                            suggest_module_path(raw_name)
-                        } else {
-                            None
-                        };
-                        if let Some(module_path) = suggestion {
-                            errors.push(
+                }
+                #[cfg(not(feature = "python-plugins"))]
+                {
+                    errors.push(
+                        LedgerError::error(
+                            "E8005",
+                            format!(
+                                "Python plugin \"{raw_name}\" requires the python-plugins feature",
+                            ),
+                        )
+                        .with_phase("plugin"),
+                    );
+                }
+            } else {
+                // Completely unknown plugin name — try to suggest a module path
+                #[cfg(feature = "python-plugins")]
+                {
+                    use rustledger_plugin::python::{is_python_available, suggest_module_path};
+                    let suggestion = if is_python_available() {
+                        suggest_module_path(raw_name)
+                    } else {
+                        None
+                    };
+                    if let Some(module_path) = suggestion {
+                        errors.push(
                                 LedgerError::error(
                                     "E8004",
                                     format!(
@@ -1048,18 +1048,7 @@ pub fn run_plugins(
                                 )
                                 .with_phase("plugin"),
                             );
-                        } else {
-                            errors.push(
-                                LedgerError::error(
-                                    "E8001",
-                                    format!("Plugin not found: \"{raw_name}\""),
-                                )
-                                .with_phase("plugin"),
-                            );
-                        }
-                    }
-                    #[cfg(not(feature = "python-plugins"))]
-                    {
+                    } else {
                         errors.push(
                             LedgerError::error(
                                 "E8001",
@@ -1069,10 +1058,16 @@ pub fn run_plugins(
                         );
                     }
                 }
+                #[cfg(not(feature = "python-plugins"))]
+                {
+                    errors.push(
+                        LedgerError::error("E8001", format!("Plugin not found: \"{raw_name}\""))
+                            .with_phase("plugin"),
+                    );
+                }
             }
         }
     }
-
     // No final wrapper→directive conversion needed: `apply_plugin_ops`
     // updates `directives` in place after each plugin call, preserving
     // original spans on Keep/Modify ops. Plugin-synthesized directives

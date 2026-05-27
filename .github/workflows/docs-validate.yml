@@ -21,7 +21,9 @@ jobs:
         uses: actions/checkout@900f2210b1d28bbbd0bd22d17926b9e224e8f231 # v6
         with:
           path: rustledger
-          sparse-checkout: docs
+          sparse-checkout: |
+            docs
+            .nvmrc
       - name: Checkout website repo (for VitePress config)
         uses: actions/checkout@900f2210b1d28bbbd0bd22d17926b9e224e8f231 # v6
         with:
@@ -34,7 +36,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v5
         with:
-          node-version-file: '.nvmrc'
+          node-version-file: 'rustledger/.nvmrc'
       - name: Install dependencies
         working-directory: website
         run: npm ci

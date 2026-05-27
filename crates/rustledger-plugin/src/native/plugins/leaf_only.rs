@@ -2,7 +2,7 @@
 
 use crate::types::{DirectiveData, PluginError, PluginInput, PluginOp, PluginOutput};
 
-use super::super::NativePlugin;
+use super::super::{NativePlugin, RegularPlugin};
 
 /// Plugin that errors when posting to non-leaf (parent) accounts.
 pub struct LeafOnlyPlugin;
@@ -60,3 +60,5 @@ impl NativePlugin for LeafOnlyPlugin {
         }
     }
 }
+
+impl RegularPlugin for LeafOnlyPlugin {}

@@ -4,7 +4,7 @@ use crate::types::{
     CloseData, DirectiveData, DirectiveWrapper, PluginInput, PluginOp, PluginOutput,
 };
 
-use super::super::NativePlugin;
+use super::super::{NativePlugin, RegularPlugin};
 
 /// Plugin that closes all descendant accounts when a parent account closes.
 ///
@@ -90,3 +90,5 @@ impl NativePlugin for CloseTreePlugin {
         }
     }
 }
+
+impl RegularPlugin for CloseTreePlugin {}

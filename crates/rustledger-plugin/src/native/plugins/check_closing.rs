@@ -5,7 +5,7 @@ use crate::types::{
     PluginOutput,
 };
 
-use super::super::NativePlugin;
+use super::super::{NativePlugin, RegularPlugin};
 use super::utils::increment_date;
 
 /// Plugin that inserts zero balance assertion when posting has `closing: TRUE` metadata.
@@ -87,3 +87,5 @@ impl NativePlugin for CheckClosingPlugin {
         }
     }
 }
+
+impl RegularPlugin for CheckClosingPlugin {}

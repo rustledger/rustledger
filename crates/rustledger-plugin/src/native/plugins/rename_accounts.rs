@@ -19,7 +19,7 @@ use crate::types::{
     DirectiveData, DirectiveWrapper, PadData, PluginInput, PluginOp, PluginOutput, PostingData,
 };
 
-use super::super::NativePlugin;
+use super::super::{NativePlugin, RegularPlugin};
 
 /// Regex for parsing config key-value pairs.
 /// Format: `'pattern': 'replacement'`
@@ -80,6 +80,8 @@ impl NativePlugin for RenameAccountsPlugin {
         }
     }
 }
+
+impl RegularPlugin for RenameAccountsPlugin {}
 
 /// Cheap structural check — only compares the account name fields the
 /// rename plugin can touch. Avoids a full `PartialEq` requirement and

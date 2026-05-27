@@ -2,7 +2,7 @@
 
 use crate::types::{DirectiveData, PluginInput, PluginOp, PluginOutput};
 
-use super::super::NativePlugin;
+use super::super::{NativePlugin, RegularPlugin};
 
 /// Plugin that automatically adds tags based on account patterns.
 ///
@@ -88,6 +88,8 @@ impl NativePlugin for AutoTagPlugin {
         }
     }
 }
+
+impl RegularPlugin for AutoTagPlugin {}
 
 #[cfg(test)]
 mod tests {

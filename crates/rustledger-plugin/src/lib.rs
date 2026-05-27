@@ -56,7 +56,10 @@ pub use convert::{
     ConversionError, directive_to_wrapper, directive_to_wrapper_with_location,
     directives_to_wrappers, wrapper_to_directive, wrappers_to_directives,
 };
-pub use native::{DocumentDiscoveryPlugin, NativePlugin, NativePluginRegistry};
+pub use native::{
+    AUTO_ACCOUNTS_NAME, DOCUMENT_DISCOVERY_NAME, NativePlugin, NativePluginRegistry, RegularPlugin,
+    SynthPlugin, document_discovery_config,
+};
 #[cfg(feature = "wasm-runtime")]
 pub use runtime::{
     Plugin, PluginManager, RuntimeConfig, WasmPluginDirScanReport, WatchingPluginManager,

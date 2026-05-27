@@ -5,7 +5,7 @@
 
 use crate::types::{DirectiveData, MetaValueData, PluginInput, PluginOp, PluginOutput};
 
-use super::super::NativePlugin;
+use super::super::{NativePlugin, RegularPlugin};
 
 /// Tag used to identify Regular Expected Transactions.
 const TAG_RX: &str = "rx_txn";
@@ -66,6 +66,8 @@ impl NativePlugin for RxTxnPlugin {
         }
     }
 }
+
+impl RegularPlugin for RxTxnPlugin {}
 
 #[cfg(test)]
 mod tests {

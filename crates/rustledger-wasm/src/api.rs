@@ -307,8 +307,11 @@ pub fn run_plugin(source: &str, plugin_name: &str) -> Result<JsValue, JsError> {
     }
 
     // Find and run the plugin
-    let registry = NativePluginRegistry::new();
-    let Some(plugin) = registry.find(plugin_name) else {
+    let registry = NativePluginRegistry::global();
+    // External API runs plugins on already-booked input — synth
+    // plugins are a loader-internal concern and would re-emit Opens
+    // for accounts the booking pass already opened.
+    let Some(plugin) = registry.find_regular(plugin_name) else {
         let result = PluginResult {
             directives: Vec::new(),
             errors: vec![Error::new(format!("Unknown plugin: {plugin_name}"))],
@@ -364,9 +367,8 @@ pub fn run_plugin(source: &str, plugin_name: &str) -> Result<JsValue, JsError> {
 pub fn list_plugins() -> Result<JsValue, JsError> {
     use rustledger_plugin::NativePluginRegistry;
 
-    let registry = NativePluginRegistry::new();
+    let registry = NativePluginRegistry::global();
     let plugins: Vec<PluginInfo> = registry
-        .list()
         .iter()
         .map(|p| PluginInfo {
             name: p.name().to_string(),

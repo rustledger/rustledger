@@ -47,7 +47,7 @@ Create a new file in `crates/rustledger-plugin/src/native/plugins/`:
 ````rust
 // crates/rustledger-plugin/src/native/plugins/my_plugin.rs
 
-use crate::native::NativePlugin;
+use crate::native::{NativePlugin, RegularPlugin};
 use crate::types::{PluginError, PluginErrorSeverity, PluginInput, PluginOp, PluginOutput};
 
 /// My Plugin - brief description.
@@ -88,11 +88,13 @@ impl NativePlugin for MyPlugin {
         let ops = (0..input.directives.len()).map(PluginOp::Keep).collect();
         PluginOutput { ops, errors }
     }
-
-    // Override `is_synth() -> true` if this plugin synthesizes directives
-    // (e.g. injected `Open`s) that the loader's pre-booking Early validation
-    // depends on. Defaults to false (post-booking pass).
 }
+
+// Mark the plugin's pass — runs post-booking, like most plugins.
+// If your plugin synthesizes directives (e.g. injected `Open`s) that the
+// loader's pre-booking Early validation depends on, implement `SynthPlugin`
+// instead.
+impl RegularPlugin for MyPlugin {}
 ````
 
 ### 2. Register the Plugin
@@ -107,32 +109,35 @@ mod my_plugin;
 pub use my_plugin::MyPlugin;
 ```
 
-Then register it in `crates/rustledger-plugin/src/native/mod.rs`:
+Then register it in `crates/rustledger-plugin/src/native/mod.rs`. The registry
+is a `LazyLock<NativePluginRegistry>` singleton initialized from two
+separately-typed `Vec`s, one per pass — add your plugin to the
+`regular` Vec (or `synth`, if it implements `SynthPlugin`):
 
 ```rust
-impl NativePluginRegistry {
-    pub fn new() -> Self {
-        Self {
-            plugins: vec![
-                // ... existing plugins ...
-                Box::new(ImplicitPricesPlugin),
-                Box::new(CheckCommodityPlugin),
-                // Add your plugin to the list
-                Box::new(MyPlugin),
-            ],
-        }
-    }
-}
+static GLOBAL_REGISTRY: LazyLock<NativePluginRegistry> = LazyLock::new(|| {
+    let synth: Vec<Box<dyn SynthPlugin>> = vec![
+        Box::new(AutoAccountsPlugin),
+        // ... other synth plugins ...
+    ];
+    let regular: Vec<Box<dyn RegularPlugin>> = vec![
+        // ... existing regular plugins ...
+        Box::new(ImplicitPricesPlugin),
+        Box::new(CheckCommodityPlugin),
+        // Add your plugin to the appropriate list
+        Box::new(MyPlugin),
+    ];
+    NativePluginRegistry { synth, regular }
+});
 ```
 
-### 3. Add Aliases (Optional)
+### 3. Prefix Aliases (Automatic)
 
-For Python beancount compatibility, add aliases in `registry.rs`:
-
-```rust
-// Allow both "my_plugin" and "beancount.plugins.my_plugin"
-registry.add_alias("beancount.plugins.my_plugin", "my_plugin");
-```
+Plugin name lookups automatically strip well-known prefixes — short
+names (`"my_plugin"`) and fully-qualified module paths
+(`"beancount.plugins.my_plugin"`, `"beancount_reds_plugins.my_plugin.my_plugin"`)
+both resolve through the same `find_synth` / `find_regular` calls.
+No explicit alias registration is needed.
 
 ### 4. Write Tests
 
@@ -217,8 +222,8 @@ Add integration tests in `crates/rustledger-plugin/tests/`:
 ```rust
 // crates/rustledger-plugin/tests/my_plugin_test.rs
 
-use rustledger_plugin::native::{NativePlugin, NativePluginRegistry};
 use rustledger_plugin::types::*;
+use rustledger_plugin::{NativePlugin, NativePluginRegistry};
 
 // Helper to create test input
 fn make_input(directives: Vec<DirectiveWrapper>) -> PluginInput {
@@ -252,8 +257,14 @@ fn make_transaction(date: &str, narration: &str) -> DirectiveWrapper {
 
 #[test]
 fn test_my_plugin_integration() {
-    let registry = NativePluginRegistry::new();
-    let plugin = registry.find("my_plugin").expect("plugin should exist");
+    // Process-wide singleton — no allocation per call.
+    let registry = NativePluginRegistry::global();
+    // `find_regular` returns `Option<&dyn RegularPlugin>` — the type
+    // system guarantees we won't accidentally invoke a synth-pass
+    // plugin in a regular-pass test (and vice versa for `find_synth`).
+    let plugin = registry
+        .find_regular("my_plugin")
+        .expect("plugin should exist");
 
     let input = make_input(vec![
         make_transaction("2024-01-15", "Test transaction"),
@@ -345,8 +356,15 @@ Keep every input index and append `PluginOp::Insert(wrapper)` for each
 synthesized directive. Inserted directives get `SYNTHESIZED_FILE_ID`
 and a zero span. If your plugin synthesizes `Open` or `Document`
 directives that the loader's pre-booking Early validation depends on,
-also override `is_synth(&self) -> bool { true }` so the loader runs it
-in the synth pass.
+implement `SynthPlugin` (instead of `RegularPlugin`) so the loader runs it
+in the synth pass:
+
+```rust
+impl SynthPlugin for MyPlugin {}
+```
+
+Implement exactly one of `SynthPlugin` or `RegularPlugin` — the registry's
+typed `Vec`s reject anything else at compile time.
 
 ```rust
 fn process(&self, input: PluginInput) -> PluginOutput {

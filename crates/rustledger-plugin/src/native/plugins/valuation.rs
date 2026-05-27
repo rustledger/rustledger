@@ -33,7 +33,7 @@ use crate::types::{
     PriceAnnotationData, PriceData, TransactionData,
 };
 
-use super::super::NativePlugin;
+use super::super::{NativePlugin, RegularPlugin};
 
 const MAPPED_CURRENCY_PRECISION: u32 = 7;
 const TAG_TO_ADD: &str = "valuation-applied";
@@ -209,6 +209,8 @@ impl NativePlugin for ValuationPlugin {
         PluginOutput { ops, errors }
     }
 }
+
+impl RegularPlugin for ValuationPlugin {}
 
 /// Parse config metadata into `AccountConfig`.
 fn parse_config(metadata: &[(String, MetaValueData)]) -> Option<AccountConfig> {

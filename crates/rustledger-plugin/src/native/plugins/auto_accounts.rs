@@ -4,25 +4,23 @@ use crate::types::{
     DirectiveData, DirectiveWrapper, OpenData, PluginInput, PluginOp, PluginOutput,
 };
 
-use super::super::NativePlugin;
+use super::super::{NativePlugin, SynthPlugin};
 
 /// Plugin that auto-generates Open directives for accounts used without explicit open.
 pub struct AutoAccountsPlugin;
 
+/// Name used by the registry, the loader (when emitting the implicit
+/// synth-pass entry for `options.auto_accounts`), and external callers.
+/// Kept as a constant so the three sites stay in sync.
+pub const AUTO_ACCOUNTS_NAME: &str = "auto_accounts";
+
 impl NativePlugin for AutoAccountsPlugin {
     fn name(&self) -> &'static str {
-        "auto_accounts"
+        AUTO_ACCOUNTS_NAME
     }
 
     fn description(&self) -> &'static str {
         "Auto-generate Open directives for used accounts"
-    }
-
-    /// Synthesizes `Open` directives the early validator needs to
-    /// see — must run pre-booking to suppress spurious E1001 errors
-    /// on accounts the plugin will auto-create.
-    fn is_synth(&self) -> bool {
-        true
     }
 
     fn process(&self, input: PluginInput) -> PluginOutput {
@@ -117,3 +115,8 @@ impl NativePlugin for AutoAccountsPlugin {
         }
     }
 }
+
+/// Synthesizes `Open` directives the early validator needs to see —
+/// must run pre-booking to suppress spurious E1001 errors on accounts
+/// the plugin will auto-create.
+impl SynthPlugin for AutoAccountsPlugin {}

@@ -120,8 +120,13 @@ fn write_tempfile(content: &str) -> (tempfile::TempDir, std::path::PathBuf) {
 fn run_process(path: &std::path::Path, plugin_names: &[&str]) {
     let raw = load_raw(path).expect("load_raw");
     let opts = LoadOptions {
-        extra_plugins: plugin_names.iter().map(|s| (*s).to_string()).collect(),
-        extra_plugin_configs: vec![None; plugin_names.len()],
+        extra_plugins: plugin_names
+            .iter()
+            .map(|s| rustledger_loader::ExtraPlugin {
+                name: (*s).to_string(),
+                config: None,
+            })
+            .collect(),
         ..LoadOptions::default()
     };
     let ledger = process(raw, &opts).expect("process");

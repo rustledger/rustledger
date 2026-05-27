@@ -2,7 +2,7 @@
 
 use crate::types::{DirectiveData, PluginError, PluginInput, PluginOp, PluginOutput};
 
-use super::super::NativePlugin;
+use super::super::{NativePlugin, RegularPlugin};
 
 /// Plugin that calculates unrealized gains on positions.
 ///
@@ -141,3 +141,5 @@ impl NativePlugin for UnrealizedPlugin {
         }
     }
 }
+
+impl RegularPlugin for UnrealizedPlugin {}

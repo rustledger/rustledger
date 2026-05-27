@@ -30,7 +30,7 @@ use crate::types::{
     PostingData, TransactionData,
 };
 
-use super::super::NativePlugin;
+use super::super::{NativePlugin, RegularPlugin};
 
 /// Regex for parsing capital gains config entries.
 /// Format: `'pattern': ['to_replace', 'repl1', 'repl2']`
@@ -72,6 +72,9 @@ impl NativePlugin for CapitalGainsGainLossPlugin {
         process_gain_loss(input)
     }
 }
+
+impl RegularPlugin for CapitalGainsLongShortPlugin {}
+impl RegularPlugin for CapitalGainsGainLossPlugin {}
 
 /// Configuration for `long_short` classification.
 struct LongShortConfig {

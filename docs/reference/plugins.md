@@ -86,12 +86,15 @@ sort → synth-plugins → Early validation → booking
      → regular-plugins → Late validation → finalize
 ```
 
-Native plugins opt into the synth pass by overriding `is_synth(&self) -> bool`
-on the `NativePlugin` trait (default: `false`). The loader uses the
-`PluginPass` enum (`PreBookingSynth`, `PostBooking`, `All`) to select
-which subset of plugins to run on each pass. Standalone callers (LSP,
-FFI, tests) that operate on already-booked input pass `PluginPass::All`
-for the historical single-pass behavior.
+Native plugins declare their pass by implementing exactly one of two
+marker subtraits — `SynthPlugin` or `RegularPlugin` — both of which
+extend the base `NativePlugin` capability. The registry stores them in
+two separately-typed `Vec`s, and the loader looks up the right kind via
+`find_synth` / `find_regular`. The loader uses the `PluginPass` enum
+(`PreBookingSynth`, `PostBooking`) to select which subset of plugins to
+run on each pass. Callers that operate on already-booked input (LSP /
+FFI / standalone tests) invoke `run_plugins` twice — once per pass —
+matching the loader's own pipeline.
 
 Within each pass, plugins still execute in the order they appear in
 your file. This matters because:

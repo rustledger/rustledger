@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use crate::types::{DirectiveData, PluginError, PluginInput, PluginOp, PluginOutput};
 
-use super::super::NativePlugin;
+use super::super::{NativePlugin, RegularPlugin};
 
 /// Plugin that checks all used commodities are declared.
 pub struct CheckCommodityPlugin;
@@ -73,3 +73,5 @@ impl NativePlugin for CheckCommodityPlugin {
         }
     }
 }
+
+impl RegularPlugin for CheckCommodityPlugin {}

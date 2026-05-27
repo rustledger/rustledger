@@ -229,23 +229,19 @@ pub fn validation_errors_to_diagnostics(
         // If booking fails, we leave the transaction as-is and let validation catch it
     }
 
-    // LSP simplification: run ALL plugins (synth + regular) post-booking,
-    // pre-validation. The loader's process::process() instead splits them —
-    // synth plugins run before Early validation, regular plugins run after
-    // booking, and Late validation runs last. The LSP path collapses these
-    // into a single pass for incremental-edit speed; see the rustdoc on
-    // validation_errors_to_diagnostics for the rationale and trade-offs.
-    // Running plugins here (rather than skipping them) still ensures
-    // plugin-transformed directives (e.g., effective_date splitting
-    // transactions across dates) are seen by validation (#793).
+    // LSP runs both plugin passes — synth then regular — on already-booked
+    // directives. The loader's process::process() splits these around its
+    // own Early/Late validation phases; the LSP collapses validation into
+    // a single step but still needs both plugin passes to fire so that
+    // synth-injected Opens (auto_accounts) suppress spurious E1001s and
+    // regular plugins (effective_date, etc.) transform directives before
+    // validation. See validation_errors_to_diagnostics for the LSP's
+    // pipeline rationale and trade-offs.
     if let Some(ctx) = plugin_ctx {
         // Emit info diagnostics for non-native plugins. The loader's run_plugins()
         // only executes native plugins — Python/WASM plugins are not run in the LSP.
         // Warn users so they understand why the LSP may disagree with `rledger check`.
-        //
-        // Create the registry once rather than calling is_builtin() per plugin
-        // (which internally allocates a new registry each time).
-        let registry = NativePluginRegistry::new();
+        let registry = NativePluginRegistry::global();
         for plugin in ctx.plugins {
             // Only show the diagnostic for plugins declared in the current file.
             if let Some(fid) = current_file_id
@@ -253,7 +249,7 @@ pub fn validation_errors_to_diagnostics(
             {
                 continue;
             }
-            let is_native = registry.find(&plugin.name).is_some();
+            let is_native = registry.has(&plugin.name);
             if !is_native {
                 let (start_line, start_col) = line_index.offset_to_position(plugin.span.start);
                 let (end_line, end_col) = line_index.offset_to_position(plugin.span.end);
@@ -284,15 +280,29 @@ pub fn validation_errors_to_diagnostics(
 
         let load_options = LoadOptions::default();
         let mut plugin_errors = Vec::new();
-        match rustledger_loader::run_plugins(
+        // Run synth pass first so auto_accounts can synthesize Opens
+        // for accounts referenced without explicit declaration; this
+        // suppresses spurious E1001 diagnostics in the LSP.
+        let synth_result = rustledger_loader::run_plugins(
             &mut booked_directives,
             ctx.plugins,
             ctx.file_options,
             &load_options,
             ctx.source_map,
             &mut plugin_errors,
-            rustledger_loader::PluginPass::All,
-        ) {
+            rustledger_loader::PluginPass::PreBookingSynth,
+        );
+        match synth_result.and_then(|()| {
+            rustledger_loader::run_plugins(
+                &mut booked_directives,
+                ctx.plugins,
+                ctx.file_options,
+                &load_options,
+                ctx.source_map,
+                &mut plugin_errors,
+                rustledger_loader::PluginPass::PostBooking,
+            )
+        }) {
             Ok(()) => {
                 // Convert plugin errors to diagnostics.
                 // Plugin errors don't carry file_id, so we only show them

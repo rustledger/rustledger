@@ -2,7 +2,7 @@
 
 use crate::types::{DirectiveData, PluginError, PluginInput, PluginOp, PluginOutput};
 
-use super::super::NativePlugin;
+use super::super::{NativePlugin, RegularPlugin};
 
 /// Plugin that enforces unique prices (one per commodity pair per day).
 pub struct UniquePricesPlugin;
@@ -45,3 +45,5 @@ impl NativePlugin for UniquePricesPlugin {
         }
     }
 }
+
+impl RegularPlugin for UniquePricesPlugin {}

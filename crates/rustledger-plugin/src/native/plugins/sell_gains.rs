@@ -2,7 +2,7 @@
 
 use crate::types::{DirectiveData, PluginError, PluginInput, PluginOp, PluginOutput};
 
-use super::super::NativePlugin;
+use super::super::{NativePlugin, RegularPlugin};
 
 /// Plugin that cross-checks declared gains against sale prices.
 ///
@@ -85,3 +85,5 @@ impl NativePlugin for SellGainsPlugin {
         }
     }
 }
+
+impl RegularPlugin for SellGainsPlugin {}

@@ -2,7 +2,7 @@
 
 use crate::types::{DirectiveData, DirectiveWrapper, PluginInput, PluginOp, PluginOutput};
 
-use super::super::NativePlugin;
+use super::super::{NativePlugin, RegularPlugin};
 use super::utils::increment_date;
 
 /// Plugin that inserts zero balance assertions when balance sheet accounts are closed.
@@ -117,6 +117,8 @@ impl NativePlugin for CheckDrainedPlugin {
         }
     }
 }
+
+impl RegularPlugin for CheckDrainedPlugin {}
 
 #[cfg(test)]
 mod check_drained_tests {

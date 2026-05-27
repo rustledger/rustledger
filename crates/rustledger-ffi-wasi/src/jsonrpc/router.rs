@@ -185,10 +185,13 @@ fn handle_load_file(params: &serde_json::Value) -> Result<serde_json::Value, Rpc
     // Run plugins if requested
     let run_plugins: Vec<&str> = params.plugins.iter().map(String::as_str).collect();
     if !run_plugins.is_empty() && errors.is_empty() {
-        let registry = NativePluginRegistry::new();
+        let registry = NativePluginRegistry::global();
 
         for plugin_name in run_plugins {
-            if let Some(plugin) = registry.find(plugin_name) {
+            // External API runs plugins on already-booked input — synth
+            // plugins are a loader-internal concern and would re-emit
+            // Opens for accounts the booking pass already opened.
+            if let Some(plugin) = registry.find_regular(plugin_name) {
                 let wrappers: Vec<_> = directives
                     .iter()
                     .enumerate()

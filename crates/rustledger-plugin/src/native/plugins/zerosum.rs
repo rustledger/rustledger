@@ -45,7 +45,7 @@ use crate::types::{
     PluginOp, PluginOutput,
 };
 
-use super::super::NativePlugin;
+use super::super::{NativePlugin, RegularPlugin};
 
 /// Default tolerance for matching amounts.
 const DEFAULT_TOLERANCE: &str = "0.0099";
@@ -333,6 +333,8 @@ impl NativePlugin for ZerosumPlugin {
         }
     }
 }
+
+impl RegularPlugin for ZerosumPlugin {}
 
 /// Parse the Python-style config dict.
 fn parse_config(

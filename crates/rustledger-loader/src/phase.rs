@@ -138,7 +138,8 @@ impl<P: Phase> Directives<P> {
     /// **Internal**: construct a `Directives<P>` from a raw `Vec`.
     /// Phase transitions use this to advance the phantom. External
     /// callers must enter the pipeline via [`Directives::from_parser`]
-    /// (which produces [`Directives<Raw>`]).
+    /// (which produces [`Directives<Raw>`]). Kept `const` because
+    /// `from_parser` is `pub const fn` and chains through here.
     pub(crate) const fn new_unchecked(inner: Vec<Spanned<Directive>>) -> Self {
         Self {
             inner,
@@ -185,6 +186,37 @@ impl Directives<Raw> {
     #[must_use]
     pub const fn from_parser(directives: Vec<Spanned<Directive>>) -> Self {
         Self::new_unchecked(directives)
+    }
+}
+
+/// Transactions that failed booking, partitioned out of the main
+/// pipeline by the `book` transition on [`Directives<EarlyValidated>`]
+/// and re-merged at the `finalize` transition on
+/// [`Directives<LateValidated>`].
+///
+/// The phantom type can't express "this Vec holds a mix of stages,"
+/// so failed bookings travel out-of-band — this newtype gives the
+/// out-of-band channel a name and a type, so the `finalize` call
+/// can't accidentally receive an arbitrary `Vec<Spanned<Directive>>`
+/// (e.g. a freshly-parsed one). The contents are pre-booking shape:
+/// unresolved cost specs, unfilled elided slots, possibly unbalanced.
+#[derive(Debug)]
+pub struct FailedBookings {
+    inner: Vec<Spanned<Directive>>,
+}
+
+impl FailedBookings {
+    /// **Internal**: construct from a raw `Vec`. The `book` transition
+    /// is the only legitimate producer.
+    pub(crate) const fn new(inner: Vec<Spanned<Directive>>) -> Self {
+        Self { inner }
+    }
+
+    /// Consume and return the underlying directives.
+    /// Used by `finalize` to merge them back into the display order.
+    #[allow(clippy::missing_const_for_fn)] // Drop on self requires non-const fn in current Rust.
+    pub(crate) fn into_inner(self) -> Vec<Spanned<Directive>> {
+        self.inner
     }
 }
 

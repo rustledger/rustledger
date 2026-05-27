@@ -294,10 +294,12 @@ pub fn process(raw: LoadResult, options: &LoadOptions) -> Result<Ledger, Process
             &mut errors,
         );
 
-    #[cfg(feature = "booking")]
-    let (booked, failed) = directives.book(effective_booking_method, &mut errors);
-    #[cfg(not(feature = "booking"))]
-    let (booked, failed) = directives.book_disabled();
+    let (booked, failed) = directives.book(
+        #[cfg(feature = "booking")]
+        effective_booking_method,
+        #[cfg(feature = "booking")]
+        &mut errors,
+    );
 
     let finalized = booked
         .apply_regular_plugins(
@@ -396,18 +398,21 @@ impl crate::Directives<crate::Sorted> {
         source_map: &SourceMap,
         errors: &mut Vec<LedgerError>,
     ) -> Result<crate::Directives<crate::Synthed>, ProcessError> {
+        // `run_plugins` early-returns when no plugin entry matches the
+        // pass; no outer gate needed (and any outer gate risked
+        // missing one of the implicit-synth triggers — auto_accounts,
+        // document_discovery via `option "documents"`, file-declared
+        // synth plugins).
         #[cfg(feature = "plugins")]
-        if options.run_plugins || options.auto_accounts {
-            run_plugins(
-                self.as_vec_mut(),
-                plugins,
-                file_options,
-                options,
-                source_map,
-                errors,
-                PluginPass::PreBookingSynth,
-            )?;
-        }
+        run_plugins(
+            self.as_vec_mut(),
+            plugins,
+            file_options,
+            options,
+            source_map,
+            errors,
+            PluginPass::PreBookingSynth,
+        )?;
         // Suppress unused-arg warnings when `plugins` feature is off.
         #[cfg(not(feature = "plugins"))]
         {
@@ -459,7 +464,7 @@ impl crate::Directives<crate::Synthed> {
 
 impl crate::Directives<crate::EarlyValidated> {
     /// Run booking/interpolation. Returns the successfully-booked
-    /// directives plus a parallel `Vec` of failed transactions.
+    /// directives plus a typed wrapper holding failed transactions.
     ///
     /// Failed transactions are in pre-booking shape (unresolved cost
     /// specs, unfilled elided slots, possibly unbalanced); they
@@ -467,27 +472,28 @@ impl crate::Directives<crate::EarlyValidated> {
     /// already reported the root cause and the downstream checks
     /// would cascade misleading errors. They get re-merged at
     /// [`crate::Directives::<crate::LateValidated>::finalize`].
-    #[cfg(feature = "booking")]
+    ///
+    /// When the `booking` feature is disabled this is an identity
+    /// transition: directives pass through unchanged and the failed
+    /// set is always empty. The same method exists in both feature
+    /// configurations so the caller in `process()` doesn't need a
+    /// `#[cfg]` match — the booking-specific arguments appear or
+    /// disappear via per-parameter `#[cfg]` attributes, mirroring
+    /// `early_validate` / `late_validate`.
     pub(crate) fn book(
         mut self,
-        effective_method: rustledger_core::BookingMethod,
-        errors: &mut Vec<LedgerError>,
-    ) -> (crate::Directives<crate::Booked>, Vec<Spanned<Directive>>) {
+        #[cfg(feature = "booking")] effective_method: rustledger_core::BookingMethod,
+        #[cfg(feature = "booking")] errors: &mut Vec<LedgerError>,
+    ) -> (crate::Directives<crate::Booked>, crate::FailedBookings) {
+        #[cfg(feature = "booking")]
         let (booked, failed) =
             run_booking(std::mem::take(self.as_vec_mut()), effective_method, errors);
-        (crate::Directives::new_unchecked(booked), failed)
-    }
-
-    /// Identity transition when the `booking` feature is disabled.
-    /// No interpolation runs; the directive list passes through
-    /// unchanged. Failed is always empty.
-    #[cfg(not(feature = "booking"))]
-    pub(crate) fn book_disabled(
-        mut self,
-    ) -> (crate::Directives<crate::Booked>, Vec<Spanned<Directive>>) {
+        #[cfg(not(feature = "booking"))]
+        let (booked, failed): (Vec<Spanned<Directive>>, Vec<Spanned<Directive>>) =
+            (std::mem::take(self.as_vec_mut()), Vec::new());
         (
-            crate::Directives::new_unchecked(std::mem::take(self.as_vec_mut())),
-            Vec::new(),
+            crate::Directives::new_unchecked(booked),
+            crate::FailedBookings::new(failed),
         )
     }
 }
@@ -512,18 +518,18 @@ impl crate::Directives<crate::Booked> {
         source_map: &SourceMap,
         errors: &mut Vec<LedgerError>,
     ) -> Result<crate::Directives<crate::RegularPluginsApplied>, ProcessError> {
+        // `run_plugins` early-returns when no plugin entry matches
+        // the pass; no outer gate needed.
         #[cfg(feature = "plugins")]
-        if options.run_plugins || !options.extra_plugins.is_empty() {
-            run_plugins(
-                self.as_vec_mut(),
-                plugins,
-                file_options,
-                options,
-                source_map,
-                errors,
-                PluginPass::PostBooking,
-            )?;
-        }
+        run_plugins(
+            self.as_vec_mut(),
+            plugins,
+            file_options,
+            options,
+            source_map,
+            errors,
+            PluginPass::PostBooking,
+        )?;
         #[cfg(not(feature = "plugins"))]
         {
             let _ = (plugins, file_options, options, source_map, errors);
@@ -575,10 +581,10 @@ impl crate::Directives<crate::LateValidated> {
     /// restores the failed entries' positions.
     pub(crate) fn finalize(
         mut self,
-        failed: Vec<Spanned<Directive>>,
+        failed: crate::FailedBookings,
     ) -> crate::Directives<crate::Finalized> {
         let mut v = std::mem::take(self.as_vec_mut());
-        v.extend(failed);
+        v.extend(failed.into_inner());
         v.sort_by_key(|d| (d.value.date(), d.value.priority(), d.file_id, d.span.start));
         crate::Directives::new_unchecked(v)
     }

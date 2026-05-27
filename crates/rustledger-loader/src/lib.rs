@@ -39,7 +39,7 @@ mod source_map;
 mod vfs;
 
 pub use phase::{
-    Booked, Directives, EarlyValidated, Finalized, LateValidated, Phase, Raw,
+    Booked, Directives, EarlyValidated, FailedBookings, Finalized, LateValidated, Phase, Raw,
     RegularPluginsApplied, Sorted, Synthed,
 };
 

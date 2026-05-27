@@ -150,6 +150,9 @@ export interface TransactionDirective extends Directive {
 
 /**
  * A posting within a transaction.
+ *
+ * Field order mirrors `rustledger_wasm::types::PostingJson` so that
+ * the type definitions read in the same order as the JSON output.
  */
 export interface Posting {
     /** Account name */
@@ -158,7 +161,9 @@ export interface Posting {
     units?: Amount | null;
     /** Cost specification */
     cost?: CostSpec | null;
-    /** Posting flag */
+    /** Price annotation (`@` per-unit or `@@` total) */
+    price?: Amount;
+    /** Posting flag (e.g. "!" for pending) */
     flag?: string;
     /** Posting-level metadata (issue #1168) */
     meta?: Record<string, MetaValueJson>;
@@ -239,6 +244,84 @@ export interface PriceDirective extends Directive {
     currency: string;
     /** Price amount */
     amount: Amount;
+}
+
+/**
+ * A commodity declaration.
+ */
+export interface CommodityDirective extends Directive {
+    type: "commodity";
+    /** Currency being declared */
+    currency: string;
+}
+
+/**
+ * A pad directive — fills `account` from `source_account` to make the
+ * next balance assertion pass.
+ */
+export interface PadDirective extends Directive {
+    type: "pad";
+    /** Account being padded */
+    account: string;
+    /** Source account the pad draws from */
+    source_account: string;
+}
+
+/**
+ * An event directive — records a named state value at a date.
+ */
+export interface EventDirective extends Directive {
+    type: "event";
+    /** Event name (e.g. "location") */
+    event_type: string;
+    /** Event value */
+    value: string;
+}
+
+/**
+ * A note directive — attaches a free-form comment to an account.
+ */
+export interface NoteDirective extends Directive {
+    type: "note";
+    /** Account the note applies to */
+    account: string;
+    /** Comment text */
+    comment: string;
+}
+
+/**
+ * A document directive — links an account to an external file path.
+ */
+export interface DocumentDirective extends Directive {
+    type: "document";
+    /** Account the document applies to */
+    account: string;
+    /** Path to the document file */
+    path: string;
+}
+
+/**
+ * A query directive — embeds a named BQL query in the ledger.
+ */
+export interface QueryDirective extends Directive {
+    type: "query";
+    /** Query name */
+    name: string;
+    /** BQL query text */
+    query_string: string;
+}
+
+/**
+ * A custom directive — `custom TYPE arg1 arg2 ...`. `values` carries
+ * the positional arguments after the type keyword (absent when there
+ * are none); each value is a [`MetaValueJson`].
+ */
+export interface CustomDirective extends Directive {
+    type: "custom";
+    /** Custom type keyword (the first word after `custom`) */
+    custom_type: string;
+    /** Positional values after the type keyword */
+    values?: MetaValueJson[];
 }
 
 /**

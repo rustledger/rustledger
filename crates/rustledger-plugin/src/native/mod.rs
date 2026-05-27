@@ -19,12 +19,11 @@
 //!
 //! Each native plugin declares which pass it runs in by implementing
 //! either [`SynthPlugin`] or [`RegularPlugin`] (both extend the base
-//! [`NativePlugin`] trait). Pre-#1166 this was a single-trait runtime
-//! discriminator (`fn is_synth(&self) -> bool`); now the registry
-//! holds two separately-typed `Vec`s, and the loader's runner
-//! consults the typed registry for the appropriate pass — a regular
-//! plugin can't accidentally be invoked in the synth pass because
-//! the registry lookup wouldn't find it there.
+//! [`NativePlugin`] trait). The registry holds two separately-typed
+//! `Vec`s, and the loader's runner consults the typed registry for
+//! the appropriate pass — a regular plugin can't accidentally be
+//! invoked in the synth pass because the registry lookup wouldn't
+//! find it there.
 //!
 //! ## Why a marker-trait pair rather than a single trait with a const
 //!
@@ -46,6 +45,8 @@
 mod plugins;
 
 pub use plugins::*;
+
+use std::sync::LazyLock;
 
 use crate::types::PluginInput;
 use crate::types::PluginOutput;
@@ -117,21 +118,28 @@ fn plugin_short_name(name: &str) -> &str {
     name.rsplit('.').next().unwrap_or(name)
 }
 
+/// Process-wide singleton registry — the registry holds no per-load
+/// state, so allocating one per call is pure waste. Use
+/// [`NativePluginRegistry::global`] to access it.
+static GLOBAL_REGISTRY: LazyLock<NativePluginRegistry> = LazyLock::new(NativePluginRegistry::new);
+
 impl NativePluginRegistry {
-    /// Create a new registry with all built-in plugins, partitioned
-    /// by pass.
+    /// Access the process-wide registry singleton.
     ///
-    /// Each plugin's pass is determined by which marker trait
-    /// ([`SynthPlugin`] or [`RegularPlugin`]) it implements; the
-    /// compiler enforces the slot at registration time.
-    pub fn new() -> Self {
+    /// The registry is immutable and stateless; reuse this reference
+    /// instead of constructing a fresh registry per call. The
+    /// underlying `LazyLock` initializes on first access.
+    #[must_use]
+    pub fn global() -> &'static Self {
+        &GLOBAL_REGISTRY
+    }
+
+    /// Construct a new registry. Crate-internal — production code
+    /// should use [`Self::global`]. Kept for `Default` and tests.
+    pub(crate) fn new() -> Self {
         let synth: Vec<Box<dyn SynthPlugin>> = vec![
             Box::new(AutoAccountsPlugin),
-            // `document_discovery` is *also* a synth plugin per
-            // intent, but is instantiated per-call by the loader's
-            // runner (its constructor takes `base_dir` + resolved
-            // documents). The trait impl on `DocumentDiscoveryPlugin`
-            // still marks it correctly for any direct caller.
+            Box::new(DocumentDiscoveryPlugin),
         ];
         let regular: Vec<Box<dyn RegularPlugin>> = vec![
             Box::new(ImplicitPricesPlugin),
@@ -188,26 +196,15 @@ impl NativePluginRegistry {
     /// Returns `None` if the plugin doesn't exist OR if it exists
     /// but is a synth-pass plugin — the type system guarantees the
     /// returned reference is `dyn RegularPlugin`.
+    ///
+    /// Accepts both short names (`"implicit_prices"`) and fully
+    /// qualified module paths (`"beancount.plugins.implicit_prices"`).
     pub fn find_regular(&self, name: &str) -> Option<&dyn RegularPlugin> {
         let short_name = plugin_short_name(name);
         self.regular
             .iter()
             .find(|p| p.name() == short_name)
             .map(std::convert::AsRef::as_ref)
-    }
-
-    /// Find a plugin by name without caring about its pass.
-    ///
-    /// Used by `is_builtin` and other queries that only need to know
-    /// "does a plugin with this name exist." The returned reference
-    /// is upcast to [`NativePlugin`] (the base trait); callers that
-    /// need pass information should use [`Self::find_synth`] /
-    /// [`Self::find_regular`] instead.
-    pub fn find_any(&self, name: &str) -> Option<&dyn NativePlugin> {
-        let short_name = plugin_short_name(name);
-        let synth = self.synth.iter().map(|p| p.as_ref() as &dyn NativePlugin);
-        let regular = self.regular.iter().map(|p| p.as_ref() as &dyn NativePlugin);
-        synth.chain(regular).find(|p| p.name() == short_name)
     }
 
     /// List all available plugins (both passes).
@@ -226,11 +223,21 @@ impl NativePluginRegistry {
     /// Check if a name refers to a built-in plugin (either pass).
     ///
     /// Accepts both short names and fully qualified module paths.
+    /// Consults the global singleton — no allocation per call.
+    #[must_use]
     pub fn is_builtin(name: &str) -> bool {
+        Self::global().has(name)
+    }
+
+    /// Check if a name refers to any plugin in this registry, in
+    /// either pass. Use this for existence queries; for invocation
+    /// use [`Self::find_synth`] / [`Self::find_regular`] so the
+    /// returned reference's type carries the pass.
+    #[must_use]
+    pub fn has(&self, name: &str) -> bool {
         let short_name = plugin_short_name(name);
-        let registry = Self::new();
-        registry.synth.iter().any(|p| p.name() == short_name)
-            || registry.regular.iter().any(|p| p.name() == short_name)
+        self.synth.iter().any(|p| p.name() == short_name)
+            || self.regular.iter().any(|p| p.name() == short_name)
     }
 }
 
@@ -332,41 +339,33 @@ mod tests {
         );
     }
 
-    /// Pin the trait-split contract (issue #1166): synth plugins live
-    /// in the synth registry, regular plugins in the regular. Looking
-    /// up a synth plugin via `find_regular` returns `None` (and vice
-    /// versa). This is what catches "regular plugin invoked in synth
-    /// pass" at the type level — the lookup wouldn't find it.
+    /// Pin the trait-split contract (issue #1166): EVERY plugin in the
+    /// registry lives in exactly one pass-typed Vec. This is what
+    /// catches "regular plugin invoked in synth pass" at the type
+    /// level — the lookup in the wrong Vec wouldn't find it.
+    ///
+    /// Exhaustive over `list()` so adding a new plugin without
+    /// declaring a pass marker can't slip past CI as a Vec-membership
+    /// mistake.
     #[test]
     fn test_registry_synth_and_regular_are_disjoint() {
         let registry = NativePluginRegistry::new();
 
-        // auto_accounts is synth — visible from find_synth, absent
-        // from find_regular.
-        assert!(
-            registry.find_synth("auto_accounts").is_some(),
-            "auto_accounts must be in the synth registry",
-        );
-        assert!(
-            registry.find_regular("auto_accounts").is_none(),
-            "auto_accounts must NOT be in the regular registry — the trait split would be defeated",
-        );
+        for plugin in registry.list() {
+            let name = plugin.name();
+            let in_synth = registry.find_synth(name).is_some();
+            let in_regular = registry.find_regular(name).is_some();
+            assert!(
+                in_synth ^ in_regular,
+                "plugin {name:?} must live in exactly one pass Vec (synth={in_synth}, regular={in_regular})",
+            );
+        }
 
-        // implicit_prices is regular — visible from find_regular,
-        // absent from find_synth.
-        assert!(
-            registry.find_regular("implicit_prices").is_some(),
-            "implicit_prices must be in the regular registry",
-        );
-        assert!(
-            registry.find_synth("implicit_prices").is_none(),
-            "implicit_prices must NOT be in the synth registry",
-        );
-
-        // `find_any` is the cross-pass lookup — finds either.
-        assert!(registry.find_any("auto_accounts").is_some());
-        assert!(registry.find_any("implicit_prices").is_some());
-        assert!(registry.find_any("nonexistent").is_none());
+        // Existence check finds plugins in either pass; a name not in
+        // either Vec returns false.
+        assert!(registry.has("auto_accounts"));
+        assert!(registry.has("implicit_prices"));
+        assert!(!registry.has("nonexistent"));
     }
 
     #[test]

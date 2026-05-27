@@ -1,5 +1,7 @@
 //! Auto-discover documents from directories.
 
+use serde::Deserialize;
+
 use crate::types::{
     DirectiveData, DirectiveWrapper, DocumentData, PluginError, PluginInput, PluginOp, PluginOutput,
 };
@@ -17,45 +19,56 @@ const MAX_SCAN_DEPTH: usize = 32;
 /// For example: `documents/Assets/Bank/Checking/2024-01-15.statement.pdf`
 /// generates: `2024-01-15 document Assets:Bank:Checking "documents/Assets/Bank/Checking/2024-01-15.statement.pdf"`
 ///
-/// # Registry membership
+/// # Configuration
 ///
-/// `DocumentDiscoveryPlugin` implements [`crate::SynthPlugin`] for type-level
-/// correctness, but it is NOT held in [`crate::NativePluginRegistry::new`]'s
-/// `synth` Vec — its constructor requires per-load context (`base_dir` +
-/// resolved document directories), so the loader instantiates it ad-hoc in
-/// its document-discovery branch rather than looking it up by name. A user-
-/// authored `plugin "document_discovery"` declaration will therefore NOT
-/// resolve through the registry; document discovery is configured via
-/// `option "documents"` instead. The marker keeps the type signature
-/// consistent for any direct caller that constructs the plugin themselves.
+/// The plugin reads its per-load context (resolved document directories
+/// and the ledger's base directory for relative-path normalization) from
+/// [`PluginInput::config`] as a JSON object:
+///
+/// ```json
+/// {"base_dir": "/path/to/ledger", "directories": ["/abs/path/docs"]}
+/// ```
+///
+/// The loader constructs this config when populating the synth pass; if
+/// `config` is `None` or `directories` is empty, the plugin returns a
+/// no-op (every input directive is kept, nothing synthesized). This lets
+/// the plugin sit in the registry as a static instance and be dispatched
+/// through the normal synth-pass machinery.
 ///
 /// # Security
 ///
 /// - Symlinks are skipped to prevent infinite recursion from symlink cycles
 /// - Maximum recursion depth is enforced to prevent denial-of-service from deeply nested directories
-pub struct DocumentDiscoveryPlugin {
-    /// Directories to scan for documents (resolved to absolute paths).
-    pub directories: Vec<String>,
-    /// Base directory for resolving relative paths in existing document directives.
-    pub base_dir: std::path::PathBuf,
+pub struct DocumentDiscoveryPlugin;
+
+/// Name passed to file-declared / extra-plugin lookups and used by the
+/// loader when emitting the synth-pass config entry. Kept as a constant
+/// so the registry, the loader, and the rustdoc stay in sync.
+pub const DOCUMENT_DISCOVERY_NAME: &str = "document_discovery";
+
+/// JSON config schema parsed from [`PluginInput::config`].
+#[derive(Debug, Deserialize)]
+struct DocumentDiscoveryConfig {
+    base_dir: std::path::PathBuf,
+    directories: Vec<String>,
 }
 
-impl DocumentDiscoveryPlugin {
-    /// Create a new plugin with the given directories and base directory.
-    ///
-    /// The `base_dir` is used to resolve relative paths in existing document directives
-    /// for duplicate detection.
-    pub const fn new(directories: Vec<String>, base_dir: std::path::PathBuf) -> Self {
-        Self {
-            directories,
-            base_dir,
-        }
-    }
+/// Build the [`PluginInput::config`] JSON string for this plugin.
+///
+/// Centralized here so callers (the loader) don't need to know the
+/// schema — the plugin owns its own config shape.
+#[must_use]
+pub fn document_discovery_config(base_dir: &std::path::Path, directories: &[String]) -> String {
+    serde_json::json!({
+        "base_dir": base_dir,
+        "directories": directories,
+    })
+    .to_string()
 }
 
 impl NativePlugin for DocumentDiscoveryPlugin {
     fn name(&self) -> &'static str {
-        "document_discovery"
+        DOCUMENT_DISCOVERY_NAME
     }
 
     fn description(&self) -> &'static str {
@@ -64,6 +77,35 @@ impl NativePlugin for DocumentDiscoveryPlugin {
 
     fn process(&self, input: PluginInput) -> PluginOutput {
         use std::path::Path;
+
+        // No config → no-op pass-through. Lets the plugin sit in the
+        // registry unconditionally without doing work when the ledger
+        // hasn't declared `option "documents"`.
+        let Some(config_json) = input.config.as_deref() else {
+            return PluginOutput {
+                ops: (0..input.directives.len()).map(PluginOp::Keep).collect(),
+                errors: Vec::new(),
+            };
+        };
+
+        let config: DocumentDiscoveryConfig = match serde_json::from_str(config_json) {
+            Ok(c) => c,
+            Err(e) => {
+                return PluginOutput {
+                    ops: (0..input.directives.len()).map(PluginOp::Keep).collect(),
+                    errors: vec![PluginError::error(format!(
+                        "document_discovery: invalid config JSON: {e}"
+                    ))],
+                };
+            }
+        };
+
+        if config.directories.is_empty() {
+            return PluginOutput {
+                ops: (0..input.directives.len()).map(PluginOp::Keep).collect(),
+                errors: Vec::new(),
+            };
+        }
 
         let mut new_directives = Vec::new();
         let mut errors = Vec::new();
@@ -74,13 +116,11 @@ impl NativePlugin for DocumentDiscoveryPlugin {
         for wrapper in &input.directives {
             if let DirectiveData::Document(doc) = &wrapper.data {
                 let doc_path = Path::new(&doc.path);
-                // Resolve relative paths against base_dir
                 let resolved = if doc_path.is_absolute() {
                     doc_path.to_path_buf()
                 } else {
-                    self.base_dir.join(doc_path)
+                    config.base_dir.join(doc_path)
                 };
-                // Canonicalize for consistent path comparison
                 let normalized = resolved
                     .canonicalize()
                     .map_or_else(|_| doc.path.clone(), |p| p.to_string_lossy().to_string());
@@ -89,7 +129,7 @@ impl NativePlugin for DocumentDiscoveryPlugin {
         }
 
         // Scan each directory
-        for dir in &self.directories {
+        for dir in &config.directories {
             let dir_path = Path::new(dir);
             if !dir_path.exists() {
                 continue;

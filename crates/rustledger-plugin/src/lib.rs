@@ -57,7 +57,8 @@ pub use convert::{
     directives_to_wrappers, wrapper_to_directive, wrappers_to_directives,
 };
 pub use native::{
-    DocumentDiscoveryPlugin, NativePlugin, NativePluginRegistry, RegularPlugin, SynthPlugin,
+    DOCUMENT_DISCOVERY_NAME, DocumentDiscoveryPlugin, NativePlugin, NativePluginRegistry,
+    RegularPlugin, SynthPlugin, document_discovery_config,
 };
 #[cfg(feature = "wasm-runtime")]
 pub use runtime::{

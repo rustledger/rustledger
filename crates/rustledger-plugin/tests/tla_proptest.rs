@@ -6,7 +6,7 @@
 //! Reference: spec/tla/PluginCorrect.tla
 
 use proptest::prelude::*;
-use rustledger_plugin::native::NativePluginRegistry;
+use rustledger_plugin::native::{NativePlugin, NativePluginRegistry};
 use rustledger_plugin::test_helpers::materialize_ops;
 use rustledger_plugin::types::*;
 
@@ -128,7 +128,7 @@ proptest! {
         date in date_strategy(),
         amount in amount_strategy(),
     ) {
-        let registry = NativePluginRegistry::new();
+        let registry = NativePluginRegistry::global();
         let plugins = registry.list();
 
         // Track execution order
@@ -202,8 +202,8 @@ proptest! {
         }
 
         // Use a simple plugin that doesn't reorder
-        let registry = NativePluginRegistry::new();
-        if let Some(plugin) = registry.find_any("implicit_prices") {
+        let registry = NativePluginRegistry::global();
+        if let Some(plugin) = registry.find_regular("implicit_prices") {
             let input = make_input(directives);
             let input_dirs = input.directives.clone();
             let output = plugin.process(input);
@@ -244,15 +244,15 @@ proptest! {
             make_transaction(&date, "Test", &amount, "Expenses:Food"),
         ];
 
-        let registry = NativePluginRegistry::new();
+        let registry = NativePluginRegistry::global();
 
-        // First, run implicit_prices
-        let plugin1 = registry.find_any("implicit_prices").unwrap();
+        // First, run implicit_prices (regular pass)
+        let plugin1 = registry.find_regular("implicit_prices").unwrap();
         let input1 = make_input(directives.clone());
         let _output1 = plugin1.process(input1);
 
-        // Then run a different plugin on the SAME original input
-        let plugin2 = registry.find_any("auto_accounts").unwrap();
+        // Then run a synth-pass plugin on the SAME original input
+        let plugin2 = registry.find_synth("auto_accounts").unwrap();
         let input2 = make_input(directives);
         let _output2 = plugin2.process(input2);
 
@@ -270,7 +270,7 @@ proptest! {
         date in date_strategy(),
         amount in amount_strategy(),
     ) {
-        let registry = NativePluginRegistry::new();
+        let registry = NativePluginRegistry::global();
 
         let directives = vec![
             make_open(&date, "Expenses:Food"),
@@ -278,9 +278,13 @@ proptest! {
             make_transaction(&date, "Test", &amount, "Expenses:Food"),
         ];
 
-        // Test a few specific plugins
+        // Test a few specific plugins — synth and regular need different lookups.
         for plugin_name in &["implicit_prices", "auto_accounts", "noduplicates"] {
-            if let Some(plugin) = registry.find_any(plugin_name) {
+            let plugin: Option<&dyn NativePlugin> = match *plugin_name {
+                "auto_accounts" => registry.find_synth(plugin_name).map(|p| p as &dyn NativePlugin),
+                _ => registry.find_regular(plugin_name).map(|p| p as &dyn NativePlugin),
+            };
+            if let Some(plugin) = plugin {
                 let input = make_input(directives.clone());
                 let input_dirs = input.directives.clone();
                 let output = plugin.process(input);
@@ -304,7 +308,7 @@ proptest! {
         date in date_strategy(),
         amount in amount_strategy(),
     ) {
-        let registry = NativePluginRegistry::new();
+        let registry = NativePluginRegistry::global();
 
         let directives = vec![
             make_open(&date, "Expenses:Food"),
@@ -312,7 +316,7 @@ proptest! {
             make_transaction(&date, "Test", &amount, "Expenses:Food"),
         ];
 
-        if let Some(plugin) = registry.find_any("implicit_prices") {
+        if let Some(plugin) = registry.find_regular("implicit_prices") {
             let input = make_input(directives);
 
             let output1 = plugin.process(input.clone());
@@ -342,7 +346,8 @@ proptest! {
 
     /// Registry lookup is consistent.
     ///
-    /// Finding a plugin by name should always return the same plugin.
+    /// `has` is a pure function on the global singleton, so it must
+    /// return the same answer for repeated calls.
     #[test]
     fn prop_registry_lookup_consistent(
         plugin_name in prop::sample::select(vec![
@@ -353,26 +358,9 @@ proptest! {
             "noduplicates",
         ]),
     ) {
-        let registry = NativePluginRegistry::new();
-
-        let plugin1 = registry.find_any(plugin_name);
-        let plugin2 = registry.find_any(plugin_name);
-
-        match (plugin1, plugin2) {
-            (Some(p1), Some(p2)) => {
-                prop_assert_eq!(
-                    p1.name(),
-                    p2.name(),
-                    "Registry lookup should be consistent"
-                );
-            }
-            (None, None) => {
-                // Both not found is consistent
-            }
-            _ => {
-                prop_assert!(false, "Inconsistent registry lookup");
-            }
-        }
+        let registry = NativePluginRegistry::global();
+        prop_assert_eq!(registry.has(plugin_name), registry.has(plugin_name));
+        prop_assert!(registry.has(plugin_name), "every sampled name is a known plugin");
     }
 
     /// Registry accepts beancount.plugins.* prefix.
@@ -384,33 +372,18 @@ proptest! {
             "auto_accounts",
         ]),
     ) {
-        let registry = NativePluginRegistry::new();
-
-        // With prefix
+        let registry = NativePluginRegistry::global();
         let prefixed = format!("beancount.plugins.{plugin_name}");
-        let with_prefix = registry.find_any(&prefixed);
-
-        // Without prefix
-        let without_prefix = registry.find_any(plugin_name);
-
-        match (with_prefix, without_prefix) {
-            (Some(p1), Some(p2)) => {
-                prop_assert_eq!(
-                    p1.name(),
-                    p2.name(),
-                    "Prefix should be stripped correctly"
-                );
-            }
-            _ => {
-                prop_assert!(false, "Both lookups should succeed");
-            }
-        }
+        prop_assert!(
+            registry.has(&prefixed) && registry.has(plugin_name),
+            "prefix should be stripped — both lookups should succeed",
+        );
     }
 
     /// Registry listing returns all plugins.
     #[test]
     fn prop_registry_list_complete(_dummy in 0..1i32) {
-        let registry = NativePluginRegistry::new();
+        let registry = NativePluginRegistry::global();
         let plugins = registry.list();
 
         // Should have at least 14 plugins

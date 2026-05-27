@@ -45,7 +45,9 @@ pub use close_tree::CloseTreePlugin;
 pub use coherent_cost::CoherentCostPlugin;
 pub use commodity_attr::CommodityAttrPlugin;
 pub use currency_accounts::CurrencyAccountsPlugin;
-pub use document_discovery::DocumentDiscoveryPlugin;
+pub use document_discovery::{
+    DOCUMENT_DISCOVERY_NAME, DocumentDiscoveryPlugin, document_discovery_config,
+};
 pub use effective_date::EffectiveDatePlugin;
 pub use forecast::ForecastPlugin;
 pub use generate_base_ccy_prices::GenerateBaseCcyPricesPlugin;

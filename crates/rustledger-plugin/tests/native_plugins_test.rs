@@ -3035,7 +3035,7 @@ proptest::proptest! {
 
 #[test]
 fn test_registry_finds_all_plugins() {
-    let registry = NativePluginRegistry::new();
+    let registry = NativePluginRegistry::global();
 
     // All 14 built-in plugins should be findable
     let plugin_names = [
@@ -3055,28 +3055,21 @@ fn test_registry_finds_all_plugins() {
     ];
 
     for name in &plugin_names {
-        assert!(
-            registry.find_any(name).is_some(),
-            "should find plugin: {name}"
-        );
+        assert!(registry.has(name), "should find plugin: {name}");
     }
 }
 
 #[test]
 fn test_registry_finds_with_beancount_prefix() {
-    let registry = NativePluginRegistry::new();
+    let registry = NativePluginRegistry::global();
 
-    assert!(registry.find_any("beancount.plugins.leafonly").is_some());
-    assert!(
-        registry
-            .find_any("beancount.plugins.noduplicates")
-            .is_some()
-    );
+    assert!(registry.has("beancount.plugins.leafonly"));
+    assert!(registry.has("beancount.plugins.noduplicates"));
 }
 
 #[test]
 fn test_registry_list_all() {
-    let registry = NativePluginRegistry::new();
+    let registry = NativePluginRegistry::global();
     let plugins = registry.list();
 
     // Should have at least 13 plugins (14 minus auto_tag which might be different).
@@ -3091,8 +3084,8 @@ fn test_auto_accounts_generates_opens() {
     use rustledger_plugin::types::*;
     use rustledger_plugin::*;
 
-    let registry = NativePluginRegistry::new();
-    let plugin: &dyn NativePlugin = registry.find_any("auto_accounts").unwrap();
+    let registry = NativePluginRegistry::global();
+    let plugin: &dyn NativePlugin = registry.find_synth("auto_accounts").unwrap();
 
     // Create test input with transaction using unopened accounts
     let input = PluginInput {
@@ -3191,8 +3184,8 @@ fn test_auto_accounts_same_date_ordering() {
     use rustledger_plugin::types::*;
     use rustledger_plugin::*;
 
-    let registry = NativePluginRegistry::new();
-    let plugin: &dyn NativePlugin = registry.find_any("auto_accounts").unwrap();
+    let registry = NativePluginRegistry::global();
+    let plugin: &dyn NativePlugin = registry.find_synth("auto_accounts").unwrap();
 
     // Input: existing open + transaction that uses new account on same date as first use
     let input = PluginInput {

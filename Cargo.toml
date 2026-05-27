@@ -15,6 +15,7 @@ members = [
   "crates/rustledger-wasm",
   "crates/rustledger-ffi-wasi",
   "crates/rustledger-lsp",
+  "crates/rustledger-wire-format-tests",
 ]
 # Exclude wasm from default builds (requires wasm32 target)
 default-members = [
@@ -30,6 +31,7 @@ default-members = [
   "crates/rustledger-ops",
   "crates/rustledger",
   "crates/rustledger-lsp",
+  "crates/rustledger-wire-format-tests",
 ]
 
 [workspace.package]
@@ -162,6 +164,8 @@ rustledger-plugin = { version = "0.15.0", path = "crates/rustledger-plugin", def
 rustledger-plugin-types = { version = "0.15.0", path = "crates/rustledger-plugin-types" }
 rustledger-importer = { version = "0.15.0", path = "crates/rustledger-importer" }
 rustledger-ops = { version = "0.15.0", path = "crates/rustledger-ops" }
+rustledger-ffi-wasi = { version = "0.15.0", path = "crates/rustledger-ffi-wasi" }
+rustledger-wasm = { version = "0.15.0", path = "crates/rustledger-wasm" }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

@@ -4037,6 +4037,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustledger-wire-format-tests"
+version = "0.15.0"
+dependencies = [
+ "jiff",
+ "rust_decimal",
+ "rust_decimal_macros",
+ "rustledger-core",
+ "rustledger-ffi-wasi",
+ "rustledger-wasm",
+ "serde_json",
+]
+
+[[package]]
 name = "rustls"
 version = "0.23.40"
 source = "registry+https://github.com/rust-lang/crates.io-index"

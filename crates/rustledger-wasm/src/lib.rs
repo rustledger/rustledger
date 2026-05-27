@@ -39,7 +39,11 @@
 
 // Internal modules
 mod cache;
-mod convert;
+// `convert` is `pub` so the cross-binding equivalence test crate
+// (`rustledger-wire-format-tests`, issue #1200) can call
+// `directive_to_json` directly. JS consumers use the bindings in
+// `api`/`parsed_ledger` instead.
+pub mod convert;
 mod editor;
 mod helpers;
 mod utils;

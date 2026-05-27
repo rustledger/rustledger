@@ -26,16 +26,7 @@
 //! - `entry.create`, `entry.createBatch`, `entry.filter`, `entry.clamp`
 //! - `util.version`, `util.types`, `util.isEncrypted`, `util.getAccountType`
 
-mod commands;
-mod convert;
-mod helpers;
-mod jsonrpc;
-mod types;
-
-/// API version for compatibility detection.
-/// Increment minor version for backwards-compatible changes.
-/// Increment major version for breaking changes.
-pub(crate) const API_VERSION: &str = "1.0";
+use rustledger_ffi_wasi::jsonrpc;
 
 fn main() {
     let exit_code = jsonrpc::process_stdin();

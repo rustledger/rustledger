@@ -1,0 +1,33 @@
+[package]
+name = "rustledger-wire-format-tests"
+description = "Cross-binding wire-format equivalence tests — pins FFI-WASI and WASM JSON shapes against shared fixtures (issue #1200)"
+version = "0.15.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+authors.workspace = true
+publish = false
+
+[lib]
+# Empty lib — the test harness lives in `tests/`. A bare lib target is
+# required for integration tests to be picked up.
+path = "src/lib.rs"
+
+[dependencies]
+# (No runtime dependencies — the lib is empty.)
+
+[dev-dependencies]
+rustledger-core.workspace = true
+rustledger-ffi-wasi.workspace = true
+rustledger-wasm.workspace = true
+serde_json.workspace = true
+rust_decimal.workspace = true
+rust_decimal_macros.workspace = true
+jiff.workspace = true
+
+[lints]
+workspace = true

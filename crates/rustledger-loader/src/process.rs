@@ -976,7 +976,7 @@ pub fn run_plugins(
                     errors.push(
                         LedgerError::error(
                             "PLUGIN",
-                            format!("WASM plugin '{raw_name}' requires the wasm-plugins feature",),
+                            format!("WASM plugin '{raw_name}' requires the wasm-plugins feature"),
                         )
                         .with_phase("plugin"),
                     );

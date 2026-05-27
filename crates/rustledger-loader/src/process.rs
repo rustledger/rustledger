@@ -9,6 +9,19 @@ use rustledger_parser::Spanned;
 use std::path::Path;
 use thiserror::Error;
 
+/// A CLI-supplied (or programmatic) extra plugin invocation.
+///
+/// Bundles the plugin name with its optional config string so the two
+/// can't drift apart — the previous parallel-Vec representation could
+/// silently misalign a config with the wrong plugin.
+#[derive(Debug, Clone)]
+pub struct ExtraPlugin {
+    /// Plugin name (short or fully-qualified module path).
+    pub name: String,
+    /// Plugin-specific config string, if any.
+    pub config: Option<String>,
+}
+
 /// Options for loading and processing a ledger.
 #[derive(Debug, Clone)]
 pub struct LoadOptions {
@@ -18,10 +31,9 @@ pub struct LoadOptions {
     pub run_plugins: bool,
     /// Run `auto_accounts` plugin (default: false).
     pub auto_accounts: bool,
-    /// Additional native plugins to run (by name).
-    pub extra_plugins: Vec<String>,
-    /// Plugin configurations for extra plugins.
-    pub extra_plugin_configs: Vec<Option<String>>,
+    /// Additional plugins to run (CLI `--plugin` or programmatic API),
+    /// each with an optional config string.
+    pub extra_plugins: Vec<ExtraPlugin>,
     /// Run validation after processing (default: true).
     pub validate: bool,
     /// Enable path security (prevent include traversal).
@@ -35,7 +47,6 @@ impl Default for LoadOptions {
             run_plugins: true,
             auto_accounts: false,
             extra_plugins: Vec::new(),
-            extra_plugin_configs: Vec::new(),
             validate: true,
             path_security: false,
         }
@@ -51,7 +62,6 @@ impl LoadOptions {
             run_plugins: false,
             auto_accounts: false,
             extra_plugins: Vec::new(),
-            extra_plugin_configs: Vec::new(),
             validate: false,
             path_security: false,
         }
@@ -622,10 +632,9 @@ pub fn run_plugins(
     }
 
     // CLI extra plugins.
-    for (i, plugin_name) in options.extra_plugins.iter().enumerate() {
-        if registry.find_synth(plugin_name).is_some() == want_synth {
-            let config = options.extra_plugin_configs.get(i).cloned().flatten();
-            entries.push((plugin_name.clone(), config, false));
+    for extra in &options.extra_plugins {
+        if registry.find_synth(&extra.name).is_some() == want_synth {
+            entries.push((extra.name.clone(), extra.config.clone(), false));
         }
     }
 
@@ -643,24 +652,13 @@ pub fn run_plugins(
     // returned reference type reflects the pass. Anything that doesn't
     // resolve falls through to the WASM/Python branches.
     for (raw_name, plugin_config, force_python) in &entries {
-        // Resolve the plugin name - try direct match first, then prefixed variants.
-        // Skip native resolution when force_python is set (plugin "python:..." prefix).
-        // Existence checks use `has` (cross-pass) because at name-resolution
-        // time we only care "is this a known native plugin?"; the pass-correct
-        // lookup happens at the invocation site below.
-        let resolved_name = if *force_python {
-            None
-        } else if registry.has(raw_name) {
-            Some(raw_name.as_str())
-        } else if let Some(short_name) = raw_name.strip_prefix("beancount.plugins.") {
-            registry.has(short_name).then_some(short_name)
-        } else if let Some(short_name) = raw_name.strip_prefix("beancount_reds_plugins.") {
-            registry.has(short_name).then_some(short_name)
-        } else if let Some(short_name) = raw_name.strip_prefix("beancount_lazy_plugins.") {
-            registry.has(short_name).then_some(short_name)
-        } else {
-            None
-        };
+        // Resolve the plugin name. `has` / `find_synth` / `find_regular`
+        // internally take the short name (last `.`-separated segment),
+        // so prefixed names like `"beancount.plugins.implicit_prices"`
+        // and `"beancount_reds_plugins.zerosum.zerosum"` resolve through
+        // the same single call — no explicit prefix-stripping needed.
+        // `force_python` ("python:..." prefix) skips native resolution.
+        let resolved_name = (!*force_python && registry.has(raw_name)).then_some(raw_name.as_str());
 
         // Dispatch via the typed registry: the lookup returns
         // `Some` only if the plugin exists AND its marker trait

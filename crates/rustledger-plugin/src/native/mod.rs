@@ -118,10 +118,10 @@ fn plugin_short_name(name: &str) -> &str {
     name.rsplit('.').next().unwrap_or(name)
 }
 
-/// Process-wide singleton registry — the registry holds no per-load
-/// state, so allocating one per call is pure waste. Use
-/// [`NativePluginRegistry::global`] to access it.
-static GLOBAL_REGISTRY: LazyLock<NativePluginRegistry> = LazyLock::new(|| {
+/// Build the singleton registry. Called once per process via the
+/// `LazyLock` below; broken out as a named function so the call stack
+/// reflects what's happening at first access.
+fn build_global_registry() -> NativePluginRegistry {
     let synth: Vec<Box<dyn SynthPlugin>> = vec![
         Box::new(AutoAccountsPlugin),
         Box::new(DocumentDiscoveryPlugin),
@@ -158,7 +158,12 @@ static GLOBAL_REGISTRY: LazyLock<NativePluginRegistry> = LazyLock::new(|| {
         Box::new(BoxAccrualPlugin),
     ];
     NativePluginRegistry { synth, regular }
-});
+}
+
+/// Process-wide singleton registry — the registry holds no per-load
+/// state, so allocating one per call is pure waste. Use
+/// [`NativePluginRegistry::global`] to access it.
+static GLOBAL_REGISTRY: LazyLock<NativePluginRegistry> = LazyLock::new(build_global_registry);
 
 impl NativePluginRegistry {
     /// Access the process-wide registry singleton.

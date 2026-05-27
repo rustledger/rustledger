@@ -31,9 +31,12 @@ const MAX_SCAN_DEPTH: usize = 32;
 ///
 /// The loader constructs this config when populating the synth pass; if
 /// `config` is `None` or `directories` is empty, the plugin returns a
-/// no-op (every input directive is kept, nothing synthesized). This lets
-/// the plugin sit in the registry as a static instance and be dispatched
-/// through the normal synth-pass machinery.
+/// no-op (every input directive is kept, nothing synthesized). If `config`
+/// is present but malformed JSON, every input directive is still kept and
+/// a `PluginError::error` is added to the output errors — the plugin
+/// never silently drops directives on bad config. This lets the plugin
+/// sit in the registry as a static instance and be dispatched through
+/// the normal synth-pass machinery.
 ///
 /// # Security
 ///

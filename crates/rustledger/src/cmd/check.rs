@@ -559,8 +559,14 @@ pub fn run(args: &Args) -> Result<ExitCode> {
     let load_options = rustledger_loader::LoadOptions {
         run_plugins: true,
         auto_accounts: args.auto,
-        extra_plugins: args.native_plugins.clone(),
-        extra_plugin_configs: vec![None; args.native_plugins.len()],
+        extra_plugins: args
+            .native_plugins
+            .iter()
+            .map(|name| rustledger_loader::ExtraPlugin {
+                name: name.clone(),
+                config: None,
+            })
+            .collect(),
         validate: true,
         ..Default::default()
     };

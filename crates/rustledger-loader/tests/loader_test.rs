@@ -524,11 +524,14 @@ fn test_process_raw_mode() {
 
 #[test]
 fn test_process_with_extra_plugins() {
+    use rustledger_loader::ExtraPlugin;
     let path = fixtures_path("simple.beancount");
     let options = LoadOptions {
         run_plugins: false, // Don't run file plugins
-        extra_plugins: vec!["check_commodity".to_string()],
-        extra_plugin_configs: vec![None],
+        extra_plugins: vec![ExtraPlugin {
+            name: "check_commodity".to_string(),
+            config: None,
+        }],
         ..Default::default()
     };
 

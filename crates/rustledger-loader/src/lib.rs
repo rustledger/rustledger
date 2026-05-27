@@ -51,8 +51,8 @@ pub use vfs::{DiskFileSystem, FileSystem, VirtualFileSystem};
 // Re-export processing API when features are enabled
 #[cfg(any(feature = "booking", feature = "plugins", feature = "validation"))]
 pub use process::{
-    ErrorLocation, ErrorSeverity, Ledger, LedgerError, LoadOptions, ProcessError, load, load_raw,
-    process,
+    ErrorLocation, ErrorSeverity, ExtraPlugin, Ledger, LedgerError, LoadOptions, ProcessError,
+    load, load_raw, process,
 };
 #[cfg(feature = "plugins")]
 pub use process::{PluginPass, run_plugins};

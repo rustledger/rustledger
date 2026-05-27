@@ -6,9 +6,9 @@
 //! Reference: spec/tla/PluginCorrect.tla
 
 use proptest::prelude::*;
+use rustledger_plugin::NativePluginRegistry;
 use rustledger_plugin::test_helpers::materialize_ops;
 use rustledger_plugin::types::*;
-use rustledger_plugin::{NativePlugin, NativePluginRegistry};
 
 // ============================================================================
 // Test Strategies
@@ -278,25 +278,21 @@ proptest! {
             make_transaction(&date, "Test", &amount, "Expenses:Food"),
         ];
 
-        // Test a few specific plugins — synth and regular need different lookups.
-        for plugin_name in &["implicit_prices", "auto_accounts", "noduplicates"] {
-            let plugin: Option<&dyn NativePlugin> = match *plugin_name {
-                "auto_accounts" => registry.find_synth(plugin_name).map(|p| p as &dyn NativePlugin),
-                _ => registry.find_regular(plugin_name).map(|p| p as &dyn NativePlugin),
-            };
-            if let Some(plugin) = plugin {
-                let input = make_input(directives.clone());
-                let input_dirs = input.directives.clone();
-                let output = plugin.process(input);
-                let materialized = materialize_ops(&input_dirs, &output);
+        // Iterate every plugin in the registry — `list()` yields both
+        // synth and regular plugins uniformly as `&dyn NativePlugin`,
+        // so no per-name pass classification is needed at this layer.
+        for plugin in registry.list() {
+            let input = make_input(directives.clone());
+            let input_dirs = input.directives.clone();
+            let output = plugin.process(input);
+            let materialized = materialize_ops(&input_dirs, &output);
 
-                // Output should be valid (no panic, has directives)
-                prop_assert!(
-                    !materialized.is_empty(),
-                    "Plugin {} should produce valid output",
-                    plugin_name
-                );
-            }
+            // Output should be valid (no panic, has directives)
+            prop_assert!(
+                !materialized.is_empty(),
+                "Plugin {} should produce valid output",
+                plugin.name()
+            );
         }
     }
 

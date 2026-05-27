@@ -67,30 +67,34 @@ fn strip_source_position_keys(json: &mut serde_json::Value) {
     }
 }
 
-/// Recursively strip empty objects keyed `"meta"` and explicit nulls.
+/// Strip empty `meta` objects and explicit nulls from the **top level
+/// of the directive only** — never recurse into the `meta` object
+/// itself. Inside `meta`, `null` is a legitimate value: `MetaValue::None`
+/// serializes as `null` in both bindings, and the metadata-variant
+/// fixture deliberately includes a `none-key: null` entry to pin
+/// that variant's wire shape. Stripping nulls there would silently
+/// hide a future drop of the `None` variant.
+///
 /// See divergences #2 and #3 in the module doc.
-fn strip_empty_meta_and_nulls(json: &mut serde_json::Value) {
-    match json {
-        serde_json::Value::Object(map) => {
-            map.retain(|key, value| {
-                if value.is_null() {
-                    return false;
-                }
-                if key == "meta" && value.as_object().is_some_and(serde_json::Map::is_empty) {
-                    return false;
-                }
-                true
-            });
-            for value in map.values_mut() {
-                strip_empty_meta_and_nulls(value);
-            }
+fn strip_top_level_empty_meta_and_nulls(json: &mut serde_json::Value) {
+    let Some(map) = json.as_object_mut() else {
+        return;
+    };
+    map.retain(|key, value| {
+        if value.is_null() {
+            return false;
         }
-        serde_json::Value::Array(arr) => {
-            for v in arr {
-                strip_empty_meta_and_nulls(v);
-            }
+        if key == "meta" && value.as_object().is_some_and(serde_json::Map::is_empty) {
+            return false;
         }
-        _ => {}
+        true
+    });
+    // Recurse into postings (which can also carry null optional
+    // fields like `flag` per audit finding #1205) but NOT into `meta`.
+    if let Some(postings) = map.get_mut("postings").and_then(|p| p.as_array_mut()) {
+        for posting in postings {
+            strip_top_level_empty_meta_and_nulls(posting);
+        }
     }
 }
 
@@ -105,12 +109,12 @@ fn assert_wire_equivalent(label: &str, directive: &Directive) {
     let mut ffi_wasi_value = serde_json::to_value(&ffi_wasi_json)
         .expect("FFI-WASI DirectiveJson is always JSON-serializable");
     strip_source_position_keys(&mut ffi_wasi_value);
-    strip_empty_meta_and_nulls(&mut ffi_wasi_value);
+    strip_top_level_empty_meta_and_nulls(&mut ffi_wasi_value);
 
     let wasm_json = rustledger_wasm::convert::directive_to_json(directive);
     let mut wasm_value =
         serde_json::to_value(&wasm_json).expect("WASM DirectiveJson is always JSON-serializable");
-    strip_empty_meta_and_nulls(&mut wasm_value);
+    strip_top_level_empty_meta_and_nulls(&mut wasm_value);
 
     assert_eq!(
         ffi_wasi_value, wasm_value,

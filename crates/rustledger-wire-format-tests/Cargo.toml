@@ -13,11 +13,13 @@ categories.workspace = true
 authors.workspace = true
 publish = false
 
-# The lib is empty — this crate exists only to host the integration
-# tests under `tests/` that depend on multiple wire-format bindings
-# (FFI-WASI + WASM). Cargo picks up `tests/` automatically given a
-# default `src/lib.rs`.
-[lib]
+# No `[lib]` / `[[bin]]` declared on purpose: this crate exists only
+# to host the integration tests under `tests/`, and cargo auto-detects
+# the empty `src/lib.rs` (which has to exist so `tests/` can `use` the
+# dev-dependencies). Declaring `[lib]` explicitly would force cargo to
+# require `src/lib.rs` even when only `Cargo.toml` is present — which
+# breaks the `Update Exemptions` workflow, since it fetches Cargo.toml
+# files from PRs without their `src/`.
 
 [dev-dependencies]
 rustledger-core.workspace = true

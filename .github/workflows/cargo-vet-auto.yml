@@ -59,11 +59,18 @@ jobs:
           gh api "repos/$REPO/contents/Cargo.lock?ref=$PR_SHA" \
             --jq '.content' | base64 -d > Cargo.lock
 
-          # Get list of changed files and fetch any Cargo.toml files
+          # Get list of changed files and fetch what `cargo metadata` needs:
+          # Cargo.toml files for the new dep graph, PLUS the default target
+          # file (src/lib.rs or src/main.rs) for any new workspace member.
+          # Without the target file, cargo metadata refuses to load the new
+          # crate's manifest ("no targets specified" or "rename file to
+          # src/lib.rs"). Fetching the source file is safe: cargo metadata
+          # parses Cargo.toml and resolves the dep graph but does NOT
+          # compile or execute the source.
           # Using --paginate to handle PRs with many files, and while read to handle spaces in paths
           gh api --paginate "repos/$REPO/pulls/${{ github.event.pull_request.number }}/files" \
             --jq '.[].filename' | while IFS= read -r file; do
-            if [[ "$file" == *"Cargo.toml" ]]; then
+            if [[ "$file" == *"Cargo.toml" || "$file" == */src/lib.rs || "$file" == */src/main.rs ]]; then
               echo "Fetching $file from PR"
               # Ensure parent directory exists (might be new in the PR)
               mkdir -p "$(dirname "$file")"

@@ -110,6 +110,16 @@ export interface PostingCost {
     label?: string;
 }
 
+/**
+ * Metadata value (issue #1168). Untagged union: branch on `typeof v`
+ * (`'string'` / `'boolean'`) or object shape (`'number' in v` → Amount).
+ */
+export type MetaValueJson =
+    | string
+    | boolean
+    | { number: string; currency: string }
+    | null;
+
 /** A posting within a transaction. */
 export interface Posting {
     account: string;
@@ -118,11 +128,15 @@ export interface Posting {
     price?: Amount;
     /** Posting flag (e.g. "!" for pending). */
     flag?: string;
+    /** Posting-level metadata (issue #1168). */
+    meta?: Record<string, MetaValueJson>;
 }
 
 /** Base directive with date. */
 interface BaseDirective {
     date: string;
+    /** Directive-level metadata (issue #1168). */
+    meta?: Record<string, MetaValueJson>;
 }
 
 /** Transaction directive. */
@@ -165,20 +179,24 @@ export interface CloseDirective extends BaseDirective {
     account: string;
 }
 
-/** All directive types. */
+/**
+ * All directive types. Named variants inherit `date` and `meta?` from
+ * `BaseDirective`; the inline shapes below don't extend it, so they
+ * spell out both fields explicitly for parity with the wire shape.
+ */
 export type Directive =
     | TransactionDirective
     | BalanceDirective
     | OpenDirective
     | CloseDirective
-    | { type: 'commodity'; date: string; currency: string }
-    | { type: 'pad'; date: string; account: string; source_account: string }
-    | { type: 'event'; date: string; event_type: string; value: string }
-    | { type: 'note'; date: string; account: string; comment: string }
-    | { type: 'document'; date: string; account: string; path: string }
-    | { type: 'price'; date: string; currency: string; amount: Amount }
-    | { type: 'query'; date: string; name: string; query_string: string }
-    | { type: 'custom'; date: string; custom_type: string };
+    | { type: 'commodity'; date: string; currency: string; meta?: Record<string, MetaValueJson> }
+    | { type: 'pad'; date: string; account: string; source_account: string; meta?: Record<string, MetaValueJson> }
+    | { type: 'event'; date: string; event_type: string; value: string; meta?: Record<string, MetaValueJson> }
+    | { type: 'note'; date: string; account: string; comment: string; meta?: Record<string, MetaValueJson> }
+    | { type: 'document'; date: string; account: string; path: string; meta?: Record<string, MetaValueJson> }
+    | { type: 'price'; date: string; currency: string; amount: Amount; meta?: Record<string, MetaValueJson> }
+    | { type: 'query'; date: string; name: string; query_string: string; meta?: Record<string, MetaValueJson> }
+    | { type: 'custom'; date: string; custom_type: string; values?: MetaValueJson[]; meta?: Record<string, MetaValueJson> };
 
 /** Ledger options. */
 export interface LedgerOptions {

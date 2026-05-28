@@ -36,8 +36,8 @@ OUTPUT="$WASM_DIR/bindings/index.d.ts"
 
 # Run the export. `cargo test --features ts-export` triggers ts-rs's
 # auto-generated `export_bindings_<type>` test functions, which write
-# the per-type .d.ts files. We pipe to /dev/null because the test
-# output is noisy; failures still surface via the exit code.
+# the per-type .d.ts files. `--quiet` keeps the test summary terse;
+# failures still surface via the exit code (set -e at the top).
 echo "Generating per-type bindings..." >&2
 (cd "$REPO_ROOT" && cargo test -p rustledger-wasm --features ts-export --lib --quiet)
 

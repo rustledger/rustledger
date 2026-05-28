@@ -49,10 +49,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     type alias on the consumer side if you want the old name.
   - `Posting` is now `PostingJson`; `Directive` is now `DirectiveJson`.
   - `Error` is now `BeancountError` (avoiding the JS-builtin
-    `Error` shadow). Severity, ParseResult, Ledger, LedgerOptions,
-    ValidationResult, QueryResult, CellValue, PositionValue,
-    CostValue, FormatResult, and PadResult are all generated under
-    their existing names.
+    `Error` shadow). All other public types -- Severity,
+    ParseResult, Ledger, LedgerOptions, ValidationResult,
+    QueryResult, CellValue, PositionValue, CostValue, FormatResult,
+    PadResult, plus the plugin types (PluginResult, PluginInfo),
+    BQL completion types (CompletionJson, CompletionResultJson),
+    and the LSP-like editor types (EditorCompletion, CompletionKind,
+    EditorCompletionResult, EditorHoverInfo, EditorRange,
+    EditorLocation, EditorDocumentSymbol, SymbolKind, ReferenceKind,
+    EditorReference, EditorReferencesResult) -- keep their Rust
+    names. 34 types in the bundle.
 
   **Phase 2 caveat (deferred to a follow-up):** the inline
   `typescript_custom_section` block in `src/lib.rs` -- which

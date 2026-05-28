@@ -58,6 +58,44 @@ export type CellValue = null | string | number | boolean | { number: string, cur
 
 
 /**
+ * BQL completion suggestion for WASM.
+ */
+export type CompletionJson = { 
+/**
+ * The completion text to insert.
+ */
+text: string, 
+/**
+ * Category: keyword, function, column, operator, literal.
+ */
+category: string, 
+/**
+ * Optional description/documentation.
+ */
+description?: string, };
+
+
+/**
+ * The kind of a completion item.
+ */
+export type CompletionKind = "keyword" | "account" | "accountsegment" | "currency" | "payee" | "date" | "text";
+
+
+/**
+ * Result of BQL completion request.
+ */
+export type CompletionResultJson = { 
+/**
+ * List of completions.
+ */
+completions: Array<CompletionJson>, 
+/**
+ * Current context for debugging.
+ */
+context: string, };
+
+
+/**
  * Wire-format of the numeric component of a [`PostingCostJson`].
  *
  * Mirrors `rustledger_core::CostNumber` on the wire so JS consumers
@@ -150,6 +188,162 @@ links?: Array<string>, meta?: { [key in string]: MetaValueJson }, } | { "type": 
  * `Vec<TypedValue>` exactly.
  */
 values?: Array<TypedValueJson>, meta?: { [key in string]: MetaValueJson }, };
+
+
+/**
+ * Result of a completion request.
+ */
+export type EditorCompletionResult = { 
+/**
+ * The completions.
+ */
+completions: Array<EditorCompletion>, 
+/**
+ * The detected context.
+ */
+context: string, };
+
+
+/**
+ * A completion item for Beancount source editing.
+ */
+export type EditorCompletion = { 
+/**
+ * The label to display in the completion list.
+ */
+label: string, 
+/**
+ * The kind of completion item.
+ */
+kind: CompletionKind, 
+/**
+ * A human-readable string with additional information.
+ */
+detail?: string, 
+/**
+ * The text to insert when this completion is selected.
+ */
+insert_text?: string, };
+
+
+/**
+ * A document symbol for the outline view.
+ */
+export type EditorDocumentSymbol = { 
+/**
+ * The name of this symbol.
+ */
+name: string, 
+/**
+ * More detail for this symbol.
+ */
+detail?: string, 
+/**
+ * The kind of this symbol.
+ */
+kind: SymbolKind, 
+/**
+ * The range enclosing this symbol.
+ */
+range: EditorRange, 
+/**
+ * Children of this symbol (e.g., postings in a transaction).
+ */
+children?: Array<EditorDocumentSymbol>, 
+/**
+ * Whether this symbol is deprecated (e.g., closed account).
+ */
+deprecated?: boolean, };
+
+
+/**
+ * Hover information for a symbol.
+ */
+export type EditorHoverInfo = { 
+/**
+ * The hover content (Markdown formatted).
+ */
+contents: string, 
+/**
+ * The range of the hovered symbol (optional).
+ */
+range?: EditorRange, };
+
+
+/**
+ * A location in the document.
+ */
+export type EditorLocation = { 
+/**
+ * Line number (0-based).
+ */
+line: number, 
+/**
+ * Character offset (0-based).
+ */
+character: number, };
+
+
+/**
+ * A range in the document.
+ */
+export type EditorRange = { 
+/**
+ * Start line (0-based).
+ */
+start_line: number, 
+/**
+ * Start character (0-based).
+ */
+start_character: number, 
+/**
+ * End line (0-based).
+ */
+end_line: number, 
+/**
+ * End character (0-based).
+ */
+end_character: number, };
+
+
+/**
+ * Result of a find-references request.
+ */
+export type EditorReferencesResult = { 
+/**
+ * The symbol being searched for.
+ */
+symbol: string, 
+/**
+ * The kind of symbol.
+ */
+kind: ReferenceKind, 
+/**
+ * All references found.
+ */
+references: Array<EditorReference>, };
+
+
+/**
+ * A reference to a symbol in the document.
+ */
+export type EditorReference = { 
+/**
+ * The range of this reference.
+ */
+range: EditorRange, 
+/**
+ * The kind of reference.
+ */
+kind: ReferenceKind, 
+/**
+ * Whether this is the defining occurrence.
+ */
+is_definition: boolean, 
+/**
+ * Human-readable context (e.g., directive type).
+ */
+context?: string, };
 
 
 /**
@@ -273,6 +467,34 @@ errors: Array<BeancountError>, };
 
 
 /**
+ * Plugin information.
+ */
+export type PluginInfo = { 
+/**
+ * Plugin name.
+ */
+name: string, 
+/**
+ * Plugin description.
+ */
+description: string, };
+
+
+/**
+ * Result of running a plugin.
+ */
+export type PluginResult = { 
+/**
+ * Modified directives.
+ */
+directives: Array<DirectiveJson>, 
+/**
+ * Plugin errors/warnings.
+ */
+errors: Array<BeancountError>, };
+
+
+/**
  * Position value for serialization.
  */
 export type PositionValue = { 
@@ -355,9 +577,21 @@ errors: Array<BeancountError>, };
 
 
 /**
+ * The kind of symbol being referenced.
+ */
+export type ReferenceKind = "account" | "currency" | "payee";
+
+
+/**
  * Error severity level.
  */
 export type Severity = "error" | "warning";
+
+
+/**
+ * The kind of a symbol.
+ */
+export type SymbolKind = "transaction" | "account" | "balance" | "commodity" | "posting" | "pad" | "event" | "note" | "document" | "price" | "query" | "custom";
 
 
 /**

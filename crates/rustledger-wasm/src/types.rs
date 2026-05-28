@@ -695,6 +695,8 @@ pub struct PadResult {
 
 /// Result of running a plugin.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts-export", ts(export, export_to = "bindings/"))]
 pub struct PluginResult {
     /// Modified directives.
     pub directives: Vec<DirectiveJson>,
@@ -704,6 +706,8 @@ pub struct PluginResult {
 
 /// Plugin information.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts-export", ts(export, export_to = "bindings/"))]
 pub struct PluginInfo {
     /// Plugin name.
     pub name: String,
@@ -713,6 +717,8 @@ pub struct PluginInfo {
 
 /// BQL completion suggestion for WASM.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts-export", ts(export, export_to = "bindings/"))]
 pub struct CompletionJson {
     /// The completion text to insert.
     pub text: String,
@@ -720,11 +726,14 @@ pub struct CompletionJson {
     pub category: String,
     /// Optional description/documentation.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts-export", ts(optional))]
     pub description: Option<String>,
 }
 
 /// Result of BQL completion request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts-export", ts(export, export_to = "bindings/"))]
 pub struct CompletionResultJson {
     /// List of completions.
     pub completions: Vec<CompletionJson>,
@@ -738,6 +747,8 @@ pub struct CompletionResultJson {
 
 /// A completion item for Beancount source editing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts-export", ts(export, export_to = "bindings/"))]
 pub struct EditorCompletion {
     /// The label to display in the completion list.
     pub label: String,
@@ -745,15 +756,19 @@ pub struct EditorCompletion {
     pub kind: CompletionKind,
     /// A human-readable string with additional information.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts-export", ts(optional))]
     pub detail: Option<String>,
     /// The text to insert when this completion is selected.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts-export", ts(optional))]
     pub insert_text: Option<String>,
 }
 
 /// The kind of a completion item.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts-export", ts(export, export_to = "bindings/"))]
 pub enum CompletionKind {
     /// A keyword (directive name).
     Keyword,
@@ -773,6 +788,8 @@ pub enum CompletionKind {
 
 /// Result of a completion request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts-export", ts(export, export_to = "bindings/"))]
 pub struct EditorCompletionResult {
     /// The completions.
     pub completions: Vec<EditorCompletion>,
@@ -782,16 +799,21 @@ pub struct EditorCompletionResult {
 
 /// Hover information for a symbol.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts-export", ts(export, export_to = "bindings/"))]
 pub struct EditorHoverInfo {
     /// The hover content (Markdown formatted).
     pub contents: String,
     /// The range of the hovered symbol (optional).
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts-export", ts(optional))]
     pub range: Option<EditorRange>,
 }
 
 /// A range in the document.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts-export", ts(export, export_to = "bindings/"))]
 pub struct EditorRange {
     /// Start line (0-based).
     pub start_line: u32,
@@ -805,6 +827,8 @@ pub struct EditorRange {
 
 /// A location in the document.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts-export", ts(export, export_to = "bindings/"))]
 pub struct EditorLocation {
     /// Line number (0-based).
     pub line: u32,
@@ -814,11 +838,14 @@ pub struct EditorLocation {
 
 /// A document symbol for the outline view.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts-export", ts(export, export_to = "bindings/"))]
 pub struct EditorDocumentSymbol {
     /// The name of this symbol.
     pub name: String,
     /// More detail for this symbol.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts-export", ts(optional))]
     pub detail: Option<String>,
     /// The kind of this symbol.
     pub kind: SymbolKind,
@@ -826,15 +853,19 @@ pub struct EditorDocumentSymbol {
     pub range: EditorRange,
     /// Children of this symbol (e.g., postings in a transaction).
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts-export", ts(optional))]
     pub children: Option<Vec<Self>>,
     /// Whether this symbol is deprecated (e.g., closed account).
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts-export", ts(optional))]
     pub deprecated: Option<bool>,
 }
 
 /// The kind of a symbol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts-export", ts(export, export_to = "bindings/"))]
 pub enum SymbolKind {
     /// A transaction.
     Transaction,
@@ -869,6 +900,8 @@ pub enum SymbolKind {
 /// The kind of symbol being referenced.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts-export", ts(export, export_to = "bindings/"))]
 pub enum ReferenceKind {
     /// An account reference.
     Account,
@@ -880,6 +913,8 @@ pub enum ReferenceKind {
 
 /// A reference to a symbol in the document.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts-export", ts(export, export_to = "bindings/"))]
 pub struct EditorReference {
     /// The range of this reference.
     pub range: EditorRange,
@@ -889,11 +924,14 @@ pub struct EditorReference {
     pub is_definition: bool,
     /// Human-readable context (e.g., directive type).
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts-export", ts(optional))]
     pub context: Option<String>,
 }
 
 /// Result of a find-references request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts-export", ts(export, export_to = "bindings/"))]
 pub struct EditorReferencesResult {
     /// The symbol being searched for.
     pub symbol: String,

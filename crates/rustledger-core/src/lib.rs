@@ -94,11 +94,10 @@ pub use rust_decimal::Decimal;
 /// Returns `None` if the date is invalid.
 #[must_use]
 pub fn naive_date(year: i32, month: u32, day: u32) -> Option<NaiveDate> {
-    i16::try_from(year)
-        .ok()
-        .and_then(|y| i8::try_from(month).ok().map(|m| (y, m)))
-        .and_then(|(y, m)| i8::try_from(day).ok().map(|d| (y, m, d)))
-        .and_then(|(y, m, d)| NaiveDate::new(y, m, d).ok())
+    let y = i16::try_from(year).ok()?;
+    let m = i8::try_from(month).ok()?;
+    let d = i8::try_from(day).ok()?;
+    NaiveDate::new(y, m, d).ok()
 }
 
 // Re-export rkyv wrappers when feature is enabled

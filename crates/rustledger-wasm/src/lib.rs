@@ -125,11 +125,23 @@ export type MetaValueJson =
  * (issue #1207). Preserves the host `MetaValue` variant tag — unlike
  * `MetaValueJson`, which collapses `Date`/`String`/`Account` to a
  * single bare-string shape. Mirrors FFI-WASI's `TypedValue` exactly.
+ *
+ * Declared as a discriminated union so `switch (v.type)` (or
+ * `if (v.type === 'amount')`) narrows `v.value` to the right payload
+ * shape — see `tsc` issue: a single interface with union types on
+ * both fields gives the cross-product, not the narrowing relationship.
  */
-export interface TypedValue {
-    type: 'string' | 'account' | 'currency' | 'tag' | 'link' | 'date' | 'number' | 'bool' | 'amount' | 'null';
-    value: string | boolean | { number: string; currency: string } | null;
-}
+export type TypedValue =
+    | { type: 'string'; value: string }
+    | { type: 'account'; value: string }
+    | { type: 'currency'; value: string }
+    | { type: 'tag'; value: string }
+    | { type: 'link'; value: string }
+    | { type: 'date'; value: string }
+    | { type: 'number'; value: string }
+    | { type: 'bool'; value: boolean }
+    | { type: 'amount'; value: { number: string; currency: string } }
+    | { type: 'null'; value: null };
 
 /** A posting within a transaction. */
 export interface Posting {

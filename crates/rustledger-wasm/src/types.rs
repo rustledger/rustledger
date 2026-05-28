@@ -267,9 +267,17 @@ pub enum DirectiveJson {
     /// Custom directive.
     ///
     /// `values` carries the positional arguments after the type
-    /// keyword (pre-#1168 these were dropped entirely from the JSON
-    /// output). Each value follows the same `MetaValueJson` shape as
-    /// metadata — strings, bools, amounts, or null.
+    /// keyword. Each value is a [`TypedValueJson`] tagged union
+    /// (`{type, value}`) that preserves the host `MetaValue`
+    /// variant tag, so JS consumers can distinguish (for example)
+    /// a `Date` from a `String` from an `Account` — all of which
+    /// would otherwise collapse to bare JSON strings under the
+    /// untagged `MetaValueJson` shape.
+    ///
+    /// Pre-#1168: `values` was dropped entirely from the JSON output.
+    /// Pre-#1207: present but emitted raw via `MetaValueJson` (lossy).
+    /// Post-#1207: emitted via `TypedValueJson` (this variant), mirroring
+    /// FFI-WASI's `Vec<TypedValue>`.
     ///
     /// Both `values` and `meta` use `skip_serializing_if` to omit
     /// the field when empty (consistent shape: a Custom directive

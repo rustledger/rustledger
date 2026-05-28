@@ -123,17 +123,21 @@ export type MetaValueJson =
  * Mirrors FFI-WASI's `TypedValue` shape exactly so portable consumers
  * see identical envelopes across both bindings.
  *
- * `type` is one of: `"string"`, `"account"`, `"currency"`, `"tag"`,
- * `"link"`, `"date"`, `"number"`, `"bool"`, `"amount"`, `"null"`.
- *
- * `value`'s shape depends on `type`: string for string-flavored
- * variants; boolean for `bool`; `{number, currency}` for `amount`;
- * `null` for `null`.
+ * Declared as a **discriminated union** rather than a single
+ * interface so `switch (v.type)` (or `if (v.type === 'amount')`)
+ * narrows `v.value` to the right payload shape.
  */
-export interface TypedValue {
-    type: "string" | "account" | "currency" | "tag" | "link" | "date" | "number" | "bool" | "amount" | "null";
-    value: string | boolean | { number: string; currency: string } | null;
-}
+export type TypedValue =
+    | { type: "string"; value: string }
+    | { type: "account"; value: string }
+    | { type: "currency"; value: string }
+    | { type: "tag"; value: string }
+    | { type: "link"; value: string }
+    | { type: "date"; value: string }
+    | { type: "number"; value: string }
+    | { type: "bool"; value: boolean }
+    | { type: "amount"; value: { number: string; currency: string } }
+    | { type: "null"; value: null };
 
 /**
  * Valid directive types.

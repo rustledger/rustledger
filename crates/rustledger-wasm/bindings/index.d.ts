@@ -191,20 +191,6 @@ values?: Array<TypedValueJson>, meta?: { [key in string]: MetaValueJson }, };
 
 
 /**
- * Result of a completion request.
- */
-export type EditorCompletionResult = { 
-/**
- * The completions.
- */
-completions: Array<EditorCompletion>, 
-/**
- * The detected context.
- */
-context: string, };
-
-
-/**
  * A completion item for Beancount source editing.
  */
 export type EditorCompletion = { 
@@ -224,6 +210,20 @@ detail?: string,
  * The text to insert when this completion is selected.
  */
 insert_text?: string, };
+
+
+/**
+ * Result of a completion request.
+ */
+export type EditorCompletionResult = { 
+/**
+ * The completions.
+ */
+completions: Array<EditorCompletion>, 
+/**
+ * The detected context.
+ */
+context: string, };
 
 
 /**
@@ -307,24 +307,6 @@ end_character: number, };
 
 
 /**
- * Result of a find-references request.
- */
-export type EditorReferencesResult = { 
-/**
- * The symbol being searched for.
- */
-symbol: string, 
-/**
- * The kind of symbol.
- */
-kind: ReferenceKind, 
-/**
- * All references found.
- */
-references: Array<EditorReference>, };
-
-
-/**
  * A reference to a symbol in the document.
  */
 export type EditorReference = { 
@@ -347,6 +329,24 @@ context?: string, };
 
 
 /**
+ * Result of a find-references request.
+ */
+export type EditorReferencesResult = { 
+/**
+ * The symbol being searched for.
+ */
+symbol: string, 
+/**
+ * The kind of symbol.
+ */
+kind: ReferenceKind, 
+/**
+ * All references found.
+ */
+references: Array<EditorReference>, };
+
+
+/**
  * Result of formatting.
  */
 export type FormatResult = { 
@@ -363,6 +363,20 @@ errors: Array<BeancountError>, };
 
 
 /**
+ * A parsed Beancount ledger.
+ */
+export type Ledger = { 
+/**
+ * All directives in the ledger.
+ */
+directives: Array<DirectiveJson>, 
+/**
+ * Ledger options.
+ */
+options: LedgerOptions, };
+
+
+/**
  * Ledger options.
  */
 export type LedgerOptions = { 
@@ -376,20 +390,6 @@ operating_currencies: Array<string>,
  * wire). TS: `string | null`, not `title?`.
  */
 title: string | null, };
-
-
-/**
- * A parsed Beancount ledger.
- */
-export type Ledger = { 
-/**
- * All directives in the ledger.
- */
-directives: Array<DirectiveJson>, 
-/**
- * Ledger options.
- */
-options: LedgerOptions, };
 
 
 /**

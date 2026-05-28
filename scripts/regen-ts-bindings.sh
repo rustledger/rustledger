@@ -47,8 +47,13 @@ if [ ! -d "$RAW_DIR" ]; then
 fi
 
 # Sort the per-type files for a deterministic output order so the
-# generated file's diff stays stable across regen runs.
-mapfile -t TS_FILES < <(find "$RAW_DIR" -name '*.ts' | sort)
+# generated file's diff stays stable across regen runs. Force the C
+# locale so `Ledger.ts` and `LedgerOptions.ts` (and similar pairs
+# where punctuation interacts with letters) sort identically on every
+# machine. en_US.UTF-8 and C disagree on the relative order of `.`
+# (0x2E) vs uppercase letters in some glibc versions -- which broke
+# CI's freshness gate before this was pinned.
+mapfile -t TS_FILES < <(find "$RAW_DIR" -name '*.ts' | LC_ALL=C sort)
 
 if [ "${#TS_FILES[@]}" -eq 0 ]; then
     echo "error: no .ts files found under $RAW_DIR" >&2

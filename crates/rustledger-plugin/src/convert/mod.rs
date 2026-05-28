@@ -357,6 +357,44 @@ mod tests {
         }
     }
 
+    /// Regression for #1214: Document directives must carry tags
+    /// and links through both legs of the plugin round-trip. Pre-fix
+    /// both `document_to_data` (way out) and `data_to_document` (way
+    /// back in) dropped these fields to empty vectors, meaning any
+    /// document passing through a plugin lost its tags/links.
+    #[test]
+    fn test_roundtrip_document_tags_and_links_1214() {
+        let date = rustledger_core::naive_date(2024, 1, 15).unwrap();
+        let doc = Document {
+            date,
+            account: "Assets:Bank".into(),
+            path: "statements/2024-01.pdf".to_string(),
+            tags: vec!["statement".into(), "bank".into()],
+            links: vec!["inv-2024-01".into()],
+            meta: Metadata::default(),
+        };
+
+        let directive = Directive::Document(doc);
+        let wrapper = directive_to_wrapper(&directive);
+        let roundtrip = wrapper_to_directive(&wrapper).unwrap();
+
+        if let (Directive::Document(orig), Directive::Document(rt)) = (&directive, &roundtrip) {
+            assert_eq!(orig.date, rt.date);
+            assert_eq!(orig.account, rt.account);
+            assert_eq!(orig.path, rt.path);
+            assert_eq!(
+                orig.tags, rt.tags,
+                "Document.tags must survive the plugin round-trip",
+            );
+            assert_eq!(
+                orig.links, rt.links,
+                "Document.links must survive the plugin round-trip",
+            );
+        } else {
+            panic!("Expected Document directive");
+        }
+    }
+
     #[test]
     fn test_roundtrip_all_directive_types() {
         let date = rustledger_core::naive_date(2024, 1, 1).unwrap();

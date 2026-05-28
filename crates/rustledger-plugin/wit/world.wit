@@ -146,6 +146,10 @@ interface types {
         date: string,
         account: string,
         path: string,
+        /// Tags (without `#` prefix). Added in #1214.
+        tags: list<string>,
+        /// Links (without `^` prefix). Added in #1214.
+        links: list<string>,
     }
 
     /// Price directive.

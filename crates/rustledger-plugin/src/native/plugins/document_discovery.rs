@@ -264,6 +264,8 @@ fn scan_documents(
                                 data: DirectiveData::Document(DocumentData {
                                     account,
                                     path: full_path,
+                                    tags: vec![],
+                                    links: vec![],
                                     metadata: vec![],
                                 }),
                             });

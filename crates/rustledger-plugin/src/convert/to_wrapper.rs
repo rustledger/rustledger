@@ -237,6 +237,8 @@ pub(super) fn document_to_data(doc: &Document) -> DocumentData {
     DocumentData {
         account: doc.account.to_string(),
         path: doc.path.clone(),
+        tags: doc.tags.iter().map(ToString::to_string).collect(),
+        links: doc.links.iter().map(ToString::to_string).collect(),
         metadata: doc
             .meta
             .iter()

@@ -823,6 +823,14 @@ pub struct DocumentData {
     pub account: String,
     /// Document path.
     pub path: String,
+    /// Tags attached to the document directive. Added to core
+    /// `Document` in #1144; plumbed through the plugin layer in
+    /// #1214 (was previously dropped on both legs of the round-trip).
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// Links attached to the document directive (issue #1144).
+    #[serde(default)]
+    pub links: Vec<String>,
     /// Metadata key-value pairs.
     #[serde(default)]
     pub metadata: Vec<(String, MetaValueData)>,

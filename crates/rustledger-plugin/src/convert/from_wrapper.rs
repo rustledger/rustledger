@@ -391,8 +391,8 @@ pub(super) fn data_to_document(data: &DocumentData, date: NaiveDate) -> Document
         date,
         account: data.account.clone().into(),
         path: data.path.clone(),
-        tags: Vec::new(),
-        links: Vec::new(),
+        tags: data.tags.iter().map(|t| t.as_str().into()).collect(),
+        links: data.links.iter().map(|l| l.as_str().into()).collect(),
         meta: data
             .metadata
             .iter()

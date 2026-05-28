@@ -81,8 +81,11 @@ toml = "1.0"
 # the `json-schema` feature (ADR-0004 Phase 3, issue #1232). Emits the
 # checked-in `crates/rustledger-wasm/bindings/index.schema.json` which
 # is the source `datamodel-code-generator` consumes to emit
-# `bindings/types.py` Pydantic v2 models.
-schemars = "1"
+# `bindings/types.py` Pydantic v2 models. Pinned to `=1.2` because the
+# schema output is checked in: a schemars minor that changes ordering
+# or adds metadata fields would break the `bindings-fresh` CI gate on
+# every unrelated PR. Bump deliberately + regenerate.
+schemars = "=1.2.1"
 
 # CLI
 clap = { version = "4", features = ["derive"] }

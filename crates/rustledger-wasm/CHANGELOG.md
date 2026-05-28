@@ -34,7 +34,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (closes #1218 Phase 1, ADR-0004). The two hand-maintained files
   `beancount.d.ts` and `beancount_wasm.d.ts` are deleted and replaced
   by `crates/rustledger-wasm/bindings/index.d.ts`, generated from the
-  Rust DTOs via `ts-rs` (run `scripts/regen-ts-bindings.sh` after any
+  Rust DTOs via `ts-rs` (run `scripts/regen-bindings.sh` after any
   wire-format change). Type *shapes* are equivalent or narrower; the
   file layout is the breaking change. Consumers importing from the
   old paths must update to import from the single bundle. CI fails

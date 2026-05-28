@@ -33,11 +33,24 @@ use serde::{Deserialize, Serialize};
 #[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "ts-export", ts(export, export_to = "bindings/"))]
+// `ledger` is `Option<Ledger>` (nullable on the wire) but has no
+// `skip_serializing_if`, so the field key is always present.
+// schemars 1.x's per-field `required` attribute would force the key
+// into the parent's `required` array but also un-null the type.
+// `extend("required" = ...)` overrides the entire required array, so
+// we must list every required field (including non-Option ones like
+// `errors`) -- if we listed only `ledger`, schemars would drop
+// `errors` from required.
+#[cfg_attr(
+    feature = "json-schema",
+    schemars(extend("required" = ["ledger", "errors"]))
+)]
 pub struct ParseResult {
     /// The parsed ledger (if successful). Emitted as JSON `null` when
     /// parsing failed entirely; no `skip_serializing_if`, so the field
     /// is always present on the wire (TS: `Ledger | null`, not
-    /// `ledger?`).
+    /// `ledger?`). See the `#[schemars(extend(...))]` on the struct
+    /// itself for the "required-and-nullable" wire-contract enforcement.
     pub ledger: Option<Ledger>,
     /// Parse errors.
     pub errors: Vec<Error>,
@@ -73,12 +86,22 @@ pub struct Ledger {
 #[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "ts-export", ts(export, export_to = "bindings/"))]
+// `title` is `Option<String>` (nullable) but always present on the
+// wire. `extend("required" = ...)` overrides the auto-detected list,
+// so we must include every required field (operating_currencies
+// included). See `ParseResult` for the full rationale.
+#[cfg_attr(
+    feature = "json-schema",
+    schemars(extend("required" = ["operating_currencies", "title"]))
+)]
 pub struct LedgerOptions {
     /// Operating currencies.
     pub operating_currencies: Vec<String>,
     /// Ledger title. Emitted as JSON `null` when no title is set
     /// (no `skip_serializing_if`; field is always present on the
-    /// wire). TS: `string | null`, not `title?`.
+    /// wire). TS: `string | null`, not `title?`. The required-and-
+    /// nullable wire contract is enforced via the `schemars(extend)`
+    /// on the struct itself; see `ParseResult` for the rationale.
     pub title: Option<String>,
 }
 
@@ -538,15 +561,28 @@ pub enum Severity {
     feature = "ts-export",
     ts(export, export_to = "bindings/", rename = "BeancountError")
 )]
-#[cfg_attr(feature = "json-schema", schemars(rename = "BeancountError"))]
+#[cfg_attr(
+    feature = "json-schema",
+    schemars(
+        rename = "BeancountError",
+        extend("required" = ["message", "line", "column", "severity"])
+    )
+)]
 pub struct Error {
     /// Error message.
     pub message: String,
     /// Line number (1-based). `null` when the error has no source
-    /// location (e.g. validation errors not tied to a span).
+    /// location (e.g. validation errors not tied to a span). Field is
+    /// always present on the wire (no `skip_serializing_if`); see the
+    /// struct-level `schemars(extend)` for the required-and-nullable
+    /// rationale. `range(min = 1)` enforces the 1-based documented
+    /// contract on the JSON Schema side (schemars defaults to
+    /// `minimum: 0` for u32).
+    #[cfg_attr(feature = "json-schema", schemars(range(min = 1)))]
     pub line: Option<u32>,
     /// Column number (1-based). `null` when the error has no source
-    /// location.
+    /// location. See `line` above for `range` rationale.
+    #[cfg_attr(feature = "json-schema", schemars(range(min = 1)))]
     pub column: Option<u32>,
     /// Error severity.
     pub severity: Severity,
@@ -1094,32 +1130,82 @@ mod cost_number_wire_tests {
     }
 }
 
+/// Codegen vehicle for the JSON Schema export (ADR-0004 Phase 3, #1232).
+///
+/// `schema_for!(ParseResult)` only walks types reachable from
+/// `ParseResult`, which covers parse output but misses the return shapes
+/// of `query`, `format`, `validate`, `runPlugin`, `listPlugins`, the BQL
+/// completion API, and the editor LSP-like surfaces. Listing every
+/// top-level public DTO here gives the generator a single root that
+/// reaches the whole wire surface; the resulting schema has
+/// `RustledgerBindings` as the title and every public type under
+/// `$defs`.
+///
+/// **Not a wire-format type.** No `Serialize`/`Deserialize` derive,
+/// no `wasm_bindgen` export -- it exists only so that
+/// `schema_for!(RustledgerBindings)` produces the union of definitions.
+/// Field types that are reachable transitively (e.g. `Severity` from
+/// `BeancountError`, `CompletionKind` from `EditorCompletion`) don't
+/// need to be listed.
+#[cfg(feature = "json-schema")]
+#[derive(schemars::JsonSchema)]
+#[schemars(rename = "RustledgerBindings")]
+#[allow(dead_code)]
+struct RustledgerBindings {
+    parse_result: ParseResult,
+    validation_result: ValidationResult,
+    query_result: QueryResult,
+    format_result: FormatResult,
+    pad_result: PadResult,
+    plugin_result: PluginResult,
+    plugin_info: PluginInfo,
+    completion_result: CompletionResultJson,
+    editor_completion_result: EditorCompletionResult,
+    editor_hover_info: EditorHoverInfo,
+    editor_document_symbol: EditorDocumentSymbol,
+    editor_references_result: EditorReferencesResult,
+}
+
 /// JSON Schema export entry point (ADR-0004 Phase 3, issue #1232).
 ///
 /// Counterpart to ts-rs's auto-generated `export_bindings_*` tests.
 /// Only compiled when the `json-schema` feature is on, which pulls
 /// `schemars` into the dep graph. Driven by `scripts/regen-bindings.sh`:
-/// the script runs `cargo test -p rustledger-wasm --features json-schema
-/// export_index_schema -- --include-ignored --nocapture`, which writes
-/// `bindings/index.schema.json` from `ParseResult` (the root wire type).
-/// All other DTOs are reachable from `ParseResult` so they end up under
-/// the schema's `$defs` automatically.
+/// the script sets `RUSTLEDGER_REGEN_SCHEMA=1` and runs `cargo test -p
+/// rustledger-wasm --features json-schema --lib -- --include-ignored
+/// --nocapture --exact types::export_json_schema::export_index_schema`,
+/// which writes `bindings/index.schema.json` from the
+/// `RustledgerBindings` wrapper above (covers all public DTOs).
 ///
-/// The export is `#[ignore]` by default so plain `cargo test --features
-/// json-schema` doesn't write the file as a side effect of any unrelated
-/// test run — the file write happens only when the regen script
-/// explicitly opts in via `--include-ignored`.
+/// Two opt-in gates protect the source tree:
+///   1. `#[ignore]` -- plain `cargo test` skips this.
+///   2. `RUSTLEDGER_REGEN_SCHEMA=1` -- a developer running
+///      `cargo test --include-ignored` (a common debug command)
+///      does NOT silently overwrite the checked-in schema; the test
+///      no-ops and warns instead. Only the regen script sets the env
+///      var.
 #[cfg(all(test, feature = "json-schema", not(target_arch = "wasm32")))]
 mod export_json_schema {
     use std::fs;
     use std::path::PathBuf;
 
-    use super::ParseResult;
+    use super::RustledgerBindings;
 
     #[test]
     #[ignore = "writes bindings/index.schema.json; driven by scripts/regen-bindings.sh"]
     fn export_index_schema() {
-        let schema = schemars::schema_for!(ParseResult);
+        // Belt-and-suspenders guard. `#[ignore]` already prevents an
+        // unintentional run, but `--include-ignored` is common enough
+        // in debug workflows that we require an explicit env var too.
+        if std::env::var_os("RUSTLEDGER_REGEN_SCHEMA").is_none() {
+            eprintln!(
+                "export_index_schema: RUSTLEDGER_REGEN_SCHEMA not set; \
+                 skipping the file write. Run scripts/regen-bindings.sh \
+                 instead of invoking this test directly."
+            );
+            return;
+        }
+        let schema = schemars::schema_for!(RustledgerBindings);
         // Pretty-print to stabilize the on-disk format for git diffs;
         // the regen script later runs prettier over it for a final
         // canonicalization pass alongside the TS bundle.

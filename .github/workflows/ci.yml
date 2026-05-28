@@ -275,7 +275,7 @@ jobs:
     name: build
     if: always()
     runs-on: ubuntu-latest
-    needs: [changes, fmt, unsafe-invariant, plugin-test-quality, ci, doctest, regressions]
+    needs: [changes, fmt, unsafe-invariant, plugin-test-quality, ci, doctest, regressions, bindings-fresh]
     steps:
       - name: Check results
         run: |
@@ -294,8 +294,11 @@ jobs:
             exit 0
           fi
 
-          # Otherwise, check that all jobs passed
-          results="${{ needs.fmt.result }} ${{ needs.unsafe-invariant.result }} ${{ needs.ci.result }} ${{ needs.doctest.result }} ${{ needs.regressions.result }}"
+          # Otherwise, check that all jobs passed. bindings-fresh is
+          # part of the gate (ADR-0004 Phase 3 / #1232): wire-format
+          # drift in the generated TS / JSON Schema / Python artifacts
+          # blocks merge just like any other failure.
+          results="${{ needs.fmt.result }} ${{ needs.unsafe-invariant.result }} ${{ needs.ci.result }} ${{ needs.doctest.result }} ${{ needs.regressions.result }} ${{ needs.bindings-fresh.result }}"
           echo "Job results: $results"
 
           if echo "$results" | grep -qE '(failure|cancelled)'; then

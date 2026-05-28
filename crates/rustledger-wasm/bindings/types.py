@@ -22,6 +22,42 @@ class AmountValue(BaseModel):
     number: str = Field(..., description="The number as a string.")
 
 
+class CellValue1(BaseModel):
+    """
+    Amount with number and currency.
+    """
+
+    currency: str
+    number: str
+
+
+class CompletionJson(BaseModel):
+    """
+    BQL completion suggestion for WASM.
+    """
+
+    category: str = Field(
+        ..., description="Category: keyword, function, column, operator, literal."
+    )
+    description: str | None = Field(
+        None, description="Optional description/documentation."
+    )
+    text: str = Field(..., description="The completion text to insert.")
+
+
+class CompletionKind(RootModel[str]):
+    root: str = Field(..., description="The kind of a completion item.")
+
+
+class CompletionResultJson(BaseModel):
+    """
+    Result of BQL completion request.
+    """
+
+    completions: list[CompletionJson] = Field(..., description="List of completions.")
+    context: str = Field(..., description="Current context for debugging.")
+
+
 class CostNumberJson1(BaseModel):
     """
     Per-unit cost (e.g., `{100 USD}`).
@@ -57,6 +93,52 @@ class CostNumberJson(RootModel[CostNumberJson1 | CostNumberJson2 | CostNumberJso
     )
 
 
+class CostValue(BaseModel):
+    """
+    Cost value for serialization.
+    """
+
+    currency: str = Field(..., description="Cost currency.")
+    date: str | None = Field(None, description="Acquisition date.")
+    label: str | None = Field(None, description="Lot label.")
+    number: str = Field(..., description="Cost per unit.")
+
+
+class EditorCompletion(BaseModel):
+    """
+    A completion item for Beancount source editing.
+    """
+
+    detail: str | None = Field(
+        None, description="A human-readable string with additional information."
+    )
+    insert_text: str | None = Field(
+        None, description="The text to insert when this completion is selected."
+    )
+    kind: CompletionKind = Field(..., description="The kind of completion item.")
+    label: str = Field(..., description="The label to display in the completion list.")
+
+
+class EditorCompletionResult(BaseModel):
+    """
+    Result of a completion request.
+    """
+
+    completions: list[EditorCompletion] = Field(..., description="The completions.")
+    context: str = Field(..., description="The detected context.")
+
+
+class EditorRange(BaseModel):
+    """
+    A range in the document.
+    """
+
+    end_character: int = Field(..., description="End character (0-based).", ge=0)
+    end_line: int = Field(..., description="End line (0-based).", ge=0)
+    start_character: int = Field(..., description="Start character (0-based).", ge=0)
+    start_line: int = Field(..., description="Start line (0-based).", ge=0)
+
+
 class LedgerOptions(BaseModel):
     """
     Ledger options.
@@ -64,8 +146,8 @@ class LedgerOptions(BaseModel):
 
     operating_currencies: list[str] = Field(..., description="Operating currencies.")
     title: str | None = Field(
-        None,
-        description="Ledger title. Emitted as JSON `null` when no title is set\n(no `skip_serializing_if`; field is always present on the\nwire). TS: `string | null`, not `title?`.",
+        ...,
+        description="Ledger title. Emitted as JSON `null` when no title is set\n(no `skip_serializing_if`; field is always present on the\nwire). TS: `string | null`, not `title?`. The required-and-\nnullable wire contract is enforced via the `schemars(extend)`\non the struct itself; see `ParseResult` for the rationale.",
     )
 
 
@@ -100,6 +182,23 @@ class MetaValueJson(RootModel[str | bool | MetaValueJson1 | None]):
     )
 
 
+class PluginInfo(BaseModel):
+    """
+    Plugin information.
+    """
+
+    description: str = Field(..., description="Plugin description.")
+    name: str = Field(..., description="Plugin name.")
+
+
+class PositionValue(BaseModel):
+    """
+    Position value for serialization.
+    """
+
+    units: AmountValue = Field(..., description="The units.")
+
+
 class PostingCostJson(BaseModel):
     """
     A posting cost in JSON-serializable form.
@@ -124,7 +223,7 @@ class PostingJson(BaseModel):
         None,
         description='Posting-level flag (e.g., `"!"` for pending). Mirrors\n`rustledger_core::Posting::flag`.',
     )
-    meta: dict[str, MetaValueJson | None] | None = Field(
+    meta: dict[str, MetaValueJson] | None = Field(
         None,
         description="Posting-level metadata (issue #1168). Empty when the posting\nhas no explicit metadata.",
     )
@@ -132,8 +231,16 @@ class PostingJson(BaseModel):
     units: AmountValue | None = Field(None, description="Units (amount).")
 
 
-class Severity(RootModel[Literal["error", "warning"]]):
-    root: Literal["error", "warning"] = Field(..., description="Error severity level.")
+class ReferenceKind(RootModel[str]):
+    root: str = Field(..., description="The kind of symbol being referenced.")
+
+
+class Severity(RootModel[str]):
+    root: str = Field(..., description="Error severity level.")
+
+
+class SymbolKind(RootModel[str]):
+    root: str = Field(..., description="The kind of a symbol.")
 
 
 class TypedValueJson(BaseModel):
@@ -172,7 +279,7 @@ class TypedValueJson(BaseModel):
         ...,
         description='Variant tag — one of `"string"`, `"account"`, `"currency"`,\n`"tag"`, `"link"`, `"date"`, `"number"`, `"bool"`, `"amount"`,\n`"null"`. Matches FFI-WASI\'s tag strings exactly.\n\nRenamed via `#[ts(type = ...)]` so the discriminator is a\nstring-literal union on the TS side. The post-process script\nfurther narrows the full struct shape into a discriminated\nunion (per-variant `{type, value}` rows) -- see ADR-0004 for\nwhy the narrowing is hand-tuned rather than generator-driven.',
     )
-    value: MetaValueJson | None = Field(
+    value: MetaValueJson = Field(
         ..., description="Variant payload (see [`MetaValueJson`] for the four shapes)."
     )
 
@@ -188,17 +295,65 @@ class BeancountError(BaseModel):
     """
 
     column: int | None = Field(
-        None,
-        description="Column number (1-based). `null` when the error has no source\nlocation.",
-        ge=0,
+        ...,
+        description="Column number (1-based). `null` when the error has no source\nlocation. See `line` above for `range` rationale.",
+        ge=1,
     )
     line: int | None = Field(
-        None,
-        description="Line number (1-based). `null` when the error has no source\nlocation (e.g. validation errors not tied to a span).",
-        ge=0,
+        ...,
+        description="Line number (1-based). `null` when the error has no source\nlocation (e.g. validation errors not tied to a span). Field is\nalways present on the wire (no `skip_serializing_if`); see the\nstruct-level `schemars(extend)` for the required-and-nullable\nrationale. `range(min = 1)` enforces the 1-based documented\ncontract on the JSON Schema side (schemars defaults to\n`minimum: 0` for u32).",
+        ge=1,
     )
     message: str = Field(..., description="Error message.")
     severity: Severity = Field(..., description="Error severity.")
+
+
+class CellValue2(BaseModel):
+    """
+    Position with units and optional cost.
+    """
+
+    cost: CostValue | None = None
+    units: AmountValue
+
+
+class CellValue3(BaseModel):
+    """
+    Inventory with positions.
+    """
+
+    positions: list[PositionValue]
+
+
+class CellValue(
+    RootModel[
+        str
+        | int
+        | bool
+        | CellValue1
+        | CellValue2
+        | CellValue3
+        | list[str]
+        | list[CellValue]
+        | dict[str, CellValue]
+        | None
+    ]
+):
+    root: (
+        str
+        | int
+        | bool
+        | CellValue1
+        | CellValue2
+        | CellValue3
+        | list[str]
+        | list[CellValue]
+        | dict[str, CellValue]
+        | None
+    ) = Field(
+        ...,
+        description="A cell value that serializes properly to JavaScript.\n\nUses untagged serialization to produce clean JSON output.",
+    )
 
 
 class DirectiveJson1(BaseModel):
@@ -209,7 +364,7 @@ class DirectiveJson1(BaseModel):
     date: str
     flag: str
     links: list[str]
-    meta: dict[str, MetaValueJson | None] | None = None
+    meta: dict[str, MetaValueJson] | None = None
     narration: str | None = Field(
         None,
         description="Optional narration. Empty narrations are normalized to\n`None` in `convert.rs` so the field is absent on the wire\nin the empty case -- matches FFI-WASI's pattern (#1221).",
@@ -231,7 +386,7 @@ class DirectiveJson2(BaseModel):
     account: str
     amount: AmountValue
     date: str
-    meta: dict[str, MetaValueJson | None] | None = None
+    meta: dict[str, MetaValueJson] | None = None
     tolerance: str | None = Field(
         None,
         description="Explicit tolerance from the `~ 0.01` annotation, stringified.\nMirrors `rustledger_core::Balance::tolerance`.",
@@ -248,7 +403,7 @@ class DirectiveJson3(BaseModel):
     booking: str | None = None
     currencies: list[str]
     date: str
-    meta: dict[str, MetaValueJson | None] | None = None
+    meta: dict[str, MetaValueJson] | None = None
     type: Literal["open"]
 
 
@@ -259,7 +414,7 @@ class DirectiveJson4(BaseModel):
 
     account: str
     date: str
-    meta: dict[str, MetaValueJson | None] | None = None
+    meta: dict[str, MetaValueJson] | None = None
     type: Literal["close"]
 
 
@@ -270,7 +425,7 @@ class DirectiveJson5(BaseModel):
 
     currency: str
     date: str
-    meta: dict[str, MetaValueJson | None] | None = None
+    meta: dict[str, MetaValueJson] | None = None
     type: Literal["commodity"]
 
 
@@ -281,7 +436,7 @@ class DirectiveJson6(BaseModel):
 
     account: str
     date: str
-    meta: dict[str, MetaValueJson | None] | None = None
+    meta: dict[str, MetaValueJson] | None = None
     source_account: str
     type: Literal["pad"]
 
@@ -293,7 +448,7 @@ class DirectiveJson7(BaseModel):
 
     date: str
     event_type: str
-    meta: dict[str, MetaValueJson | None] | None = None
+    meta: dict[str, MetaValueJson] | None = None
     type: Literal["event"]
     value: str
 
@@ -306,7 +461,7 @@ class DirectiveJson8(BaseModel):
     account: str
     comment: str
     date: str
-    meta: dict[str, MetaValueJson | None] | None = None
+    meta: dict[str, MetaValueJson] | None = None
     type: Literal["note"]
 
 
@@ -320,7 +475,7 @@ class DirectiveJson9(BaseModel):
     links: list[str] | None = Field(
         None, description="Links attached to the document directive (issue #1144)."
     )
-    meta: dict[str, MetaValueJson | None] | None = None
+    meta: dict[str, MetaValueJson] | None = None
     path: str
     tags: list[str] | None = Field(
         None, description="Tags attached to the document directive (issue #1144)."
@@ -336,7 +491,7 @@ class DirectiveJson10(BaseModel):
     amount: AmountValue
     currency: str
     date: str
-    meta: dict[str, MetaValueJson | None] | None = None
+    meta: dict[str, MetaValueJson] | None = None
     type: Literal["price"]
 
 
@@ -346,7 +501,7 @@ class DirectiveJson11(BaseModel):
     """
 
     date: str
-    meta: dict[str, MetaValueJson | None] | None = None
+    meta: dict[str, MetaValueJson] | None = None
     name: str
     query_string: str
     type: Literal["query"]
@@ -378,7 +533,7 @@ class DirectiveJson12(BaseModel):
 
     custom_type: str
     date: str
-    meta: dict[str, MetaValueJson | None] | None = None
+    meta: dict[str, MetaValueJson] | None = None
     type: Literal["custom"]
     values: list[TypedValueJson] | None = Field(
         None,
@@ -421,6 +576,71 @@ class DirectiveJson(
     )
 
 
+class EditorDocumentSymbol(BaseModel):
+    """
+    A document symbol for the outline view.
+    """
+
+    children: list[EditorDocumentSymbol] | None = Field(
+        None, description="Children of this symbol (e.g., postings in a transaction)."
+    )
+    deprecated: bool | None = Field(
+        None, description="Whether this symbol is deprecated (e.g., closed account)."
+    )
+    detail: str | None = Field(None, description="More detail for this symbol.")
+    kind: SymbolKind = Field(..., description="The kind of this symbol.")
+    name: str = Field(..., description="The name of this symbol.")
+    range: EditorRange = Field(..., description="The range enclosing this symbol.")
+
+
+class EditorHoverInfo(BaseModel):
+    """
+    Hover information for a symbol.
+    """
+
+    contents: str = Field(..., description="The hover content (Markdown formatted).")
+    range: EditorRange | None = Field(
+        None, description="The range of the hovered symbol (optional)."
+    )
+
+
+class EditorReference(BaseModel):
+    """
+    A reference to a symbol in the document.
+    """
+
+    context: str | None = Field(
+        None, description="Human-readable context (e.g., directive type)."
+    )
+    is_definition: bool = Field(
+        ..., description="Whether this is the defining occurrence."
+    )
+    kind: ReferenceKind = Field(..., description="The kind of reference.")
+    range: EditorRange = Field(..., description="The range of this reference.")
+
+
+class EditorReferencesResult(BaseModel):
+    """
+    Result of a find-references request.
+    """
+
+    kind: ReferenceKind = Field(..., description="The kind of symbol.")
+    references: list[EditorReference] = Field(..., description="All references found.")
+    symbol: str = Field(..., description="The symbol being searched for.")
+
+
+class FormatResult(BaseModel):
+    """
+    Result of formatting.
+    """
+
+    errors: list[BeancountError] = Field(..., description="Format errors.")
+    formatted: str | None = Field(
+        None,
+        description="Formatted source (if successful). Emitted as JSON `null` on\nfailure; no `skip_serializing_if`, so the field is always\npresent on the wire.",
+    )
+
+
 class LedgerJson(BaseModel):
     """
     A parsed Beancount ledger.
@@ -439,6 +659,20 @@ class LedgerJson(BaseModel):
     options: LedgerOptions = Field(..., description="Ledger options.")
 
 
+class PadResult(BaseModel):
+    """
+    Result of pad expansion.
+    """
+
+    directives: list[DirectiveJson] = Field(
+        ..., description="Directives with pads removed."
+    )
+    errors: list[BeancountError] = Field(..., description="Pad processing errors.")
+    padding_transactions: list[DirectiveJson] = Field(
+        ..., description="Generated padding transactions."
+    )
+
+
 class ParseResult(BaseModel):
     """
     Result of parsing a Beancount file.
@@ -446,6 +680,73 @@ class ParseResult(BaseModel):
 
     errors: list[BeancountError] = Field(..., description="Parse errors.")
     ledger: LedgerJson | None = Field(
-        None,
-        description="The parsed ledger (if successful). Emitted as JSON `null` when\nparsing failed entirely; no `skip_serializing_if`, so the field\nis always present on the wire (TS: `Ledger | null`, not\n`ledger?`).",
+        ...,
+        description='The parsed ledger (if successful). Emitted as JSON `null` when\nparsing failed entirely; no `skip_serializing_if`, so the field\nis always present on the wire (TS: `Ledger | null`, not\n`ledger?`). See the `#[schemars(extend(...))]` on the struct\nitself for the "required-and-nullable" wire-contract enforcement.',
     )
+
+
+class PluginResult(BaseModel):
+    """
+    Result of running a plugin.
+    """
+
+    directives: list[DirectiveJson] = Field(..., description="Modified directives.")
+    errors: list[BeancountError] = Field(..., description="Plugin errors/warnings.")
+
+
+class QueryResult(BaseModel):
+    """
+    Result of a BQL query.
+    """
+
+    columns: list[str] = Field(..., description="Column names.")
+    errors: list[BeancountError] = Field(..., description="Query errors.")
+    rows: list[list[CellValue]] = Field(..., description="Result rows.")
+
+
+class ValidationResult(BaseModel):
+    """
+    Result of validation.
+    """
+
+    errors: list[BeancountError] = Field(..., description="Validation errors.")
+    valid: bool = Field(..., description="Whether the ledger is valid.")
+
+
+class RustledgerBindings(BaseModel):
+    """
+    Codegen vehicle for the JSON Schema export (ADR-0004 Phase 3, #1232).
+
+    `schema_for!(ParseResult)` only walks types reachable from
+    `ParseResult`, which covers parse output but misses the return shapes
+    of `query`, `format`, `validate`, `runPlugin`, `listPlugins`, the BQL
+    completion API, and the editor LSP-like surfaces. Listing every
+    top-level public DTO here gives the generator a single root that
+    reaches the whole wire surface; the resulting schema has
+    `RustledgerBindings` as the title and every public type under
+    `$defs`.
+
+    **Not a wire-format type.** No `Serialize`/`Deserialize` derive,
+    no `wasm_bindgen` export -- it exists only so that
+    `schema_for!(RustledgerBindings)` produces the union of definitions.
+    Field types that are reachable transitively (e.g. `Severity` from
+    `BeancountError`, `CompletionKind` from `EditorCompletion`) don't
+    need to be listed.
+    """
+
+    completion_result: CompletionResultJson
+    editor_completion_result: EditorCompletionResult
+    editor_document_symbol: EditorDocumentSymbol
+    editor_hover_info: EditorHoverInfo
+    editor_references_result: EditorReferencesResult
+    format_result: FormatResult
+    pad_result: PadResult
+    parse_result: ParseResult
+    plugin_info: PluginInfo
+    plugin_result: PluginResult
+    query_result: QueryResult
+    validation_result: ValidationResult
+
+
+CellValue.model_rebuild()
+EditorDocumentSymbol.model_rebuild()

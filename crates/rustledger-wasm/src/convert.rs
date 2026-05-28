@@ -126,7 +126,17 @@ pub fn directive_to_json(directive: &Directive) -> DirectiveJson {
             date: txn.date.to_string(),
             flag: txn.flag.to_string(),
             payee: txn.payee.as_ref().map(ToString::to_string),
-            narration: Some(txn.narration.to_string()),
+            // Empty narration normalizes to `None` so it gets elided
+            // by `skip_serializing_if`, matching FFI-WASI's shape
+            // (closes #1221). Pre-#1221 this unconditionally wrapped
+            // in `Some(...)`, so an empty narration always emitted
+            // `"narration": ""` on the wire while FFI-WASI omitted
+            // the field entirely.
+            narration: if txn.narration.is_empty() {
+                None
+            } else {
+                Some(txn.narration.to_string())
+            },
             tags: txn.tags.iter().map(ToString::to_string).collect(),
             links: txn.links.iter().map(ToString::to_string).collect(),
             postings: txn
@@ -487,6 +497,53 @@ mod tests {
         assert!(
             !serialized.contains("\"meta\""),
             "empty meta must be omitted from JSON output; got: {serialized}",
+        );
+    }
+
+    /// Regression for #1221: WASM previously emitted `"payee": null`
+    /// when the transaction had no payee, and `"narration": ""` when
+    /// empty, while FFI-WASI omitted both fields via
+    /// `skip_serializing_if`. Post-fix both fields are absent on the
+    /// wire in their respective empty cases, matching FFI-WASI.
+    #[test]
+    fn transaction_omits_payee_and_empty_narration_1221() {
+        // No payee, empty narration -- both fields must be absent.
+        let source = "2024-01-01 *\n  Assets:Bank  10.00 USD\n  Income:Salary\n";
+        let result = parse_beancount(source);
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+
+        let json = directive_to_json(&result.directives[0].value);
+        let serialized = serde_json::to_string(&json).expect("serializes");
+        assert!(
+            !serialized.contains("\"payee\""),
+            "absent payee must be omitted from JSON; got: {serialized}",
+        );
+        assert!(
+            !serialized.contains("\"narration\""),
+            "empty narration must be omitted from JSON; got: {serialized}",
+        );
+    }
+
+    /// Regression for #1221: non-empty narration still emits.
+    /// Counterpoint to `transaction_omits_payee_and_empty_narration_1221`
+    /// so a future regression that elides the field unconditionally
+    /// also fails CI.
+    #[test]
+    fn transaction_emits_payee_and_nonempty_narration_1221() {
+        let source =
+            "2024-01-01 * \"Acme\" \"Coffee\"\n  Assets:Bank  -5.00 USD\n  Expenses:Food\n";
+        let result = parse_beancount(source);
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+
+        let json = directive_to_json(&result.directives[0].value);
+        let serialized = serde_json::to_string(&json).expect("serializes");
+        assert!(
+            serialized.contains("\"payee\":\"Acme\""),
+            "present payee must be on the wire; got: {serialized}",
+        );
+        assert!(
+            serialized.contains("\"narration\":\"Coffee\""),
+            "non-empty narration must be on the wire; got: {serialized}",
         );
     }
 

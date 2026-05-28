@@ -20,6 +20,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   positional values from `custom` directives must branch on `.type`
   and read `.value`.
 
+- **Transaction `payee` and `narration` shape change** (closes
+  #1221). Pre-fix: WASM emitted `"payee": null` when the transaction
+  had no payee, and `"narration": ""` when the narration was empty.
+  Post-fix: both fields are absent on the wire in their respective
+  empty cases, matching FFI-WASI's `skip_serializing_if`-driven
+  shape. JS consumers using `"payee" in t` (now `false` instead of
+  `true` when absent) or `t.narration === ""` (now `undefined`
+  instead of `""` when empty) must update. The hand-written `.d.ts`
+  files are updated to `payee?: string` and `narration?: string`.
+
 ## [0.13.0](https://github.com/rustledger/rustledger/compare/v0.12.0...v0.13.0) - 2026-04-21
 
 ### Bug Fixes

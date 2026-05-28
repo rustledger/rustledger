@@ -53,10 +53,13 @@
 //!    `skip_serializing_if` to the FFI-WASI side (or by always
 //!    emitting an explicit empty object on both — pick one rule).
 //!
-//! 3. **None vs absent**: WASM emits `"payee": null`, FFI-WASI uses
-//!    `skip_serializing_if = "Option::is_none"`. Normalization drops
-//!    explicit nulls. Converge by adding `skip_serializing_if` on
-//!    the WASM side.
+//! 3. ~~**None vs absent**: WASM emits `"payee": null`, FFI-WASI uses
+//!    `skip_serializing_if = "Option::is_none"`.~~ **Converged in #1221** —
+//!    WASM now uses `skip_serializing_if` on `payee` and `narration`,
+//!    matching FFI-WASI. The null-stripping in
+//!    [`strip_empty_meta_and_directive_nulls`] is retained as a
+//!    defensive guard against future regression but no longer masks
+//!    any known divergence.
 
 use rust_decimal_macros::dec;
 use rustledger_core::{

@@ -163,10 +163,11 @@ export interface TransactionDirective extends Directive {
     type: "transaction";
     /** Transaction flag (* or !) */
     flag: string;
-    /** Optional payee */
+    /** Optional payee. Absent when the transaction has no payee. */
     payee?: string;
-    /** Transaction narration/description */
-    narration: string;
+    /** Transaction narration/description. Absent when the narration
+     * is empty (matches FFI-WASI's elision; see #1221). */
+    narration?: string;
     /** Transaction tags */
     tags: string[];
     /** Transaction links */

@@ -156,7 +156,14 @@ pub enum DirectiveJson {
     Transaction {
         date: String,
         flag: String,
+        /// Optional payee. Mirrors FFI-WASI's shape: absent on the
+        /// wire when `None` (closes #1221).
+        #[serde(skip_serializing_if = "Option::is_none")]
         payee: Option<String>,
+        /// Optional narration. Empty narrations are normalized to
+        /// `None` in `convert.rs` so the field is absent on the wire
+        /// in the empty case -- matches FFI-WASI's pattern (#1221).
+        #[serde(skip_serializing_if = "Option::is_none")]
         narration: Option<String>,
         tags: Vec<String>,
         links: Vec<String>,

@@ -123,10 +123,11 @@ export interface TransactionData {
   date: string;
   /** Transaction flag: "*" for complete, "!" for flagged. */
   flag: string;
-  /** Optional payee. */
-  payee: string | null;
-  /** Transaction description. */
-  narration: string;
+  /** Optional payee. Absent when the transaction has no payee. */
+  payee?: string;
+  /** Transaction description. Absent when the narration is empty
+   * (matches FFI-WASI's elision; see #1221). */
+  narration?: string;
   /** Tags (without # prefix). */
   tags: string[];
   /** Links (without ^ prefix). */

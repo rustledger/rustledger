@@ -133,7 +133,31 @@ EOF
 awk 'BEGIN { blank = 0 }
      /^$/ { blank++; if (blank <= 2) print; next }
      { blank = 0; print }' "$TMP_OUT" > "$OUTPUT.new"
-mv "$OUTPUT.new" "$OUTPUT"
+
+# Run the bundle through Prettier (#1226). ts-rs emits a compact
+# one-line-per-field layout that wasm-bindgen's typescript_custom_section
+# formatter miscounts brackets on -- the result is escalating
+# indentation in the generated `pkg/*.d.ts`. Prettier normalizes the
+# layout (proper indentation, semicolons, line breaks) so wasm-bindgen
+# embeds clean output. As a side effect, the checked-in
+# `bindings/index.d.ts` is easier to read and review.
+#
+# `npx --yes` accepts the prompt to download `prettier` if not cached.
+# Both `npx` and `prettier` are available in CI via the existing Node
+# toolchain that wasm-pack uses.
+if ! command -v npx >/dev/null 2>&1; then
+    echo "error: npx not found in PATH. Install Node.js to regenerate." >&2
+    exit 1
+fi
+npx --yes prettier@3 --parser=typescript --no-semi=false --print-width=100 \
+    < "$OUTPUT.new" > "$OUTPUT.fmt" 2> "$OUTPUT.err" || {
+    echo "error: prettier failed to format the bundle:" >&2
+    cat "$OUTPUT.err" >&2
+    rm -f "$OUTPUT.new" "$OUTPUT.fmt" "$OUTPUT.err"
+    exit 1
+}
+rm -f "$OUTPUT.new" "$OUTPUT.err"
+mv "$OUTPUT.fmt" "$OUTPUT"
 
 # CI-only mode: fail if the regenerated file differs from the
 # committed one. Local contributors run without this env var.

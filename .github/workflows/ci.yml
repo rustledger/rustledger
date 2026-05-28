@@ -98,6 +98,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # stable
         with:
           toolchain: stable
+      # Node 24 for the prettier pass in `scripts/regen-ts-bindings.sh`
+      # (#1226). Pin the major so future runner image updates don't
+      # surprise us.
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
       # sccache is set as RUSTC_WRAPPER at the workflow level (line 21),
       # so every job that compiles Rust must install the action -- without
       # it, cargo's `-vV` probe fails with "could not execute process

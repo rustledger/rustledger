@@ -2,6 +2,18 @@
 //!
 //! These types provide a JavaScript-friendly representation of Beancount data,
 //! using string representations for dates and numbers.
+//!
+//! # TypeScript bindings (`ts-export` feature, #1218 Phase 1)
+//!
+//! The `#[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]` lines
+//! below are inert in normal builds. With the `ts-export` feature on,
+//! ts-rs emits per-type `.d.ts` files under `crates/rustledger-wasm/bindings/`
+//! when `cargo test -p rustledger-wasm --features ts-export` runs.
+//! The post-process script at `scripts/regen-ts-bindings.sh`
+//! concatenates those into the checked-in `bindings/index.d.ts`
+//! that is the canonical TS API surface (ADR-0004). Adding a new
+//! field to any DTO below requires running that script and committing
+//! the regenerated bindings.
 
 use std::collections::HashMap;
 
@@ -64,6 +76,8 @@ pub struct LedgerOptions {
 /// test).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
+#[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts-export", ts(export, export_to = "bindings/"))]
 pub enum MetaValueJson {
     /// String/Account/Currency/Tag/Link/Date/Number — anything the
     /// host can represent as a string, including `rust_decimal::Decimal`
@@ -128,11 +142,25 @@ pub enum MetaValueJson {
 /// `Custom.values` emitted raw `MetaValueJson` values (lossy). Closes
 /// #1207.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts-export", ts(export, export_to = "bindings/"))]
 pub struct TypedValueJson {
     /// Variant tag — one of `"string"`, `"account"`, `"currency"`,
     /// `"tag"`, `"link"`, `"date"`, `"number"`, `"bool"`, `"amount"`,
     /// `"null"`. Matches FFI-WASI's tag strings exactly.
+    ///
+    /// Renamed via `#[ts(type = ...)]` so the discriminator is a
+    /// string-literal union on the TS side. The post-process script
+    /// further narrows the full struct shape into a discriminated
+    /// union (per-variant `{type, value}` rows) -- see ADR-0004 for
+    /// why the narrowing is hand-tuned rather than generator-driven.
     #[serde(rename = "type")]
+    #[cfg_attr(
+        feature = "ts-export",
+        ts(
+            type = "\"string\" | \"account\" | \"currency\" | \"tag\" | \"link\" | \"date\" | \"number\" | \"bool\" | \"amount\" | \"null\""
+        )
+    )]
     pub value_type: String,
     /// Variant payload (see [`MetaValueJson`] for the four shapes).
     pub value: MetaValueJson,
@@ -150,6 +178,8 @@ pub struct TypedValueJson {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 #[allow(missing_docs)]
+#[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts-export", ts(export, export_to = "bindings/"))]
 pub enum DirectiveJson {
     /// Transaction directive.
     #[serde(rename = "transaction")]
@@ -159,11 +189,13 @@ pub enum DirectiveJson {
         /// Optional payee. Mirrors FFI-WASI's shape: absent on the
         /// wire when `None` (closes #1221).
         #[serde(skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "ts-export", ts(optional))]
         payee: Option<String>,
         /// Optional narration. Empty narrations are normalized to
         /// `None` in `convert.rs` so the field is absent on the wire
         /// in the empty case -- matches FFI-WASI's pattern (#1221).
         #[serde(skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "ts-export", ts(optional))]
         narration: Option<String>,
         tags: Vec<String>,
         links: Vec<String>,
@@ -180,6 +212,7 @@ pub enum DirectiveJson {
         /// Explicit tolerance from the `~ 0.01` annotation, stringified.
         /// Mirrors `rustledger_core::Balance::tolerance`.
         #[serde(skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "ts-export", ts(optional))]
         tolerance: Option<String>,
         #[serde(skip_serializing_if = "HashMap::is_empty", default)]
         meta: HashMap<String, MetaValueJson>,
@@ -191,6 +224,7 @@ pub enum DirectiveJson {
         account: String,
         currencies: Vec<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "ts-export", ts(optional))]
         booking: Option<String>,
         #[serde(skip_serializing_if = "HashMap::is_empty", default)]
         meta: HashMap<String, MetaValueJson>,
@@ -345,21 +379,27 @@ impl DirectiveJson {
 
 /// A posting in JSON-serializable form.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts-export", ts(export, export_to = "bindings/"))]
 pub struct PostingJson {
     /// Account name.
     pub account: String,
     /// Units (amount).
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts-export", ts(optional))]
     pub units: Option<AmountValue>,
     /// Cost specification.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts-export", ts(optional))]
     pub cost: Option<PostingCostJson>,
     /// Price annotation.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts-export", ts(optional))]
     pub price: Option<AmountValue>,
     /// Posting-level flag (e.g., `"!"` for pending). Mirrors
     /// `rustledger_core::Posting::flag`.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts-export", ts(optional))]
     pub flag: Option<String>,
     /// Posting-level metadata (issue #1168). Empty when the posting
     /// has no explicit metadata.
@@ -374,6 +414,8 @@ pub struct PostingJson {
 /// field as the discriminator.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts-export", ts(export, export_to = "bindings/"))]
 pub enum CostNumberJson {
     /// Per-unit cost (e.g., `{100 USD}`).
     PerUnit {
@@ -396,18 +438,24 @@ pub enum CostNumberJson {
 
 /// A posting cost in JSON-serializable form.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts-export", ts(export, export_to = "bindings/"))]
 pub struct PostingCostJson {
     /// Cost number (per-unit, total, or post-booking pair).
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts-export", ts(optional))]
     pub number: Option<CostNumberJson>,
     /// Cost currency.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts-export", ts(optional))]
     pub currency: Option<String>,
     /// Acquisition date.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts-export", ts(optional))]
     pub date: Option<String>,
     /// Lot label.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts-export", ts(optional))]
     pub label: Option<String>,
 }
 
@@ -548,6 +596,8 @@ pub enum CellValue {
 
 /// Amount value for serialization.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts-export", ts(export, export_to = "bindings/"))]
 pub struct AmountValue {
     /// The number as a string.
     pub number: String,

@@ -2,7 +2,12 @@
 
 ## Status
 
-Proposed (May 2026) — spike landed in #1218; awaiting decision before implementation.
+Accepted — Phase 1 (May 2026). Spike landed in #1220; Phase 1
+implementation ships the per-DTO derives, the
+`scripts/regen-ts-bindings.sh` post-process, the generated
+`bindings/index.d.ts`, and the CI freshness gate. Phase 2 (replacing
+the inline `typescript_custom_section` with `include_str!` of the
+generated bundle) is deferred to a follow-up issue.
 
 ## Context
 

@@ -21,21 +21,16 @@ default = ["plugins", "completions"]
 plugins = ["dep:rustledger-plugin"]
 ## Include BQL query completions (bqlCompletions)
 completions = []
-## Spike (#1218) -- enables the `tsrs_spike` example. Pulls in ts-rs as
-## an optional host-only dep (declared under `[target.'cfg(not(...))'.dependencies]`
-## below, so `cargo build --target wasm32-unknown-unknown --features ts-rs-spike`
-## hard-fails on the missing `ts-rs` crate -- intentional, the spike is
-## host-only by design). Not part of any default build.
-ts-rs-spike = ["dep:ts-rs"]
-
-# The `tsrs_spike` example needs the optional ts-rs dep; declare the
-# feature requirement so `cargo build --workspace --all-targets`
-# skips the example unless `ts-rs-spike` is on. Without this, CI's
-# default-feature workspace check tries to build the example without
-# its dep and fails.
-[[example]]
-name = "tsrs_spike"
-required-features = ["ts-rs-spike"]
+## TypeScript type export (#1218 Phase 1) -- enables the `#[derive(TS)]`
+## attributes on the wire-format DTOs. Pulls in ts-rs as an optional
+## host-only dep (declared under `[target.'cfg(not(...))'.dependencies]`
+## below, so `cargo build --target wasm32-unknown-unknown --features
+## ts-export` hard-fails on the missing `ts-rs` crate -- intentional,
+## the export is host-only by design). Triggered from CI via
+## `scripts/regen-ts-bindings.sh` (which runs `cargo test --features
+## ts-export` and the post-process script) so contributors regenerate
+## the .d.ts whenever a DTO changes. Not part of any default build.
+ts-export = ["dep:ts-rs"]
 
 [dependencies]
 rustledger-core.workspace = true
@@ -59,12 +54,15 @@ console_error_panic_hook = "0.1"
 [dev-dependencies]
 wasm-bindgen-test = "0.3"
 js-sys = "0.3"
-# Spike (#1218): ts-rs for TypeScript type generation prototype.
-# Host-only optional dep, opt-in via the `ts-rs-spike` feature above.
-# Used by the `tsrs_spike` example to export per-struct .d.ts to
-# `crates/rustledger-wasm/bindings/bindings/` (gitignored) so we can
-# eyeball what ts-rs produces for our existing wire-format DTO
-# shapes. Not pulled into normal builds or the wasm32 target.
+# TypeScript export (#1218 Phase 1): ts-rs is a host-only optional dep,
+# opt-in via the `ts-export` feature above. With the feature on,
+# `cargo test -p rustledger-wasm --features ts-export` writes per-type
+# .d.ts files under `crates/rustledger-wasm/bindings/` (gitignored
+# intermediate output -- the post-processed `bindings/index.d.ts`
+# *is* checked in as the public TS API surface). Without the feature,
+# `ts-rs` is not in the dep graph and the `#[derive(TS)]` derives
+# compile out via `#[cfg_attr]`. Default builds and the wasm32 target
+# are unaffected.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 ts-rs = { version = "12.0.1", optional = true }
 

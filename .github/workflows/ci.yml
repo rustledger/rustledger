@@ -83,6 +83,26 @@ jobs:
           toolchain: stable
           components: rustfmt
       - run: cargo fmt --all -- --check
+  # ts-rs bindings freshness gate (#1218 Phase 1).
+  # Regenerates `crates/rustledger-wasm/bindings/index.d.ts` from the
+  # Rust DTOs and fails if it differs from the checked-in version. This
+  # is the structural CI gate ADR-0004 was designed for: any wire-format
+  # field change must come with a regenerated TS bundle in the same PR.
+  ts-bindings-fresh:
+    name: TypeScript bindings freshness
+    needs: [changes]
+    if: needs.changes.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@900f2210b1d28bbbd0bd22d17926b9e224e8f231 # v6
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2
+        with:
+          shared-key: ts-bindings
+      - name: Regenerate + diff TS bindings
+        run: RUSTLEDGER_TS_CHECK=1 scripts/regen-ts-bindings.sh
   # Fast invariant check: verify that crates declaring
   # `#![forbid(unsafe_code)]` contain no `unsafe` blocks/items. Runs in
   # milliseconds via grep, so it fails loudly and early on AI-generated

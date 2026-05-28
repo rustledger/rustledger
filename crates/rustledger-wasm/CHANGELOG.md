@@ -30,6 +30,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of `""` when empty) must update. The hand-written `.d.ts`
   files are updated to `payee?: string` and `narration?: string`.
 
+- **TypeScript declarations consolidated into a single generated file**
+  (closes #1218 Phase 1, ADR-0004). The two hand-maintained files
+  `beancount.d.ts` and `beancount_wasm.d.ts` are deleted and replaced
+  by `crates/rustledger-wasm/bindings/index.d.ts`, generated from the
+  Rust DTOs via `ts-rs` (run `scripts/regen-ts-bindings.sh` after any
+  wire-format change). Type *shapes* are equivalent or narrower; the
+  file layout is the breaking change. Consumers importing from the
+  old paths must update to import from the single bundle. CI fails
+  the PR if a DTO changes without regenerating the bundle.
+
+  Type name changes in the process:
+  - The per-variant directive interfaces (`TransactionDirective`,
+    `BalanceDirective`, ...) are gone; the discriminated union is
+    inlined on `DirectiveJson`. Use `Extract<DirectiveJson, { type:
+    "transaction" }>` for the per-variant type.
+  - `Amount` is now `AmountValue` (the Rust DTO name); narrow via a
+    type alias on the consumer side if you want the old name.
+  - `Posting` is now `PostingJson`; `Directive` is now `DirectiveJson`.
+
 ## [0.13.0](https://github.com/rustledger/rustledger/compare/v0.12.0...v0.13.0) - 2026-04-21
 
 ### Bug Fixes

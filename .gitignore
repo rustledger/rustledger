@@ -2,11 +2,13 @@
 /target/
 **/*.rs.bk
 
-# Generated TypeScript bindings (ts-rs spike #1218). The spike example
-# `crates/rustledger-wasm/examples/tsrs_spike.rs` exports per-type .d.ts
-# into this directory; regenerable via `cargo test --example tsrs_spike
-# -p rustledger-wasm --features ts-rs-spike`.
-crates/rustledger-wasm/bindings/
+# ts-rs intermediate per-type .d.ts output (#1218 Phase 1).
+# `scripts/regen-ts-bindings.sh` writes per-type files here as
+# generator scratch, then concatenates them into
+# `crates/rustledger-wasm/bindings/index.d.ts` which IS checked in
+# (it's the canonical TS API surface; CI gates its freshness via
+# `RUSTLEDGER_TS_CHECK=1 scripts/regen-ts-bindings.sh`).
+crates/rustledger-wasm/bindings/bindings/
 
 # Editor files
 *.swp

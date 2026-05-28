@@ -746,6 +746,13 @@ pub struct CostValue {
 #[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "ts-export", ts(export, export_to = "bindings/"))]
+// `formatted` is `Option<String>` (nullable) without
+// `skip_serializing_if` -- always present on the wire. See
+// `ParseResult` for the `extend("required" = ...)` rationale.
+#[cfg_attr(
+    feature = "json-schema",
+    schemars(extend("required" = ["formatted", "errors"]))
+)]
 pub struct FormatResult {
     /// Formatted source (if successful). Emitted as JSON `null` on
     /// failure; no `skip_serializing_if`, so the field is always
@@ -1137,19 +1144,22 @@ mod cost_number_wire_tests {
 /// of `query`, `format`, `validate`, `runPlugin`, `listPlugins`, the BQL
 /// completion API, and the editor LSP-like surfaces. Listing every
 /// top-level public DTO here gives the generator a single root that
-/// reaches the whole wire surface; the resulting schema has
-/// `RustledgerBindings` as the title and every public type under
-/// `$defs`.
+/// reaches the whole wire surface; the resulting schema has every
+/// public type under `$defs`.
 ///
 /// **Not a wire-format type.** No `Serialize`/`Deserialize` derive,
 /// no `wasm_bindgen` export -- it exists only so that
-/// `schema_for!(RustledgerBindings)` produces the union of definitions.
-/// Field types that are reachable transitively (e.g. `Severity` from
-/// `BeancountError`, `CompletionKind` from `EditorCompletion`) don't
-/// need to be listed.
+/// `schema_for!(RustledgerBindings)` produces the union of
+/// definitions. The export test then strips the wrapper's own
+/// root-level keys (`type`, `title`, `properties`, `required`) before
+/// writing the JSON Schema, so consumers see a definitions-only
+/// document with no top-level "RustledgerBindings" object -- and
+/// datamodel-code-generator does not emit a corresponding Pydantic
+/// class. Field types that are reachable transitively (e.g.
+/// `Severity` from `BeancountError`, `CompletionKind` from
+/// `EditorCompletion`) don't need to be listed.
 #[cfg(feature = "json-schema")]
 #[derive(schemars::JsonSchema)]
-#[schemars(rename = "RustledgerBindings")]
 #[allow(dead_code)]
 struct RustledgerBindings {
     parse_result: ParseResult,
@@ -1164,6 +1174,11 @@ struct RustledgerBindings {
     editor_hover_info: EditorHoverInfo,
     editor_document_symbol: EditorDocumentSymbol,
     editor_references_result: EditorReferencesResult,
+    // `EditorLocation` is the return type of `getDefinition()` and is
+    // not referenced by any of the other listed DTOs, so it needs an
+    // explicit field here -- without it the schema/Python bindings
+    // silently omit it while the TS bindings still export it.
+    editor_location: EditorLocation,
 }
 
 /// JSON Schema export entry point (ADR-0004 Phase 3, issue #1232).
@@ -1180,10 +1195,17 @@ struct RustledgerBindings {
 /// Two opt-in gates protect the source tree:
 ///   1. `#[ignore]` -- plain `cargo test` skips this.
 ///   2. `RUSTLEDGER_REGEN_SCHEMA=1` -- a developer running
-///      `cargo test --include-ignored` (a common debug command)
-///      does NOT silently overwrite the checked-in schema; the test
-///      no-ops and warns instead. Only the regen script sets the env
-///      var.
+///      `cargo test --include-ignored` (a common debug command) does
+///      NOT silently overwrite the checked-in schema; the test
+///      `panic!`s with a guidance message so the failure is loud and
+///      visible without needing `--nocapture`. Only the regen script
+///      sets the env var.
+///
+/// The test also prints a unique sentinel on success
+/// (`EXPORT_INDEX_SCHEMA_RAN_OK`) which the regen script greps for --
+/// catches the case where `cargo test --exact` matches zero tests
+/// (e.g. after a future rename) and silently exits 0 with no
+/// regeneration.
 #[cfg(all(test, feature = "json-schema", not(target_arch = "wasm32")))]
 mod export_json_schema {
     use std::fs;
@@ -1191,26 +1213,62 @@ mod export_json_schema {
 
     use super::RustledgerBindings;
 
+    /// Sentinel string printed on a successful schema write. The regen
+    /// script greps for this exact bytes; do not change without
+    /// updating `scripts/regen-bindings.sh`.
+    pub const SUCCESS_SENTINEL: &str = "EXPORT_INDEX_SCHEMA_RAN_OK";
+
     #[test]
     #[ignore = "writes bindings/index.schema.json; driven by scripts/regen-bindings.sh"]
     fn export_index_schema() {
         // Belt-and-suspenders guard. `#[ignore]` already prevents an
         // unintentional run, but `--include-ignored` is common enough
-        // in debug workflows that we require an explicit env var too.
-        if std::env::var_os("RUSTLEDGER_REGEN_SCHEMA").is_none() {
-            eprintln!(
-                "export_index_schema: RUSTLEDGER_REGEN_SCHEMA not set; \
-                 skipping the file write. Run scripts/regen-bindings.sh \
-                 instead of invoking this test directly."
-            );
-            return;
-        }
+        // in debug workflows that we panic (rather than silently
+        // returning Ok) so the failure is visible without
+        // `--nocapture`. A green-passing test with the env var unset
+        // would otherwise mislead a developer into thinking the
+        // schema was regenerated.
+        assert!(
+            std::env::var_os("RUSTLEDGER_REGEN_SCHEMA").is_some(),
+            "export_index_schema mutates bindings/index.schema.json and \
+             must be driven by scripts/regen-bindings.sh, not invoked \
+             directly. Set RUSTLEDGER_REGEN_SCHEMA=1 to opt in."
+        );
+
         let schema = schemars::schema_for!(RustledgerBindings);
+
+        // Round-trip through `serde_json::Value` so we can strip the
+        // wrapper's root-level keys. `RustledgerBindings` exists only
+        // to seed `$defs` with every public DTO -- its own
+        // `type: object, properties: {...}, required: [...]` shape is
+        // an internal artifact, not a wire-format contract. Leaving
+        // it in causes datamodel-code-generator to emit a public
+        // `RustledgerBindings(BaseModel)` class consumers can import
+        // (and worse, prefixed-mangled when we try to rename it with
+        // a leading underscore). Stripping after generation gives a
+        // definitions-only schema (`$schema` + `$defs` only) which
+        // datamodel-code-generator handles cleanly: one Pydantic
+        // class per `$def`, no wrapper.
+        let mut schema_value = serde_json::to_value(&schema)
+            .expect("schemars schema should round-trip through serde_json");
+        if let Some(obj) = schema_value.as_object_mut() {
+            obj.remove("type");
+            obj.remove("title");
+            obj.remove("properties");
+            obj.remove("required");
+            obj.remove("additionalProperties");
+            // The wrapper's rustdoc gets emitted as `description`.
+            // Drop it -- datamodel-code-generator otherwise treats the
+            // root as a documented type and emits a placeholder
+            // `Model(RootModel[Any])` class.
+            obj.remove("description");
+        }
+
         // Pretty-print to stabilize the on-disk format for git diffs;
         // the regen script later runs prettier over it for a final
         // canonicalization pass alongside the TS bundle.
-        let pretty = serde_json::to_string_pretty(&schema)
-            .expect("schemars schema should round-trip through serde_json");
+        let pretty = serde_json::to_string_pretty(&schema_value)
+            .expect("stripped schema should serialize cleanly");
 
         let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         path.push("bindings");
@@ -1218,6 +1276,10 @@ mod export_json_schema {
         path.push("index.schema.json");
         fs::write(&path, format!("{pretty}\n")).expect("write index.schema.json");
 
+        // Sentinel for `scripts/regen-bindings.sh` to grep for.
+        // `println!` (stdout, not stderr) makes it survive `--quiet`
+        // when the script pipes cargo output through `tee`.
+        println!("{SUCCESS_SENTINEL}");
         eprintln!("Wrote: {}", path.display());
     }
 }

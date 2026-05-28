@@ -8,9 +8,10 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, RootModel
+
 
 
 class AmountValue(BaseModel):
@@ -126,6 +127,15 @@ class EditorCompletionResult(BaseModel):
 
     completions: list[EditorCompletion] = Field(..., description="The completions.")
     context: str = Field(..., description="The detected context.")
+
+
+class EditorLocation(BaseModel):
+    """
+    A location in the document.
+    """
+
+    character: int = Field(..., description="Character offset (0-based).", ge=0)
+    line: int = Field(..., description="Line number (0-based).", ge=0)
 
 
 class EditorRange(BaseModel):
@@ -636,7 +646,7 @@ class FormatResult(BaseModel):
 
     errors: list[BeancountError] = Field(..., description="Format errors.")
     formatted: str | None = Field(
-        None,
+        ...,
         description="Formatted source (if successful). Emitted as JSON `null` on\nfailure; no `skip_serializing_if`, so the field is always\npresent on the wire.",
     )
 
@@ -711,41 +721,6 @@ class ValidationResult(BaseModel):
 
     errors: list[BeancountError] = Field(..., description="Validation errors.")
     valid: bool = Field(..., description="Whether the ledger is valid.")
-
-
-class RustledgerBindings(BaseModel):
-    """
-    Codegen vehicle for the JSON Schema export (ADR-0004 Phase 3, #1232).
-
-    `schema_for!(ParseResult)` only walks types reachable from
-    `ParseResult`, which covers parse output but misses the return shapes
-    of `query`, `format`, `validate`, `runPlugin`, `listPlugins`, the BQL
-    completion API, and the editor LSP-like surfaces. Listing every
-    top-level public DTO here gives the generator a single root that
-    reaches the whole wire surface; the resulting schema has
-    `RustledgerBindings` as the title and every public type under
-    `$defs`.
-
-    **Not a wire-format type.** No `Serialize`/`Deserialize` derive,
-    no `wasm_bindgen` export -- it exists only so that
-    `schema_for!(RustledgerBindings)` produces the union of definitions.
-    Field types that are reachable transitively (e.g. `Severity` from
-    `BeancountError`, `CompletionKind` from `EditorCompletion`) don't
-    need to be listed.
-    """
-
-    completion_result: CompletionResultJson
-    editor_completion_result: EditorCompletionResult
-    editor_document_symbol: EditorDocumentSymbol
-    editor_hover_info: EditorHoverInfo
-    editor_references_result: EditorReferencesResult
-    format_result: FormatResult
-    pad_result: PadResult
-    parse_result: ParseResult
-    plugin_info: PluginInfo
-    plugin_result: PluginResult
-    query_result: QueryResult
-    validation_result: ValidationResult
 
 
 CellValue.model_rebuild()

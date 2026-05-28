@@ -1,64 +1,7 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "RustledgerBindings",
-  "description": "Codegen vehicle for the JSON Schema export (ADR-0004 Phase 3, #1232).\n\n`schema_for!(ParseResult)` only walks types reachable from\n`ParseResult`, which covers parse output but misses the return shapes\nof `query`, `format`, `validate`, `runPlugin`, `listPlugins`, the BQL\ncompletion API, and the editor LSP-like surfaces. Listing every\ntop-level public DTO here gives the generator a single root that\nreaches the whole wire surface; the resulting schema has\n`RustledgerBindings` as the title and every public type under\n`$defs`.\n\n**Not a wire-format type.** No `Serialize`/`Deserialize` derive,\nno `wasm_bindgen` export -- it exists only so that\n`schema_for!(RustledgerBindings)` produces the union of definitions.\nField types that are reachable transitively (e.g. `Severity` from\n`BeancountError`, `CompletionKind` from `EditorCompletion`) don't\nneed to be listed.",
-  "type": "object",
-  "properties": {
-    "completion_result": {
-      "$ref": "#/$defs/CompletionResultJson"
-    },
-    "editor_completion_result": {
-      "$ref": "#/$defs/EditorCompletionResult"
-    },
-    "editor_document_symbol": {
-      "$ref": "#/$defs/EditorDocumentSymbol"
-    },
-    "editor_hover_info": {
-      "$ref": "#/$defs/EditorHoverInfo"
-    },
-    "editor_references_result": {
-      "$ref": "#/$defs/EditorReferencesResult"
-    },
-    "format_result": {
-      "$ref": "#/$defs/FormatResult"
-    },
-    "pad_result": {
-      "$ref": "#/$defs/PadResult"
-    },
-    "parse_result": {
-      "$ref": "#/$defs/ParseResult"
-    },
-    "plugin_info": {
-      "$ref": "#/$defs/PluginInfo"
-    },
-    "plugin_result": {
-      "$ref": "#/$defs/PluginResult"
-    },
-    "query_result": {
-      "$ref": "#/$defs/QueryResult"
-    },
-    "validation_result": {
-      "$ref": "#/$defs/ValidationResult"
-    }
-  },
-  "required": [
-    "parse_result",
-    "validation_result",
-    "query_result",
-    "format_result",
-    "pad_result",
-    "plugin_result",
-    "plugin_info",
-    "completion_result",
-    "editor_completion_result",
-    "editor_hover_info",
-    "editor_document_symbol",
-    "editor_references_result"
-  ],
   "$defs": {
     "AmountValue": {
       "description": "Amount value for serialization.",
-      "type": "object",
       "properties": {
         "currency": {
           "description": "The currency.",
@@ -69,37 +12,37 @@
           "type": "string"
         }
       },
-      "required": ["number", "currency"]
+      "required": ["number", "currency"],
+      "type": "object"
     },
     "BeancountError": {
       "description": "An error with source location.\n\n**Renamed to `BeancountError` on the TS side** to avoid shadowing\nthe JS-builtin `Error` type. The Rust struct keeps the shorter\n`Error` name for internal use; the rename is applied via\n`#[ts(rename = ...)]` so consumers see a non-shadowing name.",
-      "type": "object",
       "properties": {
         "column": {
           "description": "Column number (1-based). `null` when the error has no source\nlocation. See `line` above for `range` rationale.",
-          "type": ["integer", "null"],
           "format": "uint32",
-          "minimum": 1
+          "minimum": 1,
+          "type": ["integer", "null"]
         },
         "line": {
           "description": "Line number (1-based). `null` when the error has no source\nlocation (e.g. validation errors not tied to a span). Field is\nalways present on the wire (no `skip_serializing_if`); see the\nstruct-level `schemars(extend)` for the required-and-nullable\nrationale. `range(min = 1)` enforces the 1-based documented\ncontract on the JSON Schema side (schemars defaults to\n`minimum: 0` for u32).",
-          "type": ["integer", "null"],
           "format": "uint32",
-          "minimum": 1
+          "minimum": 1,
+          "type": ["integer", "null"]
         },
         "message": {
           "description": "Error message.",
           "type": "string"
         },
         "severity": {
-          "description": "Error severity.",
-          "$ref": "#/$defs/Severity"
+          "$ref": "#/$defs/Severity",
+          "description": "Error severity."
         }
       },
-      "required": ["message", "line", "column", "severity"]
+      "required": ["message", "line", "column", "severity"],
+      "type": "object"
     },
     "CellValue": {
-      "description": "A cell value that serializes properly to JavaScript.\n\nUses untagged serialization to produce clean JSON output.",
       "anyOf": [
         {
           "description": "Null value.",
@@ -111,8 +54,8 @@
         },
         {
           "description": "Integer value. ts-rs defaults `i64` to `bigint`, but the JSON\nwire emits it as a plain Number -- override to `number` so the\nTS shape matches what JS consumers actually receive.",
-          "type": "integer",
-          "format": "int64"
+          "format": "int64",
+          "type": "integer"
         },
         {
           "description": "Boolean value.",
@@ -120,7 +63,6 @@
         },
         {
           "description": "Amount with number and currency.",
-          "type": "object",
           "properties": {
             "currency": {
               "type": "string"
@@ -129,11 +71,11 @@
               "type": "string"
             }
           },
-          "required": ["number", "currency"]
+          "required": ["number", "currency"],
+          "type": "object"
         },
         {
           "description": "Position with units and optional cost.",
-          "type": "object",
           "properties": {
             "cost": {
               "anyOf": [
@@ -149,47 +91,48 @@
               "$ref": "#/$defs/AmountValue"
             }
           },
-          "required": ["units"]
+          "required": ["units"],
+          "type": "object"
         },
         {
           "description": "Inventory with positions.",
-          "type": "object",
           "properties": {
             "positions": {
-              "type": "array",
               "items": {
                 "$ref": "#/$defs/PositionValue"
-              }
+              },
+              "type": "array"
             }
           },
-          "required": ["positions"]
+          "required": ["positions"],
+          "type": "object"
         },
         {
           "description": "Set of strings.",
-          "type": "array",
           "items": {
             "type": "string"
-          }
+          },
+          "type": "array"
         },
         {
           "description": "Generic set of values (for IN operator).",
-          "type": "array",
           "items": {
             "$ref": "#/$defs/CellValue"
-          }
+          },
+          "type": "array"
         },
         {
-          "description": "Object with key-value pairs (for `entry` and `meta` columns).",
-          "type": "object",
           "additionalProperties": {
             "$ref": "#/$defs/CellValue"
-          }
+          },
+          "description": "Object with key-value pairs (for `entry` and `meta` columns).",
+          "type": "object"
         }
-      ]
+      ],
+      "description": "A cell value that serializes properly to JavaScript.\n\nUses untagged serialization to produce clean JSON output."
     },
     "CompletionJson": {
       "description": "BQL completion suggestion for WASM.",
-      "type": "object",
       "properties": {
         "category": {
           "description": "Category: keyword, function, column, operator, literal.",
@@ -204,106 +147,106 @@
           "type": "string"
         }
       },
-      "required": ["text", "category"]
+      "required": ["text", "category"],
+      "type": "object"
     },
     "CompletionKind": {
       "description": "The kind of a completion item.",
       "oneOf": [
         {
+          "const": "keyword",
           "description": "A keyword (directive name).",
-          "type": "string",
-          "const": "keyword"
+          "type": "string"
         },
         {
+          "const": "account",
           "description": "An account name.",
-          "type": "string",
-          "const": "account"
+          "type": "string"
         },
         {
+          "const": "accountsegment",
           "description": "An account segment (partial account).",
-          "type": "string",
-          "const": "accountsegment"
+          "type": "string"
         },
         {
+          "const": "currency",
           "description": "A currency/commodity.",
-          "type": "string",
-          "const": "currency"
+          "type": "string"
         },
         {
+          "const": "payee",
           "description": "A payee name.",
-          "type": "string",
-          "const": "payee"
+          "type": "string"
         },
         {
+          "const": "date",
           "description": "A date value.",
-          "type": "string",
-          "const": "date"
+          "type": "string"
         },
         {
+          "const": "text",
           "description": "A text/string value.",
-          "type": "string",
-          "const": "text"
+          "type": "string"
         }
       ]
     },
     "CompletionResultJson": {
       "description": "Result of BQL completion request.",
-      "type": "object",
       "properties": {
         "completions": {
           "description": "List of completions.",
-          "type": "array",
           "items": {
             "$ref": "#/$defs/CompletionJson"
-          }
+          },
+          "type": "array"
         },
         "context": {
           "description": "Current context for debugging.",
           "type": "string"
         }
       },
-      "required": ["completions", "context"]
+      "required": ["completions", "context"],
+      "type": "object"
     },
     "CostNumberJson": {
       "description": "Wire-format of the numeric component of a [`PostingCostJson`].\n\nMirrors `rustledger_core::CostNumber` on the wire so JS consumers\nsee the same mutual exclusion the host enforces. Use the `kind`\nfield as the discriminator.",
       "oneOf": [
         {
           "description": "Per-unit cost (e.g., `{100 USD}`).",
-          "type": "object",
           "properties": {
             "kind": {
-              "type": "string",
-              "const": "per_unit"
+              "const": "per_unit",
+              "type": "string"
             },
             "value": {
               "description": "Per-unit value.",
               "type": "string"
             }
           },
-          "required": ["kind", "value"]
+          "required": ["kind", "value"],
+          "type": "object"
         },
         {
           "description": "Total cost as written (e.g., `{{1000 USD}}`), pre-booking.",
-          "type": "object",
           "properties": {
             "kind": {
-              "type": "string",
-              "const": "total"
+              "const": "total",
+              "type": "string"
             },
             "value": {
               "description": "Total value.",
               "type": "string"
             }
           },
-          "required": ["kind", "value"]
+          "required": ["kind", "value"],
+          "type": "object"
         },
         {
           "description": "Post-booking derived per-unit with preserved source total.",
-          "type": "object",
           "properties": {
             "kind": {
-              "type": "string",
-              "const": "per_unit_from_total"
+              "const": "per_unit_from_total",
+              "type": "string"
             },
             "per_unit": {
               "description": "Derived per-unit.",
@@ -314,13 +257,13 @@
               "type": "string"
             }
           },
-          "required": ["kind", "per_unit", "total"]
+          "required": ["kind", "per_unit", "total"],
+          "type": "object"
         }
       ]
     },
     "CostValue": {
       "description": "Cost value for serialization.",
-      "type": "object",
       "properties": {
         "currency": {
           "description": "Cost currency.",
@@ -339,14 +282,14 @@
           "type": "string"
         }
       },
-      "required": ["number", "currency"]
+      "required": ["number", "currency"],
+      "type": "object"
     },
     "DirectiveJson": {
       "description": "A directive in JSON-serializable form.\n\nEach variant corresponds to a Beancount directive type, with fields\nrepresenting the directive's data in a JavaScript-friendly format.\n\nAll variants carry a `meta` field with user-defined key/value\nmetadata from the source (issue #1168). Empty metadata serializes\nas an absent field, so existing consumers continue to see the\npre-#1168 shape on directives without explicit metadata.",
       "oneOf": [
         {
           "description": "Transaction directive.",
-          "type": "object",
           "properties": {
             "date": {
               "type": "string"
@@ -355,16 +298,16 @@
               "type": "string"
             },
             "links": {
-              "type": "array",
               "items": {
                 "type": "string"
-              }
+              },
+              "type": "array"
             },
             "meta": {
-              "type": "object",
               "additionalProperties": {
                 "$ref": "#/$defs/MetaValueJson"
-              }
+              },
+              "type": "object"
             },
             "narration": {
               "description": "Optional narration. Empty narrations are normalized to\n`None` in `convert.rs` so the field is absent on the wire\nin the empty case -- matches FFI-WASI's pattern (#1221).",
@@ -375,27 +318,27 @@
               "type": ["string", "null"]
             },
             "postings": {
-              "type": "array",
               "items": {
                 "$ref": "#/$defs/PostingJson"
-              }
+              },
+              "type": "array"
             },
             "tags": {
-              "type": "array",
               "items": {
                 "type": "string"
-              }
+              },
+              "type": "array"
             },
             "type": {
-              "type": "string",
-              "const": "transaction"
+              "const": "transaction",
+              "type": "string"
             }
           },
-          "required": ["type", "date", "flag", "tags", "links", "postings"]
+          "required": ["type", "date", "flag", "tags", "links", "postings"],
+          "type": "object"
         },
         {
           "description": "Balance assertion.",
-          "type": "object",
           "properties": {
             "account": {
               "type": "string"
@@ -407,25 +350,25 @@
               "type": "string"
             },
             "meta": {
-              "type": "object",
               "additionalProperties": {
                 "$ref": "#/$defs/MetaValueJson"
-              }
+              },
+              "type": "object"
             },
             "tolerance": {
               "description": "Explicit tolerance from the `~ 0.01` annotation, stringified.\nMirrors `rustledger_core::Balance::tolerance`.",
               "type": ["string", "null"]
             },
             "type": {
-              "type": "string",
-              "const": "balance"
+              "const": "balance",
+              "type": "string"
             }
           },
-          "required": ["type", "date", "account", "amount"]
+          "required": ["type", "date", "account", "amount"],
+          "type": "object"
         },
         {
           "description": "Open account.",
-          "type": "object",
           "properties": {
             "account": {
               "type": "string"
@@ -434,30 +377,30 @@
               "type": ["string", "null"]
             },
             "currencies": {
-              "type": "array",
               "items": {
                 "type": "string"
-              }
+              },
+              "type": "array"
             },
             "date": {
               "type": "string"
             },
             "meta": {
-              "type": "object",
               "additionalProperties": {
                 "$ref": "#/$defs/MetaValueJson"
-              }
+              },
+              "type": "object"
             },
             "type": {
-              "type": "string",
-              "const": "open"
+              "const": "open",
+              "type": "string"
             }
           },
-          "required": ["type", "date", "account", "currencies"]
+          "required": ["type", "date", "account", "currencies"],
+          "type": "object"
         },
         {
           "description": "Close account.",
-          "type": "object",
           "properties": {
             "account": {
               "type": "string"
@@ -466,21 +409,21 @@
               "type": "string"
             },
             "meta": {
-              "type": "object",
               "additionalProperties": {
                 "$ref": "#/$defs/MetaValueJson"
-              }
+              },
+              "type": "object"
             },
             "type": {
-              "type": "string",
-              "const": "close"
+              "const": "close",
+              "type": "string"
             }
           },
-          "required": ["type", "date", "account"]
+          "required": ["type", "date", "account"],
+          "type": "object"
         },
         {
           "description": "Commodity declaration.",
-          "type": "object",
           "properties": {
             "currency": {
               "type": "string"
@@ -489,21 +432,21 @@
               "type": "string"
             },
             "meta": {
-              "type": "object",
               "additionalProperties": {
                 "$ref": "#/$defs/MetaValueJson"
-              }
+              },
+              "type": "object"
             },
             "type": {
-              "type": "string",
-              "const": "commodity"
+              "const": "commodity",
+              "type": "string"
             }
           },
-          "required": ["type", "date", "currency"]
+          "required": ["type", "date", "currency"],
+          "type": "object"
         },
         {
           "description": "Pad directive.",
-          "type": "object",
           "properties": {
             "account": {
               "type": "string"
@@ -512,24 +455,24 @@
               "type": "string"
             },
             "meta": {
-              "type": "object",
               "additionalProperties": {
                 "$ref": "#/$defs/MetaValueJson"
-              }
+              },
+              "type": "object"
             },
             "source_account": {
               "type": "string"
             },
             "type": {
-              "type": "string",
-              "const": "pad"
+              "const": "pad",
+              "type": "string"
             }
           },
-          "required": ["type", "date", "account", "source_account"]
+          "required": ["type", "date", "account", "source_account"],
+          "type": "object"
         },
         {
           "description": "Event directive.",
-          "type": "object",
           "properties": {
             "date": {
               "type": "string"
@@ -538,24 +481,24 @@
               "type": "string"
             },
             "meta": {
-              "type": "object",
               "additionalProperties": {
                 "$ref": "#/$defs/MetaValueJson"
-              }
+              },
+              "type": "object"
             },
             "type": {
-              "type": "string",
-              "const": "event"
+              "const": "event",
+              "type": "string"
             },
             "value": {
               "type": "string"
             }
           },
-          "required": ["type", "date", "event_type", "value"]
+          "required": ["type", "date", "event_type", "value"],
+          "type": "object"
         },
         {
           "description": "Note directive.",
-          "type": "object",
           "properties": {
             "account": {
               "type": "string"
@@ -567,21 +510,21 @@
               "type": "string"
             },
             "meta": {
-              "type": "object",
               "additionalProperties": {
                 "$ref": "#/$defs/MetaValueJson"
-              }
+              },
+              "type": "object"
             },
             "type": {
-              "type": "string",
-              "const": "note"
+              "const": "note",
+              "type": "string"
             }
           },
-          "required": ["type", "date", "account", "comment"]
+          "required": ["type", "date", "account", "comment"],
+          "type": "object"
         },
         {
           "description": "Document directive.",
-          "type": "object",
           "properties": {
             "account": {
               "type": "string"
@@ -591,37 +534,37 @@
             },
             "links": {
               "description": "Links attached to the document directive (issue #1144).",
-              "type": "array",
               "items": {
                 "type": "string"
-              }
+              },
+              "type": "array"
             },
             "meta": {
-              "type": "object",
               "additionalProperties": {
                 "$ref": "#/$defs/MetaValueJson"
-              }
+              },
+              "type": "object"
             },
             "path": {
               "type": "string"
             },
             "tags": {
               "description": "Tags attached to the document directive (issue #1144).",
-              "type": "array",
               "items": {
                 "type": "string"
-              }
+              },
+              "type": "array"
             },
             "type": {
-              "type": "string",
-              "const": "document"
+              "const": "document",
+              "type": "string"
             }
           },
-          "required": ["type", "date", "account", "path"]
+          "required": ["type", "date", "account", "path"],
+          "type": "object"
         },
         {
           "description": "Price directive.",
-          "type": "object",
           "properties": {
             "amount": {
               "$ref": "#/$defs/AmountValue"
@@ -633,30 +576,30 @@
               "type": "string"
             },
             "meta": {
-              "type": "object",
               "additionalProperties": {
                 "$ref": "#/$defs/MetaValueJson"
-              }
+              },
+              "type": "object"
             },
             "type": {
-              "type": "string",
-              "const": "price"
+              "const": "price",
+              "type": "string"
             }
           },
-          "required": ["type", "date", "currency", "amount"]
+          "required": ["type", "date", "currency", "amount"],
+          "type": "object"
         },
         {
           "description": "Query directive.",
-          "type": "object",
           "properties": {
             "date": {
               "type": "string"
             },
             "meta": {
-              "type": "object",
               "additionalProperties": {
                 "$ref": "#/$defs/MetaValueJson"
-              }
+              },
+              "type": "object"
             },
             "name": {
               "type": "string"
@@ -665,15 +608,15 @@
               "type": "string"
             },
             "type": {
-              "type": "string",
-              "const": "query"
+              "const": "query",
+              "type": "string"
             }
           },
-          "required": ["type", "date", "name", "query_string"]
+          "required": ["type", "date", "name", "query_string"],
+          "type": "object"
         },
         {
           "description": "Custom directive.\n\n`values` carries the positional arguments after the type\nkeyword. Each value is a [`TypedValueJson`] tagged union\n(`{type, value}`) that preserves the host `MetaValue`\nvariant tag, so JS consumers can distinguish (for example)\na `Date` from a `String` from an `Account` — all of which\nwould otherwise collapse to bare JSON strings under the\nuntagged `MetaValueJson` shape.\n\nPre-#1168: `values` was dropped entirely from the JSON output.\nPre-#1207: present but emitted raw via `MetaValueJson` (lossy).\nPost-#1207: emitted via `TypedValueJson` (this variant), mirroring\nFFI-WASI's `Vec<TypedValue>`.\n\nBoth `values` and `meta` use `skip_serializing_if` to omit\nthe field when empty (consistent shape: a Custom directive\nwith no positional args and no metadata serializes as\n`{type, date, custom_type}`, matching what the TS shape\ndeclares via `values?` / `meta?`).",
-          "type": "object",
           "properties": {
             "custom_type": {
               "type": "string"
@@ -682,30 +625,30 @@
               "type": "string"
             },
             "meta": {
-              "type": "object",
               "additionalProperties": {
                 "$ref": "#/$defs/MetaValueJson"
-              }
+              },
+              "type": "object"
             },
             "type": {
-              "type": "string",
-              "const": "custom"
+              "const": "custom",
+              "type": "string"
             },
             "values": {
               "description": "Positional values after the `custom TYPE` keyword. Each\nentry is a [`TypedValueJson`] (`{type, value}`) — the\ntagged shape preserves the host `MetaValue` variant tag so\nJS consumers can distinguish a `Date` from a `String` from\nan `Account` (closes #1207). Mirrors FFI-WASI's\n`Vec<TypedValue>` exactly.",
-              "type": "array",
               "items": {
                 "$ref": "#/$defs/TypedValueJson"
-              }
+              },
+              "type": "array"
             }
           },
-          "required": ["type", "date", "custom_type"]
+          "required": ["type", "date", "custom_type"],
+          "type": "object"
         }
       ]
     },
     "EditorCompletion": {
       "description": "A completion item for Beancount source editing.",
-      "type": "object",
       "properties": {
         "detail": {
           "description": "A human-readable string with additional information.",
@@ -716,44 +659,44 @@
           "type": ["string", "null"]
         },
         "kind": {
-          "description": "The kind of completion item.",
-          "$ref": "#/$defs/CompletionKind"
+          "$ref": "#/$defs/CompletionKind",
+          "description": "The kind of completion item."
         },
         "label": {
           "description": "The label to display in the completion list.",
           "type": "string"
         }
       },
-      "required": ["label", "kind"]
+      "required": ["label", "kind"],
+      "type": "object"
     },
     "EditorCompletionResult": {
       "description": "Result of a completion request.",
-      "type": "object",
       "properties": {
         "completions": {
           "description": "The completions.",
-          "type": "array",
           "items": {
             "$ref": "#/$defs/EditorCompletion"
-          }
+          },
+          "type": "array"
         },
         "context": {
           "description": "The detected context.",
           "type": "string"
         }
       },
-      "required": ["completions", "context"]
+      "required": ["completions", "context"],
+      "type": "object"
     },
     "EditorDocumentSymbol": {
       "description": "A document symbol for the outline view.",
-      "type": "object",
       "properties": {
         "children": {
           "description": "Children of this symbol (e.g., postings in a transaction).",
-          "type": ["array", "null"],
           "items": {
             "$ref": "#/$defs/EditorDocumentSymbol"
-          }
+          },
+          "type": ["array", "null"]
         },
         "deprecated": {
           "description": "Whether this symbol is deprecated (e.g., closed account).",
@@ -764,30 +707,29 @@
           "type": ["string", "null"]
         },
         "kind": {
-          "description": "The kind of this symbol.",
-          "$ref": "#/$defs/SymbolKind"
+          "$ref": "#/$defs/SymbolKind",
+          "description": "The kind of this symbol."
         },
         "name": {
           "description": "The name of this symbol.",
           "type": "string"
         },
         "range": {
-          "description": "The range enclosing this symbol.",
-          "$ref": "#/$defs/EditorRange"
+          "$ref": "#/$defs/EditorRange",
+          "description": "The range enclosing this symbol."
         }
       },
-      "required": ["name", "kind", "range"]
+      "required": ["name", "kind", "range"],
+      "type": "object"
     },
     "EditorHoverInfo": {
       "description": "Hover information for a symbol.",
-      "type": "object",
       "properties": {
         "contents": {
           "description": "The hover content (Markdown formatted).",
           "type": "string"
         },
         "range": {
-          "description": "The range of the hovered symbol (optional).",
           "anyOf": [
             {
               "$ref": "#/$defs/EditorRange"
@@ -795,45 +737,65 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "description": "The range of the hovered symbol (optional)."
         }
       },
-      "required": ["contents"]
+      "required": ["contents"],
+      "type": "object"
+    },
+    "EditorLocation": {
+      "description": "A location in the document.",
+      "properties": {
+        "character": {
+          "description": "Character offset (0-based).",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "line": {
+          "description": "Line number (0-based).",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": ["line", "character"],
+      "type": "object"
     },
     "EditorRange": {
       "description": "A range in the document.",
-      "type": "object",
       "properties": {
         "end_character": {
           "description": "End character (0-based).",
-          "type": "integer",
           "format": "uint32",
-          "minimum": 0
+          "minimum": 0,
+          "type": "integer"
         },
         "end_line": {
           "description": "End line (0-based).",
-          "type": "integer",
           "format": "uint32",
-          "minimum": 0
+          "minimum": 0,
+          "type": "integer"
         },
         "start_character": {
           "description": "Start character (0-based).",
-          "type": "integer",
           "format": "uint32",
-          "minimum": 0
+          "minimum": 0,
+          "type": "integer"
         },
         "start_line": {
           "description": "Start line (0-based).",
-          "type": "integer",
           "format": "uint32",
-          "minimum": 0
+          "minimum": 0,
+          "type": "integer"
         }
       },
-      "required": ["start_line", "start_character", "end_line", "end_character"]
+      "required": ["start_line", "start_character", "end_line", "end_character"],
+      "type": "object"
     },
     "EditorReference": {
       "description": "A reference to a symbol in the document.",
-      "type": "object",
       "properties": {
         "context": {
           "description": "Human-readable context (e.g., directive type).",
@@ -844,94 +806,94 @@
           "type": "boolean"
         },
         "kind": {
-          "description": "The kind of reference.",
-          "$ref": "#/$defs/ReferenceKind"
+          "$ref": "#/$defs/ReferenceKind",
+          "description": "The kind of reference."
         },
         "range": {
-          "description": "The range of this reference.",
-          "$ref": "#/$defs/EditorRange"
+          "$ref": "#/$defs/EditorRange",
+          "description": "The range of this reference."
         }
       },
-      "required": ["range", "kind", "is_definition"]
+      "required": ["range", "kind", "is_definition"],
+      "type": "object"
     },
     "EditorReferencesResult": {
       "description": "Result of a find-references request.",
-      "type": "object",
       "properties": {
         "kind": {
-          "description": "The kind of symbol.",
-          "$ref": "#/$defs/ReferenceKind"
+          "$ref": "#/$defs/ReferenceKind",
+          "description": "The kind of symbol."
         },
         "references": {
           "description": "All references found.",
-          "type": "array",
           "items": {
             "$ref": "#/$defs/EditorReference"
-          }
+          },
+          "type": "array"
         },
         "symbol": {
           "description": "The symbol being searched for.",
           "type": "string"
         }
       },
-      "required": ["symbol", "kind", "references"]
+      "required": ["symbol", "kind", "references"],
+      "type": "object"
     },
     "FormatResult": {
       "description": "Result of formatting.",
-      "type": "object",
       "properties": {
         "errors": {
           "description": "Format errors.",
-          "type": "array",
           "items": {
             "$ref": "#/$defs/BeancountError"
-          }
+          },
+          "type": "array"
         },
         "formatted": {
           "description": "Formatted source (if successful). Emitted as JSON `null` on\nfailure; no `skip_serializing_if`, so the field is always\npresent on the wire.",
           "type": ["string", "null"]
         }
       },
-      "required": ["errors"]
+      "required": ["formatted", "errors"],
+      "type": "object"
     },
     "LedgerJson": {
       "description": "A parsed Beancount ledger.\n\n**Renamed to `LedgerJson` on the TS side** to avoid colliding with\nthe wasm-bindgen-exported `Ledger` class (the runtime wrapper that\nowns the parsed data). `LedgerJson` is the wire shape; `Ledger` is\nthe class consumers instantiate via `Ledger.fromFiles(...)`. The\nRust struct keeps the shorter name for internal use; the rename\nis applied via `#[ts(rename = ...)]`.",
-      "type": "object",
       "properties": {
         "directives": {
           "description": "All directives in the ledger.",
-          "type": "array",
           "items": {
             "$ref": "#/$defs/DirectiveJson"
-          }
+          },
+          "type": "array"
         },
         "options": {
-          "description": "Ledger options.",
-          "$ref": "#/$defs/LedgerOptions"
+          "$ref": "#/$defs/LedgerOptions",
+          "description": "Ledger options."
         }
       },
-      "required": ["directives", "options"]
+      "required": ["directives", "options"],
+      "type": "object"
     },
     "LedgerOptions": {
       "description": "Ledger options.",
-      "type": "object",
       "properties": {
         "operating_currencies": {
           "description": "Operating currencies.",
-          "type": "array",
           "items": {
             "type": "string"
-          }
+          },
+          "type": "array"
         },
         "title": {
           "description": "Ledger title. Emitted as JSON `null` when no title is set\n(no `skip_serializing_if`; field is always present on the\nwire). TS: `string | null`, not `title?`. The required-and-\nnullable wire contract is enforced via the `schemars(extend)`\non the struct itself; see `ParseResult` for the rationale.",
           "type": ["string", "null"]
         }
       },
-      "required": ["operating_currencies", "title"]
+      "required": ["operating_currencies", "title"],
+      "type": "object"
     },
     "MetaValueJson": {
-      "description": "Metadata-value wire format for WASM consumers.\n\n**JSON output is byte-equivalent to FFI-WASI's\n`meta_value_to_json`** — JS clients writing portable code see\nidentical metadata values from both bindings. The Rust-side\ntypes are independent though: FFI-WASI emits\n`serde_json::Value` (untyped), this crate emits a typed enum.\nUnifying the source-of-truth is tracked by issue #1200 item 2.\n\nThe host's [`rustledger_core::MetaValue`] is richer than the wire\ntype — `Account`/`Currency`/`Tag`/`Link`/`Date`/`Number` all\nflatten to JSON strings here, matching FFI-WASI behavior. JS\nconsumers that need the strong type info should query the host\nvia a typed API; this enum is the lossy-but-portable view.\n\nUntagged on the wire: `\"hello\"` serializes as a string,\n`true` as a boolean, `null` as null, and an [`AmountValue`]\n`{number,currency}` as a plain object. The TypeScript union is\n`Record<string, string | boolean | {number, currency} | null>` —\nno raw JSON number arm because `MetaValue::Number` (`Decimal`)\nstringifies to preserve precision. Issue #1168 proposed\n`string | number | boolean | null`; we substitute the\n`{number,currency}` shape for `number` so cost-bearing metadata\nround-trips cleanly and so JS numeric literals don't silently\nalias into the wire (see the `meta_value_json_rejects_raw_json_number`\ntest).",
       "anyOf": [
         {
           "description": "String/Account/Currency/Tag/Link/Date/Number — anything the\nhost can represent as a string, including `rust_decimal::Decimal`\nvalues stringified to preserve precision (JSON numbers can't\nrepresent arbitrary-precision decimals losslessly).",
@@ -943,7 +905,6 @@
         },
         {
           "description": "Amount values (`{number, currency}`) — the only structured\nshape that survives the round-trip. Same `{number, currency}`\nenvelope as [`AmountValue`] so JS consumers can branch on\nshape without a discriminator tag.\n\n**Deserialize note**: serde's untagged-enum matcher accepts\nextra fields in a JSON object (`#[serde(deny_unknown_fields)]`\ncan't be applied per-variant on an untagged enum without\nbreaking the wider match). A JS client sending\n`{number: \"100\", currency: \"USD\", extra: \"x\"}` deserializes as\n`Amount { number: \"100\", currency: \"USD\" }` with `extra`\nsilently dropped. Output-side consumers (the production path)\nare unaffected; treat `Deserialize` here as best-effort and\nvalidate at the host boundary if you need stricter checks.",
-          "type": "object",
           "properties": {
             "currency": {
               "description": "The currency code.",
@@ -954,55 +915,55 @@
               "type": "string"
             }
           },
-          "required": ["number", "currency"]
+          "required": ["number", "currency"],
+          "type": "object"
         },
         {
           "description": "Absent / null metadata value. Deserializes from JSON `null`;\nserializes to JSON `null`. (Serde supports unit variants in\nuntagged enums for null values specifically — a less common\npattern than struct/tuple variants but well-defined.)",
           "type": "null"
         }
-      ]
+      ],
+      "description": "Metadata-value wire format for WASM consumers.\n\n**JSON output is byte-equivalent to FFI-WASI's\n`meta_value_to_json`** — JS clients writing portable code see\nidentical metadata values from both bindings. The Rust-side\ntypes are independent though: FFI-WASI emits\n`serde_json::Value` (untyped), this crate emits a typed enum.\nUnifying the source-of-truth is tracked by issue #1200 item 2.\n\nThe host's [`rustledger_core::MetaValue`] is richer than the wire\ntype — `Account`/`Currency`/`Tag`/`Link`/`Date`/`Number` all\nflatten to JSON strings here, matching FFI-WASI behavior. JS\nconsumers that need the strong type info should query the host\nvia a typed API; this enum is the lossy-but-portable view.\n\nUntagged on the wire: `\"hello\"` serializes as a string,\n`true` as a boolean, `null` as null, and an [`AmountValue`]\n`{number,currency}` as a plain object. The TypeScript union is\n`Record<string, string | boolean | {number, currency} | null>` —\nno raw JSON number arm because `MetaValue::Number` (`Decimal`)\nstringifies to preserve precision. Issue #1168 proposed\n`string | number | boolean | null`; we substitute the\n`{number,currency}` shape for `number` so cost-bearing metadata\nround-trips cleanly and so JS numeric literals don't silently\nalias into the wire (see the `meta_value_json_rejects_raw_json_number`\ntest)."
     },
     "PadResult": {
       "description": "Result of pad expansion.",
-      "type": "object",
       "properties": {
         "directives": {
           "description": "Directives with pads removed.",
-          "type": "array",
           "items": {
             "$ref": "#/$defs/DirectiveJson"
-          }
+          },
+          "type": "array"
         },
         "errors": {
           "description": "Pad processing errors.",
-          "type": "array",
           "items": {
             "$ref": "#/$defs/BeancountError"
-          }
+          },
+          "type": "array"
         },
         "padding_transactions": {
           "description": "Generated padding transactions.",
-          "type": "array",
           "items": {
             "$ref": "#/$defs/DirectiveJson"
-          }
+          },
+          "type": "array"
         }
       },
-      "required": ["directives", "padding_transactions", "errors"]
+      "required": ["directives", "padding_transactions", "errors"],
+      "type": "object"
     },
     "ParseResult": {
       "description": "Result of parsing a Beancount file.",
-      "type": "object",
       "properties": {
         "errors": {
           "description": "Parse errors.",
-          "type": "array",
           "items": {
             "$ref": "#/$defs/BeancountError"
-          }
+          },
+          "type": "array"
         },
         "ledger": {
-          "description": "The parsed ledger (if successful). Emitted as JSON `null` when\nparsing failed entirely; no `skip_serializing_if`, so the field\nis always present on the wire (TS: `Ledger | null`, not\n`ledger?`). See the `#[schemars(extend(...))]` on the struct\nitself for the \"required-and-nullable\" wire-contract enforcement.",
           "anyOf": [
             {
               "$ref": "#/$defs/LedgerJson"
@@ -1010,14 +971,15 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "description": "The parsed ledger (if successful). Emitted as JSON `null` when\nparsing failed entirely; no `skip_serializing_if`, so the field\nis always present on the wire (TS: `Ledger | null`, not\n`ledger?`). See the `#[schemars(extend(...))]` on the struct\nitself for the \"required-and-nullable\" wire-contract enforcement."
         }
       },
-      "required": ["ledger", "errors"]
+      "required": ["ledger", "errors"],
+      "type": "object"
     },
     "PluginInfo": {
       "description": "Plugin information.",
-      "type": "object",
       "properties": {
         "description": {
           "description": "Plugin description.",
@@ -1028,43 +990,43 @@
           "type": "string"
         }
       },
-      "required": ["name", "description"]
+      "required": ["name", "description"],
+      "type": "object"
     },
     "PluginResult": {
       "description": "Result of running a plugin.",
-      "type": "object",
       "properties": {
         "directives": {
           "description": "Modified directives.",
-          "type": "array",
           "items": {
             "$ref": "#/$defs/DirectiveJson"
-          }
+          },
+          "type": "array"
         },
         "errors": {
           "description": "Plugin errors/warnings.",
-          "type": "array",
           "items": {
             "$ref": "#/$defs/BeancountError"
-          }
+          },
+          "type": "array"
         }
       },
-      "required": ["directives", "errors"]
+      "required": ["directives", "errors"],
+      "type": "object"
     },
     "PositionValue": {
       "description": "Position value for serialization.",
-      "type": "object",
       "properties": {
         "units": {
-          "description": "The units.",
-          "$ref": "#/$defs/AmountValue"
+          "$ref": "#/$defs/AmountValue",
+          "description": "The units."
         }
       },
-      "required": ["units"]
+      "required": ["units"],
+      "type": "object"
     },
     "PostingCostJson": {
       "description": "A posting cost in JSON-serializable form.",
-      "type": "object",
       "properties": {
         "currency": {
           "description": "Cost currency.",
@@ -1079,7 +1041,6 @@
           "type": ["string", "null"]
         },
         "number": {
-          "description": "Cost number (per-unit, total, or post-booking pair).",
           "anyOf": [
             {
               "$ref": "#/$defs/CostNumberJson"
@@ -1087,20 +1048,20 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "description": "Cost number (per-unit, total, or post-booking pair)."
         }
-      }
+      },
+      "type": "object"
     },
     "PostingJson": {
       "description": "A posting in JSON-serializable form.",
-      "type": "object",
       "properties": {
         "account": {
           "description": "Account name.",
           "type": "string"
         },
         "cost": {
-          "description": "Cost specification.",
           "anyOf": [
             {
               "$ref": "#/$defs/PostingCostJson"
@@ -1108,21 +1069,21 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "description": "Cost specification."
         },
         "flag": {
           "description": "Posting-level flag (e.g., `\"!\"` for pending). Mirrors\n`rustledger_core::Posting::flag`.",
           "type": ["string", "null"]
         },
         "meta": {
-          "description": "Posting-level metadata (issue #1168). Empty when the posting\nhas no explicit metadata.",
-          "type": "object",
           "additionalProperties": {
             "$ref": "#/$defs/MetaValueJson"
-          }
+          },
+          "description": "Posting-level metadata (issue #1168). Empty when the posting\nhas no explicit metadata.",
+          "type": "object"
         },
         "price": {
-          "description": "Price annotation.",
           "anyOf": [
             {
               "$ref": "#/$defs/AmountValue"
@@ -1130,10 +1091,10 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "description": "Price annotation."
         },
         "units": {
-          "description": "Units (amount).",
           "anyOf": [
             {
               "$ref": "#/$defs/AmountValue"
@@ -1141,59 +1102,61 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "description": "Units (amount)."
         }
       },
-      "required": ["account"]
+      "required": ["account"],
+      "type": "object"
     },
     "QueryResult": {
       "description": "Result of a BQL query.",
-      "type": "object",
       "properties": {
         "columns": {
           "description": "Column names.",
-          "type": "array",
           "items": {
             "type": "string"
-          }
+          },
+          "type": "array"
         },
         "errors": {
           "description": "Query errors.",
-          "type": "array",
           "items": {
             "$ref": "#/$defs/BeancountError"
-          }
+          },
+          "type": "array"
         },
         "rows": {
           "description": "Result rows.",
-          "type": "array",
           "items": {
-            "type": "array",
             "items": {
               "$ref": "#/$defs/CellValue"
-            }
-          }
+            },
+            "type": "array"
+          },
+          "type": "array"
         }
       },
-      "required": ["columns", "rows", "errors"]
+      "required": ["columns", "rows", "errors"],
+      "type": "object"
     },
     "ReferenceKind": {
       "description": "The kind of symbol being referenced.",
       "oneOf": [
         {
+          "const": "account",
           "description": "An account reference.",
-          "type": "string",
-          "const": "account"
+          "type": "string"
         },
         {
+          "const": "currency",
           "description": "A currency/commodity reference.",
-          "type": "string",
-          "const": "currency"
+          "type": "string"
         },
         {
+          "const": "payee",
           "description": "A payee reference.",
-          "type": "string",
-          "const": "payee"
+          "type": "string"
         }
       ]
     },
@@ -1201,14 +1164,14 @@
       "description": "Error severity level.",
       "oneOf": [
         {
+          "const": "error",
           "description": "An error that prevents processing.",
-          "type": "string",
-          "const": "error"
+          "type": "string"
         },
         {
+          "const": "warning",
           "description": "A warning that doesn't prevent processing.",
-          "type": "string",
-          "const": "warning"
+          "type": "string"
         }
       ]
     },
@@ -1216,99 +1179,100 @@
       "description": "The kind of a symbol.",
       "oneOf": [
         {
+          "const": "transaction",
           "description": "A transaction.",
-          "type": "string",
-          "const": "transaction"
+          "type": "string"
         },
         {
+          "const": "account",
           "description": "An account (open/close).",
-          "type": "string",
-          "const": "account"
+          "type": "string"
         },
         {
+          "const": "balance",
           "description": "A balance assertion.",
-          "type": "string",
-          "const": "balance"
+          "type": "string"
         },
         {
+          "const": "commodity",
           "description": "A commodity/currency declaration.",
-          "type": "string",
-          "const": "commodity"
+          "type": "string"
         },
         {
+          "const": "posting",
           "description": "A posting within a transaction.",
-          "type": "string",
-          "const": "posting"
+          "type": "string"
         },
         {
+          "const": "pad",
           "description": "A pad directive.",
-          "type": "string",
-          "const": "pad"
+          "type": "string"
         },
         {
+          "const": "event",
           "description": "An event.",
-          "type": "string",
-          "const": "event"
+          "type": "string"
         },
         {
+          "const": "note",
           "description": "A note.",
-          "type": "string",
-          "const": "note"
+          "type": "string"
         },
         {
+          "const": "document",
           "description": "A document link.",
-          "type": "string",
-          "const": "document"
+          "type": "string"
         },
         {
+          "const": "price",
           "description": "A price.",
-          "type": "string",
-          "const": "price"
+          "type": "string"
         },
         {
+          "const": "query",
           "description": "A query definition.",
-          "type": "string",
-          "const": "query"
+          "type": "string"
         },
         {
+          "const": "custom",
           "description": "A custom directive.",
-          "type": "string",
-          "const": "custom"
+          "type": "string"
         }
       ]
     },
     "TypedValueJson": {
       "description": "Tagged-union wire-format for a [`MetaValue`] that preserves the\nhost's variant tag.\n\nUsed **only** in `DirectiveJson::Custom`'s `values` field, where\ncallers genuinely need to distinguish (for example) a `Date` from\na `String` or an `Account` — all three of which collapse to a bare\nJSON string under the untagged [`MetaValueJson`] shape.\n\nWire shape: `{\"type\": \"<variant>\", \"value\": ...}` — mirrors\n`rustledger-ffi-wasi::TypedValue` (see\n`crates/rustledger-ffi-wasi/src/types/output.rs::TypedValue`) so\nportable JS consumers see identical envelopes across both bindings.\n\n**Why `value: MetaValueJson` and not `serde_json::Value`** —\n`serde_json` is intentionally a host-only dev-dependency for this\ncrate (the runtime build avoids it to keep the wasm32 dep chain\nsmall). [`MetaValueJson`] already covers every payload shape\nFFI-WASI's `TypedValue` emits: `String` for the string-flavored\nvariants, `Bool` for `bool`, `Amount` for `amount`, `Null` for\n`null`. The serialized JSON is bit-identical to FFI-WASI's.\n\n`MetaValueJson` (untagged) is retained for the `meta` map of every\ndirective — there the lossy shape is intentional and matches what\nFFI-WASI's metadata side also emits.\n\n**Breaking change from #1199** for the WASM binding: pre-#1207\n`Custom.values` emitted raw `MetaValueJson` values (lossy). Closes\n#1207.",
-      "type": "object",
       "properties": {
         "type": {
           "description": "Variant tag — one of `\"string\"`, `\"account\"`, `\"currency\"`,\n`\"tag\"`, `\"link\"`, `\"date\"`, `\"number\"`, `\"bool\"`, `\"amount\"`,\n`\"null\"`. Matches FFI-WASI's tag strings exactly.\n\nRenamed via `#[ts(type = ...)]` so the discriminator is a\nstring-literal union on the TS side. The post-process script\nfurther narrows the full struct shape into a discriminated\nunion (per-variant `{type, value}` rows) -- see ADR-0004 for\nwhy the narrowing is hand-tuned rather than generator-driven.",
           "type": "string"
         },
         "value": {
-          "description": "Variant payload (see [`MetaValueJson`] for the four shapes).",
-          "$ref": "#/$defs/MetaValueJson"
+          "$ref": "#/$defs/MetaValueJson",
+          "description": "Variant payload (see [`MetaValueJson`] for the four shapes)."
         }
       },
-      "required": ["type", "value"]
+      "required": ["type", "value"],
+      "type": "object"
     },
     "ValidationResult": {
       "description": "Result of validation.",
-      "type": "object",
       "properties": {
         "errors": {
           "description": "Validation errors.",
-          "type": "array",
           "items": {
             "$ref": "#/$defs/BeancountError"
-          }
+          },
+          "type": "array"
         },
         "valid": {
           "description": "Whether the ledger is valid.",
           "type": "boolean"
         }
       },
-      "required": ["valid", "errors"]
+      "required": ["valid", "errors"],
+      "type": "object"
     }
-  }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
 }

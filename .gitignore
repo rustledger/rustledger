@@ -2,6 +2,12 @@
 /target/
 **/*.rs.bk
 
+# Generated TypeScript bindings (ts-rs spike #1218). The spike example
+# `crates/rustledger-wasm/examples/tsrs_spike.rs` exports per-type .d.ts
+# into this directory; regenerable via `cargo test --example tsrs_spike
+# -p rustledger-wasm --features ts-rs-spike`.
+crates/rustledger-wasm/bindings/
+
 # Editor files
 *.swp
 *.swo

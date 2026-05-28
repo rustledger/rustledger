@@ -6,7 +6,7 @@ use rustledger_core::{Directive, MetaValue, Metadata};
 
 use crate::types::{
     AmountValue, CellValue, CostNumberJson, CostValue, DirectiveJson, MetaValueJson, PositionValue,
-    PostingCostJson, PostingJson,
+    PostingCostJson, PostingJson, TypedValueJson,
 };
 
 /// Lower a host [`MetaValue`] to the wire [`MetaValueJson`].
@@ -44,6 +44,65 @@ fn metadata_to_json(meta: &Metadata) -> HashMap<String, MetaValueJson> {
     meta.iter()
         .map(|(k, v)| (k.clone(), meta_value_to_json(v)))
         .collect()
+}
+
+/// Lower a host [`MetaValue`] to the tagged-union wire shape
+/// [`TypedValueJson`].
+///
+/// Used **only** for `Custom.values` — the positional values list
+/// where preserving the host variant tag matters (a `Date` must be
+/// distinguishable from a `String` or an `Account`). Mirrors
+/// `rustledger-ffi-wasi`'s `TypedValue::from_meta_value` so the two
+/// bindings emit identical tagged-union envelopes.
+///
+/// Stringified-decimal handling matches [`meta_value_to_json`] — JSON
+/// numbers can't represent `rust_decimal::Decimal` losslessly.
+fn meta_value_to_typed_json(value: &MetaValue) -> TypedValueJson {
+    match value {
+        MetaValue::String(s) => TypedValueJson {
+            value_type: "string".into(),
+            value: MetaValueJson::String(s.clone()),
+        },
+        MetaValue::Account(a) => TypedValueJson {
+            value_type: "account".into(),
+            value: MetaValueJson::String(a.to_string()),
+        },
+        MetaValue::Currency(c) => TypedValueJson {
+            value_type: "currency".into(),
+            value: MetaValueJson::String(c.to_string()),
+        },
+        MetaValue::Tag(t) => TypedValueJson {
+            value_type: "tag".into(),
+            value: MetaValueJson::String(t.to_string()),
+        },
+        MetaValue::Link(l) => TypedValueJson {
+            value_type: "link".into(),
+            value: MetaValueJson::String(l.to_string()),
+        },
+        MetaValue::Date(d) => TypedValueJson {
+            value_type: "date".into(),
+            value: MetaValueJson::String(d.to_string()),
+        },
+        MetaValue::Number(n) => TypedValueJson {
+            value_type: "number".into(),
+            value: MetaValueJson::String(n.to_string()),
+        },
+        MetaValue::Bool(b) => TypedValueJson {
+            value_type: "bool".into(),
+            value: MetaValueJson::Bool(*b),
+        },
+        MetaValue::Amount(a) => TypedValueJson {
+            value_type: "amount".into(),
+            value: MetaValueJson::Amount {
+                number: a.number.to_string(),
+                currency: a.currency.to_string(),
+            },
+        },
+        MetaValue::None => TypedValueJson {
+            value_type: "null".into(),
+            value: MetaValueJson::Null,
+        },
+    }
 }
 
 /// Convert a Directive to its JSON representation.
@@ -187,7 +246,7 @@ pub fn directive_to_json(directive: &Directive) -> DirectiveJson {
         Directive::Custom(custom) => DirectiveJson::Custom {
             date: custom.date.to_string(),
             custom_type: custom.custom_type.clone(),
-            values: custom.values.iter().map(meta_value_to_json).collect(),
+            values: custom.values.iter().map(meta_value_to_typed_json).collect(),
             meta: metadata_to_json(&custom.meta),
         },
     }
@@ -433,9 +492,9 @@ mod tests {
 
     #[test]
     fn custom_directive_carries_values_1168() {
-        // Pre-fix the Custom variant dropped both `values` AND `meta`.
-        // Pin the `values` round-trip (and verify the value shape
-        // matches `MetaValueJson`).
+        // Pre-#1168 the Custom variant dropped both `values` AND
+        // `meta`. Pre-#1207 the values were emitted raw (lossy).
+        // Pin the tagged-union round-trip here.
         let source = r#"2024-01-01 custom "budget" "monthly" 100.00 USD TRUE
 "#;
         let result = parse_beancount(source);
@@ -451,18 +510,18 @@ mod tests {
         };
 
         // The fixture has 4 positional values: "monthly", 100.00,
-        // USD, TRUE — types preserved via MetaValueJson.
+        // USD, TRUE — each emitted as a `TypedValueJson` so the
+        // variant tag survives the wire crossing.
         assert!(!values.is_empty(), "Custom values must not be empty");
         assert!(
-            values
-                .iter()
-                .any(|v| matches!(v, MetaValueJson::String(s) if s == "monthly")),
+            values.iter().any(|v| v.value_type == "string"
+                && matches!(v.value, MetaValueJson::String(ref s) if s == "monthly")),
             "values should include `monthly` string: {values:?}",
         );
         assert!(
             values
                 .iter()
-                .any(|v| matches!(v, MetaValueJson::Bool(true))),
+                .any(|v| v.value_type == "bool" && matches!(v.value, MetaValueJson::Bool(true))),
             "values should include `TRUE` bool: {values:?}",
         );
     }
@@ -564,9 +623,14 @@ mod tests {
 
     /// `Custom.values` is a positional list — a `MetaValue::None` in
     /// the middle of the list must keep its position so JS consumers
-    /// see `[..., null, ...]` rather than the position silently
-    /// collapsing. The plugin-types side of this is filed in #1200's
-    /// audit; pin the WASM wire shape here independently.
+    /// see `[..., {type:"null", value:null}, ...]` rather than the
+    /// position silently collapsing. The plugin-types side of this is
+    /// filed in #1200's audit; pin the WASM wire shape here
+    /// independently.
+    ///
+    /// Post-#1207: values are emitted as tagged unions so the variant
+    /// tag (`string` vs `number` vs `null`) is preserved, not just the
+    /// presence of a value.
     #[test]
     fn custom_values_preserve_null_position_1168() {
         use rustledger_core::{Custom, Decimal};
@@ -589,11 +653,14 @@ mod tests {
         };
 
         assert_eq!(values.len(), 3, "all three values must survive: {values:?}");
-        assert!(matches!(values[0], MetaValueJson::String(ref s) if s == "monthly"));
-        assert!(
-            matches!(values[1], MetaValueJson::Null),
+        assert_eq!(values[0].value_type, "string");
+        assert!(matches!(values[0].value, MetaValueJson::String(ref s) if s == "monthly"));
+        assert_eq!(
+            values[1].value_type, "null",
             "middle Null must keep position {values:?}",
         );
-        assert!(matches!(values[2], MetaValueJson::String(ref s) if s == "100.00"));
+        assert!(matches!(values[1].value, MetaValueJson::Null));
+        assert_eq!(values[2].value_type, "number");
+        assert!(matches!(values[2].value, MetaValueJson::String(ref s) if s == "100.00"));
     }
 }

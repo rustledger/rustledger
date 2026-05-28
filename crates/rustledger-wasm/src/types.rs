@@ -99,6 +99,45 @@ pub enum MetaValueJson {
     Null,
 }
 
+/// Tagged-union wire-format for a [`MetaValue`] that preserves the
+/// host's variant tag.
+///
+/// Used **only** in `DirectiveJson::Custom`'s `values` field, where
+/// callers genuinely need to distinguish (for example) a `Date` from
+/// a `String` or an `Account` — all three of which collapse to a bare
+/// JSON string under the untagged [`MetaValueJson`] shape.
+///
+/// Wire shape: `{"type": "<variant>", "value": ...}` — mirrors
+/// `rustledger-ffi-wasi::TypedValue` (see
+/// `crates/rustledger-ffi-wasi/src/types/output.rs::TypedValue`) so
+/// portable JS consumers see identical envelopes across both bindings.
+///
+/// **Why `value: MetaValueJson` and not `serde_json::Value`** —
+/// `serde_json` is intentionally a host-only dev-dependency for this
+/// crate (the runtime build avoids it to keep the wasm32 dep chain
+/// small). [`MetaValueJson`] already covers every payload shape
+/// FFI-WASI's `TypedValue` emits: `String` for the string-flavored
+/// variants, `Bool` for `bool`, `Amount` for `amount`, `Null` for
+/// `null`. The serialized JSON is bit-identical to FFI-WASI's.
+///
+/// `MetaValueJson` (untagged) is retained for the `meta` map of every
+/// directive — there the lossy shape is intentional and matches what
+/// FFI-WASI's metadata side also emits.
+///
+/// **Breaking change from #1199** for the WASM binding: pre-#1207
+/// `Custom.values` emitted raw `MetaValueJson` values (lossy). Closes
+/// #1207.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TypedValueJson {
+    /// Variant tag — one of `"string"`, `"account"`, `"currency"`,
+    /// `"tag"`, `"link"`, `"date"`, `"number"`, `"bool"`, `"amount"`,
+    /// `"null"`. Matches FFI-WASI's tag strings exactly.
+    #[serde(rename = "type")]
+    pub value_type: String,
+    /// Variant payload (see [`MetaValueJson`] for the four shapes).
+    pub value: MetaValueJson,
+}
+
 /// A directive in JSON-serializable form.
 ///
 /// Each variant corresponds to a Beancount directive type, with fields
@@ -241,8 +280,14 @@ pub enum DirectiveJson {
     Custom {
         date: String,
         custom_type: String,
+        /// Positional values after the `custom TYPE` keyword. Each
+        /// entry is a [`TypedValueJson`] (`{type, value}`) — the
+        /// tagged shape preserves the host `MetaValue` variant tag so
+        /// JS consumers can distinguish a `Date` from a `String` from
+        /// an `Account` (closes #1207). Mirrors FFI-WASI's
+        /// `Vec<TypedValue>` exactly.
         #[serde(skip_serializing_if = "Vec::is_empty", default)]
-        values: Vec<MetaValueJson>,
+        values: Vec<TypedValueJson>,
         #[serde(skip_serializing_if = "HashMap::is_empty", default)]
         meta: HashMap<String, MetaValueJson>,
     },

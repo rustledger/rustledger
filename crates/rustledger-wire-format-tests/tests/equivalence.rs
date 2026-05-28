@@ -434,15 +434,13 @@ fn query_directive_equivalence() {
     assert_wire_format("query_basic", &Directive::Query(query), &[]);
 }
 
-/// Audit finding from issue #1200 item 3: `Custom.values` is present
-/// in both bindings (since #1199), but the **shape** diverges. FFI-WASI
-/// emits each value as a tagged union `{type: "...", value: ...}`,
-/// which is type-safe — a JS consumer can distinguish a `Date` value
-/// from a `String` value. WASM emits values raw (the bare string,
-/// number, or object), which is lossy. Tracked in #1207 with a fix
-/// plan to adopt the tagged shape on the WASM side.
+/// Pins the fix from #1207. WASM previously emitted `Custom.values`
+/// raw (lossy — a `Date` was indistinguishable from a `String` or
+/// `Account` on the wire); FFI-WASI emitted each value as a tagged
+/// union `{type: "...", value: ...}`. After #1207 the WASM side
+/// adopts the same tagged shape so every `MetaValue` variant
+/// round-trips with its variant tag intact.
 #[test]
-#[ignore = "WASM emits Custom.values raw (lossy); tagged union expected — tracked in #1207"]
 fn custom_directive_with_all_value_variants_equivalence() {
     let custom = Custom {
         date: naive_date(2024, 1, 1).unwrap(),

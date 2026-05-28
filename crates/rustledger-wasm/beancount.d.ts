@@ -75,6 +75,21 @@ export type MetaValueJson =
   | null;
 
 /**
+ * Tagged-union value used in `CustomData.values` (issue #1207).
+ *
+ * Unlike `MetaValueJson` (untagged, lossy for primitive variants),
+ * `TypedValue` preserves the host `MetaValue` variant tag so JS
+ * consumers can tell apart a `Date`, a `String`, and an `Account`
+ * (all of which would otherwise collapse to bare strings).
+ *
+ * Mirrors FFI-WASI's `TypedValue` shape exactly.
+ */
+export interface TypedValue {
+  type: "string" | "account" | "currency" | "tag" | "link" | "date" | "number" | "bool" | "amount" | "null";
+  value: string | boolean | { number: string; currency: string } | null;
+}
+
+/**
  * Possible directive types.
  */
 export type DirectiveType =
@@ -317,10 +332,14 @@ export interface CustomData {
   /** Custom type name. */
   custom_type: string;
   /**
-   * Positional values after the custom type keyword (issue #1168).
-   * Pre-#1168 these were dropped entirely from the JSON output.
+   * Positional values after the custom type keyword.
+   *
+   * Pre-#1168: dropped entirely from the JSON output.
+   * Pre-#1207: present but emitted raw (lossy for primitive variants).
+   * Post-#1207: each value is a tagged-union [`TypedValue`] so the
+   * variant tag survives the wire crossing.
    */
-  values?: MetaValueJson[];
+  values?: TypedValue[];
   /** Custom-directive metadata (issue #1168). */
   meta?: Record<string, MetaValueJson>;
 }

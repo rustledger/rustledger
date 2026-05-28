@@ -120,6 +120,17 @@ export type MetaValueJson =
     | { number: string; currency: string }
     | null;
 
+/**
+ * Tagged-union value used in the `custom` directive's `values` field
+ * (issue #1207). Preserves the host `MetaValue` variant tag — unlike
+ * `MetaValueJson`, which collapses `Date`/`String`/`Account` to a
+ * single bare-string shape. Mirrors FFI-WASI's `TypedValue` exactly.
+ */
+export interface TypedValue {
+    type: 'string' | 'account' | 'currency' | 'tag' | 'link' | 'date' | 'number' | 'bool' | 'amount' | 'null';
+    value: string | boolean | { number: string; currency: string } | null;
+}
+
 /** A posting within a transaction. */
 export interface Posting {
     account: string;
@@ -198,7 +209,7 @@ export type Directive =
     | { type: 'document'; date: string; account: string; path: string; tags?: string[]; links?: string[]; meta?: Record<string, MetaValueJson> }
     | { type: 'price'; date: string; currency: string; amount: Amount; meta?: Record<string, MetaValueJson> }
     | { type: 'query'; date: string; name: string; query_string: string; meta?: Record<string, MetaValueJson> }
-    | { type: 'custom'; date: string; custom_type: string; values?: MetaValueJson[]; meta?: Record<string, MetaValueJson> };
+    | { type: 'custom'; date: string; custom_type: string; values?: TypedValue[]; meta?: Record<string, MetaValueJson> };
 
 /** Ledger options. */
 export interface LedgerOptions {

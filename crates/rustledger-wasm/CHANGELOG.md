@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### ⚠ BREAKING CHANGES
+
+- **Wire shape of `Custom.values`** is now a tagged union
+  `{type, value}` instead of raw values (closes #1207). Pre-fix WASM
+  emitted each `MetaValue` as its bare JSON form, which made
+  `Date`/`String`/`Account`/`Tag`/`Link`/`Number` indistinguishable on
+  the wire (all collapsed to JSON strings). Post-fix the shape mirrors
+  `rustledger-ffi-wasi`'s `TypedValue`, e.g.
+  `{type: "date", value: "2024-03-31"}`. The new `TypedValue` interface
+  is exported from the TypeScript declarations. JS consumers reading
+  positional values from `custom` directives must branch on `.type`
+  and read `.value`.
+
 ## [0.13.0](https://github.com/rustledger/rustledger/compare/v0.12.0...v0.13.0) - 2026-04-21
 
 ### Bug Fixes

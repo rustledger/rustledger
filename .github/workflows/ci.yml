@@ -98,6 +98,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # stable
         with:
           toolchain: stable
+      # sccache is set as RUSTC_WRAPPER at the workflow level (line 21),
+      # so every job that compiles Rust must install the action -- without
+      # it, cargo's `-vV` probe fails with "could not execute process
+      # sccache" (E2 / ENOENT).
+      - uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2
         with:
           shared-key: ts-bindings

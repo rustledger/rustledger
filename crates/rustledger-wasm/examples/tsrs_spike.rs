@@ -5,9 +5,12 @@
 //! Run via:
 //!
 //! ```bash
-//! cargo run --example tsrs_spike \
+//! cargo test --example tsrs_spike \
 //!   -p rustledger-wasm --features ts-rs-spike
 //! ```
+//!
+//! (ts-rs emits the `.d.ts` files from auto-generated unit tests, not
+//! from `main()` — `cargo run` compiles but doesn't export.)
 //!
 //! The four DTOs below MIRROR the structs in `src/types.rs` exactly —
 //! same fields, same serde attributes, same doc comments — but with
@@ -87,12 +90,16 @@ pub enum CostNumberJson {
 #[ts(export, export_to = "bindings/")]
 pub struct PostingCostJson {
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub number: Option<CostNumberJson>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub currency: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub date: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub label: Option<String>,
 }
 
@@ -146,6 +153,7 @@ pub enum DirectiveJson {
         account: String,
         amount: AmountValue,
         #[serde(skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
         tolerance: Option<String>,
         #[serde(skip_serializing_if = "HashMap::is_empty", default)]
         meta: HashMap<String, MetaValueJson>,

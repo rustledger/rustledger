@@ -26,7 +26,9 @@ Prototype landed in PR #1218 via `crates/rustledger-wasm/examples/tsrs_spike.rs`
 cargo test --example tsrs_spike -p rustledger-wasm --features ts-rs-spike
 ```
 
-ts-rs writes per-type `.d.ts` files under `crates/rustledger-wasm/bindings/bindings/`.
+ts-rs writes per-type `.d.ts` files under `crates/rustledger-wasm/bindings/bindings/` (the outer `bindings/` is ts-rs's per-crate output root; the inner one comes from the `export_to = "bindings/"` attribute on each derive).
+
+**The spike is intentionally a snapshot of the production DTOs at the moment of writing.** It does not track future changes to `src/types.rs`. When Phase 1 lands, the production DTOs gain the `#[derive(TS)]` and the spike example is deleted — the spike's job is to inform the design decision, not stay current.
 
 ### What ts-rs got right
 

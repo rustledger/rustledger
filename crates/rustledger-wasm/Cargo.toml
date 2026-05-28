@@ -22,7 +22,10 @@ plugins = ["dep:rustledger-plugin"]
 ## Include BQL query completions (bqlCompletions)
 completions = []
 ## Spike (#1218) -- enables the `tsrs_spike` example. Pulls in ts-rs as
-## an optional host-only dep. Not part of any default build.
+## an optional host-only dep (declared under `[target.'cfg(not(...))'.dependencies]`
+## below, so `cargo build --target wasm32-unknown-unknown --features ts-rs-spike`
+## hard-fails on the missing `ts-rs` crate -- intentional, the spike is
+## host-only by design). Not part of any default build.
 ts-rs-spike = ["dep:ts-rs"]
 
 # The `tsrs_spike` example needs the optional ts-rs dep; declare the

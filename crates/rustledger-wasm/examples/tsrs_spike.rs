@@ -17,8 +17,11 @@
 //! ship by hand, without committing to the derive in the real DTOs
 //! before the design decision is made.
 //!
-//! Output lands in `crates/rustledger-wasm/bindings/` (ts-rs default).
-//! Eyeball:
+//! Output lands in `crates/rustledger-wasm/bindings/bindings/`
+//! (ts-rs's `export_to = "bindings/"` puts files in a nested
+//! `bindings/` under the crate root — the inner directory comes from
+//! the attribute string, the outer from ts-rs's per-crate output
+//! root). Eyeball:
 //!
 //! 1. Does the `DirectiveJson` discriminated union narrow correctly?
 //! 2. Is the `TypedValueJson` payload's `MetaValueJson` substituted by
@@ -184,6 +187,6 @@ fn main() {
     println!("ts-rs spike binary compiled cleanly.");
     println!(
         "Run `cargo test --example tsrs_spike --features ts-rs-spike` to emit \
-         the .d.ts files into crates/rustledger-wasm/bindings/."
+         the .d.ts files into crates/rustledger-wasm/bindings/bindings/."
     );
 }

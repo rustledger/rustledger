@@ -1153,7 +1153,7 @@ mod cost_number_wire_tests {
 /// definitions. The export test then strips the wrapper's own
 /// root-level keys (`type`, `title`, `properties`, `required`) before
 /// writing the JSON Schema, so consumers see a definitions-only
-/// document with no top-level "RustledgerBindings" object -- and
+/// document with no top-level `RustledgerBindings` object -- and
 /// datamodel-code-generator does not emit a corresponding Pydantic
 /// class. Field types that are reachable transitively (e.g.
 /// `Severity` from `BeancountError`, `CompletionKind` from
@@ -1281,5 +1281,89 @@ mod export_json_schema {
         // when the script pipes cargo output through `tee`.
         println!("{SUCCESS_SENTINEL}");
         eprintln!("Wrote: {}", path.display());
+    }
+}
+
+/// Guards the DTOs that hand-override schemars' auto-detected `required`
+/// array via `schemars(extend("required" = [...]))`.
+///
+/// `extend("required" = ...)` *replaces* the auto-detected array rather
+/// than merging into it (schemars 1.x has no merge form). So if a field
+/// is added to one of these structs and the author forgets to update the
+/// hand-written list, that field silently drops out of `required` even
+/// though the wire always emits it -- with no compile error and no other
+/// test catching it. (PR #1241's round-2 review found exactly this: the
+/// round-1 `extend` sweep missed `FormatResult`.)
+///
+/// Every field on these four DTOs is a required wire field -- the
+/// nullable ones (`ParseResult.ledger`, `LedgerOptions.title`,
+/// `BeancountError.line/column`, `FormatResult.formatted`) are
+/// always-present-but-nullable, never absent. So the invariant is exact:
+/// the emitted `required` set must equal the full property set. If you
+/// add a genuinely-optional field to one of these structs, this test is
+/// the tripwire -- update it deliberately alongside the `extend` list.
+#[cfg(all(test, feature = "json-schema", not(target_arch = "wasm32")))]
+mod schema_required_invariants {
+    use std::collections::BTreeSet;
+
+    use super::RustledgerBindings;
+
+    /// Assert the `$def` for `def_name` lists every one of its
+    /// properties in `required`.
+    fn assert_required_equals_all_properties(def_name: &str) {
+        let schema = schemars::schema_for!(RustledgerBindings);
+        let value = serde_json::to_value(&schema).expect("schema round-trips through serde_json");
+
+        let def = value
+            .get("$defs")
+            .and_then(|d| d.get(def_name))
+            .unwrap_or_else(|| panic!("{def_name} missing from $defs"));
+
+        let properties: BTreeSet<&str> = def
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+            .unwrap_or_else(|| panic!("{def_name} has no properties object"))
+            .keys()
+            .map(String::as_str)
+            .collect();
+
+        let required: BTreeSet<&str> = def
+            .get("required")
+            .and_then(serde_json::Value::as_array)
+            .unwrap_or_else(|| {
+                panic!("{def_name}.required is missing -- did schemars(extend) get dropped?")
+            })
+            .iter()
+            .map(|v| v.as_str().expect("required entry should be a string"))
+            .collect();
+
+        assert_eq!(
+            required, properties,
+            "{def_name}: the schemars(extend(\"required\" = [...])) list is out of \
+             sync with the struct's fields. Every field on this DTO is a required \
+             wire field, so `required` must list all of them. Update the \
+             extend(\"required\") attribute on the struct in types.rs (and this \
+             test, if you intentionally introduced an optional field)."
+        );
+    }
+
+    #[test]
+    fn parse_result_requires_all_fields() {
+        assert_required_equals_all_properties("ParseResult");
+    }
+
+    #[test]
+    fn ledger_options_requires_all_fields() {
+        assert_required_equals_all_properties("LedgerOptions");
+    }
+
+    #[test]
+    fn beancount_error_requires_all_fields() {
+        assert_required_equals_all_properties("BeancountError");
+    }
+
+    #[test]
+    fn format_result_requires_all_fields() {
+        assert_required_equals_all_properties("FormatResult");
     }
 }

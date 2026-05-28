@@ -60,6 +60,13 @@ PY_OUTPUT="$WASM_DIR/bindings/types.py"
 # Bump deliberately + commit the regenerated `types.py`.
 DATAMODEL_CODEGEN_VERSION="0.32.0"
 
+# autoflake removes the import orphaned by the placeholder strip in
+# Phase 3 (see that step for the why). Pinned for the same determinism
+# reason as the other generators. Pure-Python -- chosen over ruff
+# because ruff ships a prebuilt dynamically-linked binary that NixOS
+# can't execute via uvx/pipx, which would break local regen.
+AUTOFLAKE_VERSION="2.3.1"
+
 # === Phase 1: TypeScript ===
 
 # Clear the intermediate per-type directory before regen. ts-rs only
@@ -294,6 +301,13 @@ mv "$SCHEMA_OUTPUT.fmt" "$SCHEMA_OUTPUT"
 # discriminator support; `--use-schema-description` propagates Rust
 # rustdoc comments through schemars into Python docstrings.
 #
+# Note: the Python class count exceeds the schema's `$defs` count. Each
+# internally/externally-tagged enum in the schema is a single `$def`
+# (e.g. `DirectiveJson` with its 12 `oneOf` variants), but datamodel-
+# code-generator expands every variant into its own Pydantic class plus
+# a union alias. So a count mismatch between `index.schema.json` `$defs`
+# and `types.py` classes is expected, not a regen bug.
+#
 # Pinned to `$DATAMODEL_CODEGEN_VERSION` at the same level as
 # `prettier@3` in Phase 1 -- a minor release that changes output
 # formatting would otherwise turn `bindings-fresh` red on every PR
@@ -389,6 +403,38 @@ if grep -q "^class Model(RootModel\[Any\]):$" "$PY_OUTPUT"; then
     echo "  datamodel-code-generator's output format may have drifted." >&2
     exit 1
 fi
+
+# Remove the import orphaned by the placeholder strip above.
+#
+# The `Model(RootModel[Any])` placeholder was the only consumer of
+# `Any`, so once it's gone `from typing import Any, ...` is an unused
+# import. The file is checked in and CodeQL-scanned, so a dangling
+# import turns the code-scanning gate red.
+#
+# We run autoflake (a Python-aware unused-import remover) rather than a
+# hardcoded `sed` for `Any`: autoflake understands the AST, so it
+# generically removes *whatever* the strip orphaned (not just `Any`),
+# won't wrongly edit the import line, and never touches `from __future__`
+# or imports referenced only in annotations. This mirrors the prettier
+# pass we run over the TS/JSON outputs.
+DATAMODEL_AUTOFLAKE_CMD=""
+if command -v autoflake >/dev/null 2>&1; then
+    DATAMODEL_AUTOFLAKE_CMD="autoflake"
+elif command -v pipx >/dev/null 2>&1; then
+    DATAMODEL_AUTOFLAKE_CMD="pipx run --spec autoflake==${AUTOFLAKE_VERSION} autoflake"
+elif command -v uvx >/dev/null 2>&1; then
+    DATAMODEL_AUTOFLAKE_CMD="uvx --from autoflake==${AUTOFLAKE_VERSION} autoflake"
+else
+    echo "error: need one of autoflake, pipx, or uvx on PATH." >&2
+    echo "  Install with: pipx install 'autoflake==${AUTOFLAKE_VERSION}'" >&2
+    exit 1
+fi
+
+# shellcheck disable=SC2086
+$DATAMODEL_AUTOFLAKE_CMD --remove-all-unused-imports --in-place "$PY_OUTPUT" || {
+    echo "error: autoflake failed to prune unused imports from $PY_OUTPUT" >&2
+    exit 1
+}
 
 # === CI-only freshness check ===
 

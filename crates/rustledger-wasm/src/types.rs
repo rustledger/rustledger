@@ -21,8 +21,13 @@ use serde::{Deserialize, Serialize};
 
 /// Result of parsing a Beancount file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts-export", ts(export, export_to = "bindings/"))]
 pub struct ParseResult {
-    /// The parsed ledger (if successful).
+    /// The parsed ledger (if successful). Emitted as JSON `null` when
+    /// parsing failed entirely; no `skip_serializing_if`, so the field
+    /// is always present on the wire (TS: `Ledger | null`, not
+    /// `ledger?`).
     pub ledger: Option<Ledger>,
     /// Parse errors.
     pub errors: Vec<Error>,
@@ -30,6 +35,8 @@ pub struct ParseResult {
 
 /// A parsed Beancount ledger.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts-export", ts(export, export_to = "bindings/"))]
 pub struct Ledger {
     /// All directives in the ledger.
     pub directives: Vec<DirectiveJson>,
@@ -41,10 +48,14 @@ pub struct Ledger {
 #[derive(
     Debug, Clone, Default, Serialize, Deserialize, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize,
 )]
+#[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts-export", ts(export, export_to = "bindings/"))]
 pub struct LedgerOptions {
     /// Operating currencies.
     pub operating_currencies: Vec<String>,
-    /// Ledger title.
+    /// Ledger title. Emitted as JSON `null` when no title is set
+    /// (no `skip_serializing_if`; field is always present on the
+    /// wire). TS: `string | null`, not `title?`.
     pub title: Option<String>,
 }
 
@@ -473,6 +484,8 @@ pub struct PostingCostJson {
     rkyv::Deserialize,
 )]
 #[serde(rename_all = "lowercase")]
+#[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts-export", ts(export, export_to = "bindings/"))]
 pub enum Severity {
     /// An error that prevents processing.
     Error,
@@ -481,15 +494,27 @@ pub enum Severity {
 }
 
 /// An error with source location.
+///
+/// **Renamed to `BeancountError` on the TS side** to avoid shadowing
+/// the JS-builtin `Error` type. The Rust struct keeps the shorter
+/// `Error` name for internal use; the rename is applied via
+/// `#[ts(rename = ...)]` so consumers see a non-shadowing name.
 #[derive(
     Debug, Clone, Serialize, Deserialize, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize,
+)]
+#[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
+#[cfg_attr(
+    feature = "ts-export",
+    ts(export, export_to = "bindings/", rename = "BeancountError")
 )]
 pub struct Error {
     /// Error message.
     pub message: String,
-    /// Line number (1-based).
+    /// Line number (1-based). `null` when the error has no source
+    /// location (e.g. validation errors not tied to a span).
     pub line: Option<u32>,
-    /// Column number (1-based).
+    /// Column number (1-based). `null` when the error has no source
+    /// location.
     pub column: Option<u32>,
     /// Error severity.
     pub severity: Severity,
@@ -543,6 +568,8 @@ impl From<rustledger_loader::LedgerError> for Error {
 
 /// Result of validation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts-export", ts(export, export_to = "bindings/"))]
 pub struct ValidationResult {
     /// Whether the ledger is valid.
     pub valid: bool,
@@ -552,6 +579,8 @@ pub struct ValidationResult {
 
 /// Result of a BQL query.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts-export", ts(export, export_to = "bindings/"))]
 pub struct QueryResult {
     /// Column names.
     pub columns: Vec<String>,
@@ -567,13 +596,17 @@ pub struct QueryResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 #[allow(missing_docs)]
+#[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts-export", ts(export, export_to = "bindings/"))]
 pub enum CellValue {
     /// Null value.
     Null,
     /// String value.
     String(String),
-    /// Integer value.
-    Integer(i64),
+    /// Integer value. ts-rs defaults `i64` to `bigint`, but the JSON
+    /// wire emits it as a plain Number -- override to `number` so the
+    /// TS shape matches what JS consumers actually receive.
+    Integer(#[cfg_attr(feature = "ts-export", ts(type = "number"))] i64),
     /// Boolean value.
     Boolean(bool),
     /// Amount with number and currency.
@@ -582,6 +615,7 @@ pub enum CellValue {
     Position {
         units: AmountValue,
         #[serde(skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "ts-export", ts(optional))]
         cost: Option<CostValue>,
     },
     /// Inventory with positions.
@@ -607,6 +641,8 @@ pub struct AmountValue {
 
 /// Position value for serialization.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts-export", ts(export, export_to = "bindings/"))]
 pub struct PositionValue {
     /// The units.
     pub units: AmountValue,
@@ -614,6 +650,8 @@ pub struct PositionValue {
 
 /// Cost value for serialization.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts-export", ts(export, export_to = "bindings/"))]
 pub struct CostValue {
     /// Cost per unit.
     pub number: String,
@@ -621,16 +659,22 @@ pub struct CostValue {
     pub currency: String,
     /// Acquisition date.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts-export", ts(optional))]
     pub date: Option<String>,
     /// Lot label.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts-export", ts(optional))]
     pub label: Option<String>,
 }
 
 /// Result of formatting.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts-export", ts(export, export_to = "bindings/"))]
 pub struct FormatResult {
-    /// Formatted source (if successful).
+    /// Formatted source (if successful). Emitted as JSON `null` on
+    /// failure; no `skip_serializing_if`, so the field is always
+    /// present on the wire.
     pub formatted: Option<String>,
     /// Format errors.
     pub errors: Vec<Error>,
@@ -638,6 +682,8 @@ pub struct FormatResult {
 
 /// Result of pad expansion.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts-export", ts(export, export_to = "bindings/"))]
 pub struct PadResult {
     /// Directives with pads removed.
     pub directives: Vec<DirectiveJson>,

@@ -21,6 +21,43 @@ currency: string, };
 
 
 /**
+ * An error with source location.
+ *
+ * **Renamed to `BeancountError` on the TS side** to avoid shadowing
+ * the JS-builtin `Error` type. The Rust struct keeps the shorter
+ * `Error` name for internal use; the rename is applied via
+ * `#[ts(rename = ...)]` so consumers see a non-shadowing name.
+ */
+export type BeancountError = { 
+/**
+ * Error message.
+ */
+message: string, 
+/**
+ * Line number (1-based). `null` when the error has no source
+ * location (e.g. validation errors not tied to a span).
+ */
+line: number | null, 
+/**
+ * Column number (1-based). `null` when the error has no source
+ * location.
+ */
+column: number | null, 
+/**
+ * Error severity.
+ */
+severity: Severity, };
+
+
+/**
+ * A cell value that serializes properly to JavaScript.
+ *
+ * Uses untagged serialization to produce clean JSON output.
+ */
+export type CellValue = null | string | number | boolean | { number: string, currency: string, } | { units: AmountValue, cost?: CostValue, } | { positions: Array<PositionValue>, } | Array<string> | Array<CellValue> | { [key in string]: CellValue };
+
+
+/**
  * Wire-format of the numeric component of a [`PostingCostJson`].
  *
  * Mirrors `rustledger_core::CostNumber` on the wire so JS consumers
@@ -44,6 +81,28 @@ per_unit: string,
  * Source total.
  */
 total: string, };
+
+
+/**
+ * Cost value for serialization.
+ */
+export type CostValue = { 
+/**
+ * Cost per unit.
+ */
+number: string, 
+/**
+ * Cost currency.
+ */
+currency: string, 
+/**
+ * Acquisition date.
+ */
+date?: string, 
+/**
+ * Lot label.
+ */
+label?: string, };
 
 
 /**
@@ -94,6 +153,52 @@ values?: Array<TypedValueJson>, meta?: { [key in string]: MetaValueJson }, };
 
 
 /**
+ * Result of formatting.
+ */
+export type FormatResult = { 
+/**
+ * Formatted source (if successful). Emitted as JSON `null` on
+ * failure; no `skip_serializing_if`, so the field is always
+ * present on the wire.
+ */
+formatted: string | null, 
+/**
+ * Format errors.
+ */
+errors: Array<BeancountError>, };
+
+
+/**
+ * Ledger options.
+ */
+export type LedgerOptions = { 
+/**
+ * Operating currencies.
+ */
+operating_currencies: Array<string>, 
+/**
+ * Ledger title. Emitted as JSON `null` when no title is set
+ * (no `skip_serializing_if`; field is always present on the
+ * wire). TS: `string | null`, not `title?`.
+ */
+title: string | null, };
+
+
+/**
+ * A parsed Beancount ledger.
+ */
+export type Ledger = { 
+/**
+ * All directives in the ledger.
+ */
+directives: Array<DirectiveJson>, 
+/**
+ * Ledger options.
+ */
+options: LedgerOptions, };
+
+
+/**
  * Metadata-value wire format for WASM consumers.
  *
  * **JSON output is byte-equivalent to FFI-WASI's
@@ -130,6 +235,51 @@ number: string,
  * The currency code.
  */
 currency: string, } | null;
+
+
+/**
+ * Result of pad expansion.
+ */
+export type PadResult = { 
+/**
+ * Directives with pads removed.
+ */
+directives: Array<DirectiveJson>, 
+/**
+ * Generated padding transactions.
+ */
+padding_transactions: Array<DirectiveJson>, 
+/**
+ * Pad processing errors.
+ */
+errors: Array<BeancountError>, };
+
+
+/**
+ * Result of parsing a Beancount file.
+ */
+export type ParseResult = { 
+/**
+ * The parsed ledger (if successful). Emitted as JSON `null` when
+ * parsing failed entirely; no `skip_serializing_if`, so the field
+ * is always present on the wire (TS: `Ledger | null`, not
+ * `ledger?`).
+ */
+ledger: Ledger | null, 
+/**
+ * Parse errors.
+ */
+errors: Array<BeancountError>, };
+
+
+/**
+ * Position value for serialization.
+ */
+export type PositionValue = { 
+/**
+ * The units.
+ */
+units: AmountValue, };
 
 
 /**
@@ -184,6 +334,44 @@ flag?: string,
  * has no explicit metadata.
  */
 meta?: { [key in string]: MetaValueJson }, };
+
+
+/**
+ * Result of a BQL query.
+ */
+export type QueryResult = { 
+/**
+ * Column names.
+ */
+columns: Array<string>, 
+/**
+ * Result rows.
+ */
+rows: Array<Array<CellValue>>, 
+/**
+ * Query errors.
+ */
+errors: Array<BeancountError>, };
+
+
+/**
+ * Error severity level.
+ */
+export type Severity = "error" | "warning";
+
+
+/**
+ * Result of validation.
+ */
+export type ValidationResult = { 
+/**
+ * Whether the ledger is valid.
+ */
+valid: boolean, 
+/**
+ * Validation errors.
+ */
+errors: Array<BeancountError>, };
 
 
 /**

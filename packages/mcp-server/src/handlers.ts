@@ -111,29 +111,31 @@ function handleImportCategorize(
 
   try {
     const source = args!.source as string;
+    // `rustledger.parse()` returns the `ParseResult` object directly
+    // (via `serde_wasm_bindgen::Serializer::json_compatible()` -- no
+    // intermediate JSON string). Pre-#1227 this called `JSON.parse(result)`,
+    // which threw at runtime because the value was already an object.
     const result = rustledger.parse(source);
-    const parsed = JSON.parse(result);
+    const directives = result.ledger?.directives ?? [];
 
     // Extract expense/income accounts from the ledger
     const accounts = new Set<string>();
-    if (parsed.directives) {
-      for (const d of parsed.directives) {
-        if (d.type === "open" && d.account) {
-          if (
-            d.account.startsWith("Expenses:") ||
-            d.account.startsWith("Income:")
-          ) {
-            accounts.add(d.account);
-          }
+    for (const d of directives) {
+      if (d.type === "open" && d.account) {
+        if (
+          d.account.startsWith("Expenses:") ||
+          d.account.startsWith("Income:")
+        ) {
+          accounts.add(d.account);
         }
-        if (d.type === "transaction" && d.postings) {
-          for (const p of d.postings) {
-            if (
-              p.account.startsWith("Expenses:") ||
-              p.account.startsWith("Income:")
-            ) {
-              accounts.add(p.account);
-            }
+      }
+      if (d.type === "transaction" && d.postings) {
+        for (const p of d.postings) {
+          if (
+            p.account.startsWith("Expenses:") ||
+            p.account.startsWith("Income:")
+          ) {
+            accounts.add(p.account);
           }
         }
       }
@@ -178,8 +180,10 @@ function handleImportReview(args: ToolArguments | undefined): ToolResponse {
 
   try {
     const source = args!.source as string;
+    // See `handleImportCategorize` (above) for the parse-result shape
+    // notes; same fix as in #1227.
     const result = rustledger.parse(source);
-    const parsed = JSON.parse(result);
+    const directives = result.ledger?.directives ?? [];
 
     const needsReview: Array<{
       date: string;
@@ -190,25 +194,23 @@ function handleImportReview(args: ToolArguments | undefined): ToolResponse {
       method: string;
     }> = [];
 
-    if (parsed.directives) {
-      for (const d of parsed.directives) {
-        if (d.type === "transaction" && d.meta) {
-          const confidence = d.meta["import-confidence"];
-          if (confidence !== undefined) {
-            const method = d.meta["import-method"] || "unknown";
-            const account =
-              d.postings && d.postings.length > 1
-                ? d.postings[1].account
-                : "unknown";
-            needsReview.push({
-              date: d.date,
-              narration: d.narration || "",
-              payee: d.payee || undefined,
-              account,
-              confidence: Number(confidence),
-              method: String(method),
-            });
-          }
+    for (const d of directives) {
+      if (d.type === "transaction" && d.meta) {
+        const confidence = d.meta["import-confidence"];
+        if (confidence !== undefined) {
+          const method = d.meta["import-method"] || "unknown";
+          const account =
+            d.postings && d.postings.length > 1
+              ? d.postings[1].account
+              : "unknown";
+          needsReview.push({
+            date: d.date,
+            narration: d.narration || "",
+            payee: d.payee || undefined,
+            account,
+            confidence: Number(confidence),
+            method: String(method),
+          });
         }
       }
     }

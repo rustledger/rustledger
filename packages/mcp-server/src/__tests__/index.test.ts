@@ -365,6 +365,50 @@ describe('Tool Handlers', () => {
     });
   });
 
+  // Regression for #1227: handleImportCategorize used to call
+  // `JSON.parse(rustledger.parse(source))` -- threw at runtime because
+  // the value was already a JS object. The path also referenced
+  // `parsed.directives` instead of `result.ledger.directives`.
+  describe('import_categorize', () => {
+    it('should not throw on valid source (regression for #1227)', () => {
+      const result = handleToolCall('import_categorize', {
+        source: SAMPLE_LEDGER,
+        narration: 'Coffee',
+        date: '2024-01-15',
+      });
+      expect(result.isError).toBeFalsy();
+      // The handler builds a categorization prompt; surface it as the
+      // first content entry so callers receive a usable LLM prompt.
+      expect(result.content[0].text).toContain('Categorize this');
+      expect(result.content[0].text).toContain('Coffee');
+    });
+
+    it('should reject when required args are missing', () => {
+      const result = handleToolCall('import_categorize', {});
+      expect(result.isError).toBeTruthy();
+    });
+  });
+
+  // Regression for #1227: handleImportReview had the same broken
+  // JSON.parse pattern + wrong directive access path.
+  describe('import_review', () => {
+    it('should not throw on valid source (regression for #1227)', () => {
+      const result = handleToolCall('import_review', {
+        source: SAMPLE_LEDGER,
+      });
+      expect(result.isError).toBeFalsy();
+      // The sample ledger has no import-confidence metadata, so the
+      // review summary should report zero transactions to review.
+      // We only check that the handler completed without throwing.
+      expect(result.content[0].text.length).toBeGreaterThan(0);
+    });
+
+    it('should reject when source arg is missing', () => {
+      const result = handleToolCall('import_review', {});
+      expect(result.isError).toBeTruthy();
+    });
+  });
+
   describe('editor_hover', () => {
     it('should handle positions without hover info', () => {
       const result = handleToolCall('editor_hover', {

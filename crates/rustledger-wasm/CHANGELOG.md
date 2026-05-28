@@ -60,16 +60,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     EditorReference, EditorReferencesResult) -- keep their Rust
     names. 34 types in the bundle.
 
-  **Phase 2 caveat (deferred to a follow-up):** the inline
-  `typescript_custom_section` block in `src/lib.rs` -- which
-  wasm-bindgen embeds in the auto-generated `pkg/*.d.ts` that ships
-  with the npm package -- still has the **old** hand-maintained
-  shape (`TransactionDirective`, `Posting`, `Amount`, etc.). JS
-  consumers using only the wasm-bindgen-generated `.d.ts` will see
-  the old names; consumers importing the new `bindings/index.d.ts`
-  see the new ones. Phase 2 replaces `typescript_custom_section`
-  with `include_str!("../bindings/index.d.ts")` so both surfaces
-  converge. Tracked separately.
+- **TypeScript surfaces fully converged** (closes #1224, ADR-0004
+  Phase 2). The inline `typescript_custom_section` DTO block in
+  `src/lib.rs` (~300 lines of hand-maintained types) is replaced by
+  `include_str!("../bindings/index.d.ts")`, so the wasm-bindgen-
+  generated `pkg/*.d.ts` and the importable `bindings/index.d.ts` are
+  now the **same** types -- no duplication, no drift. JS consumers
+  using only the wasm-bindgen-generated `.d.ts` now see the same new
+  names that direct-bundle consumers got in Phase 1
+  (`DirectiveJson`, `PostingJson`, etc.). One additional rename: the
+  Rust DTO `Ledger` now emits `LedgerJson` on the TS side to avoid
+  colliding with the wasm-bindgen `Ledger` class (the runtime
+  wrapper). `LedgerJson` is the wire shape returned by `parse(...)`
+  and stored on `ParseResult.ledger`; `Ledger` is the class
+  instantiated via `Ledger.fromFiles(...)`.
+
+  Remaining inline TS in `src/lib.rs`: only the wasm-bindgen-managed
+  surface that **can't** go in the bundle -- the `ParsedLedger` and
+  `Ledger` classes, the `FileMap` utility type, and the standalone
+  function signatures (`parseMultiFile`, `validateMultiFile`,
+  `queryMultiFile`, `hashSources`). ~150 lines of necessary glue,
+  down from ~480.
 
 ## [0.13.0](https://github.com/rustledger/rustledger/compare/v0.12.0...v0.13.0) - 2026-04-21
 

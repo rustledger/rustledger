@@ -34,9 +34,19 @@ pub struct ParseResult {
 }
 
 /// A parsed Beancount ledger.
+///
+/// **Renamed to `LedgerJson` on the TS side** to avoid colliding with
+/// the wasm-bindgen-exported `Ledger` class (the runtime wrapper that
+/// owns the parsed data). `LedgerJson` is the wire shape; `Ledger` is
+/// the class consumers instantiate via `Ledger.fromFiles(...)`. The
+/// Rust struct keeps the shorter name for internal use; the rename
+/// is applied via `#[ts(rename = ...)]`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
-#[cfg_attr(feature = "ts-export", ts(export, export_to = "bindings/"))]
+#[cfg_attr(
+    feature = "ts-export",
+    ts(export, export_to = "bindings/", rename = "LedgerJson")
+)]
 pub struct Ledger {
     /// All directives in the ledger.
     pub directives: Vec<DirectiveJson>,

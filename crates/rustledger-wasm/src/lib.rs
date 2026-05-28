@@ -73,308 +73,28 @@ use wasm_bindgen::prelude::*;
 // =============================================================================
 // TypeScript Type Definitions
 // =============================================================================
+//
+// **DTO types** come from the ts-rs-generated bundle at
+// `crates/rustledger-wasm/bindings/index.d.ts` (ADR-0004 Phase 2 / #1224).
+// We embed the bundle via `include_str!` so wasm-bindgen's
+// `pkg/*.d.ts` AND the hand-importable `bindings/index.d.ts` are the
+// same types -- no duplication, no drift.
+//
+// **Runtime classes and standalone function signatures** live in the
+// second `typescript_custom_section` below. These can't go in the
+// bundle (they're wasm-bindgen-managed, not serde DTOs). They
+// reference the bundle types by their generated names (`DirectiveJson`,
+// `LedgerJson`, etc.). If you rename a DTO via `#[ts(rename = ...)]`
+// in `src/types.rs`, update the references here too.
+//
+// Run `scripts/regen-ts-bindings.sh` after touching any DTO; the
+// `ts-bindings-fresh` CI job fails if the bundle drifts.
+
+#[wasm_bindgen(typescript_custom_section)]
+const TS_TYPES_DTOS: &'static str = include_str!("../bindings/index.d.ts");
 
 #[wasm_bindgen(typescript_custom_section)]
 const TS_TYPES: &'static str = r#"
-/** Error severity level. */
-export type Severity = 'error' | 'warning';
-
-/** Error with source location information. */
-export interface BeancountError {
-    message: string;
-    line?: number;
-    column?: number;
-    severity: Severity;
-}
-
-/** Amount with number and currency. */
-export interface Amount {
-    number: string;
-    currency: string;
-}
-
-/**
- * Posting cost number. Tagged enum mirroring `rustledger_core::CostNumber`.
- * Discriminate via the `kind` field; never probe for present-but-null fields.
- */
-export type CostNumber =
-    | { kind: 'per_unit'; value: string }
-    | { kind: 'total'; value: string }
-    | { kind: 'per_unit_from_total'; per_unit: string; total: string };
-
-/** Posting cost specification. */
-export interface PostingCost {
-    number?: CostNumber;
-    currency?: string;
-    date?: string;
-    label?: string;
-}
-
-/**
- * Metadata value (issue #1168). Untagged union: branch on `typeof v`
- * (`'string'` / `'boolean'`) or object shape (`'number' in v` → Amount).
- */
-export type MetaValueJson =
-    | string
-    | boolean
-    | { number: string; currency: string }
-    | null;
-
-/**
- * Tagged-union value used in the `custom` directive's `values` field
- * (issue #1207). Preserves the host `MetaValue` variant tag — unlike
- * `MetaValueJson`, which collapses `Date`/`String`/`Account` to a
- * single bare-string shape. Mirrors FFI-WASI's `TypedValue` exactly.
- *
- * Declared as a discriminated union so `switch (v.type)` (or
- * `if (v.type === 'amount')`) narrows `v.value` to the right payload
- * shape — see `tsc` issue: a single interface with union types on
- * both fields gives the cross-product, not the narrowing relationship.
- */
-export type TypedValue =
-    | { type: 'string'; value: string }
-    | { type: 'account'; value: string }
-    | { type: 'currency'; value: string }
-    | { type: 'tag'; value: string }
-    | { type: 'link'; value: string }
-    | { type: 'date'; value: string }
-    | { type: 'number'; value: string }
-    | { type: 'bool'; value: boolean }
-    | { type: 'amount'; value: { number: string; currency: string } }
-    | { type: 'null'; value: null };
-
-/** A posting within a transaction. */
-export interface Posting {
-    account: string;
-    units?: Amount;
-    cost?: PostingCost;
-    price?: Amount;
-    /** Posting flag (e.g. "!" for pending). */
-    flag?: string;
-    /** Posting-level metadata (issue #1168). */
-    meta?: Record<string, MetaValueJson>;
-}
-
-/** Base directive with date. */
-interface BaseDirective {
-    date: string;
-    /** Directive-level metadata (issue #1168). */
-    meta?: Record<string, MetaValueJson>;
-}
-
-/** Transaction directive. */
-export interface TransactionDirective extends BaseDirective {
-    type: 'transaction';
-    flag: string;
-    payee?: string;
-    narration?: string;
-    tags: string[];
-    links: string[];
-    /**
-     * Postings on this transaction. The host stores each posting in a
-     * `Spanned<Posting>` wrapper internally (with byte-offset source
-     * location), but the JS-facing shape is intentionally flattened to
-     * plain `Posting` — JS callers do not need source location for the
-     * current API surface. If source spans are ever exposed to JS, this
-     * type should change to `(Posting & { span?: ... })[]`.
-     */
-    postings: Posting[];
-}
-
-/** Balance assertion directive. */
-export interface BalanceDirective extends BaseDirective {
-    type: 'balance';
-    account: string;
-    amount: Amount;
-    /** Explicit tolerance (e.g. "0.01" from `~ 0.01`), stringified for precision. */
-    tolerance?: string;
-}
-
-/** Open account directive. */
-export interface OpenDirective extends BaseDirective {
-    type: 'open';
-    account: string;
-    currencies: string[];
-    booking?: string;
-}
-
-/** Close account directive. */
-export interface CloseDirective extends BaseDirective {
-    type: 'close';
-    account: string;
-}
-
-/**
- * All directive types. Named variants inherit `date` and `meta?` from
- * `BaseDirective`; the inline shapes below don't extend it, so they
- * spell out both fields explicitly for parity with the wire shape.
- */
-export type Directive =
-    | TransactionDirective
-    | BalanceDirective
-    | OpenDirective
-    | CloseDirective
-    | { type: 'commodity'; date: string; currency: string; meta?: Record<string, MetaValueJson> }
-    | { type: 'pad'; date: string; account: string; source_account: string; meta?: Record<string, MetaValueJson> }
-    | { type: 'event'; date: string; event_type: string; value: string; meta?: Record<string, MetaValueJson> }
-    | { type: 'note'; date: string; account: string; comment: string; meta?: Record<string, MetaValueJson> }
-    | { type: 'document'; date: string; account: string; path: string; tags?: string[]; links?: string[]; meta?: Record<string, MetaValueJson> }
-    | { type: 'price'; date: string; currency: string; amount: Amount; meta?: Record<string, MetaValueJson> }
-    | { type: 'query'; date: string; name: string; query_string: string; meta?: Record<string, MetaValueJson> }
-    | { type: 'custom'; date: string; custom_type: string; values?: TypedValue[]; meta?: Record<string, MetaValueJson> };
-
-/** Ledger options. */
-export interface LedgerOptions {
-    operating_currencies: string[];
-    title?: string;
-}
-
-/** Parsed ledger. */
-export interface Ledger {
-    directives: Directive[];
-    options: LedgerOptions;
-}
-
-/** Result of parsing a Beancount file. */
-export interface ParseResult {
-    ledger?: Ledger;
-    errors: BeancountError[];
-}
-
-/** Result of validation. */
-export interface ValidationResult {
-    valid: boolean;
-    errors: BeancountError[];
-}
-
-/** Cell value in query results. */
-export type CellValue =
-    | null
-    | string
-    | number
-    | boolean
-    | Amount
-    | { units: Amount; cost?: { number: string; currency: string; date?: string; label?: string } }
-    | { positions: Array<{ units: Amount }> }
-    | string[];
-
-/** Result of a BQL query. */
-export interface QueryResult {
-    columns: string[];
-    rows: CellValue[][];
-    errors: BeancountError[];
-}
-
-/** Result of formatting. */
-export interface FormatResult {
-    formatted?: string;
-    errors: BeancountError[];
-}
-
-/** Result of pad expansion. */
-export interface PadResult {
-    directives: Directive[];
-    padding_transactions: Directive[];
-    errors: BeancountError[];
-}
-
-/** Result of running a plugin. */
-export interface PluginResult {
-    directives: Directive[];
-    errors: BeancountError[];
-}
-
-/** Plugin information. */
-export interface PluginInfo {
-    name: string;
-    description: string;
-}
-
-/** BQL completion suggestion. */
-export interface Completion {
-    text: string;
-    category: string;
-    description?: string;
-}
-
-/** Result of BQL completion request. */
-export interface CompletionResult {
-    completions: Completion[];
-    context: string;
-}
-
-// =============================================================================
-// Editor Integration Types (LSP-like features)
-// =============================================================================
-
-/** The kind of a completion item. */
-export type EditorCompletionKind = 'keyword' | 'account' | 'accountsegment' | 'currency' | 'payee' | 'date' | 'text';
-
-/** A completion item for Beancount source editing. */
-export interface EditorCompletion {
-    label: string;
-    kind: EditorCompletionKind;
-    detail?: string;
-    insertText?: string;
-}
-
-/** Result of an editor completion request. */
-export interface EditorCompletionResult {
-    completions: EditorCompletion[];
-    context: string;
-}
-
-/** A range in the document. */
-export interface EditorRange {
-    start_line: number;
-    start_character: number;
-    end_line: number;
-    end_character: number;
-}
-
-/** Hover information for a symbol. */
-export interface EditorHoverInfo {
-    contents: string;
-    range?: EditorRange;
-}
-
-/** A location in the document. */
-export interface EditorLocation {
-    line: number;
-    character: number;
-}
-
-/** The kind of a symbol. */
-export type SymbolKind = 'transaction' | 'account' | 'balance' | 'commodity' | 'posting' | 'pad' | 'event' | 'note' | 'document' | 'price' | 'query' | 'custom';
-
-/** A document symbol for the outline view. */
-export interface EditorDocumentSymbol {
-    name: string;
-    detail?: string;
-    kind: SymbolKind;
-    range: EditorRange;
-    children?: EditorDocumentSymbol[];
-    deprecated?: boolean;
-}
-
-/** The kind of reference. */
-export type ReferenceKind = 'account' | 'currency' | 'payee';
-
-/** A reference to a symbol in the document. */
-export interface EditorReference {
-    range: EditorRange;
-    kind: ReferenceKind;
-    is_definition: boolean;
-    context?: string;
-}
-
-/** Result of a find-references request. */
-export interface EditorReferencesResult {
-    symbol: string;
-    kind: ReferenceKind;
-    references: EditorReference[];
-}
-
 /**
  * A parsed and validated ledger that caches the parse result.
  * Use this class when you need to perform multiple operations on the same
@@ -397,7 +117,7 @@ export class ParsedLedger {
     getValidationErrors(): BeancountError[];
 
     /** Get the parsed directives. */
-    getDirectives(): Directive[];
+    getDirectives(): DirectiveJson[];
 
     /** Get the ledger options. */
     getOptions(): LedgerOptions;
@@ -468,7 +188,7 @@ export class Ledger {
     getErrors(): BeancountError[];
 
     /** Get the parsed directives. */
-    getDirectives(): Directive[];
+    getDirectives(): DirectiveJson[];
 
     /** Get the ledger options. */
     getOptions(): LedgerOptions;

@@ -364,8 +364,15 @@ errors: Array<BeancountError>, };
 
 /**
  * A parsed Beancount ledger.
+ *
+ * **Renamed to `LedgerJson` on the TS side** to avoid colliding with
+ * the wasm-bindgen-exported `Ledger` class (the runtime wrapper that
+ * owns the parsed data). `LedgerJson` is the wire shape; `Ledger` is
+ * the class consumers instantiate via `Ledger.fromFiles(...)`. The
+ * Rust struct keeps the shorter name for internal use; the rename
+ * is applied via `#[ts(rename = ...)]`.
  */
-export type Ledger = { 
+export type LedgerJson = { 
 /**
  * All directives in the ledger.
  */
@@ -459,7 +466,7 @@ export type ParseResult = {
  * is always present on the wire (TS: `Ledger | null`, not
  * `ledger?`).
  */
-ledger: Ledger | null, 
+ledger: LedgerJson | null, 
 /**
  * Parse errors.
  */

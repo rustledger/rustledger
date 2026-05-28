@@ -2,12 +2,16 @@
 
 ## Status
 
-Accepted — Phase 1 (May 2026). Spike landed in #1220; Phase 1
-implementation ships the per-DTO derives, the
+Accepted — Phase 1 + Phase 2 (May 2026). Spike landed in #1220;
+Phase 1 (#1223) shipped the per-DTO derives, the
 `scripts/regen-ts-bindings.sh` post-process, the generated
-`bindings/index.d.ts`, and the CI freshness gate. Phase 2 (replacing
-the inline `typescript_custom_section` with `include_str!` of the
-generated bundle) is deferred to a follow-up issue.
+`bindings/index.d.ts`, and the CI freshness gate. Phase 2 (this PR)
+replaces the inline `typescript_custom_section` DTO block in
+`src/lib.rs` with `include_str!("../bindings/index.d.ts")` so the
+wasm-bindgen-generated `pkg/*.d.ts` and the importable
+`bindings/index.d.ts` are the same types. The inline TS in
+`src/lib.rs` shrinks to ~150 lines covering only the wasm-bindgen-
+managed runtime classes and standalone function signatures.
 
 ## Context
 

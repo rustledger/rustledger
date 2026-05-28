@@ -285,9 +285,11 @@ fn open_booking_is_clean_string_in_js() {
 
 #[wasm_bindgen_test]
 fn custom_directive_values_exposed_1168() {
-    // Pre-#1168 the `Custom` directive's positional values were
-    // dropped entirely from JSON output. Pin the new wire shape:
-    // a JS array, preserving order and per-arg type.
+    // Pre-#1168: the `Custom` directive's positional values were
+    // dropped entirely from JSON output.
+    // Pre-#1207: present but emitted raw (lossy for primitive variants).
+    // Post-#1207: each value is a tagged-union `{type, value}` so the
+    // host `MetaValue` variant tag survives the wire crossing.
     let source = r#"2024-01-01 custom "budget" "monthly" TRUE
 "#;
     let result = rustledger_wasm::parse(source).expect("parse should not throw");
@@ -306,10 +308,31 @@ fn custom_directive_values_exposed_1168() {
         2,
         "Custom values array must carry both positional args",
     );
-    assert_eq!(values_arr.get(0).as_string().as_deref(), Some("monthly"));
+
+    // First value: `"monthly"` parses as MetaValue::String — tagged
+    // as `{type: "string", value: "monthly"}` on the wire.
+    let first = values_arr.get(0);
     assert_eq!(
-        values_arr.get(1),
+        get_field(&first, "type"),
+        JsValue::from_str("string"),
+        "first value's variant tag must be `string`: {first:?}",
+    );
+    assert_eq!(
+        get_field(&first, "value").as_string().as_deref(),
+        Some("monthly"),
+    );
+
+    // Second value: `TRUE` parses as MetaValue::Bool — tagged as
+    // `{type: "bool", value: true}` on the wire.
+    let second = values_arr.get(1);
+    assert_eq!(
+        get_field(&second, "type"),
+        JsValue::from_str("bool"),
+        "second value's variant tag must be `bool`: {second:?}",
+    );
+    assert_eq!(
+        get_field(&second, "value"),
         JsValue::TRUE,
-        "TRUE arg must be a JS boolean",
+        "TRUE arg must surface as a JS boolean inside `value`",
     );
 }

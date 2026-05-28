@@ -191,6 +191,14 @@ pub enum InputEntry {
         date: String,
         account: String,
         path: String,
+        /// Tags attached to the document directive (issue #1144 added
+        /// these to core `Document`; plumbed through to the RPC input
+        /// in #1213).
+        #[serde(default)]
+        tags: Vec<String>,
+        /// Links attached to the document directive (issue #1144).
+        #[serde(default)]
+        links: Vec<String>,
         #[serde(default)]
         meta: HashMap<String, serde_json::Value>,
     },
@@ -526,6 +534,8 @@ pub fn input_entry_to_directive(entry: &InputEntry) -> Result<Directive, String>
             date,
             account,
             path,
+            tags,
+            links,
             meta,
         } => {
             let date = date
@@ -535,8 +545,8 @@ pub fn input_entry_to_directive(entry: &InputEntry) -> Result<Directive, String>
                 date,
                 account: account.clone().into(),
                 path: path.clone(),
-                tags: Vec::new(),
-                links: Vec::new(),
+                tags: tags.iter().map(|t| t.clone().into()).collect(),
+                links: links.iter().map(|l| l.clone().into()).collect(),
                 meta: json_map_to_metadata(meta),
             }))
         }
@@ -799,6 +809,54 @@ mod tests {
             "malformed posting units must surface a parse error"
         );
         assert!(result.unwrap_err().contains("posting units"));
+    }
+
+    /// Regression for #1213: `Document` directives constructed via
+    /// the RPC input side must carry `tags` and `links` through to
+    /// the resulting core `Document`. Pre-#1213 the bridge hardcoded
+    /// empty `Vec::new()` even when the caller supplied the fields.
+    #[test]
+    fn document_tags_and_links_round_trip_1213() {
+        let entry_json = r#"{
+            "type": "document",
+            "date": "2024-01-15",
+            "account": "Assets:Bank",
+            "path": "statements/2024-01.pdf",
+            "tags": ["statement", "bank"],
+            "links": ["inv-2024-01"],
+            "meta": {}
+        }"#;
+        let entry: InputEntry = serde_json::from_str(entry_json).unwrap();
+        let directive = input_entry_to_directive(&entry).expect("valid document must convert");
+        let Directive::Document(doc) = directive else {
+            panic!("expected Document directive");
+        };
+        assert_eq!(doc.tags.len(), 2);
+        assert_eq!(doc.tags[0].to_string(), "statement");
+        assert_eq!(doc.tags[1].to_string(), "bank");
+        assert_eq!(doc.links.len(), 1);
+        assert_eq!(doc.links[0].to_string(), "inv-2024-01");
+    }
+
+    /// Backward-compat: a Document payload without `tags`/`links`
+    /// fields (the pre-#1213 RPC clients still in the wild) must
+    /// continue to deserialize as empty vectors via `serde(default)`.
+    #[test]
+    fn document_tags_and_links_default_to_empty_1213() {
+        let entry_json = r#"{
+            "type": "document",
+            "date": "2024-01-15",
+            "account": "Assets:Bank",
+            "path": "statements/2024-01.pdf",
+            "meta": {}
+        }"#;
+        let entry: InputEntry = serde_json::from_str(entry_json).unwrap();
+        let directive = input_entry_to_directive(&entry).expect("legacy payload must convert");
+        let Directive::Document(doc) = directive else {
+            panic!("expected Document directive");
+        };
+        assert!(doc.tags.is_empty());
+        assert!(doc.links.is_empty());
     }
 
     #[test]

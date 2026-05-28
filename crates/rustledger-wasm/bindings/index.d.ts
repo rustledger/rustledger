@@ -5,20 +5,19 @@
 // after changing any DTO; CI fails if this file drifts from the
 // generator output. See ADR-0004 (#1218) for the design.
 
-
 /**
  * Amount value for serialization.
  */
-export type AmountValue = { 
-/**
- * The number as a string.
- */
-number: string, 
-/**
- * The currency.
- */
-currency: string, };
-
+export type AmountValue = {
+  /**
+   * The number as a string.
+   */
+  number: string;
+  /**
+   * The currency.
+   */
+  currency: string;
+};
 
 /**
  * An error with source location.
@@ -28,72 +27,87 @@ currency: string, };
  * `Error` name for internal use; the rename is applied via
  * `#[ts(rename = ...)]` so consumers see a non-shadowing name.
  */
-export type BeancountError = { 
-/**
- * Error message.
- */
-message: string, 
-/**
- * Line number (1-based). `null` when the error has no source
- * location (e.g. validation errors not tied to a span).
- */
-line: number | null, 
-/**
- * Column number (1-based). `null` when the error has no source
- * location.
- */
-column: number | null, 
-/**
- * Error severity.
- */
-severity: Severity, };
-
+export type BeancountError = {
+  /**
+   * Error message.
+   */
+  message: string;
+  /**
+   * Line number (1-based). `null` when the error has no source
+   * location (e.g. validation errors not tied to a span).
+   */
+  line: number | null;
+  /**
+   * Column number (1-based). `null` when the error has no source
+   * location.
+   */
+  column: number | null;
+  /**
+   * Error severity.
+   */
+  severity: Severity;
+};
 
 /**
  * A cell value that serializes properly to JavaScript.
  *
  * Uses untagged serialization to produce clean JSON output.
  */
-export type CellValue = null | string | number | boolean | { number: string, currency: string, } | { units: AmountValue, cost?: CostValue, } | { positions: Array<PositionValue>, } | Array<string> | Array<CellValue> | { [key in string]: CellValue };
-
+export type CellValue =
+  | null
+  | string
+  | number
+  | boolean
+  | { number: string; currency: string }
+  | { units: AmountValue; cost?: CostValue }
+  | { positions: Array<PositionValue> }
+  | Array<string>
+  | Array<CellValue>
+  | { [key in string]: CellValue };
 
 /**
  * BQL completion suggestion for WASM.
  */
-export type CompletionJson = { 
-/**
- * The completion text to insert.
- */
-text: string, 
-/**
- * Category: keyword, function, column, operator, literal.
- */
-category: string, 
-/**
- * Optional description/documentation.
- */
-description?: string, };
-
+export type CompletionJson = {
+  /**
+   * The completion text to insert.
+   */
+  text: string;
+  /**
+   * Category: keyword, function, column, operator, literal.
+   */
+  category: string;
+  /**
+   * Optional description/documentation.
+   */
+  description?: string;
+};
 
 /**
  * The kind of a completion item.
  */
-export type CompletionKind = "keyword" | "account" | "accountsegment" | "currency" | "payee" | "date" | "text";
-
+export type CompletionKind =
+  | "keyword"
+  | "account"
+  | "accountsegment"
+  | "currency"
+  | "payee"
+  | "date"
+  | "text";
 
 /**
  * Result of BQL completion request.
  */
-export type CompletionResultJson = { 
-/**
- * List of completions.
- */
-completions: Array<CompletionJson>, 
-/**
- * Current context for debugging.
- */
-context: string, };
-
+export type CompletionResultJson = {
+  /**
+   * List of completions.
+   */
+  completions: Array<CompletionJson>;
+  /**
+   * Current context for debugging.
+   */
+  context: string;
+};
 
 /**
  * Wire-format of the numeric component of a [`PostingCostJson`].
@@ -102,46 +116,54 @@ context: string, };
  * see the same mutual exclusion the host enforces. Use the `kind`
  * field as the discriminator.
  */
-export type CostNumberJson = { "kind": "per_unit", 
-/**
- * Per-unit value.
- */
-value: string, } | { "kind": "total", 
-/**
- * Total value.
- */
-value: string, } | { "kind": "per_unit_from_total", 
-/**
- * Derived per-unit.
- */
-per_unit: string, 
-/**
- * Source total.
- */
-total: string, };
-
+export type CostNumberJson =
+  | {
+      kind: "per_unit";
+      /**
+       * Per-unit value.
+       */
+      value: string;
+    }
+  | {
+      kind: "total";
+      /**
+       * Total value.
+       */
+      value: string;
+    }
+  | {
+      kind: "per_unit_from_total";
+      /**
+       * Derived per-unit.
+       */
+      per_unit: string;
+      /**
+       * Source total.
+       */
+      total: string;
+    };
 
 /**
  * Cost value for serialization.
  */
-export type CostValue = { 
-/**
- * Cost per unit.
- */
-number: string, 
-/**
- * Cost currency.
- */
-currency: string, 
-/**
- * Acquisition date.
- */
-date?: string, 
-/**
- * Lot label.
- */
-label?: string, };
-
+export type CostValue = {
+  /**
+   * Cost per unit.
+   */
+  number: string;
+  /**
+   * Cost currency.
+   */
+  currency: string;
+  /**
+   * Acquisition date.
+   */
+  date?: string;
+  /**
+   * Lot label.
+   */
+  label?: string;
+};
 
 /**
  * A directive in JSON-serializable form.
@@ -154,213 +176,286 @@ label?: string, };
  * as an absent field, so existing consumers continue to see the
  * pre-#1168 shape on directives without explicit metadata.
  */
-export type DirectiveJson = { "type": "transaction", date: string, flag: string, 
-/**
- * Optional payee. Mirrors FFI-WASI's shape: absent on the
- * wire when `None` (closes #1221).
- */
-payee?: string, 
-/**
- * Optional narration. Empty narrations are normalized to
- * `None` in `convert.rs` so the field is absent on the wire
- * in the empty case -- matches FFI-WASI's pattern (#1221).
- */
-narration?: string, tags: Array<string>, links: Array<string>, postings: Array<PostingJson>, meta?: { [key in string]: MetaValueJson }, } | { "type": "balance", date: string, account: string, amount: AmountValue, 
-/**
- * Explicit tolerance from the `~ 0.01` annotation, stringified.
- * Mirrors `rustledger_core::Balance::tolerance`.
- */
-tolerance?: string, meta?: { [key in string]: MetaValueJson }, } | { "type": "open", date: string, account: string, currencies: Array<string>, booking?: string, meta?: { [key in string]: MetaValueJson }, } | { "type": "close", date: string, account: string, meta?: { [key in string]: MetaValueJson }, } | { "type": "commodity", date: string, currency: string, meta?: { [key in string]: MetaValueJson }, } | { "type": "pad", date: string, account: string, source_account: string, meta?: { [key in string]: MetaValueJson }, } | { "type": "event", date: string, event_type: string, value: string, meta?: { [key in string]: MetaValueJson }, } | { "type": "note", date: string, account: string, comment: string, meta?: { [key in string]: MetaValueJson }, } | { "type": "document", date: string, account: string, path: string, 
-/**
- * Tags attached to the document directive (issue #1144).
- */
-tags?: Array<string>, 
-/**
- * Links attached to the document directive (issue #1144).
- */
-links?: Array<string>, meta?: { [key in string]: MetaValueJson }, } | { "type": "price", date: string, currency: string, amount: AmountValue, meta?: { [key in string]: MetaValueJson }, } | { "type": "query", date: string, name: string, query_string: string, meta?: { [key in string]: MetaValueJson }, } | { "type": "custom", date: string, custom_type: string, 
-/**
- * Positional values after the `custom TYPE` keyword. Each
- * entry is a [`TypedValueJson`] (`{type, value}`) — the
- * tagged shape preserves the host `MetaValue` variant tag so
- * JS consumers can distinguish a `Date` from a `String` from
- * an `Account` (closes #1207). Mirrors FFI-WASI's
- * `Vec<TypedValue>` exactly.
- */
-values?: Array<TypedValueJson>, meta?: { [key in string]: MetaValueJson }, };
-
+export type DirectiveJson =
+  | {
+      type: "transaction";
+      date: string;
+      flag: string;
+      /**
+       * Optional payee. Mirrors FFI-WASI's shape: absent on the
+       * wire when `None` (closes #1221).
+       */
+      payee?: string;
+      /**
+       * Optional narration. Empty narrations are normalized to
+       * `None` in `convert.rs` so the field is absent on the wire
+       * in the empty case -- matches FFI-WASI's pattern (#1221).
+       */
+      narration?: string;
+      tags: Array<string>;
+      links: Array<string>;
+      postings: Array<PostingJson>;
+      meta?: { [key in string]: MetaValueJson };
+    }
+  | {
+      type: "balance";
+      date: string;
+      account: string;
+      amount: AmountValue;
+      /**
+       * Explicit tolerance from the `~ 0.01` annotation, stringified.
+       * Mirrors `rustledger_core::Balance::tolerance`.
+       */
+      tolerance?: string;
+      meta?: { [key in string]: MetaValueJson };
+    }
+  | {
+      type: "open";
+      date: string;
+      account: string;
+      currencies: Array<string>;
+      booking?: string;
+      meta?: { [key in string]: MetaValueJson };
+    }
+  | { type: "close"; date: string; account: string; meta?: { [key in string]: MetaValueJson } }
+  | { type: "commodity"; date: string; currency: string; meta?: { [key in string]: MetaValueJson } }
+  | {
+      type: "pad";
+      date: string;
+      account: string;
+      source_account: string;
+      meta?: { [key in string]: MetaValueJson };
+    }
+  | {
+      type: "event";
+      date: string;
+      event_type: string;
+      value: string;
+      meta?: { [key in string]: MetaValueJson };
+    }
+  | {
+      type: "note";
+      date: string;
+      account: string;
+      comment: string;
+      meta?: { [key in string]: MetaValueJson };
+    }
+  | {
+      type: "document";
+      date: string;
+      account: string;
+      path: string;
+      /**
+       * Tags attached to the document directive (issue #1144).
+       */
+      tags?: Array<string>;
+      /**
+       * Links attached to the document directive (issue #1144).
+       */
+      links?: Array<string>;
+      meta?: { [key in string]: MetaValueJson };
+    }
+  | {
+      type: "price";
+      date: string;
+      currency: string;
+      amount: AmountValue;
+      meta?: { [key in string]: MetaValueJson };
+    }
+  | {
+      type: "query";
+      date: string;
+      name: string;
+      query_string: string;
+      meta?: { [key in string]: MetaValueJson };
+    }
+  | {
+      type: "custom";
+      date: string;
+      custom_type: string;
+      /**
+       * Positional values after the `custom TYPE` keyword. Each
+       * entry is a [`TypedValueJson`] (`{type, value}`) — the
+       * tagged shape preserves the host `MetaValue` variant tag so
+       * JS consumers can distinguish a `Date` from a `String` from
+       * an `Account` (closes #1207). Mirrors FFI-WASI's
+       * `Vec<TypedValue>` exactly.
+       */
+      values?: Array<TypedValueJson>;
+      meta?: { [key in string]: MetaValueJson };
+    };
 
 /**
  * A completion item for Beancount source editing.
  */
-export type EditorCompletion = { 
-/**
- * The label to display in the completion list.
- */
-label: string, 
-/**
- * The kind of completion item.
- */
-kind: CompletionKind, 
-/**
- * A human-readable string with additional information.
- */
-detail?: string, 
-/**
- * The text to insert when this completion is selected.
- */
-insert_text?: string, };
-
+export type EditorCompletion = {
+  /**
+   * The label to display in the completion list.
+   */
+  label: string;
+  /**
+   * The kind of completion item.
+   */
+  kind: CompletionKind;
+  /**
+   * A human-readable string with additional information.
+   */
+  detail?: string;
+  /**
+   * The text to insert when this completion is selected.
+   */
+  insert_text?: string;
+};
 
 /**
  * Result of a completion request.
  */
-export type EditorCompletionResult = { 
-/**
- * The completions.
- */
-completions: Array<EditorCompletion>, 
-/**
- * The detected context.
- */
-context: string, };
-
+export type EditorCompletionResult = {
+  /**
+   * The completions.
+   */
+  completions: Array<EditorCompletion>;
+  /**
+   * The detected context.
+   */
+  context: string;
+};
 
 /**
  * A document symbol for the outline view.
  */
-export type EditorDocumentSymbol = { 
-/**
- * The name of this symbol.
- */
-name: string, 
-/**
- * More detail for this symbol.
- */
-detail?: string, 
-/**
- * The kind of this symbol.
- */
-kind: SymbolKind, 
-/**
- * The range enclosing this symbol.
- */
-range: EditorRange, 
-/**
- * Children of this symbol (e.g., postings in a transaction).
- */
-children?: Array<EditorDocumentSymbol>, 
-/**
- * Whether this symbol is deprecated (e.g., closed account).
- */
-deprecated?: boolean, };
-
+export type EditorDocumentSymbol = {
+  /**
+   * The name of this symbol.
+   */
+  name: string;
+  /**
+   * More detail for this symbol.
+   */
+  detail?: string;
+  /**
+   * The kind of this symbol.
+   */
+  kind: SymbolKind;
+  /**
+   * The range enclosing this symbol.
+   */
+  range: EditorRange;
+  /**
+   * Children of this symbol (e.g., postings in a transaction).
+   */
+  children?: Array<EditorDocumentSymbol>;
+  /**
+   * Whether this symbol is deprecated (e.g., closed account).
+   */
+  deprecated?: boolean;
+};
 
 /**
  * Hover information for a symbol.
  */
-export type EditorHoverInfo = { 
-/**
- * The hover content (Markdown formatted).
- */
-contents: string, 
-/**
- * The range of the hovered symbol (optional).
- */
-range?: EditorRange, };
-
+export type EditorHoverInfo = {
+  /**
+   * The hover content (Markdown formatted).
+   */
+  contents: string;
+  /**
+   * The range of the hovered symbol (optional).
+   */
+  range?: EditorRange;
+};
 
 /**
  * A location in the document.
  */
-export type EditorLocation = { 
-/**
- * Line number (0-based).
- */
-line: number, 
-/**
- * Character offset (0-based).
- */
-character: number, };
-
+export type EditorLocation = {
+  /**
+   * Line number (0-based).
+   */
+  line: number;
+  /**
+   * Character offset (0-based).
+   */
+  character: number;
+};
 
 /**
  * A range in the document.
  */
-export type EditorRange = { 
-/**
- * Start line (0-based).
- */
-start_line: number, 
-/**
- * Start character (0-based).
- */
-start_character: number, 
-/**
- * End line (0-based).
- */
-end_line: number, 
-/**
- * End character (0-based).
- */
-end_character: number, };
-
+export type EditorRange = {
+  /**
+   * Start line (0-based).
+   */
+  start_line: number;
+  /**
+   * Start character (0-based).
+   */
+  start_character: number;
+  /**
+   * End line (0-based).
+   */
+  end_line: number;
+  /**
+   * End character (0-based).
+   */
+  end_character: number;
+};
 
 /**
  * A reference to a symbol in the document.
  */
-export type EditorReference = { 
-/**
- * The range of this reference.
- */
-range: EditorRange, 
-/**
- * The kind of reference.
- */
-kind: ReferenceKind, 
-/**
- * Whether this is the defining occurrence.
- */
-is_definition: boolean, 
-/**
- * Human-readable context (e.g., directive type).
- */
-context?: string, };
-
+export type EditorReference = {
+  /**
+   * The range of this reference.
+   */
+  range: EditorRange;
+  /**
+   * The kind of reference.
+   */
+  kind: ReferenceKind;
+  /**
+   * Whether this is the defining occurrence.
+   */
+  is_definition: boolean;
+  /**
+   * Human-readable context (e.g., directive type).
+   */
+  context?: string;
+};
 
 /**
  * Result of a find-references request.
  */
-export type EditorReferencesResult = { 
-/**
- * The symbol being searched for.
- */
-symbol: string, 
-/**
- * The kind of symbol.
- */
-kind: ReferenceKind, 
-/**
- * All references found.
- */
-references: Array<EditorReference>, };
-
+export type EditorReferencesResult = {
+  /**
+   * The symbol being searched for.
+   */
+  symbol: string;
+  /**
+   * The kind of symbol.
+   */
+  kind: ReferenceKind;
+  /**
+   * All references found.
+   */
+  references: Array<EditorReference>;
+};
 
 /**
  * Result of formatting.
  */
-export type FormatResult = { 
-/**
- * Formatted source (if successful). Emitted as JSON `null` on
- * failure; no `skip_serializing_if`, so the field is always
- * present on the wire.
- */
-formatted: string | null, 
-/**
- * Format errors.
- */
-errors: Array<BeancountError>, };
-
+export type FormatResult = {
+  /**
+   * Formatted source (if successful). Emitted as JSON `null` on
+   * failure; no `skip_serializing_if`, so the field is always
+   * present on the wire.
+   */
+  formatted: string | null;
+  /**
+   * Format errors.
+   */
+  errors: Array<BeancountError>;
+};
 
 /**
  * A parsed Beancount ledger.
@@ -372,32 +467,32 @@ errors: Array<BeancountError>, };
  * Rust struct keeps the shorter name for internal use; the rename
  * is applied via `#[ts(rename = ...)]`.
  */
-export type LedgerJson = { 
-/**
- * All directives in the ledger.
- */
-directives: Array<DirectiveJson>, 
+export type LedgerJson = {
+  /**
+   * All directives in the ledger.
+   */
+  directives: Array<DirectiveJson>;
+  /**
+   * Ledger options.
+   */
+  options: LedgerOptions;
+};
+
 /**
  * Ledger options.
  */
-options: LedgerOptions, };
-
-
-/**
- * Ledger options.
- */
-export type LedgerOptions = { 
-/**
- * Operating currencies.
- */
-operating_currencies: Array<string>, 
-/**
- * Ledger title. Emitted as JSON `null` when no title is set
- * (no `skip_serializing_if`; field is always present on the
- * wire). TS: `string | null`, not `title?`.
- */
-title: string | null, };
-
+export type LedgerOptions = {
+  /**
+   * Operating currencies.
+   */
+  operating_currencies: Array<string>;
+  /**
+   * Ledger title. Emitted as JSON `null` when no title is set
+   * (no `skip_serializing_if`; field is always present on the
+   * wire). TS: `string | null`, not `title?`.
+   */
+  title: string | null;
+};
 
 /**
  * Metadata-value wire format for WASM consumers.
@@ -427,193 +522,206 @@ title: string | null, };
  * alias into the wire (see the `meta_value_json_rejects_raw_json_number`
  * test).
  */
-export type MetaValueJson = string | boolean | { 
-/**
- * The decimal quantity, stringified for precision.
- */
-number: string, 
-/**
- * The currency code.
- */
-currency: string, } | null;
-
+export type MetaValueJson =
+  | string
+  | boolean
+  | {
+      /**
+       * The decimal quantity, stringified for precision.
+       */
+      number: string;
+      /**
+       * The currency code.
+       */
+      currency: string;
+    }
+  | null;
 
 /**
  * Result of pad expansion.
  */
-export type PadResult = { 
-/**
- * Directives with pads removed.
- */
-directives: Array<DirectiveJson>, 
-/**
- * Generated padding transactions.
- */
-padding_transactions: Array<DirectiveJson>, 
-/**
- * Pad processing errors.
- */
-errors: Array<BeancountError>, };
-
+export type PadResult = {
+  /**
+   * Directives with pads removed.
+   */
+  directives: Array<DirectiveJson>;
+  /**
+   * Generated padding transactions.
+   */
+  padding_transactions: Array<DirectiveJson>;
+  /**
+   * Pad processing errors.
+   */
+  errors: Array<BeancountError>;
+};
 
 /**
  * Result of parsing a Beancount file.
  */
-export type ParseResult = { 
-/**
- * The parsed ledger (if successful). Emitted as JSON `null` when
- * parsing failed entirely; no `skip_serializing_if`, so the field
- * is always present on the wire (TS: `Ledger | null`, not
- * `ledger?`).
- */
-ledger: LedgerJson | null, 
-/**
- * Parse errors.
- */
-errors: Array<BeancountError>, };
-
+export type ParseResult = {
+  /**
+   * The parsed ledger (if successful). Emitted as JSON `null` when
+   * parsing failed entirely; no `skip_serializing_if`, so the field
+   * is always present on the wire (TS: `Ledger | null`, not
+   * `ledger?`).
+   */
+  ledger: LedgerJson | null;
+  /**
+   * Parse errors.
+   */
+  errors: Array<BeancountError>;
+};
 
 /**
  * Plugin information.
  */
-export type PluginInfo = { 
-/**
- * Plugin name.
- */
-name: string, 
-/**
- * Plugin description.
- */
-description: string, };
-
+export type PluginInfo = {
+  /**
+   * Plugin name.
+   */
+  name: string;
+  /**
+   * Plugin description.
+   */
+  description: string;
+};
 
 /**
  * Result of running a plugin.
  */
-export type PluginResult = { 
-/**
- * Modified directives.
- */
-directives: Array<DirectiveJson>, 
-/**
- * Plugin errors/warnings.
- */
-errors: Array<BeancountError>, };
-
+export type PluginResult = {
+  /**
+   * Modified directives.
+   */
+  directives: Array<DirectiveJson>;
+  /**
+   * Plugin errors/warnings.
+   */
+  errors: Array<BeancountError>;
+};
 
 /**
  * Position value for serialization.
  */
-export type PositionValue = { 
-/**
- * The units.
- */
-units: AmountValue, };
-
+export type PositionValue = {
+  /**
+   * The units.
+   */
+  units: AmountValue;
+};
 
 /**
  * A posting cost in JSON-serializable form.
  */
-export type PostingCostJson = { 
-/**
- * Cost number (per-unit, total, or post-booking pair).
- */
-number?: CostNumberJson, 
-/**
- * Cost currency.
- */
-currency?: string, 
-/**
- * Acquisition date.
- */
-date?: string, 
-/**
- * Lot label.
- */
-label?: string, };
-
+export type PostingCostJson = {
+  /**
+   * Cost number (per-unit, total, or post-booking pair).
+   */
+  number?: CostNumberJson;
+  /**
+   * Cost currency.
+   */
+  currency?: string;
+  /**
+   * Acquisition date.
+   */
+  date?: string;
+  /**
+   * Lot label.
+   */
+  label?: string;
+};
 
 /**
  * A posting in JSON-serializable form.
  */
-export type PostingJson = { 
-/**
- * Account name.
- */
-account: string, 
-/**
- * Units (amount).
- */
-units?: AmountValue, 
-/**
- * Cost specification.
- */
-cost?: PostingCostJson, 
-/**
- * Price annotation.
- */
-price?: AmountValue, 
-/**
- * Posting-level flag (e.g., `"!"` for pending). Mirrors
- * `rustledger_core::Posting::flag`.
- */
-flag?: string, 
-/**
- * Posting-level metadata (issue #1168). Empty when the posting
- * has no explicit metadata.
- */
-meta?: { [key in string]: MetaValueJson }, };
-
+export type PostingJson = {
+  /**
+   * Account name.
+   */
+  account: string;
+  /**
+   * Units (amount).
+   */
+  units?: AmountValue;
+  /**
+   * Cost specification.
+   */
+  cost?: PostingCostJson;
+  /**
+   * Price annotation.
+   */
+  price?: AmountValue;
+  /**
+   * Posting-level flag (e.g., `"!"` for pending). Mirrors
+   * `rustledger_core::Posting::flag`.
+   */
+  flag?: string;
+  /**
+   * Posting-level metadata (issue #1168). Empty when the posting
+   * has no explicit metadata.
+   */
+  meta?: { [key in string]: MetaValueJson };
+};
 
 /**
  * Result of a BQL query.
  */
-export type QueryResult = { 
-/**
- * Column names.
- */
-columns: Array<string>, 
-/**
- * Result rows.
- */
-rows: Array<Array<CellValue>>, 
-/**
- * Query errors.
- */
-errors: Array<BeancountError>, };
-
+export type QueryResult = {
+  /**
+   * Column names.
+   */
+  columns: Array<string>;
+  /**
+   * Result rows.
+   */
+  rows: Array<Array<CellValue>>;
+  /**
+   * Query errors.
+   */
+  errors: Array<BeancountError>;
+};
 
 /**
  * The kind of symbol being referenced.
  */
 export type ReferenceKind = "account" | "currency" | "payee";
 
-
 /**
  * Error severity level.
  */
 export type Severity = "error" | "warning";
 
-
 /**
  * The kind of a symbol.
  */
-export type SymbolKind = "transaction" | "account" | "balance" | "commodity" | "posting" | "pad" | "event" | "note" | "document" | "price" | "query" | "custom";
-
+export type SymbolKind =
+  | "transaction"
+  | "account"
+  | "balance"
+  | "commodity"
+  | "posting"
+  | "pad"
+  | "event"
+  | "note"
+  | "document"
+  | "price"
+  | "query"
+  | "custom";
 
 /**
  * Result of validation.
  */
-export type ValidationResult = { 
-/**
- * Whether the ledger is valid.
- */
-valid: boolean, 
-/**
- * Validation errors.
- */
-errors: Array<BeancountError>, };
-
+export type ValidationResult = {
+  /**
+   * Whether the ledger is valid.
+   */
+  valid: boolean;
+  /**
+   * Validation errors.
+   */
+  errors: Array<BeancountError>;
+};
 
 /**
  * Tagged-union value used in `DirectiveJson::Custom`'s `values` field
@@ -626,13 +734,13 @@ errors: Array<BeancountError>, };
  * narrowing on its own. See ADR-0004 (#1218).
  */
 export type TypedValueJson =
-    | { type: "string"; value: string }
-    | { type: "account"; value: string }
-    | { type: "currency"; value: string }
-    | { type: "tag"; value: string }
-    | { type: "link"; value: string }
-    | { type: "date"; value: string }
-    | { type: "number"; value: string }
-    | { type: "bool"; value: boolean }
-    | { type: "amount"; value: { number: string; currency: string } }
-    | { type: "null"; value: null };
+  | { type: "string"; value: string }
+  | { type: "account"; value: string }
+  | { type: "currency"; value: string }
+  | { type: "tag"; value: string }
+  | { type: "link"; value: string }
+  | { type: "date"; value: string }
+  | { type: "number"; value: string }
+  | { type: "bool"; value: boolean }
+  | { type: "amount"; value: { number: string; currency: string } }
+  | { type: "null"; value: null };

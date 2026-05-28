@@ -370,17 +370,35 @@ describe('Tool Handlers', () => {
   // the value was already a JS object. The path also referenced
   // `parsed.directives` instead of `result.ledger.directives`.
   describe('import_categorize', () => {
-    it('should not throw on valid source (regression for #1227)', () => {
+    it('builds a prompt with the directives traversal working (regression for #1227)', () => {
       const result = handleToolCall('import_categorize', {
         source: SAMPLE_LEDGER,
         narration: 'Coffee',
         date: '2024-01-15',
       });
       expect(result.isError).toBeFalsy();
-      // The handler builds a categorization prompt; surface it as the
-      // first content entry so callers receive a usable LLM prompt.
-      expect(result.content[0].text).toContain('Categorize this');
-      expect(result.content[0].text).toContain('Coffee');
+      // Parse the JSON payload and assert the structural fields the
+      // directives traversal populates. SAMPLE_LEDGER opens
+      // `Expenses:Food` and `Income:Salary`; both should appear in
+      // `known_accounts`. This proves `result.ledger.directives` was
+      // walked correctly, not just that the handler didn't throw.
+      const payload = JSON.parse(result.content[0].text);
+      expect(payload.known_accounts).toContain('Expenses:Food');
+      expect(payload.known_accounts).toContain('Income:Salary');
+      expect(payload.transaction.narration).toBe('Coffee');
+      expect(payload.transaction.date).toBe('2024-01-15');
+    });
+
+    it('returns an error response when parsing fails', () => {
+      // Pre-fix this would have silently produced a categorization
+      // prompt with an empty accounts list; now it surfaces the parser
+      // diagnostic, matching `handleParse`'s behavior.
+      const result = handleToolCall('import_categorize', {
+        source: '@@@ not beancount @@@',
+        narration: 'Coffee',
+        date: '2024-01-15',
+      });
+      expect(result.isError).toBeTruthy();
     });
 
     it('should reject when required args are missing', () => {
@@ -392,15 +410,28 @@ describe('Tool Handlers', () => {
   // Regression for #1227: handleImportReview had the same broken
   // JSON.parse pattern + wrong directive access path.
   describe('import_review', () => {
-    it('should not throw on valid source (regression for #1227)', () => {
+    it('reports zero to review when no import-confidence metadata (regression for #1227)', () => {
       const result = handleToolCall('import_review', {
         source: SAMPLE_LEDGER,
       });
       expect(result.isError).toBeFalsy();
-      // The sample ledger has no import-confidence metadata, so the
-      // review summary should report zero transactions to review.
-      // We only check that the handler completed without throwing.
-      expect(result.content[0].text.length).toBeGreaterThan(0);
+      // SAMPLE_LEDGER has no `import-confidence` metadata, so the
+      // review summary should report zero across the board. Parsing
+      // the JSON payload is what proves the directives walk worked --
+      // pre-fix the handler would have thrown before producing any
+      // output.
+      const payload = JSON.parse(result.content[0].text);
+      expect(payload.total).toBe(0);
+      expect(payload.high_confidence).toBe(0);
+      expect(payload.medium_confidence).toBe(0);
+      expect(payload.low_confidence).toBe(0);
+    });
+
+    it('returns an error response when parsing fails', () => {
+      const result = handleToolCall('import_review', {
+        source: '@@@ not beancount @@@',
+      });
+      expect(result.isError).toBeTruthy();
     });
 
     it('should reject when source arg is missing', () => {

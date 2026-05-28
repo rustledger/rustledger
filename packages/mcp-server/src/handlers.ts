@@ -116,6 +116,9 @@ function handleImportCategorize(
     // intermediate JSON string). Pre-#1227 this called `JSON.parse(result)`,
     // which threw at runtime because the value was already an object.
     const result = rustledger.parse(source);
+    if (result.errors?.length > 0) {
+      return errorResponse(formatErrors(result.errors));
+    }
     const directives = result.ledger?.directives ?? [];
 
     // Extract expense/income accounts from the ledger
@@ -183,6 +186,9 @@ function handleImportReview(args: ToolArguments | undefined): ToolResponse {
     // See `handleImportCategorize` (above) for the parse-result shape
     // notes; same fix as in #1227.
     const result = rustledger.parse(source);
+    if (result.errors?.length > 0) {
+      return errorResponse(formatErrors(result.errors));
+    }
     const directives = result.ledger?.directives ?? [];
 
     const needsReview: Array<{

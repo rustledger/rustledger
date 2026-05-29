@@ -49,16 +49,7 @@ impl PythonRuntime {
         let python_wasm = download::ensure_runtime()?;
         let stdlib_path = download::python_stdlib_path()?;
 
-        // Create engine with fuel for execution limits
-        let mut config = Config::new();
-        config.consume_fuel(true);
-        // Python needs a larger stack for compiling/importing modules.
-        // As of wasmtime's Config::max_wasm_stack documentation
-        // (https://docs.wasmtime.dev/api/wasmtime/struct.Config.html#method.max_wasm_stack),
-        // the default max WebAssembly stack size is 512 KiB, which is too small for
-        // Python's recursive AST visitor, so we increase it to 16 MiB here.
-        config.max_wasm_stack(16 * 1024 * 1024);
-        let engine = Arc::new(Engine::new(&config).map_err(PythonError::Wasm)?);
+        let engine = Arc::new(Engine::new(&engine_config()).map_err(PythonError::Wasm)?);
 
         // Try to load precompiled module from cache, or compile and cache it
         let cache_path = python_wasm.with_extension("cwasm");
@@ -292,6 +283,29 @@ with open('/work/output.json', 'w') as f:
             ))
         })
     }
+}
+
+/// Build the wasmtime [`Config`] used for the Python plugin engine.
+///
+/// Python needs a larger stack for compiling/importing modules: the default
+/// `max_wasm_stack` of 512 KiB is too small for `CPython`'s recursive AST
+/// visitor, so this raises it to 16 MiB.
+///
+/// When the `async` feature is compiled in (which it is, transitively, via
+/// `wasmtime-wasi`), wasmtime enforces `max_wasm_stack <= async_stack_size`
+/// at [`Engine::new`] time, and the default `async_stack_size` of 2 MiB is
+/// smaller than our 16 MiB wasm stack. Without bumping it, engine creation
+/// fails with `"max_wasm_stack size cannot exceed the async_stack_size"`.
+/// We add 1 MiB of headroom on top of the wasm stack for host frames.
+fn engine_config() -> Config {
+    const WASM_STACK: usize = 16 * 1024 * 1024;
+    const ASYNC_STACK_HEADROOM: usize = 1024 * 1024;
+
+    let mut config = Config::new();
+    config.consume_fuel(true);
+    config.max_wasm_stack(WASM_STACK);
+    config.async_stack_size(WASM_STACK + ASYNC_STACK_HEADROOM);
+    config
 }
 
 /// Discover and read a Python plugin's source code.
@@ -537,6 +551,18 @@ mod tests {
     fn test_built_in_plugins_exist() {
         assert!(!CHECK_COMMODITY_PLUGIN.is_empty());
         assert!(!LEAFONLY_PLUGIN.is_empty());
+    }
+
+    /// Regression test: `engine_config` must produce a `Config` that satisfies
+    /// wasmtime's `max_wasm_stack <= async_stack_size` constraint.
+    /// Removing the `async_stack_size` call (or bumping `max_wasm_stack` past
+    /// it) would cause `Engine::new` to fail with
+    /// `"max_wasm_stack size cannot exceed the async_stack_size"` on every
+    /// `PythonRuntime::new()` call.
+    #[test]
+    fn test_engine_config_satisfies_async_stack_constraint() {
+        Engine::new(&engine_config())
+            .expect("engine_config must satisfy wasmtime stack constraints");
     }
 
     #[test]

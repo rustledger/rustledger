@@ -123,10 +123,10 @@ fn handle_sort_transactions(
 /// document formatter ([`format_document`]).
 ///
 /// The formatting handler is the canonical alignment path now and it
-/// delegates further to [`rustledger_core::format_posting`], the same
-/// formatter `rledger format` uses on disk. So this command, the LSP's
-/// `textDocument/formatting` request, and the CLI all produce
-/// identical output for a given `FormatConfig`. The previous bespoke
+/// delegates further to [`rustledger_core::format_posting_line`] with
+/// file-wide resolved widths, the same geometry `rledger format` uses on
+/// disk. So this command, the LSP's `textDocument/formatting` request,
+/// and the CLI all produce identical output for a given `FormatConfig`. The previous bespoke
 /// logic here ran its own regex-style line scanner with a
 /// "max-existing-column" alignment heuristic, which produced output
 /// that matched none of the canonical paths — the kind of duplicate
@@ -251,44 +251,54 @@ mod tests {
 
     #[test]
     fn test_align_amounts_produces_canonical_alignment() {
-        // Goes beyond a shape-only smoke test: applies the emitted
-        // edits to the source and asserts the resulting amount column
-        // matches `FormatConfig::default().amount_column` (the same
-        // value `rledger format` uses on disk). Pins the contract that
-        // `rledger.alignAmounts`, `textDocument/formatting`, and
-        // `rledger format` agree on the canonical alignment.
+        // Goes beyond a shape-only smoke test: applies the emitted edits
+        // to the source and asserts the amounts line up at the file-wide
+        // auto column (the same geometry `rledger format` uses on disk).
+        // Pins the contract that `rledger.alignAmounts`,
+        // `textDocument/formatting`, and `rledger format` agree on the
+        // canonical alignment — now a *document-wide* property, not a
+        // fixed column. The two postings have different-length accounts,
+        // so the widest prefix (Assets:Bank:Checking) drives the column;
+        // a per-line formatter would align each to its own number and
+        // fail the cross-line assertion below.
         use lsp_types::Uri;
-        use rustledger_core::FormatConfig;
 
-        let misaligned = "2024-01-15 * \"Coffee\"\n  Assets:Bank  -5.00 USD\n  Expenses:Food\n";
+        let misaligned =
+            "2024-01-15 * \"Coffee\"\n  Assets:Bank:Checking -5.00 USD\n  Expenses:Food 5.00 USD\n";
         let result = parse(misaligned);
         let uri: Uri = "file:///test.beancount".parse().unwrap();
         let out =
             handle_align_amounts(misaligned, &result, &uri).expect("align should return a value");
 
-        // The first posting line is misaligned (2-space gap between
-        // account and amount). After applying the edits, the amount
-        // number should start exactly at config.amount_column.
         let changes = out.get("changes").and_then(|v| v.as_object()).unwrap();
         let edits = changes.values().next().unwrap().as_array().unwrap();
         assert!(!edits.is_empty(), "misaligned input must produce edits");
 
-        let expected_col = FormatConfig::default().amount_column;
+        // The number field begins two columns past the widest account
+        // prefix; the widest number (`-5.00`) fills the field exactly, so
+        // it starts right at that column.
+        let expected_num_col = "  Assets:Bank:Checking".chars().count() + 2;
         let applied = apply_lsp_text_edits(misaligned, edits);
         let bank_line = applied
             .lines()
-            .find(|l| l.contains("Assets:Bank"))
-            .expect("Assets:Bank line should still exist after edit");
+            .find(|l| l.contains("Assets:Bank:Checking"))
+            .expect("Assets:Bank:Checking line should still exist after edit");
+        let food_line = applied
+            .lines()
+            .find(|l| l.contains("Expenses:Food"))
+            .expect("Expenses:Food line should still exist after edit");
         let dash_pos = bank_line.find("-5.00").expect("amount survived the edit");
-        // `amount_column` is the column the number starts at; in the
-        // formatter's math, "Assets:Bank" + indent ends at col 13, and
-        // padding fills out to (amount_column - amount.len()).
-        let amount_len = "-5.00 USD".len();
         assert_eq!(
-            dash_pos,
-            expected_col - amount_len,
-            "amount should be aligned to FormatConfig::default().amount_column ({expected_col}); \
-             got line {bank_line:?}"
+            dash_pos, expected_num_col,
+            "widest-number amount should start at the file-wide column \
+             ({expected_num_col}); got line {bank_line:?}"
+        );
+        // Cross-line: both currencies must land at the same column — the
+        // load-bearing property a per-line formatter would break.
+        assert_eq!(
+            bank_line.find("USD"),
+            food_line.find("USD"),
+            "currencies must align across postings; got {bank_line:?} / {food_line:?}"
         );
 
         // No-op shape: a canonically-aligned source should return the

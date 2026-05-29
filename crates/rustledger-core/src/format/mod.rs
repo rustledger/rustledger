@@ -3,28 +3,32 @@
 //! Provides pretty-printing for beancount directives with configurable
 //! amount alignment.
 
+mod align;
 mod amount;
 mod directives;
 mod helpers;
 mod transaction;
 
+pub use align::{Alignment, FormatLine, render_lines, resolve_alignment};
 pub(crate) use amount::{format_amount, format_cost_spec, format_price_annotation};
-pub(crate) use directives::{
-    format_balance, format_close, format_commodity, format_custom, format_document, format_event,
-    format_note, format_open, format_pad, format_price, format_query,
+use directives::{
+    format_balance_lines, format_close_lines, format_commodity_lines, format_custom_lines,
+    format_document_lines, format_event_lines, format_note_lines, format_open_lines,
+    format_pad_lines, format_price_lines, format_query_lines,
 };
 pub use helpers::escape_string;
 pub(crate) use helpers::format_meta_value;
-pub(crate) use transaction::{format_incomplete_amount, format_transaction};
-pub use transaction::{format_posting, format_posting_line};
+pub(crate) use transaction::{format_incomplete_amount, format_transaction_lines};
+pub use transaction::{format_posting_line, posting_format_line};
 
 use crate::Directive;
 
 /// Formatter configuration.
 #[derive(Debug, Clone)]
 pub struct FormatConfig {
-    /// Column to align amounts to (default: 60).
-    pub amount_column: usize,
+    /// How to align amounts (default: [`Alignment::Auto`], matching
+    /// `bean-format`).
+    pub alignment: Alignment,
     /// Indentation for postings and metadata (default: 2 spaces).
     pub indent: String,
 }
@@ -32,64 +36,82 @@ pub struct FormatConfig {
 impl Default for FormatConfig {
     fn default() -> Self {
         Self {
-            amount_column: 60,
+            alignment: Alignment::default(),
             indent: "  ".to_string(),
         }
     }
 }
 
 impl FormatConfig {
-    /// Create a new config with the specified amount column.
+    /// Create a config that aligns currencies to a fixed column
+    /// (`bean-format`'s `-c` mode).
     #[must_use]
     pub fn with_column(column: usize) -> Self {
         Self {
-            amount_column: column,
-            ..Default::default()
+            alignment: Alignment::CurrencyColumn(column),
+            indent: "  ".to_string(),
         }
     }
 
-    /// Create a new config with the specified indent width.
+    /// Create a config with the specified indent width (auto alignment).
     #[must_use]
     pub fn with_indent(indent_width: usize) -> Self {
-        let indent = " ".repeat(indent_width);
         Self {
-            indent,
-            ..Default::default()
+            alignment: Alignment::default(),
+            indent: " ".repeat(indent_width),
         }
     }
 
-    /// Create a new config with both column and indent settings.
+    /// Create a config with a fixed currency column and indent width.
     #[must_use]
     pub fn new(column: usize, indent_width: usize) -> Self {
-        let indent = " ".repeat(indent_width);
         Self {
-            amount_column: column,
-            indent,
+            alignment: Alignment::CurrencyColumn(column),
+            indent: " ".repeat(indent_width),
         }
     }
 }
 
-/// Format a directive to a string.
-pub fn format_directive(directive: &Directive, config: &FormatConfig) -> String {
+/// Render a directive into format lines (the *render* phase).
+///
+/// Callers that need file-wide alignment collect these across the whole file
+/// and align once with [`render_lines`]; single-directive callers can use
+/// [`format_directive`], which aligns each directive on its own.
+#[must_use]
+pub fn format_directive_lines(directive: &Directive, config: &FormatConfig) -> Vec<FormatLine> {
     match directive {
-        Directive::Transaction(txn) => format_transaction(txn, config),
-        Directive::Balance(bal) => format_balance(bal, config),
-        Directive::Open(open) => format_open(open, config),
-        Directive::Close(close) => format_close(close, config),
-        Directive::Commodity(comm) => format_commodity(comm, config),
-        Directive::Pad(pad) => format_pad(pad, config),
-        Directive::Event(event) => format_event(event, config),
-        Directive::Query(query) => format_query(query, config),
-        Directive::Note(note) => format_note(note, config),
-        Directive::Document(doc) => format_document(doc, config),
-        Directive::Price(price) => format_price(price, config),
-        Directive::Custom(custom) => format_custom(custom, config),
+        Directive::Transaction(txn) => format_transaction_lines(txn, config),
+        Directive::Balance(bal) => format_balance_lines(bal, config),
+        Directive::Open(open) => format_open_lines(open, config),
+        Directive::Close(close) => format_close_lines(close, config),
+        Directive::Commodity(comm) => format_commodity_lines(comm, config),
+        Directive::Pad(pad) => format_pad_lines(pad, config),
+        Directive::Event(event) => format_event_lines(event, config),
+        Directive::Query(query) => format_query_lines(query, config),
+        Directive::Note(note) => format_note_lines(note, config),
+        Directive::Document(doc) => format_document_lines(doc, config),
+        Directive::Price(price) => format_price_lines(price, config),
+        Directive::Custom(custom) => format_custom_lines(custom, config),
     }
+}
+
+/// Format a single directive to a string, aligning it on its own. For
+/// file-wide alignment use [`format_directive_lines`] + [`render_lines`].
+#[must_use]
+pub fn format_directive(directive: &Directive, config: &FormatConfig) -> String {
+    render_lines(
+        &format_directive_lines(directive, config),
+        &config.alignment,
+    )
 }
 
 #[cfg(test)]
 mod tests {
-    use super::transaction::format_posting;
+    use super::directives::{
+        format_balance, format_close, format_commodity, format_custom, format_document,
+        format_event, format_note, format_open, format_pad, format_price, format_query,
+    };
+    use super::transaction::{format_posting, format_transaction};
     use super::*;
     use crate::{
         Amount, Balance, Close, Commodity, CostSpec, Custom, Directive, Document, Event,
@@ -130,7 +152,9 @@ mod tests {
         );
         let config = FormatConfig::default();
         let formatted = format_balance(&bal, &config);
-        assert_eq!(formatted, "2024-01-01 balance Assets:Bank 1000.00 USD\n");
+        // Auto alignment puts a two-space gap before the (self-aligned)
+        // number — balances now align like postings.
+        assert_eq!(formatted, "2024-01-01 balance Assets:Bank  1000.00 USD\n");
     }
 
     #[test]
@@ -537,7 +561,7 @@ mod tests {
         };
         let config = FormatConfig::default();
         let formatted = format_price(&price, &config);
-        assert_eq!(formatted, "2024-01-15 price AAPL 185.50 USD\n");
+        assert_eq!(formatted, "2024-01-15 price AAPL  185.50 USD\n");
     }
 
     #[test]
@@ -637,7 +661,7 @@ mod tests {
         let formatted = format_balance(&bal, &config);
         assert_eq!(
             formatted,
-            "2024-01-01 balance Assets:Bank 1000.00 USD ~ 0.01\n"
+            "2024-01-01 balance Assets:Bank  1000.00 USD ~ 0.01\n"
         );
     }
 
@@ -746,21 +770,34 @@ mod tests {
     #[test]
     fn test_format_config_with_column() {
         let config = FormatConfig::with_column(80);
-        assert_eq!(config.amount_column, 80);
+        assert!(matches!(config.alignment, Alignment::CurrencyColumn(80)));
         assert_eq!(config.indent, "  ");
     }
 
     #[test]
     fn test_format_config_with_indent() {
         let config = FormatConfig::with_indent(4);
+        assert!(matches!(config.alignment, Alignment::Auto { .. }));
         assert_eq!(config.indent, "    ");
     }
 
     #[test]
     fn test_format_config_new() {
         let config = FormatConfig::new(70, 3);
-        assert_eq!(config.amount_column, 70);
+        assert!(matches!(config.alignment, Alignment::CurrencyColumn(70)));
         assert_eq!(config.indent, "   ");
+    }
+
+    #[test]
+    fn test_format_config_default_is_auto() {
+        let config = FormatConfig::default();
+        assert!(matches!(
+            config.alignment,
+            Alignment::Auto {
+                prefix_width: None,
+                num_width: None
+            }
+        ));
     }
 
     #[test]

@@ -30,7 +30,7 @@ pub(super) fn cmd_roundtrip<W: Write>(file: &PathBuf, writer: &mut W) -> Result<
     // Format back to string
     writeln!(writer)?;
     writeln!(writer, "Step 2: Formatting directives...")?;
-    let config = FormatConfig::new(60, 2);
+    let config = FormatConfig::default();
     let mut formatted = String::new();
     for spanned in &load_result.directives {
         formatted.push_str(&format_directive(&spanned.value, &config));

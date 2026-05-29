@@ -6,7 +6,10 @@
 //! - Consistent spacing around operators
 
 use lsp_types::{DocumentFormattingParams, Position, Range, TextEdit};
-use rustledger_core::{Directive, FormatConfig, SYNTHESIZED_FILE_ID, format_posting_line};
+use rustledger_core::{
+    Directive, FormatConfig, FormatLine, SYNTHESIZED_FILE_ID, format_directive_lines,
+    format_posting_line, resolve_alignment,
+};
 use rustledger_parser::ParseResult;
 
 use super::utils::{LineIndex, document_format_config};
@@ -46,6 +49,23 @@ pub fn format_document(
     // posting per transaction is quadratic on large files.
     let line_index = LineIndex::new(source);
 
+    // Amount alignment is a whole-file property: the column at which
+    // numbers line up depends on the widest account prefix and widest
+    // number across every amount-bearing line in the document. Render
+    // the whole document to FormatLines once, resolve the file-wide
+    // widths, and bake them into a per-line config. Each posting is then
+    // rendered against those fixed widths, so the editor's per-line edits
+    // align to exactly the same column `rledger format` writes on disk.
+    let doc_lines: Vec<FormatLine> = parse_result
+        .directives
+        .iter()
+        .flat_map(|spanned| format_directive_lines(&spanned.value, config))
+        .collect();
+    let resolved_config = FormatConfig {
+        alignment: resolve_alignment(&doc_lines, &config.alignment),
+        indent: config.indent.clone(),
+    };
+
     for spanned in &parse_result.directives {
         if let Directive::Transaction(txn) = &spanned.value {
             // Format each posting using its own source span, not a
@@ -65,7 +85,7 @@ pub fn format_document(
                 let (posting_line, _) = line_index.offset_to_position(spanned_posting.span.start);
                 if let Some(line) = lines.get(posting_line as usize)
                     && let Some(edit) =
-                        posting_text_edit(line, posting_line, spanned_posting, config)
+                        posting_text_edit(line, posting_line, spanned_posting, &resolved_config)
                 {
                     edits.push(edit);
                 }
@@ -116,14 +136,14 @@ pub fn format_document(
 }
 
 /// Compute a posting-line `TextEdit` by delegating to the canonical
-/// core formatter ([`rustledger_core::format_posting_line`]). The
-/// previous hand-rolled implementation here had two latent problems
-/// fixed by the unification:
+/// core formatter ([`rustledger_core::format_posting_line`]).
 ///
-/// - It hardcoded `AMOUNT_COLUMN = 50`, so the LSP produced output one
-///   column shy of `rledger format`'s default 60.
-/// - It only formatted account + units, silently dropping cost specs
-///   (`{...}`) and price annotations (`@`/`@@`).
+/// `config` here must already carry the file-wide resolved widths (see
+/// `format_document`, which bakes them in via
+/// [`rustledger_core::resolve_alignment`]). Passing the raw config
+/// instead would resolve widths from this single line alone, aligning
+/// each posting to its own number rather than the document column —
+/// exactly the churn issue #1242 is about.
 ///
 /// `format_posting_line` is also the unit the on-disk formatter emits
 /// (it's reused inside `format_transaction`), so any TextEdit we emit

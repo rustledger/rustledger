@@ -6,7 +6,9 @@
 //! while preserving comments and other non-directive content.
 
 use crate::cmd::completions::ShellType;
-use crate::format::{FormatConfig, escape_string, format_directive};
+use crate::format::{
+    Alignment, FormatConfig, FormatLine, escape_string, format_directive_lines, render_lines,
+};
 use anyhow::{Context, Result};
 use clap::Parser;
 use rustledger_parser::{Span, Spanned, parse};
@@ -43,9 +45,10 @@ pub struct Args {
     #[arg(long, requires = "check")]
     pub diff: bool,
 
-    /// Column for aligning currencies (same as --currency-column)
-    #[arg(short = 'c', long = "currency-column", default_value = "60")]
-    pub column: usize,
+    /// Align currencies to this fixed column (bean-format -c). When
+    /// omitted, widths are chosen automatically from the file contents.
+    #[arg(short = 'c', long = "currency-column", value_name = "COL")]
+    pub column: Option<usize>,
 
     /// Force fixed prefix width (account name column width)
     #[arg(short = 'w', long)]
@@ -165,89 +168,108 @@ fn format_file(file: &PathBuf, args: &Args) -> Result<ExitCode> {
         a_start.cmp(&b_start)
     });
 
-    let config = FormatConfig::new(args.column, args.indent.unwrap_or(2));
-    let mut formatted = String::new();
+    // Resolve the alignment mode: an explicit currency column wins (and
+    // ignores -w/-W, matching bean-format); otherwise auto-size widths
+    // from the file, honoring any -w/-W overrides.
+    let config = FormatConfig {
+        alignment: match args.column {
+            Some(col) => Alignment::CurrencyColumn(col),
+            None => Alignment::Auto {
+                prefix_width: args.prefix_width,
+                num_width: args.num_width,
+            },
+        },
+        indent: " ".repeat(args.indent.unwrap_or(2)),
+    };
+
+    // Phase 1: render every item to a flat list of FormatLines, preserving
+    // blank lines as empty entries. Phase 2 (render_lines) then aligns all
+    // amount-bearing lines against file-wide column widths in one pass.
+    let mut lines: Vec<FormatLine> = Vec::new();
     let mut prev_end: usize = 0;
 
     for item in &items {
         let item_start = item.span().start;
 
-        // Preserve blank lines between items
-        // Count newlines in the gap between previous item and current item
+        // Preserve blank lines between items by counting newlines in the
+        // gap. One newline terminates the previous item's last line; any
+        // extras are blank lines. At the start of file (prev_end == 0)
+        // every leading newline is a blank line.
         if item_start > prev_end {
             let between = &original_content[prev_end..item_start];
-            // Count actual newline characters (not logical lines)
             let newline_count = between.chars().filter(|&c| c == '\n').count();
-            // Special case: at start of file (prev_end == 0), preserve all leading blank lines
-            // Otherwise, one newline ends the previous item, extras are blank lines
             let blank_lines = if prev_end == 0 {
                 newline_count
             } else {
                 newline_count.saturating_sub(1)
             };
             for _ in 0..blank_lines {
-                formatted.push('\n');
+                lines.push(FormatLine::Plain(String::new()));
             }
         }
 
-        // Format the item
         match item {
             FormattableItem::Directive(d) => {
-                formatted.push_str(&format_directive(&d.value, &config));
+                lines.extend(format_directive_lines(&d.value, &config));
 
-                // Preserve trailing blank lines from the original directive span
-                // The directive span may include trailing newlines that we need to keep.
-                // Count trailing newline characters, handling both LF and CRLF line endings.
-                // We walk backwards, treating '\r' as part of the line ending but only
-                // incrementing the count for '\n'. This way, "\r\n\r\n" correctly yields 2.
+                // Preserve trailing blank lines inside the directive span.
+                // Walk backwards counting '\n' (treating '\r' as part of a
+                // CRLF pair) so "\r\n\r\n" yields 2. The directive's own
+                // last line already terminates with one newline at render
+                // time, so only the extras become blank lines.
                 let original_text = &original_content[d.span.start..d.span.end];
                 let mut trailing_newlines = 0usize;
                 for c in original_text.chars().rev() {
                     match c {
                         '\n' => trailing_newlines += 1,
-                        '\r' => {} // Part of a CRLF pair; continue scanning.
+                        '\r' => {}
                         _ => break,
                     }
                 }
-                // format_directive already outputs one trailing newline, so add any extras
                 for _ in 1..trailing_newlines {
-                    formatted.push('\n');
+                    lines.push(FormatLine::Plain(String::new()));
                 }
             }
             FormattableItem::Option(key, value, _) => {
-                formatted.push_str(&format!(
-                    "option \"{}\" \"{}\"\n",
+                lines.push(FormatLine::Plain(format!(
+                    "option \"{}\" \"{}\"",
                     escape_string(key),
                     escape_string(value)
-                ));
+                )));
             }
             FormattableItem::Include(path, _) => {
-                formatted.push_str(&format!("include \"{}\"\n", escape_string(path)));
+                lines.push(FormatLine::Plain(format!(
+                    "include \"{}\"",
+                    escape_string(path)
+                )));
             }
             FormattableItem::Plugin(name, config_str, _) => {
-                if let Some(cfg) = config_str {
-                    formatted.push_str(&format!(
-                        "plugin \"{}\" \"{}\"\n",
+                lines.push(FormatLine::Plain(if let Some(cfg) = config_str {
+                    format!(
+                        "plugin \"{}\" \"{}\"",
                         escape_string(name),
                         escape_string(cfg)
-                    ));
+                    )
                 } else {
-                    formatted.push_str(&format!("plugin \"{}\"\n", escape_string(name)));
-                }
+                    format!("plugin \"{}\"", escape_string(name))
+                }));
             }
             FormattableItem::Comment(c) => {
-                // Output comment as-is, ensuring it ends with newline
-                formatted.push_str(&c.value);
-                if !c.value.ends_with('\n') {
-                    formatted.push('\n');
-                }
+                // Emit verbatim; render_lines re-adds the single trailing
+                // newline that the span may have captured.
+                lines.push(FormatLine::Plain(
+                    c.value.trim_end_matches('\n').to_string(),
+                ));
             }
         }
 
         prev_end = item.span().end;
     }
 
-    // Handle trailing newline
+    let mut formatted = render_lines(&lines, &config.alignment);
+
+    // An empty file still needs a trailing newline; render_lines emits none
+    // for an empty line list.
     if !formatted.ends_with('\n') {
         formatted.push('\n');
     }

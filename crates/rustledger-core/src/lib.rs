@@ -72,7 +72,10 @@ pub use extract::{
     DEFAULT_CURRENCIES, extract_accounts, extract_accounts_iter, extract_currencies,
     extract_currencies_iter, extract_payees, extract_payees_iter,
 };
-pub use format::{FormatConfig, format_directive, format_posting, format_posting_line};
+pub use format::{
+    Alignment, FormatConfig, FormatLine, format_directive, format_directive_lines,
+    format_posting_line, posting_format_line, render_lines, resolve_alignment,
+};
 pub use identifiers::{Account, Currency, Link, Tag};
 pub use implicit_prices::extract_per_unit_price;
 pub use intern::{InternedStr, StringInterner};

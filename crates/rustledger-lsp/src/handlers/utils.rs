@@ -18,12 +18,12 @@ use rustledger_parser::ParseResult;
 ///
 /// When the LSP server gains real config plumbing (server-wide
 /// settings via initializationOptions, or per-document settings via
-/// `workspace/configuration`), update this one function: derive
-/// `amount_column` / `indent` from the client `tab_size`,
-/// `insert_spaces`, and any `properties.amount_column` extension; for
-/// the executeCommand path (`opts == None`), fall back to the
-/// server-wide configured value rather than `FormatConfig::default()`.
-/// Both call sites then benefit automatically.
+/// `workspace/configuration`), update this one function: derive the
+/// [`rustledger_core::Alignment`] / `indent` from the client `tab_size`,
+/// `insert_spaces`, and any alignment-column extension; for the
+/// executeCommand path (`opts == None`), fall back to the server-wide
+/// configured value rather than `FormatConfig::default()`. Both call
+/// sites then benefit automatically.
 #[must_use]
 pub fn document_format_config(_opts: Option<&FormattingOptions>) -> FormatConfig {
     // Intentionally ignores the supplied options for now: the LSP

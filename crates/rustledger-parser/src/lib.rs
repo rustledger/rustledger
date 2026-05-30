@@ -30,10 +30,12 @@
 #![warn(missing_docs)]
 
 mod error;
+mod format;
 pub mod logos_lexer;
 mod parser;
 
 pub use error::{ParseError, ParseErrorKind};
+pub use format::format_source;
 pub use rustledger_core::{InternedStr, SYNTHESIZED_FILE_ID, Span, Spanned};
 
 use rustledger_core::Directive;

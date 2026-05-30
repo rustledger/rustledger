@@ -2262,7 +2262,7 @@ mod tests {
     // a parse -> format -> re-parse roundtrip.
     #[test]
     fn test_issue_364_comment_preservation_roundtrip() {
-        use rustledger_core::format::{FormatConfig, format_directive};
+        use rustledger_core::format::{FormatConfig, format_directives};
 
         let source = r#"2024-01-15 * "Groceries"
   ; Pre-comment 1 for first posting
@@ -2318,7 +2318,7 @@ mod tests {
 
         // Format back to string
         let config = FormatConfig::default();
-        let formatted = format_directive(&result1.directives[0].value, &config);
+        let formatted = format_directives([&result1.directives[0].value], &config);
 
         // Re-parse the formatted output
         let result2 = parse(&formatted);

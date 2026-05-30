@@ -1,0 +1,266 @@
+//! Whole-source formatter.
+//!
+//! [`format_source`] reformats an entire beancount file from its source text
+//! plus a [`ParseResult`], preserving comments, blank lines, and original
+//! element order while aligning all amount-bearing lines against shared,
+//! file-wide column widths in a single pass.
+//!
+//! This is the canonical entry point for tools that format complete files
+//! (the `rledger format` CLI, the LSP, WASM/FFI bindings) so they all emit
+//! byte-identical output. Callers that only have a list of directives and no
+//! surrounding source should use [`rustledger_core::format::format_directives`].
+
+use crate::{ParseResult, Span, Spanned};
+use rustledger_core::Directive;
+use rustledger_core::format::{
+    FormatConfig, FormatLine, escape_string, format_directive_lines, render_lines,
+};
+
+/// A parsed element that can be formatted, paired with its source span.
+enum FormattableItem<'a> {
+    Directive(&'a Spanned<Directive>),
+    Option(&'a str, &'a str, Span),
+    Include(&'a str, Span),
+    Plugin(&'a str, Option<&'a str>, Span),
+    Comment(&'a Spanned<String>),
+}
+
+impl FormattableItem<'_> {
+    const fn span(&self) -> Span {
+        match self {
+            Self::Directive(d) => d.span,
+            Self::Option(_, _, span) => *span,
+            Self::Include(_, span) => *span,
+            Self::Plugin(_, _, span) => *span,
+            Self::Comment(c) => c.span,
+        }
+    }
+}
+
+/// Reformat a whole beancount file, preserving non-directive content.
+///
+/// `source` is the original file text and `parse_result` is the result of
+/// [`crate::parse`] over that same text. The returned string is the
+/// reformatted file: every directive is re-rendered and all amount-bearing
+/// lines are aligned against file-wide column widths, while comments, blank
+/// lines, options, includes, and plugins are preserved in their original
+/// order.
+///
+/// The output always ends with a trailing newline (even for an empty file).
+///
+/// Callers should gate this on a clean parse (`parse_result.errors`
+/// empty); formatting a file with parse errors would drop the unparsable
+/// content.
+#[must_use]
+pub fn format_source(source: &str, parse_result: &ParseResult, config: &FormatConfig) -> String {
+    // Collect every element into a single list, then sort by source position
+    // so the output preserves the original top-to-bottom order regardless of
+    // how the parser bucketed elements by kind.
+    let mut items: Vec<FormattableItem<'_>> = Vec::new();
+
+    for directive in &parse_result.directives {
+        items.push(FormattableItem::Directive(directive));
+    }
+    for (key, value, span) in &parse_result.options {
+        items.push(FormattableItem::Option(key, value, *span));
+    }
+    for (path, span) in &parse_result.includes {
+        items.push(FormattableItem::Include(path, *span));
+    }
+    for (name, cfg, span) in &parse_result.plugins {
+        items.push(FormattableItem::Plugin(name, cfg.as_deref(), *span));
+    }
+    for comment in &parse_result.comments {
+        items.push(FormattableItem::Comment(comment));
+    }
+
+    items.sort_by_key(|item| item.span().start);
+
+    // Phase 1: render every item to a flat list of FormatLines, preserving
+    // blank lines as empty entries. Phase 2 (render_lines) then aligns all
+    // amount-bearing lines against file-wide column widths in one pass.
+    let mut lines: Vec<FormatLine> = Vec::new();
+    let mut prev_end: usize = 0;
+
+    for item in &items {
+        let item_start = item.span().start;
+
+        // Preserve blank lines between items by counting newlines in the
+        // gap. One newline terminates the previous item's last line; any
+        // extras are blank lines. At the start of file (prev_end == 0)
+        // every leading newline is a blank line.
+        if item_start > prev_end {
+            let between = &source[prev_end..item_start];
+            let newline_count = between.chars().filter(|&c| c == '\n').count();
+            let blank_lines = if prev_end == 0 {
+                newline_count
+            } else {
+                newline_count.saturating_sub(1)
+            };
+            for _ in 0..blank_lines {
+                lines.push(FormatLine::Plain(String::new()));
+            }
+        }
+
+        match item {
+            FormattableItem::Directive(d) => {
+                lines.extend(format_directive_lines(&d.value, config));
+
+                // Preserve trailing blank lines inside the directive span.
+                // Walk backwards counting '\n' (treating '\r' as part of a
+                // CRLF pair) so "\r\n\r\n" yields 2. The directive's own
+                // last line already terminates with one newline at render
+                // time, so only the extras become blank lines.
+                let original_text = &source[d.span.start..d.span.end];
+                let mut trailing_newlines = 0usize;
+                for c in original_text.chars().rev() {
+                    match c {
+                        '\n' => trailing_newlines += 1,
+                        '\r' => {}
+                        _ => break,
+                    }
+                }
+                for _ in 1..trailing_newlines {
+                    lines.push(FormatLine::Plain(String::new()));
+                }
+            }
+            FormattableItem::Option(key, value, _) => {
+                lines.push(FormatLine::Plain(format!(
+                    "option \"{}\" \"{}\"",
+                    escape_string(key),
+                    escape_string(value)
+                )));
+            }
+            FormattableItem::Include(path, _) => {
+                lines.push(FormatLine::Plain(format!(
+                    "include \"{}\"",
+                    escape_string(path)
+                )));
+            }
+            FormattableItem::Plugin(name, cfg, _) => {
+                lines.push(FormatLine::Plain(if let Some(cfg) = cfg {
+                    format!(
+                        "plugin \"{}\" \"{}\"",
+                        escape_string(name),
+                        escape_string(cfg)
+                    )
+                } else {
+                    format!("plugin \"{}\"", escape_string(name))
+                }));
+            }
+            FormattableItem::Comment(c) => {
+                // Emit verbatim; render_lines re-adds the single trailing
+                // newline that the span may have captured.
+                lines.push(FormatLine::Plain(
+                    c.value.trim_end_matches('\n').to_string(),
+                ));
+            }
+        }
+
+        prev_end = item.span().end;
+    }
+
+    let mut formatted = render_lines(&lines, &config.alignment);
+
+    // An empty file still needs a trailing newline; render_lines emits none
+    // for an empty line list.
+    if !formatted.ends_with('\n') {
+        formatted.push('\n');
+    }
+
+    formatted
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parse;
+
+    fn fmt(source: &str) -> String {
+        let result = parse(source);
+        assert!(
+            result.errors.is_empty(),
+            "parse errors: {:?}",
+            result.errors
+        );
+        format_source(source, &result, &FormatConfig::default())
+    }
+
+    #[test]
+    fn preserves_standalone_comments() {
+        let src = "; a leading comment\n2024-01-01 open Assets:Cash\n";
+        let out = fmt(src);
+        assert!(out.starts_with("; a leading comment\n"));
+        assert!(out.contains("2024-01-01 open Assets:Cash"));
+    }
+
+    #[test]
+    fn preserves_blank_lines_between_directives() {
+        let src = "2024-01-01 open Assets:Cash\n\n2024-01-02 open Assets:Bank\n";
+        let out = fmt(src);
+        assert_eq!(
+            out, "2024-01-01 open Assets:Cash\n\n2024-01-02 open Assets:Bank\n",
+            "single blank line between directives should be preserved"
+        );
+    }
+
+    #[test]
+    fn preserves_trailing_blank_lines() {
+        // Trailing blank lines inside the last directive's span survive
+        // round-trip (matches bean-format and the original CLI behavior).
+        let src = "2024-01-01 open Assets:Cash\n\n\n";
+        let out = fmt(src);
+        assert_eq!(out, "2024-01-01 open Assets:Cash\n\n\n");
+    }
+
+    #[test]
+    fn empty_file_gets_trailing_newline() {
+        let out = fmt("");
+        assert_eq!(out, "\n");
+    }
+
+    #[test]
+    fn aligns_postings_file_wide() {
+        // Two transactions with different account-name widths: the narrower
+        // one should align to the same currency column as the wider one.
+        let src = "\
+2024-01-01 * \"A\"
+  Assets:Cash  10.00 USD
+  Expenses:Food
+
+2024-01-02 * \"B\"
+  Assets:Very:Long:Account:Name  20.00 USD
+  Expenses:Stuff
+";
+        let out = fmt(src);
+        let lines: Vec<&str> = out.lines().collect();
+        let col = |needle: &str| {
+            lines
+                .iter()
+                .find(|l| l.contains(needle))
+                .and_then(|l| l.find(needle))
+                .unwrap()
+        };
+        assert_eq!(
+            col("10.00 USD"),
+            col("20.00 USD"),
+            "amounts in different transactions should share a currency column"
+        );
+    }
+
+    #[test]
+    fn preserves_options_includes_plugins_in_order() {
+        let src = "\
+option \"title\" \"My Ledger\"
+include \"other.beancount\"
+plugin \"beancount.plugins.auto\"
+2024-01-01 open Assets:Cash
+";
+        let out = fmt(src);
+        let title = out.find("option \"title\"").unwrap();
+        let include = out.find("include").unwrap();
+        let plugin = out.find("plugin").unwrap();
+        let open = out.find("open Assets:Cash").unwrap();
+        assert!(title < include && include < plugin && plugin < open);
+    }
+}

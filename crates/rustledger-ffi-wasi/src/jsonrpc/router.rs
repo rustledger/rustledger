@@ -494,35 +494,7 @@ fn handle_format_source(params: &serde_json::Value) -> Result<serde_json::Value,
 
     let parse_result = rustledger_parser::parse(&params.source);
     let config = rustledger_core::format::FormatConfig::default();
-    let mut formatted = String::new();
-
-    // Add options first
-    for (key, value, _span) in &parse_result.options {
-        formatted.push_str(&format!("option \"{key}\" \"{value}\"\n"));
-    }
-    if !parse_result.options.is_empty() {
-        formatted.push('\n');
-    }
-
-    // Add plugins
-    for (plugin, config_opt, _span) in &parse_result.plugins {
-        if let Some(cfg) = config_opt {
-            formatted.push_str(&format!("plugin \"{plugin}\" \"{cfg}\"\n"));
-        } else {
-            formatted.push_str(&format!("plugin \"{plugin}\"\n"));
-        }
-    }
-    if !parse_result.plugins.is_empty() {
-        formatted.push('\n');
-    }
-
-    // Format directives
-    for spanned in &parse_result.directives {
-        formatted.push_str(&rustledger_core::format::format_directive(
-            &spanned.value,
-            &config,
-        ));
-    }
+    let formatted = rustledger_parser::format_source(&params.source, &parse_result, &config);
 
     let result = FormatResult { formatted };
     serde_json::to_value(result).map_err(|e| RpcError::internal_error(e.to_string()))
@@ -547,7 +519,7 @@ fn handle_format_entry(params: &serde_json::Value) -> Result<serde_json::Value, 
         .map_err(|e| RpcError::invalid_params(format!("Invalid entry: {e}")))?;
 
     let config = rustledger_core::format::FormatConfig::default();
-    let formatted = rustledger_core::format::format_directive(&directive, &config);
+    let formatted = rustledger_core::format::format_directives([&directive], &config);
 
     let result = FormatResult { formatted };
     serde_json::to_value(result).map_err(|e| RpcError::internal_error(e.to_string()))
@@ -558,18 +530,17 @@ fn handle_format_entries(params: &serde_json::Value) -> Result<serde_json::Value
         .map_err(|e| RpcError::invalid_params(format!("Invalid params: {e}")))?;
 
     let config = rustledger_core::format::FormatConfig::default();
-    let mut formatted_parts = Vec::new();
+    let mut directives: Vec<rustledger_core::Directive> = Vec::with_capacity(params.entries.len());
     for (i, entry) in params.entries.iter().enumerate() {
-        let directive = input_entry_to_directive(entry)
-            .map_err(|e| RpcError::invalid_params(format!("Invalid entry at index {i}: {e}")))?;
-        formatted_parts.push(rustledger_core::format::format_directive(
-            &directive, &config,
-        ));
+        directives.push(
+            input_entry_to_directive(entry).map_err(|e| {
+                RpcError::invalid_params(format!("Invalid entry at index {i}: {e}"))
+            })?,
+        );
     }
+    let formatted = rustledger_core::format::format_directives(directives.iter(), &config);
 
-    let result = FormatResult {
-        formatted: formatted_parts.concat(),
-    };
+    let result = FormatResult { formatted };
     serde_json::to_value(result).map_err(|e| RpcError::internal_error(e.to_string()))
 }
 

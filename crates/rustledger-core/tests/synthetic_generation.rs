@@ -10,7 +10,7 @@ use rust_decimal::Decimal;
 use rustledger_core::NaiveDate;
 use rustledger_core::{
     Amount, Balance, Close, Commodity, Custom, Directive, Document, Event, FormatConfig, MetaValue,
-    Note, Open, Pad, Posting, Price, Query, Transaction, format_directive,
+    Note, Open, Pad, Posting, Price, Query, Transaction, format_directives,
 };
 
 // ============================================================================
@@ -360,7 +360,7 @@ impl SyntheticLedger {
         let config = FormatConfig::default();
         self.directives
             .iter()
-            .map(|d| format_directive(d, &config))
+            .map(|d| format_directives([d], &config))
             .collect::<Vec<_>>()
             .join("\n\n")
     }
@@ -454,7 +454,7 @@ proptest! {
     #[test]
     fn prop_directive_has_format(directive in arb_directive()) {
         let config = FormatConfig::default();
-        let display = format_directive(&directive, &config);
+        let display = format_directives([&directive], &config);
         prop_assert!(!display.is_empty(), "Directive format should not be empty");
         prop_assert!(display.contains("20"), "Directive should contain a date (year 20xx)");
     }
@@ -587,7 +587,7 @@ mod tests {
         ];
 
         for directive in &directives {
-            let display = format_directive(directive, &config);
+            let display = format_directives([directive], &config);
             assert!(
                 !display.is_empty(),
                 "Format for {:?} should not be empty",

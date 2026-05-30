@@ -1,4 +1,4 @@
-use crate::format::{FormatConfig, format_directive};
+use crate::format::{FormatConfig, format_directives};
 use anyhow::{Context, Result};
 use rustledger_loader::Loader;
 use std::io::Write;
@@ -31,10 +31,7 @@ pub(super) fn cmd_roundtrip<W: Write>(file: &PathBuf, writer: &mut W) -> Result<
     writeln!(writer)?;
     writeln!(writer, "Step 2: Formatting directives...")?;
     let config = FormatConfig::default();
-    let mut formatted = String::new();
-    for spanned in &load_result.directives {
-        formatted.push_str(&format_directive(&spanned.value, &config));
-    }
+    let formatted = format_directives(load_result.directives.iter().map(|s| &s.value), &config);
 
     // Second pass: parse the formatted output
     writeln!(writer)?;

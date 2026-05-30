@@ -66,7 +66,8 @@ use config::{
 };
 use duplicate::{is_duplicate, load_existing_transactions};
 use format_num_pattern::Locale;
-use rustledger_core::{Directive, FormatConfig, format_directive};
+use rustledger_core::format::{FormatLine, format_directive_lines, render_lines};
+use rustledger_core::{Directive, FormatConfig};
 use rustledger_importer::{Importer, ImporterConfig, ImporterRegistry, csv_importer::CsvImporter};
 use std::fs;
 use std::io::{self, Write};
@@ -728,22 +729,27 @@ pub fn run(args: &Args, file: &Path) -> Result<()> {
         directives
     };
 
-    // Write output to file or stdout
+    // Render every directive together so all amount-bearing lines align
+    // against shared, file-wide column widths, with a single blank line
+    // between directives.
     let fmt_config = FormatConfig::default();
+    let mut lines: Vec<FormatLine> = Vec::new();
+    for (i, directive) in directives.iter().enumerate() {
+        if i > 0 {
+            lines.push(FormatLine::Plain(String::new()));
+        }
+        lines.extend(format_directive_lines(directive, &fmt_config));
+    }
+    let formatted = render_lines(&lines, &fmt_config.alignment);
+
     if let Some(ref output_path) = args.output {
         let mut out_file = fs::File::create(output_path)
             .with_context(|| format!("Failed to create output file: {}", output_path.display()))?;
-        for directive in &directives {
-            writeln!(out_file, "{}", format_directive(directive, &fmt_config))?;
-            writeln!(out_file)?;
-        }
+        out_file.write_all(formatted.as_bytes())?;
         eprintln!("Wrote output to {}", output_path.display());
     } else {
         let mut stdout = io::stdout().lock();
-        for directive in &directives {
-            writeln!(stdout, "{}", format_directive(directive, &fmt_config))?;
-            writeln!(stdout)?;
-        }
+        stdout.write_all(formatted.as_bytes())?;
     }
 
     eprintln!(

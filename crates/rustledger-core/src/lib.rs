@@ -73,7 +73,7 @@ pub use extract::{
     extract_currencies_iter, extract_payees, extract_payees_iter,
 };
 pub use format::{
-    Alignment, FormatConfig, FormatLine, format_directive, format_directive_lines,
+    Alignment, FormatConfig, FormatLine, format_directive_lines, format_directives,
     format_posting_line, posting_format_line, render_lines, resolve_alignment,
 };
 pub use identifiers::{Account, Currency, Link, Tag};

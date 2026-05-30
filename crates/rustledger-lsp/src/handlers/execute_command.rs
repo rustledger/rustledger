@@ -317,7 +317,9 @@ mod tests {
     /// returning the resulting text. Test-local helper — the LSP
     /// production path applies edits client-side, so this just
     /// mirrors what an editor would do, sorted bottom-to-top so each
-    /// replacement's offsets stay valid.
+    /// replacement's offsets stay valid. Handles multi-line edit ranges
+    /// by translating `(line, character)` LSP positions to byte offsets
+    /// against the source.
     fn apply_lsp_text_edits(source: &str, edits: &[serde_json::Value]) -> String {
         let mut typed: Vec<(u32, u32, u32, u32, String)> = edits
             .iter()
@@ -340,15 +342,19 @@ mod tests {
         // Apply from the end so earlier edits' offsets don't shift.
         typed.sort_by_key(|t| std::cmp::Reverse((t.0, t.1)));
 
-        let lines: Vec<String> = source.lines().map(str::to_string).collect();
-        let mut out = lines.clone();
+        let mut out = source.to_string();
         for (sl, sc, el, ec, new_text) in typed {
-            // Only single-line edits exercised by this test.
-            assert_eq!(sl, el, "test helper only handles single-line edits");
-            let line = &mut out[sl as usize];
-            let (s, e) = (sc as usize, ec as usize);
-            line.replace_range(s..e, &new_text);
+            let to_byte = |out: &str, line: u32, ch: u32| -> usize {
+                out.split_inclusive('\n')
+                    .take(line as usize)
+                    .map(str::len)
+                    .sum::<usize>()
+                    + ch as usize
+            };
+            let start = to_byte(&out, sl, sc);
+            let end = to_byte(&out, el, ec);
+            out.replace_range(start..end, &new_text);
         }
-        out.join("\n") + "\n"
+        out
     }
 }

@@ -182,7 +182,8 @@ pub fn version() -> String {
 /// Returns a `FormatResult` with the formatted source or errors.
 #[wasm_bindgen]
 pub fn format(source: &str) -> Result<JsValue, JsError> {
-    use rustledger_core::{FormatConfig, format_directive};
+    use rustledger_core::FormatConfig;
+    use rustledger_parser::format_source;
 
     let parse_result = parse_beancount(source);
     let lookup = LineLookup::new(source);
@@ -200,12 +201,7 @@ pub fn format(source: &str) -> Result<JsValue, JsError> {
     }
 
     let config = FormatConfig::default();
-    let mut formatted = String::new();
-
-    for spanned in &parse_result.directives {
-        formatted.push_str(&format_directive(&spanned.value, &config));
-        formatted.push('\n');
-    }
+    let formatted = format_source(source, &parse_result, &config);
 
     let result = FormatResult {
         formatted: Some(formatted),

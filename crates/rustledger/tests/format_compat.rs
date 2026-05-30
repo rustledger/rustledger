@@ -205,6 +205,38 @@ fn rledger_auto_output_is_bean_format_fixed_point() {
     }
 }
 
+/// Cross-path identity: the `rledger format` CLI binary and a direct call
+/// to the canonical `rustledger_parser::format_source` function produce
+/// byte-identical output. This pins parity-by-construction across every
+/// path that delegates to `format_source` — CLI, LSP, WASM, FFI — and
+/// detects any regression where a caller starts re-implementing the
+/// rendering pipeline locally.
+#[test]
+fn cli_matches_format_source_direct() {
+    use rustledger_core::FormatConfig;
+    use rustledger_parser::{format_source, parse};
+
+    if common::rledger_binary().is_none() {
+        eprintln!("Skipping: rledger binary not found");
+        return;
+    }
+    let config = FormatConfig::default();
+    for (i, input) in CORPUS.iter().enumerate() {
+        let cli_out = run_format(input, &[]);
+        let parse_result = parse(input);
+        assert!(
+            parse_result.errors.is_empty(),
+            "corpus[{i}] must parse cleanly"
+        );
+        let direct = format_source(input, &parse_result, &config);
+        assert_eq!(
+            cli_out, direct,
+            "CLI output diverged from direct format_source on corpus[{i}] — \
+             the CLI must not re-implement the rendering pipeline"
+        );
+    }
+}
+
 /// Same parity property under `-c 60`: `rledger format -c 60` output is a
 /// fixed point of `bean-format -c 60`.
 #[test]

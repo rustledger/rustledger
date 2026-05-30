@@ -75,8 +75,9 @@ impl FormatConfig {
 /// Render a directive into format lines (the *render* phase).
 ///
 /// Callers that need file-wide alignment collect these across the whole file
-/// and align once with [`render_lines`]; single-directive callers can use
-/// [`format_directive`], which aligns each directive on its own.
+/// and align once with [`render_lines`]. Callers formatting a list of
+/// directives without surrounding source can use [`format_directives`], which
+/// aligns the whole list together.
 #[must_use]
 pub fn format_directive_lines(directive: &Directive, config: &FormatConfig) -> Vec<FormatLine> {
     match directive {
@@ -95,14 +96,27 @@ pub fn format_directive_lines(directive: &Directive, config: &FormatConfig) -> V
     }
 }
 
-/// Format a single directive to a string, aligning it on its own. For
-/// file-wide alignment use [`format_directive_lines`] + [`render_lines`].
+/// Format a list of directives to a string, aligning all of them together
+/// against shared, file-wide column widths in a single pass.
+///
+/// This is the canonical entry point for callers that have a list of
+/// [`Directive`]s but no surrounding source text (e.g. synthesized output,
+/// `extract`, plugin round-trips). Callers that also need to preserve
+/// comments, blank lines, and non-directive elements from original source
+/// should use `rustledger_parser::format_source` instead.
+///
+/// Passing a single directive (`[&directive]`) formats it on its own, which is
+/// the natural degenerate case of whole-list alignment.
 #[must_use]
-pub fn format_directive(directive: &Directive, config: &FormatConfig) -> String {
-    render_lines(
-        &format_directive_lines(directive, config),
-        &config.alignment,
-    )
+pub fn format_directives<'a, I>(directives: I, config: &FormatConfig) -> String
+where
+    I: IntoIterator<Item = &'a Directive>,
+{
+    let mut lines: Vec<FormatLine> = Vec::new();
+    for directive in directives {
+        lines.extend(format_directive_lines(directive, config));
+    }
+    render_lines(&lines, &config.alignment)
 }
 
 #[cfg(test)]
@@ -844,7 +858,7 @@ mod tests {
     }
 
     #[test]
-    fn test_format_directive_all_types() {
+    fn test_format_directives_all_types() {
         let config = FormatConfig::default();
 
         // Transaction
@@ -852,7 +866,7 @@ mod tests {
             .with_flag('*')
             .with_synthesized_posting(Posting::new("Expenses:Test", Amount::new(dec!(1), "USD")))
             .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(-1), "USD")));
-        let formatted = format_directive(&Directive::Transaction(txn), &config);
+        let formatted = format_directives([&Directive::Transaction(txn)], &config);
         assert!(formatted.contains("2024-01-01"));
 
         // Balance
@@ -861,7 +875,7 @@ mod tests {
             "Assets:Bank",
             Amount::new(dec!(100), "USD"),
         );
-        let formatted = format_directive(&Directive::Balance(bal), &config);
+        let formatted = format_directives([&Directive::Balance(bal)], &config);
         assert!(formatted.contains("balance"));
 
         // Open
@@ -872,7 +886,7 @@ mod tests {
             booking: None,
             meta: Default::default(),
         };
-        let formatted = format_directive(&Directive::Open(open), &config);
+        let formatted = format_directives([&Directive::Open(open)], &config);
         assert!(formatted.contains("open"));
 
         // Close
@@ -881,7 +895,7 @@ mod tests {
             account: "Assets:Test".into(),
             meta: Default::default(),
         };
-        let formatted = format_directive(&Directive::Close(close), &config);
+        let formatted = format_directives([&Directive::Close(close)], &config);
         assert!(formatted.contains("close"));
 
         // Commodity
@@ -890,7 +904,7 @@ mod tests {
             currency: "BTC".into(),
             meta: Default::default(),
         };
-        let formatted = format_directive(&Directive::Commodity(comm), &config);
+        let formatted = format_directives([&Directive::Commodity(comm)], &config);
         assert!(formatted.contains("commodity"));
 
         // Pad
@@ -900,7 +914,7 @@ mod tests {
             source_account: "Equity:B".into(),
             meta: Default::default(),
         };
-        let formatted = format_directive(&Directive::Pad(pad), &config);
+        let formatted = format_directives([&Directive::Pad(pad)], &config);
         assert!(formatted.contains("pad"));
 
         // Event
@@ -910,7 +924,7 @@ mod tests {
             value: "value".to_string(),
             meta: Default::default(),
         };
-        let formatted = format_directive(&Directive::Event(event), &config);
+        let formatted = format_directives([&Directive::Event(event)], &config);
         assert!(formatted.contains("event"));
 
         // Query
@@ -920,7 +934,7 @@ mod tests {
             query: "SELECT *".to_string(),
             meta: Default::default(),
         };
-        let formatted = format_directive(&Directive::Query(query), &config);
+        let formatted = format_directives([&Directive::Query(query)], &config);
         assert!(formatted.contains("query"));
 
         // Note
@@ -930,7 +944,7 @@ mod tests {
             comment: "test".to_string(),
             meta: Default::default(),
         };
-        let formatted = format_directive(&Directive::Note(note), &config);
+        let formatted = format_directives([&Directive::Note(note)], &config);
         assert!(formatted.contains("note"));
 
         // Document
@@ -942,7 +956,7 @@ mod tests {
             links: vec![],
             meta: Default::default(),
         };
-        let formatted = format_directive(&Directive::Document(doc), &config);
+        let formatted = format_directives([&Directive::Document(doc)], &config);
         assert!(formatted.contains("document"));
 
         // Price
@@ -952,7 +966,7 @@ mod tests {
             amount: Amount::new(dec!(150), "USD"),
             meta: Default::default(),
         };
-        let formatted = format_directive(&Directive::Price(price), &config);
+        let formatted = format_directives([&Directive::Price(price)], &config);
         assert!(formatted.contains("price"));
 
         // Custom
@@ -962,7 +976,7 @@ mod tests {
             values: vec![],
             meta: Default::default(),
         };
-        let formatted = format_directive(&Directive::Custom(custom), &config);
+        let formatted = format_directives([&Directive::Custom(custom)], &config);
         assert!(formatted.contains("custom"));
     }
 

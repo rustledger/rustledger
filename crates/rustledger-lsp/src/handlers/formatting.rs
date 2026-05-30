@@ -1,24 +1,23 @@
 //! Document formatting handler for Beancount files.
 //!
-//! Provides formatting for:
-//! - Consistent indentation (2 spaces for postings)
-//! - Aligned amounts in transactions
-//! - Consistent spacing around operators
+//! The handler delegates to [`rustledger_parser::format_source`], the same
+//! whole-file formatter the `rledger format` CLI uses. Routing both through
+//! one function gives parity-by-construction: every editor save produces
+//! byte-identical output to the CLI, so neither side can drift.
+//!
+//! Edits are emitted as a single minimal contiguous diff (longest common
+//! prefix and suffix at line granularity are stripped) so the editor's
+//! cursor and undo stack stay anchored to the unchanged regions.
 
 use lsp_types::{DocumentFormattingParams, Position, Range, TextEdit};
-use rustledger_core::{
-    Directive, FormatConfig, FormatLine, SYNTHESIZED_FILE_ID, format_directive_lines,
-    format_posting_line, resolve_alignment,
-};
-use rustledger_parser::ParseResult;
+use rustledger_core::FormatConfig;
+use rustledger_parser::{ParseResult, format_source};
 
-use super::utils::{LineIndex, document_format_config};
+use super::utils::document_format_config;
 
 /// Handle a `textDocument/formatting` request.
 ///
-/// Thin LSP-shaped wrapper around [`format_document`]. The protocol
-/// passes client `FormattingOptions` here; this function feeds them
-/// to [`document_format_config`] for the actual `FormatConfig`.
+/// Thin LSP-shaped wrapper around [`format_document`].
 pub fn handle_formatting(
     params: &DocumentFormattingParams,
     source: &str,
@@ -28,157 +27,109 @@ pub fn handle_formatting(
     format_document(source, parse_result, &config)
 }
 
-/// Compute the document-format edits for a parsed source with a
-/// resolved [`FormatConfig`].
+/// Compute the document-format edits for a parsed source with a resolved
+/// [`FormatConfig`].
 ///
-/// Both `textDocument/formatting` (via [`handle_formatting`]) and
-/// `rledger.alignAmounts` (via `handle_align_amounts`) call into
-/// this — separated from the LSP-shaped wrapper so the executeCommand
-/// path can express its config source explicitly (`None` → server
-/// defaults) rather than synthesizing a fake `DocumentFormattingParams`
-/// just to reach the formatter.
+/// Returns `None` when the source has parse errors (we don't reformat
+/// half-broken files — that would risk dropping unparsable content) or when
+/// the source already matches the canonical form.
 pub fn format_document(
     source: &str,
     parse_result: &ParseResult,
     config: &FormatConfig,
 ) -> Option<Vec<TextEdit>> {
-    let mut edits = Vec::new();
-    let lines: Vec<&str> = source.lines().collect();
-    // Build the line index once: O(n) up front, O(log lines) per
-    // offset lookup. Without it, calling the naive O(n) scanner per
-    // posting per transaction is quadratic on large files.
-    let line_index = LineIndex::new(source);
-
-    // Amount alignment is a whole-file property: the column at which
-    // numbers line up depends on the widest account prefix and widest
-    // number across every amount-bearing line in the document. Render
-    // the whole document to FormatLines once, resolve the file-wide
-    // widths, and bake them into a per-line config. Each posting is then
-    // rendered against those fixed widths, so the editor's per-line edits
-    // align to exactly the same column `rledger format` writes on disk.
-    let doc_lines: Vec<FormatLine> = parse_result
-        .directives
-        .iter()
-        .flat_map(|spanned| format_directive_lines(&spanned.value, config))
-        .collect();
-    let resolved_config = FormatConfig {
-        alignment: resolve_alignment(&doc_lines, &config.alignment),
-        indent: config.indent.clone(),
-    };
-
-    for spanned in &parse_result.directives {
-        if let Directive::Transaction(txn) = &spanned.value {
-            // Format each posting using its own source span, not a
-            // line-arithmetic guess from the directive's start_line.
-            // Interleaved posting-level metadata (e.g., `effective_date:`)
-            // makes `start_line + 1 + i` point at metadata lines, which
-            // the formatter then overwrote with posting content — see
-            // issue #1142.
-            for spanned_posting in &txn.postings {
-                // Defensive: the LSP formats parser-derived directives,
-                // which always carry real spans. Guard against
-                // `Spanned::synthesized` entries in case a future
-                // integration feeds loader/plugin output through here.
-                if spanned_posting.file_id == SYNTHESIZED_FILE_ID {
-                    continue;
-                }
-                let (posting_line, _) = line_index.offset_to_position(spanned_posting.span.start);
-                if let Some(line) = lines.get(posting_line as usize)
-                    && let Some(edit) =
-                        posting_text_edit(line, posting_line, spanned_posting, &resolved_config)
-                {
-                    edits.push(edit);
-                }
-            }
-        }
+    // Gate on a clean parse: format_source ignores anything the parser
+    // couldn't recognize, so reformatting a file with errors would silently
+    // drop those bytes.
+    if !parse_result.errors.is_empty() {
+        return None;
     }
 
-    // Also format standalone lines (non-directive lines that might need cleanup)
-    for (line_num, line) in lines.iter().enumerate() {
-        // Fix tabs to spaces
-        if line.contains('\t') {
-            let new_line = line.replace('\t', "  ");
-            if new_line != *line {
-                edits.push(TextEdit {
-                    range: Range {
-                        start: Position::new(line_num as u32, 0),
-                        end: Position::new(line_num as u32, line.len() as u32),
-                    },
-                    new_text: new_line,
-                });
-            }
-        }
-
-        // Trim trailing whitespace
-        let trimmed = line.trim_end();
-        if trimmed.len() < line.len() {
-            edits.push(TextEdit {
-                range: Range {
-                    start: Position::new(line_num as u32, trimmed.len() as u32),
-                    end: Position::new(line_num as u32, line.len() as u32),
-                },
-                new_text: String::new(),
-            });
-        }
+    let formatted = format_source(source, parse_result, config);
+    if formatted == source {
+        return None;
     }
 
-    // Remove duplicate edits and sort
-    edits.sort_by(|a, b| {
-        a.range
-            .start
-            .line
-            .cmp(&b.range.start.line)
-            .then(a.range.start.character.cmp(&b.range.start.character))
-    });
-    edits.dedup_by(|a, b| a.range == b.range);
-
-    if edits.is_empty() { None } else { Some(edits) }
+    Some(vec![minimal_diff_edit(source, &formatted)])
 }
 
-/// Compute a posting-line `TextEdit` by delegating to the canonical
-/// core formatter ([`rustledger_core::format_posting_line`]).
+/// Produce a single contiguous `TextEdit` covering only the lines that
+/// actually changed.
 ///
-/// `config` here must already carry the file-wide resolved widths (see
-/// `format_document`, which bakes them in via
-/// [`rustledger_core::resolve_alignment`]). Passing the raw config
-/// instead would resolve widths from this single line alone, aligning
-/// each posting to its own number rather than the document column —
-/// exactly the churn issue #1242 is about.
-///
-/// `format_posting_line` is also the unit the on-disk formatter emits
-/// (it's reused inside `format_transaction`), so any TextEdit we emit
-/// matches exactly what `rledger format` would write to disk —
-/// **including the first same-line trailing comment**. An earlier
-/// draft delegated to the lower-level `format_posting`, which omitted
-/// the comment and would have produced edits that silently dropped it.
-fn posting_text_edit(
-    line: &str,
-    line_num: u32,
-    posting: &rustledger_core::Posting,
-    config: &FormatConfig,
-) -> Option<TextEdit> {
-    let trimmed = line.trim();
+/// Splits both texts on `\n` (preserving empty trailing chunks so trailing
+/// newlines are represented as a final empty segment), strips the longest
+/// common prefix and suffix, and emits one edit covering the original
+/// middle. When source and formatted differ everywhere, this degrades to a
+/// whole-document replacement.
+fn minimal_diff_edit(source: &str, formatted: &str) -> TextEdit {
+    let orig: Vec<&str> = source.split('\n').collect();
+    let new: Vec<&str> = formatted.split('\n').collect();
 
-    // Skip if empty or comment
-    if trimmed.is_empty() || trimmed.starts_with(';') {
-        return None;
+    let mut prefix = 0;
+    while prefix < orig.len() && prefix < new.len() && orig[prefix] == new[prefix] {
+        prefix += 1;
     }
 
-    let formatted = format_posting_line(posting, config);
-
-    // No edit needed when the source line already matches the canonical
-    // form (ignoring trailing whitespace, which a separate pass strips).
-    if formatted.trim_end() == line.trim_end() {
-        return None;
+    // Common suffix is counted excluding the prefix region on both sides so
+    // an identical document can't be double-counted.
+    let mut suffix = 0;
+    while suffix < orig.len() - prefix
+        && suffix < new.len() - prefix
+        && orig[orig.len() - 1 - suffix] == new[new.len() - 1 - suffix]
+    {
+        suffix += 1;
     }
 
-    Some(TextEdit {
-        range: Range {
-            start: Position::new(line_num, 0),
-            end: Position::new(line_num, line.len() as u32),
+    let orig_mid_start = prefix;
+    let orig_mid_end = orig.len() - suffix;
+    let new_mid_start = prefix;
+    let new_mid_end = new.len() - suffix;
+
+    // Range: from start of first differing line to start of first
+    // unchanged-suffix line. `(line, 0)` to `(line + n, 0)` covers exactly
+    // those n lines including their trailing newlines, which is what we
+    // want when n new lines (joined with '\n', terminated by '\n') replace
+    // them. When orig_mid_start == orig_mid_end the range is empty (pure
+    // insertion); when new_mid_start == new_mid_end new_text is "" (pure
+    // deletion).
+    let new_text = if new_mid_end > new_mid_start {
+        let mut s = new[new_mid_start..new_mid_end].join("\n");
+        // Only append the terminating newline when there's an unchanged
+        // suffix to follow — otherwise the middle reaches end-of-file and
+        // any trailing newline is already part of the last segment.
+        if suffix > 0 {
+            s.push('\n');
+        }
+        s
+    } else {
+        String::new()
+    };
+
+    let start = Position::new(orig_mid_start as u32, 0);
+    let end_line = orig_mid_end as u32;
+    let end_char = if suffix > 0 {
+        0
+    } else {
+        // No unchanged suffix: the edit extends to the very end of the
+        // file. The end position must point past the last character of
+        // the final original segment.
+        orig.last().map_or(0, |s| s.len()) as u32
+    };
+    let end = Position::new(
+        if suffix > 0 {
+            end_line
+        } else {
+            // When the middle reaches EOF, end_line is orig.len() but
+            // the last addressable line is orig.len() - 1.
+            orig.len().saturating_sub(1) as u32
         },
-        new_text: formatted,
-    })
+        end_char,
+    );
+
+    TextEdit {
+        range: Range { start, end },
+        new_text,
+    }
 }
 
 #[cfg(test)]
@@ -186,55 +137,81 @@ mod tests {
     use super::*;
     use rustledger_parser::parse;
 
-    #[test]
-    fn test_formatting_removes_trailing_whitespace() {
-        let source = "2024-01-01 open Assets:Bank USD   \n";
-        let result = parse(source);
-        let params = DocumentFormattingParams {
+    /// Apply `edits` to `source` and return the result. Edits are
+    /// non-overlapping and sorted in reverse so applying them in order is
+    /// safe; for these tests there is always a single edit, so the loop
+    /// reduces to one application but the structure is robust if that
+    /// changes.
+    fn apply(source: &str, edits: &[TextEdit]) -> String {
+        let mut sorted: Vec<&TextEdit> = edits.iter().collect();
+        sorted.sort_by(|a, b| {
+            b.range
+                .start
+                .line
+                .cmp(&a.range.start.line)
+                .then(b.range.start.character.cmp(&a.range.start.character))
+        });
+        let mut out = source.to_string();
+        for edit in sorted {
+            let lines: Vec<&str> = out.split_inclusive('\n').collect();
+            let start = lines
+                .iter()
+                .take(edit.range.start.line as usize)
+                .map(|l| l.len())
+                .sum::<usize>()
+                + edit.range.start.character as usize;
+            let end = lines
+                .iter()
+                .take(edit.range.end.line as usize)
+                .map(|l| l.len())
+                .sum::<usize>()
+                + edit.range.end.character as usize;
+            out.replace_range(start..end, &edit.new_text);
+        }
+        out
+    }
+
+    fn params() -> DocumentFormattingParams {
+        DocumentFormattingParams {
             text_document: lsp_types::TextDocumentIdentifier {
                 uri: "file:///test.beancount".parse().unwrap(),
             },
             options: Default::default(),
             work_done_progress_params: Default::default(),
-        };
-
-        let edits = handle_formatting(&params, source, &result);
-        assert!(edits.is_some());
+        }
     }
 
     #[test]
-    fn test_formatting_converts_tabs() {
-        let source = "2024-01-01 * \"Test\"\n\tAssets:Bank\n";
+    fn removes_trailing_whitespace() {
+        let source = "2024-01-01 open Assets:Bank USD   \n";
         let result = parse(source);
-        let params = DocumentFormattingParams {
-            text_document: lsp_types::TextDocumentIdentifier {
-                uri: "file:///test.beancount".parse().unwrap(),
-            },
-            options: Default::default(),
-            work_done_progress_params: Default::default(),
-        };
+        let edits = handle_formatting(&params(), source, &result).expect("expected edits");
+        let after = apply(source, &edits);
+        assert_eq!(after, "2024-01-01 open Assets:Bank USD\n");
+    }
 
-        let edits = handle_formatting(&params, source, &result);
-        assert!(edits.is_some());
-
-        let edits = edits.unwrap();
-        // Should have edit to replace tab
-        assert!(edits.iter().any(|e| e.new_text.contains("  ")));
+    #[test]
+    fn converts_tabs_to_spaces() {
+        let source = "2024-01-15 * \"Test\"\n\tAssets:Bank  -5.00 USD\n\tExpenses:Food\n";
+        let result = parse(source);
+        let edits = handle_formatting(&params(), source, &result).expect("expected edits");
+        let after = apply(source, &edits);
+        assert!(
+            !after.contains('\t'),
+            "tabs should be replaced with spaces, got {after:?}"
+        );
     }
 
     /// Regression test for issue #1142.
     ///
     /// When a transaction has posting-level metadata interleaved between
-    /// postings (e.g., `effective_date:`), the previous formatter
-    /// computed each posting's line as `txn_start_line + 1 + posting_idx`
-    /// and so produced TextEdits targeting metadata lines instead of
-    /// posting lines. Applying those edits overwrote the metadata. This
-    /// test pins the post-fix behavior: emitted edits target only the
-    /// posting lines and never the metadata lines between them.
+    /// postings, an earlier per-line formatter computed each posting's line
+    /// as `txn_start_line + 1 + posting_idx`, producing TextEdits that
+    /// overwrote the metadata lines. This test pins that, after applying
+    /// the emitted edits, the metadata lines remain byte-identical to the
+    /// originals.
     #[test]
-    fn test_formatting_preserves_interleaved_metadata_1142() {
-        // Note the two-space indentation on postings vs four-space on
-        // metadata — this is the canonical effective_date format.
+    fn preserves_interleaved_metadata_1142() {
         let source = "\
 2024-01-15 * \"Test\"
   Assets:Bank  -50.00 USD
@@ -249,65 +226,29 @@ mod tests {
             result.errors
         );
 
-        let params = DocumentFormattingParams {
-            text_document: lsp_types::TextDocumentIdentifier {
-                uri: "file:///test.beancount".parse().unwrap(),
-            },
-            options: Default::default(),
-            work_done_progress_params: Default::default(),
-        };
+        let edits = handle_formatting(&params(), source, &result).unwrap_or_default();
+        let after = apply(source, &edits);
 
-        let edits = handle_formatting(&params, source, &result).unwrap_or_default();
-
-        // Identify the metadata-line indices in the source: lines whose
-        // first non-whitespace content is the `effective_date:` key.
-        // (The canonical form uses four-space indent, but the check
-        // accepts any indentation so a future test fixture variation
-        // doesn't silently start matching the wrong lines.)
-        let metadata_lines: Vec<u32> = source
-            .lines()
-            .enumerate()
-            .filter_map(|(i, line)| {
-                line.trim_start()
-                    .starts_with("effective_date:")
-                    .then_some(i as u32)
-            })
-            .collect();
-        assert_eq!(metadata_lines, vec![2, 4], "test source layout assumption");
-        let posting_lines: [u32; 2] = [1, 3];
-
-        // No emitted edit should touch a metadata line. Pre-fix, the
-        // line-arithmetic bug produced a posting-shaped edit at line 2
-        // (the first metadata line), overwriting it.
-        for edit in &edits {
-            assert!(
-                !metadata_lines.contains(&edit.range.start.line),
-                "edit targets a metadata line — issue #1142 regressed: {edit:?}"
-            );
-        }
-        // Positive assertion: the formatter must still do its job on
-        // the real posting lines (otherwise a degenerate "emit zero
-        // edits" implementation would silently pass the test).
-        assert!(
-            edits
-                .iter()
-                .any(|e| posting_lines.contains(&e.range.start.line)),
-            "formatter emitted no edits for posting lines — alignment broken"
+        // The metadata lines must survive byte-for-byte.
+        let after_lines: Vec<&str> = after.lines().collect();
+        assert_eq!(
+            after_lines.get(2).copied(),
+            Some("    effective_date: 2024-01-20"),
+            "first effective_date line was clobbered; got {:?}",
+            after_lines.get(2)
+        );
+        assert_eq!(
+            after_lines.get(4).copied(),
+            Some("    effective_date: 2024-01-21"),
+            "second effective_date line was clobbered; got {:?}",
+            after_lines.get(4)
         );
     }
 
-    /// Regression test: the formatter must preserve a same-line
-    /// trailing comment on a posting. An earlier draft of the
-    /// unification (PR #1158, commit `e537755f`) delegated to
-    /// `format_posting`, which omits trailing comments — so the
-    /// formatter emitted edits that silently dropped them. The fix
-    /// is to route through `format_posting_line` (the helper that
-    /// `format_transaction` also uses on the on-disk path), which
-    /// appends `posting.trailing_comments[0]` to the line.
+    /// Regression test: the formatter must preserve a same-line trailing
+    /// comment on a posting.
     #[test]
-    fn test_formatting_preserves_trailing_comment_on_posting() {
-        // Indent is intentionally wrong (4-space) so the formatter
-        // *must* emit an edit; otherwise we'd be testing nothing.
+    fn preserves_trailing_comment_on_posting() {
         let source = "\
 2024-01-15 * \"Coffee\"
     Assets:Bank  -5.00 USD ; my comment
@@ -320,26 +261,37 @@ mod tests {
             result.errors
         );
 
-        let params = DocumentFormattingParams {
-            text_document: lsp_types::TextDocumentIdentifier {
-                uri: "file:///test.beancount".parse().unwrap(),
-            },
-            options: Default::default(),
-            work_done_progress_params: Default::default(),
-        };
-        let edits = handle_formatting(&params, source, &result).unwrap_or_default();
-
-        // Apply edits to the source and check the comment is still
-        // present on its original line.
-        let line1_edit = edits
-            .iter()
-            .find(|e| e.range.start.line == 1)
-            .expect("expected an edit on line 1 (the Assets:Bank posting)");
+        let edits = handle_formatting(&params(), source, &result).unwrap_or_default();
+        let after = apply(source, &edits);
         assert!(
-            line1_edit.new_text.contains("; my comment"),
-            "trailing comment dropped from canonical-formatted posting line; \
-             got new_text = {:?}",
-            line1_edit.new_text
+            after.contains("; my comment"),
+            "trailing comment dropped after formatting; got {after:?}"
         );
+    }
+
+    /// Parity-by-construction: the LSP-applied result must be byte-equal
+    /// to what `rledger format` (via `format_source`) writes.
+    #[test]
+    fn lsp_matches_cli_format_source() {
+        let source = "\
+2024-01-01 open Assets:Bank
+2024-01-15 * \"Coffee\"
+    Assets:Bank  -5.00 USD
+  Expenses:Food
+";
+        let result = parse(source);
+        let edits = handle_formatting(&params(), source, &result).unwrap_or_default();
+        let after = apply(source, &edits);
+        let cli = format_source(source, &result, &FormatConfig::default());
+        assert_eq!(after, cli);
+    }
+
+    #[test]
+    fn parse_errors_skip_formatting() {
+        // A stray invalid token should leave the document untouched.
+        let source = "2024-01-01 not_a_directive\n";
+        let result = parse(source);
+        assert!(!result.errors.is_empty());
+        assert!(handle_formatting(&params(), source, &result).is_none());
     }
 }

@@ -168,7 +168,20 @@ fn build_posting_line(
 }
 
 /// Format the single-line representation of a posting, including the first
-/// same-line trailing comment. Self-aligned against the given config.
+/// same-line trailing comment.
+///
+/// **Self-aligned against `config` only.** This function picks column widths
+/// from the single posting it's given — it has no view of the surrounding
+/// document. The result is therefore NOT guaranteed to align with the same
+/// posting as rendered by [`super::format_directives`] or
+/// `rustledger_parser::format_source`, both of which resolve widths across
+/// every amount-bearing line in the file.
+///
+/// Use this only when you genuinely want a self-aligned single-posting
+/// render (e.g., a hover preview or a doctest fixture). For "format this
+/// posting like the CLI would" use the whole-file path
+/// `format_directives([&Directive::Transaction(t)], cfg)` or
+/// `rustledger_parser::format_source`.
 #[must_use]
 pub fn format_posting_line(posting: &Posting, config: &FormatConfig) -> String {
     render_lines(

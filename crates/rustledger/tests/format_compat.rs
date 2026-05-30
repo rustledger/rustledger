@@ -205,34 +205,60 @@ fn rledger_auto_output_is_bean_format_fixed_point() {
     }
 }
 
-/// Cross-path identity: the `rledger format` CLI binary and a direct call
-/// to the canonical `rustledger_parser::format_source` function produce
-/// byte-identical output. This pins parity-by-construction across every
-/// path that delegates to `format_source` — CLI, LSP, WASM, FFI — and
-/// detects any regression where a caller starts re-implementing the
-/// rendering pipeline locally.
+/// Cross-aggregator identity: when the corpus contains no comments and no
+/// blank lines (i.e. nothing that lives outside the directive list), the
+/// CLI's whole-file output (which uses `format_source`) must equal the
+/// directive-list-only output (`format_directives`) over the same parsed
+/// directives. This is a real cross-path check — `format_source` and
+/// `format_directives` are independent code paths that resolve alignment
+/// separately — and detects drift when one aggregator's policy diverges
+/// from the other.
+///
+/// Replaces an earlier tautological test that compared the CLI against
+/// `format_source` (the CLI calls `format_source` directly, so the
+/// assertion folded to `format_source == format_source`).
 #[test]
-fn cli_matches_format_source_direct() {
+fn cli_matches_format_directives_on_directives_only_corpus() {
     use rustledger_core::FormatConfig;
-    use rustledger_parser::{format_source, parse};
+    use rustledger_core::format::format_directives;
+    use rustledger_parser::parse;
 
     if common::rledger_binary().is_none() {
         eprintln!("Skipping: rledger binary not found");
         return;
     }
+
+    // Directives-only corpus: same as CORPUS but with all blank lines and
+    // comments stripped. format_source preserves source-derived blanks,
+    // format_directives produces no separator; this transformation puts
+    // both aggregators on equal footing so a byte equality check is
+    // meaningful.
+    let directives_only: Vec<String> = CORPUS
+        .iter()
+        .map(|s| {
+            s.lines()
+                .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with(';'))
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n"
+        })
+        .collect();
+
     let config = FormatConfig::default();
-    for (i, input) in CORPUS.iter().enumerate() {
+    for (i, input) in directives_only.iter().enumerate() {
         let cli_out = run_format(input, &[]);
         let parse_result = parse(input);
         assert!(
             parse_result.errors.is_empty(),
-            "corpus[{i}] must parse cleanly"
+            "directives-only corpus[{i}] must parse cleanly: {input}"
         );
-        let direct = format_source(input, &parse_result, &config);
+        let via_directives =
+            format_directives(parse_result.directives.iter().map(|s| &s.value), &config);
         assert_eq!(
-            cli_out, direct,
-            "CLI output diverged from direct format_source on corpus[{i}] — \
-             the CLI must not re-implement the rendering pipeline"
+            cli_out, via_directives,
+            "format_source (CLI) diverged from format_directives on a directives-only \
+             input — the two aggregators must agree when source has no blanks/comments \
+             for them to disagree about. corpus[{i}]"
         );
     }
 }

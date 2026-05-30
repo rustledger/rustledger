@@ -314,12 +314,10 @@ mod tests {
     }
 
     /// Apply a JSON array of LSP `TextEdit` objects to `source`,
-    /// returning the resulting text. Test-local helper — the LSP
-    /// production path applies edits client-side, so this just
-    /// mirrors what an editor would do, sorted bottom-to-top so each
-    /// replacement's offsets stay valid. Handles multi-line edit ranges
-    /// by translating `(line, character)` LSP positions to byte offsets
-    /// against the source.
+    /// returning the resulting text. Translates each `(line, character)`
+    /// LSP position to a byte offset, treating `character` as UTF-16 code
+    /// units per the LSP 3.17 default — matching what `minimal_diff_edit`
+    /// produces on the server side.
     fn apply_lsp_text_edits(source: &str, edits: &[serde_json::Value]) -> String {
         let mut typed: Vec<(u32, u32, u32, u32, String)> = edits
             .iter()
@@ -344,17 +342,36 @@ mod tests {
 
         let mut out = source.to_string();
         for (sl, sc, el, ec, new_text) in typed {
-            let to_byte = |out: &str, line: u32, ch: u32| -> usize {
-                out.split_inclusive('\n')
-                    .take(line as usize)
-                    .map(str::len)
-                    .sum::<usize>()
-                    + ch as usize
-            };
-            let start = to_byte(&out, sl, sc);
-            let end = to_byte(&out, el, ec);
+            let start = lsp_position_to_byte(&out, sl, sc);
+            let end = lsp_position_to_byte(&out, el, ec);
             out.replace_range(start..end, &new_text);
         }
         out
+    }
+
+    fn lsp_position_to_byte(source: &str, target_line: u32, target_char: u32) -> usize {
+        let bytes = source.as_bytes();
+        let mut line = 0u32;
+        let mut line_start = 0usize;
+        let mut i = 0;
+        while i < bytes.len() && line < target_line {
+            if bytes[i] == b'\n' {
+                line += 1;
+                line_start = i + 1;
+            }
+            i += 1;
+        }
+        let line_slice = &source[line_start..];
+        let mut utf16_consumed = 0u32;
+        let mut byte_off = 0usize;
+        let mut buf = [0u16; 2];
+        for c in line_slice.chars() {
+            if utf16_consumed >= target_char || c == '\n' {
+                break;
+            }
+            utf16_consumed += c.encode_utf16(&mut buf).len() as u32;
+            byte_off += c.len_utf8();
+        }
+        line_start + byte_off
     }
 }

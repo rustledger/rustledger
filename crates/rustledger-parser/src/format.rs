@@ -11,10 +11,10 @@
 //! surrounding source should use [`rustledger_core::format::format_directives`].
 
 use crate::{ParseResult, Span, Spanned};
-use rustledger_core::Directive;
 use rustledger_core::format::{
     FormatConfig, FormatLine, escape_string, format_directive_lines, render_lines,
 };
+use rustledger_core::{Directive, SYNTHESIZED_FILE_ID};
 
 /// A parsed element that can be formatted, paired with its source span.
 enum FormattableItem<'a> {
@@ -58,7 +58,15 @@ pub fn format_source(source: &str, parse_result: &ParseResult, config: &FormatCo
     // how the parser bucketed elements by kind.
     let mut items: Vec<FormattableItem<'_>> = Vec::new();
 
+    // Skip synthesized directives — they have Span::ZERO and no source
+    // backing, so they would sort to the top of the file regardless of the
+    // caller's intended position. format_source's contract is "reformat a
+    // file from its source text"; injecting synthesized content is a
+    // separate concern callers can handle by appending after the result.
     for directive in &parse_result.directives {
+        if directive.file_id == SYNTHESIZED_FILE_ID {
+            continue;
+        }
         items.push(FormattableItem::Directive(directive));
     }
     for (key, value, span) in &parse_result.options {
@@ -163,10 +171,19 @@ pub fn format_source(source: &str, parse_result: &ParseResult, config: &FormatCo
     // content; the file's trailing newlines live in source[prev_end..]. Use
     // the same "first newline is the item's terminator, extras are blank
     // lines" rule that drives between-items gaps.
-    if !items.is_empty() && prev_end < source.len() {
+    //
+    // For a blank-only file (no items at all) every newline in the source is
+    // a blank line; preserve them verbatim instead of collapsing to a single
+    // trailing newline.
+    if prev_end < source.len() {
         let trailing = &source[prev_end..];
         let newline_count = trailing.chars().filter(|&c| c == '\n').count();
-        for _ in 0..newline_count.saturating_sub(1) {
+        let blank_lines = if items.is_empty() {
+            newline_count
+        } else {
+            newline_count.saturating_sub(1)
+        };
+        for _ in 0..blank_lines {
             lines.push(FormatLine::Plain(String::new()));
         }
     }
@@ -238,6 +255,44 @@ mod tests {
     fn preserves_trailing_blank_lines_after_option() {
         let src = "option \"title\" \"x\"\n\n\n";
         assert_eq!(fmt(src), src);
+    }
+
+    /// Regression: a file containing only blank lines must preserve every
+    /// newline, not collapse to a single trailing newline. The old
+    /// implementation gated the trailing-blanks block on `!items.is_empty()`,
+    /// dropping the entire run.
+    #[test]
+    fn preserves_blank_only_file() {
+        let src = "\n\n\n\n";
+        assert_eq!(fmt(src), src);
+    }
+
+    /// Regression: directives whose `Spanned::file_id == SYNTHESIZED_FILE_ID`
+    /// (no source backing, `Span::ZERO`) must be skipped — otherwise they
+    /// sort to the top of the file regardless of caller intent.
+    #[test]
+    fn skips_synthesized_directives() {
+        use rustledger_core::{Directive, NaiveDate, Open, SYNTHESIZED_FILE_ID, Spanned};
+        let mut pr = parse("2024-01-01 open Assets:Real\n");
+        // Append a synthesized directive after a real one. format_source
+        // should ignore it; without the filter, its span.start == 0 would
+        // collide with the real directive and reorder the output.
+        let synth = Spanned::synthesized(Directive::Open(Open {
+            date: NaiveDate::constant(2024, 6, 1),
+            account: "Assets:Synth".into(),
+            currencies: vec![],
+            booking: None,
+            meta: Default::default(),
+        }));
+        assert_eq!(synth.file_id, SYNTHESIZED_FILE_ID);
+        pr.directives.push(synth);
+        let src = "2024-01-01 open Assets:Real\n";
+        let out = format_source(src, &pr, &FormatConfig::default());
+        assert!(
+            !out.contains("Assets:Synth"),
+            "synthesized directive should be excluded from format_source output; got {out:?}"
+        );
+        assert_eq!(out, src);
     }
 
     #[test]

@@ -493,6 +493,25 @@ fn handle_format_source(params: &serde_json::Value) -> Result<serde_json::Value,
         .map_err(|e| RpcError::invalid_params(format!("Invalid params: {e}")))?;
 
     let parse_result = rustledger_parser::parse(&params.source);
+    // Gate on a clean parse: format_source ignores anything the parser
+    // couldn't recognize, so reformatting a file with errors would silently
+    // drop those bytes — which on an FFI write path is a data-loss bug.
+    // Mirrors the CLI/LSP/WASM gates.
+    if !parse_result.errors.is_empty() {
+        let summary = parse_result
+            .errors
+            .iter()
+            .take(3)
+            .map(std::string::ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(RpcError::parse_error(format!(
+            "cannot format source with {} parse error(s): {}",
+            parse_result.errors.len(),
+            summary
+        )));
+    }
+
     let config = rustledger_core::format::FormatConfig::default();
     let formatted = rustledger_parser::format_source(&params.source, &parse_result, &config);
 

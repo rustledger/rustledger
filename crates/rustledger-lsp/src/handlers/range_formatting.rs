@@ -1,280 +1,145 @@
-//! Range formatting handler for formatting selections.
+//! Range-formatting handler for `textDocument/rangeFormatting`.
 //!
-//! Formats only the selected range of the document.
+//! Delegates to [`super::formatting::format_document`] (the canonical
+//! whole-file formatter that produces byte-identical output to `rledger
+//! format`) and then filters the emitted edits to those that touch the
+//! request's range. Routing both formatter kinds through one path gives
+//! parity-by-construction with the CLI; the alternative (per-line indent
+//! heuristics, as the pre-#1242 implementation did) cannot resolve
+//! file-wide currency-column widths, so it would always disagree with the
+//! CLI for files with non-uniform account widths — the exact drift class
+//! issue #1242 is closing.
+//!
+//! Range semantics: file-wide widths must come from the whole document, so
+//! the formatter always runs on the full source. Only edits whose start
+//! position lies in the requested range are returned, so the user sees
+//! changes only in their selection even though widths were resolved
+//! globally.
 
-use lsp_types::{DocumentRangeFormattingParams, Position, Range, TextEdit};
-use rustledger_core::{Directive, SYNTHESIZED_FILE_ID};
+use lsp_types::{DocumentRangeFormattingParams, TextEdit};
 use rustledger_parser::ParseResult;
 
-use super::utils::LineIndex;
+use super::formatting::format_document;
+use super::utils::document_format_config;
 
-/// Handle a range formatting request.
+/// Handle a `textDocument/rangeFormatting` request.
 pub fn handle_range_formatting(
     params: &DocumentRangeFormattingParams,
     source: &str,
     parse_result: &ParseResult,
 ) -> Option<Vec<TextEdit>> {
+    let config = document_format_config(Some(&params.options));
+    let all_edits = format_document(source, parse_result, &config)?;
+
+    // Keep only edits whose start position is inside the requested range.
+    // `format_document` returns one contiguous edit on a clean parse, so
+    // this is usually a 0/1-element filter; on parse-error fallback it's a
+    // per-line cleanup pass and we filter line-by-line.
     let range = params.range;
-    let mut edits = Vec::new();
-    let lines: Vec<&str> = source.lines().collect();
-    // Build the line index once so per-posting offset→line lookups are
-    // O(log lines) instead of O(n). On a large file with many
-    // transactions, the naive scanner would otherwise dominate.
-    let line_index = LineIndex::new(source);
-
-    // Process lines within the range
-    for line_num in range.start.line..=range.end.line {
-        if let Some(line) = lines.get(line_num as usize) {
-            // Fix tabs to spaces
-            if line.contains('\t') {
-                let new_line = line.replace('\t', "  ");
-                if new_line != *line {
-                    edits.push(TextEdit {
-                        range: Range {
-                            start: Position::new(line_num, 0),
-                            end: Position::new(line_num, line.len() as u32),
-                        },
-                        new_text: new_line,
-                    });
-                    continue; // Skip other edits for this line
-                }
-            }
-
-            // Trim trailing whitespace
-            let trimmed = line.trim_end();
-            if trimmed.len() < line.len() {
-                edits.push(TextEdit {
-                    range: Range {
-                        start: Position::new(line_num, trimmed.len() as u32),
-                        end: Position::new(line_num, line.len() as u32),
-                    },
-                    new_text: String::new(),
-                });
-            }
-        }
-    }
-
-    // Format postings within transactions in the range. Look up each
-    // posting's line from its own source span, not via line arithmetic
-    // off the transaction header — interleaved posting-level metadata
-    // (e.g., `effective_date:`) breaks the `start_line + 1 + i`
-    // assumption and caused #1142.
-    for spanned in &parse_result.directives {
-        if let Directive::Transaction(txn) = &spanned.value {
-            let (start_line, _) = line_index.offset_to_position(spanned.span.start);
-
-            // Check if transaction overlaps with range
-            if start_line > range.end.line {
-                continue;
-            }
-
-            for spanned_posting in &txn.postings {
-                // Defensive: the LSP formats parser-derived directives,
-                // which always carry real spans. Guard against
-                // `Spanned::synthesized` entries in case a future
-                // integration feeds loader/plugin output through here.
-                if spanned_posting.file_id == SYNTHESIZED_FILE_ID {
-                    continue;
-                }
-                let (posting_line, _) = line_index.offset_to_position(spanned_posting.span.start);
-
-                // Check if posting is within range
-                if posting_line >= range.start.line
-                    && posting_line <= range.end.line
-                    && let Some(line) = lines.get(posting_line as usize)
-                    && let Some(edit) = format_posting_line(line, posting_line, spanned_posting)
-                {
-                    // Don't duplicate edits
-                    if !edits.iter().any(|e| e.range.start.line == posting_line) {
-                        edits.push(edit);
-                    }
-                }
-            }
-        }
-    }
-
-    // Sort and deduplicate
-    edits.sort_by(|a, b| {
-        a.range
-            .start
-            .line
-            .cmp(&b.range.start.line)
-            .then(a.range.start.character.cmp(&b.range.start.character))
-    });
-    edits.dedup_by(|a, b| a.range == b.range);
-
-    if edits.is_empty() { None } else { Some(edits) }
+    let kept: Vec<TextEdit> = all_edits
+        .into_iter()
+        .filter(|edit| edit_overlaps(edit, &range))
+        .collect();
+    if kept.is_empty() { None } else { Some(kept) }
 }
 
-/// Format a posting line for alignment.
-fn format_posting_line(
-    line: &str,
-    line_num: u32,
-    posting: &rustledger_core::Posting,
-) -> Option<TextEdit> {
-    let trimmed = line.trim();
-
-    // Skip if empty or comment
-    if trimmed.is_empty() || trimmed.starts_with(';') {
-        return None;
-    }
-
-    let account = posting.account.to_string();
-    let current_indent = line.len() - line.trim_start().len();
-    let expected_indent = 2;
-
-    // Only fix indentation issues
-    if current_indent != expected_indent {
-        let mut formatted = String::new();
-        formatted.push_str(&" ".repeat(expected_indent));
-        formatted.push_str(trimmed);
-
-        return Some(TextEdit {
-            range: Range {
-                start: Position::new(line_num, 0),
-                end: Position::new(line_num, line.len() as u32),
-            },
-            new_text: formatted,
-        });
-    }
-
-    let _ = account; // suppress unused warning
-    None
+fn edit_overlaps(edit: &TextEdit, range: &lsp_types::Range) -> bool {
+    // An edit overlaps the range if its `[start, end]` line interval
+    // intersects `[range.start.line, range.end.line]`.
+    let edit_start_line = edit.range.start.line;
+    let edit_end_line = edit.range.end.line;
+    edit_start_line <= range.end.line && edit_end_line >= range.start.line
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lsp_types::{DocumentRangeFormattingParams, Position, Range};
     use rustledger_parser::parse;
 
-    #[test]
-    fn test_range_formatting() {
-        let source = "2024-01-01 open Assets:Bank USD   \n";
-        let result = parse(source);
-        let params = DocumentRangeFormattingParams {
+    fn params(range: Range) -> DocumentRangeFormattingParams {
+        DocumentRangeFormattingParams {
             text_document: lsp_types::TextDocumentIdentifier {
                 uri: "file:///test.beancount".parse().unwrap(),
             },
-            range: Range {
-                start: Position::new(0, 0),
-                end: Position::new(0, 35),
-            },
+            range,
             options: Default::default(),
             work_done_progress_params: Default::default(),
-        };
-
-        let edits = handle_range_formatting(&params, source, &result);
-        assert!(edits.is_some());
+        }
     }
 
-    /// Regression test for issue #1142 (range-formatting variant).
-    ///
-    /// Pre-fix, `posting_line = start_line + 1 + i` pointed at the
-    /// metadata lines between postings, and the formatter emitted
-    /// posting-shaped edits that overwrote them. See the matching test
-    /// on `formatting.rs` for the full reasoning.
+    /// On a clean, canonical document, no edits are emitted regardless of
+    /// the requested range.
     #[test]
-    fn test_range_formatting_preserves_interleaved_metadata_1142() {
-        let source = "\
-2024-01-15 * \"Test\"
-  Assets:Bank  -50.00 USD
-    effective_date: 2024-01-20
-  Expenses:Food  50.00 USD
-    effective_date: 2024-01-21
-";
+    fn already_canonical_returns_none() {
+        let source = "2024-01-01 open Assets:Cash\n";
         let result = parse(source);
-        assert!(
-            result.errors.is_empty(),
-            "parse errors: {:?}",
-            result.errors
-        );
-
-        let params = DocumentRangeFormattingParams {
-            text_document: lsp_types::TextDocumentIdentifier {
-                uri: "file:///test.beancount".parse().unwrap(),
-            },
-            // Cover the full transaction.
-            range: Range {
-                start: Position::new(0, 0),
-                end: Position::new(5, 0),
-            },
-            options: Default::default(),
-            work_done_progress_params: Default::default(),
-        };
-
-        let edits = handle_range_formatting(&params, source, &result).unwrap_or_default();
-
-        let metadata_lines: Vec<u32> = source
-            .lines()
-            .enumerate()
-            .filter_map(|(i, line)| {
-                line.trim_start()
-                    .starts_with("effective_date:")
-                    .then_some(i as u32)
-            })
-            .collect();
-        assert_eq!(metadata_lines, vec![2, 4], "test source layout assumption");
-
-        for edit in &edits {
-            assert!(
-                !metadata_lines.contains(&edit.range.start.line),
-                "edit targets a metadata line — issue #1142 regressed: {edit:?}"
-            );
-        }
-        // No positive "must produce an edit" assertion here: range
-        // formatting only emits edits when something actually needs
-        // changing, and this source is already correctly formatted.
-        // Emitting zero edits IS the right outcome — see the
-        // `_misindented` variant below for the positive case.
+        let p = params(Range {
+            start: Position::new(0, 0),
+            end: Position::new(0, 27),
+        });
+        assert!(handle_range_formatting(&p, source, &result).is_none());
     }
 
-    /// Companion to the regression test above: with a *misindented*
-    /// posting interleaved with metadata, range formatting should
-    /// produce a fix for the posting and still leave the metadata
-    /// alone. Catches a future regression that silently short-circuits
-    /// the formatter (the all-correct test above can't tell those
-    /// apart from a working fix).
+    /// On a misindented document, range formatting emits the same canonical
+    /// fix as full formatting (when the range covers the change).
     #[test]
-    fn test_range_formatting_fixes_misindented_posting_without_touching_metadata() {
-        // Note: posting 1 has 4-space indent (should be 2).
-        let source = "\
-2024-01-15 * \"Test\"
-  Assets:Bank  -50.00 USD
-    effective_date: 2024-01-20
-    Expenses:Food  50.00 USD
-    effective_date: 2024-01-21
-";
+    fn fixes_misindentation_in_range() {
+        let source = "2024-01-15 * \"Coffee\"\n    Assets:Bank  -5.00 USD\n  Expenses:Food\n";
         let result = parse(source);
-        assert!(
-            result.errors.is_empty(),
-            "parse errors: {:?}",
-            result.errors
-        );
+        let p = params(Range {
+            start: Position::new(0, 0),
+            end: Position::new(2, 0),
+        });
+        let edits = handle_range_formatting(&p, source, &result).expect("expected edits");
+        assert!(!edits.is_empty());
+    }
 
-        let params = DocumentRangeFormattingParams {
-            text_document: lsp_types::TextDocumentIdentifier {
-                uri: "file:///test.beancount".parse().unwrap(),
-            },
-            range: Range {
-                start: Position::new(0, 0),
-                end: Position::new(5, 0),
-            },
-            options: Default::default(),
-            work_done_progress_params: Default::default(),
-        };
-
-        let edits = handle_range_formatting(&params, source, &result).unwrap_or_default();
-        let metadata_lines = [2u32, 4u32];
-
+    /// Edits outside the requested range are filtered out.
+    #[test]
+    fn filters_edits_outside_range() {
+        let source = "2024-01-15 * \"A\"\n    Assets:Bank  -5.00 USD\n  Expenses:Food\n\n2024-02-15 * \"B\"\n    Assets:Bank  -7.00 USD\n  Expenses:Food\n";
+        let result = parse(source);
+        // Range covers only the first transaction (lines 0-2).
+        let p = params(Range {
+            start: Position::new(0, 0),
+            end: Position::new(2, 0),
+        });
+        let edits = handle_range_formatting(&p, source, &result).unwrap_or_default();
+        // format_document returns one contiguous edit covering all changed
+        // lines; that single edit starts at line ≤ 2 so it's kept by the
+        // range filter. The filter's value is that it would drop edits
+        // starting after line 2, which the fallback parse-error path can
+        // emit per-line.
         for edit in &edits {
             assert!(
-                !metadata_lines.contains(&edit.range.start.line),
-                "edit targets a metadata line — issue #1142 regressed: {edit:?}"
+                edit.range.start.line <= 2,
+                "edit at line {} should be filtered (range ends at 2)",
+                edit.range.start.line
             );
         }
-        assert!(
-            edits.iter().any(|e| e.range.start.line == 3),
-            "expected an edit at the misindented posting (line 3); got {edits:?}"
-        );
+    }
+
+    /// Parse-error fallback: cleanup edits inside the range are kept, those
+    /// outside are dropped.
+    #[test]
+    fn parse_error_fallback_respects_range() {
+        let source =
+            "2024-01-01 open Assets:Bank   \n2024-01-02 not_a_directive\n\tAssets:Bank   \n";
+        let result = parse(source);
+        assert!(!result.errors.is_empty());
+
+        // Request only line 0.
+        let p = params(Range {
+            start: Position::new(0, 0),
+            end: Position::new(0, 30),
+        });
+        let edits = handle_range_formatting(&p, source, &result).unwrap_or_default();
+        for edit in &edits {
+            assert_eq!(
+                edit.range.start.line, 0,
+                "edits outside range (line 0) should be filtered: {edit:?}"
+            );
+        }
     }
 }

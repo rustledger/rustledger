@@ -107,6 +107,16 @@ pub fn format_directive_lines(directive: &Directive, config: &FormatConfig) -> V
 ///
 /// Passing a single directive (`[&directive]`) formats it on its own, which is
 /// the natural degenerate case of whole-list alignment.
+///
+/// # Separator policy
+///
+/// **No blank line is inserted between adjacent directives** — `format_directives`
+/// concatenates each rendered directive directly so it's safe to use as a
+/// building block in larger compositions. Callers that need a blank line
+/// between directives should drop down to [`format_directive_lines`] +
+/// [`render_lines`] and push a `FormatLine::Plain(String::new())` between
+/// each directive's lines (see `crates/rustledger/src/cmd/extract_cmd` for
+/// an example).
 #[must_use]
 pub fn format_directives<'a, I>(directives: I, config: &FormatConfig) -> String
 where

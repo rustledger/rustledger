@@ -952,6 +952,7 @@ mod tests {
         assert_eq!(b.per_unit, dec!(30));
     }
 
+    #[cfg(debug_assertions)]
     #[test]
     #[should_panic(expected = "BookedCost invariant violated")]
     fn booked_cost_new_rejects_inconsistent_pair_in_debug() {
@@ -961,6 +962,18 @@ mod tests {
         let _ = BookedCost::new(dec!(50), dec!(300), dec!(10));
     }
 
+    #[cfg(not(debug_assertions))]
+    #[test]
+    fn booked_cost_new_accepts_inconsistent_pair_in_release() {
+        // Release builds skip `debug_assert!` by design, so `new`
+        // behaves as an unchecked constructor. Trust-boundary callers
+        // must use `try_new` instead.
+        let b = BookedCost::new(dec!(50), dec!(300), dec!(10));
+        assert_eq!(b.per_unit, dec!(50));
+        assert_eq!(b.total, dec!(300));
+    }
+
+    #[cfg(debug_assertions)]
     #[test]
     #[should_panic(expected = "requires non-zero units")]
     fn booked_cost_new_rejects_zero_units_in_debug() {
@@ -971,6 +984,17 @@ mod tests {
         // constructs PerUnitFromTotal with zero units (see book.rs),
         // so this only fires when boundary code forgets to validate.
         let _ = BookedCost::new(dec!(7), dec!(99), dec!(0));
+    }
+
+    #[cfg(not(debug_assertions))]
+    #[test]
+    fn booked_cost_new_accepts_zero_units_in_release() {
+        // Release builds skip the debug-only invariant check. This
+        // documents the intended split with `try_new`, which remains
+        // the runtime validator for trust-boundary inputs.
+        let b = BookedCost::new(dec!(7), dec!(99), dec!(0));
+        assert_eq!(b.per_unit, dec!(7));
+        assert_eq!(b.total, dec!(99));
     }
 
     #[test]
@@ -1037,6 +1061,7 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    #[cfg(debug_assertions)]
     #[test]
     #[should_panic(expected = "overflow")]
     fn booked_cost_new_panics_in_debug_on_overflow() {
@@ -1052,6 +1077,18 @@ mod tests {
         // 2.5e31, which exceeds Decimal::MAX (~7.92e28).
         let huge = Decimal::from_str_exact("5000000000000000").unwrap();
         let _ = BookedCost::new(huge, Decimal::from_str_exact("0.01").unwrap(), huge);
+    }
+
+    #[cfg(not(debug_assertions))]
+    #[test]
+    fn booked_cost_new_accepts_overflow_case_in_release() {
+        // Same split as the other `new` tests: release skips
+        // `debug_assert!`, so only `try_new` is expected to reject
+        // overflow at runtime.
+        let huge = Decimal::from_str_exact("5000000000000000").unwrap();
+        let b = BookedCost::new(huge, Decimal::from_str_exact("0.01").unwrap(), huge);
+        assert_eq!(b.per_unit, huge);
+        assert_eq!(b.total, Decimal::from_str_exact("0.01").unwrap());
     }
 
     #[test]

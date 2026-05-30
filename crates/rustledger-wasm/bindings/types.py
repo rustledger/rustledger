@@ -255,8 +255,8 @@ class SymbolKind(RootModel[str]):
 
 class TypedValueJson(BaseModel):
     """
-    Tagged-union wire-format for a [`MetaValue`] that preserves the
-    host's variant tag.
+    Tagged-union wire-format for a [`rustledger_core::MetaValue`] that
+    preserves the host's variant tag.
 
     Used **only** in `DirectiveJson::Custom`'s `values` field, where
     callers genuinely need to distinguish (for example) a `Date` from

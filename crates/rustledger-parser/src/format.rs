@@ -149,15 +149,26 @@ pub fn format_source(source: &str, parse_result: &ParseResult, config: &FormatCo
                 }));
             }
             FormattableItem::Comment(c) => {
-                // Emit verbatim; render_lines re-adds the single trailing
-                // newline that the span may have captured.
-                lines.push(FormatLine::Plain(
-                    c.value.trim_end_matches('\n').to_string(),
-                ));
+                // The lexer's `;[^\n\r]*` regex excludes the terminator, so
+                // the comment span never contains '\n' — emit the value as-is.
+                lines.push(FormatLine::Plain(c.value.clone()));
             }
         }
 
         prev_end = item.span().end;
+    }
+
+    // Preserve trailing blank lines after the last item. Non-directive items
+    // (comments, options, includes, plugins) end at the last byte of their
+    // content; the file's trailing newlines live in source[prev_end..]. Use
+    // the same "first newline is the item's terminator, extras are blank
+    // lines" rule that drives between-items gaps.
+    if !items.is_empty() && prev_end < source.len() {
+        let trailing = &source[prev_end..];
+        let newline_count = trailing.chars().filter(|&c| c == '\n').count();
+        for _ in 0..newline_count.saturating_sub(1) {
+            lines.push(FormatLine::Plain(String::new()));
+        }
     }
 
     let mut formatted = render_lines(&lines, &config.alignment);
@@ -211,6 +222,22 @@ mod tests {
         let src = "2024-01-01 open Assets:Cash\n\n\n";
         let out = fmt(src);
         assert_eq!(out, "2024-01-01 open Assets:Cash\n\n\n");
+    }
+
+    /// Regression for Copilot review on PR #1244: when the last item is a
+    /// standalone comment, options, include, or plugin (whose spans do not
+    /// include the trailing newline), trailing blank lines after that item
+    /// must still be preserved.
+    #[test]
+    fn preserves_trailing_blank_lines_after_comment() {
+        let src = "; trailing comment\n\n\n";
+        assert_eq!(fmt(src), src);
+    }
+
+    #[test]
+    fn preserves_trailing_blank_lines_after_option() {
+        let src = "option \"title\" \"x\"\n\n\n";
+        assert_eq!(fmt(src), src);
     }
 
     #[test]

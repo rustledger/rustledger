@@ -119,18 +119,23 @@ fn handle_sort_transactions(
     serde_json::to_value(workspace_edit).ok()
 }
 
-/// Align amounts in the document by delegating to the shared
+/// Align amounts in the document by delegating to the *canonical*
 /// document formatter ([`format_document`]).
 ///
-/// The formatting handler is the canonical alignment path now and it
-/// delegates further to [`rustledger_core::format_posting_line`] with
-/// file-wide resolved widths, the same geometry `rledger format` uses on
-/// disk. So this command, the LSP's `textDocument/formatting` request,
-/// and the CLI all produce identical output for a given `FormatConfig`. The previous bespoke
-/// logic here ran its own regex-style line scanner with a
-/// "max-existing-column" alignment heuristic, which produced output
-/// that matched none of the canonical paths — the kind of duplicate
-/// code path #1142 warned about.
+/// `format_document` runs the same `rustledger_parser::format_source`
+/// pipeline as `rledger format`, so the column widths this command
+/// resolves agree with the on-disk output. The previous bespoke logic
+/// here ran a regex-style line scanner with a "max-existing-column"
+/// alignment heuristic that matched neither the LSP `textDocument/
+/// formatting` request nor the CLI — the duplicate-code-path class
+/// issue #1142 warned about.
+///
+/// **Parse-error semantics.** On a file with parse errors,
+/// `format_document` returns `None` and this command surfaces a
+/// dedicated "cannot align" message rather than running the surface-
+/// cleanup fallback that `handle_formatting` uses. The command's name
+/// promises alignment; emitting whitespace-only edits under it would
+/// silently mutate the buffer in ways the user did not request.
 fn handle_align_amounts(
     source: &str,
     parse_result: &ParseResult,
@@ -144,7 +149,19 @@ fn handle_align_amounts(
     // to server defaults rather than silently mirroring an absent
     // client value.
     let config = document_format_config(None);
-    let edits: Vec<TextEdit> = format_document(source, parse_result, &config).unwrap_or_default();
+    let Some(edits) = format_document(source, parse_result, &config) else {
+        if !parse_result.errors.is_empty() {
+            return Some(serde_json::json!({
+                "message": format!(
+                    "Cannot align amounts: source has {} parse error(s); fix them first",
+                    parse_result.errors.len()
+                )
+            }));
+        }
+        return Some(serde_json::json!({
+            "message": "No amounts to align"
+        }));
+    };
 
     if edits.is_empty() {
         return Some(serde_json::json!({
@@ -342,36 +359,16 @@ mod tests {
 
         let mut out = source.to_string();
         for (sl, sc, el, ec, new_text) in typed {
-            let start = lsp_position_to_byte(&out, sl, sc);
-            let end = lsp_position_to_byte(&out, el, ec);
+            let start = crate::handlers::utils::lsp_position_to_byte(
+                &out,
+                lsp_types::Position::new(sl, sc),
+            );
+            let end = crate::handlers::utils::lsp_position_to_byte(
+                &out,
+                lsp_types::Position::new(el, ec),
+            );
             out.replace_range(start..end, &new_text);
         }
         out
-    }
-
-    fn lsp_position_to_byte(source: &str, target_line: u32, target_char: u32) -> usize {
-        let bytes = source.as_bytes();
-        let mut line = 0u32;
-        let mut line_start = 0usize;
-        let mut i = 0;
-        while i < bytes.len() && line < target_line {
-            if bytes[i] == b'\n' {
-                line += 1;
-                line_start = i + 1;
-            }
-            i += 1;
-        }
-        let line_slice = &source[line_start..];
-        let mut utf16_consumed = 0u32;
-        let mut byte_off = 0usize;
-        let mut buf = [0u16; 2];
-        for c in line_slice.chars() {
-            if utf16_consumed >= target_char || c == '\n' {
-                break;
-            }
-            utf16_consumed += c.encode_utf16(&mut buf).len() as u32;
-            byte_off += c.len_utf8();
-        }
-        line_start + byte_off
     }
 }

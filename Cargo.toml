@@ -159,6 +159,11 @@ getrandom = { version = "0.2", features = ["js"] }
 lsp-server = "0.7"
 lsp-types = "0.97"
 ropey = "1"
+# Line-based diff used by the LSP formatting handler to compute minimal,
+# hunk-grouped TextEdits from the canonical format output. Already a
+# transitive dependency via insta; promoted to a direct dep so the
+# formatter doesn't re-roll byte/line diff primitives.
+similar = "2"
 crossbeam-channel = "0.5"
 parking_lot = "0.12"
 

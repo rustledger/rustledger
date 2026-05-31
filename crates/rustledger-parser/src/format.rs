@@ -48,9 +48,24 @@ impl FormattableItem<'_> {
 ///
 /// The output always ends with a trailing newline (even for an empty file).
 ///
-/// Callers should gate this on a clean parse (`parse_result.errors`
-/// empty); formatting a file with parse errors would drop the unparsable
-/// content.
+/// # Contract
+///
+/// * `parse_result` MUST come from [`crate::parse`] applied to `source`.
+///   Spans are byte offsets into `source`; mismatched inputs will produce
+///   wrong output. Synthesized directives (`file_id` ==
+///   [`SYNTHESIZED_FILE_ID`]) appended by callers post-parse are detected
+///   and skipped, but synthesized options/includes/plugins/comments
+///   cannot be cleanly distinguished from real ones and will be rendered
+///   as if their spans were source-derived — pass parse output only.
+/// * Callers should gate this on a clean parse (`parse_result.errors`
+///   empty); formatting a file with parse errors would drop the
+///   unparsable content. The LSP, CLI, WASM, and FFI consumers all gate.
+///
+/// To format a directive list without surrounding source, use
+/// `rustledger_core::format::format_directives` instead — it composes the
+/// same primitives (`format_directive_lines` + `render_lines`) callers
+/// can use to mix source-backed directives with synthesized ones at the
+/// line level.
 #[must_use]
 pub fn format_source(source: &str, parse_result: &ParseResult, config: &FormatConfig) -> String {
     // Collect every element into a single list, then sort by source position
@@ -60,9 +75,10 @@ pub fn format_source(source: &str, parse_result: &ParseResult, config: &FormatCo
 
     // Skip synthesized directives — they have Span::ZERO and no source
     // backing, so they would sort to the top of the file regardless of the
-    // caller's intended position. format_source's contract is "reformat a
-    // file from its source text"; injecting synthesized content is a
-    // separate concern callers can handle by appending after the result.
+    // caller's intended position. Non-directive items (options/includes/
+    // plugins/comments) carry no file_id, so we can't symmetrically filter
+    // them — the contract above warns callers that those are assumed to
+    // come from `parse` and so always have real source spans.
     for directive in &parse_result.directives {
         if directive.file_id == SYNTHESIZED_FILE_ID {
             continue;

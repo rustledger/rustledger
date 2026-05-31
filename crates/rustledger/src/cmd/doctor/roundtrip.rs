@@ -1,105 +1,145 @@
 use crate::format::FormatConfig;
 use anyhow::{Context, Result};
+use rustledger_loader::Loader;
 use rustledger_parser::{format_source, parse};
-use std::fs;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-/// Diagnose whether `rledger format` on this file is byte-stable, i.e.
-/// `format(parse(source)) == source` after one normalization. Tests the
-/// exact path the CLI takes (`format_source`), not the directive-list
-/// aggregator — so the result mirrors what the user would see running
-/// `rledger format --check` and `rledger format` themselves.
+/// Diagnose whether `rledger format` on a ledger is byte-stable —
+/// `format(parse(source)) == source` — across the entry file and every
+/// file it transitively `include`s. Uses the loader to resolve the
+/// include graph, then runs the canonical `format_source` path on each
+/// file's source independently (the same path the CLI takes).
 pub(super) fn cmd_roundtrip<W: Write>(file: &PathBuf, writer: &mut W) -> Result<()> {
     writeln!(writer, "Round-trip test for {}", file.display())?;
     writeln!(writer, "{}", "=".repeat(60))?;
     writeln!(writer)?;
 
-    // Step 1: read and parse the source directly (no Loader — Loader applies
-    // booking + plugins and produces booked Directives without source spans,
-    // which the canonical format_source needs).
-    writeln!(writer, "Step 1: Loading original file...")?;
-    let source =
-        fs::read_to_string(file).with_context(|| format!("failed to read {}", file.display()))?;
-    let parse_result = parse(&source);
-    let original_count = parse_result.directives.len();
-    writeln!(writer, "  Parsed {original_count} directives")?;
+    // Resolve the include graph via the loader. The loader's parse errors
+    // are surfaced up front; we do NOT format a file whose parse failed,
+    // because format_source would silently drop the unparsable content
+    // and a count-equality check would then report SUCCESS for what is
+    // actually a lossy round-trip.
+    writeln!(writer, "Step 1: Resolving include graph...")?;
+    let mut loader = Loader::new();
+    let load_result = loader
+        .load(file)
+        .with_context(|| format!("failed to load {}", file.display()))?;
 
-    // Bail before formatting on parse errors. format_source ignores
-    // anything the parser couldn't recognize; running it on a partial parse
-    // would silently drop the unparsable directives, and the comparison
-    // below would then report SUCCESS for what is actually a lossy
-    // round-trip. Surface the error condition to the user instead.
-    if !parse_result.errors.is_empty() {
+    if !load_result.errors.is_empty() {
         writeln!(
             writer,
-            "  Found {} parse error(s) in original — cannot diagnose round-trip until they are fixed:",
-            parse_result.errors.len()
+            "  Found {} parse error(s) — fix them before diagnosing round-trip:",
+            load_result.errors.len()
         )?;
-        for err in parse_result.errors.iter().take(10) {
+        for err in load_result.errors.iter().take(10) {
             writeln!(writer, "    {err}")?;
         }
-        if parse_result.errors.len() > 10 {
-            writeln!(
-                writer,
-                "    ... and {} more",
-                parse_result.errors.len() - 10
-            )?;
+        if load_result.errors.len() > 10 {
+            writeln!(writer, "    ... and {} more", load_result.errors.len() - 10)?;
         }
         anyhow::bail!("round-trip aborted: source has parse errors");
     }
 
-    // Step 2: format via the same path the CLI uses.
-    writeln!(writer)?;
-    writeln!(writer, "Step 2: Formatting source via format_source...")?;
-    let config = FormatConfig::default();
-    let formatted = format_source(&source, &parse_result, &config);
-
-    let byte_stable = formatted == source;
+    let files = load_result.source_map.files();
     writeln!(
         writer,
-        "  Byte-stable: {}",
-        if byte_stable { "YES" } else { "NO" }
+        "  Resolved {} file(s) in include graph",
+        files.len()
     )?;
 
-    // Step 3: re-parse the formatter's output to catch any output the
-    // parser can't read back.
-    writeln!(writer)?;
-    writeln!(writer, "Step 3: Re-parsing formatted output...")?;
-    let result2 = parse(&formatted);
+    let config = FormatConfig::default();
+    let mut all_stable = true;
+    let mut total_directives = 0usize;
 
-    if !result2.errors.is_empty() {
-        writeln!(
-            writer,
-            "  Found {} parse errors in round-trip",
-            result2.errors.len()
-        )?;
-        for err in &result2.errors {
-            writeln!(writer, "    {}", err.message())?;
+    // Step 2: per-file canonical round-trip.
+    writeln!(writer)?;
+    writeln!(writer, "Step 2: Checking byte-stability per file...")?;
+    for sf in files {
+        let source = strip_utf8_bom(&sf.source);
+        let parse_result = parse(source);
+        if !parse_result.errors.is_empty() {
+            writeln!(
+                writer,
+                "  [{}] {} parse error(s) — skipping",
+                relative_path(&sf.path, file),
+                parse_result.errors.len()
+            )?;
+            all_stable = false;
+            continue;
+        }
+
+        let formatted = format_source(source, &parse_result, &config);
+        let stable = formatted == source;
+
+        // Re-parse to verify structure round-trips even when bytes differ.
+        let reparsed = parse(&formatted);
+        let reparsed_count = reparsed.directives.len();
+        total_directives += parse_result.directives.len();
+
+        if stable {
+            writeln!(
+                writer,
+                "  [stable]   {} ({} directives)",
+                relative_path(&sf.path, file),
+                parse_result.directives.len()
+            )?;
+        } else if reparsed.errors.is_empty() && reparsed_count == parse_result.directives.len() {
+            writeln!(
+                writer,
+                "  [reflow]   {} ({} directives) — bytes change but structure preserved",
+                relative_path(&sf.path, file),
+                parse_result.directives.len()
+            )?;
+            all_stable = false;
+        } else {
+            writeln!(
+                writer,
+                "  [MISMATCH] {} — original {} directives, re-parse {} directives, {} errors",
+                relative_path(&sf.path, file),
+                parse_result.directives.len(),
+                reparsed_count,
+                reparsed.errors.len()
+            )?;
+            all_stable = false;
         }
     }
-    let roundtrip_count = result2.directives.len();
-    writeln!(writer, "  Parsed {roundtrip_count} directives")?;
 
-    // Step 4: compare.
     writeln!(writer)?;
-    writeln!(writer, "Step 4: Comparing results...")?;
-    if byte_stable {
+    writeln!(writer, "Step 3: Summary")?;
+    writeln!(
+        writer,
+        "  {} file(s), {} directives total",
+        files.len(),
+        total_directives
+    )?;
+    if all_stable {
         writeln!(
             writer,
-            "  SUCCESS: Source is byte-stable under `rledger format`"
-        )?;
-    } else if original_count == roundtrip_count && result2.errors.is_empty() {
-        writeln!(
-            writer,
-            "  PARTIAL: format produced {original_count} directive(s) → re-parse yielded {roundtrip_count} directive(s); structure preserved but bytes changed (run `rledger format --diff` to inspect)"
+            "  SUCCESS: every file is byte-stable under `rledger format`"
         )?;
     } else {
         writeln!(
             writer,
-            "  MISMATCH: Original had {original_count} directives, round-trip has {roundtrip_count}"
+            "  Some files would be modified by `rledger format` — run `rledger format --diff` on the [reflow] / [MISMATCH] files to inspect"
         )?;
     }
 
     Ok(())
+}
+
+/// Strip a leading UTF-8 BOM (`\u{FEFF}` = `EF BB BF`) if present.
+fn strip_utf8_bom(s: &str) -> &str {
+    s.strip_prefix('\u{FEFF}').unwrap_or(s)
+}
+
+/// Display the absolute file path relative to the entry file's parent
+/// when possible, so output stays readable for multi-file ledgers.
+fn relative_path(file: &Path, entry: &Path) -> String {
+    if let Some(base) = entry.parent()
+        && let Ok(rel) = file.strip_prefix(base)
+    {
+        return rel.display().to_string();
+    }
+    file.display().to_string()
 }

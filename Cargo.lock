@@ -3927,6 +3927,7 @@ dependencies = [
  "rustledger-plugin",
  "rustledger-validate",
  "serde_json",
+ "similar",
  "tempfile",
  "tracing",
  "tracing-subscriber",

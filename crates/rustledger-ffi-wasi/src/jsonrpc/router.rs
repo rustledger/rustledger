@@ -491,8 +491,23 @@ fn handle_batch_file(params: &serde_json::Value) -> Result<serde_json::Value, Rp
 fn handle_format_source(params: &serde_json::Value) -> Result<serde_json::Value, RpcError> {
     let params: FormatSourceParams = serde_json::from_value(params.clone())
         .map_err(|e| RpcError::invalid_params(format!("Invalid params: {e}")))?;
+    format_source_to_response(&params.source)
+}
 
-    let parse_result = rustledger_parser::parse(&params.source);
+fn handle_format_file(params: &serde_json::Value) -> Result<serde_json::Value, RpcError> {
+    let params: FormatFileParams = serde_json::from_value(params.clone())
+        .map_err(|e| RpcError::invalid_params(format!("Invalid params: {e}")))?;
+    let source = fs::read_to_string(&params.path)
+        .map_err(|e| RpcError::file_error(format!("Failed to read file '{}': {e}", params.path)))?;
+    format_source_to_response(&source)
+}
+
+/// Shared canonical-format implementation for `format.source` and
+/// `format.file`. Gates on a clean parse, runs `format_source`, returns a
+/// `FormatResult` JSON value or a `parse_error` `RpcError`. Avoids the
+/// re-serialization round-trip the two endpoints used to go through.
+fn format_source_to_response(source: &str) -> Result<serde_json::Value, RpcError> {
+    let parse_result = rustledger_parser::parse(source);
     // Gate on a clean parse: format_source ignores anything the parser
     // couldn't recognize, so reformatting a file with errors would silently
     // drop those bytes — which on an FFI write path is a data-loss bug.
@@ -504,30 +519,19 @@ fn handle_format_source(params: &serde_json::Value) -> Result<serde_json::Value,
             .take(3)
             .map(std::string::ToString::to_string)
             .collect::<Vec<_>>()
-            .join("; ");
+            .join("\n  ");
         return Err(RpcError::parse_error(format!(
-            "cannot format source with {} parse error(s): {}",
+            "cannot format source with {} parse error(s):\n  {}",
             parse_result.errors.len(),
             summary
         )));
     }
 
     let config = rustledger_core::format::FormatConfig::default();
-    let formatted = rustledger_parser::format_source(&params.source, &parse_result, &config);
+    let formatted = rustledger_parser::format_source(source, &parse_result, &config);
 
     let result = FormatResult { formatted };
     serde_json::to_value(result).map_err(|e| RpcError::internal_error(e.to_string()))
-}
-
-fn handle_format_file(params: &serde_json::Value) -> Result<serde_json::Value, RpcError> {
-    let params: FormatFileParams = serde_json::from_value(params.clone())
-        .map_err(|e| RpcError::invalid_params(format!("Invalid params: {e}")))?;
-
-    let source = fs::read_to_string(&params.path)
-        .map_err(|e| RpcError::file_error(format!("Failed to read file '{}': {e}", params.path)))?;
-
-    let format_params = FormatSourceParams { source };
-    handle_format_source(&serde_json::to_value(format_params).unwrap())
 }
 
 fn handle_format_entry(params: &serde_json::Value) -> Result<serde_json::Value, RpcError> {

@@ -246,14 +246,32 @@ fn cli_matches_format_directives_on_directives_only_corpus() {
 
     let config = FormatConfig::default();
     for (i, input) in directives_only.iter().enumerate() {
-        let cli_out = run_format(input, &[]);
-        let parse_result = parse(input);
+        let original_parse = parse(CORPUS[i]);
+        let filtered_parse = parse(input);
         assert!(
-            parse_result.errors.is_empty(),
+            filtered_parse.errors.is_empty(),
             "directives-only corpus[{i}] must parse cleanly: {input}"
         );
+        // Structural integrity: stripping blanks/comments must NOT change
+        // the directive count. Without this guard the test could pass
+        // trivially on degenerate input (e.g., a future parser change
+        // that treats comments as directive separators).
+        assert_eq!(
+            filtered_parse.directives.len(),
+            original_parse.directives.len(),
+            "blank/comment strip changed the directive count on corpus[{i}] \
+             (filtered: {}, original: {}); the filter or parser policy changed",
+            filtered_parse.directives.len(),
+            original_parse.directives.len(),
+        );
+        assert!(
+            !filtered_parse.directives.is_empty(),
+            "directives-only corpus[{i}] has zero directives — degenerate input"
+        );
+
+        let cli_out = run_format(input, &[]);
         let via_directives =
-            format_directives(parse_result.directives.iter().map(|s| &s.value), &config);
+            format_directives(filtered_parse.directives.iter().map(|s| &s.value), &config);
         assert_eq!(
             cli_out, via_directives,
             "format_source (CLI) diverged from format_directives on a directives-only \

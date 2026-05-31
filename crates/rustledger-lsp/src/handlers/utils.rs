@@ -175,6 +175,57 @@ pub fn char_offset_to_byte(line: &str, utf16_offset: usize) -> usize {
     line.len()
 }
 
+/// Convert a byte offset in `source` to an LSP [`Position`].
+///
+/// The `character` field uses UTF-16 code units (LSP 3.17 default
+/// encoding). Built on [`ropey`]'s line and UTF-16 conversion primitives.
+/// Clamps `byte` to `source.len()` rather than panicking.
+#[must_use]
+pub fn byte_to_lsp_position(source: &str, byte: usize) -> Position {
+    let rope = ropey::Rope::from_str(source);
+    let byte = byte.min(rope.len_bytes());
+    let line = rope.byte_to_line(byte);
+    let line_start_byte = rope.line_to_byte(line);
+    let char_at = rope.byte_to_char(byte);
+    let line_start_char = rope.byte_to_char(line_start_byte);
+    let character = rope.char_to_utf16_cu(char_at) - rope.char_to_utf16_cu(line_start_char);
+    Position::new(line as u32, character as u32)
+}
+
+/// Convert an LSP [`Position`] (line, UTF-16 character) to a byte offset
+/// in `source`. Inverse of [`byte_to_lsp_position`].
+///
+/// Clamps both line and character to the end of the document / line
+/// (never crosses a `\n`).
+#[must_use]
+pub fn lsp_position_to_byte(source: &str, pos: Position) -> usize {
+    let rope = ropey::Rope::from_str(source);
+    let line_count = rope.len_lines();
+    if line_count == 0 {
+        return 0;
+    }
+    let line = (pos.line as usize).min(line_count.saturating_sub(1));
+    let line_start_byte = rope.line_to_byte(line);
+    let line_start_char = rope.byte_to_char(line_start_byte);
+    let line_start_utf16 = rope.char_to_utf16_cu(line_start_char);
+
+    // End-of-line byte (one past the line's last content byte, before the
+    // trailing '\n'). Used to clamp pos.character so we never cross into
+    // the next line.
+    let line_end_byte = if line + 1 < line_count {
+        rope.line_to_byte(line + 1).saturating_sub(1)
+    } else {
+        rope.len_bytes()
+    };
+    let line_end_char = rope.byte_to_char(line_end_byte);
+    let line_end_utf16 = rope.char_to_utf16_cu(line_end_char);
+
+    let target_utf16 = line_start_utf16 + pos.character as usize;
+    let clamped_utf16 = target_utf16.min(line_end_utf16);
+    let char_idx = rope.utf16_cu_to_char(clamped_utf16);
+    rope.char_to_byte(char_idx)
+}
+
 /// Get the word at a given column position in a line.
 ///
 /// Returns the word, its start column, and end column (0-based).

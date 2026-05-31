@@ -97,6 +97,16 @@ impl RpcError {
         }
     }
 
+    /// Attach structured `data` per JSON-RPC 2.0. Callers can pass
+    /// arbitrary JSON; consumers that recognize the shape (e.g., an
+    /// `{"errors": [...]}` array on a parse error) can surface
+    /// individual entries without scraping the free-form message.
+    #[must_use]
+    pub fn with_data(mut self, data: serde_json::Value) -> Self {
+        self.data = Some(data);
+        self
+    }
+
     /// Create a parse error (invalid JSON).
     pub fn parse_error(details: impl Into<String>) -> Self {
         Self::new(ErrorCode::ParseError, details)

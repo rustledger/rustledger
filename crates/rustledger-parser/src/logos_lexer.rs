@@ -33,7 +33,16 @@ impl From<Span> for Range<usize> {
 
 /// Token types produced by the Logos lexer.
 #[derive(Logos, Debug, Clone, PartialEq, Eq)]
-#[logos(skip r"[ \t]+")] // Skip horizontal whitespace (spaces and tabs)
+#[logos(skip r"[ \t]+")]
+// Skip horizontal whitespace (spaces and tabs)
+// Skip a UTF-8 BOM if it appears at the start of the document. Editors on
+// Windows and some Excel exports prepend `EF BB BF`; treating it as a
+// no-op token (rather than a parse error) means a BOM'd file is
+// indistinguishable from a non-BOM'd one to every downstream consumer
+// (loader, formatter, doctor). Byte offsets in spans still match the
+// source — the BOM is consumed as a 3-byte gap, identical to leading
+// whitespace.
+#[logos(skip r"\u{FEFF}")]
 pub enum Token<'src> {
     // ===== Literals =====
     /// A date in YYYY-MM-DD, YYYY-M-D, YYYY/MM/DD, or YYYY/M/D format.

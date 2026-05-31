@@ -5,7 +5,9 @@
 //! - rledger.sortTransactions: Sort transactions by date
 //! - rledger.alignAmounts: Align amounts in a region
 
-use lsp_types::{ExecuteCommandParams, TextEdit, Uri, WorkspaceEdit};
+use lsp_types::{
+    ExecuteCommandParams, MessageType, ShowMessageParams, TextEdit, Uri, WorkspaceEdit,
+};
 use rustledger_core::Directive;
 use rustledger_parser::ParseResult;
 use std::collections::HashMap;
@@ -21,23 +23,71 @@ pub const COMMANDS: &[&str] = &[
     "rledger.showAccountBalance",
 ];
 
+/// Result of an executeCommand handler.
+///
+/// `response` is the JSON-RPC response body (returned to the caller).
+/// `show_message` is an optional `window/showMessage` notification the
+/// dispatcher should emit alongside the response. Commands like
+/// `rledger.alignAmounts` use this to surface "Cannot align: file has
+/// parse errors" feedback that clients (VS Code etc.) would otherwise
+/// drop on the floor since executeCommand has no spec-defined way to
+/// surface human-readable errors.
+#[derive(Debug, Default)]
+pub struct ExecuteCommandResponse {
+    /// JSON value returned to the client as the `workspace/executeCommand`
+    /// response (often a `WorkspaceEdit` to apply, sometimes a small JSON
+    /// payload like an inserted-date result).
+    pub response: Option<serde_json::Value>,
+    /// Optional `window/showMessage` notification the dispatcher sends
+    /// alongside the response — used for human-readable feedback that
+    /// the executeCommand response shape can't carry.
+    pub show_message: Option<ShowMessageParams>,
+}
+
+impl ExecuteCommandResponse {
+    fn json(value: serde_json::Value) -> Self {
+        Self {
+            response: Some(value),
+            show_message: None,
+        }
+    }
+
+    fn none() -> Self {
+        Self::default()
+    }
+
+    fn warn(message: impl Into<String>) -> Self {
+        Self {
+            response: None,
+            show_message: Some(ShowMessageParams {
+                typ: MessageType::WARNING,
+                message: message.into(),
+            }),
+        }
+    }
+}
+
 /// Handle an execute command request.
 pub fn handle_execute_command(
     params: &ExecuteCommandParams,
     source: &str,
     parse_result: &ParseResult,
     uri: &Uri,
-) -> Option<serde_json::Value> {
+) -> ExecuteCommandResponse {
     match params.command.as_str() {
-        "rledger.insertDate" => handle_insert_date(),
-        "rledger.sortTransactions" => handle_sort_transactions(source, parse_result, uri),
+        "rledger.insertDate" => {
+            ExecuteCommandResponse::json(handle_insert_date().unwrap_or(serde_json::Value::Null))
+        }
+        "rledger.sortTransactions" => handle_sort_transactions(source, parse_result, uri)
+            .map_or_else(ExecuteCommandResponse::none, ExecuteCommandResponse::json),
         "rledger.alignAmounts" => handle_align_amounts(source, parse_result, uri),
         "rledger.showAccountBalance" => {
             handle_show_account_balance(&params.arguments, parse_result)
+                .map_or_else(ExecuteCommandResponse::none, ExecuteCommandResponse::json)
         }
         _ => {
             tracing::warn!("Unknown command: {}", params.command);
-            None
+            ExecuteCommandResponse::none()
         }
     }
 }
@@ -140,7 +190,7 @@ fn handle_align_amounts(
     source: &str,
     parse_result: &ParseResult,
     uri: &Uri,
-) -> Option<serde_json::Value> {
+) -> ExecuteCommandResponse {
     // `workspace/executeCommand` does NOT carry the client's
     // formatting preferences — those only travel with
     // `textDocument/formatting`. Express that explicitly by passing
@@ -150,23 +200,21 @@ fn handle_align_amounts(
     // client value.
     let config = document_format_config(None);
     let Some(edits) = format_document(source, parse_result, &config) else {
+        // Parse errors: surface via window/showMessage so the user
+        // actually sees the failure. executeCommand responses are
+        // discarded by VS Code etc.; showMessage is the spec-mandated
+        // way to display a textual error.
         if !parse_result.errors.is_empty() {
-            return Some(serde_json::json!({
-                "message": format!(
-                    "Cannot align amounts: source has {} parse error(s); fix them first",
-                    parse_result.errors.len()
-                )
-            }));
+            return ExecuteCommandResponse::warn(format!(
+                "Cannot align amounts: source has {} parse error(s); fix them first",
+                parse_result.errors.len()
+            ));
         }
-        return Some(serde_json::json!({
-            "message": "No amounts to align"
-        }));
+        return ExecuteCommandResponse::warn("No amounts to align");
     };
 
     if edits.is_empty() {
-        return Some(serde_json::json!({
-            "message": "No amounts to align"
-        }));
+        return ExecuteCommandResponse::warn("No amounts to align");
     }
 
     #[allow(clippy::mutable_key_type)]
@@ -179,7 +227,10 @@ fn handle_align_amounts(
         change_annotations: None,
     };
 
-    serde_json::to_value(workspace_edit).ok()
+    match serde_json::to_value(workspace_edit) {
+        Ok(v) => ExecuteCommandResponse::json(v),
+        Err(_) => ExecuteCommandResponse::none(),
+    }
 }
 
 /// Show account balance.
@@ -284,8 +335,10 @@ mod tests {
             "2024-01-15 * \"Coffee\"\n  Assets:Bank:Checking -5.00 USD\n  Expenses:Food 5.00 USD\n";
         let result = parse(misaligned);
         let uri: Uri = "file:///test.beancount".parse().unwrap();
-        let out =
-            handle_align_amounts(misaligned, &result, &uri).expect("align should return a value");
+        let response = handle_align_amounts(misaligned, &result, &uri);
+        let out = response
+            .response
+            .expect("align should return a JSON response");
 
         let changes = out.get("changes").and_then(|v| v.as_object()).unwrap();
         let edits = changes.values().next().unwrap().as_array().unwrap();
@@ -318,15 +371,23 @@ mod tests {
             "currencies must align across postings; got {bank_line:?} / {food_line:?}"
         );
 
-        // No-op shape: a canonically-aligned source should return the
-        // "no work" message.
+        // No-op shape: a canonically-aligned source returns no JSON
+        // response and a showMessage notification ("No amounts to
+        // align") instead.
         let aligned = "2024-01-15 open Assets:Bank USD\n";
         let aligned_parsed = parse(aligned);
-        let out2 = handle_align_amounts(aligned, &aligned_parsed, &uri)
-            .expect("align should always return some value");
+        let response2 = handle_align_amounts(aligned, &aligned_parsed, &uri);
         assert!(
-            out2.get("message").is_some(),
-            "no-op input should return a message-only shape, got {out2:?}"
+            response2.response.is_none(),
+            "no-op input should not return a workspace edit, got {:?}",
+            response2.response
+        );
+        let msg = response2
+            .show_message
+            .expect("no-op input should surface a showMessage notification");
+        assert!(
+            msg.message.contains("No amounts to align"),
+            "expected 'no amounts' message, got {msg:?}"
         );
     }
 

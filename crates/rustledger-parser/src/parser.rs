@@ -2384,19 +2384,23 @@ mod tests {
         }
     }
 
+    /// A leading UTF-8 BOM (`\u{FEFF}` / EF BB BF) is now skipped
+    /// transparently by the lexer — editors on Windows and various
+    /// spreadsheet exports prepend one. The previous behavior (a parse
+    /// error on the first byte) made every BOM'd file unreadable by
+    /// every CLI / FFI / LSP / doctor consumer. Now the parser
+    /// completes cleanly and downstream tools format the file the same
+    /// way they would without the BOM.
     #[test]
-    fn test_bom_produces_invalid_token_error() {
+    fn test_bom_is_skipped_transparently() {
         let source = "\u{FEFF}2024-01-01 open Assets:Bank USD\n";
         let result = parse(source);
         assert!(
-            !result.errors.is_empty(),
-            "BOM should produce a parse error"
+            result.errors.is_empty(),
+            "BOM should be skipped, got errors: {:?}",
+            result.errors
         );
-        let msg = result.errors[0].message();
-        assert!(
-            msg.contains("Invalid token"),
-            "BOM error should contain 'Invalid token', got: {msg}"
-        );
+        assert_eq!(result.directives.len(), 1, "expected 1 directive");
     }
 
     #[test]

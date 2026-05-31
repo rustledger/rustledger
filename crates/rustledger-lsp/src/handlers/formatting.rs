@@ -27,7 +27,7 @@ use lsp_types::{DocumentFormattingParams, Position, Range, TextEdit};
 use rustledger_core::FormatConfig;
 use rustledger_parser::{ParseResult, format_source};
 
-use super::utils::{byte_to_lsp_position, document_format_config};
+use super::utils::{document_format_config, rope_byte_to_lsp_position};
 
 /// Handle a `textDocument/formatting` request.
 ///
@@ -109,18 +109,17 @@ pub fn surface_cleanup_edits(source: &str) -> Option<Vec<TextEdit>> {
 /// own.
 fn clean_line(line: &str) -> String {
     // CRLF-encoded files split on '\n' yield segments terminated with
-    // '\r'; lift it off so the trim-trailing-whitespace logic doesn't
-    // either treat '\r' as a wall (leaving spaces in front of it) or
-    // strip it (silently converting CRLF→LF).
-    let (body, cr) = match line.strip_suffix('\r') {
-        Some(b) => (b, true),
-        None => (line, false),
-    };
+    // '\r'. Detect a single trailing '\r' and re-attach it after
+    // trimming; pathological "...\r\r" (multiple CRs from buggy input)
+    // is normalized to a single trailing CR so the line ending survives
+    // round-trip.
+    let cr = line.ends_with('\r');
+    let body = line.trim_end_matches('\r');
 
     // Leading tabs → two-space indent. Walk only the leading run of
     // whitespace; once we hit any non-whitespace character we stop, so
     // tabs inside string literals or comments are preserved.
-    let mut out = String::with_capacity(line.len());
+    let mut out = String::with_capacity(body.len());
     let mut leading = true;
     for c in body.chars() {
         if leading {
@@ -136,14 +135,12 @@ fn clean_line(line: &str) -> String {
         }
         out.push(c);
     }
-    // Strip trailing ASCII space/tab from the body.
-    while let Some(last) = out.chars().next_back() {
-        if last == ' ' || last == '\t' {
-            out.pop();
-        } else {
-            break;
-        }
-    }
+    // Strip trailing ASCII space/tab + any stray CRs that ended up
+    // inside the body. `trim_end_matches` walks bytes backwards in O(n);
+    // truncate yields O(1) drop. Avoids the chars().next_back() loop's
+    // O(n²) worst case on long whitespace runs.
+    let trimmed_len = out.trim_end_matches([' ', '\t', '\r']).len();
+    out.truncate(trimmed_len);
     if cr {
         out.push('\r');
     }
@@ -153,97 +150,57 @@ fn clean_line(line: &str) -> String {
 /// Produce a list of byte-correct `TextEdit`s that transform `source`
 /// into `formatted` using a line-based diff.
 ///
-/// Uses [`similar::TextDiff`] (Myers diff over lines) to compute the
-/// minimal set of replacements. Consecutive non-equal operations are
-/// merged into a single hunk so the editor receives one `TextEdit` per
-/// contiguous changed region; unchanged regions between hunks are left
-/// alone, preserving the editor's cursor and undo granularity. Line
-/// endings (the `\n` between segments and the file's terminating
-/// newline) are part of the source bytes the diff sees, so CRLF and
-/// no-trailing-newline files round-trip correctly without bespoke
-/// boundary handling.
+/// Uses [`similar::TextDiff::from_lines`] and the structured `DiffOp`
+/// API: every operation carries explicit `old_range` (source line index
+/// range) and `new_range` (formatted line index range), so each
+/// non-Equal op becomes one `TextEdit` with byte ranges resolved via
+/// `Rope::line_to_byte`. No state machine, no implicit cursor — the
+/// previous review confirmed a state-machine implementation corrupted
+/// the buffer on pure insertions.
+///
+/// Two ropes are constructed up front (one each for source and
+/// formatted) and threaded through the helpers, so the per-edit work is
+/// O(1) lookups rather than O(N) rope construction per call.
 fn minimal_diff_edits(source: &str, formatted: &str) -> Vec<TextEdit> {
-    use similar::{ChangeTag, TextDiff};
+    use similar::{DiffTag, TextDiff};
 
+    let src_rope = ropey::Rope::from_str(source);
+    let fmt_rope = ropey::Rope::from_str(formatted);
     let diff = TextDiff::from_lines(source, formatted);
     let mut edits: Vec<TextEdit> = Vec::new();
 
-    // `iter_all_changes()` walks line-by-line with byte offsets into
-    // both strings. We group consecutive non-Equal changes into one
-    // edit per hunk.
-    let mut hunk_src_start: Option<usize> = None;
-    let mut hunk_src_end: usize = 0;
-    let mut hunk_new = String::new();
-
-    let flush =
-        |source: &str, edits: &mut Vec<TextEdit>, start: usize, end: usize, new_text: &str| {
-            edits.push(TextEdit {
-                range: Range {
-                    start: byte_to_lsp_position(source, start),
-                    end: byte_to_lsp_position(source, end),
-                },
-                new_text: new_text.to_string(),
-            });
-        };
-
-    for change in diff.iter_all_changes() {
-        match change.tag() {
-            ChangeTag::Equal => {
-                if let Some(start) = hunk_src_start.take() {
-                    flush(source, &mut edits, start, hunk_src_end, &hunk_new);
-                    hunk_new.clear();
-                }
-            }
-            ChangeTag::Delete => {
-                let old_idx = change.old_index().expect("Delete has old_index");
-                // similar reports line indices, not byte offsets; resolve.
-                let (start, end) = line_byte_range(source, old_idx);
-                if hunk_src_start.is_none() {
-                    hunk_src_start = Some(start);
-                }
-                hunk_src_end = end;
-            }
-            ChangeTag::Insert => {
-                if hunk_src_start.is_none() {
-                    // Pure insertion at the *current* source position
-                    // (between the previous Equal block's last line and
-                    // the next one). Anchor to the start of the line
-                    // following the last Equal we saw. similar exposes
-                    // this via change.old_index() == None and the value
-                    // we should anchor at is the start of the line at
-                    // new_index... which doesn't map to source. Easier:
-                    // anchor to the previous hunk_src_end (default 0 if
-                    // we haven't opened a hunk yet — fine, that means
-                    // insertion at the start of the file).
-                    let anchor = hunk_src_end;
-                    hunk_src_start = Some(anchor);
-                }
-                hunk_new.push_str(change.value());
+    for op in diff.ops() {
+        match op.tag() {
+            DiffTag::Equal => {}
+            DiffTag::Delete | DiffTag::Insert | DiffTag::Replace => {
+                let old = op.old_range();
+                let new = op.new_range();
+                let src_start = line_idx_to_byte(&src_rope, old.start);
+                let src_end = line_idx_to_byte(&src_rope, old.end);
+                let fmt_start = line_idx_to_byte(&fmt_rope, new.start);
+                let fmt_end = line_idx_to_byte(&fmt_rope, new.end);
+                edits.push(TextEdit {
+                    range: Range {
+                        start: rope_byte_to_lsp_position(&src_rope, src_start),
+                        end: rope_byte_to_lsp_position(&src_rope, src_end),
+                    },
+                    new_text: formatted[fmt_start..fmt_end].to_string(),
+                });
             }
         }
-    }
-    if let Some(start) = hunk_src_start {
-        flush(source, &mut edits, start, hunk_src_end, &hunk_new);
     }
 
     edits
 }
 
-/// Return the `[start, end)` byte range of source line `line_idx` (0-indexed),
-/// including its terminating '\n' when present.
-fn line_byte_range(source: &str, line_idx: usize) -> (usize, usize) {
-    let rope = ropey::Rope::from_str(source);
-    let line_count = rope.len_lines();
-    if line_idx >= line_count {
-        return (rope.len_bytes(), rope.len_bytes());
-    }
-    let start = rope.line_to_byte(line_idx);
-    let end = if line_idx + 1 < line_count {
-        rope.line_to_byte(line_idx + 1)
-    } else {
+/// Map a line index (possibly == line_count, meaning "past last line")
+/// to a byte offset. Saturates at `rope.len_bytes()`.
+fn line_idx_to_byte(rope: &ropey::Rope, line: usize) -> usize {
+    if line >= rope.len_lines() {
         rope.len_bytes()
-    };
-    (start, end)
+    } else {
+        rope.line_to_byte(line)
+    }
 }
 
 #[cfg(test)]
@@ -497,5 +454,45 @@ mod tests {
     fn surface_cleanup_noop_on_canonical_input() {
         let source = "2024-01-01 open Assets:Bank USD\n";
         assert!(surface_cleanup_edits(source).is_none());
+    }
+
+    /// Regression for the deep-review finding: the previous
+    /// state-machine implementation of minimal_diff_edits anchored
+    /// pure-insert hunks at a stale byte cursor, so a formatter that
+    /// inserts a line between two unchanged lines (e.g., a blank
+    /// separator, an appended directive, a trailing newline) corrupted
+    /// the buffer. This test pins the byte-correctness of pure
+    /// insertions via similar's DiffOp byte ranges.
+    #[test]
+    fn pure_insert_between_unchanged_lines_lands_at_correct_byte() {
+        let source = "a\nb\n";
+        let formatted = "a\nX\nb\n";
+        let edits = minimal_diff_edits(source, formatted);
+        let after = apply(source, &edits);
+        assert_eq!(
+            after, formatted,
+            "pure insert anchored at wrong byte: {edits:?}"
+        );
+    }
+
+    #[test]
+    fn pure_insert_at_eof_lands_at_correct_byte() {
+        let source = "a\nb\n";
+        let formatted = "a\nb\nc\n";
+        let edits = minimal_diff_edits(source, formatted);
+        let after = apply(source, &edits);
+        assert_eq!(
+            after, formatted,
+            "EOF insert anchored at wrong byte: {edits:?}"
+        );
+    }
+
+    #[test]
+    fn two_separate_inserts_each_at_correct_byte() {
+        let source = "a\nb\nc\n";
+        let formatted = "a\nX\nb\nY\nc\n";
+        let edits = minimal_diff_edits(source, formatted);
+        let after = apply(source, &edits);
+        assert_eq!(after, formatted, "multi-insert anchored wrong: {edits:?}");
     }
 }

@@ -1046,8 +1046,9 @@ impl MainLoopState {
 
         if let Some(uri) = uri_from_args {
             let (text, parse_result) = self.get_document_data(&uri);
-            let response = handle_execute_command(&params, &text, &parse_result, &uri);
-            return Ok(response.unwrap_or(serde_json::Value::Null));
+            let result = handle_execute_command(&params, &text, &parse_result, &uri);
+            self.send_show_message(result.show_message);
+            return Ok(result.response.unwrap_or(serde_json::Value::Null));
         }
 
         // Fall back to first open document (legacy behavior)
@@ -1072,9 +1073,20 @@ impl MainLoopState {
             .map_err(|e| format!("{:?}", e))?;
 
         let (text, parse_result) = self.get_document_data(&uri);
-        let response = handle_execute_command(&params, &text, &parse_result, &uri);
+        let result = handle_execute_command(&params, &text, &parse_result, &uri);
+        self.send_show_message(result.show_message);
+        Ok(result.response.unwrap_or(serde_json::Value::Null))
+    }
 
-        Ok(response.unwrap_or(serde_json::Value::Null))
+    /// Send a `window/showMessage` notification, if any.
+    fn send_show_message(&self, params: Option<lsp_types::ShowMessageParams>) {
+        let Some(params) = params else { return };
+        let notif = lsp_server::Notification::new(
+            <lsp_types::notification::ShowMessage as lsp_types::notification::Notification>::METHOD
+                .to_string(),
+            params,
+        );
+        self.send(lsp_server::Message::Notification(notif));
     }
 
     /// Handle the completionItem/resolve request.

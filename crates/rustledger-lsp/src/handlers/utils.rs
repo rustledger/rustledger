@@ -175,14 +175,23 @@ pub fn char_offset_to_byte(line: &str, utf16_offset: usize) -> usize {
     line.len()
 }
 
-/// Convert a byte offset in `source` to an LSP [`Position`].
+/// Convert a byte offset in `source` to an LSP [`Position`]
+/// (`character` is UTF-16 code units per LSP 3.17 default encoding).
 ///
-/// The `character` field uses UTF-16 code units (LSP 3.17 default
-/// encoding). Built on [`ropey`]'s line and UTF-16 conversion primitives.
-/// Clamps `byte` to `source.len()` rather than panicking.
+/// Convenience wrapper that builds a [`ropey::Rope`] for the conversion;
+/// callers doing multiple conversions on the same string should use
+/// [`rope_byte_to_lsp_position`] instead and share the rope.
 #[must_use]
 pub fn byte_to_lsp_position(source: &str, byte: usize) -> Position {
     let rope = ropey::Rope::from_str(source);
+    rope_byte_to_lsp_position(&rope, byte)
+}
+
+/// Convert a byte offset to an LSP [`Position`] using a pre-built
+/// [`ropey::Rope`]. The hot-path variant for handlers that do many
+/// conversions per request (formatting, range formatting).
+#[must_use]
+pub fn rope_byte_to_lsp_position(rope: &ropey::Rope, byte: usize) -> Position {
     let byte = byte.min(rope.len_bytes());
     let line = rope.byte_to_line(byte);
     let line_start_byte = rope.line_to_byte(line);
@@ -195,25 +204,40 @@ pub fn byte_to_lsp_position(source: &str, byte: usize) -> Position {
 /// Convert an LSP [`Position`] (line, UTF-16 character) to a byte offset
 /// in `source`. Inverse of [`byte_to_lsp_position`].
 ///
-/// Clamps both line and character to the end of the document / line
-/// (never crosses a `\n`).
+/// Convenience wrapper that builds a [`ropey::Rope`]. Callers doing
+/// multiple conversions should use [`rope_lsp_position_to_byte`].
 #[must_use]
 pub fn lsp_position_to_byte(source: &str, pos: Position) -> usize {
     let rope = ropey::Rope::from_str(source);
+    rope_lsp_position_to_byte(&rope, pos)
+}
+
+/// Convert an LSP [`Position`] to a byte offset using a pre-built
+/// [`ropey::Rope`].
+///
+/// Per the LSP spec a position past the last line (line == line_count,
+/// character == 0) is the end-of-document position; this function
+/// returns `rope.len_bytes()` in that case. Within-document positions
+/// clamp the character field to the end of the addressed line so we
+/// never cross a `\n`.
+#[must_use]
+pub fn rope_lsp_position_to_byte(rope: &ropey::Rope, pos: Position) -> usize {
     let line_count = rope.len_lines();
     if line_count == 0 {
         return 0;
     }
-    let line = (pos.line as usize).min(line_count.saturating_sub(1));
-    let line_start_byte = rope.line_to_byte(line);
+    let pos_line = pos.line as usize;
+    // EOF position: line == line_count, character == 0 means
+    // "end of document" per LSP spec; clamp to len_bytes.
+    if pos_line >= line_count {
+        return rope.len_bytes();
+    }
+    let line_start_byte = rope.line_to_byte(pos_line);
     let line_start_char = rope.byte_to_char(line_start_byte);
     let line_start_utf16 = rope.char_to_utf16_cu(line_start_char);
 
-    // End-of-line byte (one past the line's last content byte, before the
-    // trailing '\n'). Used to clamp pos.character so we never cross into
-    // the next line.
-    let line_end_byte = if line + 1 < line_count {
-        rope.line_to_byte(line + 1).saturating_sub(1)
+    let line_end_byte = if pos_line + 1 < line_count {
+        rope.line_to_byte(pos_line + 1).saturating_sub(1)
     } else {
         rope.len_bytes()
     };

@@ -506,25 +506,23 @@ fn handle_format_file(params: &serde_json::Value) -> Result<serde_json::Value, R
 /// `format.file`. Gates on a clean parse, runs `format_source`, returns a
 /// `FormatResult` JSON value or a `parse_error` `RpcError`. Avoids the
 /// re-serialization round-trip the two endpoints used to go through.
+///
+/// On parse errors the message field stays single-line for log-friendly
+/// consumption; the full list of error strings is attached as a
+/// structured `data` array per JSON-RPC 2.0, so callers that want to
+/// surface individual errors can inspect `error.data` rather than
+/// scraping the message.
 fn format_source_to_response(source: &str) -> Result<serde_json::Value, RpcError> {
     let parse_result = rustledger_parser::parse(source);
-    // Gate on a clean parse: format_source ignores anything the parser
-    // couldn't recognize, so reformatting a file with errors would silently
-    // drop those bytes — which on an FFI write path is a data-loss bug.
-    // Mirrors the CLI/LSP/WASM gates.
     if !parse_result.errors.is_empty() {
-        let summary = parse_result
+        let errors: Vec<String> = parse_result
             .errors
             .iter()
-            .take(3)
             .map(std::string::ToString::to_string)
-            .collect::<Vec<_>>()
-            .join("\n  ");
-        return Err(RpcError::parse_error(format!(
-            "cannot format source with {} parse error(s):\n  {}",
-            parse_result.errors.len(),
-            summary
-        )));
+            .collect();
+        let message = format!("cannot format source with {} parse error(s)", errors.len());
+        let data = serde_json::json!({ "errors": errors });
+        return Err(RpcError::parse_error(message).with_data(data));
     }
 
     let config = rustledger_core::format::FormatConfig::default();

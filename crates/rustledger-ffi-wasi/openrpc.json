@@ -282,7 +282,7 @@
     {
       "name": "format.source",
       "summary": "Format beancount source",
-      "description": "Formats beancount source code according to standard conventions.",
+      "description": "Formats beancount source code according to standard conventions. Returns a `parse_error` JSON-RPC error (code -32700) with structured `data: { errors: string[], total: number, truncated: boolean }` when the source has parse errors; the formatter refuses to run on a broken parse to avoid silently dropping unparsable bytes.",
       "params": [
         {
           "name": "source",
@@ -299,12 +299,21 @@
         "schema": {
           "$ref": "#/components/schemas/FormatResult"
         }
-      }
+      },
+      "errors": [
+        {
+          "code": -32700,
+          "message": "cannot format source with N parse error(s)",
+          "data": {
+            "$ref": "#/components/schemas/ParseErrorData"
+          }
+        }
+      ]
     },
     {
       "name": "format.file",
       "summary": "Format a beancount file",
-      "description": "Formats a beancount file from disk.",
+      "description": "Formats a beancount file from disk. Same parse-error semantics as `format.source` — returns a structured error rather than partial output. Uses the loader with path-traversal protection enabled.",
       "params": [
         {
           "name": "path",
@@ -321,7 +330,16 @@
         "schema": {
           "$ref": "#/components/schemas/FormatResult"
         }
-      }
+      },
+      "errors": [
+        {
+          "code": -32700,
+          "message": "cannot format source with N parse error(s)",
+          "data": {
+            "$ref": "#/components/schemas/ParseErrorData"
+          }
+        }
+      ]
     },
     {
       "name": "format.entry",
@@ -768,6 +786,26 @@
           }
         },
         "required": ["formatted"]
+      },
+      "ParseErrorData": {
+        "type": "object",
+        "description": "Structured `data` field attached to a `parse_error` RpcError (code -32700) returned by `format.source` / `format.file` when the source has parse errors. The `errors` array is capped at 100 entries; check `truncated` to detect elision.",
+        "properties": {
+          "errors": {
+            "type": "array",
+            "description": "Parse error messages (up to 100). Each entry is the rendered Display of a parser error.",
+            "items": { "type": "string" }
+          },
+          "total": {
+            "type": "integer",
+            "description": "Total number of parse errors before truncation."
+          },
+          "truncated": {
+            "type": "boolean",
+            "description": "True iff `total > 100`. Consumers should surface elision when true."
+          }
+        },
+        "required": ["errors", "total", "truncated"]
       },
       "CreateEntryResult": {
         "type": "object",

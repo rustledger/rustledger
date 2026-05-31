@@ -78,12 +78,10 @@ pub fn handle_execute_command(
         "rledger.insertDate" => {
             ExecuteCommandResponse::json(handle_insert_date().unwrap_or(serde_json::Value::Null))
         }
-        "rledger.sortTransactions" => handle_sort_transactions(source, parse_result, uri)
-            .map_or_else(ExecuteCommandResponse::none, ExecuteCommandResponse::json),
+        "rledger.sortTransactions" => handle_sort_transactions(source, parse_result, uri),
         "rledger.alignAmounts" => handle_align_amounts(source, parse_result, uri),
         "rledger.showAccountBalance" => {
             handle_show_account_balance(&params.arguments, parse_result)
-                .map_or_else(ExecuteCommandResponse::none, ExecuteCommandResponse::json)
         }
         _ => {
             tracing::warn!("Unknown command: {}", params.command);
@@ -105,8 +103,7 @@ fn handle_sort_transactions(
     source: &str,
     parse_result: &ParseResult,
     uri: &Uri,
-) -> Option<serde_json::Value> {
-    // Collect transactions with their spans
+) -> ExecuteCommandResponse {
     let mut transactions: Vec<(rustledger_core::NaiveDate, usize, usize, String)> = Vec::new();
 
     for spanned in &parse_result.directives {
@@ -119,31 +116,29 @@ fn handle_sort_transactions(
     }
 
     if transactions.len() < 2 {
-        return None; // Nothing to sort
+        return ExecuteCommandResponse::warn("Nothing to sort: fewer than 2 transactions");
     }
 
-    // Check if already sorted
     let mut sorted = transactions.clone();
     sorted.sort_by_key(|(date, start, _, _)| (*date, *start));
 
     if transactions == sorted {
-        return Some(serde_json::json!({
-            "message": "Transactions are already sorted"
-        }));
+        return ExecuteCommandResponse::warn("Transactions are already sorted");
     }
 
-    // Find the range that needs to be replaced (from first to last transaction)
-    let first_start = transactions.iter().map(|(_, s, _, _)| *s).min()?;
-    let last_end = transactions.iter().map(|(_, _, e, _)| *e).max()?;
+    let Some(first_start) = transactions.iter().map(|(_, s, _, _)| *s).min() else {
+        return ExecuteCommandResponse::none();
+    };
+    let Some(last_end) = transactions.iter().map(|(_, _, e, _)| *e).max() else {
+        return ExecuteCommandResponse::none();
+    };
 
-    // Build the sorted text
     let sorted_text: String = sorted
         .iter()
         .map(|(_, _, _, text)| text.as_str())
         .collect::<Vec<_>>()
         .join("\n\n");
 
-    // Create workspace edit
     let line_index = LineIndex::new(source);
     let (start_line, start_col) = line_index.offset_to_position(first_start);
     let (end_line, end_col) = line_index.offset_to_position(last_end);
@@ -166,7 +161,10 @@ fn handle_sort_transactions(
         change_annotations: None,
     };
 
-    serde_json::to_value(workspace_edit).ok()
+    match serde_json::to_value(workspace_edit) {
+        Ok(v) => ExecuteCommandResponse::json(v),
+        Err(_) => ExecuteCommandResponse::none(),
+    }
 }
 
 /// Align amounts in the document by delegating to the *canonical*
@@ -237,12 +235,14 @@ fn handle_align_amounts(
 fn handle_show_account_balance(
     arguments: &[serde_json::Value],
     parse_result: &ParseResult,
-) -> Option<serde_json::Value> {
-    let account = arguments.first()?.as_str()?;
+) -> ExecuteCommandResponse {
+    let Some(account) = arguments.first().and_then(|a| a.as_str()) else {
+        return ExecuteCommandResponse::warn(
+            "rledger.showAccountBalance: account argument missing",
+        );
+    };
 
-    // Calculate balance from all transactions
     let mut balances: HashMap<String, rustledger_core::Decimal> = HashMap::new();
-
     for spanned in &parse_result.directives {
         if let Directive::Transaction(txn) = &spanned.value {
             for posting in &txn.postings {
@@ -258,19 +258,18 @@ fn handle_show_account_balance(
     }
 
     if balances.is_empty() {
-        return Some(serde_json::json!({
-            "account": account,
-            "message": "No transactions found for this account"
-        }));
+        return ExecuteCommandResponse::warn(format!(
+            "No transactions found for account '{account}'"
+        ));
     }
 
     let balance_str: String = balances
         .iter()
-        .map(|(currency, amount)| format!("{} {}", amount, currency))
+        .map(|(currency, amount)| format!("{amount} {currency}"))
         .collect::<Vec<_>>()
         .join(", ");
 
-    Some(serde_json::json!({
+    ExecuteCommandResponse::json(serde_json::json!({
         "account": account,
         "balance": balance_str,
         "balances": balances
@@ -308,13 +307,25 @@ mod tests {
         let result = parse(source);
 
         let args = vec![serde_json::json!("Assets:Bank")];
-        let balance = handle_show_account_balance(&args, &result);
-        assert!(balance.is_some());
-
-        let value = balance.unwrap();
+        let response = handle_show_account_balance(&args, &result);
+        let value = response.response.expect("expected a JSON response");
         let balance_str = value.get("balance").and_then(|v| v.as_str()).unwrap();
         assert!(balance_str.contains("95")); // 100 - 5 = 95
         assert!(balance_str.contains("USD"));
+    }
+
+    /// Unknown account: response.is_none(), feedback surfaces via
+    /// window/showMessage so editors that don't subscribe to the
+    /// executeCommand return value still see the warning.
+    #[test]
+    fn show_account_balance_unknown_account_surfaces_show_message() {
+        let source = "2024-01-01 open Assets:Bank USD\n";
+        let result = parse(source);
+        let args = vec![serde_json::json!("Assets:Missing")];
+        let response = handle_show_account_balance(&args, &result);
+        assert!(response.response.is_none());
+        let msg = response.show_message.expect("expected showMessage");
+        assert!(msg.message.contains("No transactions"), "{msg:?}");
     }
 
     #[test]

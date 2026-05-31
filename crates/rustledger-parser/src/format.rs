@@ -212,6 +212,26 @@ pub fn format_source(source: &str, parse_result: &ParseResult, config: &FormatCo
         formatted.push('\n');
     }
 
+    // Preserve the source's line-ending style. `render_lines` always
+    // emits LF; if the source used CRLF (i.e., any `\r\n` is present),
+    // we rewrite the output to match so a Windows-authored file
+    // round-trips byte-for-byte through `rledger format`. Mixed-line-
+    // ending files normalize to CRLF, which matches what beancount's
+    // own tools do.
+    if source.contains("\r\n") {
+        formatted = formatted.replace('\n', "\r\n");
+    }
+
+    // Preserve a leading UTF-8 BOM. The lexer skips it as a no-op so
+    // parsing works on BOM'd files, but render_lines doesn't emit it.
+    // Re-prepend so a Windows / Excel export round-trips byte-stable.
+    if source.starts_with('\u{FEFF}') && !formatted.starts_with('\u{FEFF}') {
+        let mut with_bom = String::with_capacity(formatted.len() + 3);
+        with_bom.push('\u{FEFF}');
+        with_bom.push_str(&formatted);
+        formatted = with_bom;
+    }
+
     formatted
 }
 
@@ -270,6 +290,31 @@ mod tests {
     #[test]
     fn preserves_trailing_blank_lines_after_option() {
         let src = "option \"title\" \"x\"\n\n\n";
+        assert_eq!(fmt(src), src);
+    }
+
+    /// CRLF-encoded source must round-trip byte-stable. `render_lines`
+    /// always emits LF; `format_source` rewrites the output to match the
+    /// source's line endings.
+    #[test]
+    fn preserves_crlf_line_endings() {
+        let src = "2024-01-01 open Assets:Cash\r\n2024-01-02 open Assets:Bank\r\n";
+        assert_eq!(fmt(src), src);
+    }
+
+    /// Leading UTF-8 BOM (`EF BB BF` / `\u{FEFF}`) is consumed by the
+    /// lexer as whitespace, but `format_source` re-prepends it so the
+    /// output round-trips byte-stable for Windows / spreadsheet exports.
+    #[test]
+    fn preserves_leading_bom() {
+        let src = "\u{FEFF}2024-01-01 open Assets:Cash\n";
+        assert_eq!(fmt(src), src);
+    }
+
+    /// BOM + CRLF combination is the common Windows export shape.
+    #[test]
+    fn preserves_bom_and_crlf_together() {
+        let src = "\u{FEFF}2024-01-01 open Assets:Cash\r\n";
         assert_eq!(fmt(src), src);
     }
 

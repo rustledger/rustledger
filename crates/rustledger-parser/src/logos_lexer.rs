@@ -33,15 +33,26 @@ impl From<Span> for Range<usize> {
 
 /// Token types produced by the Logos lexer.
 #[derive(Logos, Debug, Clone, PartialEq, Eq)]
+// Skip horizontal whitespace (spaces and tabs).
 #[logos(skip r"[ \t]+")]
-// Skip horizontal whitespace (spaces and tabs)
-// Skip a UTF-8 BOM if it appears at the start of the document. Editors on
-// Windows and some Excel exports prepend `EF BB BF`; treating it as a
-// no-op token (rather than a parse error) means a BOM'd file is
-// indistinguishable from a non-BOM'd one to every downstream consumer
-// (loader, formatter, doctor). Byte offsets in spans still match the
-// source — the BOM is consumed as a 3-byte gap, identical to leading
-// whitespace.
+// Skip UTF-8 BOMs (`EF BB BF` / `\u{FEFF}`) wherever they appear.
+//
+// **Anchoring intent vs. implementation.** The common case this is
+// targeting is a leading BOM (Windows/Excel exports), but logos `skip`
+// directives have no position anchor — this regex matches any U+FEFF
+// in the source, including mid-file. Concatenating two BOM'd files
+// (`cat a.bean b.bean`) silently consumes both BOMs rather than
+// erroring on the second. That's a deliberate trade-off: catching a
+// mid-file BOM as an error would require a lexer callback that
+// inspects `lex.span().start`, adding complexity for a rare condition
+// that's already harmless (the BOM byte sequence is invisible in
+// every Unicode-aware viewer and downstream `format_source`
+// re-prepends a leading BOM to preserve byte fidelity).
+//
+// Spans remain byte-accurate to the source — the BOM is consumed as
+// a 3-byte gap identical to leading whitespace, so every downstream
+// consumer (loader, formatter, doctor) sees the same byte offsets
+// they would for a non-BOM'd file.
 #[logos(skip r"\u{FEFF}")]
 pub enum Token<'src> {
     // ===== Literals =====

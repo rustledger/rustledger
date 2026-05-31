@@ -110,11 +110,15 @@ pub fn surface_cleanup_edits(source: &str) -> Option<Vec<TextEdit>> {
 fn clean_line(line: &str) -> String {
     // CRLF-encoded files split on '\n' yield segments terminated with
     // '\r'. Detect a single trailing '\r' and re-attach it after
-    // trimming; pathological "...\r\r" (multiple CRs from buggy input)
-    // is normalized to a single trailing CR so the line ending survives
-    // round-trip.
-    let cr = line.ends_with('\r');
-    let body = line.trim_end_matches('\r');
+    // trimming. We deliberately strip EXACTLY one CR (via
+    // `strip_suffix`), preserving any preceding stray CRs in the body —
+    // surface cleanup must be byte-conservative on parse-error files so
+    // a paste-in-progress with `...\r\r\n` doesn't get silently
+    // normalized while the user is still editing.
+    let (body, cr) = match line.strip_suffix('\r') {
+        Some(b) => (b, true),
+        None => (line, false),
+    };
 
     // Leading tabs → two-space indent. Walk only the leading run of
     // whitespace; once we hit any non-whitespace character we stop, so
@@ -135,11 +139,12 @@ fn clean_line(line: &str) -> String {
         }
         out.push(c);
     }
-    // Strip trailing ASCII space/tab + any stray CRs that ended up
-    // inside the body. `trim_end_matches` walks bytes backwards in O(n);
-    // truncate yields O(1) drop. Avoids the chars().next_back() loop's
-    // O(n²) worst case on long whitespace runs.
-    let trimmed_len = out.trim_end_matches([' ', '\t', '\r']).len();
+    // Strip ONLY trailing ASCII space/tab — never CR, since the body's
+    // own trailing CR (if any) was already lifted off into the `cr`
+    // flag and a body-internal stray CR is part of the user's content.
+    // `trim_end_matches` + `truncate` is O(n); the previous
+    // `chars().next_back()` loop was O(n²) on long whitespace runs.
+    let trimmed_len = out.trim_end_matches([' ', '\t']).len();
     out.truncate(trimmed_len);
     if cr {
         out.push('\r');
@@ -179,18 +184,97 @@ fn minimal_diff_edits(source: &str, formatted: &str) -> Vec<TextEdit> {
                 let src_end = line_idx_to_byte(&src_rope, old.end);
                 let fmt_start = line_idx_to_byte(&fmt_rope, new.start);
                 let fmt_end = line_idx_to_byte(&fmt_rope, new.end);
+                let src_slice = &source[src_start..src_end];
+                let fmt_slice = &formatted[fmt_start..fmt_end];
+
+                // Sub-line precision for single-line replacements:
+                // strip the longest common UTF-8 prefix and suffix so
+                // editor cursor and inline decoration positions outside
+                // the actually-changed bytes are preserved. Only fires
+                // when the operation is contained in a single source
+                // and single formatted line — for multi-line ops the
+                // full line-granular edit is correct.
+                let (sub_start, sub_end, sub_new) =
+                    narrow_single_line_replace(src_slice, fmt_slice);
+                let edit_start = src_start + sub_start;
+                let edit_end = src_start + sub_end;
                 edits.push(TextEdit {
                     range: Range {
-                        start: rope_byte_to_lsp_position(&src_rope, src_start),
-                        end: rope_byte_to_lsp_position(&src_rope, src_end),
+                        start: rope_byte_to_lsp_position(&src_rope, edit_start),
+                        end: rope_byte_to_lsp_position(&src_rope, edit_end),
                     },
-                    new_text: formatted[fmt_start..fmt_end].to_string(),
+                    new_text: sub_new.to_string(),
                 });
             }
         }
     }
 
     edits
+}
+
+/// Strip the longest common UTF-8 prefix and suffix between `src_slice`
+/// (a source line region) and `fmt_slice` (the corresponding formatted
+/// region), returning the byte offsets into `src_slice` that need
+/// replacement and the replacement bytes from `fmt_slice`. Cursor and
+/// inline-decoration positions outside the changed bytes survive the
+/// format.
+///
+/// Skips the optimization when either slice spans multiple logical
+/// lines (more than one `\n`); a single trailing `\n` (line terminator,
+/// always present in `from_lines` output for non-tail ops) is peeled
+/// off before computing prefix/suffix so it doesn't fool the
+/// single-line check.
+fn narrow_single_line_replace<'a>(src_slice: &str, fmt_slice: &'a str) -> (usize, usize, &'a str) {
+    // Only narrow Replace ops on a single line. The sub-line
+    // optimization needs BOTH slices to share the same terminator
+    // shape: either both have a trailing '\n' (the common case
+    // for line-replace) or both don't (a tail-of-file edit). Anything
+    // else — including pure Insert (src_slice empty) and pure Delete
+    // (fmt_slice empty) — falls through to the line-granular emit
+    // because peeling an asymmetric terminator would either drop the
+    // inserted line's '\n' or invent one on the source side.
+    let src_terminated = src_slice.ends_with('\n');
+    let fmt_terminated = fmt_slice.ends_with('\n');
+    if src_slice.is_empty() || fmt_slice.is_empty() || src_terminated != fmt_terminated {
+        return (0, src_slice.len(), fmt_slice);
+    }
+    let src_body = src_slice.strip_suffix('\n').unwrap_or(src_slice);
+    let fmt_body = fmt_slice.strip_suffix('\n').unwrap_or(fmt_slice);
+    // Multi-line after peeling: don't narrow.
+    if src_body.contains('\n') || fmt_body.contains('\n') {
+        return (0, src_slice.len(), fmt_slice);
+    }
+    let s = src_body.as_bytes();
+    let f = fmt_body.as_bytes();
+    let mut prefix = 0;
+    let max_prefix = s.len().min(f.len());
+    while prefix < max_prefix && s[prefix] == f[prefix] {
+        prefix += 1;
+    }
+    while prefix > 0 && (!src_body.is_char_boundary(prefix) || !fmt_body.is_char_boundary(prefix)) {
+        prefix -= 1;
+    }
+    let mut suffix = 0;
+    let max_suffix = (s.len() - prefix).min(f.len() - prefix);
+    while suffix < max_suffix && s[s.len() - 1 - suffix] == f[f.len() - 1 - suffix] {
+        suffix += 1;
+    }
+    while suffix > 0
+        && (!src_body.is_char_boundary(src_body.len() - suffix)
+            || !fmt_body.is_char_boundary(fmt_body.len() - suffix))
+    {
+        suffix -= 1;
+    }
+    // No actual change after stripping common prefix/suffix? Return the
+    // (zero-width, empty) shape — the caller's edit collection should
+    // skip it. With Equal ops already filtered, this only fires when
+    // similar emitted a Replace that turned out byte-identical (rare
+    // but possible with whitespace normalization at the line ends).
+    (
+        prefix,
+        s.len() - suffix,
+        &fmt_body[prefix..f.len() - suffix],
+    )
 }
 
 /// Map a line index (possibly == line_count, meaning "past last line")
@@ -494,5 +578,56 @@ mod tests {
         let edits = minimal_diff_edits(source, formatted);
         let after = apply(source, &edits);
         assert_eq!(after, formatted, "multi-insert anchored wrong: {edits:?}");
+    }
+
+    /// Sub-line precision: when a single byte changes inside one line,
+    /// the emitted edit is narrowed to that byte range only — cursors,
+    /// inline diagnostics, and CodeLens positions outside the changed
+    /// bytes survive the format.
+    #[test]
+    fn sub_line_precision_for_single_byte_change() {
+        let source = "  Assets:Bank  -5.00 USD\n";
+        let formatted = "  Assets:Bank  -6.00 USD\n";
+        let edits = minimal_diff_edits(source, formatted);
+        assert_eq!(edits.len(), 1, "{edits:?}");
+        let edit = &edits[0];
+        assert_eq!(
+            edit.new_text, "6",
+            "should narrow to the changed digit, got new_text={:?}",
+            edit.new_text
+        );
+        // The replaced range must be exactly the one byte at "5".
+        assert_eq!(edit.range.start.line, 0);
+        assert_eq!(edit.range.end.line, 0);
+        assert_eq!(edit.range.end.character - edit.range.start.character, 1);
+        let after = apply(source, &edits);
+        assert_eq!(after, formatted);
+    }
+
+    /// Regression for the deep-review finding (#15): pin similar's
+    /// granularity assumption. A line replacement should produce ONE
+    /// edit, not Delete+Insert. If a future similar bump changes the
+    /// compact pass, this test surfaces the regression so the consumer
+    /// can adapt rather than silently double the per-hunk edit count.
+    #[test]
+    fn similar_compact_pass_keeps_replacements_atomic() {
+        // Source and formatted differ only on one line out of three;
+        // similar's compact pass should emit one DiffOp::Replace, not
+        // a Delete+Insert pair.
+        use similar::{DiffTag, TextDiff};
+        let source = "alpha\nbeta\ngamma\n";
+        let formatted = "alpha\nBETA\ngamma\n";
+        let diff = TextDiff::from_lines(source, formatted);
+        let non_equal: Vec<_> = diff
+            .ops()
+            .iter()
+            .filter(|op| op.tag() != DiffTag::Equal)
+            .collect();
+        assert_eq!(
+            non_equal.len(),
+            1,
+            "expected exactly one non-Equal op; similar's compact pass changed semantics: {non_equal:?}"
+        );
+        assert_eq!(non_equal[0].tag(), DiffTag::Replace);
     }
 }

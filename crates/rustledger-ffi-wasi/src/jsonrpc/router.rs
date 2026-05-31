@@ -126,8 +126,12 @@ fn handle_load_file(params: &serde_json::Value) -> Result<serde_json::Value, Rpc
 
     let path = Path::new(&params.path);
 
-    // Load using the full loader
-    let mut loader = Loader::new();
+    // Load using the full loader. `with_path_security(true)` confines
+    // the include graph to the entry file's directory tree — FFI is the
+    // most security-sensitive surface (untrusted JSON-RPC callers can
+    // pass arbitrary paths), so it gets the same hardening as the
+    // doctor diagnostic.
+    let mut loader = Loader::new().with_path_security(true);
     let load_result = loader
         .load(path)
         .map_err(|e| RpcError::file_error(format!("Failed to load file: {e}")))?;
@@ -515,13 +519,26 @@ fn handle_format_file(params: &serde_json::Value) -> Result<serde_json::Value, R
 fn format_source_to_response(source: &str) -> Result<serde_json::Value, RpcError> {
     let parse_result = rustledger_parser::parse(source);
     if !parse_result.errors.is_empty() {
+        // Cap the per-error array to keep the JSON-RPC response bounded.
+        // A pathological 10MB binary fed into `format.file` can produce
+        // tens of thousands of error strings; the structured response
+        // would otherwise grow multi-megabyte and DOS the embedder's
+        // transport. `total` and `truncated` let the consumer detect
+        // and surface the elision.
+        const MAX_ERRORS: usize = 100;
+        let total = parse_result.errors.len();
         let errors: Vec<String> = parse_result
             .errors
             .iter()
+            .take(MAX_ERRORS)
             .map(std::string::ToString::to_string)
             .collect();
-        let message = format!("cannot format source with {} parse error(s)", errors.len());
-        let data = serde_json::json!({ "errors": errors });
+        let message = format!("cannot format source with {total} parse error(s)");
+        let data = serde_json::json!({
+            "errors": errors,
+            "total": total,
+            "truncated": total > MAX_ERRORS,
+        });
         return Err(RpcError::parse_error(message).with_data(data));
     }
 

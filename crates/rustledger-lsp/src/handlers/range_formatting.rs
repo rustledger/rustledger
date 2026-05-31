@@ -38,9 +38,20 @@ pub fn handle_range_formatting(
 
     let rope = ropey::Rope::from_str(source);
     let range_start_byte = rope_lsp_position_to_byte(&rope, params.range.start);
-    let range_end_byte = rope_lsp_position_to_byte(&rope, params.range.end);
-    // Defensive: a malformed client request with end < start.
-    if range_end_byte < range_start_byte {
+    let mut range_end_byte = rope_lsp_position_to_byte(&rope, params.range.end);
+    // Snap range_end past the trailing '\n' when the user selected to
+    // the visual end of a line. Editors that click+shift-end produce
+    // Position(N, eol_char) which maps to the byte BEFORE the '\n'; the
+    // canonical line-replacement edits we filter against end at the
+    // byte AFTER the '\n' (start of line N+1). Without this snap every
+    // typical EOL selection drops every relevant edit.
+    if range_end_byte < source.len() && source.as_bytes()[range_end_byte] == b'\n' {
+        range_end_byte += 1;
+    }
+    // Reject empty / inverted ranges. A zero-width range (start == end)
+    // is a cursor position, not a selection; rangeFormatting on it
+    // should be a no-op rather than a pure-insertion at the cursor.
+    if range_end_byte <= range_start_byte {
         return None;
     }
 
@@ -173,6 +184,42 @@ mod tests {
             !edits.is_empty(),
             "the trailing-newline insertion must be kept"
         );
+    }
+
+    /// Regression for the deep-review finding: when the user
+    /// click+shift-end-selects a line, the IDE sends
+    /// `range.end = Position(N, eol_char)` (byte BEFORE the '\n').
+    /// Canonical line-replacement edits end at the byte AFTER the
+    /// '\n' (start of line N+1). The snap inside handle_range_formatting
+    /// extends range_end past the '\n' so those edits are kept.
+    #[test]
+    fn end_of_line_selection_keeps_line_replace_edit() {
+        let source = "2024-01-15 * \"Coffee\"\n    Assets:Bank  -5.00 USD\n";
+        let result = parse(source);
+        // Select the misindented posting line in full: range ends at
+        // visual EOL (the char BEFORE '\n'). The byte at that position
+        // is '\n', so the snap extends range_end by one.
+        let line1 = "    Assets:Bank  -5.00 USD";
+        let p = params(Range {
+            start: Position::new(1, 0),
+            end: Position::new(1, line1.encode_utf16().count() as u32),
+        });
+        let edits = handle_range_formatting(&p, source, &result)
+            .expect("EOL selection should preserve the line-replace edit");
+        assert!(!edits.is_empty(), "got {edits:?}");
+    }
+
+    /// A pure cursor-position request (start == end) is a no-op, not
+    /// an opportunity to inject a pure-insertion edit.
+    #[test]
+    fn empty_range_is_a_noop() {
+        let source = "2024-01-01 open Assets:Bank\n";
+        let result = parse(source);
+        let p = params(Range {
+            start: Position::new(0, 5),
+            end: Position::new(0, 5),
+        });
+        assert!(handle_range_formatting(&p, source, &result).is_none());
     }
 
     /// Parse-error files: rangeFormatting bails like the CLI (returns

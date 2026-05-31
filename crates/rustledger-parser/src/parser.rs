@@ -1919,12 +1919,12 @@ pub fn parse(source: &str) -> ParseResult {
             if let Some(err) = stream.deferred_error.take() {
                 errors.push(err);
             } else {
-                // Produce specific error messages for known patterns
+                // Produce specific error messages for known patterns.
+                // BOM handling lives in the lexer (`#[logos(skip ...)]`),
+                // so a BOM never reaches this classifier — the previous
+                // BOM error branch was dead code.
                 let error_text = &source[span.start..span.end.min(source.len())];
-                let kind = if error_text.starts_with('\u{FEFF}') {
-                    // UTF-8 BOM (byte order mark)
-                    ParseErrorKind::SyntaxError("Invalid token: UTF-8 BOM detected; remove the BOM from the beginning of the file".to_string())
-                } else if let Some(account) = find_unicode_account(error_text) {
+                let kind = if let Some(account) = find_unicode_account(error_text) {
                     // Non-ASCII characters in what looks like an account name
                     ParseErrorKind::InvalidAccount(account.to_string())
                 } else {

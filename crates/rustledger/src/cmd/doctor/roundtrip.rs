@@ -25,48 +25,54 @@ pub(super) fn cmd_roundtrip<W: Write>(file: &PathBuf, writer: &mut W) -> Result<
         .load(file)
         .with_context(|| format!("failed to load {}", file.display()))?;
 
-    // Surface ONLY parse errors as a round-trip blocker. Infrastructure
-    // errors (include cycles, unmatched globs, path traversal, IO,
-    // decryption) are not format-stability questions; the doctor reports
-    // them as advisory and still attempts the per-file round-trip on
-    // files that did parse.
-    let parse_errors: Vec<&LoadError> = load_result
+    // Abort on EVERY load error except GlobNoMatch. The doctor's
+    // contract is "predict what `rledger format` would do on every file
+    // in the ledger"; that's only meaningful if we actually read every
+    // file. Unread files (Io, PathTraversal, Decryption, IncludeCycle,
+    // GlobError) silently hide format-instability bugs from the
+    // diagnosis. Only GlobNoMatch is genuinely advisory — an
+    // intentionally-empty glob (e.g., `include "2025/*.bean"` when 2025
+    // hasn't started yet) is a common ledger pattern.
+    let blocking: Vec<&LoadError> = load_result
         .errors
         .iter()
-        .filter(|e| matches!(e, LoadError::ParseErrors { .. }))
+        .filter(|e| !matches!(e, LoadError::GlobNoMatch { .. }))
         .collect();
-    let infra_errors: Vec<&LoadError> = load_result
+    let advisory: Vec<&LoadError> = load_result
         .errors
         .iter()
-        .filter(|e| !matches!(e, LoadError::ParseErrors { .. }))
+        .filter(|e| matches!(e, LoadError::GlobNoMatch { .. }))
         .collect();
 
-    if !parse_errors.is_empty() {
+    if !blocking.is_empty() {
         writeln!(
             writer,
-            "  Found {} parse error(s) — fix them before diagnosing round-trip:",
-            parse_errors.len()
+            "  Found {} error(s) preventing complete diagnosis — fix them first:",
+            blocking.len()
         )?;
-        for err in parse_errors.iter().take(10) {
+        for err in blocking.iter().take(10) {
             writeln!(writer, "    {err}")?;
         }
-        if parse_errors.len() > 10 {
-            writeln!(writer, "    ... and {} more", parse_errors.len() - 10)?;
+        if blocking.len() > 10 {
+            writeln!(writer, "    ... and {} more", blocking.len() - 10)?;
         }
-        anyhow::bail!("round-trip aborted: source has parse errors");
+        anyhow::bail!(
+            "round-trip aborted: {} blocking load error(s); diagnosis on a partially-read ledger would be unreliable",
+            blocking.len()
+        );
     }
 
-    if !infra_errors.is_empty() {
+    if !advisory.is_empty() {
         writeln!(
             writer,
-            "  Note: {} non-parse infrastructure error(s) — proceeding with files that loaded successfully:",
-            infra_errors.len()
+            "  Note: {} empty-glob include(s) — these are valid ledger patterns and the diagnosis proceeds:",
+            advisory.len()
         )?;
-        for err in infra_errors.iter().take(5) {
+        for err in advisory.iter().take(5) {
             writeln!(writer, "    {err}")?;
         }
-        if infra_errors.len() > 5 {
-            writeln!(writer, "    ... and {} more", infra_errors.len() - 5)?;
+        if advisory.len() > 5 {
+            writeln!(writer, "    ... and {} more", advisory.len() - 5)?;
         }
     }
 
@@ -76,6 +82,15 @@ pub(super) fn cmd_roundtrip<W: Write>(file: &PathBuf, writer: &mut W) -> Result<
         "  Resolved {} file(s) in include graph",
         files.len()
     )?;
+
+    // Precompute the canonical parent of the entry file once; the per-
+    // file loop calls `relative_path` N times and recomputing
+    // canonicalize() on every call is O(N) syscalls.
+    let entry_parent: Option<PathBuf> = file
+        .canonicalize()
+        .ok()
+        .and_then(|c| c.parent().map(Path::to_path_buf));
+    let entry_parent = entry_parent.as_deref();
 
     let config = FormatConfig::default();
     let mut all_stable = true;
@@ -94,7 +109,7 @@ pub(super) fn cmd_roundtrip<W: Write>(file: &PathBuf, writer: &mut W) -> Result<
             writeln!(
                 writer,
                 "  [{}] {} parse error(s) — skipping",
-                relative_path(&sf.path, file),
+                relative_path(&sf.path, entry_parent),
                 parse_result.errors.len()
             )?;
             all_stable = false;
@@ -112,14 +127,14 @@ pub(super) fn cmd_roundtrip<W: Write>(file: &PathBuf, writer: &mut W) -> Result<
             writeln!(
                 writer,
                 "  [stable]   {} ({} directives)",
-                relative_path(&sf.path, file),
+                relative_path(&sf.path, entry_parent),
                 parse_result.directives.len()
             )?;
         } else if reparsed.errors.is_empty() && reparsed_count == parse_result.directives.len() {
             writeln!(
                 writer,
                 "  [reflow]   {} ({} directives) — bytes change but structure preserved",
-                relative_path(&sf.path, file),
+                relative_path(&sf.path, entry_parent),
                 parse_result.directives.len()
             )?;
             all_stable = false;
@@ -127,7 +142,7 @@ pub(super) fn cmd_roundtrip<W: Write>(file: &PathBuf, writer: &mut W) -> Result<
             writeln!(
                 writer,
                 "  [MISMATCH] {} — original {} directives, re-parse {} directives, {} errors",
-                relative_path(&sf.path, file),
+                relative_path(&sf.path, entry_parent),
                 parse_result.directives.len(),
                 reparsed_count,
                 reparsed.errors.len()
@@ -159,17 +174,13 @@ pub(super) fn cmd_roundtrip<W: Write>(file: &PathBuf, writer: &mut W) -> Result<
     Ok(())
 }
 
-/// Display each include-graph file relative to the entry file's
-/// canonical parent when possible. Falls back to the absolute path if
-/// the strip fails (e.g., entry parent is outside the loader's
-/// canonical-path tree, which can happen on odd symlink layouts).
-fn relative_path(file: &Path, entry: &Path) -> String {
-    let entry_parent = entry
-        .canonicalize()
-        .ok()
-        .and_then(|c| c.parent().map(Path::to_path_buf));
+/// Display each include-graph file relative to a precomputed canonical
+/// parent. Falls back to the absolute path when no parent is supplied or
+/// when the strip fails (e.g., the file is outside the canonical tree —
+/// possible with odd symlink layouts).
+fn relative_path(file: &Path, entry_parent: Option<&Path>) -> String {
     if let Some(base) = entry_parent
-        && let Ok(rel) = file.strip_prefix(&base)
+        && let Ok(rel) = file.strip_prefix(base)
     {
         return rel.display().to_string();
     }
@@ -245,9 +256,10 @@ mod tests {
         assert!(report.contains("main.beancount"), "{report}");
     }
 
-    /// A glob that matches nothing is an infrastructure error, not a
-    /// parse error, so the doctor continues with the entry file's
-    /// per-file round-trip rather than bailing.
+    /// A glob that matches nothing is intentional in many real ledgers
+    /// (e.g., `include "2025/*.bean"` ahead of the new year). The doctor
+    /// reports an advisory note and continues the per-file round-trip.
+    /// All OTHER load errors abort.
     #[test]
     fn glob_no_match_continues_with_advisory() {
         let dir = TempDir::new().unwrap();
@@ -257,13 +269,33 @@ mod tests {
             "include \"nope/*.beancount\"\n2024-01-01 open Assets:Cash\n",
         );
         let mut out = Vec::new();
-        cmd_roundtrip(&main, &mut out).expect("infra errors should not abort");
+        cmd_roundtrip(&main, &mut out).expect("GlobNoMatch should not abort");
         let report = String::from_utf8(out).unwrap();
         assert!(
-            report.contains("infrastructure error"),
-            "should mention infra errors: {report}"
+            report.contains("empty-glob include"),
+            "should describe empty-glob advisory: {report}"
         );
         assert!(report.contains("[stable]"), "{report}");
+    }
+
+    /// Unread-include errors (IO permission, path traversal,
+    /// decryption) abort: the doctor cannot give a reliable verdict on
+    /// a partially-read ledger.
+    #[test]
+    fn path_traversal_blocks_diagnosis() {
+        let dir = TempDir::new().unwrap();
+        // `include` outside the entry's directory triggers the
+        // path-traversal check (which path-security catches).
+        let main = write_file(
+            dir.path(),
+            "main.beancount",
+            "include \"/etc/this-cannot-be-read-by-doctor.bean\"\n2024-01-01 open Assets:Cash\n",
+        );
+        let mut out = Vec::new();
+        let result = cmd_roundtrip(&main, &mut out);
+        assert!(result.is_err(), "path traversal should abort: {result:?}");
+        let report = String::from_utf8(out).unwrap();
+        assert!(report.contains("preventing complete diagnosis"), "{report}");
     }
 
     /// Parse errors abort the diagnosis.

@@ -126,12 +126,13 @@ fn handle_load_file(params: &serde_json::Value) -> Result<serde_json::Value, Rpc
 
     let path = Path::new(&params.path);
 
-    // Load using the full loader. `with_path_security(true)` confines
-    // the include graph to the entry file's directory tree — FFI is the
-    // most security-sensitive surface (untrusted JSON-RPC callers can
-    // pass arbitrary paths), so it gets the same hardening as the
-    // doctor diagnostic.
-    let mut loader = Loader::new().with_path_security(true);
+    // Load using the full loader. `with_path_security` defaults to
+    // `true` (confines the include graph to the entry file's directory
+    // tree) — FFI is the most security-sensitive surface, so safe-by-
+    // default matters. Callers that legitimately need cross-tree
+    // includes (e.g., `include "../shared/accounts.bean"`) can opt out
+    // via the request's `path_security: false` field.
+    let mut loader = Loader::new().with_path_security(params.path_security);
     let load_result = loader
         .load(path)
         .map_err(|e| RpcError::file_error(format!("Failed to load file: {e}")))?;
@@ -539,7 +540,7 @@ fn format_source_to_response(source: &str) -> Result<serde_json::Value, RpcError
             "total": total,
             "truncated": total > MAX_ERRORS,
         });
-        return Err(RpcError::parse_error(message).with_data(data));
+        return Err(RpcError::beancount_parse_error(message).with_data(data));
     }
 
     let config = rustledger_core::format::FormatConfig::default();

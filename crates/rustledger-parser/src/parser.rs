@@ -1920,12 +1920,20 @@ pub fn parse(source: &str) -> ParseResult {
                 errors.push(err);
             } else {
                 // Produce specific error messages for known patterns.
-                // BOM handling lives in the lexer (`#[logos(skip ...)]`),
-                // so a BOM never reaches this classifier — the previous
-                // BOM error branch was dead code.
+                // A leading BOM is consumed by the lexer's
+                // `bom_filter` callback at byte 0 (and is preserved on
+                // output by `format_source`). A BOM at any other byte
+                // position falls through to this error branch — e.g.
+                // a file produced by `cat windows-a.bean
+                // windows-b.bean` contains a mid-file BOM. We surface
+                // that as a specific error rather than the generic
+                // "unexpected input".
                 let error_text = &source[span.start..span.end.min(source.len())];
-                let kind = if let Some(account) = find_unicode_account(error_text) {
-                    // Non-ASCII characters in what looks like an account name
+                let kind = if error_text.starts_with('\u{FEFF}') {
+                    ParseErrorKind::SyntaxError(
+                        "Invalid token: UTF-8 BOM detected mid-file (only a leading BOM is permitted); did you concatenate two BOM-prefixed files?".to_string()
+                    )
+                } else if let Some(account) = find_unicode_account(error_text) {
                     ParseErrorKind::InvalidAccount(account.to_string())
                 } else {
                     ParseErrorKind::SyntaxError("unexpected input".to_string())
@@ -2401,6 +2409,26 @@ mod tests {
             result.errors
         );
         assert_eq!(result.directives.len(), 1, "expected 1 directive");
+    }
+
+    /// A BOM at a non-zero byte offset (e.g., concatenated files like
+    /// `cat windows-a.bean windows-b.bean > merged.bean`) is NOT
+    /// silently consumed — the parser surfaces a clear "UTF-8 BOM
+    /// detected mid-file" diagnostic so the user can fix the
+    /// concatenation mistake.
+    #[test]
+    fn test_mid_file_bom_produces_error() {
+        let source = "2024-01-01 open Assets:Bank USD\n\u{FEFF}2024-01-02 open Assets:Cash USD\n";
+        let result = parse(source);
+        assert!(
+            !result.errors.is_empty(),
+            "mid-file BOM should produce a parse error"
+        );
+        let msg = result.errors[0].message();
+        assert!(
+            msg.contains("BOM") && msg.contains("mid-file"),
+            "expected mid-file BOM error, got: {msg}"
+        );
     }
 
     #[test]

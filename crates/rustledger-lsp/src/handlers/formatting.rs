@@ -196,6 +196,15 @@ fn minimal_diff_edits(source: &str, formatted: &str) -> Vec<TextEdit> {
                 // full line-granular edit is correct.
                 let (sub_start, sub_end, sub_new) =
                     narrow_single_line_replace(src_slice, fmt_slice);
+                // Skip no-op edits (zero-width range + empty new_text).
+                // similar's compact pass can emit a Replace whose
+                // slices become byte-identical after the
+                // common-prefix/suffix strip; pushing that as a
+                // TextEdit pollutes clients that count any returned
+                // edit as a dirty-document signal.
+                if sub_start == sub_end && sub_new.is_empty() {
+                    continue;
+                }
                 let edit_start = src_start + sub_start;
                 let edit_end = src_start + sub_end;
                 edits.push(TextEdit {

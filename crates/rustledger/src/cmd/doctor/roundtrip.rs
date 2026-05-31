@@ -56,6 +56,19 @@ pub(super) fn cmd_roundtrip<W: Write>(file: &PathBuf, writer: &mut W) -> Result<
         if blocking.len() > 10 {
             writeln!(writer, "    ... and {} more", blocking.len() - 10)?;
         }
+        // Behavior-change hint: include cycles previously surfaced as
+        // advisory; they now block diagnosis because a cycle means the
+        // loader stopped partway through resolving the graph and the
+        // doctor cannot give a complete verdict.
+        if blocking
+            .iter()
+            .any(|e| matches!(e, LoadError::IncludeCycle { .. }))
+        {
+            writeln!(
+                writer,
+                "  Note: include cycles now block the doctor (previously advisory). Break the cycle to enable diagnosis."
+            )?;
+        }
         anyhow::bail!(
             "round-trip aborted: {} blocking load error(s); diagnosis on a partially-read ledger would be unreliable",
             blocking.len()

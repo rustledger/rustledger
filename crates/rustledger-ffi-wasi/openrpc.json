@@ -71,7 +71,7 @@
     {
       "name": "ledger.loadFile",
       "summary": "Load a beancount file from disk",
-      "description": "Loads a beancount file with full processing: includes, booking, interpolation, and optional plugins.",
+      "description": "Loads a beancount file with full processing: includes, booking, interpolation, and optional plugins. By default the include graph is confined to the entry file's directory tree (`path_security: true`); pass `path_security: false` for ledgers that share a chart of accounts via relative `..` includes across trees.",
       "params": [
         {
           "name": "path",
@@ -90,6 +90,15 @@
             "items": {
               "type": "string"
             }
+          }
+        },
+        {
+          "name": "path_security",
+          "description": "Confine the include graph to the entry file's directory tree (default true). Set false to allow cross-tree includes; only do so when you trust the path argument's source.",
+          "required": false,
+          "schema": {
+            "type": "boolean",
+            "default": true
           }
         }
       ],
@@ -282,7 +291,7 @@
     {
       "name": "format.source",
       "summary": "Format beancount source",
-      "description": "Formats beancount source code according to standard conventions. Returns a `parse_error` JSON-RPC error (code -32700) with structured `data: { errors: string[], total: number, truncated: boolean }` when the source has parse errors; the formatter refuses to run on a broken parse to avoid silently dropping unparsable bytes.",
+      "description": "Formats beancount source code according to standard conventions. Returns a `beancount_parse_error` application-level RpcError (code -32000) with structured `data: { errors: string[], total: number, truncated: boolean }` when the source has parse errors; the formatter refuses to run on a broken parse to avoid silently dropping unparsable bytes.",
       "params": [
         {
           "name": "source",
@@ -302,7 +311,7 @@
       },
       "errors": [
         {
-          "code": -32700,
+          "code": -32000,
           "message": "cannot format source with N parse error(s)",
           "data": {
             "$ref": "#/components/schemas/ParseErrorData"
@@ -333,7 +342,7 @@
       },
       "errors": [
         {
-          "code": -32700,
+          "code": -32000,
           "message": "cannot format source with N parse error(s)",
           "data": {
             "$ref": "#/components/schemas/ParseErrorData"
@@ -789,7 +798,7 @@
       },
       "ParseErrorData": {
         "type": "object",
-        "description": "Structured `data` field attached to a `parse_error` RpcError (code -32700) returned by `format.source` / `format.file` when the source has parse errors. The `errors` array is capped at 100 entries; check `truncated` to detect elision.",
+        "description": "Structured `data` field attached to a `beancount_parse_error` RpcError (code -32000) returned by `format.source` / `format.file` when the source has parse errors. The `errors` array is capped at 100 entries; check `truncated` to detect elision.",
         "properties": {
           "errors": {
             "type": "array",

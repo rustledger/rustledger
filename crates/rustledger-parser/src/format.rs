@@ -213,13 +213,31 @@ pub fn format_source(source: &str, parse_result: &ParseResult, config: &FormatCo
     }
 
     // Preserve the source's line-ending style. `render_lines` always
-    // emits LF; if the source used CRLF (i.e., any `\r\n` is present),
-    // we rewrite the output to match so a Windows-authored file
-    // round-trips byte-for-byte through `rledger format`. Mixed-line-
-    // ending files normalize to CRLF, which matches what beancount's
-    // own tools do.
+    // emits LF; if the source used CRLF (any `\r\n` is present), we
+    // rewrite the output to match so a Windows-authored file
+    // round-trips byte-for-byte through `rledger format`.
+    //
+    // Policy:
+    //
+    // * Any `\r\n` in source → output is CRLF-only (CRLF wins, so
+    //   mixed-ending files normalize to CRLF).
+    // * No `\r\n` in source → output is LF-only.
+    // * Files using bare CR ONLY (no `\n`, legacy classic-Mac) round-
+    //   trip as LF — `format_source` does NOT preserve bare CR. That
+    //   platform is extinct in practice; the few remaining classic-Mac
+    //   ledger files we've seen in the wild were already converted by
+    //   their authors. If you have a real bare-CR file, run it
+    //   through `dos2unix -c mac in.bean` first.
+    //
+    // The replacement first collapses any pre-existing `\r\n` in
+    // `formatted` to `\n`, then rewrites every `\n` to `\r\n`. The
+    // collapse step is defensive: `render_lines` doesn't emit `\r`
+    // today, but if any future renderer (or any directive whose
+    // Display impl carries embedded line endings) emits `\r\n`
+    // directly, the unconditional `.replace('\n', "\r\n")` would
+    // otherwise turn that `\r\n` into `\r\r\n`.
     if source.contains("\r\n") {
-        formatted = formatted.replace('\n', "\r\n");
+        formatted = formatted.replace("\r\n", "\n").replace('\n', "\r\n");
     }
 
     // Preserve a leading UTF-8 BOM. The lexer skips it as a no-op so

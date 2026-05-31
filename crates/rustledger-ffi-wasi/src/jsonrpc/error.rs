@@ -107,9 +107,31 @@ impl RpcError {
         self
     }
 
-    /// Create a parse error (invalid JSON).
+    /// Create a JSON-RPC parse error (code -32700).
+    ///
+    /// Per JSON-RPC 2.0, code -32700 is RESERVED for the case where the
+    /// server received text that could not be parsed as JSON — i.e., a
+    /// transport-layer fault on the request envelope. Use this only for
+    /// genuine malformed-JSON conditions.
+    ///
+    /// For application-level beancount parse failures (the source file
+    /// the user asked us to format/load/validate is invalid), use
+    /// [`Self::beancount_parse_error`] instead. Conflating the two
+    /// causes JSON-RPC client libraries to retry the request, surface
+    /// 'server sent bad JSON' to the user, or otherwise misclassify a
+    /// content-level error as a transport-level one.
     pub fn parse_error(details: impl Into<String>) -> Self {
         Self::new(ErrorCode::ParseError, details)
+    }
+
+    /// Create a beancount parse error (code -32000, application-level).
+    ///
+    /// Use this when the source the user submitted to `format.source`,
+    /// `format.file`, `ledger.load`, etc. has beancount syntax errors.
+    /// Distinct from [`Self::parse_error`] which signals malformed JSON
+    /// in the transport envelope.
+    pub fn beancount_parse_error(details: impl Into<String>) -> Self {
+        Self::new(ErrorCode::BeancountParseError, details)
     }
 
     /// Create an invalid request error.

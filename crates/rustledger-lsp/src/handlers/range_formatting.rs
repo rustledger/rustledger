@@ -39,20 +39,30 @@ pub fn handle_range_formatting(
     let rope = ropey::Rope::from_str(source);
     let range_start_byte = rope_lsp_position_to_byte(&rope, params.range.start);
     let mut range_end_byte = rope_lsp_position_to_byte(&rope, params.range.end);
-    // Snap range_end past the trailing '\n' when the user selected to
-    // the visual end of a line. Editors that click+shift-end produce
-    // Position(N, eol_char) which maps to the byte BEFORE the '\n'; the
-    // canonical line-replacement edits we filter against end at the
-    // byte AFTER the '\n' (start of line N+1). Without this snap every
-    // typical EOL selection drops every relevant edit.
-    if range_end_byte < source.len() && source.as_bytes()[range_end_byte] == b'\n' {
-        range_end_byte += 1;
-    }
-    // Reject empty / inverted ranges. A zero-width range (start == end)
-    // is a cursor position, not a selection; rangeFormatting on it
-    // should be a no-op rather than a pure-insertion at the cursor.
+    // Reject empty / inverted ranges FIRST, before any snap. A
+    // zero-width range (start == end) is a cursor position, not a
+    // selection; widening it via the EOL snap below would convert a
+    // pure cursor-on-empty-line into a 1-byte selection of '\n',
+    // bypassing this guard's purpose.
     if range_end_byte <= range_start_byte {
         return None;
+    }
+    // Snap range_end past the trailing line terminator when the user
+    // selected to the visual end of a line. Editors that click+shift-
+    // end produce Position(N, eol_char) which maps to the byte BEFORE
+    // the terminator; canonical line-replacement edits end at the byte
+    // AFTER the terminator (start of line N+1). Handle both LF and
+    // CRLF line endings so the snap fires uniformly on Windows-
+    // authored ledgers too.
+    let bytes = source.as_bytes();
+    if range_end_byte < bytes.len() {
+        match bytes[range_end_byte] {
+            b'\n' => range_end_byte += 1,
+            b'\r' if range_end_byte + 1 < bytes.len() && bytes[range_end_byte + 1] == b'\n' => {
+                range_end_byte += 2;
+            }
+            _ => {}
+        }
     }
 
     let kept: Vec<TextEdit> = all_edits
@@ -220,6 +230,46 @@ mod tests {
             end: Position::new(0, 5),
         });
         assert!(handle_range_formatting(&p, source, &result).is_none());
+    }
+
+    /// Cursor on an empty line: the EOL snap MUST run after the
+    /// empty-range guard, otherwise the cursor's zero-width range is
+    /// widened to a 1-byte selection of '\n' and rangeFormatting
+    /// silently runs on it.
+    #[test]
+    fn cursor_on_empty_line_does_not_get_widened() {
+        let source = "2024-01-01 open Assets:Bank\n\n2024-01-02 open Assets:Cash\n";
+        let result = parse(source);
+        // Position(1, 0): start of the empty middle line. The byte at
+        // that position is '\n' — the snap would widen it without the
+        // guard ordering fix.
+        let p = params(Range {
+            start: Position::new(1, 0),
+            end: Position::new(1, 0),
+        });
+        assert!(
+            handle_range_formatting(&p, source, &result).is_none(),
+            "empty range on '\\n' byte must NOT be widened by the snap"
+        );
+    }
+
+    /// CRLF EOL snap: Windows-authored files send Position(N, eol_char)
+    /// that maps to the '\r' byte (not '\n') on a CRLF line. The snap
+    /// must extend past both bytes so line-replace edits aren't
+    /// silently dropped on CRLF files.
+    #[test]
+    fn crlf_end_of_line_selection_keeps_line_replace_edit() {
+        // CRLF source with a misindented posting on line 1.
+        let source = "2024-01-15 * \"Coffee\"\r\n    Assets:Bank  -5.00 USD\r\n";
+        let result = parse(source);
+        let line1 = "    Assets:Bank  -5.00 USD";
+        let p = params(Range {
+            start: Position::new(1, 0),
+            end: Position::new(1, line1.encode_utf16().count() as u32),
+        });
+        let edits = handle_range_formatting(&p, source, &result)
+            .expect("CRLF EOL selection should preserve the line-replace edit");
+        assert!(!edits.is_empty(), "got {edits:?}");
     }
 
     /// Parse-error files: rangeFormatting bails like the CLI (returns

@@ -3,9 +3,25 @@
 //! This module provides a fast tokenizer for Beancount syntax using the Logos crate,
 //! which generates a DFA-based lexer with SIMD optimizations where available.
 
-use logos::Logos;
+use logos::{Filter, Lexer, Logos};
 use std::fmt;
 use std::ops::Range;
+
+/// Callback for the UTF-8 BOM (`\u{FEFF}`) token.
+///
+/// A leading BOM (Windows/Excel exports) is consumed as whitespace —
+/// the parser never sees it, and `format_source` re-prepends it on
+/// output to preserve byte fidelity. A BOM anywhere else is emitted as
+/// a real token; the parser then surfaces it as an `Invalid token`
+/// error so concatenated-file mistakes (`cat windows-a.bean
+/// windows-b.bean`) and embedded-BOM payloads don't pass silently.
+fn bom_filter<'src>(lex: &Lexer<'src, Token<'src>>) -> Filter<()> {
+    if lex.span().start == 0 {
+        Filter::Skip
+    } else {
+        Filter::Emit(())
+    }
+}
 
 /// A span in the source code (byte offsets).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,26 +51,20 @@ impl From<Span> for Range<usize> {
 #[derive(Logos, Debug, Clone, PartialEq, Eq)]
 // Skip horizontal whitespace (spaces and tabs).
 #[logos(skip r"[ \t]+")]
-// Skip UTF-8 BOMs (`EF BB BF` / `\u{FEFF}`) wherever they appear.
-//
-// **Anchoring intent vs. implementation.** The common case this is
-// targeting is a leading BOM (Windows/Excel exports), but logos `skip`
-// directives have no position anchor — this regex matches any U+FEFF
-// in the source, including mid-file. Concatenating two BOM'd files
-// (`cat a.bean b.bean`) silently consumes both BOMs rather than
-// erroring on the second. That's a deliberate trade-off: catching a
-// mid-file BOM as an error would require a lexer callback that
-// inspects `lex.span().start`, adding complexity for a rare condition
-// that's already harmless (the BOM byte sequence is invisible in
-// every Unicode-aware viewer and downstream `format_source`
-// re-prepends a leading BOM to preserve byte fidelity).
-//
-// Spans remain byte-accurate to the source — the BOM is consumed as
-// a 3-byte gap identical to leading whitespace, so every downstream
-// consumer (loader, formatter, doctor) sees the same byte offsets
-// they would for a non-BOM'd file.
-#[logos(skip r"\u{FEFF}")]
 pub enum Token<'src> {
+    /// UTF-8 byte-order mark (`EF BB BF` / `\u{FEFF}`).
+    ///
+    /// A `bom_filter` callback (in this module) skips this token when
+    /// it appears at byte 0 (a leading BOM from a Windows/Excel
+    /// export) — the parser never sees it and downstream
+    /// `format_source` re-prepends it on output to preserve byte
+    /// fidelity. A BOM at any other byte position is emitted as a real
+    /// token; the parser's error classifier turns it into an `Invalid
+    /// token: UTF-8 BOM` error so concatenated-file mistakes don't
+    /// pass silently.
+    #[regex(r"\u{FEFF}", bom_filter)]
+    Bom,
+
     // ===== Literals =====
     /// A date in YYYY-MM-DD, YYYY-M-D, YYYY/MM/DD, or YYYY/M/D format.
     /// Single-digit month and day are accepted (e.g., 2024-1-5).
@@ -399,6 +409,7 @@ impl fmt::Display for Token<'_> {
             Self::Indent(n) => write!(f, "<indent:{n}>"),
             Self::DeepIndent(n) => write!(f, "<deep-indent:{n}>"),
             Self::Error(s) => write!(f, "{s}"),
+            Self::Bom => write!(f, "\u{FEFF}"),
         }
     }
 }

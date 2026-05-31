@@ -116,7 +116,12 @@ fn handle_sort_transactions(
     }
 
     if transactions.len() < 2 {
-        return ExecuteCommandResponse::warn("Nothing to sort: fewer than 2 transactions");
+        // Intentionally silent: format-on-save hooks chained to
+        // `rledger.sortTransactions` would otherwise pop a notification
+        // on every save of a single-entry or empty file. Sorting <2
+        // items isn't actionable; absence of a sort is the correct
+        // no-op behavior here.
+        return ExecuteCommandResponse::none();
     }
 
     let mut sorted = transactions.clone();
@@ -326,6 +331,35 @@ mod tests {
         assert!(response.response.is_none());
         let msg = response.show_message.expect("expected showMessage");
         assert!(msg.message.contains("No transactions"), "{msg:?}");
+    }
+
+    /// Missing first argument: previously a silent None; now a
+    /// showMessage so misbehaving clients (and human users invoking
+    /// the command without an argument) see the diagnostic.
+    #[test]
+    fn show_account_balance_missing_arg_surfaces_show_message() {
+        let result = parse("");
+        let response = handle_show_account_balance(&[], &result);
+        assert!(response.response.is_none());
+        let msg = response.show_message.expect("expected showMessage");
+        assert!(msg.message.contains("account argument"), "{msg:?}");
+    }
+
+    /// First argument present but not a string (e.g., null or an
+    /// object from a buggy client) also surfaces the same diagnostic.
+    #[test]
+    fn show_account_balance_wrong_type_arg_surfaces_show_message() {
+        let result = parse("");
+        let args = vec![serde_json::json!(null)];
+        let response = handle_show_account_balance(&args, &result);
+        assert!(response.response.is_none());
+        let msg = response.show_message.expect("expected showMessage");
+        assert!(msg.message.contains("account argument"), "{msg:?}");
+
+        let args = vec![serde_json::json!({"oops": "object"})];
+        let response = handle_show_account_balance(&args, &result);
+        assert!(response.response.is_none());
+        assert!(response.show_message.is_some());
     }
 
     #[test]

@@ -1,17 +1,23 @@
-# ADR-0004: Generate TypeScript types from Rust DTOs
+# ADR-0004: Generate wire-format bindings from Rust DTOs
 
 ## Status
 
-Accepted — Phase 1 + Phase 2 (May 2026). Spike landed in #1220;
-Phase 1 (#1223) shipped the per-DTO derives, the
-`scripts/regen-ts-bindings.sh` post-process, the generated
-`bindings/index.d.ts`, and the CI freshness gate. Phase 2 (this PR)
-replaces the inline `typescript_custom_section` DTO block in
+Accepted — Phase 1, Phase 2, and Phase 3 (May 2026). Spike landed in
+#1220; Phase 1 (#1223) shipped the per-DTO ts-rs derives, the
+`scripts/regen-bindings.sh` post-process, the generated
+`bindings/index.d.ts`, and the CI freshness gate. Phase 2 (#1225)
+replaced the inline `typescript_custom_section` DTO block in
 `src/lib.rs` with `include_str!("../bindings/index.d.ts")` so the
 wasm-bindgen-generated `pkg/*.d.ts` and the importable
 `bindings/index.d.ts` are the same types. The inline TS in
 `src/lib.rs` shrinks to ~150 lines covering only the wasm-bindgen-
-managed runtime classes and standalone function signatures.
+managed runtime classes and standalone function signatures. Phase 3
+(#1232) adds `schemars::JsonSchema` derives alongside the ts-rs
+derives, emits `bindings/index.schema.json` (draft-2020-12), and pipes
+the schema through `datamodel-code-generator` to emit
+`bindings/types.py` (Pydantic v2). Closes the hand-maintained Python
+stubs and external-integrator-contract gaps that Phase 1/2 left
+explicit.
 
 ## Context
 
@@ -135,9 +141,84 @@ For Phase 1, ts-rs outputs the wide `{ type: string, value: MetaValueJson }` for
 - **`specta`**: supports multiple target languages (TS, Python, Rust). Heavier dep, less Rust-ecosystem mindshare than ts-rs. Worth revisiting if/when Python stub generation becomes interesting.
 - **Status quo with a `.d.ts` audit checklist**: relies on humans never forgetting. The PR #1210 audit was specifically the failure mode of this approach.
 
+## Phase 3 (May 2026) — JSON Schema + Python (#1232)
+
+Phase 1 + 2 closed TypeScript drift but two surfaces remained
+hand-maintained:
+
+1. **Python compat layer** — `crates/rustledger-ffi-wasi/python/compat.py`
+   was hand-edited. Same class of drift bug ADR-0004 closed for TS was
+   still live for Python.
+2. **External integrator contract** — no machine-readable wire-format
+   schema for non-Rust/non-TS consumers (LLM tool builders, third-party
+   SDK authors, the MCP server).
+
+### Decision
+
+Layer two derives on the existing DTOs and pipe the schemars output
+into `datamodel-code-generator`:
+
+1. Add `#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]`
+   alongside every existing `#[derive(TS)]`. schemars respects the
+   serde attributes already on the DTOs (`#[serde(tag = "type")]`,
+   `#[serde(rename = ...)]`, `#[serde(skip_serializing_if = ...)]`) so
+   the cost is one extra derive per type, no per-field annotation.
+2. A new `#[ignore]`-by-default test (`export_index_schema`) walks the
+   graph from `ParseResult` and writes `bindings/index.schema.json`
+   (draft-2020-12, with all DTOs under `$defs`).
+3. `scripts/regen-bindings.sh` (renamed from `regen-ts-bindings.sh`)
+   gains two new phases: run the schema export test, then invoke
+   `datamodel-codegen --output-model-type pydantic_v2.BaseModel
+   --input-file-type jsonschema` to emit `bindings/types.py`. CI's
+   `bindings-fresh` job (renamed from `ts-bindings-fresh`) checks all
+   three artifacts via `git diff --exit-code`.
+
+### Alternatives ruled out
+
+- **`specta` wholesale migration.** Researched May 2026. Specta is
+  still `2.0.0-rc.25` after 14 months, sister crates at `0.0.x`. JSON
+  Schema output (`specta-jsonschema`) is **planned but unpublished**;
+  Python output is **planned with no crate**. Replacing ts-rs with
+  specta-typescript would leave us with the same two missing targets
+  plus a beta-stability TS pipeline.
+- **`serde-generate` (Diem/Aptos lineage).** Single Rust→Python tool
+  with runtime BCS serialization. Hard blocker: doesn't support
+  `serde(tag = "...")` tagged enums or `skip_serializing_if`. Our
+  `DirectiveJson` is exactly a tagged enum.
+- **`pyo3-stub-gen` / `rustantic`.** Both require DTOs to be PyClasses,
+  not plain serde-deriving structs. Much bigger commitment than the
+  ts-rs ergonomics we have today.
+- **`quicktype` TS→Python.** Accepts `.d.ts` as input, but Python
+  output has no Pydantic v2 path (open issue glideapps/quicktype#1474).
+
+There is no ts-rs analogue for Python in May 2026 — the hybrid above
+is what the ecosystem actually supports.
+
+### Trade-offs
+
+- **`TypedValueJson` narrowing is NOT applied to JSON Schema.** TS
+  consumers get the hand-tuned discriminated union (per Phase 1).
+  Python consumers get the wide `{type, value}` form. Pydantic v2's
+  discriminated-union ergonomics (`Annotated[Union[...],
+  Field(discriminator=...)]`) don't map cleanly from a TS literal-union
+  override; rather than maintain two narrowings, we ship the wide form
+  to Python. JSON Schema consumers can apply their own narrowing if
+  needed.
+- **One additional derive per DTO.** ~35 lines added, mirroring the
+  existing ts-rs derive pattern. schemars respects serde attributes
+  natively, so no per-field annotation work was needed.
+- **New CI tooling: Python 3.12 + pipx.** Both preinstalled on
+  ubuntu-latest. The `datamodel-code-generator` install runs once per
+  CI invocation via `pipx run`; no version drift between runs.
+- **No specta migration debt accrued.** When specta's Python and JSON
+  Schema crates ship and stabilize, the migration consideration
+  reopens. For now we're on stable Rust ecosystem tools (ts-rs,
+  schemars) plus a stable Python tool (datamodel-code-generator).
+
 ## Related
 
 - #1200 — tracking issue this work was split out of (closed).
-- #1218 — this design issue.
+- #1218 — original design issue (Phase 1 + 2).
+- #1232 — Phase 3 design issue (Python + JSON Schema).
 - PRs #1209, #1210, #1211, #1212, #1215, #1216 — the audit cascade that motivated this work.
 - `crates/rustledger-wasm/examples/tsrs_spike.rs` — the spike code this ADR is based on.

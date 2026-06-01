@@ -27,10 +27,20 @@ completions = []
 ## below, so `cargo build --target wasm32-unknown-unknown --features
 ## ts-export` hard-fails on the missing `ts-rs` crate -- intentional,
 ## the export is host-only by design). Triggered from CI via
-## `scripts/regen-ts-bindings.sh` (which runs `cargo test --features
+## `scripts/regen-bindings.sh` (which runs `cargo test --features
 ## ts-export` and the post-process script) so contributors regenerate
 ## the .d.ts whenever a DTO changes. Not part of any default build.
 ts-export = ["dep:ts-rs"]
+## JSON Schema export (ADR-0004 Phase 3, issue #1232) -- enables the
+## `#[derive(schemars::JsonSchema)]` attributes alongside ts-rs. Same
+## host-only contract: the dep is declared under
+## `[target.'cfg(not(target_arch = "wasm32"))'.dependencies]` so
+## `cargo build --target wasm32-unknown-unknown --features json-schema`
+## hard-fails. Triggered from CI via `scripts/regen-bindings.sh` which
+## also drives the `datamodel-code-generator` pass that emits
+## `bindings/types.py` Pydantic v2 models. Not part of any default
+## build.
+json-schema = ["dep:schemars"]
 
 [dependencies]
 rustledger-core.workspace = true
@@ -65,6 +75,16 @@ js-sys = "0.3"
 # are unaffected.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 ts-rs = { version = "12.0.1", optional = true }
+# JSON Schema export (ADR-0004 Phase 3, issue #1232). Host-only
+# optional dep, opt-in via the `json-schema` feature above. With the
+# feature on, `cargo test -p rustledger-wasm --features json-schema`
+# runs the `export_json_schema` test which writes
+# `bindings/index.schema.json`. The schema is then fed to
+# `datamodel-code-generator` to emit `bindings/types.py` (Pydantic v2).
+# Without the feature, `schemars` is not in the dep graph and the
+# `#[derive(JsonSchema)]` derives compile out via `#[cfg_attr]`.
+# Default builds and the wasm32 target are unaffected.
+schemars = { workspace = true, optional = true }
 
 
 # Host-only dev-dep: the wire-format tests that need it are

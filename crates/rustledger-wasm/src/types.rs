@@ -3,17 +3,26 @@
 //! These types provide a JavaScript-friendly representation of Beancount data,
 //! using string representations for dates and numbers.
 //!
-//! # TypeScript bindings (`ts-export` feature, #1218 Phase 1)
+//! # Generated bindings (ADR-0004)
 //!
-//! The `#[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]` lines
-//! below are inert in normal builds. With the `ts-export` feature on,
-//! ts-rs emits per-type `.d.ts` files under `crates/rustledger-wasm/bindings/`
-//! when `cargo test -p rustledger-wasm --features ts-export` runs.
-//! The post-process script at `scripts/regen-ts-bindings.sh`
-//! concatenates those into the checked-in `bindings/index.d.ts`
-//! that is the canonical TS API surface (ADR-0004). Adding a new
-//! field to any DTO below requires running that script and committing
-//! the regenerated bindings.
+//! The DTOs below have two generator-attribute layers, both inert in
+//! normal builds:
+//!
+//! - **`ts-export`** feature (Phase 1, #1218) — the ts-rs derive emits
+//!   per-type `.d.ts` files under `crates/rustledger-wasm/bindings/`.
+//!   The post-process script at `scripts/regen-bindings.sh`
+//!   concatenates them into the checked-in `bindings/index.d.ts`
+//!   (canonical TS API).
+//! - **`json-schema`** feature (Phase 3, #1232) — the schemars derive
+//!   lets the same script emit `bindings/index.schema.json`
+//!   (draft-2020-12). `datamodel-code-generator` then converts that
+//!   into `bindings/types.py` (Pydantic v2). Closes the
+//!   "hand-maintained Python stubs" gap left open by Phase 1/2.
+//!
+//! Adding a new field to any DTO below requires running
+//! `scripts/regen-bindings.sh` and committing the regenerated TS
+//! bundle, JSON Schema, and Python types — CI fails if any of them
+//! drift.
 
 use std::collections::HashMap;
 
@@ -22,12 +31,26 @@ use serde::{Deserialize, Serialize};
 /// Result of parsing a Beancount file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "ts-export", ts(export, export_to = "bindings/"))]
+// `ledger` is `Option<Ledger>` (nullable on the wire) but has no
+// `skip_serializing_if`, so the field key is always present.
+// schemars 1.x's per-field `required` attribute would force the key
+// into the parent's `required` array but also un-null the type.
+// `extend("required" = ...)` overrides the entire required array, so
+// we must list every required field (including non-Option ones like
+// `errors`) -- if we listed only `ledger`, schemars would drop
+// `errors` from required.
+#[cfg_attr(
+    feature = "json-schema",
+    schemars(extend("required" = ["ledger", "errors"]))
+)]
 pub struct ParseResult {
     /// The parsed ledger (if successful). Emitted as JSON `null` when
     /// parsing failed entirely; no `skip_serializing_if`, so the field
     /// is always present on the wire (TS: `Ledger | null`, not
-    /// `ledger?`).
+    /// `ledger?`). See the `#[schemars(extend(...))]` on the struct
+    /// itself for the "required-and-nullable" wire-contract enforcement.
     pub ledger: Option<Ledger>,
     /// Parse errors.
     pub errors: Vec<Error>,
@@ -43,10 +66,12 @@ pub struct ParseResult {
 /// is applied via `#[ts(rename = ...)]`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[cfg_attr(
     feature = "ts-export",
     ts(export, export_to = "bindings/", rename = "LedgerJson")
 )]
+#[cfg_attr(feature = "json-schema", schemars(rename = "LedgerJson"))]
 pub struct Ledger {
     /// All directives in the ledger.
     pub directives: Vec<DirectiveJson>,
@@ -59,13 +84,24 @@ pub struct Ledger {
     Debug, Clone, Default, Serialize, Deserialize, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize,
 )]
 #[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "ts-export", ts(export, export_to = "bindings/"))]
+// `title` is `Option<String>` (nullable) but always present on the
+// wire. `extend("required" = ...)` overrides the auto-detected list,
+// so we must include every required field (operating_currencies
+// included). See `ParseResult` for the full rationale.
+#[cfg_attr(
+    feature = "json-schema",
+    schemars(extend("required" = ["operating_currencies", "title"]))
+)]
 pub struct LedgerOptions {
     /// Operating currencies.
     pub operating_currencies: Vec<String>,
     /// Ledger title. Emitted as JSON `null` when no title is set
     /// (no `skip_serializing_if`; field is always present on the
-    /// wire). TS: `string | null`, not `title?`.
+    /// wire). TS: `string | null`, not `title?`. The required-and-
+    /// nullable wire contract is enforced via the `schemars(extend)`
+    /// on the struct itself; see `ParseResult` for the rationale.
     pub title: Option<String>,
 }
 
@@ -98,6 +134,7 @@ pub struct LedgerOptions {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 #[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "ts-export", ts(export, export_to = "bindings/"))]
 pub enum MetaValueJson {
     /// String/Account/Currency/Tag/Link/Date/Number — anything the
@@ -164,6 +201,7 @@ pub enum MetaValueJson {
 /// #1207.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "ts-export", ts(export, export_to = "bindings/"))]
 pub struct TypedValueJson {
     /// Variant tag — one of `"string"`, `"account"`, `"currency"`,
@@ -200,6 +238,7 @@ pub struct TypedValueJson {
 #[serde(tag = "type")]
 #[allow(missing_docs)]
 #[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "ts-export", ts(export, export_to = "bindings/"))]
 pub enum DirectiveJson {
     /// Transaction directive.
@@ -401,6 +440,7 @@ impl DirectiveJson {
 /// A posting in JSON-serializable form.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "ts-export", ts(export, export_to = "bindings/"))]
 pub struct PostingJson {
     /// Account name.
@@ -436,6 +476,7 @@ pub struct PostingJson {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "ts-export", ts(export, export_to = "bindings/"))]
 pub enum CostNumberJson {
     /// Per-unit cost (e.g., `{100 USD}`).
@@ -460,6 +501,7 @@ pub enum CostNumberJson {
 /// A posting cost in JSON-serializable form.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "ts-export", ts(export, export_to = "bindings/"))]
 pub struct PostingCostJson {
     /// Cost number (per-unit, total, or post-booking pair).
@@ -495,6 +537,7 @@ pub struct PostingCostJson {
 )]
 #[serde(rename_all = "lowercase")]
 #[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "ts-export", ts(export, export_to = "bindings/"))]
 pub enum Severity {
     /// An error that prevents processing.
@@ -513,18 +556,33 @@ pub enum Severity {
     Debug, Clone, Serialize, Deserialize, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize,
 )]
 #[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[cfg_attr(
     feature = "ts-export",
     ts(export, export_to = "bindings/", rename = "BeancountError")
+)]
+#[cfg_attr(
+    feature = "json-schema",
+    schemars(
+        rename = "BeancountError",
+        extend("required" = ["message", "line", "column", "severity"])
+    )
 )]
 pub struct Error {
     /// Error message.
     pub message: String,
     /// Line number (1-based). `null` when the error has no source
-    /// location (e.g. validation errors not tied to a span).
+    /// location (e.g. validation errors not tied to a span). Field is
+    /// always present on the wire (no `skip_serializing_if`); see the
+    /// struct-level `schemars(extend)` for the required-and-nullable
+    /// rationale. `range(min = 1)` enforces the 1-based documented
+    /// contract on the JSON Schema side (schemars defaults to
+    /// `minimum: 0` for u32).
+    #[cfg_attr(feature = "json-schema", schemars(range(min = 1)))]
     pub line: Option<u32>,
     /// Column number (1-based). `null` when the error has no source
-    /// location.
+    /// location. See `line` above for `range` rationale.
+    #[cfg_attr(feature = "json-schema", schemars(range(min = 1)))]
     pub column: Option<u32>,
     /// Error severity.
     pub severity: Severity,
@@ -579,6 +637,7 @@ impl From<rustledger_loader::LedgerError> for Error {
 /// Result of validation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "ts-export", ts(export, export_to = "bindings/"))]
 pub struct ValidationResult {
     /// Whether the ledger is valid.
@@ -590,6 +649,7 @@ pub struct ValidationResult {
 /// Result of a BQL query.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "ts-export", ts(export, export_to = "bindings/"))]
 pub struct QueryResult {
     /// Column names.
@@ -607,6 +667,7 @@ pub struct QueryResult {
 #[serde(untagged)]
 #[allow(missing_docs)]
 #[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "ts-export", ts(export, export_to = "bindings/"))]
 pub enum CellValue {
     /// Null value.
@@ -641,6 +702,7 @@ pub enum CellValue {
 /// Amount value for serialization.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "ts-export", ts(export, export_to = "bindings/"))]
 pub struct AmountValue {
     /// The number as a string.
@@ -652,6 +714,7 @@ pub struct AmountValue {
 /// Position value for serialization.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "ts-export", ts(export, export_to = "bindings/"))]
 pub struct PositionValue {
     /// The units.
@@ -661,6 +724,7 @@ pub struct PositionValue {
 /// Cost value for serialization.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "ts-export", ts(export, export_to = "bindings/"))]
 pub struct CostValue {
     /// Cost per unit.
@@ -680,7 +744,15 @@ pub struct CostValue {
 /// Result of formatting.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "ts-export", ts(export, export_to = "bindings/"))]
+// `formatted` is `Option<String>` (nullable) without
+// `skip_serializing_if` -- always present on the wire. See
+// `ParseResult` for the `extend("required" = ...)` rationale.
+#[cfg_attr(
+    feature = "json-schema",
+    schemars(extend("required" = ["formatted", "errors"]))
+)]
 pub struct FormatResult {
     /// Formatted source (if successful). Emitted as JSON `null` on
     /// failure; no `skip_serializing_if`, so the field is always
@@ -693,6 +765,7 @@ pub struct FormatResult {
 /// Result of pad expansion.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "ts-export", ts(export, export_to = "bindings/"))]
 pub struct PadResult {
     /// Directives with pads removed.
@@ -706,6 +779,7 @@ pub struct PadResult {
 /// Result of running a plugin.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "ts-export", ts(export, export_to = "bindings/"))]
 pub struct PluginResult {
     /// Modified directives.
@@ -717,6 +791,7 @@ pub struct PluginResult {
 /// Plugin information.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "ts-export", ts(export, export_to = "bindings/"))]
 pub struct PluginInfo {
     /// Plugin name.
@@ -728,6 +803,7 @@ pub struct PluginInfo {
 /// BQL completion suggestion for WASM.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "ts-export", ts(export, export_to = "bindings/"))]
 pub struct CompletionJson {
     /// The completion text to insert.
@@ -743,6 +819,7 @@ pub struct CompletionJson {
 /// Result of BQL completion request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "ts-export", ts(export, export_to = "bindings/"))]
 pub struct CompletionResultJson {
     /// List of completions.
@@ -758,6 +835,7 @@ pub struct CompletionResultJson {
 /// A completion item for Beancount source editing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "ts-export", ts(export, export_to = "bindings/"))]
 pub struct EditorCompletion {
     /// The label to display in the completion list.
@@ -778,6 +856,7 @@ pub struct EditorCompletion {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 #[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "ts-export", ts(export, export_to = "bindings/"))]
 pub enum CompletionKind {
     /// A keyword (directive name).
@@ -799,6 +878,7 @@ pub enum CompletionKind {
 /// Result of a completion request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "ts-export", ts(export, export_to = "bindings/"))]
 pub struct EditorCompletionResult {
     /// The completions.
@@ -810,6 +890,7 @@ pub struct EditorCompletionResult {
 /// Hover information for a symbol.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "ts-export", ts(export, export_to = "bindings/"))]
 pub struct EditorHoverInfo {
     /// The hover content (Markdown formatted).
@@ -823,6 +904,7 @@ pub struct EditorHoverInfo {
 /// A range in the document.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "ts-export", ts(export, export_to = "bindings/"))]
 pub struct EditorRange {
     /// Start line (0-based).
@@ -838,6 +920,7 @@ pub struct EditorRange {
 /// A location in the document.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "ts-export", ts(export, export_to = "bindings/"))]
 pub struct EditorLocation {
     /// Line number (0-based).
@@ -849,6 +932,7 @@ pub struct EditorLocation {
 /// A document symbol for the outline view.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "ts-export", ts(export, export_to = "bindings/"))]
 pub struct EditorDocumentSymbol {
     /// The name of this symbol.
@@ -875,6 +959,7 @@ pub struct EditorDocumentSymbol {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 #[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "ts-export", ts(export, export_to = "bindings/"))]
 pub enum SymbolKind {
     /// A transaction.
@@ -911,6 +996,7 @@ pub enum SymbolKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 #[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "ts-export", ts(export, export_to = "bindings/"))]
 pub enum ReferenceKind {
     /// An account reference.
@@ -924,6 +1010,7 @@ pub enum ReferenceKind {
 /// A reference to a symbol in the document.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "ts-export", ts(export, export_to = "bindings/"))]
 pub struct EditorReference {
     /// The range of this reference.
@@ -941,6 +1028,7 @@ pub struct EditorReference {
 /// Result of a find-references request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "ts-export", ts(export, export_to = "bindings/"))]
 pub struct EditorReferencesResult {
     /// The symbol being searched for.
@@ -1046,5 +1134,236 @@ mod cost_number_wire_tests {
         );
         assert!(with_total_json["number"].is_object());
         assert!(bare_json.get("number").is_none());
+    }
+}
+
+/// Codegen vehicle for the JSON Schema export (ADR-0004 Phase 3, #1232).
+///
+/// `schema_for!(ParseResult)` only walks types reachable from
+/// `ParseResult`, which covers parse output but misses the return shapes
+/// of `query`, `format`, `validate`, `runPlugin`, `listPlugins`, the BQL
+/// completion API, and the editor LSP-like surfaces. Listing every
+/// top-level public DTO here gives the generator a single root that
+/// reaches the whole wire surface; the resulting schema has every
+/// public type under `$defs`.
+///
+/// **Not a wire-format type.** No `Serialize`/`Deserialize` derive,
+/// no `wasm_bindgen` export -- it exists only so that
+/// `schema_for!(RustledgerBindings)` produces the union of
+/// definitions. The export test then strips the wrapper's own
+/// root-level keys (`type`, `title`, `properties`, `required`) before
+/// writing the JSON Schema, so consumers see a definitions-only
+/// document with no top-level `RustledgerBindings` object -- and
+/// datamodel-code-generator does not emit a corresponding Pydantic
+/// class. Field types that are reachable transitively (e.g.
+/// `Severity` from `BeancountError`, `CompletionKind` from
+/// `EditorCompletion`) don't need to be listed.
+#[cfg(feature = "json-schema")]
+#[derive(schemars::JsonSchema)]
+#[allow(dead_code)]
+struct RustledgerBindings {
+    parse_result: ParseResult,
+    validation_result: ValidationResult,
+    query_result: QueryResult,
+    format_result: FormatResult,
+    pad_result: PadResult,
+    plugin_result: PluginResult,
+    plugin_info: PluginInfo,
+    completion_result: CompletionResultJson,
+    editor_completion_result: EditorCompletionResult,
+    editor_hover_info: EditorHoverInfo,
+    editor_document_symbol: EditorDocumentSymbol,
+    editor_references_result: EditorReferencesResult,
+    // `EditorLocation` is the return type of `getDefinition()` and is
+    // not referenced by any of the other listed DTOs, so it needs an
+    // explicit field here -- without it the schema/Python bindings
+    // silently omit it while the TS bindings still export it.
+    editor_location: EditorLocation,
+}
+
+/// JSON Schema export entry point (ADR-0004 Phase 3, issue #1232).
+///
+/// Counterpart to ts-rs's auto-generated `export_bindings_*` tests.
+/// Only compiled when the `json-schema` feature is on, which pulls
+/// `schemars` into the dep graph. Driven by `scripts/regen-bindings.sh`:
+/// the script sets `RUSTLEDGER_REGEN_SCHEMA=1` and runs `cargo test -p
+/// rustledger-wasm --features json-schema --lib -- --include-ignored
+/// --nocapture --exact types::export_json_schema::export_index_schema`,
+/// which writes `bindings/index.schema.json` from the
+/// `RustledgerBindings` wrapper above (covers all public DTOs).
+///
+/// Two opt-in gates protect the source tree:
+///   1. `#[ignore]` -- plain `cargo test` skips this.
+///   2. `RUSTLEDGER_REGEN_SCHEMA=1` -- a developer running
+///      `cargo test --include-ignored` (a common debug command) does
+///      NOT silently overwrite the checked-in schema; the test
+///      `panic!`s with a guidance message so the failure is loud and
+///      visible without needing `--nocapture`. Only the regen script
+///      sets the env var.
+///
+/// The test also prints a unique sentinel on success
+/// (`EXPORT_INDEX_SCHEMA_RAN_OK`) which the regen script greps for --
+/// catches the case where `cargo test --exact` matches zero tests
+/// (e.g. after a future rename) and silently exits 0 with no
+/// regeneration.
+#[cfg(all(test, feature = "json-schema", not(target_arch = "wasm32")))]
+mod export_json_schema {
+    use std::fs;
+    use std::path::PathBuf;
+
+    use super::RustledgerBindings;
+
+    /// Sentinel string printed on a successful schema write. The regen
+    /// script greps for this exact bytes; do not change without
+    /// updating `scripts/regen-bindings.sh`.
+    pub const SUCCESS_SENTINEL: &str = "EXPORT_INDEX_SCHEMA_RAN_OK";
+
+    #[test]
+    #[ignore = "writes bindings/index.schema.json; driven by scripts/regen-bindings.sh"]
+    fn export_index_schema() {
+        // Belt-and-suspenders guard. `#[ignore]` already prevents an
+        // unintentional run, but `--include-ignored` is common enough
+        // in debug workflows that we panic (rather than silently
+        // returning Ok) so the failure is visible without
+        // `--nocapture`. A green-passing test with the env var unset
+        // would otherwise mislead a developer into thinking the
+        // schema was regenerated.
+        assert!(
+            std::env::var_os("RUSTLEDGER_REGEN_SCHEMA").is_some(),
+            "export_index_schema mutates bindings/index.schema.json and \
+             must be driven by scripts/regen-bindings.sh, not invoked \
+             directly. Set RUSTLEDGER_REGEN_SCHEMA=1 to opt in."
+        );
+
+        let schema = schemars::schema_for!(RustledgerBindings);
+
+        // Round-trip through `serde_json::Value` so we can strip the
+        // wrapper's root-level keys. `RustledgerBindings` exists only
+        // to seed `$defs` with every public DTO -- its own
+        // `type: object, properties: {...}, required: [...]` shape is
+        // an internal artifact, not a wire-format contract. Leaving
+        // it in causes datamodel-code-generator to emit a public
+        // `RustledgerBindings(BaseModel)` class consumers can import
+        // (and worse, prefixed-mangled when we try to rename it with
+        // a leading underscore). Stripping after generation gives a
+        // definitions-only schema (`$schema` + `$defs` only) which
+        // datamodel-code-generator handles cleanly: one Pydantic
+        // class per `$def`, no wrapper.
+        let mut schema_value = serde_json::to_value(&schema)
+            .expect("schemars schema should round-trip through serde_json");
+        if let Some(obj) = schema_value.as_object_mut() {
+            obj.remove("type");
+            obj.remove("title");
+            obj.remove("properties");
+            obj.remove("required");
+            obj.remove("additionalProperties");
+            // The wrapper's rustdoc gets emitted as `description`.
+            // Drop it -- datamodel-code-generator otherwise treats the
+            // root as a documented type and emits a placeholder
+            // `Model(RootModel[Any])` class.
+            obj.remove("description");
+        }
+
+        // Pretty-print to stabilize the on-disk format for git diffs;
+        // the regen script later runs prettier over it for a final
+        // canonicalization pass alongside the TS bundle.
+        let pretty = serde_json::to_string_pretty(&schema_value)
+            .expect("stripped schema should serialize cleanly");
+
+        let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        path.push("bindings");
+        fs::create_dir_all(&path).expect("create bindings/ directory");
+        path.push("index.schema.json");
+        fs::write(&path, format!("{pretty}\n")).expect("write index.schema.json");
+
+        // Sentinel for `scripts/regen-bindings.sh` to grep for.
+        // `println!` (stdout, not stderr) makes it survive `--quiet`
+        // when the script pipes cargo output through `tee`.
+        println!("{SUCCESS_SENTINEL}");
+        eprintln!("Wrote: {}", path.display());
+    }
+}
+
+/// Guards the DTOs that hand-override schemars' auto-detected `required`
+/// array via `schemars(extend("required" = [...]))`.
+///
+/// `extend("required" = ...)` *replaces* the auto-detected array rather
+/// than merging into it (schemars 1.x has no merge form). So if a field
+/// is added to one of these structs and the author forgets to update the
+/// hand-written list, that field silently drops out of `required` even
+/// though the wire always emits it -- with no compile error and no other
+/// test catching it. (PR #1241's round-2 review found exactly this: the
+/// round-1 `extend` sweep missed `FormatResult`.)
+///
+/// Every field on these four DTOs is a required wire field -- the
+/// nullable ones (`ParseResult.ledger`, `LedgerOptions.title`,
+/// `BeancountError.line/column`, `FormatResult.formatted`) are
+/// always-present-but-nullable, never absent. So the invariant is exact:
+/// the emitted `required` set must equal the full property set. If you
+/// add a genuinely-optional field to one of these structs, this test is
+/// the tripwire -- update it deliberately alongside the `extend` list.
+#[cfg(all(test, feature = "json-schema", not(target_arch = "wasm32")))]
+mod schema_required_invariants {
+    use std::collections::BTreeSet;
+
+    use super::RustledgerBindings;
+
+    /// Assert the `$def` for `def_name` lists every one of its
+    /// properties in `required`.
+    fn assert_required_equals_all_properties(def_name: &str) {
+        let schema = schemars::schema_for!(RustledgerBindings);
+        let value = serde_json::to_value(&schema).expect("schema round-trips through serde_json");
+
+        let def = value
+            .get("$defs")
+            .and_then(|d| d.get(def_name))
+            .unwrap_or_else(|| panic!("{def_name} missing from $defs"));
+
+        let properties: BTreeSet<&str> = def
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+            .unwrap_or_else(|| panic!("{def_name} has no properties object"))
+            .keys()
+            .map(String::as_str)
+            .collect();
+
+        let required: BTreeSet<&str> = def
+            .get("required")
+            .and_then(serde_json::Value::as_array)
+            .unwrap_or_else(|| {
+                panic!("{def_name}.required is missing -- did schemars(extend) get dropped?")
+            })
+            .iter()
+            .map(|v| v.as_str().expect("required entry should be a string"))
+            .collect();
+
+        assert_eq!(
+            required, properties,
+            "{def_name}: the schemars(extend(\"required\" = [...])) list is out of \
+             sync with the struct's fields. Every field on this DTO is a required \
+             wire field, so `required` must list all of them. Update the \
+             extend(\"required\") attribute on the struct in types.rs (and this \
+             test, if you intentionally introduced an optional field)."
+        );
+    }
+
+    #[test]
+    fn parse_result_requires_all_fields() {
+        assert_required_equals_all_properties("ParseResult");
+    }
+
+    #[test]
+    fn ledger_options_requires_all_fields() {
+        assert_required_equals_all_properties("LedgerOptions");
+    }
+
+    #[test]
+    fn beancount_error_requires_all_fields() {
+        assert_required_equals_all_properties("BeancountError");
+    }
+
+    #[test]
+    fn format_result_requires_all_fields() {
+        assert_required_equals_all_properties("FormatResult");
     }
 }

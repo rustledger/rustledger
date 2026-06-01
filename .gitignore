@@ -2,12 +2,15 @@
 /target/
 **/*.rs.bk
 
-# ts-rs intermediate per-type .d.ts output (#1218 Phase 1).
-# `scripts/regen-ts-bindings.sh` writes per-type files here as
+# ts-rs intermediate per-type .d.ts output (ADR-0004 Phase 1, #1218).
+# `scripts/regen-bindings.sh` writes per-type files here as ts-rs
 # generator scratch, then concatenates them into
-# `crates/rustledger-wasm/bindings/index.d.ts` which IS checked in
-# (it's the canonical TS API surface; CI gates its freshness via
-# `RUSTLEDGER_TS_CHECK=1 scripts/regen-ts-bindings.sh`).
+# `crates/rustledger-wasm/bindings/index.d.ts`. That file IS checked
+# in alongside `bindings/index.schema.json` (Phase 3 JSON Schema) and
+# `bindings/types.py` (Phase 3 Pydantic v2) -- only the
+# `bindings/bindings/` subdirectory is the ignored intermediate. CI
+# gates all three for freshness via
+# `RUSTLEDGER_TS_CHECK=1 scripts/regen-bindings.sh`.
 crates/rustledger-wasm/bindings/bindings/
 
 # Editor files

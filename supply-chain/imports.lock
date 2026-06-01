@@ -3620,6 +3620,17 @@ criteria = "safe-to-deploy"
 delta = "0.2.11 -> 0.2.12"
 aggregated-from = "https://raw.githubusercontent.com/zcash/wallet/main/supply-chain/audits.toml"
 
+[[audits.zcash.audits.dyn-clone]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "1.0.19 -> 1.0.20"
+notes = """
+Changes to `unsafe` code:
+- Migrating to `core::ptr::addr_of_mut!()` with MSRV bump.
+- Gating a function that uses `unsafe` behind `target_has_atomic = "ptr"`.
+"""
+aggregated-from = "https://raw.githubusercontent.com/zcash/wallet/main/supply-chain/audits.toml"
+
 [[audits.zcash.audits.errno]]
 who = "Jack Grigg <jack@electriccoin.co>"
 criteria = "safe-to-deploy"

@@ -87,8 +87,9 @@ use wasm_bindgen::prelude::*;
 // `LedgerJson`, etc.). If you rename a DTO via `#[ts(rename = ...)]`
 // in `src/types.rs`, update the references here too.
 //
-// Run `scripts/regen-ts-bindings.sh` after touching any DTO; the
-// `ts-bindings-fresh` CI job fails if the bundle drifts.
+// Run `scripts/regen-bindings.sh` after touching any DTO; the
+// `bindings-fresh` CI job fails if the bundle, JSON Schema, or
+// Python types drift.
 
 #[wasm_bindgen(typescript_custom_section)]
 const TS_TYPES_DTOS: &'static str = include_str!("../bindings/index.d.ts");

@@ -41,6 +41,13 @@ jobs:
               - 'rust-toolchain.toml'
               - 'tests/**'
               - 'spec/**'
+              # PR #1228 review flagged this gap: a PR that changes only
+              # `scripts/regen-bindings.sh` or the checked-in bindings
+              # files used to skip the `bindings-fresh` job. Include
+              # them so script-only changes still run the freshness
+              # check.
+              - 'scripts/regen-bindings.sh'
+              - 'crates/rustledger-wasm/bindings/**'
       - name: Decide if build needed
         id: decide
         env:
@@ -83,13 +90,16 @@ jobs:
           toolchain: stable
           components: rustfmt
       - run: cargo fmt --all -- --check
-  # ts-rs bindings freshness gate (#1218 Phase 1).
-  # Regenerates `crates/rustledger-wasm/bindings/index.d.ts` from the
-  # Rust DTOs and fails if it differs from the checked-in version. This
-  # is the structural CI gate ADR-0004 was designed for: any wire-format
-  # field change must come with a regenerated TS bundle in the same PR.
-  ts-bindings-fresh:
-    name: TypeScript bindings freshness
+  # Wire-format bindings freshness gate (ADR-0004, #1218 + #1232).
+  # Regenerates all three artifacts from the Rust DTOs and fails if any
+  # differs from the checked-in version:
+  #   - crates/rustledger-wasm/bindings/index.d.ts     (TS, ts-rs)
+  #   - crates/rustledger-wasm/bindings/index.schema.json (JSON Schema, schemars)
+  #   - crates/rustledger-wasm/bindings/types.py       (Python, datamodel-code-generator)
+  # Any wire-format field change must come with all three regenerated
+  # in the same PR.
+  bindings-fresh:
+    name: Wire-format bindings freshness
     needs: [changes]
     if: needs.changes.outputs.should_build == 'true'
     runs-on: ubuntu-latest
@@ -98,12 +108,20 @@ jobs:
       - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # stable
         with:
           toolchain: stable
-      # Node for the prettier pass in `scripts/regen-ts-bindings.sh`
+      # Node for the prettier pass in `scripts/regen-bindings.sh`
       # (#1226). Read from `.nvmrc` to keep the version in one place --
       # matches the convention in `wasm.yml` (single source of truth).
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version-file: '.nvmrc'
+      # Python for the `datamodel-code-generator` invocation that
+      # emits `bindings/types.py` (Phase 3, #1232). ubuntu-latest
+      # preinstalls `pipx`, so the script's `pipx run` path picks the
+      # tool up without an extra `pip install` step. Pinning Python
+      # 3.12 (matches `--target-python-version` in the regen script).
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: '3.12'
       # sccache is set as RUSTC_WRAPPER at the workflow level (line 21),
       # so every job that compiles Rust must install the action -- without
       # it, cargo's `-vV` probe fails with "could not execute process
@@ -111,9 +129,9 @@ jobs:
       - uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2
         with:
-          shared-key: ts-bindings
-      - name: Regenerate + diff TS bindings
-        run: RUSTLEDGER_TS_CHECK=1 scripts/regen-ts-bindings.sh
+          shared-key: bindings
+      - name: Regenerate + diff bindings (TS, JSON Schema, Python)
+        run: RUSTLEDGER_TS_CHECK=1 scripts/regen-bindings.sh
   # Fast invariant check: verify that crates declaring
   # `#![forbid(unsafe_code)]` contain no `unsafe` blocks/items. Runs in
   # milliseconds via grep, so it fails loudly and early on AI-generated
@@ -257,7 +275,7 @@ jobs:
     name: build
     if: always()
     runs-on: ubuntu-latest
-    needs: [changes, fmt, unsafe-invariant, plugin-test-quality, ci, doctest, regressions]
+    needs: [changes, fmt, unsafe-invariant, plugin-test-quality, ci, doctest, regressions, bindings-fresh]
     steps:
       - name: Check results
         run: |
@@ -276,8 +294,11 @@ jobs:
             exit 0
           fi
 
-          # Otherwise, check that all jobs passed
-          results="${{ needs.fmt.result }} ${{ needs.unsafe-invariant.result }} ${{ needs.ci.result }} ${{ needs.doctest.result }} ${{ needs.regressions.result }}"
+          # Otherwise, check that all jobs passed. bindings-fresh is
+          # part of the gate (ADR-0004 Phase 3 / #1232): wire-format
+          # drift in the generated TS / JSON Schema / Python artifacts
+          # blocks merge just like any other failure.
+          results="${{ needs.fmt.result }} ${{ needs.unsafe-invariant.result }} ${{ needs.ci.result }} ${{ needs.doctest.result }} ${{ needs.regressions.result }} ${{ needs.bindings-fresh.result }}"
           echo "Job results: $results"
 
           if echo "$results" | grep -qE '(failure|cancelled)'; then

@@ -304,6 +304,10 @@ criteria = "safe-to-deploy"
 version = "0.1.2"
 criteria = "safe-to-deploy"
 
+[[exemptions.dyn-clone]]
+version = "1.0.19"
+criteria = "safe-to-deploy"
+
 [[exemptions.dyn-stack]]
 version = "0.13.2"
 criteria = "safe-to-deploy"
@@ -908,6 +912,14 @@ criteria = "safe-to-deploy"
 version = "0.5.2"
 criteria = "safe-to-deploy"
 
+[[exemptions.ref-cast]]
+version = "1.0.25"
+criteria = "safe-to-deploy"
+
+[[exemptions.ref-cast-impl]]
+version = "1.0.25"
+criteria = "safe-to-deploy"
+
 [[exemptions.rend]]
 version = "0.4.2"
 criteria = "safe-to-deploy"
@@ -988,6 +1000,14 @@ criteria = "safe-to-deploy"
 version = "1.0.6"
 criteria = "safe-to-deploy"
 
+[[exemptions.schemars]]
+version = "1.2.1"
+criteria = "safe-to-deploy"
+
+[[exemptions.schemars_derive]]
+version = "1.2.1"
+criteria = "safe-to-deploy"
+
 [[exemptions.scoped-tls]]
 version = "1.0.1"
 criteria = "safe-to-deploy"
@@ -1002,6 +1022,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.serde-wasm-bindgen]]
 version = "0.6.5"
+criteria = "safe-to-deploy"
+
+[[exemptions.serde_derive_internals]]
+version = "0.29.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.sgmlish]]

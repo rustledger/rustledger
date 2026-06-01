@@ -1922,16 +1922,18 @@ pub fn parse(source: &str) -> ParseResult {
                 // Produce specific error messages for known patterns.
                 // A leading BOM is consumed by the lexer's
                 // `bom_filter` callback at byte 0 (and is preserved on
-                // output by `format_source`). A BOM at any other byte
-                // position falls through to this error branch — e.g.
-                // a file produced by `cat windows-a.bean
-                // windows-b.bean` contains a mid-file BOM. We surface
-                // that as a specific error rather than the generic
-                // "unexpected input".
+                // output by `format_source`). A BOM at ANY other byte
+                // position — at the start of an entry from a
+                // concatenation accident, or mid-line from an embedded
+                // BOM byte — falls through to this error branch. We
+                // scan the entire failed-entry slice for U+FEFF
+                // (`contains`, not `starts_with`) so we catch both
+                // shapes; the previous `starts_with` only fired when
+                // the BOM was at byte 0 of the recovered span.
                 let error_text = &source[span.start..span.end.min(source.len())];
-                let kind = if error_text.starts_with('\u{FEFF}') {
+                let kind = if error_text.contains('\u{FEFF}') {
                     ParseErrorKind::SyntaxError(
-                        "Invalid token: UTF-8 BOM detected mid-file (only a leading BOM is permitted); did you concatenate two BOM-prefixed files?".to_string()
+                        "Invalid token: UTF-8 BOM detected in directive body (only a leading BOM is permitted); did you concatenate two BOM-prefixed files or paste content with an embedded BOM?".to_string()
                     )
                 } else if let Some(account) = find_unicode_account(error_text) {
                     ParseErrorKind::InvalidAccount(account.to_string())
@@ -2426,9 +2428,27 @@ mod tests {
         );
         let msg = result.errors[0].message();
         assert!(
-            msg.contains("BOM") && msg.contains("mid-file"),
-            "expected mid-file BOM error, got: {msg}"
+            msg.contains("BOM") && msg.contains("directive body"),
+            "expected BOM-in-directive error, got: {msg}"
         );
+    }
+
+    /// A BOM embedded mid-line (not at the start of a fresh directive)
+    /// also surfaces as the dedicated BOM diagnostic. The previous
+    /// `starts_with` classifier missed this case because the error
+    /// span covers the WHOLE failed directive — which starts with the
+    /// date, not the BOM.
+    #[test]
+    fn test_mid_line_bom_produces_error() {
+        // BOM after the account name, before the currency.
+        let source = "2024-01-01 open Assets:Bank \u{FEFF}USD\n";
+        let result = parse(source);
+        assert!(
+            !result.errors.is_empty(),
+            "mid-line BOM should produce a parse error"
+        );
+        let msg = result.errors[0].message();
+        assert!(msg.contains("BOM"), "expected BOM diagnostic, got: {msg}");
     }
 
     #[test]

@@ -508,15 +508,25 @@ fn handle_format_file(params: &serde_json::Value) -> Result<serde_json::Value, R
 }
 
 /// Shared canonical-format implementation for `format.source` and
-/// `format.file`. Gates on a clean parse, runs `format_source`, returns a
-/// `FormatResult` JSON value or a `parse_error` `RpcError`. Avoids the
+/// `format.file`. Gates on a clean parse, runs `format_source`, returns
+/// either a `FormatResult` JSON value on success or a
+/// `beancount_parse_error` `RpcError` (JSON-RPC code -32000, the
+/// application-level error variant) on parse failure. Avoids the
 /// re-serialization round-trip the two endpoints used to go through.
+///
+/// **Error code policy.** Application-level beancount parse failures
+/// use -32000 (`ErrorCode::BeancountParseError`), NOT -32700 (which
+/// JSON-RPC 2.0 reserves for malformed JSON in the request envelope).
+/// Clients that dispatch on JSON-RPC error codes should treat -32000
+/// as "the source the user submitted is invalid" and -32700 as "I
+/// received bytes that weren't valid JSON."
 ///
 /// On parse errors the message field stays single-line for log-friendly
 /// consumption; the full list of error strings is attached as a
 /// structured `data` array per JSON-RPC 2.0, so callers that want to
 /// surface individual errors can inspect `error.data` rather than
-/// scraping the message.
+/// scraping the message. The array is capped at 100 entries with
+/// `truncated: bool` exposing the elision.
 fn format_source_to_response(source: &str) -> Result<serde_json::Value, RpcError> {
     let parse_result = rustledger_parser::parse(source);
     if !parse_result.errors.is_empty() {

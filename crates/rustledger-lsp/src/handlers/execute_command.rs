@@ -128,7 +128,13 @@ fn handle_sort_transactions(
     sorted.sort_by_key(|(date, start, _, _)| (*date, *start));
 
     if transactions == sorted {
-        return ExecuteCommandResponse::warn("Transactions are already sorted");
+        // Same rationale as the <2 case above: format-on-save hooks
+        // chained to `rledger.sortTransactions` would otherwise pop a
+        // notification on every save of an already-sorted ledger.
+        // Absence of an edit is the correct no-op signal — clients
+        // that want a message can detect "no edits returned" and
+        // surface their own toast.
+        return ExecuteCommandResponse::none();
     }
 
     let Some(first_start) = transactions.iter().map(|(_, s, _, _)| *s).min() else {
@@ -360,6 +366,65 @@ mod tests {
         let response = handle_show_account_balance(&args, &result);
         assert!(response.response.is_none());
         assert!(response.show_message.is_some());
+    }
+
+    /// `handle_sort_transactions` is intentionally silent in two no-op
+    /// cases: <2 transactions and already-sorted. Format-on-save hooks
+    /// chained to `rledger.sortTransactions` must not pop notifications
+    /// on every save. These regression tests pin the silent contract so
+    /// a future UX-motivated revert can't reintroduce the spam.
+    #[test]
+    fn sort_transactions_empty_file_is_silent() {
+        use lsp_types::Uri;
+        let result = parse("");
+        let uri: Uri = "file:///test.beancount".parse().unwrap();
+        let response = handle_sort_transactions("", &result, &uri);
+        assert!(response.response.is_none(), "expected silent response");
+        assert!(
+            response.show_message.is_none(),
+            "expected no showMessage, got {:?}",
+            response.show_message
+        );
+    }
+
+    #[test]
+    fn sort_transactions_single_transaction_is_silent() {
+        use lsp_types::Uri;
+        let source = "2024-01-01 * \"Solo\"\n  Assets:Bank  -5.00 USD\n  Expenses:Food\n";
+        let result = parse(source);
+        let uri: Uri = "file:///test.beancount".parse().unwrap();
+        let response = handle_sort_transactions(source, &result, &uri);
+        assert!(response.response.is_none());
+        assert!(response.show_message.is_none());
+    }
+
+    #[test]
+    fn sort_transactions_already_sorted_is_silent() {
+        use lsp_types::Uri;
+        let source = "2024-01-01 * \"A\"\n  Assets:Bank  -1.00 USD\n  Expenses:Food\n\n2024-02-01 * \"B\"\n  Assets:Bank  -2.00 USD\n  Expenses:Food\n";
+        let result = parse(source);
+        let uri: Uri = "file:///test.beancount".parse().unwrap();
+        let response = handle_sort_transactions(source, &result, &uri);
+        assert!(
+            response.response.is_none(),
+            "already-sorted should be silent, got {:?}",
+            response.response
+        );
+        assert!(response.show_message.is_none());
+    }
+
+    #[test]
+    fn sort_transactions_out_of_order_produces_edit() {
+        use lsp_types::Uri;
+        // B before A by date: actually needs sorting.
+        let source = "2024-02-01 * \"B\"\n  Assets:Bank  -2.00 USD\n  Expenses:Food\n\n2024-01-01 * \"A\"\n  Assets:Bank  -1.00 USD\n  Expenses:Food\n";
+        let result = parse(source);
+        let uri: Uri = "file:///test.beancount".parse().unwrap();
+        let response = handle_sort_transactions(source, &result, &uri);
+        assert!(
+            response.response.is_some(),
+            "out-of-order should produce a WorkspaceEdit"
+        );
     }
 
     #[test]

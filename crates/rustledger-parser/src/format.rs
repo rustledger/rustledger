@@ -224,20 +224,21 @@ pub fn format_source(source: &str, parse_result: &ParseResult, config: &FormatCo
     // * No `\r\n` in source → output is LF-only.
     // * Files using bare CR ONLY (no `\n`, legacy classic-Mac) round-
     //   trip as LF — `format_source` does NOT preserve bare CR. That
-    //   platform is extinct in practice; the few remaining classic-Mac
-    //   ledger files we've seen in the wild were already converted by
-    //   their authors. If you have a real bare-CR file, run it
-    //   through `dos2unix -c mac in.bean` first.
+    //   platform is extinct in practice. If you have a real bare-CR
+    //   file, run it through `dos2unix -c mac in.bean` first.
     //
-    // The replacement first collapses any pre-existing `\r\n` in
-    // `formatted` to `\n`, then rewrites every `\n` to `\r\n`. The
-    // collapse step is defensive: `render_lines` doesn't emit `\r`
-    // today, but if any future renderer (or any directive whose
-    // Display impl carries embedded line endings) emits `\r\n`
-    // directly, the unconditional `.replace('\n', "\r\n")` would
-    // otherwise turn that `\r\n` into `\r\r\n`.
+    // The defensive collapse (`replace("\r\n", "\n")`) is only needed
+    // when the rendered output itself might contain `\r\n` — which
+    // `render_lines` never emits today. Guard the collapse on
+    // `contains('\r')` so the common case stays O(N) (one pass) and
+    // pathological inputs (some future renderer emitting CRLF, or a
+    // directive Display impl carrying embedded line endings) still
+    // round-trip correctly as O(2N).
     if source.contains("\r\n") {
-        formatted = formatted.replace("\r\n", "\n").replace('\n', "\r\n");
+        if formatted.contains('\r') {
+            formatted = formatted.replace("\r\n", "\n");
+        }
+        formatted = formatted.replace('\n', "\r\n");
     }
 
     // Preserve a leading UTF-8 BOM. The lexer skips it as a no-op so

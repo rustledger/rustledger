@@ -30,5 +30,10 @@ sha2.workspace = true
 rustc-hash.workspace = true
 jiff.workspace = true
 
+[dev-dependencies]
+# Filesystem fixture support for integration tests that exercise the
+# loader's path-security behavior via tempdir-rooted include graphs.
+tempfile.workspace = true
+
 [lints]
 workspace = true

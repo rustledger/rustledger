@@ -58,7 +58,12 @@ use std::io::{self, Read, Write};
 pub fn process_stdin() -> i32 {
     let mut input = String::new();
     if let Err(e) = io::stdin().read_to_string(&mut input) {
-        let response = Response::parse_error(format!("Failed to read stdin: {e}"));
+        // IO failure reading the transport, NOT a JSON parse failure.
+        // JSON-RPC's -32700 is reserved for "received bytes that weren't
+        // valid JSON"; treating stdin read errors as that code would
+        // make a JSON-RPC client retry the request endlessly. Use
+        // internal_error (-32603) to signal a server-side fault.
+        let response = Response::internal_error(None, format!("Failed to read stdin: {e}"));
         output_response(&ResponseBatch::single(response));
         return 1;
     }

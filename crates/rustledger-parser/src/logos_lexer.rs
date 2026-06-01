@@ -409,7 +409,12 @@ impl fmt::Display for Token<'_> {
             Self::Indent(n) => write!(f, "<indent:{n}>"),
             Self::DeepIndent(n) => write!(f, "<deep-indent:{n}>"),
             Self::Error(s) => write!(f, "{s}"),
-            Self::Bom => write!(f, "\u{FEFF}"),
+            // Use a visible placeholder rather than the literal U+FEFF byte
+            // sequence so any error or diagnostic that interpolates this
+            // token via Display stays human-readable (LSP problem panels,
+            // CLI stderr, GitHub-rendered bug reports all silently drop or
+            // strip a literal BOM otherwise).
+            Self::Bom => write!(f, "<BOM>"),
         }
     }
 }
@@ -434,6 +439,16 @@ pub fn tokenize(source: &str) -> Vec<(Token<'_>, Span)> {
                 tokens.push((Token::Newline, span.clone().into()));
                 at_line_start = true;
                 last_newline_end = span.end;
+            }
+            // A mid-file BOM is invisible to layout: don't reset
+            // at_line_start, don't move last_newline_end. The parser's
+            // error classifier separately picks up the Token::Bom span
+            // and surfaces a dedicated "UTF-8 BOM mid-file" diagnostic.
+            // Treating BOM as a layout-affecting token would swallow the
+            // indent of legitimate content on the same line (e.g., the
+            // metadata-indent of a concatenated second file).
+            Ok(Token::Bom) => {
+                tokens.push((Token::Bom, span.into()));
             }
             Ok(Token::Hash) if at_line_start && span.start == last_newline_end => {
                 // Hash at very start of line (no indentation) is a comment

@@ -121,11 +121,14 @@ pub fn handle_code_lens(
                 // dropped response, etc.), the user still sees a
                 // sensible title instead of "Unresolved lens".
                 //
-                // The resolve handler overwrites this with the real
-                // `✓ Balance: ... USD` title once the calculation
-                // completes, or leaves it in place if the assertion
-                // failed (diagnostics report the failure in that case;
-                // see issue #491).
+                // The resolve handler overwrites this with either the
+                // real `✓ Balance: ... USD` title (passing assertion)
+                // or `⚠ Balance: ... USD (see diagnostic)` (failing
+                // assertion). For failing assertions the diagnostic
+                // remains the source of truth on the actual error
+                // (issue #491); the resolved lens title is a brief
+                // pointer so the lens stays meaningful instead of
+                // sitting forever on the "(checking…)" placeholder.
                 let placeholder = Command {
                     title: format!(
                         "Balance: {} {} (checking…)",
@@ -245,10 +248,17 @@ pub fn handle_code_lens_resolve(
         });
     }
 
-    // Ensure a command is set for non-balance lenses or malformed balance data.
-    // This prevents "Unresolved lens ..." from appearing in the editor.
-    // We don't apply this to processed balance assertions - those intentionally
-    // have no command when mismatched (shown via diagnostics instead).
+    // Ensure a command is set for non-balance lenses or malformed
+    // balance data — `command: None` makes nvim render the literal
+    // string "Unresolved lens" once the resolve response lands (see
+    // issue #1245). The `!processed_balance` guard is now mostly
+    // defensive: as of #1245, balance lenses ALWAYS receive a command
+    // in the kind == "balance" branch above (✓ on match, ⚠ on
+    // mismatch), so this fallback only fires for non-balance kinds or
+    // for balance data so malformed that we couldn't parse it. The
+    // guard prevents this fallback from overwriting the structured
+    // balance titles in the (impossible-today) case where the balance
+    // branch somehow left `command` unset.
     if !processed_balance && resolved.command.is_none() {
         resolved.command = Some(Command {
             title: "Balance assertion".to_string(),
@@ -741,7 +751,7 @@ mod tests {
                         .and_then(|v| v.as_str())
                         == Some("balance")
                 })
-                .unwrap_or_else(|| panic!("[{label}] balance lens emitted"))
+                .unwrap_or_else(|| panic!("[{label}] balance lens was not emitted"))
                 .clone();
             assert!(
                 balance_lens.command.is_some(),

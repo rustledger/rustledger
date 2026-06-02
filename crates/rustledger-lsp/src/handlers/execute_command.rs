@@ -35,11 +35,21 @@ fn is_silent_invocation(arguments: &[serde_json::Value]) -> bool {
 }
 
 /// Available commands.
+///
+/// `rledger.noop` is a deliberate placeholder used by code-lens titles
+/// that exist purely to be RENDERED (e.g. the `Balance: X USD (checking…)`
+/// placeholder set by `handlers::code_lens` on balance lenses, and the
+/// `⚠ Balance: X USD (see diagnostic)` callout set by the resolve path
+/// on mismatched assertions — see issue #1245). We advertise it here so
+/// strict clients that only forward server-advertised commands will
+/// route clicks back to the server cleanly, where `handle_execute_command`
+/// silently no-ops.
 pub const COMMANDS: &[&str] = &[
     "rledger.insertDate",
     "rledger.sortTransactions",
     "rledger.alignAmounts",
     "rledger.showAccountBalance",
+    "rledger.noop",
 ];
 
 /// Result of an executeCommand handler.
@@ -122,6 +132,13 @@ pub fn handle_execute_command(
         "rledger.showAccountBalance" => {
             handle_show_account_balance(&params.arguments, parse_result)
         }
+        // Intentional no-op: backs the placeholder / "(see diagnostic)"
+        // titles that code-lens emits for balance assertions (#1245).
+        // The lens exists to be displayed; clicking it has nothing to
+        // do. Explicit arm (rather than falling through to the
+        // unknown-command warning) so a future contributor doesn't
+        // think the lens code is buggy when they grep for the command.
+        "rledger.noop" => ExecuteCommandResponse::none(),
         _ => {
             tracing::warn!("Unknown command: {}", params.command);
             ExecuteCommandResponse::none()

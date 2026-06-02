@@ -25,12 +25,15 @@ use wasmtime_wasi::{DirPerms, FilePerms, WasiCtxBuilder};
 /// a memory-constrained host" (issue #1234) into "Python plugin can
 /// allocate up to 256 MiB then `memory.grow` returns `-1`".
 ///
-/// The value is the linear-memory ceiling AND the table-element
-/// ceiling: see [`ResourceLimiter::table_growing`] (impl on
-/// `MemoryLimiter` in `rustledger_plugin::sandbox`) for why we cap
-/// them together. wasmtime accounts memory and tables separately,
-/// so a cap on just one resource leaves the other reachable.
+/// This value caps **linear memory only**. Tables are capped
+/// separately via [`sandbox::MAX_TABLE_ELEMENTS`] (1M ref-typed
+/// slots, ~8 MiB worst case), wired into the same `MemoryLimiter`'s
+/// [`ResourceLimiter::table_growing`] impl. wasmtime accounts memory
+/// and tables as separate resource classes; without the secondary
+/// `MAX_TABLE_ELEMENTS` cap, `table.grow` would bypass the
+/// `max_memory` ceiling entirely.
 ///
+/// [`sandbox::MAX_TABLE_ELEMENTS`]: crate::sandbox::MAX_TABLE_ELEMENTS
 /// [`ResourceLimiter::table_growing`]: wasmtime::ResourceLimiter::table_growing
 const PYTHON_MAX_MEMORY: usize = 256 * 1024 * 1024;
 
@@ -38,7 +41,7 @@ const PYTHON_MAX_MEMORY: usize = 256 * 1024 * 1024;
 ///
 /// Roughly "~10 minutes of `CPython` at 1M instructions/second on the
 /// reference fixtures". Fuel exhaustion surfaces as a wasmtime trap
-/// the caller in `execute_plugin` translates into a
+/// that the caller in `execute_plugin` translates into a
 /// `PythonError::Execution` (the existing error path).
 ///
 /// Kept as a module-level `const` rather than a free-floating literal

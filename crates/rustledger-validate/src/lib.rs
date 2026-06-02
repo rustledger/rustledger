@@ -663,13 +663,14 @@ fn build_document_exists_cache<D: ValidatableDirective>(
 //
 // The single supported entry to the validator is [`ValidationSession`].
 // Callers that just want "validate this list of directives, give me all
-// errors" wire four calls: `run_early(_, today)` (consumes `Pending`,
-// produces `EarlyDone`), `run_late(_, today)` (consumes `EarlyDone`,
-// produces `LateDone`), `finalize()` (consumes `LateDone`). The visible
-// verbosity is deliberate: it surfaces the phase split so callers can
-// choose where to insert booking between phases (the loader does this)
-// or run all three back-to-back on already-booked input (LSP / FFI /
-// tests do this).
+// errors" wire four calls: `ValidationSession::new(options)` (constructs
+// `Pending`), `run_early(_, today)` (consumes `Pending`, produces
+// `EarlyDone`), `run_late(_, today)` (consumes `EarlyDone`, produces
+// `LateDone`), `finalize()` (consumes `LateDone`). The visible verbosity
+// is deliberate: it surfaces the phase split so callers can choose
+// where to insert booking between phases (the loader does this) or run
+// all four back-to-back on already-booked input (LSP / FFI / tests do
+// this).
 //
 // Prior versions of this crate exposed `validate()`, `validate_with_options()`,
 // `validate_with_today()`, and spanned variants as free-function
@@ -2966,16 +2967,26 @@ mod tests {
     // fired on out-of-order or duplicate phase calls. The typestate
     // refactor moved that enforcement to the type system: calling
     // `run_late` before `run_early`, or either phase twice, is now a
-    // compile error rather than a runtime panic. The compile-fail
-    // doctests on the `ValidationSession` struct pin the new contract.
+    // compile error rather than a runtime panic.
     //
     // We deliberately do not keep the runtime panic-tests as a parallel
-    // safety net — there is no longer a runtime code path that could
+    // safety net: there is no longer a runtime code path that could
     // panic, so a runtime test would simply be unreachable.
 
     /// Compile-time pin for the typestate ordering: `run_late` is not
     /// callable on a `ValidationSession<Pending>` (the only `new()`
     /// output). This test is type-level only and runs at compile time.
+    ///
+    /// Coverage is limited to the happy-path direction: the helper
+    /// functions below assert that the by-value transitions resolve to
+    /// the documented next-phase types. Compiler rejection of the
+    /// inverse misuse (`run_late` on `Pending`, double-`run_early`,
+    /// `finalize` on `EarlyDone`, etc.) is exercised today by ordinary
+    /// development — the missing methods produce E0599 the moment a
+    /// caller tries them. Pinning these as `trybuild`-style `compile_fail`
+    /// tests is a candidate follow-up; the dependency adds rustc-version-
+    /// sensitive `.stderr` snapshots that aren't justified by the
+    /// already-structural type-system enforcement.
     #[test]
     fn typestate_pins_phase_ordering_at_compile_time() {
         // A `Pending` session has `run_early` but not `run_late`. The
@@ -2987,11 +2998,8 @@ mod tests {
         //     // error[E0599]: no method named `run_late` found for struct
         //     //               `ValidationSession<Pending>` in the current scope
         //
-        // The actual gate sits in
-        // `crates/rustledger-validate/tests/typestate_compile_fail.rs`
-        // as `trybuild`-style compile_fail tests (added in this PR).
-        // Here we just assert the happy path produces the expected
-        // phase types at compile time via type-checking.
+        // The helper functions below pin the happy-path transitions
+        // via signatures the type-checker validates at compile time.
         fn _expect_pending_returns_early(
             s: ValidationSession<Pending>,
         ) -> ValidationSession<EarlyDone> {

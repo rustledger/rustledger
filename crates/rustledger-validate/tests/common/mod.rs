@@ -60,9 +60,14 @@ pub fn validate_spanned_with_options(
     directives: &[Spanned<Directive>],
     options: ValidationOptions,
 ) -> Vec<ValidationError> {
+    // Anchor "today" once so both phases agree on the same wall-clock
+    // reference (matches the loader/LSP/FFI pattern of computing `today`
+    // once at the top of `process()`/`all_diagnostics()` and threading
+    // the same value through Early and Late).
+    let today = test_today();
     let session = ValidationSession::new(options);
-    let (session, mut errors) = session.run_early_spanned(directives, test_today());
-    let (session, late_errs) = session.run_late_spanned(directives, test_today());
+    let (session, mut errors) = session.run_early_spanned(directives, today);
+    let (session, late_errs) = session.run_late_spanned(directives, today);
     errors.extend(late_errs);
     errors.extend(session.finalize());
     errors

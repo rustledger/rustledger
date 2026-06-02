@@ -64,6 +64,13 @@ user-id = 3618
 user-login = "dtolnay"
 user-name = "David Tolnay"
 
+[[publisher.bstr]]
+version = "1.12.1"
+when = "2025-10-26"
+user-id = 189
+user-login = "BurntSushi"
+user-name = "Andrew Gallant"
+
 [[publisher.bumpalo]]
 version = "3.20.3"
 when = "2026-05-22"

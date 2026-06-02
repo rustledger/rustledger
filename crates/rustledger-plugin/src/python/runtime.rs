@@ -16,13 +16,14 @@ use wasmtime_wasi::{DirPerms, FilePerms, WasiCtxBuilder};
 
 /// Per-instance memory cap for the Python plugin runtime.
 ///
-/// Mirrors `PluginConfig::default()`'s 256 MiB cap on the regular WASM
-/// plugin path (see `rustledger_plugin::runtime`). `CPython` compiled to
-/// WASI is memory-hungry on import and AST compilation, so we don't go
-/// lower; we also don't go higher, because the whole point of the cap
-/// is to convert "Python plugin can spin allocate-loops to OOM the
-/// host" (issue #1234) into "Python plugin can allocate up to 256 MiB
-/// then `memory.grow` returns `-1`".
+/// Mirrors `RuntimeConfig::default()`'s 256 MiB cap on the regular
+/// WASM plugin path (see `rustledger_plugin::runtime`). `CPython`
+/// compiled to WASI is memory-hungry on import and AST compilation,
+/// so we don't go lower; we also don't go higher, because the whole
+/// point of the cap is to convert "Python plugin can allocate up to
+/// 4 GiB per call (the wasm32 linear-memory ceiling), enough to OOM
+/// a memory-constrained host" (issue #1234) into "Python plugin can
+/// allocate up to 256 MiB then `memory.grow` returns `-1`".
 ///
 /// The value is the linear-memory ceiling AND the table-element
 /// ceiling: see [`MemoryLimiter::table_growing`] for why we cap them
@@ -48,9 +49,12 @@ const PYTHON_FUEL: u64 = 600_000_000;
 /// Wraps the WASI preview1 context alongside the [`MemoryLimiter`]
 /// that caps `memory.grow` and `table.grow` at [`PYTHON_MAX_MEMORY`].
 /// Pre-#1234 the runtime stored the raw `p1::WasiP1Ctx` and installed
-/// no limiter, so a buggy or hostile Python plugin could OOM the host
-/// (the fuel cap blocked CPU-spin attacks but not allocation-spin
-/// attacks). This struct is the parity counterpart of
+/// no limiter, so a buggy or hostile Python plugin could allocate up
+/// to 4 GiB per call (the wasm32 linear-memory ceiling, a spec
+/// constant), enough to OOM a memory-constrained host. The fuel cap
+/// blocked CPU-spin attacks but not allocation-spin attacks
+/// (`memory.grow` consumes negligible fuel per allocated page). This
+/// struct is the parity counterpart of
 /// `rustledger_plugin::sandbox::StoreState` for the WASI-based runtime
 /// path.
 ///
@@ -303,20 +307,11 @@ with open('/work/output.json', 'w') as f:
 
         let wasi_ctx = wasi_builder.build_p1();
 
-        // Create store with the wrapped state. The state carries the
-        // WASI context AND the memory limiter; `Store::limiter` wires
-        // the limiter into wasmtime's growth-check path so a Python
-        // plugin can't allocate past PYTHON_MAX_MEMORY (issue #1234).
-        // Fuel cap (PYTHON_FUEL) caps CPU consumption per call.
-        let mut store: Store<PythonStoreState> = Store::new(
-            &self.engine,
-            PythonStoreState {
-                wasi: wasi_ctx,
-                limiter: MemoryLimiter::new(PYTHON_MAX_MEMORY),
-            },
-        );
-        store.limiter(|state| &mut state.limiter);
-        store.set_fuel(PYTHON_FUEL).map_err(PythonError::Wasm)?;
+        // Construct the sandboxed Store via the helper so production
+        // and the `make_sandboxed_python_store_caps_memory_growth_via_wasmtime`
+        // regression test exercise the same wiring (issue #1234).
+        let mut store =
+            make_sandboxed_python_store(&self.engine, wasi_ctx).map_err(PythonError::Wasm)?;
 
         // Create linker and add WASI. The closure reaches through the
         // state wrapper to the inner `p1::WasiP1Ctx` that the WASI
@@ -347,6 +342,46 @@ with open('/work/output.json', 'w') as f:
             ))
         })
     }
+}
+
+/// Build a `Store<PythonStoreState>` pre-wired with the runtime's
+/// resource caps:
+///
+/// - `Store::limiter` is set so wasmtime's `memory.grow` and
+///   `table.grow` checks call back into [`MemoryLimiter`] with the
+///   `PYTHON_MAX_MEMORY` ceiling (issue #1234).
+/// - `set_fuel(PYTHON_FUEL)` caps per-call CPU consumption.
+///
+/// Extracted so the production path in
+/// [`PythonRuntime::run_python`] and the
+/// `make_sandboxed_python_store_caps_memory_growth_via_wasmtime`
+/// regression test exercise the SAME wiring. Without a single helper
+/// the test could only verify `MemoryLimiter` logic in isolation
+/// (which `rustledger_plugin::sandbox` already covers), not the
+/// wasmtime-side hookup, so a refactor that accidentally dropped the
+/// `store.limiter(...)` call would pass the previous test.
+///
+/// # Errors
+///
+/// Returns `wasmtime::Error` if `set_fuel` fails — only when the
+/// engine was configured without `consume_fuel(true)`, which
+/// [`engine_config`] always sets. The `Result` is defensive: a future
+/// refactor flipping the flag surfaces the error rather than silently
+/// producing an unmetered Store.
+fn make_sandboxed_python_store(
+    engine: &Engine,
+    wasi: p1::WasiP1Ctx,
+) -> wasmtime::Result<Store<PythonStoreState>> {
+    let mut store = Store::new(
+        engine,
+        PythonStoreState {
+            wasi,
+            limiter: MemoryLimiter::new(PYTHON_MAX_MEMORY),
+        },
+    );
+    store.limiter(|state| &mut state.limiter);
+    store.set_fuel(PYTHON_FUEL)?;
+    Ok(store)
 }
 
 /// Build the wasmtime [`Config`] used for the Python plugin engine.
@@ -641,61 +676,66 @@ mod tests {
             .expect("engine_config must satisfy wasmtime stack constraints");
     }
 
-    /// Regression test for issue #1234: the Python plugin runtime must
-    /// install a `ResourceLimiter` (with `PYTHON_MAX_MEMORY` ceiling)
-    /// on every `Store` it creates, mirroring the WASM-plugin path's
-    /// `sandbox::make_sandboxed_store`. Pre-#1234 the runtime created
-    /// the `Store` with a raw `p1::WasiP1Ctx` and no limiter, so a
-    /// buggy or hostile Python plugin could allocate until the host
-    /// hit OOM (the existing fuel cap blocked CPU-spin attacks but not
-    /// allocation-spin attacks).
+    /// End-to-end regression for issue #1234: build a real
+    /// `Store<PythonStoreState>` via [`make_sandboxed_python_store`],
+    /// instantiate a synthetic wasm module that calls `memory.grow`
+    /// past the cap, and assert wasmtime reports growth failure (the
+    /// `-1` sentinel `memory.grow` returns when the limiter denies the
+    /// request). This pins the WIRING between `Store::limiter` and
+    /// `MemoryLimiter::memory_growing`, not just the limiter's logic
+    /// in isolation (`rustledger_plugin::sandbox` already covers
+    /// that). A future refactor that drops the `store.limiter(...)`
+    /// line in [`make_sandboxed_python_store`] makes this test fail.
+    ///
+    /// Pre-#1234 the runtime created the `Store` with a raw
+    /// `p1::WasiP1Ctx` and no limiter. The wasm32 linear-memory
+    /// ceiling is 4 GiB per `Store` (a spec constant, not policy), so
+    /// a single hostile call without our cap could allocate up to
+    /// 4 GiB — enough to OOM a memory-constrained host (Docker
+    /// container, CI runner). The fuel cap blocked CPU-spin attacks
+    /// but not allocation-spin attacks (`memory.grow` consumes
+    /// negligible fuel per allocated page).
     ///
     /// We don't instantiate `CPython` here, that pulls the 50+ MiB
-    /// runtime download into the test. Instead we exercise the
-    /// `MemoryLimiter` directly through the `ResourceLimiter` trait
-    /// the way wasmtime would when `Store::limiter` is wired: pin
-    /// that the limiter rejects any growth beyond `PYTHON_MAX_MEMORY`
-    /// (matches the production code's `store.limiter(|state| &mut state.limiter)`
-    /// in `execute_plugin`).
+    /// runtime download into the test. A 1-page synthetic module is
+    /// enough to exercise wasmtime's limiter callback.
     #[test]
-    fn python_store_state_caps_memory_growth_at_python_max_memory() {
-        use wasmtime::ResourceLimiter;
+    fn make_sandboxed_python_store_caps_memory_growth_via_wasmtime() {
+        let engine =
+            Engine::new(&engine_config()).expect("engine_config must build a valid Engine");
+        let wasi = WasiCtxBuilder::new().build_p1();
+        let mut store =
+            make_sandboxed_python_store(&engine, wasi).expect("store construction must succeed");
 
-        let mut state = PythonStoreState {
-            // The wasi ctx is unused for this test; we only exercise
-            // the limiter field. WasiCtxBuilder::new().build_p1() is
-            // cheap (no I/O).
-            wasi: WasiCtxBuilder::new().build_p1(),
-            limiter: MemoryLimiter::new(PYTHON_MAX_MEMORY),
-        };
+        // `PYTHON_MAX_MEMORY = 256 MiB = 4096 pages` (1 wasm page = 64 KiB).
+        // Initial memory is 1 page; request grow by 5000 pages, which
+        // would land at 5001 pages = ~328 MiB, past the cap. wasmtime
+        // calls `MemoryLimiter::memory_growing` with the desired byte
+        // count, the limiter returns `Ok(false)`, and `memory.grow`
+        // surfaces `-1` to the wasm caller.
+        let wat = r#"
+            (module
+                (memory (export "mem") 1)
+                (func (export "try_grow_past_cap") (result i32)
+                    i32.const 5000
+                    memory.grow))
+        "#;
+        let module = Module::new(&engine, wat).expect("synthetic wat module must compile");
+        let linker = Linker::<PythonStoreState>::new(&engine);
+        let instance = linker
+            .instantiate(&mut store, &module)
+            .expect("instantiation must succeed under the cap");
+        let try_grow = instance
+            .get_typed_func::<(), i32>(&mut store, "try_grow_past_cap")
+            .expect("export must exist");
 
-        // Inside the cap: accepted.
-        let one_page = 64 * 1024;
-        assert!(
-            state
-                .limiter
-                .memory_growing(0, one_page, None)
-                .expect("memory_growing should not fail under the cap"),
-            "limiter must accept allocations up to PYTHON_MAX_MEMORY"
-        );
-
-        // At the cap: accepted.
-        assert!(
-            state
-                .limiter
-                .memory_growing(0, PYTHON_MAX_MEMORY, None)
-                .expect("memory_growing should not fail at the cap"),
-            "limiter must accept allocations exactly at PYTHON_MAX_MEMORY"
-        );
-
-        // One byte over the cap: rejected. This is the line that
-        // blocks the DoS-by-allocation attack named in #1234.
-        assert!(
-            !state
-                .limiter
-                .memory_growing(0, PYTHON_MAX_MEMORY + 1, None)
-                .expect("memory_growing should not error, just reject"),
-            "limiter must reject allocations past PYTHON_MAX_MEMORY"
+        let result = try_grow.call(&mut store, ()).expect("call must not trap");
+        assert_eq!(
+            result, -1,
+            "memory.grow past PYTHON_MAX_MEMORY must return -1 (growth rejected). \
+             If this fails, the limiter is not wired into the Store — most likely \
+             the `store.limiter(|state| &mut state.limiter)` call was removed from \
+             `make_sandboxed_python_store`."
         );
     }
 
@@ -712,6 +752,21 @@ mod tests {
             crate::runtime::RuntimeConfig::default().max_memory,
             "Python runtime cap should track the regular plugin path's default; \
              update both together or document the divergence in PYTHON_MAX_MEMORY's rustdoc"
+        );
+    }
+
+    /// Pin `PYTHON_FUEL` at its documented "~10 minutes of `CPython` at
+    /// 1M instructions/second" budget. Hoisted from an inline literal
+    /// in #1234; this test makes a future change to the value a
+    /// conscious edit. Doesn't pin the wasmtime-side wiring (that's
+    /// covered by `make_sandboxed_python_store_caps_memory_growth_via_wasmtime`,
+    /// which constructs the store via the helper that sets fuel).
+    #[test]
+    fn python_fuel_pins_documented_budget() {
+        assert_eq!(
+            PYTHON_FUEL, 600_000_000,
+            "PYTHON_FUEL changed without updating the rustdoc; bumping the budget \
+             should also update the \"~10 minutes at 1M instructions/sec\" doc claim."
         );
     }
 

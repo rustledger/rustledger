@@ -8,7 +8,7 @@ use rustledger_core::{BookingMethod, Directive};
 use rustledger_loader::{LoadOptions, Options as LoaderOptions, Plugin, SourceMap};
 use rustledger_parser::{ParseError, ParseResult, Span, Spanned};
 use rustledger_plugin::NativePluginRegistry;
-use rustledger_validate::{Phase, Severity, ValidationError, ValidationOptions, ValidationSession};
+use rustledger_validate::{Severity, ValidationError, ValidationOptions, ValidationSession};
 
 use super::utils::{LineIndex, PositionEncoding};
 use crate::ledger_state::LedgerState;
@@ -350,9 +350,10 @@ pub fn validation_errors_to_diagnostics(
     // against the same input. See `rustledger_validate::Phase` for the
     // architecture rationale.
     let today = jiff::Zoned::now().date();
-    let mut session = ValidationSession::new(validation_options);
-    let mut validation_errors = session.run_phase_spanned(&booked_directives, Phase::Early, today);
-    validation_errors.extend(session.run_phase_spanned(&booked_directives, Phase::Late, today));
+    let session = ValidationSession::new(validation_options);
+    let (session, mut validation_errors) = session.run_early_spanned(&booked_directives, today);
+    let (session, late_errs) = session.run_late_spanned(&booked_directives, today);
+    validation_errors.extend(late_errs);
     validation_errors.extend(session.finalize());
 
     // Filter errors to only those in the current file (if file_id filtering is enabled).

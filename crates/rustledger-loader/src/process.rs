@@ -272,7 +272,7 @@ pub fn process(raw: LoadResult, options: &LoadOptions) -> Result<Ledger, Process
     let effective_booking_method = resolve_effective_booking_method(&raw, options);
 
     #[cfg(feature = "validation")]
-    let mut validation_session = if options.validate {
+    let validation_session = if options.validate {
         Some(rustledger_validate::ValidationSession::new(
             build_validation_options(&raw.options, &raw.source_map, effective_booking_method),
         ))
@@ -286,7 +286,7 @@ pub fn process(raw: LoadResult, options: &LoadOptions) -> Result<Ledger, Process
     #[cfg(feature = "validation")]
     let today = jiff::Zoned::now().date();
 
-    let directives = crate::Directives::<crate::Raw>::from_parser(raw.directives)
+    let synthed = crate::Directives::<crate::Raw>::from_parser(raw.directives)
         .sort()
         .apply_synth_plugins(
             &raw.plugins,
@@ -294,15 +294,20 @@ pub fn process(raw: LoadResult, options: &LoadOptions) -> Result<Ledger, Process
             options,
             &raw.source_map,
             &mut errors,
-        )?
-        .early_validate(
-            #[cfg(feature = "validation")]
-            validation_session.as_mut(),
-            #[cfg(feature = "validation")]
-            today,
-            &raw.source_map,
-            &mut errors,
-        );
+        )?;
+
+    // The validation feature changes `early_validate`'s shape: with
+    // it on we thread the `Option<ValidationSession<Pending>>` in and
+    // catch the returned `Option<ValidationSession<EarlyDone>>` for
+    // `late_validate` (typestate-moved per #1236); without it we just
+    // get the next-phase `Directives` back. Branching here keeps each
+    // cfg's signature small and prevents the call site from having to
+    // know the typestate phase parameters in the disabled case.
+    #[cfg(feature = "validation")]
+    let (directives, validation_session) =
+        synthed.early_validate(validation_session, today, &raw.source_map, &mut errors);
+    #[cfg(not(feature = "validation"))]
+    let directives = synthed.early_validate(&raw.source_map, &mut errors);
 
     let (booked, failed) = directives.book(
         #[cfg(feature = "booking")]
@@ -311,23 +316,21 @@ pub fn process(raw: LoadResult, options: &LoadOptions) -> Result<Ledger, Process
         &mut errors,
     );
 
-    let finalized = booked
-        .apply_regular_plugins(
-            &raw.plugins,
-            &raw.options,
-            options,
-            &raw.source_map,
-            &mut errors,
-        )?
-        .late_validate(
-            #[cfg(feature = "validation")]
-            validation_session,
-            #[cfg(feature = "validation")]
-            today,
-            &raw.source_map,
-            &mut errors,
-        )
-        .finalize(failed);
+    let regular_applied = booked.apply_regular_plugins(
+        &raw.plugins,
+        &raw.options,
+        options,
+        &raw.source_map,
+        &mut errors,
+    )?;
+
+    #[cfg(feature = "validation")]
+    let late_validated =
+        regular_applied.late_validate(validation_session, today, &raw.source_map, &mut errors);
+    #[cfg(not(feature = "validation"))]
+    let late_validated = regular_applied.late_validate(&raw.source_map, &mut errors);
+
+    let finalized = late_validated.finalize(failed);
 
     Ok(Ledger {
         directives: finalized.into_inner(),
@@ -460,28 +463,43 @@ impl crate::Directives<crate::Synthed> {
     /// match Python's "prune zero-interp postings" behavior without
     /// losing E1001 on the elided-zero-to-unopened-account case
     /// (rustledger#877).
+    #[cfg(feature = "validation")]
     pub(crate) fn early_validate(
         mut self,
-        #[cfg(feature = "validation")] validation_session: Option<
-            &mut rustledger_validate::ValidationSession,
+        validation_session: Option<
+            rustledger_validate::ValidationSession<rustledger_validate::Pending>,
         >,
-        #[cfg(feature = "validation")] today: rustledger_core::NaiveDate,
+        today: rustledger_core::NaiveDate,
+        source_map: &SourceMap,
+        errors: &mut Vec<LedgerError>,
+    ) -> (
+        crate::Directives<crate::EarlyValidated>,
+        Option<rustledger_validate::ValidationSession<rustledger_validate::EarlyDone>>,
+    ) {
+        // Typestate move: consume `Pending`, return `EarlyDone`. The
+        // session must be threaded by value rather than `&mut`-borrowed
+        // because the phase parameter on `ValidationSession<P>` changes
+        // as a result of the call (#1236). The caller in `process()`
+        // captures the returned session and passes it to
+        // `late_validate`.
+        let session_out = validation_session.map(|session| {
+            let (session, phase_errors) = session.run_early_spanned(self.as_slice(), today);
+            ledger_errors_extend(errors, phase_errors, source_map);
+            session
+        });
+        (
+            crate::Directives::new_unchecked(std::mem::take(self.as_vec_mut())),
+            session_out,
+        )
+    }
+
+    #[cfg(not(feature = "validation"))]
+    pub(crate) fn early_validate(
+        mut self,
         source_map: &SourceMap,
         errors: &mut Vec<LedgerError>,
     ) -> crate::Directives<crate::EarlyValidated> {
-        #[cfg(feature = "validation")]
-        if let Some(session) = validation_session {
-            let phase_errors = session.run_phase_spanned(
-                self.as_slice(),
-                rustledger_validate::Phase::Early,
-                today,
-            );
-            ledger_errors_extend(errors, phase_errors, source_map);
-        }
-        #[cfg(not(feature = "validation"))]
-        {
-            let _ = (source_map, errors);
-        }
+        let _ = (source_map, errors);
         crate::Directives::new_unchecked(std::mem::take(self.as_vec_mut()))
     }
 }
@@ -572,27 +590,38 @@ impl crate::Directives<crate::RegularPluginsApplied> {
     /// directives. Reuses the `ValidationSession` from
     /// `early_validate` so account / commodity / pad bookkeeping
     /// carries forward.
+    #[cfg(feature = "validation")]
     pub(crate) fn late_validate(
         mut self,
-        #[cfg(feature = "validation")] validation_session: Option<
-            rustledger_validate::ValidationSession,
+        validation_session: Option<
+            rustledger_validate::ValidationSession<rustledger_validate::EarlyDone>,
         >,
-        #[cfg(feature = "validation")] today: rustledger_core::NaiveDate,
+        today: rustledger_core::NaiveDate,
         source_map: &SourceMap,
         errors: &mut Vec<LedgerError>,
     ) -> crate::Directives<crate::LateValidated> {
-        #[cfg(feature = "validation")]
-        if let Some(mut session) = validation_session {
-            let phase_errors =
-                session.run_phase_spanned(self.as_slice(), rustledger_validate::Phase::Late, today);
+        // Typestate move: consume `EarlyDone`, drive through `LateDone`
+        // to `finalize()`. The compile-time enforcement here is that
+        // we cannot call `late_validate` with a fresh `Pending` session
+        // (no `From<Pending>` to `EarlyDone`), so the loader caller
+        // must have routed the session through `early_validate` first
+        // (#1236).
+        if let Some(session) = validation_session {
+            let (session, phase_errors) = session.run_late_spanned(self.as_slice(), today);
             ledger_errors_extend(errors, phase_errors, source_map);
             let finalize_errors = session.finalize();
             ledger_errors_extend(errors, finalize_errors, source_map);
         }
-        #[cfg(not(feature = "validation"))]
-        {
-            let _ = (source_map, errors);
-        }
+        crate::Directives::new_unchecked(std::mem::take(self.as_vec_mut()))
+    }
+
+    #[cfg(not(feature = "validation"))]
+    pub(crate) fn late_validate(
+        mut self,
+        source_map: &SourceMap,
+        errors: &mut Vec<LedgerError>,
+    ) -> crate::Directives<crate::LateValidated> {
+        let _ = (source_map, errors);
         crate::Directives::new_unchecked(std::mem::take(self.as_vec_mut()))
     }
 }

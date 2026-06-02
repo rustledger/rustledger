@@ -12,15 +12,16 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 use rustledger_booking::interpolate;
 use rustledger_core::Directive;
 use rustledger_parser::parse;
-use rustledger_validate::{Phase, ValidationOptions, ValidationSession};
+use rustledger_validate::{ValidationOptions, ValidationSession};
 
 /// Bench helper: run both validation phases through a single session,
 /// mirroring what the LSP / FFI do on already-booked input.
 fn validate(directives: &[Directive]) -> Vec<rustledger_validate::ValidationError> {
     let today = jiff::Zoned::now().date();
-    let mut session = ValidationSession::new(ValidationOptions::default());
-    let mut errors = session.run_phase(directives, Phase::Early, today);
-    errors.extend(session.run_phase(directives, Phase::Late, today));
+    let session = ValidationSession::new(ValidationOptions::default());
+    let (session, mut errors) = session.run_early(directives, today);
+    let (session, late_errs) = session.run_late(directives, today);
+    errors.extend(late_errs);
     errors.extend(session.finalize());
     errors
 }

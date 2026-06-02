@@ -14,7 +14,7 @@
 
 use rustledger_core::{Directive, NaiveDate};
 use rustledger_parser::Spanned;
-use rustledger_validate::{Phase, ValidationError, ValidationOptions, ValidationSession};
+use rustledger_validate::{ValidationError, ValidationOptions, ValidationSession};
 
 /// Default "today" for tests that don't otherwise care. Set in the
 /// future relative to most fixtures so the future-date warning
@@ -47,9 +47,10 @@ pub fn validate_with_today(
     options: ValidationOptions,
     today: NaiveDate,
 ) -> Vec<ValidationError> {
-    let mut session = ValidationSession::new(options);
-    let mut errors = session.run_phase(directives, Phase::Early, today);
-    errors.extend(session.run_phase(directives, Phase::Late, today));
+    let session = ValidationSession::new(options);
+    let (session, mut errors) = session.run_early(directives, today);
+    let (session, late_errs) = session.run_late(directives, today);
+    errors.extend(late_errs);
     errors.extend(session.finalize());
     errors
 }
@@ -59,9 +60,10 @@ pub fn validate_spanned_with_options(
     directives: &[Spanned<Directive>],
     options: ValidationOptions,
 ) -> Vec<ValidationError> {
-    let mut session = ValidationSession::new(options);
-    let mut errors = session.run_phase_spanned(directives, Phase::Early, test_today());
-    errors.extend(session.run_phase_spanned(directives, Phase::Late, test_today()));
+    let session = ValidationSession::new(options);
+    let (session, mut errors) = session.run_early_spanned(directives, test_today());
+    let (session, late_errs) = session.run_late_spanned(directives, test_today());
+    errors.extend(late_errs);
     errors.extend(session.finalize());
     errors
 }

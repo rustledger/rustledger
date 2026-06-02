@@ -297,7 +297,7 @@ pub fn init() {
 mod tests {
     use super::*;
     use rustledger_parser::parse as parse_beancount;
-    use rustledger_validate::{Phase, ValidationOptions, ValidationSession};
+    use rustledger_validate::{ValidationOptions, ValidationSession};
 
     /// Test helper mirroring the deleted public `validate()`. Chains
     /// Early + Late + finalize through a single session against the
@@ -306,9 +306,10 @@ mod tests {
         directives: &[rustledger_core::Directive],
     ) -> Vec<rustledger_validate::ValidationError> {
         let today = rustledger_core::naive_date(2999, 12, 31).unwrap();
-        let mut session = ValidationSession::new(ValidationOptions::default());
-        let mut errors = session.run_phase(directives, Phase::Early, today);
-        errors.extend(session.run_phase(directives, Phase::Late, today));
+        let session = ValidationSession::new(ValidationOptions::default());
+        let (session, mut errors) = session.run_early(directives, today);
+        let (session, late_errs) = session.run_late(directives, today);
+        errors.extend(late_errs);
         errors.extend(session.finalize());
         errors
     }

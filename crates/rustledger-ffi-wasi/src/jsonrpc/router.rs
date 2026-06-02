@@ -11,7 +11,7 @@ use rustledger_loader::Loader;
 use rustledger_plugin::{
     NativePluginRegistry, PluginInput, PluginOptions, directive_to_wrapper, wrapper_to_directive,
 };
-use rustledger_validate::{Phase, ValidationOptions, ValidationSession};
+use rustledger_validate::{ValidationOptions, ValidationSession};
 
 use super::error::RpcError;
 use super::request::{
@@ -339,14 +339,11 @@ fn handle_validate(params: &serde_json::Value) -> Result<serde_json::Value, RpcE
     // architecture rationale.
     if parse_error_count == 0 {
         let today = jiff::Zoned::now().date();
-        let mut session = ValidationSession::new(ValidationOptions::default());
-        let mut validation_errors =
-            session.run_phase_spanned(&load.spanned_directives, Phase::Early, today);
-        validation_errors.extend(session.run_phase_spanned(
-            &load.spanned_directives,
-            Phase::Late,
-            today,
-        ));
+        let session = ValidationSession::new(ValidationOptions::default());
+        let (session, mut validation_errors) =
+            session.run_early_spanned(&load.spanned_directives, today);
+        let (session, late_errs) = session.run_late_spanned(&load.spanned_directives, today);
+        validation_errors.extend(late_errs);
         validation_errors.extend(session.finalize());
         for err in validation_errors {
             let mut e = Error::new(&err.message).validate_phase();

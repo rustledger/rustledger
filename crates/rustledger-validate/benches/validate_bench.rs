@@ -9,15 +9,16 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 use rust_decimal_macros::dec;
 use rustledger_core::NaiveDate;
 use rustledger_core::{Amount, Balance, Directive, Open, Posting, Transaction};
-use rustledger_validate::{Phase, ValidationError, ValidationOptions, ValidationSession};
+use rustledger_validate::{ValidationError, ValidationOptions, ValidationSession};
 
 /// Bench helper mirroring the deleted public `validate()`. Chains
 /// Early + Late + finalize through a single session.
 fn validate(directives: &[Directive]) -> Vec<ValidationError> {
     let today = rustledger_core::naive_date(2030, 1, 1).unwrap();
-    let mut session = ValidationSession::new(ValidationOptions::default());
-    let mut errors = session.run_phase(directives, Phase::Early, today);
-    errors.extend(session.run_phase(directives, Phase::Late, today));
+    let session = ValidationSession::new(ValidationOptions::default());
+    let (session, mut errors) = session.run_early(directives, today);
+    let (session, late_errs) = session.run_late(directives, today);
+    errors.extend(late_errs);
     errors.extend(session.finalize());
     errors
 }

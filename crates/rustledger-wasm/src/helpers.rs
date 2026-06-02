@@ -107,7 +107,7 @@ pub fn load_and_book(source: &str) -> ProcessedLedger {
 
 /// Run validation on a loaded ledger and return validation errors.
 pub fn run_validation(load: &ProcessedLedger) -> Vec<Error> {
-    use rustledger_validate::{Phase, ValidationOptions, ValidationSession};
+    use rustledger_validate::{ValidationOptions, ValidationSession};
 
     if !load.errors.is_empty() {
         return Vec::new();
@@ -127,9 +127,10 @@ pub fn run_validation(load: &ProcessedLedger) -> Vec<Error> {
     // legacy `validate()` shortcut also didn't fire these warnings
     // unless `warn_future_dates` was explicitly enabled (it isn't here).
     let today = rustledger_core::naive_date(2999, 12, 31).unwrap();
-    let mut session = ValidationSession::new(ValidationOptions::default());
-    let mut errors = session.run_phase(&load.directives, Phase::Early, today);
-    errors.extend(session.run_phase(&load.directives, Phase::Late, today));
+    let session = ValidationSession::new(ValidationOptions::default());
+    let (session, mut errors) = session.run_early(&load.directives, today);
+    let (session, late_errs) = session.run_late(&load.directives, today);
+    errors.extend(late_errs);
     errors.extend(session.finalize());
 
     errors

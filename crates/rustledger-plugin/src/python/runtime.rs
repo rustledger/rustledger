@@ -6,12 +6,63 @@
 use super::PythonError;
 use super::compat::BEANCOUNT_COMPAT_PY;
 use super::download;
+use crate::sandbox::MemoryLimiter;
 use crate::types::{PluginError, PluginErrorSeverity, PluginInput, PluginOutput};
 use anyhow::Result;
 use std::sync::Arc;
 use wasmtime::{Config, Engine, Linker, Module, Store};
 use wasmtime_wasi::p1;
 use wasmtime_wasi::{DirPerms, FilePerms, WasiCtxBuilder};
+
+/// Per-instance memory cap for the Python plugin runtime.
+///
+/// Mirrors `PluginConfig::default()`'s 256 MiB cap on the regular WASM
+/// plugin path (see `rustledger_plugin::runtime`). `CPython` compiled to
+/// WASI is memory-hungry on import and AST compilation, so we don't go
+/// lower; we also don't go higher, because the whole point of the cap
+/// is to convert "Python plugin can spin allocate-loops to OOM the
+/// host" (issue #1234) into "Python plugin can allocate up to 256 MiB
+/// then `memory.grow` returns `-1`".
+///
+/// The value is the linear-memory ceiling AND the table-element
+/// ceiling: see [`MemoryLimiter::table_growing`] for why we cap them
+/// together. wasmtime accounts memory and tables separately, so a cap
+/// on just one resource leaves the other reachable.
+const PYTHON_MAX_MEMORY: usize = 256 * 1024 * 1024;
+
+/// Per-call fuel budget for the Python plugin runtime.
+///
+/// Roughly "~10 minutes of `CPython` at 1M instructions/second on the
+/// reference fixtures". Fuel exhaustion surfaces as a wasmtime trap
+/// the caller in `execute_plugin` translates into a
+/// `PythonError::Execution` (the existing error path).
+///
+/// Kept as a module-level `const` rather than a free-floating literal
+/// inside [`PythonRuntime::execute_plugin`] so the value is grep-
+/// discoverable next to [`PYTHON_MAX_MEMORY`] (both caps move together
+/// when a future contributor tightens or relaxes the sandbox).
+const PYTHON_FUEL: u64 = 600_000_000;
+
+/// Store state for the Python plugin runtime.
+///
+/// Wraps the WASI preview1 context alongside the [`MemoryLimiter`]
+/// that caps `memory.grow` and `table.grow` at [`PYTHON_MAX_MEMORY`].
+/// Pre-#1234 the runtime stored the raw `p1::WasiP1Ctx` and installed
+/// no limiter, so a buggy or hostile Python plugin could OOM the host
+/// (the fuel cap blocked CPU-spin attacks but not allocation-spin
+/// attacks). This struct is the parity counterpart of
+/// `rustledger_plugin::sandbox::StoreState` for the WASI-based runtime
+/// path.
+///
+/// The WASI linker that runs on top of this store reaches into
+/// `state.wasi` through the closure passed to
+/// [`p1::add_to_linker_sync`]; the `Store::limiter` closure reaches
+/// into `state.limiter`. The two access paths don't collide because
+/// each subsystem holds its own `&mut` to a disjoint field.
+struct PythonStoreState {
+    wasi: p1::WasiP1Ctx,
+    limiter: MemoryLimiter,
+}
 
 /// Python plugin runtime.
 ///
@@ -252,13 +303,26 @@ with open('/work/output.json', 'w') as f:
 
         let wasi_ctx = wasi_builder.build_p1();
 
-        // Create store with fuel limit (10 minutes worth)
-        let mut store: Store<p1::WasiP1Ctx> = Store::new(&self.engine, wasi_ctx);
-        store.set_fuel(600_000_000).map_err(PythonError::Wasm)?;
+        // Create store with the wrapped state. The state carries the
+        // WASI context AND the memory limiter; `Store::limiter` wires
+        // the limiter into wasmtime's growth-check path so a Python
+        // plugin can't allocate past PYTHON_MAX_MEMORY (issue #1234).
+        // Fuel cap (PYTHON_FUEL) caps CPU consumption per call.
+        let mut store: Store<PythonStoreState> = Store::new(
+            &self.engine,
+            PythonStoreState {
+                wasi: wasi_ctx,
+                limiter: MemoryLimiter::new(PYTHON_MAX_MEMORY),
+            },
+        );
+        store.limiter(|state| &mut state.limiter);
+        store.set_fuel(PYTHON_FUEL).map_err(PythonError::Wasm)?;
 
-        // Create linker and add WASI
-        let mut linker: Linker<p1::WasiP1Ctx> = Linker::new(&self.engine);
-        p1::add_to_linker_sync(&mut linker, |ctx| ctx).map_err(PythonError::Wasm)?;
+        // Create linker and add WASI. The closure reaches through the
+        // state wrapper to the inner `p1::WasiP1Ctx` that the WASI
+        // syscall implementations expect.
+        let mut linker: Linker<PythonStoreState> = Linker::new(&self.engine);
+        p1::add_to_linker_sync(&mut linker, |state| &mut state.wasi).map_err(PythonError::Wasm)?;
 
         // Instantiate and run
         let instance = linker
@@ -575,6 +639,80 @@ mod tests {
     fn test_engine_config_satisfies_async_stack_constraint() {
         Engine::new(&engine_config())
             .expect("engine_config must satisfy wasmtime stack constraints");
+    }
+
+    /// Regression test for issue #1234: the Python plugin runtime must
+    /// install a `ResourceLimiter` (with `PYTHON_MAX_MEMORY` ceiling)
+    /// on every `Store` it creates, mirroring the WASM-plugin path's
+    /// `sandbox::make_sandboxed_store`. Pre-#1234 the runtime created
+    /// the `Store` with a raw `p1::WasiP1Ctx` and no limiter, so a
+    /// buggy or hostile Python plugin could allocate until the host
+    /// hit OOM (the existing fuel cap blocked CPU-spin attacks but not
+    /// allocation-spin attacks).
+    ///
+    /// We don't instantiate `CPython` here, that pulls the 50+ MiB
+    /// runtime download into the test. Instead we exercise the
+    /// `MemoryLimiter` directly through the `ResourceLimiter` trait
+    /// the way wasmtime would when `Store::limiter` is wired: pin
+    /// that the limiter rejects any growth beyond `PYTHON_MAX_MEMORY`
+    /// (matches the production code's `store.limiter(|state| &mut state.limiter)`
+    /// in `execute_plugin`).
+    #[test]
+    fn python_store_state_caps_memory_growth_at_python_max_memory() {
+        use wasmtime::ResourceLimiter;
+
+        let mut state = PythonStoreState {
+            // The wasi ctx is unused for this test; we only exercise
+            // the limiter field. WasiCtxBuilder::new().build_p1() is
+            // cheap (no I/O).
+            wasi: WasiCtxBuilder::new().build_p1(),
+            limiter: MemoryLimiter::new(PYTHON_MAX_MEMORY),
+        };
+
+        // Inside the cap: accepted.
+        let one_page = 64 * 1024;
+        assert!(
+            state
+                .limiter
+                .memory_growing(0, one_page, None)
+                .expect("memory_growing should not fail under the cap"),
+            "limiter must accept allocations up to PYTHON_MAX_MEMORY"
+        );
+
+        // At the cap: accepted.
+        assert!(
+            state
+                .limiter
+                .memory_growing(0, PYTHON_MAX_MEMORY, None)
+                .expect("memory_growing should not fail at the cap"),
+            "limiter must accept allocations exactly at PYTHON_MAX_MEMORY"
+        );
+
+        // One byte over the cap: rejected. This is the line that
+        // blocks the DoS-by-allocation attack named in #1234.
+        assert!(
+            !state
+                .limiter
+                .memory_growing(0, PYTHON_MAX_MEMORY + 1, None)
+                .expect("memory_growing should not error, just reject"),
+            "limiter must reject allocations past PYTHON_MAX_MEMORY"
+        );
+    }
+
+    /// Sanity-check that `PYTHON_MAX_MEMORY` matches the regular
+    /// WASM-plugin path's `RuntimeConfig::default()` cap. Drift between
+    /// the two caps would mean a Python plugin gets a different
+    /// resource budget than an equivalent native WASM plugin for no
+    /// principled reason; this test makes future drift a conscious
+    /// edit rather than a silent one.
+    #[test]
+    fn python_max_memory_matches_plugin_config_default_cap() {
+        assert_eq!(
+            PYTHON_MAX_MEMORY,
+            crate::runtime::RuntimeConfig::default().max_memory,
+            "Python runtime cap should track the regular plugin path's default; \
+             update both together or document the divergence in PYTHON_MAX_MEMORY's rustdoc"
+        );
     }
 
     #[test]

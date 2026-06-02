@@ -37,7 +37,7 @@ jobs:
     name: Validate Version
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@900f2210b1d28bbbd0bd22d17926b9e224e8f231 # v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           ref: ${{ env.RELEASE_TAG }}
       - name: Install Rust toolchain
@@ -110,7 +110,7 @@ jobs:
             os: windows-latest
             # No PGO - can't run ARM binary on x86 runner
     steps:
-      - uses: actions/checkout@900f2210b1d28bbbd0bd22d17926b9e224e8f231 # v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           ref: ${{ env.RELEASE_TAG }}
       - name: Install Rust toolchain
@@ -311,7 +311,7 @@ jobs:
     needs: validate-version
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@900f2210b1d28bbbd0bd22d17926b9e224e8f231 # v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           ref: ${{ env.RELEASE_TAG }}
       - name: Install Rust toolchain
@@ -341,7 +341,7 @@ jobs:
     needs: validate-version
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@900f2210b1d28bbbd0bd22d17926b9e224e8f231 # v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           ref: ${{ env.RELEASE_TAG }}
       - name: Install Rust toolchain
@@ -368,7 +368,7 @@ jobs:
     needs: validate-version
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@900f2210b1d28bbbd0bd22d17926b9e224e8f231 # v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           ref: ${{ env.RELEASE_TAG }}
       - name: Setup Node.js
@@ -406,7 +406,7 @@ jobs:
         with:
           client-id: ${{ secrets.BOT_CLIENT_ID }}
           private-key: ${{ secrets.BOT_PRIVATE_KEY }}
-      - uses: actions/checkout@900f2210b1d28bbbd0bd22d17926b9e224e8f231 # v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           ref: ${{ env.RELEASE_TAG }}
           token: ${{ steps.app-token.outputs.token }}

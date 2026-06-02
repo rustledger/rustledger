@@ -291,15 +291,27 @@ with open('/work/output.json', 'w') as f:
 /// `max_wasm_stack` of 512 KiB is too small for `CPython`'s recursive AST
 /// visitor, so this raises it to 16 MiB.
 ///
-/// When the `async` feature is compiled in (which it is, transitively, via
-/// `wasmtime-wasi`), wasmtime enforces `max_wasm_stack <= async_stack_size`
-/// at [`Engine::new`] time, and the default `async_stack_size` of 2 MiB is
-/// smaller than our 16 MiB wasm stack. Without bumping it, engine creation
-/// fails with `"max_wasm_stack size cannot exceed the async_stack_size"`.
-/// We add 1 MiB of headroom on top of the wasm stack for host frames.
+/// When the `async` feature is compiled in (which it is: `wasmtime`'s
+/// `default` feature set includes "async", and the workspace depends on
+/// `wasmtime` with default features enabled), wasmtime enforces
+/// `max_wasm_stack <= async_stack_size` at [`Engine::new`] time, and the
+/// default `async_stack_size` of 2 MiB is smaller than our 16 MiB wasm
+/// stack. Without bumping it, engine creation fails with
+/// `"max_wasm_stack size cannot exceed the async_stack_size"`.
+///
+/// `ASYNC_STACK_HEADROOM` is the stack space reserved for host frames
+/// running on the async stack: wasmtime's docs state "the amount of stack
+/// space guaranteed for host functions is `async_stack_size - max_wasm_stack`,
+/// so take care not to set these two values close to one another". We
+/// pick 2 MiB to match the stock default difference (default
+/// `async_stack_size` 2 MiB minus default `max_wasm_stack` 512 KiB gives
+/// ~1.5 MiB of host headroom; rounding up to 2 MiB is comfortable). The
+/// Python runtime here is sync-only (it uses [`wasmtime_wasi::p1`], no
+/// `.await`), so the async stack is never actually allocated at runtime;
+/// this value purely satisfies wasmtime's config validator.
 fn engine_config() -> Config {
     const WASM_STACK: usize = 16 * 1024 * 1024;
-    const ASYNC_STACK_HEADROOM: usize = 1024 * 1024;
+    const ASYNC_STACK_HEADROOM: usize = 2 * 1024 * 1024;
 
     let mut config = Config::new();
     config.consume_fuel(true);

@@ -333,15 +333,15 @@ user-login = "dtolnay"
 user-name = "David Tolnay"
 
 [[publisher.jiff]]
-version = "0.2.26"
-when = "2026-05-26"
+version = "0.2.28"
+when = "2026-05-29"
 user-id = 189
 user-login = "BurntSushi"
 user-name = "Andrew Gallant"
 
 [[publisher.jiff-static]]
-version = "0.2.26"
-when = "2026-05-26"
+version = "0.2.28"
+when = "2026-05-29"
 user-id = 189
 user-login = "BurntSushi"
 user-name = "Andrew Gallant"
@@ -752,8 +752,8 @@ when = "2026-04-28"
 trusted-publisher = "github:bytecodealliance/wasm-tools"
 
 [[publisher.wasm-encoder]]
-version = "0.250.0"
-when = "2026-05-21"
+version = "0.251.0"
+when = "2026-05-28"
 trusted-publisher = "github:bytecodealliance/wasm-tools"
 
 [[publisher.wasm-metadata]]
@@ -773,8 +773,8 @@ when = "2026-04-28"
 trusted-publisher = "github:bytecodealliance/wasm-tools"
 
 [[publisher.wasmparser]]
-version = "0.250.0"
-when = "2026-05-21"
+version = "0.251.0"
+when = "2026-05-28"
 trusted-publisher = "github:bytecodealliance/wasm-tools"
 
 [[publisher.wasmprinter]]
@@ -863,13 +863,13 @@ when = "2026-05-21"
 trusted-publisher = "github:bytecodealliance/wasmtime"
 
 [[publisher.wast]]
-version = "250.0.0"
-when = "2026-05-21"
+version = "251.0.0"
+when = "2026-05-28"
 trusted-publisher = "github:bytecodealliance/wasm-tools"
 
 [[publisher.wat]]
-version = "1.250.0"
-when = "2026-05-21"
+version = "1.251.0"
+when = "2026-05-28"
 trusted-publisher = "github:bytecodealliance/wasm-tools"
 
 [[publisher.wiggle]]

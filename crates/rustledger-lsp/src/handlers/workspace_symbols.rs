@@ -14,12 +14,13 @@ use rustledger_parser::ParseResult;
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use super::utils::LineIndex;
+use super::utils::{LineIndex, PositionEncoding};
 
 /// Handle a workspace symbol request.
 pub fn handle_workspace_symbols(
     params: &WorkspaceSymbolParams,
     documents: &[(Uri, String, Arc<ParseResult>)],
+    encoding: PositionEncoding,
 ) -> Option<Vec<SymbolInformation>> {
     let query = params.query.to_lowercase();
     let mut symbols = Vec::new();
@@ -35,6 +36,7 @@ pub fn handle_workspace_symbols(
             &mut symbols,
             &mut seen_accounts,
             &mut seen_currencies,
+            encoding,
         );
     }
 
@@ -56,8 +58,9 @@ fn collect_symbols_from_document(
     symbols: &mut Vec<SymbolInformation>,
     seen_accounts: &mut HashSet<String>,
     seen_currencies: &mut HashSet<String>,
+    encoding: PositionEncoding,
 ) {
-    let line_index = LineIndex::new(source);
+    let line_index = LineIndex::new(source, encoding);
     for spanned in &parse_result.directives {
         let (line, col) = line_index.offset_to_position(spanned.span.start);
         let location = Location {
@@ -176,7 +179,7 @@ mod tests {
             partial_result_params: Default::default(),
         };
 
-        let symbols = handle_workspace_symbols(&params, &docs);
+        let symbols = handle_workspace_symbols(&params, &docs, PositionEncoding::Utf16);
         assert!(symbols.is_some());
         let symbols = symbols.unwrap();
 
@@ -202,7 +205,7 @@ mod tests {
             partial_result_params: Default::default(),
         };
 
-        let symbols = handle_workspace_symbols(&params, &docs);
+        let symbols = handle_workspace_symbols(&params, &docs, PositionEncoding::Utf16);
         assert!(symbols.is_some());
         let symbols = symbols.unwrap();
 

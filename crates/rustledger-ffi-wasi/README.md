@@ -77,22 +77,60 @@ echo '[
 
 ### Standard JSON-RPC Errors
 
-| Code | Message |
-|------|---------|
-| -32700 | Parse error (invalid JSON) |
-| -32600 | Invalid Request |
-| -32601 | Method not found |
-| -32602 | Invalid params |
-| -32603 | Internal error |
+| Code | Message | When |
+|------|---------|------|
+| -32700 | Parse error (invalid JSON) | Transport-layer fault — the request envelope was not valid JSON. **Not** used for beancount-content syntax errors (see -32000 below). |
+| -32600 | Invalid Request | Request envelope is valid JSON but not a valid JSON-RPC 2.0 Request object. |
+| -32601 | Method not found | The requested method does not exist. |
+| -32602 | Invalid params | The method's parameter shape is wrong. |
+| -32603 | Internal error | Server-side fault (e.g., stdin read failure, response serialization failure). |
 
 ### Beancount-specific Errors
 
-| Code | Message |
-|------|---------|
-| -32000 | Beancount parse error |
-| -32001 | Beancount validation error |
-| -32002 | BQL query error |
-| -32003 | File I/O error |
+| Code | Message | When |
+|------|---------|------|
+| -32000 | Beancount parse error | Application-level: the beancount source the user submitted has syntax errors. Carries a structured `data` field — `{"errors": ParseErrorEntry[], "total": N, "truncated": bool}` — so clients can surface individual parse errors without scraping the free-form `message`. Distinct from -32700, which is reserved for malformed JSON. See the `ParseErrorEntry` section below for the per-error shape. |
+
+### `ParseErrorEntry` shape
+
+Each element of `error.data.errors` is an object with the following fields:
+
+| Field       | Type           | Description |
+|-------------|----------------|-------------|
+| `message`   | string         | Rendered Display of the parser error. |
+| `kind_code` | integer        | Stable numeric discriminant (1-26, see `openrpc.json`'s `ParseErrorEntry` schema). Use this for structural detection — e.g., `kind_code === 26` is `BomInDirectiveBody` (mid-file BOM; clients can surface a 'Remove BOM' quick-fix). |
+| `hint`      | string \| null | Optional actionable suggestion (e.g., 'Remove the U+FEFF byte at this position…'). Render as a separate help/fix-it line below `message`. |
+| `span`      | object         | `{start: integer, end: integer}` byte range into the source. |
+
+Example error response:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "error": {
+    "code": -32000,
+    "message": "cannot format source with 1 parse error(s)",
+    "data": {
+      "errors": [
+        {
+          "message": "parse error: Invalid token: UTF-8 BOM detected in directive body (only a leading BOM is permitted); did you concatenate two BOM-prefixed files or paste content with an embedded BOM?",
+          "kind_code": 26,
+          "hint": "remove the U+FEFF byte at this position; if the file is a concatenation of two BOM-prefixed exports, strip BOMs from the inner files before concatenating",
+          "span": { "start": 32, "end": 64 }
+        }
+      ],
+      "total": 1,
+      "truncated": false
+    }
+  },
+  "id": 1
+}
+```
+
+> **Wire-shape note (v2.0):** prior to API version 2.0, `error.data.errors` was a `string[]` of rendered messages. As of 2.0 each entry is the `ParseErrorEntry` object above. The change is a wire-shape break and earned the major bump per the version policy on `API_VERSION`. Migration recipe for cross-version clients that want to bridge both: `errors.map(e => typeof e === 'string' ? { message: e, kind_code: null, hint: null, span: null } : e)`.
+| -32001 | Beancount validation error | The directives parsed but validation (account openness, balance assertion, etc.) failed. |
+| -32002 | BQL query error | The BQL query string did not parse or did not execute. |
+| -32003 | File I/O error | Could not read/open the requested file path. |
 
 ## Examples
 
@@ -105,7 +143,7 @@ echo '{"jsonrpc":"2.0","method":"ledger.validate","params":{"source":"2024-01-01
 Response:
 
 ```json
-{"jsonrpc":"2.0","result":{"api_version":"1.0","valid":true,"errors":[]},"id":1}
+{"jsonrpc":"2.0","result":{"api_version":"2.0","valid":true,"errors":[]},"id":1}
 ```
 
 ### Execute a Query

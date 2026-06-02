@@ -214,7 +214,7 @@ fn test_commodity_precision_metadata_round_trips() {
     // Issue #991: per-commodity `precision: N` metadata must round-trip
     // through parse → format → parse without changing value or type.
     use rust_decimal_macros::dec;
-    use rustledger_core::{FormatConfig, MetaValue, format_directive};
+    use rustledger_core::{FormatConfig, MetaValue, format_directives};
 
     let source = "2024-01-01 commodity USD\n  precision: 2\n";
     let parsed = parse_ok(source);
@@ -229,7 +229,7 @@ fn test_commodity_precision_metadata_round_trips() {
     );
 
     // Format the directive and re-parse — the value must survive unchanged.
-    let formatted = format_directive(&parsed.directives[0].value, &FormatConfig::default());
+    let formatted = format_directives([&parsed.directives[0].value], &FormatConfig::default());
     let reparsed = parse_ok(&formatted);
     let Directive::Commodity(comm2) = &reparsed.directives[0].value else {
         panic!("expected commodity after re-parse");

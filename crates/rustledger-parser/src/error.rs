@@ -4,7 +4,14 @@ use crate::Span;
 use std::fmt;
 
 /// A parse error with location information.
+///
+/// Marked `#[non_exhaustive]` so external consumers must go through
+/// [`ParseError::new`] and the builder methods rather than constructing
+/// via struct literal. Future fields (e.g., a suggested fix-it span,
+/// related-information back-references) then land as non-breaking
+/// additions. Same `SemVer` hygiene argument as `crate::ParseResult`.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ParseError {
     /// The kind of error.
     pub kind: ParseErrorKind,
@@ -77,6 +84,7 @@ impl ParseError {
             ParseErrorKind::UnclosedPushmeta(_) => 23,
             ParseErrorKind::DeprecatedPipeSymbol => 24,
             ParseErrorKind::InvalidBookingMethod(_) => 25,
+            ParseErrorKind::BomInDirectiveBody => 26,
         }
     }
 
@@ -84,6 +92,61 @@ impl ParseError {
     #[must_use]
     pub fn message(&self) -> String {
         format!("{}", self.kind)
+    }
+
+    /// One sample `ParseErrorKind` per variant. Used by cross-crate
+    /// sync tests that need a complete variant set to verify
+    /// schema/test arrays stay in sync with the enum.
+    ///
+    /// **Single source of truth (round-19).** Pre-round-19 this
+    /// function had a `sample()` helper with an exhaustive match
+    /// PLUS a hand-maintained `vec![]` that called sample for each
+    /// variant. Only the `sample()` match was a compile-time gate —
+    /// a contributor adding a variant could update `sample()` and
+    /// forget the vec, leaving the returned list silently
+    /// incomplete (no compile error, no test failure unless a
+    /// downstream sync test specifically required N entries).
+    /// Round-19 collapsed both into this single vec literal. The
+    /// compile-time enforcement now lives in the
+    /// `every_kind_sample_covers_every_variant` test below, whose
+    /// exhaustive `variant_index` match catches a missing variant
+    /// at compile time and a missing vec entry at test time.
+    ///
+    /// Marked `#[doc(hidden)]` because this exists for test
+    /// infrastructure only — the stable public API is `ParseError`
+    /// + `ParseErrorKind` + `kind_code()`; this helper is a
+    /// convenience for integration tests.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn every_kind_sample() -> Vec<ParseErrorKind> {
+        vec![
+            ParseErrorKind::UnexpectedChar('x'),
+            ParseErrorKind::UnexpectedEof,
+            ParseErrorKind::Expected(String::new()),
+            ParseErrorKind::InvalidDate(String::new()),
+            ParseErrorKind::InvalidNumber(String::new()),
+            ParseErrorKind::InvalidAccount(String::new()),
+            ParseErrorKind::InvalidCurrency(String::new()),
+            ParseErrorKind::UnclosedString,
+            ParseErrorKind::InvalidEscape('x'),
+            ParseErrorKind::MissingField(String::new()),
+            ParseErrorKind::IndentationError,
+            ParseErrorKind::SyntaxError(String::new()),
+            ParseErrorKind::MissingNewline,
+            ParseErrorKind::MissingAccount,
+            ParseErrorKind::InvalidDateValue(String::new()),
+            ParseErrorKind::MissingAmount,
+            ParseErrorKind::MissingCurrency,
+            ParseErrorKind::InvalidAccountFormat(String::new()),
+            ParseErrorKind::MissingDirective,
+            ParseErrorKind::InvalidPoptag(String::new()),
+            ParseErrorKind::UnclosedPushtag(String::new()),
+            ParseErrorKind::InvalidPopmeta(String::new()),
+            ParseErrorKind::UnclosedPushmeta(String::new()),
+            ParseErrorKind::DeprecatedPipeSymbol,
+            ParseErrorKind::InvalidBookingMethod(String::new()),
+            ParseErrorKind::BomInDirectiveBody,
+        ]
     }
 
     /// Get a short label for the error.
@@ -115,6 +178,7 @@ impl ParseError {
             ParseErrorKind::UnclosedPushmeta(_) => "unclosed pushmeta",
             ParseErrorKind::DeprecatedPipeSymbol => "deprecated pipe symbol",
             ParseErrorKind::InvalidBookingMethod(_) => "invalid booking method",
+            ParseErrorKind::BomInDirectiveBody => "mid-file BOM",
         }
     }
 }
@@ -132,7 +196,14 @@ impl fmt::Display for ParseError {
 impl std::error::Error for ParseError {}
 
 /// Kinds of parse errors.
+///
+/// Marked `#[non_exhaustive]` because new variants land routinely
+/// (the most recent was `InvalidBookingMethod` — variant 25). Without
+/// the attribute, every new variant would be a `SemVer`-breaking change
+/// for external consumers that `match err.kind { ... }` exhaustively
+/// without a wildcard arm.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ParseErrorKind {
     /// Unexpected character in input.
     UnexpectedChar(char),
@@ -184,6 +255,24 @@ pub enum ParseErrorKind {
     DeprecatedPipeSymbol,
     /// Invalid booking method (must be uppercase: FIFO, STRICT, `STRICT_WITH_SIZE`, LIFO, HIFO, NONE, AVERAGE).
     InvalidBookingMethod(String),
+    /// UTF-8 byte-order mark detected in a directive body (mid-file
+    /// BOM that survived the leading-BOM strip at the parser's
+    /// public entry — typically a concatenation accident or an
+    /// embedded-BOM payload).
+    ///
+    /// A dedicated variant rather than `SyntaxError(String)` so that:
+    ///
+    /// 1. The diagnostic text isn't re-stringified at every emission
+    ///    site (Display renders the static message from a `&'static
+    ///    str`, so no `to_string()` heap allocation per error).
+    /// 2. External consumers get a structural discriminant to match
+    ///    on instead of a brittle string-equality compare against a
+    ///    message body that might be reworded.
+    /// 3. The message text becomes an implementation detail (it
+    ///    lives in this enum's Display impl) rather than a public
+    ///    `&'static str` constant whose wording would be a `SemVer`
+    ///    stability commitment.
+    BomInDirectiveBody,
 }
 
 impl fmt::Display for ParseErrorKind {
@@ -231,13 +320,100 @@ impl fmt::Display for ParseErrorKind {
                     "invalid booking method '{m}': must be one of FIFO, STRICT, STRICT_WITH_SIZE, LIFO, HIFO, NONE, AVERAGE"
                 )
             }
+            Self::BomInDirectiveBody => f.write_str(BOM_MIDFILE_DIAGNOSTIC),
         }
     }
 }
 
+/// Mid-file BOM diagnostic message.
+///
+/// Private — emission sites construct `ParseErrorKind::BomInDirectiveBody`
+/// and the Display impl renders this text. External consumers detect
+/// the diagnostic structurally via the enum variant, not by string
+/// compare against this constant. Reworking the wording is therefore
+/// not a `SemVer` break.
+///
+/// Spelled via `concat!` rather than a `\<newline>` line-continuation
+/// literal so editor 'strip trailing whitespace on save' and similar
+/// hooks can't collapse word boundaries inside the string.
+const BOM_MIDFILE_DIAGNOSTIC: &str = concat!(
+    "Invalid token: UTF-8 BOM detected in directive body ",
+    "(only a leading BOM is permitted); ",
+    "did you concatenate two BOM-prefixed files or paste content with an embedded BOM?",
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Compile-time + test-time gate for `every_kind_sample`'s
+    /// completeness. The `variant_index` match is exhaustive over
+    /// `ParseErrorKind` — adding a new variant breaks compilation
+    /// until an arm is added with a unique index. The runtime
+    /// assertion below then catches the case where a contributor
+    /// added the variant + the `variant_index` arm but forgot to
+    /// add a constructor to `every_kind_sample`'s vec.
+    ///
+    /// Two compile gates working together:
+    ///   1. `variant_index` match exhaustiveness — catches added
+    ///      variants at compile time.
+    ///   2. The unique-index + max-index assertions — catches a
+    ///      missing or duplicate `every_kind_sample` vec entry at
+    ///      test time.
+    #[test]
+    fn every_kind_sample_covers_every_variant() {
+        // Assign each variant a unique sequential index. The match
+        // is exhaustive — a new variant breaks compile until an
+        // arm is added with the next index.
+        fn variant_index(k: &ParseErrorKind) -> u32 {
+            match k {
+                ParseErrorKind::UnexpectedChar(_) => 0,
+                ParseErrorKind::UnexpectedEof => 1,
+                ParseErrorKind::Expected(_) => 2,
+                ParseErrorKind::InvalidDate(_) => 3,
+                ParseErrorKind::InvalidNumber(_) => 4,
+                ParseErrorKind::InvalidAccount(_) => 5,
+                ParseErrorKind::InvalidCurrency(_) => 6,
+                ParseErrorKind::UnclosedString => 7,
+                ParseErrorKind::InvalidEscape(_) => 8,
+                ParseErrorKind::MissingField(_) => 9,
+                ParseErrorKind::IndentationError => 10,
+                ParseErrorKind::SyntaxError(_) => 11,
+                ParseErrorKind::MissingNewline => 12,
+                ParseErrorKind::MissingAccount => 13,
+                ParseErrorKind::InvalidDateValue(_) => 14,
+                ParseErrorKind::MissingAmount => 15,
+                ParseErrorKind::MissingCurrency => 16,
+                ParseErrorKind::InvalidAccountFormat(_) => 17,
+                ParseErrorKind::MissingDirective => 18,
+                ParseErrorKind::InvalidPoptag(_) => 19,
+                ParseErrorKind::UnclosedPushtag(_) => 20,
+                ParseErrorKind::InvalidPopmeta(_) => 21,
+                ParseErrorKind::UnclosedPushmeta(_) => 22,
+                ParseErrorKind::DeprecatedPipeSymbol => 23,
+                ParseErrorKind::InvalidBookingMethod(_) => 24,
+                ParseErrorKind::BomInDirectiveBody => 25,
+            }
+        }
+        let samples = ParseError::every_kind_sample();
+        let indices: std::collections::BTreeSet<u32> = samples.iter().map(variant_index).collect();
+        assert_eq!(
+            indices.len(),
+            samples.len(),
+            "every_kind_sample has duplicate variants (collapsed by variant_index): \
+             samples = {samples:?}, unique indices = {indices:?}"
+        );
+        let max = indices.iter().max().copied().unwrap_or(0);
+        assert_eq!(
+            samples.len() as u32,
+            max + 1,
+            "every_kind_sample is missing variants: highest variant_index = {max}, \
+             expected {} entries in the vec, got {}. Add the missing constructor \
+             to every_kind_sample's vec.",
+            max + 1,
+            samples.len()
+        );
+    }
 
     #[test]
     fn test_parse_error_new() {
@@ -302,6 +478,7 @@ mod tests {
             (ParseErrorKind::UnclosedPushmeta("key".to_string()), 23),
             (ParseErrorKind::DeprecatedPipeSymbol, 24),
             (ParseErrorKind::InvalidBookingMethod("BAD".to_string()), 25),
+            (ParseErrorKind::BomInDirectiveBody, 26),
         ];
 
         for (kind, expected_code) in kinds {
@@ -339,6 +516,7 @@ mod tests {
             ParseErrorKind::UnclosedPushmeta("key".to_string()),
             ParseErrorKind::DeprecatedPipeSymbol,
             ParseErrorKind::InvalidBookingMethod("BAD".to_string()),
+            ParseErrorKind::BomInDirectiveBody,
         ];
 
         for kind in kinds {
@@ -429,6 +607,15 @@ mod tests {
             (
                 ParseErrorKind::InvalidBookingMethod("BAD".to_string()),
                 "invalid booking method 'BAD'",
+            ),
+            // BOM diagnostic — Display renders BOM_MIDFILE_DIAGNOSTIC.
+            // Assert on the salient substrings rather than the full text
+            // so a future copyedit of the message body doesn't have to
+            // touch this test, but a regression that drops the BOM
+            // mention entirely (e.g., Display returning "") would fail.
+            (
+                ParseErrorKind::BomInDirectiveBody,
+                "UTF-8 BOM detected in directive body",
             ),
         ];
 

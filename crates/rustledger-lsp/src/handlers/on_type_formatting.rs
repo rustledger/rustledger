@@ -6,29 +6,67 @@
 
 use lsp_types::{DocumentOnTypeFormattingParams, Position, Range, TextEdit};
 
+use super::utils::PositionEncoding;
+
 /// First trigger character for on-type formatting.
 pub const FIRST_TRIGGER_CHARACTER: &str = "\n";
 /// Additional trigger characters for on-type formatting.
 pub const MORE_TRIGGER_CHARACTERS: &[&str] = &[" "];
 
+/// Convert a column in the negotiated encoding to a byte offset into `line`.
+/// Returns `line.len()` when `col` overshoots the line.
+fn col_to_byte(line: &str, col: usize, encoding: PositionEncoding) -> usize {
+    let mut acc = 0usize;
+    let mut byte = 0usize;
+    for ch in line.chars() {
+        if acc >= col {
+            return byte;
+        }
+        let u = match encoding {
+            PositionEncoding::Utf8 => ch.len_utf8(),
+            PositionEncoding::Utf16 => ch.len_utf16(),
+        };
+        if acc + u > col {
+            // col lands inside a multi-unit char — bail to current byte.
+            return byte;
+        }
+        acc += u;
+        byte += ch.len_utf8();
+    }
+    byte
+}
+
+/// Encoded length of an ASCII-or-multibyte string in the negotiated encoding.
+fn encoded_len(s: &str, encoding: PositionEncoding) -> u32 {
+    match encoding {
+        PositionEncoding::Utf8 => s.len() as u32,
+        PositionEncoding::Utf16 => s.encode_utf16().count() as u32,
+    }
+}
+
 /// Handle an on-type formatting request.
 pub fn handle_on_type_formatting(
     params: &DocumentOnTypeFormattingParams,
     source: &str,
+    encoding: PositionEncoding,
 ) -> Option<Vec<TextEdit>> {
     let position = params.text_document_position.position;
     let ch = &params.ch;
 
     match ch.as_str() {
-        "\n" => handle_newline_formatting(source, position),
-        " " => handle_space_formatting(source, position),
+        "\n" => handle_newline_formatting(source, position, encoding),
+        " " => handle_space_formatting(source, position, encoding),
         _ => None,
     }
 }
 
 /// Handle formatting after a newline.
 /// If the previous line was a transaction header, indent the new posting line.
-fn handle_newline_formatting(source: &str, position: Position) -> Option<Vec<TextEdit>> {
+fn handle_newline_formatting(
+    source: &str,
+    position: Position,
+    encoding: PositionEncoding,
+) -> Option<Vec<TextEdit>> {
     let lines: Vec<&str> = source.lines().collect();
     let prev_line_idx = position.line.saturating_sub(1) as usize;
 
@@ -48,10 +86,11 @@ fn handle_newline_formatting(source: &str, position: Position) -> Option<Vec<Tex
         let leading_spaces = current_line.len() - current_line.trim_start().len();
         if leading_spaces < 2 {
             let indent = "  "; // Standard Beancount indent
+            let leading_in_encoding = encoded_len(&current_line[..leading_spaces], encoding);
             return Some(vec![TextEdit {
                 range: Range {
                     start: Position::new(position.line, 0),
-                    end: Position::new(position.line, leading_spaces as u32),
+                    end: Position::new(position.line, leading_in_encoding),
                 },
                 new_text: indent.to_string(),
             }]);
@@ -68,10 +107,11 @@ fn handle_newline_formatting(source: &str, position: Position) -> Option<Vec<Tex
             // Keep same indentation as previous posting
             let prev_indent = prev_line.len() - prev_line.trim_start().len();
             let indent = " ".repeat(prev_indent);
+            let leading_in_encoding = encoded_len(&current_line[..leading_spaces], encoding);
             return Some(vec![TextEdit {
                 range: Range {
                     start: Position::new(position.line, 0),
-                    end: Position::new(position.line, leading_spaces as u32),
+                    end: Position::new(position.line, leading_in_encoding),
                 },
                 new_text: indent,
             }]);
@@ -83,7 +123,11 @@ fn handle_newline_formatting(source: &str, position: Position) -> Option<Vec<Tex
 
 /// Handle formatting after a space.
 /// Used to help align amounts in postings.
-fn handle_space_formatting(source: &str, position: Position) -> Option<Vec<TextEdit>> {
+fn handle_space_formatting(
+    source: &str,
+    position: Position,
+    encoding: PositionEncoding,
+) -> Option<Vec<TextEdit>> {
     let lines: Vec<&str> = source.lines().collect();
     let line_idx = position.line as usize;
     let line = lines.get(line_idx)?;
@@ -94,7 +138,7 @@ fn handle_space_formatting(source: &str, position: Position) -> Option<Vec<TextE
     }
 
     // Check if we just typed a space after an account name
-    let byte_col = super::utils::char_offset_to_byte(line, position.character as usize);
+    let byte_col = col_to_byte(line, position.character as usize, encoding);
     if byte_col < 2 {
         return None;
     }
@@ -203,7 +247,7 @@ mod tests {
             },
         };
 
-        let result = handle_on_type_formatting(&params, source);
+        let result = handle_on_type_formatting(&params, source, PositionEncoding::Utf16);
         assert!(result.is_some());
 
         let edits = result.unwrap();

@@ -12,16 +12,17 @@ use lsp_types::{
 use rustledger_core::{Directive, SYNTHESIZED_FILE_ID};
 use rustledger_parser::ParseResult;
 
-use super::utils::LineIndex;
+use super::utils::{LineIndex, PositionEncoding};
 
 /// Handle a document symbols request.
 pub fn handle_document_symbols(
     _params: &DocumentSymbolParams,
     source: &str,
     parse_result: &ParseResult,
+    encoding: PositionEncoding,
 ) -> Option<DocumentSymbolResponse> {
     // Build line index once for O(log n) lookups
-    let line_index = LineIndex::new(source);
+    let line_index = LineIndex::new(source, encoding);
 
     let symbols: Vec<DocumentSymbol> = parse_result
         .directives
@@ -290,7 +291,7 @@ mod tests {
             partial_result_params: Default::default(),
         };
 
-        let response = handle_document_symbols(&params, source, &result);
+        let response = handle_document_symbols(&params, source, &result, PositionEncoding::Utf16);
         assert!(response.is_some());
 
         if let Some(DocumentSymbolResponse::Nested(symbols)) = response {

@@ -5,6 +5,21 @@ use std::fmt;
 use std::ops::Range;
 
 /// A span in the source code, represented as a byte range.
+///
+/// # `#[non_exhaustive]` policy
+///
+/// Deliberately NOT `#[non_exhaustive]`, unlike
+/// `rustledger_parser::{ParseResult, ParseError, ParseErrorKind}`.
+/// `Span` is constructed via struct literal in hundreds of call sites
+/// across the workspace (every parser rule, every test fixture, every
+/// LSP/FFI/loader path that synthesizes a location). Marking it
+/// non-exhaustive would force a workspace-wide migration to
+/// [`Span::new`] for zero practical benefit — the struct has carried
+/// the same two fields since the project's inception and there is no
+/// realistic future field that would justify breaking that surface.
+/// If a future need arises (e.g., `line: Option<u32>` for faster LSP
+/// position lookups), the right move is to add a sibling type with
+/// `non_exhaustive` rather than retrofit it onto `Span`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(
     feature = "rkyv",
@@ -124,6 +139,14 @@ pub const SYNTHESIZED_FILE_ID: u16 = u16::MAX;
 /// `Eq`. The host doesn't compare archived values today; if a future
 /// code path needs to, add `rkyv(compare = (PartialEq))` to the derive
 /// attribute below or hand-roll a manual impl on the archived type.
+///
+/// # `#[non_exhaustive]` policy
+///
+/// Deliberately NOT `#[non_exhaustive]`, for the same reason as
+/// [`Span`]: it is constructed via struct literal in hundreds of
+/// call sites and the field set is intentionally minimal and stable.
+/// Add fields cautiously; if a new field is genuinely needed, prefer
+/// a sibling/wrapper type over modifying this one in place.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(
     feature = "rkyv",
@@ -411,4 +434,116 @@ mod tests {
         assert_eq!(s.span, Span::ZERO);
         assert_eq!(s.file_id, SYNTHESIZED_FILE_ID);
     }
+
+    /// `ShiftSpans` on a `Spanned<T>` shifts the outer span AND
+    /// recurses into the inner value. Pins the contract that
+    /// compound type impls inherit shifting via their fields'
+    /// `ShiftSpans` impls.
+    #[test]
+    fn test_shift_spans_recurses_through_spanned() {
+        let mut sp = Spanned::new(Span::new(10, 20), Span::new(100, 200));
+        sp.shift_spans(&|s: &mut Span| {
+            s.start += 3;
+            s.end += 3;
+        });
+        // Outer span shifted.
+        assert_eq!(sp.span, Span::new(103, 203));
+        // Inner Span (the value) also shifted via Span's own impl.
+        assert_eq!(sp.value, Span::new(13, 23));
+    }
 }
+
+/// Shift every `Span` reachable inside `self` by applying `shift`.
+///
+/// Used by the parser at the public `parse()` boundary to map
+/// inner-parser spans (in BOM-stripped coordinates) back to the
+/// caller's frame when a leading BOM was stripped before
+/// tokenization.
+///
+/// **Architectural discipline (round-18).** Pre-round-18, span
+/// shifting was a single monolithic function in the parser that did
+/// named-field destructure on every `Directive` variant. That caught
+/// added fields but missed added Spanned-bearing VARIANTS of a nested
+/// type (e.g., a future `MetaValue::String(Spanned<String>)` would
+/// silently bypass shifting because the destructure binds `meta: _`).
+/// Round 18 propagates the discipline into the type system: every
+/// type reachable from `Directive` either implements `ShiftSpans` to
+/// delegate into its fields (compound types) or implements it as a
+/// no-op (leaf types with no spans). Adding a new field or new
+/// Spanned-bearing variant requires updating the type's own impl —
+/// the parser's shift call doesn't change.
+///
+/// Implementors must recurse into every field that COULD contain
+/// (transitively) a Span. The provided impls for `Vec<T>`,
+/// `Option<T>`, `Box<T>`, and `Spanned<T>` handle the common
+/// compound shapes; concrete leaf types handle themselves.
+pub trait ShiftSpans {
+    /// Apply `shift` to every `Span` reachable in `self`.
+    fn shift_spans<F: Fn(&mut Span)>(&mut self, shift: &F);
+}
+
+impl ShiftSpans for Span {
+    // `clippy::use_self` would suggest `&mut Self` in the closure
+    // bound, but the trait's `F: Fn(&mut Span)` requires the literal
+    // type — substituting Self in the impl breaks bound matching.
+    #[allow(clippy::use_self, reason = "trait bound names the literal type Span")]
+    fn shift_spans<F: Fn(&mut Span)>(&mut self, shift: &F) {
+        shift(self);
+    }
+}
+
+impl<T: ShiftSpans> ShiftSpans for Spanned<T> {
+    fn shift_spans<F: Fn(&mut Span)>(&mut self, shift: &F) {
+        shift(&mut self.span);
+        self.value.shift_spans(shift);
+    }
+}
+
+impl<T: ShiftSpans> ShiftSpans for Vec<T> {
+    fn shift_spans<F: Fn(&mut Span)>(&mut self, shift: &F) {
+        for item in self {
+            item.shift_spans(shift);
+        }
+    }
+}
+
+impl<T: ShiftSpans> ShiftSpans for Option<T> {
+    fn shift_spans<F: Fn(&mut Span)>(&mut self, shift: &F) {
+        if let Some(v) = self {
+            v.shift_spans(shift);
+        }
+    }
+}
+
+impl<T: ShiftSpans + ?Sized> ShiftSpans for Box<T> {
+    fn shift_spans<F: Fn(&mut Span)>(&mut self, shift: &F) {
+        (**self).shift_spans(shift);
+    }
+}
+
+/// Helper macro for declaring `ShiftSpans` no-op impls on leaf types.
+///
+/// Using the macro (rather than a blanket `impl<T: NoSpans> ShiftSpans
+/// for T`) means each "this type has no spans" decision is explicit
+/// and grep-able — a contributor extending one of these types with a
+/// `Spanned<U>` field will notice the no-op impl and have to choose
+/// between leaving it (silently no-op) or removing the no-op and
+/// writing a recursing impl. The blanket-with-marker approach hides
+/// that decision behind a single marker impl.
+#[macro_export]
+macro_rules! impl_shift_spans_noop {
+    ($($t:ty),* $(,)?) => {
+        $(
+            impl $crate::ShiftSpans for $t {
+                #[inline]
+                fn shift_spans<F: Fn(&mut $crate::Span)>(&mut self, _shift: &F) {}
+            }
+        )*
+    };
+}
+
+// No-op impls for the primitive-ish leaf types that appear in
+// directive payloads but never carry Span values themselves.
+impl_shift_spans_noop!(
+    String, bool, u8, u16, u32, u64, i8, i16, i32, i64, usize, isize,
+);

@@ -12,7 +12,7 @@ use rustledger_core::Directive;
 use rustledger_parser::ParseResult;
 use std::collections::HashSet;
 
-use super::utils::{LineIndex, get_word_at_position, is_account_like};
+use super::utils::{LineIndex, PositionEncoding, get_word_at_position, is_account_like};
 
 /// Handle a prepare type hierarchy request.
 /// Returns the account at the cursor position as a TypeHierarchyItem.
@@ -21,6 +21,7 @@ pub fn handle_prepare_type_hierarchy(
     source: &str,
     parse_result: &ParseResult,
     uri: &Uri,
+    encoding: PositionEncoding,
 ) -> Option<Vec<TypeHierarchyItem>> {
     let position = params.text_document_position_params.position;
     let line_idx = position.line as usize;
@@ -28,7 +29,7 @@ pub fn handle_prepare_type_hierarchy(
     let line = lines.get(line_idx)?;
 
     // Get the word at the cursor position
-    let (word, start, end) = get_word_at_position(line, position.character as usize)?;
+    let (word, start, end) = get_word_at_position(line, position.character as usize, encoding)?;
 
     // Check if it's an account
     if !is_account_like(&word) {
@@ -67,6 +68,7 @@ pub fn handle_supertypes(
     source: &str,
     parse_result: &ParseResult,
     uri: &Uri,
+    encoding: PositionEncoding,
 ) -> Option<Vec<TypeHierarchyItem>> {
     let account = params
         .item
@@ -79,7 +81,7 @@ pub fn handle_supertypes(
     let parent = get_parent_account(account)?;
 
     // Find where this parent account is defined or used
-    let line_index = LineIndex::new(source);
+    let line_index = LineIndex::new(source, encoding);
     let location = find_account_location(source, &line_index, parse_result, &parent)?;
 
     let item = TypeHierarchyItem {
@@ -103,6 +105,7 @@ pub fn handle_subtypes(
     source: &str,
     parse_result: &ParseResult,
     uri: &Uri,
+    encoding: PositionEncoding,
 ) -> Option<Vec<TypeHierarchyItem>> {
     let account = params
         .item
@@ -118,7 +121,7 @@ pub fn handle_subtypes(
         return None;
     }
 
-    let line_index = LineIndex::new(source);
+    let line_index = LineIndex::new(source, encoding);
     let items: Vec<TypeHierarchyItem> = children
         .into_iter()
         .filter_map(|child| {
@@ -218,30 +221,41 @@ fn find_account_location(
             && open.account.as_ref() == account
         {
             let (line, _) = line_index.offset_to_position(spanned.span.start);
-            let line_text = line_index.line_text(source, line)?;
+            let line_text = line_index.line_text(line)?;
             if let Some(col) = line_text.find(account) {
-                return Some(Range {
-                    start: Position::new(line, col as u32),
-                    end: Position::new(line, (col + account.len()) as u32),
-                });
+                let start = line_index.byte_in_line_to_position(line, col)?;
+                let end = line_index.byte_in_line_to_position(line, col + account.len())?;
+                return Some(Range { start, end });
             }
         }
     }
 
-    // Fall back to first usage
+    // Fall back to first usage. Walk directive lines via a tracked
+    // absolute byte cursor so each match's position is routed
+    // through the encoding-aware LineIndex. Pre-round-19 emitted
+    // raw byte offsets as columns, broken under UTF-16 on non-ASCII.
     for spanned in &parse_result.directives {
         let accounts = get_accounts_from_directive(&spanned.value);
         if accounts.iter().any(|a| a == account) {
-            let (line, _) = line_index.offset_to_position(spanned.span.start);
             let directive_text = &source[spanned.span.start..spanned.span.end];
-
-            for (line_offset, line_content) in directive_text.lines().enumerate() {
+            let mut byte_cursor = spanned.span.start;
+            for line_content in directive_text.lines() {
                 if let Some(col) = line_content.find(account) {
-                    let ref_line = line + line_offset as u32;
+                    let needle_start = byte_cursor + col;
+                    let needle_end = needle_start + account.len();
+                    let (sl, sc) = line_index.offset_to_position(needle_start);
+                    let (el, ec) = line_index.offset_to_position(needle_end);
                     return Some(Range {
-                        start: Position::new(ref_line, col as u32),
-                        end: Position::new(ref_line, (col + account.len()) as u32),
+                        start: Position::new(sl, sc),
+                        end: Position::new(el, ec),
                     });
+                }
+                byte_cursor += line_content.len();
+                let remaining = &source[byte_cursor.min(spanned.span.end)..spanned.span.end];
+                if remaining.starts_with("\r\n") {
+                    byte_cursor += 2;
+                } else if remaining.starts_with('\n') {
+                    byte_cursor += 1;
                 }
             }
         }
@@ -305,7 +319,8 @@ mod tests {
             work_done_progress_params: Default::default(),
         };
 
-        let items = handle_prepare_type_hierarchy(&params, source, &result, &uri);
+        let items =
+            handle_prepare_type_hierarchy(&params, source, &result, &uri, PositionEncoding::Utf16);
         assert!(items.is_some());
 
         let items = items.unwrap();

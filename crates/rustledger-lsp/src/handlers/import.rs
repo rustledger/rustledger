@@ -13,7 +13,7 @@ use lsp_types::{
 use rustledger_core::{Directive, MetaValue};
 use rustledger_parser::Spanned;
 
-use super::utils::LineIndex;
+use super::utils::{LineIndex, PositionEncoding, ranges_overlap};
 
 /// Convert a byte offset to an LSP Position using a LineIndex.
 fn to_position(line_index: &LineIndex, offset: usize) -> Position {
@@ -34,8 +34,12 @@ const META_METHOD: &str = "import-method";
 /// - confidence > 0.9 → Hint ("Imported via rule: Expenses:Groceries")
 /// - confidence 0.5–0.9 → Information ("Review: Expenses:Dining (72%)")
 /// - confidence < 0.5 → Warning ("Low confidence: Expenses:Unknown")
-pub fn import_diagnostics(directives: &[Spanned<Directive>], source: &str) -> Vec<Diagnostic> {
-    let line_index = LineIndex::new(source);
+pub fn import_diagnostics(
+    directives: &[Spanned<Directive>],
+    source: &str,
+    encoding: PositionEncoding,
+) -> Vec<Diagnostic> {
+    let line_index = LineIndex::new(source, encoding);
     let mut diagnostics = Vec::new();
 
     for spanned in directives {
@@ -108,8 +112,9 @@ pub fn import_code_actions(
     directives: &[Spanned<Directive>],
     source: &str,
     range: Range,
+    encoding: PositionEncoding,
 ) -> Vec<CodeAction> {
-    let line_index = LineIndex::new(source);
+    let line_index = LineIndex::new(source, encoding);
     let mut actions = Vec::new();
     let mut high_confidence_count = 0;
 
@@ -176,8 +181,12 @@ pub fn import_code_actions(
 ///
 /// Shows a summary line above the first imported transaction:
 /// "N imported | M need review | K duplicates"
-pub fn import_code_lens(directives: &[Spanned<Directive>], source: &str) -> Vec<CodeLens> {
-    let line_index = LineIndex::new(source);
+pub fn import_code_lens(
+    directives: &[Spanned<Directive>],
+    source: &str,
+    encoding: PositionEncoding,
+) -> Vec<CodeLens> {
+    let line_index = LineIndex::new(source, encoding);
     let mut total = 0u32;
     let mut needs_review = 0u32;
     let mut first_import_line: Option<Position> = None;
@@ -233,23 +242,6 @@ pub fn import_code_lens(directives: &[Spanned<Directive>], source: &str) -> Vec<
         }),
         data: None,
     }]
-}
-
-/// Check if two ranges overlap, including character positions for single-line ranges.
-fn ranges_overlap(a: Range, b: Range) -> bool {
-    // a ends before b starts
-    if a.end.line < b.start.line
-        || (a.end.line == b.start.line && a.end.character < b.start.character)
-    {
-        return false;
-    }
-    // b ends before a starts
-    if b.end.line < a.start.line
-        || (b.end.line == a.start.line && b.end.character < a.start.character)
-    {
-        return false;
-    }
-    true
 }
 
 /// Extract f64 from MetaValue.
@@ -328,7 +320,7 @@ mod tests {
     fn diagnostics_high_confidence_is_hint() {
         let source = make_source();
         let directives = vec![make_imported_txn(0.95, "rule", "Expenses:Groceries")];
-        let diags = import_diagnostics(&directives, &source);
+        let diags = import_diagnostics(&directives, &source, PositionEncoding::Utf16);
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].severity, Some(DiagnosticSeverity::HINT));
         assert!(diags[0].message.contains("Expenses:Groceries"));
@@ -338,7 +330,7 @@ mod tests {
     fn diagnostics_medium_confidence_is_info() {
         let source = make_source();
         let directives = vec![make_imported_txn(0.72, "ml", "Expenses:Dining")];
-        let diags = import_diagnostics(&directives, &source);
+        let diags = import_diagnostics(&directives, &source, PositionEncoding::Utf16);
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].severity, Some(DiagnosticSeverity::INFORMATION));
         assert!(diags[0].message.contains("72%"));
@@ -348,7 +340,7 @@ mod tests {
     fn diagnostics_low_confidence_is_warning() {
         let source = make_source();
         let directives = vec![make_imported_txn(0.3, "default", "Expenses:Unknown")];
-        let diags = import_diagnostics(&directives, &source);
+        let diags = import_diagnostics(&directives, &source, PositionEncoding::Utf16);
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].severity, Some(DiagnosticSeverity::WARNING));
         assert!(diags[0].message.contains("recategorizing"));
@@ -364,7 +356,7 @@ mod tests {
             span: Span { start: 0, end: 50 },
             file_id: 0,
         }];
-        let diags = import_diagnostics(&directives, &source);
+        let diags = import_diagnostics(&directives, &source, PositionEncoding::Utf16);
         assert!(diags.is_empty());
     }
 
@@ -376,7 +368,7 @@ mod tests {
             make_imported_txn(0.6, "ml", "Expenses:Dining"),
             make_imported_txn(0.3, "default", "Expenses:Unknown"),
         ];
-        let lenses = import_code_lens(&directives, &source);
+        let lenses = import_code_lens(&directives, &source, PositionEncoding::Utf16);
         assert_eq!(lenses.len(), 1);
         let title = &lenses[0].command.as_ref().unwrap().title;
         assert!(title.contains("3 imported"));
@@ -390,7 +382,7 @@ mod tests {
             make_imported_txn(0.95, "rule", "Expenses:Groceries"),
             make_imported_txn(0.99, "rule", "Expenses:Dining"),
         ];
-        let lenses = import_code_lens(&directives, &source);
+        let lenses = import_code_lens(&directives, &source, PositionEncoding::Utf16);
         assert_eq!(lenses.len(), 1);
         let title = &lenses[0].command.as_ref().unwrap().title;
         assert!(title.contains("all accepted"));
@@ -400,7 +392,7 @@ mod tests {
     fn code_lens_empty_for_no_imports() {
         let source = make_source();
         let directives = vec![];
-        let lenses = import_code_lens(&directives, &source);
+        let lenses = import_code_lens(&directives, &source, PositionEncoding::Utf16);
         assert!(lenses.is_empty());
     }
 
@@ -472,7 +464,7 @@ mod tests {
                 character: 50,
             },
         };
-        let actions = import_code_actions(&directives, &source, range);
+        let actions = import_code_actions(&directives, &source, range, PositionEncoding::Utf16);
 
         // Should have action for first txn + batch action (2 high-confidence)
         let accept_actions: Vec<_> = actions
@@ -507,7 +499,7 @@ mod tests {
                 character: 50,
             },
         };
-        let actions = import_code_actions(&directives, &source, range);
+        let actions = import_code_actions(&directives, &source, range, PositionEncoding::Utf16);
 
         // No accept actions for individual txns (only batch if applicable)
         let accept_actions: Vec<_> = actions
@@ -537,7 +529,7 @@ mod tests {
                 character: 599,
             },
         };
-        let actions = import_code_actions(&directives, &source, range);
+        let actions = import_code_actions(&directives, &source, range, PositionEncoding::Utf16);
 
         // Should have batch accept with count = 2 (only the two > 0.9)
         let batch_action = actions
@@ -565,7 +557,7 @@ mod tests {
                 character: 399,
             },
         };
-        let actions = import_code_actions(&directives, &source, range);
+        let actions = import_code_actions(&directives, &source, range, PositionEncoding::Utf16);
 
         // Only 1 high confidence → no batch action
         let batch_actions: Vec<_> = actions
@@ -625,11 +617,51 @@ mod tests {
         assert!(!ranges_overlap(a, b));
     }
 
+    /// LSP half-open `Range.end` semantics: adjacent ranges where
+    /// `a.end == b.start` are NOT overlapping. Pre-round-17 the import
+    /// module had a private `ranges_overlap` with strict `<` semantics
+    /// that returned `true` for this boundary case; the round-17
+    /// canonicalization hoisted the helper to `utils::ranges_overlap`
+    /// with the spec-correct `<=` semantics. This test pins the new
+    /// behavior so a future revert (or accidental re-introduction of
+    /// the old `<` predicate) is caught.
+    #[test]
+    fn ranges_adjacent_are_not_overlapping() {
+        let a = Range {
+            start: Position::new(0, 0),
+            end: Position::new(0, 10),
+        };
+        let b = Range {
+            start: Position::new(0, 10),
+            end: Position::new(0, 20),
+        };
+        assert!(
+            !ranges_overlap(a, b),
+            "adjacent ranges (a.end == b.start) must not overlap under LSP half-open semantics"
+        );
+        assert!(
+            !ranges_overlap(b, a),
+            "adjacency is symmetric — swapping the args must not flip the result"
+        );
+
+        // Cross-line adjacency: a ends on line 1 col 0 (= start of
+        // line 1), b starts at line 1 col 0. Same not-overlapping.
+        let a = Range {
+            start: Position::new(0, 0),
+            end: Position::new(1, 0),
+        };
+        let b = Range {
+            start: Position::new(1, 0),
+            end: Position::new(2, 0),
+        };
+        assert!(!ranges_overlap(a, b));
+    }
+
     #[test]
     fn diagnostics_source_is_set() {
         let source = make_source();
         let directives = vec![make_imported_txn(0.95, "rule", "Expenses:Groceries")];
-        let diags = import_diagnostics(&directives, &source);
+        let diags = import_diagnostics(&directives, &source, PositionEncoding::Utf16);
         assert_eq!(diags[0].source.as_deref(), Some("rustledger-import"));
     }
 }

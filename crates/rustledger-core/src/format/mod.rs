@@ -3,28 +3,32 @@
 //! Provides pretty-printing for beancount directives with configurable
 //! amount alignment.
 
+mod align;
 mod amount;
 mod directives;
 mod helpers;
 mod transaction;
 
+pub use align::{Alignment, FormatLine, render_lines, resolve_alignment};
 pub(crate) use amount::{format_amount, format_cost_spec, format_price_annotation};
-pub(crate) use directives::{
-    format_balance, format_close, format_commodity, format_custom, format_document, format_event,
-    format_note, format_open, format_pad, format_price, format_query,
+use directives::{
+    format_balance_lines, format_close_lines, format_commodity_lines, format_custom_lines,
+    format_document_lines, format_event_lines, format_note_lines, format_open_lines,
+    format_pad_lines, format_price_lines, format_query_lines,
 };
 pub use helpers::escape_string;
 pub(crate) use helpers::format_meta_value;
-pub(crate) use transaction::{format_incomplete_amount, format_transaction};
-pub use transaction::{format_posting, format_posting_line};
+pub(crate) use transaction::{format_incomplete_amount, format_transaction_lines};
+pub use transaction::{format_posting_line, posting_format_line};
 
 use crate::Directive;
 
 /// Formatter configuration.
 #[derive(Debug, Clone)]
 pub struct FormatConfig {
-    /// Column to align amounts to (default: 60).
-    pub amount_column: usize,
+    /// How to align amounts (default: [`Alignment::Auto`], matching
+    /// `bean-format`).
+    pub alignment: Alignment,
     /// Indentation for postings and metadata (default: 2 spaces).
     pub indent: String,
 }
@@ -32,64 +36,106 @@ pub struct FormatConfig {
 impl Default for FormatConfig {
     fn default() -> Self {
         Self {
-            amount_column: 60,
+            alignment: Alignment::default(),
             indent: "  ".to_string(),
         }
     }
 }
 
 impl FormatConfig {
-    /// Create a new config with the specified amount column.
+    /// Create a config that aligns currencies to a fixed column
+    /// (`bean-format`'s `-c` mode).
     #[must_use]
     pub fn with_column(column: usize) -> Self {
         Self {
-            amount_column: column,
-            ..Default::default()
+            alignment: Alignment::CurrencyColumn(column),
+            indent: "  ".to_string(),
         }
     }
 
-    /// Create a new config with the specified indent width.
+    /// Create a config with the specified indent width (auto alignment).
     #[must_use]
     pub fn with_indent(indent_width: usize) -> Self {
-        let indent = " ".repeat(indent_width);
         Self {
-            indent,
-            ..Default::default()
+            alignment: Alignment::default(),
+            indent: " ".repeat(indent_width),
         }
     }
 
-    /// Create a new config with both column and indent settings.
+    /// Create a config with a fixed currency column and indent width.
     #[must_use]
     pub fn new(column: usize, indent_width: usize) -> Self {
-        let indent = " ".repeat(indent_width);
         Self {
-            amount_column: column,
-            indent,
+            alignment: Alignment::CurrencyColumn(column),
+            indent: " ".repeat(indent_width),
         }
     }
 }
 
-/// Format a directive to a string.
-pub fn format_directive(directive: &Directive, config: &FormatConfig) -> String {
+/// Render a directive into format lines (the *render* phase).
+///
+/// Callers that need file-wide alignment collect these across the whole file
+/// and align once with [`render_lines`]. Callers formatting a list of
+/// directives without surrounding source can use [`format_directives`], which
+/// aligns the whole list together.
+#[must_use]
+pub fn format_directive_lines(directive: &Directive, config: &FormatConfig) -> Vec<FormatLine> {
     match directive {
-        Directive::Transaction(txn) => format_transaction(txn, config),
-        Directive::Balance(bal) => format_balance(bal, config),
-        Directive::Open(open) => format_open(open, config),
-        Directive::Close(close) => format_close(close, config),
-        Directive::Commodity(comm) => format_commodity(comm, config),
-        Directive::Pad(pad) => format_pad(pad, config),
-        Directive::Event(event) => format_event(event, config),
-        Directive::Query(query) => format_query(query, config),
-        Directive::Note(note) => format_note(note, config),
-        Directive::Document(doc) => format_document(doc, config),
-        Directive::Price(price) => format_price(price, config),
-        Directive::Custom(custom) => format_custom(custom, config),
+        Directive::Transaction(txn) => format_transaction_lines(txn, config),
+        Directive::Balance(bal) => format_balance_lines(bal, config),
+        Directive::Open(open) => format_open_lines(open, config),
+        Directive::Close(close) => format_close_lines(close, config),
+        Directive::Commodity(comm) => format_commodity_lines(comm, config),
+        Directive::Pad(pad) => format_pad_lines(pad, config),
+        Directive::Event(event) => format_event_lines(event, config),
+        Directive::Query(query) => format_query_lines(query, config),
+        Directive::Note(note) => format_note_lines(note, config),
+        Directive::Document(doc) => format_document_lines(doc, config),
+        Directive::Price(price) => format_price_lines(price, config),
+        Directive::Custom(custom) => format_custom_lines(custom, config),
     }
+}
+
+/// Format a list of directives to a string, aligning all of them together
+/// against shared, file-wide column widths in a single pass.
+///
+/// This is the canonical entry point for callers that have a list of
+/// [`Directive`]s but no surrounding source text (e.g. synthesized output,
+/// `extract`, plugin round-trips). Callers that also need to preserve
+/// comments, blank lines, and non-directive elements from original source
+/// should use `rustledger_parser::format_source` instead.
+///
+/// Passing a single directive (`[&directive]`) formats it on its own, which is
+/// the natural degenerate case of whole-list alignment.
+///
+/// # Separator policy
+///
+/// **No blank line is inserted between adjacent directives** — `format_directives`
+/// concatenates each rendered directive directly so it's safe to use as a
+/// building block in larger compositions. Callers that need a blank line
+/// between directives should drop down to [`format_directive_lines`] +
+/// [`render_lines`] and push a `FormatLine::Plain(String::new())` between
+/// each directive's lines (see `crates/rustledger/src/cmd/extract_cmd` for
+/// an example).
+#[must_use]
+pub fn format_directives<'a, I>(directives: I, config: &FormatConfig) -> String
+where
+    I: IntoIterator<Item = &'a Directive>,
+{
+    let mut lines: Vec<FormatLine> = Vec::new();
+    for directive in directives {
+        lines.extend(format_directive_lines(directive, config));
+    }
+    render_lines(&lines, &config.alignment)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::transaction::format_posting;
+    use super::directives::{
+        format_balance, format_close, format_commodity, format_custom, format_document,
+        format_event, format_note, format_open, format_pad, format_price, format_query,
+    };
+    use super::transaction::{format_posting, format_transaction};
     use super::*;
     use crate::{
         Amount, Balance, Close, Commodity, CostSpec, Custom, Directive, Document, Event,
@@ -130,7 +176,9 @@ mod tests {
         );
         let config = FormatConfig::default();
         let formatted = format_balance(&bal, &config);
-        assert_eq!(formatted, "2024-01-01 balance Assets:Bank 1000.00 USD\n");
+        // Auto alignment puts a two-space gap before the (self-aligned)
+        // number — balances now align like postings.
+        assert_eq!(formatted, "2024-01-01 balance Assets:Bank  1000.00 USD\n");
     }
 
     #[test]
@@ -537,7 +585,7 @@ mod tests {
         };
         let config = FormatConfig::default();
         let formatted = format_price(&price, &config);
-        assert_eq!(formatted, "2024-01-15 price AAPL 185.50 USD\n");
+        assert_eq!(formatted, "2024-01-15 price AAPL  185.50 USD\n");
     }
 
     #[test]
@@ -637,7 +685,7 @@ mod tests {
         let formatted = format_balance(&bal, &config);
         assert_eq!(
             formatted,
-            "2024-01-01 balance Assets:Bank 1000.00 USD ~ 0.01\n"
+            "2024-01-01 balance Assets:Bank  1000.00 USD ~ 0.01\n"
         );
     }
 
@@ -746,21 +794,34 @@ mod tests {
     #[test]
     fn test_format_config_with_column() {
         let config = FormatConfig::with_column(80);
-        assert_eq!(config.amount_column, 80);
+        assert!(matches!(config.alignment, Alignment::CurrencyColumn(80)));
         assert_eq!(config.indent, "  ");
     }
 
     #[test]
     fn test_format_config_with_indent() {
         let config = FormatConfig::with_indent(4);
+        assert!(matches!(config.alignment, Alignment::Auto { .. }));
         assert_eq!(config.indent, "    ");
     }
 
     #[test]
     fn test_format_config_new() {
         let config = FormatConfig::new(70, 3);
-        assert_eq!(config.amount_column, 70);
+        assert!(matches!(config.alignment, Alignment::CurrencyColumn(70)));
         assert_eq!(config.indent, "   ");
+    }
+
+    #[test]
+    fn test_format_config_default_is_auto() {
+        let config = FormatConfig::default();
+        assert!(matches!(
+            config.alignment,
+            Alignment::Auto {
+                prefix_width: None,
+                num_width: None
+            }
+        ));
     }
 
     #[test]
@@ -807,7 +868,7 @@ mod tests {
     }
 
     #[test]
-    fn test_format_directive_all_types() {
+    fn test_format_directives_all_types() {
         let config = FormatConfig::default();
 
         // Transaction
@@ -815,7 +876,7 @@ mod tests {
             .with_flag('*')
             .with_synthesized_posting(Posting::new("Expenses:Test", Amount::new(dec!(1), "USD")))
             .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(-1), "USD")));
-        let formatted = format_directive(&Directive::Transaction(txn), &config);
+        let formatted = format_directives([&Directive::Transaction(txn)], &config);
         assert!(formatted.contains("2024-01-01"));
 
         // Balance
@@ -824,7 +885,7 @@ mod tests {
             "Assets:Bank",
             Amount::new(dec!(100), "USD"),
         );
-        let formatted = format_directive(&Directive::Balance(bal), &config);
+        let formatted = format_directives([&Directive::Balance(bal)], &config);
         assert!(formatted.contains("balance"));
 
         // Open
@@ -835,7 +896,7 @@ mod tests {
             booking: None,
             meta: Default::default(),
         };
-        let formatted = format_directive(&Directive::Open(open), &config);
+        let formatted = format_directives([&Directive::Open(open)], &config);
         assert!(formatted.contains("open"));
 
         // Close
@@ -844,7 +905,7 @@ mod tests {
             account: "Assets:Test".into(),
             meta: Default::default(),
         };
-        let formatted = format_directive(&Directive::Close(close), &config);
+        let formatted = format_directives([&Directive::Close(close)], &config);
         assert!(formatted.contains("close"));
 
         // Commodity
@@ -853,7 +914,7 @@ mod tests {
             currency: "BTC".into(),
             meta: Default::default(),
         };
-        let formatted = format_directive(&Directive::Commodity(comm), &config);
+        let formatted = format_directives([&Directive::Commodity(comm)], &config);
         assert!(formatted.contains("commodity"));
 
         // Pad
@@ -863,7 +924,7 @@ mod tests {
             source_account: "Equity:B".into(),
             meta: Default::default(),
         };
-        let formatted = format_directive(&Directive::Pad(pad), &config);
+        let formatted = format_directives([&Directive::Pad(pad)], &config);
         assert!(formatted.contains("pad"));
 
         // Event
@@ -873,7 +934,7 @@ mod tests {
             value: "value".to_string(),
             meta: Default::default(),
         };
-        let formatted = format_directive(&Directive::Event(event), &config);
+        let formatted = format_directives([&Directive::Event(event)], &config);
         assert!(formatted.contains("event"));
 
         // Query
@@ -883,7 +944,7 @@ mod tests {
             query: "SELECT *".to_string(),
             meta: Default::default(),
         };
-        let formatted = format_directive(&Directive::Query(query), &config);
+        let formatted = format_directives([&Directive::Query(query)], &config);
         assert!(formatted.contains("query"));
 
         // Note
@@ -893,7 +954,7 @@ mod tests {
             comment: "test".to_string(),
             meta: Default::default(),
         };
-        let formatted = format_directive(&Directive::Note(note), &config);
+        let formatted = format_directives([&Directive::Note(note)], &config);
         assert!(formatted.contains("note"));
 
         // Document
@@ -905,7 +966,7 @@ mod tests {
             links: vec![],
             meta: Default::default(),
         };
-        let formatted = format_directive(&Directive::Document(doc), &config);
+        let formatted = format_directives([&Directive::Document(doc)], &config);
         assert!(formatted.contains("document"));
 
         // Price
@@ -915,7 +976,7 @@ mod tests {
             amount: Amount::new(dec!(150), "USD"),
             meta: Default::default(),
         };
-        let formatted = format_directive(&Directive::Price(price), &config);
+        let formatted = format_directives([&Directive::Price(price)], &config);
         assert!(formatted.contains("price"));
 
         // Custom
@@ -925,7 +986,7 @@ mod tests {
             values: vec![],
             meta: Default::default(),
         };
-        let formatted = format_directive(&Directive::Custom(custom), &config);
+        let formatted = format_directives([&Directive::Custom(custom)], &config);
         assert!(formatted.contains("custom"));
     }
 

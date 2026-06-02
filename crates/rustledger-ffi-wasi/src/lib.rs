@@ -40,7 +40,36 @@ pub(crate) mod types;
 // `Directive → JSON` conversion contract.
 pub use types::{Amount, CostNumber, DirectiveJson, Meta, Posting, PostingCost, TypedValue};
 
-/// API version for compatibility detection.
+/// API version this server compiled against. Reported as the
+/// `api_version` field on every method's response (`util.version`,
+/// `ledger.load`, etc.).
+///
 /// Increment minor version for backwards-compatible changes.
 /// Increment major version for breaking changes.
-pub const API_VERSION: &str = "1.0";
+///
+/// # Server vs. client semantics
+///
+/// This constant is the SERVER's compile-time advertised version.
+/// Cross-version clients negotiating wire shape MUST read the
+/// `api_version` field FROM THE RESPONSE PAYLOAD they receive — not
+/// from a locally-linked `API_VERSION` constant. A client binary
+/// statically linked against `rustledger-ffi-wasi` v1.0 carries
+/// `API_VERSION = "1.0"` in its image but, if it talks to a
+/// dynamically-deployed v2.0 server, must use the v2.0-shaped response
+/// — the server's version comes from the wire, not the client's
+/// link-time copy.
+///
+/// # Version history
+///
+/// * **2.0** — `error.data.errors` on `beancount_parse_error` (-32000)
+///   responses is now `ParseErrorEntry[]` (per-error object with
+///   `message`, `kind_code`, `hint`, `span`) instead of the previous
+///   `string[]` of rendered messages. This is a wire-shape break,
+///   hence the major bump per the policy above (round-19 correction:
+///   the change shipped briefly as 1.1, which violated the major-on-
+///   break rule). Cross-version clients negotiate via `api_version`
+///   on the response; v1.x clients that parse errors as `string[]`
+///   should refuse to talk to a v2.x server. See `README.md` for the
+///   migration recipe.
+/// * **1.0** — initial API.
+pub const API_VERSION: &str = "2.0";

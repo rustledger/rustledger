@@ -6,7 +6,8 @@
 //! - Payees (all transactions with same payee)
 
 use super::utils::{
-    LineIndex, commodity_declaration_spans, get_word_at_position, is_account_like, is_currency_like,
+    LineIndex, PositionEncoding, commodity_declaration_spans, get_word_at_position,
+    is_account_like, is_currency_like,
 };
 use lsp_types::{Location, Position, Range, ReferenceParams, Uri};
 use rustledger_core::{Directive, SYNTHESIZED_FILE_ID};
@@ -18,6 +19,7 @@ pub fn handle_references(
     source: &str,
     parse_result: &ParseResult,
     uri: &Uri,
+    encoding: PositionEncoding,
 ) -> Option<Vec<Location>> {
     let position = params.text_document_position.position;
     let include_declaration = params.context.include_declaration;
@@ -27,12 +29,12 @@ pub fn handle_references(
     let line = lines.get(line_idx)?;
 
     // Get the word at the cursor position
-    let (word, _, _) = get_word_at_position(line, position.character as usize)?;
+    let (word, _, _) = get_word_at_position(line, position.character as usize, encoding)?;
 
     let mut locations = Vec::new();
     // Build the line index once and share it across collectors —
     // otherwise each posting/directive lookup is an O(n) scan.
-    let line_index = LineIndex::new(source);
+    let line_index = LineIndex::new(source, encoding);
 
     // Check if it's an account
     if is_account_like(&word) {
@@ -204,13 +206,14 @@ fn collect_account_references(
                             line_index.offset_to_position(spanned_posting.span.start);
                         if let Some(line_text) = source.lines().nth(posting_line as usize)
                             && let Some(col) = line_text.find(account)
+                            && let Some(start) =
+                                line_index.byte_in_line_to_position(posting_line, col)
+                            && let Some(end) = line_index
+                                .byte_in_line_to_position(posting_line, col + account.len())
                         {
                             locations.push(Location {
                                 uri: uri.clone(),
-                                range: Range {
-                                    start: Position::new(posting_line, col as u32),
-                                    end: Position::new(posting_line, (col + account.len()) as u32),
-                                },
+                                range: Range { start, end },
                             });
                         }
                     }
@@ -298,13 +301,14 @@ fn collect_payee_references(
             let line_text = source.lines().nth(line as usize).unwrap_or("");
 
             // Find the payee in quotes
-            if let Some(start) = line_text.find(&format!("\"{}\"", payee)) {
+            if let Some(quote_byte) = line_text.find(&format!("\"{}\"", payee))
+                && let Some(start) = line_index.byte_in_line_to_position(line, quote_byte + 1)
+                && let Some(end) =
+                    line_index.byte_in_line_to_position(line, quote_byte + 1 + payee.len())
+            {
                 locations.push(Location {
                     uri: uri.clone(),
-                    range: Range {
-                        start: Position::new(line, (start + 1) as u32),
-                        end: Position::new(line, (start + 1 + payee.len()) as u32),
-                    },
+                    range: Range { start, end },
                 });
             }
         }
@@ -321,24 +325,38 @@ fn find_in_directive(
     uri: &Uri,
 ) -> Option<Location> {
     let directive_text = &source[start_offset..end_offset];
-    let (start_line, start_col) = line_index.offset_to_position(start_offset);
 
-    for (line_offset, line) in directive_text.lines().enumerate() {
+    // Walk the directive's lines and emit BYTE-OFFSET-based ranges
+    // routed through the LineIndex's encoding-aware conversion.
+    // Pre-round-19 mixed encoded `start_col` (negotiated encoding)
+    // with raw `col` (byte offset within line) — broken under UTF-16
+    // negotiation on any non-ASCII content.
+    let mut byte_cursor = start_offset;
+    for line in directive_text.lines() {
         if let Some(col) = line.find(needle) {
-            let ref_line = start_line + line_offset as u32;
-            let ref_col = if line_offset == 0 {
-                start_col + col as u32
-            } else {
-                col as u32
-            };
-
+            let needle_start = byte_cursor + col;
+            let needle_end = needle_start + needle.len();
+            let (sl, sc) = line_index.offset_to_position(needle_start);
+            let (el, ec) = line_index.offset_to_position(needle_end);
             return Some(Location {
                 uri: uri.clone(),
                 range: Range {
-                    start: Position::new(ref_line, ref_col),
-                    end: Position::new(ref_line, ref_col + needle.len() as u32),
+                    start: Position::new(sl, sc),
+                    end: Position::new(el, ec),
                 },
             });
+        }
+        // Advance byte_cursor past this line + its terminator. `lines()`
+        // yields content without the terminator, so add the length of
+        // the terminator that follows it in source.
+        byte_cursor += line.len();
+        // Skip the line terminator (`\n` or `\r\n`); only the bytes
+        // strictly within `directive_text` are addressable here.
+        let remaining = &source[byte_cursor.min(end_offset)..end_offset];
+        if remaining.starts_with("\r\n") {
+            byte_cursor += 2;
+        } else if remaining.starts_with('\n') {
+            byte_cursor += 1;
         }
     }
 
@@ -390,7 +408,7 @@ mod tests {
             },
         };
 
-        let refs = handle_references(&params, source, &result, &uri);
+        let refs = handle_references(&params, source, &result, &uri, PositionEncoding::Utf16);
         assert!(refs.is_some());
 
         let refs = refs.unwrap();
@@ -420,7 +438,7 @@ mod tests {
             },
         };
 
-        let refs = handle_references(&params, source, &result, &uri);
+        let refs = handle_references(&params, source, &result, &uri, PositionEncoding::Utf16);
         assert!(refs.is_some());
 
         let refs = refs.unwrap();
@@ -462,8 +480,8 @@ mod tests {
             },
         };
 
-        let refs =
-            handle_references(&params, source, &result, &uri).expect("references returns Some");
+        let refs = handle_references(&params, source, &result, &uri, PositionEncoding::Utf16)
+            .expect("references returns Some");
 
         // Expected: 3 references — `commodity USD`, `-100 USD`,
         // `100 USD`. Bespoke string-search would have reported the
@@ -483,8 +501,14 @@ mod tests {
             },
             ..params
         };
-        let refs_no_decl = handle_references(&params_no_decl, source, &result, &uri)
-            .expect("references returns Some");
+        let refs_no_decl = handle_references(
+            &params_no_decl,
+            source,
+            &result,
+            &uri,
+            PositionEncoding::Utf16,
+        )
+        .expect("references returns Some");
         assert_eq!(
             refs_no_decl.len(),
             2,
@@ -539,8 +563,8 @@ mod tests {
             },
         };
 
-        let refs =
-            handle_references(&params, source, &result, &uri).expect("references returns Some");
+        let refs = handle_references(&params, source, &result, &uri, PositionEncoding::Utf16)
+            .expect("references returns Some");
 
         // Expected: 2 non-declaration references — the metadata
         // `parent: USD` and the posting `-5.00 USD`. The
@@ -591,7 +615,7 @@ mod tests {
             },
         };
 
-        let refs = handle_references(&params, source, &result, &uri)
+        let refs = handle_references(&params, source, &result, &uri, PositionEncoding::Utf16)
             .expect("at least the Open definition + 1 posting reference");
 
         let metadata_lines = [3u32, 5u32];

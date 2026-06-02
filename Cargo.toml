@@ -158,7 +158,17 @@ getrandom = { version = "0.2", features = ["js"] }
 # LSP
 lsp-server = "0.7"
 lsp-types = "0.97"
-ropey = "1"
+# Pin to `cr_lines` feature only (no `unicode_lines`) so ropey's line
+# breaks match `similar::TextDiff::from_lines` semantics: LF, CRLF, bare
+# CR — and nothing else. With default features ropey also splits on
+# NEL/VT/FF/LS/PS, which would disagree with similar (and with what an
+# LSP client counts), producing wrong byte ranges for any source
+# containing those characters.
+ropey = { version = "1", default-features = false, features = ["cr_lines", "simd"] }
+# Line-based diff used by the LSP formatting handler. Already a
+# transitive dependency via insta; promoted to a direct dep so the
+# formatter doesn't re-roll byte/line diff primitives.
+similar = "2"
 crossbeam-channel = "0.5"
 parking_lot = "0.12"
 

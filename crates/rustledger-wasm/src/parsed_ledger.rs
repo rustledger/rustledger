@@ -274,9 +274,13 @@ impl ParsedLedger {
     }
 
     /// Format the ledger source.
+    ///
+    /// Reformats the original source preserving comments, blank lines, and
+    /// non-directive content with file-wide aligned columns.
     #[wasm_bindgen]
     pub fn format(&self) -> Result<JsValue, JsError> {
-        use rustledger_core::{FormatConfig, format_directive};
+        use rustledger_core::FormatConfig;
+        use rustledger_parser::format_source;
 
         if !self.parse_errors.is_empty() {
             let result = FormatResult {
@@ -287,12 +291,7 @@ impl ParsedLedger {
         }
 
         let config = FormatConfig::default();
-        let mut formatted = String::new();
-
-        for directive in &self.directives {
-            formatted.push_str(&format_directive(directive, &config));
-            formatted.push('\n');
-        }
+        let formatted = format_source(&self.source, &self.parse_result, &config);
 
         let result = FormatResult {
             formatted: Some(formatted),

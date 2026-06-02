@@ -1,0 +1,10 @@
+; Formatting is purposely broken
+
+2024-01-01 open Assets:Bank:Checking USD
+2024-01-01 open Income:Salary
+
+2024-01-15 * "Paycheck"
+  Assets:Bank:Checking                                5000 USD
+  Income:Salary                                      -5000 USD
+
+2024-01-16 balance Assets:Bank:Checking               5000 USD

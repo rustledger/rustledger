@@ -12,13 +12,14 @@ use rustledger_core::{Decimal, Directive, IncompleteAmount, SYNTHESIZED_FILE_ID}
 use rustledger_parser::ParseResult;
 use std::collections::HashMap;
 
-use super::utils::LineIndex;
+use super::utils::{LineIndex, PositionEncoding};
 
 /// Handle an inlay hints request.
 pub fn handle_inlay_hints(
     params: &InlayHintParams,
     source: &str,
     parse_result: &ParseResult,
+    encoding: PositionEncoding,
 ) -> Option<Vec<InlayHint>> {
     let range = params.range;
     let mut hints = Vec::new();
@@ -28,7 +29,7 @@ pub fn handle_inlay_hints(
     // use `line_index.line_text(...)` further down instead of
     // pre-collecting `Vec<&str>` of all lines, so a large fully-
     // explicit ledger pays neither allocation.
-    let line_index = LineIndex::new(source);
+    let line_index = LineIndex::new(source, encoding);
 
     for spanned in &parse_result.directives {
         let Directive::Transaction(txn) = &spanned.value else {
@@ -150,7 +151,7 @@ pub fn handle_inlay_hints(
                 continue;
             };
 
-            let Some(line) = line_index.line_text(source, posting_line) else {
+            let Some(line) = line_index.line_text(posting_line) else {
                 continue;
             };
 
@@ -285,7 +286,7 @@ mod tests {
             work_done_progress_params: Default::default(),
         };
 
-        let hints = handle_inlay_hints(&params, source, &result);
+        let hints = handle_inlay_hints(&params, source, &result, PositionEncoding::Utf16);
         assert!(hints.is_some());
 
         let hints = hints.unwrap();
@@ -369,11 +370,11 @@ mod tests {
 
         // Parse V1 and get hints
         let result_v1 = parse(source_v1);
-        let hints_v1 = handle_inlay_hints(&params, source_v1, &result_v1);
+        let hints_v1 = handle_inlay_hints(&params, source_v1, &result_v1, PositionEncoding::Utf16);
 
         // Parse V2 and get hints
         let result_v2 = parse(source_v2);
-        let hints_v2 = handle_inlay_hints(&params, source_v2, &result_v2);
+        let hints_v2 = handle_inlay_hints(&params, source_v2, &result_v2, PositionEncoding::Utf16);
 
         // V1 should have 1 hint (for Income:Salary without amount)
         assert!(hints_v1.is_some(), "V1 should have hints");
@@ -427,7 +428,8 @@ mod tests {
             work_done_progress_params: Default::default(),
         };
 
-        let hints = handle_inlay_hints(&params, source, &result).unwrap_or_default();
+        let hints = handle_inlay_hints(&params, source, &result, PositionEncoding::Utf16)
+            .unwrap_or_default();
         assert_eq!(hints.len(), 1, "exactly one inferred-amount hint expected");
 
         // Expenses:Food is on line 3 (after Assets:Bank on line 1 and
@@ -473,7 +475,8 @@ mod tests {
             work_done_progress_params: Default::default(),
         };
 
-        let hints = handle_inlay_hints(&params, source, &result).unwrap_or_default();
+        let hints = handle_inlay_hints(&params, source, &result, PositionEncoding::Utf16)
+            .unwrap_or_default();
 
         // Both empty postings should get a hint, with the correct
         // per-currency residual. Pre-refactor: zero hints (multi-
@@ -562,7 +565,7 @@ mod tests {
             work_done_progress_params: Default::default(),
         };
 
-        let hints = handle_inlay_hints(&params, source, &result);
+        let hints = handle_inlay_hints(&params, source, &result, PositionEncoding::Utf16);
         assert!(
             hints.is_none() || hints.as_ref().unwrap().is_empty(),
             "no hint expected for NumberOnly source posting; got {hints:?}"
@@ -617,7 +620,7 @@ mod tests {
             work_done_progress_params: Default::default(),
         };
 
-        let hints = handle_inlay_hints(&params, source, &result);
+        let hints = handle_inlay_hints(&params, source, &result, PositionEncoding::Utf16);
         assert!(
             hints.is_none() || hints.as_ref().unwrap().is_empty(),
             "no hint expected for CurrencyOnly source posting; got {hints:?}"

@@ -18,6 +18,9 @@ lsp-types.workspace = true
 # Document management
 ropey.workspace = true
 
+# Line-based diffing for textDocument/formatting edits
+similar.workspace = true
+
 # Concurrency
 crossbeam-channel.workspace = true
 parking_lot.workspace = true

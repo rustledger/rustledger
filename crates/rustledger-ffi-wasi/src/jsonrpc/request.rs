@@ -146,6 +146,19 @@ pub struct LoadFileParams {
     /// Optional plugin names to apply.
     #[serde(default)]
     pub plugins: Vec<String>,
+    /// Confine the include graph to the entry file's directory tree
+    /// (default: `true`). Set to `false` to allow includes that
+    /// reference paths outside the entry file's parent directory —
+    /// useful for ledgers that share a chart of accounts via
+    /// `include "../shared/accounts.bean"`. The default is safe by
+    /// design; opt out only when you trust the source of the path
+    /// argument.
+    #[serde(default = "default_true")]
+    pub path_security: bool,
+}
+
+const fn default_true() -> bool {
+    true
 }
 
 /// Parameters for ledger.validate method.

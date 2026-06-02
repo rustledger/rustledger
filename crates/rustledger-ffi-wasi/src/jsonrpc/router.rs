@@ -126,8 +126,13 @@ fn handle_load_file(params: &serde_json::Value) -> Result<serde_json::Value, Rpc
 
     let path = Path::new(&params.path);
 
-    // Load using the full loader
-    let mut loader = Loader::new();
+    // Load using the full loader. `with_path_security` defaults to
+    // `true` (confines the include graph to the entry file's directory
+    // tree) — FFI is the most security-sensitive surface, so safe-by-
+    // default matters. Callers that legitimately need cross-tree
+    // includes (e.g., `include "../shared/accounts.bean"`) can opt out
+    // via the request's `path_security: false` field.
+    let mut loader = Loader::new().with_path_security(params.path_security);
     let load_result = loader
         .load(path)
         .map_err(|e| RpcError::file_error(format!("Failed to load file: {e}")))?;
@@ -491,52 +496,91 @@ fn handle_batch_file(params: &serde_json::Value) -> Result<serde_json::Value, Rp
 fn handle_format_source(params: &serde_json::Value) -> Result<serde_json::Value, RpcError> {
     let params: FormatSourceParams = serde_json::from_value(params.clone())
         .map_err(|e| RpcError::invalid_params(format!("Invalid params: {e}")))?;
-
-    let parse_result = rustledger_parser::parse(&params.source);
-    let config = rustledger_core::format::FormatConfig::default();
-    let mut formatted = String::new();
-
-    // Add options first
-    for (key, value, _span) in &parse_result.options {
-        formatted.push_str(&format!("option \"{key}\" \"{value}\"\n"));
-    }
-    if !parse_result.options.is_empty() {
-        formatted.push('\n');
-    }
-
-    // Add plugins
-    for (plugin, config_opt, _span) in &parse_result.plugins {
-        if let Some(cfg) = config_opt {
-            formatted.push_str(&format!("plugin \"{plugin}\" \"{cfg}\"\n"));
-        } else {
-            formatted.push_str(&format!("plugin \"{plugin}\"\n"));
-        }
-    }
-    if !parse_result.plugins.is_empty() {
-        formatted.push('\n');
-    }
-
-    // Format directives
-    for spanned in &parse_result.directives {
-        formatted.push_str(&rustledger_core::format::format_directive(
-            &spanned.value,
-            &config,
-        ));
-    }
-
-    let result = FormatResult { formatted };
-    serde_json::to_value(result).map_err(|e| RpcError::internal_error(e.to_string()))
+    format_source_to_response(&params.source)
 }
 
 fn handle_format_file(params: &serde_json::Value) -> Result<serde_json::Value, RpcError> {
     let params: FormatFileParams = serde_json::from_value(params.clone())
         .map_err(|e| RpcError::invalid_params(format!("Invalid params: {e}")))?;
-
     let source = fs::read_to_string(&params.path)
         .map_err(|e| RpcError::file_error(format!("Failed to read file '{}': {e}", params.path)))?;
+    format_source_to_response(&source)
+}
 
-    let format_params = FormatSourceParams { source };
-    handle_format_source(&serde_json::to_value(format_params).unwrap())
+/// Shared canonical-format implementation for `format.source` and
+/// `format.file`. Gates on a clean parse, runs `format_source`, returns
+/// either a `FormatResult` JSON value on success or a
+/// `beancount_parse_error` `RpcError` (JSON-RPC code -32000, the
+/// application-level error variant) on parse failure. Avoids the
+/// re-serialization round-trip the two endpoints used to go through.
+///
+/// **Error code policy.** Application-level beancount parse failures
+/// use -32000 (`ErrorCode::BeancountParseError`), NOT -32700 (which
+/// JSON-RPC 2.0 reserves for malformed JSON in the request envelope).
+/// Clients that dispatch on JSON-RPC error codes should treat -32000
+/// as "the source the user submitted is invalid" and -32700 as "I
+/// received bytes that weren't valid JSON."
+///
+/// On parse errors the message field stays single-line for log-friendly
+/// consumption; the full list of error strings is attached as a
+/// structured `data` array per JSON-RPC 2.0, so callers that want to
+/// surface individual errors can inspect `error.data` rather than
+/// scraping the message. The array is capped at 100 entries with
+/// `truncated: bool` exposing the elision.
+fn format_source_to_response(source: &str) -> Result<serde_json::Value, RpcError> {
+    let parse_result = rustledger_parser::parse(source);
+    if !parse_result.errors.is_empty() {
+        // Cap the per-error array to keep the JSON-RPC response bounded.
+        // A pathological 10MB binary fed into `format.file` can produce
+        // tens of thousands of error strings; the structured response
+        // would otherwise grow multi-megabyte and DOS the embedder's
+        // transport. `total` and `truncated` let the consumer detect
+        // and surface the elision.
+        const MAX_ERRORS: usize = 100;
+        let total = parse_result.errors.len();
+        // Structured per-error object: `message` (rendered Display),
+        // `kind_code` (stable numeric discriminant — see
+        // `rustledger_parser::ParseError::kind_code`), and `span`
+        // (byte range into the source). Consumers can detect specific
+        // error kinds — e.g., `BomInDirectiveBody` is code 26 — and
+        // wire structural UX (a 'Remove BOM' suggestion, a code action)
+        // without regex-matching the message body.
+        let errors: Vec<serde_json::Value> = parse_result
+            .errors
+            .iter()
+            .take(MAX_ERRORS)
+            .map(|e| {
+                // `hint` is optional — serde_json::json! includes it
+                // unconditionally, so we serialize Some -> string and
+                // None -> null. RPC consumers that want to surface a
+                // fix-it suggestion (e.g., 'Remove BOM' for
+                // BomInDirectiveBody) read this field; consumers that
+                // don't can ignore it. ParseError::Display only emits
+                // the primary message, not the hint, so without this
+                // field the hint would be silently dropped at the
+                // FFI boundary.
+                serde_json::json!({
+                    "message": e.to_string(),
+                    "kind_code": e.kind_code(),
+                    "hint": e.hint,
+                    "span": { "start": e.span.start, "end": e.span.end },
+                })
+            })
+            .collect();
+        let message = format!("cannot format source with {total} parse error(s)");
+        let data = serde_json::json!({
+            "errors": errors,
+            "total": total,
+            "truncated": total > MAX_ERRORS,
+        });
+        return Err(RpcError::beancount_parse_error(message).with_data(data));
+    }
+
+    let config = rustledger_core::format::FormatConfig::default();
+    let formatted = rustledger_parser::format_source(source, &parse_result, &config);
+
+    let result = FormatResult { formatted };
+    serde_json::to_value(result).map_err(|e| RpcError::internal_error(e.to_string()))
 }
 
 fn handle_format_entry(params: &serde_json::Value) -> Result<serde_json::Value, RpcError> {
@@ -547,7 +591,7 @@ fn handle_format_entry(params: &serde_json::Value) -> Result<serde_json::Value, 
         .map_err(|e| RpcError::invalid_params(format!("Invalid entry: {e}")))?;
 
     let config = rustledger_core::format::FormatConfig::default();
-    let formatted = rustledger_core::format::format_directive(&directive, &config);
+    let formatted = rustledger_core::format::format_directives([&directive], &config);
 
     let result = FormatResult { formatted };
     serde_json::to_value(result).map_err(|e| RpcError::internal_error(e.to_string()))
@@ -558,18 +602,17 @@ fn handle_format_entries(params: &serde_json::Value) -> Result<serde_json::Value
         .map_err(|e| RpcError::invalid_params(format!("Invalid params: {e}")))?;
 
     let config = rustledger_core::format::FormatConfig::default();
-    let mut formatted_parts = Vec::new();
+    let mut directives: Vec<rustledger_core::Directive> = Vec::with_capacity(params.entries.len());
     for (i, entry) in params.entries.iter().enumerate() {
-        let directive = input_entry_to_directive(entry)
-            .map_err(|e| RpcError::invalid_params(format!("Invalid entry at index {i}: {e}")))?;
-        formatted_parts.push(rustledger_core::format::format_directive(
-            &directive, &config,
-        ));
+        directives.push(
+            input_entry_to_directive(entry).map_err(|e| {
+                RpcError::invalid_params(format!("Invalid entry at index {i}: {e}"))
+            })?,
+        );
     }
+    let formatted = rustledger_core::format::format_directives(directives.iter(), &config);
 
-    let result = FormatResult {
-        formatted: formatted_parts.concat(),
-    };
+    let result = FormatResult { formatted };
     serde_json::to_value(result).map_err(|e| RpcError::internal_error(e.to_string()))
 }
 

@@ -19,7 +19,7 @@ use rustledger_parser::ParseResult;
 use rustledger_parser::logos_lexer::{Token, tokenize};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use super::utils::LineIndex;
+use super::utils::{LineIndex, PositionEncoding};
 
 /// Token types we support.
 pub const TOKEN_TYPES: &[SemanticTokenType] = &[
@@ -141,8 +141,22 @@ fn lexer_token_type(token: &Token) -> Option<u32> {
     }
 }
 
+/// Length of `s` in the negotiated LSP position encoding.
+///
+/// Under [`PositionEncoding::Utf8`] this is the byte length;
+/// under [`PositionEncoding::Utf16`] it is the UTF-16 code-unit count
+/// (so non-BMP scalars contribute 2). Used to emit semantic-token
+/// column offsets and lengths in the wire encoding the client
+/// negotiated.
+fn encoded_len(s: &str, encoding: PositionEncoding) -> u32 {
+    match encoding {
+        PositionEncoding::Utf8 => s.len() as u32,
+        PositionEncoding::Utf16 => s.chars().map(|c| c.len_utf16() as u32).sum::<u32>(),
+    }
+}
+
 /// Collect raw tokens from the lexer output for a source string.
-fn collect_lexer_tokens(source: &str) -> Vec<RawToken> {
+fn collect_lexer_tokens(source: &str, encoding: PositionEncoding) -> Vec<RawToken> {
     let lexer_tokens = tokenize(source);
     let mut raw_tokens = Vec::with_capacity(lexer_tokens.len());
 
@@ -156,18 +170,12 @@ fn collect_lexer_tokens(source: &str) -> Vec<RawToken> {
             // Binary search for the line containing this byte offset.
             let line_idx = line_starts.partition_point(|&start| start <= span.start) - 1;
             let line = line_idx as u32;
-            // Convert byte offset within line to UTF-16 code units for LSP.
+            // Convert byte offset within line to the negotiated wire
+            // encoding (UTF-16 by default; UTF-8 byte offsets if the
+            // client negotiated UTF-8 at initialization).
             let line_start = line_starts[line_idx];
-            let line_bytes = &source[line_start..span.start];
-            let col = line_bytes
-                .chars()
-                .map(|c| c.len_utf16() as u32)
-                .sum::<u32>();
-            let token_bytes = &source[span.start..span.end];
-            let length = token_bytes
-                .chars()
-                .map(|c| c.len_utf16() as u32)
-                .sum::<u32>();
+            let col = encoded_len(&source[line_start..span.start], encoding);
+            let length = encoded_len(&source[span.start..span.end], encoding);
             raw_tokens.push(RawToken {
                 line,
                 start: col,
@@ -187,7 +195,11 @@ fn collect_lexer_tokens(source: &str) -> Vec<RawToken> {
 /// Runs the full lexer (Logos doesn't support partial input) but only builds
 /// `RawToken`s for tokens within the requested range, skipping the UTF-16
 /// column computation for out-of-range tokens.
-fn collect_lexer_tokens_in_range(source: &str, range: &Range) -> Vec<RawToken> {
+fn collect_lexer_tokens_in_range(
+    source: &str,
+    range: &Range,
+    encoding: PositionEncoding,
+) -> Vec<RawToken> {
     let lexer_tokens = tokenize(source);
 
     let line_starts: Vec<usize> = std::iter::once(0)
@@ -216,16 +228,8 @@ fn collect_lexer_tokens_in_range(source: &str, range: &Range) -> Vec<RawToken> {
             let line_idx = line_starts.partition_point(|&start| start <= span.start) - 1;
             let line = line_idx as u32;
             let line_start = line_starts[line_idx];
-            let line_bytes = &source[line_start..span.start];
-            let col = line_bytes
-                .chars()
-                .map(|c| c.len_utf16() as u32)
-                .sum::<u32>();
-            let token_bytes = &source[span.start..span.end];
-            let length = token_bytes
-                .chars()
-                .map(|c| c.len_utf16() as u32)
-                .sum::<u32>();
+            let col = encoded_len(&source[line_start..span.start], encoding);
+            let length = encoded_len(&source[span.start..span.end], encoding);
 
             let raw = RawToken {
                 line,
@@ -343,9 +347,10 @@ pub fn handle_semantic_tokens(
     _params: &SemanticTokensParams,
     source: &str,
     parse_result: &ParseResult,
+    encoding: PositionEncoding,
 ) -> Option<SemanticTokensResult> {
-    let mut raw_tokens = collect_lexer_tokens(source);
-    let line_index = LineIndex::new(source);
+    let mut raw_tokens = collect_lexer_tokens(source, encoding);
+    let line_index = LineIndex::new(source, encoding);
     apply_directive_modifiers(&mut raw_tokens, source, &line_index, parse_result);
 
     // Tokens are already in source order from the lexer
@@ -367,9 +372,10 @@ pub fn handle_semantic_tokens_delta(
     source: &str,
     parse_result: &ParseResult,
     previous_tokens: Option<&[SemanticToken]>,
+    encoding: PositionEncoding,
 ) -> Option<SemanticTokensFullDeltaResult> {
-    let mut raw_tokens = collect_lexer_tokens(source);
-    let line_index = LineIndex::new(source);
+    let mut raw_tokens = collect_lexer_tokens(source, encoding);
+    let line_index = LineIndex::new(source, encoding);
     apply_directive_modifiers(&mut raw_tokens, source, &line_index, parse_result);
     let current_tokens = encode_tokens(&raw_tokens);
 
@@ -428,11 +434,12 @@ pub fn handle_semantic_tokens_range(
     params: &SemanticTokensRangeParams,
     source: &str,
     parse_result: &ParseResult,
+    encoding: PositionEncoding,
 ) -> Option<SemanticTokensRangeResult> {
     let range = params.range;
 
-    let mut raw_tokens = collect_lexer_tokens_in_range(source, &range);
-    let line_index = LineIndex::new(source);
+    let mut raw_tokens = collect_lexer_tokens_in_range(source, &range, encoding);
+    let line_index = LineIndex::new(source, encoding);
     apply_directive_modifiers(&mut raw_tokens, source, &line_index, parse_result);
 
     let tokens = encode_tokens(&raw_tokens);
@@ -478,7 +485,7 @@ mod tests {
             partial_result_params: Default::default(),
         };
 
-        let response = handle_semantic_tokens(&params, source, &result);
+        let response = handle_semantic_tokens(&params, source, &result, PositionEncoding::Utf16);
         assert!(response.is_some());
 
         if let Some(SemanticTokensResult::Tokens(tokens)) = response {
@@ -501,7 +508,7 @@ mod tests {
             partial_result_params: Default::default(),
         };
 
-        let response = handle_semantic_tokens(&params, source, &result);
+        let response = handle_semantic_tokens(&params, source, &result, PositionEncoding::Utf16);
         assert!(response.is_some());
 
         if let Some(SemanticTokensResult::Tokens(tokens)) = response {
@@ -532,7 +539,7 @@ mod tests {
             partial_result_params: Default::default(),
         };
 
-        let response = handle_semantic_tokens(&params, source, &result);
+        let response = handle_semantic_tokens(&params, source, &result, PositionEncoding::Utf16);
         assert!(response.is_some());
 
         if let Some(SemanticTokensResult::Tokens(tokens)) = response {
@@ -561,7 +568,7 @@ mod tests {
             partial_result_params: Default::default(),
         };
 
-        let response = handle_semantic_tokens(&params, source, &result);
+        let response = handle_semantic_tokens(&params, source, &result, PositionEncoding::Utf16);
         assert!(response.is_some());
 
         if let Some(SemanticTokensResult::Tokens(tokens)) = response {
@@ -591,7 +598,7 @@ mod tests {
             partial_result_params: Default::default(),
         };
 
-        let response = handle_semantic_tokens(&params, source, &result);
+        let response = handle_semantic_tokens(&params, source, &result, PositionEncoding::Utf16);
         assert!(response.is_some());
 
         if let Some(SemanticTokensResult::Tokens(tokens)) = response {
@@ -622,7 +629,7 @@ mod tests {
             partial_result_params: Default::default(),
         };
 
-        let response = handle_semantic_tokens(&params, source, &result);
+        let response = handle_semantic_tokens(&params, source, &result, PositionEncoding::Utf16);
         assert!(response.is_some());
 
         if let Some(SemanticTokensResult::Tokens(tokens)) = response {
@@ -661,7 +668,8 @@ mod tests {
             partial_result_params: Default::default(),
         };
 
-        let response = handle_semantic_tokens_range(&params, source, &result);
+        let response =
+            handle_semantic_tokens_range(&params, source, &result, PositionEncoding::Utf16);
         assert!(response.is_some());
 
         if let Some(SemanticTokensRangeResult::Tokens(tokens)) = response {
@@ -681,7 +689,7 @@ mod tests {
             work_done_progress_params: Default::default(),
             partial_result_params: Default::default(),
         };
-        let initial = handle_semantic_tokens(&params, source, &result);
+        let initial = handle_semantic_tokens(&params, source, &result, PositionEncoding::Utf16);
         let initial_tokens = match initial {
             Some(SemanticTokensResult::Tokens(t)) => t.data,
             _ => panic!("Expected tokens"),
@@ -696,8 +704,13 @@ mod tests {
             partial_result_params: Default::default(),
         };
 
-        let delta =
-            handle_semantic_tokens_delta(&delta_params, source, &result, Some(&initial_tokens));
+        let delta = handle_semantic_tokens_delta(
+            &delta_params,
+            source,
+            &result,
+            Some(&initial_tokens),
+            PositionEncoding::Utf16,
+        );
         assert!(delta.is_some());
 
         if let Some(SemanticTokensFullDeltaResult::TokensDelta(d)) = delta {
@@ -768,7 +781,7 @@ mod tests {
             partial_result_params: Default::default(),
         };
 
-        let response = handle_semantic_tokens(&params, source, &result);
+        let response = handle_semantic_tokens(&params, source, &result, PositionEncoding::Utf16);
         assert!(response.is_some(), "should produce tokens for CJK source");
 
         if let Some(SemanticTokensResult::Tokens(tokens)) = response {
@@ -799,7 +812,7 @@ mod tests {
             partial_result_params: Default::default(),
         };
 
-        let response = handle_semantic_tokens(&params, source, &result);
+        let response = handle_semantic_tokens(&params, source, &result, PositionEncoding::Utf16);
         assert!(response.is_some());
 
         if let Some(SemanticTokensResult::Tokens(tokens)) = response {

@@ -5,6 +5,60 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Breaking Changes
+
+- `ParseResult`, `ParseError`, and `ParseErrorKind` are now `#[non_exhaustive]`.
+  Downstream consumers that pattern-match on these types must add a wildcard arm:
+  ```rust
+  // Before — compiled exhaustively pre-this-release:
+  match err.kind {
+      ParseErrorKind::UnexpectedEof => ...,
+      ParseErrorKind::SyntaxError(_) => ...,
+      // ... every variant listed
+  }
+
+  // After — wildcard arm required:
+  match err.kind {
+      ParseErrorKind::UnexpectedEof => ...,
+      ParseErrorKind::SyntaxError(_) => ...,
+      _ => /* fallback for future variants */,
+  }
+  ```
+  Rationale: SemVer-hygiene. Adding a new error variant in a future release is
+  no longer a breaking change for consumers that use a wildcard arm.
+
+- `ParseErrorKind::BomInDirectiveBody` is a new structural variant for the
+  "BOM byte appears mid-directive" diagnostic (kind_code 26). Previously this
+  was reported as a generic `SyntaxError` with a string-matched message; the
+  dedicated variant lets downstream tooling (LSP quick-fix, FFI structural
+  error reporting) detect the case by `matches!()` rather than substring
+  search of the message.
+
+### Features
+
+- `ParseResult::has_leading_bom` records whether the source had a leading UTF-8
+  BOM that the parser stripped before tokenization. The formatter uses this
+  to round-trip the BOM verbatim, so `format(parse(source))` preserves a
+  Windows-encoded file's leading byte sequence even though the parser sees
+  BOM-free coordinates.
+
+- Mid-file BOM recovery (round 17): a BOM token at the start of a directive
+  position is now consumed and reported as a focused single-BOM diagnostic,
+  **without** consuming the following directive into the error span. Previous
+  behavior silently dropped the directive immediately after a mid-file BOM
+  from `result.directives` — a regression caught by extending the
+  `test_mid_file_bom_produces_error` assertion to require both directives
+  surviving.
+
+- `ParseError::every_kind_sample()` (doc-hidden, `#[non_exhaustive]`-aware)
+  returns one `ParseError` per `ParseErrorKind` variant via an exhaustive
+  `match`. Used by integration tests (notably `openrpc_kind_code_sync.rs`)
+  to enforce that downstream wire schemas (openrpc.json) list every kind_code
+  the parser can emit; compiler-enforced because the inner match is
+  exhaustive on `&ParseErrorKind`.
+
 ## [0.13.0](https://github.com/rustledger/rustledger/compare/v0.12.0...v0.13.0) - 2026-04-21
 
 ### Bug Fixes

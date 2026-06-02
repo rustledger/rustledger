@@ -13,7 +13,7 @@
 use crate::{
     Amount, Balance, Close, Commodity, Directive, Event, Note, Open, Pad, Posting, Price,
     Transaction,
-    format::{FormatConfig, format_directive},
+    format::{FormatConfig, FormatLine, format_directive_lines, render_lines},
 };
 use rust_decimal::Decimal;
 use std::str::FromStr;
@@ -37,16 +37,22 @@ impl EdgeCaseCollection {
     }
 
     /// Format all directives to beancount text.
+    ///
+    /// All directives are aligned together against shared, file-wide column
+    /// widths, with a blank line separating each one.
     pub fn to_beancount(&self) -> String {
         let config = FormatConfig::default();
-        let mut output = format!("; Edge cases: {}\n\n", self.category);
+        let mut lines: Vec<FormatLine> = vec![
+            FormatLine::Plain(format!("; Edge cases: {}", self.category)),
+            FormatLine::Plain(String::new()),
+        ];
 
         for directive in &self.directives {
-            output.push_str(&format_directive(directive, &config));
-            output.push_str("\n\n");
+            lines.extend(format_directive_lines(directive, &config));
+            lines.push(FormatLine::Plain(String::new()));
         }
 
-        output
+        render_lines(&lines, &config.alignment)
     }
 }
 

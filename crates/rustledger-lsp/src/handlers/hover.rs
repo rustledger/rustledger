@@ -10,7 +10,7 @@ use rustledger_core::Directive;
 use rustledger_parser::ParseResult;
 
 use super::utils::{
-    commodity_declaration_spans, get_word_at_source_position, is_account_type,
+    PositionEncoding, commodity_declaration_spans, get_word_at_source_position, is_account_type,
     is_currency_like_simple,
 };
 
@@ -19,11 +19,12 @@ pub fn handle_hover(
     params: &HoverParams,
     source: &str,
     parse_result: &ParseResult,
+    encoding: PositionEncoding,
 ) -> Option<Hover> {
     let position = params.text_document_position_params.position;
 
     // Get the word at the cursor position
-    let word = get_word_at_source_position(source, position)?;
+    let word = get_word_at_source_position(source, position, encoding)?;
 
     tracing::debug!("Hover for word: {:?}", word);
 

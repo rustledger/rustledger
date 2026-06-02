@@ -35,7 +35,7 @@ use anyhow::{Context, Result, bail};
 use clap::Parser;
 use parsing::{calculate_balance, parse_amount, parse_date};
 use rustledger_core::NaiveDate;
-use rustledger_core::format::{FormatConfig, format_directive};
+use rustledger_core::format::{FormatConfig, format_directives};
 use rustledger_core::{Amount, Directive, Posting, Transaction};
 use rustledger_parser::parse;
 use rustyline::completion::{Completer, Pair};
@@ -281,7 +281,7 @@ fn run_quick_mode(args: &Args, file: &PathBuf, date: NaiveDate) -> Result<()> {
     // Format and display
     let config = FormatConfig::default();
     let directive = Directive::Transaction(txn);
-    let formatted = format_directive(&directive, &config);
+    let formatted = format_directives([&directive], &config);
 
     if args.dry_run {
         println!("{formatted}");
@@ -517,7 +517,7 @@ fn run_interactive_mode(args: &Args, file: &PathBuf, date: NaiveDate) -> Result<
     // Format and display preview
     let config = FormatConfig::default();
     let directive = Directive::Transaction(txn);
-    let formatted = format_directive(&directive, &config);
+    let formatted = format_directives([&directive], &config);
 
     if args.dry_run {
         println!("\n{formatted}");

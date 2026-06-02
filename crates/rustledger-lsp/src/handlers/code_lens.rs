@@ -101,7 +101,9 @@ pub fn handle_code_lens(
                 });
             }
             Directive::Balance(bal) => {
-                // Store data for resolve - verification is deferred
+                // Store data for resolve: real verification is deferred to
+                // handle_code_lens_resolve because booking the full ledger
+                // is O(N) and the cost is paid per balance assertion.
                 let data = serde_json::json!({
                     "uri": uri,
                     "kind": "balance",
@@ -111,12 +113,34 @@ pub fn handle_code_lens(
                     "expected_currency": bal.amount.currency.to_string(),
                 });
 
+                // Placeholder command set on the initial response so
+                // clients never render the literal "Unresolved lens"
+                // string for balance lenses during the resolve
+                // round-trip window (issue #1245). If `codeLens/resolve`
+                // never lands (cancellation race in nvim's LSP client,
+                // dropped response, etc.), the user still sees a
+                // sensible title instead of "Unresolved lens".
+                //
+                // The resolve handler overwrites this with the real
+                // `✓ Balance: ... USD` title once the calculation
+                // completes, or leaves it in place if the assertion
+                // failed (diagnostics report the failure in that case;
+                // see issue #491).
+                let placeholder = Command {
+                    title: format!(
+                        "Balance: {} {} (checking…)",
+                        bal.amount.number, bal.amount.currency
+                    ),
+                    command: "rledger.noop".to_string(),
+                    arguments: None,
+                };
+
                 lenses.push(CodeLens {
                     range: Range {
                         start: Position::new(line, 0),
                         end: Position::new(line, 0),
                     },
-                    command: None, // Resolved lazily
+                    command: Some(placeholder),
                     data: Some(data),
                 });
             }
@@ -187,11 +211,19 @@ pub fn handle_code_lens_resolve(
             .copied()
             .unwrap_or_default();
 
-        // Only show codelens for passing balance assertions.
-        // Failed assertions are shown as diagnostics (standard IDE behavior).
-        // Showing both would duplicate information (issue #491).
-        if actual_amount == expected_amount {
-            resolved.command = Some(Command {
+        // On passing assertions, show the verified-balance lens.
+        // On failing assertions, the error is surfaced via diagnostics
+        // (standard IDE behavior; showing both would duplicate the
+        // information, see issue #491), so we replace the placeholder
+        // with a brief "(see diagnostic)" callout rather than letting
+        // it stand as a falsely-passing-looking string.
+        //
+        // Crucially, we ALWAYS set `resolved.command` here. The
+        // pre-#1245 path of leaving `command = None` for mismatches
+        // surfaced as nvim rendering the literal string "Unresolved
+        // lens" once the resolve response landed (issue #1245).
+        resolved.command = Some(if actual_amount == expected_amount {
+            Command {
                 title: format!("✓ Balance: {} {}", expected_amount, expected_currency),
                 command: "rledger.showBalanceDetails".to_string(),
                 arguments: Some(vec![serde_json::json!({
@@ -200,9 +232,17 @@ pub fn handle_code_lens_resolve(
                     "expected": format!("{} {}", expected_amount, expected_currency),
                     "actual": format!("{} {}", actual_amount, expected_currency),
                 })]),
-            });
-        }
-        // For mismatches, command stays None - diagnostic will show the error.
+            }
+        } else {
+            Command {
+                title: format!(
+                    "⚠ Balance: {} {} (see diagnostic)",
+                    expected_amount, expected_currency
+                ),
+                command: "rledger.noop".to_string(),
+                arguments: None,
+            }
+        });
     }
 
     // Ensure a command is set for non-balance lenses or malformed balance data.
@@ -363,16 +403,31 @@ mod tests {
         assert!(lenses.is_some());
 
         let lenses = lenses.unwrap();
-        // Balance lens should have data but no command (resolved lazily)
-        let balance_lens = lenses.iter().find(|l| {
-            l.data
-                .as_ref()
-                .and_then(|d| d.get("kind"))
-                .and_then(|v| v.as_str())
-                == Some("balance")
-        });
-        assert!(balance_lens.is_some());
-        assert!(balance_lens.unwrap().command.is_none());
+        // Balance lens carries data for deferred verification, plus a
+        // placeholder command set on the initial response so nvim
+        // never renders the literal "Unresolved lens" string during
+        // the resolve round-trip window (issue #1245). The real ✓ or
+        // ⚠ title lands once `codeLens/resolve` returns.
+        let balance_lens = lenses
+            .iter()
+            .find(|l| {
+                l.data
+                    .as_ref()
+                    .and_then(|d| d.get("kind"))
+                    .and_then(|v| v.as_str())
+                    == Some("balance")
+            })
+            .expect("balance lens emitted");
+        let cmd = balance_lens
+            .command
+            .as_ref()
+            .expect("balance lens carries placeholder command (issue #1245)");
+        assert!(
+            cmd.title.contains("checking"),
+            "placeholder title should mark the lens as still-resolving; got {:?}",
+            cmd.title
+        );
+        assert_eq!(cmd.command, "rledger.noop");
     }
 
     #[test]
@@ -436,12 +491,22 @@ mod tests {
 
         let resolved = handle_code_lens_resolve(lens, &result, None);
 
-        // For mismatched balances, codelens should NOT have a command.
-        // The error is shown via diagnostics instead (issue #491).
+        // Mismatched balances are surfaced via diagnostics (#491), so
+        // the lens still does NOT duplicate the amount/✓ marker. But
+        // it MUST carry SOME command, otherwise nvim renders the
+        // literal "Unresolved lens" string for the line (issue #1245).
+        // We use a "⚠ ... (see diagnostic)" callout that points the
+        // user at the diagnostic without duplicating its content.
+        let cmd = resolved
+            .command
+            .as_ref()
+            .expect("mismatched balance must carry a command (issue #1245)");
         assert!(
-            resolved.command.is_none(),
-            "Mismatched balance should not show codelens (diagnostic handles it)"
+            cmd.title.contains("see diagnostic"),
+            "mismatched balance lens should point at the diagnostic; got {:?}",
+            cmd.title
         );
+        assert_eq!(cmd.command, "rledger.noop");
     }
 
     #[test]
@@ -556,11 +621,20 @@ mod tests {
             })),
         };
 
-        // Without full ledger (single-file mode) - balance would be 5000, mismatch!
+        // Without full ledger (single-file mode) the balance comes out to
+        // 5000 (no offsetting -50 from credit_card.bean), so the assertion
+        // mismatches. Pre-#1245 this surfaced as `command: None`; now we
+        // emit the "⚠ ... (see diagnostic)" callout so nvim never renders
+        // the literal "Unresolved lens" string.
         let resolved_single = handle_code_lens_resolve(lens.clone(), &bank_result, None);
+        let single_cmd = resolved_single
+            .command
+            .as_ref()
+            .expect("mismatched balance must carry a command (issue #1245)");
         assert!(
-            resolved_single.command.is_none(),
-            "Single-file mode should see mismatch (5000 != 4950)"
+            single_cmd.title.contains("see diagnostic"),
+            "single-file mismatch should point at the diagnostic; got {:?}",
+            single_cmd.title
         );
 
         // With full ledger (multi-file mode) - balance is 5000 - 50 = 4950, match!
@@ -606,5 +680,82 @@ mod tests {
             resolved.command.is_some(),
             "Lens must always have a command after resolve"
         );
+    }
+
+    /// Regression for issue #1245: balance lenses must NEVER be emitted
+    /// with `command: None`, because nvim's LSP client renders that as
+    /// the literal string "Unresolved lens" until the resolve response
+    /// lands and is processed. If the resolve races with a cancellation
+    /// (or never lands), the lens stays visible as "Unresolved lens"
+    /// for the lifetime of the session. The placeholder command we emit
+    /// on the initial response, plus the always-set command on resolve,
+    /// together break that failure mode.
+    ///
+    /// The user's reproduction (`balance Assets:Bank:Checking 5 USD`
+    /// on date `2024-01-03` after a `+5 USD` posting on `2024-01-01`)
+    /// passes server-side for both `2024-01-02` and `2024-01-03`. The
+    /// observed inconsistency was a client-side timing artifact of the
+    /// `command: None` round-trip window; this test pins the invariant
+    /// that closes that window.
+    #[test]
+    fn issue_1245_balance_lens_always_has_command() {
+        // Sanity: both initial-emission and resolve paths must produce
+        // a command for both passing and failing balance assertions.
+        for (label, expected) in [
+            ("passing match", "5"),
+            ("mismatch", "999"), // forces mismatch path
+        ] {
+            let source = format!(
+                "2024-01-01 open Assets:Bank:Checking USD\n\
+                 2024-01-01 open Income:Salary\n\
+                 \n\
+                 2024-01-01 * \"Paycheck\"\n  \
+                   Assets:Bank:Checking  5 USD\n  \
+                   Income:Salary\n\
+                 \n\
+                 2024-01-03 balance Assets:Bank:Checking {expected} USD\n"
+            );
+            let parse_result = parse(&source);
+            let params = CodeLensParams {
+                text_document: lsp_types::TextDocumentIdentifier {
+                    uri: "file:///test.beancount".parse().unwrap(),
+                },
+                work_done_progress_params: Default::default(),
+                partial_result_params: Default::default(),
+            };
+
+            // 1. Initial emission must carry a placeholder command.
+            let lenses = handle_code_lens(
+                &params,
+                &source,
+                &parse_result,
+                super::PositionEncoding::Utf16,
+            )
+            .expect("lenses emitted");
+            let balance_lens = lenses
+                .iter()
+                .find(|l| {
+                    l.data
+                        .as_ref()
+                        .and_then(|d| d.get("kind"))
+                        .and_then(|v| v.as_str())
+                        == Some("balance")
+                })
+                .unwrap_or_else(|| panic!("[{label}] balance lens emitted"))
+                .clone();
+            assert!(
+                balance_lens.command.is_some(),
+                "[{label}] initial balance lens must carry a placeholder command (issue #1245); \
+                 nvim renders `command: None` as the literal string \"Unresolved lens\""
+            );
+
+            // 2. After resolve, the command must remain set (replaced
+            //    with the real ✓ or ⚠ callout, never reset to None).
+            let resolved = handle_code_lens_resolve(balance_lens, &parse_result, None);
+            assert!(
+                resolved.command.is_some(),
+                "[{label}] resolved balance lens must carry a command (issue #1245)"
+            );
+        }
     }
 }

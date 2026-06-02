@@ -14,15 +14,16 @@ use rustledger_core::{BookingMethod, Decimal, Directive};
 use rustledger_parser::{ParseResult, Spanned};
 use std::collections::HashMap;
 
-use super::utils::LineIndex;
+use super::utils::{LineIndex, PositionEncoding};
 
 /// Handle a code lens request.
 pub fn handle_code_lens(
     params: &CodeLensParams,
     source: &str,
     parse_result: &ParseResult,
+    encoding: PositionEncoding,
 ) -> Option<Vec<CodeLens>> {
-    let line_index = LineIndex::new(source);
+    let line_index = LineIndex::new(source, encoding);
     let mut lenses = Vec::new();
     let uri = params.text_document.uri.as_str();
 
@@ -127,6 +128,7 @@ pub fn handle_code_lens(
     lenses.extend(super::import::import_code_lens(
         &parse_result.directives,
         source,
+        encoding,
     ));
 
     if lenses.is_empty() {
@@ -325,7 +327,7 @@ mod tests {
             partial_result_params: Default::default(),
         };
 
-        let lenses = handle_code_lens(&params, source, &result);
+        let lenses = handle_code_lens(&params, source, &result, PositionEncoding::Utf16);
         assert!(lenses.is_some());
 
         let lenses = lenses.unwrap();
@@ -357,7 +359,7 @@ mod tests {
             partial_result_params: Default::default(),
         };
 
-        let lenses = handle_code_lens(&params, source, &result);
+        let lenses = handle_code_lens(&params, source, &result, PositionEncoding::Utf16);
         assert!(lenses.is_some());
 
         let lenses = lenses.unwrap();

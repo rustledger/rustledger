@@ -113,9 +113,12 @@ pub(super) fn cmd_roundtrip<W: Write>(file: &PathBuf, writer: &mut W) -> Result<
     writeln!(writer)?;
     writeln!(writer, "Step 2: Checking byte-stability per file...")?;
     for sf in files {
-        // No bespoke BOM strip here — the parser's lexer now skips a
-        // leading UTF-8 BOM transparently, so the doctor sees what the
-        // CLI sees byte-for-byte.
+        // No bespoke BOM strip here — `rustledger_parser::parse`
+        // strips a strict-byte-0 BOM via `crate::bom::strip_leading`
+        // at its public entry and records the outcome in
+        // `ParseResult::has_leading_bom`; `format_source` re-prepends
+        // it on output. The doctor sees what the CLI sees byte-for-
+        // byte and the BOM-preservation contract lives in one place.
         let source: &str = &sf.source;
         let parse_result = parse(source);
         if !parse_result.errors.is_empty() {
@@ -227,10 +230,20 @@ mod tests {
         assert!(report.contains("SUCCESS"), "{report}");
     }
 
-    /// BOM at the start of the file must NOT block the round-trip
-    /// diagnosis — the parser's lexer skips it transparently.
+    /// BOM at the start of the file must round-trip byte-stable.
+    /// `rustledger_parser::parse` strips the BOM via
+    /// `crate::bom::strip_leading`, records the outcome in
+    /// `has_leading_bom`, and `format_source` re-prepends it via
+    /// `crate::bom::restore_leading`. The doctor command exercises the
+    /// full parse → format pipeline, so a regression in EITHER end of
+    /// the strip/restore pair would surface here as `[reflow]` or
+    /// `[MISMATCH]` rather than `[stable]`. Asserting `[stable]`
+    /// (rather than just "no parse error") pins the architectural
+    /// invariant at the CLI surface — the parser-level
+    /// `format_source_two_pass_idempotent` test covers the unit-level
+    /// invariant, this one covers the doctor's end-to-end path.
     #[test]
-    fn bom_prefixed_file_does_not_abort() {
+    fn bom_prefixed_file_round_trips_stable() {
         let dir = TempDir::new().unwrap();
         let with_bom = "\u{FEFF}2024-01-01 open Assets:Cash\n";
         let p = write_file(dir.path(), "ledger.beancount", with_bom);
@@ -240,6 +253,10 @@ mod tests {
         assert!(
             !report.to_lowercase().contains("parse error"),
             "BOM should not produce a parse error: {report}"
+        );
+        assert!(
+            report.contains("[stable]"),
+            "BOM-prefixed file should round-trip byte-stable; got: {report}"
         );
     }
 

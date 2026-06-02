@@ -29,6 +29,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod bom;
 mod error;
 mod format;
 pub mod logos_lexer;
@@ -41,7 +42,13 @@ pub use rustledger_core::{InternedStr, SYNTHESIZED_FILE_ID, Span, Spanned};
 use rustledger_core::Directive;
 
 /// Result of parsing a beancount file.
+///
+/// Marked `#[non_exhaustive]` so external consumers must go through
+/// [`parse`] rather than constructing the struct by literal. Future
+/// field additions (e.g., diagnostic metadata, source-map back-
+/// references) then land as non-breaking changes.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct ParseResult {
     /// Successfully parsed directives.
     pub directives: Vec<Spanned<Directive>>,
@@ -87,6 +94,22 @@ pub struct ParseResult {
     /// (today: every LSP handler) can ignore `file_id`; future
     /// multi-file consumers must remember to thread it through.
     pub currency_occurrences: Vec<Spanned<rustledger_core::Currency>>,
+    /// `true` iff the parsed source began with a UTF-8 BOM (strict
+    /// byte 0).
+    ///
+    /// This is the **single source of truth** for downstream consumers
+    /// that need to know whether to preserve a leading BOM on output
+    /// (notably `format_source`). Do NOT inspect the source bytes
+    /// directly; the parser already handled the strip/detect logic in
+    /// one place ([`crate::bom::strip_leading`]) and stored the result
+    /// here. Reproducing the check elsewhere is exactly the contract-
+    /// drift class of bug this field was introduced to eliminate.
+    ///
+    /// Span coordinates in this `ParseResult` are in the **original
+    /// source frame** — i.e., if `has_leading_bom` is true, spans
+    /// already include the 3-byte BOM offset and index directly into
+    /// the caller's source.
+    pub has_leading_bom: bool,
 }
 
 /// A warning from the parser (non-fatal).
@@ -122,6 +145,7 @@ impl ParseWarning {
 /// # Returns
 ///
 /// A `ParseResult` containing directives, options, includes, plugins, and errors.
+#[must_use]
 pub fn parse(source: &str) -> ParseResult {
     parser::parse(source)
 }
@@ -129,6 +153,7 @@ pub fn parse(source: &str) -> ParseResult {
 /// Parse beancount source code, returning only directives and errors.
 ///
 /// This is a simpler interface when you don't need options/includes/plugins.
+#[must_use]
 pub fn parse_directives(source: &str) -> (Vec<Spanned<Directive>>, Vec<ParseError>) {
     let result = parse(source);
     (result.directives, result.errors)

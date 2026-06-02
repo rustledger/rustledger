@@ -17,7 +17,7 @@ use lsp_types::{DocumentRangeFormattingParams, TextEdit};
 use rustledger_parser::ParseResult;
 
 use super::formatting::format_document;
-use super::utils::{document_format_config, rope_lsp_position_to_byte};
+use super::utils::{LineIndex, PositionEncoding, document_format_config};
 
 /// Handle a `textDocument/rangeFormatting` request.
 ///
@@ -32,13 +32,21 @@ pub fn handle_range_formatting(
     params: &DocumentRangeFormattingParams,
     source: &str,
     parse_result: &ParseResult,
+    encoding: PositionEncoding,
 ) -> Option<Vec<TextEdit>> {
     let config = document_format_config(Some(&params.options));
-    let all_edits = format_document(source, parse_result, &config)?;
+    let all_edits = format_document(source, parse_result, &config, encoding)?;
 
-    let rope = ropey::Rope::from_str(source);
-    let range_start_byte = rope_lsp_position_to_byte(&rope, params.range.start);
-    let mut range_end_byte = rope_lsp_position_to_byte(&rope, params.range.end);
+    let line_index = LineIndex::new(source, encoding);
+    // Both the request range AND the returned edit ranges are in the
+    // negotiated encoding; resolve them through the same index.
+    // Client-supplied positions that overshoot a line return None;
+    // a malformed range short-circuits to a no-op rather than risking
+    // misaligned clip boundaries.
+    let range_start_byte =
+        line_index.position_to_offset(params.range.start.line, params.range.start.character)?;
+    let mut range_end_byte =
+        line_index.position_to_offset(params.range.end.line, params.range.end.character)?;
     // Reject empty / inverted ranges FIRST, before any snap. A
     // zero-width range (start == end) is a cursor position, not a
     // selection; widening it via the EOL snap below would convert a
@@ -67,7 +75,7 @@ pub fn handle_range_formatting(
 
     let kept: Vec<TextEdit> = all_edits
         .into_iter()
-        .filter(|edit| edit_inside_range(&rope, edit, range_start_byte, range_end_byte))
+        .filter(|edit| edit_inside_range(&line_index, edit, range_start_byte, range_end_byte))
         .collect();
     if kept.is_empty() { None } else { Some(kept) }
 }
@@ -77,13 +85,21 @@ pub fn handle_range_formatting(
 /// boundaries, since a pure insertion at the selection start is
 /// semantically inside the selection).
 fn edit_inside_range(
-    rope: &ropey::Rope,
+    line_index: &LineIndex,
     edit: &TextEdit,
     range_start: usize,
     range_end: usize,
 ) -> bool {
-    let edit_start = rope_lsp_position_to_byte(rope, edit.range.start);
-    let edit_end = rope_lsp_position_to_byte(rope, edit.range.end);
+    let Some(edit_start) =
+        line_index.position_to_offset(edit.range.start.line, edit.range.start.character)
+    else {
+        return false;
+    };
+    let Some(edit_end) =
+        line_index.position_to_offset(edit.range.end.line, edit.range.end.character)
+    else {
+        return false;
+    };
     edit_start >= range_start && edit_end <= range_end
 }
 
@@ -112,7 +128,7 @@ mod tests {
             start: Position::new(0, 0),
             end: Position::new(0, 27),
         });
-        assert!(handle_range_formatting(&p, source, &result).is_none());
+        assert!(handle_range_formatting(&p, source, &result, PositionEncoding::Utf16).is_none());
     }
 
     #[test]
@@ -123,7 +139,8 @@ mod tests {
             start: Position::new(0, 0),
             end: Position::new(3, 0),
         });
-        let edits = handle_range_formatting(&p, source, &result).expect("expected edits");
+        let edits = handle_range_formatting(&p, source, &result, PositionEncoding::Utf16)
+            .expect("expected edits");
         assert!(!edits.is_empty());
     }
 
@@ -140,7 +157,8 @@ mod tests {
             start: Position::new(4, 0),
             end: Position::new(7, 0),
         });
-        let edits = handle_range_formatting(&p, source, &result).expect("expected edits");
+        let edits = handle_range_formatting(&p, source, &result, PositionEncoding::Utf16)
+            .expect("expected edits");
         for edit in &edits {
             // Inclusive lower bound, exclusive upper bound.
             assert!(
@@ -162,13 +180,22 @@ mod tests {
             start: Position::new(0, 0),
             end: Position::new(3, 0),
         });
-        let edits = handle_range_formatting(&p, source, &result).unwrap_or_default();
-        let rope = ropey::Rope::from_str(source);
-        let range_start = rope_lsp_position_to_byte(&rope, p.range.start);
-        let range_end = rope_lsp_position_to_byte(&rope, p.range.end);
+        let edits = handle_range_formatting(&p, source, &result, PositionEncoding::Utf16)
+            .unwrap_or_default();
+        let line_index = LineIndex::new(source, PositionEncoding::Utf16);
+        let range_start = line_index
+            .position_to_offset(p.range.start.line, p.range.start.character)
+            .expect("range start in bounds");
+        let range_end = line_index
+            .position_to_offset(p.range.end.line, p.range.end.character)
+            .expect("range end in bounds");
         for edit in &edits {
-            let s = rope_lsp_position_to_byte(&rope, edit.range.start);
-            let e = rope_lsp_position_to_byte(&rope, edit.range.end);
+            let s = line_index
+                .position_to_offset(edit.range.start.line, edit.range.start.character)
+                .expect("edit start in bounds");
+            let e = line_index
+                .position_to_offset(edit.range.end.line, edit.range.end.character)
+                .expect("edit end in bounds");
             assert!(
                 s >= range_start && e <= range_end,
                 "edit {edit:?} (bytes {s}..{e}) escapes byte range {range_start}..{range_end}"
@@ -189,7 +216,8 @@ mod tests {
             start: Position::new(0, 0),
             end: Position::new(0, source.encode_utf16().count() as u32),
         });
-        let edits = handle_range_formatting(&p, source, &result).expect("expected edits");
+        let edits = handle_range_formatting(&p, source, &result, PositionEncoding::Utf16)
+            .expect("expected edits");
         assert!(
             !edits.is_empty(),
             "the trailing-newline insertion must be kept"
@@ -214,7 +242,7 @@ mod tests {
             start: Position::new(1, 0),
             end: Position::new(1, line1.encode_utf16().count() as u32),
         });
-        let edits = handle_range_formatting(&p, source, &result)
+        let edits = handle_range_formatting(&p, source, &result, PositionEncoding::Utf16)
             .expect("EOL selection should preserve the line-replace edit");
         assert!(!edits.is_empty(), "got {edits:?}");
     }
@@ -229,7 +257,7 @@ mod tests {
             start: Position::new(0, 5),
             end: Position::new(0, 5),
         });
-        assert!(handle_range_formatting(&p, source, &result).is_none());
+        assert!(handle_range_formatting(&p, source, &result, PositionEncoding::Utf16).is_none());
     }
 
     /// Cursor on an empty line: the EOL snap MUST run after the
@@ -248,7 +276,7 @@ mod tests {
             end: Position::new(1, 0),
         });
         assert!(
-            handle_range_formatting(&p, source, &result).is_none(),
+            handle_range_formatting(&p, source, &result, PositionEncoding::Utf16).is_none(),
             "empty range on '\\n' byte must NOT be widened by the snap"
         );
     }
@@ -267,7 +295,7 @@ mod tests {
             start: Position::new(1, 0),
             end: Position::new(1, line1.encode_utf16().count() as u32),
         });
-        let edits = handle_range_formatting(&p, source, &result)
+        let edits = handle_range_formatting(&p, source, &result, PositionEncoding::Utf16)
             .expect("CRLF EOL selection should preserve the line-replace edit");
         assert!(!edits.is_empty(), "got {edits:?}");
     }
@@ -284,6 +312,6 @@ mod tests {
             start: Position::new(0, 0),
             end: Position::new(2, 0),
         });
-        assert!(handle_range_formatting(&p, source, &result).is_none());
+        assert!(handle_range_formatting(&p, source, &result, PositionEncoding::Utf16).is_none());
     }
 }

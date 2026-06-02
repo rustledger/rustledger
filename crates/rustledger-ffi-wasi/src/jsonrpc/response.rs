@@ -42,6 +42,20 @@ impl Response {
     }
 
     /// Create a parse error response (no ID available).
+    ///
+    /// Wraps [`RpcError::parse_error`] (code -32700). Per JSON-RPC 2.0,
+    /// -32700 is RESERVED for the case where the server received text
+    /// that could not be parsed as JSON — i.e. a transport-layer fault
+    /// on the request envelope. Use this ONLY for genuinely malformed
+    /// JSON input.
+    ///
+    /// For application-level beancount parse failures (the source file
+    /// the user asked us to format/load/validate has syntax errors),
+    /// build a response from [`RpcError::beancount_parse_error`] (code
+    /// -32000) instead. Conflating the two causes JSON-RPC client
+    /// libraries to retry the request, surface 'server sent bad JSON'
+    /// to the user, or otherwise misclassify a content-level error as
+    /// a transport-level one.
     pub fn parse_error(details: impl Into<String>) -> Self {
         Self::error(None, RpcError::parse_error(details))
     }

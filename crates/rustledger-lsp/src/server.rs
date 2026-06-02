@@ -18,11 +18,19 @@ pub struct Server {
     init_params: InitializeParams,
     /// LSP configuration parsed from init options.
     config: LspConfig,
+    /// Position encoding negotiated with the client during
+    /// `initialize`. Handler code emitting `Position` values must
+    /// consult this so output aligns with what the client expects.
+    position_encoding: crate::handlers::utils::PositionEncoding,
 }
 
 impl Server {
     /// Create a new LSP server from a connection.
-    pub fn new(connection: Connection, init_params: InitializeParams) -> Self {
+    pub fn new(
+        connection: Connection,
+        init_params: InitializeParams,
+        position_encoding: crate::handlers::utils::PositionEncoding,
+    ) -> Self {
         // Parse configuration from initialization options
         let config = LspConfig::from_init_options(init_params.initialization_options.as_ref());
 
@@ -34,6 +42,7 @@ impl Server {
             connection,
             init_params,
             config,
+            position_encoding,
         }
     }
 
@@ -55,8 +64,10 @@ impl Server {
         }
 
         // Run the main event loop with the journal file configuration
+        // and the negotiated position encoding (so handlers emit
+        // positions in the encoding the client expects).
         let (sender, receiver) = (self.connection.sender, self.connection.receiver);
-        run_main_loop(receiver, sender, journal_file);
+        run_main_loop(receiver, sender, journal_file, self.position_encoding);
 
         tracing::info!("Server shutdown complete");
     }
@@ -164,6 +175,15 @@ pub fn start_stdio() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             encs.contains(&lsp_types::PositionEncodingKind::UTF8)
                 .then_some(lsp_types::PositionEncodingKind::UTF8)
         });
+
+    // Derive the handler-facing `PositionEncoding` once, BEFORE
+    // `position_encoding` moves into the `ServerCapabilities` field
+    // below. The `Option<PositionEncodingKind>` is non-Copy, so we
+    // can't borrow it after the move; computing here also makes the
+    // negotiated-encoding-vs-handler-encoding mapping explicit at
+    // the negotiation site.
+    let handler_encoding =
+        crate::handlers::utils::PositionEncoding::from_negotiated(position_encoding.as_ref());
 
     // Build server capabilities
     let capabilities = lsp_types::ServerCapabilities {
@@ -277,8 +297,9 @@ pub fn start_stdio() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     tracing::info!("LSP initialized successfully");
 
-    // Create and run server
-    let server = Server::new(connection, init_params);
+    // Create and run server with the handler-facing position encoding
+    // (derived above at the negotiation site).
+    let server = Server::new(connection, init_params, handler_encoding);
     server.run();
 
     // Wait for IO threads to finish

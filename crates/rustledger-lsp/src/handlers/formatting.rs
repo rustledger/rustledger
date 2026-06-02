@@ -18,16 +18,18 @@
 //!   editing through a parse error. Alignment-named commands deliberately
 //!   skip it.
 //!
-//! Edits use UTF-16 LSP positions (LSP 3.17 default). The per-hunk
-//! algorithm in `minimal_diff_edits` emits one edit per maximal run of
-//! differing lines (driven by `similar::TextDiff::from_lines`), preserving
-//! the editor's cursor and undo granularity across unchanged blocks.
+//! Edits are emitted in the LSP position encoding negotiated with the
+//! client (UTF-16 by spec default; UTF-8 when modern editors negotiate).
+//! The per-hunk algorithm in `minimal_diff_edits` emits one edit per
+//! maximal run of differing lines (driven by
+//! `similar::TextDiff::from_lines`), preserving the editor's cursor
+//! and undo granularity across unchanged blocks.
 
 use lsp_types::{DocumentFormattingParams, Position, Range, TextEdit};
 use rustledger_core::FormatConfig;
 use rustledger_parser::{ParseResult, format_source};
 
-use super::utils::{document_format_config, rope_byte_to_lsp_position};
+use super::utils::{LineIndex, PositionEncoding, document_format_config};
 
 /// Handle a `textDocument/formatting` request.
 ///
@@ -39,9 +41,10 @@ pub fn handle_formatting(
     params: &DocumentFormattingParams,
     source: &str,
     parse_result: &ParseResult,
+    encoding: PositionEncoding,
 ) -> Option<Vec<TextEdit>> {
     let config = document_format_config(Some(&params.options));
-    if let Some(edits) = format_document(source, parse_result, &config) {
+    if let Some(edits) = format_document(source, parse_result, &config, encoding) {
         return Some(edits);
     }
     // Parse error or already canonical. The "already canonical" case
@@ -49,7 +52,7 @@ pub fn handle_formatting(
     // parse_result.errors so it only runs when canonical formatting
     // couldn't.
     if !parse_result.errors.is_empty() {
-        return surface_cleanup_edits(source);
+        return surface_cleanup_edits(source, encoding);
     }
     None
 }
@@ -65,6 +68,7 @@ pub fn format_document(
     source: &str,
     parse_result: &ParseResult,
     config: &FormatConfig,
+    encoding: PositionEncoding,
 ) -> Option<Vec<TextEdit>> {
     if !parse_result.errors.is_empty() {
         return None;
@@ -73,7 +77,7 @@ pub fn format_document(
     if formatted == source {
         return None;
     }
-    Some(minimal_diff_edits(source, &formatted))
+    Some(minimal_diff_edits(source, &formatted, encoding))
 }
 
 /// Per-line cleanup pass: strip trailing space/tab from every line, and
@@ -82,9 +86,12 @@ pub fn format_document(
 /// tabs inside string literals, comments, or anywhere past the leading
 /// whitespace are preserved so we never silently mutate content.
 ///
+/// `encoding` is the negotiated LSP wire encoding; the emitted line-end
+/// column is computed accordingly (UTF-8 bytes vs. UTF-16 code units).
+///
 /// Returns `None` when no line needs changing.
 #[must_use]
-pub fn surface_cleanup_edits(source: &str) -> Option<Vec<TextEdit>> {
+pub fn surface_cleanup_edits(source: &str, encoding: PositionEncoding) -> Option<Vec<TextEdit>> {
     let mut edits = Vec::new();
     for (line_num, line) in source.split('\n').enumerate() {
         let line_num = line_num as u32;
@@ -92,11 +99,14 @@ pub fn surface_cleanup_edits(source: &str) -> Option<Vec<TextEdit>> {
         if cleaned == line {
             continue;
         }
-        let line_utf16_len = line.encode_utf16().count() as u32;
+        let line_end_col: u32 = match encoding {
+            PositionEncoding::Utf8 => line.len() as u32,
+            PositionEncoding::Utf16 => line.encode_utf16().count() as u32,
+        };
         edits.push(TextEdit {
             range: Range {
                 start: Position::new(line_num, 0),
-                end: Position::new(line_num, line_utf16_len),
+                end: Position::new(line_num, line_end_col),
             },
             new_text: cleaned,
         });
@@ -166,13 +176,17 @@ fn clean_line(line: &str) -> String {
 /// Two ropes are constructed up front (one each for source and
 /// formatted) and threaded through the helpers, so the per-edit work is
 /// O(1) lookups rather than O(N) rope construction per call.
-fn minimal_diff_edits(source: &str, formatted: &str) -> Vec<TextEdit> {
+fn minimal_diff_edits(source: &str, formatted: &str, encoding: PositionEncoding) -> Vec<TextEdit> {
     use similar::{DiffTag, TextDiff};
 
     let src_rope = ropey::Rope::from_str(source);
     let fmt_rope = ropey::Rope::from_str(formatted);
     let diff = TextDiff::from_lines(source, formatted);
     let mut edits: Vec<TextEdit> = Vec::new();
+    // Source line index for emitting edits in the negotiated encoding.
+    // The rope is kept only for `line_to_byte` lookups during diff
+    // resolution; column math goes through LineIndex.
+    let src_index = LineIndex::new(source, encoding);
 
     for op in diff.ops() {
         match op.tag() {
@@ -207,10 +221,12 @@ fn minimal_diff_edits(source: &str, formatted: &str) -> Vec<TextEdit> {
                 }
                 let edit_start = src_start + sub_start;
                 let edit_end = src_start + sub_end;
+                let (sl, sc) = src_index.offset_to_position(edit_start);
+                let (el, ec) = src_index.offset_to_position(edit_end);
                 edits.push(TextEdit {
                     range: Range {
-                        start: rope_byte_to_lsp_position(&src_rope, edit_start),
-                        end: rope_byte_to_lsp_position(&src_rope, edit_end),
+                        start: Position::new(sl, sc),
+                        end: Position::new(el, ec),
                     },
                     new_text: sub_new.to_string(),
                 });
@@ -299,7 +315,7 @@ fn line_idx_to_byte(rope: &ropey::Rope, line: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::handlers::utils::lsp_position_to_byte;
+    use crate::handlers::utils::LineIndex;
     use rustledger_parser::parse;
 
     fn apply(source: &str, edits: &[TextEdit]) -> String {
@@ -313,8 +329,17 @@ mod tests {
         });
         let mut out = source.to_string();
         for edit in sorted {
-            let start = lsp_position_to_byte(&out, edit.range.start);
-            let end = lsp_position_to_byte(&out, edit.range.end);
+            // Build a fresh LineIndex per edit because the buffer
+            // mutates between edits; production handlers apply edits
+            // client-side, so this O(edits * source.len()) cost is
+            // test-only.
+            let idx = LineIndex::new(&out, PositionEncoding::Utf16);
+            let start = idx
+                .position_to_offset(edit.range.start.line, edit.range.start.character)
+                .expect("edit start in bounds");
+            let end = idx
+                .position_to_offset(edit.range.end.line, edit.range.end.character)
+                .expect("edit end in bounds");
             out.replace_range(start..end, &edit.new_text);
         }
         out
@@ -345,7 +370,8 @@ mod tests {
     fn removes_trailing_whitespace() {
         let source = "2024-01-01 open Assets:Bank USD   \n";
         let result = parse(source);
-        let edits = handle_formatting(&params(), source, &result).expect("expected edits");
+        let edits = handle_formatting(&params(), source, &result, PositionEncoding::Utf16)
+            .expect("expected edits");
         assert_well_formed(&edits);
         let after = apply(source, &edits);
         assert_eq!(after, "2024-01-01 open Assets:Bank USD\n");
@@ -355,7 +381,8 @@ mod tests {
     fn converts_tabs_to_spaces() {
         let source = "2024-01-15 * \"Test\"\n\tAssets:Bank  -5.00 USD\n\tExpenses:Food\n";
         let result = parse(source);
-        let edits = handle_formatting(&params(), source, &result).expect("expected edits");
+        let edits = handle_formatting(&params(), source, &result, PositionEncoding::Utf16)
+            .expect("expected edits");
         assert_well_formed(&edits);
         let after = apply(source, &edits);
         assert!(!after.contains('\t'), "got {after:?}");
@@ -377,7 +404,8 @@ mod tests {
             result.errors
         );
 
-        let edits = handle_formatting(&params(), source, &result).expect("expected edits");
+        let edits = handle_formatting(&params(), source, &result, PositionEncoding::Utf16)
+            .expect("expected edits");
         assert_well_formed(&edits);
         let after = apply(source, &edits);
 
@@ -408,7 +436,8 @@ mod tests {
     Expenses:Food
 ";
         let result = parse(source);
-        let edits = handle_formatting(&params(), source, &result).expect("expected edits");
+        let edits = handle_formatting(&params(), source, &result, PositionEncoding::Utf16)
+            .expect("expected edits");
         assert_well_formed(&edits);
         let after = apply(source, &edits);
         assert!(after.contains("; my comment"), "got {after:?}");
@@ -423,7 +452,8 @@ mod tests {
   Expenses:Food
 ";
         let result = parse(source);
-        let edits = handle_formatting(&params(), source, &result).expect("expected edits");
+        let edits = handle_formatting(&params(), source, &result, PositionEncoding::Utf16)
+            .expect("expected edits");
         assert_well_formed(&edits);
         let after = apply(source, &edits);
         let cli = format_source(source, &result, &FormatConfig::default());
@@ -434,7 +464,8 @@ mod tests {
     fn source_without_trailing_newline_gets_one() {
         let source = "; comment";
         let result = parse(source);
-        let edits = handle_formatting(&params(), source, &result).expect("expected edits");
+        let edits = handle_formatting(&params(), source, &result, PositionEncoding::Utf16)
+            .expect("expected edits");
         assert_well_formed(&edits);
         let after = apply(source, &edits);
         assert_eq!(after, "; comment\n");
@@ -448,14 +479,15 @@ mod tests {
             format_source(source, &result, &FormatConfig::default()),
             source
         );
-        assert!(handle_formatting(&params(), source, &result).is_none());
+        assert!(handle_formatting(&params(), source, &result, PositionEncoding::Utf16).is_none());
     }
 
     #[test]
     fn non_ascii_payee_roundtrips() {
         let source = "2024-01-15 * \"Café\"\n    Assets:Bank  -1.00 USD\n  Expenses:Food\n";
         let result = parse(source);
-        let edits = handle_formatting(&params(), source, &result).expect("expected edits");
+        let edits = handle_formatting(&params(), source, &result, PositionEncoding::Utf16)
+            .expect("expected edits");
         assert_well_formed(&edits);
         let after = apply(source, &edits);
         let cli = format_source(source, &result, &FormatConfig::default());
@@ -478,7 +510,8 @@ mod tests {
   Expenses:Coffee
 ";
         let result = parse(source);
-        let edits = handle_formatting(&params(), source, &result).expect("expected edits");
+        let edits = handle_formatting(&params(), source, &result, PositionEncoding::Utf16)
+            .expect("expected edits");
         assert_well_formed(&edits);
         let after = apply(source, &edits);
         let cli = format_source(source, &result, &FormatConfig::default());
@@ -496,7 +529,8 @@ mod tests {
         let source = "2024-01-01 open Assets:Bank   \n2024-01-02 not_a_directive\n\tAssets:Bank\n";
         let result = parse(source);
         assert!(!result.errors.is_empty());
-        let edits = handle_formatting(&params(), source, &result).expect("expected cleanup edits");
+        let edits = handle_formatting(&params(), source, &result, PositionEncoding::Utf16)
+            .expect("expected cleanup edits");
         assert_well_formed(&edits);
         let after = apply(source, &edits);
         assert!(!after.contains('\t'));
@@ -509,7 +543,15 @@ mod tests {
         let source = "2024-01-01 not_a_directive\n";
         let result = parse(source);
         assert!(!result.errors.is_empty());
-        assert!(format_document(source, &result, &FormatConfig::default()).is_none());
+        assert!(
+            format_document(
+                source,
+                &result,
+                &FormatConfig::default(),
+                PositionEncoding::Utf16
+            )
+            .is_none()
+        );
     }
 
     // --- surface_cleanup_edits regression tests -----------------------
@@ -519,7 +561,8 @@ mod tests {
     #[test]
     fn surface_cleanup_preserves_crlf() {
         let source = "first\r\nsecond  \r\nthird\t\r\n";
-        let edits = surface_cleanup_edits(source).expect("trailing whitespace requires edits");
+        let edits = surface_cleanup_edits(source, PositionEncoding::Utf16)
+            .expect("trailing whitespace requires edits");
         let after = apply(source, &edits);
         assert!(after.contains("first\r\n"), "first CRLF gone: {after:?}");
         assert!(after.contains("second\r\n"), "second CRLF gone: {after:?}");
@@ -533,7 +576,8 @@ mod tests {
     #[test]
     fn surface_cleanup_only_replaces_leading_tabs() {
         let source = "\t2024-01-01 open Assets:Bank \"col1\tcol2\"\n";
-        let edits = surface_cleanup_edits(source).expect("leading tab requires an edit");
+        let edits = surface_cleanup_edits(source, PositionEncoding::Utf16)
+            .expect("leading tab requires an edit");
         let after = apply(source, &edits);
         assert!(!after.starts_with('\t'));
         assert!(after.starts_with("  "));
@@ -546,7 +590,7 @@ mod tests {
     #[test]
     fn surface_cleanup_noop_on_canonical_input() {
         let source = "2024-01-01 open Assets:Bank USD\n";
-        assert!(surface_cleanup_edits(source).is_none());
+        assert!(surface_cleanup_edits(source, PositionEncoding::Utf16).is_none());
     }
 
     /// Regression for the deep-review finding: the previous
@@ -560,7 +604,7 @@ mod tests {
     fn pure_insert_between_unchanged_lines_lands_at_correct_byte() {
         let source = "a\nb\n";
         let formatted = "a\nX\nb\n";
-        let edits = minimal_diff_edits(source, formatted);
+        let edits = minimal_diff_edits(source, formatted, PositionEncoding::Utf16);
         let after = apply(source, &edits);
         assert_eq!(
             after, formatted,
@@ -572,7 +616,7 @@ mod tests {
     fn pure_insert_at_eof_lands_at_correct_byte() {
         let source = "a\nb\n";
         let formatted = "a\nb\nc\n";
-        let edits = minimal_diff_edits(source, formatted);
+        let edits = minimal_diff_edits(source, formatted, PositionEncoding::Utf16);
         let after = apply(source, &edits);
         assert_eq!(
             after, formatted,
@@ -584,7 +628,7 @@ mod tests {
     fn two_separate_inserts_each_at_correct_byte() {
         let source = "a\nb\nc\n";
         let formatted = "a\nX\nb\nY\nc\n";
-        let edits = minimal_diff_edits(source, formatted);
+        let edits = minimal_diff_edits(source, formatted, PositionEncoding::Utf16);
         let after = apply(source, &edits);
         assert_eq!(after, formatted, "multi-insert anchored wrong: {edits:?}");
     }
@@ -597,7 +641,7 @@ mod tests {
     fn sub_line_precision_for_single_byte_change() {
         let source = "  Assets:Bank  -5.00 USD\n";
         let formatted = "  Assets:Bank  -6.00 USD\n";
-        let edits = minimal_diff_edits(source, formatted);
+        let edits = minimal_diff_edits(source, formatted, PositionEncoding::Utf16);
         assert_eq!(edits.len(), 1, "{edits:?}");
         let edit = &edits[0];
         assert_eq!(

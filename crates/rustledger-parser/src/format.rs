@@ -68,6 +68,35 @@ impl FormattableItem<'_> {
 /// line level.
 #[must_use]
 pub fn format_source(source: &str, parse_result: &ParseResult, config: &FormatConfig) -> String {
+    // Exhaustive destructure of every ParseResult field by name —
+    // mirrors the guard in `shift_spans_up`. Adding a new field to
+    // ParseResult breaks this pattern and forces an explicit decision
+    // about whether the new field needs to be rendered (and how) or
+    // is irrelevant to output (bind to `_` with a one-line comment).
+    //
+    // Without this exhaustiveness, a future spanned source-bearing
+    // field would silently get dropped from formatter output even
+    // though shift_spans_up correctly tracks it — exactly the kind of
+    // visit-every-field drift the round-10 architecture refactor was
+    // meant to eliminate.
+    let ParseResult {
+        directives,
+        options,
+        includes,
+        plugins,
+        comments,
+        // `errors`, `warnings`, `currency_occurrences`, `has_leading_bom`
+        // are not source-bearing items to be rendered: errors/warnings
+        // are diagnostic state the caller already gated on (per
+        // contract), currency_occurrences is just an index for LSP
+        // tooling, and has_leading_bom is consulted by the BOM-restore
+        // tail of this function via parse_result.has_leading_bom.
+        errors: _,
+        warnings: _,
+        currency_occurrences: _,
+        has_leading_bom: _,
+    } = parse_result;
+
     // Collect every element into a single list, then sort by source position
     // so the output preserves the original top-to-bottom order regardless of
     // how the parser bucketed elements by kind.
@@ -79,22 +108,22 @@ pub fn format_source(source: &str, parse_result: &ParseResult, config: &FormatCo
     // plugins/comments) carry no file_id, so we can't symmetrically filter
     // them — the contract above warns callers that those are assumed to
     // come from `parse` and so always have real source spans.
-    for directive in &parse_result.directives {
+    for directive in directives {
         if directive.file_id == SYNTHESIZED_FILE_ID {
             continue;
         }
         items.push(FormattableItem::Directive(directive));
     }
-    for (key, value, span) in &parse_result.options {
+    for (key, value, span) in options {
         items.push(FormattableItem::Option(key, value, *span));
     }
-    for (path, span) in &parse_result.includes {
+    for (path, span) in includes {
         items.push(FormattableItem::Include(path, *span));
     }
-    for (name, cfg, span) in &parse_result.plugins {
+    for (name, cfg, span) in plugins {
         items.push(FormattableItem::Plugin(name, cfg.as_deref(), *span));
     }
-    for comment in &parse_result.comments {
+    for comment in comments {
         items.push(FormattableItem::Comment(comment));
     }
 
@@ -227,31 +256,41 @@ pub fn format_source(source: &str, parse_result: &ParseResult, config: &FormatCo
     //   platform is extinct in practice. If you have a real bare-CR
     //   file, run it through `dos2unix -c mac in.bean` first.
     //
-    // The defensive collapse (`replace("\r\n", "\n")`) is only needed
-    // when the rendered output itself might contain `\r\n` — which
-    // `render_lines` never emits today. Guard the collapse on
-    // `contains('\r')` so the common case stays O(N) (one pass) and
-    // pathological inputs (some future renderer emitting CRLF, or a
-    // directive Display impl carrying embedded line endings) still
-    // round-trip correctly as O(2N).
+    // The collapse path normalizes ALL CR bytes from the rendered
+    // output before re-applying CRLF, so:
+    //
+    // 1. CRLFs introduced by a future renderer collapse to single LF
+    //    and then re-expand to CRLF (idempotent round-trip).
+    // 2. Lone bare CR bytes (a Display impl carrying an embedded `\r`
+    //    inside a string literal) are stripped so the output never
+    //    contains mixed `\r` + `\r\n` line endings. A bare CR mid-line
+    //    is uniformly garbage — neither LF nor CRLF platforms render
+    //    it usefully, and `wc -l` parity breaks with mixed endings.
+    //
+    // Guard the collapse on `contains('\r')` so the common case stays
+    // O(N) (one pass for the final LF→CRLF replace).
     if source.contains("\r\n") {
         if formatted.contains('\r') {
+            // Collapse `\r\n` first (pair-wise), THEN strip any lone
+            // `\r` survivors. Doing the strip second avoids tearing
+            // valid CRLF pairs into orphan LFs.
             formatted = formatted.replace("\r\n", "\n");
+            if formatted.contains('\r') {
+                formatted = formatted.replace('\r', "");
+            }
         }
         formatted = formatted.replace('\n', "\r\n");
     }
 
-    // Preserve a leading UTF-8 BOM. The lexer skips it as a no-op so
-    // parsing works on BOM'd files, but render_lines doesn't emit it.
-    // Re-prepend so a Windows / Excel export round-trips byte-stable.
-    if source.starts_with('\u{FEFF}') && !formatted.starts_with('\u{FEFF}') {
-        let mut with_bom = String::with_capacity(formatted.len() + 3);
-        with_bom.push('\u{FEFF}');
-        with_bom.push_str(&formatted);
-        formatted = with_bom;
-    }
-
-    formatted
+    // Preserve a leading UTF-8 BOM. Whether the source had one is
+    // recorded as a single boolean on the ParseResult by the parser
+    // (see `crate::bom`'s module docstring for the architectural
+    // rationale). The formatter does not inspect the source for a BOM
+    // itself — that decision was already made, once, at the parser's
+    // strip-at-entry boundary. Trusting the flag rather than re-
+    // checking `source` is what keeps the two ends of the round-trip
+    // in agreement.
+    crate::bom::restore_leading(formatted, parse_result.has_leading_bom)
 }
 
 #[cfg(test)]
@@ -335,6 +374,77 @@ mod tests {
     fn preserves_bom_and_crlf_together() {
         let src = "\u{FEFF}2024-01-01 open Assets:Cash\r\n";
         assert_eq!(fmt(src), src);
+    }
+
+    /// Two-pass idempotence: formatting an already-formatted source
+    /// must produce a byte-identical result. Covers the cross product
+    /// of BOM × CRLF × LF — the cell that previously regressed across
+    /// architecture iterations was the BOM + format-twice combination,
+    /// where contract drift between `bom_filter` and `format_source`
+    /// caused the second pass to drop the BOM.
+    ///
+    /// Now that the BOM decision is made once at `parse()`'s strip-at-
+    /// entry boundary and recorded on `has_leading_bom`, every pass
+    /// sees the same flag and agrees on the output.
+    #[test]
+    fn format_source_two_pass_idempotent() {
+        let inputs = [
+            // LF, no BOM
+            "2024-01-01 open Assets:Cash\n",
+            // CRLF, no BOM
+            "2024-01-01 open Assets:Cash\r\n",
+            // LF, with BOM
+            "\u{FEFF}2024-01-01 open Assets:Cash\n",
+            // CRLF, with BOM
+            "\u{FEFF}2024-01-01 open Assets:Cash\r\n",
+            // Multi-directive LF + BOM
+            "\u{FEFF}2024-01-01 open Assets:Cash\n2024-01-02 open Assets:Bank\n",
+        ];
+        for src in inputs {
+            let pass1 = fmt(src);
+            let pass2 = fmt(&pass1);
+            assert_eq!(
+                pass1, pass2,
+                "two-pass formatting must be idempotent for {src:?}; \
+                 pass1={pass1:?}, pass2={pass2:?}"
+            );
+        }
+    }
+
+    /// The `has_leading_bom` flag is the single source of truth.
+    /// Constructing a `ParseResult` by hand with `has_leading_bom: false`
+    /// and passing it to `format_source` with a BOM-prefixed source
+    /// must NOT re-prepend a BOM (the flag wins). This pins that the
+    /// formatter trusts the flag rather than re-inspecting the source.
+    #[test]
+    fn format_source_trusts_flag_not_source_inspection() {
+        let src = "\u{FEFF}2024-01-01 open Assets:Cash\n";
+        let mut parsed = parse(src);
+        assert!(parsed.has_leading_bom, "sanity: parse detected BOM");
+
+        // Now flip the flag and verify the formatter respects it.
+        parsed.has_leading_bom = false;
+        let out = format_source(src, &parsed, &FormatConfig::default());
+        assert!(
+            !out.starts_with(crate::bom::BOM_CHAR),
+            "formatter must respect has_leading_bom=false even when source has a BOM; \
+             got {out:?}"
+        );
+    }
+
+    /// Mirror of the above: a source without a BOM, but a parse result
+    /// claiming there was one, produces output WITH a BOM. The flag is
+    /// authoritative either direction.
+    #[test]
+    fn format_source_flag_authoritative_other_direction() {
+        let src = "2024-01-01 open Assets:Cash\n";
+        let mut parsed = parse(src);
+        parsed.has_leading_bom = true;
+        let out = format_source(src, &parsed, &FormatConfig::default());
+        assert!(
+            out.starts_with(crate::bom::BOM_CHAR),
+            "formatter must respect has_leading_bom=true; got {out:?}"
+        );
     }
 
     /// Regression: a file containing only blank lines must preserve every

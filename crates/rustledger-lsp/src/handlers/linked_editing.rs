@@ -8,13 +8,16 @@ use lsp_types::{LinkedEditingRangeParams, LinkedEditingRanges, Position, Range};
 use rustledger_core::{Directive, SYNTHESIZED_FILE_ID};
 use rustledger_parser::ParseResult;
 
-use super::utils::{LineIndex, get_word_at_position, is_account_like, is_currency_like};
+use super::utils::{
+    LineIndex, PositionEncoding, get_word_at_position, is_account_like, is_currency_like,
+};
 
 /// Handle a linked editing range request.
 pub fn handle_linked_editing_range(
     params: &LinkedEditingRangeParams,
     source: &str,
     parse_result: &ParseResult,
+    encoding: PositionEncoding,
 ) -> Option<LinkedEditingRanges> {
     let position = params.text_document_position_params.position;
     let line_idx = position.line as usize;
@@ -22,16 +25,16 @@ pub fn handle_linked_editing_range(
     let line = lines.get(line_idx)?;
 
     // Get the word at the cursor position
-    let (word, _, _) = get_word_at_position(line, position.character as usize)?;
+    let (word, _, _) = get_word_at_position(line, position.character as usize, encoding)?;
 
     let mut ranges = Vec::new();
     // Build the line index once and share it across collectors —
     // otherwise each posting/directive lookup is an O(n) scan.
-    let line_index = LineIndex::new(source);
+    let line_index = LineIndex::new(source, encoding);
 
     // Check if it's an account
     if is_account_like(&word) {
-        collect_account_ranges(source, parse_result, &line_index, &word, &mut ranges);
+        collect_account_ranges(parse_result, &line_index, &word, &mut ranges);
     }
     // Check if it's a currency
     else if is_currency_like(&word, parse_result) {
@@ -57,7 +60,6 @@ pub fn handle_linked_editing_range(
 
 /// Collect all ranges for an account.
 fn collect_account_ranges(
-    source: &str,
     parse_result: &ParseResult,
     line_index: &LineIndex,
     account: &str,
@@ -69,55 +71,58 @@ fn collect_account_ranges(
         match &spanned.value {
             Directive::Open(open) => {
                 if open.account.as_ref() == account
-                    && let Some(range) = find_in_line(source, start_line, account)
+                    && let Some(range) = find_in_line(line_index, start_line, account)
                 {
                     ranges.push(range);
                 }
             }
             Directive::Close(close) => {
                 if close.account.as_ref() == account
-                    && let Some(range) = find_in_line(source, start_line, account)
+                    && let Some(range) = find_in_line(line_index, start_line, account)
                 {
                     ranges.push(range);
                 }
             }
             Directive::Balance(bal) => {
                 if bal.account.as_ref() == account
-                    && let Some(range) = find_in_line(source, start_line, account)
+                    && let Some(range) = find_in_line(line_index, start_line, account)
                 {
                     ranges.push(range);
                 }
             }
             Directive::Pad(pad) => {
                 if pad.account.as_ref() == account
-                    && let Some(range) = find_in_line(source, start_line, account)
+                    && let Some(range) = find_in_line(line_index, start_line, account)
                 {
                     ranges.push(range);
                 }
                 if pad.source_account.as_ref() == account {
-                    let line_text = source.lines().nth(start_line as usize).unwrap_or("");
+                    let line_text = line_index.line_text(start_line).unwrap_or("");
                     if let Some(first_pos) = line_text.find(account) {
                         let after_first = first_pos + account.len();
-                        if let Some(second_pos) = line_text[after_first..].find(account) {
-                            let actual_pos = after_first + second_pos;
-                            ranges.push(Range {
-                                start: Position::new(start_line, actual_pos as u32),
-                                end: Position::new(start_line, (actual_pos + account.len()) as u32),
-                            });
+                        if let Some(second_pos) = line_text[after_first..].find(account)
+                            && let Some(start) = line_index
+                                .byte_in_line_to_position(start_line, after_first + second_pos)
+                            && let Some(end) = line_index.byte_in_line_to_position(
+                                start_line,
+                                after_first + second_pos + account.len(),
+                            )
+                        {
+                            ranges.push(Range { start, end });
                         }
                     }
                 }
             }
             Directive::Note(note) => {
                 if note.account.as_ref() == account
-                    && let Some(range) = find_in_line(source, start_line, account)
+                    && let Some(range) = find_in_line(line_index, start_line, account)
                 {
                     ranges.push(range);
                 }
             }
             Directive::Document(doc) => {
                 if doc.account.as_ref() == account
-                    && let Some(range) = find_in_line(source, start_line, account)
+                    && let Some(range) = find_in_line(line_index, start_line, account)
                 {
                     ranges.push(range);
                 }
@@ -133,7 +138,7 @@ fn collect_account_ranges(
                     if spanned_posting.account.as_ref() == account {
                         let (posting_line, _) =
                             line_index.offset_to_position(spanned_posting.span.start);
-                        if let Some(range) = find_in_line(source, posting_line, account) {
+                        if let Some(range) = find_in_line(line_index, posting_line, account) {
                             ranges.push(range);
                         }
                     }
@@ -185,14 +190,15 @@ fn collect_currency_ranges(
     ranges.dedup();
 }
 
-/// Find a string in a specific line.
-fn find_in_line(source: &str, line_num: u32, needle: &str) -> Option<Range> {
-    let line = source.lines().nth(line_num as usize)?;
+/// Find a string in a specific line — encoding-aware via the
+/// LineIndex. Pre-round-19 emitted raw byte offsets as columns,
+/// which broke under UTF-16 on non-ASCII content.
+fn find_in_line(line_index: &LineIndex<'_>, line_num: u32, needle: &str) -> Option<Range> {
+    let line = line_index.line_text(line_num)?;
     let col = line.find(needle)?;
-    Some(Range {
-        start: Position::new(line_num, col as u32),
-        end: Position::new(line_num, (col + needle.len()) as u32),
-    })
+    let start = line_index.byte_in_line_to_position(line_num, col)?;
+    let end = line_index.byte_in_line_to_position(line_num, col + needle.len())?;
+    Some(Range { start, end })
 }
 
 #[cfg(test)]
@@ -219,7 +225,7 @@ mod tests {
             work_done_progress_params: Default::default(),
         };
 
-        let result = handle_linked_editing_range(&params, source, &result);
+        let result = handle_linked_editing_range(&params, source, &result, PositionEncoding::Utf16);
         assert!(result.is_some());
 
         let ranges = result.unwrap();
@@ -247,7 +253,7 @@ mod tests {
             work_done_progress_params: Default::default(),
         };
 
-        let result = handle_linked_editing_range(&params, source, &result);
+        let result = handle_linked_editing_range(&params, source, &result, PositionEncoding::Utf16);
         assert!(result.is_some());
 
         let ranges = result.unwrap();
@@ -288,7 +294,7 @@ mod tests {
             work_done_progress_params: Default::default(),
         };
 
-        let ranges = handle_linked_editing_range(&params, source, &result)
+        let ranges = handle_linked_editing_range(&params, source, &result, PositionEncoding::Utf16)
             .expect("linked editing returns Some");
 
         // Expected: 3 ranges — `commodity USD`, `-100 USD`,

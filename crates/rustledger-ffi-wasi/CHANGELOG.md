@@ -5,6 +5,46 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Features
+
+- `ParseErrorEntry.kind_code` exposes the stable numeric discriminant
+  from `rustledger_parser::ParseError::kind_code()`. Codes 1-26
+  documented in `openrpc.json`'s `ParseErrorEntry` schema. Notably,
+  `kind_code === 26` is `BomInDirectiveBody` (mid-file UTF-8 BOM
+  detected). RPC clients can detect this structurally and surface a
+  'Remove BOM' fix-it action without regex-matching the message body.
+- `ParseErrorEntry.hint` carries the actionable suggestion attached at
+  the parser emission site (e.g., 'Remove the U+FEFF byte…' for the
+  BOM diagnostic). Render below `message` as a help/fix-it line.
+- `ParseErrorEntry.span` carries the byte range of the failed entry
+  for source-location-aware UX (highlight, navigate-to).
+
+### Breaking Changes
+
+- **Wire shape (major bump 1.0 → 2.0):** `error.data.errors` on
+  `beancount_parse_error` (-32000) responses is now
+  `ParseErrorEntry[]` (per-error object with `message`, `kind_code`,
+  `hint`, `span`) instead of the previous `string[]` of rendered
+  messages. Bump `API_VERSION` to `2.0` per the major-on-break policy
+  documented on `API_VERSION` in `src/lib.rs` (round-19 correction:
+  this change shipped briefly as 1.1, which violated the policy).
+  Clients negotiate via `api_version` on every response payload; v1.x
+  clients that parse errors as `string[]` should refuse to talk to a
+  v2.x server. Migration recipe for cross-version clients that want
+  to bridge both:
+  ```js
+  errors.map(e => typeof e === 'string'
+    ? { message: e, kind_code: null, hint: null, span: null }
+    : e)
+  ```
+  The `ParseErrorEntry` schema allows `null` for
+  `kind_code`/`hint`/`span` so legacy entries bridged through the
+  recipe above still validate; 2.0+ servers always emit the
+  integer/object form. See `README.md` for the full
+  `ParseErrorEntry` shape and an example.
+
 ## [0.13.0](https://github.com/rustledger/rustledger/compare/v0.12.0...v0.13.0) - 2026-04-21
 
 ### Bug Fixes

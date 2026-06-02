@@ -52,6 +52,7 @@ pub mod implicit_prices;
 pub mod intern;
 pub mod inventory;
 pub mod position;
+pub mod shift_spans_impls;
 pub mod span;
 pub mod synthetic;
 pub mod visit;
@@ -83,7 +84,7 @@ pub use inventory::{
     AccountedBookingError, BookingError, BookingMethod, BookingResult, Inventory, ReductionScope,
 };
 pub use position::Position;
-pub use span::{SYNTHESIZED_FILE_ID, Span, Spanned};
+pub use span::{SYNTHESIZED_FILE_ID, ShiftSpans, Span, Spanned};
 pub use visit::{visit_accounts, visit_currencies};
 
 // Re-export commonly used external types

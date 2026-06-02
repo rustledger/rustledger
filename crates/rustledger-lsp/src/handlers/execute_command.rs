@@ -13,7 +13,26 @@ use rustledger_parser::ParseResult;
 use std::collections::HashMap;
 
 use super::formatting::format_document;
-use super::utils::{LineIndex, document_format_config};
+use super::utils::{LineIndex, PositionEncoding, document_format_config};
+
+/// Argument key clients can pass to suppress informational no-op
+/// notifications (the "already sorted" / "no transactions to sort"
+/// toasts that interactive users see). Format-on-save hooks and
+/// chained automation pass `{"silent": true}` to opt out; the default
+/// (no argument or `silent: false`) preserves toasts so command-
+/// palette users get feedback when nothing happened.
+const SILENT_ARG_KEY: &str = "silent";
+
+fn is_silent_invocation(arguments: &[serde_json::Value]) -> bool {
+    arguments
+        .iter()
+        .filter_map(serde_json::Value::as_object)
+        .any(|obj| {
+            obj.get(SILENT_ARG_KEY)
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+        })
+}
 
 /// Available commands.
 pub const COMMANDS: &[&str] = &[
@@ -65,6 +84,22 @@ impl ExecuteCommandResponse {
             }),
         }
     }
+
+    /// Info-level notification — used for no-op acknowledgments where
+    /// the user explicitly invoked a command and nothing happened
+    /// (e.g. "already sorted", "no transactions to sort"). Distinct
+    /// from `warn` so editor themes can style the two differently;
+    /// VS Code's `window.showInformationMessage` is non-modal whereas
+    /// `showWarningMessage` is more attention-grabbing.
+    fn info(message: impl Into<String>) -> Self {
+        Self {
+            response: None,
+            show_message: Some(ShowMessageParams {
+                typ: MessageType::INFO,
+                message: message.into(),
+            }),
+        }
+    }
 }
 
 /// Handle an execute command request.
@@ -73,13 +108,17 @@ pub fn handle_execute_command(
     source: &str,
     parse_result: &ParseResult,
     uri: &Uri,
+    encoding: PositionEncoding,
 ) -> ExecuteCommandResponse {
     match params.command.as_str() {
         "rledger.insertDate" => {
             ExecuteCommandResponse::json(handle_insert_date().unwrap_or(serde_json::Value::Null))
         }
-        "rledger.sortTransactions" => handle_sort_transactions(source, parse_result, uri),
-        "rledger.alignAmounts" => handle_align_amounts(source, parse_result, uri),
+        "rledger.sortTransactions" => {
+            let silent = is_silent_invocation(&params.arguments);
+            handle_sort_transactions(source, parse_result, uri, silent, encoding)
+        }
+        "rledger.alignAmounts" => handle_align_amounts(source, parse_result, uri, encoding),
         "rledger.showAccountBalance" => {
             handle_show_account_balance(&params.arguments, parse_result)
         }
@@ -99,10 +138,21 @@ fn handle_insert_date() -> Option<serde_json::Value> {
 }
 
 /// Sort all transactions by date.
+///
+/// `silent` distinguishes interactive invocations (command palette,
+/// default) from chained automation (format-on-save hooks that pass
+/// `{"silent": true}` as the first argument). Both paths return the
+/// same JSON response on success; on a no-op (`<2 transactions` or
+/// already-sorted), interactive callers get an info-level
+/// `window/showMessage` so they know the command did fire and just
+/// had nothing to do, while silent callers get a fully empty response
+/// to avoid spamming a toast on every save.
 fn handle_sort_transactions(
     source: &str,
     parse_result: &ParseResult,
     uri: &Uri,
+    silent: bool,
+    encoding: PositionEncoding,
 ) -> ExecuteCommandResponse {
     let mut transactions: Vec<(rustledger_core::NaiveDate, usize, usize, String)> = Vec::new();
 
@@ -116,25 +166,27 @@ fn handle_sort_transactions(
     }
 
     if transactions.len() < 2 {
-        // Intentionally silent: format-on-save hooks chained to
-        // `rledger.sortTransactions` would otherwise pop a notification
-        // on every save of a single-entry or empty file. Sorting <2
-        // items isn't actionable; absence of a sort is the correct
-        // no-op behavior here.
-        return ExecuteCommandResponse::none();
+        // Interactive callers (command palette, default) see an info
+        // toast so they know the command fired and just had nothing
+        // actionable. Chained automation (format-on-save) passes
+        // `silent: true` to suppress the toast.
+        if silent {
+            return ExecuteCommandResponse::none();
+        }
+        return ExecuteCommandResponse::info(
+            "No transactions to sort (the file has fewer than 2 transactions).",
+        );
     }
 
     let mut sorted = transactions.clone();
     sorted.sort_by_key(|(date, start, _, _)| (*date, *start));
 
     if transactions == sorted {
-        // Same rationale as the <2 case above: format-on-save hooks
-        // chained to `rledger.sortTransactions` would otherwise pop a
-        // notification on every save of an already-sorted ledger.
-        // Absence of an edit is the correct no-op signal — clients
-        // that want a message can detect "no edits returned" and
-        // surface their own toast.
-        return ExecuteCommandResponse::none();
+        // Same interactive vs silent split as the <2 case above.
+        if silent {
+            return ExecuteCommandResponse::none();
+        }
+        return ExecuteCommandResponse::info("Transactions are already sorted by date.");
     }
 
     let Some(first_start) = transactions.iter().map(|(_, s, _, _)| *s).min() else {
@@ -150,7 +202,7 @@ fn handle_sort_transactions(
         .collect::<Vec<_>>()
         .join("\n\n");
 
-    let line_index = LineIndex::new(source);
+    let line_index = LineIndex::new(source, encoding);
     let (start_line, start_col) = line_index.offset_to_position(first_start);
     let (end_line, end_col) = line_index.offset_to_position(last_end);
 
@@ -199,6 +251,7 @@ fn handle_align_amounts(
     source: &str,
     parse_result: &ParseResult,
     uri: &Uri,
+    encoding: PositionEncoding,
 ) -> ExecuteCommandResponse {
     // `workspace/executeCommand` does NOT carry the client's
     // formatting preferences — those only travel with
@@ -208,7 +261,7 @@ fn handle_align_amounts(
     // to server defaults rather than silently mirroring an absent
     // client value.
     let config = document_format_config(None);
-    let Some(edits) = format_document(source, parse_result, &config) else {
+    let Some(edits) = format_document(source, parse_result, &config, encoding) else {
         // Parse errors: surface via window/showMessage so the user
         // actually sees the failure. executeCommand responses are
         // discarded by VS Code etc.; showMessage is the spec-mandated
@@ -368,49 +421,98 @@ mod tests {
         assert!(response.show_message.is_some());
     }
 
-    /// `handle_sort_transactions` is intentionally silent in two no-op
-    /// cases: <2 transactions and already-sorted. Format-on-save hooks
-    /// chained to `rledger.sortTransactions` must not pop notifications
-    /// on every save. These regression tests pin the silent contract so
-    /// a future UX-motivated revert can't reintroduce the spam.
+    /// `handle_sort_transactions` no-op behavior is split on the
+    /// `silent` flag: interactive callers (command palette default,
+    /// `silent=false`) get an info-level `showMessage` so they know
+    /// the command fired; chained automation (format-on-save hooks
+    /// passing `silent=true`) gets a fully empty response so toasts
+    /// don't pop on every save. These tests pin BOTH halves of the
+    /// contract — a future revert in either direction surfaces here.
     #[test]
-    fn sort_transactions_empty_file_is_silent() {
+    fn sort_transactions_empty_file_silent_mode_is_silent() {
         use lsp_types::Uri;
         let result = parse("");
         let uri: Uri = "file:///test.beancount".parse().unwrap();
-        let response = handle_sort_transactions("", &result, &uri);
+        let response = handle_sort_transactions("", &result, &uri, true, PositionEncoding::Utf16);
         assert!(response.response.is_none(), "expected silent response");
         assert!(
             response.show_message.is_none(),
-            "expected no showMessage, got {:?}",
+            "expected no showMessage in silent mode, got {:?}",
             response.show_message
         );
     }
 
     #[test]
-    fn sort_transactions_single_transaction_is_silent() {
+    fn sort_transactions_empty_file_interactive_shows_info() {
+        use lsp_types::Uri;
+        let result = parse("");
+        let uri: Uri = "file:///test.beancount".parse().unwrap();
+        let response = handle_sort_transactions("", &result, &uri, false, PositionEncoding::Utf16);
+        assert!(response.response.is_none());
+        let msg = response.show_message.expect("expected info showMessage");
+        assert_eq!(msg.typ, MessageType::INFO);
+        assert!(
+            msg.message.contains("No transactions to sort"),
+            "expected 'No transactions to sort' info, got {msg:?}"
+        );
+    }
+
+    #[test]
+    fn sort_transactions_single_transaction_silent_mode_is_silent() {
         use lsp_types::Uri;
         let source = "2024-01-01 * \"Solo\"\n  Assets:Bank  -5.00 USD\n  Expenses:Food\n";
         let result = parse(source);
         let uri: Uri = "file:///test.beancount".parse().unwrap();
-        let response = handle_sort_transactions(source, &result, &uri);
+        let response =
+            handle_sort_transactions(source, &result, &uri, true, PositionEncoding::Utf16);
         assert!(response.response.is_none());
         assert!(response.show_message.is_none());
     }
 
     #[test]
-    fn sort_transactions_already_sorted_is_silent() {
+    fn sort_transactions_single_transaction_interactive_shows_info() {
+        use lsp_types::Uri;
+        let source = "2024-01-01 * \"Solo\"\n  Assets:Bank  -5.00 USD\n  Expenses:Food\n";
+        let result = parse(source);
+        let uri: Uri = "file:///test.beancount".parse().unwrap();
+        let response =
+            handle_sort_transactions(source, &result, &uri, false, PositionEncoding::Utf16);
+        assert!(response.response.is_none());
+        let msg = response.show_message.expect("expected info showMessage");
+        assert_eq!(msg.typ, MessageType::INFO);
+    }
+
+    #[test]
+    fn sort_transactions_already_sorted_silent_mode_is_silent() {
         use lsp_types::Uri;
         let source = "2024-01-01 * \"A\"\n  Assets:Bank  -1.00 USD\n  Expenses:Food\n\n2024-02-01 * \"B\"\n  Assets:Bank  -2.00 USD\n  Expenses:Food\n";
         let result = parse(source);
         let uri: Uri = "file:///test.beancount".parse().unwrap();
-        let response = handle_sort_transactions(source, &result, &uri);
+        let response =
+            handle_sort_transactions(source, &result, &uri, true, PositionEncoding::Utf16);
         assert!(
             response.response.is_none(),
-            "already-sorted should be silent, got {:?}",
+            "already-sorted in silent mode should be silent, got {:?}",
             response.response
         );
         assert!(response.show_message.is_none());
+    }
+
+    #[test]
+    fn sort_transactions_already_sorted_interactive_shows_info() {
+        use lsp_types::Uri;
+        let source = "2024-01-01 * \"A\"\n  Assets:Bank  -1.00 USD\n  Expenses:Food\n\n2024-02-01 * \"B\"\n  Assets:Bank  -2.00 USD\n  Expenses:Food\n";
+        let result = parse(source);
+        let uri: Uri = "file:///test.beancount".parse().unwrap();
+        let response =
+            handle_sort_transactions(source, &result, &uri, false, PositionEncoding::Utf16);
+        assert!(response.response.is_none());
+        let msg = response.show_message.expect("expected info showMessage");
+        assert_eq!(msg.typ, MessageType::INFO);
+        assert!(
+            msg.message.contains("already sorted"),
+            "expected 'already sorted' info, got {msg:?}"
+        );
     }
 
     #[test]
@@ -420,11 +522,28 @@ mod tests {
         let source = "2024-02-01 * \"B\"\n  Assets:Bank  -2.00 USD\n  Expenses:Food\n\n2024-01-01 * \"A\"\n  Assets:Bank  -1.00 USD\n  Expenses:Food\n";
         let result = parse(source);
         let uri: Uri = "file:///test.beancount".parse().unwrap();
-        let response = handle_sort_transactions(source, &result, &uri);
+        let response =
+            handle_sort_transactions(source, &result, &uri, false, PositionEncoding::Utf16);
         assert!(
             response.response.is_some(),
             "out-of-order should produce a WorkspaceEdit"
         );
+    }
+
+    /// `is_silent_invocation` extracts the `silent` flag from the
+    /// command's `arguments` array. Default (no args) is interactive;
+    /// `{"silent": true}` opts out; anything else is interactive.
+    #[test]
+    fn silent_invocation_arg_parser() {
+        assert!(!is_silent_invocation(&[]));
+        assert!(!is_silent_invocation(&[serde_json::json!({})]));
+        assert!(!is_silent_invocation(&[
+            serde_json::json!({"silent": false})
+        ]));
+        assert!(is_silent_invocation(&[serde_json::json!({"silent": true})]));
+        // Non-object argument: ignored.
+        assert!(!is_silent_invocation(&[serde_json::json!("silent")]));
+        assert!(!is_silent_invocation(&[serde_json::json!(true)]));
     }
 
     #[test]
@@ -445,7 +564,7 @@ mod tests {
             "2024-01-15 * \"Coffee\"\n  Assets:Bank:Checking -5.00 USD\n  Expenses:Food 5.00 USD\n";
         let result = parse(misaligned);
         let uri: Uri = "file:///test.beancount".parse().unwrap();
-        let response = handle_align_amounts(misaligned, &result, &uri);
+        let response = handle_align_amounts(misaligned, &result, &uri, PositionEncoding::Utf16);
         let out = response
             .response
             .expect("align should return a JSON response");
@@ -486,7 +605,8 @@ mod tests {
         // align") instead.
         let aligned = "2024-01-15 open Assets:Bank USD\n";
         let aligned_parsed = parse(aligned);
-        let response2 = handle_align_amounts(aligned, &aligned_parsed, &uri);
+        let response2 =
+            handle_align_amounts(aligned, &aligned_parsed, &uri, PositionEncoding::Utf16);
         assert!(
             response2.response.is_none(),
             "no-op input should not return a workspace edit, got {:?}",
@@ -530,14 +650,16 @@ mod tests {
 
         let mut out = source.to_string();
         for (sl, sc, el, ec, new_text) in typed {
-            let start = crate::handlers::utils::lsp_position_to_byte(
+            // Build a fresh LineIndex for the mutating buffer on every
+            // edit so byte offsets reflect the current state. Test-
+            // only path; production handlers build the index once per
+            // request and apply edits client-side.
+            let idx = crate::handlers::utils::LineIndex::new(
                 &out,
-                lsp_types::Position::new(sl, sc),
+                crate::handlers::utils::PositionEncoding::Utf16,
             );
-            let end = crate::handlers::utils::lsp_position_to_byte(
-                &out,
-                lsp_types::Position::new(el, ec),
-            );
+            let start = idx.position_to_offset(sl, sc).expect("start in bounds");
+            let end = idx.position_to_offset(el, ec).expect("end in bounds");
             out.replace_range(start..end, &new_text);
         }
         out

@@ -9,18 +9,43 @@ use lsp_types::{
     SignatureHelpParams, SignatureInformation,
 };
 
+use super::utils::PositionEncoding;
+
 /// Trigger characters for signature help.
 pub const TRIGGER_CHARACTERS: &[&str] = &[" ", "*", "!"];
 
 /// Handle a signature help request.
-pub fn handle_signature_help(params: &SignatureHelpParams, source: &str) -> Option<SignatureHelp> {
+pub fn handle_signature_help(
+    params: &SignatureHelpParams,
+    source: &str,
+    encoding: PositionEncoding,
+) -> Option<SignatureHelp> {
     let position = params.text_document_position_params.position;
     let line_idx = position.line as usize;
     let lines: Vec<&str> = source.lines().collect();
     let line = lines.get(line_idx)?;
 
-    // Get text up to cursor (convert UTF-16 offset to byte offset)
-    let byte_col = super::utils::char_offset_to_byte(line, position.character as usize);
+    // Map `position.character` (in the negotiated encoding) to a
+    // byte offset into `line`. Walks chars once; `len_utf8` /
+    // `len_utf16` per char dispatch is the only encoding-sensitive
+    // step.
+    let col = position.character as usize;
+    let mut acc = 0usize;
+    let mut byte_col = 0usize;
+    for ch in line.chars() {
+        if acc >= col {
+            break;
+        }
+        let u = match encoding {
+            PositionEncoding::Utf8 => ch.len_utf8(),
+            PositionEncoding::Utf16 => ch.len_utf16(),
+        };
+        if acc + u > col {
+            break;
+        }
+        acc += u;
+        byte_col += ch.len_utf8();
+    }
     let text_before = &line[..byte_col];
 
     // Detect what kind of signature help to show
@@ -573,7 +598,7 @@ mod tests {
             work_done_progress_params: Default::default(),
         };
 
-        let help = handle_signature_help(&params, source);
+        let help = handle_signature_help(&params, source, PositionEncoding::Utf16);
         assert!(help.is_some());
 
         let help = help.unwrap();
@@ -595,7 +620,7 @@ mod tests {
             work_done_progress_params: Default::default(),
         };
 
-        let help = handle_signature_help(&params, source);
+        let help = handle_signature_help(&params, source, PositionEncoding::Utf16);
         assert!(help.is_some());
 
         let help = help.unwrap();
@@ -617,7 +642,7 @@ mod tests {
             work_done_progress_params: Default::default(),
         };
 
-        let help = handle_signature_help(&params, source);
+        let help = handle_signature_help(&params, source, PositionEncoding::Utf16);
         assert!(help.is_some());
 
         let help = help.unwrap();
@@ -640,7 +665,7 @@ mod tests {
             work_done_progress_params: Default::default(),
         };
 
-        let help = handle_signature_help(&params, source);
+        let help = handle_signature_help(&params, source, PositionEncoding::Utf16);
         assert!(help.is_some());
 
         let help = help.unwrap();

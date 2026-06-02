@@ -11,6 +11,7 @@ pub use super::definition::handle_goto_definition as handle_goto_declaration;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::handlers::utils::PositionEncoding;
     use lsp_types::{
         GotoDefinitionParams, Position, TextDocumentIdentifier, TextDocumentPositionParams,
     };
@@ -35,7 +36,8 @@ mod tests {
             partial_result_params: Default::default(),
         };
 
-        let result = handle_goto_declaration(&params, source, &result, &uri);
+        let result =
+            handle_goto_declaration(&params, source, &result, &uri, PositionEncoding::Utf16);
         assert!(result.is_some());
     }
 }

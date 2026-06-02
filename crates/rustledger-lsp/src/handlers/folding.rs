@@ -9,18 +9,19 @@ use lsp_types::{FoldingRange, FoldingRangeKind, FoldingRangeParams};
 use rustledger_core::Directive;
 use rustledger_parser::ParseResult;
 
-use super::utils::LineIndex;
+use super::utils::{LineIndex, PositionEncoding};
 
 /// Handle a folding range request.
 pub fn handle_folding_ranges(
     _params: &FoldingRangeParams,
     source: &str,
     parse_result: &ParseResult,
+    encoding: PositionEncoding,
 ) -> Option<Vec<FoldingRange>> {
     let mut ranges = Vec::new();
 
     // Build line index once for O(log n) lookups
-    let line_index = LineIndex::new(source);
+    let line_index = LineIndex::new(source, encoding);
 
     // Add folding ranges for transactions (multi-line)
     for spanned in &parse_result.directives {
@@ -182,7 +183,7 @@ mod tests {
             partial_result_params: Default::default(),
         };
 
-        let ranges = handle_folding_ranges(&params, source, &result);
+        let ranges = handle_folding_ranges(&params, source, &result, PositionEncoding::Utf16);
         assert!(ranges.is_some());
 
         let ranges = ranges.unwrap();

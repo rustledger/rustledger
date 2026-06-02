@@ -225,7 +225,11 @@ impl FailedBookings {
 
     /// Consume and return the underlying directives.
     /// Used by `finalize` to merge them back into the display order.
-    #[allow(clippy::missing_const_for_fn)] // Drop on self requires non-const fn in current Rust.
+    //
+    // Not `const fn`: `self` has a destructor (the `Vec` field), and
+    // E0493 forbids running destructors at compile-time. Clippy's
+    // `missing_const_for_fn` knows this and correctly doesn't fire,
+    // so no `#[allow]`/`#[expect]` is needed.
     pub fn into_inner(self) -> Vec<Spanned<Directive>> {
         self.inner
     }
@@ -236,8 +240,9 @@ impl Directives<Finalized> {
     /// underlying `Vec`. The only way to extract `Vec<Spanned<Directive>>`
     /// from the pipeline. Downstream code (`Ledger.directives`) only
     /// sees fully-processed output.
+    //
+    // Same rationale as above for not being `const fn`.
     #[must_use]
-    #[allow(clippy::missing_const_for_fn)] // Drop on self requires non-const fn in current Rust.
     pub fn into_inner(self) -> Vec<Spanned<Directive>> {
         self.inner
     }

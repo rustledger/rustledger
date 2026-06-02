@@ -15,7 +15,7 @@ use rustledger_core::{Directive, SYNTHESIZED_FILE_ID};
 use rustledger_parser::ParseResult;
 use std::collections::HashMap;
 
-use super::utils::{LineIndex, get_word_at_position, is_account_like};
+use super::utils::{LineIndex, PositionEncoding, get_word_at_position, is_account_like};
 
 /// Handle a prepare call hierarchy request.
 /// Returns the account at the cursor position as a CallHierarchyItem.
@@ -24,6 +24,7 @@ pub fn handle_prepare_call_hierarchy(
     source: &str,
     parse_result: &ParseResult,
     uri: &Uri,
+    encoding: PositionEncoding,
 ) -> Option<Vec<CallHierarchyItem>> {
     let position = params.text_document_position_params.position;
     let line_idx = position.line as usize;
@@ -31,7 +32,7 @@ pub fn handle_prepare_call_hierarchy(
     let line = lines.get(line_idx)?;
 
     // Get the word at the cursor position
-    let (word, start, end) = get_word_at_position(line, position.character as usize)?;
+    let (word, start, end) = get_word_at_position(line, position.character as usize, encoding)?;
 
     // Check if it's an account
     if !is_account_like(&word) {
@@ -70,6 +71,7 @@ pub fn handle_incoming_calls(
     source: &str,
     parse_result: &ParseResult,
     uri: &Uri,
+    encoding: PositionEncoding,
 ) -> Option<Vec<CallHierarchyIncomingCall>> {
     let account = params
         .item
@@ -80,7 +82,7 @@ pub fn handle_incoming_calls(
         .unwrap_or(&params.item.name);
 
     let mut calls: Vec<CallHierarchyIncomingCall> = Vec::new();
-    let line_index = LineIndex::new(source);
+    let line_index = LineIndex::new(source, encoding);
 
     // Find all transactions that reference this account
     for spanned in &parse_result.directives {
@@ -115,12 +117,19 @@ pub fn handle_incoming_calls(
                         return None;
                     }
                     let (posting_line, _) = line_index.offset_to_position(sp.span.start);
-                    let line_text = line_index.line_text(source, posting_line)?;
+                    let line_text = line_index.line_text(posting_line)?;
                     let col = line_text.find(account)?;
-                    Some(Range {
-                        start: Position::new(posting_line, col as u32),
-                        end: Position::new(posting_line, (col + account.len()) as u32),
-                    })
+                    // Route both endpoints through the index so the
+                    // emitted columns are in the negotiated encoding
+                    // (byte offsets under UTF-8, UTF-16 code units
+                    // under UTF-16). Pre-round-19 emitted `col as u32`
+                    // directly — a UTF-16-negotiated client interpreted
+                    // the UTF-8 byte offset as a UTF-16 code-unit
+                    // count and misaligned every non-ASCII line.
+                    let start = line_index.byte_in_line_to_position(posting_line, col)?;
+                    let end =
+                        line_index.byte_in_line_to_position(posting_line, col + account.len())?;
+                    Some(Range { start, end })
                 })
                 .collect();
 
@@ -184,6 +193,7 @@ pub fn handle_outgoing_calls(
     source: &str,
     parse_result: &ParseResult,
     uri: &Uri,
+    encoding: PositionEncoding,
 ) -> Option<Vec<CallHierarchyOutgoingCall>> {
     // Check if this is a transaction
     let data = params.item.data.as_ref()?;
@@ -195,7 +205,7 @@ pub fn handle_outgoing_calls(
     }
 
     let txn_line = data.get("line").and_then(|v| v.as_u64())? as u32;
-    let line_index = LineIndex::new(source);
+    let line_index = LineIndex::new(source, encoding);
 
     // Find the transaction at this line
     for spanned in &parse_result.directives {
@@ -219,7 +229,7 @@ pub fn handle_outgoing_calls(
                 .filter_map(|(account, indices)| {
                     // Find where this account is defined (open directive)
                     let account_location =
-                        find_account_definition(source, parse_result, &line_index, &account);
+                        find_account_definition(parse_result, &line_index, &account);
                     let (_acc_line, acc_range) = match account_location {
                         Some(loc) => loc,
                         None => {
@@ -230,15 +240,12 @@ pub fn handle_outgoing_calls(
                                 return None;
                             }
                             let (posting_line, _) = line_index.offset_to_position(sp.span.start);
-                            let line_text = line_index.line_text(source, posting_line)?;
+                            let line_text = line_index.line_text(posting_line)?;
                             let col = line_text.find(&account)?;
-                            (
-                                posting_line,
-                                Range {
-                                    start: Position::new(posting_line, col as u32),
-                                    end: Position::new(posting_line, (col + account.len()) as u32),
-                                },
-                            )
+                            let start = line_index.byte_in_line_to_position(posting_line, col)?;
+                            let end = line_index
+                                .byte_in_line_to_position(posting_line, col + account.len())?;
+                            (posting_line, Range { start, end })
                         }
                     };
 
@@ -252,12 +259,12 @@ pub fn handle_outgoing_calls(
                                 return None;
                             }
                             let (posting_line, _) = line_index.offset_to_position(sp.span.start);
-                            let line_text = line_index.line_text(source, posting_line)?;
+                            let line_text = line_index.line_text(posting_line)?;
                             let col = line_text.find(&account)?;
-                            Some(Range {
-                                start: Position::new(posting_line, col as u32),
-                                end: Position::new(posting_line, (col + account.len()) as u32),
-                            })
+                            let start = line_index.byte_in_line_to_position(posting_line, col)?;
+                            let end = line_index
+                                .byte_in_line_to_position(posting_line, col + account.len())?;
+                            Some(Range { start, end })
                         })
                         .collect();
 
@@ -288,9 +295,8 @@ pub fn handle_outgoing_calls(
 
 /// Find where an account is defined (open directive).
 fn find_account_definition(
-    source: &str,
     parse_result: &ParseResult,
-    line_index: &LineIndex,
+    line_index: &LineIndex<'_>,
     account: &str,
 ) -> Option<(u32, Range)> {
     for spanned in &parse_result.directives {
@@ -298,15 +304,11 @@ fn find_account_definition(
             && open.account.as_ref() == account
         {
             let (line, _) = line_index.offset_to_position(spanned.span.start);
-            let line_text = line_index.line_text(source, line)?;
+            let line_text = line_index.line_text(line)?;
             let col = line_text.find(account)?;
-            return Some((
-                line,
-                Range {
-                    start: Position::new(line, col as u32),
-                    end: Position::new(line, (col + account.len()) as u32),
-                },
-            ));
+            let start = line_index.byte_in_line_to_position(line, col)?;
+            let end = line_index.byte_in_line_to_position(line, col + account.len())?;
+            return Some((line, Range { start, end }));
         }
     }
     None
@@ -353,7 +355,8 @@ mod tests {
             work_done_progress_params: Default::default(),
         };
 
-        let items = handle_prepare_call_hierarchy(&params, source, &result, &uri);
+        let items =
+            handle_prepare_call_hierarchy(&params, source, &result, &uri, PositionEncoding::Utf16);
         assert!(items.is_some());
 
         let items = items.unwrap();
@@ -392,7 +395,7 @@ mod tests {
             partial_result_params: Default::default(),
         };
 
-        let calls = handle_incoming_calls(&params, source, &result, &uri);
+        let calls = handle_incoming_calls(&params, source, &result, &uri, PositionEncoding::Utf16);
         assert!(calls.is_some());
 
         let calls = calls.unwrap();
@@ -430,7 +433,7 @@ mod tests {
             partial_result_params: Default::default(),
         };
 
-        let calls = handle_outgoing_calls(&params, source, &result, &uri);
+        let calls = handle_outgoing_calls(&params, source, &result, &uri, PositionEncoding::Utf16);
         assert!(calls.is_some());
 
         let calls = calls.unwrap();

@@ -538,11 +538,34 @@ fn format_source_to_response(source: &str) -> Result<serde_json::Value, RpcError
         // and surface the elision.
         const MAX_ERRORS: usize = 100;
         let total = parse_result.errors.len();
-        let errors: Vec<String> = parse_result
+        // Structured per-error object: `message` (rendered Display),
+        // `kind_code` (stable numeric discriminant — see
+        // `rustledger_parser::ParseError::kind_code`), and `span`
+        // (byte range into the source). Consumers can detect specific
+        // error kinds — e.g., `BomInDirectiveBody` is code 26 — and
+        // wire structural UX (a 'Remove BOM' suggestion, a code action)
+        // without regex-matching the message body.
+        let errors: Vec<serde_json::Value> = parse_result
             .errors
             .iter()
             .take(MAX_ERRORS)
-            .map(std::string::ToString::to_string)
+            .map(|e| {
+                // `hint` is optional — serde_json::json! includes it
+                // unconditionally, so we serialize Some -> string and
+                // None -> null. RPC consumers that want to surface a
+                // fix-it suggestion (e.g., 'Remove BOM' for
+                // BomInDirectiveBody) read this field; consumers that
+                // don't can ignore it. ParseError::Display only emits
+                // the primary message, not the hint, so without this
+                // field the hint would be silently dropped at the
+                // FFI boundary.
+                serde_json::json!({
+                    "message": e.to_string(),
+                    "kind_code": e.kind_code(),
+                    "hint": e.hint,
+                    "span": { "start": e.span.start, "end": e.span.end },
+                })
+            })
             .collect();
         let message = format!("cannot format source with {total} parse error(s)");
         let data = serde_json::json!({

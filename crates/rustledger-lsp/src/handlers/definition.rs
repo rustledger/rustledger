@@ -8,7 +8,9 @@ use lsp_types::{GotoDefinitionParams, GotoDefinitionResponse, Location, Position
 use rustledger_core::Directive;
 use rustledger_parser::ParseResult;
 
-use super::utils::{LineIndex, get_word_at_source_position, is_account_type, is_currency_like};
+use super::utils::{
+    LineIndex, PositionEncoding, get_word_at_source_position, is_account_type, is_currency_like,
+};
 
 /// Handle a go-to-definition request.
 pub fn handle_goto_definition(
@@ -16,11 +18,12 @@ pub fn handle_goto_definition(
     source: &str,
     parse_result: &ParseResult,
     uri: &Uri,
+    encoding: PositionEncoding,
 ) -> Option<GotoDefinitionResponse> {
     let position = params.text_document_position_params.position;
 
     // Get the word at the cursor position
-    let word = get_word_at_source_position(source, position)?;
+    let word = get_word_at_source_position(source, position, encoding)?;
 
     tracing::debug!("Go-to-definition for word: {:?}", word);
 
@@ -28,7 +31,7 @@ pub fn handle_goto_definition(
     // Each `byte_offset_to_position` call is O(n) (linear scan from
     // byte 0); `LineIndex::offset_to_position` is O(log lines)
     // after a one-shot O(n) build.
-    let line_index = LineIndex::new(source);
+    let line_index = LineIndex::new(source, encoding);
 
     // Check if it's an account name
     if (word.contains(':') || is_account_type(&word))
@@ -180,8 +183,14 @@ mod tests {
             partial_result_params: Default::default(),
         };
 
-        let resp = handle_goto_definition(&params, source, &parse_result, &uri)
-            .expect("definition returns Some");
+        let resp = handle_goto_definition(
+            &params,
+            source,
+            &parse_result,
+            &uri,
+            PositionEncoding::Utf16,
+        )
+        .expect("definition returns Some");
         let loc = match resp {
             GotoDefinitionResponse::Scalar(l) => l,
             other => panic!("expected Scalar location; got {other:?}"),
@@ -216,6 +225,15 @@ mod tests {
             partial_result_params: Default::default(),
         };
 
-        assert!(handle_goto_definition(&params, source, &parse_result, &uri).is_none());
+        assert!(
+            handle_goto_definition(
+                &params,
+                source,
+                &parse_result,
+                &uri,
+                PositionEncoding::Utf16
+            )
+            .is_none()
+        );
     }
 }

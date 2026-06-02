@@ -11,32 +11,29 @@ use rustledger_core::Directive;
 use rustledger_parser::ParseResult;
 use std::path::Path;
 
-use super::utils::LineIndex;
+use super::utils::{LineIndex, PositionEncoding};
 
 /// Handle a document links request.
 pub fn handle_document_links(
     params: &DocumentLinkParams,
     source: &str,
     parse_result: &ParseResult,
+    encoding: PositionEncoding,
 ) -> Option<Vec<DocumentLink>> {
     let mut links = Vec::new();
     let base_uri = &params.text_document.uri;
 
     // Get the base directory from the document URI
     let base_dir = get_base_directory(base_uri);
-    let line_index = LineIndex::new(source);
+    let line_index = LineIndex::new(source, encoding);
 
     for spanned in &parse_result.directives {
         if let Directive::Document(doc) = &spanned.value {
             // Create link for document path
             let path_str = doc.path.to_string();
-            if let Some(link) = create_document_link(
-                source,
-                &line_index,
-                spanned.span.start,
-                &path_str,
-                &base_dir,
-            ) {
+            if let Some(link) =
+                create_document_link(&line_index, spanned.span.start, &path_str, &base_dir)
+            {
                 links.push(link);
             }
         }
@@ -127,8 +124,7 @@ fn get_base_directory(uri: &Uri) -> Option<String> {
 /// Create a document link for a path found in source.
 /// The target is deferred to the resolve phase for lazy verification.
 fn create_document_link(
-    source: &str,
-    line_index: &LineIndex,
+    line_index: &LineIndex<'_>,
     directive_start: usize,
     path: &str,
     base_dir: &Option<String>,
@@ -136,7 +132,7 @@ fn create_document_link(
     let (start_line, _) = line_index.offset_to_position(directive_start);
 
     // Find the path in the directive line
-    let line = line_index.line_text(source, start_line)?;
+    let line = line_index.line_text(start_line)?;
 
     // Find the quoted path
     let quote_start = line.find('"')?;

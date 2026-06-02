@@ -12,13 +12,21 @@ use rustledger_core::Directive;
 use rustledger_parser::ParseResult;
 use std::collections::HashMap;
 
-use super::utils::{LineIndex, get_word_at_position, is_account_like, is_currency_like};
+use super::utils::{
+    LineIndex, PositionEncoding, get_word_at_position, is_account_like, is_currency_like,
+};
 
 /// Handle a prepare rename request (check if rename is valid at position).
+///
+/// `encoding` is required because the emitted `Range` carries columns
+/// in the negotiated wire encoding; `get_word_at_position` returns
+/// columns in the same encoding as the input `col`, so threading
+/// `encoding` keeps the round-trip consistent.
 pub fn handle_prepare_rename(
     params: &TextDocumentPositionParams,
     source: &str,
     parse_result: &ParseResult,
+    encoding: PositionEncoding,
 ) -> Option<PrepareRenameResponse> {
     let position = params.position;
     let line_idx = position.line as usize;
@@ -27,7 +35,8 @@ pub fn handle_prepare_rename(
     let line = lines.get(line_idx)?;
 
     // Get the word at the cursor position
-    let (word, start_col, end_col) = get_word_at_position(line, position.character as usize)?;
+    let (word, start_col, end_col) =
+        get_word_at_position(line, position.character as usize, encoding)?;
 
     // Check if it's a valid renameable symbol
     if is_account_like(&word) || is_currency_like(&word, parse_result) {
@@ -46,6 +55,7 @@ pub fn handle_rename(
     params: &RenameParams,
     source: &str,
     parse_result: &ParseResult,
+    encoding: PositionEncoding,
 ) -> Option<WorkspaceEdit> {
     let position = params.text_document_position.position;
     let new_name = &params.new_name;
@@ -56,7 +66,7 @@ pub fn handle_rename(
     let line = lines.get(line_idx)?;
 
     // Get the word at the cursor position
-    let (old_name, _, _) = get_word_at_position(line, position.character as usize)?;
+    let (old_name, _, _) = get_word_at_position(line, position.character as usize, encoding)?;
 
     // Collect all edits
     let mut edits = Vec::new();
@@ -65,7 +75,7 @@ pub fn handle_rename(
     // O(n) per call (linear scan from byte 0); for a large ledger
     // with many account / currency occurrences, that scaled
     // quadratically with file size.
-    let line_index = LineIndex::new(source);
+    let line_index = LineIndex::new(source, encoding);
 
     if is_account_like(&old_name) {
         // Rename account
@@ -290,32 +300,40 @@ fn collect_currency_rename_edits(
 /// or in metadata keys).
 fn find_and_create_edit(
     source: &str,
-    line_index: &LineIndex,
+    line_index: &LineIndex<'_>,
     start_offset: usize,
     end_offset: usize,
     old_name: &str,
     new_name: &str,
 ) -> Option<TextEdit> {
     let directive_text = &source[start_offset..end_offset];
-    let (start_line, start_col) = line_index.offset_to_position(start_offset);
 
-    // Find the old name in the directive
-    for (line_offset, line) in directive_text.lines().enumerate() {
+    // Walk lines tracking the absolute byte cursor through `source`;
+    // route emitted positions through the LineIndex so encoded columns
+    // match the negotiated wire encoding. Pre-round-19 mixed encoded
+    // `start_col` with raw byte `col`, breaking under UTF-16
+    // negotiation on non-ASCII content.
+    let mut byte_cursor = start_offset;
+    for line in directive_text.lines() {
         if let Some(col) = line.find(old_name) {
-            let edit_line = start_line + line_offset as u32;
-            let edit_col = if line_offset == 0 {
-                start_col + col as u32
-            } else {
-                col as u32
-            };
-
+            let name_start = byte_cursor + col;
+            let name_end = name_start + old_name.len();
+            let (sl, sc) = line_index.offset_to_position(name_start);
+            let (el, ec) = line_index.offset_to_position(name_end);
             return Some(TextEdit {
                 range: Range {
-                    start: Position::new(edit_line, edit_col),
-                    end: Position::new(edit_line, edit_col + old_name.len() as u32),
+                    start: Position::new(sl, sc),
+                    end: Position::new(el, ec),
                 },
                 new_text: new_name.to_string(),
             });
+        }
+        byte_cursor += line.len();
+        let remaining = &source[byte_cursor.min(end_offset)..end_offset];
+        if remaining.starts_with("\r\n") {
+            byte_cursor += 2;
+        } else if remaining.starts_with('\n') {
+            byte_cursor += 1;
         }
     }
 
@@ -330,7 +348,7 @@ mod tests {
     #[test]
     fn test_get_word_at_position() {
         let line = "  Assets:Bank  -5.00 USD";
-        let (word, start, end) = get_word_at_position(line, 5).unwrap();
+        let (word, start, end) = get_word_at_position(line, 5, PositionEncoding::Utf8).unwrap();
         assert_eq!(word, "Assets:Bank");
         assert_eq!(start, 2);
         assert_eq!(end, 13);
@@ -364,7 +382,7 @@ mod tests {
             work_done_progress_params: Default::default(),
         };
 
-        let edit = handle_rename(&params, source, &result);
+        let edit = handle_rename(&params, source, &result, PositionEncoding::Utf16);
         assert!(edit.is_some());
 
         let edit = edit.unwrap();
@@ -421,7 +439,8 @@ mod tests {
             work_done_progress_params: Default::default(),
         };
 
-        let edit = handle_rename(&params, source, &result).expect("rename returns edit");
+        let edit = handle_rename(&params, source, &result, PositionEncoding::Utf16)
+            .expect("rename returns edit");
         let changes = edit.changes.expect("edit has changes");
         let edits = changes.values().next().expect("at least one file");
 

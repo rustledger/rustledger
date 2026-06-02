@@ -28,6 +28,15 @@ use rustledger_core::{
 /// grows past this transparently if a real file exceeds it. See `parse`.
 const MAX_PREALLOC_DIRECTIVES: usize = 16_384;
 
+/// Hint text attached via `ParseError::with_hint` to every mid-file
+/// BOM diagnostic so miette renders it on a dedicated `help:` line
+/// rather than burying it inside the primary message body.
+const BOM_REMOVAL_HINT: &str = concat!(
+    "remove the U+FEFF byte at this position; ",
+    "if the file is a concatenation of two BOM-prefixed exports, ",
+    "strip BOMs from the inner files before concatenating",
+);
+
 /// Cap on upfront `comments` preallocation. Same rationale as
 /// [`MAX_PREALLOC_DIRECTIVES`].
 const MAX_PREALLOC_COMMENTS: usize = 8_192;
@@ -1811,7 +1820,177 @@ fn apply_pushed_meta(directive: &mut Directive, meta_stack: &[(String, MetaValue
 
 /// Parse beancount source code using the hand-rolled state-machine parser
 /// over a Logos-produced token stream.
+///
+/// # Canonical UTF-8 BOM handling
+///
+/// A strict-byte-0 leading BOM is stripped before any lexer/parser
+/// code runs ([`crate::bom::strip_leading`]). The result is flagged
+/// in [`ParseResult::has_leading_bom`] and all spans returned to the
+/// caller are shifted back into the *original source* coordinate
+/// frame, so a directive starting at byte 3 of the original BOM-
+/// prefixed source has `span.start == 3` even though the inner parser
+/// saw it at byte 0 of the stripped view.
+///
+/// This shape — strip at the boundary, flag on the result, restore
+/// spans — is the single source of truth for BOM handling across the
+/// parser/formatter pair. See the [`crate::bom`] module docstring for
+/// the architectural rationale.
 pub fn parse(source: &str) -> ParseResult {
+    let (stripped, had_bom) = crate::bom::strip_leading(source);
+    let mut result = parse_inner(stripped);
+    if had_bom {
+        shift_spans_up(&mut result, crate::bom::BOM_LEN);
+    }
+    result.has_leading_bom = had_bom;
+    result
+}
+
+/// Add `offset` to every span stored in `result`. Used to translate
+/// spans from the BOM-stripped coordinate frame the inner parser uses
+/// back to the original-source frame callers expect.
+///
+/// # Compile-time enforcement of completeness
+///
+/// The body opens with an **exhaustive named destructure** of
+/// `ParseResult`. Adding a new field to `ParseResult` will fail to
+/// compile here until the contributor decides whether the field
+/// carries a span and, if so, threads it through `shift`. This is the
+/// only place in the codebase that must visit every spanned field; a
+/// soft "remember to extend this function" doc comment was previously
+/// the only contract, and it failed (a `Transaction.postings`
+/// recursion was missed for several iterations before this guard was
+/// added).
+///
+/// If you're adding a new field and the compiler points you here:
+///
+/// * Carries a `Span` (or nests one transitively): add a `shift(&mut
+///   field.span)` line (or recurse, e.g. via the `shift_directive_*`
+///   helpers below).
+/// * Doesn't carry a span (e.g. `has_leading_bom: bool`): bind it to
+///   `_` in the destructure and add a one-line comment explaining
+///   why.
+fn shift_spans_up(result: &mut ParseResult, offset: usize) {
+    use rustledger_core::ShiftSpans;
+    let shift = |s: &mut crate::Span| {
+        s.start += offset;
+        s.end += offset;
+    };
+
+    // Destructure exhaustively. The compiler enforces that every field
+    // of ParseResult is mentioned here; any field added to the struct
+    // breaks this pattern and forces an explicit decision about
+    // whether it needs span shifting.
+    let ParseResult {
+        directives,
+        options,
+        includes,
+        plugins,
+        comments,
+        errors,
+        warnings,
+        currency_occurrences,
+        // `has_leading_bom` is a bool, not a span. It's set by the
+        // outer `parse()` after this function runs.
+        has_leading_bom: _,
+    } = result;
+
+    // Directives: shift the wrapping span AND descend into any inner
+    // spans the directive variant might carry. Recursion through the
+    // payload is delegated to `ShiftSpans` impls living in
+    // rustledger-core's `shift_spans_impls` module — see the rustdoc
+    // there for the discipline (round-18: per-type exhaustive matches
+    // without wildcards force a deliberate compile-time decision
+    // whenever a directive payload's structure changes).
+    for d in directives {
+        shift(&mut d.span);
+        d.value.shift_spans(&shift);
+    }
+    for (_, _, span) in options {
+        shift(span);
+    }
+    for (_, span) in includes {
+        shift(span);
+    }
+    for (_, _, span) in plugins {
+        shift(span);
+    }
+    for c in comments {
+        shift(&mut c.span);
+    }
+    for err in errors {
+        shift(&mut err.span);
+    }
+    for warn in warnings {
+        shift(&mut warn.span);
+    }
+    for occ in currency_occurrences {
+        shift(&mut occ.span);
+    }
+}
+
+/// Consume a leading run of BOM-only `Token::Error` tokens from
+/// `stream` and return their combined span, if any.
+///
+/// Logos's default error path emits one `Err(())` per unrecognized
+/// character; the `Err` arm in `tokenize` wraps the offending bytes in
+/// `Token::Error(invalid_text)`. A mid-file BOM therefore appears as
+/// one (or, for runs, several BYTE-ADJACENT) `Token::Error("\u{FEFF}")`
+/// tokens.
+///
+/// **Byte-adjacency requirement.** The helper coalesces consecutive
+/// BOM tokens only when they are byte-contiguous (`prev.span.end ==
+/// next.span.start`). Logos's `#[logos(skip r"[ \t]+"]` removes
+/// whitespace tokens from the stream entirely, so `\u{FEFF} \u{FEFF}`
+/// produces two BOM `Token::Error`s that LOOK adjacent in the stream
+/// but cover NON-contiguous byte ranges (with a space byte between
+/// them). Coalescing those would emit a diagnostic span covering the
+/// inter-BOM whitespace — misleading the user about which bytes to
+/// delete. The adjacency check forces a separate diagnostic per
+/// non-adjacent BOM token.
+///
+/// Returns `None` (and does not advance) when the current token is not
+/// a BOM-only `Token::Error`. Hybrid spans like `\u{FEFF}garbage`
+/// appear as a BOM-only Err immediately followed by non-BOM Errs;
+/// only the BOM-only prefix is consumed here, so the caller still
+/// surfaces a `SyntaxError` for the trailing garbage.
+fn consume_leading_bom_run(stream: &mut TokenStream<'_>) -> Option<Span> {
+    fn is_bom_only_err(token: &Token<'_>) -> bool {
+        if let Token::Error(s) = token {
+            !s.is_empty() && s.chars().all(|c| c == crate::bom::BOM_CHAR)
+        } else {
+            false
+        }
+    }
+
+    let first = stream.peek()?;
+    if !is_bom_only_err(&first.token) {
+        return None;
+    }
+    let span_start = first.span.0;
+    let mut span_end = first.span.1;
+    stream.advance();
+    while let Some(t) = stream.peek() {
+        if !is_bom_only_err(&t.token) {
+            break;
+        }
+        // Only coalesce byte-adjacent BOM tokens. A gap (lexer-
+        // skipped whitespace between two BOMs) breaks the run; the
+        // next iteration's call into this helper picks up the second
+        // BOM as its own focused diagnostic.
+        if t.span.0 != span_end {
+            break;
+        }
+        span_end = t.span.1;
+        stream.advance();
+    }
+    Some(Span::new(span_start, span_end))
+}
+
+/// Inner parser entry point. Operates on a source assumed to have NO
+/// leading BOM (the public [`parse`] function strips it before calling
+/// this). All spans this returns are in the stripped coordinate
+/// frame — [`parse`] shifts them up by `BOM_LEN` if a BOM was stripped.
+fn parse_inner(source: &str) -> ParseResult {
     let raw_tokens: Vec<SpannedToken<'_>> = tokenize(source)
         .into_iter()
         .map(|(token, span)| SpannedToken {
@@ -1852,6 +2031,24 @@ pub fn parse(source: &str) -> ParseResult {
         if stream.is_empty() {
             break;
         }
+
+        // Mid-file BOM recovery: a Token::Error containing only BOM
+        // bytes is layout-transparent. Without this targeted handling,
+        // the generic skip_to_newline recovery below consumes the
+        // entire following directive into the error span — the user
+        // loses their next `open` / transaction / balance assertion
+        // silently. We coalesce a run of consecutive BOM-only Error
+        // tokens (logos emits one Err per char, so a 6-byte `\u{FEFF}
+        // \u{FEFF}` produces two tokens) into a single diagnostic, then
+        // resume from the next non-BOM token.
+        if let Some(bom_span) = consume_leading_bom_run(&mut stream) {
+            errors.push(
+                ParseError::new(ParseErrorKind::BomInDirectiveBody, bom_span)
+                    .with_hint(BOM_REMOVAL_HINT),
+            );
+            continue;
+        }
+
         let error_start = stream.pos;
 
         if let Ok(item) = parse_entry(&mut stream) {
@@ -1913,34 +2110,156 @@ pub fn parse(source: &str) -> ParseResult {
             // Error recovery: skip to next newline (no-op if already at EOF).
             stream.skip_to_newline();
             let span = stream.span_from(error_start);
-            // Prefer a deferred error set by an inner parser (e.g., invalid
-            // date value or unclosed cost spec) over the generic "unexpected
-            // input" fallback.
-            if let Some(err) = stream.deferred_error.take() {
+            // Specific-error classification is split from the deferred-
+            // error pull so a BOM byte in the failed span is ALWAYS
+            // surfaced — even when an inner parser also set a deferred
+            // error (e.g., invalid date) for the same region. Without
+            // this split, a two-strike input (`"2024-13-99 open Bank
+            // \u{FEFF}USD\n"`, invalid month + embedded BOM) would
+            // surface only the date diagnostic and the user would have
+            // no clue that a BOM is also corrupting the line.
+            //
+            // A strict-byte-0 leading BOM was already stripped at the
+            // `crate::parse` entry boundary (see `crate::bom`), so any
+            // U+FEFF byte we see in `error_text` is by definition mid-
+            // file. Logos's default error path emits Token::Error for
+            // it; we scan with `contains` rather than `starts_with` to
+            // catch both shapes (BOM at span start from a concatenation
+            // accident, and BOM mid-token from embedded payloads).
+            // Clamp BOTH ends to source.len() — defense against any
+            // future recovery path that records error_start past the
+            // source's byte length. Used both for slicing `error_text`
+            // (to avoid 'byte index out of bounds' panics here) AND
+            // for every emitted error's span (so downstream consumers
+            // like the LSP that slice `source[err.span.start..err.span.end]`
+            // for diagnostic-context rendering can't panic either).
+            // Defining the clamped span ONCE means a contributor can't
+            // accidentally emit an unclamped span in one of the four
+            // classification branches below.
+            // Clamp the span to source bounds before using it for any
+            // slicing or emission. Three axes of defense:
+            //
+            // 1. `start.min(source.len())` and `end.min(source.len())`
+            //    bound both ends by the source length, so a future
+            //    recovery path that records error_start past the
+            //    source's byte length can't panic the slice below.
+            // 2. `lo.min(hi)` enforces `start <= end` so a degenerate
+            //    out-of-order span (e.g., a hypothetical future
+            //    recovery path that mistakenly calls `Span::new(later,
+            //    earlier)`) can't panic the slice with 'slice index
+            //    starts after end'.
+            // 3. Building `clamped_span` ONCE and using it for every
+            //    `ParseError::new(..., clamped_span)` push — INCLUDING
+            //    the deferred-error rebuild below — means a contributor
+            //    can't accidentally emit an unclamped span in one of
+            //    the five emission paths.
+            let lo = span.start.min(source.len());
+            let hi = span.end.min(source.len());
+            // Debug builds surface upstream span-ordering bugs at the
+            // point of construction; release builds silently collapse
+            // the span via `lo.min(hi)` below. Without the assert, a
+            // `Span::new(later, earlier)` mistake elsewhere would
+            // produce a zero-width empty diagnostic at `end` rather
+            // than a visible failure pointing at the bug's origin.
+            debug_assert!(
+                span.start <= span.end,
+                "ParseError span has start > end: start={}, end={} — \
+                 a producer constructed a degenerate span; fix the producer rather than \
+                 relying on this clamp",
+                span.start,
+                span.end,
+            );
+            let clamped_span = crate::Span::new(lo.min(hi), hi);
+            // Use `get(..)` rather than `&source[..]` so a span that
+            // lands on a non-UTF-8-char-boundary byte (which logos
+            // doesn't produce, but a future heuristic recovery path
+            // using byte-position arithmetic might) doesn't panic.
+            // Falling back to the empty string means classification
+            // treats the span as containing no BOM / no Unicode-
+            // account; the dedicated diagnostic still fires (because
+            // some primary error WAS recorded), just without the
+            // BOM/Unicode hint. Strictly better than panicking.
+            let error_text = source
+                .get(clamped_span.start..clamped_span.end)
+                .unwrap_or("");
+            let has_bom = error_text.contains(crate::bom::BOM_CHAR);
+            let unicode_account = find_unicode_account(error_text);
+            let deferred = stream.deferred_error.take();
+
+            // The primary diagnostic is the most actionable description
+            // of what went wrong. `bom_is_primary` records whether THAT
+            // primary is itself the BOM diagnostic — in which case the
+            // additive secondary BOM emission below is suppressed (we
+            // don't want to emit BOM twice). In all other cases
+            // (deferred-error / unicode-account / generic syntax) the
+            // primary is something else and `has_bom` triggers the
+            // additive secondary so the user learns about both.
+            //
+            // Expression form (rather than `let bom_is_primary; if ...`)
+            // so every branch yields a `bool` structurally — a future
+            // contributor adding a fifth classifier branch can't
+            // forget the assignment or escape via `return`/`continue`
+            // without the compiler catching it.
+            let bom_is_primary: bool = if let Some(mut err) = deferred {
+                // Clamp the deferred error's span to source bounds
+                // before pushing — keeps the "all emitted spans are
+                // bounded by source.len()" invariant intact for
+                // downstream LSP consumers that slice source by
+                // `err.span`. The deferred error was constructed
+                // elsewhere with a span we didn't clamp at the
+                // build site.
+                err.span = crate::Span::new(
+                    err.span.start.min(source.len()),
+                    err.span.end.min(source.len()),
+                );
+                err.span.start = err.span.start.min(err.span.end);
+                // If the deferred error is ITSELF a BOM diagnostic
+                // (no current inner parser sets this, but the path is
+                // structurally reachable once a future contributor
+                // wires BOM detection inside e.g. parse_date), treat
+                // it as the primary BOM diagnostic so the additive
+                // secondary emission below doesn't double-fire and
+                // produce duplicate Bom errors for the same span.
+                let deferred_is_bom = matches!(err.kind, ParseErrorKind::BomInDirectiveBody);
                 errors.push(err);
+                deferred_is_bom
+            } else if let Some(account) = unicode_account {
+                // Prefer the Unicode-account diagnostic over the BOM
+                // diagnostic when both are present — the account name
+                // is the actionable root cause (the BOM is often a
+                // side-effect of a Windows-exported file containing a
+                // non-ASCII account).
+                errors.push(ParseError::new(
+                    ParseErrorKind::InvalidAccount(account.to_string()),
+                    clamped_span,
+                ));
+                false
+            } else if has_bom {
+                errors.push(
+                    ParseError::new(ParseErrorKind::BomInDirectiveBody, clamped_span)
+                        .with_hint(BOM_REMOVAL_HINT),
+                );
+                true
             } else {
-                // Produce specific error messages for known patterns.
-                // A leading BOM is consumed by the lexer's
-                // `bom_filter` callback at byte 0 (and is preserved on
-                // output by `format_source`). A BOM at ANY other byte
-                // position — at the start of an entry from a
-                // concatenation accident, or mid-line from an embedded
-                // BOM byte — falls through to this error branch. We
-                // scan the entire failed-entry slice for U+FEFF
-                // (`contains`, not `starts_with`) so we catch both
-                // shapes; the previous `starts_with` only fired when
-                // the BOM was at byte 0 of the recovered span.
-                let error_text = &source[span.start..span.end.min(source.len())];
-                let kind = if error_text.contains('\u{FEFF}') {
-                    ParseErrorKind::SyntaxError(
-                        "Invalid token: UTF-8 BOM detected in directive body (only a leading BOM is permitted); did you concatenate two BOM-prefixed files or paste content with an embedded BOM?".to_string()
-                    )
-                } else if let Some(account) = find_unicode_account(error_text) {
-                    ParseErrorKind::InvalidAccount(account.to_string())
-                } else {
-                    ParseErrorKind::SyntaxError("unexpected input".to_string())
-                };
-                errors.push(ParseError::new(kind, span));
+                errors.push(ParseError::new(
+                    ParseErrorKind::SyntaxError("unexpected input".to_string()),
+                    clamped_span,
+                ));
+                false
+            };
+
+            // Surface the BOM diagnostic as an additive secondary error
+            // when a different primary diagnostic already fired for the
+            // same span. Two errors are better than one when both
+            // apply — without this the deferred-error path (e.g.
+            // invalid date) would hide the BOM completely and the user
+            // would have no clue that an invisible byte is also
+            // corrupting the line.
+            if has_bom && !bom_is_primary {
+                errors.push(
+                    ParseError::new(ParseErrorKind::BomInDirectiveBody, clamped_span)
+                        .with_hint(BOM_REMOVAL_HINT),
+                );
             }
         }
     }
@@ -1970,6 +2289,12 @@ pub fn parse(source: &str) -> ParseResult {
         errors,
         warnings: Vec::new(),
         currency_occurrences: stream.currency_occurrences,
+        // The strip-at-entry boundary sets this flag on the outer
+        // ParseResult after `parse_inner` returns. Inside the inner
+        // parser we always operate on a BOM-free view, so this is
+        // unconditionally false here — the wrapper `parse()` overwrites
+        // it when a BOM was stripped.
+        has_leading_bom: false,
     }
 }
 
@@ -2394,23 +2719,167 @@ mod tests {
         }
     }
 
-    /// A leading UTF-8 BOM (`\u{FEFF}` / EF BB BF) is now skipped
-    /// transparently by the lexer — editors on Windows and various
-    /// spreadsheet exports prepend one. The previous behavior (a parse
-    /// error on the first byte) made every BOM'd file unreadable by
-    /// every CLI / FFI / LSP / doctor consumer. Now the parser
-    /// completes cleanly and downstream tools format the file the same
-    /// way they would without the BOM.
+    /// A leading UTF-8 BOM (`\u{FEFF}` / EF BB BF) at strict byte 0 is
+    /// stripped at the `parse()` boundary (see `crate::bom`), the inner
+    /// parser runs on a BOM-free view, and every span returned to the
+    /// caller is shifted back into the original-source coordinate
+    /// frame. The `has_leading_bom` flag carries the strip outcome.
     #[test]
-    fn test_bom_is_skipped_transparently() {
+    fn test_leading_bom_strips_cleanly_and_flag_set() {
         let source = "\u{FEFF}2024-01-01 open Assets:Bank USD\n";
         let result = parse(source);
         assert!(
             result.errors.is_empty(),
-            "BOM should be skipped, got errors: {:?}",
+            "BOM should be stripped, got errors: {:?}",
             result.errors
         );
         assert_eq!(result.directives.len(), 1, "expected 1 directive");
+        assert!(
+            result.has_leading_bom,
+            "has_leading_bom should be true for a BOM-prefixed source"
+        );
+        // Spans are in ORIGINAL coords: the directive starts at byte 3
+        // (after the 3-byte BOM), not byte 0.
+        let dir_span = result.directives[0].span;
+        assert_eq!(
+            dir_span.start, 3,
+            "directive span.start should be in original-source coords (3, after BOM); \
+             got {dir_span:?}"
+        );
+    }
+
+    /// No-BOM source: flag is false, spans are in their natural
+    /// (unshifted) coordinate frame.
+    #[test]
+    fn test_no_leading_bom_flag_is_false() {
+        let source = "2024-01-01 open Assets:Bank USD\n";
+        let result = parse(source);
+        assert!(result.errors.is_empty());
+        assert!(
+            !result.has_leading_bom,
+            "has_leading_bom should be false for a BOM-less source"
+        );
+        assert_eq!(result.directives[0].span.start, 0);
+    }
+
+    /// Regression: nested `Spanned<Posting>` inside `Transaction.postings`
+    /// must be shifted into the original-source coordinate frame too,
+    /// not just the outer `Spanned<Directive>::span`.
+    ///
+    /// Verifies the `shift_spans_up` recursion into directive bodies
+    /// (via `shift_directive_inner_spans`). Without that recursion,
+    /// posting spans stay in the BOM-stripped frame — 3 bytes too
+    /// small. Every LSP feature that uses per-posting spans
+    /// (`document_highlight`, `document_color`, `linked_editing`,
+    /// `call_hierarchy`) would land 3 bytes early, off the start of
+    /// the actual posting line.
+    ///
+    /// The test computes the expected byte offset of each posting line
+    /// in the ORIGINAL (BOM-included) source and asserts that
+    /// `posting.span.start` matches. Catches the bug structurally
+    /// rather than relying on a format round-trip (`format_source`
+    /// happens not to use posting spans — it re-renders from
+    /// structured data).
+    #[test]
+    fn test_posting_spans_shifted_into_original_source_frame() {
+        let src =
+            "\u{FEFF}2024-01-15 * \"Coffee\"\n  Expenses:Food 5.00 USD\n  Assets:Bank -5.00 USD\n";
+        let result = parse(src);
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(result.directives.len(), 1);
+        assert!(result.has_leading_bom);
+
+        let Directive::Transaction(txn) = &result.directives[0].value else {
+            panic!("expected Transaction, got {:?}", result.directives[0].value);
+        };
+        assert_eq!(txn.postings.len(), 2, "expected 2 postings");
+
+        // The byte IMMEDIATELY BEFORE posting.span.start must be
+        // `\n` — postings span from the start of their indent (or
+        // account, if no indent) on a fresh line. This is the LSP
+        // load-bearing invariant: per-posting features (highlight,
+        // color, linked-edit, call-hierarchy) walk back from
+        // span.start expecting to find the line boundary.
+        //
+        // Without the `shift_directive_inner_spans` recursion, posting
+        // spans stay in the stripped-source frame (3 bytes too small).
+        // For the test input, the byte 3 positions earlier is INSIDE
+        // the previous directive's payload — `e"` (the closing
+        // characters of `"Coffee"`) — NOT a newline. This assertion
+        // catches that exact byte-offset drift.
+        let p0_start = txn.postings[0].span.start;
+        assert!(p0_start > 0, "posting[0].span.start must be > 0");
+        // Build a context window that's safe to slice even if the
+        // regression under test makes `p0_start` overshoot
+        // `src.len()` — without explicit clamping on BOTH bounds, the
+        // diagnostic format-arg slice would panic 'byte index out of
+        // bounds' before the assertion message renders, masking the
+        // real failure with an opaque arithmetic panic.
+        let ctx0_lo = p0_start.saturating_sub(5);
+        let ctx0_hi = (p0_start + 5).min(src.len());
+        assert_eq!(
+            src.as_bytes()[p0_start - 1],
+            b'\n',
+            "byte before posting[0].span.start ({p0_start}) must be \\n in original source frame; \
+             a regression that leaves spans in stripped-source frame would point this 3 bytes too early, \
+             into the directive's payload bytes. \
+             Got byte before = {:?} (0x{:02x}); \
+             surrounding context: {:?}",
+            src.as_bytes()[p0_start - 1] as char,
+            src.as_bytes()[p0_start - 1],
+            &src[ctx0_lo..ctx0_hi],
+        );
+        let p1_start = txn.postings[1].span.start;
+        // Symmetric guard with the p0 case — without it, a regression
+        // that affects posting[1] too would underflow in `p1_start - 1`
+        // and panic instead of surfacing the documented diagnostic.
+        assert!(p1_start > 0, "posting[1].span.start must be > 0");
+        assert_eq!(
+            src.as_bytes()[p1_start - 1],
+            b'\n',
+            "byte before posting[1].span.start ({p1_start}) must be \\n in original source frame; \
+             got: {:?}",
+            src.as_bytes()[p1_start - 1] as char,
+        );
+
+        // And the slice contains the account name (sanity check that
+        // posting.span.end is also in the correct frame, not just
+        // span.start).
+        let p0_slice = &src[txn.postings[0].span.start..txn.postings[0].span.end];
+        assert!(
+            p0_slice.contains("Expenses:Food"),
+            "slicing original source by posting[0].span must contain 'Expenses:Food'; got {p0_slice:?}"
+        );
+        let p1_slice = &src[txn.postings[1].span.start..txn.postings[1].span.end];
+        assert!(
+            p1_slice.contains("Assets:Bank"),
+            "slicing original source by posting[1].span must contain 'Assets:Bank'; got {p1_slice:?}"
+        );
+    }
+
+    /// The previously-widened case (whitespace before BOM) is correctly
+    /// a parse error now: that input is malformed (the BOM is mid-file
+    /// by strict definition). The strict-byte-0 strip means
+    /// `crate::bom::strip_leading` leaves the input alone, the lexer
+    /// sees the space + BOM, and the BOM byte falls into the error
+    /// path producing the dedicated diagnostic.
+    #[test]
+    fn test_leading_whitespace_then_bom_is_error() {
+        let source = " \u{FEFF}2024-01-01 open Assets:Bank USD\n";
+        let result = parse(source);
+        assert!(
+            !result.errors.is_empty(),
+            "whitespace-before-BOM is mid-file BOM, should produce an error"
+        );
+        let messages: Vec<String> = result.errors.iter().map(ParseError::message).collect();
+        assert!(
+            messages.iter().any(|m| m.contains("BOM")),
+            "expected a BOM diagnostic, got: {messages:?}"
+        );
+        assert!(
+            !result.has_leading_bom,
+            "has_leading_bom should be false — only strict-byte-0 counts"
+        );
     }
 
     /// A BOM at a non-zero byte offset (e.g., concatenated files like
@@ -2418,6 +2887,17 @@ mod tests {
     /// silently consumed — the parser surfaces a clear "UTF-8 BOM
     /// detected mid-file" diagnostic so the user can fix the
     /// concatenation mistake.
+    ///
+    /// Pins two contracts simultaneously: (1) the BOM produces a
+    /// `BomInDirectiveBody` diagnostic with span covering just the
+    /// BOM bytes (3 UTF-8 bytes for one U+FEFF), and (2) the
+    /// directive FOLLOWING the BOM still parses — the parser does
+    /// NOT consume the next directive into the error recovery span.
+    /// The two-directive assertion catches the data-loss regression
+    /// that existed before `consume_leading_bom_run`: the old
+    /// `skip_to_newline` recovery would swallow the entire
+    /// `2024-01-02 open Assets:Cash USD` line into the BOM span,
+    /// silently dropping the second `open` directive.
     #[test]
     fn test_mid_file_bom_produces_error() {
         let source = "2024-01-01 open Assets:Bank USD\n\u{FEFF}2024-01-02 open Assets:Cash USD\n";
@@ -2431,6 +2911,126 @@ mod tests {
             msg.contains("BOM") && msg.contains("directive body"),
             "expected BOM-in-directive error, got: {msg}"
         );
+
+        // Both directives must survive: the BOM at the start of line
+        // 2 is layout-transparent, not a terminator.
+        assert_eq!(
+            result.directives.len(),
+            2,
+            "the directive following the mid-file BOM must still parse — \
+             got directives: {:?}",
+            result
+                .directives
+                .iter()
+                .map(|d| format!("{:?}", d.value))
+                .collect::<Vec<_>>()
+        );
+
+        // The BOM diagnostic span covers exactly the BOM bytes
+        // (3 UTF-8 bytes per U+FEFF), not the whole second line.
+        let bom_err = result
+            .errors
+            .iter()
+            .find(|e| matches!(e.kind, ParseErrorKind::BomInDirectiveBody))
+            .expect("a BomInDirectiveBody error must exist");
+        let span_len = bom_err.span.end - bom_err.span.start;
+        assert_eq!(
+            span_len,
+            crate::bom::BOM_LEN,
+            "BOM diagnostic span must cover exactly the BOM bytes ({} bytes), \
+             not the whole recovery range — span = {}..{}, length = {}",
+            crate::bom::BOM_LEN,
+            bom_err.span.start,
+            bom_err.span.end,
+            span_len
+        );
+    }
+
+    /// Multiple consecutive mid-file BOMs (e.g., from triple-
+    /// concatenated Windows files) coalesce into ONE diagnostic
+    /// whose span covers the full BOM run, and the directive
+    /// following the run still parses. Pins the
+    /// `consume_leading_bom_run` coalescing behavior.
+    #[test]
+    fn test_consecutive_mid_file_boms_coalesce_and_preserve_next_directive() {
+        let source =
+            "2024-01-01 open Assets:Bank USD\n\u{FEFF}\u{FEFF}2024-01-02 open Assets:Cash USD\n";
+        let result = parse(source);
+        assert_eq!(
+            result.directives.len(),
+            2,
+            "directive after a multi-BOM run must still parse"
+        );
+        let bom_errs: Vec<_> = result
+            .errors
+            .iter()
+            .filter(|e| matches!(e.kind, ParseErrorKind::BomInDirectiveBody))
+            .collect();
+        assert_eq!(
+            bom_errs.len(),
+            1,
+            "consecutive BOMs must coalesce into a single diagnostic, got: {bom_errs:?}"
+        );
+        let span_len = bom_errs[0].span.end - bom_errs[0].span.start;
+        assert_eq!(
+            span_len,
+            2 * crate::bom::BOM_LEN,
+            "coalesced BOM-run span must cover both BOMs"
+        );
+    }
+
+    /// Two BOMs separated by lexer-skipped whitespace (`\u{FEFF}
+    /// \u{FEFF}`) emit per-BOM focused diagnostics, NOT one coalesced
+    /// span covering the inter-BOM space.
+    ///
+    /// Pre-round-18, the coalescing loop in `consume_leading_bom_run`
+    /// didn't check byte adjacency. For input `\u{FEFF} \u{FEFF}` the
+    /// two BOM Errs appear consecutive in the token stream (space
+    /// skipped by logos) and were coalesced into a single span
+    /// covering bytes 0..7 — labeling the inter-BOM whitespace as
+    /// part of the BOM diagnostic. The adjacency check forces a
+    /// separate diagnostic per BOM, each covering exactly the BOM
+    /// bytes.
+    ///
+    /// The test asserts there are AT LEAST TWO focused
+    /// `BomInDirectiveBody` diagnostics whose spans contain only BOM
+    /// chars. Recovery downstream may emit additional broader errors
+    /// covering the inter-BOM whitespace + later corruption
+    /// (currently the indent walker treats the post-BOM space as an
+    /// `Indent` token that `parse_entry` rejects); those broader
+    /// diagnostics may also happen to be classified as
+    /// `BomInDirectiveBody` because their span contains a BOM byte.
+    /// The user-visible contract pinned here is: the focused per-BOM
+    /// diagnostics exist.
+    #[test]
+    fn test_non_adjacent_boms_emit_per_bom_diagnostics() {
+        let source =
+            "2024-01-01 open Assets:Bank USD\n\u{FEFF} \u{FEFF}2024-01-02 open Assets:Cash USD\n";
+        let result = parse(source);
+        let focused_bom_errs: Vec<_> = result
+            .errors
+            .iter()
+            .filter(|e| matches!(e.kind, ParseErrorKind::BomInDirectiveBody))
+            .filter(|e| {
+                let span_text = source.get(e.span.start..e.span.end).unwrap_or("");
+                !span_text.is_empty() && span_text.chars().all(|c| c == crate::bom::BOM_CHAR)
+            })
+            .collect();
+        assert!(
+            focused_bom_errs.len() >= 2,
+            "expected at least one focused diagnostic per non-adjacent BOM — \
+             span containing only BOM chars; got focused errs: {focused_bom_errs:?}, \
+             all errs: {:?}",
+            result.errors
+        );
+        // Each focused diagnostic's span is exactly one BOM long.
+        for err in &focused_bom_errs {
+            assert_eq!(
+                err.span.end - err.span.start,
+                crate::bom::BOM_LEN,
+                "focused diagnostic must cover exactly one BOM"
+            );
+        }
     }
 
     /// A BOM embedded mid-line (not at the start of a fresh directive)
@@ -2449,6 +3049,116 @@ mod tests {
         );
         let msg = result.errors[0].message();
         assert!(msg.contains("BOM"), "expected BOM diagnostic, got: {msg}");
+    }
+
+    /// Two-strike input: invalid date AND a BOM in the same failed
+    /// span. The deferred date error fires first, but the BOM
+    /// diagnostic must STILL surface as a separate error — the user
+    /// should learn about both. Previously the deferred-error branch
+    /// short-circuited the BOM classifier entirely and the BOM hint
+    /// was silently dropped.
+    #[test]
+    fn test_bom_alongside_deferred_error_both_surface() {
+        let source = "2024-13-99 open Assets:Bank \u{FEFF}USD\n";
+        let result = parse(source);
+        assert!(
+            result.errors.len() >= 2,
+            "expected both invalid-date AND BOM errors, got: {:?}",
+            result
+                .errors
+                .iter()
+                .map(ParseError::message)
+                .collect::<Vec<_>>()
+        );
+        // The date diagnostic comes first (primary, actionable root cause).
+        let messages: Vec<String> = result.errors.iter().map(ParseError::message).collect();
+        assert!(
+            messages.iter().any(|m| m.to_lowercase().contains("date")
+                || m.contains("13")
+                || m.to_lowercase().contains("month")),
+            "expected an invalid-date diagnostic in the error set, got: {messages:?}"
+        );
+        // The BOM diagnostic surfaces as a secondary additive error.
+        assert!(
+            messages.iter().any(|m| m.contains("BOM")),
+            "expected a BOM diagnostic alongside the deferred date error, got: {messages:?}"
+        );
+    }
+
+    /// Pins the load-bearing `matches!(err.kind, BomInDirectiveBody)`
+    /// discriminant used by the deferred-error branch of the
+    /// classifier (parser.rs:~2305). Today no inner parser sets
+    /// `stream.deferred_error = Some(ParseError::new(BomInDirectiveBody, ...))`,
+    /// so this code path is structurally reachable but unreachable
+    /// via real input. Without this test, a future rename or refactor
+    /// that broke the `matches!()` expression (e.g., variant rename
+    /// gone wrong, or a destructure-typo) would slip through every
+    /// existing integration test because none of them exercise the
+    /// dedup path.
+    ///
+    /// When a future contributor wires BOM detection inside an inner
+    /// parser (e.g. `parse_date` recognizing an embedded BOM and
+    /// setting a deferred `BomInDirectiveBody`), this test ensures the
+    /// dedup logic recognizes it as the primary diagnostic and
+    /// suppresses the additive secondary, preventing duplicate
+    /// emission.
+    #[test]
+    fn test_deferred_bom_kind_discriminant() {
+        let err = ParseError::new(ParseErrorKind::BomInDirectiveBody, crate::Span::new(0, 3));
+        assert!(
+            matches!(err.kind, ParseErrorKind::BomInDirectiveBody),
+            "matches! on err.kind must recognize BomInDirectiveBody; \
+             this is the load-bearing expression in the deferred-error \
+             dedup branch of the classifier."
+        );
+        // Inverse check: a non-BOM kind must NOT match.
+        let other = ParseError::new(
+            ParseErrorKind::SyntaxError("not a BOM".to_string()),
+            crate::Span::new(0, 3),
+        );
+        assert!(
+            !matches!(other.kind, ParseErrorKind::BomInDirectiveBody),
+            "matches! must NOT misclassify other kinds as BomInDirectiveBody"
+        );
+    }
+
+    /// When the failed-entry span contains a Cyrillic/CJK account
+    /// AND a BOM, the Unicode-account diagnostic (if it would fire) is
+    /// the primary and the BOM hint is surfaced as an additive
+    /// secondary error. The error-ordering policy is asserted at the
+    /// code-path level (`bom_is_primary` flag in the classifier above,
+    /// false when a non-BOM diagnostic is the primary so the additive
+    /// secondary BOM emission fires) rather than via a single input,
+    /// because constructing an input where `find_unicode_account`
+    /// returns Some AND the error span also contains a BOM is narrow:
+    /// most valid Cyrillic/CJK accounts tokenize cleanly as
+    /// `Token::Account`, so they don't appear in the recovered error
+    /// span. The dual-diagnostic contract for the common case
+    /// (deferred-error + BOM) is pinned by
+    /// `test_bom_alongside_deferred_error_both_surface`. The
+    /// Unicode-account-only path (no BOM) is pinned by
+    /// `test_unicode_account_emits_invalid_account_error` (below, if
+    /// present) and by the lexer's account tests.
+    #[test]
+    fn test_cyrillic_account_with_bom_surfaces_bom_diagnostic() {
+        // The Cyrillic account parses cleanly, so the failed span is
+        // just `\u{FEFF}USD`. We pin the BOM diagnostic as the only
+        // diagnostic — the test ensures the BOM classifier still fires
+        // for this real-world Windows-export shape even when a
+        // non-ASCII account is part of the line.
+        let source = "2024-01-01 open Активы:Банк \u{FEFF}USD\n";
+        let result = parse(source);
+        assert!(
+            !result.errors.is_empty(),
+            "expected at least one error, got: {:?}",
+            result.errors
+        );
+        let messages: Vec<String> = result.errors.iter().map(ParseError::message).collect();
+        assert!(
+            messages.iter().any(|m| m.contains("BOM")),
+            "expected a BOM diagnostic when a BOM byte sits next to a Cyrillic account, \
+             got: {messages:?}"
+        );
     }
 
     #[test]

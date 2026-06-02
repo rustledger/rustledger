@@ -3,9 +3,66 @@
 //! This module contains common utilities used across multiple handlers,
 //! including position conversion, word extraction, and type checking.
 
-use lsp_types::{FormattingOptions, Position};
+use lsp_types::{FormattingOptions, Position, Range};
 use rustledger_core::FormatConfig;
 use rustledger_parser::ParseResult;
+
+/// Whether two LSP `Range`s overlap, using LSP half-open semantics
+/// (`Range.end` is EXCLUSIVE per the spec).
+///
+/// Two ranges where `a.end == b.start` are adjacent, NOT overlapping
+/// — hence the `<=` (rather than strict `<`). A zero-width range
+/// (cursor position) at exactly `r.end` is past `r`, not inside it;
+/// a zero-width range at exactly `r.start` IS inside `r`.
+///
+/// Single canonical implementation. Previously two private copies
+/// existed (`handlers/import.rs` and `handlers/code_actions.rs`) with
+/// opposite semantics — one strict-`<`, one `<=`. Hoisting here
+/// removes the inconsistency.
+#[must_use]
+pub fn ranges_overlap(a: Range, b: Range) -> bool {
+    !(a.end <= b.start || b.end <= a.start)
+}
+
+/// LSP position-encoding negotiated with the client at initialization.
+///
+/// Per LSP 3.17, a client advertises which encodings it accepts via
+/// `InitializeParams.capabilities.general.positionEncodings`. The
+/// server replies with the encoding it will use; clients that don't
+/// negotiate get the default (UTF-16). Modern editors (VS Code,
+/// neovim, helix, zed) negotiate UTF-8 because that's cheaper than
+/// re-encoding every diagnostic position.
+///
+/// All position emission paths in the LSP layer should consult this
+/// type — emitting LSP positions in a different encoding than the
+/// negotiated one will misalign on non-ASCII content. Today most
+/// handlers in this crate emit byte (UTF-8) offsets via
+/// [`LineIndex::offset_to_position`]; that works under UTF-8
+/// negotiation but is wrong for UTF-16-only clients. See
+/// `server.rs::run` for the negotiation site and `MainLoopState`
+/// for the storage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PositionEncoding {
+    /// UTF-8 byte offsets. The native unit of the underlying source
+    /// representation; preferred by modern editors.
+    Utf8,
+    /// UTF-16 code units. The LSP 3.17 default for clients that
+    /// don't negotiate.
+    Utf16,
+}
+
+impl PositionEncoding {
+    /// Decide the negotiated encoding from a `ServerCapabilities`-
+    /// shaped value. `Some(UTF8)` → UTF-8; `None` → UTF-16 (the
+    /// LSP default).
+    #[must_use]
+    pub fn from_negotiated(negotiated: Option<&lsp_types::PositionEncodingKind>) -> Self {
+        match negotiated {
+            Some(kind) if *kind == lsp_types::PositionEncodingKind::UTF8 => Self::Utf8,
+            _ => Self::Utf16,
+        }
+    }
+}
 
 /// Resolve the `FormatConfig` the LSP server uses for a given request.
 ///
@@ -34,31 +91,67 @@ pub fn document_format_config(_opts: Option<&FormattingOptions>) -> FormatConfig
     FormatConfig::default()
 }
 
-/// A line index for efficient offset-to-position conversion.
+/// A line index for efficient offset-to-position conversion, encoding-aware.
 ///
-/// Building the index is O(n) where n is the source length, but subsequent
-/// lookups are O(log(lines)) using binary search. This is much faster than
-/// the naive O(n) approach when doing multiple conversions on the same source.
+/// Borrows the source via `&'a str` — the index does NOT allocate a copy.
+/// Construction is O(n) for the `line_starts` table walk; subsequent
+/// lookups are O(log lines) for line resolution. Column resolution
+/// under UTF-16 encoding is also O(log n) via a lazily-built
+/// [`ropey::Rope`] that's only paid for under UTF-16 negotiation;
+/// under UTF-8 encoding the column math is constant time after line
+/// resolution (the column equals the byte delta from line start).
+///
+/// **Architecture (round-18).** Previous iterations alternated
+/// between full-rope-only (O(log n) lookups but O(n) construction
+/// for both encodings), no-rope-only (O(line_length) UTF-16 lookups
+/// with no rope cost), and owned-Arc-source (gratuitous O(n) clone).
+/// This design picks the right cost for each path: UTF-8 paths pay
+/// no rope cost; UTF-16 paths pay one rope construction per index
+/// and get O(log n) lookups.
+///
+/// **Line-break semantics.** Only `\n` is treated as a line break,
+/// matching the LSP-spec-implied convention that `Position.line` is
+/// indexed by `\n` boundaries. Bare `\r` (legacy macOS line endings)
+/// is NOT a line break. CRLF is recognized via the `\r` being part
+/// of the preceding line content (trimmed in `position_to_offset`
+/// and `line_text`).
 ///
 /// # Example
 ///
 /// ```ignore
-/// let index = LineIndex::new(source);
+/// let index = LineIndex::new(source, PositionEncoding::Utf16);
 /// let (line, col) = index.offset_to_position(offset);
 /// ```
-#[derive(Debug, Clone)]
-pub struct LineIndex {
+#[derive(Debug)]
+pub struct LineIndex<'a> {
+    /// Borrowed source — the index lives only as long as the source.
+    source: &'a str,
     /// Byte offset of the start of each line (including line 0 at offset 0).
     line_starts: Vec<usize>,
-    /// Total length of the source in bytes.
-    len: usize,
+    /// Negotiated LSP position encoding.
+    encoding: PositionEncoding,
+    /// Lazily-built rope used ONLY for UTF-16 column conversions.
+    /// `None` until the first UTF-16-encoded lookup; `None` forever
+    /// under [`PositionEncoding::Utf8`]. Single-threaded interior
+    /// mutability via [`std::cell::OnceCell`] — handlers build a
+    /// LineIndex per request, no cross-thread sharing.
+    utf16_rope: std::cell::OnceCell<ropey::Rope>,
 }
 
-impl LineIndex {
+impl<'a> LineIndex<'a> {
     /// Build a line index from source text.
     ///
-    /// This is O(n) where n is the source length.
-    pub fn new(source: &str) -> Self {
+    /// O(n) for the line-starts table walk. The UTF-16 rope is NOT
+    /// built here — it's deferred to the first UTF-16 column lookup
+    /// via `utf16_rope`'s [`std::cell::OnceCell`]. Under UTF-8
+    /// encoding the rope is never built at all.
+    ///
+    /// `encoding` is the LSP position encoding negotiated with the
+    /// client (see [`PositionEncoding`]). Pass
+    /// [`PositionEncoding::Utf16`] for the LSP spec default, or the
+    /// value stored on the main-loop state for the negotiated wire
+    /// encoding.
+    pub fn new(source: &'a str, encoding: PositionEncoding) -> Self {
         let mut line_starts = vec![0]; // Line 0 starts at offset 0
 
         for (i, ch) in source.char_indices() {
@@ -68,45 +161,127 @@ impl LineIndex {
         }
 
         Self {
+            source,
             line_starts,
-            len: source.len(),
+            encoding,
+            utf16_rope: std::cell::OnceCell::new(),
+        }
+    }
+
+    /// Get or build the UTF-16 rope on demand.
+    fn rope(&self) -> &ropey::Rope {
+        self.utf16_rope
+            .get_or_init(|| ropey::Rope::from_str(self.source))
+    }
+
+    /// Locate the line containing `byte` via binary search over
+    /// `line_starts`. Saturating-sub on the `Err` branch handles a
+    /// byte that falls strictly between line starts (the common
+    /// case).
+    fn byte_to_line(&self, byte: usize) -> usize {
+        match self.line_starts.binary_search(&byte) {
+            Ok(line) => line,
+            Err(line) => line.saturating_sub(1),
         }
     }
 
     /// Convert a byte offset to a (line, column) position (0-based).
     ///
-    /// This is O(log(lines)) using binary search.
+    /// `column` is in the negotiated encoding — UTF-8 byte offsets
+    /// under [`PositionEncoding::Utf8`], UTF-16 code units under
+    /// [`PositionEncoding::Utf16`]. UTF-8 is O(log lines) total;
+    /// UTF-16 is O(log lines) line resolution + O(log n) rope
+    /// conversion (after a one-time O(n) rope construction).
     pub fn offset_to_position(&self, offset: usize) -> (u32, u32) {
-        let offset = offset.min(self.len);
-
-        // Binary search for the line containing this offset
-        let line = match self.line_starts.binary_search(&offset) {
-            Ok(line) => line,                    // Exact match: offset is at line start
-            Err(line) => line.saturating_sub(1), // Between lines: use previous line
-        };
-
+        let offset = offset.min(self.source.len());
+        let line = self.byte_to_line(offset);
         let line_start = self.line_starts[line];
-        let col = offset - line_start;
-
-        (line as u32, col as u32)
+        let col: u32 = match self.encoding {
+            PositionEncoding::Utf8 => (offset - line_start) as u32,
+            PositionEncoding::Utf16 => {
+                let rope = self.rope();
+                let char_at = rope.byte_to_char(offset);
+                let line_start_char = rope.byte_to_char(line_start);
+                (rope.char_to_utf16_cu(char_at) - rope.char_to_utf16_cu(line_start_char)) as u32
+            }
+        };
+        (line as u32, col)
     }
 
     /// Convert a (line, column) position to a byte offset.
     ///
-    /// Returns None if the position is out of bounds.
+    /// `col` is interpreted in the negotiated encoding (UTF-8 bytes
+    /// vs. UTF-16 code units). Returns `None` when:
+    /// - `line` is past the last line in the source, OR
+    /// - `col` overshoots the line's content in the negotiated
+    ///   encoding, OR
+    /// - `col` lands inside a surrogate pair (UTF-16) or off a
+    ///   UTF-8 char boundary (UTF-8).
+    ///
+    /// The strict-overshoot contract is symmetric across encodings
+    /// so callers can rely on `None` as a uniform "malformed client
+    /// position" signal regardless of negotiation.
     pub fn position_to_offset(&self, line: u32, col: u32) -> Option<usize> {
-        let line = line as usize;
-        if line >= self.line_starts.len() {
+        let line_usize = line as usize;
+        if line_usize >= self.line_starts.len() {
             return None;
         }
-
-        let line_start = self.line_starts[line];
-        let offset = line_start + col as usize;
-
-        if offset <= self.len {
-            Some(offset)
-        } else {
-            None
+        let line_start = self.line_starts[line_usize];
+        let line_end_raw = self
+            .line_starts
+            .get(line_usize + 1)
+            .copied()
+            .unwrap_or(self.source.len());
+        // Exclude only the trailing '\n' from the addressable-content
+        // range. The '\r' under CRLF is treated as line content (it
+        // sits inside the byte range `source.split('\n')` yields for
+        // the line), so handlers can address positions immediately
+        // before the `\n`. Strict `\n`-only stripping mirrors the
+        // `\n`-only line-break policy enforced in `line_starts`.
+        let line_text_end = {
+            let bytes = self.source.as_bytes();
+            if line_end_raw > line_start && bytes.get(line_end_raw - 1) == Some(&b'\n') {
+                line_end_raw - 1
+            } else {
+                line_end_raw
+            }
+        };
+        match self.encoding {
+            PositionEncoding::Utf8 => {
+                let offset = line_start.checked_add(col as usize)?;
+                if offset > line_text_end {
+                    return None;
+                }
+                if offset < self.source.len() && !self.source.is_char_boundary(offset) {
+                    return None;
+                }
+                Some(offset)
+            }
+            PositionEncoding::Utf16 => {
+                // Route through ropey for O(log n) lookup. The rope
+                // helper translates a UTF-16 code-unit offset into a
+                // byte offset; we still validate the result lies
+                // within the addressed line's content (strict
+                // overshoot returns None).
+                let rope = self.rope();
+                let line_start_char = rope.byte_to_char(line_start);
+                let line_start_utf16 = rope.char_to_utf16_cu(line_start_char);
+                let line_text_end_char = rope.byte_to_char(line_text_end);
+                let line_text_end_utf16 = rope.char_to_utf16_cu(line_text_end_char);
+                let target_utf16 = line_start_utf16.checked_add(col as usize)?;
+                if target_utf16 > line_text_end_utf16 {
+                    return None;
+                }
+                let char_idx = rope.utf16_cu_to_char(target_utf16);
+                // Round-trip check: if `col` landed in a surrogate
+                // pair, utf16_cu_to_char snaps to the surrounding
+                // char, and re-converting gives a different code-
+                // unit count. That's the malformed-input signal.
+                if rope.char_to_utf16_cu(char_idx) != target_utf16 {
+                    return None;
+                }
+                Some(rope.char_to_byte(char_idx))
+            }
         }
     }
 
@@ -115,19 +290,73 @@ impl LineIndex {
         self.line_starts.len()
     }
 
+    /// Byte offset of the start of `line` in the source. Returns
+    /// `None` if `line` is past the last line.
+    #[must_use]
+    pub fn line_start_byte(&self, line: u32) -> Option<usize> {
+        self.line_starts.get(line as usize).copied()
+    }
+
+    /// Convert a `(line, byte_offset_within_line)` pair to an LSP
+    /// `Position` in the negotiated encoding.
+    ///
+    /// The common pattern this serves: a handler calls
+    /// `line.find(needle)` to locate a substring, getting a BYTE
+    /// offset within the line. Emitting that offset directly as a
+    /// `Position::character` is wrong under UTF-16 negotiation on
+    /// non-ASCII content (round-19 reviewer-flagged hazard across
+    /// references / rename / document_highlight / linked_editing /
+    /// call_hierarchy / type_hierarchy / selection_range). This
+    /// helper routes through the index's encoding-aware
+    /// `offset_to_position` so the emitted `Position.character` is
+    /// correct under both negotiations.
+    ///
+    /// Returns `None` if:
+    /// - `line` is past the last line, OR
+    /// - `byte_in_line` would overflow `usize` when added to the
+    ///   line start, OR
+    /// - `byte_in_line` strictly overshoots the line's addressable
+    ///   content (i.e. exceeds `line_text(line).len()`). The
+    ///   strict-overshoot reject mirrors `position_to_offset`'s
+    ///   contract: silently routing into the next line via
+    ///   `offset_to_position`'s `min(source.len())` clamp would
+    ///   hide caller bugs where the byte offset came from a stale
+    ///   cached value rather than a fresh `line.find()`.
+    #[must_use]
+    pub fn byte_in_line_to_position(&self, line: u32, byte_in_line: usize) -> Option<Position> {
+        let line_start = self.line_start_byte(line)?;
+        let line_text = self.line_text(line)?;
+        if byte_in_line > line_text.len() {
+            return None;
+        }
+        let abs_byte = line_start.checked_add(byte_in_line)?;
+        let (l, c) = self.offset_to_position(abs_byte);
+        Some(Position::new(l, c))
+    }
+
+    /// Negotiated LSP position encoding the index was built with.
+    #[must_use]
+    pub fn encoding(&self) -> PositionEncoding {
+        self.encoding
+    }
+
     /// Get the text of a single line (0-indexed), excluding the
     /// terminating newline. Returns None if `line` is out of bounds.
     ///
-    /// Cheaper than `source.lines().collect::<Vec<_>>()` for handlers
-    /// that only need a few specific lines.
-    pub fn line_text<'a>(&self, source: &'a str, line: u32) -> Option<&'a str> {
+    /// Borrows from the index's source — same lifetime as the
+    /// LineIndex itself.
+    pub fn line_text(&self, line: u32) -> Option<&'a str> {
         let line = line as usize;
         let start = *self.line_starts.get(line)?;
-        let end = self.line_starts.get(line + 1).copied().unwrap_or(self.len);
+        let end = self
+            .line_starts
+            .get(line + 1)
+            .copied()
+            .unwrap_or(self.source.len());
         // `start..end` includes any trailing `\n` (and `\r` if CRLF);
         // strip both so the returned slice mirrors `str::lines()`.
         Some(
-            source
+            self.source
                 .get(start..end)?
                 .trim_end_matches('\n')
                 .trim_end_matches('\r'),
@@ -135,187 +364,100 @@ impl LineIndex {
     }
 }
 
-/// Convert a byte offset to a line/column position (0-based for LSP).
+/// Get the word at a given column position in a line, interpreting
+/// `col` in the negotiated LSP position encoding.
 ///
-/// Note: This is O(n) where n is the offset. For handlers that do multiple
-/// conversions on the same source, use [`LineIndex`] instead for O(log n) lookups.
-pub fn byte_offset_to_position(source: &str, offset: usize) -> (u32, u32) {
-    let mut line = 0u32;
-    let mut col = 0u32;
+/// Returns the word and its start/end columns in the **same encoding
+/// as `col`** — so callers can splice the returned `(start, end)`
+/// directly into LSP `Position` / `Range` values without further
+/// conversion. Words include alphanumeric characters, colons,
+/// hyphens, and underscores.
+///
+/// Pre-round-17 this helper treated `col` as a raw char index, which
+/// is neither UTF-8 bytes nor UTF-16 code units. The result misfired
+/// on any non-ASCII line under EITHER negotiated encoding, breaking
+/// rename / references / document-highlight / linked-editing on
+/// Cyrillic / CJK / emoji content.
+pub fn get_word_at_position(
+    line: &str,
+    col: usize,
+    encoding: PositionEncoding,
+) -> Option<(String, usize, usize)> {
+    // Walk the line accumulating (byte_offset, char_count, units_seen)
+    // tuples so we can map `col` (in the negotiated encoding) to a
+    // char index. Then find the word boundary at that char index and
+    // map the boundary back to the same encoding so the returned
+    // columns are wire-ready.
+    let chars: Vec<char> = line.chars().collect();
 
-    for (i, ch) in source.char_indices() {
-        if i >= offset {
+    // Mapping from char index → encoded col, in O(line length).
+    let encoded_col_at_char = |char_idx: usize| -> usize {
+        chars
+            .iter()
+            .take(char_idx)
+            .map(|c| match encoding {
+                PositionEncoding::Utf8 => c.len_utf8(),
+                PositionEncoding::Utf16 => c.len_utf16(),
+            })
+            .sum()
+    };
+
+    // Mapping `col` → char index. Returns None if `col` lands inside
+    // a multi-byte char (UTF-8) or surrogate pair (UTF-16).
+    let mut acc = 0usize;
+    let mut cursor_char_idx = 0usize;
+    for (i, c) in chars.iter().enumerate() {
+        if acc == col {
+            cursor_char_idx = i;
             break;
         }
-        if ch == '\n' {
-            line += 1;
-            col = 0;
-        } else {
-            col += 1;
+        let u = match encoding {
+            PositionEncoding::Utf8 => c.len_utf8(),
+            PositionEncoding::Utf16 => c.len_utf16(),
+        };
+        if acc + u > col {
+            // `col` lands inside the char `c`.
+            return None;
         }
+        acc += u;
+        cursor_char_idx = i + 1;
     }
-
-    (line, col)
-}
-
-/// Convert an LSP character offset (UTF-16 code units) to a byte offset in a UTF-8 line.
-///
-/// LSP `Position.character` counts UTF-16 code units. For BMP characters (ASCII,
-/// CJK, Korean, Cyrillic, etc.) one code point = one UTF-16 unit, but non-BMP
-/// characters (many emoji) use two UTF-16 units (a surrogate pair).
-/// Returns `line.len()` if the offset is past the end.
-pub fn char_offset_to_byte(line: &str, utf16_offset: usize) -> usize {
-    let mut utf16_count = 0usize;
-    for (byte_offset, ch) in line.char_indices() {
-        if utf16_count >= utf16_offset {
-            return byte_offset;
-        }
-        utf16_count += ch.len_utf16();
-    }
-    line.len()
-}
-
-/// Convert a byte offset in `source` to an LSP [`Position`]
-/// (`character` is UTF-16 code units per LSP 3.17 default encoding).
-///
-/// Convenience wrapper that builds a [`ropey::Rope`] for the conversion;
-/// callers doing multiple conversions on the same string should use
-/// [`rope_byte_to_lsp_position`] instead and share the rope.
-#[must_use]
-pub fn byte_to_lsp_position(source: &str, byte: usize) -> Position {
-    let rope = ropey::Rope::from_str(source);
-    rope_byte_to_lsp_position(&rope, byte)
-}
-
-/// Convert a byte offset to an LSP [`Position`] using a pre-built
-/// [`ropey::Rope`]. The hot-path variant for handlers that do many
-/// conversions per request (formatting, range formatting).
-#[must_use]
-pub fn rope_byte_to_lsp_position(rope: &ropey::Rope, byte: usize) -> Position {
-    let byte = byte.min(rope.len_bytes());
-    let line = rope.byte_to_line(byte);
-    let line_start_byte = rope.line_to_byte(line);
-    let char_at = rope.byte_to_char(byte);
-    let line_start_char = rope.byte_to_char(line_start_byte);
-    let character = rope.char_to_utf16_cu(char_at) - rope.char_to_utf16_cu(line_start_char);
-    Position::new(line as u32, character as u32)
-}
-
-/// Convert an LSP [`Position`] (line, UTF-16 character) to a byte offset
-/// in `source`. Inverse of [`byte_to_lsp_position`].
-///
-/// Convenience wrapper that builds a [`ropey::Rope`]. Callers doing
-/// multiple conversions should use [`rope_lsp_position_to_byte`].
-#[must_use]
-pub fn lsp_position_to_byte(source: &str, pos: Position) -> usize {
-    let rope = ropey::Rope::from_str(source);
-    rope_lsp_position_to_byte(&rope, pos)
-}
-
-/// Convert an LSP [`Position`] to a byte offset using a pre-built
-/// [`ropey::Rope`].
-///
-/// Per the LSP spec a position past the last line (line == line_count,
-/// character == 0) is the end-of-document position; this function
-/// returns `rope.len_bytes()` in that case. Within-document positions
-/// clamp the character field to the end of the addressed line so we
-/// never cross a `\n`.
-#[must_use]
-pub fn rope_lsp_position_to_byte(rope: &ropey::Rope, pos: Position) -> usize {
-    let line_count = rope.len_lines();
-    if line_count == 0 {
-        return 0;
-    }
-    let pos_line = pos.line as usize;
-    // EOF position: line == line_count, character == 0 means
-    // "end of document" per LSP spec; clamp to len_bytes.
-    if pos_line >= line_count {
-        return rope.len_bytes();
-    }
-    let line_start_byte = rope.line_to_byte(pos_line);
-    let line_start_char = rope.byte_to_char(line_start_byte);
-    let line_start_utf16 = rope.char_to_utf16_cu(line_start_char);
-
-    let line_end_byte = if pos_line + 1 < line_count {
-        rope.line_to_byte(pos_line + 1).saturating_sub(1)
-    } else {
-        rope.len_bytes()
-    };
-    let line_end_char = rope.byte_to_char(line_end_byte);
-    let line_end_utf16 = rope.char_to_utf16_cu(line_end_char);
-
-    let target_utf16 = line_start_utf16 + pos.character as usize;
-    let clamped_utf16 = target_utf16.min(line_end_utf16);
-    let char_idx = rope.utf16_cu_to_char(clamped_utf16);
-    rope.char_to_byte(char_idx)
-}
-
-/// Get the word at a given column position in a line.
-///
-/// Returns the word, its start column, and end column (0-based).
-/// Words include alphanumeric characters, colons, hyphens, and underscores.
-pub fn get_word_at_position(line: &str, col: usize) -> Option<(String, usize, usize)> {
-    let chars: Vec<char> = line.chars().collect();
-    if col > chars.len() {
+    if acc < col {
+        // `col` past end of line.
         return None;
     }
 
-    // Find word start
-    let mut start = col;
-    while start > 0 && is_word_char(chars.get(start - 1).copied().unwrap_or(' ')) {
+    let mut start = cursor_char_idx;
+    while start > 0 && is_word_char(chars[start - 1]) {
         start -= 1;
     }
-
-    // Find word end
-    let mut end = col;
+    let mut end = cursor_char_idx;
     while end < chars.len() && is_word_char(chars[end]) {
         end += 1;
     }
-
     if start == end {
         return None;
     }
 
     let word: String = chars[start..end].iter().collect();
-    Some((word, start, end))
+    Some((word, encoded_col_at_char(start), encoded_col_at_char(end)))
 }
 
-/// Get the word at a position in a source document.
+/// Get the word at a position in a source document, interpreting
+/// `position.character` in the negotiated encoding.
 ///
-/// This is a convenience wrapper that handles line extraction.
-pub fn get_word_at_source_position(source: &str, position: Position) -> Option<String> {
+/// Convenience wrapper that extracts the addressed line and delegates
+/// to [`get_word_at_position`]. Returns only the word text (not its
+/// columns) since most callers (hover, goto-definition) don't need
+/// the column values.
+pub fn get_word_at_source_position(
+    source: &str,
+    position: Position,
+    encoding: PositionEncoding,
+) -> Option<String> {
     let line = source.lines().nth(position.line as usize)?;
-    let col = position.character as usize;
-
-    // Handle UTF-8: convert character offset to byte offset for the line
-    let byte_col = line
-        .char_indices()
-        .nth(col)
-        .map(|(i, _)| i)
-        .unwrap_or(line.len());
-
-    if byte_col > line.len() {
-        return None;
-    }
-
-    let chars: Vec<char> = line.chars().collect();
-
-    // Find word boundaries
-    let mut start = col.min(chars.len());
-    while start > 0 && is_word_char(chars.get(start - 1).copied().unwrap_or(' ')) {
-        start -= 1;
-    }
-
-    let mut end = col.min(chars.len());
-    while end < chars.len() && is_word_char(chars[end]) {
-        end += 1;
-    }
-
-    if start == end {
-        return None;
-    }
-
-    Some(chars[start..end].iter().collect())
+    let (word, _, _) = get_word_at_position(line, position.character as usize, encoding)?;
+    Some(word)
 }
 
 /// Check if a character is part of a word (for Beancount identifiers).
@@ -430,7 +572,7 @@ mod tests {
     #[test]
     fn test_line_index_basic() {
         let source = "line1\nline2\nline3";
-        let index = LineIndex::new(source);
+        let index = LineIndex::new(source, PositionEncoding::Utf8);
 
         // Same tests as byte_offset_to_position
         assert_eq!(index.offset_to_position(0), (0, 0));
@@ -446,14 +588,14 @@ mod tests {
 
     #[test]
     fn test_line_index_empty() {
-        let index = LineIndex::new("");
+        let index = LineIndex::new("", PositionEncoding::Utf8);
         assert_eq!(index.offset_to_position(0), (0, 0));
         assert_eq!(index.line_count(), 1);
     }
 
     #[test]
     fn test_line_index_single_line() {
-        let index = LineIndex::new("hello world");
+        let index = LineIndex::new("hello world", PositionEncoding::Utf8);
         assert_eq!(index.offset_to_position(0), (0, 0));
         assert_eq!(index.offset_to_position(5), (0, 5));
         assert_eq!(index.offset_to_position(11), (0, 11));
@@ -463,7 +605,7 @@ mod tests {
     #[test]
     fn test_line_index_trailing_newline() {
         let source = "line1\nline2\n";
-        let index = LineIndex::new(source);
+        let index = LineIndex::new(source, PositionEncoding::Utf8);
         assert_eq!(index.offset_to_position(11), (1, 5));
         assert_eq!(index.offset_to_position(12), (2, 0)); // Empty line 3
         assert_eq!(index.line_count(), 3);
@@ -472,7 +614,7 @@ mod tests {
     #[test]
     fn test_line_index_position_to_offset() {
         let source = "line1\nline2\nline3";
-        let index = LineIndex::new(source);
+        let index = LineIndex::new(source, PositionEncoding::Utf8);
 
         assert_eq!(index.position_to_offset(0, 0), Some(0));
         assert_eq!(index.position_to_offset(0, 5), Some(5));
@@ -485,26 +627,140 @@ mod tests {
         assert_eq!(index.position_to_offset(0, 100), None);
     }
 
+    /// Cross-check the indexed UTF-8 column math against a simple
+    /// inline walk over the source. Both should land on the same
+    /// (line, col) for every byte offset in a typical beancount
+    /// fixture.
     #[test]
-    fn test_line_index_matches_naive() {
-        // Verify LineIndex matches the naive implementation
+    fn test_line_index_utf8_matches_inline_walk() {
         let source = "2024-01-01 open Assets:Bank USD\n2024-01-15 * \"Coffee\"\n  Assets:Bank  -5.00 USD\n  Expenses:Food\n";
-        let index = LineIndex::new(source);
+        let index = LineIndex::new(source, PositionEncoding::Utf8);
 
         for offset in 0..source.len() {
-            let naive = byte_offset_to_position(source, offset);
+            let mut line = 0u32;
+            let mut col = 0u32;
+            for (i, ch) in source.char_indices() {
+                if i >= offset {
+                    break;
+                }
+                if ch == '\n' {
+                    line += 1;
+                    col = 0;
+                } else {
+                    col += 1;
+                }
+            }
             let indexed = index.offset_to_position(offset);
-            assert_eq!(naive, indexed, "Mismatch at offset {}", offset);
+            assert_eq!((line, col), indexed, "Mismatch at offset {}", offset);
         }
     }
 
+    /// `position_to_offset` returns `None` symmetrically across
+    /// encodings on column overshoot. Pins the round-17 fix for the
+    /// reviewer-flagged divergence (UTF-8 was strict, UTF-16 silently
+    /// clamped via ropey).
     #[test]
-    fn test_byte_offset_to_position() {
+    fn test_line_index_position_to_offset_overshoot_symmetric() {
         let source = "line1\nline2\nline3";
-        assert_eq!(byte_offset_to_position(source, 0), (0, 0));
-        assert_eq!(byte_offset_to_position(source, 5), (0, 5));
-        assert_eq!(byte_offset_to_position(source, 6), (1, 0));
-        assert_eq!(byte_offset_to_position(source, 10), (1, 4));
+
+        let utf8 = LineIndex::new(source, PositionEncoding::Utf8);
+        assert_eq!(utf8.position_to_offset(0, 5), Some(5));
+        assert_eq!(utf8.position_to_offset(0, 6), None);
+        assert_eq!(utf8.position_to_offset(0, 100), None);
+
+        let utf16 = LineIndex::new(source, PositionEncoding::Utf16);
+        assert_eq!(utf16.position_to_offset(0, 5), Some(5));
+        assert_eq!(utf16.position_to_offset(0, 6), None);
+        assert_eq!(utf16.position_to_offset(0, 100), None);
+    }
+
+    /// Non-BMP scalars (emoji) take TWO UTF-16 code units (surrogate
+    /// pair) but FOUR UTF-8 bytes. The encoding-aware `LineIndex`
+    /// must emit different `character` values for the two encodings —
+    /// this test pins both directions.
+    #[test]
+    fn test_line_index_utf16_columns() {
+        // "💰" = U+1F4B0, 4 UTF-8 bytes, 2 UTF-16 code units.
+        let source = "💰 USD";
+        let after_emoji_byte = '💰'.len_utf8();
+
+        let utf8 = LineIndex::new(source, PositionEncoding::Utf8);
+        assert_eq!(utf8.offset_to_position(after_emoji_byte), (0, 4));
+
+        let utf16 = LineIndex::new(source, PositionEncoding::Utf16);
+        assert_eq!(utf16.offset_to_position(after_emoji_byte), (0, 2));
+
+        // Inverse: a UTF-16 col=2 maps back to byte offset 4.
+        assert_eq!(utf16.position_to_offset(0, 2), Some(after_emoji_byte));
+        // ASCII content past the emoji: byte 8 = UTF-16 col 6.
+        assert_eq!(utf16.offset_to_position(8), (0, 6));
+    }
+
+    /// Bare CR is NOT a line break — only `\n` is. Source `"a\rb"`
+    /// is one line; the LineIndex emits column 2 (UTF-8) / column 2
+    /// (UTF-16) for byte 2. Pre-round-18 ropey-based impls treated
+    /// bare CR as a line break, which diverges from the LSP spec's
+    /// implicit `\n`-only convention. Pinning this prevents an
+    /// accidental ropey-revert from silently shifting positions in
+    /// legacy-Mac files.
+    #[test]
+    fn test_line_index_bare_cr_not_a_line_break() {
+        let source = "a\rb";
+        let index = LineIndex::new(source, PositionEncoding::Utf8);
+        assert_eq!(index.line_count(), 1);
+        // Byte 2 (the 'b') is on line 0 col 2 — NOT line 1 col 0.
+        assert_eq!(index.offset_to_position(2), (0, 2));
+        // CRLF is still recognized as ONE line break (the '\n'), and
+        // the '\r' is trimmed from the line's visible content range.
+        let crlf = LineIndex::new("a\r\nb", PositionEncoding::Utf8);
+        assert_eq!(crlf.line_count(), 2);
+        assert_eq!(crlf.offset_to_position(3), (1, 0));
+    }
+
+    #[test]
+    fn test_line_index_basic_offsets() {
+        let source = "line1\nline2\nline3";
+        let index = LineIndex::new(source, PositionEncoding::Utf8);
+        assert_eq!(index.offset_to_position(0), (0, 0));
+        assert_eq!(index.offset_to_position(5), (0, 5));
+        assert_eq!(index.offset_to_position(6), (1, 0));
+        assert_eq!(index.offset_to_position(10), (1, 4));
+    }
+
+    /// `byte_in_line_to_position` must reject byte offsets that
+    /// strictly overshoot the addressed line's content. Pre-round-20
+    /// it silently routed overshoots through `offset_to_position`'s
+    /// `min(source.len())` clamp, emitting a Position pointing into
+    /// the NEXT line — masking caller bugs (stale cached offsets,
+    /// off-by-one in needle arithmetic) as wrong-line edits.
+    #[test]
+    fn test_byte_in_line_to_position_strict_overshoot() {
+        let source = "abc\ndefgh\nij";
+        let index = LineIndex::new(source, PositionEncoding::Utf8);
+
+        // In-range on line 0 ("abc", len=3): 0..=3 succeed.
+        assert_eq!(
+            index.byte_in_line_to_position(0, 0),
+            Some(Position::new(0, 0))
+        );
+        assert_eq!(
+            index.byte_in_line_to_position(0, 3),
+            Some(Position::new(0, 3))
+        );
+        // Overshoot line 0: 4 would have addressed line 1 col 0 under
+        // the old clamp; strict reject is None.
+        assert_eq!(index.byte_in_line_to_position(0, 4), None);
+        assert_eq!(index.byte_in_line_to_position(0, 100), None);
+
+        // In-range on line 1 ("defgh", len=5): 0..=5 succeed.
+        assert_eq!(
+            index.byte_in_line_to_position(1, 5),
+            Some(Position::new(1, 5))
+        );
+        assert_eq!(index.byte_in_line_to_position(1, 6), None);
+
+        // Past-last-line still None via line_text.
+        assert_eq!(index.byte_in_line_to_position(99, 0), None);
     }
 
     #[test]
@@ -512,7 +768,7 @@ mod tests {
         let line = "  Assets:Bank  -100.00 USD";
 
         // At "Assets:Bank"
-        let result = get_word_at_position(line, 5);
+        let result = get_word_at_position(line, 5, PositionEncoding::Utf8);
         assert!(result.is_some());
         let (word, start, end) = result.unwrap();
         assert_eq!(word, "Assets:Bank");
@@ -520,10 +776,37 @@ mod tests {
         assert_eq!(end, 13);
 
         // At "USD"
-        let result = get_word_at_position(line, 24);
+        let result = get_word_at_position(line, 24, PositionEncoding::Utf8);
         assert!(result.is_some());
         let (word, _, _) = result.unwrap();
         assert_eq!(word, "USD");
+    }
+
+    /// `get_word_at_position` returns columns in the same encoding as
+    /// the input `col`. On a Cyrillic account, UTF-16 col=12 lands on
+    /// the space before `USD`; the word `USD` starts at UTF-16 col=13
+    /// (one Cyrillic char = 1 UTF-16 unit but 2 UTF-8 bytes, so the
+    /// UTF-8 column for the same byte is larger). Pins both encodings.
+    #[test]
+    fn test_get_word_at_position_encoding_aware() {
+        let line = "Активы:Банк USD";
+        // "Активы:Банк " is 12 chars / 12 UTF-16 units / 22 UTF-8
+        // bytes (each Cyrillic char is 2 UTF-8 bytes / 1 UTF-16
+        // unit). "USD" starts at char 12.
+
+        let (word, s, e) = get_word_at_position(line, 12, PositionEncoding::Utf16)
+            .expect("word at UTF-16 col 12 should resolve");
+        assert_eq!(word, "USD");
+        assert_eq!((s, e), (12, 15));
+
+        let (word, s, e) = get_word_at_position(line, 22, PositionEncoding::Utf8)
+            .expect("word at UTF-8 col 22 should resolve");
+        assert_eq!(word, "USD");
+        assert_eq!((s, e), (22, 25));
+
+        // A col that lands inside a multi-byte char under UTF-8 returns None.
+        // Byte 1 is in the middle of "А" (2 bytes).
+        assert!(get_word_at_position(line, 1, PositionEncoding::Utf8).is_none());
     }
 
     #[test]

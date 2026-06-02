@@ -12,7 +12,8 @@ use rustledger_core::{Directive, SYNTHESIZED_FILE_ID};
 use rustledger_parser::ParseResult;
 
 use super::utils::{
-    LineIndex, commodity_declaration_spans, get_word_at_position, is_account_like, is_currency_like,
+    LineIndex, PositionEncoding, commodity_declaration_spans, get_word_at_position,
+    is_account_like, is_currency_like,
 };
 
 /// Handle a document highlight request.
@@ -20,6 +21,7 @@ pub fn handle_document_highlight(
     params: &DocumentHighlightParams,
     source: &str,
     parse_result: &ParseResult,
+    encoding: PositionEncoding,
 ) -> Option<Vec<DocumentHighlight>> {
     let position = params.text_document_position_params.position;
     let line_idx = position.line as usize;
@@ -27,17 +29,17 @@ pub fn handle_document_highlight(
     let line = lines.get(line_idx)?;
 
     // Get the word at the cursor position
-    let (word, _, _) = get_word_at_position(line, position.character as usize)?;
+    let (word, _, _) = get_word_at_position(line, position.character as usize, encoding)?;
 
     let mut highlights = Vec::new();
     // Build the line index once and share it across collectors: each
     // directive (and posting) used to trigger an O(n) byte→line scan,
     // which scales quadratically on large files.
-    let line_index = LineIndex::new(source);
+    let line_index = LineIndex::new(source, encoding);
 
     // Check if it's an account
     if is_account_like(&word) {
-        collect_account_highlights(source, parse_result, &line_index, &word, &mut highlights);
+        collect_account_highlights(parse_result, &line_index, &word, &mut highlights);
     }
     // Check if it's a currency
     else if is_currency_like(&word, parse_result) {
@@ -45,7 +47,7 @@ pub fn handle_document_highlight(
     }
     // Check if it's a payee (inside quotes)
     else if is_in_quotes(line, position.character as usize) {
-        collect_payee_highlights(source, parse_result, &line_index, &word, &mut highlights);
+        collect_payee_highlights(parse_result, &line_index, &word, &mut highlights);
     }
 
     if highlights.is_empty() {
@@ -57,7 +59,6 @@ pub fn handle_document_highlight(
 
 /// Collect all highlights for an account.
 fn collect_account_highlights(
-    source: &str,
     parse_result: &ParseResult,
     line_index: &LineIndex,
     account: &str,
@@ -69,7 +70,7 @@ fn collect_account_highlights(
         match &spanned.value {
             Directive::Open(open) => {
                 if open.account.as_ref() == account
-                    && let Some(range) = find_in_line(source, start_line, account)
+                    && let Some(range) = find_in_line(line_index, start_line, account)
                 {
                     highlights.push(DocumentHighlight {
                         range,
@@ -79,7 +80,7 @@ fn collect_account_highlights(
             }
             Directive::Close(close) => {
                 if close.account.as_ref() == account
-                    && let Some(range) = find_in_line(source, start_line, account)
+                    && let Some(range) = find_in_line(line_index, start_line, account)
                 {
                     highlights.push(DocumentHighlight {
                         range,
@@ -89,7 +90,7 @@ fn collect_account_highlights(
             }
             Directive::Balance(bal) => {
                 if bal.account.as_ref() == account
-                    && let Some(range) = find_in_line(source, start_line, account)
+                    && let Some(range) = find_in_line(line_index, start_line, account)
                 {
                     highlights.push(DocumentHighlight {
                         range,
@@ -99,7 +100,7 @@ fn collect_account_highlights(
             }
             Directive::Pad(pad) => {
                 if pad.account.as_ref() == account
-                    && let Some(range) = find_in_line(source, start_line, account)
+                    && let Some(range) = find_in_line(line_index, start_line, account)
                 {
                     highlights.push(DocumentHighlight {
                         range,
@@ -107,20 +108,21 @@ fn collect_account_highlights(
                     });
                 }
                 if pad.source_account.as_ref() == account {
-                    // Find second occurrence
-                    let line_text = source.lines().nth(start_line as usize).unwrap_or("");
+                    // Find second occurrence — route both positions
+                    // through line_index for encoding correctness.
+                    let line_text = line_index.line_text(start_line).unwrap_or("");
                     if let Some(first_pos) = line_text.find(account) {
                         let after_first = first_pos + account.len();
-                        if let Some(second_pos) = line_text[after_first..].find(account) {
-                            let actual_pos = after_first + second_pos;
+                        if let Some(second_pos) = line_text[after_first..].find(account)
+                            && let Some(start) = line_index
+                                .byte_in_line_to_position(start_line, after_first + second_pos)
+                            && let Some(end) = line_index.byte_in_line_to_position(
+                                start_line,
+                                after_first + second_pos + account.len(),
+                            )
+                        {
                             highlights.push(DocumentHighlight {
-                                range: Range {
-                                    start: Position::new(start_line, actual_pos as u32),
-                                    end: Position::new(
-                                        start_line,
-                                        (actual_pos + account.len()) as u32,
-                                    ),
-                                },
+                                range: Range { start, end },
                                 kind: Some(DocumentHighlightKind::READ),
                             });
                         }
@@ -129,7 +131,7 @@ fn collect_account_highlights(
             }
             Directive::Note(note) => {
                 if note.account.as_ref() == account
-                    && let Some(range) = find_in_line(source, start_line, account)
+                    && let Some(range) = find_in_line(line_index, start_line, account)
                 {
                     highlights.push(DocumentHighlight {
                         range,
@@ -139,7 +141,7 @@ fn collect_account_highlights(
             }
             Directive::Document(doc) => {
                 if doc.account.as_ref() == account
-                    && let Some(range) = find_in_line(source, start_line, account)
+                    && let Some(range) = find_in_line(line_index, start_line, account)
                 {
                     highlights.push(DocumentHighlight {
                         range,
@@ -158,7 +160,7 @@ fn collect_account_highlights(
                     if spanned_posting.account.as_ref() == account {
                         let (posting_line, _) =
                             line_index.offset_to_position(spanned_posting.span.start);
-                        if let Some(range) = find_in_line(source, posting_line, account) {
+                        if let Some(range) = find_in_line(line_index, posting_line, account) {
                             highlights.push(DocumentHighlight {
                                 range,
                                 kind: Some(DocumentHighlightKind::READ),
@@ -224,7 +226,6 @@ fn collect_currency_highlights(
 
 /// Collect all highlights for a payee.
 fn collect_payee_highlights(
-    source: &str,
     parse_result: &ParseResult,
     line_index: &LineIndex,
     payee: &str,
@@ -236,14 +237,15 @@ fn collect_payee_highlights(
             && txn_payee.as_ref() == payee
         {
             let (line, _) = line_index.offset_to_position(spanned.span.start);
-            let line_text = source.lines().nth(line as usize).unwrap_or("");
+            let line_text = line_index.line_text(line).unwrap_or("");
 
-            if let Some(start) = line_text.find(&format!("\"{}\"", payee)) {
+            if let Some(quote_byte) = line_text.find(&format!("\"{}\"", payee))
+                && let Some(start) = line_index.byte_in_line_to_position(line, quote_byte + 1)
+                && let Some(end) =
+                    line_index.byte_in_line_to_position(line, quote_byte + 1 + payee.len())
+            {
                 highlights.push(DocumentHighlight {
-                    range: Range {
-                        start: Position::new(line, (start + 1) as u32),
-                        end: Position::new(line, (start + 1 + payee.len()) as u32),
-                    },
+                    range: Range { start, end },
                     kind: Some(DocumentHighlightKind::READ),
                 });
             }
@@ -251,14 +253,15 @@ fn collect_payee_highlights(
     }
 }
 
-/// Find a string in a specific line.
-fn find_in_line(source: &str, line_num: u32, needle: &str) -> Option<Range> {
-    let line = source.lines().nth(line_num as usize)?;
+/// Find a string in a specific line — encoding-aware via the
+/// LineIndex. Pre-round-19 emitted raw byte offsets as columns,
+/// which broke under UTF-16 on non-ASCII content.
+fn find_in_line(line_index: &LineIndex<'_>, line_num: u32, needle: &str) -> Option<Range> {
+    let line = line_index.line_text(line_num)?;
     let col = line.find(needle)?;
-    Some(Range {
-        start: Position::new(line_num, col as u32),
-        end: Position::new(line_num, (col + needle.len()) as u32),
-    })
+    let start = line_index.byte_in_line_to_position(line_num, col)?;
+    let end = line_index.byte_in_line_to_position(line_num, col + needle.len())?;
+    Some(Range { start, end })
 }
 
 fn is_in_quotes(line: &str, col: usize) -> bool {
@@ -302,7 +305,8 @@ mod tests {
             partial_result_params: Default::default(),
         };
 
-        let highlights = handle_document_highlight(&params, source, &result);
+        let highlights =
+            handle_document_highlight(&params, source, &result, PositionEncoding::Utf16);
         assert!(highlights.is_some());
 
         let highlights = highlights.unwrap();
@@ -332,7 +336,8 @@ mod tests {
             partial_result_params: Default::default(),
         };
 
-        let highlights = handle_document_highlight(&params, source, &result);
+        let highlights =
+            handle_document_highlight(&params, source, &result, PositionEncoding::Utf16);
         assert!(highlights.is_some());
 
         let highlights = highlights.unwrap();
@@ -369,7 +374,8 @@ mod tests {
         };
 
         let highlights =
-            handle_document_highlight(&params, source, &result).expect("highlights returns Some");
+            handle_document_highlight(&params, source, &result, PositionEncoding::Utf16)
+                .expect("highlights returns Some");
 
         // Expected: 3 highlights — declaration + 2 postings. Bespoke
         // string-search would have produced 5 (payee + 2 account
@@ -421,7 +427,8 @@ mod tests {
         };
 
         let highlights =
-            handle_document_highlight(&params, source, &result).expect("highlights returns Some");
+            handle_document_highlight(&params, source, &result, PositionEncoding::Utf16)
+                .expect("highlights returns Some");
 
         // 3 highlights total: declaration + metadata reference + posting.
         assert_eq!(highlights.len(), 3, "{highlights:#?}");
@@ -472,8 +479,9 @@ mod tests {
             partial_result_params: Default::default(),
         };
 
-        let highlights = handle_document_highlight(&params, source, &result)
-            .expect("Assets:Bank has at least the Open + 1 posting");
+        let highlights =
+            handle_document_highlight(&params, source, &result, PositionEncoding::Utf16)
+                .expect("Assets:Bank has at least the Open + 1 posting");
 
         // Lines 3 and 5 contain `effective_date:`; the posting is on
         // line 2 (after the Open + transaction header). No highlight

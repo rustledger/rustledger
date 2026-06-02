@@ -64,10 +64,11 @@ pub fn handle_completion(
     source: &str,
     parse_result: &ParseResult,
     ledger_state: Option<&LedgerState>,
+    encoding: super::utils::PositionEncoding,
 ) -> Option<CompletionResponse> {
     let position = params.text_document_position.position;
     let uri = &params.text_document_position.text_document.uri;
-    let context = detect_context(source, position);
+    let context = detect_context(source, position, encoding);
 
     tracing::debug!("Completion context: {:?} at {:?}", context, position);
 
@@ -106,11 +107,39 @@ pub fn handle_completion(
 }
 
 /// Detect the completion context from cursor position.
-fn detect_context(source: &str, position: Position) -> CompletionContext {
+///
+/// `position.character` is interpreted in the negotiated `encoding`
+/// — UTF-8 byte offset or UTF-16 code-unit count. Walking `chars()`
+/// once accumulates the encoded length so the conversion is correct
+/// under either negotiation.
+fn detect_context(
+    source: &str,
+    position: Position,
+    encoding: super::utils::PositionEncoding,
+) -> CompletionContext {
+    use super::utils::PositionEncoding;
     let line = get_line(source, position.line as usize);
 
-    // Get text before cursor (convert UTF-16 offset to byte offset)
-    let byte_col = super::utils::char_offset_to_byte(line, position.character as usize);
+    // Map `position.character` (in the negotiated encoding) to a byte
+    // offset into `line`. Walks chars once.
+    let col = position.character as usize;
+    let mut acc = 0usize;
+    let mut byte_col = 0usize;
+    for ch in line.chars() {
+        if acc >= col {
+            break;
+        }
+        let u = match encoding {
+            PositionEncoding::Utf8 => ch.len_utf8(),
+            PositionEncoding::Utf16 => ch.len_utf16(),
+        };
+        if acc + u > col {
+            // Position lands mid-char — bail at the start of this char.
+            break;
+        }
+        acc += u;
+        byte_col += ch.len_utf8();
+    }
     let before_cursor = &line[..byte_col];
 
     let trimmed = before_cursor.trim_start();
@@ -480,28 +509,44 @@ mod tests {
     #[test]
     fn test_detect_context_line_start() {
         let source = "\n";
-        let ctx = detect_context(source, Position::new(0, 0));
+        let ctx = detect_context(
+            source,
+            Position::new(0, 0),
+            crate::handlers::utils::PositionEncoding::Utf16,
+        );
         assert_eq!(ctx, CompletionContext::LineStart);
     }
 
     #[test]
     fn test_detect_context_after_date() {
         let source = "2024-01-15 ";
-        let ctx = detect_context(source, Position::new(0, 11));
+        let ctx = detect_context(
+            source,
+            Position::new(0, 11),
+            crate::handlers::utils::PositionEncoding::Utf16,
+        );
         assert_eq!(ctx, CompletionContext::AfterDate);
     }
 
     #[test]
     fn test_detect_context_expecting_account() {
         let source = "  ";
-        let ctx = detect_context(source, Position::new(0, 2));
+        let ctx = detect_context(
+            source,
+            Position::new(0, 2),
+            crate::handlers::utils::PositionEncoding::Utf16,
+        );
         assert_eq!(ctx, CompletionContext::ExpectingAccount);
     }
 
     #[test]
     fn test_detect_context_account_segment() {
         let source = "  Assets:";
-        let ctx = detect_context(source, Position::new(0, 9));
+        let ctx = detect_context(
+            source,
+            Position::new(0, 9),
+            crate::handlers::utils::PositionEncoding::Utf16,
+        );
         assert_eq!(
             ctx,
             CompletionContext::AccountSegment {
@@ -518,7 +563,7 @@ mod tests {
         // Position at char offset 45 — inside "소" if treated as byte index
         let pos = Position::new(0, 45);
         // Must not panic (the actual context value doesn't matter)
-        let _ctx = detect_context(source, pos);
+        let _ctx = detect_context(source, pos, crate::handlers::utils::PositionEncoding::Utf16);
     }
 
     #[test]
@@ -527,7 +572,7 @@ mod tests {
         let source = "2024-01-15 * \"午餐\" \"中華料理\"\n  Expenses:Food  100 CNY\n";
         let pos = Position::new(0, 20);
         // Must not panic
-        let _ctx = detect_context(source, pos);
+        let _ctx = detect_context(source, pos, crate::handlers::utils::PositionEncoding::Utf16);
     }
 
     #[test]
@@ -539,7 +584,7 @@ mod tests {
         // Position 17 is after the closing quote
         let pos = Position::new(0, 17);
         // Must not panic
-        let _ctx = detect_context(source, pos);
+        let _ctx = detect_context(source, pos, crate::handlers::utils::PositionEncoding::Utf16);
     }
 
     /// Regression for #1183: pre-fix `complete_account_start` capped

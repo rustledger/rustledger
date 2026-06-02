@@ -10,7 +10,7 @@ use rustledger_parser::{ParseError, ParseResult, Span, Spanned};
 use rustledger_plugin::NativePluginRegistry;
 use rustledger_validate::{Phase, Severity, ValidationError, ValidationOptions, ValidationSession};
 
-use super::utils::LineIndex;
+use super::utils::{LineIndex, PositionEncoding};
 use crate::ledger_state::LedgerState;
 
 /// Build `ValidationOptions` with custom account type names from loader options.
@@ -114,8 +114,12 @@ fn build_validation_options_from_file(
 }
 
 /// Convert parse errors to LSP diagnostics.
-pub fn parse_errors_to_diagnostics(result: &ParseResult, source: &str) -> Vec<Diagnostic> {
-    let line_index = LineIndex::new(source);
+pub fn parse_errors_to_diagnostics(
+    result: &ParseResult,
+    source: &str,
+    encoding: PositionEncoding,
+) -> Vec<Diagnostic> {
+    let line_index = LineIndex::new(source, encoding);
     result
         .errors
         .iter()
@@ -200,8 +204,9 @@ pub fn validation_errors_to_diagnostics(
     validation_options: ValidationOptions,
     current_file_id: Option<u16>,
     plugin_ctx: Option<&PluginContext<'_>>,
+    encoding: PositionEncoding,
 ) -> Vec<Diagnostic> {
-    let line_index = LineIndex::new(source);
+    let line_index = LineIndex::new(source, encoding);
     let mut extra_diagnostics = Vec::new();
 
     // Sort directives by date, type priority, then cost-basis reductions last
@@ -538,8 +543,9 @@ pub fn all_diagnostics(
     current_file_id: Option<u16>,
     current_file_path: Option<&std::path::Path>,
     other_buffer_overlays: &[(u16, &[Spanned<Directive>])],
+    encoding: PositionEncoding,
 ) -> Vec<Diagnostic> {
-    let mut diagnostics = parse_errors_to_diagnostics(result, source);
+    let mut diagnostics = parse_errors_to_diagnostics(result, source, encoding);
 
     // Only run validation if:
     // 1. There are no parse errors (validation on partial parses is confusing)
@@ -706,6 +712,7 @@ pub fn all_diagnostics(
                 validation_options,
                 current_file_id,
                 plugin_ctx.as_ref(),
+                encoding,
             );
             diagnostics.extend(validation_diagnostics);
         } else {
@@ -762,6 +769,7 @@ pub fn all_diagnostics(
     diagnostics.extend(super::import::import_diagnostics(
         &result.directives,
         source,
+        encoding,
     ));
 
     diagnostics
@@ -783,7 +791,7 @@ mod tests {
     #[test]
     fn test_line_index_offset_to_position() {
         let source = "line1\nline2\nline3";
-        let line_index = LineIndex::new(source);
+        let line_index = LineIndex::new(source, PositionEncoding::Utf8);
 
         assert_eq!(line_index.offset_to_position(0), (0, 0));
         assert_eq!(line_index.offset_to_position(5), (0, 5));
@@ -812,7 +820,15 @@ mod tests {
         assert!(result.errors.is_empty(), "Should have no parse errors");
 
         // Single-file validation (no ledger state)
-        let diagnostics = all_diagnostics(&result, source, None, None, None, &[]);
+        let diagnostics = all_diagnostics(
+            &result,
+            source,
+            None,
+            None,
+            None,
+            &[],
+            PositionEncoding::Utf16,
+        );
 
         // Should have at least these validation errors:
         // - E1001: Account Income:Typo was never opened
@@ -877,7 +893,15 @@ mod tests {
         assert!(result.errors.is_empty(), "Should have no parse errors");
 
         // Single-file validation (no ledger state)
-        let diagnostics = all_diagnostics(&result, source, None, None, None, &[]);
+        let diagnostics = all_diagnostics(
+            &result,
+            source,
+            None,
+            None,
+            None,
+            &[],
+            PositionEncoding::Utf16,
+        );
 
         // Filter to only ERROR severity diagnostics (allow warnings/info)
         let error_diagnostics: Vec<&Diagnostic> = diagnostics
@@ -976,6 +1000,7 @@ mod tests {
             ValidationOptions::default(),
             None,
             None,
+            PositionEncoding::Utf16,
         );
 
         let isolated_codes: Vec<_> = isolated_diagnostics.iter().map(get_code).collect();
@@ -996,6 +1021,7 @@ mod tests {
             ValidationOptions::default(),
             Some(1), // file_id=1 for bank.bean
             None,
+            PositionEncoding::Utf16,
         );
 
         let full_ledger_codes: Vec<_> = full_ledger_diagnostics.iter().map(get_code).collect();
@@ -1056,7 +1082,7 @@ option "name_equity" "Капитал"
         );
 
         // No parse errors means no diagnostics from this layer.
-        let diagnostics = parse_errors_to_diagnostics(&result, source);
+        let diagnostics = parse_errors_to_diagnostics(&result, source, PositionEncoding::Utf16);
         assert!(
             diagnostics.is_empty(),
             "Valid Unicode accounts should produce no diagnostics"
@@ -1137,6 +1163,7 @@ option "name_equity" "Капитал"
             ValidationOptions::default(),
             Some(1),
             None,
+            PositionEncoding::Utf16,
         );
         let no_overlay_codes: Vec<_> = no_overlay.iter().map(get_code).collect();
         assert!(
@@ -1159,6 +1186,7 @@ option "name_equity" "Капитал"
             ValidationOptions::default(),
             Some(1),
             None,
+            PositionEncoding::Utf16,
         );
         let with_overlay_codes: Vec<_> = with_overlay.iter().map(get_code).collect();
         assert!(
@@ -1196,6 +1224,7 @@ option "name_equity" "Капитал"
             ValidationOptions::default(),
             Some(1),
             None,
+            PositionEncoding::Utf16,
         );
         let no_overlay_persist_codes: Vec<_> = no_overlay_persist.iter().map(get_code).collect();
         assert!(
@@ -1219,6 +1248,7 @@ option "name_equity" "Капитал"
             ValidationOptions::default(),
             Some(1),
             None,
+            PositionEncoding::Utf16,
         );
         let with_overlay_fixed_codes: Vec<_> = with_overlay_fixed.iter().map(get_code).collect();
         assert!(
@@ -1344,6 +1374,7 @@ option "name_equity" "Капитал"
             ValidationOptions::default(),
             Some(1),
             None,
+            PositionEncoding::Utf16,
         );
         let baseline_codes: Vec<_> = baseline.iter().map(get_code).collect();
         assert!(
@@ -1373,6 +1404,7 @@ option "name_equity" "Капитал"
             ValidationOptions::default(),
             Some(1),
             None,
+            PositionEncoding::Utf16,
         );
         let single_codes: Vec<_> = single_overlay_diagnostics.iter().map(get_code).collect();
         assert!(
@@ -1401,6 +1433,7 @@ option "name_equity" "Капитал"
             ValidationOptions::default(),
             Some(1),
             None,
+            PositionEncoding::Utf16,
         );
         let multi_codes: Vec<_> = multi_overlay_diagnostics.iter().map(get_code).collect();
         assert!(
@@ -1488,6 +1521,7 @@ option "name_equity" "Капитал"
             Some(file_id),
             None,
             &[],
+            PositionEncoding::Utf16,
         );
         let codes: Vec<_> = diagnostics.iter().map(get_code).collect();
 
@@ -1512,6 +1546,7 @@ option "name_equity" "Капитал"
             Some(file_id),
             None,
             &[],
+            PositionEncoding::Utf16,
         );
         let clean_error_count = clean_diagnostics
             .iter()
@@ -1627,6 +1662,7 @@ include "credit_card.beancount"
             Some(main_file_id),
             None,
             &[],
+            PositionEncoding::Utf16,
         );
         let baseline_codes: Vec<_> = baseline.iter().map(get_code).collect();
         assert!(
@@ -1654,6 +1690,7 @@ include "credit_card.beancount"
                 credit_card_file_id,
                 credit_card_buffer_parse.directives.as_slice(),
             )],
+            PositionEncoding::Utf16,
         );
         let with_overlay_codes: Vec<_> = with_overlay.iter().map(get_code).collect();
         assert!(
@@ -1685,7 +1722,15 @@ include "credit_card.beancount"
 
         // all_diagnostics() now runs plugins in single-file mode, so
         // auto_accounts should auto-generate the missing opens.
-        let diags = all_diagnostics(&result, source, None, None, None, &[]);
+        let diags = all_diagnostics(
+            &result,
+            source,
+            None,
+            None,
+            None,
+            &[],
+            PositionEncoding::Utf16,
+        );
         let codes: Vec<_> = diags.iter().map(get_code).collect();
 
         assert!(
@@ -1714,6 +1759,7 @@ include "credit_card.beancount"
             ValidationOptions::default(),
             None,
             None,
+            PositionEncoding::Utf16,
         );
         let without_codes: Vec<_> = without_plugins.iter().map(get_code).collect();
         assert!(
@@ -1743,6 +1789,7 @@ include "credit_card.beancount"
             ValidationOptions::default(),
             None,
             Some(&ctx),
+            PositionEncoding::Utf16,
         );
         let with_codes: Vec<_> = with_plugins.iter().map(get_code).collect();
         assert!(
@@ -1797,7 +1844,15 @@ include "credit_card.beancount"
         // Use all_diagnostics (single-file mode) — this should run the
         // effective_date plugin and NOT produce a false E2001 for the
         // 2024-02-04 balance assertion.
-        let diagnostics = all_diagnostics(&result, source, None, None, None, &[]);
+        let diagnostics = all_diagnostics(
+            &result,
+            source,
+            None,
+            None,
+            None,
+            &[],
+            PositionEncoding::Utf16,
+        );
         let codes: Vec<_> = diagnostics.iter().map(get_code).collect();
 
         // The key assertion: no E2001 balance error at 2024-02-04.
@@ -1825,7 +1880,15 @@ include "credit_card.beancount"
         let result = parse(source);
         assert!(result.errors.is_empty());
 
-        let diagnostics = all_diagnostics(&result, source, None, None, None, &[]);
+        let diagnostics = all_diagnostics(
+            &result,
+            source,
+            None,
+            None,
+            None,
+            &[],
+            PositionEncoding::Utf16,
+        );
 
         // Should have an E8006 info diagnostic about the non-native plugin
         let info_diags: Vec<_> = diagnostics
@@ -1864,7 +1927,15 @@ include "credit_card.beancount"
         let result = parse(source);
         assert!(result.errors.is_empty());
 
-        let diagnostics = all_diagnostics(&result, source, None, None, None, &[]);
+        let diagnostics = all_diagnostics(
+            &result,
+            source,
+            None,
+            None,
+            None,
+            &[],
+            PositionEncoding::Utf16,
+        );
         let info_diags: Vec<_> = diagnostics
             .iter()
             .filter(|d| get_code(d) == "E8006")
@@ -1892,7 +1963,15 @@ plugin "auto_accounts"
 
         // This exercises the plugin execution path. Even if no errors are
         // produced (document_discovery is lenient), the code path is covered.
-        let diagnostics = all_diagnostics(&result, source, None, None, None, &[]);
+        let diagnostics = all_diagnostics(
+            &result,
+            source,
+            None,
+            None,
+            None,
+            &[],
+            PositionEncoding::Utf16,
+        );
 
         // auto_accounts should still work — no E1001
         let codes: Vec<_> = diagnostics.iter().map(get_code).collect();

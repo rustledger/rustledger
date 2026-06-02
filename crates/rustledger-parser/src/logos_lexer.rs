@@ -3,25 +3,27 @@
 //! This module provides a fast tokenizer for Beancount syntax using the Logos crate,
 //! which generates a DFA-based lexer with SIMD optimizations where available.
 
-use logos::{Filter, Lexer, Logos};
+use logos::Logos;
 use std::fmt;
 use std::ops::Range;
 
-/// Callback for the UTF-8 BOM (`\u{FEFF}`) token.
-///
-/// A leading BOM (Windows/Excel exports) is consumed as whitespace —
-/// the parser never sees it, and `format_source` re-prepends it on
-/// output to preserve byte fidelity. A BOM anywhere else is emitted as
-/// a real token; the parser then surfaces it as an `Invalid token`
-/// error so concatenated-file mistakes (`cat windows-a.bean
-/// windows-b.bean`) and embedded-BOM payloads don't pass silently.
-fn bom_filter<'src>(lex: &Lexer<'src, Token<'src>>) -> Filter<()> {
-    if lex.span().start == 0 {
-        Filter::Skip
-    } else {
-        Filter::Emit(())
-    }
-}
+// The leading-BOM strip happens at the `parse()` entry boundary (see
+// `crate::bom::strip_leading`). By the time the lexer runs, the source
+// is BOM-free at byte 0 by construction. Any U+FEFF byte the lexer
+// encounters is therefore mid-file and unrecognized — logos's default
+// error path emits a `Token::Error` for it, and the parser's existing
+// error classifier (which searches `error_text` for U+FEFF) surfaces
+// the dedicated `ParseErrorKind::BomInDirectiveBody` diagnostic.
+//
+// No BOM-aware lexer callback, no `Token::Bom` variant, and no
+// BOM regex in the Token enum — but the `Err(()) => ...` arm in
+// `tokenize` DOES contain one mid-file-BOM special case: it preserves
+// `at_line_start` and advances `last_newline_end` past leading BOM
+// bytes in the error span, so indented content on the same logical
+// line still emits an `Indent` token. That logic lives in the
+// `apply_err_layout_transparency` helper below and is unit-tested
+// directly (including the multi-BOM coalesced-Err case that logos
+// doesn't produce from real input today but might in the future).
 
 /// A span in the source code (byte offsets).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,19 +54,6 @@ impl From<Span> for Range<usize> {
 // Skip horizontal whitespace (spaces and tabs).
 #[logos(skip r"[ \t]+")]
 pub enum Token<'src> {
-    /// UTF-8 byte-order mark (`EF BB BF` / `\u{FEFF}`).
-    ///
-    /// A `bom_filter` callback (in this module) skips this token when
-    /// it appears at byte 0 (a leading BOM from a Windows/Excel
-    /// export) — the parser never sees it and downstream
-    /// `format_source` re-prepends it on output to preserve byte
-    /// fidelity. A BOM at any other byte position is emitted as a real
-    /// token; the parser's error classifier turns it into an `Invalid
-    /// token: UTF-8 BOM` error so concatenated-file mistakes don't
-    /// pass silently.
-    #[regex(r"\u{FEFF}", bom_filter)]
-    Bom,
-
     // ===== Literals =====
     /// A date in YYYY-MM-DD, YYYY-M-D, YYYY/MM/DD, or YYYY/M/D format.
     /// Single-digit month and day are accepted (e.g., 2024-1-5).
@@ -408,14 +397,118 @@ impl fmt::Display for Token<'_> {
             Self::MetaKey(s) => write!(f, "{s}"),
             Self::Indent(n) => write!(f, "<indent:{n}>"),
             Self::DeepIndent(n) => write!(f, "<deep-indent:{n}>"),
-            Self::Error(s) => write!(f, "{s}"),
-            // Use a visible placeholder rather than the literal U+FEFF byte
-            // sequence so any error or diagnostic that interpolates this
-            // token via Display stays human-readable (LSP problem panels,
-            // CLI stderr, GitHub-rendered bug reports all silently drop or
-            // strip a literal BOM otherwise).
-            Self::Bom => write!(f, "<BOM>"),
+            Self::Error(s) => {
+                // Strip any embedded U+FEFF bytes (a mid-file BOM
+                // captured into a lexer error span) so diagnostics
+                // rendering this token stay human-readable. LSP problem
+                // panels, CLI stderr, and GitHub-rendered bug reports
+                // all silently drop or strip literal BOM bytes — the
+                // `<BOM>` placeholder makes the failure mode visible.
+                //
+                // Streamed (rather than `s.replace(...)`) so this
+                // Display impl is zero-allocation. LSP problem panels
+                // re-render diagnostics on every keystroke during
+                // interactive editing; a `String` allocation per
+                // render showed up in flame graphs for files with
+                // many BOM-containing Token::Error tokens. The fast
+                // path (no BOM in `s`) is one `f.write_str(s)` call.
+                if s.contains(crate::bom::BOM_CHAR) {
+                    let mut chunks = s.split(crate::bom::BOM_CHAR);
+                    // Interleave chunks with "<BOM>" between them.
+                    // `split` yields N+1 chunks for N matches, so the
+                    // first chunk is emitted as-is and each subsequent
+                    // chunk gets a `<BOM>` prefix. Final output is
+                    // chunk0 + "<BOM>" + chunk1 + "<BOM>" + chunkN —
+                    // matching the (allocating) `s.replace(...)`
+                    // behavior exactly.
+                    if let Some(first) = chunks.next() {
+                        f.write_str(first)?;
+                    }
+                    for chunk in chunks {
+                        f.write_str("<BOM>")?;
+                        f.write_str(chunk)?;
+                    }
+                    Ok(())
+                } else {
+                    f.write_str(s)
+                }
+            }
         }
+    }
+}
+
+/// Apply mid-file BOM layout-transparency rules to lexer-state from
+/// inside the `Err` arm of `tokenize`.
+///
+/// A mid-file BOM (U+FEFF) is layout-transparent: it produces an
+/// error diagnostic via the parser's classifier, but must NOT clobber
+/// `at_line_start` or move `last_newline_end` past the BOM, otherwise
+/// the next token on the same logical line (e.g. an indented posting
+/// from a concatenated Windows file) loses its indent classification
+/// and the parser mistypes it. Leading-BOM is handled at the
+/// `crate::parse` boundary and never reaches this code path; only
+/// mid-file BOMs that survived the strip do.
+///
+/// We use `trim_start_matches` (rather than `starts_with` + a single
+/// `BOM_LEN` advance) so a multi-BOM run — e.g., a hypothetical
+/// coalesced `\u{FEFF}\u{FEFF}` Err span from a triple-concatenated
+/// Windows file — is ENTIRELY layout-transparent. Advancing
+/// `last_newline_end` past only the first BOM but then clobbering
+/// `at_line_start` because of the second BOM would cascade into
+/// misclassifying the next real token. The contract is: every BOM
+/// byte is layout-transparent; `at_line_start` is preserved iff the
+/// entire error span is BOM bytes; `last_newline_end` advances past
+/// the full run of leading BOMs.
+///
+/// Extracted as a private helper so the multi-BOM defensive code path
+/// can be unit-tested independently of logos's emission strategy.
+/// Today logos emits one Err per unrecognized char, so the coalesced
+/// path is unreachable from real input; the unit tests at the bottom
+/// of this file feed the helper synthetic `invalid_text` values that
+/// exercise the coalesced case directly.
+fn apply_err_layout_transparency(
+    invalid_text: &str,
+    span_start: usize,
+    at_line_start: &mut bool,
+    last_newline_end: &mut usize,
+) {
+    // Round-17 fix: the contract documented above says "every BOM
+    // byte is layout-transparent" — i.e., a span like
+    // `\u{FEFF}@@\u{FEFF}` should classify its non-BOM bytes for the
+    // at_line_start decision, not its BOM bytes. The previous impl
+    // only inspected the LEADING run of BOMs and clobbered
+    // `at_line_start` for any non-empty tail. That sub-case worked
+    // because a coalesced span starting with BOM + non-BOM tail
+    // really does break the indent contract. But a coalesced span
+    // like `@@\u{FEFF}` (non-BOM head followed by BOM tail) would
+    // also clobber — the BOM in the tail is layout-transparent per
+    // contract, but the head is real content so the clobber is
+    // already correct. The genuinely-wrong case (currently
+    // unreachable but reachable under a future logos upgrade that
+    // coalesces error sequences) is when the ENTIRE span is BOMs,
+    // possibly interleaved with whitespace: those should be fully
+    // layout-transparent. We now extract the LEADING run of BOM
+    // bytes for `last_newline_end` advancement, and consult the
+    // FULL invalid_text minus all BOM bytes for the at_line_start
+    // decision.
+    let after_leading_bom = invalid_text.trim_start_matches(crate::bom::BOM_CHAR);
+    let leading_bom_bytes = invalid_text.len() - after_leading_bom.len();
+    if leading_bom_bytes > 0 && *at_line_start && span_start == *last_newline_end {
+        *last_newline_end = span_start + leading_bom_bytes;
+    }
+
+    // Any non-BOM byte ANYWHERE in the span is "real content" for
+    // indent purposes. An all-BOM span (possibly interleaving BOMs
+    // at any position) leaves `at_line_start` untouched. The
+    // previous `is_empty()` check on JUST the after-leading-BOM
+    // tail had a latent gap for a coalesced `@<BOM>` span: the
+    // leading run is empty, so the `else` arm clobbered — which
+    // happens to be correct for that case, but the path was
+    // accidental rather than principled. Walking the whole span
+    // makes the rule explicit.
+    let has_non_bom_byte = invalid_text.chars().any(|c| c != crate::bom::BOM_CHAR);
+    if has_non_bom_byte {
+        *at_line_start = false;
     }
 }
 
@@ -439,16 +532,6 @@ pub fn tokenize(source: &str) -> Vec<(Token<'_>, Span)> {
                 tokens.push((Token::Newline, span.clone().into()));
                 at_line_start = true;
                 last_newline_end = span.end;
-            }
-            // A mid-file BOM is invisible to layout: don't reset
-            // at_line_start, don't move last_newline_end. The parser's
-            // error classifier separately picks up the Token::Bom span
-            // and surfaces a dedicated "UTF-8 BOM mid-file" diagnostic.
-            // Treating BOM as a layout-affecting token would swallow the
-            // indent of legitimate content on the same line (e.g., the
-            // metadata-indent of a concatenated second file).
-            Ok(Token::Bom) => {
-                tokens.push((Token::Bom, span.into()));
             }
             Ok(Token::Hash) if at_line_start && span.start == last_newline_end => {
                 // Hash at very start of line (no indentation) is a comment
@@ -526,9 +609,14 @@ pub fn tokenize(source: &str) -> Vec<(Token<'_>, Span)> {
                 tokens.push((token, span.into()));
             }
             Err(()) => {
-                // Lexer error - produce an Error token with the invalid source text
-                at_line_start = false;
+                // Lexer error - produce an Error token with the invalid source text.
                 let invalid_text = &source[span.clone()];
+                apply_err_layout_transparency(
+                    invalid_text,
+                    span.start,
+                    &mut at_line_start,
+                    &mut last_newline_end,
+                );
                 tokens.push((Token::Error(invalid_text), span.into()));
             }
         }
@@ -745,6 +833,355 @@ mod tests {
         let tokens = tokenize("txn\n  Assets:Bank 100 USD");
         // Should have: Txn, Newline, Indent, Account, Number, Currency
         assert!(tokens.iter().any(|(t, _)| matches!(t, Token::Indent(_))));
+    }
+
+    /// `Token::Error`'s Display impl strips embedded BOM bytes — if a
+    /// mid-file U+FEFF gets captured into a lexer error span, the
+    /// diagnostic still renders human-readably. The leading-BOM case
+    /// is handled at the `crate::parse` boundary (see `crate::bom`),
+    /// so this defensive measure only matters for mid-file BOMs that
+    /// fall into the lexer's default error path.
+    #[test]
+    fn test_display_token_error_strips_embedded_bom() {
+        let payload = "foo\u{FEFF}bar";
+        let s = format!("{}", Token::Error(payload));
+        assert_eq!(s, "foo<BOM>bar");
+        assert!(!s.contains(crate::bom::BOM_CHAR));
+    }
+
+    /// A mid-file BOM (any U+FEFF not at strict byte 0) reaches the
+    /// lexer with no special handling — there is no BOM regex on the
+    /// Token enum anymore. Logos's default error path emits `Token::Error`
+    /// for the unrecognized byte; the parser's error classifier (which
+    /// searches `error_text` for U+FEFF) surfaces the dedicated
+    /// diagnostic on the parser side. This test pins the lexer side:
+    /// some `Token::Error` appears in the stream containing the BOM byte.
+    #[test]
+    fn test_tokenize_mid_file_bom_falls_into_error_path() {
+        // Note: this test calls `tokenize` directly with the BOM byte
+        // present in the source — it does NOT go through `parse`, which
+        // would have stripped a strict-byte-0 BOM. So we put the BOM
+        // mid-source to bypass the strip.
+        let source = "2024-01-01 open Assets:Bank USD\n\u{FEFF}";
+        let tokens = tokenize(source);
+        let has_bom_in_error = tokens.iter().any(|(t, _)| {
+            if let Token::Error(s) = t {
+                s.contains(crate::bom::BOM_CHAR)
+            } else {
+                false
+            }
+        });
+        assert!(
+            has_bom_in_error,
+            "mid-file BOM should fall into `Token::Error`, got: {tokens:?}"
+        );
+    }
+
+    /// Layout-transparency contract for mid-file BOM: a BOM at line
+    /// start followed by indented content (the
+    /// `cat windows-a.bean windows-b.bean` concatenation case) must
+    /// NOT swallow the indent on the next token. The Err arm in
+    /// `tokenize` recognizes `Token::Error("\u{FEFF}")` and preserves
+    /// `at_line_start` + advances `last_newline_end` so the next
+    /// real token still gets its `Token::Indent` emission.
+    ///
+    /// Without this special case, the Err arm sets `at_line_start =
+    /// false` like for any other lex error, the indented posting
+    /// fails to produce an Indent token, and the parser misclassifies
+    /// the posting as a top-level directive — producing cascading
+    /// errors instead of the targeted BOM diagnostic.
+    #[test]
+    fn test_mid_file_bom_at_line_start_preserves_following_indent() {
+        // First a directive, then newline, then mid-file BOM, then
+        // indented posting-like content. `tokenize` is called directly
+        // (bypassing parse's strip-at-entry) so the BOM is mid-file.
+        let source = "2024-01-01 open Assets:Bank USD\n\u{FEFF}  meta-key: \"v\"\n";
+        let tokens = tokenize(source);
+        // The Token::Error for the BOM must be present.
+        let has_bom_error = tokens.iter().any(|(t, _)| {
+            if let Token::Error(s) = t {
+                *s == crate::bom::BOM
+            } else {
+                false
+            }
+        });
+        assert!(
+            has_bom_error,
+            "expected Token::Error(\"\\u{{FEFF}}\") in stream, got: {tokens:?}"
+        );
+        // Critically: the indent for the 2-space metadata line must
+        // survive — it should be a Token::Indent(2), not absorbed.
+        let has_indent_2 = tokens.iter().any(|(t, _)| matches!(t, Token::Indent(2)));
+        assert!(
+            has_indent_2,
+            "mid-file BOM at line start must not swallow the following Indent; got: {tokens:?}"
+        );
+        // And the metadata key tokenizes normally on the same line.
+        assert!(
+            tokens
+                .iter()
+                .any(|(t, _)| matches!(t, Token::MetaKey("meta-key:"))),
+            "expected MetaKey after BOM-prefixed indent, got: {tokens:?}"
+        );
+    }
+
+    /// Consecutive BOMs at line start (logos emits each as its own
+    /// Err) ALL preserve layout-transparency. The Err arm uses
+    /// `trim_start_matches(BOM_CHAR)` to find non-BOM content, so a
+    /// triple-concatenated Windows file producing `\n\u{FEFF}\u{FEFF}`
+    /// at line start, followed by indented content, still emits the
+    /// `Indent` for the metadata line. Without the `trim_start_matches`
+    /// approach (using a single-BOM length check instead), the second
+    /// BOM would either not advance `last_newline_end` correctly or
+    /// would clobber `at_line_start`, breaking the indent walk on the
+    /// next real token.
+    #[test]
+    fn test_consecutive_mid_file_boms_preserve_layout() {
+        let source = "2024-01-01 open Assets:Bank USD\n\u{FEFF}\u{FEFF}  meta-key: \"v\"\n";
+        let tokens = tokenize(source);
+        // Both BOMs should appear as Token::Error.
+        let bom_error_count = tokens
+            .iter()
+            .filter(|(t, _)| matches!(t, Token::Error(s) if *s == crate::bom::BOM))
+            .count();
+        assert_eq!(
+            bom_error_count, 2,
+            "expected 2 Token::Error(BOM) tokens, got: {tokens:?}"
+        );
+        // And the indent on the line containing the BOMs must survive.
+        let has_indent_2 = tokens.iter().any(|(t, _)| matches!(t, Token::Indent(2)));
+        assert!(
+            has_indent_2,
+            "consecutive mid-file BOMs at line start must not swallow following indent; \
+             got: {tokens:?}"
+        );
+        assert!(
+            tokens
+                .iter()
+                .any(|(t, _)| matches!(t, Token::MetaKey("meta-key:"))),
+            "expected MetaKey after consecutive-BOM-prefixed indent, got: {tokens:?}"
+        );
+    }
+
+    // ===== Direct tests of `apply_err_layout_transparency` =====
+    //
+    // These tests exercise the helper independently of logos's
+    // emission strategy. Today logos emits one Err per unrecognized
+    // char, so the multi-BOM-in-one-Err code path (the
+    // `trim_start_matches` loop's motivating case) is unreachable
+    // from real input. The tests below feed the helper synthetic
+    // invalid_text values so the defensive code is actually
+    // validated rather than documentation-only.
+
+    /// Coalesced double-BOM at line start: must advance
+    /// `last_newline_end` past BOTH bytes and keep `at_line_start`.
+    /// Pins the contract `trim_start_matches` exists to provide.
+    #[test]
+    fn err_layout_transparency_coalesced_double_bom_at_line_start() {
+        let invalid_text = "\u{FEFF}\u{FEFF}";
+        let span_start = 10;
+        let mut at_line_start = true;
+        let mut last_newline_end = 10;
+        apply_err_layout_transparency(
+            invalid_text,
+            span_start,
+            &mut at_line_start,
+            &mut last_newline_end,
+        );
+        assert!(
+            at_line_start,
+            "all-BOM error span must preserve at_line_start"
+        );
+        assert_eq!(
+            last_newline_end,
+            10 + 2 * crate::bom::BOM_LEN,
+            "last_newline_end must advance past BOTH BOMs, not just the first"
+        );
+    }
+
+    /// Coalesced BOM + trailing content: `at_line_start` clobbers (real
+    /// content follows the BOM run); `last_newline_end` still
+    /// advances past the BOM portion only.
+    #[test]
+    fn err_layout_transparency_coalesced_bom_with_trailing_content() {
+        let invalid_text = "\u{FEFF}\u{FEFF}xyz";
+        let span_start = 10;
+        let mut at_line_start = true;
+        let mut last_newline_end = 10;
+        apply_err_layout_transparency(
+            invalid_text,
+            span_start,
+            &mut at_line_start,
+            &mut last_newline_end,
+        );
+        assert!(
+            !at_line_start,
+            "trailing non-BOM content must clobber at_line_start"
+        );
+        assert_eq!(
+            last_newline_end,
+            10 + 2 * crate::bom::BOM_LEN,
+            "last_newline_end advances past leading BOMs, NOT past trailing content"
+        );
+    }
+
+    /// Non-BOM error: standard clobber.
+    #[test]
+    fn err_layout_transparency_non_bom_clobbers() {
+        let invalid_text = "garbage";
+        let mut at_line_start = true;
+        let mut last_newline_end = 10;
+        apply_err_layout_transparency(invalid_text, 10, &mut at_line_start, &mut last_newline_end);
+        assert!(!at_line_start);
+        assert_eq!(last_newline_end, 10, "non-BOM error must not advance");
+    }
+
+    /// All-BOM error span but NOT at line start (e.g., BOM appears
+    /// mid-line after some content): `at_line_start` was already
+    /// false, the inner advance guard fails, and nothing changes.
+    #[test]
+    fn err_layout_transparency_all_bom_not_at_line_start_is_noop() {
+        let invalid_text = "\u{FEFF}\u{FEFF}";
+        let span_start = 20;
+        let mut at_line_start = false; // mid-line
+        let mut last_newline_end = 10;
+        apply_err_layout_transparency(
+            invalid_text,
+            span_start,
+            &mut at_line_start,
+            &mut last_newline_end,
+        );
+        assert!(!at_line_start);
+        assert_eq!(last_newline_end, 10, "guard prevents stale advance");
+    }
+
+    /// Complementary to the previous test: the inner `at_line_start &&
+    /// span_start == last_newline_end` guard has two clauses. The
+    /// `*_not_at_line_start_*` test above exercises the first
+    /// (`at_line_start = false`); THIS test pins the second
+    /// (span doesn't begin at `last_newline_end`).
+    ///
+    /// Without exercising both clauses independently, a refactor that
+    /// flipped `&&` to `||` would not be caught — either clause alone
+    /// suffices to suppress the advance.
+    #[test]
+    fn err_layout_transparency_all_bom_span_mismatch_is_noop() {
+        let invalid_text = "\u{FEFF}\u{FEFF}";
+        // at_line_start IS true (the first clause's condition holds)…
+        let mut at_line_start = true;
+        // …but span_start (20) != last_newline_end (10), so the
+        // second clause's condition fails. Combined: the advance
+        // must NOT fire.
+        let span_start = 20;
+        let mut last_newline_end = 10;
+        apply_err_layout_transparency(
+            invalid_text,
+            span_start,
+            &mut at_line_start,
+            &mut last_newline_end,
+        );
+        assert!(
+            at_line_start,
+            "all-BOM error span must preserve at_line_start regardless of span-vs-last-newline match"
+        );
+        assert_eq!(
+            last_newline_end, 10,
+            "span_start != last_newline_end must prevent stale advance"
+        );
+    }
+
+    /// Round-17/18: the contract "every BOM byte is layout-
+    /// transparent" covers BOMs at ANY position in a coalesced error
+    /// span, not just the leading run. Pre-round-17 the
+    /// implementation only inspected the leading BOM run for the
+    /// `at_line_start` decision — a coalesced span like
+    /// `@@<BOM>` (non-BOM head, BOM tail) was clobbered by the
+    /// leading-only logic even though the trailing BOM should have
+    /// been transparent (and the leading `@@` would correctly
+    /// clobber on its own). The fixed implementation walks the
+    /// whole span: ANY non-BOM byte clobbers; only an all-BOM span
+    /// (in any arrangement) preserves `at_line_start`.
+    ///
+    /// These tests cover the interleaved shapes the round-17
+    /// contract claims to handle: BOM-only-tail, BOM-in-middle,
+    /// and the recently-flagged "BOM-only in any arrangement"
+    /// preservation guarantee.
+    #[test]
+    fn err_layout_transparency_bom_only_in_any_arrangement_preserves() {
+        // All-BOM coalesced span — preserves at_line_start AND
+        // advances last_newline_end past the leading run.
+        let mut at_line_start = true;
+        let mut last_newline_end = 10;
+        apply_err_layout_transparency(
+            "\u{FEFF}\u{FEFF}",
+            10, // span_start == last_newline_end → advance fires
+            &mut at_line_start,
+            &mut last_newline_end,
+        );
+        assert!(at_line_start, "all-BOM span preserves at_line_start");
+        assert_eq!(
+            last_newline_end, 16,
+            "leading BOM run advances last_newline_end past both BOM bytes \
+             (each BOM is 3 UTF-8 bytes)"
+        );
+    }
+
+    /// Non-BOM head clobbers `at_line_start`. Pre-round-17 also did
+    /// this (correctly); pinning prevents a regression that re-
+    /// introduces a BOM-only-trim that misses non-BOM head bytes.
+    #[test]
+    fn err_layout_transparency_non_bom_head_clobbers() {
+        let mut at_line_start = true;
+        let mut last_newline_end = 0;
+        apply_err_layout_transparency("@@\u{FEFF}", 10, &mut at_line_start, &mut last_newline_end);
+        assert!(
+            !at_line_start,
+            "non-BOM head ('@@') clobbers at_line_start regardless of trailing BOM"
+        );
+    }
+
+    /// BOM head + non-BOM tail clobbers (because of the tail).
+    /// Pre-round-17 the leading-only logic was correct here too;
+    /// pinning ensures no regression that flips to leading-only.
+    #[test]
+    fn err_layout_transparency_bom_head_non_bom_tail_clobbers() {
+        let mut at_line_start = true;
+        let mut last_newline_end = 10;
+        apply_err_layout_transparency("\u{FEFF}@@", 10, &mut at_line_start, &mut last_newline_end);
+        assert!(
+            !at_line_start,
+            "non-BOM tail ('@@') clobbers at_line_start even though span starts with BOM"
+        );
+        assert_eq!(
+            last_newline_end, 13,
+            "leading BOM run STILL advances last_newline_end past the BOM"
+        );
+    }
+
+    /// Non-BOM in the middle of a BOM-flanked span clobbers. THIS
+    /// is the case the round-17 docstring specifically claimed to
+    /// cover; pre-round-17 the same outcome held (leading BOMs
+    /// trimmed, non-empty tail clobbered) but only by accident.
+    /// The fixed `has_non_bom_byte = chars().any(|c| c != BOM)`
+    /// walks the whole span and makes the case explicit.
+    #[test]
+    fn err_layout_transparency_bom_flanking_non_bom_clobbers() {
+        let mut at_line_start = true;
+        let mut last_newline_end = 10;
+        apply_err_layout_transparency(
+            "\u{FEFF}@@\u{FEFF}",
+            10,
+            &mut at_line_start,
+            &mut last_newline_end,
+        );
+        assert!(
+            !at_line_start,
+            "non-BOM middle ('@@') clobbers at_line_start"
+        );
+        assert_eq!(
+            last_newline_end, 13,
+            "leading BOM run advances last_newline_end past the leading BOM only"
+        );
     }
 
     #[test]

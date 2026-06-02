@@ -62,15 +62,13 @@ use lsp_types::request::{
 use lsp_types::{
     CallHierarchyIncomingCallsParams, CallHierarchyOutgoingCallsParams, CallHierarchyPrepareParams,
     CodeAction, CodeActionParams, CodeLens, CodeLensParams, ColorPresentationParams,
-    CompletionItem, CompletionParams, DiagnosticOptions, DiagnosticServerCapabilities,
-    DocumentColorParams, DocumentFormattingParams, DocumentHighlightParams, DocumentLink,
-    DocumentLinkParams, DocumentOnTypeFormattingParams, DocumentRangeFormattingParams,
-    DocumentSymbolParams, ExecuteCommandParams, FoldingRangeParams, GotoDefinitionParams,
-    HoverParams, InitializeParams, InitializeResult, InlayHint, InlayHintParams,
+    CompletionItem, CompletionParams, DocumentColorParams, DocumentFormattingParams,
+    DocumentHighlightParams, DocumentLink, DocumentLinkParams, DocumentOnTypeFormattingParams,
+    DocumentRangeFormattingParams, DocumentSymbolParams, ExecuteCommandParams, FoldingRangeParams,
+    GotoDefinitionParams, HoverParams, InitializeParams, InlayHint, InlayHintParams,
     LinkedEditingRangeParams, PublishDiagnosticsParams, ReferenceParams, RenameParams,
     SelectionRangeParams, SemanticTokensDeltaParams, SemanticTokensParams,
-    SemanticTokensRangeParams, ServerCapabilities, ServerInfo, SignatureHelpParams,
-    TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind,
+    SemanticTokensRangeParams, SignatureHelpParams, TextDocumentPositionParams,
     TypeHierarchyPrepareParams, TypeHierarchySubtypesParams, TypeHierarchySupertypesParams, Uri,
     WorkspaceSymbolParams,
 };
@@ -113,6 +111,60 @@ pub struct TaskResult {
 /// A job to be executed on the background worker thread.
 type BackgroundJob = Box<dyn FnOnce() + Send>;
 
+/// Structured failure reasons emitted by the request-dispatch loop.
+///
+/// Each variant maps deterministically to an LSP `ErrorCode` via
+/// [`DispatchError::error_code`]. Round-20 introduced this enum to
+/// replace the prior error-message-prefix routing
+/// (`msg.starts_with("Unhandled request")` etc.) — that worked, but
+/// silently coupled the dispatcher's routing decisions to the exact
+/// wording of handler error strings, so a future handler whose
+/// `Err` happened to start with a reserved prefix would have been
+/// misrouted to the wrong wire error code.
+#[derive(Debug)]
+enum DispatchError {
+    /// The request's `method` is not implemented by this server.
+    /// Maps to [`lsp_server::ErrorCode::MethodNotFound`].
+    MethodNotFound(String),
+    /// A second `initialize` request reached the dispatcher. Per LSP
+    /// 3.17 §Lifecycle, `initialize` MUST be sent exactly once; the
+    /// first one is consumed by `server.rs::start_stdio` before the
+    /// main loop runs, so any `initialize` reaching this dispatcher
+    /// is a client-side protocol violation. Maps to
+    /// [`lsp_server::ErrorCode::InvalidRequest`].
+    DuplicateInitialize,
+    /// A handler returned `Err(_)` for any other reason (parse error,
+    /// IO failure, etc.). Maps to
+    /// [`lsp_server::ErrorCode::InternalError`].
+    Handler(String),
+}
+
+impl DispatchError {
+    /// LSP wire error code for this dispatch failure.
+    fn error_code(&self) -> lsp_server::ErrorCode {
+        match self {
+            Self::MethodNotFound(_) => lsp_server::ErrorCode::MethodNotFound,
+            Self::DuplicateInitialize => lsp_server::ErrorCode::InvalidRequest,
+            Self::Handler(_) => lsp_server::ErrorCode::InternalError,
+        }
+    }
+}
+
+impl std::fmt::Display for DispatchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MethodNotFound(method) => write!(f, "Unhandled request: {method}"),
+            Self::DuplicateInitialize => write!(
+                f,
+                "initialize must be sent exactly once per LSP connection (LSP 3.17 \
+                 §Lifecycle); this connection has already been initialized via \
+                 server.rs::start_stdio."
+            ),
+            Self::Handler(msg) => f.write_str(msg),
+        }
+    }
+}
+
 /// State managed by the main loop.
 pub struct MainLoopState {
     /// Virtual file system for open documents.
@@ -123,6 +175,10 @@ pub struct MainLoopState {
     pub diagnostics: HashMap<Uri, Vec<lsp_types::Diagnostic>>,
     /// Whether shutdown was requested.
     pub shutdown_requested: bool,
+    /// LSP position encoding negotiated at initialization (UTF-8 or
+    /// UTF-16). Handler code emitting `Position`s must consult this
+    /// so positions align with what the client expects.
+    pub position_encoding: crate::handlers::utils::PositionEncoding,
     /// Full ledger state (loaded from journal file if configured).
     pub ledger_state: SharedLedgerState,
     /// Path to the journal file (if configured).
@@ -174,6 +230,11 @@ impl MainLoopState {
             sender,
             diagnostics: HashMap::new(),
             shutdown_requested: false,
+            // Conservative default: UTF-16 (the LSP spec default).
+            // `server.rs::run` overrides this with the negotiated
+            // encoding after `initialize`. Construction without
+            // initialize (e.g., in tests) gets the spec-safe value.
+            position_encoding: crate::handlers::utils::PositionEncoding::Utf16,
             ledger_state,
             journal_file,
             task_sender,
@@ -319,9 +380,13 @@ impl MainLoopState {
                 // Snapshot data eagerly
                 let uri = &params.text_document.uri;
                 let (text, parse_result) = self.get_document_data(uri);
+                // Capture the negotiated encoding by value so the
+                // worker closure (which loses access to `self`) emits
+                // semantic tokens in the right wire encoding.
+                let encoding = self.position_encoding;
 
                 self.dispatch_async(id, move || {
-                    let response = handle_semantic_tokens(&params, &text, &parse_result);
+                    let response = handle_semantic_tokens(&params, &text, &parse_result, encoding);
                     serde_json::to_value(response).map_err(|e| e.to_string())
                 });
                 true
@@ -355,9 +420,41 @@ impl MainLoopState {
             return; // Response will come back as Event::Task
         }
 
-        // Synchronous dispatch for all other requests.
-        let result = match req.method.as_str() {
-            Initialize::METHOD => self.handle_initialize(req),
+        // Send response, routed through the typed `DispatchError`
+        // (see the enum's rustdoc for the rationale — round-20
+        // replaces the prior error-message-prefix routing).
+        let response = match self.dispatch_sync(req) {
+            Ok(value) => lsp_server::Response::new_ok(id, value),
+            Err(err) => lsp_server::Response::new_err(id, err.error_code() as i32, err.to_string()),
+        };
+
+        self.send(lsp_server::Message::Response(response));
+    }
+
+    /// Synchronous request dispatch. Returns the handler's JSON
+    /// response, or a typed [`DispatchError`].
+    ///
+    /// Each match arm either handles the request inline (Shutdown,
+    /// Initialize) or delegates to a per-method handler that returns
+    /// `Result<Value, String>`; the inner `String` is wrapped via
+    /// `DispatchError::Handler` on the way out, keeping the handler
+    /// signatures unchanged.
+    fn dispatch_sync(
+        &mut self,
+        req: lsp_server::Request,
+    ) -> Result<serde_json::Value, DispatchError> {
+        // Initialize is special: a second `initialize` reaching this
+        // dispatcher is a protocol violation per LSP 3.17 §Lifecycle.
+        // Parse the params to surface a malformed-payload error if
+        // present, then emit the structured `DuplicateInitialize`.
+        if req.method == Initialize::METHOD {
+            let _params: InitializeParams = serde_json::from_value(req.params)
+                .map_err(|e| DispatchError::Handler(e.to_string()))?;
+            return Err(DispatchError::DuplicateInitialize);
+        }
+
+        let method = req.method.clone();
+        let inner: Result<serde_json::Value, String> = match method.as_str() {
             Shutdown::METHOD => {
                 self.shutdown_requested = true;
                 Ok(serde_json::Value::Null)
@@ -401,51 +498,11 @@ impl MainLoopState {
             ExecuteCommand::METHOD => self.handle_execute_command_request(req),
             ResolveCompletionItem::METHOD => self.handle_completion_resolve_request(req),
             _ => {
-                tracing::warn!("Unhandled request: {}", req.method);
-                Err(format!("Unhandled request: {}", req.method))
+                tracing::warn!("Unhandled request: {method}");
+                return Err(DispatchError::MethodNotFound(method));
             }
         };
-
-        // Send response
-        let response = match result {
-            Ok(value) => lsp_server::Response::new_ok(id, value),
-            Err(msg) => {
-                // Use MethodNotFound only for truly unknown methods,
-                // InternalError for handler failures
-                let error_code = if msg.starts_with("Unhandled request") {
-                    lsp_server::ErrorCode::MethodNotFound
-                } else {
-                    lsp_server::ErrorCode::InternalError
-                };
-                lsp_server::Response::new_err(id, error_code as i32, msg)
-            }
-        };
-
-        self.send(lsp_server::Message::Response(response));
-    }
-
-    /// Handle the initialize request.
-    fn handle_initialize(&mut self, req: lsp_server::Request) -> Result<serde_json::Value, String> {
-        let _params: InitializeParams =
-            serde_json::from_value(req.params).map_err(|e| e.to_string())?;
-
-        let capabilities = ServerCapabilities {
-            text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
-            diagnostic_provider: Some(DiagnosticServerCapabilities::Options(DiagnosticOptions {
-                ..Default::default()
-            })),
-            ..Default::default()
-        };
-
-        let result = InitializeResult {
-            capabilities,
-            server_info: Some(ServerInfo {
-                name: "rledger-lsp".to_string(),
-                version: Some(crate::VERSION.to_string()),
-            }),
-        };
-
-        serde_json::to_value(result).map_err(|e| e.to_string())
+        inner.map_err(DispatchError::Handler)
     }
 
     /// Handle the textDocument/completion request.
@@ -467,7 +524,13 @@ impl MainLoopState {
             None
         };
 
-        let response = handle_completion(&params, &text, &parse_result, ledger_state);
+        let response = handle_completion(
+            &params,
+            &text,
+            &parse_result,
+            ledger_state,
+            self.position_encoding,
+        );
 
         serde_json::to_value(response).map_err(|e| e.to_string())
     }
@@ -483,7 +546,8 @@ impl MainLoopState {
         let uri = &params.text_document_position_params.text_document.uri;
         let (text, parse_result) = self.get_document_data(uri);
 
-        let response = handle_goto_definition(&params, &text, &parse_result, uri);
+        let response =
+            handle_goto_definition(&params, &text, &parse_result, uri, self.position_encoding);
 
         serde_json::to_value(response).map_err(|e| e.to_string())
     }
@@ -499,7 +563,8 @@ impl MainLoopState {
         let uri = &params.text_document_position.text_document.uri;
         let (text, parse_result) = self.get_document_data(uri);
 
-        let response = handle_references(&params, &text, &parse_result, uri);
+        let response =
+            handle_references(&params, &text, &parse_result, uri, self.position_encoding);
 
         serde_json::to_value(response).map_err(|e| e.to_string())
     }
@@ -511,7 +576,7 @@ impl MainLoopState {
         let uri = &params.text_document_position_params.text_document.uri;
         let (text, parse_result) = self.get_document_data(uri);
 
-        let response = handle_hover(&params, &text, &parse_result);
+        let response = handle_hover(&params, &text, &parse_result, self.position_encoding);
 
         serde_json::to_value(response).map_err(|e| e.to_string())
     }
@@ -527,7 +592,8 @@ impl MainLoopState {
         let uri = &params.text_document.uri;
         let (text, parse_result) = self.get_document_data(uri);
 
-        let response = handle_document_symbols(&params, &text, &parse_result);
+        let response =
+            handle_document_symbols(&params, &text, &parse_result, self.position_encoding);
 
         serde_json::to_value(response).map_err(|e| e.to_string())
     }
@@ -546,7 +612,13 @@ impl MainLoopState {
         // Note: For a full implementation, we would store previous tokens by result_id
         // and pass them to handle_semantic_tokens_delta. For now, pass None to always
         // return full tokens as a delta.
-        let response = handle_semantic_tokens_delta(&params, &text, &parse_result, None);
+        let response = handle_semantic_tokens_delta(
+            &params,
+            &text,
+            &parse_result,
+            None,
+            self.position_encoding,
+        );
 
         serde_json::to_value(response).map_err(|e| e.to_string())
     }
@@ -562,7 +634,8 @@ impl MainLoopState {
         let uri = &params.text_document.uri;
         let (text, parse_result) = self.get_document_data(uri);
 
-        let response = handle_semantic_tokens_range(&params, &text, &parse_result);
+        let response =
+            handle_semantic_tokens_range(&params, &text, &parse_result, self.position_encoding);
 
         serde_json::to_value(response).map_err(|e| e.to_string())
     }
@@ -578,7 +651,7 @@ impl MainLoopState {
         let uri = &params.text_document.uri;
         let (text, parse_result) = self.get_document_data(uri);
 
-        let response = handle_code_actions(&params, &text, &parse_result);
+        let response = handle_code_actions(&params, &text, &parse_result, self.position_encoding);
 
         serde_json::to_value(response).map_err(|e| e.to_string())
     }
@@ -602,7 +675,8 @@ impl MainLoopState {
 
         let (text, parse_result) = self.get_document_data(&uri);
 
-        let resolved = handle_code_action_resolve(action, &text, &parse_result, &uri);
+        let resolved =
+            handle_code_action_resolve(action, &text, &parse_result, &uri, self.position_encoding);
 
         serde_json::to_value(resolved).map_err(|e| e.to_string())
     }
@@ -628,7 +702,7 @@ impl MainLoopState {
             })
             .collect();
 
-        let response = handle_workspace_symbols(&params, &documents);
+        let response = handle_workspace_symbols(&params, &documents, self.position_encoding);
 
         serde_json::to_value(response).map_err(|e| e.to_string())
     }
@@ -644,7 +718,7 @@ impl MainLoopState {
         let uri = &params.text_document.uri;
         let (text, parse_result) = self.get_document_data(uri);
 
-        let response = handle_prepare_rename(&params, &text, &parse_result);
+        let response = handle_prepare_rename(&params, &text, &parse_result, self.position_encoding);
 
         serde_json::to_value(response).map_err(|e| e.to_string())
     }
@@ -656,7 +730,7 @@ impl MainLoopState {
         let uri = &params.text_document_position.text_document.uri;
         let (text, parse_result) = self.get_document_data(uri);
 
-        let response = handle_rename(&params, &text, &parse_result);
+        let response = handle_rename(&params, &text, &parse_result, self.position_encoding);
 
         serde_json::to_value(response).map_err(|e| e.to_string())
     }
@@ -672,7 +746,7 @@ impl MainLoopState {
         let uri = &params.text_document.uri;
         let (text, parse_result) = self.get_document_data(uri);
 
-        let response = handle_formatting(&params, &text, &parse_result);
+        let response = handle_formatting(&params, &text, &parse_result, self.position_encoding);
 
         serde_json::to_value(response).map_err(|e| e.to_string())
     }
@@ -688,7 +762,7 @@ impl MainLoopState {
         let uri = &params.text_document.uri;
         let (text, parse_result) = self.get_document_data(uri);
 
-        let response = handle_folding_ranges(&params, &text, &parse_result);
+        let response = handle_folding_ranges(&params, &text, &parse_result, self.position_encoding);
 
         serde_json::to_value(response).map_err(|e| e.to_string())
     }
@@ -704,7 +778,8 @@ impl MainLoopState {
         let uri = &params.text_document.uri;
         let (text, parse_result) = self.get_document_data(uri);
 
-        let response = handle_range_formatting(&params, &text, &parse_result);
+        let response =
+            handle_range_formatting(&params, &text, &parse_result, self.position_encoding);
 
         serde_json::to_value(response).map_err(|e| e.to_string())
     }
@@ -720,7 +795,7 @@ impl MainLoopState {
         let uri = &params.text_document.uri;
         let (text, parse_result) = self.get_document_data(uri);
 
-        let response = handle_document_links(&params, &text, &parse_result);
+        let response = handle_document_links(&params, &text, &parse_result, self.position_encoding);
 
         serde_json::to_value(response).map_err(|e| e.to_string())
     }
@@ -748,7 +823,7 @@ impl MainLoopState {
         let uri = &params.text_document.uri;
         let (text, parse_result) = self.get_document_data(uri);
 
-        let response = handle_inlay_hints(&params, &text, &parse_result);
+        let response = handle_inlay_hints(&params, &text, &parse_result, self.position_encoding);
 
         serde_json::to_value(response).map_err(|e| e.to_string())
     }
@@ -787,7 +862,8 @@ impl MainLoopState {
         let uri = &params.text_document.uri;
         let (text, parse_result) = self.get_document_data(uri);
 
-        let response = handle_selection_range(&params, &text, &parse_result);
+        let response =
+            handle_selection_range(&params, &text, &parse_result, self.position_encoding);
 
         serde_json::to_value(response).map_err(|e| e.to_string())
     }
@@ -803,7 +879,13 @@ impl MainLoopState {
         let uri = &params.text_document_position_params.text_document.uri;
         let (text, parse_result) = self.get_document_data(uri);
 
-        let response = handle_prepare_type_hierarchy(&params, &text, &parse_result, uri);
+        let response = handle_prepare_type_hierarchy(
+            &params,
+            &text,
+            &parse_result,
+            uri,
+            self.position_encoding,
+        );
 
         serde_json::to_value(response).map_err(|e| e.to_string())
     }
@@ -819,7 +901,8 @@ impl MainLoopState {
         let uri = &params.item.uri;
         let (text, parse_result) = self.get_document_data(uri);
 
-        let response = handle_supertypes(&params, &text, &parse_result, uri);
+        let response =
+            handle_supertypes(&params, &text, &parse_result, uri, self.position_encoding);
 
         serde_json::to_value(response).map_err(|e| e.to_string())
     }
@@ -835,7 +918,7 @@ impl MainLoopState {
         let uri = &params.item.uri;
         let (text, parse_result) = self.get_document_data(uri);
 
-        let response = handle_subtypes(&params, &text, &parse_result, uri);
+        let response = handle_subtypes(&params, &text, &parse_result, uri, self.position_encoding);
 
         serde_json::to_value(response).map_err(|e| e.to_string())
     }
@@ -851,7 +934,8 @@ impl MainLoopState {
         let uri = &params.text_document_position_params.text_document.uri;
         let (text, parse_result) = self.get_document_data(uri);
 
-        let response = handle_document_highlight(&params, &text, &parse_result);
+        let response =
+            handle_document_highlight(&params, &text, &parse_result, self.position_encoding);
 
         serde_json::to_value(response).map_err(|e| e.to_string())
     }
@@ -867,7 +951,8 @@ impl MainLoopState {
         let uri = &params.text_document_position_params.text_document.uri;
         let (text, parse_result) = self.get_document_data(uri);
 
-        let response = handle_linked_editing_range(&params, &text, &parse_result);
+        let response =
+            handle_linked_editing_range(&params, &text, &parse_result, self.position_encoding);
 
         serde_json::to_value(response).map_err(|e| e.to_string())
     }
@@ -889,7 +974,7 @@ impl MainLoopState {
             String::new()
         };
 
-        let response = handle_on_type_formatting(&params, &text);
+        let response = handle_on_type_formatting(&params, &text, self.position_encoding);
 
         serde_json::to_value(response).map_err(|e| e.to_string())
     }
@@ -905,7 +990,7 @@ impl MainLoopState {
         let uri = &params.text_document.uri;
         let (text, parse_result) = self.get_document_data(uri);
 
-        let response = handle_code_lens(&params, &text, &parse_result);
+        let response = handle_code_lens(&params, &text, &parse_result, self.position_encoding);
 
         serde_json::to_value(response).map_err(|e| e.to_string())
     }
@@ -921,7 +1006,7 @@ impl MainLoopState {
         let uri = &params.text_document.uri;
         let (text, parse_result) = self.get_document_data(uri);
 
-        let response = handle_document_color(&params, &text, &parse_result);
+        let response = handle_document_color(&params, &text, &parse_result, self.position_encoding);
 
         serde_json::to_value(response).map_err(|e| e.to_string())
     }
@@ -952,7 +1037,8 @@ impl MainLoopState {
         let (text, parse_result) = self.get_document_data(uri);
 
         // Handle go-to-declaration (same as definition for Beancount)
-        let response = handle_goto_declaration(&params, &text, &parse_result, uri);
+        let response =
+            handle_goto_declaration(&params, &text, &parse_result, uri, self.position_encoding);
 
         serde_json::to_value(response).map_err(|e| e.to_string())
     }
@@ -968,7 +1054,13 @@ impl MainLoopState {
         let uri = &params.text_document_position_params.text_document.uri;
         let (text, parse_result) = self.get_document_data(uri);
 
-        let response = handle_prepare_call_hierarchy(&params, &text, &parse_result, uri);
+        let response = handle_prepare_call_hierarchy(
+            &params,
+            &text,
+            &parse_result,
+            uri,
+            self.position_encoding,
+        );
 
         serde_json::to_value(response).map_err(|e| e.to_string())
     }
@@ -984,7 +1076,8 @@ impl MainLoopState {
         let uri = &params.item.uri;
         let (text, parse_result) = self.get_document_data(uri);
 
-        let response = handle_incoming_calls(&params, &text, &parse_result, uri);
+        let response =
+            handle_incoming_calls(&params, &text, &parse_result, uri, self.position_encoding);
 
         serde_json::to_value(response).map_err(|e| e.to_string())
     }
@@ -1000,7 +1093,8 @@ impl MainLoopState {
         let uri = &params.item.uri;
         let (text, parse_result) = self.get_document_data(uri);
 
-        let response = handle_outgoing_calls(&params, &text, &parse_result, uri);
+        let response =
+            handle_outgoing_calls(&params, &text, &parse_result, uri, self.position_encoding);
 
         serde_json::to_value(response).map_err(|e| e.to_string())
     }
@@ -1023,7 +1117,7 @@ impl MainLoopState {
         };
 
         // Handle signature help (doesn't need parse result)
-        let response = handle_signature_help(&params, &text);
+        let response = handle_signature_help(&params, &text, self.position_encoding);
 
         serde_json::to_value(response).map_err(|e| e.to_string())
     }
@@ -1046,7 +1140,8 @@ impl MainLoopState {
 
         if let Some(uri) = uri_from_args {
             let (text, parse_result) = self.get_document_data(&uri);
-            let result = handle_execute_command(&params, &text, &parse_result, &uri);
+            let result =
+                handle_execute_command(&params, &text, &parse_result, &uri, self.position_encoding);
             self.send_show_message(result.show_message);
             return Ok(result.response.unwrap_or(serde_json::Value::Null));
         }
@@ -1073,7 +1168,8 @@ impl MainLoopState {
             .map_err(|e| format!("{:?}", e))?;
 
         let (text, parse_result) = self.get_document_data(&uri);
-        let result = handle_execute_command(&params, &text, &parse_result, &uri);
+        let result =
+            handle_execute_command(&params, &text, &parse_result, &uri, self.position_encoding);
         self.send_show_message(result.show_message);
         Ok(result.response.unwrap_or(serde_json::Value::Null))
     }
@@ -1421,6 +1517,7 @@ impl MainLoopState {
             current_file_id,
             current_canonical_path.as_deref(),
             &other_buffer_overlays,
+            self.position_encoding,
         );
         drop(ledger_guard); // Release lock before sending
 
@@ -1471,8 +1568,10 @@ pub fn run_main_loop(
     receiver: Receiver<lsp_server::Message>,
     sender: Sender<lsp_server::Message>,
     journal_file: Option<PathBuf>,
+    position_encoding: crate::handlers::utils::PositionEncoding,
 ) {
     let mut state = MainLoopState::new(sender, journal_file);
+    state.position_encoding = position_encoding;
     let task_receiver = state.task_receiver.clone();
 
     tracing::info!("Main loop started");
@@ -1502,4 +1601,55 @@ pub fn run_main_loop(
     }
 
     tracing::info!("Main loop ended");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pin the structural error-code mapping. Round-20 introduced
+    /// `DispatchError` to replace the prior `msg.starts_with("...")`
+    /// routing in `handle_request`; this test guards against silent
+    /// regressions where a future refactor swaps a variant's mapped
+    /// code (e.g. routing `DuplicateInitialize` to `InternalError`,
+    /// which would mask a client-side protocol violation as a server
+    /// fault).
+    #[test]
+    fn dispatch_error_codes() {
+        // `lsp_server::ErrorCode` doesn't implement PartialEq, so
+        // compare via the wire integer (which is what we serialize).
+        assert_eq!(
+            DispatchError::MethodNotFound("foo/bar".into()).error_code() as i32,
+            lsp_server::ErrorCode::MethodNotFound as i32,
+        );
+        assert_eq!(
+            DispatchError::DuplicateInitialize.error_code() as i32,
+            lsp_server::ErrorCode::InvalidRequest as i32,
+        );
+        assert_eq!(
+            DispatchError::Handler("boom".into()).error_code() as i32,
+            lsp_server::ErrorCode::InternalError as i32,
+        );
+    }
+
+    /// `Display` produces stable, distinguishable messages — clients
+    /// (and humans tailing logs) shouldn't see the same string for
+    /// two different failure modes.
+    #[test]
+    fn dispatch_error_display() {
+        let unhandled = DispatchError::MethodNotFound("foo/bar".into()).to_string();
+        assert!(
+            unhandled.contains("foo/bar"),
+            "MethodNotFound should include the method name: {unhandled}",
+        );
+
+        let dup_init = DispatchError::DuplicateInitialize.to_string();
+        assert!(
+            dup_init.contains("exactly once"),
+            "DuplicateInitialize message should cite the spec invariant: {dup_init}",
+        );
+
+        let handler = DispatchError::Handler("custom failure".into()).to_string();
+        assert_eq!(handler, "custom failure");
+    }
 }

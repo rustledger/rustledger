@@ -57,7 +57,7 @@
           "result": {
             "name": "Result",
             "value": {
-              "api_version": "1.0",
+              "api_version": "2.0",
               "entries": [],
               "errors": [],
               "options": {},
@@ -291,7 +291,7 @@
     {
       "name": "format.source",
       "summary": "Format beancount source",
-      "description": "Formats beancount source code according to standard conventions. Returns a `beancount_parse_error` application-level RpcError (code -32000) with structured `data: { errors: string[], total: number, truncated: boolean }` when the source has parse errors; the formatter refuses to run on a broken parse to avoid silently dropping unparsable bytes.",
+      "description": "Formats beancount source code according to standard conventions. Returns a `beancount_parse_error` application-level RpcError (code -32000) with structured `data: ParseErrorData` (see schema) when the source has parse errors; the formatter refuses to run on a broken parse to avoid silently dropping unparsable bytes. Each `errors[i]` is a `ParseErrorEntry` object with `message`, `kind_code` (numeric discriminant), `hint` (optional fix-it text), and `span` (byte range).",
       "params": [
         {
           "name": "source",
@@ -322,7 +322,7 @@
     {
       "name": "format.file",
       "summary": "Format a beancount file",
-      "description": "Formats a beancount file from disk. Same parse-error semantics as `format.source` — returns a structured error rather than partial output. Uses the loader with path-traversal protection enabled.",
+      "description": "Formats a beancount file from disk. Same parse-error semantics as `format.source` — returns a structured `ParseErrorData` (`errors: ParseErrorEntry[]`) on -32000 rather than partial output. Uses the loader with path-traversal protection enabled.",
       "params": [
         {
           "name": "path",
@@ -802,8 +802,8 @@
         "properties": {
           "errors": {
             "type": "array",
-            "description": "Parse error messages (up to 100). Each entry is the rendered Display of a parser error.",
-            "items": { "type": "string" }
+            "description": "Parse errors (up to 100). Each entry carries the rendered message, a stable numeric `kind_code` discriminant, and the source byte range.",
+            "items": { "$ref": "#/components/schemas/ParseErrorEntry" }
           },
           "total": {
             "type": "integer",
@@ -815,6 +815,40 @@
           }
         },
         "required": ["errors", "total", "truncated"]
+      },
+      "ParseErrorEntry": {
+        "type": "object",
+        "description": "A single parse error in the `ParseErrorData.errors` array. Detect specific error kinds via `kind_code` (a stable numeric discriminant from `rustledger_parser::ParseError::kind_code`) rather than regex-matching `message`. Known codes: 1 unexpected char, 2 unexpected EOF, 3 expected token, 4 invalid date, 5 invalid number, 6 invalid account, 7 invalid currency, 8 unclosed string, 9 invalid escape, 10 missing field, 11 indentation, 12 syntax error, 13 missing newline, 14 missing account, 15 invalid date value, 16 missing amount, 17 missing currency, 18 invalid account format, 19 missing directive, 20 invalid poptag, 21 unclosed pushtag, 22 invalid popmeta, 23 unclosed pushmeta, 24 deprecated pipe symbol, 25 invalid booking method, 26 BOM in directive body (UTF-8 BOM detected mid-file — suggest 'Remove BOM' UX).",
+        "properties": {
+          "message": {
+            "type": "string",
+            "description": "Rendered Display of the parser error."
+          },
+          "kind_code": {
+            "type": ["integer", "null"],
+            "description": "Stable numeric discriminant for the error variant. Use this for structural detection (e.g., suppress duplicate diagnostics, attach a quick-fix code action) rather than regex-matching the message. `null` indicates the entry came from a pre-2.0 server normalized via the cross-version migration recipe in the CHANGELOG (legacy `string[]` shape carried no kind_code); 2.0+ servers always emit an integer."
+          },
+          "hint": {
+            "type": ["string", "null"],
+            "description": "Optional actionable suggestion attached at the parser emission site (e.g., 'Remove the U+FEFF byte at this position' for kind_code 26). Render in your client UX as a separate 'help' / 'fix-it' line below the primary message. `null` when no hint was attached."
+          },
+          "span": {
+            "oneOf": [
+              {
+                "type": "object",
+                "description": "Byte range into the source.",
+                "properties": {
+                  "start": { "type": "integer", "description": "Inclusive start byte offset." },
+                  "end": { "type": "integer", "description": "Exclusive end byte offset." }
+                },
+                "required": ["start", "end"]
+              },
+              { "type": "null" }
+            ],
+            "description": "Byte range into the source, or `null` for entries normalized from a pre-2.0 server's `string[]` shape via the CHANGELOG migration recipe. 2.0+ servers always emit the object form."
+          }
+        },
+        "required": ["message", "kind_code", "hint", "span"]
       },
       "CreateEntryResult": {
         "type": "object",

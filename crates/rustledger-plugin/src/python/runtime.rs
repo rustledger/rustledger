@@ -292,8 +292,8 @@ with open('/work/output.json', 'w') as f:
 /// visitor, so this raises it to 16 MiB.
 ///
 /// When the `async` feature is compiled in (which it is: `wasmtime`'s
-/// `default` feature set includes `"async"`, and the workspace's
-/// `wasmtime = "45.0.0"` dep uses default features), wasmtime enforces
+/// `default` feature set includes "async", and the workspace depends on
+/// `wasmtime` with default features enabled), wasmtime enforces
 /// `max_wasm_stack <= async_stack_size` at [`Engine::new`] time, and the
 /// default `async_stack_size` of 2 MiB is smaller than our 16 MiB wasm
 /// stack. Without bumping it, engine creation fails with

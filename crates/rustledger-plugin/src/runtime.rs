@@ -78,7 +78,10 @@ pub struct RuntimeConfig {
 impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
-            max_memory: 256 * 1024 * 1024, // 256MB
+            // 256 MiB. Single source of truth lives in
+            // `sandbox::DEFAULT_PLUGIN_MAX_MEMORY` so this path and
+            // the Python plugin runtime can't drift apart silently.
+            max_memory: crate::sandbox::DEFAULT_PLUGIN_MAX_MEMORY,
             max_time_secs: 30,
         }
     }
@@ -811,7 +814,11 @@ mod tests {
     #[test]
     fn test_runtime_config_defaults() {
         let config = RuntimeConfig::default();
-        assert_eq!(config.max_memory, 256 * 1024 * 1024); // 256MB
+        // Single source of truth — both this path and Python's runtime
+        // reference `DEFAULT_PLUGIN_MAX_MEMORY`; if a future contributor
+        // changes the constant, this test reflects the new value
+        // without manual update.
+        assert_eq!(config.max_memory, crate::sandbox::DEFAULT_PLUGIN_MAX_MEMORY);
         assert_eq!(config.max_time_secs, 30);
     }
 

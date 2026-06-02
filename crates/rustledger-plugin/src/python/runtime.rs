@@ -14,16 +14,17 @@ use wasmtime::{Config, Engine, Linker, Module, Store};
 use wasmtime_wasi::p1;
 use wasmtime_wasi::{DirPerms, FilePerms, WasiCtxBuilder};
 
-/// Per-instance memory cap for the Python plugin runtime.
+/// Per-instance linear-memory cap for the Python plugin runtime.
 ///
-/// Mirrors `RuntimeConfig::default()`'s 256 MiB cap on the regular
-/// WASM plugin path (see `rustledger_plugin::runtime`). `CPython`
-/// compiled to WASI is memory-hungry on import and AST compilation,
-/// so we don't go lower; we also don't go higher, because the whole
-/// point of the cap is to convert "Python plugin can allocate up to
-/// 4 GiB per call (the wasm32 linear-memory ceiling), enough to OOM
-/// a memory-constrained host" (issue #1234) into "Python plugin can
-/// allocate up to 256 MiB then `memory.grow` returns `-1`".
+/// Aliases [`sandbox::DEFAULT_PLUGIN_MAX_MEMORY`] so this path and
+/// the regular WASM-plugin path (`runtime::RuntimeConfig::default`)
+/// share a single source of truth. `CPython` compiled to WASI is
+/// memory-hungry on import and AST compilation; the 256 MiB cap is
+/// generous enough for that workload while small enough to block
+/// allocation-spin `DoS` against memory-constrained hosts (issue
+/// #1234). Without this cap a single hostile call could allocate up
+/// to 4 GiB (the wasm32 linear-memory ceiling), enough to OOM many
+/// hosts.
 ///
 /// This value caps **linear memory only**. Tables are capped
 /// separately via [`sandbox::MAX_TABLE_ELEMENTS`] (1M ref-typed
@@ -33,9 +34,10 @@ use wasmtime_wasi::{DirPerms, FilePerms, WasiCtxBuilder};
 /// `MAX_TABLE_ELEMENTS` cap, `table.grow` would bypass the
 /// `max_memory` ceiling entirely.
 ///
+/// [`sandbox::DEFAULT_PLUGIN_MAX_MEMORY`]: crate::sandbox::DEFAULT_PLUGIN_MAX_MEMORY
 /// [`sandbox::MAX_TABLE_ELEMENTS`]: crate::sandbox::MAX_TABLE_ELEMENTS
 /// [`ResourceLimiter::table_growing`]: wasmtime::ResourceLimiter::table_growing
-const PYTHON_MAX_MEMORY: usize = 256 * 1024 * 1024;
+const PYTHON_MAX_MEMORY: usize = crate::sandbox::DEFAULT_PLUGIN_MAX_MEMORY;
 
 /// Per-call fuel budget for the Python plugin runtime.
 ///
@@ -423,20 +425,15 @@ fn engine_config() -> Config {
     config.max_wasm_stack(WASM_STACK);
     config.async_stack_size(WASM_STACK + ASYNC_STACK_HEADROOM);
 
-    // Defense-in-depth: disable the same multi-memory / 64-bit-memory
-    // proposals `sandbox_config` disables on the regular WASM-plugin
-    // path. Today this is belt-and-suspenders: the wasm module we
-    // execute here is fixed (downloaded `CPython`-WASI, pinned by
-    // `download::ensure_runtime`), so the untrusted code runs INSIDE
-    // CPython, not as raw wasm. But if a future contributor ever
-    // widens the trust boundary (e.g. accepts user-supplied wasm
-    // modules through this path), the limiter's single-memory
-    // assumption — and the u32-addressed offset math throughout —
-    // would silently break under `multi_memory` / `memory64`. Match
-    // the sandbox path's posture now so the surface stays small even
-    // before that hypothetical change.
-    config.wasm_multi_memory(false);
-    config.wasm_memory64(false);
+    // Apply the full WASM-proposal disable set the regular WASM-plugin
+    // path uses, via the shared helper in `sandbox`. Today this is
+    // defense-in-depth: the wasm module we execute here is fixed
+    // (downloaded `CPython`-WASI, pinned by `download::ensure_runtime`)
+    // so the untrusted code runs INSIDE CPython, not as raw wasm. But
+    // sharing the disable list with `sandbox_config` means a wasmtime
+    // bump that lands a new proposal default-on is caught in ONE place
+    // for both paths (per `apply_proposal_disables`'s rustdoc).
+    crate::sandbox::apply_proposal_disables(&mut config);
 
     config
 }
@@ -765,21 +762,13 @@ mod tests {
         );
     }
 
-    /// Sanity-check that `PYTHON_MAX_MEMORY` matches the regular
-    /// WASM-plugin path's `RuntimeConfig::default()` cap. Drift between
-    /// the two caps would mean a Python plugin gets a different
-    /// resource budget than an equivalent native WASM plugin for no
-    /// principled reason; this test makes future drift a conscious
-    /// edit rather than a silent one.
-    #[test]
-    fn python_max_memory_matches_plugin_config_default_cap() {
-        assert_eq!(
-            PYTHON_MAX_MEMORY,
-            crate::runtime::RuntimeConfig::default().max_memory,
-            "Python runtime cap should track the regular plugin path's default; \
-             update both together or document the divergence in PYTHON_MAX_MEMORY's rustdoc"
-        );
-    }
+    // Pre-architectural-refactor this module had a
+    // `python_max_memory_matches_plugin_config_default_cap` test that
+    // asserted `PYTHON_MAX_MEMORY == RuntimeConfig::default().max_memory`.
+    // Both expressions now reduce to
+    // `crate::sandbox::DEFAULT_PLUGIN_MAX_MEMORY` at compile time, so
+    // the drift the test was guarding against is unrepresentable. The
+    // type system enforces what the runtime assertion used to.
 
     /// Pin `PYTHON_FUEL` at its documented "~10 minutes of `CPython` at
     /// 1M instructions/second" budget. Hoisted from an inline literal

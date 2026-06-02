@@ -16,15 +16,16 @@ use wasmtime_wasi::{DirPerms, FilePerms, WasiCtxBuilder};
 
 /// Per-instance linear-memory cap for the Python plugin runtime.
 ///
-/// Aliases [`sandbox::DEFAULT_PLUGIN_MAX_MEMORY`] so this path and
-/// the regular WASM-plugin path (`runtime::RuntimeConfig::default`)
-/// share a single source of truth. `CPython` compiled to WASI is
-/// memory-hungry on import and AST compilation; the 256 MiB cap is
-/// generous enough for that workload while small enough to block
-/// allocation-spin `DoS` against memory-constrained hosts (issue
-/// #1234). Without this cap a single hostile call could allocate up
-/// to 4 GiB (the wasm32 linear-memory ceiling), enough to OOM many
-/// hosts.
+/// Aliases [`sandbox::DEFAULT_SANDBOX_MAX_MEMORY`] so this path, the
+/// regular WASM-plugin path
+/// ([`crate::runtime::RuntimeConfig::default`]), and the WASM
+/// importer host all share a single source of truth. `CPython`
+/// compiled to WASI is memory-hungry on import and AST compilation;
+/// the 256 MiB shared default is generous enough for that workload
+/// while small enough to block allocation-spin `DoS` against
+/// memory-constrained hosts (issue #1234). Without this cap a single
+/// hostile call could allocate up to 4 GiB (the wasm32 linear-memory
+/// ceiling), enough to OOM many hosts.
 ///
 /// This value caps **linear memory only**. Tables are capped
 /// separately via [`sandbox::MAX_TABLE_ELEMENTS`] (1M ref-typed
@@ -34,10 +35,10 @@ use wasmtime_wasi::{DirPerms, FilePerms, WasiCtxBuilder};
 /// `MAX_TABLE_ELEMENTS` cap, `table.grow` would bypass the
 /// `max_memory` ceiling entirely.
 ///
-/// [`sandbox::DEFAULT_PLUGIN_MAX_MEMORY`]: crate::sandbox::DEFAULT_PLUGIN_MAX_MEMORY
+/// [`sandbox::DEFAULT_SANDBOX_MAX_MEMORY`]: crate::sandbox::DEFAULT_SANDBOX_MAX_MEMORY
 /// [`sandbox::MAX_TABLE_ELEMENTS`]: crate::sandbox::MAX_TABLE_ELEMENTS
 /// [`ResourceLimiter::table_growing`]: wasmtime::ResourceLimiter::table_growing
-const PYTHON_MAX_MEMORY: usize = crate::sandbox::DEFAULT_PLUGIN_MAX_MEMORY;
+const PYTHON_MAX_MEMORY: usize = crate::sandbox::DEFAULT_SANDBOX_MAX_MEMORY;
 
 /// Per-call fuel budget for the Python plugin runtime.
 ///
@@ -46,10 +47,25 @@ const PYTHON_MAX_MEMORY: usize = crate::sandbox::DEFAULT_PLUGIN_MAX_MEMORY;
 /// that the caller in `execute_plugin` translates into a
 /// `PythonError::Execution` (the existing error path).
 ///
+/// # Why this isn't [`sandbox::DEFAULT_SANDBOX_MAX_TIME_SECS`]
+///
+/// The shared sandbox default is 30 seconds (= 30M fuel via the 1M-
+/// fuel-per-second convention used by [`sandbox::make_sandboxed_store`]).
+/// `CPython` compiled to WASI runs as an interpreter that emits many
+/// wasm instructions per Python-source operation, so the same
+/// wall-clock budget needs ~10-100x more wasmtime fuel for a Python
+/// workload than for equivalent native wasm. Reusing the shared
+/// 30-second default would leave Python plugins fuel-starved before
+/// `CPython` finished its own startup. The opt-out is principled:
+/// interpreter overhead is a structural property of
+/// `CPython`-on-wasm, not a budget choice.
+///
 /// Kept as a module-level `const` rather than a free-floating literal
 /// inside [`PythonRuntime::execute_plugin`] so the value is grep-
-/// discoverable next to [`PYTHON_MAX_MEMORY`] (both caps move together
-/// when a future contributor tightens or relaxes the sandbox).
+/// discoverable next to [`PYTHON_MAX_MEMORY`].
+///
+/// [`sandbox::DEFAULT_SANDBOX_MAX_TIME_SECS`]: crate::sandbox::DEFAULT_SANDBOX_MAX_TIME_SECS
+/// [`sandbox::make_sandboxed_store`]: crate::sandbox::make_sandboxed_store
 const PYTHON_FUEL: u64 = 600_000_000;
 
 /// Store state for the Python plugin runtime.

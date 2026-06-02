@@ -55,11 +55,55 @@ use wasmtime::{Config, Engine, ResourceLimiter, Store};
 /// wasm32 linear-memory ceiling is 4 GiB per `Store` by spec; this
 /// cap brings the per-call ceiling 16x lower.
 ///
-/// Single source of truth — exposed so the regular WASM-plugin
-/// path ([`crate::runtime::RuntimeConfig::default`]) and the Python
-/// plugin runtime (`crate::python::runtime`) reference the same
-/// value and can't drift apart silently.
-pub const DEFAULT_PLUGIN_MAX_MEMORY: usize = 256 * 1024 * 1024;
+/// Currently shared by all three sandboxed wasmtime paths in
+/// rustledger:
+///
+/// - The regular WASM plugin runtime via
+///   [`crate::runtime::RuntimeConfig::default`]
+/// - The WASM importer host via
+///   `rustledger_importer::wasm::WasmRuntimeConfig::default`
+/// - The Python plugin runtime via `crate::python::runtime`
+///
+/// The three subsystems happen to converge on the same value today
+/// because each independently judged 256 MiB to fit its workload
+/// while preserving host headroom — not because the value is
+/// structurally fixed. A subsystem whose workload legitimately needs
+/// a different cap should introduce its own per-subsystem constant
+/// rather than bend this shared default; the shared constant exists
+/// to eliminate drift between subsystems that ARE aligned, not to
+/// force alignment where it would harm correctness.
+pub const DEFAULT_SANDBOX_MAX_MEMORY: usize = 256 * 1024 * 1024;
+
+/// Default per-call CPU-time budget (in seconds) for sandboxed
+/// wasmtime calls in rustledger.
+///
+/// Combined with the "1M wasmtime fuel ~ 1 second of wasm
+/// execution" convention used by [`make_sandboxed_store`], this
+/// gives every sandboxed call ~30 million fuel before exhaustion
+/// trips a trap. Generous enough for legitimate plugins (booking
+/// transactions, classifying entries) and importers (parsing
+/// CSV/OFX statements) while small enough that a runaway call
+/// surfaces as an error within a sensible interactive window
+/// rather than hanging.
+///
+/// Shared by the WASM plugin runtime
+/// ([`crate::runtime::RuntimeConfig::default`]) and the WASM
+/// importer host
+/// (`rustledger_importer::wasm::WasmRuntimeConfig::default`).
+///
+/// # Python opts out
+///
+/// The Python plugin runtime does NOT use this constant. `CPython`
+/// compiled to WASI runs as an interpreter that emits many wasm
+/// instructions per Python-source operation, so a Python workload
+/// at "the same wall-clock budget" needs ~10-100x more wasmtime
+/// fuel than equivalent native wasm. The Python path therefore
+/// sets fuel directly via its own `PYTHON_FUEL` constant
+/// (`crate::python::runtime::PYTHON_FUEL`), independent of this
+/// seconds-based default. The opt-out is principled — interpreter
+/// overhead is a structural property of CPython-on-wasm, not an
+/// oversight.
+pub const DEFAULT_SANDBOX_MAX_TIME_SECS: u64 = 30;
 
 /// Hard cap on the number of elements in any single WASM table.
 ///

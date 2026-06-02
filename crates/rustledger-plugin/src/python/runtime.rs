@@ -26,9 +26,12 @@ use wasmtime_wasi::{DirPerms, FilePerms, WasiCtxBuilder};
 /// allocate up to 256 MiB then `memory.grow` returns `-1`".
 ///
 /// The value is the linear-memory ceiling AND the table-element
-/// ceiling: see [`MemoryLimiter::table_growing`] for why we cap them
-/// together. wasmtime accounts memory and tables separately, so a cap
-/// on just one resource leaves the other reachable.
+/// ceiling: see [`ResourceLimiter::table_growing`] (impl on
+/// `MemoryLimiter` in `rustledger_plugin::sandbox`) for why we cap
+/// them together. wasmtime accounts memory and tables separately,
+/// so a cap on just one resource leaves the other reachable.
+///
+/// [`ResourceLimiter::table_growing`]: wasmtime::ResourceLimiter::table_growing
 const PYTHON_MAX_MEMORY: usize = 256 * 1024 * 1024;
 
 /// Per-call fuel budget for the Python plugin runtime.
@@ -416,6 +419,22 @@ fn engine_config() -> Config {
     config.consume_fuel(true);
     config.max_wasm_stack(WASM_STACK);
     config.async_stack_size(WASM_STACK + ASYNC_STACK_HEADROOM);
+
+    // Defense-in-depth: disable the same multi-memory / 64-bit-memory
+    // proposals `sandbox_config` disables on the regular WASM-plugin
+    // path. Today this is belt-and-suspenders: the wasm module we
+    // execute here is fixed (downloaded `CPython`-WASI, pinned by
+    // `download::ensure_runtime`), so the untrusted code runs INSIDE
+    // CPython, not as raw wasm. But if a future contributor ever
+    // widens the trust boundary (e.g. accepts user-supplied wasm
+    // modules through this path), the limiter's single-memory
+    // assumption — and the u32-addressed offset math throughout —
+    // would silently break under `multi_memory` / `memory64`. Match
+    // the sandbox path's posture now so the surface stays small even
+    // before that hypothetical change.
+    config.wasm_multi_memory(false);
+    config.wasm_memory64(false);
+
     config
 }
 
@@ -713,9 +732,13 @@ mod tests {
         // calls `MemoryLimiter::memory_growing` with the desired byte
         // count, the limiter returns `Ok(false)`, and `memory.grow`
         // surfaces `-1` to the wasm caller.
+        // Minimal module: 1 page of memory (no export needed; the
+        // test never reads it through the host) and a function the
+        // test calls. memory.grow defaults to memory 0 when no
+        // explicit memidx is given.
         let wat = r#"
             (module
-                (memory (export "mem") 1)
+                (memory 1)
                 (func (export "try_grow_past_cap") (result i32)
                     i32.const 5000
                     memory.grow))

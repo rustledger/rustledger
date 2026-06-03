@@ -30,7 +30,18 @@ cd "$(git rev-parse --show-toplevel)"
 # 100 matches the minimum the test/CI workflow uses; well below the
 # real corpus size (~700) so partial fetches still trigger this guard.
 MIN_CORPUS_SIZE=100
-corpus_size=$(find tests/compatibility/files -name '*.beancount' 2>/dev/null | wc -l)
+
+if [ ! -d tests/compatibility/files ]; then
+  echo "error: tests/compatibility/files/ does not exist." >&2
+  echo "       Run scripts/fetch-compat-test-files.sh first." >&2
+  exit 1
+fi
+
+# Deliberately do NOT swallow find's stderr (memory rule: never use
+# 2>/dev/null). A permissions accident or stale FUSE mount under the
+# corpus directory would otherwise be miscounted as "0 files" and
+# produce a misleading error message.
+corpus_size=$(find tests/compatibility/files -name '*.beancount' | wc -l)
 
 if [ "$corpus_size" -lt "$MIN_CORPUS_SIZE" ]; then
   echo "error: compat corpus has $corpus_size .beancount files (need at least $MIN_CORPUS_SIZE)." >&2

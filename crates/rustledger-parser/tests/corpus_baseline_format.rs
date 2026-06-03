@@ -58,10 +58,7 @@ fn repo_root() -> &'static Path {
         // See corpus_baseline.rs::repo_root() for rationale.
         let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         loop {
-            if p.join("tests/compatibility/files").is_dir()
-                && std::fs::read_to_string(p.join("Cargo.toml"))
-                    .is_ok_and(|s| s.contains("[workspace]"))
-            {
+            if p.join("tests/compatibility/files").is_dir() && has_workspace_table(&p) {
                 return p;
             }
             assert!(p.pop(), "could not locate repo root");
@@ -69,15 +66,29 @@ fn repo_root() -> &'static Path {
     })
 }
 
-fn discover_corpus_files() -> Vec<PathBuf> {
-    let corpus_dir = repo_root().join(CORPUS_ROOT);
-    let mut out = Vec::new();
-    if !corpus_dir.is_dir() {
-        return out;
-    }
-    walk(&corpus_dir, &mut out);
-    out.sort();
-    out
+fn has_workspace_table(dir: &Path) -> bool {
+    let Ok(toml) = std::fs::read_to_string(dir.join("Cargo.toml")) else {
+        return false;
+    };
+    toml.lines()
+        .any(|line| line.trim_start().starts_with("[workspace]"))
+}
+
+fn discover_corpus_files() -> &'static [PathBuf] {
+    // Cached: the formatter test calls discovery from both
+    // compute_manifest and the small-corpus guard. See
+    // corpus_baseline.rs::discover_corpus_files for rationale.
+    static DISCOVERED: OnceLock<Vec<PathBuf>> = OnceLock::new();
+    DISCOVERED.get_or_init(|| {
+        let corpus_dir = repo_root().join(CORPUS_ROOT);
+        let mut out = Vec::new();
+        if !corpus_dir.is_dir() {
+            return out;
+        }
+        walk(&corpus_dir, &mut out);
+        out.sort();
+        out
+    })
 }
 
 fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -122,22 +133,31 @@ fn fingerprint(absolute_path: &Path) -> Option<FileHash> {
     match outcome {
         Ok(Some(text)) => Some(blake3::hash(text.as_bytes()).to_hex().to_string()),
         Ok(None) => None,
-        Err(payload) => {
-            let msg = payload
-                .downcast_ref::<&'static str>()
-                .copied()
-                .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
-                .unwrap_or("<non-string panic payload>");
-            Some(format!("panic:{}", blake3::hash(msg.as_bytes()).to_hex()))
-        }
+        Err(payload) => Some(format!("panic:{}", panic_payload_hash(&*payload))),
     }
+}
+
+/// See `corpus_baseline.rs::panic_payload_hash` for the rationale.
+/// Duplicated here rather than lifted to a shared module to keep
+/// each test binary self-contained.
+fn panic_payload_hash(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&'static str>() {
+        return blake3::hash(s.as_bytes()).to_hex().to_string();
+    }
+    if let Some(s) = payload.downcast_ref::<String>() {
+        return blake3::hash(s.as_bytes()).to_hex().to_string();
+    }
+    let mut h = blake3::Hasher::new();
+    h.update(b"non-string-panic:");
+    h.update(format!("{:?}", payload.type_id()).as_bytes());
+    h.finalize().to_hex().to_string()
 }
 
 fn compute_manifest() -> BTreeMap<PathBuf, FileHash> {
     let root = repo_root();
     discover_corpus_files()
-        .into_iter()
-        .filter_map(|rel| fingerprint(&root.join(&rel)).map(|h| (rel, h)))
+        .iter()
+        .filter_map(|rel| fingerprint(&root.join(rel)).map(|h| (rel.clone(), h)))
         .collect()
 }
 
@@ -217,8 +237,19 @@ fn formatter_output_matches_baseline() {
     // entries than the corpus has files (files that parse to zero
     // directives have no baseline). We only flag missing-from-manifest
     // for files that DO parse non-empty.
+    // Discover-on-disk tells us whether a missing-from-current file
+    // is genuinely gone from the corpus OR still on disk but now
+    // parses to zero directives (a parser regression we should
+    // surface as drift, not silently warn about).
+    let on_disk: std::collections::HashSet<&PathBuf> = discover_corpus_files().iter().collect();
+
     let mut hash_changes: Vec<(PathBuf, &FileHash, &FileHash)> = Vec::new();
-    let mut missing_from_corpus: Vec<&PathBuf> = Vec::new();
+    // File missing from current AND from disk: corpus shrank. Warn.
+    let mut removed_from_corpus: Vec<&PathBuf> = Vec::new();
+    // File missing from current but still on disk: previously
+    // formatted non-empty, now produces no directives. Real
+    // regression. Strict mode treats this as drift.
+    let mut became_empty: Vec<&PathBuf> = Vec::new();
     let mut missing_from_manifest: Vec<&PathBuf> = Vec::new();
     for (path, expected_hash) in &committed {
         match current.get(path) {
@@ -226,7 +257,8 @@ fn formatter_output_matches_baseline() {
                 hash_changes.push((path.clone(), expected_hash, current_hash));
             }
             Some(_) => {}
-            None => missing_from_corpus.push(path),
+            None if on_disk.contains(path) => became_empty.push(path),
+            None => removed_from_corpus.push(path),
         }
     }
     for path in current.keys() {
@@ -235,8 +267,8 @@ fn formatter_output_matches_baseline() {
         }
     }
 
-    let unprotected_in_strict = strict && !missing_from_manifest.is_empty();
-    if hash_changes.is_empty() && !unprotected_in_strict {
+    let strict_fail = strict && (!missing_from_manifest.is_empty() || !became_empty.is_empty());
+    if hash_changes.is_empty() && !strict_fail {
         if !missing_from_manifest.is_empty() {
             eprintln!(
                 "warning: {} corpus file(s) format to non-empty output \
@@ -246,11 +278,19 @@ fn formatter_output_matches_baseline() {
                 missing_from_manifest.len(),
             );
         }
-        if !missing_from_corpus.is_empty() {
+        if !became_empty.is_empty() {
+            eprintln!(
+                "warning: {} file(s) used to format non-empty and now \
+                 parse to zero directives (a parser regression). CI \
+                 fails on this under STRICT_BASELINE=1.",
+                became_empty.len(),
+            );
+        }
+        if !removed_from_corpus.is_empty() {
             eprintln!(
                 "warning: {} manifest entry/entries refer to files no \
                  longer present in the corpus.",
-                missing_from_corpus.len(),
+                removed_from_corpus.len(),
             );
         }
         return;
@@ -271,13 +311,23 @@ fn formatter_output_matches_baseline() {
             ));
         }
     }
-    if unprotected_in_strict {
+    if strict && !missing_from_manifest.is_empty() {
         report.push_str(&format!(
             "\n{} corpus file(s) format non-empty but have no manifest \
              entry (first 10):\n",
             missing_from_manifest.len(),
         ));
         for path in missing_from_manifest.iter().take(10) {
+            report.push_str(&format!("  {}\n", path.display()));
+        }
+    }
+    if strict && !became_empty.is_empty() {
+        report.push_str(&format!(
+            "\n{} file(s) used to format non-empty but now parse to \
+             zero directives (parser regression, first 10):\n",
+            became_empty.len(),
+        ));
+        for path in became_empty.iter().take(10) {
             report.push_str(&format!("  {}\n", path.display()));
         }
     }

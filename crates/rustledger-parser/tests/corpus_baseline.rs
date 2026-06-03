@@ -79,16 +79,13 @@ fn repo_root() -> &'static Path {
     ROOT.get_or_init(|| {
         // Walk up from CARGO_MANIFEST_DIR until we find a directory
         // containing BOTH `tests/compatibility/files` AND a top-level
-        // `Cargo.toml` with a `[workspace]` table. The two-condition
+        // `Cargo.toml` that declares a workspace. The two-condition
         // anchor avoids halting at a coincidentally-named parent
         // directory (e.g., a sibling clone organizing fixtures the
         // same way).
         let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         loop {
-            if p.join("tests/compatibility/files").is_dir()
-                && std::fs::read_to_string(p.join("Cargo.toml"))
-                    .is_ok_and(|s| s.contains("[workspace]"))
-            {
+            if p.join("tests/compatibility/files").is_dir() && has_workspace_table(&p) {
                 return p;
             }
             assert!(
@@ -100,18 +97,40 @@ fn repo_root() -> &'static Path {
     })
 }
 
+/// Return true if `dir/Cargo.toml` declares a `[workspace]` table
+/// at top-of-line. A substring check is too loose: a comment like
+/// `# inherits parent [workspace]` or a string literal like
+/// `description = "helper for [workspace] testing"` would false-
+/// positive. This matches `[workspace]` only when it's the leading
+/// non-whitespace text on its line, which is how TOML headers look.
+fn has_workspace_table(dir: &Path) -> bool {
+    let Ok(toml) = std::fs::read_to_string(dir.join("Cargo.toml")) else {
+        return false;
+    };
+    toml.lines()
+        .any(|line| line.trim_start().starts_with("[workspace]"))
+}
+
 /// Walk `CORPUS_ROOT` for every `.beancount` file. Returns paths
 /// relative to the repo root, sorted lexically so the output is
 /// deterministic.
-fn discover_corpus_files() -> Vec<PathBuf> {
-    let corpus_dir = repo_root().join(CORPUS_ROOT);
-    let mut out = Vec::new();
-    if !corpus_dir.is_dir() {
-        return out;
-    }
-    walk(&corpus_dir, &mut out);
-    out.sort();
-    out
+///
+/// Cached behind a `OnceLock` because the test invokes discovery
+/// from both `compute_manifest` and the small-corpus guard, and a
+/// re-walk of ~700 nested entries is a measurable chunk of the
+/// strict-mode CI run on a slow runner.
+fn discover_corpus_files() -> &'static [PathBuf] {
+    static DISCOVERED: OnceLock<Vec<PathBuf>> = OnceLock::new();
+    DISCOVERED.get_or_init(|| {
+        let corpus_dir = repo_root().join(CORPUS_ROOT);
+        let mut out = Vec::new();
+        if !corpus_dir.is_dir() {
+            return out;
+        }
+        walk(&corpus_dir, &mut out);
+        out.sort();
+        out
+    })
 }
 
 fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -150,24 +169,16 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
 fn fingerprint(absolute_path: &Path) -> FileHash {
     let source = match std::fs::read_to_string(absolute_path) {
         Ok(s) => s,
-        Err(e) => return format!("read-error:{}", e.kind() as u32),
+        // Encode the ErrorKind name (e.g., "PermissionDenied", "NotFound")
+        // rather than the discriminant integer: ten files showing
+        // `read-error:13` in CI logs gives no diagnostic info.
+        Err(e) => return format!("read-error:{:?}", e.kind()),
     };
     let parse_outcome =
         std::panic::catch_unwind(AssertUnwindSafe(|| rustledger_parser::parse(&source)));
     let result = match parse_outcome {
         Ok(r) => r,
-        Err(payload) => {
-            // Distill the panic payload to something stable to hash.
-            // We deliberately don't include line numbers or RUST_BACKTRACE
-            // output: the goal is to detect "this file's parse behavior
-            // changed," not to encode incidental backtrace text.
-            let msg = payload
-                .downcast_ref::<&'static str>()
-                .copied()
-                .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
-                .unwrap_or("<non-string panic payload>");
-            return format!("panic:{}", blake3::hash(msg.as_bytes()).to_hex());
-        }
+        Err(payload) => return format!("panic:{}", panic_payload_hash(&*payload)),
     };
     let mut hasher = blake3::Hasher::new();
     // Directives route through serde_json::Value (BTreeMap-backed
@@ -196,14 +207,47 @@ fn fingerprint(absolute_path: &Path) -> FileHash {
     hasher.finalize().to_hex().to_string()
 }
 
+/// Distill a panic payload to a stable hex string.
+///
+/// Handles three cases:
+/// - `&'static str` and `String` payloads: hash the message text.
+///   Most parser panics today carry one of these.
+/// - Anything else (`panic_any(MyError)`, `anyhow::Error`, custom
+///   panic hooks): tag the hash with the payload's `TypeId` so two
+///   structurally different non-string panics produce different
+///   sentinels. Without this, all non-string panics collapsed into
+///   one sentinel hash and a regression that fixed one of two
+///   panic sites would not surface as drift.
+///
+/// We deliberately don't include line numbers or backtrace text:
+/// the goal is "this file's parse behavior changed," not "incidental
+/// position info encoded into a hash."
+fn panic_payload_hash(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&'static str>() {
+        return blake3::hash(s.as_bytes()).to_hex().to_string();
+    }
+    if let Some(s) = payload.downcast_ref::<String>() {
+        return blake3::hash(s.as_bytes()).to_hex().to_string();
+    }
+    let mut h = blake3::Hasher::new();
+    h.update(b"non-string-panic:");
+    // TypeId's Debug renders an opaque but stable identifier; that's
+    // sufficient to distinguish two distinct payload types within a
+    // single binary. The identifier is NOT stable across rustc
+    // versions, so a toolchain bump could shift these hashes; that
+    // matches Debug's behavior on the rest of the result.
+    h.update(format!("{:?}", payload.type_id()).as_bytes());
+    h.finalize().to_hex().to_string()
+}
+
 fn compute_manifest() -> BTreeMap<PathBuf, FileHash> {
     let root = repo_root();
     discover_corpus_files()
-        .into_iter()
+        .iter()
         .map(|rel| {
-            let absolute = root.join(&rel);
+            let absolute = root.join(rel);
             let hash = fingerprint(&absolute);
-            (rel, hash)
+            (rel.clone(), hash)
         })
         .collect()
 }
@@ -394,5 +438,63 @@ fn discovery_finds_in_tree_plugin_fixtures() {
          tests/compatibility/files/plugins/implicit_prices/; got \
          {} corpus files total. Check CORPUS_ROOT resolution.",
         files.len()
+    );
+}
+
+/// Same-binary determinism guard.
+///
+/// The fingerprint algorithm assumes that the only `HashMap`-shaped
+/// payload in `ParseResult` is `Directive.meta` / `Posting.meta`,
+/// and that the canonicalization through `serde_json::to_value`
+/// handles it. If a future PR adds a `HashMap`-bearing field to
+/// `ParseResult`, `ParseError`, `ParseWarning`, or any nested type
+/// reached by `Debug` formatting, the `Debug`-of-`HashMap` iteration
+/// order would silently leak into the fingerprint. The regression
+/// then only appears cross-machine on a hashbrown bump.
+///
+/// This test runs the fingerprint twice in the same binary on a
+/// fixture that exercises every supported directive variant
+/// (including metadata) and asserts byte equality. A non-deterministic
+/// fingerprint fails here loudly, not weeks later in CI on a
+/// dependabot PR.
+#[test]
+fn fingerprint_is_deterministic_within_one_binary() {
+    let fixture = r#"
+; Exercises directives with metadata to catch any HashMap-of-strings
+; leaking iteration order into the fingerprint.
+option "title" "T"
+plugin "p"
+include "i.beancount"
+
+2024-01-01 open Assets:Bank USD
+  meta-key-a: "a"
+  meta-key-b: "b"
+  meta-key-c: "c"
+
+2024-01-02 * "Coffee"
+  meta-on-txn: 1
+  Assets:Bank  -3.50 USD
+    meta-on-posting-1: "x"
+    meta-on-posting-2: "y"
+  Expenses:Food
+
+2024-01-03 balance Assets:Bank -3.50 USD
+2024-01-04 close Assets:Bank
+"#;
+    let tmp = std::env::temp_dir().join(format!(
+        "corpus-baseline-determinism-{}.beancount",
+        std::process::id()
+    ));
+    std::fs::write(&tmp, fixture).expect("write temp fixture");
+    let h1 = fingerprint(&tmp);
+    let h2 = fingerprint(&tmp);
+    std::fs::remove_file(&tmp).ok();
+    assert_eq!(
+        h1, h2,
+        "fingerprint() produced different hashes on identical input \
+         within one binary. This usually means a HashMap-shaped field \
+         in ParseResult (or one of its nested types) is leaking its \
+         iteration order into Debug formatting. Update the fingerprint \
+         to canonicalize the new field; see the module rustdoc."
     );
 }

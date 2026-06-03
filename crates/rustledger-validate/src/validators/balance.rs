@@ -13,6 +13,40 @@ use rustledger_core::Inventory;
 /// Balance assertions use 2x the `tolerance_multiplier` option.
 const BALANCE_TOLERANCE_MULTIPLIER: Decimal = Decimal::TWO;
 
+/// Compute the tolerance to apply when comparing a balance assertion's
+/// expected amount against the booked actual.
+///
+/// - `expected`: the asserted amount from the balance directive.
+/// - `explicit`: the `~ tolerance` from the directive, if any (always
+///   wins).
+/// - `tolerance_multiplier`: the active `inferred_tolerance_multiplier`
+///   option (default 0.5; overridable via `option
+///   "inferred_tolerance_multiplier" "..."`).
+///
+/// Mirrors the inline logic in [`validate_balance_late`] so out-of-pipeline
+/// consumers (currently the LSP code-lens path) produce the same verdict
+/// as the validator without re-deriving the rule from the Beancount spec.
+///
+/// Matches Python beancount:
+/// <https://github.com/beancount/beancount/blob/master/beancount/ops/balance.py>
+#[must_use]
+pub fn balance_tolerance(
+    expected: Decimal,
+    explicit: Option<Decimal>,
+    tolerance_multiplier: Decimal,
+) -> Decimal {
+    if let Some(t) = explicit {
+        return t;
+    }
+    let scale = expected.scale();
+    if scale > 0 {
+        let quantum = DECIMAL_TEN.powi(-i64::from(scale));
+        tolerance_multiplier * BALANCE_TOLERANCE_MULTIPLIER * quantum
+    } else {
+        Decimal::ZERO
+    }
+}
+
 /// Sum the units of a given currency across an account and all its sub-accounts.
 ///
 /// In beancount, `balance Assets:Bank` includes `Assets:Bank:Checking`,
@@ -221,28 +255,10 @@ pub fn validate_balance_late(
     let expected = bal.amount.number;
     let difference = (actual - expected).abs();
 
-    // Determine tolerance. Use explicit tolerance if specified, otherwise derive
-    // from the balance assertion amount's decimal precision (Python beancount behavior).
-    // See: https://github.com/beancount/beancount/blob/master/beancount/ops/balance.py
-    let (tolerance, is_explicit) = if let Some(t) = bal.tolerance {
-        (t, true)
-    } else {
-        // Python beancount derives tolerance from the balance amount's decimal places:
-        //   expo = balance_entry.amount.number.as_tuple().exponent
-        //   tolerance = tolerance_multiplier * 2 * 10^expo
-        // In rust_decimal, scale() gives number of decimal places (positive), so we negate it.
-        let scale = expected.scale();
-        if scale > 0 {
-            let quantum = DECIMAL_TEN.powi(-i64::from(scale));
-            (
-                state.options.tolerance_multiplier * BALANCE_TOLERANCE_MULTIPLIER * quantum,
-                false,
-            )
-        } else {
-            // Integer amount: exact match required
-            (Decimal::ZERO, false)
-        }
-    };
+    // Determine tolerance via the shared helper so out-of-pipeline
+    // consumers (LSP code lens) and the validator stay in lockstep.
+    let is_explicit = bal.tolerance.is_some();
+    let tolerance = balance_tolerance(expected, bal.tolerance, state.options.tolerance_multiplier);
 
     if difference > tolerance {
         // Use E2002 for explicit tolerance, E2001 for inferred

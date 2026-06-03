@@ -48,7 +48,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use rustledger_lsp::handlers::utils::PositionEncoding;
-use rustledger_lsp::main_loop::run_main_loop;
+use rustledger_lsp::main_loop::run_main_loop_with_exit_action;
 
 /// Default timeout for any blocking receive in the harness.
 ///
@@ -142,7 +142,16 @@ impl LspTestClient {
                 return;
             }
 
-            run_main_loop(server.receiver, server.sender, None, PositionEncoding::Utf8);
+            // No-op exit action: the `exit` notification will not
+            // terminate the test process. After the action returns,
+            // the main loop keeps running until the connection drops.
+            run_main_loop_with_exit_action(
+                server.receiver,
+                server.sender,
+                None,
+                PositionEncoding::Utf8,
+                |_code| {},
+            );
         });
 
         Self {
@@ -411,19 +420,39 @@ impl Drop for LspTestClient {
         if let Some(handle) = self.server_thread.take()
             && let Err(panic_payload) = handle.join()
         {
-            // A panic inside `run_main_loop` would otherwise be
-            // silently swallowed, turning a server crash into a
-            // passing test. Re-panic so the test failure points at
-            // the real bug. (Only re-raise if we aren't already
-            // unwinding — panic-during-drop aborts the process.)
+            // A panic inside `run_main_loop` is a real bug. Two
+            // cases, picked apart by `std::thread::panicking()`:
+            //
+            // 1. Test thread NOT panicking: `resume_unwind` to
+            //    propagate the server panic as the test failure.
+            //    This is the case the eager-resolve harness was
+            //    built to surface.
+            //
+            // 2. Test thread already panicking: `resume_unwind`
+            //    inside Drop on an unwinding stack would abort the
+            //    process via double-panic, taking down the rest of
+            //    the test binary. We don't want to silence the
+            //    server bug either, so write it to stderr with a
+            //    loud, scrubbable prefix and a tagged payload. CI
+            //    log scrapers should grep for `harness-fatal:` to
+            //    surface these alongside the primary failure.
             if !std::thread::panicking() {
                 std::panic::resume_unwind(panic_payload);
-            } else {
-                eprintln!(
-                    "[harness] server thread panicked during cleanup of an \
-                     already-panicking test; payload: {panic_payload:?}"
-                );
             }
+            let payload_str = panic_payload
+                .downcast_ref::<&'static str>()
+                .copied()
+                .or_else(|| panic_payload.downcast_ref::<String>().map(String::as_str))
+                .unwrap_or("<non-string panic payload>");
+            eprintln!(
+                "\n=== harness-fatal: server thread panicked during \
+                 cleanup of an already-panicking test ===\n\
+                 payload: {payload_str}\n\
+                 (Not re-raised because we are mid-unwind; double-panic \
+                 would abort the test binary and lose remaining \
+                 tests. Grep CI logs for `harness-fatal:` to surface \
+                 alongside the primary test failure.)\n"
+            );
         }
     }
 }

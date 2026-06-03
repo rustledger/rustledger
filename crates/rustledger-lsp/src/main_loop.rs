@@ -189,6 +189,16 @@ pub struct MainLoopState {
     pub task_receiver: Receiver<TaskResult>,
     /// Channel for submitting jobs to the background worker thread.
     pub job_sender: Sender<BackgroundJob>,
+    /// Action invoked when the `exit` notification arrives. Production
+    /// wires this to [`std::process::exit`]; tests pass a no-op so the
+    /// notification breaks the loop cleanly without terminating the
+    /// cargo-test process. `FnOnce` because `exit` is the terminal
+    /// notification of an LSP session.
+    ///
+    /// Defaults to `process::exit` so existing constructions continue
+    /// to behave identically; override via [`Self::with_exit_action`]
+    /// or [`run_main_loop_with_exit_action`].
+    exit_action: Option<Box<dyn FnOnce(i32) + Send>>,
 }
 
 /// Default empty parse result for missing documents.
@@ -240,7 +250,21 @@ impl MainLoopState {
             task_sender,
             task_receiver,
             job_sender,
+            exit_action: Some(Box::new(|code| std::process::exit(code))),
         }
+    }
+
+    /// Replace the exit action. Returns `self` for chaining. The
+    /// default action is [`std::process::exit`]; tests pass a no-op
+    /// (or a flag-set closure) to avoid terminating the test process
+    /// when the `exit` notification arrives.
+    #[must_use]
+    pub fn with_exit_action<F>(mut self, action: F) -> Self
+    where
+        F: FnOnce(i32) + Send + 'static,
+    {
+        self.exit_action = Some(Box::new(action));
+        self
     }
 
     /// Reload the journal file (e.g., after a file change).
@@ -1263,7 +1287,15 @@ impl MainLoopState {
             }
             "exit" => {
                 tracing::info!("Exit notification received");
-                std::process::exit(if self.shutdown_requested { 0 } else { 1 });
+                let code = if self.shutdown_requested { 0 } else { 1 };
+                // Pull the configured exit action; production wires
+                // this to `process::exit` (terminates immediately),
+                // tests pass a no-op. If the action returns (test
+                // path), the main loop continues running until the
+                // channel closes — which is what the harness wants.
+                if let Some(action) = self.exit_action.take() {
+                    action(code);
+                }
             }
             _ => {
                 tracing::debug!("Unhandled notification: {}", notif.method);
@@ -1586,7 +1618,30 @@ pub fn run_main_loop(
     journal_file: Option<PathBuf>,
     position_encoding: crate::handlers::utils::PositionEncoding,
 ) {
-    let mut state = MainLoopState::new(sender, journal_file);
+    run_main_loop_with_exit_action(receiver, sender, journal_file, position_encoding, |code| {
+        std::process::exit(code)
+    });
+}
+
+/// Same as [`run_main_loop`] but with a caller-supplied `exit_action`
+/// invoked when the `exit` notification arrives.
+///
+/// Production calls [`run_main_loop`] which wires the action to
+/// [`std::process::exit`]. The in-process integration test harness
+/// calls this entry point with a no-op so receipt of `exit` does NOT
+/// terminate the cargo-test process. After the no-op returns, the
+/// main loop continues until the channel closes (which the harness
+/// triggers by dropping its `Connection`).
+pub fn run_main_loop_with_exit_action<F>(
+    receiver: Receiver<lsp_server::Message>,
+    sender: Sender<lsp_server::Message>,
+    journal_file: Option<PathBuf>,
+    position_encoding: crate::handlers::utils::PositionEncoding,
+    exit_action: F,
+) where
+    F: FnOnce(i32) + Send + 'static,
+{
+    let mut state = MainLoopState::new(sender, journal_file).with_exit_action(exit_action);
     state.position_encoding = position_encoding;
     let task_receiver = state.task_receiver.clone();
 

@@ -12,7 +12,7 @@ mod harness;
 #[path = "lsp_protocol/quirks.rs"]
 mod quirks;
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use harness::{LspTestClient, test_uri};
 use lsp_types::request::{CodeLensRequest, SemanticTokensFullRequest};
@@ -82,35 +82,12 @@ fn issue_1253_balance_lens_ships_eagerly_resolved_with_cancel_belt_and_braces() 
          2012-02-02 balance Assets:Bank  1000 USD\n",
     );
 
-    // `on_did_open` calls `publish_diagnostics` synchronously, so any
-    // diagnostic for the file is already in the channel by now. Drain
-    // it BEFORE sending the codeLens request: `expect_response_timeout`
-    // would silently consume it, and we want to assert on it later.
-    // For a passing balance there should be zero non-empty
-    // publishDiagnostics; capture any to surface in the assert below.
-    let mut saw_diagnostic = false;
-    while let Some(msg) = client.recv_with_timeout(Duration::from_millis(200)) {
-        if let lsp_server::Message::Notification(n) = msg
-            && n.method == "textDocument/publishDiagnostics"
-        {
-            let params: lsp_types::PublishDiagnosticsParams =
-                serde_json::from_value(n.params).unwrap();
-            if !params.diagnostics.is_empty() {
-                saw_diagnostic = true;
-                eprintln!("unexpected didOpen diagnostic: {:?}", params.diagnostics);
-            }
-        }
-    }
-    assert!(
-        !saw_diagnostic,
-        "valid balance assertion must not produce a diagnostic at \
-         didOpen time; the user reported #1253's lens looking like an \
-         error, but the underlying validator must not flag it"
-    );
-
-    // Issue the codeLens request. We capture its id so we can fire
-    // a cancel "race" (see test rustdoc — this is structurally a
-    // no-op given sync dispatch, but kept as belt-and-braces).
+    // Issue the codeLens request and immediately fire the nvim
+    // cancellation quirk. The codeLens path is synchronously
+    // dispatched (see test rustdoc), so the cancel won't actually
+    // race the response in-harness — but we still send it as
+    // belt-and-braces in case a future refactor moves codeLens into
+    // async dispatch.
     let id = client.next_request_id();
     let req = lsp_server::Request {
         id: id.clone(),
@@ -127,10 +104,48 @@ fn issue_1253_balance_lens_ships_eagerly_resolved_with_cancel_belt_and_braces() 
     client.raw_send_request(req).expect("send codeLens request");
     quirks::nvim_cancel_race(&client, &id);
 
-    // Wait for the response. Use a slightly-longer timeout because
-    // this test starts a fresh server (cold cache) and books the
-    // ledger.
-    let resp = client.expect_response_timeout(&id, Duration::from_secs(10));
+    // Drain messages manually until the codeLens response arrives,
+    // capturing every publishDiagnostics along the way. This avoids
+    // the fixed-timeout drain pattern that has a timing window: on
+    // slow CI, a didOpen diagnostic could be in-flight when a
+    // pre-codeLens drain times out, then be silently consumed by
+    // `expect_response_timeout` and missed by a post-response drain.
+    // The manual loop captures everything between request and
+    // response, which is exactly the window the server has to
+    // publish diagnostics for the document we just opened.
+    let mut diagnostic_payloads: Vec<lsp_types::PublishDiagnosticsParams> = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let resp = loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let msg = client
+            .recv_with_timeout(remaining)
+            .expect("timed out waiting for codeLens response");
+        match msg {
+            lsp_server::Message::Response(r) if r.id == id => break r,
+            lsp_server::Message::Notification(n)
+                if n.method == "textDocument/publishDiagnostics" =>
+            {
+                let p: lsp_types::PublishDiagnosticsParams =
+                    serde_json::from_value(n.params).unwrap();
+                diagnostic_payloads.push(p);
+            }
+            // Other notifications and unrelated responses are
+            // discarded (no test currently asserts on them).
+            _ => {}
+        }
+    };
+
+    let bad: Vec<_> = diagnostic_payloads
+        .iter()
+        .filter(|p| !p.diagnostics.is_empty())
+        .collect();
+    assert!(
+        bad.is_empty(),
+        "valid balance assertion must not produce any diagnostic; \
+         the user reported #1253's lens looking like an error, but \
+         the underlying validator must not flag it. captured payloads: \
+         {bad:?}"
+    );
 
     let result = resp
         .result

@@ -9,6 +9,23 @@ balance-lens regressions caused by client/server protocol-interaction
 bugs that handler-level tests structurally could not catch). The
 layered testing approach below closes that gap.
 
+## Validator vs lens divergence (single-file mode)
+
+The balance code lens computes ✓ / ⚠ by booking the current file
+locally. It deliberately does NOT run synthesizer plugins
+(`auto_accounts`, `document_discovery`, user plugins) on every
+codeLens request: running them per keystroke would dominate lens
+latency. Consequence: in **single-file mode**, the lens can disagree
+with `rledger check` on ledgers that rely on plugin-synthesized
+directives.
+
+In **multi-file mode** the lens uses the snapshot the LSP loaded via
+`LedgerState::load`, which DID run the full pipeline. Multi-file lens
+verdicts match the validator exactly (modulo bugs in either path).
+
+When the lens diverges from the diagnostic, the diagnostic is the
+source of truth. The lens is a fast local approximation.
+
 ## Supported clients
 
 A client is "tier-1 supported" if there is at least one automated test

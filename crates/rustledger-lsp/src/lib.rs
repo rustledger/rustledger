@@ -85,7 +85,7 @@ mod snapshot;
 mod vfs;
 
 pub use ledger_state::{LedgerState, LspConfig, SharedLedgerState, new_shared_ledger_state};
-pub use main_loop::run_main_loop;
+pub use main_loop::{run_main_loop, run_main_loop_with_exit_action};
 pub use server::{Server, start_stdio};
 pub use snapshot::Snapshot;
 pub use vfs::Vfs;

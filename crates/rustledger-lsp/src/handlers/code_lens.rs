@@ -30,26 +30,14 @@
 //! any future lens kind that genuinely needs deferred resolution.
 
 use lsp_types::{CodeLens, CodeLensParams, Command, Position, Range};
-use rust_decimal::MathematicalOps;
 use rustledger_booking::BookingEngine;
 use rustledger_core::{BookingMethod, Decimal, Directive, NaiveDate};
+use rustledger_loader::Options as LoaderOptions;
 use rustledger_parser::{ParseResult, Spanned};
+use rustledger_validate::balance_tolerance;
 use std::collections::HashMap;
-use std::str::FromStr;
 
 use super::utils::{LineIndex, PositionEncoding};
-
-/// Balance assertions use 2x the `tolerance_multiplier` option.
-/// Mirrors `BALANCE_TOLERANCE_MULTIPLIER` in
-/// `rustledger-validate/src/validators/balance.rs`; the constant is
-/// duplicated here rather than re-exported to avoid widening the
-/// validator crate's public API.
-const BALANCE_TOLERANCE_MULTIPLIER: Decimal = Decimal::TWO;
-
-/// Default value of `options.tolerance_multiplier`, matching
-/// `ValidationOptions::default()` (`Decimal::new(5, 1)` = 0.5).
-const DEFAULT_TOLERANCE_MULTIPLIER_NUM: i64 = 5;
-const DEFAULT_TOLERANCE_MULTIPLIER_SCALE: u32 = 1;
 
 /// Handle a code lens request.
 ///
@@ -91,16 +79,46 @@ pub fn handle_code_lens(
         .directives
         .iter()
         .any(|s| matches!(s.value, Directive::Balance(_)));
-    let booking_method = resolve_booking_method_from_options(parse_result);
-    let booked_directives = if has_balance {
-        book_directives_once(
-            ledger_directives.unwrap_or(&parse_result.directives),
-            booking_method,
-        )
-    } else {
+
+    // Build an `Options` from the file's raw `option` directives so
+    // we read `booking_method`, `tolerance_multiplier`, and
+    // `inferred_tolerance_multiplier` via the same parser the loader
+    // uses. Without this the lens hard-codes the workspace defaults
+    // and disagrees with the validator on any file that overrides
+    // them. We don't run the full loader pipeline here (no plugins,
+    // no validation), only its option-string-to-typed-field parse.
+    let loader_options = build_loader_options(parse_result);
+    let booking_method = loader_options
+        .booking_method
+        .parse()
+        .unwrap_or(BookingMethod::Strict);
+    let tolerance_multiplier = loader_options.inferred_tolerance_multiplier;
+
+    // In multi-file mode (`ledger_directives` is Some), the snapshot
+    // already went through the loader's full pipeline (synth-plugins,
+    // booking, regular plugins) — see `LedgerState::load`. Re-booking
+    // it would be wasted work at best, and could disagree with the
+    // loader on edge cases (a different default booking method, a
+    // plugin that ran after booking). Use the snapshot as-is.
+    //
+    // In single-file mode the lens approximates: parse → sort → book
+    // with the file's `option "booking_method"`. We deliberately do
+    // NOT run synth-plugins (auto_accounts, document_discovery,
+    // user plugins) here because they require a `SourceMap` +
+    // `LoadOptions` we don't have, AND because running them on every
+    // keystroke would dominate codeLens latency. Consequence: in
+    // single-file mode the lens can disagree with `rledger check`
+    // on ledgers that rely on plugin-synthesized directives. The
+    // validator remains the source of truth; the lens is a fast
+    // local approximation. This limitation is documented in
+    // `docs/development/lsp-support.md`.
+    let booked_directives: Vec<Spanned<Directive>> = if !has_balance {
         Vec::new()
+    } else if let Some(snapshot) = ledger_directives {
+        snapshot.to_vec()
+    } else {
+        book_directives_once(&parse_result.directives, booking_method)
     };
-    let tolerance_multiplier = default_tolerance_multiplier();
 
     for spanned in &parse_result.directives {
         let (line, _) = line_index.offset_to_position(spanned.span.start);
@@ -324,64 +342,25 @@ fn book_directives_once(
     directives
 }
 
-/// Compute the tolerance for a balance assertion, mirroring the
-/// validator at `rustledger-validate/src/validators/balance.rs`:
-/// - explicit `~ tolerance` on the directive always wins
-/// - otherwise: `tolerance_multiplier * 2 * 10^(-scale)` for decimal
-///   amounts, exact match for integers
+/// Build a [`LoaderOptions`] from the file's raw `option` directives.
 ///
-/// Lenses don't have access to the booked `ValidationState` (where
-/// `options.tolerance_multiplier` lives in the full pipeline), so
-/// `tolerance_multiplier` is passed in from
-/// [`default_tolerance_multiplier`] today and could be threaded from
-/// `option "inferred_tolerance_multiplier"` in a follow-up. Files
-/// that override the multiplier are rare; the default is what the
-/// vast majority of users hit.
-fn balance_tolerance(
-    expected: Decimal,
-    explicit: Option<Decimal>,
-    tolerance_multiplier: Decimal,
-) -> Decimal {
-    if let Some(t) = explicit {
-        return t;
+/// The parser exposes `option` entries as raw `(key, value, span)`
+/// tuples; [`LoaderOptions::set`] maps them onto the typed Options
+/// struct (validating types, expanding the deprecated
+/// `inferred_tolerance_multiplier` -> `tolerance_multiplier` alias,
+/// etc.). The LSP uses this so the lens's tolerance and booking-method
+/// reads come from exactly the same parser the loader pipeline runs,
+/// rather than a reimplementation that can drift.
+///
+/// Warnings are discarded: a malformed `option` value already produces
+/// a diagnostic via the regular validation pass; we don't want to
+/// double-report it on the codeLens response.
+fn build_loader_options(parse_result: &ParseResult) -> LoaderOptions {
+    let mut options = LoaderOptions::new();
+    for (key, value, _span) in &parse_result.options {
+        options.set(key, value);
     }
-    let scale = expected.scale();
-    if scale > 0 {
-        let quantum = Decimal::TEN.powi(-i64::from(scale));
-        tolerance_multiplier * BALANCE_TOLERANCE_MULTIPLIER * quantum
-    } else {
-        Decimal::ZERO
-    }
-}
-
-/// Returns the validator's default `tolerance_multiplier`
-/// (`Decimal::new(5, 1)` = 0.5; see
-/// `rustledger-validate::ValidationOptions::default`).
-#[inline]
-fn default_tolerance_multiplier() -> Decimal {
-    Decimal::new(
-        DEFAULT_TOLERANCE_MULTIPLIER_NUM,
-        DEFAULT_TOLERANCE_MULTIPLIER_SCALE,
-    )
-}
-
-/// Resolve the workspace default booking method from
-/// `parse_result.options` (the parser exposes raw `(key, value, span)`
-/// tuples; we just scan for `"booking_method"`). Mirrors the loader's
-/// `resolve_effective_booking_method`: file-level `option
-/// "booking_method"` wins, otherwise default to Strict. Unknown
-/// strings fall back to Strict rather than failing the lens.
-fn resolve_booking_method_from_options(parse_result: &ParseResult) -> BookingMethod {
-    parse_result
-        .options
-        .iter()
-        .rev()
-        .find_map(|(k, v, _)| {
-            (k == "booking_method")
-                .then(|| BookingMethod::from_str(v).ok())
-                .flatten()
-        })
-        .unwrap_or(BookingMethod::Strict)
+    options
 }
 
 /// Sum postings to `account` from `booked` whose transaction date is
@@ -407,8 +386,19 @@ fn balance_at_date_from_booked(
                 continue;
             }
             for posting in &txn.postings {
-                if posting.account.as_ref() == account
-                    && let Some(units) = &posting.units
+                // Beancount semantic: `balance Assets:Bank` includes
+                // postings to `Assets:Bank` AND any sub-account
+                // (`Assets:Bank:Checking`, `Assets:Bank:Savings`, ...).
+                // The validator at
+                // `rustledger-validate::validators::balance::sum_account_and_subaccounts`
+                // does the same prefix-match; the lens used to do
+                // exact-account-match, which silently diverged from the
+                // validator on every ledger with sub-accounts.
+                let posting_account = posting.account.as_ref();
+                if !is_account_or_subaccount(posting_account, account) {
+                    continue;
+                }
+                if let Some(units) = &posting.units
                     && let Some(number) = units.number()
                 {
                     let currency = units.currency().unwrap_or("???").to_string();
@@ -418,6 +408,17 @@ fn balance_at_date_from_booked(
         }
     }
     balances
+}
+
+/// Returns true if `child` is `parent` itself or a sub-account of it
+/// (i.e., starts with `parent:`). Mirrors the validator's
+/// `sum_account_and_subaccounts` prefix check.
+fn is_account_or_subaccount(child: &str, parent: &str) -> bool {
+    if child == parent {
+        return true;
+    }
+    let parent_len = parent.len();
+    child.len() > parent_len && child.as_bytes()[parent_len] == b':' && child.starts_with(parent)
 }
 
 /// Statistics for an account.
@@ -635,6 +636,75 @@ mod tests {
             "actual 99.999 USD is within the default ±0.01 tolerance \
              of asserted 100.00 USD; lens must show ✓ to match the \
              validator. got {:?}",
+            cmd.title
+        );
+    }
+
+    /// Beancount semantic: `balance Assets:Bank` includes postings
+    /// to sub-accounts (`Assets:Bank:Checking`, etc.). The validator
+    /// at `sum_account_and_subaccounts` does this prefix match;
+    /// pre-fix the lens did exact-account-match only, silently
+    /// diverging on every ledger with sub-accounts.
+    #[test]
+    fn balance_lens_includes_subaccount_postings() {
+        let source = r#"2024-01-01 open Assets:Bank:Checking USD
+2024-01-01 open Income:Misc
+2024-01-15 * "Salary"
+  Assets:Bank:Checking  1000 USD
+  Income:Misc
+2024-01-31 balance Assets:Bank 1000 USD
+"#;
+        let result = parse(source);
+        let params = code_lens_params();
+
+        let balance_lens = find_balance_lens(
+            handle_code_lens(&params, source, &result, None, PositionEncoding::Utf16)
+                .expect("lenses emitted"),
+        );
+        let cmd = balance_lens
+            .command
+            .as_ref()
+            .expect("balance lens ships fully-resolved");
+        assert!(
+            cmd.title.contains('✓'),
+            "asserted Assets:Bank must sum sub-account postings to \
+             Assets:Bank:Checking, matching the validator. got {:?}",
+            cmd.title
+        );
+    }
+
+    /// Companion to [`balance_lens_includes_subaccount_postings`]:
+    /// a non-prefix account that happens to start with the parent's
+    /// name must NOT be summed. `Assets:Bank` does not include
+    /// `Assets:BankAlias`; the segment boundary requires a `:`.
+    #[test]
+    fn balance_lens_does_not_match_non_subaccount_prefix() {
+        let source = r#"2024-01-01 open Assets:Bank USD
+2024-01-01 open Assets:BankAlias USD
+2024-01-01 open Income:Misc
+2024-01-15 * "Bank deposit"
+  Assets:Bank  1000 USD
+  Income:Misc
+2024-01-16 * "Alias deposit (should not count toward Assets:Bank)"
+  Assets:BankAlias  500 USD
+  Income:Misc
+2024-01-31 balance Assets:Bank 1000 USD
+"#;
+        let result = parse(source);
+        let params = code_lens_params();
+
+        let balance_lens = find_balance_lens(
+            handle_code_lens(&params, source, &result, None, PositionEncoding::Utf16)
+                .expect("lenses emitted"),
+        );
+        let cmd = balance_lens
+            .command
+            .as_ref()
+            .expect("balance lens ships fully-resolved");
+        assert!(
+            cmd.title.contains('✓'),
+            "asserted Assets:Bank should equal only its own postings; \
+             Assets:BankAlias must NOT be summed. got {:?}",
             cmd.title
         );
     }

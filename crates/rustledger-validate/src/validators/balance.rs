@@ -1,7 +1,7 @@
 //! Balance and pad validation.
 
 use rust_decimal::{Decimal, MathematicalOps};
-use rustledger_core::{Amount, Balance, Pad, Position};
+use rustledger_core::{Amount, Balance, Pad, Position, is_subaccount_or_equal};
 
 use crate::error::{ErrorCode, ValidationError};
 use crate::{LedgerState, PendingPad};
@@ -50,8 +50,10 @@ pub fn balance_tolerance(
 /// Sum the units of a given currency across an account and all its sub-accounts.
 ///
 /// In beancount, `balance Assets:Bank` includes `Assets:Bank:Checking`,
-/// `Assets:Bank:Savings`, etc. This function checks for exact match or
-/// sub-account prefix (account followed by `:`) without allocating.
+/// `Assets:Bank:Savings`, etc. Account membership is delegated to
+/// [`is_subaccount_or_equal`] so the segment-boundary rule
+/// (`Assets:BankAlias` does NOT match `Assets:Bank`) lives in one
+/// definition shared with the LSP code-lens path.
 fn sum_account_and_subaccounts(
     inventories: &FxHashMap<rustledger_core::Account, Inventory>,
     account: &rustledger_core::Account,
@@ -60,10 +62,7 @@ fn sum_account_and_subaccounts(
     let account_str = account.as_str();
     let mut total = Decimal::ZERO;
     for (inv_account, inv) in inventories {
-        if inv_account == account
-            || (inv_account.starts_with(account_str)
-                && inv_account.as_bytes().get(account_str.len()) == Some(&b':'))
-        {
+        if is_subaccount_or_equal(inv_account.as_str(), account_str) {
             total += inv.units(currency);
         }
     }

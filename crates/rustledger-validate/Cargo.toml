@@ -19,7 +19,13 @@ bench = false
 rustledger-core.workspace = true
 rustledger-parser.workspace = true
 rustledger-booking.workspace = true
-rust_decimal.workspace = true
+# The `maths` feature provides `MathematicalOps::powi`, used by the
+# public `balance_tolerance` helper. Currently it's pulled in
+# transitively via `rustledger-core` thanks to Cargo workspace feature
+# unification, but declaring it explicitly here pins the requirement
+# to the surface that needs it — out-of-workspace consumers and
+# future dep-graph refactors won't silently break compilation.
+rust_decimal = { workspace = true, features = ["maths"] }
 bigdecimal = "0.4"
 thiserror.workspace = true
 jiff.workspace = true

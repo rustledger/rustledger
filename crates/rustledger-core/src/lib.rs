@@ -77,7 +77,7 @@ pub use format::{
     Alignment, FormatConfig, FormatLine, format_directive_lines, format_directives,
     format_posting_line, posting_format_line, render_lines, resolve_alignment,
 };
-pub use identifiers::{Account, Currency, Link, Tag};
+pub use identifiers::{Account, Currency, Link, Tag, is_subaccount_or_equal};
 pub use implicit_prices::extract_per_unit_price;
 pub use intern::{InternedStr, StringInterner};
 pub use inventory::{

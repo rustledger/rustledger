@@ -1017,7 +1017,31 @@ impl MainLoopState {
             .directives
             .iter()
             .any(|s| matches!(s.value, Directive::Balance(_)));
-        let ledger_directives = if has_balance {
+        // Snapshot the ledger ONLY when (a) the file has balance
+        // directives that need cross-file lookup AND (b) the current
+        // file is actually part of the loaded journal. Without the
+        // contains_file check, opening an unrelated scratch
+        // .beancount file while a journal is loaded would feed the
+        // scratch lens the WRONG ledger's bookkeeping, producing
+        // nonsense ⚠ markers for assertions that are valid in the
+        // file the user is editing.
+        //
+        // Known limitation (Q3 from the architecture review): when
+        // the current file IS in the journal but has unsaved
+        // changes, the snapshot reflects the on-disk state, not the
+        // buffer. didChange doesn't trigger a journal reload (full
+        // pipeline is too expensive per keystroke). Result: balance
+        // lenses on the current file can be stale relative to the
+        // user's edits until they save. The validator's overlay
+        // path (see `validate_phase` around line 1499) does compute
+        // a buffer-overlaid view; lifting that into codeLens is a
+        // follow-up. The validator is the source of truth in the
+        // meantime, and the diagnostic (which DOES use the overlay)
+        // surfaces the real verdict.
+        let in_journal = uri_to_path(uri)
+            .map(|p| self.ledger_state.read().contains_file(&p))
+            .unwrap_or(false);
+        let ledger_directives = if has_balance && in_journal {
             let guard = self.ledger_state.read();
             guard.directives().map(|d| d.to_vec())
         } else {

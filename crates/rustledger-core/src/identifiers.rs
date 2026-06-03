@@ -295,6 +295,31 @@ domain_newtype!(Currency, "currency code (e.g. `USD`, `EUR`, `AAPL`)");
 domain_newtype!(Tag, "beancount tag (e.g. `#travel`)");
 domain_newtype!(Link, "beancount link (e.g. `^invoice-2024-01`)");
 
+/// Returns `true` if `child` is the same account as `parent`, or a
+/// sub-account of it.
+///
+/// Beancount's `balance Assets:Bank` assertion (and several other
+/// account-scoped operations) includes postings to `Assets:Bank` AND
+/// `Assets:Bank:Checking`, `Assets:Bank:Savings`, etc. The match is
+/// exact OR `parent + ":"` prefix; a name that merely starts with
+/// `parent`'s string (`Assets:BankAlias`) is NOT a sub-account.
+///
+/// Both arguments are `&str` so callers can mix `Account`, `&str`,
+/// and `String` without coercion. The function does not allocate.
+///
+/// Lifted from
+/// `rustledger-validate::validators::balance::sum_account_and_subaccounts`
+/// + `rustledger-lsp::handlers::code_lens::is_account_or_subaccount`
+/// so both call sites stay aligned under one definition.
+#[must_use]
+pub fn is_subaccount_or_equal(child: &str, parent: &str) -> bool {
+    if child == parent {
+        return true;
+    }
+    let parent_len = parent.len();
+    child.len() > parent_len && child.as_bytes()[parent_len] == b':' && child.starts_with(parent)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

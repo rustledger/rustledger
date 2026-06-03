@@ -9,6 +9,28 @@ balance-lens regressions caused by client/server protocol-interaction
 bugs that handler-level tests structurally could not catch). The
 layered testing approach below closes that gap.
 
+## Known limitations
+
+Two cases where the lens verdict can differ from the validator:
+
+1. **Single-file mode skips synthesizer plugins.** Files outside the
+   journal (scratch buffers, files not yet `include`d) parse without
+   running `auto_accounts` / `document_discovery` / user plugins.
+   Ledgers that rely on plugin-synthesized directives see lens
+   verdicts that disagree with `rledger check`.
+
+2. **Multi-file mode uses the on-disk snapshot.** When the journal
+   is loaded, the lens reads the post-pipeline directives from
+   `LedgerState`. `didChange` does NOT trigger a journal reload (the
+   full pipeline is too expensive per keystroke), so balance lenses
+   on a file with unsaved edits reflect the last-saved state, not
+   the current buffer. Save the file to refresh.
+
+In both cases the diagnostic is authoritative; the lens is a fast
+local approximation. A follow-up that splices the buffer into the
+multi-file snapshot (like the diagnostic overlay does) would close
+limitation 2.
+
 ## Validator vs lens divergence (single-file mode)
 
 The balance code lens computes ✓ / ⚠ by booking the current file

@@ -31,7 +31,7 @@
 
 use lsp_types::{CodeLens, CodeLensParams, Command, Position, Range};
 use rustledger_booking::BookingEngine;
-use rustledger_core::{BookingMethod, Decimal, Directive, NaiveDate};
+use rustledger_core::{BookingMethod, Decimal, Directive, NaiveDate, is_subaccount_or_equal};
 use rustledger_loader::Options as LoaderOptions;
 use rustledger_parser::{ParseResult, Spanned};
 use rustledger_validate::balance_tolerance;
@@ -342,23 +342,43 @@ fn book_directives_once(
     directives
 }
 
-/// Build a [`LoaderOptions`] from the file's raw `option` directives.
+/// Options keys the codeLens path needs from
+/// [`LoaderOptions`]. Filtered tightly because:
+/// - `Options::set("documents", v)` calls `Path::new(v).exists()` —
+///   a filesystem syscall on every codeLens request. NFS-mounted
+///   document roots make this user-visible latency.
+/// - Other options (operating_currency, account_*, plugin_*) parse
+///   into FxHashMap inserts the lens never reads.
 ///
-/// The parser exposes `option` entries as raw `(key, value, span)`
-/// tuples; [`LoaderOptions::set`] maps them onto the typed Options
-/// struct (validating types, expanding the deprecated
-/// `inferred_tolerance_multiplier` -> `tolerance_multiplier` alias,
-/// etc.). The LSP uses this so the lens's tolerance and booking-method
-/// reads come from exactly the same parser the loader pipeline runs,
-/// rather than a reimplementation that can drift.
+/// Only `booking_method`, `tolerance_multiplier`, and the deprecated
+/// alias `inferred_tolerance_multiplier` flow into the lens verdict.
+/// Adding to this list is the deliberate gate when the lens grows a
+/// new option-dependent decision.
+const LENS_OPTION_KEYS: &[&str] = &[
+    "booking_method",
+    "tolerance_multiplier",
+    "inferred_tolerance_multiplier",
+];
+
+/// Build a [`LoaderOptions`] populated only with the keys the lens
+/// needs. The parser exposes `option` entries as raw `(key, value,
+/// span)` tuples; for each entry whose key is in [`LENS_OPTION_KEYS`]
+/// we call [`LoaderOptions::set`], which handles the deprecated
+/// alias mapping and value validation identically to the loader's
+/// own option-parse pass.
 ///
-/// Warnings are discarded: a malformed `option` value already produces
-/// a diagnostic via the regular validation pass; we don't want to
-/// double-report it on the codeLens response.
+/// The narrow filter prevents `Options::set` side effects we don't
+/// want on the hot path: `path.exists()` for `documents`, deprecation
+/// warnings into `self.warnings`, FxHashMap inserts for unrelated
+/// per-key state. A malformed lens-relevant value still produces a
+/// diagnostic via the regular validation pass; we don't double-report
+/// here.
 fn build_loader_options(parse_result: &ParseResult) -> LoaderOptions {
     let mut options = LoaderOptions::new();
     for (key, value, _span) in &parse_result.options {
-        options.set(key, value);
+        if LENS_OPTION_KEYS.contains(&key.as_str()) {
+            options.set(key, value);
+        }
     }
     options
 }
@@ -395,7 +415,7 @@ fn balance_at_date_from_booked(
                 // exact-account-match, which silently diverged from the
                 // validator on every ledger with sub-accounts.
                 let posting_account = posting.account.as_ref();
-                if !is_account_or_subaccount(posting_account, account) {
+                if !is_subaccount_or_equal(posting_account, account) {
                     continue;
                 }
                 if let Some(units) = &posting.units
@@ -408,17 +428,6 @@ fn balance_at_date_from_booked(
         }
     }
     balances
-}
-
-/// Returns true if `child` is `parent` itself or a sub-account of it
-/// (i.e., starts with `parent:`). Mirrors the validator's
-/// `sum_account_and_subaccounts` prefix check.
-fn is_account_or_subaccount(child: &str, parent: &str) -> bool {
-    if child == parent {
-        return true;
-    }
-    let parent_len = parent.len();
-    child.len() > parent_len && child.as_bytes()[parent_len] == b':' && child.starts_with(parent)
 }
 
 /// Statistics for an account.

@@ -80,6 +80,11 @@ fn repo_root() -> &'static Path {
     })
 }
 
+/// See `corpus_baseline.rs::is_in_tree_fixture` for rationale.
+fn is_in_tree_fixture(rel: &Path) -> bool {
+    rel.starts_with("tests/compatibility/files/plugins/")
+}
+
 fn has_workspace_table(dir: &Path) -> bool {
     let Ok(toml) = std::fs::read_to_string(dir.join("Cargo.toml")) else {
         return false;
@@ -302,7 +307,14 @@ fn formatter_output_matches_baseline() {
         }
     }
 
-    let strict_fail = strict && (!missing_from_manifest.is_empty() || !became_empty.is_empty());
+    // Only escalate missing-from-manifest in-tree fixtures to strict
+    // failure (see corpus_baseline.rs comment for rationale).
+    let unmanifested_in_tree: Vec<&PathBuf> = missing_from_manifest
+        .iter()
+        .filter(|p| is_in_tree_fixture(p))
+        .copied()
+        .collect();
+    let strict_fail = strict && (!unmanifested_in_tree.is_empty() || !became_empty.is_empty());
     if format_drift.is_empty() && !strict_fail {
         if !source_drift.is_empty() {
             eprintln!(
@@ -355,13 +367,13 @@ fn formatter_output_matches_baseline() {
             ));
         }
     }
-    if strict && !missing_from_manifest.is_empty() {
+    if strict && !unmanifested_in_tree.is_empty() {
         report.push_str(&format!(
-            "\n{} corpus file(s) format non-empty but have no manifest \
-             entry (first 10):\n",
-            missing_from_manifest.len(),
+            "\n{} in-tree fixture(s) format non-empty but have no \
+             manifest entry (first 10):\n",
+            unmanifested_in_tree.len(),
         ));
-        for path in missing_from_manifest.iter().take(10) {
+        for path in unmanifested_in_tree.iter().take(10) {
             report.push_str(&format!("  {}\n", path.display()));
         }
     }

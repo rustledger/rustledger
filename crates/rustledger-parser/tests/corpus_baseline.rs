@@ -129,6 +129,19 @@ fn repo_root() -> &'static Path {
 /// `description = "helper for [workspace] testing"` would false-
 /// positive. This matches `[workspace]` only when it's the leading
 /// non-whitespace text on its line, which is how TOML headers look.
+/// Returns true if `rel` is an in-tree fixture (committed under
+/// `tests/compatibility/files/plugins/` per the `.gitignore`
+/// exception), false if it came from `fetch-compat-test-files.sh`.
+///
+/// The strict-mode gate uses this to distinguish "the contributor
+/// added a fixture and forgot to regenerate" (which we DO want to
+/// catch) from "upstream pushed a new file between the regen and
+/// CI's fetch" (which we DON'T want to gate on, because the corpus
+/// race is outside the PR author's control).
+fn is_in_tree_fixture(rel: &Path) -> bool {
+    rel.starts_with("tests/compatibility/files/plugins/")
+}
+
 fn has_workspace_table(dir: &Path) -> bool {
     let Ok(toml) = std::fs::read_to_string(dir.join("Cargo.toml")) else {
         return false;
@@ -423,7 +436,18 @@ fn parser_output_matches_baseline() {
         }
     }
 
-    let unprotected_in_strict = strict && !missing_from_manifest.is_empty();
+    // Files added upstream (downloaded by fetch-compat-test-files.sh)
+    // appear and disappear with that script's race against upstream
+    // pushes; we don't gate on those. Only escalate missing-from-
+    // manifest to a strict failure for in-tree paths (under `plugins/`
+    // per the .gitignore exception), where appearance means a real
+    // contributor added a fixture and forgot to regenerate.
+    let unmanifested_in_tree: Vec<&PathBuf> = missing_from_manifest
+        .iter()
+        .filter(|p| is_in_tree_fixture(p))
+        .copied()
+        .collect();
+    let unprotected_in_strict = strict && !unmanifested_in_tree.is_empty();
     if parser_drift.is_empty() && !unprotected_in_strict {
         if !source_drift.is_empty() {
             eprintln!(
@@ -470,10 +494,10 @@ fn parser_output_matches_baseline() {
     }
     if unprotected_in_strict {
         report.push_str(&format!(
-            "\n{} corpus file(s) have no manifest entry (first 10):\n",
-            missing_from_manifest.len(),
+            "\n{} in-tree fixture(s) have no manifest entry (first 10):\n",
+            unmanifested_in_tree.len(),
         ));
-        for path in missing_from_manifest.iter().take(10) {
+        for path in unmanifested_in_tree.iter().take(10) {
             report.push_str(&format!("  {}\n", path.display()));
         }
     }

@@ -49,7 +49,7 @@ jobs:
       # per cache-key version.
       - name: Cache compatibility test files
         id: cache-compat-files
-        uses: actions/cache@v4
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: tests/compatibility/files
           key: compat-files-v3-${{ hashFiles('scripts/fetch-compat-test-files.sh') }}

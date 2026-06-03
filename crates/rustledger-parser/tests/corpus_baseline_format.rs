@@ -187,17 +187,28 @@ fn compute_manifest() -> BTreeMap<PathBuf, FileFingerprint> {
 
 fn read_committed_manifest() -> BTreeMap<PathBuf, FileFingerprint> {
     let path = repo_root().join(MANIFEST_PATH);
-    let contents = std::fs::read_to_string(&path).unwrap_or_default();
+    let contents = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        // Don't swallow non-NotFound errors; they would silently
+        // disable the gate. Same rationale as corpus_baseline.rs.
+        Err(e) => panic!("failed to read {}: {e}", path.display()),
+    };
     let mut out = BTreeMap::new();
-    for line in contents.lines() {
+    for (lineno, line) in contents.lines().enumerate() {
+        let lineno = lineno + 1;
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
         let mut parts = line.split('\t');
-        let (Some(path_str), Some(source), Some(parser)) =
-            (parts.next(), parts.next(), parts.next())
+        let (Some(path_str), Some(source), Some(parser), None) =
+            (parts.next(), parts.next(), parts.next(), parts.next())
         else {
-            continue;
+            panic!(
+                "{}:{lineno}: malformed manifest line (expected \
+                 `path<TAB>source<TAB>parser`): {line:?}",
+                path.display(),
+            );
         };
         out.insert(
             PathBuf::from(path_str),

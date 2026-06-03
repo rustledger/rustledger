@@ -309,7 +309,7 @@ domain_newtype!(Link, "beancount link (e.g. `^invoice-2024-01`)");
 ///
 /// Lifted from
 /// `rustledger-validate::validators::balance::sum_account_and_subaccounts`
-/// + `rustledger-lsp::handlers::code_lens::is_account_or_subaccount`
+/// and `rustledger-lsp::handlers::code_lens::is_account_or_subaccount`
 /// so both call sites stay aligned under one definition.
 #[must_use]
 pub fn is_subaccount_or_equal(child: &str, parent: &str) -> bool {

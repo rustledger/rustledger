@@ -23,9 +23,10 @@ const BALANCE_TOLERANCE_MULTIPLIER: Decimal = Decimal::TWO;
 ///   option (default 0.5; overridable via `option
 ///   "inferred_tolerance_multiplier" "..."`).
 ///
-/// Mirrors the inline logic in [`validate_balance_late`] so out-of-pipeline
-/// consumers (currently the LSP code-lens path) produce the same verdict
-/// as the validator without re-deriving the rule from the Beancount spec.
+/// Mirrors the inline logic in `validate_balance_late` (private) so
+/// out-of-pipeline consumers (currently the LSP code-lens path)
+/// produce the same verdict as the validator without re-deriving the
+/// rule from the Beancount spec.
 ///
 /// Matches Python beancount:
 /// <https://github.com/beancount/beancount/blob/master/beancount/ops/balance.py>

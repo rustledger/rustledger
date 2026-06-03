@@ -15,7 +15,7 @@ mod quirks;
 use std::time::{Duration, Instant};
 
 use harness::{LspTestClient, test_uri};
-use lsp_types::request::{CodeLensRequest, SemanticTokensFullRequest};
+use lsp_types::request::{CodeLensRequest, CodeLensResolve, SemanticTokensFullRequest};
 use lsp_types::{CodeLensParams, SemanticTokensParams, TextDocumentIdentifier};
 
 /// Smoke test: spawn the harness, perform initialize, send a
@@ -265,5 +265,128 @@ fn unknown_method_returns_method_not_found_error() {
          got code {} with message {:?}",
         err.code,
         err.message
+    );
+}
+
+/// `codeLens/resolve` is dispatched through `try_dispatch_async` to the
+/// background worker (`main_loop::try_dispatch_async` line 333), so a
+/// real resolve request exercises:
+///   1. `req.params` deserialization into `CodeLens`
+///   2. `dispatch_async` id propagation through the task channel
+///   3. `Event::Task` routing back to the main loop
+///   4. response delivery
+///
+/// Today every lens kind ships with `command: Some(...)` after #1253,
+/// so `handle_code_lens_resolve` only ever takes the
+/// `command.is_none()` defensive branch on the wire. This test sends
+/// a synthetic `command: None` lens and verifies the fallback
+/// produces the documented `rledger.noop` command. If a future change
+/// breaks the async dispatch wiring (wrong id propagation, lost
+/// response, panic in the worker), the smoke would be lost without
+/// a test that drives the full path.
+#[test]
+fn code_lens_resolve_round_trip_through_async_dispatch() {
+    let mut client = LspTestClient::spawn();
+    client.initialize();
+
+    // No didOpen needed: the resolve fallback doesn't read document
+    // state (signature dropped its parse_result + ledger_directives
+    // params in PR #1261). We just send a synthetic lens with
+    // command: None and assert on the round-trip.
+    let synthetic_lens = lsp_types::CodeLens {
+        range: lsp_types::Range {
+            start: lsp_types::Position::new(0, 0),
+            end: lsp_types::Position::new(0, 0),
+        },
+        command: None,
+        data: None,
+    };
+
+    let resolved: lsp_types::CodeLens = client.request::<CodeLensResolve>(synthetic_lens);
+
+    let cmd = resolved
+        .command
+        .expect("defensive fallback must populate command on a command:None lens");
+    assert_eq!(
+        cmd.command, "rledger.noop",
+        "fallback command must be rledger.noop so strict clients \
+         render something benign instead of nvim's literal \
+         'Unresolved lens'. got {:?}",
+        cmd.command
+    );
+}
+
+/// Regression for F1 from the round-3 deep review: when a journal is
+/// loaded AND the user opens a `.beancount` file that is NOT part of
+/// the journal, `handle_code_lens_request`'s `contains_file` gate
+/// must fall back to single-file mode rather than feed the lens the
+/// other ledger's bookkeeping.
+///
+/// Pre-fix the snapshot was used unconditionally, so a scratch file
+/// asserting `balance Assets:Bank 1000 USD` would render ⚠ against
+/// the journal's (unrelated) Assets:Bank balance, with no diagnostic
+/// to explain the warning.
+#[test]
+fn scratch_file_not_in_journal_uses_single_file_mode() {
+    // Write a journal whose Assets:Bank ends 2024 at 100 USD.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let journal_path = tmp.path().join("journal.beancount");
+    std::fs::write(
+        &journal_path,
+        "2024-01-01 open Assets:Bank USD\n\
+         2024-01-01 open Income:Salary\n\
+         2024-01-15 * \"Paycheck\"\n  \
+           Assets:Bank   100 USD\n  \
+           Income:Salary\n",
+    )
+    .expect("write journal");
+
+    let mut client = LspTestClient::spawn_with_journal(Some(journal_path));
+    client.initialize();
+
+    // Now open a SCRATCH file (different path, NOT in the journal)
+    // that asserts a balance the journal would fail (1000 USD). The
+    // scratch file's own postings sum to 1000 USD; in single-file
+    // mode the lens shows ✓. Pre-fix the snapshot path would have
+    // shown ⚠ because the journal's Assets:Bank ends at 100.
+    let scratch_uri = test_uri("scratch_not_in_journal.beancount");
+    client.open_document(
+        &scratch_uri,
+        "2024-01-01 open Assets:Bank USD\n\
+         2024-01-01 open Income:Other\n\
+         2024-02-01 * \"Scratch deposit\"\n  \
+           Assets:Bank   1000 USD\n  \
+           Income:Other\n\
+         2024-02-02 balance Assets:Bank 1000 USD\n",
+    );
+
+    let lenses: Option<Vec<lsp_types::CodeLens>> =
+        client.request::<CodeLensRequest>(CodeLensParams {
+            text_document: TextDocumentIdentifier {
+                uri: scratch_uri.parse().unwrap(),
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        });
+    let lenses = lenses.expect("scratch file has directives, lenses emitted");
+
+    let balance_lens = lenses
+        .iter()
+        .find(|l| {
+            l.command
+                .as_ref()
+                .is_some_and(|c| c.title.contains("Balance:"))
+        })
+        .expect("balance lens emitted on the scratch file");
+    let cmd = balance_lens
+        .command
+        .as_ref()
+        .expect("balance lens carries a command");
+    assert!(
+        cmd.title.contains('✓'),
+        "scratch file's balance is valid against ITS OWN postings; \
+         the contains_file gate must keep the journal's snapshot \
+         from leaking into the scratch lens. got {:?}",
+        cmd.title
     );
 }

@@ -291,3 +291,93 @@ pub fn validate_balance_late(
         );
     }
 }
+
+#[cfg(test)]
+mod tolerance_tests {
+    use super::*;
+    use rust_decimal_macros::dec;
+
+    /// Default `tolerance_multiplier` from `ValidationOptions::default()`
+    /// (also the loader's default via `Options::new()`).
+    fn default_mul() -> Decimal {
+        dec!(0.5)
+    }
+
+    #[test]
+    fn explicit_tolerance_always_wins() {
+        // Even an absurdly-small / absurdly-large explicit tolerance
+        // overrides the scale-derived default. This is the
+        // contract `~ tolerance` on a Balance directive provides.
+        assert_eq!(
+            balance_tolerance(dec!(100.00), Some(dec!(0.001)), default_mul()),
+            dec!(0.001)
+        );
+        assert_eq!(
+            balance_tolerance(dec!(100.00), Some(dec!(50)), default_mul()),
+            dec!(50)
+        );
+    }
+
+    #[test]
+    fn integer_amount_requires_exact_match() {
+        // scale == 0 means the asserted amount has no decimal places.
+        // Python beancount requires an exact match in that case; the
+        // helper returns ZERO to make `difference > 0` strict.
+        assert_eq!(
+            balance_tolerance(dec!(100), None, default_mul()),
+            Decimal::ZERO
+        );
+    }
+
+    #[test]
+    fn two_decimal_amount_uses_default_quantum() {
+        // For `100.00 USD` with the default multiplier 0.5:
+        //   tolerance = 0.5 * 2 * 0.01 = 0.01
+        // This is the Beancount-spec rule the LSP and the validator
+        // both depend on; if this changes, every balance assertion
+        // shifts pass/fail.
+        assert_eq!(
+            balance_tolerance(dec!(100.00), None, default_mul()),
+            dec!(0.01)
+        );
+    }
+
+    #[test]
+    fn higher_precision_scales_down() {
+        // 4 decimal places: tolerance = 0.5 * 2 * 0.0001 = 0.0001
+        assert_eq!(
+            balance_tolerance(dec!(100.0000), None, default_mul()),
+            dec!(0.0001)
+        );
+    }
+
+    #[test]
+    fn multiplier_one_doubles_default() {
+        // File overrides `option "inferred_tolerance_multiplier" "1.0"`:
+        //   tolerance = 1.0 * 2 * 0.01 = 0.02
+        assert_eq!(balance_tolerance(dec!(100.00), None, dec!(1.0)), dec!(0.02));
+    }
+
+    #[test]
+    fn multiplier_zero_forces_strict_match() {
+        // `option "inferred_tolerance_multiplier" "0.0"` is the
+        // canonical way to force strict equality on a decimal
+        // amount. The helper must yield zero so the validator emits
+        // a diagnostic on any rounding drift.
+        assert_eq!(
+            balance_tolerance(dec!(100.00), None, dec!(0.0)),
+            Decimal::ZERO
+        );
+    }
+
+    #[test]
+    fn negative_amount_uses_same_scale_logic() {
+        // Tolerance is sign-independent (the validator applies it
+        // against `(actual - expected).abs()`), but the helper does
+        // not flip sign on negative expected — scale() is unsigned.
+        assert_eq!(
+            balance_tolerance(dec!(-100.00), None, default_mul()),
+            dec!(0.01)
+        );
+    }
+}

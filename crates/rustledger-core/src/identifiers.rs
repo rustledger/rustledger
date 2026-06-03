@@ -396,4 +396,69 @@ mod tests {
         let back: Account = serde_json::from_str(&json).unwrap();
         assert_eq!(a, back);
     }
+
+    #[test]
+    fn is_subaccount_or_equal_exact_match() {
+        assert!(is_subaccount_or_equal("Assets:Bank", "Assets:Bank"));
+    }
+
+    #[test]
+    fn is_subaccount_or_equal_proper_subaccount() {
+        assert!(is_subaccount_or_equal(
+            "Assets:Bank:Checking",
+            "Assets:Bank"
+        ));
+        assert!(is_subaccount_or_equal(
+            "Assets:Bank:Checking:Joint",
+            "Assets:Bank"
+        ));
+    }
+
+    #[test]
+    fn is_subaccount_or_equal_prefix_without_segment_boundary_excluded() {
+        // The whole point of the segment-boundary rule: a name that
+        // starts with the parent's bytes but isn't followed by `:`
+        // is NOT a sub-account. This is the case the validator and
+        // the LSP both depend on; if the rule ever drifts, balance
+        // assertions for `Assets:Bank` would silently include
+        // `Assets:BankAlias` postings.
+        assert!(!is_subaccount_or_equal("Assets:BankAlias", "Assets:Bank"));
+        assert!(!is_subaccount_or_equal(
+            "Assets:BankAlias:Checking",
+            "Assets:Bank"
+        ));
+    }
+
+    #[test]
+    fn is_subaccount_or_equal_parent_is_prefix_substring_excluded() {
+        // `Assets:Ban` is not a sub-account of `Assets:Bank` —
+        // unrelated except for sharing a prefix.
+        assert!(!is_subaccount_or_equal("Assets:Ban", "Assets:Bank"));
+    }
+
+    #[test]
+    fn is_subaccount_or_equal_empty_inputs() {
+        // Both empty: trivially equal, returns true.
+        assert!(is_subaccount_or_equal("", ""));
+        // Empty parent against a non-empty child: child does not
+        // start with `:`, so excluded. (Beancount account names
+        // never start with `:`; this is a defensive-by-construction
+        // case for callers that pass garbage.)
+        assert!(!is_subaccount_or_equal("Assets:Bank", ""));
+        // Empty child against non-empty parent: child shorter, no
+        // segment boundary possible.
+        assert!(!is_subaccount_or_equal("", "Assets:Bank"));
+    }
+
+    #[test]
+    fn is_subaccount_or_equal_case_sensitive() {
+        // Beancount account names are case-sensitive; the helper
+        // delegates to byte equality and starts_with, both of which
+        // honor case.
+        assert!(!is_subaccount_or_equal("Assets:bank", "Assets:Bank"));
+        assert!(!is_subaccount_or_equal(
+            "assets:Bank:Checking",
+            "Assets:Bank"
+        ));
+    }
 }

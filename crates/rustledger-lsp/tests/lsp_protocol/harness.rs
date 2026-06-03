@@ -95,25 +95,13 @@ impl LspTestClient {
     /// Spawn a server backed by `journal_file` for multi-file mode.
     /// `None` is single-file mode (the LSP path most users follow).
     ///
-    /// # Panics
-    ///
-    /// Panics if `journal_file` is `Some(_)`: multi-file harness
-    /// support is not wired up yet. Earlier versions silently
-    /// constructed the server with `None` regardless of the
-    /// argument, which would have made a future multi-file test
-    /// pass-or-fail on the wrong baseline. Fail loudly until the
-    /// path is actually plumbed through to `run_main_loop` (the
-    /// constructor accepts a journal but doesn't currently forward
-    /// it; lifting the journal-loader into `MainLoopState::new`
-    /// from inside the spawned thread is the missing piece).
+    /// When `Some(path)`, the spawned server loads the journal via
+    /// `LedgerState::load` as part of `MainLoopState::new`, populating
+    /// the cross-file directives snapshot. Tests that need to exercise
+    /// the multi-file codeLens path (or the `contains_file` scratch-file
+    /// gate) construct a temp-dir journal and pass its path here.
     #[must_use]
     pub fn spawn_with_journal(journal_file: Option<PathBuf>) -> Self {
-        assert!(
-            journal_file.is_none(),
-            "spawn_with_journal(Some(_)) is not yet implemented; \
-             pass None or extend the harness to forward journal_file \
-             into run_main_loop"
-        );
         let (server, client) = Connection::memory();
 
         let server_thread = std::thread::spawn(move || {
@@ -148,7 +136,7 @@ impl LspTestClient {
             run_main_loop_with_exit_action(
                 server.receiver,
                 server.sender,
-                None,
+                journal_file,
                 PositionEncoding::Utf8,
                 |_code| {},
             );

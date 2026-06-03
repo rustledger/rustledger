@@ -128,10 +128,22 @@ impl LedgerState {
         let options = LoadOptions::default();
         match load(journal_path, &options) {
             Ok(ledger) => {
-                // Extract included files from source map
+                // Extract included files from source map. Canonicalize
+                // each path at insert time so the symmetric lookup in
+                // `contains_file` matches editor-supplied URIs whose
+                // canonical form may differ (symlinks, `./` segments,
+                // relative includes). Fallback to the raw path when
+                // canonicalize fails (file was deleted between load
+                // and here, or the loader returned a synthetic path);
+                // those entries can't be matched by an editor URI
+                // anyway.
                 self.included_files.clear();
                 for file in ledger.source_map.files() {
-                    self.included_files.insert(file.path.clone());
+                    let canonical = file
+                        .path
+                        .canonicalize()
+                        .unwrap_or_else(|_| file.path.clone());
+                    self.included_files.insert(canonical);
                 }
 
                 // Extract accounts, currencies, payees for completions
@@ -160,8 +172,20 @@ impl LedgerState {
     }
 
     /// Check if a file is part of this ledger.
+    ///
+    /// Canonicalizes `path` before lookup so editor-supplied URIs
+    /// (which may carry `./`, `..`, or symlink path segments) match
+    /// the canonical paths inserted at load time. A canonicalize
+    /// failure (broken symlink, file just deleted) means the file is
+    /// not on disk in any form addressable by the loaded ledger, so
+    /// the answer is `false`. One stat() per call; the lookup runs
+    /// on the codeLens hot path, but the cost is per-request (not
+    /// per-included-file as iterating included_files would be).
     pub fn contains_file(&self, path: &Path) -> bool {
-        self.included_files.contains(path)
+        match path.canonicalize() {
+            Ok(canonical) => self.included_files.contains(&canonical),
+            Err(_) => self.included_files.contains(path),
+        }
     }
 
     /// Get all accounts from the full ledger.

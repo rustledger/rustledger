@@ -1661,8 +1661,30 @@ pub fn run_main_loop(
 /// [`std::process::exit`]. The in-process integration test harness
 /// calls this entry point with a no-op so receipt of `exit` does NOT
 /// terminate the cargo-test process. After the no-op returns, the
-/// main loop continues until the channel closes (which the harness
-/// triggers by dropping its `Connection`).
+/// main loop continues running until the connection is closed; the
+/// harness completes shutdown by dropping the client side of the
+/// `Connection::memory()` pair, which closes the channel and makes
+/// the inner `select!` return `Err`, breaking the loop cleanly.
+///
+/// # Example
+///
+/// ```ignore
+/// use lsp_server::Connection;
+/// use rustledger_lsp::{handlers::utils::PositionEncoding, run_main_loop_with_exit_action};
+///
+/// let (server, client) = Connection::memory();
+/// std::thread::spawn(move || {
+///     run_main_loop_with_exit_action(
+///         server.receiver,
+///         server.sender,
+///         None,
+///         PositionEncoding::Utf8,
+///         |_code| {}, // test harness: don't terminate the process
+///     );
+/// });
+/// // ... drive `client` with LSP messages ...
+/// drop(client); // closes the channel; the server thread exits.
+/// ```
 pub fn run_main_loop_with_exit_action<F>(
     receiver: Receiver<lsp_server::Message>,
     sender: Sender<lsp_server::Message>,

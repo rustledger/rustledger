@@ -457,6 +457,71 @@ mod tests {
     use super::*;
     use rustledger_parser::parse;
 
+    /// Drift guard for [`LENS_OPTION_KEYS`]: every key the lens reads
+    /// from the resulting `LoaderOptions` must be in the allowlist,
+    /// and exercising each key end-to-end must produce a field
+    /// change the lens actually consumes. If a future contributor
+    /// adds a lens-relevant option to `LoaderOptions` without
+    /// updating `LENS_OPTION_KEYS`, this test fails: their option
+    /// won't appear in the filter list AND the build_loader_options
+    /// output won't carry the value through.
+    ///
+    /// The verification approach: for each documented key, build a
+    /// source string that sets the option, parse it, and verify the
+    /// helper produces the expected typed value. New lens-relevant
+    /// options must be added here AND to `LENS_OPTION_KEYS`.
+    #[test]
+    fn lens_option_keys_are_threaded_end_to_end() {
+        // booking_method: file-level override flows through.
+        let result = parse("option \"booking_method\" \"AVERAGE\"\n");
+        let opts = build_loader_options(&result);
+        assert_eq!(
+            opts.booking_method, "AVERAGE",
+            "booking_method must thread through; key missing from \
+             LENS_OPTION_KEYS or LoaderOptions::set wiring drifted"
+        );
+
+        // tolerance_multiplier (canonical name): overrides default.
+        let result = parse("option \"tolerance_multiplier\" \"1.0\"\n");
+        let opts = build_loader_options(&result);
+        assert_eq!(
+            opts.inferred_tolerance_multiplier,
+            Decimal::new(10, 1), // 1.0
+            "tolerance_multiplier must override the 0.5 default"
+        );
+
+        // inferred_tolerance_multiplier (deprecated alias): same field.
+        let result = parse("option \"inferred_tolerance_multiplier\" \"2.0\"\n");
+        let opts = build_loader_options(&result);
+        assert_eq!(
+            opts.inferred_tolerance_multiplier,
+            Decimal::new(20, 1), // 2.0
+            "deprecated alias inferred_tolerance_multiplier must \
+             map to the same field as tolerance_multiplier"
+        );
+
+        // Default (no options): values are what ValidationOptions
+        // sees in the validator path, so the lens and validator
+        // agree on a file with no `option` directives.
+        let result = parse("2024-01-01 open Assets:Bank USD\n");
+        let opts = build_loader_options(&result);
+        assert_eq!(opts.booking_method, "STRICT");
+        assert_eq!(opts.inferred_tolerance_multiplier, Decimal::new(5, 1)); // 0.5
+
+        // Sanity: an unrelated option (e.g., "title") does NOT
+        // flow through. If this assertion ever fails, the filter
+        // has been broken; the lens would start paying for
+        // Options::set's path.exists() on documents, etc.
+        let result = parse("option \"title\" \"My Ledger\"\n");
+        let opts = build_loader_options(&result);
+        assert_eq!(
+            opts.title, None,
+            "title option must NOT be set via build_loader_options; \
+             the filter has drifted and unrelated options are now \
+             on the codeLens hot path"
+        );
+    }
+
     #[test]
     fn test_code_lens_accounts() {
         let source = r#"2024-01-01 open Assets:Bank USD

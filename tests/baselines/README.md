@@ -11,11 +11,16 @@ Two files, both rebuilt from the corpus on every CI run:
 
 - `parser-corpus.manifest` — `relative/path<TAB>blake3-hex` for every
   `.beancount` file the parser produces output on. The hash covers a
-  Debug serialization of the full `ParseResult` (directives, options,
-  includes, plugins, comments, errors, warnings, currency-token spans).
+  canonical serialization of the full `ParseResult` (directives via
+  `serde_json::to_value` so metadata maps sort deterministically,
+  plus `Debug` of `options`, `includes`, `plugins`, `comments`,
+  `errors`, `warnings`, `currency_occurrences`).
 - `format-corpus.manifest` — same shape, but the hash covers the
-  string the formatter produces from each file's parsed directives
-  (using `FormatConfig::default()`). Files that parse to zero
+  string `rustledger_parser::format_source(&source, &parse_result,
+  &FormatConfig::default())` produces. That's the same API the CLI
+  invokes (`crates/rustledger/src/cmd/format.rs`), so the baseline
+  gates the production code path, not a sibling formatter that runs
+  through a different posting-span code. Files that parse to zero
   directives are omitted; there's nothing to format.
 
 Both manifests are sorted lexically by path so diffs are localized.

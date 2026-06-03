@@ -11,9 +11,24 @@
 //!
 //! The baseline manifest is `tests/baselines/parser-corpus.manifest`:
 //! one line per file, `relative/path/from/repo-root<TAB>hex-hash`,
-//! sorted lexically. The hash covers the `ParseResult`'s Debug
-//! representation, which is deterministic for our types
-//! (`Vec`-based, no `HashMap` payloads).
+//! sorted lexically.
+//!
+//! ## Fingerprint stability
+//!
+//! `Directive` (in `rustledger-core::directive`) carries a
+//! `meta: FxHashMap<String, MetaValue>` field, and `FxHashMap`'s
+//! `Debug` iterates in hashbrown bucket order. That's deterministic
+//! for a given hashbrown version but NOT stable across versions, so
+//! a naive `format!("{:#?}", result)` hash would generate spurious
+//! cross-file drift on every hashbrown bump.
+//!
+//! Instead we route directives through `serde_json::to_value`, whose
+//! `Map` is backed by `BTreeMap` and therefore sorts metadata keys
+//! deterministically regardless of source hashbrown order. All other
+//! `ParseResult` fields are `Vec<_>` with no map payloads inside
+//! (verified across `Options`, `Include`, `Plugin`, `Comment`,
+//! `ParseError`, `ParseWarning`, `currency_occurrences`) and use
+//! `Debug` directly.
 //!
 //! ## Regeneration
 //!
@@ -24,26 +39,21 @@
 //! BASELINE_UPDATE=1 cargo test -p rustledger-parser --test corpus_baseline
 //! ```
 //!
-//! Review the diff and commit. CI must NOT regenerate on its own —
+//! Review the diff and commit. CI must NOT regenerate on its own;
 //! the whole point is that drift fails the build.
 //!
 //! ## In-tree vs downloaded corpus
 //!
 //! The corpus under `tests/compatibility/files/` is mostly downloaded
-//! by `scripts/fetch-compat-test-files.sh` and not checked in. This
-//! test runs against whatever files are present:
-//!
-//! - Local dev with no corpus downloaded: covers the 3 in-tree
-//!   `plugins/` fixtures. The manifest will only list those.
-//! - CI after corpus download: covers ~1000 files. The manifest
-//!   committed to the repo covers this case; mismatch fails CI.
-//!
-//! If your local checkout has the corpus AND your manifest covers
-//! fewer files than your checkout (the in-tree-only case), the test
-//! warns but passes; this avoids dev-loop friction. Running in
-//! `STRICT_BASELINE=1` mode treats this as failure (used by CI).
+//! by `scripts/fetch-compat-test-files.sh` and not checked in. The
+//! repo commits 3 in-tree `plugins/` fixtures regardless. To avoid
+//! dev-loop friction, the test treats anything with fewer than
+//! [`MIN_FULL_CORPUS_SIZE`] files as "not the full corpus" and skips
+//! drift checks; CI sets `STRICT_BASELINE=1` to make this a hard
+//! failure.
 
 use std::collections::BTreeMap;
+use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -53,6 +63,14 @@ const CORPUS_ROOT: &str = "tests/compatibility/files";
 /// Relative path to the committed manifest from the repo root.
 const MANIFEST_PATH: &str = "tests/baselines/parser-corpus.manifest";
 
+/// Minimum corpus size we consider "fully populated." Below this,
+/// the test treats the corpus as not-downloaded and either skips
+/// (default mode) or fails (`STRICT_BASELINE=1`). 100 matches the
+/// CI workflow's sanity threshold; values below mean
+/// `fetch-compat-test-files.sh` either wasn't run or partially
+/// failed.
+const MIN_FULL_CORPUS_SIZE: usize = 100;
+
 /// Hash of one file's parsed output.
 type FileHash = String;
 
@@ -60,11 +78,17 @@ fn repo_root() -> &'static Path {
     static ROOT: OnceLock<PathBuf> = OnceLock::new();
     ROOT.get_or_init(|| {
         // Walk up from CARGO_MANIFEST_DIR until we find a directory
-        // containing `tests/compatibility`. That's the repo root in
-        // both local checkouts and CI.
+        // containing BOTH `tests/compatibility/files` AND a top-level
+        // `Cargo.toml` with a `[workspace]` table. The two-condition
+        // anchor avoids halting at a coincidentally-named parent
+        // directory (e.g., a sibling clone organizing fixtures the
+        // same way).
         let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         loop {
-            if p.join("tests/compatibility").is_dir() {
+            if p.join("tests/compatibility/files").is_dir()
+                && std::fs::read_to_string(p.join("Cargo.toml"))
+                    .is_ok_and(|s| s.contains("[workspace]"))
+            {
                 return p;
             }
             assert!(
@@ -110,23 +134,66 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
 }
 
 /// Parse `path` (absolute) and return a stable hash of the
-/// `ParseResult` Debug representation. Errors during file reading
-/// or non-UTF-8 content are themselves part of the fingerprint:
-/// a future parser change that makes a previously-readable file
-/// unreadable would still show up as a manifest delta.
+/// `ParseResult` content. Read errors, non-UTF-8 content, and parser
+/// panics are encoded as distinct sentinel hashes so any of them
+/// becoming or ceasing to occur shows up as a manifest delta on
+/// exactly that file (not as a missing entry).
+///
+/// Hash inputs:
+/// - Directives serialized via `serde_json::to_value` (whose `Map`
+///   sorts keys via `BTreeMap`, so the `Metadata` `FxHashMap` cannot
+///   leak its iteration order into the hash).
+/// - Other `ParseResult` fields (`options`, `includes`, `plugins`,
+///   `comments`, `errors`, `warnings`, `currency_occurrences`)
+///   formatted with `Debug` — they're all `Vec<_>` with no map
+///   payloads inside, so `Debug` is deterministic for them.
 fn fingerprint(absolute_path: &Path) -> FileHash {
     let source = match std::fs::read_to_string(absolute_path) {
         Ok(s) => s,
         Err(e) => return format!("read-error:{}", e.kind() as u32),
     };
-    let result = rustledger_parser::parse(&source);
-    // Debug formatting is deterministic for our types: directives
-    // are Vec-ordered, errors are Vec-ordered, no HashMap payloads
-    // in the AST. blake3 of the Debug string gives a 32-byte hash
-    // that captures every observable parser output.
-    let debug_repr = format!("{result:#?}");
-    let hash = blake3::hash(debug_repr.as_bytes());
-    hash.to_hex().to_string()
+    let parse_outcome =
+        std::panic::catch_unwind(AssertUnwindSafe(|| rustledger_parser::parse(&source)));
+    let result = match parse_outcome {
+        Ok(r) => r,
+        Err(payload) => {
+            // Distill the panic payload to something stable to hash.
+            // We deliberately don't include line numbers or RUST_BACKTRACE
+            // output: the goal is to detect "this file's parse behavior
+            // changed," not to encode incidental backtrace text.
+            let msg = payload
+                .downcast_ref::<&'static str>()
+                .copied()
+                .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+                .unwrap_or("<non-string panic payload>");
+            return format!("panic:{}", blake3::hash(msg.as_bytes()).to_hex());
+        }
+    };
+    let mut hasher = blake3::Hasher::new();
+    // Directives route through serde_json::Value (BTreeMap-backed
+    // for objects), neutralizing FxHashMap iteration order in
+    // `Directive.meta` / `Posting.meta`.
+    let directives_json = serde_json::to_value(&result.directives)
+        .map_or_else(|e| format!("serialize-error:{e}"), |v| v.to_string());
+    hasher.update(b"directives:");
+    hasher.update(directives_json.as_bytes());
+    // Remaining fields are Vec-of-leaf-types with no map payloads
+    // inside; Debug is deterministic.
+    hasher.update(b"\noptions:");
+    hasher.update(format!("{:?}", &result.options).as_bytes());
+    hasher.update(b"\nincludes:");
+    hasher.update(format!("{:?}", &result.includes).as_bytes());
+    hasher.update(b"\nplugins:");
+    hasher.update(format!("{:?}", &result.plugins).as_bytes());
+    hasher.update(b"\ncomments:");
+    hasher.update(format!("{:?}", &result.comments).as_bytes());
+    hasher.update(b"\nerrors:");
+    hasher.update(format!("{:?}", &result.errors).as_bytes());
+    hasher.update(b"\nwarnings:");
+    hasher.update(format!("{:?}", &result.warnings).as_bytes());
+    hasher.update(b"\ncurrency_occurrences:");
+    hasher.update(format!("{:?}", &result.currency_occurrences).as_bytes());
+    hasher.finalize().to_hex().to_string()
 }
 
 fn compute_manifest() -> BTreeMap<PathBuf, FileHash> {
@@ -187,12 +254,16 @@ fn write_manifest(manifest: &BTreeMap<PathBuf, FileHash>) {
 ///
 /// Modes:
 /// - **Default** (no env var): compare current output against the
-///   committed manifest. Mismatch fails. Empty corpus directory is
-///   tolerated (local dev without `fetch-compat-test-files.sh`).
+///   committed manifest. Mismatch fails. A corpus smaller than
+///   [`MIN_FULL_CORPUS_SIZE`] files is treated as not-fully-populated
+///   and skipped (the in-tree fixtures alone are 3 files and are
+///   committed, so "empty" never really happens; the min-size check
+///   is what makes the skip actually fire).
 /// - `BASELINE_UPDATE=1`: regenerate the manifest. Use deliberately.
-/// - `STRICT_BASELINE=1`: also fail if the corpus has fewer files
-///   than the manifest expects. Used by CI to catch a missing
-///   `fetch-compat-test-files.sh` step.
+/// - `STRICT_BASELINE=1`: turn skip-on-small-corpus into a hard
+///   failure, and additionally fail if any file present in the
+///   corpus has no entry in the manifest (catches "added a fixture
+///   but forgot to regen"). Used by CI.
 #[test]
 fn parser_output_matches_baseline() {
     if std::env::var_os("BASELINE_UPDATE").is_some() {
@@ -205,67 +276,106 @@ fn parser_output_matches_baseline() {
     let committed = read_committed_manifest();
     let strict = std::env::var_os("STRICT_BASELINE").is_some();
 
-    if current.is_empty() && !strict {
+    if current.len() < MIN_FULL_CORPUS_SIZE {
+        assert!(
+            !strict,
+            "STRICT_BASELINE: current corpus has {} files (need at \
+             least {MIN_FULL_CORPUS_SIZE}). Did \
+             `fetch-compat-test-files.sh` run?",
+            current.len(),
+        );
         eprintln!(
-            "corpus is empty at `{CORPUS_ROOT}`. Run \
-             `./scripts/fetch-compat-test-files.sh` to populate it; \
-             skipping baseline check. Set STRICT_BASELINE=1 to make \
-             this a hard failure (CI uses STRICT_BASELINE)."
+            "corpus at `{CORPUS_ROOT}` has only {} files (need at least \
+             {}). Run `./scripts/fetch-compat-test-files.sh` to populate \
+             it; skipping baseline check. CI uses STRICT_BASELINE=1 \
+             to make this a hard failure.",
+            current.len(),
+            MIN_FULL_CORPUS_SIZE,
         );
         return;
     }
 
-    if strict && current.len() < committed.len() {
-        panic!(
-            "STRICT_BASELINE: current corpus has {} files, manifest \
-             expects {}. Did `fetch-compat-test-files.sh` succeed?",
-            current.len(),
-            committed.len()
-        );
-    }
+    // Bidirectional drift check.
+    //
+    // Hash-changed entries: file in both, hash differs. Always a
+    // failure; that's the original gate.
+    let mut hash_changes: Vec<(PathBuf, &FileHash, &FileHash)> = Vec::new();
+    // Missing-from-corpus: file in manifest but no longer in
+    // corpus. Could be intentional (a source went away) but worth
+    // surfacing.
+    let mut missing_from_corpus: Vec<&PathBuf> = Vec::new();
+    // Missing-from-manifest: file in corpus but no manifest entry.
+    // Real failure under strict mode: someone added a fixture and
+    // didn't regen, so that file's parser output is now unprotected.
+    let mut missing_from_manifest: Vec<&PathBuf> = Vec::new();
 
-    // Compare entries that appear in BOTH the committed manifest and
-    // the current corpus. Files in the corpus but not the manifest
-    // are not failures (they were added without baselining); files
-    // in the manifest but not the corpus we treat as expected only
-    // under STRICT_BASELINE (covered above).
-    let mut mismatches: Vec<(PathBuf, &FileHash, &FileHash)> = Vec::new();
     for (path, expected_hash) in &committed {
-        if let Some(current_hash) = current.get(path)
-            && current_hash != expected_hash
-        {
-            mismatches.push((path.clone(), expected_hash, current_hash));
+        match current.get(path) {
+            Some(current_hash) if current_hash != expected_hash => {
+                hash_changes.push((path.clone(), expected_hash, current_hash));
+            }
+            Some(_) => {}
+            None => missing_from_corpus.push(path),
+        }
+    }
+    for path in current.keys() {
+        if !committed.contains_key(path) {
+            missing_from_manifest.push(path);
         }
     }
 
-    if mismatches.is_empty() {
+    // Strict mode treats unmanifested files as drift.
+    let unprotected_in_strict = strict && !missing_from_manifest.is_empty();
+    if hash_changes.is_empty() && !unprotected_in_strict {
+        if !missing_from_manifest.is_empty() {
+            eprintln!(
+                "warning: {} corpus file(s) have no manifest entry. \
+                 Regenerate to extend coverage:\n  \
+                 BASELINE_UPDATE=1 cargo test -p rustledger-parser \
+                 --test corpus_baseline",
+                missing_from_manifest.len(),
+            );
+        }
+        if !missing_from_corpus.is_empty() {
+            eprintln!(
+                "warning: {} manifest entry/entries refer to files no \
+                 longer present in the corpus.",
+                missing_from_corpus.len(),
+            );
+        }
         return;
     }
 
-    let preview = mismatches
-        .iter()
-        .take(10)
-        .map(|(path, expected, current)| {
-            format!(
-                "  {path}\n    expected: {expected}\n    current:  {current}",
+    let mut report = String::new();
+    if !hash_changes.is_empty() {
+        report.push_str(&format!(
+            "Hash mismatch on {} file(s) (first 10 shown):\n",
+            hash_changes.len(),
+        ));
+        for (path, expected, current) in hash_changes.iter().take(10) {
+            report.push_str(&format!(
+                "  {path}\n    expected: {e}\n    current:  {c}\n",
                 path = path.display(),
-                expected = &expected[..16],
-                current = &current[..16],
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-
+                e = &expected[..16],
+                c = &current[..16],
+            ));
+        }
+    }
+    if unprotected_in_strict {
+        report.push_str(&format!(
+            "\n{} corpus file(s) have no manifest entry (first 10):\n",
+            missing_from_manifest.len(),
+        ));
+        for path in missing_from_manifest.iter().take(10) {
+            report.push_str(&format!("  {}\n", path.display()));
+        }
+    }
     panic!(
-        "Parser output drifted from the committed baseline for {} \
-         file(s). First {} shown:\n\n{}\n\nIf this drift is \
-         intentional, regenerate the manifest:\n  \
+        "Parser baseline drift:\n\n{report}\nIf this drift is \
+         intentional, regenerate:\n  \
          BASELINE_UPDATE=1 cargo test -p rustledger-parser --test \
-         corpus_baseline\n\nReview the diff against \
-         `{MANIFEST_PATH}` and commit.",
-        mismatches.len(),
-        mismatches.len().min(10),
-        preview,
+         corpus_baseline\n\nReview the diff against `{MANIFEST_PATH}` \
+         and commit.",
     );
 }
 
@@ -275,12 +385,11 @@ fn parser_output_matches_baseline() {
 #[test]
 fn discovery_finds_in_tree_plugin_fixtures() {
     let files = discover_corpus_files();
-    let plugin_fixtures: Vec<_> = files
+    let has_plugin_fixture = files
         .iter()
-        .filter(|p| p.to_string_lossy().contains("plugins/implicit_prices"))
-        .collect();
+        .any(|p| p.to_string_lossy().contains("plugins/implicit_prices"));
     assert!(
-        !plugin_fixtures.is_empty(),
+        has_plugin_fixture,
         "expected to find at least one in-tree fixture under \
          tests/compatibility/files/plugins/implicit_prices/; got \
          {} corpus files total. Check CORPUS_ROOT resolution.",

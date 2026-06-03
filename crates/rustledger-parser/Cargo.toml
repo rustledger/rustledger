@@ -35,6 +35,11 @@ proptest.workspace = true
 # Used by tests/corpus_baseline.rs to hash parser output across the
 # compat corpus for drift detection (#1262 phase 0).
 blake3.workspace = true
+# Used by tests/corpus_baseline.rs to canonicalize directives via
+# `serde_json::to_value` (BTreeMap-backed Object), which sorts the
+# Metadata FxHashMap deterministically regardless of hashbrown
+# iteration order.
+serde_json.workspace = true
 
 [[bench]]
 name = "parser_bench"

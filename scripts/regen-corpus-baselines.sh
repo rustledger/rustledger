@@ -21,9 +21,22 @@ set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
 
-if [ ! -d tests/compatibility/files ] || [ -z "$(find tests/compatibility/files -name '*.beancount' -print -quit)" ]; then
-  echo "error: compat corpus is empty. Run scripts/fetch-compat-test-files.sh first." >&2
-  echo "       (Without it the regenerated manifest would only cover the 3 in-tree fixtures." >&2
+# Require a meaningfully-populated corpus before regenerating. The
+# repo commits 3 in-tree plugin fixtures, so a plain non-empty check
+# would let regen proceed on a fresh checkout, overwriting the
+# committed multi-hundred-entry manifests with 3-entry versions and
+# silently zeroing out the baseline gate.
+#
+# 100 matches the minimum the test/CI workflow uses; well below the
+# real corpus size (~700) so partial fetches still trigger this guard.
+MIN_CORPUS_SIZE=100
+corpus_size=$(find tests/compatibility/files -name '*.beancount' 2>/dev/null | wc -l)
+
+if [ "$corpus_size" -lt "$MIN_CORPUS_SIZE" ]; then
+  echo "error: compat corpus has $corpus_size .beancount files (need at least $MIN_CORPUS_SIZE)." >&2
+  echo "       Run scripts/fetch-compat-test-files.sh first; without the full corpus" >&2
+  echo "       the regenerated manifest would only cover a tiny subset and would" >&2
+  echo "       overwrite the committed manifests." >&2
   exit 1
 fi
 

@@ -30,12 +30,26 @@
 //! any future lens kind that genuinely needs deferred resolution.
 
 use lsp_types::{CodeLens, CodeLensParams, Command, Position, Range};
+use rust_decimal::MathematicalOps;
 use rustledger_booking::BookingEngine;
 use rustledger_core::{BookingMethod, Decimal, Directive, NaiveDate};
 use rustledger_parser::{ParseResult, Spanned};
 use std::collections::HashMap;
+use std::str::FromStr;
 
 use super::utils::{LineIndex, PositionEncoding};
+
+/// Balance assertions use 2x the `tolerance_multiplier` option.
+/// Mirrors `BALANCE_TOLERANCE_MULTIPLIER` in
+/// `rustledger-validate/src/validators/balance.rs`; the constant is
+/// duplicated here rather than re-exported to avoid widening the
+/// validator crate's public API.
+const BALANCE_TOLERANCE_MULTIPLIER: Decimal = Decimal::TWO;
+
+/// Default value of `options.tolerance_multiplier`, matching
+/// `ValidationOptions::default()` (`Decimal::new(5, 1)` = 0.5).
+const DEFAULT_TOLERANCE_MULTIPLIER_NUM: i64 = 5;
+const DEFAULT_TOLERANCE_MULTIPLIER_SCALE: u32 = 1;
 
 /// Handle a code lens request.
 ///
@@ -60,8 +74,9 @@ pub fn handle_code_lens(
     let account_stats = collect_account_stats(parse_result);
 
     // Book the directives ONCE. The booked result feeds every balance
-    // lens lookup in this request (M assertions cost O(N + M) total
-    // instead of O(M * N) for the pre-#1253 per-resolve booking).
+    // lens lookup in this request (booking is O(N), each lookup is
+    // O(N), total O(N + M*N) for M assertions; pre-#1253 each resolve
+    // re-booked, so the same total but per-lens latency dropped).
     // `None` ledger_directives falls back to the current file's
     // parse_result, matching the resolve path's behavior in
     // single-file mode.
@@ -69,16 +84,23 @@ pub fn handle_code_lens(
     // Fast path: skip booking entirely when the file has no balance
     // directives. Open/transaction lenses don't read `booked_directives`,
     // so for the common-case file (zero balance assertions) we save
-    // an O(N) booking pass on every codeLens request.
+    // an O(N) booking pass on every codeLens request. The caller in
+    // `main_loop.rs` does the same pre-scan to skip cloning the full
+    // ledger directives vector under the read lock.
     let has_balance = parse_result
         .directives
         .iter()
         .any(|s| matches!(s.value, Directive::Balance(_)));
+    let booking_method = resolve_booking_method_from_options(parse_result);
     let booked_directives = if has_balance {
-        book_directives_once(ledger_directives.unwrap_or(&parse_result.directives))
+        book_directives_once(
+            ledger_directives.unwrap_or(&parse_result.directives),
+            booking_method,
+        )
     } else {
         Vec::new()
     };
+    let tolerance_multiplier = default_tolerance_multiplier();
 
     for spanned in &parse_result.directives {
         let (line, _) = line_index.offset_to_position(spanned.span.start);
@@ -162,7 +184,18 @@ pub fn handle_code_lens(
                         .copied()
                         .unwrap_or_default();
 
-                let command = if actual_amount == bal.amount.number {
+                // Match the validator's tolerance comparison
+                // (validators/balance.rs:222-247). Strict equality
+                // here would emit a ⚠ for an amount the validator
+                // accepts (e.g. 99.999 vs 100.00 USD at the default
+                // ±0.005 tolerance), which would point the user at a
+                // diagnostic that doesn't exist — the same dead-link
+                // UX #1253 set out to prevent.
+                let tolerance =
+                    balance_tolerance(bal.amount.number, bal.tolerance, tolerance_multiplier);
+                let difference = (actual_amount - bal.amount.number).abs();
+
+                let command = if difference <= tolerance {
                     // Passing assertion: informational title, no
                     // click action. Uses `rledger.noop` (matching the
                     // failing branch below and the pre-eager path) so
@@ -226,14 +259,12 @@ pub fn handle_code_lens(
 /// defensive: if any future lens kind ever ships with
 /// `command: None`, the fallback below guarantees the client renders
 /// something sensible rather than nvim's literal `"Unresolved lens"`
-/// string. `ledger_directives` is unused today but kept on the
-/// signature so a future resolve-using lens kind can opt back in
-/// without a churn-inducing API change.
-pub fn handle_code_lens_resolve(
-    lens: CodeLens,
-    _parse_result: &ParseResult,
-    _ledger_directives: Option<&[Spanned<Directive>]>,
-) -> CodeLens {
+/// string. The signature deliberately takes no parse_result or
+/// ledger directives, so `try_dispatch_async`'s CodeLensResolve
+/// branch can skip its hot-path read-lock + Vec clone. A future
+/// resolve-using lens kind that genuinely needs that data should add
+/// it back as a parameter (and pay the snapshot cost then, not now).
+pub fn handle_code_lens_resolve(lens: CodeLens) -> CodeLens {
     let mut resolved = lens;
     if resolved.command.is_none() {
         resolved.command = Some(Command {
@@ -259,7 +290,17 @@ pub fn handle_code_lens_resolve(
 /// Booking matches the validator's behavior; without it, auto-filled
 /// postings (Income:Salary with no explicit amount, etc.) wouldn't
 /// be counted toward the asserted account's balance.
-fn book_directives_once(directives_in: &[Spanned<Directive>]) -> Vec<Spanned<Directive>> {
+///
+/// `default_method` is the workspace default (driven by
+/// `option "booking_method" "..."` if set, else
+/// `BookingMethod::Strict`). Per-account methods declared on `Open`
+/// directives are layered on top by `register_account_methods`, so
+/// the only thing this argument controls is what FIFO/LIFO/AVERAGE
+/// accounts WITHOUT an explicit per-account method use.
+fn book_directives_once(
+    directives_in: &[Spanned<Directive>],
+    default_method: BookingMethod,
+) -> Vec<Spanned<Directive>> {
     let mut directives: Vec<Spanned<Directive>> = directives_in.to_vec();
     directives.sort_by_cached_key(|d| {
         (
@@ -269,7 +310,7 @@ fn book_directives_once(directives_in: &[Spanned<Directive>]) -> Vec<Spanned<Dir
         )
     });
 
-    let mut booking_engine = BookingEngine::with_method(BookingMethod::Strict);
+    let mut booking_engine = BookingEngine::with_method(default_method);
     booking_engine.register_account_methods(directives.iter().map(|s| &s.value));
     for spanned in &mut directives {
         if let Directive::Transaction(txn) = &mut spanned.value
@@ -281,6 +322,66 @@ fn book_directives_once(directives_in: &[Spanned<Directive>]) -> Vec<Spanned<Dir
     }
 
     directives
+}
+
+/// Compute the tolerance for a balance assertion, mirroring the
+/// validator at `rustledger-validate/src/validators/balance.rs`:
+/// - explicit `~ tolerance` on the directive always wins
+/// - otherwise: `tolerance_multiplier * 2 * 10^(-scale)` for decimal
+///   amounts, exact match for integers
+///
+/// Lenses don't have access to the booked `ValidationState` (where
+/// `options.tolerance_multiplier` lives in the full pipeline), so
+/// `tolerance_multiplier` is passed in from
+/// [`default_tolerance_multiplier`] today and could be threaded from
+/// `option "inferred_tolerance_multiplier"` in a follow-up. Files
+/// that override the multiplier are rare; the default is what the
+/// vast majority of users hit.
+fn balance_tolerance(
+    expected: Decimal,
+    explicit: Option<Decimal>,
+    tolerance_multiplier: Decimal,
+) -> Decimal {
+    if let Some(t) = explicit {
+        return t;
+    }
+    let scale = expected.scale();
+    if scale > 0 {
+        let quantum = Decimal::TEN.powi(-i64::from(scale));
+        tolerance_multiplier * BALANCE_TOLERANCE_MULTIPLIER * quantum
+    } else {
+        Decimal::ZERO
+    }
+}
+
+/// Returns the validator's default `tolerance_multiplier`
+/// (`Decimal::new(5, 1)` = 0.5; see
+/// `rustledger-validate::ValidationOptions::default`).
+#[inline]
+fn default_tolerance_multiplier() -> Decimal {
+    Decimal::new(
+        DEFAULT_TOLERANCE_MULTIPLIER_NUM,
+        DEFAULT_TOLERANCE_MULTIPLIER_SCALE,
+    )
+}
+
+/// Resolve the workspace default booking method from
+/// `parse_result.options` (the parser exposes raw `(key, value, span)`
+/// tuples; we just scan for `"booking_method"`). Mirrors the loader's
+/// `resolve_effective_booking_method`: file-level `option
+/// "booking_method"` wins, otherwise default to Strict. Unknown
+/// strings fall back to Strict rather than failing the lens.
+fn resolve_booking_method_from_options(parse_result: &ParseResult) -> BookingMethod {
+    parse_result
+        .options
+        .iter()
+        .rev()
+        .find_map(|(k, v, _)| {
+            (k == "booking_method")
+                .then(|| BookingMethod::from_str(v).ok())
+                .flatten()
+        })
+        .unwrap_or(BookingMethod::Strict)
 }
 
 /// Sum postings to `account` from `booked` whose transaction date is
@@ -485,6 +586,59 @@ mod tests {
         );
     }
 
+    /// Regression for the post-#1253 follow-up review: the eager
+    /// balance check must mirror the validator's tolerance logic.
+    /// Pre-fix this used strict `==`; the validator at
+    /// `rustledger-validate/src/validators/balance.rs:222-247` accepts
+    /// `(actual - expected).abs() <= tolerance`. For a 2-decimal
+    /// amount like `100.00 USD`, default tolerance is
+    /// `0.5 * 2 * 0.01 = 0.01`. An actual of `99.999 USD` (off by
+    /// 0.001) is well within tolerance.
+    ///
+    /// If the lens reverted to strict equality, this test would fail:
+    /// the balance would render `⚠ (see diagnostic)` while the
+    /// validator passes silently, reintroducing the dead-link UX
+    /// #1253 originally set out to prevent.
+    #[test]
+    fn balance_lens_honors_validator_tolerance() {
+        // Choose actual amounts that round to slightly off the
+        // asserted value. Three penny-fractional postings of
+        // 33.333 USD sum to 99.999 USD; the assertion expects
+        // 100.00 USD. The validator accepts (under tolerance);
+        // the lens must too.
+        let source = r#"2024-01-01 open Assets:Bank USD
+2024-01-01 open Income:Misc
+2024-01-02 * "A"
+  Assets:Bank  33.333 USD
+  Income:Misc
+2024-01-02 * "B"
+  Assets:Bank  33.333 USD
+  Income:Misc
+2024-01-02 * "C"
+  Assets:Bank  33.333 USD
+  Income:Misc
+2024-01-31 balance Assets:Bank 100.00 USD
+"#;
+        let result = parse(source);
+        let params = code_lens_params();
+
+        let balance_lens = find_balance_lens(
+            handle_code_lens(&params, source, &result, None, PositionEncoding::Utf16)
+                .expect("lenses emitted"),
+        );
+        let cmd = balance_lens
+            .command
+            .as_ref()
+            .expect("balance lens ships fully-resolved");
+        assert!(
+            cmd.title.contains('✓'),
+            "actual 99.999 USD is within the default ±0.01 tolerance \
+             of asserted 100.00 USD; lens must show ✓ to match the \
+             validator. got {:?}",
+            cmd.title
+        );
+    }
+
     #[test]
     fn test_code_lens_balance_uses_full_ledger_in_multi_file_mode() {
         // Issue #470 coverage: when ledger_directives carries the
@@ -558,7 +712,6 @@ mod tests {
         // future contributor adds a resolve-using lens kind and forgets
         // to handle it, the fallback guarantees the client renders a
         // sensible string instead of nvim's literal "Unresolved lens".
-        let result = parse("2024-01-01 open Assets:Bank USD");
         let lens = CodeLens {
             range: Range {
                 start: Position::new(0, 0),
@@ -567,7 +720,7 @@ mod tests {
             command: None,
             data: None,
         };
-        let resolved = handle_code_lens_resolve(lens, &result, None);
+        let resolved = handle_code_lens_resolve(lens);
         let cmd = resolved
             .command
             .as_ref()

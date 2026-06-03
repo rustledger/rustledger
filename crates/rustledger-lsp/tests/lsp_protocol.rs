@@ -48,24 +48,24 @@ fn harness_smoke_initialize_and_codelens() {
 
 /// Regression for issue #1253: a balance assertion must ship with
 /// its final ✓ / ⚠ title on the *initial* `textDocument/codeLens`
-/// response. The previous deferred-resolve pattern exposed the lens
-/// to nvim's resolve-cancellation race; this test pins the invariant
-/// that closes that exposure by driving the exact race through the
-/// harness.
+/// response, with no `data` payload that would require a
+/// `codeLens/resolve` round-trip. That structural invariant is what
+/// closes the exposure to nvim's resolve-cancellation race: with no
+/// resolve round-trip, there is nothing for the cancel to discard.
 ///
-/// The flow:
-/// 1. Open the user's reproduction file from #1253 (salary posts
-///    1000 USD on 02-01, balance assertion on 02-02 expects 1000
-///    USD, passing).
-/// 2. Send `textDocument/codeLens` (id=N).
-/// 3. Immediately fire `$/cancelRequest(N)` to simulate nvim's race.
-/// 4. Read the response anyway (the server is free to respond to a
-///    cancelled request; cancellation is advisory in LSP). Assert
-///    that the balance lens carries the real ✓ title and no `data`
-///    payload, i.e., no resolve round-trip is required, so the
-///    race can't strand the lens on a placeholder.
+/// Note on what this test does NOT exercise: `textDocument/codeLens`
+/// is synchronously dispatched on the main loop
+/// (`main_loop::try_dispatch_async` only async-dispatches
+/// `codeLens/resolve` and `semanticTokens/full`), so the server
+/// processes the request to completion before it ever reads the
+/// `$/cancelRequest` notification we fire after it. The cancel is
+/// sent anyway, as belt-and-braces: if a future refactor moves
+/// codeLens into async dispatch, the cancel would then actually race
+/// the response. The substantive assertions are the lens-shape
+/// invariants (✓ title, no `data`), which hold regardless of whether
+/// the cancel "won" the race.
 #[test]
-fn issue_1253_balance_lens_resolves_without_round_trip_under_cancel_race() {
+fn issue_1253_balance_lens_ships_eagerly_resolved_with_cancel_belt_and_braces() {
     let mut client = LspTestClient::spawn();
     client.initialize();
 
@@ -82,8 +82,35 @@ fn issue_1253_balance_lens_resolves_without_round_trip_under_cancel_race() {
          2012-02-02 balance Assets:Bank  1000 USD\n",
     );
 
+    // `on_did_open` calls `publish_diagnostics` synchronously, so any
+    // diagnostic for the file is already in the channel by now. Drain
+    // it BEFORE sending the codeLens request: `expect_response_timeout`
+    // would silently consume it, and we want to assert on it later.
+    // For a passing balance there should be zero non-empty
+    // publishDiagnostics; capture any to surface in the assert below.
+    let mut saw_diagnostic = false;
+    while let Some(msg) = client.recv_with_timeout(Duration::from_millis(200)) {
+        if let lsp_server::Message::Notification(n) = msg
+            && n.method == "textDocument/publishDiagnostics"
+        {
+            let params: lsp_types::PublishDiagnosticsParams =
+                serde_json::from_value(n.params).unwrap();
+            if !params.diagnostics.is_empty() {
+                saw_diagnostic = true;
+                eprintln!("unexpected didOpen diagnostic: {:?}", params.diagnostics);
+            }
+        }
+    }
+    assert!(
+        !saw_diagnostic,
+        "valid balance assertion must not produce a diagnostic at \
+         didOpen time; the user reported #1253's lens looking like an \
+         error, but the underlying validator must not flag it"
+    );
+
     // Issue the codeLens request. We capture its id so we can fire
-    // a cancel before the server has a chance to respond.
+    // a cancel "race" (see test rustdoc — this is structurally a
+    // no-op given sync dispatch, but kept as belt-and-braces).
     let id = client.next_request_id();
     let req = lsp_server::Request {
         id: id.clone(),
@@ -98,9 +125,6 @@ fn issue_1253_balance_lens_resolves_without_round_trip_under_cancel_race() {
         .unwrap(),
     };
     client.raw_send_request(req).expect("send codeLens request");
-
-    // Immediately fire the nvim cancellation quirk. The server may
-    // still respond (cancellation is advisory); we want it to.
     quirks::nvim_cancel_race(&client, &id);
 
     // Wait for the response. Use a slightly-longer timeout because
@@ -146,30 +170,6 @@ fn issue_1253_balance_lens_resolves_without_round_trip_under_cancel_race() {
          payload; the round-trip is what nvim could race against. \
          got data = {:?}",
         balance_lens.data
-    );
-
-    // Also drain any publishDiagnostics the server emitted. A
-    // passing balance must NOT produce a diagnostic. Up to 200ms is
-    // a generous window for the diagnostic publish to land if it
-    // were going to.
-    let mut saw_diagnostic = false;
-    while let Some(msg) = client.recv_with_timeout(Duration::from_millis(200)) {
-        if let lsp_server::Message::Notification(n) = msg
-            && n.method == "textDocument/publishDiagnostics"
-        {
-            let params: lsp_types::PublishDiagnosticsParams =
-                serde_json::from_value(n.params).unwrap();
-            if !params.diagnostics.is_empty() {
-                saw_diagnostic = true;
-                eprintln!("unexpected diagnostic: {:?}", params.diagnostics);
-            }
-        }
-    }
-    assert!(
-        !saw_diagnostic,
-        "valid balance assertion must not produce a diagnostic; \
-         the user reported #1253's lens looking like an error, but \
-         the underlying validator must not flag it"
     );
 }
 

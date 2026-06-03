@@ -328,8 +328,17 @@ impl MainLoopState {
     /// are called from both sync and async paths.
     fn try_dispatch_async(&self, req: &lsp_server::Request) -> bool {
         match req.method.as_str() {
-            // codeLens/resolve runs full balance calculations — the most
-            // expensive operation in the LSP.
+            // codeLens/resolve is now a no-op for every lens kind
+            // emitted by `handle_code_lens` (since #1253, balance
+            // lenses ship fully-resolved on the initial response).
+            // The defensive fallback only fills in `command` when a
+            // lens arrives with `command: None`, which no current
+            // path produces. We keep the async dispatch wiring so a
+            // future resolve-using lens kind that needs heavy work
+            // can re-enable it cheaply, but we no longer snapshot
+            // `parse_result` or clone the full ledger directives:
+            // the fallback needs neither. Pre-#1253 those snapshots
+            // each cost an O(N) deep clone on every resolve request.
             CodeLensResolve::METHOD => {
                 let id = req.id.clone();
                 let lens: CodeLens = match serde_json::from_value(req.params.clone()) {
@@ -340,27 +349,8 @@ impl MainLoopState {
                     }
                 };
 
-                // Snapshot data eagerly on the main thread
-                let uri: Option<Uri> = lens
-                    .data
-                    .as_ref()
-                    .and_then(|d| d.get("uri"))
-                    .and_then(|u| u.as_str())
-                    .and_then(|s| s.parse().ok());
-                let (_text, parse_result) = if let Some(ref uri) = uri {
-                    self.get_document_data(uri)
-                } else {
-                    (String::new(), empty_parse_result())
-                };
-                let ledger_directives = {
-                    let guard = self.ledger_state.read();
-                    guard.directives().map(|d| d.to_vec())
-                };
-
-                // Dispatch the expensive balance calculation to the worker
                 self.dispatch_async(id, move || {
-                    let resolved =
-                        handle_code_lens_resolve(lens, &parse_result, ledger_directives.as_deref());
+                    let resolved = handle_code_lens_resolve(lens);
                     serde_json::to_value(resolved).map_err(|e| e.to_string())
                 });
                 true
@@ -990,14 +980,24 @@ impl MainLoopState {
         let uri = &params.text_document.uri;
         let (text, parse_result) = self.get_document_data(uri);
 
-        // Snapshot the multi-file ledger directives so the eager
-        // balance verification inside `handle_code_lens` (#1253) sees
-        // the same multi-file view that `codeLens/resolve` used to
-        // see. Matches the snapshot pattern in `try_dispatch_async`'s
-        // CodeLensResolve branch.
-        let ledger_directives = {
+        // Snapshot the multi-file ledger directives ONLY when the
+        // current file has at least one balance assertion. The eager
+        // balance check inside `handle_code_lens` (#1253) is the only
+        // consumer of the snapshot; open/transaction lenses don't
+        // read it. Files with zero balance directives — the vast
+        // majority — would otherwise pay an O(N) deep clone of the
+        // full ledger under a read lock on every codeLens request.
+        // Editors fire codeLens frequently (post-edit, post-scroll),
+        // so the snapshot was the dominant cost on the hot path.
+        let has_balance = parse_result
+            .directives
+            .iter()
+            .any(|s| matches!(s.value, Directive::Balance(_)));
+        let ledger_directives = if has_balance {
             let guard = self.ledger_state.read();
             guard.directives().map(|d| d.to_vec())
+        } else {
+            None
         };
 
         let response = handle_code_lens(

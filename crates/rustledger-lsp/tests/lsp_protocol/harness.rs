@@ -94,8 +94,26 @@ impl LspTestClient {
 
     /// Spawn a server backed by `journal_file` for multi-file mode.
     /// `None` is single-file mode (the LSP path most users follow).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `journal_file` is `Some(_)`: multi-file harness
+    /// support is not wired up yet. Earlier versions silently
+    /// constructed the server with `None` regardless of the
+    /// argument, which would have made a future multi-file test
+    /// pass-or-fail on the wrong baseline. Fail loudly until the
+    /// path is actually plumbed through to `run_main_loop` (the
+    /// constructor accepts a journal but doesn't currently forward
+    /// it; lifting the journal-loader into `MainLoopState::new`
+    /// from inside the spawned thread is the missing piece).
     #[must_use]
     pub fn spawn_with_journal(journal_file: Option<PathBuf>) -> Self {
+        assert!(
+            journal_file.is_none(),
+            "spawn_with_journal(Some(_)) is not yet implemented; \
+             pass None or extend the harness to forward journal_file \
+             into run_main_loop"
+        );
         let (server, client) = Connection::memory();
 
         let server_thread = std::thread::spawn(move || {
@@ -125,7 +143,6 @@ impl LspTestClient {
             }
 
             run_main_loop(server.receiver, server.sender, None, PositionEncoding::Utf8);
-            let _ = journal_file; // reserved for a future multi-file harness
         });
 
         Self {
@@ -241,16 +258,24 @@ impl LspTestClient {
             .expect("send to server");
     }
 
-    /// Block until the response matching `id` arrives, draining any
-    /// server-initiated messages (notifications, requests) in the
-    /// meantime. Server notifications are silently dropped; tests
-    /// that want to observe them should use
-    /// [`Self::recv_with_timeout`] explicitly before issuing the
-    /// request whose response they care about.
+    /// Block until the response matching `id` arrives. Notifications
+    /// and server-initiated requests that arrive in the meantime are
+    /// silently drained; if the server returns a Response with a
+    /// DIFFERENT id, this PANICS rather than dropping it on the
+    /// floor — a wrong-id response is exactly the kind of bug the
+    /// harness exists to catch, and silently discarding it would
+    /// surface the bug as `timed out waiting for response`, pointing
+    /// the diagnosis at the wrong layer.
+    ///
+    /// Tests that want to observe server notifications (e.g.,
+    /// `publishDiagnostics`) should call [`Self::recv_with_timeout`]
+    /// explicitly BEFORE issuing the request whose response they
+    /// want; once `expect_response` is called, any intervening
+    /// notification is gone.
     ///
     /// # Panics
     ///
-    /// Panics on timeout or if the server channel closes.
+    /// Panics on timeout, on channel close, or on a wrong-id Response.
     pub fn expect_response(&self, id: &RequestId) -> Response {
         self.expect_response_timeout(id, DEFAULT_TIMEOUT)
     }
@@ -269,12 +294,17 @@ impl LspTestClient {
                 .unwrap_or_else(|e| panic!("timed out waiting for response to {id:?}: {e}"));
             match msg {
                 Message::Response(resp) if resp.id == *id => return resp,
-                Message::Response(_) | Message::Notification(_) | Message::Request(_) => {
+                Message::Response(other) => {
+                    panic!(
+                        "expected response for id {id:?}, got response for id {:?}: {other:?}",
+                        other.id
+                    );
+                }
+                Message::Notification(_) | Message::Request(_) => {
                     // Drain server-initiated traffic the test isn't
-                    // interested in. A future test that needs to
-                    // observe specific server messages can use
-                    // `recv_with_timeout` before calling
-                    // `expect_response`.
+                    // interested in. Tests that want to observe these
+                    // should call `recv_with_timeout` BEFORE the
+                    // request whose response they want.
                 }
             }
         }
@@ -312,22 +342,61 @@ impl LspTestClient {
         id
     }
 
-    /// Send the `shutdown` request as a best-effort protocol-clean
-    /// cleanup. Deliberately does NOT send the `exit` notification:
+    /// Send the `shutdown` request and wait briefly for its
+    /// response. Deliberately does NOT send the `exit` notification:
     /// `main_loop`'s `exit` handler calls [`std::process::exit`],
     /// which would terminate the cargo-test process mid-suite (and
     /// take every other test in this binary with it).
     ///
-    /// The server is actually wound down by dropping the connection
-    /// in [`Drop::drop`]: channel closure makes `run_main_loop`'s
-    /// `select!` return `Err`, which breaks the loop normally.
+    /// The shutdown response is observed (best-effort, with a short
+    /// timeout) so the server has actually processed the request
+    /// before the connection is dropped; otherwise channel-close
+    /// could race the request and leave the server's
+    /// `shutdown_requested` flag unset. The server is then wound
+    /// down by dropping the connection in [`Drop::drop`]: channel
+    /// closure makes `run_main_loop`'s `select!` return `Err`, which
+    /// breaks the loop normally.
+    ///
+    /// Caveat: `MainLoopState::new` spawns an internal `lsp-worker`
+    /// thread for background jobs (codeLens/resolve, semanticTokens).
+    /// Its join handle is not exposed, so the harness can't join it.
+    /// In practice the worker exits as soon as its `job_sender` is
+    /// dropped (which happens when `MainLoopState` drops at the end
+    /// of `run_main_loop`), but a long-running job in flight at
+    /// shutdown time will keep the worker alive past this `Drop`.
     fn shutdown(&mut self) {
         let id = self.next_request_id();
-        let _ = self.conn().sender.send(Message::Request(Request {
-            id,
-            method: "shutdown".to_string(),
-            params: serde_json::json!(null),
-        }));
+        if self
+            .conn()
+            .sender
+            .send(Message::Request(Request {
+                id: id.clone(),
+                method: "shutdown".to_string(),
+                params: serde_json::json!(null),
+            }))
+            .is_err()
+        {
+            // Channel already closed (server panicked or exited).
+            // Nothing to wait for.
+            return;
+        }
+        // Short timeout: most tests have already drained their own
+        // responses by this point, so the shutdown response is the
+        // very next message. We don't reuse `expect_response_timeout`
+        // because we don't want a panic in Drop on timeout (which
+        // would abort the test process).
+        let deadline = Instant::now() + Duration::from_millis(500);
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return;
+            }
+            match self.conn().receiver.recv_timeout(remaining) {
+                Ok(Message::Response(resp)) if resp.id == id => return,
+                Ok(_) => continue,
+                Err(_) => return,
+            }
+        }
     }
 }
 
@@ -339,8 +408,22 @@ impl Drop for LspTestClient {
         // and `run_main_loop` break out cleanly. Without this, the
         // server thread would block forever and the join would hang.
         drop(self.client.take());
-        if let Some(handle) = self.server_thread.take() {
-            let _ = handle.join();
+        if let Some(handle) = self.server_thread.take()
+            && let Err(panic_payload) = handle.join()
+        {
+            // A panic inside `run_main_loop` would otherwise be
+            // silently swallowed, turning a server crash into a
+            // passing test. Re-panic so the test failure points at
+            // the real bug. (Only re-raise if we aren't already
+            // unwinding — panic-during-drop aborts the process.)
+            if !std::thread::panicking() {
+                std::panic::resume_unwind(panic_payload);
+            } else {
+                eprintln!(
+                    "[harness] server thread panicked during cleanup of an \
+                     already-panicking test; payload: {panic_payload:?}"
+                );
+            }
         }
     }
 }

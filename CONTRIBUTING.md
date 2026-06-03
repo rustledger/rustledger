@@ -286,6 +286,33 @@ See issue #992, which traced a single rendering bug to a chain of mutually-reinf
 
 Each requirement above closes one of those gaps. Following all of them eliminates the bug class structurally.
 
+## LSP testing requirements
+
+Changes under `crates/rustledger-lsp/` must follow the layered testing
+strategy documented in
+[`docs/development/lsp-support.md`](docs/development/lsp-support.md).
+
+In short:
+
+1. **Handler unit tests** for handler-level logic (e.g. lens text,
+   range computation). Goes in `crates/rustledger-lsp/src/handlers/*.rs`.
+
+2. **Protocol integration tests** for anything that touches message
+   sequencing, cancellation, or multi-message flows. Goes in
+   `crates/rustledger-lsp/tests/lsp_protocol.rs` and the
+   `tests/lsp_protocol/` directory. Use the `LspTestClient` harness;
+   do not roll your own message-pumping loop.
+
+3. **Manual smoke** in nvim and VS Code before merging anything that
+   changes client-visible UX (lens titles, diagnostic shape,
+   completion items, etc.). Smoke steps are in `lsp-support.md`.
+
+If you found a real-world bug specific to a client (nvim's cancellation
+behavior, VS Code's resolve ordering, etc.), encode the client pattern
+as a quirk in `crates/rustledger-lsp/tests/lsp_protocol/quirks.rs` so
+the next regression is caught automatically. See #1245 / #1253 for
+worked examples.
+
 ## Questions?
 
 Open an issue or discussion on GitHub.

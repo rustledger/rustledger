@@ -43,6 +43,11 @@ jiff.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# Used by tests/lsp_protocol/harness.rs to deserialize typed LSP request/response
+# payloads through `lsp_types::request::Request::Result`. Normal `dependencies`
+# only pull serde transitively via `serde_json`, which isn't enough to name the
+# `serde::de::DeserializeOwned` trait directly.
+serde.workspace = true
 
 [[bin]]
 name = "rledger-lsp"

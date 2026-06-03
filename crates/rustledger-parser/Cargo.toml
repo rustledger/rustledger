@@ -32,6 +32,9 @@ rust_decimal_macros = "1.40"
 insta.workspace = true
 criterion.workspace = true
 proptest.workspace = true
+# Used by tests/corpus_baseline.rs to hash parser output across the
+# compat corpus for drift detection (#1262 phase 0).
+blake3.workspace = true
 
 [[bench]]
 name = "parser_bench"

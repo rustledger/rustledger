@@ -3964,6 +3964,7 @@ dependencies = [
 name = "rustledger-parser"
 version = "0.15.0"
 dependencies = [
+ "blake3",
  "criterion",
  "insta",
  "logos",

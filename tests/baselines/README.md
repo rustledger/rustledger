@@ -1,0 +1,93 @@
+# Output baselines
+
+This directory holds parser-output and formatter-output baselines for
+the compatibility corpus under `tests/compatibility/files/`. They
+implement phase 0 of the parser-CST migration tracking issue
+([#1262](https://github.com/rustledger/rustledger/issues/1262)).
+
+## Contract
+
+Two files, both rebuilt from the corpus on every CI run:
+
+- `parser-corpus.manifest` — `relative/path<TAB>blake3-hex` for every
+  `.beancount` file the parser produces output on. The hash covers a
+  Debug serialization of the full `ParseResult` (directives, options,
+  includes, plugins, comments, errors, warnings, currency-token spans).
+- `format-corpus.manifest` — same shape, but the hash covers the
+  string the formatter produces from each file's parsed directives
+  (using `FormatConfig::default()`). Files that parse to zero
+  directives are omitted; there's nothing to format.
+
+Both manifests are sorted lexically by path so diffs are localized.
+
+## CI behavior
+
+The `Parser Baselines` workflow (`.github/workflows/parser-baselines.yml`)
+runs on every PR and push to main. It:
+
+1. Restores or fetches the compat corpus.
+2. Runs the baseline tests with `STRICT_BASELINE=1`.
+3. Fails if any committed manifest entry has a different current hash,
+   or if the corpus is smaller than the manifest expects.
+
+Strict mode is what makes the gate a gate. In default mode (no env
+var), the test passes when no entries overlap; local devs without
+the corpus see the test skip, not fail.
+
+## Regenerating the manifests
+
+When a parser or formatter change shifts output bytes intentionally:
+
+```bash
+# Download corpus if needed (one-time, ~3 minutes).
+./scripts/fetch-compat-test-files.sh
+
+# Regenerate both manifests.
+./scripts/regen-corpus-baselines.sh
+
+# Review the diff. Every changed hash must trace back to a code
+# change in the PR. If you can't explain a change, find out why
+# before committing.
+git diff tests/baselines/
+
+# Commit when satisfied.
+git add tests/baselines/
+git commit -m 'chore(baselines): regenerate parser+format manifests'
+```
+
+The regen script gates on a populated corpus and runs both tests with
+`BASELINE_UPDATE=1`.
+
+## Why this exists
+
+The parser-CST migration in #1262 stands up a parallel parser and
+gates equivalence via a differential test. Before that work starts,
+we need a contract for "the current parser's output is what it is."
+Without this baseline, an unrelated PR could silently shift parser
+output between the start of phase 1 and the differential test in
+phase 2, and we'd discover the regression at the worst possible
+moment — when the new parser disagreed with the old.
+
+The baseline is independently valuable: it makes drift detection
+explicit on every PR, not just when something downstream fails. We
+keep it after #1262 closes.
+
+## Local workflow
+
+Run the baseline tests as part of your normal cycle when you change
+parsing or formatting:
+
+```bash
+# Default mode: tolerates empty corpus, skips silently. CI uses
+# STRICT_BASELINE=1.
+cargo test -p rustledger-parser --test corpus_baseline
+cargo test -p rustledger-parser --test corpus_baseline_format
+
+# Strict mode locally (must have corpus populated):
+STRICT_BASELINE=1 cargo test -p rustledger-parser --test corpus_baseline
+STRICT_BASELINE=1 cargo test -p rustledger-parser --test corpus_baseline_format
+```
+
+If a failure surprises you, **don't regenerate yet**. Look at the
+diff first, find the code change that caused it, and decide whether
+the new output is correct.

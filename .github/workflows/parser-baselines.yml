@@ -1,0 +1,105 @@
+# Parser + formatter output baseline gate.
+#
+# Phase 0 of the parser-CST migration (#1262). Runs on every PR and
+# push to main; fails if `cargo test -p rustledger-parser --test
+# corpus_baseline` (or `--test corpus_baseline_format`) reports drift
+# against the committed manifests under `tests/baselines/`.
+#
+# The point: any change to the parser's or formatter's output on the
+# compat corpus is detected before merge. Intentional changes
+# regenerate the manifests via `scripts/regen-corpus-baselines.sh`
+# and commit the diff.
+#
+# Cache key matches `compat.yml`'s so we don't re-download the corpus
+# on every push.
+
+name: Parser Baselines
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: parser-baselines-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  baseline:
+    name: Corpus output baseline
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # stable
+        with:
+          toolchain: stable
+      - uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2
+      # Share the corpus cache with the Compatibility workflow so the
+      # ~3 minute download only happens once across the two workflows
+      # per cache-key version.
+      - name: Cache compatibility test files
+        id: cache-compat-files
+        uses: actions/cache@v4
+        with:
+          path: tests/compatibility/files
+          key: compat-files-v3-${{ hashFiles('scripts/fetch-compat-test-files.sh') }}
+          restore-keys: |
+            compat-files-v3-
+      - name: Fetch compatibility test files
+        if: steps.cache-compat-files.outputs.cache-hit != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./scripts/fetch-compat-test-files.sh
+      - name: Verify corpus is populated
+        run: |
+          count=$(find tests/compatibility/files -name '*.beancount' | wc -l)
+          echo "Corpus size: $count files"
+          if [ "$count" -lt 100 ]; then
+            echo "::error::Corpus is suspiciously small ($count files); fetch likely failed."
+            exit 1
+          fi
+      - name: Parser baseline (strict)
+        env:
+          STRICT_BASELINE: "1"
+        run: |
+          cargo test -p rustledger-parser --test corpus_baseline \
+            parser_output_matches_baseline -- --nocapture
+      - name: Formatter baseline (strict)
+        env:
+          STRICT_BASELINE: "1"
+        run: |
+          cargo test -p rustledger-parser --test corpus_baseline_format \
+            formatter_output_matches_baseline -- --nocapture
+      - name: Help text on failure
+        if: failure()
+        run: |
+          cat <<'EOF'
+          ::group::How to fix this failure
+          The parser or formatter output drifted from the committed
+          baseline. Two cases:
+
+          1. Drift is INTENTIONAL (you meant to change the output):
+             Regenerate the manifest locally and commit the diff:
+               ./scripts/regen-corpus-baselines.sh
+               git diff tests/baselines/   # review!
+               git add tests/baselines/
+               git commit -m 'chore(baselines): regenerate'
+
+          2. Drift is UNINTENTIONAL:
+             Find the parser/formatter change in your PR that altered
+             output bytes on at least one corpus file, and fix it
+             before regenerating.
+
+          See tests/baselines/README.md for the full contract.
+          ::endgroup::
+          EOF

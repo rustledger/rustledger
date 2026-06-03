@@ -85,11 +85,21 @@ fn rledger_lsp_binary_handles_initialize_shutdown_exit() {
         stdin.write_all(msg.as_bytes()).expect("write to child");
     }
     stdin.flush().expect("flush child stdin");
-    // Closing stdin signals EOF, which lets the server's reader exit
-    // cleanly if it didn't already act on `exit`.
-    drop(stdin);
+    // Deliberately keep `stdin` open until the end of the test:
+    // dropping it here races the server's reader thread on CI. If
+    // the reader sees EOF before it pulls the buffered `shutdown` +
+    // `exit` messages out of the pipe, the server's main loop
+    // breaks via channel-close before processing them, and stdout
+    // ends after the initialize response only. The explicit `exit`
+    // notification we just wrote is the LSP-spec-correct way to
+    // terminate the server, and the in-process `process::exit` in
+    // `main_loop` ends the child before `wait_or_kill` returns.
 
     let output = read_until(stdout, Instant::now() + Duration::from_secs(10));
+    // Release stdin AFTER reading; the child has already process::exit'd
+    // by the time we get here, so close-on-drop just frees the
+    // descriptor.
+    drop(stdin);
     assert!(
         output.contains("Content-Length:"),
         "expected at least one Content-Length-framed response on stdout; \

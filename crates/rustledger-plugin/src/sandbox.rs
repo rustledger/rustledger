@@ -45,6 +45,66 @@ use std::sync::{Arc, OnceLock};
 
 use wasmtime::{Config, Engine, ResourceLimiter, Store};
 
+/// Default per-instance linear-memory cap (in bytes) for any
+/// sandboxed wasmtime [`Store`] in rustledger.
+///
+/// 256 MiB is generous enough for legitimate plugins / importers /
+/// `CPython`-WASI on import + AST compilation, and small enough to
+/// keep a single hostile call well under host-OOM territory on
+/// memory-constrained hosts (Docker containers, CI runners). The
+/// wasm32 linear-memory ceiling is 4 GiB per `Store` by spec; this
+/// cap brings the per-call ceiling 16x lower.
+///
+/// Currently shared by all three sandboxed wasmtime paths in
+/// rustledger:
+///
+/// - The regular WASM plugin runtime via
+///   [`crate::runtime::RuntimeConfig::default`]
+/// - The WASM importer host via
+///   `rustledger_importer::wasm::WasmRuntimeConfig::default`
+/// - The Python plugin runtime via `crate::python::runtime`
+///
+/// The three subsystems happen to converge on the same value today
+/// because each independently judged 256 MiB to fit its workload
+/// while preserving host headroom — not because the value is
+/// structurally fixed. A subsystem whose workload legitimately needs
+/// a different cap should introduce its own per-subsystem constant
+/// rather than bend this shared default; the shared constant exists
+/// to eliminate drift between subsystems that ARE aligned, not to
+/// force alignment where it would harm correctness.
+pub const DEFAULT_SANDBOX_MAX_MEMORY: usize = 256 * 1024 * 1024;
+
+/// Default per-call CPU-time budget (in seconds) for sandboxed
+/// wasmtime calls in rustledger.
+///
+/// Combined with the "1M wasmtime fuel ~ 1 second of wasm
+/// execution" convention used by [`make_sandboxed_store`], this
+/// gives every sandboxed call ~30 million fuel before exhaustion
+/// trips a trap. Generous enough for legitimate plugins (booking
+/// transactions, classifying entries) and importers (parsing
+/// CSV/OFX statements) while small enough that a runaway call
+/// surfaces as an error within a sensible interactive window
+/// rather than hanging.
+///
+/// Shared by the WASM plugin runtime
+/// ([`crate::runtime::RuntimeConfig::default`]) and the WASM
+/// importer host
+/// (`rustledger_importer::wasm::WasmRuntimeConfig::default`).
+///
+/// # Python opts out
+///
+/// The Python plugin runtime does NOT use this constant. `CPython`
+/// compiled to WASI runs as an interpreter that emits many wasm
+/// instructions per Python-source operation, so a Python workload
+/// at "the same wall-clock budget" needs ~10-100x more wasmtime
+/// fuel than equivalent native wasm. The Python path therefore
+/// sets fuel directly via its own `PYTHON_FUEL` constant
+/// (`crate::python::runtime::PYTHON_FUEL`), independent of this
+/// seconds-based default. The opt-out is principled — interpreter
+/// overhead is a structural property of CPython-on-wasm, not an
+/// oversight.
+pub const DEFAULT_SANDBOX_MAX_TIME_SECS: u64 = 30;
+
 /// Hard cap on the number of elements in any single WASM table.
 ///
 /// Importers/plugins don't typically need indirect-call tables at all,
@@ -178,82 +238,73 @@ pub fn make_sandboxed_store(
 /// posture. Exposed for tests and embedders who need to construct an
 /// `Engine` with the same flags but different lifetimes.
 ///
+/// Composes [`apply_proposal_disables`] (the WASM-proposal disable
+/// set, shared with the Python runtime's `engine_config`) with
+/// `consume_fuel(true)`. The proposal-list rationale and the
+/// wasmtime-bump maintenance audit both live on
+/// [`apply_proposal_disables`].
+#[must_use]
+pub fn sandbox_config() -> Config {
+    let mut c = Config::new();
+    c.consume_fuel(true);
+    apply_proposal_disables(&mut c);
+    c
+}
+
+/// Apply rustledger's WASM-proposal disable list to an existing
+/// [`Config`].
+///
+/// Single source of truth for the disable set; every rustledger
+/// sandboxed [`Engine`] (the regular plugin / importer path via
+/// [`sandbox_config`], the Python runtime via
+/// `crate::python::runtime`) should call this.
+///
+/// Each disable matches a rationale documented on [`sandbox_config`]:
+///
+/// - `wasm_threads`, `wasm_shared_everything_threads` — concurrency
+///   proposals that bypass per-call `Store` isolation.
+/// - `wasm_multi_memory`, `wasm_memory64` — invalidate the single-
+///   memory accounting in [`ResourceLimiter::memory_growing`] and the
+///   u32-based ABI offset math.
+/// - `wasm_component_model` — we use a custom `MessagePack` ABI, not
+///   components.
+/// - `wasm_gc`, `wasm_function_references` — typed-ref / GC proposals
+///   we don't use; disabled to shrink attack surface.
+/// - `wasm_stack_switching`, `wasm_tail_call` — unused control-flow
+///   proposals.
+///
+/// Proposals NOT touched (default-on and we rely on or tolerate them):
+/// `wasm_simd`, `wasm_bulk_memory`, `wasm_reference_types`,
+/// `wasm_multi_value`, `wasm_extended_const`, `wasm_relaxed_simd`.
+///
 /// # Maintenance: re-audit on every wasmtime bump
 ///
 /// wasmtime's `Config::new()` returns its *current* defaults, which
 /// evolve across versions — new proposals routinely land as
 /// default-on. On every wasmtime bump in `Cargo.toml`, re-audit this
-/// function: check wasmtime's release notes for new `wasm_*`
-/// features and decide whether to keep, disable, or leave at
-/// default. wasmtime does not provide a "deny by default" mode, so
-/// this audit is structurally required, not optional.
-///
-/// # Enabled
-///
-/// - `consume_fuel(true)` — fuel metering for `DoS` bound. Every
-///   sandboxed call must `Store::set_fuel(...)` before invoking
-///   (handled by [`make_sandboxed_store`]).
-///
-/// # Explicitly disabled (security)
-///
-/// - `wasm_threads` — atomics on shared memory bypass per-call `Store`
-///   isolation and enable contention-based `DoS`.
-/// - `wasm_shared_everything_threads` — extension of the above.
-/// - `wasm_multi_memory` — importers/plugins are designed for exactly
-///   one linear memory. Multiple memories would invalidate the single-
-///   memory accounting in `ResourceLimiter::memory_growing`.
-/// - `wasm_memory64` — our ABIs are u32-addressed. 64-bit memory would
-///   silently break offset math.
-/// - `wasm_component_model` (and the `_async`/`_threading`/`_gc`/etc.
-///   sub-flags) — we use a custom `MessagePack` ABI, not wasmtime
-///   components. Disabled to shrink attack surface.
-/// - `wasm_gc` / `wasm_function_references` — opt out of the GC and
-///   typed-references proposals; not used and add runtime complexity.
-/// - `wasm_stack_switching` / `wasm_tail_call` — control-flow features
-///   we don't use; disabled to shrink attack surface.
-///
-/// # Kept enabled (default + we rely on or tolerate)
-///
-/// - `wasm_simd` — vector instructions; useful for parsing,
-///   sandbox-safe.
-/// - `wasm_bulk_memory` — `memory.copy`/`memory.fill`; needed by
-///   compilers and harmless under our memory cap.
-/// - `wasm_reference_types` — `externref`/`funcref`; we cap table
-///   growth separately so unbounded ref tables aren't reachable.
-/// - `wasm_multi_value` — multi-return functions; sandbox-safe.
-#[must_use]
-pub fn sandbox_config() -> Config {
-    let mut c = Config::new();
-    c.consume_fuel(true);
-
-    // Concurrency / shared-state proposals — bypass our per-call
-    // `Store` isolation. Off.
+/// function: check wasmtime's release notes for new `wasm_*` features
+/// and decide whether to keep, disable, or leave at default. The
+/// audit covers BOTH sandbox paths because every sandboxed config
+/// flows through this function.
+pub fn apply_proposal_disables(c: &mut Config) {
+    // Concurrency / shared-state proposals.
     c.wasm_threads(false);
     c.wasm_shared_everything_threads(false);
 
-    // Multi-memory / 64-bit memory — invalidate our single-memory
-    // ResourceLimiter accounting and u32-based ABI offset math. Off.
+    // Multi-memory / 64-bit memory.
     c.wasm_multi_memory(false);
     c.wasm_memory64(false);
 
-    // Component model — we use a custom MessagePack ABI, not
-    // components. Off (shrinks attack surface).
+    // Component model.
     c.wasm_component_model(false);
 
-    // GC + typed function references — not used; runtime complexity
-    // without benefit. Off.
+    // GC + typed function references.
     c.wasm_gc(false);
     c.wasm_function_references(false);
 
-    // Control-flow features we don't use. Off.
+    // Control-flow features we don't use.
     c.wasm_stack_switching(false);
     c.wasm_tail_call(false);
-
-    // Implicitly default-on and we tolerate them:
-    //   wasm_simd, wasm_bulk_memory, wasm_reference_types,
-    //   wasm_multi_value, wasm_extended_const, wasm_relaxed_simd.
-
-    c
 }
 
 #[cfg(test)]

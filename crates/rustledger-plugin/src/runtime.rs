@@ -78,8 +78,12 @@ pub struct RuntimeConfig {
 impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
-            max_memory: 256 * 1024 * 1024, // 256MB
-            max_time_secs: 30,
+            // Both defaults flow from `sandbox` constants so this
+            // path, the WASM importer, and the Python plugin runtime
+            // (memory only — Python opts out of the time default)
+            // share single sources of truth.
+            max_memory: crate::sandbox::DEFAULT_SANDBOX_MAX_MEMORY,
+            max_time_secs: crate::sandbox::DEFAULT_SANDBOX_MAX_TIME_SECS,
         }
     }
 }
@@ -811,8 +815,18 @@ mod tests {
     #[test]
     fn test_runtime_config_defaults() {
         let config = RuntimeConfig::default();
-        assert_eq!(config.max_memory, 256 * 1024 * 1024); // 256MB
-        assert_eq!(config.max_time_secs, 30);
+        // Single source of truth: both fields are aliases of the
+        // sandbox-wide defaults. The Python and importer paths
+        // reference the same constants, so a future bump to either
+        // value propagates uniformly.
+        assert_eq!(
+            config.max_memory,
+            crate::sandbox::DEFAULT_SANDBOX_MAX_MEMORY
+        );
+        assert_eq!(
+            config.max_time_secs,
+            crate::sandbox::DEFAULT_SANDBOX_MAX_TIME_SECS
+        );
     }
 
     /// Test that a module missing memory export is rejected.
@@ -1290,7 +1304,7 @@ mod tests {
         let plugin =
             Plugin::load_bytes("fuel-zero", &wasm, &RuntimeConfig::default()).expect("loads");
         let zero_secs = RuntimeConfig {
-            max_memory: 256 * 1024 * 1024,
+            max_memory: crate::sandbox::DEFAULT_SANDBOX_MAX_MEMORY,
             max_time_secs: 0,
         };
         let err = plugin
@@ -1309,7 +1323,7 @@ mod tests {
         let plugin =
             Plugin::load_bytes("fuel-max", &wasm, &RuntimeConfig::default()).expect("loads");
         let max_secs = RuntimeConfig {
-            max_memory: 256 * 1024 * 1024,
+            max_memory: crate::sandbox::DEFAULT_SANDBOX_MAX_MEMORY,
             max_time_secs: u64::MAX,
         };
         let err = plugin

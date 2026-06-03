@@ -168,7 +168,7 @@ ropey = { version = "1", default-features = false, features = ["cr_lines", "simd
 # Line-based diff used by the LSP formatting handler. Already a
 # transitive dependency via insta; promoted to a direct dep so the
 # formatter doesn't re-roll byte/line diff primitives.
-similar = "2"
+similar = "3"
 crossbeam-channel = "0.5"
 parking_lot = "0.12"
 

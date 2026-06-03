@@ -81,8 +81,12 @@ pub struct WasmRuntimeConfig {
 impl Default for WasmRuntimeConfig {
     fn default() -> Self {
         Self {
-            max_memory: 256 * 1024 * 1024,
-            max_time_secs: 30,
+            // Both fields are aliases of the workspace-wide sandbox
+            // defaults so the importer, the regular plugin path, and
+            // the Python plugin runtime (memory only -- Python opts
+            // out of the time default) can't drift apart silently.
+            max_memory: sandbox::DEFAULT_SANDBOX_MAX_MEMORY,
+            max_time_secs: sandbox::DEFAULT_SANDBOX_MAX_TIME_SECS,
         }
     }
 }
@@ -800,8 +804,12 @@ mod tests {
     #[test]
     fn wasm_runtime_config_default_is_sensible() {
         let c = WasmRuntimeConfig::default();
-        assert_eq!(c.max_memory, 256 * 1024 * 1024);
-        assert_eq!(c.max_time_secs, 30);
+        // Sourced from the workspace-wide sandbox constants. A future
+        // bump propagates here without manual update; this test pins
+        // that the importer continues to track the shared defaults
+        // rather than drifting to a local literal.
+        assert_eq!(c.max_memory, sandbox::DEFAULT_SANDBOX_MAX_MEMORY);
+        assert_eq!(c.max_time_secs, sandbox::DEFAULT_SANDBOX_MAX_TIME_SECS);
     }
 
     #[test]
@@ -1099,7 +1107,7 @@ mod tests {
         // .max(1) so a 0 config still gets enough fuel to complete a
         // trivial call.
         let config = WasmRuntimeConfig {
-            max_memory: 256 * 1024 * 1024,
+            max_memory: sandbox::DEFAULT_SANDBOX_MAX_MEMORY,
             max_time_secs: 0,
         };
         let bytes = wat::parse_str(roundtrip_wat()).expect("WAT parses");
@@ -1138,7 +1146,7 @@ mod tests {
         // u64::MAX which set_fuel accepts.
         let bytes = wat::parse_str(roundtrip_wat()).expect("WAT parses");
         let config = WasmRuntimeConfig {
-            max_memory: 256 * 1024 * 1024,
+            max_memory: sandbox::DEFAULT_SANDBOX_MAX_MEMORY,
             max_time_secs: u64::MAX,
         };
         // Successful load proves the fuel calc didn't panic and the
@@ -1419,9 +1427,15 @@ mod tests {
         // The diagnostic name flows through to `path()` so error
         // messages and logs identify the embedded module.
         assert_eq!(importer.path(), Path::new("inline-test"));
-        // Default config is used — caller didn't pass one.
-        assert_eq!(importer.runtime_config().max_memory, 256 * 1024 * 1024);
-        assert_eq!(importer.runtime_config().max_time_secs, 30);
+        // Default config is used, caller didn't pass one.
+        assert_eq!(
+            importer.runtime_config().max_memory,
+            sandbox::DEFAULT_SANDBOX_MAX_MEMORY
+        );
+        assert_eq!(
+            importer.runtime_config().max_time_secs,
+            sandbox::DEFAULT_SANDBOX_MAX_TIME_SECS
+        );
         // Metadata still cached as in the standard load path.
         assert_eq!(importer.name(), "tst");
     }

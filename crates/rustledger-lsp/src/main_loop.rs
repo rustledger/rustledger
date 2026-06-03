@@ -990,7 +990,23 @@ impl MainLoopState {
         let uri = &params.text_document.uri;
         let (text, parse_result) = self.get_document_data(uri);
 
-        let response = handle_code_lens(&params, &text, &parse_result, self.position_encoding);
+        // Snapshot the multi-file ledger directives so the eager
+        // balance verification inside `handle_code_lens` (#1253) sees
+        // the same multi-file view that `codeLens/resolve` used to
+        // see. Matches the snapshot pattern in `try_dispatch_async`'s
+        // CodeLensResolve branch.
+        let ledger_directives = {
+            let guard = self.ledger_state.read();
+            guard.directives().map(<[_]>::to_vec)
+        };
+
+        let response = handle_code_lens(
+            &params,
+            &text,
+            &parse_result,
+            ledger_directives.as_deref(),
+            self.position_encoding,
+        );
 
         serde_json::to_value(response).map_err(|e| e.to_string())
     }

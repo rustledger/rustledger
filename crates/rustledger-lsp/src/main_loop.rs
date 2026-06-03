@@ -997,7 +997,7 @@ impl MainLoopState {
         // CodeLensResolve branch.
         let ledger_directives = {
             let guard = self.ledger_state.read();
-            guard.directives().map(<[_]>::to_vec)
+            guard.directives().map(|d| d.to_vec())
         };
 
         let response = handle_code_lens(

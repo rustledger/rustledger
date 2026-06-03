@@ -65,8 +65,20 @@ pub fn handle_code_lens(
     // `None` ledger_directives falls back to the current file's
     // parse_result, matching the resolve path's behavior in
     // single-file mode.
-    let booked_directives =
-        book_directives_once(ledger_directives.unwrap_or(&parse_result.directives));
+    //
+    // Fast path: skip booking entirely when the file has no balance
+    // directives. Open/transaction lenses don't read `booked_directives`,
+    // so for the common-case file (zero balance assertions) we save
+    // an O(N) booking pass on every codeLens request.
+    let has_balance = parse_result
+        .directives
+        .iter()
+        .any(|s| matches!(s.value, Directive::Balance(_)));
+    let booked_directives = if has_balance {
+        book_directives_once(ledger_directives.unwrap_or(&parse_result.directives))
+    } else {
+        Vec::new()
+    };
 
     for spanned in &parse_result.directives {
         let (line, _) = line_index.offset_to_position(spanned.span.start);
@@ -151,15 +163,18 @@ pub fn handle_code_lens(
                         .unwrap_or_default();
 
                 let command = if actual_amount == bal.amount.number {
+                    // Passing assertion: informational title, no
+                    // click action. Uses `rledger.noop` (matching the
+                    // failing branch below and the pre-eager path) so
+                    // strict clients that filter on advertised
+                    // commands don't dead-link the lens. A future
+                    // "show balance details" command can be added
+                    // here once its handler is registered in
+                    // `execute_command::COMMANDS`.
                     Command {
                         title: format!("✓ Balance: {} {}", bal.amount.number, bal.amount.currency),
-                        command: "rledger.showBalanceDetails".to_string(),
-                        arguments: Some(vec![serde_json::json!({
-                            "account": bal.account.to_string(),
-                            "status": "verified",
-                            "expected": format!("{} {}", bal.amount.number, bal.amount.currency),
-                            "actual": format!("{} {}", actual_amount, bal.amount.currency),
-                        })]),
+                        command: "rledger.noop".to_string(),
+                        arguments: None,
                     }
                 } else {
                     // Failing assertions: the real error is surfaced
@@ -230,10 +245,12 @@ pub fn handle_code_lens_resolve(
     resolved
 }
 
-/// Sort + book a directive list once, returning the booked
-/// transactions in chronological order.
+/// Sort + book a directive list once, returning the full directive
+/// list in chronological order with each transaction booked and
+/// interpolated in place.
 ///
-/// Output is suitable for any number of subsequent
+/// Non-transaction directives pass through unchanged. The returned
+/// vector is suitable for any number of subsequent
 /// [`balance_at_date_from_booked`] lookups, which is how
 /// [`handle_code_lens`] amortizes booking cost across all balance
 /// lenses in a file (O(N) booking + O(M) lookups, vs O(M*N) for the

@@ -1038,12 +1038,19 @@ impl MainLoopState {
         // follow-up. The validator is the source of truth in the
         // meantime, and the diagnostic (which DOES use the overlay)
         // surfaces the real verdict.
-        let in_journal = uri_to_path(uri)
-            .map(|p| self.ledger_state.read().contains_file(&p))
-            .unwrap_or(false);
-        let ledger_directives = if has_balance && in_journal {
+        // One read-lock acquisition guards both the contains_file
+        // check and the directives snapshot. Splitting them across
+        // two `.read()` calls left a window where a journal reload
+        // could remove the file between the membership check and
+        // the snapshot read, producing a wrong-ledger lens for a
+        // file no longer in the journal.
+        let ledger_directives = if has_balance {
+            let path = uri_to_path(uri);
             let guard = self.ledger_state.read();
-            guard.directives().map(|d| d.to_vec())
+            match path {
+                Some(p) if guard.contains_file(&p) => guard.directives().map(|d| d.to_vec()),
+                _ => None,
+            }
         } else {
             None
         };

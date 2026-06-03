@@ -10,8 +10,28 @@
 //! differential test starts firing for the wrong reasons.
 //!
 //! The baseline manifest is `tests/baselines/parser-corpus.manifest`:
-//! one line per file, `relative/path/from/repo-root<TAB>hex-hash`,
-//! sorted lexically.
+//! one line per file, sorted lexically, with two hashes per line:
+//!
+//! ```text
+//! relative/path<TAB>source_blake3<TAB>parser_output_blake3
+//! ```
+//!
+//! Both hashes are present so the gate can distinguish "the
+//! compatibility corpus drifted upstream" from "the parser's output
+//! changed." Without that distinction CI fires on every push that
+//! happens to land while an upstream beancount-related repo gets a
+//! new commit, and the test stops being a useful gate.
+//!
+//! Drift policy:
+//! - `source` matches AND `parser` matches: no change.
+//! - `source` matches AND `parser` differs: real parser drift, fails.
+//! - `source` differs: corpus content changed upstream; we warn and
+//!   skip the parser check for that file. Strict mode does NOT
+//!   treat this as failure because a corpus-fetch race is outside
+//!   the PR author's control. Regenerate the manifest to refresh.
+//! - File in manifest but absent from disk: warn (corpus shrank).
+//! - File on disk but absent from manifest: warn in default mode,
+//!   fail in strict mode (new fixture without regen).
 //!
 //! ## Fingerprint stability
 //!
@@ -71,8 +91,14 @@ const MANIFEST_PATH: &str = "tests/baselines/parser-corpus.manifest";
 /// failed.
 const MIN_FULL_CORPUS_SIZE: usize = 100;
 
-/// Hash of one file's parsed output.
-type FileHash = String;
+/// Per-file fingerprint: source-content hash plus parser-output hash.
+/// The source hash lets the gate distinguish "upstream pushed a new
+/// version of this corpus file" from "the parser's output changed."
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FileFingerprint {
+    source: String,
+    parser: String,
+}
 
 fn repo_root() -> &'static Path {
     static ROOT: OnceLock<PathBuf> = OnceLock::new();
@@ -166,19 +192,31 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
 ///   `comments`, `errors`, `warnings`, `currency_occurrences`)
 ///   formatted with `Debug` — they're all `Vec<_>` with no map
 ///   payloads inside, so `Debug` is deterministic for them.
-fn fingerprint(absolute_path: &Path) -> FileHash {
+fn fingerprint(absolute_path: &Path) -> FileFingerprint {
     let source = match std::fs::read_to_string(absolute_path) {
         Ok(s) => s,
-        // Encode the ErrorKind name (e.g., "PermissionDenied", "NotFound")
-        // rather than the discriminant integer: ten files showing
-        // `read-error:13` in CI logs gives no diagnostic info.
-        Err(e) => return format!("read-error:{:?}", e.kind()),
+        Err(e) => {
+            // Read error: both hashes encode the failure kind. Same
+            // semantics as a real hash but tagged so the manifest
+            // line is self-describing in CI logs.
+            let tag = format!("read-error:{:?}", e.kind());
+            return FileFingerprint {
+                source: tag.clone(),
+                parser: tag,
+            };
+        }
     };
+    let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
     let parse_outcome =
         std::panic::catch_unwind(AssertUnwindSafe(|| rustledger_parser::parse(&source)));
     let result = match parse_outcome {
         Ok(r) => r,
-        Err(payload) => return format!("panic:{}", panic_payload_hash(&*payload)),
+        Err(payload) => {
+            return FileFingerprint {
+                source: source_hash,
+                parser: format!("panic:{}", panic_payload_hash(&*payload)),
+            };
+        }
     };
     let mut hasher = blake3::Hasher::new();
     // Directives route through serde_json::Value (BTreeMap-backed
@@ -204,7 +242,11 @@ fn fingerprint(absolute_path: &Path) -> FileHash {
     hasher.update(format!("{:?}", &result.warnings).as_bytes());
     hasher.update(b"\ncurrency_occurrences:");
     hasher.update(format!("{:?}", &result.currency_occurrences).as_bytes());
-    hasher.finalize().to_hex().to_string()
+    let parser_hash = hasher.finalize().to_hex().to_string();
+    FileFingerprint {
+        source: source_hash,
+        parser: parser_hash,
+    }
 }
 
 /// Distill a panic payload to a stable hex string.
@@ -240,19 +282,15 @@ fn panic_payload_hash(payload: &(dyn std::any::Any + Send)) -> String {
     h.finalize().to_hex().to_string()
 }
 
-fn compute_manifest() -> BTreeMap<PathBuf, FileHash> {
+fn compute_manifest() -> BTreeMap<PathBuf, FileFingerprint> {
     let root = repo_root();
     discover_corpus_files()
         .iter()
-        .map(|rel| {
-            let absolute = root.join(rel);
-            let hash = fingerprint(&absolute);
-            (rel.clone(), hash)
-        })
+        .map(|rel| (rel.clone(), fingerprint(&root.join(rel))))
         .collect()
 }
 
-fn read_committed_manifest() -> BTreeMap<PathBuf, FileHash> {
+fn read_committed_manifest() -> BTreeMap<PathBuf, FileFingerprint> {
     let path = repo_root().join(MANIFEST_PATH);
     let contents = std::fs::read_to_string(&path).unwrap_or_default();
     let mut out = BTreeMap::new();
@@ -260,32 +298,45 @@ fn read_committed_manifest() -> BTreeMap<PathBuf, FileHash> {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        let Some((path_str, hash)) = line.split_once('\t') else {
+        // path<TAB>source<TAB>parser
+        let mut parts = line.split('\t');
+        let (Some(path_str), Some(source), Some(parser)) =
+            (parts.next(), parts.next(), parts.next())
+        else {
             continue;
         };
-        out.insert(PathBuf::from(path_str), hash.to_string());
+        out.insert(
+            PathBuf::from(path_str),
+            FileFingerprint {
+                source: source.to_string(),
+                parser: parser.to_string(),
+            },
+        );
     }
     out
 }
 
-fn render_manifest(manifest: &BTreeMap<PathBuf, FileHash>) -> String {
+fn render_manifest(manifest: &BTreeMap<PathBuf, FileFingerprint>) -> String {
     let mut out = String::new();
     out.push_str(
         "# Parser-output baseline. See crates/rustledger-parser/tests/corpus_baseline.rs.\n",
     );
+    out.push_str("# Format: path<TAB>source_hash<TAB>parser_output_hash\n");
     out.push_str(
         "# Regenerate: BASELINE_UPDATE=1 cargo test -p rustledger-parser --test corpus_baseline\n",
     );
-    for (path, hash) in manifest {
+    for (path, fp) in manifest {
         out.push_str(&path.to_string_lossy());
         out.push('\t');
-        out.push_str(hash);
+        out.push_str(&fp.source);
+        out.push('\t');
+        out.push_str(&fp.parser);
         out.push('\n');
     }
     out
 }
 
-fn write_manifest(manifest: &BTreeMap<PathBuf, FileHash>) {
+fn write_manifest(manifest: &BTreeMap<PathBuf, FileFingerprint>) {
     let path = repo_root().join(MANIFEST_PATH);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).expect("create baseline dir");
@@ -339,27 +390,31 @@ fn parser_output_matches_baseline() {
         return;
     }
 
-    // Bidirectional drift check.
+    // Source-aware drift classification. See module rustdoc.
     //
-    // Hash-changed entries: file in both, hash differs. Always a
-    // failure; that's the original gate.
-    let mut hash_changes: Vec<(PathBuf, &FileHash, &FileHash)> = Vec::new();
-    // Missing-from-corpus: file in manifest but no longer in
-    // corpus. Could be intentional (a source went away) but worth
-    // surfacing.
+    // parser_drift: source matches but parser output differs.
+    // This is the only "real" drift signal.
+    let mut parser_drift: Vec<(&PathBuf, &str, &str)> = Vec::new();
+    // source_drift: corpus content changed upstream. We don't gate
+    // on this because it's outside the PR author's control; just
+    // warn that the manifest is now partially stale.
+    let mut source_drift: Vec<&PathBuf> = Vec::new();
+    // Missing-from-corpus: file in manifest but no longer on disk.
     let mut missing_from_corpus: Vec<&PathBuf> = Vec::new();
-    // Missing-from-manifest: file in corpus but no manifest entry.
-    // Real failure under strict mode: someone added a fixture and
-    // didn't regen, so that file's parser output is now unprotected.
+    // Missing-from-manifest: file on disk but no manifest entry.
+    // Strict mode treats this as drift (new fixture without regen).
     let mut missing_from_manifest: Vec<&PathBuf> = Vec::new();
 
-    for (path, expected_hash) in &committed {
+    for (path, expected) in &committed {
         match current.get(path) {
-            Some(current_hash) if current_hash != expected_hash => {
-                hash_changes.push((path.clone(), expected_hash, current_hash));
+            None => missing_from_corpus.push(path),
+            Some(current_fp) if current_fp.source != expected.source => {
+                source_drift.push(path);
+            }
+            Some(current_fp) if current_fp.parser != expected.parser => {
+                parser_drift.push((path, expected.parser.as_str(), current_fp.parser.as_str()));
             }
             Some(_) => {}
-            None => missing_from_corpus.push(path),
         }
     }
     for path in current.keys() {
@@ -368,15 +423,22 @@ fn parser_output_matches_baseline() {
         }
     }
 
-    // Strict mode treats unmanifested files as drift.
     let unprotected_in_strict = strict && !missing_from_manifest.is_empty();
-    if hash_changes.is_empty() && !unprotected_in_strict {
-        if !missing_from_manifest.is_empty() {
+    if parser_drift.is_empty() && !unprotected_in_strict {
+        if !source_drift.is_empty() {
             eprintln!(
-                "warning: {} corpus file(s) have no manifest entry. \
-                 Regenerate to extend coverage:\n  \
+                "info: {} corpus file(s) have new upstream content \
+                 (source hash changed). Parser output on those files \
+                 was NOT checked against the manifest because they're \
+                 different inputs. Regenerate when convenient:\n  \
                  BASELINE_UPDATE=1 cargo test -p rustledger-parser \
                  --test corpus_baseline",
+                source_drift.len(),
+            );
+        }
+        if !missing_from_manifest.is_empty() {
+            eprintln!(
+                "warning: {} corpus file(s) have no manifest entry.",
                 missing_from_manifest.len(),
             );
         }
@@ -391,17 +453,18 @@ fn parser_output_matches_baseline() {
     }
 
     let mut report = String::new();
-    if !hash_changes.is_empty() {
+    if !parser_drift.is_empty() {
         report.push_str(&format!(
-            "Hash mismatch on {} file(s) (first 10 shown):\n",
-            hash_changes.len(),
+            "Parser-output drift on {} file(s) with unchanged source \
+             (first 10 shown):\n",
+            parser_drift.len(),
         ));
-        for (path, expected, current) in hash_changes.iter().take(10) {
+        for (path, expected, current) in parser_drift.iter().take(10) {
             report.push_str(&format!(
                 "  {path}\n    expected: {e}\n    current:  {c}\n",
                 path = path.display(),
-                e = &expected[..16],
-                c = &current[..16],
+                e = &expected[..16.min(expected.len())],
+                c = &current[..16.min(current.len())],
             ));
         }
     }

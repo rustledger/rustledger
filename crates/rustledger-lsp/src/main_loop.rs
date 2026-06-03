@@ -39,7 +39,6 @@ use crate::handlers::type_hierarchy::{
 };
 use crate::handlers::workspace_symbols::handle_workspace_symbols;
 use crate::ledger_state::{SharedLedgerState, new_shared_ledger_state};
-use crate::snapshot::bump_revision;
 use crate::uri_to_path;
 use crate::vfs::Vfs;
 use crossbeam_channel::{Receiver, Sender};
@@ -189,6 +188,18 @@ pub struct MainLoopState {
     pub task_receiver: Receiver<TaskResult>,
     /// Channel for submitting jobs to the background worker thread.
     pub job_sender: Sender<BackgroundJob>,
+    /// Per-instance revision counter for stale-result detection in
+    /// `dispatch_async`. Pre-PR #1261 this was a process-wide static
+    /// in `snapshot.rs`, which broke when multiple `MainLoopState`s
+    /// shared a process: the integration test harness spawns many
+    /// in-process LSP servers in parallel, and a `didChange` in test
+    /// A would bump the revision such that test B's pending async
+    /// result was silently discarded as stale even though B's world
+    /// hadn't changed. Tests would then time out waiting for the
+    /// dropped response. An `Arc<AtomicU64>` keeps clone-and-share
+    /// cheap so worker closures can capture without borrowing
+    /// `MainLoopState`.
+    revision: Arc<std::sync::atomic::AtomicU64>,
     /// Action invoked when the `exit` notification arrives. Production
     /// wires this to [`std::process::exit`]; tests pass a no-op so the
     /// notification breaks the loop cleanly without terminating the
@@ -250,8 +261,18 @@ impl MainLoopState {
             task_sender,
             task_receiver,
             job_sender,
+            revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             exit_action: Some(Box::new(|code| std::process::exit(code))),
         }
+    }
+
+    /// Bump the per-instance revision counter. Called whenever the
+    /// world state changes (didChange, didClose) so in-flight async
+    /// handlers can detect they should drop their results.
+    fn bump_revision(&self) -> u64 {
+        self.revision
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1
     }
 
     /// Replace the exit action. Returns `self` for chaining. The
@@ -320,15 +341,60 @@ impl MainLoopState {
         request_id: lsp_server::RequestId,
         handler: impl FnOnce() -> Result<serde_json::Value, String> + Send + 'static,
     ) {
+        self.dispatch_async_inner(request_id, handler, true);
+    }
+
+    /// Same as [`Self::dispatch_async`] but skips the stale-result
+    /// check. Use for handlers whose output does not depend on any
+    /// world state (so "stale" and "fresh" produce the same answer).
+    ///
+    /// The staleness check exists to drop results computed against
+    /// outdated parse / ledger snapshots; for a stateless handler
+    /// (today: [`handle_code_lens_resolve`]'s defensive fallback,
+    /// which does nothing more than fill `command` on a `None` lens)
+    /// the check is pure overhead AND, critically, a correctness
+    /// hazard when multiple `MainLoopState`s share a process — the
+    /// revision counter is a process-wide `AtomicU64`, so parallel
+    /// instances (e.g., the integration test harness) clobber each
+    /// other's dispatch revisions and lose stateless results that
+    /// have nothing to do with the world state.
+    fn dispatch_async_unconditional(
+        &self,
+        request_id: lsp_server::RequestId,
+        handler: impl FnOnce() -> Result<serde_json::Value, String> + Send + 'static,
+    ) {
+        self.dispatch_async_inner(request_id, handler, false);
+    }
+
+    fn dispatch_async_inner(
+        &self,
+        request_id: lsp_server::RequestId,
+        handler: impl FnOnce() -> Result<serde_json::Value, String> + Send + 'static,
+        check_staleness: bool,
+    ) {
         let task_sender = self.task_sender.clone();
-        let dispatch_revision = crate::snapshot::current_revision();
+        // Capture the per-instance revision counter via Arc clone so
+        // the worker can compare without borrowing `MainLoopState`.
+        // Using the per-instance counter (not the global one in
+        // `snapshot.rs`) is required for correctness when multiple
+        // MainLoopStates share a process — see the `revision` field
+        // rustdoc.
+        let revision_arc = self.revision.clone();
+        let dispatch_revision = if check_staleness {
+            Some(revision_arc.load(std::sync::atomic::Ordering::SeqCst))
+        } else {
+            None
+        };
 
         let _ = self.job_sender.send(Box::new(move || {
             let result = handler();
 
             // Drop stale results — if the world changed since dispatch,
             // the client will have sent a new request for fresh data.
-            if crate::snapshot::current_revision() != dispatch_revision {
+            // Skipped for unconditional dispatch (stateless handlers).
+            if let Some(rev) = dispatch_revision
+                && revision_arc.load(std::sync::atomic::Ordering::SeqCst) != rev
+            {
                 tracing::debug!(
                     "Dropping stale result for request {:?} (revision changed)",
                     request_id
@@ -368,12 +434,14 @@ impl MainLoopState {
                 let lens: CodeLens = match serde_json::from_value(req.params.clone()) {
                     Ok(l) => l,
                     Err(e) => {
-                        self.dispatch_async(id, move || Err(e.to_string()));
+                        // Use unconditional dispatch (stateless
+                        // handler — see dispatch_async_unconditional).
+                        self.dispatch_async_unconditional(id, move || Err(e.to_string()));
                         return true;
                     }
                 };
 
-                self.dispatch_async(id, move || {
+                self.dispatch_async_unconditional(id, move || {
                     let resolved = handle_code_lens_resolve(lens);
                     serde_json::to_value(resolved).map_err(|e| e.to_string())
                 });
@@ -1348,7 +1416,7 @@ impl MainLoopState {
         }
 
         // Bump revision (invalidates any in-flight requests)
-        bump_revision();
+        self.bump_revision();
 
         // Compute and publish diagnostics
         self.publish_diagnostics(&uri, &text);
@@ -1371,7 +1439,7 @@ impl MainLoopState {
             }
 
             // Bump revision
-            bump_revision();
+            self.bump_revision();
 
             // Recompute diagnostics
             self.publish_diagnostics(&uri, &text);

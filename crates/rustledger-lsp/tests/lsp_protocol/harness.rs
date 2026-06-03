@@ -52,12 +52,18 @@ use rustledger_lsp::main_loop::run_main_loop_with_exit_action;
 
 /// Default timeout for any blocking receive in the harness.
 ///
-/// Generous enough to absorb cold-cache cargo-test runs on slower
-/// CI workers (booking + plugins can take 100ms+ on first call) and
-/// short enough that a stuck test fails the suite rather than hanging
-/// it. A test that legitimately needs longer should pass an explicit
+/// Set generously enough to absorb cold-cache cargo-test runs on
+/// CI workers under parallel-test contention: each protocol test
+/// spawns its own server thread + `lsp-worker` thread, and the
+/// async-dispatch paths (codeLens/resolve, semanticTokens/full)
+/// can be starved of CPU when 6+ tests run in parallel on a
+/// limited core count. Empirically 5s wasn't enough on GitHub
+/// Actions linux runners; 15s leaves plenty of headroom while
+/// still failing fast on a genuinely stuck test.
+///
+/// A test that legitimately needs longer should pass an explicit
 /// duration to [`LspTestClient::expect_response_timeout`].
-pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
+pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// An in-process LSP client connected to a freshly-spawned server.
 ///

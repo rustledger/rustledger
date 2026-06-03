@@ -6,16 +6,32 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Global revision counter for cancellation detection.
+/// Global revision counter used by [`Snapshot`].
+///
+/// Note: the LSP main loop maintains its OWN per-instance revision
+/// counter on `MainLoopState`. This global is kept only because the
+/// `Snapshot` API exposes `is_current` / `is_cancelled`, which today
+/// has no production callers and is exercised only by the test below.
+/// New cancellation-detection logic should use the per-instance
+/// counter on `MainLoopState` so multiple LSP instances in one
+/// process (e.g., integration tests) don't clobber each other.
 static REVISION: AtomicU64 = AtomicU64::new(0);
 
-/// Bump the global revision counter.
-/// Called when the world state changes (e.g., document edit).
+/// Bump the global revision counter. See [`REVISION`] note about
+/// preferring the per-instance counter on `MainLoopState`.
+///
+/// Kept `#[allow(dead_code)]` because production no longer calls it
+/// (the per-instance counter on `MainLoopState` replaced it); the
+/// remaining caller is `test_snapshot_cancellation` below, which
+/// pins the `Snapshot::is_cancelled` contract even though no
+/// production handler reads `Snapshot` today.
+#[allow(dead_code)]
 pub fn bump_revision() -> u64 {
     REVISION.fetch_add(1, Ordering::SeqCst) + 1
 }
 
-/// Get the current revision.
+/// Get the current revision. See [`REVISION`] note about preferring
+/// the per-instance counter on `MainLoopState`.
 pub fn current_revision() -> u64 {
     REVISION.load(Ordering::SeqCst)
 }

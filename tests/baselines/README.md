@@ -79,6 +79,17 @@ git commit -m 'chore(baselines): regenerate parser+format manifests'
 The regen script gates on a populated corpus and runs both tests with
 `BASELINE_UPDATE=1`.
 
+## Phase-3-of-#1262 staleness
+
+When `rustledger-cst::parse` becomes the production parser (phase 3.2
+of #1262), this gate still runs against the OLD `rustledger-parser`
+until phase 5.1. Between those phases the gate measures a parser
+users no longer invoke. A phase-3.5+ PR should add a parallel CST
+baseline alongside this one, or this gate should be removed when
+phase 5.1 lands. The current manifest scheme (path + source_hash +
+output_hash) lets a parallel CST baseline reuse the corpus and
+source hashes cheaply.
+
 ## Why this exists
 
 The parser-CST migration in #1262 stands up a parallel parser and

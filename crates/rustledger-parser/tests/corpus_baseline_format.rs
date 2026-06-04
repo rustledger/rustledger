@@ -18,6 +18,10 @@
 //! compatibility corpus drifted upstream" from "the formatter's
 //! output changed." Files whose parser output contains zero
 //! directives have nothing to format; the manifest omits them.
+//! Files that fail to read are encoded as a `read-error:<kind>`
+//! sentinel matching the parser baseline so a future readability
+//! flip doesn't produce contradictory diagnostics across the two
+//! manifests.
 //!
 //! ## Why `format_source`
 //!
@@ -39,109 +43,47 @@
 //!
 //! Review the diff and commit.
 
-use std::collections::BTreeMap;
+mod baseline_common;
+
+use std::collections::HashSet;
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 
 use rustledger_core::format::FormatConfig;
 use rustledger_parser::format_source;
 
-const CORPUS_ROOT: &str = "tests/compatibility/files";
+use baseline_common::{
+    CORPUS_ROOT, FileFingerprint, MIN_FULL_CORPUS_SIZE, compute_manifest, discover_corpus_files,
+    is_in_tree_fixture, panic_payload_hash, read_committed_manifest, repo_root, write_manifest,
+};
+
 const MANIFEST_PATH: &str = "tests/baselines/format-corpus.manifest";
 
-/// Minimum corpus size we consider "fully populated." Matches the
-/// parser baseline (see `corpus_baseline.rs`).
-const MIN_FULL_CORPUS_SIZE: usize = 100;
-
-/// Per-file fingerprint: source-content hash plus formatted-output
-/// hash. The source hash lets the gate distinguish "upstream pushed
-/// a new version of this corpus file" from "the formatter changed."
-/// See `corpus_baseline.rs::FileFingerprint`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct FileFingerprint {
-    source: String,
-    parser: String,
-}
-
-fn repo_root() -> &'static Path {
-    static ROOT: OnceLock<PathBuf> = OnceLock::new();
-    ROOT.get_or_init(|| {
-        // Two-condition anchor (corpus dir + workspace Cargo.toml)
-        // avoids halting at a coincidentally-named parent.
-        // See corpus_baseline.rs::repo_root() for rationale.
-        let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        loop {
-            if p.join("tests/compatibility/files").is_dir() && has_workspace_table(&p) {
-                return p;
-            }
-            assert!(p.pop(), "could not locate repo root");
-        }
-    })
-}
-
-/// See `corpus_baseline.rs::is_in_tree_fixture` for rationale.
-fn is_in_tree_fixture(rel: &Path) -> bool {
-    rel.starts_with("tests/compatibility/files/plugins/")
-}
-
-fn has_workspace_table(dir: &Path) -> bool {
-    let Ok(toml) = std::fs::read_to_string(dir.join("Cargo.toml")) else {
-        return false;
-    };
-    toml.lines()
-        .any(|line| line.trim_start().starts_with("[workspace]"))
-}
-
-fn discover_corpus_files() -> &'static [PathBuf] {
-    // Cached: the formatter test calls discovery from both
-    // compute_manifest and the small-corpus guard. See
-    // corpus_baseline.rs::discover_corpus_files for rationale.
-    static DISCOVERED: OnceLock<Vec<PathBuf>> = OnceLock::new();
-    DISCOVERED.get_or_init(|| {
-        let corpus_dir = repo_root().join(CORPUS_ROOT);
-        let mut out = Vec::new();
-        if !corpus_dir.is_dir() {
-            return out;
-        }
-        walk(&corpus_dir, &mut out);
-        out.sort();
-        out
-    })
-}
-
-fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            walk(&path, out);
-        } else if path.extension().and_then(|s| s.to_str()) == Some("beancount") {
-            let rel = path
-                .strip_prefix(repo_root())
-                .expect("corpus paths under repo_root")
-                .to_path_buf();
-            out.push(rel);
-        }
-    }
-}
+const MANIFEST_HEADER: &[&str] = &[
+    "# Formatter-output baseline. See crates/rustledger-parser/tests/corpus_baseline_format.rs.",
+    "# Format: path<TAB>source_hash<TAB>format_output_hash",
+    "# Regenerate: BASELINE_UPDATE=1 cargo test -p rustledger-parser --test corpus_baseline_format",
+];
 
 /// Parse `path` (absolute), pass its directives through
 /// [`format_source`] (the exact API the CLI uses), and return a
-/// stable hash of the formatted text.
+/// stable `(source, format_output)` fingerprint pair.
 ///
-/// Files that parse to zero directives return `None`. These are
-/// pure-comment files, empty files, or files whose every directive
-/// failed to parse; `format_source` would produce a degenerate
-/// output and there's no useful drift signal.
-///
-/// Parser or formatter panics are encoded as a stable sentinel hash
-/// so a panicking file doesn't kill visibility on the other ~700.
+/// Returns `None` for files that parse to zero directives — there's
+/// nothing for the formatter to produce and no useful drift signal.
+/// Read failures are encoded as a `read-error:<kind>` sentinel to
+/// mirror the parser baseline's behavior.
 fn fingerprint(absolute_path: &Path) -> Option<FileFingerprint> {
-    let source = std::fs::read_to_string(absolute_path).ok()?;
+    let source = match std::fs::read_to_string(absolute_path) {
+        Ok(s) => s,
+        Err(e) => {
+            let tag = format!("read-error:{:?}", e.kind());
+            return Some(FileFingerprint {
+                source: tag.clone(),
+                parser: tag,
+            });
+        }
+    };
     let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
     let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
         let result = rustledger_parser::parse(&source);
@@ -161,101 +103,18 @@ fn fingerprint(absolute_path: &Path) -> Option<FileFingerprint> {
     })
 }
 
-/// See `corpus_baseline.rs::panic_payload_hash` for the rationale.
-/// Duplicated here rather than lifted to a shared module to keep
-/// each test binary self-contained.
-fn panic_payload_hash(payload: &(dyn std::any::Any + Send)) -> String {
-    if let Some(s) = payload.downcast_ref::<&'static str>() {
-        return blake3::hash(s.as_bytes()).to_hex().to_string();
-    }
-    if let Some(s) = payload.downcast_ref::<String>() {
-        return blake3::hash(s.as_bytes()).to_hex().to_string();
-    }
-    let mut h = blake3::Hasher::new();
-    h.update(b"non-string-panic:");
-    h.update(format!("{:?}", payload.type_id()).as_bytes());
-    h.finalize().to_hex().to_string()
-}
-
-fn compute_manifest() -> BTreeMap<PathBuf, FileFingerprint> {
-    let root = repo_root();
-    discover_corpus_files()
-        .iter()
-        .filter_map(|rel| fingerprint(&root.join(rel)).map(|fp| (rel.clone(), fp)))
-        .collect()
-}
-
-fn read_committed_manifest() -> BTreeMap<PathBuf, FileFingerprint> {
-    let path = repo_root().join(MANIFEST_PATH);
-    let contents = match std::fs::read_to_string(&path) {
-        Ok(s) => s,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-        // Don't swallow non-NotFound errors; they would silently
-        // disable the gate. Same rationale as corpus_baseline.rs.
-        Err(e) => panic!("failed to read {}: {e}", path.display()),
-    };
-    let mut out = BTreeMap::new();
-    for (lineno, line) in contents.lines().enumerate() {
-        let lineno = lineno + 1;
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let mut parts = line.split('\t');
-        let (Some(path_str), Some(source), Some(parser), None) =
-            (parts.next(), parts.next(), parts.next(), parts.next())
-        else {
-            panic!(
-                "{}:{lineno}: malformed manifest line (expected \
-                 `path<TAB>source<TAB>parser`): {line:?}",
-                path.display(),
-            );
-        };
-        out.insert(
-            PathBuf::from(path_str),
-            FileFingerprint {
-                source: source.to_string(),
-                parser: parser.to_string(),
-            },
-        );
-    }
-    out
-}
-
-fn render_manifest(manifest: &BTreeMap<PathBuf, FileFingerprint>) -> String {
-    let mut out = String::new();
-    out.push_str("# Formatter-output baseline. See crates/rustledger-parser/tests/corpus_baseline_format.rs.\n");
-    out.push_str("# Format: path<TAB>source_hash<TAB>format_output_hash\n");
-    out.push_str("# Regenerate: BASELINE_UPDATE=1 cargo test -p rustledger-parser --test corpus_baseline_format\n");
-    for (path, fp) in manifest {
-        out.push_str(&path.to_string_lossy());
-        out.push('\t');
-        out.push_str(&fp.source);
-        out.push('\t');
-        out.push_str(&fp.parser);
-        out.push('\n');
-    }
-    out
-}
-
-fn write_manifest(manifest: &BTreeMap<PathBuf, FileFingerprint>) {
-    let path = repo_root().join(MANIFEST_PATH);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).expect("create baseline dir");
-    }
-    std::fs::write(&path, render_manifest(manifest)).expect("write manifest");
-    eprintln!("wrote {} entries to {}", manifest.len(), MANIFEST_PATH);
-}
-
 #[test]
 fn formatter_output_matches_baseline() {
+    let manifest_abs = repo_root().join(MANIFEST_PATH);
+
     if std::env::var_os("BASELINE_UPDATE").is_some() {
-        let current = compute_manifest();
-        write_manifest(&current);
+        let current = compute_manifest(fingerprint);
+        write_manifest(&manifest_abs, &current, MANIFEST_HEADER);
         return;
     }
 
-    let current = compute_manifest();
-    let committed = read_committed_manifest();
+    let current = compute_manifest(fingerprint);
+    let committed = read_committed_manifest(&manifest_abs);
     let strict = std::env::var_os("STRICT_BASELINE").is_some();
 
     // Discovery uses the raw .beancount count to decide
@@ -279,16 +138,11 @@ fn formatter_output_matches_baseline() {
         return;
     }
 
-    // Bidirectional drift check (see corpus_baseline.rs for the
-    // rationale). The formatter manifest can legitimately have fewer
-    // entries than the corpus has files (files that parse to zero
-    // directives have no baseline). We only flag missing-from-manifest
-    // for files that DO parse non-empty.
     // Discover-on-disk tells us whether a missing-from-current file
     // is genuinely gone from the corpus OR still on disk but now
     // parses to zero directives (a parser regression we should
     // surface as drift, not silently warn about).
-    let on_disk: std::collections::HashSet<&PathBuf> = discover_corpus_files().iter().collect();
+    let on_disk: HashSet<&PathBuf> = discover_corpus_files().iter().collect();
 
     let mut format_drift: Vec<(&PathBuf, &str, &str)> = Vec::new();
     let mut source_drift: Vec<&PathBuf> = Vec::new();
@@ -319,7 +173,8 @@ fn formatter_output_matches_baseline() {
     }
 
     // Only escalate missing-from-manifest in-tree fixtures to strict
-    // failure (see corpus_baseline.rs comment for rationale).
+    // failure. Downloaded-corpus appearances are subject to upstream
+    // race; we don't gate on them.
     let unmanifested_in_tree: Vec<&PathBuf> = missing_from_manifest
         .iter()
         .filter(|p| is_in_tree_fixture(p))

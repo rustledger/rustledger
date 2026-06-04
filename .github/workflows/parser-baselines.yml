@@ -61,11 +61,22 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: ./scripts/fetch-compat-test-files.sh
       - name: Verify corpus is populated
+        # Compare against the committed manifest's entry count rather
+        # than a flat threshold (e.g., the prior `< 100` check). A
+        # partial corpus from a flaky upstream fetch could pass the
+        # flat threshold but still leave hundreds of manifest entries
+        # as warning-not-failure missing-from-corpus, producing silent
+        # green CI on a degraded corpus. Allowing a generous slack
+        # (50 files) tolerates legitimate upstream churn while still
+        # catching a substantially partial fetch.
         run: |
           count=$(find tests/compatibility/files -name '*.beancount' | wc -l)
-          echo "Corpus size: $count files"
-          if [ "$count" -lt 100 ]; then
-            echo "::error::Corpus is suspiciously small ($count files); fetch likely failed."
+          expected=$(grep -cv '^#' tests/baselines/parser-corpus.manifest || echo 0)
+          slack=50
+          floor=$((expected - slack))
+          echo "Corpus size: $count files; manifest expects ~$expected; floor=$floor"
+          if [ "$count" -lt "$floor" ]; then
+            echo "::error::Corpus has only $count .beancount files; manifest expects ~$expected (slack=$slack). Fetch likely failed; check fetch-compat-test-files.sh output."
             exit 1
           fi
       - name: Parser baseline (strict)

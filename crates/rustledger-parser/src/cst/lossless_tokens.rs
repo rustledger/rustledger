@@ -8,8 +8,10 @@
 //! shift the lexer's spans by the BOM length.
 //!
 //! Postcondition: for every byte of `source`, exactly one emitted
-//! `(SyntaxKind, Range)` entry covers it. Verified by the round-trip
-//! test in `tests/cst_round_trip.rs`.
+//! `(SyntaxKind, Range)` entry covers it. Verified by the inline
+//! `assert_tiles` cases in this module's `tests` submodule and, at
+//! corpus scale, by the byte-round-trip check in
+//! `crates/rustledger-parser/tests/cst_baseline.rs`.
 
 use std::ops::Range;
 

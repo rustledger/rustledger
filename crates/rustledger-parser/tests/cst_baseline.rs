@@ -38,10 +38,13 @@
 //! verify the token column is unchanged (any drift there is a real
 //! regression).
 
+mod baseline_common;
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
+use baseline_common::is_in_tree_fixture;
 use rustledger_parser::parse_flat;
 
 const CORPUS_ROOT: &str = "tests/compatibility/files";
@@ -254,6 +257,20 @@ fn write_manifest(manifest: &BTreeMap<PathBuf, Fingerprint>) {
     eprintln!("wrote {} entries to {}", manifest.len(), path.display());
 }
 
+/// The baseline test.
+///
+/// Modes (mirrors `corpus_baseline.rs`):
+///
+/// - **Default**: compare against the committed manifest. Token or
+///   node drift on an unchanged-source file fails. A corpus smaller
+///   than `MIN_FULL_CORPUS_SIZE` is skipped (warn).
+/// - `BASELINE_UPDATE=1`: regenerate the manifest from current output.
+/// - `STRICT_BASELINE=1`: turn the corpus-too-small skip into a hard
+///   failure, AND escalate two in-tree-fixture conditions into drift:
+///   (a) in-tree fixture present without a manifest entry; (b) in-
+///   tree fixture with edited source whose manifest entry was not
+///   regenerated. Downloaded-corpus equivalents stay warn-only (race
+///   with upstream pushes is not the PR author's fault).
 #[test]
 fn cst_output_matches_baseline() {
     let strict = std::env::var_os("STRICT_BASELINE").is_some();
@@ -324,7 +341,31 @@ fn cst_output_matches_baseline() {
         }
     }
 
-    if token_drift.is_empty() && node_drift.is_empty() && round_trip_failures.is_empty() {
+    // Mirror corpus_baseline.rs: only ESCALATE in-tree-fixture problems
+    // to strict-mode failure. Downloaded-corpus appearances are subject
+    // to upstream race; an unmanifested-or-edited downloaded fixture
+    // shouldn't fail CI on PRs that don't touch it. But edits under
+    // `tests/compatibility/files/plugins/` ARE PR-author actions
+    // (committed in-tree), and a missing manifest entry or source
+    // drift there means the contributor forgot to regenerate
+    // — exactly the silent-manifest-desync class of bug strict mode
+    // exists to catch.
+    let unmanifested_in_tree: Vec<&PathBuf> = missing_from_manifest
+        .iter()
+        .filter(|p| is_in_tree_fixture(p))
+        .collect();
+    let source_drift_in_tree: Vec<&PathBuf> = source_drift
+        .iter()
+        .filter(|p| is_in_tree_fixture(p))
+        .collect();
+    let unprotected_in_strict =
+        strict && (!unmanifested_in_tree.is_empty() || !source_drift_in_tree.is_empty());
+
+    if token_drift.is_empty()
+        && node_drift.is_empty()
+        && round_trip_failures.is_empty()
+        && !unprotected_in_strict
+    {
         if !source_drift.is_empty() {
             eprintln!(
                 "info: {} corpus file(s) have new source hashes; CST \
@@ -394,6 +435,28 @@ fn cst_output_matches_baseline() {
                 &expected[..16.min(expected.len())],
                 &current[..16.min(current.len())],
             );
+        }
+    }
+    if strict && !unmanifested_in_tree.is_empty() {
+        use std::fmt::Write;
+        let _ = writeln!(
+            &mut report,
+            "\n{} in-tree fixture(s) have no manifest entry (first 10):",
+            unmanifested_in_tree.len(),
+        );
+        for path in unmanifested_in_tree.iter().take(10) {
+            let _ = writeln!(&mut report, "  {}", path.display());
+        }
+    }
+    if strict && !source_drift_in_tree.is_empty() {
+        use std::fmt::Write;
+        let _ = writeln!(
+            &mut report,
+            "\n{} in-tree fixture(s) have edited source without a manifest regen (first 10):",
+            source_drift_in_tree.len(),
+        );
+        for path in source_drift_in_tree.iter().take(10) {
+            let _ = writeln!(&mut report, "  {}", path.display());
         }
     }
     panic!(

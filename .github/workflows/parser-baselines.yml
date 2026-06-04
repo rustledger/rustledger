@@ -70,8 +70,22 @@ jobs:
         # (50 files) tolerates legitimate upstream churn while still
         # catching a substantially partial fetch.
         run: |
+          set -euo pipefail
+          manifest=tests/baselines/parser-corpus.manifest
+          if [ ! -f "$manifest" ]; then
+            echo "::error::Manifest $manifest is missing. The baseline gate cannot run without it; check the PR didn't delete or move the file."
+            exit 1
+          fi
           count=$(find tests/compatibility/files -name '*.beancount' | wc -l)
-          expected=$(grep -cv '^#' tests/baselines/parser-corpus.manifest || echo 0)
+          # Count non-comment, non-blank manifest entries. `grep -c`
+          # exits 1 when zero matches; we want that to fail loudly
+          # rather than silently degrade to expected=0 (which would
+          # make floor=-50 and the gate inert).
+          expected=$(grep -Ecv '^(#|$)' "$manifest")
+          if [ "$expected" -lt 1 ]; then
+            echo "::error::Manifest $manifest has zero entries. Cannot derive a meaningful corpus-size floor."
+            exit 1
+          fi
           slack=50
           floor=$((expected - slack))
           echo "Corpus size: $count files; manifest expects ~$expected; floor=$floor"

@@ -31,13 +31,20 @@ Manifests:
   serialization of the full `ParseResult` (directives via
   `serde_json::to_value` so metadata maps sort deterministically,
   plus `Debug` of `options`, `includes`, `plugins`, `comments`,
-  `errors`, `warnings`, `currency_occurrences`).
+  `errors`, `warnings`, `currency_occurrences`, and the
+  `has_leading_bom` flag). The runtime test
+  `fingerprint_covers_every_parse_result_field` plus a compile-time
+  exhaustive-destructure sentinel in `rustledger-parser` keep the
+  field list and the hash in sync as `ParseResult` evolves.
 - `format-corpus.manifest` — output hash covers the string
   `rustledger_parser::format_source(&source, &parse_result,
   &FormatConfig::default())` produces. That's the same API the CLI
   invokes (`crates/rustledger/src/cmd/format.rs`), so the baseline
-  gates the production code path. Files that parse to zero
-  directives are omitted; there's nothing to format.
+  gates the production code path. Files are omitted only when they
+  contain no formattable content at all (no directives, options,
+  includes, plugins, or comments) — option-only and comment-only
+  files are still tracked, because `format_source` renders those
+  items and a formatter regression on them must be detected.
 
 Both manifests are sorted lexically by path so diffs are localized.
 

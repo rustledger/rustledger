@@ -114,11 +114,18 @@ pub fn discover_corpus_files() -> &'static [PathBuf] {
 }
 
 fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-    for entry in entries.flatten() {
+    // Panic on read errors instead of swallowing. A silently-skipped
+    // subdirectory (stale NFS handle, permission glitch, broken
+    // symlink) would shrink the discovered corpus under the workflow's
+    // slack=50 floor and let strict-mode CI pass on a degraded run.
+    // For a test binary, a hard failure surfaces the FS issue
+    // immediately; the alternative (`entries.flatten()`) drops per-
+    // entry errors with no diagnostic.
+    let entries = std::fs::read_dir(dir)
+        .unwrap_or_else(|e| panic!("read_dir({}) failed: {e}", dir.display()));
+    for entry in entries {
+        let entry =
+            entry.unwrap_or_else(|e| panic!("read_dir entry under {} failed: {e}", dir.display()));
         let path = entry.path();
         if path.is_dir() {
             walk(&path, out);

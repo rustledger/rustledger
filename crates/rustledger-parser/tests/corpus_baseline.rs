@@ -184,23 +184,33 @@ fn parser_hash_of(result: &rustledger_parser::ParseResult) -> String {
 fn parser_output_matches_baseline() {
     let manifest_abs = repo_root().join(MANIFEST_PATH);
     let fp = |p: &Path| Some(fingerprint(p));
-
-    if std::env::var_os("BASELINE_UPDATE").is_some() {
-        let current = compute_manifest(fp);
-        write_manifest(&manifest_abs, &current, MANIFEST_HEADER);
-        return;
-    }
+    let update = std::env::var_os("BASELINE_UPDATE").is_some();
 
     let current = compute_manifest(fp);
     let committed = read_committed_manifest(&manifest_abs);
     let strict = std::env::var_os("STRICT_BASELINE").is_some();
 
+    // Corpus-size guard runs BEFORE the BASELINE_UPDATE write path so
+    // a bare `BASELINE_UPDATE=1 cargo test ...` invocation (per the
+    // module rustdoc's regeneration snippet) on a fresh checkout
+    // cannot truncate the committed manifest down to the 3 in-tree
+    // plugin fixtures. `scripts/regen-corpus-baselines.sh` has its
+    // own outer guard; this is the inner one that protects the
+    // direct-cargo-invocation path documented in the rustdoc.
     if current.len() < MIN_FULL_CORPUS_SIZE {
         assert!(
             !strict,
             "STRICT_BASELINE: current corpus has {} files (need at \
              least {MIN_FULL_CORPUS_SIZE}). Did \
              `fetch-compat-test-files.sh` run?",
+            current.len(),
+        );
+        assert!(
+            !update,
+            "BASELINE_UPDATE=1 refusing to write a manifest from only \
+             {} files (need at least {MIN_FULL_CORPUS_SIZE}). Run \
+             `./scripts/fetch-compat-test-files.sh` first; an unguarded \
+             regen would silently truncate the committed manifest.",
             current.len(),
         );
         eprintln!(
@@ -211,6 +221,11 @@ fn parser_output_matches_baseline() {
              failure.",
             current.len(),
         );
+        return;
+    }
+
+    if update {
+        write_manifest(&manifest_abs, &current, MANIFEST_HEADER);
         return;
     }
 
@@ -247,7 +262,20 @@ fn parser_output_matches_baseline() {
         .filter(|p| is_in_tree_fixture(p))
         .copied()
         .collect();
-    let unprotected_in_strict = strict && !unmanifested_in_tree.is_empty();
+    // Symmetric in-tree filter for source drift: editing an in-tree
+    // fixture IS a PR-author action (no upstream race), so source drift
+    // on those files should fail strict mode the same way an
+    // unmanifested in-tree fixture does. Without this filter a
+    // contributor could edit `plugins/.../foo.beancount` in a way
+    // that changes parser output and the source-drift bucket would
+    // skip the parser check, leaving the manifest silently desynced.
+    let source_drift_in_tree: Vec<&PathBuf> = source_drift
+        .iter()
+        .filter(|p| is_in_tree_fixture(p))
+        .copied()
+        .collect();
+    let unprotected_in_strict =
+        strict && (!unmanifested_in_tree.is_empty() || !source_drift_in_tree.is_empty());
     if parser_drift.is_empty() && !unprotected_in_strict {
         if !source_drift.is_empty() {
             eprintln!(
@@ -291,12 +319,22 @@ fn parser_output_matches_baseline() {
             ));
         }
     }
-    if unprotected_in_strict {
+    if strict && !unmanifested_in_tree.is_empty() {
         report.push_str(&format!(
             "\n{} in-tree fixture(s) have no manifest entry (first 10):\n",
             unmanifested_in_tree.len(),
         ));
         for path in unmanifested_in_tree.iter().take(10) {
+            report.push_str(&format!("  {}\n", path.display()));
+        }
+    }
+    if strict && !source_drift_in_tree.is_empty() {
+        report.push_str(&format!(
+            "\n{} in-tree fixture(s) have edited source without a \
+             manifest regen (first 10):\n",
+            source_drift_in_tree.len(),
+        ));
+        for path in source_drift_in_tree.iter().take(10) {
             report.push_str(&format!("  {}\n", path.display()));
         }
     }

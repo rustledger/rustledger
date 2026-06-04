@@ -158,3 +158,41 @@ pub fn parse_directives(source: &str) -> (Vec<Spanned<Directive>>, Vec<ParseErro
     let result = parse(source);
     (result.directives, result.errors)
 }
+
+#[cfg(test)]
+mod parse_result_field_coverage {
+    //! Compile-time guard: when a field is added to [`ParseResult`],
+    //! the exhaustive destructure below stops compiling. That's the
+    //! signal to also update:
+    //!
+    //! 1. `parser_hash_of` in
+    //!    `crates/rustledger-parser/tests/corpus_baseline.rs` — the new
+    //!    field must contribute to the parser fingerprint or the
+    //!    baseline silently misses regressions in it.
+    //! 2. `fingerprint_covers_every_parse_result_field` in the same
+    //!    file — add a `mutate` arm for the new field so the runtime
+    //!    coverage test stays honest.
+    //!
+    //! Why this lives here instead of the integration test:
+    //! `ParseResult` is `#[non_exhaustive]`, which blocks exhaustive
+    //! destructuring from external crates (including this crate's
+    //! integration tests). Inside the defining crate the attribute
+    //! does NOT apply, so an exhaustive destructure here will fail to
+    //! compile when a field is added — exactly what we want.
+    use super::ParseResult;
+
+    #[allow(dead_code)]
+    fn destructure_must_be_exhaustive(r: &ParseResult) {
+        let ParseResult {
+            directives: _,
+            options: _,
+            includes: _,
+            plugins: _,
+            comments: _,
+            errors: _,
+            warnings: _,
+            currency_occurrences: _,
+            has_leading_bom: _,
+        } = r;
+    }
+}

@@ -65,14 +65,24 @@ const MANIFEST_HEADER: &[&str] = &[
     "# Regenerate: BASELINE_UPDATE=1 cargo test -p rustledger-parser --test corpus_baseline_format",
 ];
 
-/// Parse `path` (absolute), pass its directives through
+/// Parse `path` (absolute), pass its parse result through
 /// [`format_source`] (the exact API the CLI uses), and return a
 /// stable `(source, format_output)` fingerprint pair.
 ///
-/// Returns `None` for files that parse to zero directives — there's
-/// nothing for the formatter to produce and no useful drift signal.
+/// Returns `None` for files with no formattable content at all —
+/// no directives, options, includes, plugins, or comments.
+/// `format_source` produces a trailing-newline-only string for those
+/// and no drift signal can hide in the output. Files with ONLY
+/// options/plugins/includes/comments (and zero directives) are still
+/// included: `format_source` renders those items, so a formatter
+/// regression on an option-only file would otherwise pass silently.
+///
 /// Read failures are encoded as a `read-error:<kind>` sentinel to
-/// mirror the parser baseline's behavior.
+/// mirror the parser baseline's behavior. Parse panics and format
+/// panics are kept distinct (`parse-panic:` vs `format-panic:`) so
+/// a future parser fix that uncovers a `format_source` panic does
+/// not surface as misleading "formatter drift" against a hash that
+/// actually captured a parser panic.
 fn fingerprint(absolute_path: &Path) -> Option<FileFingerprint> {
     let source = match std::fs::read_to_string(absolute_path) {
         Ok(s) => s,
@@ -85,17 +95,34 @@ fn fingerprint(absolute_path: &Path) -> Option<FileFingerprint> {
         }
     };
     let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
-    let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
-        let result = rustledger_parser::parse(&source);
-        if result.directives.is_empty() {
-            return None;
+
+    let parse_outcome =
+        std::panic::catch_unwind(AssertUnwindSafe(|| rustledger_parser::parse(&source)));
+    let result = match parse_outcome {
+        Ok(r) => r,
+        Err(payload) => {
+            return Some(FileFingerprint {
+                source: source_hash,
+                parser: format!("parse-panic:{}", panic_payload_hash(&*payload)),
+            });
         }
-        Some(format_source(&source, &result, &FormatConfig::default()))
+    };
+
+    if result.directives.is_empty()
+        && result.options.is_empty()
+        && result.includes.is_empty()
+        && result.plugins.is_empty()
+        && result.comments.is_empty()
+    {
+        return None;
+    }
+
+    let format_outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        format_source(&source, &result, &FormatConfig::default())
     }));
-    let formatted_hash = match outcome {
-        Ok(Some(text)) => blake3::hash(text.as_bytes()).to_hex().to_string(),
-        Ok(None) => return None,
-        Err(payload) => format!("panic:{}", panic_payload_hash(&*payload)),
+    let formatted_hash = match format_outcome {
+        Ok(text) => blake3::hash(text.as_bytes()).to_hex().to_string(),
+        Err(payload) => format!("format-panic:{}", panic_payload_hash(&*payload)),
     };
     Some(FileFingerprint {
         source: source_hash,
@@ -106,21 +133,16 @@ fn fingerprint(absolute_path: &Path) -> Option<FileFingerprint> {
 #[test]
 fn formatter_output_matches_baseline() {
     let manifest_abs = repo_root().join(MANIFEST_PATH);
-
-    if std::env::var_os("BASELINE_UPDATE").is_some() {
-        let current = compute_manifest(fingerprint);
-        write_manifest(&manifest_abs, &current, MANIFEST_HEADER);
-        return;
-    }
-
-    let current = compute_manifest(fingerprint);
-    let committed = read_committed_manifest(&manifest_abs);
+    let update = std::env::var_os("BASELINE_UPDATE").is_some();
     let strict = std::env::var_os("STRICT_BASELINE").is_some();
 
     // Discovery uses the raw .beancount count to decide
-    // populated-vs-not; current.len() is the *formattable* subset
-    // (some corpus files parse to zero directives and produce no
-    // baseline entry), which would always undercount.
+    // populated-vs-not; the formattable subset (current.len() below)
+    // would always undercount because files with no formattable
+    // content produce no baseline entry. Check size BEFORE the
+    // BASELINE_UPDATE write path so a bare `BASELINE_UPDATE=1 cargo
+    // test ...` invocation on a fresh checkout cannot truncate the
+    // committed manifest down to a handful of in-tree fixtures.
     let total_corpus = discover_corpus_files().len();
     if total_corpus < MIN_FULL_CORPUS_SIZE {
         assert!(
@@ -128,6 +150,13 @@ fn formatter_output_matches_baseline() {
             "STRICT_BASELINE: corpus has {total_corpus} files (need at \
              least {MIN_FULL_CORPUS_SIZE}). Did \
              `fetch-compat-test-files.sh` run?",
+        );
+        assert!(
+            !update,
+            "BASELINE_UPDATE=1 refusing to write a manifest from only \
+             {total_corpus} files (need at least {MIN_FULL_CORPUS_SIZE}). \
+             Run `./scripts/fetch-compat-test-files.sh` first; an \
+             unguarded regen would silently truncate the committed manifest.",
         );
         eprintln!(
             "corpus at `{CORPUS_ROOT}` has only {total_corpus} files (need \
@@ -137,6 +166,15 @@ fn formatter_output_matches_baseline() {
         );
         return;
     }
+
+    let current = compute_manifest(fingerprint);
+
+    if update {
+        write_manifest(&manifest_abs, &current, MANIFEST_HEADER);
+        return;
+    }
+
+    let committed = read_committed_manifest(&manifest_abs);
 
     // Discover-on-disk tells us whether a missing-from-current file
     // is genuinely gone from the corpus OR still on disk but now
@@ -149,13 +187,24 @@ fn formatter_output_matches_baseline() {
     // File missing from current AND from disk: corpus shrank. Warn.
     let mut removed_from_corpus: Vec<&PathBuf> = Vec::new();
     // File missing from current but still on disk: previously
-    // formatted non-empty, now produces no directives. Real
+    // formatted non-empty, now produces no formattable content. Real
     // regression. Strict mode treats this as drift.
     let mut became_empty: Vec<&PathBuf> = Vec::new();
+    // File missing from current but still on disk AND the committed
+    // entry was a `read-error:*` sentinel. The file went from
+    // unreadable to readable-with-no-content — an improvement, not a
+    // regression. Warn only; never strict-fail.
+    let mut read_error_resolved: Vec<&PathBuf> = Vec::new();
     let mut missing_from_manifest: Vec<&PathBuf> = Vec::new();
     for (path, expected) in &committed {
         match current.get(path) {
-            None if on_disk.contains(path) => became_empty.push(path),
+            None if on_disk.contains(path) => {
+                if expected.source.starts_with("read-error:") {
+                    read_error_resolved.push(path);
+                } else {
+                    became_empty.push(path);
+                }
+            }
             None => removed_from_corpus.push(path),
             Some(current_fp) if current_fp.source != expected.source => {
                 source_drift.push(path);
@@ -180,7 +229,18 @@ fn formatter_output_matches_baseline() {
         .filter(|p| is_in_tree_fixture(p))
         .copied()
         .collect();
-    let strict_fail = strict && (!unmanifested_in_tree.is_empty() || !became_empty.is_empty());
+    // Symmetric in-tree filter for source drift — see corpus_baseline.rs
+    // for the rationale. An in-tree fixture edit is a PR-author action
+    // and must fail strict, not be warn-skipped as upstream-race.
+    let source_drift_in_tree: Vec<&PathBuf> = source_drift
+        .iter()
+        .filter(|p| is_in_tree_fixture(p))
+        .copied()
+        .collect();
+    let strict_fail = strict
+        && (!unmanifested_in_tree.is_empty()
+            || !became_empty.is_empty()
+            || !source_drift_in_tree.is_empty());
     if format_drift.is_empty() && !strict_fail {
         if !source_drift.is_empty() {
             eprintln!(
@@ -205,6 +265,14 @@ fn formatter_output_matches_baseline() {
                  parse to zero directives (a parser regression). CI \
                  fails on this under STRICT_BASELINE=1.",
                 became_empty.len(),
+            );
+        }
+        if !read_error_resolved.is_empty() {
+            eprintln!(
+                "info: {} file(s) previously recorded as `read-error:*` \
+                 are now readable but contain no formattable items. \
+                 Improvement, not regression; regenerate when convenient.",
+                read_error_resolved.len(),
             );
         }
         if !removed_from_corpus.is_empty() {
@@ -250,6 +318,16 @@ fn formatter_output_matches_baseline() {
             became_empty.len(),
         ));
         for path in became_empty.iter().take(10) {
+            report.push_str(&format!("  {}\n", path.display()));
+        }
+    }
+    if strict && !source_drift_in_tree.is_empty() {
+        report.push_str(&format!(
+            "\n{} in-tree fixture(s) have edited source without a \
+             manifest regen (first 10):\n",
+            source_drift_in_tree.len(),
+        ));
+        for path in source_drift_in_tree.iter().take(10) {
             report.push_str(&format!("  {}\n", path.display()));
         }
     }

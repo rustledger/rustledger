@@ -12,6 +12,18 @@ set -e
 DEST="tests/compatibility/files"
 TMPDIR="/tmp/beancount-fetch-$$"
 
+# Per-repo clone failures are tolerated (each repo is a best-effort
+# source), but we surface stderr and count failures so a substantially
+# broken fetch doesn't silently produce a partial corpus. The parser-
+# baseline workflow's corpus-floor (manifest entries minus slack=50)
+# catches partial fetches downstream; this counter catches them HERE
+# with a more actionable diagnostic.
+FETCH_FAILURES=0
+# Above this many clone failures the script gives up. Keeps a single
+# transient network blip from masquerading as success while still
+# catching a half-broken auth or rate-limit storm.
+MAX_FETCH_FAILURES=15
+
 echo "=== Fetching Beancount Test Files ==="
 echo ""
 
@@ -23,7 +35,13 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Helper function to fetch and extract beancount files
+# Helper function to fetch and extract beancount files.
+# Clone failures are tolerated per repo (each source is best-effort)
+# but stderr is NOT silenced — see the FETCH_FAILURES counter at the
+# top of the script for the abort threshold. `cp` failures are also
+# surfaced (silently dropping a per-file copy can produce a partial
+# corpus, which is exactly what the baseline gate is trying to
+# detect upstream).
 fetch_repo() {
   local name="$1"
   local repo="$2" # GitHub repo in "owner/repo" format
@@ -38,17 +56,26 @@ fetch_repo() {
     clone_args+=(--branch="$branch")
   fi
 
-  gh repo clone "$repo" "$TMPDIR/$name" "${clone_args[@]}" 2>/dev/null || {
-    echo "  Warning: Failed to clone $name"
+  if ! gh repo clone "$repo" "$TMPDIR/$name" "${clone_args[@]}"; then
+    echo "  Warning: Failed to clone $name (see stderr above)"
+    FETCH_FAILURES=$((FETCH_FAILURES + 1))
+    if [ "$FETCH_FAILURES" -ge "$MAX_FETCH_FAILURES" ]; then
+      echo ""
+      echo "ERROR: $FETCH_FAILURES clone failures reached the abort threshold ($MAX_FETCH_FAILURES)." >&2
+      echo "Check gh auth status, network, and rate limits before retrying." >&2
+      exit 1
+    fi
     return 0
-  }
+  fi
 
   # Find and copy all .beancount files, preserving some path info in filename
   find "$TMPDIR/$name" -name "*.beancount" -type f | while read -r f; do
     # Create a unique filename based on relative path
     relpath="${f#$TMPDIR/$name/}"
     safename=$(echo "$relpath" | tr '/' '_')
-    cp "$f" "$subdir/$safename" 2>/dev/null || true
+    if ! cp "$f" "$subdir/$safename"; then
+      echo "  Warning: failed to copy $relpath" >&2
+    fi
   done
 
   count=$(find "$subdir" -name "*.beancount" | wc -l | tr -d ' ')
@@ -340,5 +367,8 @@ fi
 
 echo ""
 echo "Total: $total beancount files"
+if [ "$FETCH_FAILURES" -gt 0 ]; then
+  echo "Note: $FETCH_FAILURES repository clone(s) failed (under the abort threshold of $MAX_FETCH_FAILURES). The corpus may be slightly smaller than usual."
+fi
 echo ""
 echo "Files saved to: $DEST"

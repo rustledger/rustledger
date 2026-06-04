@@ -314,7 +314,7 @@ fn has_balance_error_at_line(diagnostics: &[Diagnostic], line: u32) -> bool {
 /// (ERROR, WARNING, or INFORMATION severity) anchored at `line.start`?
 ///
 /// Severity matters: a balance directive can carry a WARNING-severity
-/// diagnostic (`FutureDate` E6004, `DateOutOfOrder` E6005, etc.) that
+/// diagnostic (`FutureDate` E10002, `DateOutOfOrder` E10001, etc.) that
 /// gets the balance directive's span patched onto it via
 /// `validate/lib.rs:548-562`. If we filtered on ERROR only, the lens
 /// would render `✓ Balance: X USD` for a directive the validator is
@@ -774,9 +774,11 @@ mod tests {
         let result = parse(source);
         let params = code_lens_params();
 
-        // E6004 (or any non-balance code) at WARNING severity.
+        // E10002 (FutureDate) at WARNING severity — what the
+        // validator actually emits for a balance directive dated
+        // after `today`.
         let diags = vec![diagnostic_with_code_severity_at_line(
-            "E6004",
+            "E10002",
             DiagnosticSeverity::WARNING,
             0,
         )];
@@ -812,7 +814,7 @@ mod tests {
         let params = code_lens_params();
 
         let diags = vec![diagnostic_with_code_severity_at_line(
-            "E6005",
+            "E10001",
             DiagnosticSeverity::INFORMATION,
             0,
         )];

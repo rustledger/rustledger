@@ -101,6 +101,7 @@ skip = [
   { crate = "object" },           # backtrace vs gimli
   { crate = "rand" },             # 0.8 (num-complex via faer/ferrolearn-bayes) vs 0.9 (faer's own) vs 0.10 (wasmtime 45 stack)
   { crate = "rand_core" },        # paired with rand — 0.6 vs 0.9 vs 0.10 same skew
+  { crate = "rustc-hash" },       # rowan (via hashbrown) ships 1.x; workspace is 2.x
   { crate = "rustix" },           # 0.38 vs 1.x
   { crate = "sha2" },             # 0.9 vs 0.10
   { crate = "syn" },              # 1.x (proc-macro ecosystem legacy) vs 2.x

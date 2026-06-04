@@ -437,14 +437,26 @@ const MAX_VALIDATION_FILE_SIZE: usize = 500 * 1024;
 /// Returns true iff [`all_diagnostics`] will actually invoke the
 /// validator (rather than emit only parse-error diagnostics or nothing).
 ///
-/// The codeLens path uses this to distinguish "validator ran and found
-/// no errors at this line" (render `✓`) from "validator declined to run"
-/// (render neutrally, never `✓`). Without this check a balance lens
+/// Called by [`all_diagnostics`] to gate the validator AND by
+/// [`super::code_lens::handle_code_lens`] to gate the verdict source
+/// fed into the balance lens. Both call sites are structurally
+/// locked-step: changes to the predicate flow into the validator
+/// pipeline AND the lens's "cache trustable?" check together, with no
+/// duplicated-condition drift.
+///
+/// `pub(crate)` because the two callers above are the only legitimate
+/// consumers. External callers (FFI, hypothetical future crates) that
+/// imported this predicate would tie themselves to an internal
+/// contract whose semantics may shift as the validator's skip
+/// conditions evolve.
+///
+/// The codeLens path needs this to distinguish "validator ran and
+/// found no errors at this line" (render `✓`) from "validator declined
+/// to run" (render neutrally, never `✓`). Without it a balance lens
 /// would silently mislabel an unvalidated assertion as passing — the
-/// inverse of the dead-link UX that #1264 closed. Keep these conditions
-/// in lock-step with the two `if` guards inside `all_diagnostics`.
+/// inverse of the dead-link UX that #1264 closed.
 #[must_use]
-pub fn validation_would_run(source: &str, parse_result: &ParseResult) -> bool {
+pub(crate) fn validation_would_run(source: &str, parse_result: &ParseResult) -> bool {
     parse_result.errors.is_empty() && source.len() <= MAX_VALIDATION_FILE_SIZE
 }
 
@@ -733,11 +745,15 @@ pub fn all_diagnostics(
             encoding,
         );
         diagnostics.extend(validation_diagnostics);
-    } else if source.len() > MAX_VALIDATION_FILE_SIZE {
+    } else if result.errors.is_empty() && source.len() > MAX_VALIDATION_FILE_SIZE {
         // The size-specific log is the only signal a human gets when
         // a giant file silently stops validating. Skipped-because-of-
         // parse-errors is self-evident: the parse-error diagnostics
-        // are already in `diagnostics`.
+        // are already in `diagnostics`. Guard on `result.errors.is_empty()`
+        // so the log fires ONLY when the size cap is the sole reason —
+        // pre-refactor the outer `if errors.is_empty()` provided the
+        // same gating; replicate it here so an operator chasing the
+        // skip cause isn't pointed at the wrong remediation.
         tracing::debug!(
             "Skipping validation for large file ({} bytes > {} limit)",
             source.len(),

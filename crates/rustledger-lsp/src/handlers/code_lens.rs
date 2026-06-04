@@ -207,9 +207,24 @@ pub fn handle_code_lens(
 /// balance directive's line.
 ///
 /// Pulled from [`ErrorCode`] (`pub const fn code() -> &'static str`)
-/// instead of hardcoding the strings, so renumbering on the validator
-/// side breaks the lens build rather than silently mislabelling every
-/// balance failure as a non-balance ERROR. The codes themselves:
+/// instead of hardcoding the strings, so:
+///
+/// - **Renaming a variant** (e.g., `BalanceAssertionFailed` →
+///   `BalanceMismatch`) breaks the lens build — the const-fn call
+///   resolves a symbol that no longer exists.
+/// - **Renumbering the string returned by `code()`** (e.g., `"E2001"`
+///   → `"E2099"`) is detected and propagated automatically — the
+///   lens build still passes and `BALANCE_ERROR_CODES` picks up the
+///   new string, so the runtime match against the validator's
+///   emitted code stays in sync without any manual update.
+///
+/// Hardcoding `&["E2001", "E2002", "E2004"]` would have given the
+/// opposite property: renaming would have compiled silently, and only
+/// renumbering at the validator side (without a corresponding lens
+/// update) would have produced runtime drift. The const-fn bridge
+/// trades the cheaper failure mode for the more expensive one.
+///
+/// The codes themselves:
 ///
 /// - `E2001` ([`ErrorCode::BalanceAssertionFailed`]): asserted amount
 ///   != actual.
@@ -252,12 +267,15 @@ const BALANCE_ERROR_CODES: &[&str] = &[
 ///   validator emitted a real balance-arithmetic failure. Render
 ///   `⚠ Balance: X USD (see diagnostic)` — "see diagnostic" is a true
 ///   link by construction.
-/// - `Some(diags)` with some OTHER ERROR at `line` (e.g., `E1001`
-///   AccountNotOpen) but NO `BALANCE_ERROR_CODES`: a non-balance
-///   diagnostic happens to anchor here. Render neutrally; don't
-///   misattribute it as a balance failure.
-/// - `Some(diags)` with no ERROR at all at `line`: the validator
-///   says the assertion holds. Render `✓ Balance: X USD`.
+/// - `Some(diags)` with some OTHER non-HINT diagnostic at `line`
+///   (e.g., `E1001` AccountNotOpen ERROR, `FutureDate` WARNING,
+///   `DateOutOfOrder` INFORMATION) but NO `BALANCE_ERROR_CODES`:
+///   the validator has something to say about this directive but
+///   it isn't a balance-arithmetic failure. Render neutrally; don't
+///   misattribute it as a balance failure AND don't claim ✓ on a
+///   directive the validator is actively flagging.
+/// - `Some(diags)` with no relevant diagnostic at `line`: the
+///   validator says the assertion holds. Render `✓ Balance: X USD`.
 fn balance_lens_title(
     amount: rustledger_core::Decimal,
     currency: &str,
@@ -292,13 +310,32 @@ fn has_balance_error_at_line(diagnostics: &[Diagnostic], line: u32) -> bool {
     })
 }
 
-/// Does the diagnostic slice contain an ERROR at `line.start` whose
-/// code is NOT one of the balance-arithmetic codes? (Used to decide
-/// whether to render neutrally instead of ✓.)
+/// Does the diagnostic slice contain ANY non-balance diagnostic
+/// (ERROR, WARNING, or INFORMATION severity) anchored at `line.start`?
+///
+/// Severity matters: a balance directive can carry a WARNING-severity
+/// diagnostic (`FutureDate` E6004, `DateOutOfOrder` E6005, etc.) that
+/// gets the balance directive's span patched onto it via
+/// `validate/lib.rs:548-562`. If we filtered on ERROR only, the lens
+/// would render `✓ Balance: X USD` for a directive the validator is
+/// actively warning about — the same false-confidence pattern #1264
+/// closed for plugins, just transposed to severity-filtering. Any
+/// non-balance diagnostic at the line tells us "the validator has
+/// something to say about this directive" and disqualifies the ✓.
+///
+/// HINT severity is excluded because hints are routinely produced as
+/// code-action suggestions; treating them as "something is wrong"
+/// would surface ✓-disqualifying noise on every code-action-eligible
+/// line.
 fn has_non_balance_error_at_line(diagnostics: &[Diagnostic], line: u32) -> bool {
     diagnostics.iter().any(|d| {
         d.range.start.line == line
-            && d.severity == Some(DiagnosticSeverity::ERROR)
+            && matches!(
+                d.severity,
+                Some(DiagnosticSeverity::ERROR)
+                    | Some(DiagnosticSeverity::WARNING)
+                    | Some(DiagnosticSeverity::INFORMATION)
+            )
             && !is_balance_error_code(d.code.as_ref())
     })
 }
@@ -399,18 +436,22 @@ mod tests {
             .expect("balance lens emitted")
     }
 
-    /// Synthetic ERROR diagnostic at the given zero-based line with
-    /// the given LSP error code. Source string matches what the
+    /// Synthetic diagnostic at the given zero-based line with the given
+    /// LSP error code and severity. Source string matches what the
     /// validator emits in production (`"rustledger"`, see
     /// `diagnostics.rs:145`) so any future filter on `source` would
     /// behave the same in tests and production.
-    fn error_with_code_at_line(code: &str, line: u32) -> Diagnostic {
+    fn diagnostic_with_code_severity_at_line(
+        code: &str,
+        severity: DiagnosticSeverity,
+        line: u32,
+    ) -> Diagnostic {
         Diagnostic {
             range: Range {
                 start: Position::new(line, 0),
                 end: Position::new(line, 80),
             },
-            severity: Some(DiagnosticSeverity::ERROR),
+            severity: Some(severity),
             code: Some(NumberOrString::String(code.into())),
             code_description: None,
             source: Some("rustledger".into()),
@@ -419,6 +460,10 @@ mod tests {
             tags: None,
             data: None,
         }
+    }
+
+    fn error_with_code_at_line(code: &str, line: u32) -> Diagnostic {
+        diagnostic_with_code_severity_at_line(code, DiagnosticSeverity::ERROR, line)
     }
 
     /// Default-case: a balance-assertion-failed diagnostic at `line`.
@@ -712,6 +757,115 @@ mod tests {
             "lens must not claim ✓ when an unrelated error blankets \
              the assertion's line — the assertion's status is uncertain. \
              got {:?}",
+            cmd.title
+        );
+    }
+
+    /// WARNING-severity diagnostics that anchor on the balance line —
+    /// `FutureDate`, `DateOutOfOrder`, `AccountCloseNotEmpty` —
+    /// disqualify ✓. Without this, the lens claims the assertion holds
+    /// while the validator is actively flagging the directive's date or
+    /// account state, which is the same false-confidence pattern #1264
+    /// closed for plugins, just transposed to severity filtering.
+    #[test]
+    fn balance_lens_neutral_on_non_balance_warning_at_line() {
+        let source = r#"2099-01-31 balance Assets:Bank 100 USD
+"#;
+        let result = parse(source);
+        let params = code_lens_params();
+
+        // E6004 (or any non-balance code) at WARNING severity.
+        let diags = vec![diagnostic_with_code_severity_at_line(
+            "E6004",
+            DiagnosticSeverity::WARNING,
+            0,
+        )];
+        let balance_lens = find_balance_lens(
+            handle_code_lens(
+                &params,
+                source,
+                &result,
+                Some(&diags),
+                PositionEncoding::Utf16,
+            )
+            .expect("lenses emitted"),
+        );
+        let cmd = balance_lens.command.as_ref().expect("ships resolved");
+        assert!(
+            !cmd.title.contains('✓') && !cmd.title.contains('⚠'),
+            "warning at the balance line must disqualify ✓; lens must \
+             not claim a verdict while the validator is flagging the \
+             directive. got {:?}",
+            cmd.title
+        );
+    }
+
+    /// INFORMATION-severity diagnostics at the balance line also
+    /// disqualify ✓ — same rationale as WARNING, applied to
+    /// `DateOutOfOrder` and similar advisory-level findings the
+    /// validator anchors via the span-patch path.
+    #[test]
+    fn balance_lens_neutral_on_information_severity_at_line() {
+        let source = r#"2024-01-31 balance Assets:Bank 100 USD
+"#;
+        let result = parse(source);
+        let params = code_lens_params();
+
+        let diags = vec![diagnostic_with_code_severity_at_line(
+            "E6005",
+            DiagnosticSeverity::INFORMATION,
+            0,
+        )];
+        let balance_lens = find_balance_lens(
+            handle_code_lens(
+                &params,
+                source,
+                &result,
+                Some(&diags),
+                PositionEncoding::Utf16,
+            )
+            .expect("lenses emitted"),
+        );
+        let cmd = balance_lens.command.as_ref().expect("ships resolved");
+        assert!(
+            !cmd.title.contains('✓') && !cmd.title.contains('⚠'),
+            "information-severity diagnostic at the balance line must \
+             disqualify ✓. got {:?}",
+            cmd.title
+        );
+    }
+
+    /// HINT-severity diagnostics are excluded from the ✓-disqualifying
+    /// set — code-action hints routinely anchor on directives, and
+    /// treating them as "validator flagged this" would produce neutral
+    /// titles on every code-action-eligible balance line.
+    #[test]
+    fn balance_lens_keeps_check_when_only_hint_at_line() {
+        let source = r#"2024-01-31 balance Assets:Bank 100 USD
+"#;
+        let result = parse(source);
+        let params = code_lens_params();
+
+        let diags = vec![diagnostic_with_code_severity_at_line(
+            "H1001",
+            DiagnosticSeverity::HINT,
+            0,
+        )];
+        let balance_lens = find_balance_lens(
+            handle_code_lens(
+                &params,
+                source,
+                &result,
+                Some(&diags),
+                PositionEncoding::Utf16,
+            )
+            .expect("lenses emitted"),
+        );
+        let cmd = balance_lens.command.as_ref().expect("ships resolved");
+        assert!(
+            cmd.title.contains('✓'),
+            "HINT-severity must not disqualify ✓ — code-action hints \
+             routinely anchor on directives. got {:?}",
             cmd.title
         );
     }

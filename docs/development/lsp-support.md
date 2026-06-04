@@ -26,15 +26,27 @@ diagnostic vector for the file — and renders one of:
   the full list and the rationale for excluded codes (E1001, parse
   errors, plugin errors at the line — those describe a different
   failure and surface independently).
-- `Balance: X USD` (neutral, no symbol) in any of three cases:
+- `Balance: X USD` (neutral, no symbol) in any of three user-facing
+  conditions:
   - Cold start, before the first `publish_diagnostics` for the file.
   - Validation was skipped this turn (file > 500 KB or buffer has
     parse errors elsewhere — see `validation_would_run`).
-  - A non-balance ERROR (e.g., `E1001 AccountNotOpen`) anchors on the
-    balance directive's line — the diagnostic explains a different
-    problem; claiming `⚠ Balance` would misattribute the failure.
+  - A non-balance non-HINT diagnostic (e.g., `E1001 AccountNotOpen`
+    ERROR, `FutureDate` WARNING, `DateOutOfOrder` INFORMATION) anchors
+    on the balance directive's line — the diagnostic explains a
+    different problem; claiming `⚠ Balance` would misattribute the
+    failure and claiming `✓` would dismiss a real concern.
   In every neutral case the lens declines to claim a verdict it
   cannot back up.
+
+  Internally, the first two conditions are folded into
+  `verdict_diagnostics = None` by `handle_code_lens` before
+  `balance_lens_title` sees them — the title function itself only
+  distinguishes `None` (neutral) from `Some(diags)` with the three
+  diag-content branches (balance code → ⚠, non-balance/non-HINT → 
+  neutral, nothing → ✓). HINT-severity diagnostics are intentionally
+  ignored: code-action hints routinely anchor on directives and would
+  otherwise produce neutral noise on every code-action-eligible line.
 
 The validator runs the full pipeline (synth-plugins → Early → book →
 regular-plugins → Late) on every `didOpen` / `didChange` / `didSave`,

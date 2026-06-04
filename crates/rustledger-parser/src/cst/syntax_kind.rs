@@ -126,32 +126,22 @@ pub enum SyntaxKind {
     ERROR_TOKEN,
 
     // ---- Node kinds ------------------------------------------------------
+    //
+    // Phase 1 emits a flat tree, so the only node kind actually used
+    // is `SOURCE_FILE`. Structural node kinds (DIRECTIVE / POSTING /
+    // AMOUNT / COST_SPEC / PRICE_ANNOTATION / META_ENTRY / ...) are
+    // NOT pre-declared — phase 2 PRs add them at the moment they're
+    // needed. `#[non_exhaustive]` + `num_enum`'s derive make new
+    // variants safe to add without ABI concerns.
     /// Root node — every byte of the file is reachable under this node.
     SOURCE_FILE,
 
-    /// A single directive (transaction / open / close / balance / pad
-    /// / event / note / document / price / commodity / query / custom
-    /// / option / include / plugin / pushtag / poptag / pushmeta /
-    /// popmeta). The specific kind is determined by the keyword token
-    /// child.
-    DIRECTIVE,
-
-    /// A single posting line under a transaction.
-    POSTING,
-
-    /// `<number> <currency>` (with optional sign).
-    AMOUNT,
-
-    /// `{ ... }` or `{{ ... }}` cost specification.
-    COST_SPEC,
-
-    /// `@ amount` or `@@ amount` price annotation.
-    PRICE_ANNOTATION,
-
-    /// `meta-key: value` line.
-    META_ENTRY,
-
-    /// Generic error-recovery node.
+    /// Generic error-recovery wrapper. Phase 1 doesn't emit this
+    /// (lexer errors surface as `ERROR_TOKEN` leaves), but phase 2's
+    /// structured parser will wrap partial-directive fragments in
+    /// these. Kept here so the kind is available without a follow-up
+    /// PR adding it — error recovery is in scope for any parser that
+    /// promises to keep going past bad input.
     ERROR_NODE,
 }
 
@@ -284,21 +274,93 @@ mod tests {
     /// wrong category (or forgotten in either `matches!` list) would
     /// fail this property.
     #[test]
-    fn is_token_complements_node_kinds() {
-        let node_kinds = [
-            SyntaxKind::SOURCE_FILE,
-            SyntaxKind::DIRECTIVE,
-            SyntaxKind::POSTING,
-            SyntaxKind::AMOUNT,
-            SyntaxKind::COST_SPEC,
-            SyntaxKind::PRICE_ANNOTATION,
-            SyntaxKind::META_ENTRY,
-            SyntaxKind::ERROR_NODE,
-        ];
+    fn nodes_are_not_tokens() {
+        let node_kinds = [SyntaxKind::SOURCE_FILE, SyntaxKind::ERROR_NODE];
         for kind in node_kinds {
             assert!(
                 !kind.is_token(),
                 "{kind:?} is a node but is_token() returns true",
+            );
+        }
+    }
+
+    /// Inverse of `nodes_are_not_tokens`: every token kind must satisfy
+    /// `is_token()`. Catches a future variant added to the enum but
+    /// forgotten in the `matches!` arm of `is_token`, which would
+    /// silently misclassify at runtime while passing the
+    /// `nodes_are_not_tokens` test.
+    #[test]
+    fn tokens_are_tokens() {
+        let token_kinds = [
+            // Trivia
+            SyntaxKind::BOM,
+            SyntaxKind::WHITESPACE,
+            SyntaxKind::NEWLINE,
+            SyntaxKind::COMMENT,
+            SyntaxKind::PERCENT_COMMENT,
+            SyntaxKind::SHEBANG,
+            SyntaxKind::EMACS_DIRECTIVE,
+            // Literals
+            SyntaxKind::DATE,
+            SyntaxKind::NUMBER,
+            SyntaxKind::STRING,
+            SyntaxKind::ACCOUNT,
+            SyntaxKind::CURRENCY,
+            SyntaxKind::TAG,
+            SyntaxKind::LINK,
+            SyntaxKind::META_KEY,
+            SyntaxKind::FLAG,
+            SyntaxKind::BOOL_TRUE,
+            SyntaxKind::BOOL_FALSE,
+            SyntaxKind::NULL_KW,
+            // Keywords
+            SyntaxKind::TXN_KW,
+            SyntaxKind::BALANCE_KW,
+            SyntaxKind::OPEN_KW,
+            SyntaxKind::CLOSE_KW,
+            SyntaxKind::COMMODITY_KW,
+            SyntaxKind::PAD_KW,
+            SyntaxKind::EVENT_KW,
+            SyntaxKind::QUERY_KW,
+            SyntaxKind::NOTE_KW,
+            SyntaxKind::DOCUMENT_KW,
+            SyntaxKind::PRICE_KW,
+            SyntaxKind::CUSTOM_KW,
+            SyntaxKind::OPTION_KW,
+            SyntaxKind::INCLUDE_KW,
+            SyntaxKind::PLUGIN_KW,
+            SyntaxKind::PUSHTAG_KW,
+            SyntaxKind::POPTAG_KW,
+            SyntaxKind::PUSHMETA_KW,
+            SyntaxKind::POPMETA_KW,
+            SyntaxKind::PENDING_KW,
+            // Punctuation
+            SyntaxKind::L_BRACE,
+            SyntaxKind::R_BRACE,
+            SyntaxKind::L_DOUBLE_BRACE,
+            SyntaxKind::R_DOUBLE_BRACE,
+            SyntaxKind::L_BRACE_HASH,
+            SyntaxKind::L_PAREN,
+            SyntaxKind::R_PAREN,
+            SyntaxKind::AT,
+            SyntaxKind::AT_AT,
+            SyntaxKind::COLON,
+            SyntaxKind::COMMA,
+            SyntaxKind::TILDE,
+            SyntaxKind::PIPE,
+            SyntaxKind::PLUS,
+            SyntaxKind::MINUS,
+            SyntaxKind::STAR,
+            SyntaxKind::SLASH,
+            SyntaxKind::HASH,
+            // Error
+            SyntaxKind::ERROR_TOKEN,
+        ];
+        for kind in token_kinds {
+            assert!(
+                kind.is_token(),
+                "{kind:?} is a token but is_token() returns false — \
+                 likely missing from the matches! arm in is_token",
             );
         }
     }

@@ -19,19 +19,30 @@
 //! Manifest format (one line per file, sorted lexically):
 //!
 //! ```text
-//! relative/path<TAB>source_blake3<TAB>kind_sequence_blake3
+//! relative/path<TAB>source_blake3<TAB>token_seq_blake3<TAB>node_shape_blake3
 //! ```
 //!
-//! Same shape as the AST-level baseline in `parser-corpus.manifest`,
-//! so a phase-2+ contributor adding structural nodes regenerates with
-//! `BASELINE_UPDATE=1` and the diff localizes to the files they
-//! changed behavior on.
+//! Two distinct kind-sequence hashes per file:
+//!
+//! - `token_seq_blake3` — the ordered `(kind, len)` sequence of LEAF
+//!   tokens only. STABLE across phase 2+ — adding parent nodes around
+//!   token runs doesn't change the token sequence, so this hash only
+//!   moves when token classification changes.
+//! - `node_shape_blake3` — the preorder sequence of node ENTER events
+//!   (kinds only, no tokens). Phase 1 emits exactly one entry per
+//!   file (the root `SOURCE_FILE`). Phase 2 PRs WILL churn this
+//!   column on every file as `DIRECTIVE`/`POSTING`/etc. nodes appear.
+//!
+//! The split keeps phase-2 review surface honest: a structural PR
+//! diffs the node column (expected, every file), and reviewers can
+//! verify the token column is unchanged (any drift there is a real
+//! regression).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use rustledger_parser::{SyntaxKind, parse_flat};
+use rustledger_parser::parse_flat;
 
 const CORPUS_ROOT: &str = "tests/compatibility/files";
 const MIN_FULL_CORPUS_SIZE: usize = 100;
@@ -39,14 +50,15 @@ const MANIFEST_PATH: &str = "tests/baselines/cst-corpus.manifest";
 
 const MANIFEST_HEADER: &[&str] = &[
     "# CST baseline (#1262 phase 1). See crates/rustledger-parser/tests/cst_baseline.rs.",
-    "# Format: path<TAB>source_blake3<TAB>kind_sequence_blake3",
+    "# Format: path<TAB>source_blake3<TAB>token_seq_blake3<TAB>node_shape_blake3",
     "# Regenerate: BASELINE_UPDATE=1 cargo test -p rustledger-parser --test cst_baseline",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Fingerprint {
     source: String,
-    kinds: String,
+    tokens: String,
+    nodes: String,
 }
 
 fn repo_root() -> &'static Path {
@@ -104,10 +116,11 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// Compute the fingerprint pair for a single corpus file. Returns
-/// `None` for files that can't be UTF-8-decoded (e.g.,
-/// `fava/tests_data_invalid-unicode.beancount`); those are recorded
-/// as a `read-error:<kind>` sentinel matching the AST baseline.
+/// Compute the fingerprint triple for a single corpus file. Files
+/// that can't be UTF-8-decoded (e.g.,
+/// `fava/tests_data_invalid-unicode.beancount`) get a
+/// `read-error:<kind>` sentinel in every column matching the AST
+/// baseline.
 fn fingerprint(rel: &Path) -> Fingerprint {
     let abs = repo_root().join(rel);
     let source = match std::fs::read_to_string(&abs) {
@@ -116,7 +129,8 @@ fn fingerprint(rel: &Path) -> Fingerprint {
             let tag = format!("read-error:{:?}", e.kind());
             return Fingerprint {
                 source: tag.clone(),
-                kinds: tag,
+                tokens: tag.clone(),
+                nodes: tag,
             };
         }
     };
@@ -130,42 +144,48 @@ fn fingerprint(rel: &Path) -> Fingerprint {
     if reconstructed != source {
         return Fingerprint {
             source: source_hash,
-            kinds: "round-trip-failure".to_string(),
+            tokens: "round-trip-failure".to_string(),
+            nodes: "round-trip-failure".to_string(),
         };
     }
 
-    let kinds_hash = hash_kind_sequence(&tree);
     Fingerprint {
         source: source_hash,
-        kinds: kinds_hash,
+        tokens: hash_token_sequence(&tree),
+        nodes: hash_node_shape(&tree),
     }
 }
 
-/// Hash the ordered `(SyntaxKind, byte_offset)` sequence of every
-/// token in the tree. This is what makes the gate catch
-/// classification bugs that pure round-trip can't.
-fn hash_kind_sequence(tree: &rustledger_parser::SyntaxNode) -> String {
+/// Hash the ordered `(kind, len)` sequence of LEAF tokens. Stable
+/// across phase 2+ structural changes because wrapping tokens in
+/// parent nodes doesn't change the token sequence itself. The gate
+/// for token-classification bugs (BOM misread as `ERROR_TOKEN`, Comment
+/// vs Hash confusion, etc.).
+fn hash_token_sequence(tree: &rustledger_parser::SyntaxNode) -> String {
     let mut hasher = blake3::Hasher::new();
-    let mut offset = 0u32;
     for elem in tree.preorder_with_tokens() {
         if let rowan::WalkEvent::Enter(rowan::NodeOrToken::Token(tok)) = elem {
             let kind = tok.kind() as u16;
             let len = u32::try_from(usize::from(tok.text_range().len())).unwrap_or(u32::MAX);
-            // u16 kind, u32 length, u32 cumulative offset — fixed
-            // layout so any insertion/deletion/reordering produces a
-            // different hash.
             hasher.update(&kind.to_le_bytes());
             hasher.update(&len.to_le_bytes());
-            hasher.update(&offset.to_le_bytes());
-            offset = offset.saturating_add(len);
-        } else if let rowan::WalkEvent::Enter(rowan::NodeOrToken::Node(node)) = elem {
-            // Hash node kinds too, with a sentinel length, so a
-            // future phase-2 PR that introduces a new node kind moves
-            // the affected files in the manifest.
-            let kind = SyntaxKind::SOURCE_FILE as u16; // sentinel marker for "node enter"
+        }
+    }
+    hasher.finalize().to_hex().to_string()
+}
+
+/// Hash the preorder sequence of node ENTER events (kinds only, no
+/// tokens). Phase 1 emits exactly one entry per file (the root
+/// `SOURCE_FILE`). Phase 2 PRs that wrap token runs in
+/// `DIRECTIVE`/`POSTING`/etc. nodes change this column on every file
+/// — that's the expected churn. The split lets reviewers verify
+/// `token_seq_blake3` stays put while `node_shape_blake3` moves.
+fn hash_node_shape(tree: &rustledger_parser::SyntaxNode) -> String {
+    let mut hasher = blake3::Hasher::new();
+    for elem in tree.preorder_with_tokens() {
+        if let rowan::WalkEvent::Enter(rowan::NodeOrToken::Node(node)) = elem {
+            let kind = node.kind() as u16;
             hasher.update(&kind.to_le_bytes());
-            hasher.update(&u32::MAX.to_le_bytes());
-            hasher.update(&(node.kind() as u16).to_le_bytes());
         }
     }
     hasher.finalize().to_hex().to_string()
@@ -185,9 +205,13 @@ fn read_committed_manifest() -> BTreeMap<PathBuf, Fingerprint> {
             continue;
         }
         let mut parts = line.split('\t');
-        let (Some(path_str), Some(source), Some(kinds), None) =
-            (parts.next(), parts.next(), parts.next(), parts.next())
-        else {
+        let (Some(path_str), Some(source), Some(tokens), Some(nodes), None) = (
+            parts.next(),
+            parts.next(),
+            parts.next(),
+            parts.next(),
+            parts.next(),
+        ) else {
             panic!(
                 "{}:{lineno}: malformed manifest line: {line:?}",
                 path.display(),
@@ -197,7 +221,8 @@ fn read_committed_manifest() -> BTreeMap<PathBuf, Fingerprint> {
             PathBuf::from(path_str),
             Fingerprint {
                 source: source.to_string(),
-                kinds: kinds.to_string(),
+                tokens: tokens.to_string(),
+                nodes: nodes.to_string(),
             },
         );
     }
@@ -218,10 +243,11 @@ fn write_manifest(manifest: &BTreeMap<PathBuf, Fingerprint>) {
         use std::fmt::Write;
         let _ = writeln!(
             &mut out,
-            "{}\t{}\t{}",
+            "{}\t{}\t{}\t{}",
             rel.to_string_lossy(),
             fp.source,
-            fp.kinds,
+            fp.tokens,
+            fp.nodes,
         );
     }
     std::fs::write(&path, out).expect("write manifest");
@@ -268,7 +294,8 @@ fn cst_output_matches_baseline() {
 
     let committed = read_committed_manifest();
 
-    let mut drift: Vec<(PathBuf, String, String)> = Vec::new();
+    let mut token_drift: Vec<(PathBuf, String, String)> = Vec::new();
+    let mut node_drift: Vec<(PathBuf, String, String)> = Vec::new();
     let mut source_drift: Vec<PathBuf> = Vec::new();
     let mut round_trip_failures: Vec<PathBuf> = Vec::new();
     let mut missing_from_corpus: Vec<PathBuf> = Vec::new();
@@ -278,11 +305,17 @@ fn cst_output_matches_baseline() {
         match current.get(path) {
             None => missing_from_corpus.push(path.clone()),
             Some(c) if c.source != expected.source => source_drift.push(path.clone()),
-            Some(c) if c.kinds == "round-trip-failure" => round_trip_failures.push(path.clone()),
-            Some(c) if c.kinds != expected.kinds => {
-                drift.push((path.clone(), expected.kinds.clone(), c.kinds.clone()));
+            Some(c) if c.tokens == "round-trip-failure" => {
+                round_trip_failures.push(path.clone());
             }
-            Some(_) => {}
+            Some(c) => {
+                if c.tokens != expected.tokens {
+                    token_drift.push((path.clone(), expected.tokens.clone(), c.tokens.clone()));
+                }
+                if c.nodes != expected.nodes {
+                    node_drift.push((path.clone(), expected.nodes.clone(), c.nodes.clone()));
+                }
+            }
         }
     }
     for path in current.keys() {
@@ -291,7 +324,7 @@ fn cst_output_matches_baseline() {
         }
     }
 
-    if drift.is_empty() && round_trip_failures.is_empty() {
+    if token_drift.is_empty() && node_drift.is_empty() && round_trip_failures.is_empty() {
         if !source_drift.is_empty() {
             eprintln!(
                 "info: {} corpus file(s) have new source hashes; CST \
@@ -329,14 +362,31 @@ fn cst_output_matches_baseline() {
             let _ = writeln!(&mut report, "  {}", path.display());
         }
     }
-    if !drift.is_empty() {
+    if !token_drift.is_empty() {
         use std::fmt::Write;
         let _ = writeln!(
             &mut report,
-            "Kind-sequence drift on {} file(s) with unchanged source (first 10):",
-            drift.len(),
+            "Token-sequence drift on {} file(s) with unchanged source (first 10):",
+            token_drift.len(),
         );
-        for (path, expected, current) in drift.iter().take(10) {
+        for (path, expected, current) in token_drift.iter().take(10) {
+            let _ = writeln!(
+                &mut report,
+                "  {}\n    expected: {}\n    current:  {}",
+                path.display(),
+                &expected[..16.min(expected.len())],
+                &current[..16.min(current.len())],
+            );
+        }
+    }
+    if !node_drift.is_empty() {
+        use std::fmt::Write;
+        let _ = writeln!(
+            &mut report,
+            "Node-shape drift on {} file(s) with unchanged source (first 10):",
+            node_drift.len(),
+        );
+        for (path, expected, current) in node_drift.iter().take(10) {
             let _ = writeln!(
                 &mut report,
                 "  {}\n    expected: {}\n    current:  {}",

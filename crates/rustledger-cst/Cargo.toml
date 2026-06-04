@@ -1,0 +1,26 @@
+[package]
+name = "rustledger-cst"
+description = "Lossless concrete syntax tree (CST) for Beancount, built on rowan. Phase 1 of #1262."
+version = "0.15.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+authors.workspace = true
+readme = "README.md"
+
+[lib]
+bench = false
+
+[dependencies]
+rowan.workspace = true
+# Phase-1 reuses the existing Logos lexer via `rustledger_parser::tokenize`.
+# Phase 2+ may absorb the lexer outright; for now we lean on it to keep
+# the new crate purely additive (zero changes to existing code paths).
+rustledger-parser.workspace = true
+
+[lints]
+workspace = true

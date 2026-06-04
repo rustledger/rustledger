@@ -3,6 +3,7 @@ resolver = "3"
 members = [
   "crates/rustledger-core",
   "crates/rustledger-parser",
+  "crates/rustledger-cst",
   "crates/rustledger-loader",
   "crates/rustledger-booking",
   "crates/rustledger-validate",
@@ -21,6 +22,7 @@ members = [
 default-members = [
   "crates/rustledger-core",
   "crates/rustledger-parser",
+  "crates/rustledger-cst",
   "crates/rustledger-loader",
   "crates/rustledger-booking",
   "crates/rustledger-validate",
@@ -71,6 +73,9 @@ format_num_pattern = { version = "0.9.5", features = ["rust_decimal"] }
 chumsky = "1.0.0-alpha.7"
 miette = { version = "7", features = ["fancy"] }
 logos = "0.16"
+# Lossless syntax tree (rust-analyzer's library). Used by
+# `rustledger-cst` as phase 1 of the CST migration tracked in #1262.
+rowan = "0.16"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -175,6 +180,7 @@ parking_lot = "0.12"
 # Internal crates
 rustledger-core = { version = "0.15.0", path = "crates/rustledger-core" }
 rustledger-parser = { version = "0.15.0", path = "crates/rustledger-parser" }
+rustledger-cst = { version = "0.15.0", path = "crates/rustledger-cst" }
 rustledger-loader = { version = "0.15.0", path = "crates/rustledger-loader" }
 rustledger-booking = { version = "0.15.0", path = "crates/rustledger-booking" }
 rustledger-validate = { version = "0.15.0", path = "crates/rustledger-validate" }

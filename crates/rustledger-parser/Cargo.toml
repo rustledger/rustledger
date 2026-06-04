@@ -25,6 +25,9 @@ rustledger-core.workspace = true
 logos.workspace = true
 rust_decimal.workspace = true
 serde.workspace = true
+# CST migration (#1262).
+rowan.workspace = true
+num_enum.workspace = true
 # Used by the doc-hidden `__baseline_canonical_payload` helper that
 # the corpus baseline test consumes. The helper canonicalizes
 # directives via `serde_json::to_value` (BTreeMap-backed Object),

@@ -50,10 +50,21 @@ impl From<Span> for Range<usize> {
 }
 
 /// Token types produced by the Logos lexer.
+///
+/// Horizontal whitespace is emitted as a first-class [`Token::Whitespace`]
+/// token (was previously skipped via `#[logos(skip r"[ \t]+")]`). The
+/// existing [`tokenize`] entry point filters whitespace out for
+/// backward-compat with the AST-style parser; the new
+/// [`tokenize_lossless`] entry point keeps them so the CST can
+/// reconstruct source byte-for-byte. Both paths share the same Logos
+/// implementation — there is exactly one tokenization pass per file.
 #[derive(Logos, Debug, Clone, PartialEq, Eq)]
-// Skip horizontal whitespace (spaces and tabs).
-#[logos(skip r"[ \t]+")]
 pub enum Token<'src> {
+    /// Horizontal whitespace (`[ \t]+`). Significant for the CST and
+    /// for the existing indent post-processing in [`tokenize`]; both
+    /// callers handle this variant.
+    #[regex(r"[ \t]+")]
+    Whitespace(&'src str),
     // ===== Literals =====
     /// A date in YYYY-MM-DD, YYYY-M-D, YYYY/MM/DD, or YYYY/M/D format.
     /// Single-digit month and day are accepted (e.g., 2024-1-5).
@@ -388,6 +399,7 @@ impl fmt::Display for Token<'_> {
             Self::Slash => write!(f, "/"),
             Self::Pending => write!(f, "!"),
             Self::Flag(s) => write!(f, "{s}"),
+            Self::Whitespace(s) => write!(f, "{s}"),
             Self::Newline => write!(f, "\\n"),
             Self::Comment(s) => write!(f, "{s}"),
             Self::Hash => write!(f, "#"),
@@ -512,13 +524,30 @@ fn apply_err_layout_transparency(
     }
 }
 
-/// Tokenize source code into a vector of (Token, Span) pairs.
+/// Tokenize source code into a vector of (Token, Span) pairs for the
+/// AST-style parser.
 ///
-/// This function:
-/// 1. Runs the Logos lexer for fast tokenization
-/// 2. Post-processes to detect indentation at line starts
-/// 3. Handles lexer errors by producing Error tokens
+/// Filters out [`Token::Whitespace`] (mid-line horizontal whitespace)
+/// but otherwise emits everything the lexer produces, with
+/// post-processing for line-start `#` comments and indentation.
+/// Callers that need a fully-lossless token stream (the CST builder)
+/// use [`tokenize_lossless`] instead.
 pub fn tokenize(source: &str) -> Vec<(Token<'_>, Span)> {
+    tokenize_inner(source, /* keep_whitespace = */ false)
+}
+
+/// Tokenize source code losslessly: every byte of `source` appears in
+/// exactly one emitted `(Token, Span)` entry. This is the input to
+/// the CST builder.
+///
+/// Differs from [`tokenize`] in that [`Token::Whitespace`] tokens are
+/// preserved (the AST-style parser drops them; the CST keeps them so
+/// the round-trip stays byte-identical).
+pub fn tokenize_lossless(source: &str) -> Vec<(Token<'_>, Span)> {
+    tokenize_inner(source, /* keep_whitespace = */ true)
+}
+
+fn tokenize_inner(source: &str, keep_whitespace: bool) -> Vec<(Token<'_>, Span)> {
     let mut tokens = Vec::new();
     let mut lexer = Token::lexer(source);
     let mut at_line_start = true;
@@ -526,6 +555,14 @@ pub fn tokenize(source: &str) -> Vec<(Token<'_>, Span)> {
 
     while let Some(result) = lexer.next() {
         let span = lexer.span();
+
+        if !keep_whitespace && matches!(result, Ok(Token::Whitespace(_))) {
+            // AST-path drops mid-line whitespace; the CST path keeps
+            // it. Layout-relevant whitespace (start-of-line indentation,
+            // BOM error spans) is handled by the dedicated arms below
+            // regardless of which path we are on.
+            continue;
+        }
 
         match result {
             Ok(Token::Newline) => {

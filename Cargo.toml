@@ -71,6 +71,14 @@ format_num_pattern = { version = "0.9.5", features = ["rust_decimal"] }
 chumsky = "1.0.0-alpha.7"
 miette = { version = "7", features = ["fancy"] }
 logos = "0.16"
+# Lossless syntax tree (rust-analyzer's library). Used by
+# `rustledger-parser`'s CST module — see #1262.
+rowan = "0.16"
+# Safe `repr(u16)` → enum conversion derive, used by `SyntaxKind`. Lets
+# rowan's `Language::kind_from_raw` be a one-line `try_from` instead of
+# a hand-rolled 70-arm match (rejected by the round-1 architecture
+# review of the parallel-crate attempt — see #1262).
+num_enum = "0.7"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

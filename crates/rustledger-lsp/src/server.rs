@@ -46,8 +46,14 @@ impl Server {
         }
     }
 
-    /// Run the server's main loop.
-    pub fn run(self) {
+    /// Run the server's main loop. Returns the exit code produced by
+    /// the `exit` notification (or 0 if the channel closed without
+    /// one). The caller is responsible for draining IO threads
+    /// (`io_threads.join()`) before terminating the process — without
+    /// that drain, the writer can lose the shutdown response queued
+    /// when the loop broke.
+    #[must_use]
+    pub fn run(self) -> i32 {
         tracing::info!("Starting Beancount Language Server v{}", crate::VERSION);
 
         // Resolve journal file path relative to workspace root if needed
@@ -67,9 +73,10 @@ impl Server {
         // and the negotiated position encoding (so handlers emit
         // positions in the encoding the client expects).
         let (sender, receiver) = (self.connection.sender, self.connection.receiver);
-        run_main_loop(receiver, sender, journal_file, self.position_encoding);
+        let code = run_main_loop(receiver, sender, journal_file, self.position_encoding);
 
-        tracing::info!("Server shutdown complete");
+        tracing::info!("Server shutdown complete (exit code {code})");
+        code
     }
 
     /// Resolve the journal file path, making it absolute if necessary.
@@ -147,7 +154,18 @@ impl Server {
 }
 
 /// Start the LSP server using stdio transport.
-pub fn start_stdio() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+///
+/// Returns the exit code that the `exit` notification supplied (0 for
+/// a clean shutdown, 1 for exit-without-prior-shutdown per LSP spec).
+/// If the channel closed without an `exit` notification, returns 0.
+///
+/// Critically, `io_threads.join()` is called BEFORE returning, so the
+/// shutdown response queued in the writer thread's channel is fully
+/// flushed to stdout. Previously the production exit path called
+/// `process::exit(code)` from inside the main loop, which terminated
+/// the process before the writer could flush — losing the shutdown
+/// response on slow runners (the `stdio_smoke` CI flake).
+pub fn start_stdio() -> Result<i32, Box<dyn std::error::Error + Send + Sync>> {
     tracing::info!("Starting LSP server on stdio");
 
     // Create connection using stdio
@@ -300,10 +318,16 @@ pub fn start_stdio() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Create and run server with the handler-facing position encoding
     // (derived above at the negotiation site).
     let server = Server::new(connection, init_params, handler_encoding);
-    server.run();
+    let exit_code = server.run();
 
-    // Wait for IO threads to finish
+    // Drain the writer thread BEFORE returning. The main loop has
+    // already broken (either via the `exit` notification or because
+    // the channel closed), but the writer may still be flushing the
+    // shutdown response queued just before. Without this drain, a
+    // subsequent `process::exit` in `main()` would kill the writer
+    // mid-flush; with it, the response reaches stdout before main
+    // tears down.
     io_threads.join()?;
 
-    Ok(())
+    Ok(exit_code)
 }

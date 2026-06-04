@@ -174,6 +174,20 @@ pub struct MainLoopState {
     pub diagnostics: HashMap<Uri, Vec<lsp_types::Diagnostic>>,
     /// Whether shutdown was requested.
     pub shutdown_requested: bool,
+    /// Set by the `exit` notification handler. The main loop checks
+    /// this after each event and breaks when it's `Some(_)`, returning
+    /// the code from `run_main_loop_with_exit_action` so the caller
+    /// (`server.rs::start_stdio` in production) can drain the writer
+    /// thread via `io_threads.join()` BEFORE `process::exit`. Without
+    /// this, the production exit_action was `process::exit(code)`
+    /// directly — which terminates the process before the writer
+    /// thread flushes the shutdown response queued in its channel.
+    /// On a slow CI runner the writer can't keep up, the test
+    /// observes only the initialize response on stdout, and
+    /// `stdio_smoke` fails. See the `handle_notification` "exit"
+    /// arm and `run_main_loop_with_exit_action`'s return-value
+    /// documentation.
+    pub pending_exit_code: Option<i32>,
     /// LSP position encoding negotiated at initialization (UTF-8 or
     /// UTF-16). Handler code emitting `Position`s must consult this
     /// so positions align with what the client expects.
@@ -251,6 +265,7 @@ impl MainLoopState {
             sender,
             diagnostics: HashMap::new(),
             shutdown_requested: false,
+            pending_exit_code: None,
             // Conservative default: UTF-16 (the LSP spec default).
             // `server.rs::run` overrides this with the negotiated
             // encoding after `initialize`. Construction without
@@ -262,7 +277,15 @@ impl MainLoopState {
             task_receiver,
             job_sender,
             revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            exit_action: Some(Box::new(|code| std::process::exit(code))),
+            // Production used to wire this to `process::exit(code)`,
+            // which terminated before `io_threads.join()` could drain
+            // the writer — losing the shutdown response on slow runners
+            // (the stdio_smoke flake). The exit notification now
+            // signals via `pending_exit_code` instead, and the loop
+            // breaks normally; the caller then joins io_threads and
+            // exits with the propagated code. `exit_action` is kept
+            // for side effects (test harnesses use a no-op).
+            exit_action: Some(Box::new(|_code| {})),
         }
     }
 
@@ -1348,11 +1371,14 @@ impl MainLoopState {
             "exit" => {
                 tracing::info!("Exit notification received");
                 let code = if self.shutdown_requested { 0 } else { 1 };
-                // Pull the configured exit action; production wires
-                // this to `process::exit` (terminates immediately),
-                // tests pass a no-op. If the action returns (test
-                // path), the main loop continues running until the
-                // channel closes — which is what the harness wants.
+                // Signal the main loop to break with this code; the
+                // caller will drain the writer thread before exiting.
+                // See `pending_exit_code` field rustdoc.
+                self.pending_exit_code = Some(code);
+                // Invoke any caller-supplied side effect (test harnesses
+                // pass a no-op; production passes a no-op too post-fix
+                // because the actual process::exit is now done by the
+                // outer caller AFTER io_threads.join()).
                 if let Some(action) = self.exit_action.take() {
                     action(code);
                 }
@@ -1669,18 +1695,39 @@ impl MainLoopState {
 /// loop responsive while expensive requests run in parallel.
 ///
 /// # Arguments
+///
 /// * `receiver` - Channel to receive LSP messages from the client
 /// * `sender` - Channel to send LSP messages to the client
 /// * `journal_file` - Optional path to the root journal file for multi-file support
+///
+/// # Returns
+///
+/// The exit code from the `exit` notification (after the loop breaks
+/// cleanly), or `0` if the channel was closed before an `exit`
+/// notification arrived. The caller is expected to drain any IO
+/// threads (e.g., `lsp_server::Connection::stdio()`'s
+/// `io_threads.join()`) AFTER this returns and BEFORE terminating the
+/// process — otherwise the shutdown response queued in the writer
+/// thread's channel never reaches the client, which is the bug behind
+/// the `stdio_smoke` CI flake.
+#[must_use]
 pub fn run_main_loop(
     receiver: Receiver<lsp_server::Message>,
     sender: Sender<lsp_server::Message>,
     journal_file: Option<PathBuf>,
     position_encoding: crate::handlers::utils::PositionEncoding,
-) {
-    run_main_loop_with_exit_action(receiver, sender, journal_file, position_encoding, |code| {
-        std::process::exit(code)
-    });
+) -> i32 {
+    // No-op exit_action: the actual process termination (if any) is
+    // the caller's responsibility, performed AFTER io_threads.join()
+    // has drained the writer. The returned code is the source of
+    // truth.
+    run_main_loop_with_exit_action(
+        receiver,
+        sender,
+        journal_file,
+        position_encoding,
+        |_code| {},
+    )
 }
 
 /// Same as [`run_main_loop`] but with a caller-supplied `exit_action`
@@ -1714,13 +1761,15 @@ pub fn run_main_loop(
 /// // ... drive `client` with LSP messages ...
 /// drop(client); // closes the channel; the server thread exits.
 /// ```
+#[must_use]
 pub fn run_main_loop_with_exit_action<F>(
     receiver: Receiver<lsp_server::Message>,
     sender: Sender<lsp_server::Message>,
     journal_file: Option<PathBuf>,
     position_encoding: crate::handlers::utils::PositionEncoding,
     exit_action: F,
-) where
+) -> i32
+where
     F: FnOnce(i32) + Send + 'static,
 {
     let mut state = MainLoopState::new(sender, journal_file).with_exit_action(exit_action);
@@ -1729,12 +1778,12 @@ pub fn run_main_loop_with_exit_action<F>(
 
     tracing::info!("Main loop started");
 
-    loop {
+    let exit_code = loop {
         crossbeam_channel::select! {
             recv(receiver) -> msg => {
                 let msg = match msg {
                     Ok(msg) => msg,
-                    Err(_) => break, // Channel closed
+                    Err(_) => break 0, // Channel closed without an `exit` notification.
                 };
                 let event = match msg {
                     lsp_server::Message::Request(req) => Event::Message(Message::Request(req)),
@@ -1751,9 +1800,19 @@ pub fn run_main_loop_with_exit_action<F>(
                 }
             }
         }
-    }
+        // The `exit` notification handler signals via `pending_exit_code`
+        // instead of calling `process::exit` directly. Break here so
+        // the caller can drain the writer thread before terminating
+        // the process; otherwise the queued shutdown response can be
+        // lost on slow IO. See the field's rustdoc and the
+        // `stdio_smoke` flake discussion.
+        if let Some(code) = state.pending_exit_code {
+            break code;
+        }
+    };
 
-    tracing::info!("Main loop ended");
+    tracing::info!("Main loop ended (exit code {exit_code})");
+    exit_code
 }
 
 #[cfg(test)]

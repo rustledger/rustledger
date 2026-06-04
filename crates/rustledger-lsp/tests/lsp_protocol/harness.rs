@@ -137,9 +137,11 @@ impl LspTestClient {
             }
 
             // No-op exit action: the `exit` notification will not
-            // terminate the test process. After the action returns,
-            // the main loop keeps running until the connection drops.
-            run_main_loop_with_exit_action(
+            // terminate the test process. The loop breaks cleanly via
+            // the new `pending_exit_code` path (post-stdio-flake fix);
+            // the returned code is discarded — the harness lets the
+            // test process keep running.
+            let _exit_code = run_main_loop_with_exit_action(
                 server.receiver,
                 server.sender,
                 journal_file,

@@ -41,9 +41,21 @@ fn main() -> ExitCode {
         .with_writer(std::io::stderr)
         .init();
 
-    // Run the server
+    // Run the server. `start_stdio` drains the writer thread before
+    // returning, so by the time we convert the code into an ExitCode
+    // the client has already received the shutdown response.
+    // `process::exit` would still work, but returning ExitCode lets
+    // Rust's main runtime do any final cleanup it has.
     match rustledger_lsp::start_stdio() {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(0) => ExitCode::SUCCESS,
+        Ok(code) => {
+            // `code` is the exit code the client requested via the
+            // `exit` notification (1 = exit without prior shutdown,
+            // per LSP spec). Truncating to u8 mirrors what process::exit
+            // would do — exit codes outside 0..=255 are not portable.
+            #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+            ExitCode::from(code as u8)
+        }
         Err(e) => {
             tracing::error!("Server error: {}", e);
             ExitCode::FAILURE

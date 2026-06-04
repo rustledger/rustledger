@@ -159,40 +159,63 @@ pub fn parse_directives(source: &str) -> (Vec<Spanned<Directive>>, Vec<ParseErro
     (result.directives, result.errors)
 }
 
-#[cfg(test)]
-mod parse_result_field_coverage {
-    //! Compile-time guard: when a field is added to [`ParseResult`],
-    //! the exhaustive destructure below stops compiling. That's the
-    //! signal to also update:
-    //!
-    //! 1. `parser_hash_of` in
-    //!    `crates/rustledger-parser/tests/corpus_baseline.rs` — the new
-    //!    field must contribute to the parser fingerprint or the
-    //!    baseline silently misses regressions in it.
-    //! 2. `fingerprint_covers_every_parse_result_field` in the same
-    //!    file — add a `mutate` arm for the new field so the runtime
-    //!    coverage test stays honest.
-    //!
-    //! Why this lives here instead of the integration test:
-    //! `ParseResult` is `#[non_exhaustive]`, which blocks exhaustive
-    //! destructuring from external crates (including this crate's
-    //! integration tests). Inside the defining crate the attribute
-    //! does NOT apply, so an exhaustive destructure here will fail to
-    //! compile when a field is added — exactly what we want.
-    use super::ParseResult;
-
-    #[allow(dead_code)]
-    fn destructure_must_be_exhaustive(r: &ParseResult) {
-        let ParseResult {
-            directives: _,
-            options: _,
-            includes: _,
-            plugins: _,
-            comments: _,
-            errors: _,
-            warnings: _,
-            currency_occurrences: _,
-            has_leading_bom: _,
-        } = r;
-    }
+/// Canonical hash-payload serialization for the corpus baseline
+/// (#1262 phase 0). **Internal**: this exists only so the baseline
+/// integration test can hash a `ParseResult` without listing fields
+/// outside the defining crate.
+///
+/// Returns a byte string that uniquely identifies the `ParseResult`'s
+/// observable content. Directives route through `serde_json::to_value`
+/// to normalize the `FxHashMap` iteration order in metadata; all
+/// other fields use `Debug` formatting, which is deterministic for
+/// `Vec`-based types.
+///
+/// **Why this lives in `rustledger-parser` instead of the test:**
+/// `ParseResult` is `#[non_exhaustive]`, which blocks exhaustive
+/// destructuring from external crates (including the integration
+/// test). Performing the destructure here forces the compiler to
+/// flag any field added to `ParseResult` that the canonical
+/// serialization does not feed into its output. Without this, a new
+/// `ParseResult` field could silently exit the baseline fingerprint —
+/// the BOM-flag-omission class of bug the round-3 review caught.
+///
+/// **Add a new field?** Add a binding (NOT `_`) AND a hasher feed
+/// line to the destructure below. The compiler enforces the binding;
+/// reviewers must enforce the feed.
+#[doc(hidden)]
+#[must_use]
+pub fn __baseline_canonical_payload(result: &ParseResult) -> Vec<u8> {
+    let ParseResult {
+        directives,
+        options,
+        includes,
+        plugins,
+        comments,
+        errors,
+        warnings,
+        currency_occurrences,
+        has_leading_bom,
+    } = result;
+    let mut out: Vec<u8> = Vec::new();
+    let directives_json = serde_json::to_value(directives)
+        .map_or_else(|e| format!("serialize-error:{e}"), |v| v.to_string());
+    out.extend_from_slice(b"directives:");
+    out.extend_from_slice(directives_json.as_bytes());
+    out.extend_from_slice(b"\noptions:");
+    out.extend_from_slice(format!("{options:?}").as_bytes());
+    out.extend_from_slice(b"\nincludes:");
+    out.extend_from_slice(format!("{includes:?}").as_bytes());
+    out.extend_from_slice(b"\nplugins:");
+    out.extend_from_slice(format!("{plugins:?}").as_bytes());
+    out.extend_from_slice(b"\ncomments:");
+    out.extend_from_slice(format!("{comments:?}").as_bytes());
+    out.extend_from_slice(b"\nerrors:");
+    out.extend_from_slice(format!("{errors:?}").as_bytes());
+    out.extend_from_slice(b"\nwarnings:");
+    out.extend_from_slice(format!("{warnings:?}").as_bytes());
+    out.extend_from_slice(b"\ncurrency_occurrences:");
+    out.extend_from_slice(format!("{currency_occurrences:?}").as_bytes());
+    out.extend_from_slice(b"\nhas_leading_bom:");
+    out.extend_from_slice(format!("{has_leading_bom:?}").as_bytes());
+    out
 }

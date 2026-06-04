@@ -77,11 +77,26 @@ jobs:
             exit 1
           fi
           count=$(find tests/compatibility/files -name '*.beancount' | wc -l)
-          # Count non-comment, non-blank manifest entries. `grep -c`
-          # exits 1 when zero matches; we want that to fail loudly
-          # rather than silently degrade to expected=0 (which would
-          # make floor=-50 and the gate inert).
-          expected=$(grep -Ecv '^(#|$)' "$manifest")
+          # Count non-comment, non-blank manifest entries.
+          #
+          # `grep -c` exits 1 when zero matches AND `set -e` is on, so
+          # a header-only manifest (legitimate state during bootstrap
+          # or after a botched edit) would abort the step before our
+          # `expected -lt 1` diagnostic runs. The explicit if/else
+          # captures the zero-match case so the diagnostic stays
+          # reachable — and importantly does NOT silently coerce
+          # other grep failures (e.g., I/O errors, exit 2) to zero.
+          if expected=$(grep -Ecv '^(#|$)' "$manifest"); then
+            :
+          else
+            rc=$?
+            if [ "$rc" -eq 1 ]; then
+              expected=0
+            else
+              echo "::error::grep failed unexpectedly on $manifest (exit $rc)."
+              exit 1
+            fi
+          fi
           if [ "$expected" -lt 1 ]; then
             echo "::error::Manifest $manifest has zero entries. Cannot derive a meaningful corpus-size floor."
             exit 1

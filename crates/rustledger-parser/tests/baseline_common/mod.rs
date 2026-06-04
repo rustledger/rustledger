@@ -287,7 +287,9 @@ pub fn write_manifest(
 /// Build the on-disk manifest by walking the corpus and calling
 /// `fingerprint_fn` for each file. The fingerprinter returns `None`
 /// for files that should be excluded from the manifest entirely
-/// (e.g., the format baseline's "zero directives" case).
+/// (e.g., the format baseline's "no formattable content at all"
+/// case — files with no directives, options, includes, plugins, or
+/// comments).
 pub fn compute_manifest<F>(fingerprint_fn: F) -> BTreeMap<PathBuf, FileFingerprint>
 where
     F: Fn(&Path) -> Option<FileFingerprint>,

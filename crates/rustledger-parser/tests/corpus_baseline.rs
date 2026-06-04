@@ -132,41 +132,20 @@ fn fingerprint(absolute_path: &Path) -> FileFingerprint {
 }
 
 /// Hash a fully-formed `ParseResult` to the canonical parser
-/// fingerprint. Factored out of [`fingerprint`] so a coverage test
-/// (see [`fingerprint_covers_every_parse_result_field`]) can prove
-/// every field of `ParseResult` actually influences the hash.
+/// fingerprint.
 ///
-/// **Field list maintenance**: when a field is added to
-/// `ParseResult`, append it here AND extend the coverage test. The
-/// `#[non_exhaustive]` attribute on `ParseResult` blocks exhaustive
-/// destructuring from this integration test, so the compiler cannot
-/// enforce coverage; the coverage test is the runtime equivalent.
+/// The payload bytes come from
+/// [`rustledger_parser::__baseline_canonical_payload`], a doc-hidden
+/// helper inside the parser crate that performs an exhaustive
+/// destructure of `ParseResult`. Because the destructure lives in the
+/// defining crate, `#[non_exhaustive]` does not apply and the
+/// compiler flags any added field — closing the BOM-flag-omission
+/// class of bug at compile time, not just at test time. The runtime
+/// coverage test [`fingerprint_covers_every_parse_result_field`]
+/// remains as defense in depth.
 fn parser_hash_of(result: &rustledger_parser::ParseResult) -> String {
-    let mut hasher = blake3::Hasher::new();
-    // Directives route through serde_json::Value (BTreeMap-backed
-    // for objects), neutralizing FxHashMap iteration order in
-    // `Directive.meta` / `Posting.meta`.
-    let directives_json = serde_json::to_value(&result.directives)
-        .map_or_else(|e| format!("serialize-error:{e}"), |v| v.to_string());
-    hasher.update(b"directives:");
-    hasher.update(directives_json.as_bytes());
-    hasher.update(b"\noptions:");
-    hasher.update(format!("{:?}", &result.options).as_bytes());
-    hasher.update(b"\nincludes:");
-    hasher.update(format!("{:?}", &result.includes).as_bytes());
-    hasher.update(b"\nplugins:");
-    hasher.update(format!("{:?}", &result.plugins).as_bytes());
-    hasher.update(b"\ncomments:");
-    hasher.update(format!("{:?}", &result.comments).as_bytes());
-    hasher.update(b"\nerrors:");
-    hasher.update(format!("{:?}", &result.errors).as_bytes());
-    hasher.update(b"\nwarnings:");
-    hasher.update(format!("{:?}", &result.warnings).as_bytes());
-    hasher.update(b"\ncurrency_occurrences:");
-    hasher.update(format!("{:?}", &result.currency_occurrences).as_bytes());
-    hasher.update(b"\nhas_leading_bom:");
-    hasher.update(format!("{:?}", result.has_leading_bom).as_bytes());
-    hasher.finalize().to_hex().to_string()
+    let payload = rustledger_parser::__baseline_canonical_payload(result);
+    blake3::hash(&payload).to_hex().to_string()
 }
 
 /// The baseline test.
@@ -185,10 +164,9 @@ fn parser_output_matches_baseline() {
     let manifest_abs = repo_root().join(MANIFEST_PATH);
     let fp = |p: &Path| Some(fingerprint(p));
     let update = std::env::var_os("BASELINE_UPDATE").is_some();
+    let strict = std::env::var_os("STRICT_BASELINE").is_some();
 
     let current = compute_manifest(fp);
-    let committed = read_committed_manifest(&manifest_abs);
-    let strict = std::env::var_os("STRICT_BASELINE").is_some();
 
     // Corpus-size guard runs BEFORE the BASELINE_UPDATE write path so
     // a bare `BASELINE_UPDATE=1 cargo test ...` invocation (per the
@@ -225,9 +203,14 @@ fn parser_output_matches_baseline() {
     }
 
     if update {
+        // Deliberately skip read_committed_manifest in update mode:
+        // a corrupt or partially-written committed manifest must not
+        // panic the very regen that would replace it.
         write_manifest(&manifest_abs, &current, MANIFEST_HEADER);
         return;
     }
+
+    let committed = read_committed_manifest(&manifest_abs);
 
     // Source-aware drift classification. See module rustdoc.
     let mut parser_drift: Vec<(&PathBuf, &str, &str)> = Vec::new();

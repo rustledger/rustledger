@@ -34,6 +34,26 @@
 //! spans). The CLI is what users invoke, so the baseline gates
 //! exactly that.
 //!
+//! ## Implicit gates beyond the formatter
+//!
+//! `format_source`'s contract (see its rustdoc) recommends callers
+//! gate on `parse_result.errors.is_empty()`. The baseline deliberately
+//! does NOT — it formats every corpus file, including ones with parse
+//! errors. Consequences worth being explicit about:
+//!
+//! - For files with parse errors, the format output reflects the
+//!   parser's error-recovery state. A change to error recovery (e.g.,
+//!   different resync token, different span on a partial directive)
+//!   shifts the format hash for those files. This baseline therefore
+//!   ALSO gates changes to parser error recovery on the corpus, not
+//!   just the formatter.
+//! - For files with parse panics, see `parse-panic:` / `format-panic:`
+//!   sentinels below.
+//! - Default `FormatConfig::default()` is used. Changing the default
+//!   of any `FormatConfig` field will shift hashes across many files.
+//!   That's intentional — the gate IS the test that the default
+//!   configuration's output is stable.
+//!
 //! ## Regeneration
 //!
 //! ```ignore
@@ -170,6 +190,9 @@ fn formatter_output_matches_baseline() {
     let current = compute_manifest(fingerprint);
 
     if update {
+        // Deliberately skip read_committed_manifest in update mode:
+        // a corrupt or partially-written committed manifest must not
+        // panic the very regen that would replace it.
         write_manifest(&manifest_abs, &current, MANIFEST_HEADER);
         return;
     }
@@ -191,16 +214,23 @@ fn formatter_output_matches_baseline() {
     // regression. Strict mode treats this as drift.
     let mut became_empty: Vec<&PathBuf> = Vec::new();
     // File missing from current but still on disk AND the committed
-    // entry was a `read-error:*` sentinel. The file went from
-    // unreadable to readable-with-no-content — an improvement, not a
-    // regression. Warn only; never strict-fail.
-    let mut read_error_resolved: Vec<&PathBuf> = Vec::new();
+    // entry was a sentinel (`read-error:*`, `parse-panic:*`, or
+    // `format-panic:*`). The file went from broken to readable-with-
+    // no-formattable-content — an improvement, not a regression. Warn
+    // only; never strict-fail. Without this distinction, fixing a
+    // panicking parser or a panicking formatter would surface as a
+    // false "parser regression" against the committed sentinel.
+    let mut previously_broken_resolved: Vec<&PathBuf> = Vec::new();
     let mut missing_from_manifest: Vec<&PathBuf> = Vec::new();
     for (path, expected) in &committed {
         match current.get(path) {
             None if on_disk.contains(path) => {
-                if expected.source.starts_with("read-error:") {
-                    read_error_resolved.push(path);
+                if expected.source.starts_with("read-error:")
+                    || expected.parser.starts_with("read-error:")
+                    || expected.parser.starts_with("parse-panic:")
+                    || expected.parser.starts_with("format-panic:")
+                {
+                    previously_broken_resolved.push(path);
                 } else {
                     became_empty.push(path);
                 }
@@ -267,12 +297,13 @@ fn formatter_output_matches_baseline() {
                 became_empty.len(),
             );
         }
-        if !read_error_resolved.is_empty() {
+        if !previously_broken_resolved.is_empty() {
             eprintln!(
-                "info: {} file(s) previously recorded as `read-error:*` \
-                 are now readable but contain no formattable items. \
+                "info: {} file(s) previously recorded as a sentinel \
+                 (`read-error:*`, `parse-panic:*`, or `format-panic:*`) \
+                 are now readable AND parse to no formattable items. \
                  Improvement, not regression; regenerate when convenient.",
-                read_error_resolved.len(),
+                previously_broken_resolved.len(),
             );
         }
         if !removed_from_corpus.is_empty() {

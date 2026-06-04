@@ -327,9 +327,20 @@ fn has_balance_error_at_line(diagnostics: &[Diagnostic], line: u32) -> bool {
 /// code-action suggestions; treating them as "something is wrong"
 /// would surface ✓-disqualifying noise on every code-action-eligible
 /// line.
+///
+/// Diagnostics with a zero-width range anchored at `(0, 0)..(0, 0)`
+/// are ALSO excluded: that's the sentinel for "I have no source span"
+/// used by the plugin-error emitter at
+/// `handlers/diagnostics.rs:325-329` (and any future spanless
+/// diagnostic source). Treating them as anchored on line 0 would make
+/// every balance directive on line 0 — common in scratch buffers and
+/// include-only files — render neutral whenever a plugin happens to
+/// fail. Keep the lens focused on directive-anchored diagnostics; the
+/// global ones surface independently in the problems panel.
 fn has_non_balance_error_at_line(diagnostics: &[Diagnostic], line: u32) -> bool {
     diagnostics.iter().any(|d| {
         d.range.start.line == line
+            && !is_global_sentinel_range(&d.range)
             && matches!(
                 d.severity,
                 Some(DiagnosticSeverity::ERROR)
@@ -338,6 +349,17 @@ fn has_non_balance_error_at_line(diagnostics: &[Diagnostic], line: u32) -> bool 
             )
             && !is_balance_error_code(d.code.as_ref())
     })
+}
+
+/// Returns true for the `(0, 0)..(0, 0)` sentinel that spanless
+/// diagnostic emitters (plugin errors today) use when they have no
+/// source location to attach. A diagnostic with this exact range is
+/// "global to the file," not anchored on line 0.
+fn is_global_sentinel_range(range: &Range) -> bool {
+    range.start.line == 0
+        && range.start.character == 0
+        && range.end.line == 0
+        && range.end.character == 0
 }
 
 fn is_balance_error_code(code: Option<&NumberOrString>) -> bool {
@@ -462,13 +484,12 @@ mod tests {
         }
     }
 
-    fn error_with_code_at_line(code: &str, line: u32) -> Diagnostic {
-        diagnostic_with_code_severity_at_line(code, DiagnosticSeverity::ERROR, line)
-    }
-
-    /// Default-case: a balance-assertion-failed diagnostic at `line`.
+    /// Default-case: a balance-assertion-failed (E2001) ERROR
+    /// diagnostic at `line`. The most common test fixture; non-default
+    /// shapes go through `diagnostic_with_code_severity_at_line`
+    /// directly so the chosen severity is visible at the call site.
     fn error_at_line(line: u32) -> Diagnostic {
-        error_with_code_at_line("E2001", line)
+        diagnostic_with_code_severity_at_line("E2001", DiagnosticSeverity::ERROR, line)
     }
 
     #[test]
@@ -734,7 +755,11 @@ mod tests {
         let params = code_lens_params();
 
         // E1001 (account never opened) at the balance directive's line.
-        let diags = vec![error_with_code_at_line("E1001", 0)];
+        let diags = vec![diagnostic_with_code_severity_at_line(
+            "E1001",
+            DiagnosticSeverity::ERROR,
+            0,
+        )];
         let balance_lens = find_balance_lens(
             handle_code_lens(
                 &params,
@@ -868,6 +893,60 @@ mod tests {
             cmd.title.contains('✓'),
             "HINT-severity must not disqualify ✓ — code-action hints \
              routinely anchor on directives. got {:?}",
+            cmd.title
+        );
+    }
+
+    /// Plugin errors (and any future spanless diagnostic) are emitted
+    /// with the global sentinel range `(0,0)..(0,0)` per
+    /// `handlers/diagnostics.rs:325-329`. A balance directive that
+    /// happens to land on line 0 must NOT be marked neutral just
+    /// because a plugin failed elsewhere in the file. The sentinel
+    /// range exclusion keeps the lens focused on directive-anchored
+    /// diagnostics; the global plugin error surfaces independently in
+    /// the problems panel.
+    #[test]
+    fn balance_lens_ignores_global_sentinel_range_diagnostic() {
+        // Balance directive IS on line 0 — the case where a naive
+        // line-only filter would conflate the global plugin error with
+        // a directive-anchored one.
+        let source = "2024-01-31 balance Assets:Bank 100 USD\n";
+        let result = parse(source);
+        let params = code_lens_params();
+
+        // Plugin-shaped diagnostic: ERROR severity, range (0,0)..(0,0),
+        // non-balance code. Mirrors what diagnostics.rs:325-329 emits.
+        let plugin_error = Diagnostic {
+            range: Range {
+                start: Position::new(0, 0),
+                end: Position::new(0, 0),
+            },
+            severity: Some(DiagnosticSeverity::ERROR),
+            code: Some(NumberOrString::String("PluginLoadFailed".into())),
+            code_description: None,
+            source: Some("rustledger".into()),
+            message: "plugin failed to load".into(),
+            related_information: None,
+            tags: None,
+            data: None,
+        };
+        let balance_lens = find_balance_lens(
+            handle_code_lens(
+                &params,
+                source,
+                &result,
+                Some(&[plugin_error]),
+                PositionEncoding::Utf16,
+            )
+            .expect("lenses emitted"),
+        );
+        let cmd = balance_lens.command.as_ref().expect("ships resolved");
+        assert!(
+            cmd.title.contains('✓'),
+            "global-sentinel-range diagnostic (plugin error with no \
+             source span) must not disqualify ✓ on a line-0 balance \
+             directive; the sentinel range means 'global', not \
+             'anchored on line 0'. got {:?}",
             cmd.title
         );
     }

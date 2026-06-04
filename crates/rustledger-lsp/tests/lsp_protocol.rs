@@ -414,14 +414,28 @@ plugin \"beancount_reds_plugins.effective_date.effective_date\" \"{\n\
     let lenses = lenses.expect("lenses emitted on a non-empty document");
 
     // Latest diagnostics for our URI (the server may publish multiple
-    // times; the last one is the authoritative current state).
-    let latest_diags = diagnostic_payloads
+    // times; the last one is the authoritative current state). Fail
+    // loudly if no publishDiagnostics arrived for the URI — otherwise
+    // a URI-canonicalization mismatch (`p.uri.as_str()` vs the test's
+    // `uri: String`) could silently fall through to an empty slice,
+    // and a regression that emits ⚠ lenses without diagnostics could
+    // still pass the assertion vacuously.
+    let latest_payload = diagnostic_payloads
         .iter()
         .rev()
         .find(|p| p.uri.as_str() == uri)
-        .map(|p| p.diagnostics.as_slice())
-        .unwrap_or(&[]);
-    let error_lines: std::collections::HashSet<u32> = latest_diags
+        .unwrap_or_else(|| {
+            panic!(
+                "no publishDiagnostics arrived for {uri}; captured \
+                 payloads: {:?}",
+                diagnostic_payloads
+                    .iter()
+                    .map(|p| p.uri.as_str())
+                    .collect::<Vec<_>>()
+            )
+        });
+    let error_lines: std::collections::HashSet<u32> = latest_payload
+        .diagnostics
         .iter()
         .filter(|d| d.severity == Some(lsp_types::DiagnosticSeverity::ERROR))
         .map(|d| d.range.start.line)
@@ -445,6 +459,273 @@ plugin \"beancount_reds_plugins.effective_date.effective_date\" \"{\n\
          ERROR diagnostic exists at the same line(s). This is exactly \
          the dead-link UX the issue reported. error lines: {error_lines:?}, \
          dead-link lenses: {dead_links:?}"
+    );
+}
+
+/// Companion to `issue_1264_no_balance_lens_without_matching_diagnostic`:
+/// the opposite direction. A real balance-arithmetic failure (validator
+/// emits `E2001`) MUST surface as `⚠ Balance: X USD (see diagnostic)`
+/// on the lens, with a matching diagnostic at the same line.
+///
+/// Without this assertion, a future regression where the lens reads
+/// the wrong cache key, URI canonicalization drifts, or the new
+/// `validation_would_run` gate is misconfigured would silently
+/// downgrade every failing assertion to ✓ — the inverse of #1264 and
+/// just as misleading. The one-direction test (`issue_1264_*`) only
+/// catches the false-⚠ class; this catches the false-✓ class.
+#[test]
+fn real_balance_failure_round_trips_to_warning_lens() {
+    let mut client = LspTestClient::spawn();
+    client.initialize();
+
+    let uri = test_uri("real_balance_failure.beancount");
+    // Deposit 50, assert 100 — guaranteed to fail balance-arithmetic.
+    let source = "2024-01-01 open Assets:Bank USD\n\
+2024-01-01 open Income:Salary\n\
+2024-01-15 * \"Deposit\"\n  \
+  Assets:Bank  50.00 USD\n  \
+  Income:Salary\n\
+2024-01-31 balance Assets:Bank 100 USD\n";
+    client.open_document(&uri, source);
+
+    let id = client.next_request_id();
+    let req = lsp_server::Request {
+        id: id.clone(),
+        method: <CodeLensRequest as lsp_types::request::Request>::METHOD.to_string(),
+        params: serde_json::to_value(CodeLensParams {
+            text_document: TextDocumentIdentifier {
+                uri: uri.parse().unwrap(),
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        })
+        .unwrap(),
+    };
+    client.raw_send_request(req).expect("send codeLens request");
+
+    let mut diagnostic_payloads: Vec<lsp_types::PublishDiagnosticsParams> = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let resp = loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let msg = client
+            .recv_with_timeout(remaining)
+            .expect("timed out waiting for codeLens response");
+        match msg {
+            lsp_server::Message::Response(r) if r.id == id => break r,
+            lsp_server::Message::Notification(n)
+                if n.method == "textDocument/publishDiagnostics" =>
+            {
+                let p: lsp_types::PublishDiagnosticsParams =
+                    serde_json::from_value(n.params).unwrap();
+                diagnostic_payloads.push(p);
+            }
+            _ => {}
+        }
+    };
+
+    let result = resp.result.expect("codeLens returned a result");
+    let lenses: Option<Vec<lsp_types::CodeLens>> = serde_json::from_value(result).unwrap();
+    let lenses = lenses.expect("lenses emitted on a non-empty document");
+
+    // Verify the validator emitted an E2001 (balance assertion failed)
+    // diagnostic — otherwise the test premise is broken.
+    let latest_payload = diagnostic_payloads
+        .iter()
+        .rev()
+        .find(|p| p.uri.as_str() == uri)
+        .unwrap_or_else(|| {
+            panic!(
+                "no publishDiagnostics arrived for {uri}; captured \
+                 payloads: {:?}",
+                diagnostic_payloads
+                    .iter()
+                    .map(|p| p.uri.as_str())
+                    .collect::<Vec<_>>()
+            )
+        });
+    let balance_error = latest_payload.diagnostics.iter().find(|d| {
+        d.severity == Some(lsp_types::DiagnosticSeverity::ERROR)
+            && matches!(
+                &d.code,
+                Some(lsp_types::NumberOrString::String(s)) if s == "E2001",
+            )
+    });
+    let balance_error = balance_error.unwrap_or_else(|| {
+        panic!(
+            "test premise: validator must emit an E2001 for `balance \
+             Assets:Bank 100 USD` against a 50 USD deposit. captured \
+             diagnostics: {:?}",
+            latest_payload.diagnostics
+        )
+    });
+
+    // The balance lens for that line must be ⚠.
+    let balance_lens = lenses
+        .iter()
+        .find(|l| {
+            l.range.start.line == balance_error.range.start.line
+                && l.command
+                    .as_ref()
+                    .is_some_and(|c| c.title.contains("Balance:"))
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "no balance lens emitted at line {} (where the E2001 \
+                 lives). lenses: {:?}",
+                balance_error.range.start.line, lenses
+            )
+        });
+    let cmd = balance_lens.command.as_ref().expect("ships resolved");
+    assert!(
+        cmd.title.contains('⚠') && cmd.title.contains("see diagnostic"),
+        "real validator failure (E2001) MUST surface as ⚠ on the \
+         balance lens. got {:?}",
+        cmd.title
+    );
+}
+
+/// Replacement for the unit-level
+/// `test_code_lens_balance_uses_full_ledger_in_multi_file_mode` deleted
+/// in #1265. That test fed the old lens a multi-file directives
+/// snapshot directly and asserted the lens used cross-file aggregation
+/// (issue #470 coverage). The new lens reads from the validator's
+/// diagnostic cache; cross-file aggregation now lives in the validator,
+/// not the lens.
+///
+/// This protocol test pins the end-to-end story: a journal that
+/// includes two files, where file A asserts a balance that's only
+/// correct when file B's offsetting transaction is considered, must
+/// produce a `✓` lens on file A. Without multi-file aggregation, the
+/// validator would emit `E2001` on file A and the lens would render
+/// `⚠`. The test passing means the validator's cross-file overlay
+/// AND the lens's verdict propagation both work.
+#[test]
+fn multi_file_balance_lens_reflects_cross_file_aggregation() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let journal_path = tmp.path().join("journal.beancount");
+    let bank_path = tmp.path().join("bank.beancount");
+    let credit_card_path = tmp.path().join("credit_card.beancount");
+
+    // bank.beancount asserts 4950 USD — only correct if credit_card.beancount's
+    // -50 USD transfer is visible.
+    std::fs::write(
+        &bank_path,
+        "2024-01-01 open Assets:Bank:Checking USD\n\
+         2024-01-01 open Income:Salary\n\
+         2024-01-15 * \"Paycheck\"\n  \
+           Assets:Bank:Checking   5000 USD\n  \
+           Income:Salary\n\
+         2024-01-21 balance Assets:Bank:Checking 4950 USD\n",
+    )
+    .expect("write bank.beancount");
+    std::fs::write(
+        &credit_card_path,
+        "2024-01-01 open Liabilities:Credit-Card\n\
+         2024-01-20 * \"Pay off credit card\"\n  \
+           Assets:Bank:Checking  -50 USD\n  \
+           Liabilities:Credit-Card\n",
+    )
+    .expect("write credit_card.beancount");
+    std::fs::write(
+        &journal_path,
+        format!(
+            "include \"{}\"\ninclude \"{}\"\n",
+            bank_path.display(),
+            credit_card_path.display()
+        ),
+    )
+    .expect("write journal.beancount");
+
+    let mut client = LspTestClient::spawn_with_journal(Some(journal_path));
+    client.initialize();
+
+    let bank_uri = format!("file://{}", bank_path.display());
+    let source = std::fs::read_to_string(&bank_path).expect("read bank");
+    client.open_document(&bank_uri, &source);
+
+    let id = client.next_request_id();
+    let req = lsp_server::Request {
+        id: id.clone(),
+        method: <CodeLensRequest as lsp_types::request::Request>::METHOD.to_string(),
+        params: serde_json::to_value(CodeLensParams {
+            text_document: TextDocumentIdentifier {
+                uri: bank_uri.parse().unwrap(),
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        })
+        .unwrap(),
+    };
+    client.raw_send_request(req).expect("send codeLens request");
+
+    let mut diagnostic_payloads: Vec<lsp_types::PublishDiagnosticsParams> = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let resp = loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let msg = client
+            .recv_with_timeout(remaining)
+            .expect("timed out waiting for codeLens response");
+        match msg {
+            lsp_server::Message::Response(r) if r.id == id => break r,
+            lsp_server::Message::Notification(n)
+                if n.method == "textDocument/publishDiagnostics" =>
+            {
+                let p: lsp_types::PublishDiagnosticsParams =
+                    serde_json::from_value(n.params).unwrap();
+                diagnostic_payloads.push(p);
+            }
+            _ => {}
+        }
+    };
+
+    let result = resp.result.expect("codeLens returned a result");
+    let lenses: Option<Vec<lsp_types::CodeLens>> = serde_json::from_value(result).unwrap();
+    let lenses = lenses.expect("lenses emitted");
+
+    // bank.beancount's diagnostics must contain no E2001 for the
+    // balance: the validator saw both files via the journal and
+    // accepted the assertion.
+    let bank_diags = diagnostic_payloads
+        .iter()
+        .rev()
+        .find(|p| p.uri.as_str() == bank_uri)
+        .unwrap_or_else(|| {
+            panic!(
+                "no publishDiagnostics for {bank_uri}; captured: {:?}",
+                diagnostic_payloads
+                    .iter()
+                    .map(|p| p.uri.as_str())
+                    .collect::<Vec<_>>()
+            )
+        });
+    let unexpected_balance_error = bank_diags.diagnostics.iter().find(|d| {
+        d.severity == Some(lsp_types::DiagnosticSeverity::ERROR)
+            && matches!(
+                &d.code,
+                Some(lsp_types::NumberOrString::String(s)) if s == "E2001",
+            )
+    });
+    assert!(
+        unexpected_balance_error.is_none(),
+        "multi-file validator should have aggregated the -50 USD from \
+         credit_card.beancount; got an unexpected E2001 on bank.beancount: {:?}",
+        unexpected_balance_error,
+    );
+
+    let balance_lens = lenses
+        .iter()
+        .find(|l| {
+            l.command
+                .as_ref()
+                .is_some_and(|c| c.title.contains("Balance:"))
+        })
+        .expect("balance lens emitted");
+    let cmd = balance_lens.command.as_ref().expect("ships resolved");
+    assert!(
+        cmd.title.contains('✓') && cmd.title.contains("4950"),
+        "multi-file aggregation makes the assertion hold; lens must \
+         reflect the validator's ✓ verdict. got {:?}",
+        cmd.title
     );
 }
 

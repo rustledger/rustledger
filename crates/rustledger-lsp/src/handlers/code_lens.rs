@@ -36,12 +36,14 @@
 //! resolution.
 
 use lsp_types::{
-    CodeLens, CodeLensParams, Command, Diagnostic, DiagnosticSeverity, Position, Range,
+    CodeLens, CodeLensParams, Command, Diagnostic, DiagnosticSeverity, NumberOrString, Position,
+    Range,
 };
 use rustledger_core::Directive;
 use rustledger_parser::ParseResult;
 use std::collections::HashMap;
 
+use super::diagnostics::validation_would_run;
 use super::utils::{LineIndex, PositionEncoding};
 
 /// Handle a code lens request.
@@ -56,6 +58,13 @@ use super::utils::{LineIndex, PositionEncoding};
 /// between server initialization and the first `publish_diagnostics`
 /// call). The balance lens then renders neutrally — never claiming a
 /// verdict the lens cannot back up.
+///
+/// The balance lens ALSO renders neutrally when validation would have
+/// been skipped for this buffer (parse errors elsewhere in the file,
+/// or `source.len() > MAX_VALIDATION_FILE_SIZE`). Without this, the
+/// diagnostic cache reads `Some(&[])` and the lens would render `✓`
+/// for assertions the validator never evaluated — the inverse-symmetric
+/// failure of #1264.
 pub fn handle_code_lens(
     params: &CodeLensParams,
     source: &str,
@@ -66,6 +75,15 @@ pub fn handle_code_lens(
     let line_index = LineIndex::new(source, encoding);
     let mut lenses = Vec::new();
     let uri = params.text_document.uri.as_str();
+    // Even with a populated cache, the validator may have declined to
+    // run (large file, or parse errors elsewhere). Treat that as cold-
+    // start for the lens: the cache is `Some(&[])` not because the
+    // assertion holds but because no balance verdict was computed.
+    let verdict_diagnostics = if validation_would_run(source, parse_result) {
+        cached_diagnostics
+    } else {
+        None
+    };
 
     // Collect account usage statistics
     let account_stats = collect_account_stats(parse_result);
@@ -147,7 +165,7 @@ pub fn handle_code_lens(
                     bal.amount.number,
                     bal.amount.currency.as_ref(),
                     line,
-                    cached_diagnostics,
+                    verdict_diagnostics,
                 );
                 lenses.push(CodeLens {
                     range: Range {
@@ -184,20 +202,42 @@ pub fn handle_code_lens(
     }
 }
 
+/// Error codes the lens treats as a balance-arithmetic failure on a
+/// balance directive's line:
+///
+/// - `E2001`: balance assertion failed (asserted amount != actual)
+/// - `E2002`: balance exceeds explicit tolerance
+///
+/// Other ERROR diagnostics that may also land on a balance directive's
+/// line — `E1001 AccountNotOpen`, parse errors, plugin errors patched
+/// onto the balance span — describe a different problem. Showing
+/// `⚠ Balance: X USD (see diagnostic)` for those misattributes the
+/// failure category: the user clicks the lens expecting a balance
+/// arithmetic explanation and finds something unrelated. The lens
+/// renders neutrally for those instead, letting the diagnostic itself
+/// speak.
+const BALANCE_ERROR_CODES: &[&str] = &["E2001", "E2002"];
+
 /// Render the balance lens title for a balance directive on `line`.
 ///
 /// `cached_diagnostics` is the validator's last-computed verdict for
-/// this URI:
+/// this URI (after [`validation_would_run`] confirmed the validator
+/// actually ran):
 ///
-/// - `None`: the validator hasn't run yet for this file (cold start).
-///   Render neutrally — `Balance: X USD` with no ✓/⚠ symbol. Never
-///   claim a verdict we can't back up.
-/// - `Some(diags)` with no error overlapping `line`: validator says the
-///   assertion holds. Render `✓ Balance: X USD`.
-/// - `Some(diags)` with an error overlapping `line`: validator already
-///   surfaced the failure. Render `⚠ Balance: X USD (see diagnostic)` —
-///   "see diagnostic" is a true link because the diagnostic exists by
-///   construction.
+/// - `None`: the validator hasn't run yet for this file (cold start)
+///   OR validation was skipped (parse errors, file too large). Render
+///   neutrally — `Balance: X USD` with no ✓/⚠ symbol. Never claim a
+///   verdict we can't back up.
+/// - `Some(diags)` with a `BALANCE_ERROR_CODES` entry at `line`: the
+///   validator emitted a real balance-arithmetic failure. Render
+///   `⚠ Balance: X USD (see diagnostic)` — "see diagnostic" is a true
+///   link by construction.
+/// - `Some(diags)` with some OTHER ERROR at `line` (e.g., `E1001`
+///   AccountNotOpen) but NO `BALANCE_ERROR_CODES`: a non-balance
+///   diagnostic happens to anchor here. Render neutrally; don't
+///   misattribute it as a balance failure.
+/// - `Some(diags)` with no ERROR at all at `line`: the validator
+///   says the assertion holds. Render `✓ Balance: X USD`.
 fn balance_lens_title(
     amount: rustledger_core::Decimal,
     currency: &str,
@@ -205,31 +245,49 @@ fn balance_lens_title(
     cached_diagnostics: Option<&[Diagnostic]>,
 ) -> String {
     let amount_str = format!("Balance: {amount} {currency}");
-    match cached_diagnostics {
-        None => amount_str,
-        Some(diags) => {
-            if has_error_at_line(diags, line) {
-                format!("⚠ {amount_str} (see diagnostic)")
-            } else {
-                format!("✓ {amount_str}")
-            }
-        }
+    let Some(diags) = cached_diagnostics else {
+        return amount_str;
+    };
+    if has_balance_error_at_line(diags, line) {
+        format!("⚠ {amount_str} (see diagnostic)")
+    } else if has_non_balance_error_at_line(diags, line) {
+        // A diagnostic at this line is about something else; let it
+        // surface independently. Don't claim ✓ (the assertion's
+        // verdict is uncertain in the presence of an account/parse
+        // error here) and don't claim ⚠ (the asserted arithmetic
+        // isn't what failed).
+        amount_str
+    } else {
+        format!("✓ {amount_str}")
     }
 }
 
-/// Does the diagnostic slice contain an ERROR-severity entry whose
-/// range starts on `line`?
-///
-/// The validator emits balance-assertion failures with their range
-/// anchored on the balance directive's line. Match on
-/// `range.start.line` only (not full Range overlap) so a multi-line
-/// diagnostic at this line still matches. Severity filter on `ERROR`
-/// excludes Hint / Information entries (e.g., code-action suggestions)
-/// that would otherwise mark a clean assertion as ⚠.
-fn has_error_at_line(diagnostics: &[Diagnostic], line: u32) -> bool {
-    diagnostics
-        .iter()
-        .any(|d| d.range.start.line == line && d.severity == Some(DiagnosticSeverity::ERROR))
+/// Does the diagnostic slice contain an ERROR with one of the
+/// balance-arithmetic error codes anchored at `line.start`?
+fn has_balance_error_at_line(diagnostics: &[Diagnostic], line: u32) -> bool {
+    diagnostics.iter().any(|d| {
+        d.range.start.line == line
+            && d.severity == Some(DiagnosticSeverity::ERROR)
+            && is_balance_error_code(d.code.as_ref())
+    })
+}
+
+/// Does the diagnostic slice contain an ERROR at `line.start` whose
+/// code is NOT one of the balance-arithmetic codes? (Used to decide
+/// whether to render neutrally instead of ✓.)
+fn has_non_balance_error_at_line(diagnostics: &[Diagnostic], line: u32) -> bool {
+    diagnostics.iter().any(|d| {
+        d.range.start.line == line
+            && d.severity == Some(DiagnosticSeverity::ERROR)
+            && !is_balance_error_code(d.code.as_ref())
+    })
+}
+
+fn is_balance_error_code(code: Option<&NumberOrString>) -> bool {
+    match code {
+        Some(NumberOrString::String(s)) => BALANCE_ERROR_CODES.contains(&s.as_str()),
+        _ => false,
+    }
 }
 
 /// Handle a `codeLens/resolve` request.
@@ -306,25 +364,31 @@ mod tests {
             .expect("balance lens emitted")
     }
 
-    /// Synthetic ERROR diagnostic at the given zero-based line. Mirrors
-    /// what `all_diagnostics` produces for a failed balance assertion;
-    /// the lens treats anything matching this shape as the validator
-    /// saying "this balance is wrong."
-    fn error_at_line(line: u32) -> Diagnostic {
+    /// Synthetic ERROR diagnostic at the given zero-based line with
+    /// the given LSP error code. Source string matches what the
+    /// validator emits in production (`"rustledger"`, see
+    /// `diagnostics.rs:145`) so any future filter on `source` would
+    /// behave the same in tests and production.
+    fn error_with_code_at_line(code: &str, line: u32) -> Diagnostic {
         Diagnostic {
             range: Range {
                 start: Position::new(line, 0),
                 end: Position::new(line, 80),
             },
             severity: Some(DiagnosticSeverity::ERROR),
-            code: Some(NumberOrString::String("E2001".into())),
+            code: Some(NumberOrString::String(code.into())),
             code_description: None,
-            source: Some("rledger".into()),
-            message: "Balance assertion failed".into(),
+            source: Some("rustledger".into()),
+            message: format!("{code} test diagnostic"),
             related_information: None,
             tags: None,
             data: None,
         }
+    }
+
+    /// Default-case: a balance-assertion-failed diagnostic at `line`.
+    fn error_at_line(line: u32) -> Diagnostic {
+        error_with_code_at_line("E2001", line)
     }
 
     #[test]
@@ -525,6 +589,90 @@ mod tests {
              the structural property that fixes #1264's effective_date \
              false positive: the validator runs plugins, the lens \
              trusts the validator. got {:?}",
+            cmd.title
+        );
+    }
+
+    /// When the buffer has parse errors elsewhere, `all_diagnostics`
+    /// (diagnostics.rs:554) skips validation entirely; the cache for
+    /// the URI then contains only parse-error diagnostics — none of
+    /// which sit at the balance line. The lens MUST render neutrally
+    /// in this case, not ✓: the validator did not evaluate the
+    /// assertion. This is the inverse-symmetric failure of the #1264
+    /// dead-link UX (silent ✓ instead of silent ⚠) — both come from
+    /// the lens asserting verdicts it cannot back up.
+    #[test]
+    fn balance_lens_neutral_when_parse_errors_skip_validation() {
+        // First non-comment line is a syntax error (stray garbage),
+        // forcing parse_result.errors to be non-empty.
+        let source = r#"!!! syntax garbage on line 0
+2024-01-01 open Assets:Bank USD
+2024-01-31 balance Assets:Bank 100.00 USD
+"#;
+        let result = parse(source);
+        assert!(
+            !result.errors.is_empty(),
+            "test setup: source must produce a parse error to exercise \
+             the validation-skip branch. got errors = {:?}",
+            result.errors,
+        );
+        let params = code_lens_params();
+
+        // Diagnostic cache populated and contains nothing at the
+        // balance line. Pre-fix the lens would have read this as
+        // "validator approved" and rendered ✓.
+        let balance_lens = find_balance_lens(
+            handle_code_lens(&params, source, &result, Some(&[]), PositionEncoding::Utf16)
+                .expect("lenses emitted"),
+        );
+        let cmd = balance_lens.command.as_ref().expect("ships resolved");
+        assert!(
+            !cmd.title.contains('✓') && !cmd.title.contains('⚠'),
+            "parse-error skip path: lens must not claim a verdict the \
+             validator never computed. got {:?}",
+            cmd.title
+        );
+        assert!(cmd.title.starts_with("Balance:"));
+    }
+
+    /// A non-balance ERROR diagnostic at the balance directive's line
+    /// (e.g., `E1001 AccountNotOpen`) must NOT render as
+    /// `⚠ Balance: X USD (see diagnostic)`. The user clicking that
+    /// lens would expect a balance-arithmetic explanation and instead
+    /// see something unrelated. The lens renders neutrally; the
+    /// non-balance diagnostic surfaces independently with its own
+    /// (correct) message.
+    #[test]
+    fn balance_lens_neutral_on_non_balance_error_at_line() {
+        let source = r#"2024-01-31 balance Assets:NeverOpened 0 USD
+"#;
+        let result = parse(source);
+        let params = code_lens_params();
+
+        // E1001 (account never opened) at the balance directive's line.
+        let diags = vec![error_with_code_at_line("E1001", 0)];
+        let balance_lens = find_balance_lens(
+            handle_code_lens(
+                &params,
+                source,
+                &result,
+                Some(&diags),
+                PositionEncoding::Utf16,
+            )
+            .expect("lenses emitted"),
+        );
+        let cmd = balance_lens.command.as_ref().expect("ships resolved");
+        assert!(
+            !cmd.title.contains('⚠') && !cmd.title.contains("see diagnostic"),
+            "non-balance error (E1001) at the balance line must not \
+             render as a balance arithmetic failure. got {:?}",
+            cmd.title
+        );
+        assert!(
+            !cmd.title.contains('✓'),
+            "lens must not claim ✓ when an unrelated error blankets \
+             the assertion's line — the assertion's status is uncertain. \
+             got {:?}",
             cmd.title
         );
     }

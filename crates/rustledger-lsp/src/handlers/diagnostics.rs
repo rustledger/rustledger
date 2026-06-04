@@ -434,6 +434,20 @@ pub fn validation_error_to_diagnostic(
 /// 500KB is a generous limit - most beancount files are much smaller.
 const MAX_VALIDATION_FILE_SIZE: usize = 500 * 1024;
 
+/// Returns true iff [`all_diagnostics`] will actually invoke the
+/// validator (rather than emit only parse-error diagnostics or nothing).
+///
+/// The codeLens path uses this to distinguish "validator ran and found
+/// no errors at this line" (render `✓`) from "validator declined to run"
+/// (render neutrally, never `✓`). Without this check a balance lens
+/// would silently mislabel an unvalidated assertion as passing — the
+/// inverse of the dead-link UX that #1264 closed. Keep these conditions
+/// in lock-step with the two `if` guards inside `all_diagnostics`.
+#[must_use]
+pub fn validation_would_run(source: &str, parse_result: &ParseResult) -> bool {
+    parse_result.errors.is_empty() && source.len() <= MAX_VALIDATION_FILE_SIZE
+}
+
 /// Build the effective directive list for validation by overlaying one or
 /// more fresh in-memory parses onto a potentially-stale ledger snapshot.
 ///

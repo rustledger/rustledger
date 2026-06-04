@@ -216,6 +216,10 @@ criteria = "safe-to-deploy"
 version = "0.22.1"
 criteria = "safe-to-deploy"
 
+[[exemptions.countme]]
+version = "3.0.1"
+criteria = "safe-to-deploy"
+
 [[exemptions.cpp_demangle]]
 version = "0.4.5"
 criteria = "safe-to-deploy"
@@ -454,6 +458,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.half]]
 version = "2.7.1"
+criteria = "safe-to-deploy"
+
+[[exemptions.hashbrown]]
+version = "0.14.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.hashbrown]]
@@ -716,6 +724,14 @@ criteria = "safe-to-deploy"
 version = "1.13.1"
 criteria = "safe-to-deploy"
 
+[[exemptions.num_enum]]
+version = "0.7.6"
+criteria = "safe-to-deploy"
+
+[[exemptions.num_enum_derive]]
+version = "0.7.6"
+criteria = "safe-to-deploy"
+
 [[exemptions.ofxy]]
 version = "0.2.0"
 criteria = "safe-to-deploy"
@@ -956,6 +972,10 @@ criteria = "safe-to-deploy"
 version = "1.6.1"
 criteria = "safe-to-deploy"
 
+[[exemptions.rowan]]
+version = "0.16.1"
+criteria = "safe-to-deploy"
+
 [[exemptions.rust_decimal]]
 version = "1.42.0"
 criteria = "safe-to-deploy"
@@ -1094,6 +1114,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.terminal_size]]
 version = "0.4.4"
+criteria = "safe-to-deploy"
+
+[[exemptions.text-size]]
+version = "1.1.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.time]]

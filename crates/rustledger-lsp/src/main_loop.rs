@@ -1072,62 +1072,23 @@ impl MainLoopState {
         let uri = &params.text_document.uri;
         let (text, parse_result) = self.get_document_data(uri);
 
-        // Snapshot the multi-file ledger directives ONLY when the
-        // current file has at least one balance assertion. The eager
-        // balance check inside `handle_code_lens` (#1253) is the only
-        // consumer of the snapshot; open/transaction lenses don't
-        // read it. Files with zero balance directives — the vast
-        // majority — would otherwise pay an O(N) deep clone of the
-        // full ledger under a read lock on every codeLens request.
-        // Editors fire codeLens frequently (post-edit, post-scroll),
-        // so the snapshot was the dominant cost on the hot path.
-        let has_balance = parse_result
-            .directives
-            .iter()
-            .any(|s| matches!(s.value, Directive::Balance(_)));
-        // Snapshot the ledger ONLY when (a) the file has balance
-        // directives that need cross-file lookup AND (b) the current
-        // file is actually part of the loaded journal. Without the
-        // contains_file check, opening an unrelated scratch
-        // .beancount file while a journal is loaded would feed the
-        // scratch lens the WRONG ledger's bookkeeping, producing
-        // nonsense ⚠ markers for assertions that are valid in the
-        // file the user is editing.
-        //
-        // Known limitation (Q3 from the architecture review): when
-        // the current file IS in the journal but has unsaved
-        // changes, the snapshot reflects the on-disk state, not the
-        // buffer. didChange doesn't trigger a journal reload (full
-        // pipeline is too expensive per keystroke). Result: balance
-        // lenses on the current file can be stale relative to the
-        // user's edits until they save. The validator's overlay
-        // path (see `validate_phase` around line 1499) does compute
-        // a buffer-overlaid view; lifting that into codeLens is a
-        // follow-up. The validator is the source of truth in the
-        // meantime, and the diagnostic (which DOES use the overlay)
-        // surfaces the real verdict.
-        // One read-lock acquisition guards both the contains_file
-        // check and the directives snapshot. Splitting them across
-        // two `.read()` calls left a window where a journal reload
-        // could remove the file between the membership check and
-        // the snapshot read, producing a wrong-ledger lens for a
-        // file no longer in the journal.
-        let ledger_directives = if has_balance {
-            let path = uri_to_path(uri);
-            let guard = self.ledger_state.read();
-            match path {
-                Some(p) if guard.contains_file(&p) => guard.directives().map(|d| d.to_vec()),
-                _ => None,
-            }
-        } else {
-            None
-        };
+        // The balance lens reads the validator's last-computed verdict
+        // for this URI from `self.diagnostics` (#1264). Pre-#1264 we
+        // snapshotted `ledger_state` so the lens could run its own
+        // evaluator; that evaluator dropped plugins (effective_date,
+        // lazy_balance, ...) and silently disagreed with `rledger check`
+        // on every ledger that used them. The new lens consults the
+        // diagnostic cache instead — diagnostics ARE the validator's
+        // verdict after the full pipeline. None means cold start
+        // (no `publish_diagnostics` for this URI yet); the lens renders
+        // a neutral title and never claims a verdict it can't back up.
+        let cached_diagnostics = self.diagnostics.get(uri).map(Vec::as_slice);
 
         let response = handle_code_lens(
             &params,
             &text,
             &parse_result,
-            ledger_directives.as_deref(),
+            cached_diagnostics,
             self.position_encoding,
         );
 

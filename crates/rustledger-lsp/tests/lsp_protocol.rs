@@ -316,6 +316,138 @@ fn code_lens_resolve_round_trip_through_async_dispatch() {
     );
 }
 
+/// Regression for issue #1264: a balance lens carrying
+/// `⚠ ... (see diagnostic)` MUST correspond to a real ERROR diagnostic
+/// at the same line. Pre-#1264 the lens ran its own evaluator that
+/// dropped plugins (`effective_date`, `lazy_balance`, ...) and
+/// silently disagreed with `rledger check` — producing the dead-link
+/// UX of a ⚠ lens pointing at a diagnostic that didn't exist.
+///
+/// The structural fix is for the lens to consult the validator's
+/// diagnostic cache instead of re-deriving. This test pins the
+/// dead-link-impossibility invariant at the protocol level:
+/// drain all publishDiagnostics, request codeLens, and verify every
+/// ⚠ lens line is matched by an ERROR diagnostic line. The test
+/// doesn't need the effective_date plugin to actually load — the
+/// invariant holds regardless of what the validator computes, because
+/// the lens now follows the validator.
+///
+/// The document used is the exact reproduction from the issue.
+#[test]
+fn issue_1264_no_balance_lens_without_matching_diagnostic() {
+    let mut client = LspTestClient::spawn();
+    client.initialize();
+
+    let uri = test_uri("issue_1264.beancount");
+    // Exact bytes from the issue: effective_date plugin shifts the
+    // 2012-02-03 food purchase to 2012-02-05, so balance assertions
+    // on 02-03 through 02-04 pass at 1000 USD (validator's verdict).
+    let source = "option \"operating_currency\" \"USD\"\n\
+\n\
+2012-01-01 open Assets:Bank\n\
+2012-01-01 open Equity:Transfer\n\
+2012-01-01 open Expenses:Food\n\
+2012-01-01 open Income:Employment\n\
+\n\
+plugin \"beancount_reds_plugins.effective_date.effective_date\" \"{\n\
+  'Assets':   {'earlier': 'Equity:Transfer', 'later': 'Equity:Transfer'},\n\
+}\"\n\
+\n\
+2012-02-01 * \"Salary\"\n  \
+  Assets:Bank                   1000 USD\n  \
+  Income:Employment\n\
+\n\
+2012-02-02 balance Assets:Bank  1000 USD\n\
+\n\
+2012-02-03 * \"Delayed food purchase\"\n  \
+  Expenses:Food                  100 USD\n  \
+  Assets:Bank                   -100 USD\n    \
+    effective_date: 2012-02-05\n\
+\n\
+2012-02-03 balance Assets:Bank  1000 USD\n\
+2012-02-04 balance Assets:Bank  1000 USD\n\
+2012-02-05 balance Assets:Bank  1000 USD\n\
+2012-02-06 balance Assets:Bank   900 USD\n";
+    client.open_document(&uri, source);
+
+    // Issue the codeLens request and drain everything until the
+    // response arrives, capturing every publishDiagnostics on the way.
+    // Same drain pattern as the #1253 test — guarantees we capture
+    // the diagnostic state matching the codeLens response.
+    let id = client.next_request_id();
+    let req = lsp_server::Request {
+        id: id.clone(),
+        method: <CodeLensRequest as lsp_types::request::Request>::METHOD.to_string(),
+        params: serde_json::to_value(CodeLensParams {
+            text_document: TextDocumentIdentifier {
+                uri: uri.parse().unwrap(),
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        })
+        .unwrap(),
+    };
+    client.raw_send_request(req).expect("send codeLens request");
+
+    let mut diagnostic_payloads: Vec<lsp_types::PublishDiagnosticsParams> = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let resp = loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let msg = client
+            .recv_with_timeout(remaining)
+            .expect("timed out waiting for codeLens response");
+        match msg {
+            lsp_server::Message::Response(r) if r.id == id => break r,
+            lsp_server::Message::Notification(n)
+                if n.method == "textDocument/publishDiagnostics" =>
+            {
+                let p: lsp_types::PublishDiagnosticsParams =
+                    serde_json::from_value(n.params).unwrap();
+                diagnostic_payloads.push(p);
+            }
+            _ => {}
+        }
+    };
+
+    let result = resp.result.expect("codeLens returned a result");
+    let lenses: Option<Vec<lsp_types::CodeLens>> = serde_json::from_value(result).unwrap();
+    let lenses = lenses.expect("lenses emitted on a non-empty document");
+
+    // Latest diagnostics for our URI (the server may publish multiple
+    // times; the last one is the authoritative current state).
+    let latest_diags = diagnostic_payloads
+        .iter()
+        .rev()
+        .find(|p| p.uri.as_str() == uri)
+        .map(|p| p.diagnostics.as_slice())
+        .unwrap_or(&[]);
+    let error_lines: std::collections::HashSet<u32> = latest_diags
+        .iter()
+        .filter(|d| d.severity == Some(lsp_types::DiagnosticSeverity::ERROR))
+        .map(|d| d.range.start.line)
+        .collect();
+
+    // The dead-link-impossibility invariant: every ⚠ balance lens
+    // (which says "see diagnostic") must have a real ERROR diagnostic
+    // at the same line.
+    let dead_links: Vec<_> = lenses
+        .iter()
+        .filter(|l| {
+            let title = l.command.as_ref().map(|c| c.title.as_str()).unwrap_or("");
+            title.contains("Balance:") && title.contains("see diagnostic")
+        })
+        .filter(|l| !error_lines.contains(&l.range.start.line))
+        .collect();
+
+    assert!(
+        dead_links.is_empty(),
+        "issue #1264: balance lens(es) carry `(see diagnostic)` but no \
+         ERROR diagnostic exists at the same line(s). This is exactly \
+         the dead-link UX the issue reported. error lines: {error_lines:?}, \
+         dead-link lenses: {dead_links:?}"
+    );
+}
+
 /// Regression for F1 from the round-3 deep review: when a journal is
 /// loaded AND the user opens a `.beancount` file that is NOT part of
 /// the journal, `handle_code_lens_request`'s `contains_file` gate

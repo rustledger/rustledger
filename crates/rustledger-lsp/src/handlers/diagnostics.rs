@@ -562,181 +562,187 @@ pub fn all_diagnostics(
 ) -> Vec<Diagnostic> {
     let mut diagnostics = parse_errors_to_diagnostics(result, source, encoding);
 
-    // Only run validation if:
-    // 1. There are no parse errors (validation on partial parses is confusing)
-    // 2. File is not too large (to keep LSP responsive)
-    if result.errors.is_empty() {
-        if source.len() <= MAX_VALIDATION_FILE_SIZE {
-            // Get full directives from ledger state if available, then
-            // apply a live overlay of every fresh in-memory parse we have.
-            //
-            // See `build_live_directive_overlay` for why the overlay is
-            // necessary (#685 / #760: without it, diagnostics lag behind
-            // in-memory buffer edits because the ledger state is only
-            // refreshed on file-watcher save events).
-            //
-            // We build the overlay list inline from the current file's
-            // fresh parse plus any other open buffers the caller handed
-            // in. The current file is always first so that a caller
-            // passing duplicate entries in `other_buffer_overlays`
-            // (shouldn't happen, but is harmless) doesn't shadow it.
-            let full_directives_raw = ledger_state.and_then(|ls| ls.directives());
+    // [`validation_would_run`] is the single source of truth for whether
+    // the validator runs (no parse errors AND under the size cap). It's
+    // re-used by `handle_code_lens` to render the balance lens neutrally
+    // when validation was skipped, instead of mistaking an empty
+    // diagnostic vec for "validator approved." Calling it here keeps
+    // the two sites structurally locked-step instead of relying on a
+    // humans-must-remember comment.
+    if validation_would_run(source, result) {
+        // Get full directives from ledger state if available, then
+        // apply a live overlay of every fresh in-memory parse we have.
+        //
+        // See `build_live_directive_overlay` for why the overlay is
+        // necessary (#685 / #760: without it, diagnostics lag behind
+        // in-memory buffer edits because the ledger state is only
+        // refreshed on file-watcher save events).
+        //
+        // We build the overlay list inline from the current file's
+        // fresh parse plus any other open buffers the caller handed
+        // in. The current file is always first so that a caller
+        // passing duplicate entries in `other_buffer_overlays`
+        // (shouldn't happen, but is harmless) doesn't shadow it.
+        let full_directives_raw = ledger_state.and_then(|ls| ls.directives());
 
-            // Build the list of overlays to apply to the ledger snapshot.
-            // Always include the current file's fresh parse first, then
-            // append any other open buffers the caller handed in (#760).
-            let mut overlay_entries: Vec<(u16, &[Spanned<Directive>])> =
-                Vec::with_capacity(1 + other_buffer_overlays.len());
-            if let Some(fid) = current_file_id {
-                overlay_entries.push((fid, result.directives.as_slice()));
-            }
-            overlay_entries.extend_from_slice(other_buffer_overlays);
-            let overlay = build_live_directive_overlay(&overlay_entries, full_directives_raw);
+        // Build the list of overlays to apply to the ledger snapshot.
+        // Always include the current file's fresh parse first, then
+        // append any other open buffers the caller handed in (#760).
+        let mut overlay_entries: Vec<(u16, &[Spanned<Directive>])> =
+            Vec::with_capacity(1 + other_buffer_overlays.len());
+        if let Some(fid) = current_file_id {
+            overlay_entries.push((fid, result.directives.as_slice()));
+        }
+        overlay_entries.extend_from_slice(other_buffer_overlays);
+        let overlay = build_live_directive_overlay(&overlay_entries, full_directives_raw);
 
-            // Construct the owned directive list for validation. Moving
-            // the overlay in by value saves a second clone on the
-            // multi-file overlay path (the overlay is already an owned
-            // Vec; handing it to `validation_errors_to_diagnostics` by
-            // value avoids the `.to_vec()` that used to happen inside
-            // that function). Other paths still pay one clone, same as
-            // before. See #758 for the single-file version of this
-            // optimization.
-            let booked_directives: Vec<Spanned<Directive>> = if let Some(owned) = overlay {
-                owned
-            } else if let Some(full) = full_directives_raw
-                && current_file_id.is_some()
-            {
-                full.to_vec()
-            } else {
-                result.directives.clone()
-            };
+        // Construct the owned directive list for validation. Moving
+        // the overlay in by value saves a second clone on the
+        // multi-file overlay path (the overlay is already an owned
+        // Vec; handing it to `validation_errors_to_diagnostics` by
+        // value avoids the `.to_vec()` that used to happen inside
+        // that function). Other paths still pay one clone, same as
+        // before. See #758 for the single-file version of this
+        // optimization.
+        let booked_directives: Vec<Spanned<Directive>> = if let Some(owned) = overlay {
+            owned
+        } else if let Some(full) = full_directives_raw
+            && current_file_id.is_some()
+        {
+            full.to_vec()
+        } else {
+            result.directives.clone()
+        };
 
-            // Build validation options with custom account type names.
-            // Use ledger-wide options when a ledger is loaded (handles multi-file
-            // ledgers where name_* options may be in included files); fall back
-            // to per-file options for single-file validation.
-            let validation_options = if let Some(ls) = ledger_state
-                && let Some(ledger) = ls.ledger()
-            {
-                let base_dir = ledger
-                    .source_map
-                    .files()
-                    .first()
-                    .and_then(|f| f.path.parent())
-                    .unwrap_or_else(|| std::path::Path::new("."));
-                build_validation_options_from_loader(&ledger.options, base_dir)
-            } else {
-                // Single-file: resolve relative document dirs against the
-                // current file's parent directory so they don't end up being
-                // interpreted relative to the LSP process CWD.
-                let base_dir = current_file_path.and_then(|p| p.parent());
-                build_validation_options_from_file(&result.options, base_dir)
-            };
+        // Build validation options with custom account type names.
+        // Use ledger-wide options when a ledger is loaded (handles multi-file
+        // ledgers where name_* options may be in included files); fall back
+        // to per-file options for single-file validation.
+        let validation_options = if let Some(ls) = ledger_state
+            && let Some(ledger) = ls.ledger()
+        {
+            let base_dir = ledger
+                .source_map
+                .files()
+                .first()
+                .and_then(|f| f.path.parent())
+                .unwrap_or_else(|| std::path::Path::new("."));
+            build_validation_options_from_loader(&ledger.options, base_dir)
+        } else {
+            // Single-file: resolve relative document dirs against the
+            // current file's parent directory so they don't end up being
+            // interpreted relative to the LSP process CWD.
+            let base_dir = current_file_path.and_then(|p| p.parent());
+            build_validation_options_from_file(&result.options, base_dir)
+        };
 
-            // Build plugin context for running plugins before validation.
-            // Multi-file: merge ledger plugins with fresh buffer plugins (so
-            // unsaved edits to plugin directives take effect immediately).
-            // Single-file: build entirely from ParseResult's plugin declarations.
-            //
-            // Helper closure to convert ParseResult plugins to Plugin structs.
-            let parse_result_to_plugins =
-                |plugins: &[(String, Option<String>, Span)], file_id: usize| -> Vec<Plugin> {
-                    plugins
-                        .iter()
-                        .map(|(name, config, span)| {
-                            let (actual_name, force_python) =
-                                if let Some(stripped) = name.strip_prefix("python:") {
-                                    (stripped.to_string(), true)
-                                } else {
-                                    (name.clone(), false)
-                                };
-                            Plugin {
-                                name: actual_name,
-                                config: config.clone(),
-                                span: *span,
-                                file_id,
-                                force_python,
-                            }
-                        })
-                        .collect()
-                };
-
-            let merged_plugins: Vec<Plugin>;
-            let single_file_options: LoaderOptions;
-            let single_file_source_map: SourceMap;
-
-            let plugin_ctx = if let Some(ls) = ledger_state
-                && let Some(ledger) = ls.ledger()
-            {
-                // Merge: keep ledger plugins from OTHER files, replace current
-                // file's plugins with the fresh parse (mirrors directive overlay).
-                let current_fid = current_file_id.unwrap_or(0) as usize;
-                merged_plugins = ledger
-                    .plugins
+        // Build plugin context for running plugins before validation.
+        // Multi-file: merge ledger plugins with fresh buffer plugins (so
+        // unsaved edits to plugin directives take effect immediately).
+        // Single-file: build entirely from ParseResult's plugin declarations.
+        //
+        // Helper closure to convert ParseResult plugins to Plugin structs.
+        let parse_result_to_plugins =
+            |plugins: &[(String, Option<String>, Span)], file_id: usize| -> Vec<Plugin> {
+                plugins
                     .iter()
-                    .filter(|p| p.file_id != current_fid)
-                    .cloned()
-                    .chain(parse_result_to_plugins(&result.plugins, current_fid))
-                    .collect();
-
-                if merged_plugins.is_empty() {
-                    None
-                } else {
-                    Some(PluginContext {
-                        plugins: &merged_plugins,
-                        file_options: &ledger.options,
-                        source_map: &ledger.source_map,
+                    .map(|(name, config, span)| {
+                        let (actual_name, force_python) =
+                            if let Some(stripped) = name.strip_prefix("python:") {
+                                (stripped.to_string(), true)
+                            } else {
+                                (name.clone(), false)
+                            };
+                        Plugin {
+                            name: actual_name,
+                            config: config.clone(),
+                            span: *span,
+                            file_id,
+                            force_python,
+                        }
                     })
-                }
-            } else if !result.plugins.is_empty() {
-                // Single-file mode: build plugin list from ParseResult
-                merged_plugins = parse_result_to_plugins(&result.plugins, 0);
-                single_file_options = {
-                    let mut opts = LoaderOptions::new();
-                    for (key, value, _span) in &result.options {
-                        opts.set(key, value);
-                    }
-                    opts
-                };
-                // Build a SourceMap with the current buffer so run_plugins()
-                // can attach filename/line info to wrappers and reconstruct
-                // spans when converting back. Use an absolute path so that
-                // document directory resolution in run_plugins (which uses
-                // the first file's parent as base_dir) doesn't produce an
-                // empty path.
-                single_file_source_map = {
-                    let mut sm = SourceMap::new();
-                    sm.add_file(
-                        std::path::PathBuf::from("/tmp/rustledger-lsp-buffer.beancount"),
-                        Arc::from(source),
-                    );
-                    sm
-                };
+                    .collect()
+            };
+
+        let merged_plugins: Vec<Plugin>;
+        let single_file_options: LoaderOptions;
+        let single_file_source_map: SourceMap;
+
+        let plugin_ctx = if let Some(ls) = ledger_state
+            && let Some(ledger) = ls.ledger()
+        {
+            // Merge: keep ledger plugins from OTHER files, replace current
+            // file's plugins with the fresh parse (mirrors directive overlay).
+            let current_fid = current_file_id.unwrap_or(0) as usize;
+            merged_plugins = ledger
+                .plugins
+                .iter()
+                .filter(|p| p.file_id != current_fid)
+                .cloned()
+                .chain(parse_result_to_plugins(&result.plugins, current_fid))
+                .collect();
+
+            if merged_plugins.is_empty() {
+                None
+            } else {
                 Some(PluginContext {
                     plugins: &merged_plugins,
-                    file_options: &single_file_options,
-                    source_map: &single_file_source_map,
+                    file_options: &ledger.options,
+                    source_map: &ledger.source_map,
                 })
-            } else {
-                None
+            }
+        } else if !result.plugins.is_empty() {
+            // Single-file mode: build plugin list from ParseResult
+            merged_plugins = parse_result_to_plugins(&result.plugins, 0);
+            single_file_options = {
+                let mut opts = LoaderOptions::new();
+                for (key, value, _span) in &result.options {
+                    opts.set(key, value);
+                }
+                opts
             };
-
-            let validation_diagnostics = validation_errors_to_diagnostics(
-                booked_directives,
-                source,
-                validation_options,
-                current_file_id,
-                plugin_ctx.as_ref(),
-                encoding,
-            );
-            diagnostics.extend(validation_diagnostics);
+            // Build a SourceMap with the current buffer so run_plugins()
+            // can attach filename/line info to wrappers and reconstruct
+            // spans when converting back. Use an absolute path so that
+            // document directory resolution in run_plugins (which uses
+            // the first file's parent as base_dir) doesn't produce an
+            // empty path.
+            single_file_source_map = {
+                let mut sm = SourceMap::new();
+                sm.add_file(
+                    std::path::PathBuf::from("/tmp/rustledger-lsp-buffer.beancount"),
+                    Arc::from(source),
+                );
+                sm
+            };
+            Some(PluginContext {
+                plugins: &merged_plugins,
+                file_options: &single_file_options,
+                source_map: &single_file_source_map,
+            })
         } else {
-            tracing::debug!(
-                "Skipping validation for large file ({} bytes > {} limit)",
-                source.len(),
-                MAX_VALIDATION_FILE_SIZE
-            );
-        }
+            None
+        };
+
+        let validation_diagnostics = validation_errors_to_diagnostics(
+            booked_directives,
+            source,
+            validation_options,
+            current_file_id,
+            plugin_ctx.as_ref(),
+            encoding,
+        );
+        diagnostics.extend(validation_diagnostics);
+    } else if source.len() > MAX_VALIDATION_FILE_SIZE {
+        // The size-specific log is the only signal a human gets when
+        // a giant file silently stops validating. Skipped-because-of-
+        // parse-errors is self-evident: the parse-error diagnostics
+        // are already in `diagnostics`.
+        tracing::debug!(
+            "Skipping validation for large file ({} bytes > {} limit)",
+            source.len(),
+            MAX_VALIDATION_FILE_SIZE
+        );
     }
 
     // Emit option warnings (E7001–E7006).

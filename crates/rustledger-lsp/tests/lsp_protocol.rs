@@ -599,6 +599,18 @@ fn real_balance_failure_round_trips_to_warning_lens() {
 /// validator would emit `E2001` on file A and the lens would render
 /// `⚠`. The test passing means the validator's cross-file overlay
 /// AND the lens's verdict propagation both work.
+///
+/// Gated on `cfg(unix)`: the `file://{path}` URI assembly below assumes
+/// the path starts with `/` (POSIX absolute), so on Windows it would
+/// produce `file://C:\...` (only two slashes plus drive letter) and
+/// fail Uri parsing — or worse, parse to a non-canonical URI that the
+/// server rejects and falls into single-file mode, producing a
+/// misleading `⚠` for "balance assertion failed" instead of a clean
+/// platform skip. `main_loop.rs` cfg-splits its URI assembly between
+/// Unix (`file://{}`) and Windows (`file:///{}`); a Windows-portable
+/// variant of this test would mirror that. Today CI is Linux-only, so
+/// the gate is a guardrail for the future.
+#[cfg(unix)]
 #[test]
 fn multi_file_balance_lens_reflects_cross_file_aggregation() {
     let tmp = tempfile::tempdir().expect("tempdir");

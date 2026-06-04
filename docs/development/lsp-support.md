@@ -13,16 +13,28 @@ layered testing approach below closes that gap.
 
 The balance code lens does not compute its own verdict. It reads
 `MainLoopState::diagnostics[uri]` — the validator's last-computed
-diagnostic vector for the file — and renders:
+diagnostic vector for the file — and renders one of:
 
-- `✓ Balance: X USD` when no ERROR diagnostic overlaps the balance
-  directive's line.
-- `⚠ Balance: X USD (see diagnostic)` when one does. "see diagnostic"
-  is a true link by construction: the diagnostic the lens points at
-  is the diagnostic the lens consulted.
-- `Balance: X USD` (neutral, no symbol) on cold start, before the
-  first `publish_diagnostics` for the file. Never lies about a
-  verdict the lens has not computed.
+- `✓ Balance: X USD` when the validator ran AND no ERROR diagnostic
+  anchors on the balance directive's line.
+- `⚠ Balance: X USD (see diagnostic)` when an ERROR diagnostic with a
+  balance-arithmetic error code (`E2001` BalanceAssertionFailed,
+  `E2002` BalanceToleranceExceeded, `E2004` MultiplePadForBalance)
+  anchors on the line. "see diagnostic" is a true link by construction:
+  the diagnostic the lens points at is the diagnostic the lens
+  consulted. See `BALANCE_ERROR_CODES` in `handlers/code_lens.rs` for
+  the full list and the rationale for excluded codes (E1001, parse
+  errors, plugin errors at the line — those describe a different
+  failure and surface independently).
+- `Balance: X USD` (neutral, no symbol) in any of three cases:
+  - Cold start, before the first `publish_diagnostics` for the file.
+  - Validation was skipped this turn (file > 500 KB or buffer has
+    parse errors elsewhere — see `validation_would_run`).
+  - A non-balance ERROR (e.g., `E1001 AccountNotOpen`) anchors on the
+    balance directive's line — the diagnostic explains a different
+    problem; claiming `⚠ Balance` would misattribute the failure.
+  In every neutral case the lens declines to claim a verdict it
+  cannot back up.
 
 The validator runs the full pipeline (synth-plugins → Early → book →
 regular-plugins → Late) on every `didOpen` / `didChange` / `didSave`,

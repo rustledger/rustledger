@@ -41,6 +41,7 @@ use lsp_types::{
 };
 use rustledger_core::Directive;
 use rustledger_parser::ParseResult;
+use rustledger_validate::ErrorCode;
 use std::collections::HashMap;
 
 use super::diagnostics::validation_would_run;
@@ -203,20 +204,39 @@ pub fn handle_code_lens(
 }
 
 /// Error codes the lens treats as a balance-arithmetic failure on a
-/// balance directive's line:
+/// balance directive's line.
 ///
-/// - `E2001`: balance assertion failed (asserted amount != actual)
-/// - `E2002`: balance exceeds explicit tolerance
+/// Pulled from [`ErrorCode`] (`pub const fn code() -> &'static str`)
+/// instead of hardcoding the strings, so renumbering on the validator
+/// side breaks the lens build rather than silently mislabelling every
+/// balance failure as a non-balance ERROR. The codes themselves:
 ///
-/// Other ERROR diagnostics that may also land on a balance directive's
-/// line — `E1001 AccountNotOpen`, parse errors, plugin errors patched
-/// onto the balance span — describe a different problem. Showing
+/// - `E2001` ([`ErrorCode::BalanceAssertionFailed`]): asserted amount
+///   != actual.
+/// - `E2002` ([`ErrorCode::BalanceToleranceExceeded`]): difference is
+///   beyond the explicit `~` tolerance.
+/// - `E2004` ([`ErrorCode::MultiplePadForBalance`]): two effective
+///   pads before the assertion. The validator's lib.rs:548-562 patches
+///   the balance directive's span onto this error (it's constructed
+///   with `bal.date` and no span of its own), so the diagnostic anchors
+///   on the balance line — same as E2001/E2002. The user-facing failure
+///   IS that the asserted balance can't be unambiguously verified.
+///
+/// Codes that may land at the balance line but describe a different
+/// problem (`E1001 AccountNotOpen`, parse errors, plugin errors
+/// patched onto the span) are deliberately excluded. Showing
 /// `⚠ Balance: X USD (see diagnostic)` for those misattributes the
 /// failure category: the user clicks the lens expecting a balance
 /// arithmetic explanation and finds something unrelated. The lens
-/// renders neutrally for those instead, letting the diagnostic itself
-/// speak.
-const BALANCE_ERROR_CODES: &[&str] = &["E2001", "E2002"];
+/// renders neutrally for those, letting the diagnostic itself speak.
+///
+/// `E2003 PadWithoutBalance` anchors on the pad directive, not the
+/// balance directive, so it's not relevant to this list.
+const BALANCE_ERROR_CODES: &[&str] = &[
+    ErrorCode::BalanceAssertionFailed.code(),
+    ErrorCode::BalanceToleranceExceeded.code(),
+    ErrorCode::MultiplePadForBalance.code(),
+];
 
 /// Render the balance lens title for a balance directive on `line`.
 ///
@@ -286,7 +306,22 @@ fn has_non_balance_error_at_line(diagnostics: &[Diagnostic], line: u32) -> bool 
 fn is_balance_error_code(code: Option<&NumberOrString>) -> bool {
     match code {
         Some(NumberOrString::String(s)) => BALANCE_ERROR_CODES.contains(&s.as_str()),
-        _ => false,
+        Some(NumberOrString::Number(n)) => {
+            // Today every validator-emitted diagnostic code is a
+            // String (see `validation_error_to_diagnostic` at
+            // diagnostics.rs:~420). If a future contributor adds a
+            // Number-coded path, this branch fires — debug builds get
+            // a loud signal so the lens's filter can be updated;
+            // release builds default to "not a balance code" to avoid
+            // a spurious ⚠ on an unknown numeric code.
+            debug_assert!(
+                false,
+                "lens received an unexpected numeric diagnostic code: {n}; \
+                 update `is_balance_error_code` or normalize at the emitter",
+            );
+            false
+        }
+        None => false,
     }
 }
 
@@ -603,11 +638,15 @@ mod tests {
     /// the lens asserting verdicts it cannot back up.
     #[test]
     fn balance_lens_neutral_when_parse_errors_skip_validation() {
-        // First non-comment line is a syntax error (stray garbage),
-        // forcing parse_result.errors to be non-empty.
-        let source = r#"!!! syntax garbage on line 0
-2024-01-01 open Assets:Bank USD
+        // Open + balance directives come first (cleanly parsed, so the
+        // balance lens is always emitted regardless of how the parser
+        // recovers from the trailing garbage). The malformed line at
+        // the END forces `parse_result.errors` to be non-empty without
+        // making the test depend on parser-recovery behavior at the
+        // top of the file.
+        let source = r#"2024-01-01 open Assets:Bank USD
 2024-01-31 balance Assets:Bank 100.00 USD
+!!! syntax garbage on a trailing line
 "#;
         let result = parse(source);
         assert!(

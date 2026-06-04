@@ -182,6 +182,13 @@ pub fn parse_directives(source: &str) -> (Vec<Spanned<Directive>>, Vec<ParseErro
 /// **Add a new field?** Add a binding (NOT `_`) AND a hasher feed
 /// line to the destructure below. The compiler enforces the binding;
 /// reviewers must enforce the feed.
+///
+/// **Determinism precondition:** this routes directives through
+/// `serde_json::to_value`, which is only sort-stable when
+/// `serde_json`'s `preserve_order` feature is **off**. Cargo feature
+/// unification can flip this on workspace-wide; the unit test
+/// `serde_json_object_is_sorted` in this crate's tests catches that
+/// flip before the canonical hash silently desyncs.
 #[doc(hidden)]
 #[must_use]
 pub fn __baseline_canonical_payload(result: &ParseResult) -> Vec<u8> {
@@ -218,4 +225,40 @@ pub fn __baseline_canonical_payload(result: &ParseResult) -> Vec<u8> {
     out.extend_from_slice(b"\nhas_leading_bom:");
     out.extend_from_slice(format!("{has_leading_bom:?}").as_bytes());
     out
+}
+
+#[cfg(test)]
+mod canonical_payload_determinism {
+    //! Guard against cargo feature unification silently enabling
+    //! `serde_json/preserve_order` workspace-wide. When `preserve_order`
+    //! is OFF, `serde_json::Value::Object` is BTreeMap-backed and sorts
+    //! its keys; when ON, it's IndexMap-backed and preserves insertion
+    //! order. `__baseline_canonical_payload` relies on the sort-stable
+    //! behavior to neutralize `FxHashMap` iteration order in directive
+    //! metadata. A workspace crate flipping the feature on would make
+    //! canonical hashes vary with hashbrown state across machines —
+    //! the very class of bug the canonicalization was added to
+    //! prevent. This test fails fast and points at the cargo-feature
+    //! cause instead of letting the corpus baseline mysteriously drift.
+    use serde_json::json;
+
+    #[test]
+    fn serde_json_object_is_sorted() {
+        // Insertion order `b, a` would survive under `preserve_order`.
+        // Default features sort to `a, b`.
+        let v = json!({ "b": 1, "a": 2 });
+        let s = v.to_string();
+        assert!(
+            s.starts_with("{\"a\""),
+            "serde_json::Value::Object is not sorting keys (got {s}). \
+             This means cargo feature unification turned on \
+             serde_json/preserve_order somewhere in the workspace. \
+             The corpus baseline's canonical hash assumes sorted \
+             Object keys to neutralize FxHashMap iteration order in \
+             directive metadata. Find the crate that enabled \
+             `serde_json = {{ ..., features = [\"preserve_order\"] }}` \
+             and remove it, or thread an alternative canonicalization \
+             through __baseline_canonical_payload.",
+        );
+    }
 }

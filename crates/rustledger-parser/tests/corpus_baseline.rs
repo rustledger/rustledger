@@ -82,8 +82,9 @@ use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 
 use baseline_common::{
-    CORPUS_ROOT, FileFingerprint, MIN_FULL_CORPUS_SIZE, compute_manifest, discover_corpus_files,
-    is_in_tree_fixture, panic_payload_hash, read_committed_manifest, repo_root, write_manifest,
+    CORPUS_ROOT, FileFingerprint, IN_TREE_FIXTURE_PREFIX, MIN_FULL_CORPUS_SIZE, compute_manifest,
+    discover_corpus_files, is_in_tree_fixture, panic_payload_hash, read_committed_manifest,
+    repo_root, write_manifest,
 };
 
 /// Relative path to the committed manifest from the repo root.
@@ -217,6 +218,11 @@ fn parser_output_matches_baseline() {
     let mut source_drift: Vec<&PathBuf> = Vec::new();
     let mut missing_from_corpus: Vec<&PathBuf> = Vec::new();
     let mut missing_from_manifest: Vec<&PathBuf> = Vec::new();
+    // Committed sentinel (`panic:*` or `read-error:*`) now produces a
+    // real hash: the file was broken, now it isn't. Improvement, not
+    // regression. Warn only; never strict-fail. Symmetric with the
+    // format baseline's `previously_broken_resolved` bucket.
+    let mut previously_broken_resolved: Vec<&PathBuf> = Vec::new();
 
     for (path, expected) in &committed {
         match current.get(path) {
@@ -225,7 +231,15 @@ fn parser_output_matches_baseline() {
                 source_drift.push(path);
             }
             Some(current_fp) if current_fp.parser != expected.parser => {
-                parser_drift.push((path, expected.parser.as_str(), current_fp.parser.as_str()));
+                let was_broken = expected.parser.starts_with("panic:")
+                    || expected.parser.starts_with("read-error:");
+                let is_now_real = !current_fp.parser.starts_with("panic:")
+                    && !current_fp.parser.starts_with("read-error:");
+                if was_broken && is_now_real {
+                    previously_broken_resolved.push(path);
+                } else {
+                    parser_drift.push((path, expected.parser.as_str(), current_fp.parser.as_str()));
+                }
             }
             Some(_) => {}
         }
@@ -283,6 +297,14 @@ fn parser_output_matches_baseline() {
                 missing_from_corpus.len(),
             );
         }
+        if !previously_broken_resolved.is_empty() {
+            eprintln!(
+                "info: {} file(s) previously recorded as a sentinel \
+                 (`panic:*` or `read-error:*`) now parse cleanly. \
+                 Improvement, not regression; regenerate when convenient.",
+                previously_broken_resolved.len(),
+            );
+        }
         return;
     }
 
@@ -330,20 +352,22 @@ fn parser_output_matches_baseline() {
     );
 }
 
-/// Sanity check: discovery must find at least the in-tree
-/// `plugins/` fixtures. If this fails the corpus path resolution is
-/// wrong and every other test in this file is silently no-op.
+/// Sanity check: discovery must find at least one in-tree fixture
+/// under the `IN_TREE_FIXTURE_PREFIX` path. If this fails the corpus
+/// path resolution is wrong and every other test in this file is
+/// silently no-op. Routed through the const so renaming a specific
+/// fixture (e.g., `plugins/implicit_prices/` → `plugins/foo/`) does
+/// not break a test that's actually checking corpus discovery, not
+/// that one fixture's presence.
 #[test]
 fn discovery_finds_in_tree_plugin_fixtures() {
     let files = discover_corpus_files();
-    let has_plugin_fixture = files
-        .iter()
-        .any(|p| p.to_string_lossy().contains("plugins/implicit_prices"));
+    let has_plugin_fixture = files.iter().any(|p| p.starts_with(IN_TREE_FIXTURE_PREFIX));
     assert!(
         has_plugin_fixture,
         "expected to find at least one in-tree fixture under \
-         tests/compatibility/files/plugins/implicit_prices/; got \
-         {} corpus files total. Check CORPUS_ROOT resolution.",
+         `{IN_TREE_FIXTURE_PREFIX}`; got {} corpus files total. \
+         Check CORPUS_ROOT resolution and the `.gitignore` exception.",
         files.len()
     );
 }

@@ -152,17 +152,32 @@ pub fn is_in_tree_fixture(rel: &Path) -> bool {
 }
 
 /// Reject corpus paths the manifest serializer cannot represent.
-/// The manifest format is `path<TAB>...<TAB>...`, so a path
-/// containing a tab corrupts the round trip; a path starting with
-/// `#` is misread as a comment. Today the corpus contains neither,
-/// but rejecting up front beats writing a manifest the strict
-/// reader will panic on.
+/// The manifest format is one entry per line, `path<TAB>...<TAB>...`,
+/// so a path containing a tab corrupts the round trip; a path
+/// containing `\n` or `\r` would split into multiple lines on read
+/// (with the first fragment surfacing a confusing "malformed manifest
+/// line" panic that hides the real cause); a path starting with `#`
+/// is misread as a comment. Today the corpus contains none of these,
+/// but rejecting up front beats writing a manifest the strict reader
+/// will panic on far from where the bad name was introduced.
 pub fn validate_path(rel: &Path) {
     let s = rel.to_string_lossy();
     assert!(
         !s.contains('\t'),
         "corpus path contains a TAB character, which the manifest \
          serializer cannot represent: {}",
+        rel.display(),
+    );
+    assert!(
+        !s.contains('\n'),
+        "corpus path contains a newline, which would split the \
+         manifest entry across lines: {}",
+        rel.display(),
+    );
+    assert!(
+        !s.contains('\r'),
+        "corpus path contains a carriage return, which would corrupt \
+         the line-oriented manifest format: {}",
         rel.display(),
     );
     assert!(

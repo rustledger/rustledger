@@ -16,12 +16,15 @@
 //!
 //! Both hashes are present so the gate can distinguish "the
 //! compatibility corpus drifted upstream" from "the formatter's
-//! output changed." Files whose parser output contains zero
-//! directives have nothing to format; the manifest omits them.
-//! Files that fail to read are encoded as a `read-error:<kind>`
-//! sentinel matching the parser baseline so a future readability
-//! flip doesn't produce contradictory diagnostics across the two
-//! manifests.
+//! output changed." Files are omitted from the manifest only when
+//! they parse to NO formattable content at all (no directives AND
+//! no options AND no includes AND no plugins AND no comments) —
+//! option-only and comment-only files are still tracked because
+//! `format_source` renders those items and a regression on them
+//! must be detected. Files that fail to read are encoded as a
+//! `read-error:<kind>` sentinel matching the parser baseline so a
+//! future readability flip doesn't produce contradictory diagnostics
+//! across the two manifests.
 //!
 //! ## Why `format_source`
 //!

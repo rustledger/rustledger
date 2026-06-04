@@ -38,9 +38,16 @@ if [ ! -d tests/compatibility/files ]; then
 fi
 
 # Deliberately do NOT swallow find's stderr (memory rule: never use
-# 2>/dev/null). A permissions accident or stale FUSE mount under the
-# corpus directory would otherwise be miscounted as "0 files" and
-# produce a misleading error message.
+# 2>/dev/null). Two failure paths to be precise about under
+# `set -euo pipefail`:
+# - find itself fails (permission denied on a subdir, stale FUSE
+#   mount): pipefail propagates the non-zero exit, the `$(...)`
+#   assignment fails, and `set -e` aborts the script here. The user
+#   sees find's stderr explaining what broke. Good.
+# - find succeeds, prints zero matches: corpus_size=0, falls through
+#   to the explicit error below. Good.
+# Either way the user gets an actionable diagnostic; the silencer
+# would have collapsed both into a confusing "0 files" message.
 corpus_size=$(find tests/compatibility/files -name '*.beancount' | wc -l)
 
 if [ "$corpus_size" -lt "$MIN_CORPUS_SIZE" ]; then

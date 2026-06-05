@@ -167,18 +167,37 @@ pub enum SyntaxKind {
     /// promises to keep going past bad input.
     ERROR_NODE,
 
-    /// Generic structural-directive wrapper. Phase 2.0 introduces it
-    /// solely as a regression-test target for the trivia attachment
-    /// policy (see `cst::trivia`). Phase 2.1 adds specific kinds
-    /// alongside (`TRANSACTION`, `OPEN_DIRECTIVE`, `CLOSE_DIRECTIVE`,
-    /// `BALANCE_DIRECTIVE`, ...) when the structured parser starts
-    /// emitting them; `DIRECTIVE` remains as (a) the umbrella kind
-    /// for error-recovery wrappers around partial-directive
-    /// fragments, and (b) the test target for any structural
-    /// regression that's the same shape across all directive kinds.
-    /// The trivia policy applies UNIFORMLY to every specific kind,
-    /// so phase 2.1's tests can use any of them interchangeably.
+    /// Generic structural-directive wrapper. Phase 2.0 introduced it
+    /// as the regression-test target for the trivia attachment
+    /// policy. Phase 2.1a (this section) adds specific kinds
+    /// alongside it; `DIRECTIVE` remains as the umbrella kind for
+    /// error-recovery wrappers around partial-directive fragments
+    /// AND as a structural test target where the shape is the same
+    /// across all directive kinds.
     DIRECTIVE,
+
+    // Phase 2.1a: specific directive kinds for the 14 single-line
+    // directives. The trivia attachment policy (see `cst::trivia`)
+    // applies UNIFORMLY to each. Each wraps its content tokens +
+    // same-line trailing trivia + terminator NEWLINE per the
+    // Directive-Terminator Rule. TRANSACTION is deliberately
+    // ABSENT — it lands in phase 2.1b paired with PR 2.2's body
+    // parsing. OPTION/INCLUDE/PLUGIN/CUSTOM are edge directives
+    // (PR 2.3); also absent here.
+    OPEN_DIRECTIVE,
+    CLOSE_DIRECTIVE,
+    BALANCE_DIRECTIVE,
+    PAD_DIRECTIVE,
+    EVENT_DIRECTIVE,
+    QUERY_DIRECTIVE,
+    NOTE_DIRECTIVE,
+    DOCUMENT_DIRECTIVE,
+    PRICE_DIRECTIVE,
+    COMMODITY_DIRECTIVE,
+    PUSHTAG_DIRECTIVE,
+    POPTAG_DIRECTIVE,
+    PUSHMETA_DIRECTIVE,
+    POPMETA_DIRECTIVE,
 }
 
 impl SyntaxKind {
@@ -333,6 +352,20 @@ mod tests {
             SyntaxKind::SOURCE_FILE,
             SyntaxKind::ERROR_NODE,
             SyntaxKind::DIRECTIVE,
+            SyntaxKind::OPEN_DIRECTIVE,
+            SyntaxKind::CLOSE_DIRECTIVE,
+            SyntaxKind::BALANCE_DIRECTIVE,
+            SyntaxKind::PAD_DIRECTIVE,
+            SyntaxKind::EVENT_DIRECTIVE,
+            SyntaxKind::QUERY_DIRECTIVE,
+            SyntaxKind::NOTE_DIRECTIVE,
+            SyntaxKind::DOCUMENT_DIRECTIVE,
+            SyntaxKind::PRICE_DIRECTIVE,
+            SyntaxKind::COMMODITY_DIRECTIVE,
+            SyntaxKind::PUSHTAG_DIRECTIVE,
+            SyntaxKind::POPTAG_DIRECTIVE,
+            SyntaxKind::PUSHMETA_DIRECTIVE,
+            SyntaxKind::POPMETA_DIRECTIVE,
         ];
         for kind in node_kinds {
             assert!(
@@ -378,6 +411,20 @@ mod tests {
             SyntaxKind::SOURCE_FILE,
             SyntaxKind::ERROR_NODE,
             SyntaxKind::DIRECTIVE,
+            SyntaxKind::OPEN_DIRECTIVE,
+            SyntaxKind::CLOSE_DIRECTIVE,
+            SyntaxKind::BALANCE_DIRECTIVE,
+            SyntaxKind::PAD_DIRECTIVE,
+            SyntaxKind::EVENT_DIRECTIVE,
+            SyntaxKind::QUERY_DIRECTIVE,
+            SyntaxKind::NOTE_DIRECTIVE,
+            SyntaxKind::DOCUMENT_DIRECTIVE,
+            SyntaxKind::PRICE_DIRECTIVE,
+            SyntaxKind::COMMODITY_DIRECTIVE,
+            SyntaxKind::PUSHTAG_DIRECTIVE,
+            SyntaxKind::POPTAG_DIRECTIVE,
+            SyntaxKind::PUSHMETA_DIRECTIVE,
+            SyntaxKind::POPMETA_DIRECTIVE,
         ];
         let observed_nodes: Vec<SyntaxKind> = all_kinds
             .iter()

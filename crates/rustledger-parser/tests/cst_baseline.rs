@@ -1,37 +1,29 @@
-//! CST baseline gate for `#1262` phase 1.
+//! CST baseline gate for `#1262`, switched to `parse_structured` at
+//! phase 2.1a.
 //!
-//! For every `.beancount` file in `tests/compatibility/files/`, hash:
+//! For every `.beancount` file in `tests/compatibility/files/`,
+//! hash:
 //!
-//! 1. The byte-identical round-trip of `parse_flat(source).text()` —
-//!    must equal the source. This is the primary CST invariant.
-//! 2. The KIND SEQUENCE: the ordered list of every emitted
-//!    `(SyntaxKind, byte_range)`. A misclassification (BOM emitted as
-//!    `ERROR_TOKEN`, INDENT mistaken for content WHITESPACE, line-start
-//!    `#` not folded into COMMENT, etc.) round-trips equally well at
-//!    the byte level but produces a different kind sequence — which
-//!    the manifest catches.
-//!
-//! The kind-sequence hash is the gate the round-1 architecture review
-//! demanded: a pure byte-round-trip is trivially provable from the
-//! adapter's tile-and-cover property, so it doesn't catch the
-//! interesting bugs (label drift). Hashing the kind sequence does.
+//! 1. The byte-identical round-trip of
+//!    `parse_structured(source).text()` — must equal the source.
+//!    Primary CST invariant.
+//! 2. `token_seq_blake3` — ordered `(kind, len)` of LEAF tokens
+//!    only. Stable across phase 2+ structural PRs — adding parent
+//!    nodes around token runs doesn't change the token sequence.
+//!    Only token-classification changes move this hash.
+//! 3. `node_shape_blake3` — preorder node-ENTER sequence (kinds,
+//!    no tokens). Phase 1 produced one entry per file
+//!    (`SOURCE_FILE`). Phase 2.0 added the `DIRECTIVE` umbrella
+//!    kind but didn't emit it from the parser. Phase 2.1a emits
+//!    specific `*_DIRECTIVE` kinds for 14 single-line directives,
+//!    so this column churns on every file that contains any
+//!    recognized directive.
 //!
 //! Manifest format (one line per file, sorted lexically):
 //!
 //! ```text
 //! relative/path<TAB>source_blake3<TAB>token_seq_blake3<TAB>node_shape_blake3
 //! ```
-//!
-//! Two distinct kind-sequence hashes per file:
-//!
-//! - `token_seq_blake3` — the ordered `(kind, len)` sequence of LEAF
-//!   tokens only. STABLE across phase 2+ — adding parent nodes around
-//!   token runs doesn't change the token sequence, so this hash only
-//!   moves when token classification changes.
-//! - `node_shape_blake3` — the preorder sequence of node ENTER events
-//!   (kinds only, no tokens). Phase 1 emits exactly one entry per
-//!   file (the root `SOURCE_FILE`). Phase 2 PRs WILL churn this
-//!   column on every file as `DIRECTIVE`/`POSTING`/etc. nodes appear.
 //!
 //! The split keeps phase-2 review surface honest: a structural PR
 //! diffs the node column (expected, every file), and reviewers can
@@ -45,14 +37,14 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use baseline_common::is_in_tree_fixture;
-use rustledger_parser::parse_flat;
+use rustledger_parser::parse_structured;
 
 const CORPUS_ROOT: &str = "tests/compatibility/files";
 const MIN_FULL_CORPUS_SIZE: usize = 100;
 const MANIFEST_PATH: &str = "tests/baselines/cst-corpus.manifest";
 
 const MANIFEST_HEADER: &[&str] = &[
-    "# CST baseline (#1262 phase 1). See crates/rustledger-parser/tests/cst_baseline.rs.",
+    "# CST baseline (#1262 phase 2.1a, parse_structured). See crates/rustledger-parser/tests/cst_baseline.rs.",
     "# Format: path<TAB>source_blake3<TAB>token_seq_blake3<TAB>node_shape_blake3",
     "# Regenerate: BASELINE_UPDATE=1 cargo test -p rustledger-parser --test cst_baseline",
 ];
@@ -142,7 +134,7 @@ fn fingerprint(rel: &Path) -> Fingerprint {
     // Round-trip is part of the contract: a divergence here is a hard
     // failure of the CST builder, recorded as a sentinel so the
     // manifest diff is visible.
-    let tree = parse_flat(&source);
+    let tree = parse_structured(&source);
     let reconstructed = tree.text().to_string();
     if reconstructed != source {
         return Fingerprint {

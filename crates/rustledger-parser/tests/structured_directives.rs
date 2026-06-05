@@ -1,0 +1,536 @@
+//! Source-driven tests for `parse_structured` (phase 2.1a).
+//!
+//! Each test feeds real Beancount source through the structured
+//! parser and asserts the resulting tree shape against the
+//! Directive-Terminator Rule (see `cst::trivia`).
+//!
+//! These complement (do NOT replace) the hand-constructed-tree
+//! tests in `cst::trivia::tests` — those pin the policy as
+//! invariants on tree shape, these pin that
+//! `parse_structured(source)` actually PRODUCES trees matching
+//! those invariants on real source.
+
+// Each test references many `SyntaxKind` variants for its expected
+// children sequence; a per-test glob import is the cleanest local
+// shape. Clippy's enum_glob_use lint is the wrong call here.
+#![allow(clippy::enum_glob_use)]
+
+use rustledger_parser::{SyntaxKind, SyntaxNode, parse_structured};
+
+/// Per-child kind sequence for a node. Distinguishes tokens from
+/// nested nodes so a test can assert both leaf trivia and structural
+/// wrapping at the same node level.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Element {
+    Tok(SyntaxKind),
+    Node(SyntaxKind),
+}
+
+fn elements_of(node: &SyntaxNode) -> Vec<Element> {
+    node.children_with_tokens()
+        .map(|el| match el {
+            rowan::NodeOrToken::Token(t) => Element::Tok(t.kind()),
+            rowan::NodeOrToken::Node(n) => Element::Node(n.kind()),
+        })
+        .collect()
+}
+
+fn tok_seq(kinds: &[SyntaxKind]) -> Vec<Element> {
+    kinds.iter().copied().map(Element::Tok).collect()
+}
+
+/// Find direct-children directive nodes of any specific
+/// `*_DIRECTIVE` kind under `root`.
+fn directives(root: &SyntaxNode) -> Vec<SyntaxNode> {
+    root.children()
+        .filter(|c| {
+            matches!(
+                c.kind(),
+                SyntaxKind::OPEN_DIRECTIVE
+                    | SyntaxKind::CLOSE_DIRECTIVE
+                    | SyntaxKind::BALANCE_DIRECTIVE
+                    | SyntaxKind::PAD_DIRECTIVE
+                    | SyntaxKind::EVENT_DIRECTIVE
+                    | SyntaxKind::QUERY_DIRECTIVE
+                    | SyntaxKind::NOTE_DIRECTIVE
+                    | SyntaxKind::DOCUMENT_DIRECTIVE
+                    | SyntaxKind::PRICE_DIRECTIVE
+                    | SyntaxKind::COMMODITY_DIRECTIVE
+                    | SyntaxKind::PUSHTAG_DIRECTIVE
+                    | SyntaxKind::POPTAG_DIRECTIVE
+                    | SyntaxKind::PUSHMETA_DIRECTIVE
+                    | SyntaxKind::POPMETA_DIRECTIVE
+            )
+        })
+        .collect()
+}
+
+/// Round-trip property: the tree's text must equal the source for
+/// every input. Asserted at the top of every test.
+fn assert_round_trip(source: &str, tree: &SyntaxNode) {
+    assert_eq!(
+        tree.text().to_string(),
+        source,
+        "structured parser must round-trip byte-identically",
+    );
+}
+
+// ---------- 10 dated directives ----------
+
+#[test]
+fn open_directive_with_currency() {
+    use SyntaxKind::*;
+    let source = "2024-01-01 open Assets:Cash USD\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let ds = directives(&tree);
+    assert_eq!(ds.len(), 1);
+    assert_eq!(ds[0].kind(), OPEN_DIRECTIVE);
+    assert_eq!(
+        elements_of(&ds[0]),
+        tok_seq(&[
+            DATE, WHITESPACE, OPEN_KW, WHITESPACE, ACCOUNT, WHITESPACE, CURRENCY, NEWLINE
+        ]),
+    );
+}
+
+#[test]
+fn close_directive() {
+    use SyntaxKind::*;
+    let source = "2024-12-31 close Assets:Cash\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let ds = directives(&tree);
+    assert_eq!(ds.len(), 1);
+    assert_eq!(ds[0].kind(), CLOSE_DIRECTIVE);
+    assert_eq!(
+        elements_of(&ds[0]),
+        tok_seq(&[DATE, WHITESPACE, CLOSE_KW, WHITESPACE, ACCOUNT, NEWLINE]),
+    );
+}
+
+#[test]
+fn balance_directive() {
+    use SyntaxKind::*;
+    let source = "2024-06-30 balance Assets:Cash 100.00 USD\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let ds = directives(&tree);
+    assert_eq!(ds.len(), 1);
+    assert_eq!(ds[0].kind(), BALANCE_DIRECTIVE);
+    assert_eq!(
+        elements_of(&ds[0]),
+        tok_seq(&[
+            DATE, WHITESPACE, BALANCE_KW, WHITESPACE, ACCOUNT, WHITESPACE, NUMBER, WHITESPACE,
+            CURRENCY, NEWLINE,
+        ]),
+    );
+}
+
+#[test]
+fn pad_directive() {
+    use SyntaxKind::*;
+    let source = "2024-01-01 pad Assets:Cash Equity:Opening-Balances\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let ds = directives(&tree);
+    assert_eq!(ds.len(), 1);
+    assert_eq!(ds[0].kind(), PAD_DIRECTIVE);
+    assert_eq!(
+        elements_of(&ds[0]),
+        tok_seq(&[
+            DATE, WHITESPACE, PAD_KW, WHITESPACE, ACCOUNT, WHITESPACE, ACCOUNT, NEWLINE,
+        ]),
+    );
+}
+
+#[test]
+fn event_directive() {
+    use SyntaxKind::*;
+    let source = "2024-01-15 event \"location\" \"Berlin\"\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let ds = directives(&tree);
+    assert_eq!(ds.len(), 1);
+    assert_eq!(ds[0].kind(), EVENT_DIRECTIVE);
+    assert_eq!(
+        elements_of(&ds[0]),
+        tok_seq(&[
+            DATE, WHITESPACE, EVENT_KW, WHITESPACE, STRING, WHITESPACE, STRING, NEWLINE,
+        ]),
+    );
+}
+
+#[test]
+fn query_directive() {
+    use SyntaxKind::*;
+    let source = "2024-01-01 query \"income\" \"SELECT *\"\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let ds = directives(&tree);
+    assert_eq!(ds.len(), 1);
+    assert_eq!(ds[0].kind(), QUERY_DIRECTIVE);
+}
+
+#[test]
+fn note_directive() {
+    use SyntaxKind::*;
+    let source = "2024-01-15 note Assets:Cash \"deposit\"\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let ds = directives(&tree);
+    assert_eq!(ds.len(), 1);
+    assert_eq!(ds[0].kind(), NOTE_DIRECTIVE);
+    assert_eq!(
+        elements_of(&ds[0]),
+        tok_seq(&[
+            DATE, WHITESPACE, NOTE_KW, WHITESPACE, ACCOUNT, WHITESPACE, STRING, NEWLINE,
+        ]),
+    );
+}
+
+#[test]
+fn document_directive() {
+    use SyntaxKind::*;
+    let source = "2024-01-15 document Assets:Cash \"/path/to/file.pdf\"\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let ds = directives(&tree);
+    assert_eq!(ds.len(), 1);
+    assert_eq!(ds[0].kind(), DOCUMENT_DIRECTIVE);
+}
+
+#[test]
+fn price_directive() {
+    use SyntaxKind::*;
+    let source = "2024-01-15 price USD 1.10 EUR\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let ds = directives(&tree);
+    assert_eq!(ds.len(), 1);
+    assert_eq!(ds[0].kind(), PRICE_DIRECTIVE);
+    assert_eq!(
+        elements_of(&ds[0]),
+        tok_seq(&[
+            DATE, WHITESPACE, PRICE_KW, WHITESPACE, CURRENCY, WHITESPACE, NUMBER, WHITESPACE,
+            CURRENCY, NEWLINE,
+        ]),
+    );
+}
+
+#[test]
+fn commodity_directive() {
+    use SyntaxKind::*;
+    let source = "2024-01-01 commodity USD\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let ds = directives(&tree);
+    assert_eq!(ds.len(), 1);
+    assert_eq!(ds[0].kind(), COMMODITY_DIRECTIVE);
+    assert_eq!(
+        elements_of(&ds[0]),
+        tok_seq(&[
+            DATE,
+            WHITESPACE,
+            COMMODITY_KW,
+            WHITESPACE,
+            CURRENCY,
+            NEWLINE
+        ]),
+    );
+}
+
+// ---------- 4 standalone-keyword directives ----------
+
+#[test]
+fn pushtag_directive() {
+    use SyntaxKind::*;
+    let source = "pushtag #project-x\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let ds = directives(&tree);
+    assert_eq!(ds.len(), 1);
+    assert_eq!(ds[0].kind(), PUSHTAG_DIRECTIVE);
+    assert_eq!(
+        elements_of(&ds[0]),
+        tok_seq(&[PUSHTAG_KW, WHITESPACE, TAG, NEWLINE]),
+    );
+}
+
+#[test]
+fn poptag_directive() {
+    use SyntaxKind::*;
+    let source = "poptag #project-x\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let ds = directives(&tree);
+    assert_eq!(ds.len(), 1);
+    assert_eq!(ds[0].kind(), POPTAG_DIRECTIVE);
+    assert_eq!(
+        elements_of(&ds[0]),
+        tok_seq(&[POPTAG_KW, WHITESPACE, TAG, NEWLINE]),
+    );
+}
+
+#[test]
+fn pushmeta_directive() {
+    use SyntaxKind::*;
+    let source = "pushmeta key: \"value\"\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let ds = directives(&tree);
+    assert_eq!(ds.len(), 1);
+    assert_eq!(ds[0].kind(), PUSHMETA_DIRECTIVE);
+}
+
+#[test]
+fn popmeta_directive() {
+    use SyntaxKind::*;
+    let source = "popmeta key:\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let ds = directives(&tree);
+    assert_eq!(ds.len(), 1);
+    assert_eq!(ds[0].kind(), POPMETA_DIRECTIVE);
+}
+
+// ---------- Trivia attachment tests (Directive-Terminator Rule) ----------
+
+#[test]
+fn rule_1_same_line_trailing_comment_inside_directive() {
+    use SyntaxKind::*;
+    let source = "2024-01-01 open Assets:Cash  ; main checking\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let ds = directives(&tree);
+    assert_eq!(ds.len(), 1);
+    assert_eq!(ds[0].kind(), OPEN_DIRECTIVE);
+    // Rule 1: WS + COMMENT + terminator NEWLINE all INSIDE the directive.
+    assert_eq!(
+        elements_of(&ds[0]),
+        tok_seq(&[
+            DATE, WHITESPACE, OPEN_KW, WHITESPACE, ACCOUNT, WHITESPACE, COMMENT, NEWLINE,
+        ]),
+    );
+}
+
+#[test]
+fn rule_2_blank_line_leads_following_directive() {
+    use SyntaxKind::*;
+    let source = "2024-01-01 open Assets:Cash\n\
+                  \n\
+                  2024-01-02 open Assets:Bank\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let ds = directives(&tree);
+    assert_eq!(ds.len(), 2);
+    // Rule 1: d1 owns its own terminator NEWLINE.
+    assert_eq!(
+        elements_of(&ds[0]),
+        tok_seq(&[DATE, WHITESPACE, OPEN_KW, WHITESPACE, ACCOUNT, NEWLINE]),
+    );
+    // Rule 2: the blank-line NEWLINE leads d2.
+    assert_eq!(
+        elements_of(&ds[1]),
+        tok_seq(&[
+            NEWLINE, DATE, WHITESPACE, OPEN_KW, WHITESPACE, ACCOUNT, NEWLINE
+        ]),
+    );
+}
+
+#[test]
+fn rule_3_copyright_header_under_source_file() {
+    use SyntaxKind::*;
+    let source = ";; Copyright 2024\n\
+                  2024-01-01 open Assets:Cash\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    // Rule 3: header trivia is direct under SOURCE_FILE, NOT inside d1.
+    assert_eq!(
+        elements_of(&tree),
+        vec![
+            Element::Tok(COMMENT),
+            Element::Tok(NEWLINE),
+            Element::Node(OPEN_DIRECTIVE),
+        ],
+    );
+}
+
+#[test]
+fn rule_4_trailing_comment_block_under_source_file() {
+    use SyntaxKind::*;
+    let source = "2024-01-01 open Assets:Cash\n\
+                  ;; closing remarks\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    // Rule 4: trailing comment block is direct under SOURCE_FILE,
+    // NOT inside the file-final directive.
+    assert_eq!(
+        elements_of(&tree),
+        vec![
+            Element::Node(OPEN_DIRECTIVE),
+            Element::Tok(COMMENT),
+            Element::Tok(NEWLINE),
+        ],
+    );
+}
+
+#[test]
+fn rule_5_unterminated_final_directive() {
+    use SyntaxKind::*;
+    let source = "2024-01-01 open Assets:Cash";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let ds = directives(&tree);
+    assert_eq!(ds.len(), 1);
+    // Rule 5: no terminator. Directive ends at last content token.
+    assert_eq!(
+        elements_of(&ds[0]),
+        tok_seq(&[DATE, WHITESPACE, OPEN_KW, WHITESPACE, ACCOUNT]),
+    );
+}
+
+#[test]
+fn rule_5_unterminated_with_same_line_trailing_trivia() {
+    use SyntaxKind::*;
+    let source = "2024-01-01 open Assets:Cash  ; eol-no-nl";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let ds = directives(&tree);
+    assert_eq!(ds.len(), 1);
+    // Rules 1+5: same-line trailing trivia stays INSIDE the
+    // directive even without a terminator NEWLINE.
+    assert_eq!(
+        elements_of(&ds[0]),
+        tok_seq(&[
+            DATE, WHITESPACE, OPEN_KW, WHITESPACE, ACCOUNT, WHITESPACE, COMMENT,
+        ]),
+    );
+}
+
+#[test]
+fn mixed_directive_kinds_each_get_their_own_node() {
+    use SyntaxKind::*;
+    let source = "2024-01-01 open Assets:Cash USD\n\
+                  pushtag #x\n\
+                  2024-01-02 close Assets:Cash\n\
+                  poptag #x\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let ds = directives(&tree);
+    assert_eq!(ds.len(), 4);
+    assert_eq!(ds[0].kind(), OPEN_DIRECTIVE);
+    assert_eq!(ds[1].kind(), PUSHTAG_DIRECTIVE);
+    assert_eq!(ds[2].kind(), CLOSE_DIRECTIVE);
+    assert_eq!(ds[3].kind(), POPTAG_DIRECTIVE);
+}
+
+// ---------- Pass-through for unrecognized content ----------
+
+#[test]
+fn transaction_passes_through_flat() {
+    // TRANSACTION lands in PR 2.1b. Until then, transaction lines
+    // flow through as flat SOURCE_FILE children — no DIRECTIVE
+    // node wrapping. Bytes preserved.
+    let source = "2024-01-15 * \"Coffee\"\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    // No specific directive kind was emitted — all tokens are flat
+    // under SOURCE_FILE.
+    let ds = directives(&tree);
+    assert!(ds.is_empty());
+}
+
+#[test]
+fn option_directive_passes_through_flat() {
+    // PR 2.3 handles `option`. Until then: flat passthrough.
+    let source = "option \"title\" \"My Ledger\"\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let ds = directives(&tree);
+    assert!(ds.is_empty());
+}
+
+#[test]
+fn recognized_and_passthrough_can_coexist() {
+    use SyntaxKind::*;
+    let source = "option \"title\" \"My Ledger\"\n\
+                  2024-01-01 open Assets:Cash\n\
+                  2024-01-15 * \"Coffee\"\n\
+                  2024-01-16 close Assets:Cash\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    // Two recognized directives (open, close); two pass-through
+    // lines (option, transaction).
+    let ds = directives(&tree);
+    assert_eq!(ds.len(), 2);
+    assert_eq!(ds[0].kind(), OPEN_DIRECTIVE);
+    assert_eq!(ds[1].kind(), CLOSE_DIRECTIVE);
+}
+
+// ---------- Edge cases ----------
+
+#[test]
+fn empty_source() {
+    let tree = parse_structured("");
+    assert_round_trip("", &tree);
+    assert_eq!(tree.kind(), SyntaxKind::SOURCE_FILE);
+    assert!(directives(&tree).is_empty());
+}
+
+#[test]
+fn only_trivia_no_directives() {
+    use SyntaxKind::*;
+    let source = ";; only a comment\n\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    assert!(directives(&tree).is_empty());
+    // All under SOURCE_FILE.
+    assert_eq!(
+        elements_of(&tree),
+        vec![
+            Element::Tok(COMMENT),
+            Element::Tok(NEWLINE),
+            Element::Tok(NEWLINE)
+        ],
+    );
+}
+
+#[test]
+fn bom_under_source_file_directive_follows() {
+    use SyntaxKind::*;
+    let source = "\u{FEFF}2024-01-01 open Assets:Cash\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    // BOM is file-leading; first directive comes after.
+    assert_eq!(
+        elements_of(&tree),
+        vec![Element::Tok(BOM), Element::Node(OPEN_DIRECTIVE)],
+    );
+}

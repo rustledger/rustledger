@@ -54,5 +54,5 @@ mod syntax_kind;
 mod trivia;
 
 pub use lossless_tokens::lossless_kind_tokens;
-pub use parser::parse_flat;
+pub use parser::{parse_flat, parse_structured};
 pub use syntax_kind::{BeancountLanguage, SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken};

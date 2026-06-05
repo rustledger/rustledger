@@ -18,21 +18,33 @@
 //!
 //! # Trivia attachment policy (phase 2.0)
 //!
-//! Phase 1 emits a flat tree. Phase 2.0 pins the policy that phase
-//! 2.1+ parsers will follow when wrapping token runs in structural
-//! nodes. The full spec lives in the `trivia` submodule; the short
-//! version:
+//! Phase 1 emits a flat tree, where trivia attachment is a non-
+//! question. Phase 2.1+ introduces structural nodes (`DIRECTIVE`,
+//! then `POSTING` / `AMOUNT` / `COST_SPEC` / `META_ENTRY` / ...)
+//! that wrap token runs. Phase 2.0 pins the rule for which
+//! structural node owns which trivia token: **the Two-Line Rule**.
 //!
-//! - **Leading attaches forward.** A blank line between two
-//!   directives belongs to the SECOND directive.
-//! - **EOF is the exception.** Trivia after the last content token
-//!   attaches to the PRECEDING directive (nothing follows).
-//! - **`SOURCE_FILE` is the parent of last resort.** Trivia before
-//!   the first content token stays under `SOURCE_FILE`.
+//! Short version:
 //!
-//! Phase 1's `parse_flat` is policy-neutral (flat tree). Phase 2.1
-//! calls [`classify_trivia`] when deciding directive boundaries; see
-//! [`TriviaAttachment`] for the per-token classification it returns.
+//! - **Same-line trailing** trivia attaches to the PRECEDING
+//!   directive. An inline `; EOL comment` after an account name
+//!   trails its directive.
+//! - **Line-crossing leading** trivia attaches to the FOLLOWING
+//!   directive. The blank line between two directives leads the
+//!   second one.
+//! - **File-leading** trivia (before any content) attaches to
+//!   `SOURCE_FILE` directly — copyright headers are file-level
+//!   metadata, not part of the first directive.
+//! - **EOF trailing** trivia (after the last content) has no
+//!   following directive, so it stays with the file-final one.
+//!
+//! Phase 2.0 ships NO production helper for this — the policy is
+//! enforced via tree-shape regression tests in `cst::trivia`
+//! (private submodule). Phase 2.1's structured parser writes its
+//! own streaming, state-aware predicate that produces trees
+//! matching those shapes. If the parser drifts from the policy,
+//! the regression tests fire. See the `trivia` module rustdoc for
+//! the full spec and rationale.
 
 mod lossless_tokens;
 mod parser;
@@ -42,4 +54,3 @@ mod trivia;
 pub use lossless_tokens::lossless_kind_tokens;
 pub use parser::parse_flat;
 pub use syntax_kind::{BeancountLanguage, SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken};
-pub use trivia::{TriviaAttachment, classify_trivia};

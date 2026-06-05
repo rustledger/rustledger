@@ -127,12 +127,15 @@ pub enum SyntaxKind {
 
     // ---- Node kinds ------------------------------------------------------
     //
-    // Phase 1 emits a flat tree, so the only node kind actually used
-    // is `SOURCE_FILE`. Structural node kinds (DIRECTIVE / POSTING /
-    // AMOUNT / COST_SPEC / PRICE_ANNOTATION / META_ENTRY / ...) are
-    // NOT pre-declared — phase 2 PRs add them at the moment they're
-    // needed. `#[non_exhaustive]` + `num_enum`'s derive make new
-    // variants safe to add without ABI concerns.
+    // Structural node kinds are added at the moment they're first
+    // needed. Phase 1 emitted only `SOURCE_FILE` (plus `ERROR_NODE`
+    // reserved for phase 2's structured recovery). Phase 2.0 adds
+    // `DIRECTIVE` because the trivia-policy regression tests need a
+    // wrapper to demonstrate which directive owns which trivia.
+    // Phase 2.1 will refine `DIRECTIVE` into specific kinds
+    // (`TRANSACTION`, `OPEN_DIRECTIVE`, ...). `#[non_exhaustive]` +
+    // `num_enum`'s derive make new variants safe to add without ABI
+    // concerns.
     /// Root node — every byte of the file is reachable under this node.
     SOURCE_FILE,
 
@@ -143,6 +146,16 @@ pub enum SyntaxKind {
     /// PR adding it — error recovery is in scope for any parser that
     /// promises to keep going past bad input.
     ERROR_NODE,
+
+    /// Generic structural-directive wrapper. Phase 2.0 introduces it
+    /// solely as a regression-test target for the trivia attachment
+    /// policy (see `cst::trivia`). Phase 2.1 will replace it with
+    /// the 15+ specific directive-header kinds (`TRANSACTION`,
+    /// `OPEN_DIRECTIVE`, `CLOSE_DIRECTIVE`, ...) when the structured
+    /// parser starts emitting them; the trivia policy applies
+    /// uniformly to each, so the policy tests written against
+    /// `DIRECTIVE` carry over.
+    DIRECTIVE,
 }
 
 impl SyntaxKind {
@@ -275,7 +288,11 @@ mod tests {
     /// fail this property.
     #[test]
     fn nodes_are_not_tokens() {
-        let node_kinds = [SyntaxKind::SOURCE_FILE, SyntaxKind::ERROR_NODE];
+        let node_kinds = [
+            SyntaxKind::SOURCE_FILE,
+            SyntaxKind::ERROR_NODE,
+            SyntaxKind::DIRECTIVE,
+        ];
         for kind in node_kinds {
             assert!(
                 !kind.is_token(),

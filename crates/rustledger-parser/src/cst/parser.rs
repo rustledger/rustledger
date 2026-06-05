@@ -148,11 +148,11 @@ fn emit_through_terminator(
 }
 
 /// Consume the header line through its terminator NEWLINE, then
-/// keep consuming any indented `META_KEY: value` metadata sub-lines
-/// that follow at the same logical block.
+/// keep consuming any indented metadata sub-lines OR indented
+/// `;`/`%` comment lines that follow at the same logical block.
 ///
-/// The Directive-Terminator Rule (see `cst::trivia`) declares that a
-/// directive carrying metadata spans multiple lines: its last
+/// The Directive-Terminator Rule (see `cst::trivia`) declares that
+/// a directive carrying metadata spans multiple lines: its last
 /// content token is the last content token of its LAST sub-line,
 /// not the header. Stopping at the header NEWLINE would orphan
 /// metadata under `SOURCE_FILE` and silently violate the rule. PR
@@ -160,11 +160,20 @@ fn emit_through_terminator(
 /// `META_ENTRY` sub-node around each `WHITESPACE META_KEY ...
 /// NEWLINE` run inside.
 ///
-/// A metadata sub-line is identified by `WHITESPACE` (the indent)
-/// followed by `META_KEY`. Any other shape — a comment-only
-/// indented line, a blank line, a top-level keyword, EOF —
-/// terminates the directive. (Comments interleaved with metadata
-/// are a corner case left for a follow-up.)
+/// A continuation sub-line is recognized as `WHITESPACE` (the
+/// indent) followed by either:
+/// - `META_KEY` — the standard metadata sub-line, or
+/// - `COMMENT` / `PERCENT_COMMENT` — an indented documentation
+///   comment between metadata entries (a common Beancount idiom;
+///   keeping it inside the directive prevents subsequent metadata
+///   from getting orphaned to `SOURCE_FILE`).
+///
+/// Anything else — a blank line, a non-indented top-level token,
+/// EOF — terminates the directive. Blank-line separated metadata
+/// blocks are currently a known limitation: a `\n` between two
+/// metadata entries closes the directive and orphans the second
+/// entry. PR 2.2's grammar will likely subsume this when it
+/// introduces `META_ENTRY` structure.
 fn emit_directive_body(
     builder: &mut GreenNodeBuilder<'_>,
     source: &str,
@@ -172,19 +181,31 @@ fn emit_directive_body(
     mut i: usize,
 ) -> usize {
     i = emit_through_terminator(builder, source, tokens, i);
-    while is_indented_meta_line(tokens, i) {
+    while is_indented_directive_continuation(tokens, i) {
         i = emit_through_terminator(builder, source, tokens, i);
     }
     i
 }
 
-/// Returns true iff `tokens[i..]` starts an indented metadata
-/// sub-line — i.e., `WHITESPACE` then `META_KEY`. Used by
-/// `emit_directive_body` to decide whether the next physical line
-/// continues the current directive.
-fn is_indented_meta_line(tokens: &[(SyntaxKind, Range<usize>)], i: usize) -> bool {
-    matches!(tokens.get(i), Some((SyntaxKind::WHITESPACE, _)))
-        && matches!(tokens.get(i + 1), Some((SyntaxKind::META_KEY, _)))
+/// Returns true iff `tokens[i..]` starts an indented line that
+/// CONTINUES the current multi-line directive: `WHITESPACE` (the
+/// indent) followed by content that visually "belongs to" the
+/// metadata block.
+///
+/// Recognizes: `WS META_KEY`, `WS COMMENT`, `WS PERCENT_COMMENT`.
+/// All other shapes (including blank `\n` and non-indented
+/// content) terminate the directive.
+fn is_indented_directive_continuation(tokens: &[(SyntaxKind, Range<usize>)], i: usize) -> bool {
+    if !matches!(tokens.get(i), Some((SyntaxKind::WHITESPACE, _))) {
+        return false;
+    }
+    matches!(
+        tokens.get(i + 1),
+        Some((
+            SyntaxKind::META_KEY | SyntaxKind::COMMENT | SyntaxKind::PERCENT_COMMENT,
+            _
+        ))
+    )
 }
 
 /// Given the token slice and the index of a non-trivia token,

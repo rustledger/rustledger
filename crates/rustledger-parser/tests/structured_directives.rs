@@ -537,6 +537,43 @@ fn directive_with_metadata_then_next_directive() {
 }
 
 #[test]
+fn indented_comment_between_metadata_lines_stays_inside_directive() {
+    use SyntaxKind::*;
+    // Beancount idiom: documentation comments between metadata
+    // entries. They MUST stay inside the directive — otherwise the
+    // metadata that follows is orphaned to SOURCE_FILE, losing
+    // structural ownership and producing a tree where bare
+    // META_KEY tokens sit directly under SOURCE_FILE.
+    let source = "2024-01-01 open Assets:Cash\n\
+                  \x20\x20k1: \"v1\"\n\
+                  \x20\x20; doc comment for k2\n\
+                  \x20\x20k2: \"v2\"\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let ds = directives(&tree);
+    assert_eq!(ds.len(), 1);
+    assert_eq!(ds[0].kind(), OPEN_DIRECTIVE);
+    // The entire multi-line body — header + k1 + indented comment
+    // + k2 — must be inside the OPEN_DIRECTIVE. SOURCE_FILE owns
+    // ONLY the directive node.
+    assert_eq!(elements_of(&tree), vec![Element::Node(OPEN_DIRECTIVE)]);
+    // Specifically: no META_KEY appears as a direct child of
+    // SOURCE_FILE (would mean orphaning).
+    let sf_children: Vec<SyntaxKind> = elements_of(&tree)
+        .iter()
+        .filter_map(|e| match e {
+            Element::Tok(k) => Some(*k),
+            Element::Node(_) => None,
+        })
+        .collect();
+    assert!(
+        !sf_children.contains(&META_KEY),
+        "META_KEY orphaned to SOURCE_FILE: {sf_children:?}",
+    );
+}
+
+#[test]
 fn blank_line_between_metadata_lines_terminates_directive() {
     use SyntaxKind::*;
     // A blank line breaks the indented-metadata run; the second

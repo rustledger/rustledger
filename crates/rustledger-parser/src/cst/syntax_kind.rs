@@ -132,10 +132,20 @@ pub enum SyntaxKind {
     // reserved for phase 2's structured recovery). Phase 2.0 adds
     // `DIRECTIVE` because the trivia-policy regression tests need a
     // wrapper to demonstrate which directive owns which trivia.
-    // Phase 2.1 will refine `DIRECTIVE` into specific kinds
-    // (`TRANSACTION`, `OPEN_DIRECTIVE`, ...). `#[non_exhaustive]` +
-    // `num_enum`'s derive make new variants safe to add without ABI
-    // concerns.
+    // Phase 2.1 will introduce specific directive kinds
+    // (`TRANSACTION`, `OPEN_DIRECTIVE`, ...) alongside `DIRECTIVE`,
+    // which remains as the umbrella kind for error-recovery
+    // wrappers and any structural test reusable across kinds.
+    // `#[non_exhaustive]` + `num_enum`'s derive make new variants
+    // safe to add without ABI concerns.
+    //
+    // **Variant order is observable.** The corpus baseline
+    // (`tests/cst_baseline.rs`) hashes `(kind as u16)` per token
+    // for every file in the 714-file corpus. APPEND only; reordering
+    // invalidates every committed manifest entry in one go and the
+    // resulting diff is unreadable. If you must reorder, regenerate
+    // the manifest in a SEPARATE commit from any parser change so
+    // the diff stays reviewable.
     /// Root node — every byte of the file is reachable under this node.
     SOURCE_FILE,
 
@@ -149,12 +159,15 @@ pub enum SyntaxKind {
 
     /// Generic structural-directive wrapper. Phase 2.0 introduces it
     /// solely as a regression-test target for the trivia attachment
-    /// policy (see `cst::trivia`). Phase 2.1 will replace it with
-    /// the 15+ specific directive-header kinds (`TRANSACTION`,
-    /// `OPEN_DIRECTIVE`, `CLOSE_DIRECTIVE`, ...) when the structured
-    /// parser starts emitting them; the trivia policy applies
-    /// uniformly to each, so the policy tests written against
-    /// `DIRECTIVE` carry over.
+    /// policy (see `cst::trivia`). Phase 2.1 adds specific kinds
+    /// alongside (`TRANSACTION`, `OPEN_DIRECTIVE`, `CLOSE_DIRECTIVE`,
+    /// `BALANCE_DIRECTIVE`, ...) when the structured parser starts
+    /// emitting them; `DIRECTIVE` remains as (a) the umbrella kind
+    /// for error-recovery wrappers around partial-directive
+    /// fragments, and (b) the test target for any structural
+    /// regression that's the same shape across all directive kinds.
+    /// The trivia policy applies UNIFORMLY to every specific kind,
+    /// so phase 2.1's tests can use any of them interchangeably.
     DIRECTIVE,
 }
 
@@ -262,8 +275,15 @@ impl rowan::Language for BeancountLanguage {
     type Kind = SyntaxKind;
 
     fn kind_from_raw(raw: rowan::SyntaxKind) -> Self::Kind {
-        SyntaxKind::try_from(raw.0)
-            .unwrap_or_else(|_| panic!("invalid SyntaxKind discriminant: {}", raw.0))
+        // Defensive: fall back to ERROR_NODE on unknown discriminants
+        // rather than panic. Phase 2.0 added the `DIRECTIVE` variant
+        // and phase 2.1 will add more; any cross-version GreenNode
+        // bytes (LSP cache, incremental persistence, sidecar tooling
+        // reading our trees) seen by an older binary would otherwise
+        // panic deep inside rowan's tree walk, which is unrecoverable
+        // and a hard footgun. Returning `ERROR_NODE` surfaces the
+        // skew at the consumer's `kind()` check instead.
+        SyntaxKind::try_from(raw.0).unwrap_or(SyntaxKind::ERROR_NODE)
     }
 
     fn kind_to_raw(kind: Self::Kind) -> rowan::SyntaxKind {
@@ -297,6 +317,67 @@ mod tests {
             assert!(
                 !kind.is_token(),
                 "{kind:?} is a node but is_token() returns true",
+            );
+        }
+    }
+
+    /// Closed-form exhaustiveness check that catches the failure
+    /// mode the two hand-maintained lists (`nodes_are_not_tokens`
+    /// and `tokens_are_tokens`) miss in isolation: a future variant
+    /// added to the enum but forgotten in `is_token`'s `matches!` arm
+    /// AND in both hand-maintained test lists.
+    ///
+    /// We enumerate every valid discriminant via the `num_enum`
+    /// `try_from` derive — the same surface `kind_from_raw` uses —
+    /// then count how many fall into each category, and compare to
+    /// the documented node list. If the counts disagree, a variant
+    /// was added without updating the test scaffolding.
+    #[test]
+    fn every_kind_partitions_token_xor_node() {
+        // Search a generous discriminant range. `SyntaxKind` is
+        // small (~60 variants in phase 2.0); 256 is comfortable
+        // headroom for phase 2.1+ growth.
+        let all_kinds: Vec<SyntaxKind> = (0u16..256)
+            .filter_map(|d| SyntaxKind::try_from(d).ok())
+            .collect();
+
+        // Sanity: we found something (catches a bug where
+        // try_from is broken for ALL discriminants).
+        assert!(
+            !all_kinds.is_empty(),
+            "SyntaxKind::try_from rejected every discriminant 0..256",
+        );
+
+        // The documented node kinds — must be kept in sync with
+        // the `// ---- Node kinds ----` section of the enum above.
+        // The exhaustive iteration catches any drift.
+        let documented_nodes = [
+            SyntaxKind::SOURCE_FILE,
+            SyntaxKind::ERROR_NODE,
+            SyntaxKind::DIRECTIVE,
+        ];
+        let observed_nodes: Vec<SyntaxKind> = all_kinds
+            .iter()
+            .copied()
+            .filter(|k| !k.is_token())
+            .collect();
+
+        assert_eq!(
+            observed_nodes.len(),
+            documented_nodes.len(),
+            "is_token() says there are {} node kinds but the \
+             documented list has {}: observed={observed_nodes:?}, \
+             documented={documented_nodes:?}. A new SyntaxKind \
+             variant was added without updating is_token's matches! \
+             arm AND the documented_nodes list in this test.",
+            observed_nodes.len(),
+            documented_nodes.len(),
+        );
+        for kind in documented_nodes {
+            assert!(
+                observed_nodes.contains(&kind),
+                "{kind:?} is documented as a node but is_token() \
+                 returns true for it",
             );
         }
     }

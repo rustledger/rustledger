@@ -21,30 +21,32 @@
 //! Phase 1 emits a flat tree, where trivia attachment is a non-
 //! question. Phase 2.1+ introduces structural nodes (`DIRECTIVE`,
 //! then `POSTING` / `AMOUNT` / `COST_SPEC` / `META_ENTRY` / ...)
-//! that wrap token runs. Phase 2.0 pins the rule for which
-//! structural node owns which trivia token: **the Two-Line Rule**.
+//! that wrap token runs. Phase 2.0 pins **the
+//! Directive-Terminator Rule**: every directive owns its content
+//! tokens PLUS its terminating `NEWLINE`.
 //!
 //! Short version:
 //!
-//! - **Same-line trailing** trivia attaches to the PRECEDING
-//!   directive. An inline `; EOL comment` after an account name
-//!   trails its directive.
-//! - **Line-crossing leading** trivia attaches to the FOLLOWING
-//!   directive. The blank line between two directives leads the
-//!   second one.
-//! - **File-leading** trivia (before any content) attaches to
-//!   `SOURCE_FILE` directly — copyright headers are file-level
-//!   metadata, not part of the first directive.
-//! - **EOF trailing** trivia (after the last content) has no
-//!   following directive, so it stays with the file-final one.
+//! - **Same-line trailing** trivia (whitespace + EOL comment
+//!   before the terminator) lives INSIDE the directive.
+//! - **Inter-directive leading** trivia (blank lines, mid-file
+//!   comment blocks) lives INSIDE the NEXT directive.
+//! - **File-leading** trivia (before the first content token) is
+//!   a direct child of `SOURCE_FILE`.
+//! - **File-trailing** trivia (after the file-final directive's
+//!   terminator) is also a direct child of `SOURCE_FILE`.
 //!
-//! Phase 2.0 ships NO production helper for this — the policy is
-//! enforced via tree-shape regression tests in `cst::trivia`
-//! (private submodule). Phase 2.1's structured parser writes its
-//! own streaming, state-aware predicate that produces trees
-//! matching those shapes. If the parser drifts from the policy,
-//! the regression tests fire. See the `trivia` module rustdoc for
-//! the full spec and rationale.
+//! Fully symmetric: every directive has the same children shape
+//! (optional leading + content + optional same-line trailing +
+//! terminator `NEWLINE`). No EOF special case.
+//!
+//! Phase 2.0 ships NO production helper — the policy is enforced
+//! via tree-shape regression tests in `cst::trivia` (private
+//! submodule). Phase 2.1's structured parser writes its own
+//! streaming, state-aware predicate that produces trees matching
+//! those shapes. If the parser drifts, the regression tests fire.
+//! See the `trivia` module rustdoc for the full spec, rationale,
+//! and recursive-application notes for phase 2.1's grammar.
 
 mod lossless_tokens;
 mod parser;

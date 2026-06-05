@@ -16,29 +16,30 @@
 //! - [`parse_flat`]: produce a flat `SOURCE_FILE` tree that round-trips
 //!   byte-identically against the source.
 //!
-//! # Deferred design: trivia attachment policy (phase 2)
+//! # Trivia attachment policy (phase 2.0)
 //!
-//! Phase 1 emits a flat tree, so every token (content AND trivia) is
-//! a direct child of `SOURCE_FILE`. When phase 2 introduces structural
-//! nodes (`DIRECTIVE`, `POSTING`, ...) the question becomes: does the
-//! newline between two directives attach to the preceding directive,
-//! to the next one, or stay a `SOURCE_FILE`-level child?
+//! Phase 1 emits a flat tree. Phase 2.0 pins the policy that phase
+//! 2.1+ parsers will follow when wrapping token runs in structural
+//! nodes. The full spec lives in the `trivia` submodule; the short
+//! version:
 //!
-//! Phase 2's first PR must pick a policy and pin it with a regression
-//! test. The default recommendation (matching rust-analyzer's
-//! convention) is: leading trivia attaches to the FOLLOWING non-trivia
-//! node; trailing trivia attaches to the PRECEDING node only on the
-//! last item before EOF, where there is nothing following. That makes
-//! "node enter" the natural visiting point for any consumer that wants
-//! to skip trivia (the typed AST surface, validators, the formatter's
-//! header walk) while keeping the formatter's full-tree walk lossless.
+//! - **Leading attaches forward.** A blank line between two
+//!   directives belongs to the SECOND directive.
+//! - **EOF is the exception.** Trivia after the last content token
+//!   attaches to the PRECEDING directive (nothing follows).
+//! - **`SOURCE_FILE` is the parent of last resort.** Trivia before
+//!   the first content token stays under `SOURCE_FILE`.
 //!
-//! No policy is enforced in phase 1 — the flat tree is policy-neutral.
+//! Phase 1's `parse_flat` is policy-neutral (flat tree). Phase 2.1
+//! calls [`classify_trivia`] when deciding directive boundaries; see
+//! [`TriviaAttachment`] for the per-token classification it returns.
 
 mod lossless_tokens;
 mod parser;
 mod syntax_kind;
+mod trivia;
 
 pub use lossless_tokens::lossless_kind_tokens;
 pub use parser::parse_flat;
 pub use syntax_kind::{BeancountLanguage, SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken};
+pub use trivia::{TriviaAttachment, classify_trivia};

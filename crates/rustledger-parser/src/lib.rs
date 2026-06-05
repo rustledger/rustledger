@@ -37,8 +37,8 @@ pub mod logos_lexer;
 mod parser;
 
 pub use cst::{
-    BeancountLanguage, SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken, lossless_kind_tokens,
-    parse_flat,
+    BeancountLanguage, SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken, TriviaAttachment,
+    classify_trivia, lossless_kind_tokens, parse_flat,
 };
 pub use error::{ParseError, ParseErrorKind};
 pub use format::format_source;

@@ -105,37 +105,101 @@
 //! No trivia escapes to `SOURCE_FILE`; both directives have
 //! symmetric shape `[content..., terminator-NEWLINE]`.
 //!
-//! # Scope and phase-2.1 grammar option
+//! # Scope and recursive application
 //!
 //! This module pins the policy at the TOP-LEVEL inter-directive
-//! level. The rule is RECURSIVE in principle: phase 2.1 applies
-//! the same shape to nested structural elements (a `POSTING`
-//! inside a `TRANSACTION` owns its content + its terminating
-//! `NEWLINE` the same way a `DIRECTIVE` does at the top level).
-//! Whether a given inter-token `NEWLINE` ends the CURRENT
-//! structural node or continues it (e.g., transaction header to
-//! first posting) is a GRAMMAR question for phase 2.1 — once the
-//! grammar decides "this NEWLINE closes this node," the
-//! Directive-Terminator Rule is what determines that NEWLINE is
-//! INSIDE that node, not leading the next.
+//! level. The rule is RECURSIVE: phase 2.1 applies the same shape
+//! to nested structural elements (a `POSTING` inside a
+//! `TRANSACTION`, a `META_ENTRY` inside any directive that carries
+//! metadata). At each level, the structural node owns its content
+//! tokens plus its own terminating `NEWLINE`, by the same rule.
 //!
-//! **Phase 2.1 may additionally choose to promote same-line
-//! trailing comments to first-class structural slots** — i.e.,
-//! `Posting { content, trailing_comment: Option<COMMENT> }` —
-//! mirroring `polarmutex/tree-sitter-beancount`. This is purely
-//! additive on top of the Directive-Terminator Rule: rule 1 still
-//! says the COMMENT is INSIDE the posting; promoting it to a
-//! typed slot just exposes it through a typed accessor instead of
-//! requiring downstream code to scan children. The trade-off:
-//! grammar gets ~one extra optional slot per directive type
-//! (~15 directive kinds) in exchange for typed-AST clarity in
-//! phase 3 (`posting.trailing_comment()` becomes a direct
-//! accessor, not a scan-and-filter), and the phase-4 formatter
-//! places per-directive comments at a canonical structural
-//! location rather than preserving them positionally. Whether to
-//! adopt this pattern is a phase 2.1 design call, not a phase 2.0
-//! policy call; recording it here so phase 2.1's reviewer has
-//! prior art to refer to.
+//! ## Multi-line directives (with postings or metadata)
+//!
+//! Beancount directives that carry sub-lines — transactions with
+//! postings, and any directive with indented `key: "value"`
+//! metadata — span MULTIPLE LINES. The Directive-Terminator Rule
+//! says "the first `NEWLINE` after the directive's last content
+//! token"; for a multi-line directive, **the directive's last
+//! content token is the last content token of its LAST SUB-LINE**,
+//! not the header.
+//!
+//! Worked example (`2024-01-01 open Assets:Cash\n  description: "x"\n  currency: "USD"\n`):
+//!
+//! ```text
+//! OPEN_DIRECTIVE                       // outer directive node
+//! ├── DATE("2024-01-01")
+//! ├── WHITESPACE(" ")
+//! ├── OPEN_KW("open")
+//! ├── WHITESPACE(" ")
+//! ├── ACCOUNT("Assets:Cash")
+//! ├── NEWLINE("\n")                    // intra-directive: closes header line
+//! ├── META_ENTRY                       // nested structural node, recursive
+//! │   ├── WHITESPACE("  ")             // intra-meta-entry indent
+//! │   ├── META_KEY("description")
+//! │   ├── ... content tokens ...
+//! │   └── NEWLINE("\n")                // META_ENTRY's terminator
+//! ├── META_ENTRY                       // second meta entry
+//! │   ├── WHITESPACE("  ")
+//! │   ├── META_KEY("currency")
+//! │   ├── ... content tokens ...
+//! │   └── NEWLINE("\n")                // OPEN_DIRECTIVE's terminator
+//! ```
+//!
+//! Two consequences worth pinning:
+//!
+//! 1. **The header `NEWLINE` lives INSIDE the directive**, not as
+//!    its terminator. The directive's terminator is the LAST
+//!    `NEWLINE` (the one after the final sub-line). Deleting the
+//!    outer directive deletes its metadata too — what users
+//!    expect.
+//! 2. **Each `META_ENTRY` is itself a structural node** and owns
+//!    its own terminating `NEWLINE` by the recursive application.
+//!    The "last" `META_ENTRY`'s terminator NEWLINE is BOTH the
+//!    `META_ENTRY`'s terminator AND the outer directive's
+//!    terminator — it sits structurally INSIDE the `META_ENTRY`,
+//!    which is itself a child of the outer directive.
+//!
+//! ## `Indent` and `DeepIndent` are trivia
+//!
+//! The Logos lexer's AST-side `tokenize` pass synthesizes
+//! `Token::Indent(level)` and `Token::DeepIndent(level)` tokens
+//! for indented posting/metadata lines. The LOSSLESS path
+//! ([`crate::cst::lossless_tokens::lossless_kind_tokens`]) does
+//! NOT emit these — it keeps the raw `Token::Whitespace` runs
+//! that the indent tokens were summarizing. If a synthesized
+//! `Indent`/`DeepIndent` somehow reaches `lossless_kind_tokens`,
+//! the kind map at `cst/lossless_tokens.rs::map_kind` classifies
+//! it as `SyntaxKind::WHITESPACE` — i.e., trivia under
+//! `SyntaxKind::is_trivia`. The Directive-Terminator Rule treats
+//! these indent runs like any other intra-directive whitespace.
+//! No special policy line is required.
+//!
+//! # Phase 2.1 grammar option: typed comment accessor
+//!
+//! `polarmutex/tree-sitter-beancount` (the closest Beancount-
+//! specific lossless prior art) exposes each directive's same-
+//! line trailing comment via a `field("comment", optional($.comment))`
+//! declaration. In tree-sitter terms, the field is a NAME on one of
+//! the directive's existing children — the COMMENT is still in its
+//! source-order position as a child of the directive; the field
+//! just provides a named accessor.
+//!
+//! Phase 2.1 may adopt the equivalent in our typed-AST layer
+//! (`Posting::trailing_comment() -> Option<&SyntaxToken>` scanning
+//! the posting's direct token children for a `COMMENT`). **This
+//! is additive on top of the Directive-Terminator Rule:** the
+//! COMMENT remains a direct child token of the directive in the
+//! same source-order position rule 1 puts it; the typed accessor
+//! is a method on the typed AST wrapper, NOT a structural sub-node
+//! kind. The tree shape pinned by this module's tests is unchanged.
+//!
+//! If phase 2.1 instead chose a STRUCTURAL trailing-comment slot —
+//! a new `TRAILING_COMMENT_GROUP` wrapper node around the
+//! `WHITESPACE + COMMENT` run — that would be a TREE-SHAPE change,
+//! not additive, and would require updating rule 1 (and this
+//! module's tests). That option is out of scope for this PR; flag
+//! it explicitly if you go that direction.
 //!
 //! # Why
 //!

@@ -181,20 +181,52 @@ fn emit_directive_body(
     mut i: usize,
 ) -> usize {
     i = emit_through_terminator(builder, source, tokens, i);
-    // Indented `;`-comments are continuations ONLY after a metadata
-    // block has been established by at least one prior `WS META_KEY`
-    // sub-line. Before that, an indented comment that follows a
-    // header-only directive is inter-directive trivia (rule 2) or
-    // file-trailing trivia (rule 4) — accumulating it inside the
-    // directive would attribute it to the wrong structural owner.
-    let mut body_has_meta = false;
-    while is_indented_directive_continuation(tokens, i, body_has_meta) {
-        if matches!(tokens.get(i + 1), Some((SyntaxKind::META_KEY, _))) {
-            body_has_meta = true;
-        }
+    // PROSPECTIVELY scan the upcoming indented-content block for
+    // any `WS META_KEY`. If the block contains metadata, any
+    // indented comments anywhere in it — including BEFORE the
+    // first META_KEY (the "doc-comment-for-the-following-field"
+    // idiom) — are continuations that belong inside the directive.
+    // If the block contains NO metadata, an indented comment is
+    // inter-directive trivia (rule 2) or file-trailing (rule 4)
+    // and must not be absorbed. Per-line bookkeeping was tried in
+    // v4 but couldn't see the META_KEY that came AFTER a leading
+    // comment, so a comment-before-first-metadata silently closed
+    // the directive and orphaned the metadata.
+    let block_has_meta = upcoming_indented_block_has_meta(tokens, i);
+    while is_indented_directive_continuation(tokens, i, block_has_meta) {
         i = emit_through_terminator(builder, source, tokens, i);
     }
     i
+}
+
+/// Scan forward through any indented `WS META_KEY` / `WS COMMENT`
+/// / `WS PERCENT_COMMENT` sub-lines starting at `tokens[i..]`,
+/// returning `true` iff at least one of them is a metadata
+/// (`WS META_KEY`) sub-line. Stops at the first line that is
+/// neither metadata nor an indented comment (blank line,
+/// non-indented top-level content, EOF).
+fn upcoming_indented_block_has_meta(tokens: &[(SyntaxKind, Range<usize>)], mut i: usize) -> bool {
+    loop {
+        let head = tokens.get(i).map(|(k, _)| *k);
+        let next = tokens.get(i + 1).map(|(k, _)| *k);
+        match (head, next) {
+            (Some(SyntaxKind::WHITESPACE), Some(SyntaxKind::META_KEY)) => return true,
+            (
+                Some(SyntaxKind::WHITESPACE),
+                Some(SyntaxKind::COMMENT | SyntaxKind::PERCENT_COMMENT),
+            ) => {
+                // Skip past this indented-comment line.
+                while i < tokens.len() && tokens[i].0 != SyntaxKind::NEWLINE {
+                    i += 1;
+                }
+                if i >= tokens.len() {
+                    return false;
+                }
+                i += 1; // past the NEWLINE
+            }
+            _ => return false,
+        }
+    }
 }
 
 /// Returns true iff `tokens[i..]` starts an indented line that
@@ -203,30 +235,27 @@ fn emit_directive_body(
 /// metadata block.
 ///
 /// Recognizes:
-/// - `WS META_KEY` — the standard metadata sub-line, always a
-///   continuation regardless of body history.
-/// - `WS COMMENT` / `WS PERCENT_COMMENT` — only a continuation
-///   AFTER at least one `META_KEY` has been observed in the
-///   current directive body (via `body_has_meta`). This prevents
-///   over-attaching an indented comment that follows a header-only
-///   directive (it should be inter-directive trivia per rule 2 or
-///   file-trailing trivia per rule 4, not absorbed into the prior
-///   directive). Once a metadata block exists, intra-block
-///   documentation comments belong inside it.
+/// - `WS META_KEY` — always a continuation regardless of context.
+/// - `WS COMMENT` / `WS PERCENT_COMMENT` — a continuation iff the
+///   surrounding indented block contains ANY `WS META_KEY` (the
+///   `block_has_meta` argument). This prevents absorbing indented
+///   comments that follow a header-only directive (rule 2 / rule
+///   4 cases) while still keeping documentation comments BEFORE
+///   the first metadata entry inside the directive.
 ///
 /// All other shapes (blank `\n`, non-indented content, EOF)
 /// terminate the directive.
 fn is_indented_directive_continuation(
     tokens: &[(SyntaxKind, Range<usize>)],
     i: usize,
-    body_has_meta: bool,
+    block_has_meta: bool,
 ) -> bool {
     if !matches!(tokens.get(i), Some((SyntaxKind::WHITESPACE, _))) {
         return false;
     }
     match tokens.get(i + 1) {
         Some((SyntaxKind::META_KEY, _)) => true,
-        Some((SyntaxKind::COMMENT | SyntaxKind::PERCENT_COMMENT, _)) => body_has_meta,
+        Some((SyntaxKind::COMMENT | SyntaxKind::PERCENT_COMMENT, _)) => block_has_meta,
         _ => false,
     }
 }

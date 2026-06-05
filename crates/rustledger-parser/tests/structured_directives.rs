@@ -612,6 +612,43 @@ fn indented_comment_at_eof_after_no_metadata_directive_is_file_trailing() {
 }
 
 #[test]
+fn indented_comment_before_first_metadata_stays_inside_directive() {
+    use SyntaxKind::*;
+    // The "documentation-comment-for-the-following-field" idiom
+    // — an indented `;` line BEFORE the first META_KEY. v4's per-
+    // line `body_has_meta` couldn't see the META_KEY that came
+    // after the comment, so v4 silently closed the directive at
+    // the comment and orphaned the metadata. v5's prospective
+    // upcoming_indented_block_has_meta scan catches it.
+    let source = "2024-01-01 open Assets:Cash\n\
+                  \x20\x20; documentation for the next field\n\
+                  \x20\x20description: \"main checking\"\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let ds = directives(&tree);
+    assert_eq!(ds.len(), 1);
+    assert_eq!(ds[0].kind(), OPEN_DIRECTIVE);
+    // The OPEN_DIRECTIVE owns the entire input — header, the
+    // documentation comment, AND the metadata line. SOURCE_FILE
+    // has no orphaned children.
+    assert_eq!(elements_of(&tree), vec![Element::Node(OPEN_DIRECTIVE)]);
+    // Specifically: NO bare META_KEY appears as a direct child of
+    // SOURCE_FILE (would mean the v4 orphaning regression).
+    let sf_token_kinds: Vec<SyntaxKind> = elements_of(&tree)
+        .iter()
+        .filter_map(|e| match e {
+            Element::Tok(k) => Some(*k),
+            Element::Node(_) => None,
+        })
+        .collect();
+    assert!(
+        !sf_token_kinds.contains(&META_KEY),
+        "META_KEY orphaned to SOURCE_FILE: {sf_token_kinds:?}",
+    );
+}
+
+#[test]
 fn indented_comment_between_metadata_lines_stays_inside_directive() {
     use SyntaxKind::*;
     // Beancount idiom: documentation comments between metadata

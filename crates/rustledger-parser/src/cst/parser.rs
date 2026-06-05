@@ -181,7 +181,17 @@ fn emit_directive_body(
     mut i: usize,
 ) -> usize {
     i = emit_through_terminator(builder, source, tokens, i);
-    while is_indented_directive_continuation(tokens, i) {
+    // Indented `;`-comments are continuations ONLY after a metadata
+    // block has been established by at least one prior `WS META_KEY`
+    // sub-line. Before that, an indented comment that follows a
+    // header-only directive is inter-directive trivia (rule 2) or
+    // file-trailing trivia (rule 4) — accumulating it inside the
+    // directive would attribute it to the wrong structural owner.
+    let mut body_has_meta = false;
+    while is_indented_directive_continuation(tokens, i, body_has_meta) {
+        if matches!(tokens.get(i + 1), Some((SyntaxKind::META_KEY, _))) {
+            body_has_meta = true;
+        }
         i = emit_through_terminator(builder, source, tokens, i);
     }
     i
@@ -192,20 +202,33 @@ fn emit_directive_body(
 /// indent) followed by content that visually "belongs to" the
 /// metadata block.
 ///
-/// Recognizes: `WS META_KEY`, `WS COMMENT`, `WS PERCENT_COMMENT`.
-/// All other shapes (including blank `\n` and non-indented
-/// content) terminate the directive.
-fn is_indented_directive_continuation(tokens: &[(SyntaxKind, Range<usize>)], i: usize) -> bool {
+/// Recognizes:
+/// - `WS META_KEY` — the standard metadata sub-line, always a
+///   continuation regardless of body history.
+/// - `WS COMMENT` / `WS PERCENT_COMMENT` — only a continuation
+///   AFTER at least one `META_KEY` has been observed in the
+///   current directive body (via `body_has_meta`). This prevents
+///   over-attaching an indented comment that follows a header-only
+///   directive (it should be inter-directive trivia per rule 2 or
+///   file-trailing trivia per rule 4, not absorbed into the prior
+///   directive). Once a metadata block exists, intra-block
+///   documentation comments belong inside it.
+///
+/// All other shapes (blank `\n`, non-indented content, EOF)
+/// terminate the directive.
+fn is_indented_directive_continuation(
+    tokens: &[(SyntaxKind, Range<usize>)],
+    i: usize,
+    body_has_meta: bool,
+) -> bool {
     if !matches!(tokens.get(i), Some((SyntaxKind::WHITESPACE, _))) {
         return false;
     }
-    matches!(
-        tokens.get(i + 1),
-        Some((
-            SyntaxKind::META_KEY | SyntaxKind::COMMENT | SyntaxKind::PERCENT_COMMENT,
-            _
-        ))
-    )
+    match tokens.get(i + 1) {
+        Some((SyntaxKind::META_KEY, _)) => true,
+        Some((SyntaxKind::COMMENT | SyntaxKind::PERCENT_COMMENT, _)) => body_has_meta,
+        _ => false,
+    }
 }
 
 /// Given the token slice and the index of a non-trivia token,

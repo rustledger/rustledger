@@ -537,6 +537,81 @@ fn directive_with_metadata_then_next_directive() {
 }
 
 #[test]
+fn indented_comment_after_no_metadata_directive_leads_next_directive() {
+    use SyntaxKind::*;
+    // An indented comment AFTER a directive that has no metadata
+    // is inter-directive trivia per rule 2 — it leads the NEXT
+    // directive, NOT trailing into the previous one. The widening
+    // of is_indented_directive_continuation must be gated on a
+    // prior META_KEY in the body; otherwise this comment is
+    // wrongly absorbed into the preceding directive.
+    let source = "2024-01-01 open Assets:Cash\n\
+                  \x20\x20; documentation for the next directive\n\
+                  2024-01-02 close Assets:Cash\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let ds = directives(&tree);
+    assert_eq!(ds.len(), 2);
+    assert_eq!(ds[0].kind(), OPEN_DIRECTIVE);
+    assert_eq!(ds[1].kind(), CLOSE_DIRECTIVE);
+
+    // d1 OWNS its header NEWLINE only — no trailing trivia.
+    assert_eq!(
+        elements_of(&ds[0]),
+        tok_seq(&[DATE, WHITESPACE, OPEN_KW, WHITESPACE, ACCOUNT, NEWLINE]),
+        "rule 2: indented comment after header-only directive must NOT be absorbed; \
+         it's inter-directive trivia leading the next directive",
+    );
+
+    // d2 leads with the indented comment + its NEWLINE.
+    let d2_first = elements_of(&ds[1])
+        .iter()
+        .take_while(|e| !matches!(e, Element::Tok(DATE)))
+        .copied()
+        .collect::<Vec<_>>();
+    assert_eq!(
+        d2_first,
+        tok_seq(&[WHITESPACE, COMMENT, NEWLINE]),
+        "rule 2: leading trivia of d2 must include the inter-directive comment",
+    );
+}
+
+#[test]
+fn indented_comment_at_eof_after_no_metadata_directive_is_file_trailing() {
+    use SyntaxKind::*;
+    // An indented comment at EOF following a header-only directive
+    // is file-trailing trivia per rule 4 — it attaches to
+    // SOURCE_FILE, NOT inside the directive. v3's overbroad
+    // widening incorrectly absorbed this; the META_KEY gate
+    // restores rule 4 conformance.
+    let source = "2024-01-01 open Assets:Cash\n\
+                  \x20\x20; trailing indented comment\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let ds = directives(&tree);
+    assert_eq!(ds.len(), 1);
+    assert_eq!(
+        elements_of(&ds[0]),
+        tok_seq(&[DATE, WHITESPACE, OPEN_KW, WHITESPACE, ACCOUNT, NEWLINE]),
+        "directive owns ONLY its header + terminator NEWLINE",
+    );
+
+    // SOURCE_FILE owns the trailing WS + COMMENT + NEWLINE.
+    assert_eq!(
+        elements_of(&tree),
+        vec![
+            Element::Node(OPEN_DIRECTIVE),
+            Element::Tok(WHITESPACE),
+            Element::Tok(COMMENT),
+            Element::Tok(NEWLINE),
+        ],
+        "rule 4: indented trailing comment is file-trailing under SOURCE_FILE",
+    );
+}
+
+#[test]
 fn indented_comment_between_metadata_lines_stays_inside_directive() {
     use SyntaxKind::*;
     // Beancount idiom: documentation comments between metadata

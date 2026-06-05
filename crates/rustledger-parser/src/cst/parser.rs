@@ -77,10 +77,14 @@ pub fn parse_structured(source: &str) -> SyntaxNode {
         // starts here.
         if let Some(directive_kind) = identify_single_line_directive(&tokens, i) {
             // Per the Directive-Terminator Rule, pending trivia is
-            // FILE-LEADING (SOURCE_FILE direct child) if this is the
-            // first directive we've recognized; otherwise it's
-            // LEADING of this new directive (children of the
-            // directive node).
+            // FILE-LEADING (SOURCE_FILE direct child) only when NO
+            // non-trivia content has appeared yet anywhere in the
+            // file — `seen_first_content` tracks that, and it
+            // flips on the FIRST non-trivia content we encounter,
+            // recognized or unrecognized. Once any content has been
+            // seen, subsequent pending trivia is the LEADING trivia
+            // of THIS new directive (rule 2) and goes INSIDE the
+            // directive node we're about to open.
             if seen_first_content {
                 builder.start_node(directive_kind.into());
                 emit_tokens(&mut builder, source, std::mem::take(&mut pending_leading));

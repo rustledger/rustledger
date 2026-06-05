@@ -11,12 +11,10 @@
 //! # The Directive-Terminator Rule
 //!
 //! **Every directive structural node OWNS its content tokens PLUS
-//! its terminating `NEWLINE`** — the first `NEWLINE` encountered
-//! after its last content token. This is the actual rust-analyzer
-//! / Roslyn convention, and matches the user's intuition that "a
-//! directive ends at the end of its line."
+//! its terminating `NEWLINE`** — the first `NEWLINE` token (not
+//! byte; see below) the lexer emits after its last content token.
 //!
-//! Four corollaries:
+//! Five corollaries:
 //!
 //! 1. **Same-line trailing trivia.** Whitespace and EOL comments
 //!    that appear AFTER the last content token but BEFORE the
@@ -47,48 +45,114 @@
 //!
 //! 5. **Unterminated final directive.** If the file ends mid-
 //!    content (no `NEWLINE` after the last content token), the
-//!    final directive owns its content tokens plus any same-line
-//!    trailing trivia. No terminator means the directive's range
-//!    ends at its last token, period — no fabrication.
+//!    final directive STILL applies rule 1 to any same-line
+//!    trailing trivia it carries (WHITESPACE + EOL COMMENT
+//!    immediately after content) — they sit INSIDE the directive.
+//!    The directive simply has no terminator child; its range
+//!    ends at the last trivia token attached by rule 1, or at the
+//!    last content token if no trailing trivia exists.
+//!
+//! ## "NEWLINE" means the NEWLINE token kind, not a `\n` byte
+//!
+//! Beancount STRING tokens may contain literal `\n` bytes
+//! (multi-line strings in `note` / `document` / transaction
+//! narrations). The Directive-Terminator Rule keys off the lexer's
+//! NEWLINE token (regex `\r?\n` at the top level of
+//! `logos_lexer.rs`), not raw byte content. A multi-line STRING is
+//! a SINGLE content token regardless of its internal `\n` bytes;
+//! the directive's terminator is the next NEWLINE token AFTER the
+//! STRING token, not somewhere inside it.
+//!
+//! # Provenance and worked example
+//!
+//! This rule matches **Roslyn's documented model** ([Microsoft
+//! Learn](https://learn.microsoft.com/en-us/dotnet/csharp/roslyn-sdk/work-with-syntax)):
+//!
+//! > "A token owns any trivia after it on the same line up to the
+//! > next token. Any trivia after that line is associated with the
+//! > following token."
+//!
+//! Roslyn additionally says: "The first token in the source file
+//! gets all the initial trivia, and the last sequence of trivia
+//! in the file is tacked onto the end-of-file token." Beancount's
+//! CST has no synthesized end-of-file token, and absorbing
+//! file-leading / file-trailing trivia into the first / last
+//! directive is the wrong intuition for a Beancount user (a
+//! copyright header at the top is not part of the first directive
+//! the user happens to have written). **The Directive-Terminator
+//! Rule deviates from Roslyn on this single point**: rules 3 and
+//! 4 attach file-leading / file-trailing trivia to `SOURCE_FILE`
+//! directly, not to the first / last directive.
+//!
+//! **It does NOT match rust-analyzer**, despite what earlier
+//! drafts of this module claimed. RA's trivia-attachment helper
+//! (in `crates/parser/src/shortcuts.rs`) walks trivia in reverse
+//! from the next item, breaking on a blank-line whitespace, and
+//! attaches same-line trailing comments to the FOLLOWING item.
+//! That is the opposite of what Beancount users expect — a
+//! `; deposit` after an amount visually belongs to the posting it
+//! shares a line with, not to the next directive.
+//!
+//! Worked example (`2024-01-01 open Assets:Cash  ; bank\n\n2024-01-02 open Assets:Bank\n`):
+//!
+//! | trivia run | rule | home |
+//! |---|---|---|
+//! | `  ; bank` between `Assets:Cash` and `\n` | 1 | inside d1 |
+//! | `\n` terminating d1 line | 1 | inside d1 |
+//! | `\n` blank line | 2 | leading trivia of d2 |
+//! | `\n` terminating d2 line | 1 | inside d2 |
+//!
+//! No trivia escapes to `SOURCE_FILE`; both directives have
+//! symmetric shape `[content..., terminator-NEWLINE]`.
+//!
+//! # Scope and phase-2.1 grammar option
+//!
+//! This module pins the policy at the TOP-LEVEL inter-directive
+//! level. The rule is RECURSIVE in principle: phase 2.1 applies
+//! the same shape to nested structural elements (a `POSTING`
+//! inside a `TRANSACTION` owns its content + its terminating
+//! `NEWLINE` the same way a `DIRECTIVE` does at the top level).
+//! Whether a given inter-token `NEWLINE` ends the CURRENT
+//! structural node or continues it (e.g., transaction header to
+//! first posting) is a GRAMMAR question for phase 2.1 — once the
+//! grammar decides "this NEWLINE closes this node," the
+//! Directive-Terminator Rule is what determines that NEWLINE is
+//! INSIDE that node, not leading the next.
+//!
+//! **Phase 2.1 may additionally choose to promote same-line
+//! trailing comments to first-class structural slots** — i.e.,
+//! `Posting { content, trailing_comment: Option<COMMENT> }` —
+//! mirroring `polarmutex/tree-sitter-beancount`. This is purely
+//! additive on top of the Directive-Terminator Rule: rule 1 still
+//! says the COMMENT is INSIDE the posting; promoting it to a
+//! typed slot just exposes it through a typed accessor instead of
+//! requiring downstream code to scan children. The trade-off:
+//! grammar gets ~one extra optional slot per directive type
+//! (~15 directive kinds) in exchange for typed-AST clarity in
+//! phase 3 (`posting.trailing_comment()` becomes a direct
+//! accessor, not a scan-and-filter), and the phase-4 formatter
+//! places per-directive comments at a canonical structural
+//! location rather than preserving them positionally. Whether to
+//! adopt this pattern is a phase 2.1 design call, not a phase 2.0
+//! policy call; recording it here so phase 2.1's reviewer has
+//! prior art to refer to.
 //!
 //! # Why
 //!
-//! - **Same-line trailing.** Beancount has inline EOL comments
-//!   everywhere (`2024-01-01 open Assets:Cash  ; my main checking`).
-//!   The user visually associates the comment with the line it
-//!   shares — splitting it onto the next directive would be a
-//!   surprise in LSP hover, code lens, and formatter output.
+//! - **Same-line trailing inside the directive.** Beancount has
+//!   inline EOL comments everywhere; the user visually associates
+//!   the comment with the line it shares.
 //! - **Directive owns its terminator.** Makes
 //!   `directive.text_range()` uniformly cover the directive's
 //!   visual line for every directive in the file, including the
-//!   final one. LSP `selection-range`, code-lens placement,
-//!   folding ranges, and "select directive" all get a consistent
-//!   answer.
+//!   final one.
 //! - **File-leading / file-trailing under `SOURCE_FILE`.** A
 //!   copyright comment at the top of the file is file-level
-//!   metadata. The user doesn't expect deleting the first
-//!   directive to also delete the copyright. The same intuition
-//!   applies to closing-remarks comments at the bottom.
-//! - **Symmetric.** No EOF special case. Every directive has the
-//!   same children shape (optional leading trivia + content +
-//!   optional same-line trailing + terminator `NEWLINE`).
-//!   Consumers iterating directives never need to special-case
-//!   the file-final one.
-//! - **Matches rust-analyzer (and Roslyn, and most lossless-CST
-//!   parsers).** Reviewers familiar with that family don't have
-//!   to relearn the convention.
-//!
-//! # Scope
-//!
-//! This module pins the policy at the TOP-LEVEL inter-directive
-//! level. The rule is RECURSIVE: phase 2.1 applies it to nested
-//! structural elements (`POSTING` inside `TRANSACTION`,
-//! `META_ENTRY` inside any directive). Each level's "directive"
-//! is just "the structural node currently being closed." A
-//! posting owns its terminating `NEWLINE`; mid-transaction blank
-//! lines lead the next posting (or close the transaction body,
-//! depending on phase 2.1's grammar — that's a grammar question,
-//! not a trivia question).
+//!   metadata; the user doesn't expect deleting the first
+//!   directive to also delete the copyright. Same at EOF.
+//! - **Symmetric.** Every directive has the same children shape
+//!   (optional leading trivia + content + optional same-line
+//!   trailing + terminator `NEWLINE`). No EOF special case.
 //!
 //! # Test approach: tree-shape regression, NO production helper
 //!
@@ -263,11 +327,10 @@ mod tests {
             tok_seq(&[DATE, WHITESPACE, OPEN_KW, WHITESPACE, ACCOUNT]),
             "d2 has no leading trivia (none exists between d1 terminator and d2 first content)",
         );
-        assert!(
-            elements_of(&tree)
-                .iter()
-                .all(|e| matches!(e, Element::Node(DIRECTIVE))),
-            "SOURCE_FILE has no direct trivia children (no file-leading or file-trailing)",
+        assert_eq!(
+            elements_of(&tree),
+            vec![Element::Node(DIRECTIVE), Element::Node(DIRECTIVE)],
+            "SOURCE_FILE owns exactly the two directives — no trivia leaks",
         );
     }
 
@@ -452,6 +515,54 @@ mod tests {
             elements_of(&directives[0]),
             tok_seq(&[DATE, WHITESPACE, OPEN_KW, WHITESPACE, ACCOUNT]),
             "rule 5: no terminator means directive range ends at last content",
+        );
+    }
+
+    #[test]
+    fn rule_1_plus_rule_5_unterminated_directive_with_same_line_trailing() {
+        // Source under test:
+        //   2024-01-01 open Assets:Cash  ; eol-no-nl     <-- EOF mid-comment, no terminator
+        //
+        // This is the case the v3 review flagged as ambiguous: rule 1
+        // says same-line trailing trivia lives INSIDE the directive;
+        // rule 5 says no terminator means the range ends at last
+        // content "no fabrication." The rule 5 wording in v3 wasn't
+        // explicit that same-line trailing trivia ALSO survives the
+        // no-terminator case. v4 makes it explicit: rule 1 fires
+        // (no NEWLINE was needed for rule 1; it only triggers off
+        // the trivia run between last content and the directive's
+        // terminator-OR-EOF), and the directive owns the trailing
+        // WS + COMMENT even though no terminator NEWLINE exists.
+        //
+        // Beancount files saved without a final newline are common
+        // (editors that don't enforce POSIX line termination); this
+        // test pins behavior on a realistic case.
+        let source = "2024-01-01 open Assets:Cash  ; eol-no-nl";
+        let mut b = GreenNodeBuilder::new();
+        b.start_node(SOURCE_FILE.into());
+        build_open_directive(
+            &mut b,
+            "2024-01-01",
+            "Assets:Cash",
+            &[(WHITESPACE, "  "), (COMMENT, "; eol-no-nl")],
+            None,
+        );
+        b.finish_node();
+        let tree = SyntaxNode::new_root(b.finish());
+
+        assert_eq!(tree.text().to_string(), source);
+
+        // No file-trailing trivia under SOURCE_FILE — the trailing
+        // WS+COMMENT live INSIDE the directive (rule 1).
+        assert_eq!(elements_of(&tree), vec![Element::Node(DIRECTIVE)]);
+        let directives = top_level_directives(&tree);
+        assert_eq!(
+            elements_of(&directives[0]),
+            tok_seq(&[
+                DATE, WHITESPACE, OPEN_KW, WHITESPACE, ACCOUNT, WHITESPACE, COMMENT,
+            ]),
+            "rules 1+5: same-line trailing trivia stays INSIDE the directive \
+             even when there's no terminator NEWLINE",
         );
     }
 

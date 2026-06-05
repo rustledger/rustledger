@@ -1,18 +1,34 @@
 //! `SyntaxKind`: every kind of token or node that can appear in the
 //! Beancount CST.
 //!
-//! Design notes (from the round-1 architecture review of the
-//! parallel-crate attempt that preceded this in-place migration):
+//! Design notes:
 //!
-//! - **No discriminant stability commitment.** Phase 2+ may reorder,
-//!   group, or rename freely. There are no committed serialized forms
-//!   to keep stable. Reservations are antipatterns.
+//! - **No cross-version stability commitment.** Phase 2+ may add new
+//!   variants. No serialized form persists `SyntaxKind` values across
+//!   binary versions (rowan green trees aren't designed as on-disk
+//!   format).
+//! - **APPEND-ONLY in practice.** The corpus baseline at
+//!   `tests/baselines/cst-corpus.manifest` hashes
+//!   `(SyntaxKind as u16, len)` per token for every file in the 714-
+//!   file compatibility corpus, AND a separate per-file node-shape
+//!   hash. Reordering variants invalidates every committed manifest
+//!   entry simultaneously, producing an unreviewable 700-line diff.
+//!   The rule for routine work: APPEND new variants at the relevant
+//!   section's end. If you genuinely must reorder, do it in a
+//!   SEPARATE commit from any parser change so reviewers can verify
+//!   the regen is mechanical.
 //! - **Safe u16 conversion via `num_enum::TryFromPrimitive`** instead
 //!   of a hand-rolled match table. Adding a new variant is a single
 //!   line; the derive enforces parity.
 //! - **`is_token` via `matches!` over the actual token variants**, not
 //!   a boundary trick on discriminants. A future variant inserted
 //!   anywhere is classified correctly.
+//! - **`kind_from_raw` falls back to `ERROR_NODE` on unknown
+//!   discriminants** in release builds (`debug_assert!` panics in
+//!   debug/test). Defends against version-skewed green-node bytes
+//!   reaching the parser via LSP cache, sidecar tooling, or
+//!   incremental persistence without crashing production. Surfaces
+//!   the skew loudly in dev/test where it's actionable.
 
 use num_enum::TryFromPrimitive;
 
@@ -137,15 +153,9 @@ pub enum SyntaxKind {
     // which remains as the umbrella kind for error-recovery
     // wrappers and any structural test reusable across kinds.
     // `#[non_exhaustive]` + `num_enum`'s derive make new variants
-    // safe to add without ABI concerns.
-    //
-    // **Variant order is observable.** The corpus baseline
-    // (`tests/cst_baseline.rs`) hashes `(kind as u16)` per token
-    // for every file in the 714-file corpus. APPEND only; reordering
-    // invalidates every committed manifest entry in one go and the
-    // resulting diff is unreadable. If you must reorder, regenerate
-    // the manifest in a SEPARATE commit from any parser change so
-    // the diff stays reviewable.
+    // safe to add without ABI concerns. (Append-only discipline
+    // and discriminant stability notes live in the module
+    // rustdoc.)
     /// Root node — every byte of the file is reachable under this node.
     SOURCE_FILE,
 
@@ -275,14 +285,25 @@ impl rowan::Language for BeancountLanguage {
     type Kind = SyntaxKind;
 
     fn kind_from_raw(raw: rowan::SyntaxKind) -> Self::Kind {
-        // Defensive: fall back to ERROR_NODE on unknown discriminants
-        // rather than panic. Phase 2.0 added the `DIRECTIVE` variant
-        // and phase 2.1 will add more; any cross-version GreenNode
-        // bytes (LSP cache, incremental persistence, sidecar tooling
-        // reading our trees) seen by an older binary would otherwise
-        // panic deep inside rowan's tree walk, which is unrecoverable
-        // and a hard footgun. Returning `ERROR_NODE` surfaces the
-        // skew at the consumer's `kind()` check instead.
+        // Dev/test: panic loudly so version-skewed green-node bytes
+        // surface during development, when they're actionable. Prod:
+        // fall back to ERROR_NODE so an unrecoverable panic deep in
+        // rowan's tree walk (rowan calls kind_from_raw inside every
+        // tree traversal) can't take down a long-running LSP from a
+        // single stale cache file.
+        //
+        // The asymmetry with `SyntaxKind::try_from` is deliberate:
+        // try_from is for explicit roundtrip validation (e.g.,
+        // serializing a kind and reading it back, where Err is the
+        // useful signal); kind_from_raw is for tree-walk hot paths
+        // (where panic in prod is worse than a downgraded kind).
+        debug_assert!(
+            SyntaxKind::try_from(raw.0).is_ok(),
+            "unknown SyntaxKind discriminant {} — cross-version GreenNode \
+             skew, manifest reorder corruption, or a missing num_enum \
+             derive update. In release builds this becomes ERROR_NODE.",
+            raw.0,
+        );
         SyntaxKind::try_from(raw.0).unwrap_or(SyntaxKind::ERROR_NODE)
     }
 
@@ -334,10 +355,12 @@ mod tests {
     /// was added without updating the test scaffolding.
     #[test]
     fn every_kind_partitions_token_xor_node() {
-        // Search a generous discriminant range. `SyntaxKind` is
-        // small (~60 variants in phase 2.0); 256 is comfortable
-        // headroom for phase 2.1+ growth.
-        let all_kinds: Vec<SyntaxKind> = (0u16..256)
+        // FULL `u16::MAX` sweep, not a sampling. SyntaxKind is
+        // #[repr(u16)] so any discriminant in [0, u16::MAX] is
+        // legally constructible by a future PR. ~65K try_from
+        // calls is sub-millisecond and catches a future PR that
+        // pushes new variants past any arbitrary upper bound.
+        let all_kinds: Vec<SyntaxKind> = (0u16..=u16::MAX)
             .filter_map(|d| SyntaxKind::try_from(d).ok())
             .collect();
 

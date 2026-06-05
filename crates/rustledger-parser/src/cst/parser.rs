@@ -90,9 +90,12 @@ pub fn parse_structured(source: &str) -> SyntaxNode {
             }
             seen_first_content = true;
 
-            // Consume tokens through the directive's terminator
-            // NEWLINE token (rule 1) or until EOF (rule 5).
-            i = emit_through_terminator(&mut builder, source, &tokens, i);
+            // Consume the directive's full multi-line body: header
+            // through its terminator NEWLINE (rule 1) PLUS any
+            // indented metadata sub-lines that follow (per the
+            // multi-line clause of the Directive-Terminator Rule;
+            // see cst::trivia rustdoc).
+            i = emit_directive_body(&mut builder, source, &tokens, i);
             builder.finish_node();
         } else {
             // Unrecognized line. Drain pending trivia + this entire
@@ -144,6 +147,46 @@ fn emit_through_terminator(
     i
 }
 
+/// Consume the header line through its terminator NEWLINE, then
+/// keep consuming any indented `META_KEY: value` metadata sub-lines
+/// that follow at the same logical block.
+///
+/// The Directive-Terminator Rule (see `cst::trivia`) declares that a
+/// directive carrying metadata spans multiple lines: its last
+/// content token is the last content token of its LAST sub-line,
+/// not the header. Stopping at the header NEWLINE would orphan
+/// metadata under `SOURCE_FILE` and silently violate the rule. PR
+/// 2.1a wraps the full multi-line span; PR 2.2 will introduce a
+/// `META_ENTRY` sub-node around each `WHITESPACE META_KEY ...
+/// NEWLINE` run inside.
+///
+/// A metadata sub-line is identified by `WHITESPACE` (the indent)
+/// followed by `META_KEY`. Any other shape — a comment-only
+/// indented line, a blank line, a top-level keyword, EOF —
+/// terminates the directive. (Comments interleaved with metadata
+/// are a corner case left for a follow-up.)
+fn emit_directive_body(
+    builder: &mut GreenNodeBuilder<'_>,
+    source: &str,
+    tokens: &[(SyntaxKind, Range<usize>)],
+    mut i: usize,
+) -> usize {
+    i = emit_through_terminator(builder, source, tokens, i);
+    while is_indented_meta_line(tokens, i) {
+        i = emit_through_terminator(builder, source, tokens, i);
+    }
+    i
+}
+
+/// Returns true iff `tokens[i..]` starts an indented metadata
+/// sub-line — i.e., `WHITESPACE` then `META_KEY`. Used by
+/// `emit_directive_body` to decide whether the next physical line
+/// continues the current directive.
+fn is_indented_meta_line(tokens: &[(SyntaxKind, Range<usize>)], i: usize) -> bool {
+    matches!(tokens.get(i), Some((SyntaxKind::WHITESPACE, _)))
+        && matches!(tokens.get(i + 1), Some((SyntaxKind::META_KEY, _)))
+}
+
 /// Given the token slice and the index of a non-trivia token,
 /// decide whether it starts one of the 14 single-line directives
 /// PR 2.1a handles. Returns the directive `SyntaxKind` if yes,
@@ -168,10 +211,17 @@ fn identify_single_line_directive(
         SyntaxKind::PUSHMETA_KW => Some(SyntaxKind::PUSHMETA_DIRECTIVE),
         SyntaxKind::POPMETA_KW => Some(SyntaxKind::POPMETA_DIRECTIVE),
 
-        // Dated directives — peek past trivia for the keyword.
+        // Dated directives — peek past SAME-LINE whitespace for the
+        // keyword. Only WHITESPACE separates content tokens within a
+        // directive's header line; a NEWLINE means we crossed into
+        // the next line and the DATE/keyword pair is NOT a single
+        // directive. Skipping `is_trivia()` (which includes NEWLINE
+        // and COMMENT) would wrongly identify malformed `DATE\nopen ...`
+        // as OPEN_DIRECTIVE while `emit_through_terminator` only
+        // captures the first line, leaving the keyword orphaned.
         SyntaxKind::DATE => {
             let mut j = i + 1;
-            while j < tokens.len() && tokens[j].0.is_trivia() {
+            while j < tokens.len() && tokens[j].0 == SyntaxKind::WHITESPACE {
                 j += 1;
             }
             let (next, _) = tokens.get(j)?;

@@ -464,6 +464,121 @@ fn transaction_passes_through_flat() {
 }
 
 #[test]
+fn commodity_with_metadata_wraps_full_multi_line_directive() {
+    use SyntaxKind::*;
+    // Per cst::trivia, a directive that carries indented metadata
+    // sub-lines spans MULTIPLE LINES — the directive's last content
+    // token is the last content token of its LAST sub-line, not
+    // the header. The COMMODITY_DIRECTIVE node must therefore span
+    // the header AND the metadata line.
+    let source = "2024-01-01 commodity HOOL\n  name: \"Hooli Common shares.\"\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let ds = directives(&tree);
+    assert_eq!(ds.len(), 1);
+    assert_eq!(ds[0].kind(), COMMODITY_DIRECTIVE);
+    assert_eq!(
+        elements_of(&ds[0]),
+        tok_seq(&[
+            DATE,
+            WHITESPACE,
+            COMMODITY_KW,
+            WHITESPACE,
+            CURRENCY,
+            NEWLINE,
+            WHITESPACE,
+            META_KEY,
+            WHITESPACE,
+            STRING,
+            NEWLINE,
+        ]),
+        "multi-line directive: header + metadata BOTH inside the directive node \
+         (metadata is flat for now; PR 2.2 wraps it in META_ENTRY)",
+    );
+
+    // SOURCE_FILE owns ONLY the directive — no orphaned metadata.
+    assert_eq!(elements_of(&tree), vec![Element::Node(COMMODITY_DIRECTIVE)]);
+}
+
+#[test]
+fn open_with_multiple_metadata_lines_wraps_all_inside_directive() {
+    use SyntaxKind::*;
+    let source = "2024-01-01 open Assets:Cash USD\n\
+                  \x20\x20description: \"main checking\"\n\
+                  \x20\x20priority: \"high\"\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let ds = directives(&tree);
+    assert_eq!(ds.len(), 1);
+    assert_eq!(ds[0].kind(), OPEN_DIRECTIVE);
+    // OPEN_DIRECTIVE node should contain header + BOTH metadata
+    // lines (no orphaned content under SOURCE_FILE).
+    assert_eq!(elements_of(&tree), vec![Element::Node(OPEN_DIRECTIVE)]);
+}
+
+#[test]
+fn directive_with_metadata_then_next_directive() {
+    use SyntaxKind::*;
+    // After a metadata-carrying directive, the next directive
+    // starts cleanly — the metadata-loop must stop when the indent
+    // pattern ends.
+    let source = "2024-01-01 open Assets:Cash USD\n\
+                  \x20\x20description: \"main\"\n\
+                  2024-01-02 close Assets:Cash\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let ds = directives(&tree);
+    assert_eq!(ds.len(), 2);
+    assert_eq!(ds[0].kind(), OPEN_DIRECTIVE);
+    assert_eq!(ds[1].kind(), CLOSE_DIRECTIVE);
+}
+
+#[test]
+fn blank_line_between_metadata_lines_terminates_directive() {
+    use SyntaxKind::*;
+    // A blank line breaks the indented-metadata run; the second
+    // metadata line is NOT part of the same directive. Conservative
+    // interpretation: stop at the first non-indented-meta line.
+    let source = "2024-01-01 open Assets:Cash USD\n\
+                  \x20\x20description: \"main\"\n\
+                  \n\
+                  2024-01-02 close Assets:Cash\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let ds = directives(&tree);
+    assert_eq!(ds.len(), 2);
+    assert_eq!(ds[0].kind(), OPEN_DIRECTIVE);
+    assert_eq!(ds[1].kind(), CLOSE_DIRECTIVE);
+    // The blank-line NEWLINE leads d2 per rule 2.
+    let d2_first = elements_of(&ds[1]).first().copied();
+    assert_eq!(d2_first, Some(Element::Tok(NEWLINE)));
+}
+
+#[test]
+fn malformed_date_then_keyword_on_next_line_is_not_a_directive() {
+    // Beancount directive headers are single-line: `DATE keyword
+    // ...` on ONE line. If a DATE is followed by a NEWLINE (then
+    // a keyword on the next line), the identifier MUST NOT
+    // recognize it as a directive — otherwise emit_through_terminator
+    // would stop at the first NEWLINE and produce a node
+    // containing only `[DATE, NEWLINE]`, orphaning the keyword.
+    let source = "2024-01-01\nopen Assets:Cash\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+    // Neither line is a recognized directive — both pass through
+    // flat.
+    let ds = directives(&tree);
+    assert!(
+        ds.is_empty(),
+        "DATE alone on a line is malformed; identifier must not pretend it starts an OPEN_DIRECTIVE just because the next non-trivia token (skipping the NEWLINE) happens to be OPEN_KW",
+    );
+}
+
+#[test]
 fn option_directive_passes_through_flat() {
     // PR 2.3 handles `option`. Until then: flat passthrough.
     let source = "option \"title\" \"My Ledger\"\n";

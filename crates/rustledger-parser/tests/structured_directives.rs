@@ -2251,6 +2251,151 @@ fn cost_spec_with_inner_label_and_date_stays_flat_internally() {
 }
 
 #[test]
+fn amount_wraps_number_and_currency_with_no_whitespace_between() {
+    use SyntaxKind::*;
+    // The lexer's NUMBER and CURRENCY regexes are exclusive
+    // (NUMBER stops at a non-digit, CURRENCY starts on an
+    // uppercase letter), so `1USD` lexes as adjacent NUMBER +
+    // CURRENCY with NO WHITESPACE between. Real corpus shape
+    // (e.g., beancount-import fixtures). AMOUNT must still wrap
+    // the CURRENCY despite the missing separator — regression for
+    // the round-1 review finding where emit_amount required a WS
+    // token between NUMBER and CURRENCY.
+    let source = "2024-01-15 * \"x\"\n\
+                  \x20\x20Assets:Cash 1USD\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let amts = amounts(&tree);
+    assert_eq!(amts.len(), 1);
+    assert_eq!(
+        elements_of(&amts[0]),
+        tok_seq(&[NUMBER, CURRENCY]),
+        "AMOUNT wraps both NUMBER and adjacent CURRENCY (no WS between)",
+    );
+}
+
+#[test]
+fn price_annotation_with_negative_amount_wraps_sign_inside_nested_amount() {
+    use SyntaxKind::*;
+    // `@ -5 USD` — negative price. The nested AMOUNT contains
+    // MINUS NUMBER WS CURRENCY. Pins the sign-detection path
+    // inside emit_price_annotation.
+    let source = "2024-01-15 * \"x\"\n\
+                  \x20\x20Assets:Cash  10 HOOL @ -5.00 USD\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let prices = price_annotations(&tree);
+    assert_eq!(prices.len(), 1);
+    let inner_amount = prices[0].children().find(|n| n.kind() == AMOUNT).unwrap();
+    assert_eq!(
+        elements_of(&inner_amount),
+        tok_seq(&[MINUS, NUMBER, WHITESPACE, CURRENCY]),
+    );
+}
+
+#[test]
+fn cost_spec_empty_braces_wraps_open_close_pair_only() {
+    use SyntaxKind::*;
+    // `{}` — empty cost spec (Beancount accepts this as a
+    // "no-cost" marker). COST_SPEC contains exactly the L_BRACE +
+    // R_BRACE pair.
+    let source = "2024-01-15 * \"x\"\n\
+                  \x20\x20Assets:Cash  10 HOOL {}\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let cs = cost_specs(&tree);
+    assert_eq!(cs.len(), 1);
+    assert_eq!(elements_of(&cs[0]), tok_seq(&[L_BRACE, R_BRACE]));
+}
+
+#[test]
+fn cost_spec_with_merge_star_keeps_star_inside_node() {
+    use SyntaxKind::*;
+    // `{*}` — merge marker. Per the legacy parser, the STAR
+    // inside braces signals lot merging. emit_cost_spec keeps
+    // STAR as a flat content token between the braces.
+    let source = "2024-01-15 * \"x\"\n\
+                  \x20\x20Assets:Cash  10 HOOL {*}\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let cs = cost_specs(&tree);
+    assert_eq!(cs.len(), 1);
+    assert_eq!(elements_of(&cs[0]), tok_seq(&[L_BRACE, STAR, R_BRACE]));
+}
+
+#[test]
+fn price_annotation_at_eof_without_newline_still_wraps_opener_only() {
+    use SyntaxKind::*;
+    // Per rule 5, an unterminated PRICE_ANNOTATION at EOF (no
+    // newline, no amount) still wraps — the PRICE_ANNOTATION
+    // contains just the AT opener.
+    let source = "2024-01-15 * \"x\"\n\
+                  \x20\x20Assets:Cash 10 HOOL @";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let prices = price_annotations(&tree);
+    assert_eq!(prices.len(), 1);
+    assert_eq!(elements_of(&prices[0]), tok_seq(&[AT]));
+}
+
+#[test]
+fn mixed_shape_sibling_postings_each_wrap_their_own_amount_or_not() {
+    use SyntaxKind::*;
+    // Three postings in one transaction with different shapes:
+    // auto (no amount), basic (NUMBER + CURRENCY), full (with
+    // COST_SPEC and PRICE_ANNOTATION). Pins that emit_posting_line
+    // re-initializes its state for each posting line and doesn't
+    // leak an open AMOUNT / COST_SPEC scope across siblings.
+    let source = "2024-01-15 * \"x\"\n\
+                  \x20\x20Assets:Cash\n\
+                  \x20\x20Assets:Bank  -5.00 USD\n\
+                  \x20\x20Income:Misc  10 HOOL {500.00 USD} @ 510.00 USD\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let ps = postings(&tree);
+    assert_eq!(ps.len(), 3);
+
+    // First: auto posting, no AMOUNT.
+    let p0_amounts = ps[0].children().filter(|n| n.kind() == AMOUNT).count();
+    let p0_costs = ps[0].children().filter(|n| n.kind() == COST_SPEC).count();
+    let p0_prices = ps[0]
+        .children()
+        .filter(|n| n.kind() == PRICE_ANNOTATION)
+        .count();
+    assert_eq!(p0_amounts, 0);
+    assert_eq!(p0_costs, 0);
+    assert_eq!(p0_prices, 0);
+
+    // Second: basic posting, one AMOUNT, no COST_SPEC / PRICE.
+    let p1_amounts = ps[1].children().filter(|n| n.kind() == AMOUNT).count();
+    let p1_costs = ps[1].children().filter(|n| n.kind() == COST_SPEC).count();
+    let p1_prices = ps[1]
+        .children()
+        .filter(|n| n.kind() == PRICE_ANNOTATION)
+        .count();
+    assert_eq!(p1_amounts, 1);
+    assert_eq!(p1_costs, 0);
+    assert_eq!(p1_prices, 0);
+
+    // Third: full posting, one of each.
+    let p2_amounts = ps[2].children().filter(|n| n.kind() == AMOUNT).count();
+    let p2_costs = ps[2].children().filter(|n| n.kind() == COST_SPEC).count();
+    let p2_prices = ps[2]
+        .children()
+        .filter(|n| n.kind() == PRICE_ANNOTATION)
+        .count();
+    assert_eq!(p2_amounts, 1);
+    assert_eq!(p2_costs, 1);
+    assert_eq!(p2_prices, 1);
+}
+
+#[test]
 fn commodity_with_metadata_wraps_full_multi_line_directive() {
     use SyntaxKind::*;
     // Per cst::trivia, a directive that carries indented metadata

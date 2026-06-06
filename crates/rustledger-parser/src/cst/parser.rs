@@ -571,8 +571,15 @@ fn emit_amount(
         let range = tokens[i].1.clone();
         builder.token(SyntaxKind::NUMBER.into(), &source[range]);
         i += 1;
-        // Optional WS + CURRENCY.
-        if matches!(tokens.get(i).map(|(k, _)| *k), Some(SyntaxKind::WHITESPACE),)
+        // Optional CURRENCY, either directly adjacent (`100USD`)
+        // or separated by WHITESPACE (`100 USD`). The lexer's
+        // NUMBER and CURRENCY regexes are exclusive — NUMBER stops
+        // at a non-digit, CURRENCY starts on an uppercase letter —
+        // so adjacent `NUMBER CURRENCY` with no WS token between
+        // them is a real corpus shape (e.g., `1USD` in some
+        // beancount-import fixtures). Both forms wrap inside
+        // AMOUNT.
+        if matches!(tokens.get(i).map(|(k, _)| *k), Some(SyntaxKind::WHITESPACE))
             && matches!(
                 tokens.get(i + 1).map(|(k, _)| *k),
                 Some(SyntaxKind::CURRENCY),
@@ -581,6 +588,10 @@ fn emit_amount(
             let ws_range = tokens[i].1.clone();
             builder.token(SyntaxKind::WHITESPACE.into(), &source[ws_range]);
             i += 1;
+            let cur_range = tokens[i].1.clone();
+            builder.token(SyntaxKind::CURRENCY.into(), &source[cur_range]);
+            i += 1;
+        } else if matches!(tokens.get(i).map(|(k, _)| *k), Some(SyntaxKind::CURRENCY)) {
             let cur_range = tokens[i].1.clone();
             builder.token(SyntaxKind::CURRENCY.into(), &source[cur_range]);
             i += 1;

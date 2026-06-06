@@ -259,12 +259,13 @@ pub enum SyntaxKind {
     COST_SPEC,
 
     // Phase 2.2c: PRICE_ANNOTATION wraps a price clause inside a
-    // posting line, i.e. `(AT | AT_AT) WS [AMOUNT-shape tokens]`.
-    // Beancount uses `@` for per-unit price and `@@` for total
-    // price. The price's own amount is NOT recursively wrapped in
-    // an AMOUNT node — it stays as flat children of
-    // PRICE_ANNOTATION so the typed-AST can decode `@`-vs-`@@`
-    // semantics without two-level walking.
+    // posting line, i.e. `(AT | AT_AT) [WS AMOUNT]`. Beancount
+    // uses `@` for per-unit price and `@@` for total price. The
+    // trailing amount IS recursively wrapped in an AMOUNT
+    // sub-node mirroring the units-amount case; the typed-AST
+    // decodes per-unit-vs-total by inspecting the opener token
+    // kind (`AT` vs `AT_AT`) and walks the `AMOUNT` child for the
+    // number and currency.
     PRICE_ANNOTATION,
 }
 

@@ -1,4 +1,4 @@
-//! Source-driven tests for `parse_structured` (phase 2.1a).
+//! Source-driven tests for `parse_structured` (phase 2.1-2.2c).
 //!
 //! Each test feeds real Beancount source through the structured
 //! parser and asserts the resulting tree shape against the

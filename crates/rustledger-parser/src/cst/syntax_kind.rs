@@ -205,8 +205,8 @@ pub enum SyntaxKind {
     // CURRENCY (ticker letters T/V/F/X/...). Mirrors the legacy
     // AST parser at parser.rs:1707-1715. Body spans header +
     // indented posting and metadata sub-lines until next top-
-    // level construct or EOF. POSTING / AMOUNT / COST_SPEC
-    // STRUCTURE inside is PR 2.2b/c.
+    // level construct or EOF. POSTING wrapping landed in PR 2.2b;
+    // AMOUNT / COST_SPEC / PRICE_ANNOTATION inside POSTING is PR 2.2c.
     TRANSACTION,
 
     // Phase 2.2a: META_ENTRY wraps each `WS META_KEY ... (NEWLINE
@@ -220,6 +220,19 @@ pub enum SyntaxKind {
     // stay as flat children of the parent directive, not META_ENTRY
     // children.
     META_ENTRY,
+
+    // Phase 2.2b: POSTING wraps each posting sub-line inside a
+    // TRANSACTION. Recognition shape is `WS [(FLAG|STAR|PENDING_KW)
+    // WS] ACCOUNT ...` followed by an optional amount / cost spec /
+    // price annotation, terminated by NEWLINE or EOF (per rule 5
+    // an unterminated final posting at EOF still gets wrapped — its
+    // POSTING simply has no NEWLINE child). Posting-attached
+    // metadata — META_ENTRY sub-lines strictly more indented than
+    // the POSTING's own indent — becomes a child of the POSTING; a
+    // META_ENTRY at the same indent terminates the POSTING and
+    // stays at TRANSACTION level. AMOUNT / COST_SPEC /
+    // PRICE_ANNOTATION sub-nodes inside POSTING are PR 2.2c.
+    POSTING,
 }
 
 impl SyntaxKind {
@@ -390,6 +403,7 @@ mod tests {
             SyntaxKind::POPMETA_DIRECTIVE,
             SyntaxKind::TRANSACTION,
             SyntaxKind::META_ENTRY,
+            SyntaxKind::POSTING,
         ];
         for kind in node_kinds {
             assert!(
@@ -451,6 +465,7 @@ mod tests {
             SyntaxKind::POPMETA_DIRECTIVE,
             SyntaxKind::TRANSACTION,
             SyntaxKind::META_ENTRY,
+            SyntaxKind::POSTING,
         ];
         let observed_nodes: Vec<SyntaxKind> = all_kinds
             .iter()

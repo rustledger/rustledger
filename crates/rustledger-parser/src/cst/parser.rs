@@ -27,11 +27,15 @@
 //! Phase 2.2a adds `META_ENTRY` sub-node structure around indented
 //! `WS META_KEY ... (NEWLINE | EOF)` sub-lines inside any directive
 //! or transaction (per rule 5 of `cst::trivia`, an unterminated
-//! final sub-line at EOF still gets wrapped). Phase 2.2b/c add
-//! `POSTING` / `AMOUNT` /
-//! `COST_SPEC` / `PRICE_ANNOTATION` inside TRANSACTION. Phase 5
-//! deletes `parse_flat` once `parse_structured` covers every byte
-//! in every corpus file.
+//! final sub-line at EOF still gets wrapped). Phase 2.2b adds
+//! `POSTING` sub-node structure around each `WS [(FLAG|STAR|
+//! PENDING_KW) WS] ACCOUNT ...` posting line inside `TRANSACTION`,
+//! with posting-attached metadata (strictly deeper-indented
+//! `META_ENTRY` sub-lines following the posting) becoming a child
+//! of that `POSTING`. Phase 2.2c adds `AMOUNT` / `COST_SPEC` /
+//! `PRICE_ANNOTATION` inside `POSTING`. Phase 5 deletes
+//! `parse_flat` once `parse_structured` covers every byte in
+//! every corpus file.
 
 use std::ops::Range;
 
@@ -111,10 +115,10 @@ pub fn parse_structured(source: &str) -> SyntaxNode {
             // single-line-directive path consumes only `WS META_KEY`
             // (and gated indented comments). TRANSACTION consumes
             // ANY indented sub-line (postings, metadata, comments)
-            // until a blank line, non-indented content, or EOF —
-            // its body shape is much looser, and PR 2.2 will
-            // introduce POSTING / AMOUNT / COST_SPEC / META_ENTRY
-            // structure INSIDE the TRANSACTION node.
+            // until a blank line, non-indented content, or EOF.
+            // PR 2.2a/b wrap META_ENTRY and POSTING inside
+            // TRANSACTION; PR 2.2c will wrap AMOUNT / COST_SPEC /
+            // PRICE_ANNOTATION inside POSTING.
             i = if directive_kind == SyntaxKind::TRANSACTION {
                 emit_transaction_body(&mut builder, source, &tokens, i)
             } else {
@@ -184,8 +188,9 @@ fn emit_through_terminator(
 /// with no `NEWLINE` child. Token kinds inside the `META_ENTRY`
 /// stay flat — phase 3's typed-AST surface will expose `key()` and
 /// `value()` accessors that walk these children. Indented
-/// `;`-comments and POSTING lines (PR 2.2b) flow through as flat
-/// children of the parent directive, NOT wrapped in `META_ENTRY`.
+/// `;`-comments flow through as flat children, NOT wrapped in
+/// `META_ENTRY`. POSTING lines are recognized earlier in
+/// `emit_transaction_body` and never reach this helper.
 fn emit_body_sub_line(
     builder: &mut GreenNodeBuilder<'_>,
     source: &str,
@@ -277,33 +282,49 @@ fn emit_directive_body(
 /// indented comments — any line starting with `WHITESPACE`
 /// followed by a non-`NEWLINE` token).
 ///
-/// **Phase 2.2a doesn't attribute metadata by indent depth.**
-/// Beancount distinguishes TRANSACTION-level metadata (at the
-/// transaction's standard indent, typically two spaces, before
-/// any posting OR interspersed between postings at that same
-/// indent) from POSTING-attached metadata (at a DEEPER indent
-/// following a posting line). PR 2.2a wraps both as `META_ENTRY`
-/// children of `TRANSACTION`. **PR 2.2b** must inspect the
-/// following sub-line's indent depth and move the deeper-indented
-/// `META_ENTRY` nodes from `TRANSACTION`'s direct children to the
-/// preceding `POSTING`'s children. The transaction-level case
-/// stays put; only the posting-attached case relocates. No
-/// existing PR 2.2a test pins a posting-attached `META_ENTRY` (the
-/// shape PR 2.2b will need to relocate); PR 2.2b should ADD such
-/// tests alongside the relocation logic.
+/// **Phase 2.2b attributes metadata by indent depth.** Beancount
+/// distinguishes TRANSACTION-level metadata (at the transaction's
+/// standard indent, typically two spaces, before any posting OR
+/// interspersed between postings at that same indent) from
+/// POSTING-attached metadata (at a DEEPER indent following a
+/// posting line). The transaction-level case stays a direct child
+/// of `TRANSACTION`; the posting-attached case becomes a child of
+/// the preceding `POSTING` node.
+///
+/// State machine: walk the body lines while tracking the indent
+/// width of the most-recently-opened `POSTING` (if any). For each
+/// sub-line:
+///
+/// - **Posting line** (`WS [(FLAG|STAR|PENDING_KW) WS] ACCOUNT ...`):
+///   close the open POSTING if any, then open a new POSTING and
+///   consume the line.
+/// - **Metadata sub-line** (`WS META_KEY ...`): if a POSTING is
+///   open AND this line's indent is strictly greater than the
+///   POSTING's indent, emit the `META_ENTRY` INSIDE the POSTING.
+///   Otherwise (no open POSTING, or shallower/equal indent), close
+///   any open POSTING and emit the `META_ENTRY` at TRANSACTION level.
+/// - **Indented comment line**: close any open POSTING and emit
+///   the comment line flat at TRANSACTION level. (Beancount
+///   treats inter-posting comments as transaction-level by
+///   convention; this matches the legacy AST parser's posting-
+///   metadata loop, which does not absorb comments.)
+///
+/// Indent width is measured as the byte length of the leading
+/// `WHITESPACE` token — sufficient for the strictly-deeper test
+/// when the source uses uniform spaces (the standard Beancount
+/// convention; tabs in postings are extremely rare and would
+/// compare by byte width too, just less visually meaningful).
 ///
 /// Compared with `emit_directive_body` (which only continues on
 /// `WS META_KEY` and gated `WS COMMENT`), transactions have a
-/// looser body shape: posting lines start with `WS ACCOUNT`,
-/// metadata sub-lines with `WS META_KEY`, indented comments with
-/// `WS COMMENT`, etc. All belong inside `TRANSACTION` per the
-/// multi-line clause of the Directive-Terminator Rule. PR 2.2
-/// will introduce `POSTING` / `AMOUNT` / `COST_SPEC` /
-/// `META_ENTRY` sub-nodes inside the TRANSACTION wrapper; for
-/// now those tokens are flat children.
+/// looser body shape. PR 2.2c will introduce `AMOUNT` /
+/// `COST_SPEC` / `PRICE_ANNOTATION` sub-nodes INSIDE `POSTING`;
+/// for now the POSTING's content tokens (account, amount,
+/// currency, etc.) stay flat children of POSTING.
 ///
 /// Termination: a blank line (NEWLINE alone, or WHITESPACE then
-/// NEWLINE), any non-indented top-level token, or EOF.
+/// NEWLINE), any non-indented top-level token, or EOF. Any open
+/// POSTING is closed before returning.
 fn emit_transaction_body(
     builder: &mut GreenNodeBuilder<'_>,
     source: &str,
@@ -311,10 +332,83 @@ fn emit_transaction_body(
     mut i: usize,
 ) -> usize {
     i = emit_through_terminator(builder, source, tokens, i);
+
+    let mut open_posting_indent: Option<usize> = None;
+
     while is_indented_transaction_body_line(tokens, i) {
-        i = emit_body_sub_line(builder, source, tokens, i);
+        let sub_line_indent = indent_width(tokens, i);
+
+        if starts_posting_sub_line(tokens, i) {
+            if open_posting_indent.is_some() {
+                builder.finish_node();
+            }
+            builder.start_node(SyntaxKind::POSTING.into());
+            open_posting_indent = Some(sub_line_indent);
+            i = emit_through_terminator(builder, source, tokens, i);
+        } else if starts_meta_sub_line(tokens, i) {
+            let attach_to_posting =
+                open_posting_indent.is_some_and(|p_indent| sub_line_indent > p_indent);
+            if !attach_to_posting && open_posting_indent.is_some() {
+                builder.finish_node();
+                open_posting_indent = None;
+            }
+            i = emit_body_sub_line(builder, source, tokens, i);
+        } else {
+            if open_posting_indent.is_some() {
+                builder.finish_node();
+                open_posting_indent = None;
+            }
+            i = emit_through_terminator(builder, source, tokens, i);
+        }
     }
+
+    if open_posting_indent.is_some() {
+        builder.finish_node();
+    }
+
     i
+}
+
+/// Returns true iff `tokens[i..]` starts a posting sub-line:
+/// `WHITESPACE` (the indent) followed by `ACCOUNT`, or by an
+/// optional flag (`FLAG` / `STAR` / `PENDING_KW` / single-char
+/// `CURRENCY`) plus another `WHITESPACE` then `ACCOUNT`. Mirrors
+/// the legacy AST parser's `parse_posting` shape
+/// (`parser.rs:866-880`): indent, optional flag, then a required
+/// account. The single-char `CURRENCY`-as-flag arm mirrors
+/// `identify_directive`'s same treatment for the transaction
+/// header: NYSE-style ticker letters like `T`/`V`/`F`/`X` win the
+/// lexer's Currency-vs-Flag tie-break (priority 3) but still
+/// function as posting flags in this position.
+fn starts_posting_sub_line(tokens: &[(SyntaxKind, Range<usize>)], i: usize) -> bool {
+    if !matches!(tokens.get(i), Some((SyntaxKind::WHITESPACE, _))) {
+        return false;
+    }
+    if matches!(tokens.get(i + 1), Some((SyntaxKind::ACCOUNT, _))) {
+        return true;
+    }
+    let has_flag = match tokens.get(i + 1) {
+        Some((SyntaxKind::FLAG | SyntaxKind::STAR | SyntaxKind::PENDING_KW, _)) => true,
+        Some((SyntaxKind::CURRENCY, range)) => range.len() == 1,
+        _ => false,
+    };
+    if !has_flag {
+        return false;
+    }
+    matches!(tokens.get(i + 2), Some((SyntaxKind::WHITESPACE, _)))
+        && matches!(tokens.get(i + 3), Some((SyntaxKind::ACCOUNT, _)))
+}
+
+/// Byte length of the leading `WHITESPACE` token at `tokens[i]`,
+/// or 0 if there is no leading whitespace. Used by
+/// `emit_transaction_body` to decide whether a metadata sub-line's
+/// indent is strictly deeper than the surrounding POSTING's
+/// indent (the posting-attached-metadata rule).
+fn indent_width(tokens: &[(SyntaxKind, Range<usize>)], i: usize) -> usize {
+    match tokens.get(i) {
+        Some((SyntaxKind::WHITESPACE, range)) => range.len(),
+        _ => 0,
+    }
 }
 
 /// Returns true iff `tokens[i..]` starts an indented line with

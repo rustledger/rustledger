@@ -277,16 +277,20 @@ fn emit_directive_body(
 /// indented comments — any line starting with `WHITESPACE`
 /// followed by a non-`NEWLINE` token).
 ///
-/// **Phase 2.2a doesn't attribute metadata by indent depth.** A
-/// deeper-indented `WS META_KEY ...` line that follows a posting
-/// — Beancount's posting-attached metadata idiom — is currently
-/// wrapped as a `META_ENTRY` that becomes a direct sibling of the
-/// (future) `POSTING` under `TRANSACTION`. PR 2.2b's `POSTING`
-/// wrapping must move these `META_ENTRY` nodes from `TRANSACTION`'s
-/// children to the preceding `POSTING`'s children by peeking the
-/// next sub-line's indent depth. Tests pinning the current direct-
-/// sibling shape (e.g., `meta_entry_inside_transaction_body`) will
-/// need to update when PR 2.2b lands.
+/// **Phase 2.2a doesn't attribute metadata by indent depth.**
+/// Beancount distinguishes TRANSACTION-level metadata (at the
+/// transaction's standard indent, typically two spaces, before
+/// any posting OR interspersed between postings at that same
+/// indent) from POSTING-attached metadata (at a DEEPER indent
+/// following a posting line). PR 2.2a wraps both as `META_ENTRY`
+/// children of `TRANSACTION`. **PR 2.2b** must inspect the
+/// following sub-line's indent depth and move the deeper-indented
+/// `META_ENTRY` nodes from `TRANSACTION`'s direct children to the
+/// preceding `POSTING`'s children. The transaction-level case
+/// stays put; only the posting-attached case relocates. No
+/// existing PR 2.2a test pins a posting-attached `META_ENTRY` (the
+/// shape PR 2.2b will need to relocate); PR 2.2b should ADD such
+/// tests alongside the relocation logic.
 ///
 /// Compared with `emit_directive_body` (which only continues on
 /// `WS META_KEY` and gated `WS COMMENT`), transactions have a

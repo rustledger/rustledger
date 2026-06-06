@@ -248,14 +248,15 @@ pub enum SyntaxKind {
     // optional CURRENCY, or CURRENCY alone.
     //
     // **Scoped to postings only**: directive-header amounts
-    // (`balance Assets:Cash 100 USD`, `price USD 1.10 EUR`, pad
-    // amounts, etc.) are emitted FLAT by `emit_directive_body`'s
-    // `emit_through_terminator`, NOT wrapped in AMOUNT. Phase 3
-    // typed-AST accessors for `Balance::amount()` /
-    // `Price::amount()` / etc. will need a different walking
-    // strategy (scan flat tokens after the keyword) than
-    // `Posting::amount()` (find the AMOUNT child). Pinned by
-    // `balance_directive_header_amount_stays_flat_not_wrapped`.
+    // (`balance Assets:Cash 100 USD`, `price USD 1.10 EUR`) are
+    // emitted FLAT by `emit_directive_body`'s
+    // `emit_through_terminator`, NOT wrapped in AMOUNT. PAD has
+    // no inline amount and is unaffected. Phase 3 typed-AST
+    // accessors for `Balance::amount()` / `Price::amount()` will
+    // need a different walking strategy (scan flat tokens after
+    // the keyword) than `Posting::amount()` (find the AMOUNT
+    // child). Pinned by
+    // `balance_and_price_directive_header_amounts_stay_flat_not_wrapped`.
     AMOUNT,
 
     // Phase 2.2c: COST_SPEC wraps a bracketed cost annotation

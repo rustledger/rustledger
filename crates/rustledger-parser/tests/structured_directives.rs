@@ -2361,40 +2361,45 @@ fn total_price_annotation_at_at_eof_without_newline_still_wraps_opener_only() {
 }
 
 #[test]
-fn balance_directive_header_amount_stays_flat_not_wrapped() {
-    // Phase 2.2c scopes AMOUNT wrapping to POSTING only. Directive
-    // headers (BALANCE, PRICE, PAD) emit their inline amounts as
-    // flat NUMBER + CURRENCY tokens via `emit_through_terminator`,
-    // NOT wrapped in an AMOUNT node. Phase 3 typed-AST
+fn balance_and_price_directive_header_amounts_stay_flat_not_wrapped() {
+    use SyntaxKind::*;
+    // Phase 2.2c scopes AMOUNT wrapping to POSTING only. BALANCE
+    // and PRICE directive headers emit their inline NUMBER +
+    // CURRENCY tokens flat via `emit_through_terminator`, NOT
+    // wrapped in an AMOUNT node. Phase 3 typed-AST
     // `Balance::amount()` / `Price::amount()` will need a token-
     // walking strategy distinct from `Posting::amount()`. Pinned
     // here so a future refactor that unifies the code path (e.g.,
     // calling emit_amount from the directive header) is a visible,
     // intentional break rather than a silent design shift.
+    //
+    // Each sub-case also asserts the directive's specific kind, so
+    // a regression that drops keyword recognition (and falls
+    // through to flat passthrough under SOURCE_FILE) doesn't
+    // trivially satisfy the `amts.len() == 0` assertion.
     let source = "2024-06-30 balance Assets:Cash 100.00 USD\n";
     let tree = parse_structured(source);
     assert_round_trip(source, &tree);
-
-    let amts = amounts(&tree);
+    let ds = directives(&tree);
+    assert_eq!(ds.len(), 1);
+    assert_eq!(ds[0].kind(), BALANCE_DIRECTIVE);
     assert_eq!(
-        amts.len(),
+        amounts(&tree).len(),
         0,
-        "directive-header amounts are NOT wrapped in AMOUNT",
+        "BALANCE header NUMBER + CURRENCY are flat children of BALANCE_DIRECTIVE",
     );
 
-    // Same for PRICE_DIRECTIVE: `1.10 EUR` is flat.
     let price_source = "2024-01-01 price USD 1.10 EUR\n";
     let price_tree = parse_structured(price_source);
     assert_round_trip(price_source, &price_tree);
-    let price_amts = amounts(&price_tree);
-    assert_eq!(price_amts.len(), 0);
-
-    // And for PAD_DIRECTIVE (no inline amount): just sanity.
-    let pad_source = "2024-01-01 pad Assets:Cash Equity:OpeningBalances\n";
-    let pad_tree = parse_structured(pad_source);
-    assert_round_trip(pad_source, &pad_tree);
-    let pad_amts = amounts(&pad_tree);
-    assert_eq!(pad_amts.len(), 0);
+    let price_ds = directives(&price_tree);
+    assert_eq!(price_ds.len(), 1);
+    assert_eq!(price_ds[0].kind(), PRICE_DIRECTIVE);
+    assert_eq!(
+        amounts(&price_tree).len(),
+        0,
+        "PRICE header NUMBER + CURRENCY are flat children of PRICE_DIRECTIVE",
+    );
 }
 
 #[test]
@@ -2420,6 +2425,14 @@ fn amount_with_arithmetic_currently_produces_sibling_amounts() {
     //
     // This test PINS the current shape so the divergence is
     // discoverable and the fix's behavior change is visible.
+    //
+    // **TODO: When the arithmetic-expression wrapping fix lands,
+    // REWRITE this test (do NOT preserve the two-sibling shape).**
+    // The fix should produce ONE `AMOUNT(NUMBER PLUS NUMBER WS
+    // CURRENCY)` node. If you're seeing this test fail with
+    // `amts.len()` going 2 → 1, that's the correct direction —
+    // update the assertions to match the new single-AMOUNT shape
+    // rather than reverting the fix.
     let source = "2024-01-15 * \"x\"\n\
                   \x20\x20Assets:Cash  10+5 USD\n";
     let tree = parse_structured(source);

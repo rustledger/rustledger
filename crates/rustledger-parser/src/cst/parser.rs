@@ -1,4 +1,4 @@
-//! CST builders: phase 1 flat ([`parse_flat`]) + phase 2.1a/2.1b
+//! CST builders: phase 1 flat ([`parse_flat`]) + phase 2.1-2.2c
 //! structured ([`parse_structured`]).
 //!
 //! Both walk the lossless token stream and emit a `GreenNode` whose

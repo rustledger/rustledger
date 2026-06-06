@@ -187,7 +187,7 @@ fn emit_body_sub_line(
     tokens: &[(SyntaxKind, Range<usize>)],
     i: usize,
 ) -> usize {
-    if is_indented_meta_sub_line(tokens, i) {
+    if starts_meta_sub_line(tokens, i) {
         builder.start_node(SyntaxKind::META_ENTRY.into());
         let next = emit_through_terminator(builder, source, tokens, i);
         builder.finish_node();
@@ -197,9 +197,20 @@ fn emit_body_sub_line(
     }
 }
 
-/// Returns true iff `tokens[i..]` starts a `WS META_KEY ...` line
-/// that should be wrapped in a `META_ENTRY` node.
-fn is_indented_meta_sub_line(tokens: &[(SyntaxKind, Range<usize>)], i: usize) -> bool {
+/// Returns true iff `tokens[i..]` starts an indented `WS META_KEY ...`
+/// metadata sub-line.
+///
+/// **Single source of truth** for the `WS + META_KEY` recognition
+/// pattern. Used by both `emit_body_sub_line` (decides whether to
+/// open a `META_ENTRY` node around the sub-line) and
+/// `is_indented_directive_continuation`'s `META_KEY` arm (decides
+/// whether the directive body should keep consuming). Routing both
+/// call sites through one helper prevents the predicate-pair drift
+/// hazard where one widens (e.g. admits a different indent token)
+/// without the other and the parser starts consuming sub-lines
+/// without wrapping them, or wrapping sub-lines that the body loop
+/// never reaches.
+fn starts_meta_sub_line(tokens: &[(SyntaxKind, Range<usize>)], i: usize) -> bool {
     matches!(tokens.get(i), Some((SyntaxKind::WHITESPACE, _)))
         && matches!(tokens.get(i + 1), Some((SyntaxKind::META_KEY, _)))
 }
@@ -260,6 +271,17 @@ fn emit_directive_body(
 /// then keep consuming ANY indented sub-line (postings, metadata,
 /// indented comments — any line starting with `WHITESPACE`
 /// followed by a non-`NEWLINE` token).
+///
+/// **Phase 2.2a doesn't attribute metadata by indent depth.** A
+/// deeper-indented `WS META_KEY ...` line that follows a posting
+/// — Beancount's posting-attached metadata idiom — is currently
+/// wrapped as a `META_ENTRY` that becomes a direct sibling of the
+/// (future) `POSTING` under `TRANSACTION`. PR 2.2b's `POSTING`
+/// wrapping must move these `META_ENTRY` nodes from `TRANSACTION`'s
+/// children to the preceding `POSTING`'s children by peeking the
+/// next sub-line's indent depth. Tests pinning the current direct-
+/// sibling shape (e.g., `meta_entry_inside_transaction_body`) will
+/// need to update when PR 2.2b lands.
 ///
 /// Compared with `emit_directive_body` (which only continues on
 /// `WS META_KEY` and gated `WS COMMENT`), transactions have a
@@ -357,11 +379,16 @@ fn is_indented_directive_continuation(
     i: usize,
     block_has_meta: bool,
 ) -> bool {
+    // The META_KEY arm routes through `starts_meta_sub_line` so the
+    // continuation predicate and the wrapping predicate
+    // (`emit_body_sub_line`) cannot drift.
+    if starts_meta_sub_line(tokens, i) {
+        return true;
+    }
     if !matches!(tokens.get(i), Some((SyntaxKind::WHITESPACE, _))) {
         return false;
     }
     match tokens.get(i + 1) {
-        Some((SyntaxKind::META_KEY, _)) => true,
         Some((SyntaxKind::COMMENT | SyntaxKind::PERCENT_COMMENT, _)) => block_has_meta,
         _ => false,
     }

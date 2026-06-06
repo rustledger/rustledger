@@ -468,9 +468,11 @@ fn transaction_with_star_flag_header_only() {
 }
 
 #[test]
-fn transaction_with_exclamation_flag() {
+fn transaction_with_pending_kw_flag() {
     use SyntaxKind::*;
-    // `!` is the FLAG token for incomplete transactions (warning).
+    // `!` lexes as PENDING_KW (`Token::Pending` →
+    // `SyntaxKind::PENDING_KW`), NOT as `FLAG`. It signals an
+    // incomplete/warning transaction in Beancount syntax.
     let source = "2024-01-15 ! \"WIP\"\n";
     let tree = parse_structured(source);
     assert_round_trip(source, &tree);
@@ -478,6 +480,12 @@ fn transaction_with_exclamation_flag() {
     let ds = directives(&tree);
     assert_eq!(ds.len(), 1);
     assert_eq!(ds[0].kind(), TRANSACTION);
+    // Pin the exact token sequence so a regression that
+    // mistokenizes `!` or fails to wrap the full header fires.
+    assert_eq!(
+        elements_of(&ds[0]),
+        tok_seq(&[DATE, WHITESPACE, PENDING_KW, WHITESPACE, STRING, NEWLINE]),
+    );
 }
 
 #[test]
@@ -599,6 +607,26 @@ fn transaction_with_indented_comment_between_postings() {
 
     let ds = directives(&tree);
     assert_eq!(ds.len(), 1);
+    assert_eq!(elements_of(&tree), vec![Element::Node(TRANSACTION)]);
+}
+
+#[test]
+fn transaction_with_implied_flag_via_bare_string() {
+    use SyntaxKind::*;
+    // Beancount accepts the implied-transaction shorthand:
+    // `DATE WS STRING ...` with no explicit flag. The legacy
+    // AST parser at parser.rs:1713 dispatches `Token::String(_)`
+    // to parse_transaction_directive with an implied `*`. Common
+    // in real ledgers as a convenient shorthand.
+    let source = "2024-01-15 \"Coffee\"\n\
+                  \x20\x20Assets:Cash 100 USD\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let ds = directives(&tree);
+    assert_eq!(ds.len(), 1);
+    assert_eq!(ds[0].kind(), TRANSACTION);
+    // SOURCE_FILE owns only the TRANSACTION — no orphaned posting.
     assert_eq!(elements_of(&tree), vec![Element::Node(TRANSACTION)]);
 }
 

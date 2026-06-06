@@ -342,8 +342,12 @@ fn is_indented_directive_continuation(
 /// - `DATE WHITESPACE <KEYWORD> ...`: OPEN / CLOSE / BALANCE / PAD
 ///   / EVENT / QUERY / NOTE / DOCUMENT / PRICE / COMMODITY (PR
 ///   2.1a)
-/// - `DATE WHITESPACE (STAR | FLAG | TXN_KW) ...`: TRANSACTION
-///   (PR 2.1b — this PR)
+/// - `DATE WHITESPACE <txn-trigger> ...`: TRANSACTION (PR 2.1b),
+///   where `<txn-trigger>` is one of `STAR` / `PENDING_KW` (`!`)
+///   / `FLAG` / `HASH` / `TXN_KW` / `STRING` ("implied" txn form
+///   with no explicit flag) / single-char `CURRENCY` (ticker
+///   letters). Mirrors `parse_dated_directive` in the legacy AST
+///   parser at parser.rs:1707-1715.
 /// - `<KEYWORD> ...` (no leading date): PUSHTAG / POPTAG /
 ///   PUSHMETA / POPMETA (PR 2.1a)
 fn identify_directive(tokens: &[(SyntaxKind, Range<usize>)], i: usize) -> Option<SyntaxKind> {
@@ -381,18 +385,26 @@ fn identify_directive(tokens: &[(SyntaxKind, Range<usize>)], i: usize) -> Option
                 SyntaxKind::PRICE_KW => Some(SyntaxKind::PRICE_DIRECTIVE),
                 SyntaxKind::COMMODITY_KW => Some(SyntaxKind::COMMODITY_DIRECTIVE),
                 // Transaction triggers after the DATE. Beancount
-                // uses `*` (STAR) for completed transactions, `!`
-                // (PENDING_KW) for incomplete/warning, letter flags
-                // P/S/T/C/U/R/M/?/& (FLAG) for various states, the
-                // `#` symbol (HASH — promoted to a flag in this
-                // position; cf. `Token::is_txn_flag` and the AST
-                // parser's `parse_flag` accepting Hash), or the
-                // explicit `txn` keyword (TXN_KW).
+                // accepts:
+                // - `*` (STAR) for completed transactions
+                // - `!` (PENDING_KW) for incomplete/warning
+                // - letter flags P/S/T/C/U/R/M/?/& (FLAG)
+                // - `#` (HASH) promoted to a flag in this position
+                //   (cf. `Token::is_txn_flag` and the AST parser's
+                //   `parse_flag` accepting Hash)
+                // - the explicit `txn` keyword (TXN_KW)
+                // - a bare STRING ("implied transaction": the AST
+                //   parser at parser.rs:1713 dispatches
+                //   `Token::String(_)` to `parse_transaction_directive`
+                //   with an implied `*` flag; common shorthand
+                //   form in real ledgers like
+                //   `2024-01-15 "Coffee"`)
                 SyntaxKind::STAR
                 | SyntaxKind::PENDING_KW
                 | SyntaxKind::FLAG
                 | SyntaxKind::HASH
-                | SyntaxKind::TXN_KW => Some(SyntaxKind::TRANSACTION),
+                | SyntaxKind::TXN_KW
+                | SyntaxKind::STRING => Some(SyntaxKind::TRANSACTION),
                 // Single-character CURRENCY: NYSE/NASDAQ-style
                 // ticker letters (T, V, F, X, ...) double as
                 // transaction flags. The lexer prioritizes

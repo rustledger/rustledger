@@ -1464,14 +1464,12 @@ fn deeper_indented_trailing_comment_at_eof_stays_inside_posting() {
 }
 
 #[test]
-fn deeper_indented_shebang_or_emacs_directive_attaches_to_open_posting() {
+fn deeper_indented_emacs_directive_attaches_to_open_posting() {
     use SyntaxKind::*;
-    // `is_comment_token` includes SHEBANG (`#!`) and
-    // EMACS_DIRECTIVE (`#+`) alongside COMMENT (`;`) and
-    // PERCENT_COMMENT (`%`). The new indented-comment branch in
-    // `emit_transaction_body` routes them through the same
-    // indent-attribution rule. Deeper-indented than the POSTING =
-    // stays INSIDE POSTING.
+    // `is_comment_token` includes EMACS_DIRECTIVE (`#+`). The
+    // indented-comment branch in `emit_transaction_body` routes it
+    // through the same indent-attribution rule as COMMENT: deeper-
+    // indented than the open POSTING = stays INSIDE POSTING.
     let source = "2024-01-15 * \"x\"\n\
                   \x20\x20Assets:Cash 1 USD\n\
                   \x20\x20\x20\x20#+STARTUP: overview\n";
@@ -1487,6 +1485,137 @@ fn deeper_indented_shebang_or_emacs_directive_attaches_to_open_posting() {
     assert_eq!(
         emacs_inside_posting, 1,
         "EMACS_DIRECTIVE recognized as comment-class trivia, attaches by indent",
+    );
+}
+
+#[test]
+fn deeper_indented_shebang_attaches_to_open_posting() {
+    use SyntaxKind::*;
+    // Companion to the EMACS_DIRECTIVE test: pin that SHEBANG
+    // (`#!`) is also recognized as comment-class trivia via
+    // `is_comment_token` and follows the same indent-attribution
+    // rule. Catches a regression that drops SHEBANG from the
+    // helper while leaving EMACS_DIRECTIVE in place.
+    let source = "2024-01-15 * \"x\"\n\
+                  \x20\x20Assets:Cash 1 USD\n\
+                  \x20\x20\x20\x20#!/usr/bin/env something\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let ps = postings(&tree);
+    assert_eq!(ps.len(), 1);
+    let shebang_inside_posting = ps[0]
+        .children_with_tokens()
+        .filter(|e| e.kind() == SHEBANG)
+        .count();
+    assert_eq!(
+        shebang_inside_posting, 1,
+        "SHEBANG recognized as comment-class trivia, attaches by indent",
+    );
+}
+
+#[test]
+fn deeper_indented_percent_comment_attaches_to_open_posting() {
+    use SyntaxKind::*;
+    // PERCENT_COMMENT (`%`) is included in `is_comment_token` but
+    // every other comment-attribution test uses `;`. Pin the `%`
+    // path so a regression that demotes PERCENT_COMMENT (e.g., via
+    // a typo or split refactor) fails here.
+    let source = "2024-01-15 * \"x\"\n\
+                  \x20\x20Assets:Cash 1 USD\n\
+                  \x20\x20\x20\x20% percent-style doc\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let ps = postings(&tree);
+    assert_eq!(ps.len(), 1);
+    let pct_inside_posting = ps[0]
+        .children_with_tokens()
+        .filter(|e| e.kind() == PERCENT_COMMENT)
+        .count();
+    assert_eq!(
+        pct_inside_posting, 1,
+        "PERCENT_COMMENT recognized as comment-class trivia, attaches by indent",
+    );
+}
+
+#[test]
+fn directive_body_absorbs_indented_emacs_directive_when_block_has_meta() {
+    use SyntaxKind::*;
+    // The `is_comment_token` widening also affects
+    // `upcoming_indented_block_has_meta` and
+    // `is_indented_directive_continuation` for NON-transaction
+    // directives. Pin that an indented `#+STARTUP` line inside an
+    // OPEN_DIRECTIVE that ALSO contains a meta line is absorbed as
+    // a continuation (rather than orphaning to SOURCE_FILE).
+    // Mirrors the existing `indented_comment_before_first_metadata`
+    // / `indented_comment_between_metadata_lines` tests, which use
+    // `;` only; this pins the SHEBANG/EMACS_DIRECTIVE branch.
+    let source = "2024-01-01 open Assets:Cash\n\
+                  \x20\x20#+STARTUP: overview\n\
+                  \x20\x20key: \"v\"\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let ds = directives(&tree);
+    assert_eq!(ds.len(), 1);
+    assert_eq!(ds[0].kind(), OPEN_DIRECTIVE);
+
+    // The EMACS_DIRECTIVE token lives inside the OPEN_DIRECTIVE,
+    // not orphaned at SOURCE_FILE level.
+    let emacs_in_directive = ds[0]
+        .descendants_with_tokens()
+        .filter(|e| e.kind() == EMACS_DIRECTIVE)
+        .count();
+    assert_eq!(emacs_in_directive, 1);
+    let emacs_orphaned_at_source_file: usize = tree
+        .children_with_tokens()
+        .filter(|e| e.kind() == EMACS_DIRECTIVE)
+        .count();
+    assert_eq!(emacs_orphaned_at_source_file, 0);
+}
+
+#[test]
+fn directive_body_does_not_absorb_indented_emacs_directive_when_no_meta() {
+    use SyntaxKind::*;
+    // Complementary case: when an OPEN_DIRECTIVE has NO meta block,
+    // an indented EMACS_DIRECTIVE / SHEBANG / `;`-comment that
+    // follows the header is NOT a continuation (per the
+    // block_has_meta gate). Pins that the widening did not
+    // accidentally make these tokens unconditional continuations.
+    let source = "2024-01-01 open Assets:Cash\n\
+                  \x20\x20#+STARTUP: trailing only\n\
+                  2024-01-02 open Assets:Bank\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let ds = directives(&tree);
+    assert_eq!(
+        ds.len(),
+        2,
+        "two OPEN_DIRECTIVES, separated by EMACS_DIRECTIVE rule-2 trivia"
+    );
+    assert_eq!(ds[0].kind(), OPEN_DIRECTIVE);
+    assert_eq!(ds[1].kind(), OPEN_DIRECTIVE);
+
+    // The EMACS_DIRECTIVE is rule-2 inter-directive trivia: it
+    // attaches as LEADING trivia of the SECOND directive (per
+    // `cst::trivia`), NOT as a continuation of the first.
+    let emacs_in_first = ds[0]
+        .descendants_with_tokens()
+        .filter(|e| e.kind() == EMACS_DIRECTIVE)
+        .count();
+    let emacs_in_second = ds[1]
+        .descendants_with_tokens()
+        .filter(|e| e.kind() == EMACS_DIRECTIVE)
+        .count();
+    assert_eq!(
+        emacs_in_first, 0,
+        "EMACS_DIRECTIVE is NOT absorbed by header-only directive"
+    );
+    assert_eq!(
+        emacs_in_second, 1,
+        "EMACS_DIRECTIVE leads the next directive as rule-2 trivia"
     );
 }
 
@@ -1543,11 +1672,15 @@ fn same_indent_comment_between_posting_and_deeper_meta_orphans_meta() {
     // indent-attribution rule: comment indent is not strictly
     // greater than posting indent). The subsequent deeper-indented
     // META_KEY then has no open POSTING and lands at TRANSACTION
-    // level. Matches Beancount's lex/yacc semantics: an explicit
-    // same-indent break ends the posting's metadata block, so a
-    // following meta line is a transaction-level entry even if it
-    // happens to be indented deeper. Pinned so a future refactor
-    // can't silently flip the attribution without a test update.
+    // level. Matches the legacy AST parser's
+    // `parse_posting_metadata` loop, which terminates posting-
+    // attached metadata at any indented sub-line that is not a
+    // DeepIndent META_KEY (a same-indent COMMENT being one such
+    // terminator). Python beancount parity is NOT verified here —
+    // a future compat audit may find Python attaches the deeper
+    // META to the still-open posting, in which case this test is
+    // the touch-point. Pinned so a future refactor can't silently
+    // flip the attribution without a test update.
     let source = "2024-01-15 * \"x\"\n\
                   \x20\x20Assets:Cash -5 USD\n\
                   \x20\x20; explicit break at posting indent\n\

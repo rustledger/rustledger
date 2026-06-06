@@ -245,10 +245,11 @@ fn starts_meta_sub_line(tokens: &[(SyntaxKind, Range<usize>)], i: usize) -> bool
 /// A continuation sub-line is recognized as `WHITESPACE` (the
 /// indent) followed by either:
 /// - `META_KEY` — the standard metadata sub-line, or
-/// - `COMMENT` / `PERCENT_COMMENT` — an indented documentation
-///   comment between metadata entries (a common Beancount idiom;
-///   keeping it inside the directive prevents subsequent metadata
-///   from getting orphaned to `SOURCE_FILE`).
+/// - any comment-class trivia token (per [`is_comment_token`]: `;`,
+///   `%`, `#!`, `#+`) — an indented documentation comment between
+///   metadata entries (a common Beancount idiom; keeping it inside
+///   the directive prevents subsequent metadata from getting
+///   orphaned to `SOURCE_FILE`).
 ///
 /// Anything else — a blank line, a non-indented top-level token,
 /// EOF — terminates the directive. Blank-line separated metadata
@@ -413,20 +414,18 @@ fn emit_transaction_body(
 ///
 /// "Attached" means strictly more indented than the open POSTING.
 /// A same-indent or shallower sub-line closes the POSTING; a
-/// deeper-indented sub-line leaves it open. Returns the attach
-/// decision so the caller doesn't need to recompute it (though
-/// neither current caller uses the return value).
+/// deeper-indented sub-line leaves it open. Called with
+/// `open_posting_indent = None` is a no-op (no POSTING to close).
 fn close_open_posting_unless_attached(
     builder: &mut GreenNodeBuilder<'_>,
     open_posting_indent: &mut Option<usize>,
     sub_line_indent: usize,
-) -> bool {
+) {
     let attach = open_posting_indent.is_some_and(|p_indent| sub_line_indent > p_indent);
     if !attach && open_posting_indent.is_some() {
         builder.finish_node();
         *open_posting_indent = None;
     }
-    attach
 }
 
 /// Returns true iff `tokens[i..]` starts a posting sub-line:
@@ -500,7 +499,23 @@ fn indent_width(tokens: &[(SyntaxKind, Range<usize>)], i: usize) -> usize {
 /// purposes (`starts_indented_comment`,
 /// `upcoming_indented_block_has_meta`,
 /// `is_indented_directive_continuation`). A new comment-class
-/// token would otherwise require three coordinated edits.
+/// token would otherwise require three coordinated edits;
+/// `is_comment_token_covers_all_comment_class_trivia` in this
+/// module's tests asserts membership stays in sync with `is_trivia`.
+///
+/// **Known CST/AST divergence**: The legacy AST parser
+/// (`crates/rustledger-parser/src/parser.rs:1225`) only treats
+/// `Token::Comment` and `Token::PercentComment` as in-body trivia
+/// for transaction / directive bodies. `Token::Shebang` and
+/// `Token::EmacsDirective` are processed only at top level
+/// (`parser.rs:1756`). So a deeper-indented `#+STARTUP: overview`
+/// between two postings is INSIDE the POSTING for the CST but
+/// TERMINATES the transaction for the AST. Phase-isolated: nothing
+/// downstream consumes `parse_structured` yet (the loader, LSP,
+/// validator all use the AST path), so the divergence is
+/// unobservable in production. Phase 5 deletes `parse_flat` and
+/// the AST; that reconciliation needs to pick one rule and apply
+/// it consistently.
 const fn is_comment_token(kind: SyntaxKind) -> bool {
     matches!(
         kind,
@@ -705,6 +720,48 @@ mod tests {
         assert_eq!(tree.text().to_string(), source);
         let structured = parse_structured(source);
         assert_eq!(structured.text().to_string(), source);
+    }
+
+    /// Drift guard: every comment-class trivia kind in `is_trivia()`
+    /// must also be covered by `is_comment_token`. Without this
+    /// invariant, a future lexer-level addition (a new comment-like
+    /// token added to `is_trivia()`) silently falls through three
+    /// call sites (`starts_indented_comment`,
+    /// `upcoming_indented_block_has_meta`,
+    /// `is_indented_directive_continuation`) and a deeper-indented
+    /// instance closes the open POSTING instead of attaching.
+    ///
+    /// The non-comment trivia kinds (BOM, WHITESPACE, NEWLINE) are
+    /// allow-listed here; if a future PR adds a new non-comment
+    /// trivia kind, this test forces an explicit decision about
+    /// whether it belongs in `is_comment_token`.
+    #[test]
+    fn is_comment_token_covers_all_comment_class_trivia() {
+        let non_comment_trivia = [SyntaxKind::BOM, SyntaxKind::WHITESPACE, SyntaxKind::NEWLINE];
+
+        let mut missed: Vec<SyntaxKind> = Vec::new();
+        for d in 0u16..=u16::MAX {
+            let Ok(kind) = SyntaxKind::try_from(d) else {
+                continue;
+            };
+            if !kind.is_trivia() {
+                continue;
+            }
+            if non_comment_trivia.contains(&kind) {
+                continue;
+            }
+            if !is_comment_token(kind) {
+                missed.push(kind);
+            }
+        }
+        assert!(
+            missed.is_empty(),
+            "trivia kinds present in is_trivia() but missing from \
+             is_comment_token: {missed:?}. Either add them to \
+             is_comment_token (if they are comment-class) or extend \
+             the non_comment_trivia allow-list in this test (if \
+             they are whitespace-class)",
+        );
     }
 
     #[test]

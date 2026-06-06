@@ -304,7 +304,17 @@ fn emit_directive_body(
 ///   single-char CURRENCY) WS] ACCOUNT ...`, full flag set per
 ///   [`starts_posting_sub_line`]):
 ///   close the open POSTING if any, then open a new POSTING and
-///   consume the line.
+///   consume the line. **Sibling POSTING indents are not required
+///   to be uniform**: a transaction with postings at different
+///   indent depths produces sibling POSTING nodes whose
+///   `open_posting_indent` reflects each one's own header indent.
+///   Subsequent metadata then attributes against the
+///   most-recently-opened POSTING's indent, which means
+///   metadata can attribute differently depending on which
+///   posting precedes it. Beancount's grammar uses uniform
+///   indentation by convention, so this is a defensive (not
+///   primary) shape; pinned by
+///   `postings_at_increasing_indents_produce_siblings_and_meta_attributes_to_latest`.
 /// - **Metadata sub-line** (`WS META_KEY ...`): if a POSTING is
 ///   open AND this line's indent is strictly greater than the
 ///   POSTING's indent, emit the `META_ENTRY` INSIDE the POSTING.
@@ -503,19 +513,24 @@ fn indent_width(tokens: &[(SyntaxKind, Range<usize>)], i: usize) -> usize {
 /// `is_comment_token_covers_all_comment_class_trivia` in this
 /// module's tests asserts membership stays in sync with `is_trivia`.
 ///
-/// **Known CST/AST divergence**: The legacy AST parser
-/// (`crates/rustledger-parser/src/parser.rs:1225`) only treats
+/// **Known CST/AST divergence**: The legacy AST parser's
+/// `parse_posting_metadata` / `parse_transaction_directive` paths
+/// in `crates/rustledger-parser/src/parser.rs` only treat
 /// `Token::Comment` and `Token::PercentComment` as in-body trivia
 /// for transaction / directive bodies. `Token::Shebang` and
 /// `Token::EmacsDirective` are processed only at top level
-/// (`parser.rs:1756`). So a deeper-indented `#+STARTUP: overview`
-/// between two postings is INSIDE the POSTING for the CST but
-/// TERMINATES the transaction for the AST. Phase-isolated: nothing
-/// downstream consumes `parse_structured` yet (the loader, LSP,
-/// validator all use the AST path), so the divergence is
-/// unobservable in production. Phase 5 deletes `parse_flat` and
-/// the AST; that reconciliation needs to pick one rule and apply
-/// it consistently.
+/// (`parse_directive` dispatch). So a deeper-indented `#+STARTUP:
+/// overview` between two postings is INSIDE the POSTING for the
+/// CST but TERMINATES the transaction for the AST. Phase-isolated
+/// in practice: the loader, LSP, validator, query, booking, and
+/// CLI all run through the AST path; the only current
+/// `parse_structured` consumers are this crate's corpus baseline
+/// test and `examples/dump_top_level_directives.rs`. Phase 5
+/// deletes `parse_flat` and the AST; that reconciliation should
+/// adopt the CST behavior (consistent with `is_trivia()`'s
+/// classification of all four comment-class tokens) rather than
+/// the AST behavior (an indented comment-class line silently
+/// terminating the directive is the surprising outcome).
 const fn is_comment_token(kind: SyntaxKind) -> bool {
     matches!(
         kind,
@@ -722,45 +737,66 @@ mod tests {
         assert_eq!(structured.text().to_string(), source);
     }
 
-    /// Drift guard: every comment-class trivia kind in `is_trivia()`
-    /// must also be covered by `is_comment_token`. Without this
-    /// invariant, a future lexer-level addition (a new comment-like
-    /// token added to `is_trivia()`) silently falls through three
-    /// call sites (`starts_indented_comment`,
-    /// `upcoming_indented_block_has_meta`,
-    /// `is_indented_directive_continuation`) and a deeper-indented
-    /// instance closes the open POSTING instead of attaching.
+    /// Drift guard: `is_comment_token` and `is_trivia` must agree on
+    /// what counts as comment-class trivia. Enforces two invariants:
     ///
-    /// The non-comment trivia kinds (BOM, WHITESPACE, NEWLINE) are
-    /// allow-listed here; if a future PR adds a new non-comment
-    /// trivia kind, this test forces an explicit decision about
-    /// whether it belongs in `is_comment_token`.
+    /// 1. `is_trivia() ⊆ is_comment_token ∪ non_comment_trivia`:
+    ///    every trivia kind is either a comment or in the explicit
+    ///    whitespace-class allow-list. Catches a new lexer-level
+    ///    addition to `is_trivia()` that's silently forgotten in
+    ///    `is_comment_token`.
+    /// 2. `is_comment_token ⊆ is_trivia()`: every kind
+    ///    `is_comment_token` says yes to is actually trivia. Catches
+    ///    a future edit to `is_comment_token`'s match arm that
+    ///    accidentally pulls in a non-trivia content token,
+    ///    silently extending indent-attribution to real content
+    ///    inside POSTING / directive bodies.
+    ///
+    /// On failure (1), if the new trivia kind is neither comment-
+    /// class nor whitespace-class (e.g., some future
+    /// `SECTION_HEADER` that should NOT be absorbed as a
+    /// continuation), don't reflexively add it to either set —
+    /// revisit whether the body-continuation predicates need a
+    /// different abstraction (`is_body_continuation_trivia` or
+    /// similar) and propagate the choice to the three call sites.
     #[test]
     fn is_comment_token_covers_all_comment_class_trivia() {
         let non_comment_trivia = [SyntaxKind::BOM, SyntaxKind::WHITESPACE, SyntaxKind::NEWLINE];
 
-        let mut missed: Vec<SyntaxKind> = Vec::new();
+        let mut trivia_missed_from_comment: Vec<SyntaxKind> = Vec::new();
+        let mut comment_not_trivia: Vec<SyntaxKind> = Vec::new();
         for d in 0u16..=u16::MAX {
             let Ok(kind) = SyntaxKind::try_from(d) else {
                 continue;
             };
-            if !kind.is_trivia() {
-                continue;
+            // Invariant 1: trivia (minus whitespace allow-list) ⊆ comment.
+            if kind.is_trivia() && !non_comment_trivia.contains(&kind) && !is_comment_token(kind) {
+                trivia_missed_from_comment.push(kind);
             }
-            if non_comment_trivia.contains(&kind) {
-                continue;
-            }
-            if !is_comment_token(kind) {
-                missed.push(kind);
+            // Invariant 2: comment ⊆ trivia.
+            if is_comment_token(kind) && !kind.is_trivia() {
+                comment_not_trivia.push(kind);
             }
         }
         assert!(
-            missed.is_empty(),
+            trivia_missed_from_comment.is_empty(),
             "trivia kinds present in is_trivia() but missing from \
-             is_comment_token: {missed:?}. Either add them to \
-             is_comment_token (if they are comment-class) or extend \
-             the non_comment_trivia allow-list in this test (if \
-             they are whitespace-class)",
+             is_comment_token: {trivia_missed_from_comment:?}. Three \
+             options: (a) add them to is_comment_token if they are \
+             comment-class; (b) extend the non_comment_trivia allow- \
+             list in this test if they are whitespace-class; (c) if \
+             they are neither, revisit whether the body-continuation \
+             predicates need a different abstraction and propagate \
+             the decision to the three call sites.",
+        );
+        assert!(
+            comment_not_trivia.is_empty(),
+            "is_comment_token claims these kinds are comments but \
+             is_trivia() disagrees: {comment_not_trivia:?}. Either \
+             add them to is_trivia() (if they really are trivia) or \
+             remove them from is_comment_token (if they are content \
+             tokens that should not be absorbed as comment \
+             continuations).",
         );
     }
 

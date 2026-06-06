@@ -1153,6 +1153,51 @@ fn posting_attached_meta_entry_terminates_at_next_posting() {
 }
 
 #[test]
+fn postings_at_increasing_indents_produce_siblings_and_meta_attributes_to_latest() {
+    use SyntaxKind::*;
+    // Defensive shape: Beancount normally uses uniform posting
+    // indentation. But the state machine doesn't enforce
+    // monotonic indent — two posting lines at different indents
+    // produce sibling POSTING nodes, and a subsequent META_ENTRY
+    // attributes against the MOST-RECENTLY-OPENED POSTING's
+    // indent. Pins this behavior so any future "monotonic indent"
+    // refactor is a visible, intentional break.
+    //
+    // Source:
+    //   posting at 2 spaces
+    //   posting at 4 spaces  (DEEPER than the first)
+    //   meta at 2 spaces     (NOT strictly deeper than 4)
+    //
+    // Expected: two POSTING siblings; the meta closes the second
+    // (its indent is shallower) and lands at TRANSACTION level.
+    let source = "2024-01-15 * \"x\"\n\
+                  \x20\x20Assets:A\n\
+                  \x20\x20\x20\x20Assets:B  10 USD\n\
+                  \x20\x20note: \"transaction-level\"\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let ps = postings(&tree);
+    assert_eq!(ps.len(), 2, "two POSTING siblings at different indents");
+
+    let txs: Vec<SyntaxNode> = tree
+        .children()
+        .filter(|c| c.kind() == TRANSACTION)
+        .collect();
+    assert_eq!(txs.len(), 1);
+    let tx_meta = txs[0].children().filter(|n| n.kind() == META_ENTRY).count();
+    assert_eq!(
+        tx_meta, 1,
+        "meta at shallower indent than the open POSTING lands at TRANSACTION level",
+    );
+    // Neither POSTING owns the META_ENTRY.
+    for p in &ps {
+        let inner_meta = p.children().filter(|n| n.kind() == META_ENTRY).count();
+        assert_eq!(inner_meta, 0);
+    }
+}
+
+#[test]
 fn meta_entry_before_first_posting_stays_at_transaction_level() {
     use SyntaxKind::*;
     // A META_ENTRY that appears BEFORE any POSTING (regardless of
@@ -1562,17 +1607,35 @@ fn directive_body_absorbs_indented_emacs_directive_when_block_has_meta() {
     assert_eq!(ds[0].kind(), OPEN_DIRECTIVE);
 
     // The EMACS_DIRECTIVE token lives inside the OPEN_DIRECTIVE,
-    // not orphaned at SOURCE_FILE level.
+    // not orphaned anywhere else in the tree. Use `descendants`
+    // symmetrically on both sides so a future refactor that wraps
+    // SOURCE_FILE trivia in any nested node doesn't make the
+    // orphan check vacuously pass.
+    let emacs_total = tree
+        .descendants_with_tokens()
+        .filter(|e| e.kind() == EMACS_DIRECTIVE)
+        .count();
     let emacs_in_directive = ds[0]
         .descendants_with_tokens()
         .filter(|e| e.kind() == EMACS_DIRECTIVE)
         .count();
-    assert_eq!(emacs_in_directive, 1);
-    let emacs_orphaned_at_source_file: usize = tree
-        .children_with_tokens()
-        .filter(|e| e.kind() == EMACS_DIRECTIVE)
+    assert_eq!(emacs_total, 1, "exactly one EMACS_DIRECTIVE in the tree");
+    assert_eq!(
+        emacs_in_directive, 1,
+        "EMACS_DIRECTIVE absorbed by OPEN_DIRECTIVE"
+    );
+
+    // The block_has_meta look-ahead is what kept the EMACS line
+    // inside the directive: the subsequent `key: "v"` becomes a
+    // META_ENTRY child of OPEN_DIRECTIVE. Assert that META_ENTRY
+    // actually appears so a regression that breaks the META_KEY
+    // arm (closing the directive AFTER the EMACS line but BEFORE
+    // the meta) fails here, not silently.
+    let meta_entries_in_directive = ds[0]
+        .descendants()
+        .filter(|n| n.kind() == META_ENTRY)
         .count();
-    assert_eq!(emacs_orphaned_at_source_file, 0);
+    assert_eq!(meta_entries_in_directive, 1, "META_ENTRY also absorbed");
 }
 
 #[test]
@@ -1601,6 +1664,13 @@ fn directive_body_does_not_absorb_indented_emacs_directive_when_no_meta() {
     // The EMACS_DIRECTIVE is rule-2 inter-directive trivia: it
     // attaches as LEADING trivia of the SECOND directive (per
     // `cst::trivia`), NOT as a continuation of the first.
+    // Symmetric `descendants` walks on both sides and a total-
+    // count sanity check guard against future structural changes
+    // that wrap trivia in a nested node.
+    let emacs_total = tree
+        .descendants_with_tokens()
+        .filter(|e| e.kind() == EMACS_DIRECTIVE)
+        .count();
     let emacs_in_first = ds[0]
         .descendants_with_tokens()
         .filter(|e| e.kind() == EMACS_DIRECTIVE)
@@ -1609,6 +1679,7 @@ fn directive_body_does_not_absorb_indented_emacs_directive_when_no_meta() {
         .descendants_with_tokens()
         .filter(|e| e.kind() == EMACS_DIRECTIVE)
         .count();
+    assert_eq!(emacs_total, 1, "exactly one EMACS_DIRECTIVE in the tree");
     assert_eq!(
         emacs_in_first, 0,
         "EMACS_DIRECTIVE is NOT absorbed by header-only directive"

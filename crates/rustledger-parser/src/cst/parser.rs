@@ -377,7 +377,7 @@ fn emit_transaction_body(
             }
             builder.start_node(SyntaxKind::POSTING.into());
             open_posting_indent = Some(sub_line_indent);
-            i = emit_through_terminator(builder, source, tokens, i);
+            i = emit_posting_line(builder, source, tokens, i);
         } else if starts_meta_sub_line(tokens, i) {
             close_open_posting_unless_attached(builder, &mut open_posting_indent, sub_line_indent);
             i = emit_body_sub_line(builder, source, tokens, i);
@@ -412,6 +412,268 @@ fn emit_transaction_body(
         builder.finish_node();
     }
 
+    i
+}
+
+/// Consume a posting sub-line through its terminator NEWLINE (or
+/// EOF), wrapping the `AMOUNT`, `COST_SPEC`, and `PRICE_ANNOTATION`
+/// sub-structures inside the already-open `POSTING` node.
+///
+/// Preconditions: the caller has opened a `POSTING` node and is
+/// positioned at the first token of the posting line (`WS`).
+/// `starts_posting_sub_line(tokens, i)` must hold.
+///
+/// Body shape (after the `WS [(flag) WS] ACCOUNT` prefix):
+///
+/// - `AMOUNT` is the units amount: `[(MINUS | PLUS)] NUMBER
+///   [WS CURRENCY]`, or a bare `CURRENCY`. Mirrors the legacy AST
+///   `parse_incomplete_amount`: NUMBER + optional CURRENCY, or
+///   CURRENCY alone. Wrapping skips intervening `WHITESPACE`
+///   between AMOUNT and CURRENCY so the sub-node owns both.
+/// - `COST_SPEC` is a bracketed cost annotation, opened by
+///   `LBRACE` (per-unit), `LBRACE_HASH` (per-unit + total), or
+///   `LDOUBLE_BRACE` (total-only), and closed by the matching
+///   `RBRACE` / `RDOUBLE_BRACE`. Contents stay flat children;
+///   phase 3 typed-AST will surface accessors. Per rule 5 of
+///   `cst::trivia`, an unclosed brace at EOF still gets wrapped
+///   (the `COST_SPEC` simply has no matching close-brace child).
+/// - `PRICE_ANNOTATION` is opened by `AT` (per-unit price) or
+///   `AT_AT` (total price). Its trailing amount is recursively
+///   wrapped in `AMOUNT` so the structure mirrors the units-amount
+///   case: `PRICE_ANNOTATION(AT [WS AMOUNT])`. The typed-AST
+///   decodes per-unit-vs-total by the opener token kind, then
+///   walks the `AMOUNT` child for the number/currency.
+///
+/// Canonical order on a well-formed posting line is `ACCOUNT
+/// [AMOUNT] [COST_SPEC] [PRICE_ANNOTATION]`. The state machine
+/// here is order-independent at the recognition level (each sub-
+/// structure wraps when its opener token is encountered), so a
+/// malformed posting with reordered or duplicated sub-structures
+/// still round-trips byte-identically — duplicates each get their
+/// own wrapper.
+///
+/// Trailing tokens (`WHITESPACE`, `COMMENT`, `PERCENT_COMMENT`,
+/// `NEWLINE`) that follow the last recognized sub-structure stay
+/// as flat children of `POSTING`.
+fn emit_posting_line(
+    builder: &mut GreenNodeBuilder<'_>,
+    source: &str,
+    tokens: &[(SyntaxKind, Range<usize>)],
+    mut i: usize,
+) -> usize {
+    // Emit the indent `WHITESPACE`.
+    if let Some((SyntaxKind::WHITESPACE, range)) = tokens.get(i) {
+        builder.token(SyntaxKind::WHITESPACE.into(), &source[range.clone()]);
+        i += 1;
+    }
+
+    // Optional flag (`FLAG` / `STAR` / `PENDING_KW` / `HASH` /
+    // single-char `CURRENCY`) + separating `WHITESPACE`. Mirrors
+    // `starts_posting_sub_line`'s flag arm.
+    let next = tokens.get(i).map(|(k, _)| *k);
+    let is_flag = match next {
+        Some(SyntaxKind::FLAG | SyntaxKind::STAR | SyntaxKind::PENDING_KW | SyntaxKind::HASH) => {
+            true
+        }
+        Some(SyntaxKind::CURRENCY) => tokens[i].1.len() == 1,
+        _ => false,
+    };
+    if is_flag {
+        // Emit flag + WHITESPACE pair.
+        if let Some((kind, range)) = tokens.get(i) {
+            builder.token((*kind).into(), &source[range.clone()]);
+            i += 1;
+        }
+        if let Some((SyntaxKind::WHITESPACE, range)) = tokens.get(i) {
+            builder.token(SyntaxKind::WHITESPACE.into(), &source[range.clone()]);
+            i += 1;
+        }
+    }
+
+    // Emit the required ACCOUNT.
+    if let Some((SyntaxKind::ACCOUNT, range)) = tokens.get(i) {
+        builder.token(SyntaxKind::ACCOUNT.into(), &source[range.clone()]);
+        i += 1;
+    }
+
+    // Scan post-ACCOUNT tokens, wrapping AMOUNT / COST_SPEC /
+    // PRICE_ANNOTATION as openers appear. Anything else flows as
+    // flat children of POSTING.
+    while i < tokens.len() {
+        let (kind, range) = (tokens[i].0, tokens[i].1.clone());
+        if kind == SyntaxKind::NEWLINE {
+            builder.token(kind.into(), &source[range]);
+            i += 1;
+            break;
+        }
+        if starts_amount(tokens, i) {
+            i = emit_amount(builder, source, tokens, i);
+            continue;
+        }
+        if matches!(
+            kind,
+            SyntaxKind::L_BRACE | SyntaxKind::L_BRACE_HASH | SyntaxKind::L_DOUBLE_BRACE,
+        ) {
+            i = emit_cost_spec(builder, source, tokens, i);
+            continue;
+        }
+        if matches!(kind, SyntaxKind::AT | SyntaxKind::AT_AT) {
+            i = emit_price_annotation(builder, source, tokens, i);
+            continue;
+        }
+        // Flat passthrough (WHITESPACE, COMMENT, PERCENT_COMMENT,
+        // anything else).
+        builder.token(kind.into(), &source[range]);
+        i += 1;
+    }
+
+    i
+}
+
+/// Returns true iff `tokens[i..]` starts an AMOUNT-shape token
+/// run: `(MINUS | PLUS) NUMBER ...`, or a bare `NUMBER`, or a
+/// bare `CURRENCY`. Used by `emit_posting_line` to gate whether to
+/// open an `AMOUNT` wrapper at this position.
+fn starts_amount(tokens: &[(SyntaxKind, Range<usize>)], i: usize) -> bool {
+    match tokens.get(i).map(|(k, _)| *k) {
+        Some(SyntaxKind::NUMBER | SyntaxKind::CURRENCY) => true,
+        Some(SyntaxKind::MINUS | SyntaxKind::PLUS) => {
+            matches!(tokens.get(i + 1).map(|(k, _)| *k), Some(SyntaxKind::NUMBER))
+        }
+        _ => false,
+    }
+}
+
+/// Emit an `AMOUNT` node containing the units amount: optional
+/// sign + `NUMBER` + optional `WS` + `CURRENCY`, or a bare
+/// `CURRENCY`. Stops at the first non-amount token. Returns the
+/// new index.
+fn emit_amount(
+    builder: &mut GreenNodeBuilder<'_>,
+    source: &str,
+    tokens: &[(SyntaxKind, Range<usize>)],
+    mut i: usize,
+) -> usize {
+    builder.start_node(SyntaxKind::AMOUNT.into());
+
+    // Optional sign.
+    if matches!(
+        tokens.get(i).map(|(k, _)| *k),
+        Some(SyntaxKind::MINUS | SyntaxKind::PLUS),
+    ) {
+        let (kind, range) = (tokens[i].0, tokens[i].1.clone());
+        builder.token(kind.into(), &source[range]);
+        i += 1;
+    }
+
+    // NUMBER (if NUMBER-led shape).
+    if matches!(tokens.get(i).map(|(k, _)| *k), Some(SyntaxKind::NUMBER)) {
+        let range = tokens[i].1.clone();
+        builder.token(SyntaxKind::NUMBER.into(), &source[range]);
+        i += 1;
+        // Optional WS + CURRENCY.
+        if matches!(tokens.get(i).map(|(k, _)| *k), Some(SyntaxKind::WHITESPACE),)
+            && matches!(
+                tokens.get(i + 1).map(|(k, _)| *k),
+                Some(SyntaxKind::CURRENCY),
+            )
+        {
+            let ws_range = tokens[i].1.clone();
+            builder.token(SyntaxKind::WHITESPACE.into(), &source[ws_range]);
+            i += 1;
+            let cur_range = tokens[i].1.clone();
+            builder.token(SyntaxKind::CURRENCY.into(), &source[cur_range]);
+            i += 1;
+        }
+    } else if matches!(tokens.get(i).map(|(k, _)| *k), Some(SyntaxKind::CURRENCY)) {
+        // Bare CURRENCY (currency-only amount).
+        let range = tokens[i].1.clone();
+        builder.token(SyntaxKind::CURRENCY.into(), &source[range]);
+        i += 1;
+    }
+
+    builder.finish_node();
+    i
+}
+
+/// Emit a `COST_SPEC` node spanning `LBRACE` / `LBRACE_HASH` /
+/// `LDOUBLE_BRACE` ... matching `RBRACE` / `RDOUBLE_BRACE`. Per
+/// rule 5 (unterminated final directive), an unclosed brace at
+/// EOF or hitting a NEWLINE still gets wrapped — the `COST_SPEC`
+/// simply has no matching close-brace child. Contents stay flat
+/// children of `COST_SPEC`.
+fn emit_cost_spec(
+    builder: &mut GreenNodeBuilder<'_>,
+    source: &str,
+    tokens: &[(SyntaxKind, Range<usize>)],
+    mut i: usize,
+) -> usize {
+    builder.start_node(SyntaxKind::COST_SPEC.into());
+
+    // Emit opening brace token.
+    if let Some((kind, range)) = tokens.get(i) {
+        builder.token((*kind).into(), &source[range.clone()]);
+        i += 1;
+    }
+
+    // Emit content tokens up to and including the matching close
+    // brace, or until NEWLINE / EOF (unclosed-brace case).
+    while i < tokens.len() {
+        let (kind, range) = (tokens[i].0, tokens[i].1.clone());
+        if kind == SyntaxKind::NEWLINE {
+            // Unclosed brace: stop BEFORE the NEWLINE so the
+            // NEWLINE remains a sibling of COST_SPEC (the
+            // posting-line terminator), not a child.
+            break;
+        }
+        builder.token(kind.into(), &source[range]);
+        i += 1;
+        if matches!(kind, SyntaxKind::R_BRACE | SyntaxKind::R_DOUBLE_BRACE) {
+            break;
+        }
+    }
+
+    builder.finish_node();
+    i
+}
+
+/// Emit a `PRICE_ANNOTATION` node opened by `AT` or `AT_AT`,
+/// optionally followed by `WS` and a nested `AMOUNT`. The nested
+/// `AMOUNT` mirrors the units-amount wrapping above; the typed-AST
+/// decodes per-unit-vs-total by inspecting the opener token kind
+/// (`AT` vs `AT_AT`) and walks the `AMOUNT` child for the number
+/// and currency. Avoids absorbing a trailing-only `WHITESPACE`
+/// before a comment or `NEWLINE` (only swallows WS that precedes
+/// an actual amount start).
+fn emit_price_annotation(
+    builder: &mut GreenNodeBuilder<'_>,
+    source: &str,
+    tokens: &[(SyntaxKind, Range<usize>)],
+    mut i: usize,
+) -> usize {
+    builder.start_node(SyntaxKind::PRICE_ANNOTATION.into());
+
+    // Emit the `AT` / `AT_AT` opener.
+    if let Some((kind, range)) = tokens.get(i) {
+        builder.token((*kind).into(), &source[range.clone()]);
+        i += 1;
+    }
+
+    // Optional intervening WHITESPACE, but only if an amount
+    // follows; trailing-only WS belongs as a sibling of
+    // PRICE_ANNOTATION, not a child.
+    let ws_then_amount = matches!(tokens.get(i).map(|(k, _)| *k), Some(SyntaxKind::WHITESPACE),)
+        && starts_amount(tokens, i + 1);
+    if ws_then_amount {
+        let ws_range = tokens[i].1.clone();
+        builder.token(SyntaxKind::WHITESPACE.into(), &source[ws_range]);
+        i += 1;
+    }
+    if starts_amount(tokens, i) {
+        i = emit_amount(builder, source, tokens, i);
+    }
+
+    builder.finish_node();
     i
 }
 

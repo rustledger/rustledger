@@ -971,10 +971,9 @@ fn posting_wraps_account_only_line() {
 #[test]
 fn posting_wraps_account_with_amount_and_currency() {
     use SyntaxKind::*;
-    // A normal posting with amount + currency. POSTING contains the
-    // indent WHITESPACE, ACCOUNT, inter-token WHITESPACE, NUMBER,
-    // WHITESPACE, CURRENCY, NEWLINE. AMOUNT sub-node wrapping is
-    // PR 2.2c — for now, amount tokens are flat children of POSTING.
+    // A normal posting with amount + currency. POSTING contains
+    // the indent WHITESPACE, ACCOUNT, inter-token WHITESPACE, an
+    // AMOUNT sub-node (PR 2.2c), then NEWLINE.
     let source = "2024-01-15 * \"x\"\n\
                   \x20\x20Assets:Cash  -5.00 USD\n";
     let tree = parse_structured(source);
@@ -984,17 +983,29 @@ fn posting_wraps_account_with_amount_and_currency() {
     assert_eq!(ps.len(), 1);
     assert_eq!(
         elements_of(&ps[0]),
-        tok_seq(&[
-            WHITESPACE, ACCOUNT, WHITESPACE, MINUS, NUMBER, WHITESPACE, CURRENCY, NEWLINE
-        ]),
+        vec![
+            Element::Tok(WHITESPACE),
+            Element::Tok(ACCOUNT),
+            Element::Tok(WHITESPACE),
+            Element::Node(AMOUNT),
+            Element::Tok(NEWLINE),
+        ],
+    );
+
+    // AMOUNT internal shape: MINUS NUMBER WS CURRENCY.
+    let amounts: Vec<SyntaxNode> = ps[0].children().filter(|n| n.kind() == AMOUNT).collect();
+    assert_eq!(amounts.len(), 1);
+    assert_eq!(
+        elements_of(&amounts[0]),
+        tok_seq(&[MINUS, NUMBER, WHITESPACE, CURRENCY]),
     );
 }
 
 #[test]
 fn posting_wraps_each_of_multiple_postings_in_a_transaction() {
     use SyntaxKind::*;
-    // Two postings → two POSTING nodes; each contains exactly its
-    // own sub-line.
+    // Two postings → two POSTING nodes; each wraps an AMOUNT
+    // sub-node around the NUMBER + CURRENCY portion (PR 2.2c).
     let source = "2024-01-15 * \"x\"\n\
                   \x20\x20Assets:Cash  -5.00 USD\n\
                   \x20\x20Expenses:Food  5.00 USD\n";
@@ -1004,23 +1015,23 @@ fn posting_wraps_each_of_multiple_postings_in_a_transaction() {
     let ps = postings(&tree);
     assert_eq!(ps.len(), 2);
     for p in &ps {
-        let kinds: Vec<SyntaxKind> = elements_of(p)
-            .iter()
-            .filter_map(|e| match e {
-                Element::Tok(k) => Some(*k),
-                Element::Node(_) => None,
-            })
-            .collect();
-        assert!(kinds.contains(&ACCOUNT) && kinds.contains(&NUMBER) && kinds.contains(&CURRENCY));
+        assert!(
+            elements_of(p)
+                .iter()
+                .any(|e| matches!(e, Element::Tok(ACCOUNT)))
+        );
+        let n_amounts = p.children().filter(|n| n.kind() == AMOUNT).count();
+        assert_eq!(n_amounts, 1, "each POSTING contains exactly one AMOUNT");
     }
 }
 
 #[test]
 fn posting_with_pending_flag_wraps_flag_inside_node() {
     use SyntaxKind::*;
-    // Beancount accepts `! Account ...` and `* Account ...` for
-    // posting-level flags. The PENDING_KW / STAR / single-char FLAG
-    // sits between the indent and the ACCOUNT inside the POSTING.
+    // `! Assets:Cash ...` — the PENDING_KW flag sits between the
+    // indent and the ACCOUNT. After PR 2.2c, the amount portion is
+    // wrapped in an AMOUNT sub-node; the flag and account remain
+    // flat tokens inside POSTING.
     let source = "2024-01-15 * \"x\"\n\
                   \x20\x20! Assets:Cash  -5.00 USD\n";
     let tree = parse_structured(source);
@@ -1028,18 +1039,16 @@ fn posting_with_pending_flag_wraps_flag_inside_node() {
 
     let ps = postings(&tree);
     assert_eq!(ps.len(), 1);
-    let kinds: Vec<SyntaxKind> = elements_of(&ps[0])
-        .iter()
-        .filter_map(|e| match e {
-            Element::Tok(k) => Some(*k),
-            Element::Node(_) => None,
-        })
-        .collect();
     assert_eq!(
-        kinds,
+        elements_of(&ps[0]),
         vec![
-            WHITESPACE, PENDING_KW, WHITESPACE, ACCOUNT, WHITESPACE, MINUS, NUMBER, WHITESPACE,
-            CURRENCY, NEWLINE
+            Element::Tok(WHITESPACE),
+            Element::Tok(PENDING_KW),
+            Element::Tok(WHITESPACE),
+            Element::Tok(ACCOUNT),
+            Element::Tok(WHITESPACE),
+            Element::Node(AMOUNT),
+            Element::Tok(NEWLINE),
         ],
     );
 }
@@ -1354,18 +1363,22 @@ fn posting_at_eof_without_trailing_newline_still_wrapped() {
 
     let ps = postings(&tree);
     assert_eq!(ps.len(), 1);
-    let kinds: Vec<SyntaxKind> = elements_of(&ps[0])
-        .iter()
-        .filter_map(|e| match e {
-            Element::Tok(k) => Some(*k),
-            Element::Node(_) => None,
-        })
-        .collect();
+    // POSTING children: WS, ACCOUNT, WS, AMOUNT (no trailing
+    // NEWLINE because of rule 5).
     assert_eq!(
-        kinds,
+        elements_of(&ps[0]),
         vec![
-            WHITESPACE, ACCOUNT, WHITESPACE, MINUS, NUMBER, WHITESPACE, CURRENCY
+            Element::Tok(WHITESPACE),
+            Element::Tok(ACCOUNT),
+            Element::Tok(WHITESPACE),
+            Element::Node(AMOUNT),
         ],
+    );
+    // AMOUNT internal shape, also unterminated.
+    let amounts: Vec<SyntaxNode> = ps[0].children().filter(|n| n.kind() == AMOUNT).collect();
+    assert_eq!(
+        elements_of(&amounts[0]),
+        tok_seq(&[MINUS, NUMBER, WHITESPACE, CURRENCY]),
     );
 }
 
@@ -1797,6 +1810,444 @@ fn single_char_currency_flagged_posting_wraps_currency_as_flag() {
         })
         .collect();
     assert!(kinds.starts_with(&[WHITESPACE, CURRENCY, WHITESPACE, ACCOUNT]));
+}
+
+// ---------- Phase 2.2c: AMOUNT / COST_SPEC / PRICE_ANNOTATION ----------
+
+/// Walk all `AMOUNT` descendants of a node, in source order.
+fn amounts(node: &SyntaxNode) -> Vec<SyntaxNode> {
+    node.descendants()
+        .filter(|n| n.kind() == SyntaxKind::AMOUNT)
+        .collect()
+}
+
+/// Walk all `COST_SPEC` descendants of a node, in source order.
+fn cost_specs(node: &SyntaxNode) -> Vec<SyntaxNode> {
+    node.descendants()
+        .filter(|n| n.kind() == SyntaxKind::COST_SPEC)
+        .collect()
+}
+
+/// Walk all `PRICE_ANNOTATION` descendants of a node, in source order.
+fn price_annotations(node: &SyntaxNode) -> Vec<SyntaxNode> {
+    node.descendants()
+        .filter(|n| n.kind() == SyntaxKind::PRICE_ANNOTATION)
+        .collect()
+}
+
+#[test]
+fn amount_wraps_positive_number_and_currency() {
+    use SyntaxKind::*;
+    let source = "2024-01-15 * \"x\"\n\
+                  \x20\x20Assets:Cash  100.00 USD\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let amts = amounts(&tree);
+    assert_eq!(amts.len(), 1);
+    assert_eq!(
+        elements_of(&amts[0]),
+        tok_seq(&[NUMBER, WHITESPACE, CURRENCY]),
+    );
+}
+
+#[test]
+fn amount_wraps_negative_number_and_currency_with_sign_token() {
+    use SyntaxKind::*;
+    // Lexer emits MINUS + NUMBER for negative amounts (enables
+    // arithmetic expressions). The sign token lives INSIDE the
+    // AMOUNT wrapper.
+    let source = "2024-01-15 * \"x\"\n\
+                  \x20\x20Assets:Cash  -100.00 USD\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let amts = amounts(&tree);
+    assert_eq!(amts.len(), 1);
+    assert_eq!(
+        elements_of(&amts[0]),
+        tok_seq(&[MINUS, NUMBER, WHITESPACE, CURRENCY]),
+    );
+}
+
+#[test]
+fn amount_wraps_explicit_plus_sign_and_currency() {
+    use SyntaxKind::*;
+    // `+100 USD` — the lexer emits PLUS + NUMBER; both live
+    // inside AMOUNT.
+    let source = "2024-01-15 * \"x\"\n\
+                  \x20\x20Assets:Cash  +100.00 USD\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let amts = amounts(&tree);
+    assert_eq!(amts.len(), 1);
+    assert_eq!(
+        elements_of(&amts[0]),
+        tok_seq(&[PLUS, NUMBER, WHITESPACE, CURRENCY]),
+    );
+}
+
+#[test]
+fn amount_wraps_number_only_no_currency() {
+    use SyntaxKind::*;
+    // Incomplete amount: NUMBER without a trailing currency.
+    // AMOUNT wraps the NUMBER alone.
+    let source = "2024-01-15 * \"x\"\n\
+                  \x20\x20Assets:Cash  100.00\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let amts = amounts(&tree);
+    assert_eq!(amts.len(), 1);
+    assert_eq!(elements_of(&amts[0]), tok_seq(&[NUMBER]));
+}
+
+#[test]
+fn amount_wraps_currency_only_no_number() {
+    use SyntaxKind::*;
+    // Incomplete amount: bare CURRENCY (currency-only amount).
+    // AMOUNT wraps the CURRENCY alone.
+    let source = "2024-01-15 * \"x\"\n\
+                  \x20\x20Assets:Cash  USD\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let amts = amounts(&tree);
+    assert_eq!(amts.len(), 1);
+    assert_eq!(elements_of(&amts[0]), tok_seq(&[CURRENCY]));
+}
+
+#[test]
+fn auto_posting_with_no_amount_has_no_amount_node() {
+    // Account-only "auto" posting — the booker fills in the
+    // amount from the others. No AMOUNT wrapper because there's
+    // nothing to wrap.
+    let source = "2024-01-15 * \"x\"\n\
+                  \x20\x20Assets:Cash\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let amts = amounts(&tree);
+    assert_eq!(amts.len(), 0, "auto posting has no AMOUNT child");
+    let ps = postings(&tree);
+    assert_eq!(ps.len(), 1);
+}
+
+#[test]
+fn cost_spec_wraps_simple_per_unit_cost() {
+    use SyntaxKind::*;
+    // Per-unit cost spec: `{NUMBER WS CURRENCY}`. COST_SPEC's
+    // direct children include the brace tokens and the inner
+    // amount tokens flat (per-2.2c design — contents are
+    // unstructured until phase 3).
+    let source = "2024-01-15 * \"x\"\n\
+                  \x20\x20Assets:Cash  10 HOOL {500.00 USD}\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let cs = cost_specs(&tree);
+    assert_eq!(cs.len(), 1);
+    assert_eq!(
+        elements_of(&cs[0]),
+        tok_seq(&[L_BRACE, NUMBER, WHITESPACE, CURRENCY, R_BRACE]),
+    );
+}
+
+#[test]
+fn cost_spec_wraps_total_double_brace() {
+    use SyntaxKind::*;
+    // `{{ ... }}` total-cost form.
+    let source = "2024-01-15 * \"x\"\n\
+                  \x20\x20Assets:Cash  10 HOOL {{5000.00 USD}}\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let cs = cost_specs(&tree);
+    assert_eq!(cs.len(), 1);
+    assert_eq!(
+        elements_of(&cs[0]),
+        tok_seq(&[L_DOUBLE_BRACE, NUMBER, WHITESPACE, CURRENCY, R_DOUBLE_BRACE]),
+    );
+}
+
+#[test]
+fn cost_spec_wraps_per_unit_plus_total_brace_hash() {
+    use SyntaxKind::*;
+    // `{# ... }` per-unit + total form (HASH separator inside).
+    let source = "2024-01-15 * \"x\"\n\
+                  \x20\x20Assets:Cash  10 HOOL {# 5000.00 USD}\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let cs = cost_specs(&tree);
+    assert_eq!(cs.len(), 1);
+    // L_BRACE_HASH opener, content tokens, R_BRACE close.
+    let kinds: Vec<SyntaxKind> = elements_of(&cs[0])
+        .iter()
+        .filter_map(|e| match e {
+            Element::Tok(k) => Some(*k),
+            Element::Node(_) => None,
+        })
+        .collect();
+    assert!(kinds.contains(&L_BRACE_HASH));
+    assert!(kinds.contains(&R_BRACE));
+}
+
+#[test]
+fn cost_spec_unclosed_at_eof_still_wraps_per_rule_5() {
+    use SyntaxKind::*;
+    // Per rule 5, an unclosed brace at EOF still gets wrapped;
+    // the COST_SPEC simply has no matching close-brace child.
+    let source = "2024-01-15 * \"x\"\n\
+                  \x20\x20Assets:Cash  10 HOOL {500.00 USD";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let cs = cost_specs(&tree);
+    assert_eq!(cs.len(), 1);
+    let kinds: Vec<SyntaxKind> = elements_of(&cs[0])
+        .iter()
+        .filter_map(|e| match e {
+            Element::Tok(k) => Some(*k),
+            Element::Node(_) => None,
+        })
+        .collect();
+    assert!(kinds.contains(&L_BRACE));
+    assert!(!kinds.contains(&R_BRACE), "no close brace consumed");
+    assert!(kinds.contains(&CURRENCY));
+}
+
+#[test]
+fn price_annotation_wraps_per_unit_with_nested_amount() {
+    use SyntaxKind::*;
+    // `@ NUMBER WS CURRENCY` — per-unit price. PRICE_ANNOTATION
+    // contains AT + WHITESPACE + AMOUNT.
+    let source = "2024-01-15 * \"x\"\n\
+                  \x20\x20Assets:Cash  10 HOOL @ 500.00 USD\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let prices = price_annotations(&tree);
+    assert_eq!(prices.len(), 1);
+    assert_eq!(
+        elements_of(&prices[0]),
+        vec![
+            Element::Tok(AT),
+            Element::Tok(WHITESPACE),
+            Element::Node(AMOUNT),
+        ],
+    );
+    // The nested AMOUNT has its own NUMBER/CURRENCY.
+    let inner_amount = prices[0].children().find(|n| n.kind() == AMOUNT).unwrap();
+    assert_eq!(
+        elements_of(&inner_amount),
+        tok_seq(&[NUMBER, WHITESPACE, CURRENCY]),
+    );
+}
+
+#[test]
+fn price_annotation_wraps_total_at_at() {
+    use SyntaxKind::*;
+    // `@@ NUMBER WS CURRENCY` — total price. The opener distinguishes
+    // per-unit (AT) from total (AT_AT).
+    let source = "2024-01-15 * \"x\"\n\
+                  \x20\x20Assets:Cash  10 HOOL @@ 5000.00 USD\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let prices = price_annotations(&tree);
+    assert_eq!(prices.len(), 1);
+    let first_child_kind = elements_of(&prices[0]).first().copied();
+    assert_eq!(first_child_kind, Some(Element::Tok(AT_AT)));
+    let inner_amount = prices[0].children().find(|n| n.kind() == AMOUNT).unwrap();
+    assert_eq!(
+        elements_of(&inner_amount),
+        tok_seq(&[NUMBER, WHITESPACE, CURRENCY]),
+    );
+}
+
+#[test]
+fn posting_with_amount_cost_spec_and_price_annotation_all_three() {
+    use SyntaxKind::*;
+    // Full posting form: units AMOUNT, COST_SPEC, PRICE_ANNOTATION
+    // in canonical order. Each gets its own wrapper inside POSTING.
+    let source = "2024-01-15 * \"x\"\n\
+                  \x20\x20Assets:Cash  10 HOOL {500.00 USD} @ 510.00 USD\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let ps = postings(&tree);
+    assert_eq!(ps.len(), 1);
+    let posting_kids = elements_of(&ps[0]);
+    // Locate the three sub-nodes.
+    let amount_count = posting_kids
+        .iter()
+        .filter(|e| matches!(e, Element::Node(AMOUNT)))
+        .count();
+    let cost_count = posting_kids
+        .iter()
+        .filter(|e| matches!(e, Element::Node(COST_SPEC)))
+        .count();
+    let price_count = posting_kids
+        .iter()
+        .filter(|e| matches!(e, Element::Node(PRICE_ANNOTATION)))
+        .count();
+    assert_eq!(amount_count, 1, "one units AMOUNT");
+    assert_eq!(cost_count, 1, "one COST_SPEC");
+    assert_eq!(price_count, 1, "one PRICE_ANNOTATION");
+
+    // Source-order: AMOUNT before COST_SPEC before PRICE_ANNOTATION.
+    let amount_idx = posting_kids
+        .iter()
+        .position(|e| matches!(e, Element::Node(AMOUNT)))
+        .unwrap();
+    let cost_idx = posting_kids
+        .iter()
+        .position(|e| matches!(e, Element::Node(COST_SPEC)))
+        .unwrap();
+    let price_idx = posting_kids
+        .iter()
+        .position(|e| matches!(e, Element::Node(PRICE_ANNOTATION)))
+        .unwrap();
+    assert!(amount_idx < cost_idx);
+    assert!(cost_idx < price_idx);
+}
+
+#[test]
+fn posting_amount_and_trailing_comment_keeps_comment_outside_amount() {
+    use SyntaxKind::*;
+    // A trailing same-line comment after the amount stays as a
+    // flat POSTING child, NOT inside AMOUNT (the amount wrapper
+    // closes at the last currency / number).
+    let source = "2024-01-15 * \"x\"\n\
+                  \x20\x20Assets:Cash  100 USD ; trailing\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let amts = amounts(&tree);
+    assert_eq!(amts.len(), 1);
+    // The COMMENT token lives at POSTING level, not inside AMOUNT.
+    let amount_comments = amts[0]
+        .descendants_with_tokens()
+        .filter(|e| e.kind() == COMMENT)
+        .count();
+    assert_eq!(amount_comments, 0, "comment is not absorbed into AMOUNT");
+    let ps = postings(&tree);
+    let posting_comments = ps[0]
+        .children_with_tokens()
+        .filter(|e| e.kind() == COMMENT)
+        .count();
+    assert_eq!(posting_comments, 1, "comment is a POSTING flat child");
+}
+
+#[test]
+fn posting_attached_meta_entry_after_amount_still_attaches() {
+    use SyntaxKind::*;
+    // Combines AMOUNT wrapping with the indent-aware meta
+    // attribution from PR 2.2b: a deeper-indented META_KEY after
+    // a posting with an AMOUNT still attaches to the POSTING.
+    let source = "2024-01-15 * \"x\"\n\
+                  \x20\x20Assets:Cash  10 HOOL {500.00 USD}\n\
+                  \x20\x20\x20\x20note: \"posting-attached\"\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let ps = postings(&tree);
+    assert_eq!(ps.len(), 1);
+    let amount_count = ps[0].children().filter(|n| n.kind() == AMOUNT).count();
+    let cost_count = ps[0].children().filter(|n| n.kind() == COST_SPEC).count();
+    let meta_count = ps[0].children().filter(|n| n.kind() == META_ENTRY).count();
+    assert_eq!(amount_count, 1);
+    assert_eq!(cost_count, 1);
+    assert_eq!(meta_count, 1);
+}
+
+#[test]
+fn hash_flagged_posting_with_amount_wraps_both() {
+    use SyntaxKind::*;
+    // HASH flag + AMOUNT together — pins that the flag-flagged
+    // arm of starts_posting_sub_line still allows AMOUNT wrapping
+    // inside the same POSTING.
+    let source = "2024-01-15 * \"x\"\n\
+                  \x20\x20# Assets:Cash  -5.00 USD\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let ps = postings(&tree);
+    assert_eq!(ps.len(), 1);
+    let amount_count = ps[0].children().filter(|n| n.kind() == AMOUNT).count();
+    assert_eq!(amount_count, 1);
+    // The HASH and ACCOUNT are flat siblings, then AMOUNT.
+    let first_three: Vec<Element> = elements_of(&ps[0]).into_iter().take(4).collect();
+    assert_eq!(
+        first_three,
+        vec![
+            Element::Tok(WHITESPACE),
+            Element::Tok(HASH),
+            Element::Tok(WHITESPACE),
+            Element::Tok(ACCOUNT),
+        ],
+    );
+}
+
+#[test]
+fn amount_with_only_negative_number_no_currency() {
+    use SyntaxKind::*;
+    // `MINUS NUMBER` without a CURRENCY (incomplete amount).
+    // AMOUNT wraps MINUS NUMBER only.
+    let source = "2024-01-15 * \"x\"\n\
+                  \x20\x20Assets:Cash  -100\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let amts = amounts(&tree);
+    assert_eq!(amts.len(), 1);
+    assert_eq!(elements_of(&amts[0]), tok_seq(&[MINUS, NUMBER]));
+}
+
+#[test]
+fn price_annotation_without_amount_still_wraps_opener_only() {
+    use SyntaxKind::*;
+    // Degenerate `@` with no following amount (malformed).
+    // PRICE_ANNOTATION wraps the AT opener and stops; round-trip
+    // is preserved.
+    let source = "2024-01-15 * \"x\"\n\
+                  \x20\x20Assets:Cash  10 HOOL @\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let prices = price_annotations(&tree);
+    assert_eq!(prices.len(), 1);
+    assert_eq!(elements_of(&prices[0]), tok_seq(&[AT]));
+}
+
+#[test]
+fn cost_spec_with_inner_label_and_date_stays_flat_internally() {
+    use SyntaxKind::*;
+    // `{NUMBER CURRENCY, "label", DATE}` — multi-component cost.
+    // COST_SPEC's internal structure is flat for phase 2.2c;
+    // phase 3 typed-AST will surface accessors.
+    let source = "2024-01-15 * \"x\"\n\
+                  \x20\x20Assets:Cash  10 HOOL {500.00 USD, \"lot1\", 2024-01-15}\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let cs = cost_specs(&tree);
+    assert_eq!(cs.len(), 1);
+    let kinds: Vec<SyntaxKind> = elements_of(&cs[0])
+        .iter()
+        .filter_map(|e| match e {
+            Element::Tok(k) => Some(*k),
+            Element::Node(_) => None,
+        })
+        .collect();
+    assert!(kinds.contains(&NUMBER));
+    assert!(kinds.contains(&CURRENCY));
+    assert!(kinds.contains(&STRING));
+    assert!(kinds.contains(&DATE));
+    assert!(kinds.contains(&L_BRACE));
+    assert!(kinds.contains(&R_BRACE));
 }
 
 #[test]

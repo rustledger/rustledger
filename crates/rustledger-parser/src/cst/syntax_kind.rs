@@ -236,8 +236,36 @@ pub enum SyntaxKind {
     // becomes a child of the POSTING; a META_ENTRY at the same
     // indent terminates the POSTING and stays at TRANSACTION
     // level. AMOUNT / COST_SPEC / PRICE_ANNOTATION sub-nodes
-    // inside POSTING are PR 2.2c.
+    // inside POSTING are PR 2.2c (below).
     POSTING,
+
+    // Phase 2.2c: AMOUNT wraps the units-amount portion of a
+    // posting line, i.e. `[(MINUS | PLUS)] NUMBER [WS CURRENCY]`,
+    // a bare `NUMBER` (incomplete amount with no currency), or a
+    // bare `CURRENCY` (currency-only amount). Appears after the
+    // ACCOUNT and before any COST_SPEC / PRICE_ANNOTATION. Mirrors
+    // the legacy AST `parse_incomplete_amount` shape: NUMBER plus
+    // optional CURRENCY, or CURRENCY alone.
+    AMOUNT,
+
+    // Phase 2.2c: COST_SPEC wraps a bracketed cost annotation
+    // inside a posting line, i.e. `LBRACE ... RBRACE`,
+    // `LBRACE_HASH ... RBRACE` (per-unit + total), or
+    // `LDOUBLE_BRACE ... RDOUBLE_BRACE` (total-only). Contents
+    // stay flat children of COST_SPEC for now (phase 3 typed-AST
+    // will surface accessors); an unclosed brace at EOF still
+    // gets wrapped (the COST_SPEC simply has no matching closing
+    // brace child) per rule 5.
+    COST_SPEC,
+
+    // Phase 2.2c: PRICE_ANNOTATION wraps a price clause inside a
+    // posting line, i.e. `(AT | AT_AT) WS [AMOUNT-shape tokens]`.
+    // Beancount uses `@` for per-unit price and `@@` for total
+    // price. The price's own amount is NOT recursively wrapped in
+    // an AMOUNT node — it stays as flat children of
+    // PRICE_ANNOTATION so the typed-AST can decode `@`-vs-`@@`
+    // semantics without two-level walking.
+    PRICE_ANNOTATION,
 }
 
 impl SyntaxKind {
@@ -409,6 +437,9 @@ mod tests {
             SyntaxKind::TRANSACTION,
             SyntaxKind::META_ENTRY,
             SyntaxKind::POSTING,
+            SyntaxKind::AMOUNT,
+            SyntaxKind::COST_SPEC,
+            SyntaxKind::PRICE_ANNOTATION,
         ];
         for kind in node_kinds {
             assert!(
@@ -471,6 +502,9 @@ mod tests {
             SyntaxKind::TRANSACTION,
             SyntaxKind::META_ENTRY,
             SyntaxKind::POSTING,
+            SyntaxKind::AMOUNT,
+            SyntaxKind::COST_SPEC,
+            SyntaxKind::PRICE_ANNOTATION,
         ];
         let observed_nodes: Vec<SyntaxKind> = all_kinds
             .iter()

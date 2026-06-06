@@ -883,6 +883,27 @@ fn meta_entry_inside_transaction_body() {
 }
 
 #[test]
+fn meta_entry_at_eof_without_trailing_newline() {
+    use SyntaxKind::*;
+    // Per rule 5 of `cst::trivia` (unterminated final directive),
+    // a metadata sub-line that ends mid-content without a final
+    // NEWLINE still gets wrapped in META_ENTRY — the META_ENTRY
+    // simply has no NEWLINE child. Pins the rustdoc claim.
+    let source = "2024-01-01 open Assets:Cash\n  key: \"v\"";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let mes = meta_entries(&tree);
+    assert_eq!(mes.len(), 1);
+    // The META_ENTRY contains WS + META_KEY + WS + STRING and NO
+    // NEWLINE (last token reached EOF).
+    assert_eq!(
+        elements_of(&mes[0]),
+        tok_seq(&[WHITESPACE, META_KEY, WHITESPACE, STRING]),
+    );
+}
+
+#[test]
 fn meta_entry_with_value_kinds_other_than_string() {
     use SyntaxKind::*;
     // Metadata values can be a NUMBER, ACCOUNT, CURRENCY, DATE,

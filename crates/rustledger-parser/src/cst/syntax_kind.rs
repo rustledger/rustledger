@@ -209,13 +209,16 @@ pub enum SyntaxKind {
     // STRUCTURE inside is PR 2.2b/c.
     TRANSACTION,
 
-    // Phase 2.2a: META_ENTRY wraps each `WS META_KEY ... NEWLINE`
-    // indented metadata sub-line inside a directive or transaction.
-    // Sub-node contents stay flat (token-level access to the value);
-    // typed AST wrappers in phase 3 will surface `key()` and
-    // `value()` accessors. Indented `;`-comments interleaved with
-    // metadata stay as flat children of the parent directive, not
-    // META_ENTRY children.
+    // Phase 2.2a: META_ENTRY wraps each `WS META_KEY ... (NEWLINE
+    // | EOF)` indented metadata sub-line inside a directive or
+    // transaction. An unterminated final metadata sub-line at EOF
+    // (per rule 5 of `cst::trivia`) is still wrapped — its
+    // META_ENTRY simply has no NEWLINE child. Sub-node contents
+    // stay flat (token-level access to the value); typed AST
+    // wrappers in phase 3 will surface `key()` and `value()`
+    // accessors. Indented `;`-comments interleaved with metadata
+    // stay as flat children of the parent directive, not META_ENTRY
+    // children.
     META_ENTRY,
 }
 

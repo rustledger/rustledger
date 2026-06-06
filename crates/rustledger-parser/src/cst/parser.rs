@@ -25,8 +25,10 @@
 //!   children for now.
 //!
 //! Phase 2.2a adds `META_ENTRY` sub-node structure around indented
-//! `WS META_KEY ... NEWLINE` sub-lines inside any directive or
-//! transaction. Phase 2.2b/c add `POSTING` / `AMOUNT` /
+//! `WS META_KEY ... (NEWLINE | EOF)` sub-lines inside any directive
+//! or transaction (per rule 5 of `cst::trivia`, an unterminated
+//! final sub-line at EOF still gets wrapped). Phase 2.2b/c add
+//! `POSTING` / `AMOUNT` /
 //! `COST_SPEC` / `PRICE_ANNOTATION` inside TRANSACTION. Phase 5
 //! deletes `parse_flat` once `parse_structured` covers every byte
 //! in every corpus file.
@@ -175,9 +177,12 @@ fn emit_through_terminator(
 ///
 /// Phase 2.2a structural wrapping: each metadata sub-line becomes
 /// its own `META_ENTRY` node containing the indent `WHITESPACE`,
-/// the `META_KEY`, the rest of the line's content tokens, and the
-/// terminator `NEWLINE`. Token kinds inside the `META_ENTRY` stay
-/// flat — phase 3's typed-AST surface will expose `key()` and
+/// the `META_KEY`, the rest of the line's content tokens, and —
+/// when present — the terminator `NEWLINE`. An UNTERMINATED final
+/// metadata sub-line at EOF (per rule 5 of `cst::trivia`) is still
+/// wrapped: its `META_ENTRY` simply ends at the last content token
+/// with no `NEWLINE` child. Token kinds inside the `META_ENTRY`
+/// stay flat — phase 3's typed-AST surface will expose `key()` and
 /// `value()` accessors that walk these children. Indented
 /// `;`-comments and POSTING lines (PR 2.2b) flow through as flat
 /// children of the parent directive, NOT wrapped in `META_ENTRY`.

@@ -253,6 +253,15 @@ fn emit_transaction_body(
 /// actual content: `WHITESPACE` followed by ANY non-`NEWLINE`
 /// token. A blank line (`NEWLINE` alone, or `WHITESPACE NEWLINE`)
 /// or EOF terminates the transaction body.
+///
+/// **Deliberate divergence from rule 4 of `cst::trivia`:** unlike
+/// the single-line-directive body, a TRANSACTION body absorbs an
+/// indented trailing `;`-comment AT EOF (file-trailing-ish) into
+/// the directive. Rationale: documentation comments interleaved
+/// with postings are a Beancount idiom, and forcing the body to
+/// "back-track" the last comment if it's trailing would require
+/// look-ahead the per-line predicate can't do without extra state.
+/// Pinned by `transaction_trailing_indented_comment_at_eof_stays_inside`.
 fn is_indented_transaction_body_line(tokens: &[(SyntaxKind, Range<usize>)], i: usize) -> bool {
     if !matches!(tokens.get(i), Some((SyntaxKind::WHITESPACE, _))) {
         return false;
@@ -374,12 +383,25 @@ fn identify_directive(tokens: &[(SyntaxKind, Range<usize>)], i: usize) -> Option
                 // Transaction triggers after the DATE. Beancount
                 // uses `*` (STAR) for completed transactions, `!`
                 // (PENDING_KW) for incomplete/warning, letter flags
-                // P/S/T/C/U/R/M/?/& (FLAG) for various states, or
-                // the explicit `txn` keyword (TXN_KW).
+                // P/S/T/C/U/R/M/?/& (FLAG) for various states, the
+                // `#` symbol (HASH — promoted to a flag in this
+                // position; cf. `Token::is_txn_flag` and the AST
+                // parser's `parse_flag` accepting Hash), or the
+                // explicit `txn` keyword (TXN_KW).
                 SyntaxKind::STAR
                 | SyntaxKind::PENDING_KW
                 | SyntaxKind::FLAG
+                | SyntaxKind::HASH
                 | SyntaxKind::TXN_KW => Some(SyntaxKind::TRANSACTION),
+                // Single-character CURRENCY: NYSE/NASDAQ-style
+                // ticker letters (T, V, F, X, ...) double as
+                // transaction flags. The lexer prioritizes
+                // CURRENCY over FLAG for single uppercase letters
+                // (logos_lexer Currency priority 3); the AST parser
+                // (`parse_flag` arm `Token::Currency(s) if s.len() == 1`)
+                // mirrors this. We do the same to stay consistent
+                // with the established lexer/parser contract.
+                SyntaxKind::CURRENCY if tokens[j].1.len() == 1 => Some(SyntaxKind::TRANSACTION),
                 // Anything else: unknown shape.
                 _ => None,
             }

@@ -603,6 +603,128 @@ fn transaction_with_indented_comment_between_postings() {
 }
 
 #[test]
+fn transaction_with_hash_flag() {
+    use SyntaxKind::*;
+    // `#` is promoted to a transaction flag when it appears in
+    // the post-DATE flag slot. The lexer's `Token::is_txn_flag`
+    // includes Hash and the AST parser's `parse_flag` accepts it;
+    // the CST mirrors that contract.
+    let source = "2024-01-15 # \"pending hash\"\n\
+                  \x20\x20Assets:Cash 100 USD\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let ds = directives(&tree);
+    assert_eq!(ds.len(), 1);
+    assert_eq!(ds[0].kind(), TRANSACTION);
+    // SOURCE_FILE owns only the TRANSACTION — no orphaned posting.
+    assert_eq!(elements_of(&tree), vec![Element::Node(TRANSACTION)]);
+}
+
+#[test]
+fn transaction_with_single_char_currency_as_flag() {
+    use SyntaxKind::*;
+    // NYSE/NASDAQ-style single-letter tickers (T, V, F, X, ...)
+    // tokenize as CURRENCY (priority 3 over FLAG in the lexer)
+    // but are accepted as transaction flags. The AST parser's
+    // `parse_flag` arm `Token::Currency(s) if s.len() == 1` does
+    // this; the CST mirrors it.
+    let source = "2024-01-15 T \"AT&T dividend\"\n\
+                  \x20\x20Assets:Brokerage 10 T\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let ds = directives(&tree);
+    assert_eq!(ds.len(), 1);
+    assert_eq!(ds[0].kind(), TRANSACTION);
+    assert_eq!(elements_of(&tree), vec![Element::Node(TRANSACTION)]);
+}
+
+#[test]
+fn transaction_multi_char_currency_after_date_is_not_a_flag() {
+    // Guard against the reverse: `USD` (a real currency, length 3)
+    // must NOT be treated as a transaction flag. The CURRENCY arm
+    // gates on length == 1.
+    let source = "2024-01-15 USD \"garbled\"\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    // No directive recognized — falls into the passthrough branch.
+    let ds = directives(&tree);
+    assert!(
+        ds.is_empty(),
+        "multi-char CURRENCY after DATE must not be a transaction flag",
+    );
+}
+
+#[test]
+fn transaction_blank_line_inside_body_terminates_and_orphans_subsequent_postings() {
+    use SyntaxKind::*;
+    // Pins the documented blank-line termination behavior (matches
+    // Python beancount). The second posting after the blank line
+    // ends up flat under SOURCE_FILE, not inside the TRANSACTION.
+    // PR 2.2's POSTING-wrapping work must NOT accidentally widen
+    // the body scope across blank lines; this test guards that.
+    let source = "2024-01-15 * \"x\"\n\
+                  \x20\x20Assets:Cash 100 USD\n\
+                  \n\
+                  \x20\x20Liab:Card -100 USD\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let ds = directives(&tree);
+    // Exactly ONE recognized directive (the transaction). The
+    // post-blank posting is flat passthrough, not a second
+    // structural node.
+    assert_eq!(ds.len(), 1);
+    assert_eq!(ds[0].kind(), TRANSACTION);
+
+    // The TRANSACTION owns only header + first posting line.
+    let tx_kinds: Vec<SyntaxKind> = elements_of(&ds[0])
+        .iter()
+        .filter_map(|e| match e {
+            Element::Tok(k) => Some(*k),
+            Element::Node(_) => None,
+        })
+        .collect();
+    assert!(
+        tx_kinds.contains(&DATE) && tx_kinds.contains(&STAR),
+        "tx contains header",
+    );
+    // The second ACCOUNT (Liab:Card) is NOT inside the transaction.
+    let accounts_inside_tx = tx_kinds.iter().filter(|k| **k == ACCOUNT).count();
+    assert_eq!(
+        accounts_inside_tx, 1,
+        "only the FIRST posting's ACCOUNT is inside the tx; the second is orphaned",
+    );
+}
+
+#[test]
+fn transaction_trailing_indented_comment_at_eof_stays_inside() {
+    use SyntaxKind::*;
+    // TRANSACTION deliberately diverges from rule 4 (which puts
+    // indented trailing comments under SOURCE_FILE for the 14
+    // single-line directive kinds). The transaction body
+    // predicate accepts any indented non-blank line, so a
+    // trailing indented comment after the last posting stays
+    // inside the TRANSACTION. Compare with
+    // `indented_comment_at_eof_after_no_metadata_directive_is_file_trailing`
+    // earlier in this file for the OPEN_DIRECTIVE policy.
+    let source = "2024-01-15 * \"x\"\n\
+                  \x20\x20Assets:Cash 100 USD\n\
+                  \x20\x20Liab:Card -100 USD\n\
+                  \x20\x20; closing note for this transaction\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let ds = directives(&tree);
+    assert_eq!(ds.len(), 1);
+    assert_eq!(ds[0].kind(), TRANSACTION);
+    // SOURCE_FILE owns ONLY the TRANSACTION — comment is inside.
+    assert_eq!(elements_of(&tree), vec![Element::Node(TRANSACTION)]);
+}
+
+#[test]
 fn transaction_unterminated_at_eof_with_postings() {
     use SyntaxKind::*;
     // No final NEWLINE on the last posting line. Per rule 5,

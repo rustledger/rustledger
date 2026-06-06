@@ -2179,9 +2179,9 @@ fn hash_flagged_posting_with_amount_wraps_both() {
     let amount_count = ps[0].children().filter(|n| n.kind() == AMOUNT).count();
     assert_eq!(amount_count, 1);
     // The HASH and ACCOUNT are flat siblings, then AMOUNT.
-    let first_three: Vec<Element> = elements_of(&ps[0]).into_iter().take(4).collect();
+    let first_four: Vec<Element> = elements_of(&ps[0]).into_iter().take(4).collect();
     assert_eq!(
-        first_three,
+        first_four,
         vec![
             Element::Tok(WHITESPACE),
             Element::Tok(HASH),

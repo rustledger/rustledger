@@ -431,9 +431,9 @@ fn emit_transaction_body(
 ///   CURRENCY alone. Wrapping skips intervening `WHITESPACE`
 ///   between AMOUNT and CURRENCY so the sub-node owns both.
 /// - `COST_SPEC` is a bracketed cost annotation, opened by
-///   `LBRACE` (per-unit), `LBRACE_HASH` (per-unit + total), or
-///   `LDOUBLE_BRACE` (total-only), and closed by the matching
-///   `RBRACE` / `RDOUBLE_BRACE`. Contents stay flat children;
+///   `L_BRACE` (per-unit), `L_BRACE_HASH` (per-unit + total), or
+///   `L_DOUBLE_BRACE` (total-only), and closed by the matching
+///   `R_BRACE` / `R_DOUBLE_BRACE`. Contents stay flat children;
 ///   phase 3 typed-AST will surface accessors. Per rule 5 of
 ///   `cst::trivia`, an unclosed brace at EOF still gets wrapped
 ///   (the `COST_SPEC` simply has no matching close-brace child).
@@ -607,8 +607,8 @@ fn emit_amount(
     i
 }
 
-/// Emit a `COST_SPEC` node spanning `LBRACE` / `LBRACE_HASH` /
-/// `LDOUBLE_BRACE` ... matching `RBRACE` / `RDOUBLE_BRACE`. Per
+/// Emit a `COST_SPEC` node spanning `L_BRACE` / `L_BRACE_HASH` /
+/// `L_DOUBLE_BRACE` ... matching `R_BRACE` / `R_DOUBLE_BRACE`. Per
 /// rule 5 (unterminated final directive), an unclosed brace at
 /// EOF or hitting a NEWLINE still gets wrapped — the `COST_SPEC`
 /// simply has no matching close-brace child. Contents stay flat

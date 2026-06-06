@@ -249,9 +249,9 @@ pub enum SyntaxKind {
     AMOUNT,
 
     // Phase 2.2c: COST_SPEC wraps a bracketed cost annotation
-    // inside a posting line, i.e. `LBRACE ... RBRACE`,
-    // `LBRACE_HASH ... RBRACE` (per-unit + total), or
-    // `LDOUBLE_BRACE ... RDOUBLE_BRACE` (total-only). Contents
+    // inside a posting line, i.e. `L_BRACE ... R_BRACE`,
+    // `L_BRACE_HASH ... R_BRACE` (per-unit + total), or
+    // `L_DOUBLE_BRACE ... R_DOUBLE_BRACE` (total-only). Contents
     // stay flat children of COST_SPEC for now (phase 3 typed-AST
     // will surface accessors); an unclosed brace at EOF still
     // gets wrapped (the COST_SPEC simply has no matching closing

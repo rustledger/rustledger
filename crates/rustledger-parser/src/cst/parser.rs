@@ -28,11 +28,15 @@
 //! `WS META_KEY ... (NEWLINE | EOF)` sub-lines inside any directive
 //! or transaction (per rule 5 of `cst::trivia`, an unterminated
 //! final sub-line at EOF still gets wrapped). Phase 2.2b adds
-//! `POSTING` sub-node structure around each `WS [(FLAG|STAR|
-//! PENDING_KW) WS] ACCOUNT ...` posting line inside `TRANSACTION`,
-//! with posting-attached metadata (strictly deeper-indented
-//! `META_ENTRY` sub-lines following the posting) becoming a child
-//! of that `POSTING`. Phase 2.2c adds `AMOUNT` / `COST_SPEC` /
+//! `POSTING` sub-node structure around each `WS [(FLAG | STAR |
+//! PENDING_KW | HASH | single-char CURRENCY) WS] ACCOUNT ...`
+//! posting line inside `TRANSACTION` (the flag arm mirrors
+//! `parse_flag` in the legacy AST parser and `identify_directive`'s
+//! transaction-trigger arm; single-char `CURRENCY` covers letters
+//! like `T`/`V`/`F`/`X` that win the lexer's priority-3 Currency-
+//! vs-Flag tie-break). Posting-attached metadata (strictly deeper-
+//! indented `META_ENTRY` sub-lines following the posting) becomes a
+//! child of that `POSTING`. Phase 2.2c adds `AMOUNT` / `COST_SPEC` /
 //! `PRICE_ANNOTATION` inside `POSTING`. Phase 5 deletes
 //! `parse_flat` once `parse_structured` covers every byte in
 //! every corpus file.
@@ -295,7 +299,9 @@ fn emit_directive_body(
 /// width of the most-recently-opened `POSTING` (if any). For each
 /// sub-line:
 ///
-/// - **Posting line** (`WS [(FLAG|STAR|PENDING_KW) WS] ACCOUNT ...`):
+/// - **Posting line** (`WS [(FLAG | STAR | PENDING_KW | HASH |
+///   single-char CURRENCY) WS] ACCOUNT ...`, full flag set per
+///   [`starts_posting_sub_line`]):
 ///   close the open POSTING if any, then open a new POSTING and
 ///   consume the line.
 /// - **Metadata sub-line** (`WS META_KEY ...`): if a POSTING is

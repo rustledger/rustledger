@@ -99,6 +99,7 @@ const fn directive_kind_label(kind: SyntaxKind) -> Option<&'static str> {
         SyntaxKind::POPTAG_DIRECTIVE => Some("poptag"),
         SyntaxKind::PUSHMETA_DIRECTIVE => Some("pushmeta"),
         SyntaxKind::POPMETA_DIRECTIVE => Some("popmeta"),
+        SyntaxKind::TRANSACTION => Some("transaction"),
         _ => None,
     }
 }

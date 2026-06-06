@@ -206,8 +206,17 @@ pub enum SyntaxKind {
     // AST parser at parser.rs:1707-1715. Body spans header +
     // indented posting and metadata sub-lines until next top-
     // level construct or EOF. POSTING / AMOUNT / COST_SPEC
-    // STRUCTURE inside is PR 2.2.
+    // STRUCTURE inside is PR 2.2b/c.
     TRANSACTION,
+
+    // Phase 2.2a: META_ENTRY wraps each `WS META_KEY ... NEWLINE`
+    // indented metadata sub-line inside a directive or transaction.
+    // Sub-node contents stay flat (token-level access to the value);
+    // typed AST wrappers in phase 3 will surface `key()` and
+    // `value()` accessors. Indented `;`-comments interleaved with
+    // metadata stay as flat children of the parent directive, not
+    // META_ENTRY children.
+    META_ENTRY,
 }
 
 impl SyntaxKind {
@@ -377,6 +386,7 @@ mod tests {
             SyntaxKind::PUSHMETA_DIRECTIVE,
             SyntaxKind::POPMETA_DIRECTIVE,
             SyntaxKind::TRANSACTION,
+            SyntaxKind::META_ENTRY,
         ];
         for kind in node_kinds {
             assert!(
@@ -437,6 +447,7 @@ mod tests {
             SyntaxKind::PUSHMETA_DIRECTIVE,
             SyntaxKind::POPMETA_DIRECTIVE,
             SyntaxKind::TRANSACTION,
+            SyntaxKind::META_ENTRY,
         ];
         let observed_nodes: Vec<SyntaxKind> = all_kinds
             .iter()

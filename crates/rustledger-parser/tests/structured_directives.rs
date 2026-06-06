@@ -770,6 +770,139 @@ fn transaction_unterminated_at_eof_with_postings() {
 
 // ---------- Pass-through for still-unrecognized content ----------
 
+// ---------- Phase 2.2a: META_ENTRY structural wrapping ----------
+
+/// Walk all `META_ENTRY` descendants of a node, in source order.
+fn meta_entries(node: &SyntaxNode) -> Vec<SyntaxNode> {
+    node.descendants()
+        .filter(|n| n.kind() == SyntaxKind::META_ENTRY)
+        .collect()
+}
+
+#[test]
+fn meta_entry_wraps_metadata_sub_line_inside_open_directive() {
+    use SyntaxKind::*;
+    let source = "2024-01-01 open Assets:Cash\n  description: \"main checking\"\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let mes = meta_entries(&tree);
+    assert_eq!(mes.len(), 1);
+    assert_eq!(
+        elements_of(&mes[0]),
+        tok_seq(&[WHITESPACE, META_KEY, WHITESPACE, STRING, NEWLINE]),
+    );
+}
+
+#[test]
+fn meta_entry_wraps_each_of_multiple_metadata_sub_lines() {
+    use SyntaxKind::*;
+    let source = "2024-01-01 open Assets:Cash\n\
+                  \x20\x20key1: \"value1\"\n\
+                  \x20\x20key2: \"value2\"\n\
+                  \x20\x20key3: \"value3\"\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let mes = meta_entries(&tree);
+    assert_eq!(mes.len(), 3);
+    for me in &mes {
+        assert_eq!(
+            elements_of(me),
+            tok_seq(&[WHITESPACE, META_KEY, WHITESPACE, STRING, NEWLINE]),
+        );
+    }
+}
+
+#[test]
+fn meta_entry_does_not_wrap_indented_comments() {
+    use SyntaxKind::*;
+    // An indented `;`-comment between metadata entries stays as
+    // flat children of the parent directive — NOT inside a
+    // META_ENTRY. META_ENTRY is reserved for metadata sub-lines
+    // proper (the `WS META_KEY ... NEWLINE` shape).
+    let source = "2024-01-01 open Assets:Cash\n\
+                  \x20\x20k1: \"v1\"\n\
+                  \x20\x20; doc comment\n\
+                  \x20\x20k2: \"v2\"\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let mes = meta_entries(&tree);
+    assert_eq!(mes.len(), 2, "only k1 and k2 are META_ENTRYs");
+
+    // The indented comment line lives as flat tokens (WS, COMMENT,
+    // NEWLINE) inside the OPEN_DIRECTIVE between the two
+    // META_ENTRY nodes.
+    let ds = directives(&tree);
+    assert_eq!(ds.len(), 1);
+    let kids: Vec<Element> = elements_of(&ds[0]);
+    let comment_pos = kids
+        .iter()
+        .position(|e| matches!(e, Element::Tok(COMMENT)))
+        .expect("indented COMMENT lives flat in the directive");
+    let n_me_before_comment = kids[..comment_pos]
+        .iter()
+        .filter(|e| matches!(e, Element::Node(META_ENTRY)))
+        .count();
+    let n_me_after_comment = kids[comment_pos..]
+        .iter()
+        .filter(|e| matches!(e, Element::Node(META_ENTRY)))
+        .count();
+    assert_eq!(n_me_before_comment, 1, "k1 META_ENTRY precedes the comment");
+    assert_eq!(n_me_after_comment, 1, "k2 META_ENTRY follows the comment");
+}
+
+#[test]
+fn meta_entry_inside_transaction_body() {
+    use SyntaxKind::*;
+    // Transactions can carry intra-transaction metadata. The
+    // META_ENTRY wrapping applies there too.
+    let source = "2024-01-15 * \"Coffee\"\n\
+                  \x20\x20note: \"morning\"\n\
+                  \x20\x20Assets:Cash -5.00 USD\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let mes = meta_entries(&tree);
+    assert_eq!(mes.len(), 1);
+    assert_eq!(
+        elements_of(&mes[0]),
+        tok_seq(&[WHITESPACE, META_KEY, WHITESPACE, STRING, NEWLINE]),
+    );
+
+    // The posting line (WS ACCOUNT WS ...) stays flat under
+    // TRANSACTION — PR 2.2b will wrap it in POSTING.
+    let txs: Vec<SyntaxNode> = tree
+        .children()
+        .filter(|c| c.kind() == TRANSACTION)
+        .collect();
+    assert_eq!(txs.len(), 1);
+    let n_meta_entries_in_tx = txs[0].children().filter(|n| n.kind() == META_ENTRY).count();
+    assert_eq!(n_meta_entries_in_tx, 1);
+}
+
+#[test]
+fn meta_entry_with_value_kinds_other_than_string() {
+    use SyntaxKind::*;
+    // Metadata values can be a NUMBER, ACCOUNT, CURRENCY, DATE,
+    // boolean, etc. META_ENTRY wraps the whole sub-line regardless
+    // of the value kind — phase 3's typed AST will surface
+    // `value()` accessors that decode by inspecting children.
+    let source = "2024-01-01 open Assets:Cash\n\
+                  \x20\x20count: 42\n\
+                  \x20\x20since: 2024-01-01\n\
+                  \x20\x20mirror: Assets:Mirror\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let mes = meta_entries(&tree);
+    assert_eq!(mes.len(), 3);
+    // Spot-check the second (DATE-valued) entry's value-token kind.
+    let date_me_kinds = elements_of(&mes[1]);
+    assert!(date_me_kinds.contains(&Element::Tok(DATE)));
+}
+
 #[test]
 fn commodity_with_metadata_wraps_full_multi_line_directive() {
     use SyntaxKind::*;
@@ -785,23 +918,32 @@ fn commodity_with_metadata_wraps_full_multi_line_directive() {
     let ds = directives(&tree);
     assert_eq!(ds.len(), 1);
     assert_eq!(ds[0].kind(), COMMODITY_DIRECTIVE);
+    // PR 2.2a: the metadata sub-line is now wrapped in META_ENTRY.
+    // The directive owns the header tokens followed by the
+    // META_ENTRY node (which contains the indented metadata's
+    // tokens internally).
     assert_eq!(
         elements_of(&ds[0]),
-        tok_seq(&[
-            DATE,
-            WHITESPACE,
-            COMMODITY_KW,
-            WHITESPACE,
-            CURRENCY,
-            NEWLINE,
-            WHITESPACE,
-            META_KEY,
-            WHITESPACE,
-            STRING,
-            NEWLINE,
-        ]),
-        "multi-line directive: header + metadata BOTH inside the directive node \
-         (metadata is flat for now; PR 2.2 wraps it in META_ENTRY)",
+        vec![
+            Element::Tok(DATE),
+            Element::Tok(WHITESPACE),
+            Element::Tok(COMMODITY_KW),
+            Element::Tok(WHITESPACE),
+            Element::Tok(CURRENCY),
+            Element::Tok(NEWLINE),
+            Element::Node(META_ENTRY),
+        ],
+    );
+
+    // Drill into the META_ENTRY: it owns the indent + key +
+    // value tokens + terminator NEWLINE.
+    let me = ds[0]
+        .children()
+        .find(|n| n.kind() == META_ENTRY)
+        .expect("directive contains a META_ENTRY child");
+    assert_eq!(
+        elements_of(&me),
+        tok_seq(&[WHITESPACE, META_KEY, WHITESPACE, STRING, NEWLINE]),
     );
 
     // SOURCE_FILE owns ONLY the directive — no orphaned metadata.

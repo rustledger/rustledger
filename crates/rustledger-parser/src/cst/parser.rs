@@ -24,10 +24,12 @@
 //!   2.3; error-recovery lines) flow through as flat `SOURCE_FILE`
 //!   children for now.
 //!
-//! Phase 2.2 adds `POSTING` / `AMOUNT` / `COST_SPEC` / `META_ENTRY`
-//! sub-node structure INSIDE the TRANSACTION + dated directive
-//! wrappers; phase 5 deletes `parse_flat` once `parse_structured`
-//! covers every byte in every corpus file.
+//! Phase 2.2a adds `META_ENTRY` sub-node structure around indented
+//! `WS META_KEY ... NEWLINE` sub-lines inside any directive or
+//! transaction. Phase 2.2b/c add `POSTING` / `AMOUNT` /
+//! `COST_SPEC` / `PRICE_ANNOTATION` inside TRANSACTION. Phase 5
+//! deletes `parse_flat` once `parse_structured` covers every byte
+//! in every corpus file.
 
 use std::ops::Range;
 
@@ -167,6 +169,41 @@ fn emit_through_terminator(
     i
 }
 
+/// Consume one indented sub-line of a directive or transaction
+/// body, wrapping it in a `META_ENTRY` node iff it's metadata
+/// (i.e., starts `WS META_KEY ...`).
+///
+/// Phase 2.2a structural wrapping: each metadata sub-line becomes
+/// its own `META_ENTRY` node containing the indent `WHITESPACE`,
+/// the `META_KEY`, the rest of the line's content tokens, and the
+/// terminator `NEWLINE`. Token kinds inside the `META_ENTRY` stay
+/// flat — phase 3's typed-AST surface will expose `key()` and
+/// `value()` accessors that walk these children. Indented
+/// `;`-comments and POSTING lines (PR 2.2b) flow through as flat
+/// children of the parent directive, NOT wrapped in `META_ENTRY`.
+fn emit_body_sub_line(
+    builder: &mut GreenNodeBuilder<'_>,
+    source: &str,
+    tokens: &[(SyntaxKind, Range<usize>)],
+    i: usize,
+) -> usize {
+    if is_indented_meta_sub_line(tokens, i) {
+        builder.start_node(SyntaxKind::META_ENTRY.into());
+        let next = emit_through_terminator(builder, source, tokens, i);
+        builder.finish_node();
+        next
+    } else {
+        emit_through_terminator(builder, source, tokens, i)
+    }
+}
+
+/// Returns true iff `tokens[i..]` starts a `WS META_KEY ...` line
+/// that should be wrapped in a `META_ENTRY` node.
+fn is_indented_meta_sub_line(tokens: &[(SyntaxKind, Range<usize>)], i: usize) -> bool {
+    matches!(tokens.get(i), Some((SyntaxKind::WHITESPACE, _)))
+        && matches!(tokens.get(i + 1), Some((SyntaxKind::META_KEY, _)))
+}
+
 /// Consume the header line through its terminator NEWLINE, then
 /// keep consuming any indented metadata sub-lines OR indented
 /// `;`/`%` comment lines that follow at the same logical block.
@@ -214,7 +251,7 @@ fn emit_directive_body(
     // the directive and orphaned the metadata.
     let block_has_meta = upcoming_indented_block_has_meta(tokens, i);
     while is_indented_directive_continuation(tokens, i, block_has_meta) {
-        i = emit_through_terminator(builder, source, tokens, i);
+        i = emit_body_sub_line(builder, source, tokens, i);
     }
     i
 }
@@ -244,7 +281,7 @@ fn emit_transaction_body(
 ) -> usize {
     i = emit_through_terminator(builder, source, tokens, i);
     while is_indented_transaction_body_line(tokens, i) {
-        i = emit_through_terminator(builder, source, tokens, i);
+        i = emit_body_sub_line(builder, source, tokens, i);
     }
     i
 }

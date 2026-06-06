@@ -548,6 +548,27 @@ fn starts_amount(tokens: &[(SyntaxKind, Range<usize>)], i: usize) -> bool {
 /// sign + `NUMBER` + optional `WS` + `CURRENCY`, or a bare
 /// `CURRENCY`. Stops at the first non-amount token. Returns the
 /// new index.
+///
+/// **Known divergence from Python beancount on arithmetic
+/// expressions**: Python beancount accepts arithmetic in posting
+/// amounts (verified: `bean-check` accepts `10+5 USD`, `-10+5 USD`,
+/// and `-(10+5) USD`). Its `parse_expr` builds an expression AST.
+/// This CST helper only wraps a single `NUMBER` operand plus
+/// optional sign and currency — `10+5 USD` produces
+/// `AMOUNT(NUMBER "10")` then a flat `PLUS` then
+/// `AMOUNT(NUMBER "5" WS CURRENCY "USD")` (two sibling AMOUNT
+/// nodes with the operator between). Round-trip is byte-identical
+/// so no data is lost, but the structural shape is wrong for any
+/// downstream typed-AST consumer.
+///
+/// Zero corpus files exercise this today; the divergence is a
+/// known limitation deferred to a future PR (likely 2.2c.1 or a
+/// phase 3 prerequisite). Full fix requires consuming
+/// `[sign] NUMBER (op [WS] [sign] NUMBER)* [WS CURRENCY]` runs,
+/// plus parenthesized sub-expressions via `L_PAREN` / `R_PAREN`
+/// recursion. Pinned by
+/// `amount_with_arithmetic_currently_produces_sibling_amounts` so
+/// the divergence is discoverable.
 fn emit_amount(
     builder: &mut GreenNodeBuilder<'_>,
     source: &str,

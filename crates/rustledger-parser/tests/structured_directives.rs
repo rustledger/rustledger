@@ -2344,6 +2344,107 @@ fn price_annotation_at_eof_without_newline_still_wraps_opener_only() {
 }
 
 #[test]
+fn total_price_annotation_at_at_eof_without_newline_still_wraps_opener_only() {
+    use SyntaxKind::*;
+    // Companion to the single-`@` EOF test: pin that `@@` (total
+    // price opener) at EOF also wraps. Both code paths emit
+    // through the same opener branch in emit_price_annotation,
+    // but the AT_AT-specific path was unpinned.
+    let source = "2024-01-15 * \"x\"\n\
+                  \x20\x20Assets:Cash 10 HOOL @@";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let prices = price_annotations(&tree);
+    assert_eq!(prices.len(), 1);
+    assert_eq!(elements_of(&prices[0]), tok_seq(&[AT_AT]));
+}
+
+#[test]
+fn balance_directive_header_amount_stays_flat_not_wrapped() {
+    // Phase 2.2c scopes AMOUNT wrapping to POSTING only. Directive
+    // headers (BALANCE, PRICE, PAD) emit their inline amounts as
+    // flat NUMBER + CURRENCY tokens via `emit_through_terminator`,
+    // NOT wrapped in an AMOUNT node. Phase 3 typed-AST
+    // `Balance::amount()` / `Price::amount()` will need a token-
+    // walking strategy distinct from `Posting::amount()`. Pinned
+    // here so a future refactor that unifies the code path (e.g.,
+    // calling emit_amount from the directive header) is a visible,
+    // intentional break rather than a silent design shift.
+    let source = "2024-06-30 balance Assets:Cash 100.00 USD\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let amts = amounts(&tree);
+    assert_eq!(
+        amts.len(),
+        0,
+        "directive-header amounts are NOT wrapped in AMOUNT",
+    );
+
+    // Same for PRICE_DIRECTIVE: `1.10 EUR` is flat.
+    let price_source = "2024-01-01 price USD 1.10 EUR\n";
+    let price_tree = parse_structured(price_source);
+    assert_round_trip(price_source, &price_tree);
+    let price_amts = amounts(&price_tree);
+    assert_eq!(price_amts.len(), 0);
+
+    // And for PAD_DIRECTIVE (no inline amount): just sanity.
+    let pad_source = "2024-01-01 pad Assets:Cash Equity:OpeningBalances\n";
+    let pad_tree = parse_structured(pad_source);
+    assert_round_trip(pad_source, &pad_tree);
+    let pad_amts = amounts(&pad_tree);
+    assert_eq!(pad_amts.len(), 0);
+}
+
+#[test]
+fn amount_with_arithmetic_currently_produces_sibling_amounts() {
+    use SyntaxKind::*;
+    // Known divergence from Python beancount: bean-check accepts
+    // `10+5 USD` as a single arithmetic-expression amount, but our
+    // emit_amount only handles `[sign] NUMBER [WS CURRENCY]`. So
+    // `10+5 USD` produces:
+    //   AMOUNT(NUMBER "10")
+    //   AMOUNT(PLUS NUMBER "5" WS CURRENCY "USD")
+    // — two sibling AMOUNT nodes inside POSTING, where the PLUS
+    // is consumed by the SECOND AMOUNT as its sign (because
+    // starts_amount(PLUS) at position i sees NUMBER at i+1 and
+    // routes through emit_amount's sign branch).
+    //
+    // Zero corpus files use arithmetic in posting amounts today;
+    // the divergence is deferred to a future PR (likely 2.2c.1)
+    // that extends emit_amount to consume `[sign] NUMBER (op
+    // [sign] NUMBER)* [WS CURRENCY]` runs (and optionally
+    // parenthesized sub-expressions via L_PAREN / R_PAREN
+    // recursion).
+    //
+    // This test PINS the current shape so the divergence is
+    // discoverable and the fix's behavior change is visible.
+    let source = "2024-01-15 * \"x\"\n\
+                  \x20\x20Assets:Cash  10+5 USD\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let ps = postings(&tree);
+    assert_eq!(ps.len(), 1);
+    // Two AMOUNT siblings.
+    let amts: Vec<SyntaxNode> = ps[0].children().filter(|n| n.kind() == AMOUNT).collect();
+    assert_eq!(
+        amts.len(),
+        2,
+        "arithmetic expression currently produces sibling AMOUNTs (known divergence; \
+         deferred to a future PR)",
+    );
+    // First AMOUNT wraps just `10`.
+    assert_eq!(elements_of(&amts[0]), tok_seq(&[NUMBER]));
+    // Second AMOUNT wraps `+5 USD` (PLUS consumed as sign).
+    assert_eq!(
+        elements_of(&amts[1]),
+        tok_seq(&[PLUS, NUMBER, WHITESPACE, CURRENCY]),
+    );
+}
+
+#[test]
 fn mixed_shape_sibling_postings_each_wrap_their_own_amount_or_not() {
     use SyntaxKind::*;
     // Three postings in one transaction with different shapes:

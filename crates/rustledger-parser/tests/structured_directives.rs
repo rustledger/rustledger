@@ -1182,6 +1182,81 @@ fn meta_entry_before_first_posting_stays_at_transaction_level() {
 }
 
 #[test]
+fn deeper_indented_comment_stays_inside_posting_with_following_meta() {
+    use SyntaxKind::*;
+    // Doc-comment-for-following-posting-metadata idiom: an indented
+    // `;` comment at indent STRICTLY GREATER than the open POSTING
+    // (and at the same depth as the subsequent posting-attached
+    // META_ENTRY) belongs to the POSTING. Both the comment AND the
+    // META_ENTRY land inside the POSTING node.
+    let source = "2024-01-15 * \"x\"\n\
+                  \x20\x20Assets:Cash  -5.00 USD\n\
+                  \x20\x20\x20\x20; comment about note\n\
+                  \x20\x20\x20\x20note: \"deeper\"\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let ps = postings(&tree);
+    assert_eq!(ps.len(), 1);
+
+    // The deeper-indented META_ENTRY is attached to the POSTING.
+    let posting_meta_count = ps[0].children().filter(|n| n.kind() == META_ENTRY).count();
+    assert_eq!(posting_meta_count, 1);
+
+    // The deeper-indented COMMENT token is also inside POSTING.
+    let posting_comment_count = ps[0]
+        .children_with_tokens()
+        .filter(|e| e.kind() == COMMENT)
+        .count();
+    assert_eq!(
+        posting_comment_count, 1,
+        "deeper-indented `;` comment stays inside POSTING with following meta",
+    );
+
+    // TRANSACTION's direct children have ZERO orphaned META_ENTRY
+    // or COMMENT.
+    let txs: Vec<SyntaxNode> = tree
+        .children()
+        .filter(|c| c.kind() == TRANSACTION)
+        .collect();
+    let tx_meta = txs[0].children().filter(|n| n.kind() == META_ENTRY).count();
+    let tx_comment = txs[0]
+        .children_with_tokens()
+        .filter(|e| e.kind() == COMMENT)
+        .count();
+    assert_eq!(tx_meta, 0);
+    assert_eq!(tx_comment, 0);
+}
+
+#[test]
+fn deeper_indented_comment_stays_inside_posting_even_without_following_meta() {
+    use SyntaxKind::*;
+    // Rule is purely indent-based: a deeper-indented comment
+    // belongs to the open POSTING regardless of whether a
+    // META_ENTRY follows. Pins the rule's edge so the predicate
+    // can't drift to "only attach when followed by meta".
+    let source = "2024-01-15 * \"x\"\n\
+                  \x20\x20Assets:Cash  -5.00 USD\n\
+                  \x20\x20\x20\x20; trailing posting doc\n\
+                  \x20\x20Expenses:Food  5.00 USD\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let ps = postings(&tree);
+    assert_eq!(ps.len(), 2);
+    let first_comment_count = ps[0]
+        .children_with_tokens()
+        .filter(|e| e.kind() == COMMENT)
+        .count();
+    let second_comment_count = ps[1]
+        .children_with_tokens()
+        .filter(|e| e.kind() == COMMENT)
+        .count();
+    assert_eq!(first_comment_count, 1);
+    assert_eq!(second_comment_count, 0);
+}
+
+#[test]
 fn posting_with_indented_comment_between_postings_terminates_posting() {
     use SyntaxKind::*;
     // An indented `;`-comment between two posting lines is
@@ -1294,6 +1369,32 @@ fn flagged_posting_with_question_mark_wraps_flag_inside_node() {
         })
         .collect();
     assert!(kinds.starts_with(&[WHITESPACE, FLAG, WHITESPACE, ACCOUNT]));
+}
+
+#[test]
+fn hash_flagged_posting_wraps_hash_inside_node() {
+    use SyntaxKind::*;
+    // `# Account ...` is a valid Beancount posting flag (legacy
+    // `parse_flag` accepts `Token::Hash`; `identify_directive`
+    // accepts HASH as a transaction trigger). Pin that
+    // `starts_posting_sub_line` recognizes it so the line is
+    // wrapped in POSTING rather than falling through as flat
+    // tokens.
+    let source = "2024-01-15 * \"x\"\n\
+                  \x20\x20# Assets:Cash  -5.00 USD\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let ps = postings(&tree);
+    assert_eq!(ps.len(), 1);
+    let kinds: Vec<SyntaxKind> = elements_of(&ps[0])
+        .iter()
+        .filter_map(|e| match e {
+            Element::Tok(k) => Some(*k),
+            Element::Node(_) => None,
+        })
+        .collect();
+    assert!(kinds.starts_with(&[WHITESPACE, HASH, WHITESPACE, ACCOUNT]));
 }
 
 #[test]

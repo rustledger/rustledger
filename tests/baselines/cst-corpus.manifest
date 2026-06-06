@@ -1,4 +1,4 @@
-# CST baseline (#1262 phase 2.1a, parse_structured). See crates/rustledger-parser/tests/cst_baseline.rs.
+# CST baseline (#1262 phase 2.2b, parse_structured). See crates/rustledger-parser/tests/cst_baseline.rs.
 # Format: path<TAB>source_blake3<TAB>token_seq_blake3<TAB>node_shape_blake3
 # Regenerate: BASELINE_UPDATE=1 cargo test -p rustledger-parser --test cst_baseline
 tests/compatibility/files/apyb-financeiro/financeiro_2020-01.beancount	97c414bb9d83ab443a98b356ef0b7d38ae73edaa40090a6fabd07408c147e5a9	6dbc6c9f95dbe9ba0dfa3a9bb0e7302d6a88d0a7811c8d1e516053143fb719ae	80d5384b63ac24c5624a72b9939d56a9363e0ec1f743506f6e3175a15d928dc6

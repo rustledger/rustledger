@@ -303,17 +303,33 @@ fn emit_directive_body(
 ///   POSTING's indent, emit the `META_ENTRY` INSIDE the POSTING.
 ///   Otherwise (no open POSTING, or shallower/equal indent), close
 ///   any open POSTING and emit the `META_ENTRY` at TRANSACTION level.
-/// - **Indented comment line**: close any open POSTING and emit
-///   the comment line flat at TRANSACTION level. (Beancount
-///   treats inter-posting comments as transaction-level by
-///   convention; this matches the legacy AST parser's posting-
-///   metadata loop, which does not absorb comments.)
+/// - **Indented comment line** (`WS COMMENT` / `WS PERCENT_COMMENT`):
+///   apply the same indent-attribution rule as metadata. If the
+///   comment is strictly more indented than the open POSTING, it
+///   stays INSIDE the POSTING (preserving the doc-comment-for-
+///   following-posting-metadata idiom — a deeper-indented `; doc`
+///   followed by deeper-indented `key: value` should both belong
+///   to the same posting). Otherwise close any open POSTING and
+///   emit the comment flat at TRANSACTION level (matches the
+///   `posting_with_indented_comment_between_postings_terminates_posting`
+///   test, where the comment is at the SAME indent as the postings
+///   and is therefore transaction-level inter-posting trivia).
+/// - **Any other indented content** (`WS STRING`, `WS NUMBER`,
+///   unrecognized shape): close any open POSTING and emit the line
+///   flat at TRANSACTION level. We don't know what to do with it
+///   structurally; flat-passthrough preserves bytes.
 ///
-/// Indent width is measured as the byte length of the leading
-/// `WHITESPACE` token — sufficient for the strictly-deeper test
-/// when the source uses uniform spaces (the standard Beancount
-/// convention; tabs in postings are extremely rare and would
-/// compare by byte width too, just less visually meaningful).
+/// Indent width is measured as the BYTE LENGTH of the leading
+/// `WHITESPACE` token — sufficient when the source uses uniform
+/// spaces (the standard Beancount convention). **Known divergence
+/// from the legacy AST parser**: the legacy lexer's `Indent(N)` /
+/// `DeepIndent(N)` variants (`logos_lexer.rs:615-616`) count tabs
+/// as 4 spaces, so a tab-indented posting followed by space-
+/// indented metadata is compared by VISUAL columns there but by
+/// BYTE COUNT here. The two paths can disagree on mixed-indent
+/// files. No test corpus file currently triggers the divergence in
+/// posting-attached-metadata position; if one shows up, switching
+/// `indent_width` to a column-aware count is the fix.
 ///
 /// Compared with `emit_directive_body` (which only continues on
 /// `WS META_KEY` and gated `WS COMMENT`), transactions have a
@@ -353,6 +369,19 @@ fn emit_transaction_body(
                 open_posting_indent = None;
             }
             i = emit_body_sub_line(builder, source, tokens, i);
+        } else if starts_indented_comment(tokens, i) {
+            // Same indent-attribution rule as META_ENTRY: deeper-
+            // indented comments stay INSIDE the open POSTING; same-
+            // or-shallower-indented comments close the POSTING and
+            // emit flat at TRANSACTION level. Preserves the doc-
+            // comment-for-following-posting-metadata idiom.
+            let attach_to_posting =
+                open_posting_indent.is_some_and(|p_indent| sub_line_indent > p_indent);
+            if !attach_to_posting && open_posting_indent.is_some() {
+                builder.finish_node();
+                open_posting_indent = None;
+            }
+            i = emit_through_terminator(builder, source, tokens, i);
         } else {
             if open_posting_indent.is_some() {
                 builder.finish_node();
@@ -371,15 +400,20 @@ fn emit_transaction_body(
 
 /// Returns true iff `tokens[i..]` starts a posting sub-line:
 /// `WHITESPACE` (the indent) followed by `ACCOUNT`, or by an
-/// optional flag (`FLAG` / `STAR` / `PENDING_KW` / single-char
-/// `CURRENCY`) plus another `WHITESPACE` then `ACCOUNT`. Mirrors
-/// the legacy AST parser's `parse_posting` shape
+/// optional flag (`FLAG` / `STAR` / `PENDING_KW` / `HASH` /
+/// single-char `CURRENCY`) plus another `WHITESPACE` then
+/// `ACCOUNT`. Mirrors the legacy AST parser's `parse_posting` shape
 /// (`parser.rs:866-880`): indent, optional flag, then a required
-/// account. The single-char `CURRENCY`-as-flag arm mirrors
-/// `identify_directive`'s same treatment for the transaction
-/// header: NYSE-style ticker letters like `T`/`V`/`F`/`X` win the
-/// lexer's Currency-vs-Flag tie-break (priority 3) but still
-/// function as posting flags in this position.
+/// account. The flag set MUST stay in sync with `parse_flag` in the
+/// legacy parser (`Token::Star | Pending | Flag(_) | Hash` plus
+/// single-char `Currency`) and with `identify_directive`'s
+/// transaction-trigger arm above; drift would silently leave
+/// HASH-flagged or single-char-CURRENCY-flagged posting lines flat
+/// under `TRANSACTION` instead of wrapped in `POSTING`. The single-
+/// char `CURRENCY`-as-flag arm exists because the lexer's priority-3
+/// Currency-vs-Flag tie-break makes letters like `T`/`V`/`F`/`X`
+/// tokenize as `CURRENCY`, but they still function as posting flags
+/// by Beancount convention.
 fn starts_posting_sub_line(tokens: &[(SyntaxKind, Range<usize>)], i: usize) -> bool {
     if !matches!(tokens.get(i), Some((SyntaxKind::WHITESPACE, _))) {
         return false;
@@ -388,7 +422,10 @@ fn starts_posting_sub_line(tokens: &[(SyntaxKind, Range<usize>)], i: usize) -> b
         return true;
     }
     let has_flag = match tokens.get(i + 1) {
-        Some((SyntaxKind::FLAG | SyntaxKind::STAR | SyntaxKind::PENDING_KW, _)) => true,
+        Some((
+            SyntaxKind::FLAG | SyntaxKind::STAR | SyntaxKind::PENDING_KW | SyntaxKind::HASH,
+            _,
+        )) => true,
         Some((SyntaxKind::CURRENCY, range)) => range.len() == 1,
         _ => false,
     };
@@ -401,14 +438,39 @@ fn starts_posting_sub_line(tokens: &[(SyntaxKind, Range<usize>)], i: usize) -> b
 
 /// Byte length of the leading `WHITESPACE` token at `tokens[i]`,
 /// or 0 if there is no leading whitespace. Used by
-/// `emit_transaction_body` to decide whether a metadata sub-line's
-/// indent is strictly deeper than the surrounding POSTING's
-/// indent (the posting-attached-metadata rule).
+/// `emit_transaction_body` to decide whether a metadata or
+/// comment sub-line's indent is strictly deeper than the
+/// surrounding POSTING's indent (the posting-attached-metadata /
+/// posting-attached-comment rule).
+///
+/// **Known divergence from the legacy AST parser**: the legacy
+/// lexer's `Indent(N)` / `DeepIndent(N)` variants
+/// (`logos_lexer.rs:615-616`) count tabs as 4 spaces, but this
+/// helper returns raw bytes. Mixed tab+space indentation can
+/// therefore produce different attribution between the two paths.
+/// Acceptable for now because (a) Beancount idiom is uniform
+/// spaces, (b) no corpus file currently triggers the divergence in
+/// posting-attached-metadata position, and (c) the CST round-trip
+/// is byte-identical regardless of how `indent_width` classifies.
+/// If a file shows up, switch to a column-aware count.
 fn indent_width(tokens: &[(SyntaxKind, Range<usize>)], i: usize) -> usize {
     match tokens.get(i) {
         Some((SyntaxKind::WHITESPACE, range)) => range.len(),
         _ => 0,
     }
+}
+
+/// Returns true iff `tokens[i..]` starts an indented `;`/`%`
+/// comment line: `WHITESPACE` (the indent) followed by `COMMENT`
+/// or `PERCENT_COMMENT`. Used by `emit_transaction_body` to apply
+/// the same indent-attribution rule to comments that it applies to
+/// metadata.
+fn starts_indented_comment(tokens: &[(SyntaxKind, Range<usize>)], i: usize) -> bool {
+    matches!(tokens.get(i), Some((SyntaxKind::WHITESPACE, _)))
+        && matches!(
+            tokens.get(i + 1),
+            Some((SyntaxKind::COMMENT | SyntaxKind::PERCENT_COMMENT, _)),
+        )
 }
 
 /// Returns true iff `tokens[i..]` starts an indented line with

@@ -362,12 +362,7 @@ fn emit_transaction_body(
             open_posting_indent = Some(sub_line_indent);
             i = emit_through_terminator(builder, source, tokens, i);
         } else if starts_meta_sub_line(tokens, i) {
-            let attach_to_posting =
-                open_posting_indent.is_some_and(|p_indent| sub_line_indent > p_indent);
-            if !attach_to_posting && open_posting_indent.is_some() {
-                builder.finish_node();
-                open_posting_indent = None;
-            }
+            close_open_posting_unless_attached(builder, &mut open_posting_indent, sub_line_indent);
             i = emit_body_sub_line(builder, source, tokens, i);
         } else if starts_indented_comment(tokens, i) {
             // Same indent-attribution rule as META_ENTRY: deeper-
@@ -375,14 +370,19 @@ fn emit_transaction_body(
             // or-shallower-indented comments close the POSTING and
             // emit flat at TRANSACTION level. Preserves the doc-
             // comment-for-following-posting-metadata idiom.
-            let attach_to_posting =
-                open_posting_indent.is_some_and(|p_indent| sub_line_indent > p_indent);
-            if !attach_to_posting && open_posting_indent.is_some() {
-                builder.finish_node();
-                open_posting_indent = None;
-            }
+            close_open_posting_unless_attached(builder, &mut open_posting_indent, sub_line_indent);
             i = emit_through_terminator(builder, source, tokens, i);
         } else {
+            // Catch-all: any other indented content (e.g., `WS
+            // STRING`, `WS NUMBER`, or unrecognized shapes that
+            // future error-recovery work might surface). Close any
+            // open POSTING and emit flat at TRANSACTION level. PR
+            // 2.2c (AMOUNT / COST_SPEC / PRICE_ANNOTATION) lives
+            // INSIDE a `POSTING` and reaches the parser through
+            // `starts_posting_sub_line`, never this branch — but
+            // if a future continuation form (e.g., multi-line
+            // postings) gets added, this branch is where it would
+            // need to be teased apart from genuine other content.
             if open_posting_indent.is_some() {
                 builder.finish_node();
                 open_posting_indent = None;
@@ -396,6 +396,31 @@ fn emit_transaction_body(
     }
 
     i
+}
+
+/// Close any currently-open POSTING node IF the next sub-line at
+/// `sub_line_indent` should NOT be attached to it (i.e., the next
+/// sub-line is not strictly more indented than the POSTING). Shared
+/// between the `META_ENTRY` and indented-comment branches of
+/// `emit_transaction_body` so the two indent-attribution rules
+/// cannot drift.
+///
+/// "Attached" means strictly more indented than the open POSTING.
+/// A same-indent or shallower sub-line closes the POSTING; a
+/// deeper-indented sub-line leaves it open. Returns the attach
+/// decision so the caller doesn't need to recompute it (though
+/// neither current caller uses the return value).
+fn close_open_posting_unless_attached(
+    builder: &mut GreenNodeBuilder<'_>,
+    open_posting_indent: &mut Option<usize>,
+    sub_line_indent: usize,
+) -> bool {
+    let attach = open_posting_indent.is_some_and(|p_indent| sub_line_indent > p_indent);
+    if !attach && open_posting_indent.is_some() {
+        builder.finish_node();
+        *open_posting_indent = None;
+    }
+    attach
 }
 
 /// Returns true iff `tokens[i..]` starts a posting sub-line:
@@ -460,17 +485,34 @@ fn indent_width(tokens: &[(SyntaxKind, Range<usize>)], i: usize) -> usize {
     }
 }
 
-/// Returns true iff `tokens[i..]` starts an indented `;`/`%`
-/// comment line: `WHITESPACE` (the indent) followed by `COMMENT`
-/// or `PERCENT_COMMENT`. Used by `emit_transaction_body` to apply
+/// Returns true iff `kind` is one of the four comment-class trivia
+/// token kinds: `COMMENT` (`;`), `PERCENT_COMMENT` (`%`), `SHEBANG`
+/// (`#!`), or `EMACS_DIRECTIVE` (`#+`). Mirrors the comment subset
+/// of `SyntaxKind::is_trivia()` and is the single source of truth
+/// for the three call sites that need to decide whether a token
+/// "is a comment" for body-continuation / indent-attribution
+/// purposes (`starts_indented_comment`,
+/// `upcoming_indented_block_has_meta`,
+/// `is_indented_directive_continuation`). A new comment-class
+/// token would otherwise require three coordinated edits.
+const fn is_comment_token(kind: SyntaxKind) -> bool {
+    matches!(
+        kind,
+        SyntaxKind::COMMENT
+            | SyntaxKind::PERCENT_COMMENT
+            | SyntaxKind::SHEBANG
+            | SyntaxKind::EMACS_DIRECTIVE,
+    )
+}
+
+/// Returns true iff `tokens[i..]` starts an indented comment line:
+/// `WHITESPACE` (the indent) followed by a comment-class token (per
+/// [`is_comment_token`]). Used by `emit_transaction_body` to apply
 /// the same indent-attribution rule to comments that it applies to
 /// metadata.
 fn starts_indented_comment(tokens: &[(SyntaxKind, Range<usize>)], i: usize) -> bool {
     matches!(tokens.get(i), Some((SyntaxKind::WHITESPACE, _)))
-        && matches!(
-            tokens.get(i + 1),
-            Some((SyntaxKind::COMMENT | SyntaxKind::PERCENT_COMMENT, _)),
-        )
+        && matches!(tokens.get(i + 1), Some((k, _)) if is_comment_token(*k))
 }
 
 /// Returns true iff `tokens[i..]` starts an indented line with
@@ -493,11 +535,11 @@ fn is_indented_transaction_body_line(tokens: &[(SyntaxKind, Range<usize>)], i: u
     !matches!(tokens.get(i + 1), Some((SyntaxKind::NEWLINE, _)) | None)
 }
 
-/// Scan forward through any indented `WS META_KEY` / `WS COMMENT`
-/// / `WS PERCENT_COMMENT` sub-lines starting at `tokens[i..]`,
-/// returning `true` iff at least one of them is a metadata
-/// (`WS META_KEY`) sub-line. Stops at the first line that is
-/// neither metadata nor an indented comment (blank line,
+/// Scan forward through any indented `WS META_KEY` sub-lines or
+/// `WS <comment>` sub-lines (per [`is_comment_token`]) starting at
+/// `tokens[i..]`, returning `true` iff at least one of them is a
+/// metadata (`WS META_KEY`) sub-line. Stops at the first line that
+/// is neither metadata nor an indented comment (blank line,
 /// non-indented top-level content, EOF).
 fn upcoming_indented_block_has_meta(tokens: &[(SyntaxKind, Range<usize>)], mut i: usize) -> bool {
     loop {
@@ -505,10 +547,7 @@ fn upcoming_indented_block_has_meta(tokens: &[(SyntaxKind, Range<usize>)], mut i
         let next = tokens.get(i + 1).map(|(k, _)| *k);
         match (head, next) {
             (Some(SyntaxKind::WHITESPACE), Some(SyntaxKind::META_KEY)) => return true,
-            (
-                Some(SyntaxKind::WHITESPACE),
-                Some(SyntaxKind::COMMENT | SyntaxKind::PERCENT_COMMENT),
-            ) => {
+            (Some(SyntaxKind::WHITESPACE), Some(k)) if is_comment_token(k) => {
                 // Skip past this indented-comment line.
                 while i < tokens.len() && tokens[i].0 != SyntaxKind::NEWLINE {
                     i += 1;
@@ -530,8 +569,8 @@ fn upcoming_indented_block_has_meta(tokens: &[(SyntaxKind, Range<usize>)], mut i
 ///
 /// Recognizes:
 /// - `WS META_KEY` — always a continuation regardless of context.
-/// - `WS COMMENT` / `WS PERCENT_COMMENT` — a continuation iff the
-///   surrounding indented block contains ANY `WS META_KEY` (the
+/// - `WS <comment>` (per [`is_comment_token`]) — a continuation iff
+///   the surrounding indented block contains ANY `WS META_KEY` (the
 ///   `block_has_meta` argument). This prevents absorbing indented
 ///   comments that follow a header-only directive (rule 2 / rule
 ///   4 cases) while still keeping documentation comments BEFORE
@@ -554,7 +593,7 @@ fn is_indented_directive_continuation(
         return false;
     }
     match tokens.get(i + 1) {
-        Some((SyntaxKind::COMMENT | SyntaxKind::PERCENT_COMMENT, _)) => block_has_meta,
+        Some((k, _)) if is_comment_token(*k) => block_has_meta,
         _ => false,
     }
 }

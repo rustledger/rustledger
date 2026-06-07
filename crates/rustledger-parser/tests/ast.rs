@@ -584,3 +584,211 @@ fn ast_token_text_is_borrowed_not_allocated() {
     let stripped: &str = mkey.text_without_colon();
     assert_eq!(stripped, "location");
 }
+
+// ---- Round-2 review fixes ----------------------------------------
+
+#[test]
+fn transaction_strings_excludes_malformed_body_strings() {
+    // emit_transaction_body's catch-all (parser.rs:396-401) emits
+    // malformed indented body lines flat into TRANSACTION; their
+    // STRING tokens would be siblings of the header STRING.
+    // strings() / payee() / narration() must scope to the header
+    // region (tokens before the first NEWLINE) and ignore body
+    // strings.
+    let f = parse(
+        "2024-01-15 * \"header\"\n\
+         \x20\x20\"stray body string\"\n",
+    );
+    let Directive::Transaction(t) = single_directive(&f) else {
+        panic!("expected Transaction");
+    };
+    let all: Vec<String> = t
+        .strings()
+        .map(|s| s.text_unquoted().unwrap().to_string())
+        .collect();
+    assert_eq!(all, vec!["header"]);
+    assert!(t.payee().is_none());
+    assert_eq!(t.narration().unwrap().text_unquoted().unwrap(), "header");
+}
+
+#[test]
+fn transaction_flag_scoped_to_pre_string_region() {
+    // A stray trailing single-char CURRENCY after the narration
+    // STRING must NOT be misclassified as a ticker-letter flag.
+    // The header is `DATE WS STRING WS CURRENCY NEWLINE`,
+    // classified as TRANSACTION via the STRING-implied-flag arm.
+    let f = parse("2024-01-15 \"narration\" T\n  Assets:Cash  -5 USD\n");
+    let Directive::Transaction(t) = single_directive(&f) else {
+        panic!("expected Transaction");
+    };
+    assert!(
+        t.flag().is_none(),
+        "trailing stray CURRENCY 'T' must NOT be reported as a flag"
+    );
+    assert_eq!(t.narration().unwrap().text_unquoted().unwrap(), "narration");
+}
+
+#[test]
+fn transaction_tags_links_excluded_from_body() {
+    // Body tags/links (if any leak via catch-all) must not appear
+    // in tags() / links() either.
+    let f = parse(
+        "2024-01-15 * \"x\" #header-tag ^header-link\n\
+         \x20\x20#body-tag-stray\n",
+    );
+    let Directive::Transaction(t) = single_directive(&f) else {
+        panic!("expected Transaction");
+    };
+    let tags: Vec<String> = t.tags().map(|t| t.text().to_string()).collect();
+    assert_eq!(tags, vec!["#header-tag"]);
+    let links: Vec<String> = t.links().map(|l| l.text().to_string()).collect();
+    assert_eq!(links, vec!["^header-link"]);
+}
+
+#[test]
+fn amount_currency_unclosed_paren_returns_none() {
+    // emit_amount_operand breaks on NEWLINE without emitting a
+    // synthetic R_PAREN, so AMOUNT for `(1 USD\n` is
+    // [L_PAREN, NUMBER, WS, CURRENCY] with unbalanced parens.
+    // currency() must refuse rather than silently surface the
+    // paren-internal USD.
+    let f = parse("2024-01-15 * \"x\"\n  Assets:Cash  (1 USD\n");
+    let Directive::Transaction(t) = single_directive(&f) else {
+        panic!("expected Transaction");
+    };
+    let amt = t.postings().next().unwrap().amount().unwrap();
+    assert!(
+        amt.currency().is_none(),
+        "unclosed paren must yield None, not the inside-paren USD"
+    );
+}
+
+#[test]
+fn amount_currency_closed_paren_no_outer_currency_returns_none() {
+    // `(10 + 5)` — closed paren with no trailing outer currency.
+    // depth returns to 0 by end, but no CURRENCY was seen at
+    // depth 0, so result is None.
+    let f = parse("2024-01-15 * \"x\"\n  Assets:Cash  (10 + 5)\n");
+    let Directive::Transaction(t) = single_directive(&f) else {
+        panic!("expected Transaction");
+    };
+    let amt = t.postings().next().unwrap().amount().unwrap();
+    assert!(amt.currency().is_none());
+}
+
+#[test]
+fn amount_currency_paren_arithmetic_with_outer_currency() {
+    // `(10 + 5) USD` — closed paren followed by outer USD.
+    // Forward walk picks USD at depth 0.
+    let f = parse("2024-01-15 * \"x\"\n  Assets:Cash  (10 + 5) USD\n");
+    let Directive::Transaction(t) = single_directive(&f) else {
+        panic!("expected Transaction");
+    };
+    let amt = t.postings().next().unwrap().amount().unwrap();
+    assert_eq!(amt.currency().unwrap().text(), "USD");
+}
+
+#[test]
+fn error_node_text_is_syntaxtext_zero_alloc() {
+    // ErrorNode::text returns a rowan SyntaxText (rope view); the
+    // implementation should not call to_string(). SyntaxText
+    // impls PartialEq<&str>, so direct comparison still works.
+    let f = parse("bogus content here\n2024-01-01 open Assets:Cash\n");
+    let errs: Vec<ErrorNode> = f.errors().collect();
+    assert_eq!(errs.len(), 1);
+    let txt: rowan::SyntaxText = errs[0].text();
+    assert_eq!(txt, "bogus content here\n");
+    // Also verify Display works (LSP diagnostic path).
+    assert_eq!(format!("{txt}"), "bogus content here\n");
+}
+
+#[test]
+fn directive_enum_can_cast_and_cast_agree_for_every_kind() {
+    // Pin lockstep between the macro-derived can_cast and cast.
+    // If a contributor adds a Directive variant but forgets one
+    // half of the match (which the macro now makes impossible),
+    // this test catches the drift.
+    use rustledger_parser::cst::SyntaxKind;
+    let directive_kinds = [
+        ("open", SyntaxKind::OPEN_DIRECTIVE),
+        ("close", SyntaxKind::CLOSE_DIRECTIVE),
+        ("balance", SyntaxKind::BALANCE_DIRECTIVE),
+        ("pad", SyntaxKind::PAD_DIRECTIVE),
+        ("event", SyntaxKind::EVENT_DIRECTIVE),
+        ("query", SyntaxKind::QUERY_DIRECTIVE),
+        ("note", SyntaxKind::NOTE_DIRECTIVE),
+        ("document", SyntaxKind::DOCUMENT_DIRECTIVE),
+        ("price", SyntaxKind::PRICE_DIRECTIVE),
+        ("commodity", SyntaxKind::COMMODITY_DIRECTIVE),
+        ("pushtag", SyntaxKind::PUSHTAG_DIRECTIVE),
+        ("poptag", SyntaxKind::POPTAG_DIRECTIVE),
+        ("pushmeta", SyntaxKind::PUSHMETA_DIRECTIVE),
+        ("popmeta", SyntaxKind::POPMETA_DIRECTIVE),
+        ("option", SyntaxKind::OPTION_DIRECTIVE),
+        ("include", SyntaxKind::INCLUDE_DIRECTIVE),
+        ("plugin", SyntaxKind::PLUGIN_DIRECTIVE),
+        ("custom", SyntaxKind::CUSTOM_DIRECTIVE),
+        ("transaction", SyntaxKind::TRANSACTION),
+    ];
+    for (name, kind) in directive_kinds {
+        assert!(
+            Directive::can_cast(kind),
+            "can_cast must accept {name} ({kind:?})"
+        );
+    }
+    // Negative cases — non-directive kinds must be rejected.
+    for kind in [
+        SyntaxKind::POSTING,
+        SyntaxKind::AMOUNT,
+        SyntaxKind::META_ENTRY,
+        SyntaxKind::ERROR_NODE,
+        SyntaxKind::SOURCE_FILE,
+    ] {
+        assert!(
+            !Directive::can_cast(kind),
+            "can_cast must reject non-directive {kind:?}"
+        );
+    }
+}
+
+#[test]
+fn transaction_flag_classify_is_exhaustive() {
+    use rustledger_parser::cst::ast::TransactionFlagKind;
+    let f = parse("2024-01-15 ! \"x\"\n  Assets:Cash  -5 USD\n");
+    let Directive::Transaction(t) = single_directive(&f) else {
+        unreachable!()
+    };
+    let flag = t.flag().unwrap();
+    match flag.classify() {
+        TransactionFlagKind::Pending => {} // expected
+        other => panic!("expected Pending, got {other:?}"),
+    }
+}
+
+#[test]
+fn posting_flag_classify_is_exhaustive() {
+    use rustledger_parser::cst::ast::PostingFlagKind;
+    let f = parse("2024-01-15 * \"x\"\n  ! Assets:Cash  -5 USD\n");
+    let Directive::Transaction(t) = single_directive(&f) else {
+        unreachable!()
+    };
+    let p = t.postings().next().unwrap();
+    let flag = p.flag().unwrap();
+    match flag.classify() {
+        PostingFlagKind::Pending => {} // expected
+        other => panic!("expected Pending, got {other:?}"),
+    }
+}
+
+#[test]
+fn payee_narration_zero_strings_returns_none() {
+    // Bareword `txn` keyword with no strings — header strings
+    // count is 0; both accessors must return None.
+    let f = parse("2024-01-15 txn\n  Assets:Cash  -5 USD\n");
+    let Directive::Transaction(t) = single_directive(&f) else {
+        panic!("expected Transaction");
+    };
+    assert_eq!(t.strings().count(), 0);
+    assert!(t.payee().is_none());
+    assert!(t.narration().is_none());
+}

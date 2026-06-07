@@ -212,19 +212,44 @@ ast_token!(
 
 // ---- Heterogeneous flag/sign token wrappers --------------------
 //
-// These wrap a SyntaxToken whose kind is one of several possibilities
-// (a transaction flag may be STAR, PENDING_KW, FLAG letter, HASH,
-// TXN_KW, or single-char CURRENCY). We deliberately do NOT implement
-// AstToken for them, since AstToken::can_cast is kind-only and the
-// CURRENCY case needs a length check. Inherent cast() does the full
-// check; downstream code discriminates via the is_*() predicates or
-// kind().
+// These wrap a SyntaxToken whose kind is one of several
+// possibilities (a transaction flag may be STAR, PENDING_KW, FLAG
+// letter, HASH, TXN_KW, or single-char CURRENCY). We deliberately
+// do NOT implement AstToken for them: AstToken::can_cast is
+// kind-only, and the CURRENCY case needs a length check (only
+// single-character CURRENCY counts as a ticker-letter flag).
+// Inherent cast() runs the full check.
+//
+// Downstream code that needs exhaustive matching should use the
+// `kind()` method paired with the dedicated `*FlagKind` enum
+// returned by `classify()` (or `Sign::classify()`), which is
+// pinned to the same variant set as `cast`.
+
+/// Exhaustive classification of a [`TransactionFlag`] token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TransactionFlagKind {
+    /// `*` token.
+    Star,
+    /// `!` (the `PENDING_KW` token).
+    Pending,
+    /// Single-letter `FLAG` token (e.g. `P` from `posti P`).
+    Letter,
+    /// `#` token.
+    Hash,
+    /// `txn` keyword.
+    Txn,
+    /// Single-character `CURRENCY` token used as the
+    /// ticker-letter flag.
+    CurrencyLetter,
+}
 
 /// Typed wrapper for the transaction-header flag token.
 ///
 /// May be `STAR` (`*`), `PENDING_KW` (`!`), `FLAG` (letter),
 /// `HASH` (`#`), `TXN_KW` (`txn`), or single-character `CURRENCY`
-/// (ticker-letter flag, e.g. `T`).
+/// (ticker-letter flag, e.g. `T`). Use [`Self::classify`] for
+/// exhaustive `match` ergonomics, or the `is_*` predicates for
+/// boolean checks.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TransactionFlag(SyntaxToken);
 
@@ -252,6 +277,21 @@ impl TransactionFlag {
     pub fn text(&self) -> &str {
         self.0.text()
     }
+
+    /// Exhaustive classification — pair with a `match` for
+    /// compiler-checked coverage of every variant.
+    pub fn classify(&self) -> TransactionFlagKind {
+        match self.kind() {
+            SyntaxKind::STAR => TransactionFlagKind::Star,
+            SyntaxKind::PENDING_KW => TransactionFlagKind::Pending,
+            SyntaxKind::FLAG => TransactionFlagKind::Letter,
+            SyntaxKind::HASH => TransactionFlagKind::Hash,
+            SyntaxKind::TXN_KW => TransactionFlagKind::Txn,
+            SyntaxKind::CURRENCY => TransactionFlagKind::CurrencyLetter,
+            _ => unreachable!("TransactionFlag invariant — guarded by cast()"),
+        }
+    }
+
     pub fn is_star(&self) -> bool {
         self.kind() == SyntaxKind::STAR
     }
@@ -272,9 +312,22 @@ impl TransactionFlag {
     }
 }
 
+/// Exhaustive classification of a [`PostingFlag`] token.
+/// Same as [`TransactionFlagKind`] minus `Txn` (postings cannot
+/// carry the `txn` keyword).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PostingFlagKind {
+    Star,
+    Pending,
+    Letter,
+    Hash,
+    CurrencyLetter,
+}
+
 /// Typed wrapper for a posting-line flag token. Same as
 /// [`TransactionFlag`] minus the `TXN_KW` variant (postings can't
-/// carry the `txn` keyword).
+/// carry the `txn` keyword). Use [`Self::classify`] for
+/// exhaustive `match` ergonomics.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PostingFlag(SyntaxToken);
 
@@ -298,6 +351,20 @@ impl PostingFlag {
     pub fn text(&self) -> &str {
         self.0.text()
     }
+
+    /// Exhaustive classification — pair with a `match` for
+    /// compiler-checked coverage.
+    pub fn classify(&self) -> PostingFlagKind {
+        match self.kind() {
+            SyntaxKind::STAR => PostingFlagKind::Star,
+            SyntaxKind::PENDING_KW => PostingFlagKind::Pending,
+            SyntaxKind::FLAG => PostingFlagKind::Letter,
+            SyntaxKind::HASH => PostingFlagKind::Hash,
+            SyntaxKind::CURRENCY => PostingFlagKind::CurrencyLetter,
+            _ => unreachable!("PostingFlag invariant — guarded by cast()"),
+        }
+    }
+
     pub fn is_star(&self) -> bool {
         self.kind() == SyntaxKind::STAR
     }
@@ -316,6 +383,14 @@ impl PostingFlag {
 }
 
 /// Typed wrapper for an amount sign token (`PLUS` or `MINUS`).
+///
+/// `Sign::cast` is a position-AGNOSTIC kind check: it accepts ANY
+/// `PLUS` or `MINUS` token, including operator-position signs
+/// inside arithmetic (e.g., the `-` in `10 + -5 USD`). To get the
+/// LEADING sign of an `Amount`, use [`Amount::sign`] which scopes
+/// to the first non-whitespace token of `AMOUNT`. Calling
+/// `Sign::cast` on an arbitrary token does not imply the token
+/// occupies the leading-sign position.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Sign(SyntaxToken);
 
@@ -367,105 +442,60 @@ impl SourceFile {
     }
 }
 
-/// Sum type over every recognized top-level directive wrapper.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum Directive {
-    Open(OpenDirective),
-    Close(CloseDirective),
-    Balance(BalanceDirective),
-    Pad(PadDirective),
-    Event(EventDirective),
-    Query(QueryDirective),
-    Note(NoteDirective),
-    Document(DocumentDirective),
-    Price(PriceDirective),
-    Commodity(CommodityDirective),
-    Pushtag(PushtagDirective),
-    Poptag(PoptagDirective),
-    Pushmeta(PushmetaDirective),
-    Popmeta(PopmetaDirective),
-    Option(OptionDirective),
-    Include(IncludeDirective),
-    Plugin(PluginDirective),
-    Custom(CustomDirective),
-    Transaction(Transaction),
-}
-
-impl AstNode for Directive {
-    fn can_cast(kind: SyntaxKind) -> bool {
-        matches!(
-            kind,
-            SyntaxKind::OPEN_DIRECTIVE
-                | SyntaxKind::CLOSE_DIRECTIVE
-                | SyntaxKind::BALANCE_DIRECTIVE
-                | SyntaxKind::PAD_DIRECTIVE
-                | SyntaxKind::EVENT_DIRECTIVE
-                | SyntaxKind::QUERY_DIRECTIVE
-                | SyntaxKind::NOTE_DIRECTIVE
-                | SyntaxKind::DOCUMENT_DIRECTIVE
-                | SyntaxKind::PRICE_DIRECTIVE
-                | SyntaxKind::COMMODITY_DIRECTIVE
-                | SyntaxKind::PUSHTAG_DIRECTIVE
-                | SyntaxKind::POPTAG_DIRECTIVE
-                | SyntaxKind::PUSHMETA_DIRECTIVE
-                | SyntaxKind::POPMETA_DIRECTIVE
-                | SyntaxKind::OPTION_DIRECTIVE
-                | SyntaxKind::INCLUDE_DIRECTIVE
-                | SyntaxKind::PLUGIN_DIRECTIVE
-                | SyntaxKind::CUSTOM_DIRECTIVE
-                | SyntaxKind::TRANSACTION
-        )
-    }
-
-    fn cast(node: SyntaxNode) -> Option<Self> {
-        Some(match node.kind() {
-            SyntaxKind::OPEN_DIRECTIVE => Self::Open(OpenDirective(node)),
-            SyntaxKind::CLOSE_DIRECTIVE => Self::Close(CloseDirective(node)),
-            SyntaxKind::BALANCE_DIRECTIVE => Self::Balance(BalanceDirective(node)),
-            SyntaxKind::PAD_DIRECTIVE => Self::Pad(PadDirective(node)),
-            SyntaxKind::EVENT_DIRECTIVE => Self::Event(EventDirective(node)),
-            SyntaxKind::QUERY_DIRECTIVE => Self::Query(QueryDirective(node)),
-            SyntaxKind::NOTE_DIRECTIVE => Self::Note(NoteDirective(node)),
-            SyntaxKind::DOCUMENT_DIRECTIVE => Self::Document(DocumentDirective(node)),
-            SyntaxKind::PRICE_DIRECTIVE => Self::Price(PriceDirective(node)),
-            SyntaxKind::COMMODITY_DIRECTIVE => Self::Commodity(CommodityDirective(node)),
-            SyntaxKind::PUSHTAG_DIRECTIVE => Self::Pushtag(PushtagDirective(node)),
-            SyntaxKind::POPTAG_DIRECTIVE => Self::Poptag(PoptagDirective(node)),
-            SyntaxKind::PUSHMETA_DIRECTIVE => Self::Pushmeta(PushmetaDirective(node)),
-            SyntaxKind::POPMETA_DIRECTIVE => Self::Popmeta(PopmetaDirective(node)),
-            SyntaxKind::OPTION_DIRECTIVE => Self::Option(OptionDirective(node)),
-            SyntaxKind::INCLUDE_DIRECTIVE => Self::Include(IncludeDirective(node)),
-            SyntaxKind::PLUGIN_DIRECTIVE => Self::Plugin(PluginDirective(node)),
-            SyntaxKind::CUSTOM_DIRECTIVE => Self::Custom(CustomDirective(node)),
-            SyntaxKind::TRANSACTION => Self::Transaction(Transaction(node)),
-            _ => return None,
-        })
-    }
-
-    fn syntax(&self) -> &SyntaxNode {
-        match self {
-            Self::Open(d) => d.syntax(),
-            Self::Close(d) => d.syntax(),
-            Self::Balance(d) => d.syntax(),
-            Self::Pad(d) => d.syntax(),
-            Self::Event(d) => d.syntax(),
-            Self::Query(d) => d.syntax(),
-            Self::Note(d) => d.syntax(),
-            Self::Document(d) => d.syntax(),
-            Self::Price(d) => d.syntax(),
-            Self::Commodity(d) => d.syntax(),
-            Self::Pushtag(d) => d.syntax(),
-            Self::Poptag(d) => d.syntax(),
-            Self::Pushmeta(d) => d.syntax(),
-            Self::Popmeta(d) => d.syntax(),
-            Self::Option(d) => d.syntax(),
-            Self::Include(d) => d.syntax(),
-            Self::Plugin(d) => d.syntax(),
-            Self::Custom(d) => d.syntax(),
-            Self::Transaction(d) => d.syntax(),
+// Sum-type Directive enum + AstNode impl, derived from a single
+// variant list so can_cast, cast, and syntax() are guaranteed to
+// agree. Adding a new directive variant requires editing exactly
+// one line; drift between can_cast and cast is impossible.
+macro_rules! directive_enum {
+    ($($variant:ident($struct:ident, $kind:ident)),* $(,)?) => {
+        /// Sum type over every recognized top-level directive wrapper.
+        #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+        pub enum Directive {
+            $($variant($struct),)*
         }
-    }
+
+        impl AstNode for Directive {
+            fn can_cast(kind: SyntaxKind) -> bool {
+                matches!(kind, $(SyntaxKind::$kind)|*)
+            }
+
+            fn cast(node: SyntaxNode) -> Option<Self> {
+                Some(match node.kind() {
+                    $(SyntaxKind::$kind => Self::$variant($struct(node)),)*
+                    _ => return None,
+                })
+            }
+
+            fn syntax(&self) -> &SyntaxNode {
+                match self {
+                    $(Self::$variant(d) => d.syntax(),)*
+                }
+            }
+        }
+    };
 }
+
+directive_enum!(
+    Open(OpenDirective, OPEN_DIRECTIVE),
+    Close(CloseDirective, CLOSE_DIRECTIVE),
+    Balance(BalanceDirective, BALANCE_DIRECTIVE),
+    Pad(PadDirective, PAD_DIRECTIVE),
+    Event(EventDirective, EVENT_DIRECTIVE),
+    Query(QueryDirective, QUERY_DIRECTIVE),
+    Note(NoteDirective, NOTE_DIRECTIVE),
+    Document(DocumentDirective, DOCUMENT_DIRECTIVE),
+    Price(PriceDirective, PRICE_DIRECTIVE),
+    Commodity(CommodityDirective, COMMODITY_DIRECTIVE),
+    Pushtag(PushtagDirective, PUSHTAG_DIRECTIVE),
+    Poptag(PoptagDirective, POPTAG_DIRECTIVE),
+    Pushmeta(PushmetaDirective, PUSHMETA_DIRECTIVE),
+    Popmeta(PopmetaDirective, POPMETA_DIRECTIVE),
+    Option(OptionDirective, OPTION_DIRECTIVE),
+    Include(IncludeDirective, INCLUDE_DIRECTIVE),
+    Plugin(PluginDirective, PLUGIN_DIRECTIVE),
+    Custom(CustomDirective, CUSTOM_DIRECTIVE),
+    Transaction(Transaction, TRANSACTION),
+);
 
 impl Directive {
     /// Metadata sub-lines attached to this directive (phase 2.2a
@@ -484,10 +514,13 @@ ast_node!(
 );
 
 impl ErrorNode {
-    /// The raw bytes of the malformed region.
+    /// The raw bytes of the malformed region as a rowan
+    /// [`rowan::SyntaxText`] (a rope view). Zero allocation; use
+    /// `.to_string()` on the result if you need an owned
+    /// `String`, or `format!`/`Display` for direct output.
     #[must_use]
-    pub fn text(&self) -> String {
-        self.syntax().text().to_string()
+    pub fn text(&self) -> rowan::SyntaxText {
+        self.syntax().text()
     }
 }
 
@@ -767,8 +800,37 @@ ast_node!(
 );
 
 impl Transaction {
+    /// Direct-child tokens of TRANSACTION up to (but not
+    /// including) the first NEWLINE — i.e., the header region.
+    /// Body content (`POSTING` / `META_ENTRY` nodes; flat tokens
+    /// emitted by `emit_transaction_body`'s catch-all for
+    /// malformed indented lines) is excluded, so accessors using
+    /// this helper can't mistake body content for header content.
+    fn header_tokens(&self) -> impl Iterator<Item = SyntaxToken> + '_ {
+        self.syntax()
+            .children_with_tokens()
+            .filter_map(rowan::NodeOrToken::into_token)
+            .take_while(|t| t.kind() != SyntaxKind::NEWLINE)
+    }
+
+    /// Header tokens BEFORE the first STRING/TAG/LINK — i.e., the
+    /// flag-position region (between DATE and the first header
+    /// content token). Used by [`Self::flag`] to scope its search.
+    fn flag_region_tokens(&self) -> impl Iterator<Item = SyntaxToken> + '_ {
+        self.header_tokens().take_while(|t| {
+            !matches!(
+                t.kind(),
+                SyntaxKind::STRING | SyntaxKind::TAG | SyntaxKind::LINK
+            )
+        })
+    }
+
     pub fn date(&self) -> Option<Date> {
-        first_token(self.syntax(), SyntaxKind::DATE).and_then(Date::cast)
+        // DATE is in the header, so first_token over the whole node
+        // is fine — but for symmetry, scope to header_tokens.
+        self.header_tokens()
+            .find(|t| t.kind() == SyntaxKind::DATE)
+            .and_then(Date::cast)
     }
 
     /// Transaction flag token. May be `STAR` (`*`), `PENDING_KW`
@@ -776,55 +838,85 @@ impl Transaction {
     /// (the `txn` keyword), single-char `CURRENCY` (ticker-letter
     /// flag), or absent (implied via a leading `STRING`
     /// payee/narration).
+    ///
+    /// Scoped to the flag-position region (between `DATE` and the
+    /// first `STRING`/`TAG`/`LINK`) so a stray trailing
+    /// single-char `CURRENCY` after the narration is NOT
+    /// misclassified as a flag.
     pub fn flag(&self) -> Option<TransactionFlag> {
-        self.syntax()
-            .children_with_tokens()
-            .filter_map(rowan::NodeOrToken::into_token)
-            .find_map(TransactionFlag::cast)
+        self.flag_region_tokens().find_map(TransactionFlag::cast)
     }
 
-    /// All `STRING` tokens in the header, in source order. The
-    /// 2-string convention (`"payee" "narration"`) is the
+    /// All `STRING` tokens in the header, in source order.
+    ///
+    /// Scoped to the header (tokens before the terminating
+    /// `NEWLINE`), so `STRING` tokens emitted into TRANSACTION by
+    /// `emit_transaction_body`'s catch-all for malformed indented
+    /// body lines are excluded.
+    ///
+    /// The 2-string convention (`"payee" "narration"`) is the
     /// canonical form; [`Self::payee`] and [`Self::narration`]
     /// follow it strictly. For 3+ strings (malformed but
     /// losslessly parsed), use this method to surface every
     /// header string.
     pub fn strings(&self) -> impl Iterator<Item = StringLit> + '_ {
-        tokens_of_kind(self.syntax(), SyntaxKind::STRING).filter_map(StringLit::cast)
+        self.header_tokens()
+            .filter(|t| t.kind() == SyntaxKind::STRING)
+            .filter_map(StringLit::cast)
     }
 
     /// The payee string, if a separate payee + narration pair is
     /// present. Returns `Some(first)` ONLY when exactly two
-    /// `STRING` tokens appear in the header (the canonical
+    /// header `STRING` tokens appear (the canonical
     /// `"payee" "narration"` shape). With 0, 1, or 3+ strings
     /// the convention is ambiguous and this returns `None` —
     /// use [`Self::strings`] for lossless access.
     pub fn payee(&self) -> Option<StringLit> {
-        let strings: Vec<StringLit> = self.strings().collect();
-        (strings.len() == 2).then(|| strings.into_iter().next().unwrap())
+        // Take up to 3 to disambiguate 2 from 3+ without
+        // allocating the whole sequence.
+        let mut iter = self.strings();
+        let first = iter.next()?;
+        let second = iter.next()?;
+        if iter.next().is_some() {
+            None
+        } else {
+            // Exactly 2 strings; first is payee.
+            let _ = second;
+            Some(first)
+        }
     }
 
     /// The narration string. Returns `Some(only)` for a single
-    /// string and `Some(last)` for the 2-string `"payee"
-    /// "narration"` form. Returns `None` for 0 or 3+ strings —
-    /// use [`Self::strings`] for lossless access on malformed
-    /// headers.
+    /// header string and `Some(last)` for the 2-string
+    /// `"payee" "narration"` form. Returns `None` for 0 or 3+
+    /// strings — use [`Self::strings`] for lossless access on
+    /// malformed headers.
     pub fn narration(&self) -> Option<StringLit> {
-        let mut strings: Vec<StringLit> = self.strings().collect();
-        match strings.len() {
-            1 | 2 => strings.pop(),
+        let mut iter = self.strings();
+        let first = iter.next()?;
+        let second = iter.next();
+        let third = iter.next();
+        match (second, third) {
+            (None, _) => Some(first),
+            (Some(s2), None) => Some(s2),
             _ => None,
         }
     }
 
     /// All `#TAG` tokens attached to the transaction header.
+    /// Scoped to the header region (excludes body tokens).
     pub fn tags(&self) -> impl Iterator<Item = Tag> + '_ {
-        tokens_of_kind(self.syntax(), SyntaxKind::TAG).filter_map(Tag::cast)
+        self.header_tokens()
+            .filter(|t| t.kind() == SyntaxKind::TAG)
+            .filter_map(Tag::cast)
     }
 
     /// All `^LINK` tokens attached to the transaction header.
+    /// Scoped to the header region (excludes body tokens).
     pub fn links(&self) -> impl Iterator<Item = Link> + '_ {
-        tokens_of_kind(self.syntax(), SyntaxKind::LINK).filter_map(Link::cast)
+        self.header_tokens()
+            .filter(|t| t.kind() == SyntaxKind::LINK)
+            .filter_map(Link::cast)
     }
 
     /// All `POSTING` sub-lines, in source order.
@@ -919,34 +1011,40 @@ impl Amount {
         first_token(self.syntax(), SyntaxKind::NUMBER).and_then(Number::cast)
     }
 
-    /// The trailing currency at paren-depth 0. For `100 USD` or
-    /// `100USD` or `(1+2) USD`, this is the trailing `USD`. For
-    /// bare currency-only `AMOUNT(CURRENCY)`, it's the same
-    /// token. For malformed `AMOUNT( CURRENCY )` (no trailing
-    /// currency outside the parens), returns `None` rather than
-    /// silently picking the paren-internal token.
+    /// The trailing currency at paren-depth 0.
+    ///
+    /// For `100 USD`, `100USD`, `(1+2) USD`: returns the trailing
+    /// `USD`. For bare currency-only `AMOUNT(CURRENCY)`: returns
+    /// the same token. For malformed `(1 USD)` (CURRENCY inside
+    /// parens, no outer trailing currency): returns `None`. For
+    /// unclosed `(1 USD\n` or stray-closer `1 USD)` (unbalanced
+    /// parens): returns `None`, refusing to surface a possibly
+    /// paren-internal currency.
+    ///
+    /// Single forward pass with paren-depth tracking; no
+    /// allocation. `emit_amount_operand` keeps paren contents
+    /// flat under AMOUNT (no `PAREN_EXPR` sub-node), so depth
+    /// tracking is the only structural disambiguator.
     pub fn currency(&self) -> Option<CurrencyName> {
-        // Walk tokens in reverse with paren-depth tracking; the
-        // first CURRENCY we hit at depth 0 is the trailing one.
-        // emit_amount_operand keeps paren contents flat under
-        // AMOUNT (no PAREN_EXPR sub-node), so internal currency
-        // tokens are direct children too — depth tracking is
-        // the only structural disambiguator.
-        let tokens: Vec<SyntaxToken> = self
-            .syntax()
-            .children_with_tokens()
-            .filter_map(rowan::NodeOrToken::into_token)
-            .collect();
         let mut depth: i32 = 0;
-        for t in tokens.iter().rev() {
+        let mut last_at_depth_0: Option<SyntaxToken> = None;
+        for el in self.syntax().children_with_tokens() {
+            let rowan::NodeOrToken::Token(t) = el else {
+                continue;
+            };
             match t.kind() {
-                SyntaxKind::R_PAREN => depth += 1,
-                SyntaxKind::L_PAREN => depth -= 1,
-                SyntaxKind::CURRENCY if depth == 0 => return CurrencyName::cast(t.clone()),
+                SyntaxKind::L_PAREN => depth += 1,
+                SyntaxKind::R_PAREN => depth -= 1,
+                SyntaxKind::CURRENCY if depth == 0 => last_at_depth_0 = Some(t),
                 _ => {}
             }
         }
-        None
+        // Unbalanced parens (unclosed or stray closer): refuse to
+        // surface a currency rather than guess.
+        if depth != 0 {
+            return None;
+        }
+        last_at_depth_0.and_then(CurrencyName::cast)
     }
 
     /// Returns true iff the amount contains an arithmetic operator

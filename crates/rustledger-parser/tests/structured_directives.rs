@@ -2978,6 +2978,165 @@ fn custom_directive_unterminated_at_eof_still_wraps_per_rule_5() {
     assert!(!has_trailing_newline);
 }
 
+#[test]
+fn include_directive_with_metadata_wraps_multi_line() {
+    use SyntaxKind::*;
+    // The body / metadata code path is shared across all edge
+    // directives; pinning INCLUDE-with-meta complements the
+    // OPTION-with-meta test and guards against a future refactor
+    // that special-cases dated vs keyword directives.
+    let source = "include \"shared/2024.beancount\"\n\
+                  \x20\x20note: \"shared accounts\"\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let ds = directives(&tree);
+    assert_eq!(ds.len(), 1);
+    assert_eq!(ds[0].kind(), INCLUDE_DIRECTIVE);
+    let metas = ds[0]
+        .descendants()
+        .filter(|n| n.kind() == META_ENTRY)
+        .count();
+    assert_eq!(metas, 1);
+}
+
+#[test]
+fn plugin_directive_with_metadata_wraps_multi_line() {
+    use SyntaxKind::*;
+    let source = "plugin \"my.plugin\" \"cfg\"\n\
+                  \x20\x20tolerance: \"0.01\"\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let ds = directives(&tree);
+    assert_eq!(ds.len(), 1);
+    assert_eq!(ds[0].kind(), PLUGIN_DIRECTIVE);
+    let metas = ds[0]
+        .descendants()
+        .filter(|n| n.kind() == META_ENTRY)
+        .count();
+    assert_eq!(metas, 1);
+}
+
+#[test]
+fn custom_directive_with_metadata_wraps_multi_line() {
+    use SyntaxKind::*;
+    let source = "2024-01-01 custom \"budget\" \"food\"\n\
+                  \x20\x20source: \"manual\"\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let ds = directives(&tree);
+    assert_eq!(ds.len(), 1);
+    assert_eq!(ds[0].kind(), CUSTOM_DIRECTIVE);
+    let metas = ds[0]
+        .descendants()
+        .filter(|n| n.kind() == META_ENTRY)
+        .count();
+    assert_eq!(metas, 1);
+}
+
+#[test]
+fn option_directive_with_trailing_inline_comment_attaches_inside() {
+    use SyntaxKind::*;
+    // Rule 1 of `cst::trivia`: a same-line trailing `;` comment
+    // attaches INSIDE the directive. The body code path
+    // (`emit_through_terminator`) handles this uniformly for all
+    // directive shapes; pinning the four new kinds protects
+    // against a regression that splits the path.
+    let source = "option \"title\" \"My Ledger\" ; an explanation\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let ds = directives(&tree);
+    assert_eq!(ds.len(), 1);
+    assert_eq!(ds[0].kind(), OPTION_DIRECTIVE);
+    let comment_in_directive = ds[0]
+        .children_with_tokens()
+        .filter(|e| e.kind() == COMMENT)
+        .count();
+    assert_eq!(comment_in_directive, 1);
+}
+
+#[test]
+fn include_directive_with_trailing_inline_comment_attaches_inside() {
+    use SyntaxKind::*;
+    let source = "include \"shared.beancount\" ; main shared file\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let ds = directives(&tree);
+    assert_eq!(ds.len(), 1);
+    assert_eq!(ds[0].kind(), INCLUDE_DIRECTIVE);
+    let comment_in_directive = ds[0]
+        .children_with_tokens()
+        .filter(|e| e.kind() == COMMENT)
+        .count();
+    assert_eq!(comment_in_directive, 1);
+}
+
+#[test]
+fn plugin_directive_with_trailing_inline_comment_attaches_inside() {
+    use SyntaxKind::*;
+    let source = "plugin \"my.plugin\" ; description\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let ds = directives(&tree);
+    assert_eq!(ds.len(), 1);
+    assert_eq!(ds[0].kind(), PLUGIN_DIRECTIVE);
+    let comment_in_directive = ds[0]
+        .children_with_tokens()
+        .filter(|e| e.kind() == COMMENT)
+        .count();
+    assert_eq!(comment_in_directive, 1);
+}
+
+#[test]
+fn custom_directive_with_trailing_inline_comment_attaches_inside() {
+    use SyntaxKind::*;
+    let source = "2024-01-01 custom \"budget\" \"food\" ; monthly cap\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let ds = directives(&tree);
+    assert_eq!(ds.len(), 1);
+    assert_eq!(ds[0].kind(), CUSTOM_DIRECTIVE);
+    let comment_in_directive = ds[0]
+        .children_with_tokens()
+        .filter(|e| e.kind() == COMMENT)
+        .count();
+    assert_eq!(comment_in_directive, 1);
+}
+
+#[test]
+fn all_four_edge_directives_mixed_with_dated_directives() {
+    use SyntaxKind::*;
+    // Smoke test: all 4 new edge directives plus an OPEN and a
+    // TRANSACTION in one source. Pins that CUSTOM (the only dated
+    // edge directive — dispatched via the DATE-peek arm of
+    // identify_directive) coexists cleanly with both keyword-head
+    // edge directives and the legacy dated/standalone ones.
+    let source = "option \"title\" \"X\"\n\
+                  include \"shared.bean\"\n\
+                  plugin \"my.plugin\"\n\
+                  2024-01-01 open Assets:Cash\n\
+                  2024-01-15 * \"tx\"\n\
+                  \x20\x20Assets:Cash 1 USD\n\
+                  2024-01-20 custom \"note\" \"end of test\"\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let ds = directives(&tree);
+    assert_eq!(ds.len(), 6);
+    assert_eq!(ds[0].kind(), OPTION_DIRECTIVE);
+    assert_eq!(ds[1].kind(), INCLUDE_DIRECTIVE);
+    assert_eq!(ds[2].kind(), PLUGIN_DIRECTIVE);
+    assert_eq!(ds[3].kind(), OPEN_DIRECTIVE);
+    assert_eq!(ds[4].kind(), TRANSACTION);
+    assert_eq!(ds[5].kind(), CUSTOM_DIRECTIVE);
+}
+
 // ---------- Edge cases ----------
 
 #[test]

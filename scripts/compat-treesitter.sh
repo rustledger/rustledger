@@ -148,6 +148,10 @@ cat > "${TS_QUERY_FILE}" <<'EOF'
 (poptag) @directive
 (pushmeta) @directive
 (popmeta) @directive
+(option) @directive
+(include) @directive
+(plugin) @directive
+(custom) @directive
 EOF
 
 # Tree-sitter query output looks like

@@ -13,8 +13,9 @@
 //! - `<kind>` is the lowercased `SyntaxKind` name with `_directive`
 //!   suffix stripped (e.g. `open`, `close`, `commodity`). Top-level
 //!   tokens that are NOT inside a `*_DIRECTIVE` node are skipped
-//!   (PR 2.1a's pass-through path for TRANSACTION / OPTION /
-//!   INCLUDE / PLUGIN / CUSTOM / error-recovery lines).
+//!   (error-recovery lines; everything else, including TRANSACTION
+//!   and the four edge directives OPTION / INCLUDE / PLUGIN /
+//!   CUSTOM, is wrapped as of phases 2.1-2.3).
 //! - `<start_byte>` and `<end_byte>` are absolute byte offsets
 //!   into the source.
 //! - `<first_line_excerpt>` is the directive's first line of
@@ -99,6 +100,10 @@ const fn directive_kind_label(kind: SyntaxKind) -> Option<&'static str> {
         SyntaxKind::POPTAG_DIRECTIVE => Some("poptag"),
         SyntaxKind::PUSHMETA_DIRECTIVE => Some("pushmeta"),
         SyntaxKind::POPMETA_DIRECTIVE => Some("popmeta"),
+        SyntaxKind::OPTION_DIRECTIVE => Some("option"),
+        SyntaxKind::INCLUDE_DIRECTIVE => Some("include"),
+        SyntaxKind::PLUGIN_DIRECTIVE => Some("plugin"),
+        SyntaxKind::CUSTOM_DIRECTIVE => Some("custom"),
         SyntaxKind::TRANSACTION => Some("transaction"),
         _ => None,
     }

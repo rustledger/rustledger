@@ -140,11 +140,11 @@ pub fn parse_structured(source: &str) -> SyntaxNode {
             builder.finish_node();
         } else {
             // Unrecognized line. Drain pending trivia + this entire
-            // line flat under SOURCE_FILE; phase 2.1b / 2.3 / error
-            // recovery will replace this branch. We DO NOT open a
-            // node for this content — the current shape is
-            // "everything outside a recognized directive is flat
-            // under SOURCE_FILE."
+            // line flat under SOURCE_FILE; PR 2.4 (error recovery)
+            // will replace this branch. We DO NOT open a node for
+            // this content — the current shape is "everything
+            // outside a recognized directive is flat under
+            // SOURCE_FILE."
             emit_tokens(&mut builder, source, std::mem::take(&mut pending_leading));
             seen_first_content = true;
             i = emit_through_terminator(&mut builder, source, &tokens, i);
@@ -940,9 +940,9 @@ fn is_indented_directive_continuation(
 /// Given the token slice and the index of a non-trivia token,
 /// decide whether it starts a recognized top-level directive of
 /// any kind. Returns the directive `SyntaxKind` if yes, `None`
-/// otherwise (OPTION / INCLUDE / PLUGIN / CUSTOM remain
-/// unrecognized — PR 2.3 — as does random content that doesn't
-/// fit a known shape).
+/// otherwise (random content that doesn't fit a known shape;
+/// error-recovery lines fall here until PR 2.4 wraps them
+/// structurally).
 ///
 /// Beancount directive line shapes recognized here:
 ///

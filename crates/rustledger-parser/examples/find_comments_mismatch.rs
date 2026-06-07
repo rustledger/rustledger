@@ -2,7 +2,12 @@
 //! Helps isolate top-level-comments extraction bugs from
 //! everything else.
 
-#![allow(clippy::useless_format, clippy::missing_panics_doc)]
+#![allow(
+    clippy::useless_format,
+    clippy::missing_panics_doc,
+    clippy::print_stdout,
+    clippy::manual_unwrap_or_default
+)]
 
 #[path = "../tests/baseline_common/mod.rs"]
 mod baseline_common;
@@ -27,7 +32,7 @@ fn main() {
             continue;
         }
         if legacy.comments.len() != cst.comments.len() {
-            let size = abs.metadata().map(|m| m.len()).unwrap_or(u64::MAX);
+            let size = abs.metadata().map_or(u64::MAX, |m| m.len());
             by_size.push((size, rel.clone()));
         }
     }

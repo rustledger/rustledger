@@ -939,7 +939,7 @@ fn extract_top_level_comments(source_file: &SourceFile, bom_offset: u32) -> Vec<
                 // After a directive node, reset whitespace state.
                 preceded_by_ws = false;
             }
-            _ => {}
+            rowan::NodeOrToken::Node(_) => {}
         }
     }
     out

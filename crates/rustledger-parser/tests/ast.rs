@@ -792,3 +792,107 @@ fn payee_narration_zero_strings_returns_none() {
     assert!(t.payee().is_none());
     assert!(t.narration().is_none());
 }
+
+// ---- Round-3 review fixes ----------------------------------------
+
+#[test]
+fn transaction_header_tokens_eof_without_newline() {
+    // EOF-terminated transaction with no NEWLINE in the tree.
+    // header_tokens (take_while != NEWLINE) walks ALL direct-child
+    // tokens. Since there's no body, all tokens ARE header — the
+    // accessors must still return the right answers, kind-filtered.
+    let f = parse("2024-01-15 * \"Coffee\"");
+    let Directive::Transaction(t) = single_directive(&f) else {
+        panic!("expected Transaction");
+    };
+    assert_eq!(t.date().unwrap().text(), "2024-01-15");
+    assert!(t.flag().unwrap().is_star());
+    assert_eq!(t.narration().unwrap().text_unquoted().unwrap(), "Coffee");
+    assert!(t.payee().is_none());
+}
+
+#[test]
+fn amount_arithmetic_paren_contents_stay_flat_under_amount() {
+    // Pin the structural invariant Amount::currency depends on:
+    // emit_amount_operand keeps paren contents flat under AMOUNT,
+    // so direct-token paren-depth tracking is sound. If a future
+    // phase wraps parens in a PAREN_EXPR sub-node, currency()'s
+    // depth tracking breaks silently — this test catches the
+    // structural change.
+    use rustledger_parser::cst::SyntaxKind;
+    let f = parse("2024-01-15 * \"x\"\n  Assets:Cash  (10 + 5) USD\n");
+    let Directive::Transaction(t) = single_directive(&f) else {
+        unreachable!()
+    };
+    let amt = t.postings().next().unwrap().amount().unwrap();
+    let has_node_children = amt
+        .syntax()
+        .children()
+        .any(|n| n.kind() != SyntaxKind::AMOUNT);
+    assert!(
+        !has_node_children,
+        "AMOUNT must keep paren contents as direct tokens, no sub-nodes"
+    );
+    // And the L_PAREN/R_PAREN tokens must be direct children:
+    let token_kinds: Vec<SyntaxKind> = amt
+        .syntax()
+        .children_with_tokens()
+        .filter_map(|el| el.into_token().map(|t| t.kind()))
+        .collect();
+    assert!(token_kinds.contains(&SyntaxKind::L_PAREN));
+    assert!(token_kinds.contains(&SyntaxKind::R_PAREN));
+}
+
+#[test]
+fn transaction_strings_excludes_catch_all_body_leak() {
+    // Pin the round-2 body-pollution fix against the exact builder
+    // shape that structured_directives.rs::catch_all_indented_
+    // unknown_content_closes_posting_and_emits_flat exercises:
+    // a stray indented STRING line between postings lands as a
+    // flat direct child of TRANSACTION. strings()/payee()/
+    // narration() must ignore it.
+    let f = parse(
+        "2024-01-15 * \"x\"\n\
+         \x20\x20Assets:Cash 1 USD\n\
+         \x20\x20\"stray string on own line\"\n\
+         \x20\x20Expenses:Food 1 USD\n",
+    );
+    let Directive::Transaction(t) = single_directive(&f) else {
+        panic!("expected Transaction");
+    };
+    let all: Vec<String> = t
+        .strings()
+        .map(|s| s.text_unquoted().unwrap().to_string())
+        .collect();
+    assert_eq!(all, vec!["x"], "only the header string");
+    assert_eq!(t.narration().unwrap().text_unquoted().unwrap(), "x");
+    assert!(t.payee().is_none());
+}
+
+#[test]
+fn cost_spec_per_unit_plus_total_positive() {
+    // Positive test for is_per_unit_plus_total. Existing tests
+    // only assert NOT-per-unit-plus-total for normal `{...}`
+    // costs; this pins the `{# ... }` form.
+    let f = parse(
+        "2024-01-15 * \"x\"\n\
+         \x20\x20Assets:Inv  10 HOOL {# 500.00 USD}\n",
+    );
+    let Directive::Transaction(t) = single_directive(&f) else {
+        unreachable!()
+    };
+    let cost = t.postings().next().unwrap().cost_spec().unwrap();
+    assert!(cost.is_per_unit_plus_total());
+    assert!(!cost.is_total());
+    assert!(!cost.is_merge());
+}
+
+#[test]
+fn syntax_text_is_reexported_from_ast() {
+    // Re-export sanity: ErrorNode::text returns SyntaxText, and
+    // SyntaxText is reachable as rustledger_parser::cst::ast::
+    // SyntaxText so downstream code doesn't need a direct rowan
+    // dep.
+    fn t<T>() {}
+    t::<rustledger_parser::cst::ast::SyntaxText>();
+}

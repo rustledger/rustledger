@@ -33,6 +33,12 @@
 
 use crate::cst::syntax_kind::{SyntaxKind, SyntaxNode, SyntaxToken};
 
+/// Re-export of rowan's `SyntaxText` — a rope view over a
+/// `SyntaxNode`'s text without allocation. Returned by
+/// [`ErrorNode::text`] so consumers don't need a direct
+/// `rowan` dependency.
+pub use rowan::SyntaxText;
+
 /// Typed wrapper around a `SyntaxNode` of a specific
 /// `SyntaxKind`.
 pub trait AstNode: Sized {
@@ -250,65 +256,75 @@ pub enum TransactionFlagKind {
 /// (ticker-letter flag, e.g. `T`). Use [`Self::classify`] for
 /// exhaustive `match` ergonomics, or the `is_*` predicates for
 /// boolean checks.
+///
+/// **Note**: [`Self::cast`] is position-AGNOSTIC — it accepts any
+/// token of a flag-eligible kind regardless of where it sits in
+/// the tree. To get the leading flag of a transaction, use
+/// [`Transaction::flag`] (which scopes the search to the
+/// pre-content header region).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct TransactionFlag(SyntaxToken);
+pub struct TransactionFlag {
+    token: SyntaxToken,
+    classification: TransactionFlagKind,
+}
 
 impl TransactionFlag {
     /// Wrap the token if its kind is a valid transaction flag.
     /// For `CURRENCY`, only single-character forms qualify.
+    ///
+    /// Single source of truth: this match also derives
+    /// [`Self::classify`]'s result, so cast + classify cannot
+    /// drift.
     pub fn cast(token: SyntaxToken) -> Option<Self> {
-        match token.kind() {
-            SyntaxKind::STAR
-            | SyntaxKind::PENDING_KW
-            | SyntaxKind::FLAG
-            | SyntaxKind::HASH
-            | SyntaxKind::TXN_KW => Some(Self(token)),
-            SyntaxKind::CURRENCY if token.text().len() == 1 => Some(Self(token)),
-            _ => None,
-        }
-    }
-
-    pub const fn syntax(&self) -> &SyntaxToken {
-        &self.0
-    }
-    pub fn kind(&self) -> SyntaxKind {
-        self.0.kind()
-    }
-    pub fn text(&self) -> &str {
-        self.0.text()
-    }
-
-    /// Exhaustive classification — pair with a `match` for
-    /// compiler-checked coverage of every variant.
-    pub fn classify(&self) -> TransactionFlagKind {
-        match self.kind() {
+        let classification = match token.kind() {
             SyntaxKind::STAR => TransactionFlagKind::Star,
             SyntaxKind::PENDING_KW => TransactionFlagKind::Pending,
             SyntaxKind::FLAG => TransactionFlagKind::Letter,
             SyntaxKind::HASH => TransactionFlagKind::Hash,
             SyntaxKind::TXN_KW => TransactionFlagKind::Txn,
-            SyntaxKind::CURRENCY => TransactionFlagKind::CurrencyLetter,
-            _ => unreachable!("TransactionFlag invariant — guarded by cast()"),
-        }
+            SyntaxKind::CURRENCY if token.text().len() == 1 => TransactionFlagKind::CurrencyLetter,
+            _ => return None,
+        };
+        Some(Self {
+            token,
+            classification,
+        })
     }
 
-    pub fn is_star(&self) -> bool {
-        self.kind() == SyntaxKind::STAR
+    pub const fn syntax(&self) -> &SyntaxToken {
+        &self.token
     }
-    pub fn is_pending(&self) -> bool {
-        self.kind() == SyntaxKind::PENDING_KW
+    pub fn kind(&self) -> SyntaxKind {
+        self.token.kind()
     }
-    pub fn is_hash(&self) -> bool {
-        self.kind() == SyntaxKind::HASH
+    pub fn text(&self) -> &str {
+        self.token.text()
     }
-    pub fn is_txn(&self) -> bool {
-        self.kind() == SyntaxKind::TXN_KW
+
+    /// Exhaustive classification — pair with a `match` for
+    /// compiler-checked coverage of every variant. Cached at
+    /// `cast()` time; no runtime panic risk.
+    pub const fn classify(&self) -> TransactionFlagKind {
+        self.classification
     }
-    pub fn is_letter_flag(&self) -> bool {
-        self.kind() == SyntaxKind::FLAG
+
+    pub const fn is_star(&self) -> bool {
+        matches!(self.classification, TransactionFlagKind::Star)
     }
-    pub fn is_currency_letter(&self) -> bool {
-        self.kind() == SyntaxKind::CURRENCY
+    pub const fn is_pending(&self) -> bool {
+        matches!(self.classification, TransactionFlagKind::Pending)
+    }
+    pub const fn is_hash(&self) -> bool {
+        matches!(self.classification, TransactionFlagKind::Hash)
+    }
+    pub const fn is_txn(&self) -> bool {
+        matches!(self.classification, TransactionFlagKind::Txn)
+    }
+    pub const fn is_letter_flag(&self) -> bool {
+        matches!(self.classification, TransactionFlagKind::Letter)
+    }
+    pub const fn is_currency_letter(&self) -> bool {
+        matches!(self.classification, TransactionFlagKind::CurrencyLetter)
     }
 }
 
@@ -328,57 +344,63 @@ pub enum PostingFlagKind {
 /// [`TransactionFlag`] minus the `TXN_KW` variant (postings can't
 /// carry the `txn` keyword). Use [`Self::classify`] for
 /// exhaustive `match` ergonomics.
+///
+/// **Note**: [`Self::cast`] is position-AGNOSTIC. To get the
+/// leading flag of a posting, use [`Posting::flag`] (which
+/// scopes the search to the pre-ACCOUNT region of the posting).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct PostingFlag(SyntaxToken);
+pub struct PostingFlag {
+    token: SyntaxToken,
+    classification: PostingFlagKind,
+}
 
 impl PostingFlag {
+    /// Single source of truth for cast + classify — drift impossible.
     pub fn cast(token: SyntaxToken) -> Option<Self> {
-        match token.kind() {
-            SyntaxKind::STAR | SyntaxKind::PENDING_KW | SyntaxKind::FLAG | SyntaxKind::HASH => {
-                Some(Self(token))
-            }
-            SyntaxKind::CURRENCY if token.text().len() == 1 => Some(Self(token)),
-            _ => None,
-        }
-    }
-
-    pub const fn syntax(&self) -> &SyntaxToken {
-        &self.0
-    }
-    pub fn kind(&self) -> SyntaxKind {
-        self.0.kind()
-    }
-    pub fn text(&self) -> &str {
-        self.0.text()
-    }
-
-    /// Exhaustive classification — pair with a `match` for
-    /// compiler-checked coverage.
-    pub fn classify(&self) -> PostingFlagKind {
-        match self.kind() {
+        let classification = match token.kind() {
             SyntaxKind::STAR => PostingFlagKind::Star,
             SyntaxKind::PENDING_KW => PostingFlagKind::Pending,
             SyntaxKind::FLAG => PostingFlagKind::Letter,
             SyntaxKind::HASH => PostingFlagKind::Hash,
-            SyntaxKind::CURRENCY => PostingFlagKind::CurrencyLetter,
-            _ => unreachable!("PostingFlag invariant — guarded by cast()"),
-        }
+            SyntaxKind::CURRENCY if token.text().len() == 1 => PostingFlagKind::CurrencyLetter,
+            _ => return None,
+        };
+        Some(Self {
+            token,
+            classification,
+        })
     }
 
-    pub fn is_star(&self) -> bool {
-        self.kind() == SyntaxKind::STAR
+    pub const fn syntax(&self) -> &SyntaxToken {
+        &self.token
     }
-    pub fn is_pending(&self) -> bool {
-        self.kind() == SyntaxKind::PENDING_KW
+    pub fn kind(&self) -> SyntaxKind {
+        self.token.kind()
     }
-    pub fn is_hash(&self) -> bool {
-        self.kind() == SyntaxKind::HASH
+    pub fn text(&self) -> &str {
+        self.token.text()
     }
-    pub fn is_letter_flag(&self) -> bool {
-        self.kind() == SyntaxKind::FLAG
+
+    /// Exhaustive classification — cached at `cast()` time;
+    /// no runtime panic risk.
+    pub const fn classify(&self) -> PostingFlagKind {
+        self.classification
     }
-    pub fn is_currency_letter(&self) -> bool {
-        self.kind() == SyntaxKind::CURRENCY
+
+    pub const fn is_star(&self) -> bool {
+        matches!(self.classification, PostingFlagKind::Star)
+    }
+    pub const fn is_pending(&self) -> bool {
+        matches!(self.classification, PostingFlagKind::Pending)
+    }
+    pub const fn is_hash(&self) -> bool {
+        matches!(self.classification, PostingFlagKind::Hash)
+    }
+    pub const fn is_letter_flag(&self) -> bool {
+        matches!(self.classification, PostingFlagKind::Letter)
+    }
+    pub const fn is_currency_letter(&self) -> bool {
+        matches!(self.classification, PostingFlagKind::CurrencyLetter)
     }
 }
 
@@ -442,12 +464,39 @@ impl SourceFile {
     }
 }
 
-// Sum-type Directive enum + AstNode impl, derived from a single
-// variant list so can_cast, cast, and syntax() are guaranteed to
-// agree. Adding a new directive variant requires editing exactly
-// one line; drift between can_cast and cast is impossible.
+// Sum-type Directive enum + AstNode impl + per-variant struct
+// declarations, all derived from a single variant list. The
+// macro is the single source of truth for "what directives
+// exist": adding a new directive requires editing exactly one
+// line. Drift between any of {can_cast, cast, syntax, per-variant
+// struct decl, per-variant AstNode impl} is structurally
+// impossible.
+//
+// Per-variant accessor methods (date(), account(), etc.) stay
+// in separate `impl SomeDirective { ... }` blocks below.
 macro_rules! directive_enum {
-    ($($variant:ident($struct:ident, $kind:ident)),* $(,)?) => {
+    ($($(#[$variant_meta:meta])* $variant:ident($struct:ident, $kind:ident)),* $(,)?) => {
+        // Per-variant struct + AstNode impl, formerly emitted via
+        // `ast_node!` invocations. Folded into directive_enum! so
+        // the variant list is the only source of truth.
+        $(
+            $(#[$variant_meta])*
+            #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+            pub struct $struct(SyntaxNode);
+
+            impl AstNode for $struct {
+                fn can_cast(kind: SyntaxKind) -> bool {
+                    kind == SyntaxKind::$kind
+                }
+                fn cast(syntax: SyntaxNode) -> Option<Self> {
+                    Self::can_cast(syntax.kind()).then_some(Self(syntax))
+                }
+                fn syntax(&self) -> &SyntaxNode {
+                    &self.0
+                }
+            }
+        )*
+
         /// Sum type over every recognized top-level directive wrapper.
         #[derive(Debug, Clone, PartialEq, Eq, Hash)]
         pub enum Directive {
@@ -476,24 +525,49 @@ macro_rules! directive_enum {
 }
 
 directive_enum!(
+    /// `DATE open ACCOUNT [CURRENCY[,CURRENCY]*] ["BOOKING"]`.
     Open(OpenDirective, OPEN_DIRECTIVE),
+    /// `DATE close ACCOUNT`.
     Close(CloseDirective, CLOSE_DIRECTIVE),
+    /// `DATE balance ACCOUNT AMOUNT_TOKENS`. Amount stays flat
+    /// (phase 2.2c scopes AMOUNT wrapping to POSTING only); walk
+    /// `number()` and `currency()` to read it.
     Balance(BalanceDirective, BALANCE_DIRECTIVE),
+    /// `DATE pad ACCOUNT_TARGET ACCOUNT_SOURCE`.
     Pad(PadDirective, PAD_DIRECTIVE),
+    /// `DATE event "TYPE" "VALUE"`.
     Event(EventDirective, EVENT_DIRECTIVE),
+    /// `DATE query "NAME" "QUERY"`.
     Query(QueryDirective, QUERY_DIRECTIVE),
+    /// `DATE note ACCOUNT "TEXT"`.
     Note(NoteDirective, NOTE_DIRECTIVE),
+    /// `DATE document ACCOUNT "PATH"`.
     Document(DocumentDirective, DOCUMENT_DIRECTIVE),
+    /// `DATE price CURRENCY NUMBER CURRENCY`.
     Price(PriceDirective, PRICE_DIRECTIVE),
+    /// `DATE commodity CURRENCY`.
     Commodity(CommodityDirective, COMMODITY_DIRECTIVE),
+    /// `pushtag #TAG`.
     Pushtag(PushtagDirective, PUSHTAG_DIRECTIVE),
+    /// `poptag #TAG`.
     Poptag(PoptagDirective, POPTAG_DIRECTIVE),
+    /// `pushmeta KEY: VALUE`.
     Pushmeta(PushmetaDirective, PUSHMETA_DIRECTIVE),
+    /// `popmeta KEY:`.
     Popmeta(PopmetaDirective, POPMETA_DIRECTIVE),
+    /// `option "KEY" "VALUE"`.
     Option(OptionDirective, OPTION_DIRECTIVE),
+    /// `include "PATH"`.
     Include(IncludeDirective, INCLUDE_DIRECTIVE),
+    /// `plugin "MODULE" ["CONFIG"]`.
     Plugin(PluginDirective, PLUGIN_DIRECTIVE),
+    /// `DATE custom "TYPE" values...`. Heterogeneous value list
+    /// stays flat (phase 2.3); walk the raw token sequence
+    /// via `syntax().children_with_tokens()`.
     Custom(CustomDirective, CUSTOM_DIRECTIVE),
+    /// `DATE FLAG ["PAYEE"] "NARRATION" #TAG... ^LINK...`
+    /// followed by indented `POSTING` lines and `META_ENTRY`
+    /// sub-lines.
     Transaction(Transaction, TRANSACTION),
 );
 
@@ -514,22 +588,22 @@ ast_node!(
 );
 
 impl ErrorNode {
-    /// The raw bytes of the malformed region as a rowan
-    /// [`rowan::SyntaxText`] (a rope view). Zero allocation; use
-    /// `.to_string()` on the result if you need an owned
-    /// `String`, or `format!`/`Display` for direct output.
+    /// The raw bytes of the malformed region as a [`SyntaxText`]
+    /// rope view. Zero allocation; use `.to_string()` on the
+    /// result if you need an owned `String`, or `format!` /
+    /// `Display` for direct output.
     #[must_use]
-    pub fn text(&self) -> rowan::SyntaxText {
+    pub fn text(&self) -> SyntaxText {
         self.syntax().text()
     }
 }
 
 // ---- 10 dated single-line directives (PR 2.1a) -----------------
+//
+// The 19 directive struct declarations + AstNode impls are
+// generated by the `directive_enum!` macro invocation above.
+// Per-variant accessor methods live in the `impl` blocks below.
 
-ast_node!(
-    /// `DATE open ACCOUNT [CURRENCY[,CURRENCY]*] ["BOOKING"]`.
-    OpenDirective, OPEN_DIRECTIVE
-);
 impl OpenDirective {
     pub fn date(&self) -> Option<Date> {
         first_token(self.syntax(), SyntaxKind::DATE).and_then(Date::cast)
@@ -547,10 +621,6 @@ impl OpenDirective {
     }
 }
 
-ast_node!(
-    /// `DATE close ACCOUNT`.
-    CloseDirective, CLOSE_DIRECTIVE
-);
 impl CloseDirective {
     pub fn date(&self) -> Option<Date> {
         first_token(self.syntax(), SyntaxKind::DATE).and_then(Date::cast)
@@ -560,12 +630,6 @@ impl CloseDirective {
     }
 }
 
-ast_node!(
-    /// `DATE balance ACCOUNT AMOUNT_TOKENS`. Amount stays flat
-    /// (phase 2.2c scopes AMOUNT wrapping to POSTING only) — walk
-    /// `number()` and `currency()` to read it.
-    BalanceDirective, BALANCE_DIRECTIVE
-);
 impl BalanceDirective {
     pub fn date(&self) -> Option<Date> {
         first_token(self.syntax(), SyntaxKind::DATE).and_then(Date::cast)
@@ -581,10 +645,6 @@ impl BalanceDirective {
     }
 }
 
-ast_node!(
-    /// `DATE pad ACCOUNT_TARGET ACCOUNT_SOURCE`.
-    PadDirective, PAD_DIRECTIVE
-);
 impl PadDirective {
     pub fn date(&self) -> Option<Date> {
         first_token(self.syntax(), SyntaxKind::DATE).and_then(Date::cast)
@@ -597,10 +657,6 @@ impl PadDirective {
     }
 }
 
-ast_node!(
-    /// `DATE event "TYPE" "VALUE"`.
-    EventDirective, EVENT_DIRECTIVE
-);
 impl EventDirective {
     pub fn date(&self) -> Option<Date> {
         first_token(self.syntax(), SyntaxKind::DATE).and_then(Date::cast)
@@ -613,10 +669,6 @@ impl EventDirective {
     }
 }
 
-ast_node!(
-    /// `DATE query "NAME" "QUERY"`.
-    QueryDirective, QUERY_DIRECTIVE
-);
 impl QueryDirective {
     pub fn date(&self) -> Option<Date> {
         first_token(self.syntax(), SyntaxKind::DATE).and_then(Date::cast)
@@ -629,10 +681,6 @@ impl QueryDirective {
     }
 }
 
-ast_node!(
-    /// `DATE note ACCOUNT "TEXT"`.
-    NoteDirective, NOTE_DIRECTIVE
-);
 impl NoteDirective {
     pub fn date(&self) -> Option<Date> {
         first_token(self.syntax(), SyntaxKind::DATE).and_then(Date::cast)
@@ -645,10 +693,6 @@ impl NoteDirective {
     }
 }
 
-ast_node!(
-    /// `DATE document ACCOUNT "PATH"`.
-    DocumentDirective, DOCUMENT_DIRECTIVE
-);
 impl DocumentDirective {
     pub fn date(&self) -> Option<Date> {
         first_token(self.syntax(), SyntaxKind::DATE).and_then(Date::cast)
@@ -661,10 +705,6 @@ impl DocumentDirective {
     }
 }
 
-ast_node!(
-    /// `DATE price CURRENCY NUMBER CURRENCY`.
-    PriceDirective, PRICE_DIRECTIVE
-);
 impl PriceDirective {
     pub fn date(&self) -> Option<Date> {
         first_token(self.syntax(), SyntaxKind::DATE).and_then(Date::cast)
@@ -680,10 +720,6 @@ impl PriceDirective {
     }
 }
 
-ast_node!(
-    /// `DATE commodity CURRENCY`.
-    CommodityDirective, COMMODITY_DIRECTIVE
-);
 impl CommodityDirective {
     pub fn date(&self) -> Option<Date> {
         first_token(self.syntax(), SyntaxKind::DATE).and_then(Date::cast)
@@ -695,40 +731,24 @@ impl CommodityDirective {
 
 // ---- 4 standalone-keyword directives (PR 2.1a) -----------------
 
-ast_node!(
-    /// `pushtag #TAG`.
-    PushtagDirective, PUSHTAG_DIRECTIVE
-);
 impl PushtagDirective {
     pub fn tag(&self) -> Option<Tag> {
         first_token(self.syntax(), SyntaxKind::TAG).and_then(Tag::cast)
     }
 }
 
-ast_node!(
-    /// `poptag #TAG`.
-    PoptagDirective, POPTAG_DIRECTIVE
-);
 impl PoptagDirective {
     pub fn tag(&self) -> Option<Tag> {
         first_token(self.syntax(), SyntaxKind::TAG).and_then(Tag::cast)
     }
 }
 
-ast_node!(
-    /// `pushmeta KEY: VALUE`.
-    PushmetaDirective, PUSHMETA_DIRECTIVE
-);
 impl PushmetaDirective {
     pub fn key(&self) -> Option<MetaKey> {
         first_token(self.syntax(), SyntaxKind::META_KEY).and_then(MetaKey::cast)
     }
 }
 
-ast_node!(
-    /// `popmeta KEY:`.
-    PopmetaDirective, POPMETA_DIRECTIVE
-);
 impl PopmetaDirective {
     pub fn key(&self) -> Option<MetaKey> {
         first_token(self.syntax(), SyntaxKind::META_KEY).and_then(MetaKey::cast)
@@ -737,10 +757,6 @@ impl PopmetaDirective {
 
 // ---- 4 edge directives (PR 2.3) --------------------------------
 
-ast_node!(
-    /// `option "KEY" "VALUE"`.
-    OptionDirective, OPTION_DIRECTIVE
-);
 impl OptionDirective {
     pub fn key(&self) -> Option<StringLit> {
         first_token(self.syntax(), SyntaxKind::STRING).and_then(StringLit::cast)
@@ -750,20 +766,12 @@ impl OptionDirective {
     }
 }
 
-ast_node!(
-    /// `include "PATH"`.
-    IncludeDirective, INCLUDE_DIRECTIVE
-);
 impl IncludeDirective {
     pub fn path(&self) -> Option<StringLit> {
         first_token(self.syntax(), SyntaxKind::STRING).and_then(StringLit::cast)
     }
 }
 
-ast_node!(
-    /// `plugin "MODULE" ["CONFIG"]`.
-    PluginDirective, PLUGIN_DIRECTIVE
-);
 impl PluginDirective {
     pub fn module(&self) -> Option<StringLit> {
         first_token(self.syntax(), SyntaxKind::STRING).and_then(StringLit::cast)
@@ -773,12 +781,6 @@ impl PluginDirective {
     }
 }
 
-ast_node!(
-    /// `DATE custom "TYPE" values...`. Heterogeneous value list
-    /// stays flat (phase 2.3); walk `values()` for the raw token
-    /// sequence.
-    CustomDirective, CUSTOM_DIRECTIVE
-);
 impl CustomDirective {
     pub fn date(&self) -> Option<Date> {
         first_token(self.syntax(), SyntaxKind::DATE).and_then(Date::cast)
@@ -791,13 +793,6 @@ impl CustomDirective {
 }
 
 // ---- TRANSACTION + body sub-nodes ------------------------------
-
-ast_node!(
-    /// `DATE FLAG ["PAYEE"] "NARRATION" #TAG... ^LINK...`
-    /// followed by indented `POSTING` lines and `META_ENTRY`
-    /// sub-lines.
-    Transaction, TRANSACTION
-);
 
 impl Transaction {
     /// Direct-child tokens of TRANSACTION up to (but not

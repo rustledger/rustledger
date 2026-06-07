@@ -166,7 +166,7 @@ pub enum SyntaxKind {
     /// regions structurally rather than scanning flat `SOURCE_FILE`
     /// children for stray content. Same trivia attachment policy as
     /// recognized directives (rule 2 of `cst::trivia`); per rule 5,
-    /// an unterminated final ERROR_NODE at EOF still wraps and
+    /// an unterminated final `ERROR_NODE` at EOF still wraps and
     /// simply has no NEWLINE child.
     ERROR_NODE,
 

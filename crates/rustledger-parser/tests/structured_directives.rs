@@ -2532,6 +2532,103 @@ fn amount_wraps_nested_parens_via_depth_tracking() {
 }
 
 #[test]
+fn amount_wraps_real_corpus_arithmetic_shape() {
+    use SyntaxKind::*;
+    // The canonical real-corpus shape `NUMBER WS STAR WS NUMBER
+    // WS CURRENCY` (`700.00 * 0.1 BRL`) — appears in 6+ files in
+    // `tests/compatibility/files/apyb-financeiro/`. Pins the
+    // exact multi-space-around-STAR pattern that drives the
+    // manifest churn from this PR; the other arithmetic tests
+    // cover synthetic shapes.
+    let source = "2024-01-15 * \"x\"\n\
+                  \x20\x20Assets:Bancos:BB  700.00 * 0.1 BRL\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let ps = postings(&tree);
+    let amts: Vec<SyntaxNode> = ps[0].children().filter(|n| n.kind() == AMOUNT).collect();
+    assert_eq!(amts.len(), 1);
+    assert_eq!(
+        elements_of(&amts[0]),
+        tok_seq(&[
+            NUMBER, WHITESPACE, STAR, WHITESPACE, NUMBER, WHITESPACE, CURRENCY
+        ]),
+    );
+}
+
+#[test]
+fn price_annotation_inner_amount_wraps_arithmetic() {
+    use SyntaxKind::*;
+    // `@ 5+1 USD` — the per-unit price is itself an arithmetic
+    // expression. emit_price_annotation delegates to emit_amount,
+    // so the inner AMOUNT should wrap the whole expression as one
+    // node. Pinned because no corpus file currently exercises
+    // arithmetic in PRICE_ANNOTATION; without a test, a future
+    // refactor that special-cases the inner-amount path would
+    // silently regress without manifest signal.
+    let source = "2024-01-15 * \"x\"\n\
+                  \x20\x20Assets:Cash  10 HOOL @ 5+1 USD\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let ps = postings(&tree);
+    let prices: Vec<SyntaxNode> = ps[0]
+        .children()
+        .filter(|n| n.kind() == PRICE_ANNOTATION)
+        .collect();
+    assert_eq!(prices.len(), 1);
+    let inner_amount = prices[0].children().find(|n| n.kind() == AMOUNT).unwrap();
+    assert_eq!(
+        elements_of(&inner_amount),
+        tok_seq(&[NUMBER, PLUS, NUMBER, WHITESPACE, CURRENCY]),
+    );
+}
+
+#[test]
+fn amount_with_unclosed_paren_at_newline_stops_per_rule_5() {
+    use SyntaxKind::*;
+    // Rule 5 (unterminated final content) extends to paren
+    // expressions inside AMOUNT: when an unclosed `(` hits NEWLINE,
+    // emit_amount_operand stops emitting and the AMOUNT closes
+    // with depth>0 (no R_PAREN child). The NEWLINE goes back to
+    // the surrounding scope (POSTING line terminator). Pins the
+    // exact tree shape so a future refactor that changes the stop
+    // condition is a visible, intentional break.
+    let source = "2024-01-15 * \"x\"\n\
+                  \x20\x20Assets:Cash  (10+5 USD\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let ps = postings(&tree);
+    let amts: Vec<SyntaxNode> = ps[0].children().filter(|n| n.kind() == AMOUNT).collect();
+    assert_eq!(amts.len(), 1);
+    // AMOUNT contains the open paren and its consumed-before-
+    // NEWLINE content; NO R_PAREN child.
+    let kinds: Vec<SyntaxKind> = elements_of(&amts[0])
+        .iter()
+        .filter_map(|e| match e {
+            Element::Tok(k) => Some(*k),
+            Element::Node(_) => None,
+        })
+        .collect();
+    assert!(kinds.contains(&L_PAREN));
+    assert!(!kinds.contains(&R_PAREN));
+    // POSTING's NEWLINE terminator is OUTSIDE the AMOUNT (sibling).
+    let posting_kids = elements_of(&ps[0]);
+    let newline_after_amount = posting_kids
+        .iter()
+        .position(|e| matches!(e, Element::Tok(NEWLINE)));
+    let amount_idx = posting_kids
+        .iter()
+        .position(|e| matches!(e, Element::Node(AMOUNT)))
+        .unwrap();
+    assert!(
+        newline_after_amount.is_some_and(|n| n > amount_idx),
+        "NEWLINE terminator follows the AMOUNT, not consumed inside it",
+    );
+}
+
+#[test]
 fn mixed_shape_sibling_postings_each_wrap_their_own_amount_or_not() {
     use SyntaxKind::*;
     // Three postings in one transaction with different shapes:
@@ -3353,6 +3450,57 @@ fn error_node_leading_trivia_attaches_inside_per_rule_2() {
     // serves as its leading trivia.
     let first = elements_of(&errs[0]).first().copied();
     assert_eq!(first, Some(Element::Tok(NEWLINE)));
+}
+
+#[test]
+fn error_node_adjacent_to_multi_line_transaction_doesnt_bleed() {
+    use SyntaxKind::*;
+    // Multi-line TRANSACTION coexistence: the transaction body
+    // (header + posting lines) must terminate cleanly when the
+    // next top-level line is unrecognized, so the unrecognized
+    // line wraps as its own ERROR_NODE without being absorbed
+    // into the transaction. emit_transaction_body's stop
+    // condition is non-indented top-level content; a regression
+    // there could silently merge an ERROR_NODE line into the
+    // preceding transaction.
+    let source = "2024-01-15 * \"x\"\n\
+                  \x20\x20Assets:Cash  -5 USD\n\
+                  \x20\x20Expenses:Food  5 USD\n\
+                  bogus content here\n\
+                  2024-01-16 * \"y\"\n\
+                  \x20\x20Assets:Cash  -3 USD\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let ds = directives(&tree);
+    assert_eq!(ds.len(), 2);
+    assert_eq!(ds[0].kind(), TRANSACTION);
+    assert_eq!(ds[1].kind(), TRANSACTION);
+
+    let errs = error_nodes(&tree);
+    assert_eq!(
+        errs.len(),
+        1,
+        "exactly one ERROR_NODE between the two transactions"
+    );
+
+    // The ERROR_NODE is a direct sibling of TRANSACTION under
+    // SOURCE_FILE, NOT nested inside either transaction.
+    let tx_inner_errors = ds[0]
+        .descendants()
+        .filter(|n| n.kind() == ERROR_NODE)
+        .count()
+        + ds[1]
+            .descendants()
+            .filter(|n| n.kind() == ERROR_NODE)
+            .count();
+    assert_eq!(tx_inner_errors, 0);
+
+    // Both transactions retain their full posting count.
+    let p0_count = ds[0].descendants().filter(|n| n.kind() == POSTING).count();
+    let p1_count = ds[1].descendants().filter(|n| n.kind() == POSTING).count();
+    assert_eq!(p0_count, 2);
+    assert_eq!(p1_count, 1);
 }
 
 // ---------- Edge cases ----------

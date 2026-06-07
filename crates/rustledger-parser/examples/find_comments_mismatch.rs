@@ -15,6 +15,17 @@ mod baseline_common;
 use baseline_common::{discover_corpus_files, repo_root};
 
 fn main() {
+    // `parse()` is env-gated to `parse_via_cst()` when this var
+    // is set; that would make the legacy side identical to the
+    // CST side and silently report no comments mismatches.
+    if std::env::var_os("RUSTLEDGER_CST_PARSER").is_some() {
+        eprintln!(
+            "error: RUSTLEDGER_CST_PARSER is set; this probe \
+             needs it UNSET so that parse() invokes the legacy \
+             parser. Re-run with the env var removed.",
+        );
+        std::process::exit(2);
+    }
     let files = discover_corpus_files();
     let root = repo_root();
 

@@ -1152,27 +1152,6 @@ const fn is_comment_kind(kind: crate::SyntaxKind) -> bool {
     )
 }
 
-/// Walk the source file and collect every "standalone" comment
-/// line into `ParseResult.comments`, mirroring the legacy parser.
-///
-/// **Column-0 only.** The legacy parser's `parse_entry` matches
-/// `Token::Comment` only when it's the first non-newline token
-/// on its line. An indented comment (preceded by `WHITESPACE` on
-/// the same line) becomes a parse error in the legacy parser,
-/// not a comment entry. The CST trivia policy attaches indented
-/// trailing trivia as a direct `SOURCE_FILE` child too, but we
-/// must exclude those from `comments` to match.
-///
-/// **Inside directives.** Comment tokens that appear inside a
-/// directive node BEFORE the first non-trivia content token (the
-/// directive's inter-directive leading trivia from the trivia
-/// policy) are inter-directive comments and the legacy parser
-/// surfaces them as standalone. We apply the same column-0 rule
-/// there.
-///
-/// **After content.** Comments that appear AFTER the directive's
-/// first content token (e.g., trailing same-line comments on a
-/// posting) belong to the directive, not to `comments`.
 /// Walk each `TRANSACTION` and emit a `SyntaxError` for any body
 /// line that contains flat catch-all tokens (e.g., an
 /// unrecognized identifier where a posting was expected).
@@ -1577,10 +1556,24 @@ fn node_span(node: &crate::SyntaxNode, bom_offset: u32) -> Span {
 
 /// Trivia kinds that don't count toward a span's start/end when
 /// matching the legacy parser's span convention.
+///
+/// Covers WHITESPACE / NEWLINE plus EVERY comment-trivia kind
+/// (`COMMENT`, `PERCENT_COMMENT`, `SHEBANG`, `EMACS_DIRECTIVE`)
+/// so files with ledger-style `%` comments or org-mode
+/// `#!`/`#+` lines have the same span/header-tracking behavior
+/// as files with only `;` comments. Mirrors
+/// `SyntaxKind::is_trivia()` minus `BOM` — a mid-file BOM byte
+/// is an error to surface (`extract_inline_bom_errors` /
+/// `classify_recovery_error`), not trivia to silently skip.
 const fn is_trivia_kind(kind: crate::SyntaxKind) -> bool {
     matches!(
         kind,
-        crate::SyntaxKind::WHITESPACE | crate::SyntaxKind::NEWLINE | crate::SyntaxKind::COMMENT
+        crate::SyntaxKind::WHITESPACE
+            | crate::SyntaxKind::NEWLINE
+            | crate::SyntaxKind::COMMENT
+            | crate::SyntaxKind::PERCENT_COMMENT
+            | crate::SyntaxKind::SHEBANG
+            | crate::SyntaxKind::EMACS_DIRECTIVE
     )
 }
 

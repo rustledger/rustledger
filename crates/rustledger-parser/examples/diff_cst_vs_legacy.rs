@@ -13,6 +13,17 @@
 use std::path::PathBuf;
 
 fn main() {
+    // `parse()` is env-gated to `parse_via_cst()` when this var
+    // is set; that would make the legacy column of this diff
+    // ALSO be CST output and silently report no divergence.
+    if std::env::var_os("RUSTLEDGER_CST_PARSER").is_some() {
+        eprintln!(
+            "error: RUSTLEDGER_CST_PARSER is set; this diagnostic \
+             needs it UNSET so that parse() invokes the legacy \
+             parser. Re-run with the env var removed.",
+        );
+        std::process::exit(2);
+    }
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
         eprintln!("usage: diff_cst_vs_legacy <path-to-beancount-file>");

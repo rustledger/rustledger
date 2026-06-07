@@ -95,6 +95,20 @@ fn cst_vs_legacy_corpus_convergence() {
     let verbose = std::env::var_os("DIFFERENTIAL_VERBOSE").is_some();
     let report_path = std::env::var_os("DIFFERENTIAL_REPORT_PATH");
 
+    // `parse()` is env-gated: with `RUSTLEDGER_CST_PARSER` set,
+    // BOTH `parse()` and `parse_via_cst()` go through the CST
+    // path and this test would compare CST-vs-CST while
+    // reporting 100% convergence — exactly the false signal we
+    // built this test to catch. Fail fast and tell the user how
+    // to re-run.
+    assert!(
+        std::env::var_os("RUSTLEDGER_CST_PARSER").is_none(),
+        "RUSTLEDGER_CST_PARSER is set; this differential test \
+         requires the env var unset so that `parse()` invokes \
+         the legacy parser. Re-run with `RUSTLEDGER_CST_PARSER` \
+         removed from the environment."
+    );
+
     // Small-corpus guard mirrors corpus_baseline.rs: a fresh
     // checkout without `fetch-compat-test-files.sh` should not
     // be silently treated as a clean 100% pass.

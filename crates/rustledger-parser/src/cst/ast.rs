@@ -810,10 +810,23 @@ impl Transaction {
             // Skip leading trivia (blank-line newlines, top-of-
             // directive whitespace, leading comments). The first
             // non-trivia token marks the start of the header.
+            //
+            // Comment-trivia covers all four comment kinds — ledger-
+            // style `%` comments and org-mode `#!`/`#+` lines are
+            // attached as leading trivia by the Directive-Terminator
+            // Rule the same way `;` comments are, so a transaction
+            // preceded by any of them must skip them too. BOM stays
+            // OUT of the skip set: a mid-file BOM in a transaction
+            // header is a corruption to surface, not trivia.
             .skip_while(|t| {
                 matches!(
                     t.kind(),
-                    SyntaxKind::WHITESPACE | SyntaxKind::NEWLINE | SyntaxKind::COMMENT
+                    SyntaxKind::WHITESPACE
+                        | SyntaxKind::NEWLINE
+                        | SyntaxKind::COMMENT
+                        | SyntaxKind::PERCENT_COMMENT
+                        | SyntaxKind::SHEBANG
+                        | SyntaxKind::EMACS_DIRECTIVE
                 )
             })
             .take_while(|t| t.kind() != SyntaxKind::NEWLINE)

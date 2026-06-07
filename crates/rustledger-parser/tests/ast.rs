@@ -35,8 +35,11 @@ fn open_directive_accessors() {
     };
     assert_eq!(d.date().unwrap().text(), "2024-01-01");
     assert_eq!(d.account().unwrap().text(), "Assets:Cash");
-    let curs: Vec<String> = d.currencies().map(|c| c.text()).collect();
+    let curs: Vec<String> = d.currencies().map(|c| c.text().to_string()).collect();
     assert_eq!(curs, vec!["USD", "EUR"]);
+    // accessor still returns &str when called on a bound value
+    let acct = d.account().unwrap();
+    let _: &str = acct.text();
     assert_eq!(
         d.booking_method().unwrap().text_unquoted().unwrap(),
         "STRICT"
@@ -236,9 +239,9 @@ fn transaction_with_payee_narration_tags_links() {
         t.narration().unwrap().text_unquoted().unwrap(),
         "Morning coffee"
     );
-    let tags: Vec<String> = t.tags().map(|tg| tg.text()).collect();
+    let tags: Vec<String> = t.tags().map(|tg| tg.text().to_string()).collect();
     assert_eq!(tags, vec!["#daily"]);
-    let links: Vec<String> = t.links().map(|l| l.text()).collect();
+    let links: Vec<String> = t.links().map(|l| l.text().to_string()).collect();
     assert_eq!(links, vec!["^trip1"]);
     assert_eq!(t.postings().count(), 2);
 }
@@ -430,4 +433,154 @@ fn public_re_exports_exist() {
     t::<Link>();
     t::<CostSpec>();
     t::<PriceAnnotation>();
+    t::<rustledger_parser::cst::ast::TransactionFlag>();
+    t::<rustledger_parser::cst::ast::PostingFlag>();
+    t::<rustledger_parser::cst::ast::Sign>();
+}
+
+// ---- Review-fix regressions --------------------------------------
+
+#[test]
+fn transaction_flag_recognizes_single_char_currency_letter() {
+    // The ticker-letter transaction flag form (e.g. `T`). The CST
+    // builder classifies single-char CURRENCY in the flag position
+    // as a TRANSACTION; the typed accessor must surface it.
+    let f = parse("2024-01-15 T \"AT&T dividend\"\n  Assets:Brokerage  10 T\n");
+    let Directive::Transaction(t) = single_directive(&f) else {
+        panic!("expected Transaction");
+    };
+    let flag = t.flag().expect("flag present");
+    assert!(flag.is_currency_letter());
+    assert_eq!(flag.text(), "T");
+}
+
+#[test]
+fn transaction_flag_typed_discriminators() {
+    let f = parse("2024-01-15 ! \"x\"\n  Assets:Cash  -5 USD\n");
+    let Directive::Transaction(t) = single_directive(&f) else {
+        unreachable!()
+    };
+    let flag = t.flag().unwrap();
+    assert!(flag.is_pending());
+    assert!(!flag.is_star());
+}
+
+#[test]
+fn posting_flag_typed_discriminators() {
+    let f = parse("2024-01-15 * \"x\"\n  ! Assets:Cash  -5 USD\n");
+    let Directive::Transaction(t) = single_directive(&f) else {
+        unreachable!()
+    };
+    let p = t.postings().next().unwrap();
+    let flag = p.flag().unwrap();
+    assert!(flag.is_pending());
+    assert_eq!(flag.text(), "!");
+}
+
+#[test]
+fn amount_sign_typed_discriminators() {
+    let f = parse("2024-01-15 * \"x\"\n  Assets:Cash  -5 USD\n");
+    let Directive::Transaction(t) = single_directive(&f) else {
+        unreachable!()
+    };
+    let amt = t.postings().next().unwrap().amount().unwrap();
+    let sign = amt.sign().unwrap();
+    assert!(sign.is_minus());
+    assert!(!sign.is_plus());
+}
+
+#[test]
+fn cost_spec_is_merge_only_for_leading_star() {
+    // `{*}` — leading STAR is a merge marker.
+    let f = parse(
+        "2024-01-15 * \"x\"\n\
+         \x20\x20Assets:Inv  10 HOOL {*}\n",
+    );
+    let Directive::Transaction(t) = single_directive(&f) else {
+        unreachable!()
+    };
+    let cost = t.postings().next().unwrap().cost_spec().unwrap();
+    assert!(cost.is_merge(), "leading STAR should be merge marker");
+}
+
+#[test]
+fn cost_spec_is_not_merge_for_multiplication_star() {
+    // `{500 * 2 USD}` — STAR is multiplication, NOT a merge
+    // marker. This is the bug fixed in the review pass.
+    let f = parse(
+        "2024-01-15 * \"x\"\n\
+         \x20\x20Assets:Inv  10 HOOL {500 * 2 USD}\n",
+    );
+    let Directive::Transaction(t) = single_directive(&f) else {
+        unreachable!()
+    };
+    let cost = t.postings().next().unwrap().cost_spec().unwrap();
+    assert!(
+        !cost.is_merge(),
+        "multiplication * inside cost must not be classified as merge"
+    );
+}
+
+#[test]
+fn transaction_three_strings_payee_and_narration_return_none() {
+    // 3+ strings is ambiguous; both accessors return None.
+    // strings() exposes all three for lossless access.
+    let f = parse("2024-01-15 * \"A\" \"B\" \"C\"\n  Assets:Cash  -5 USD\n");
+    let Directive::Transaction(t) = single_directive(&f) else {
+        unreachable!()
+    };
+    assert!(t.payee().is_none(), "3+ strings: payee ambiguous");
+    assert!(t.narration().is_none(), "3+ strings: narration ambiguous");
+    let all: Vec<String> = t
+        .strings()
+        .map(|s| s.text_unquoted().unwrap().to_string())
+        .collect();
+    assert_eq!(all, vec!["A", "B", "C"]);
+}
+
+#[test]
+fn directive_implements_ast_node_trait() {
+    use rustledger_parser::cst::SyntaxKind;
+    // Generic over AstNode: confirms Directive participates in the
+    // trait, not just its variant structs.
+    fn syntax_kind_of<N: AstNode>(n: &N) -> SyntaxKind {
+        n.syntax().kind()
+    }
+    let file = parse("2024-01-01 open Assets:Cash\n");
+    let dir = single_directive(&file);
+    assert_eq!(syntax_kind_of(&dir), SyntaxKind::OPEN_DIRECTIVE);
+    // can_cast on the enum's trait
+    assert!(Directive::can_cast(SyntaxKind::OPEN_DIRECTIVE));
+    assert!(Directive::can_cast(SyntaxKind::TRANSACTION));
+    assert!(!Directive::can_cast(SyntaxKind::POSTING));
+}
+
+#[test]
+fn ast_token_text_is_borrowed_not_allocated() {
+    // The trait method should return &str borrowed from the token,
+    // confirming no per-call allocation. Compile-only check that
+    // the return type is &str.
+    let file = parse("2024-01-01 open Assets:Cash\n");
+    let Directive::Open(open) = single_directive(&file) else {
+        unreachable!()
+    };
+    let date = open.date().unwrap();
+    let date_text: &str = date.text();
+    assert_eq!(date_text, "2024-01-01");
+    // text_unquoted returns Option<&str>
+    let file2 = parse("option \"k\" \"v\"\n");
+    let Directive::Option(opt) = single_directive(&file2) else {
+        unreachable!()
+    };
+    let key = opt.key().unwrap();
+    let key_text: &str = key.text_unquoted().unwrap();
+    assert_eq!(key_text, "k");
+    // text_without_colon returns &str
+    let file3 = parse("pushmeta location:\n");
+    let Directive::Pushmeta(pmeta) = single_directive(&file3) else {
+        unreachable!()
+    };
+    let mkey = pmeta.key().unwrap();
+    let stripped: &str = mkey.text_without_colon();
+    assert_eq!(stripped, "location");
 }

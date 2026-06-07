@@ -56,9 +56,11 @@ pub trait AstToken: Sized {
     fn cast(token: SyntaxToken) -> Option<Self>;
     fn syntax(&self) -> &SyntaxToken;
 
-    /// The raw token text (bytes from the source).
-    fn text(&self) -> String {
-        self.syntax().text().to_string()
+    /// The raw token text (borrowed from the green tree, zero
+    /// allocation). Tokens are always contiguous, so a `&str`
+    /// slice is well-defined.
+    fn text(&self) -> &str {
+        self.syntax().text()
     }
 }
 
@@ -161,13 +163,14 @@ ast_token!(
 impl StringLit {
     /// String content with surrounding `"` stripped. Returns
     /// `None` if the raw text isn't a well-formed quoted string.
-    pub fn text_unquoted(&self) -> Option<String> {
+    /// Borrowed from the green tree (zero allocation).
+    pub fn text_unquoted(&self) -> Option<&str> {
         let raw = self.text();
         let bytes = raw.as_bytes();
         if bytes.len() < 2 || bytes[0] != b'"' || bytes[bytes.len() - 1] != b'"' {
             return None;
         }
-        Some(raw[1..raw.len() - 1].to_string())
+        Some(&raw[1..raw.len() - 1])
     }
 }
 
@@ -182,10 +185,11 @@ ast_token!(
 );
 
 impl MetaKey {
-    /// Key name with the trailing `:` stripped.
-    pub fn text_without_colon(&self) -> String {
+    /// Key name with the trailing `:` stripped. Borrowed from the
+    /// green tree (zero allocation).
+    pub fn text_without_colon(&self) -> &str {
         let raw = self.text();
-        raw.strip_suffix(':').unwrap_or(&raw).to_string()
+        raw.strip_suffix(':').unwrap_or(raw)
     }
 }
 
@@ -205,6 +209,136 @@ ast_token!(
     /// `BOOL_FALSE` token literal.
     BoolFalse, BOOL_FALSE
 );
+
+// ---- Heterogeneous flag/sign token wrappers --------------------
+//
+// These wrap a SyntaxToken whose kind is one of several possibilities
+// (a transaction flag may be STAR, PENDING_KW, FLAG letter, HASH,
+// TXN_KW, or single-char CURRENCY). We deliberately do NOT implement
+// AstToken for them, since AstToken::can_cast is kind-only and the
+// CURRENCY case needs a length check. Inherent cast() does the full
+// check; downstream code discriminates via the is_*() predicates or
+// kind().
+
+/// Typed wrapper for the transaction-header flag token.
+///
+/// May be `STAR` (`*`), `PENDING_KW` (`!`), `FLAG` (letter),
+/// `HASH` (`#`), `TXN_KW` (`txn`), or single-character `CURRENCY`
+/// (ticker-letter flag, e.g. `T`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TransactionFlag(SyntaxToken);
+
+impl TransactionFlag {
+    /// Wrap the token if its kind is a valid transaction flag.
+    /// For `CURRENCY`, only single-character forms qualify.
+    pub fn cast(token: SyntaxToken) -> Option<Self> {
+        match token.kind() {
+            SyntaxKind::STAR
+            | SyntaxKind::PENDING_KW
+            | SyntaxKind::FLAG
+            | SyntaxKind::HASH
+            | SyntaxKind::TXN_KW => Some(Self(token)),
+            SyntaxKind::CURRENCY if token.text().len() == 1 => Some(Self(token)),
+            _ => None,
+        }
+    }
+
+    pub const fn syntax(&self) -> &SyntaxToken {
+        &self.0
+    }
+    pub fn kind(&self) -> SyntaxKind {
+        self.0.kind()
+    }
+    pub fn text(&self) -> &str {
+        self.0.text()
+    }
+    pub fn is_star(&self) -> bool {
+        self.kind() == SyntaxKind::STAR
+    }
+    pub fn is_pending(&self) -> bool {
+        self.kind() == SyntaxKind::PENDING_KW
+    }
+    pub fn is_hash(&self) -> bool {
+        self.kind() == SyntaxKind::HASH
+    }
+    pub fn is_txn(&self) -> bool {
+        self.kind() == SyntaxKind::TXN_KW
+    }
+    pub fn is_letter_flag(&self) -> bool {
+        self.kind() == SyntaxKind::FLAG
+    }
+    pub fn is_currency_letter(&self) -> bool {
+        self.kind() == SyntaxKind::CURRENCY
+    }
+}
+
+/// Typed wrapper for a posting-line flag token. Same as
+/// [`TransactionFlag`] minus the `TXN_KW` variant (postings can't
+/// carry the `txn` keyword).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PostingFlag(SyntaxToken);
+
+impl PostingFlag {
+    pub fn cast(token: SyntaxToken) -> Option<Self> {
+        match token.kind() {
+            SyntaxKind::STAR | SyntaxKind::PENDING_KW | SyntaxKind::FLAG | SyntaxKind::HASH => {
+                Some(Self(token))
+            }
+            SyntaxKind::CURRENCY if token.text().len() == 1 => Some(Self(token)),
+            _ => None,
+        }
+    }
+
+    pub const fn syntax(&self) -> &SyntaxToken {
+        &self.0
+    }
+    pub fn kind(&self) -> SyntaxKind {
+        self.0.kind()
+    }
+    pub fn text(&self) -> &str {
+        self.0.text()
+    }
+    pub fn is_star(&self) -> bool {
+        self.kind() == SyntaxKind::STAR
+    }
+    pub fn is_pending(&self) -> bool {
+        self.kind() == SyntaxKind::PENDING_KW
+    }
+    pub fn is_hash(&self) -> bool {
+        self.kind() == SyntaxKind::HASH
+    }
+    pub fn is_letter_flag(&self) -> bool {
+        self.kind() == SyntaxKind::FLAG
+    }
+    pub fn is_currency_letter(&self) -> bool {
+        self.kind() == SyntaxKind::CURRENCY
+    }
+}
+
+/// Typed wrapper for an amount sign token (`PLUS` or `MINUS`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Sign(SyntaxToken);
+
+impl Sign {
+    pub fn cast(token: SyntaxToken) -> Option<Self> {
+        matches!(token.kind(), SyntaxKind::PLUS | SyntaxKind::MINUS).then_some(Self(token))
+    }
+    pub const fn syntax(&self) -> &SyntaxToken {
+        &self.0
+    }
+    pub fn kind(&self) -> SyntaxKind {
+        self.0.kind()
+    }
+    pub fn text(&self) -> &str {
+        self.0.text()
+    }
+    pub fn is_plus(&self) -> bool {
+        self.kind() == SyntaxKind::PLUS
+    }
+    pub fn is_minus(&self) -> bool {
+        self.kind() == SyntaxKind::MINUS
+    }
+}
 
 // ---- Source file root + Directive enum ------------------------
 
@@ -257,11 +391,33 @@ pub enum Directive {
     Transaction(Transaction),
 }
 
-impl Directive {
-    /// Cast a `SyntaxNode` to a typed directive if it's a
-    /// recognized directive kind.
-    #[must_use]
-    pub fn cast(node: SyntaxNode) -> Option<Self> {
+impl AstNode for Directive {
+    fn can_cast(kind: SyntaxKind) -> bool {
+        matches!(
+            kind,
+            SyntaxKind::OPEN_DIRECTIVE
+                | SyntaxKind::CLOSE_DIRECTIVE
+                | SyntaxKind::BALANCE_DIRECTIVE
+                | SyntaxKind::PAD_DIRECTIVE
+                | SyntaxKind::EVENT_DIRECTIVE
+                | SyntaxKind::QUERY_DIRECTIVE
+                | SyntaxKind::NOTE_DIRECTIVE
+                | SyntaxKind::DOCUMENT_DIRECTIVE
+                | SyntaxKind::PRICE_DIRECTIVE
+                | SyntaxKind::COMMODITY_DIRECTIVE
+                | SyntaxKind::PUSHTAG_DIRECTIVE
+                | SyntaxKind::POPTAG_DIRECTIVE
+                | SyntaxKind::PUSHMETA_DIRECTIVE
+                | SyntaxKind::POPMETA_DIRECTIVE
+                | SyntaxKind::OPTION_DIRECTIVE
+                | SyntaxKind::INCLUDE_DIRECTIVE
+                | SyntaxKind::PLUGIN_DIRECTIVE
+                | SyntaxKind::CUSTOM_DIRECTIVE
+                | SyntaxKind::TRANSACTION
+        )
+    }
+
+    fn cast(node: SyntaxNode) -> Option<Self> {
         Some(match node.kind() {
             SyntaxKind::OPEN_DIRECTIVE => Self::Open(OpenDirective(node)),
             SyntaxKind::CLOSE_DIRECTIVE => Self::Close(CloseDirective(node)),
@@ -286,9 +442,7 @@ impl Directive {
         })
     }
 
-    /// The underlying `SyntaxNode` regardless of variant.
-    #[must_use]
-    pub fn syntax(&self) -> &SyntaxNode {
+    fn syntax(&self) -> &SyntaxNode {
         match self {
             Self::Open(d) => d.syntax(),
             Self::Close(d) => d.syntax(),
@@ -311,7 +465,9 @@ impl Directive {
             Self::Transaction(d) => d.syntax(),
         }
     }
+}
 
+impl Directive {
     /// Metadata sub-lines attached to this directive (phase 2.2a
     /// `META_ENTRY` wrapping). Every directive wrapper may carry
     /// indented metadata.
@@ -617,47 +773,48 @@ impl Transaction {
 
     /// Transaction flag token. May be `STAR` (`*`), `PENDING_KW`
     /// (`!`), `FLAG` letter, `HASH` (`#`), `TXN_KW`
-    /// (the `txn` keyword), single-char `CURRENCY`, or absent
-    /// (implied via a leading `STRING` payee/narration).
-    pub fn flag(&self) -> Option<SyntaxToken> {
+    /// (the `txn` keyword), single-char `CURRENCY` (ticker-letter
+    /// flag), or absent (implied via a leading `STRING`
+    /// payee/narration).
+    pub fn flag(&self) -> Option<TransactionFlag> {
         self.syntax()
             .children_with_tokens()
             .filter_map(rowan::NodeOrToken::into_token)
-            .find(|t| {
-                matches!(
-                    t.kind(),
-                    SyntaxKind::STAR
-                        | SyntaxKind::PENDING_KW
-                        | SyntaxKind::FLAG
-                        | SyntaxKind::HASH
-                        | SyntaxKind::TXN_KW
-                )
-            })
+            .find_map(TransactionFlag::cast)
+    }
+
+    /// All `STRING` tokens in the header, in source order. The
+    /// 2-string convention (`"payee" "narration"`) is the
+    /// canonical form; [`Self::payee`] and [`Self::narration`]
+    /// follow it strictly. For 3+ strings (malformed but
+    /// losslessly parsed), use this method to surface every
+    /// header string.
+    pub fn strings(&self) -> impl Iterator<Item = StringLit> + '_ {
+        tokens_of_kind(self.syntax(), SyntaxKind::STRING).filter_map(StringLit::cast)
     }
 
     /// The payee string, if a separate payee + narration pair is
-    /// present. With two `STRING` children, the first is the
-    /// payee. With only one `STRING`, the entire string is
-    /// considered narration.
+    /// present. Returns `Some(first)` ONLY when exactly two
+    /// `STRING` tokens appear in the header (the canonical
+    /// `"payee" "narration"` shape). With 0, 1, or 3+ strings
+    /// the convention is ambiguous and this returns `None` —
+    /// use [`Self::strings`] for lossless access.
     pub fn payee(&self) -> Option<StringLit> {
-        let strings: Vec<StringLit> = tokens_of_kind(self.syntax(), SyntaxKind::STRING)
-            .filter_map(StringLit::cast)
-            .collect();
-        if strings.len() >= 2 {
-            Some(strings.into_iter().next().unwrap())
-        } else {
-            None
-        }
+        let strings: Vec<StringLit> = self.strings().collect();
+        (strings.len() == 2).then(|| strings.into_iter().next().unwrap())
     }
 
-    /// The narration string. The last `STRING` child of the
-    /// header line (handles both the payee+narration and
-    /// narration-only cases).
+    /// The narration string. Returns `Some(only)` for a single
+    /// string and `Some(last)` for the 2-string `"payee"
+    /// "narration"` form. Returns `None` for 0 or 3+ strings —
+    /// use [`Self::strings`] for lossless access on malformed
+    /// headers.
     pub fn narration(&self) -> Option<StringLit> {
-        let mut strings: Vec<StringLit> = tokens_of_kind(self.syntax(), SyntaxKind::STRING)
-            .filter_map(StringLit::cast)
-            .collect();
-        strings.pop()
+        let mut strings: Vec<StringLit> = self.strings().collect();
+        match strings.len() {
+            1 | 2 => strings.pop(),
+            _ => None,
+        }
     }
 
     /// All `#TAG` tokens attached to the transaction header.
@@ -688,22 +845,18 @@ ast_node!(
 );
 
 impl Posting {
-    /// Posting flag (optional). Same kinds as `Transaction::flag`
-    /// but indicates whether THIS posting is pending, etc.
-    pub fn flag(&self) -> Option<SyntaxToken> {
-        // Walk children up to the ACCOUNT; any flag-kind token
-        // before ACCOUNT is the posting flag.
+    /// Posting flag (optional). Same kinds as
+    /// [`TransactionFlag`] minus `TXN_KW` — indicates whether
+    /// THIS posting is pending, marked, etc.
+    pub fn flag(&self) -> Option<PostingFlag> {
+        // Walk children up to the ACCOUNT; the first non-whitespace
+        // token is the flag iff it's a valid PostingFlag kind.
         for el in self.syntax().children_with_tokens() {
             if let rowan::NodeOrToken::Token(t) = el {
                 match t.kind() {
                     SyntaxKind::WHITESPACE => {}
                     SyntaxKind::ACCOUNT => return None,
-                    SyntaxKind::STAR
-                    | SyntaxKind::PENDING_KW
-                    | SyntaxKind::FLAG
-                    | SyntaxKind::HASH => return Some(t),
-                    SyntaxKind::CURRENCY if t.text().len() == 1 => return Some(t),
-                    _ => return None,
+                    _ => return PostingFlag::cast(t),
                 }
             }
         }
@@ -748,14 +901,15 @@ ast_node!(
 impl Amount {
     /// Sign token (`MINUS` or `PLUS`), if present as the FIRST
     /// non-whitespace child of AMOUNT. Returns `None` if no
-    /// sign or if the sign is inside an arithmetic-expression
-    /// inner operand.
-    pub fn sign(&self) -> Option<SyntaxToken> {
+    /// sign or if the leading non-whitespace token is something
+    /// else (e.g., `L_PAREN`, `NUMBER`, `CURRENCY`).
+    pub fn sign(&self) -> Option<Sign> {
         let first = self
             .syntax()
             .children_with_tokens()
-            .find_map(rowan::NodeOrToken::into_token)?;
-        matches!(first.kind(), SyntaxKind::MINUS | SyntaxKind::PLUS).then_some(first)
+            .filter_map(rowan::NodeOrToken::into_token)
+            .find(|t| t.kind() != SyntaxKind::WHITESPACE)?;
+        Sign::cast(first)
     }
 
     /// First `NUMBER` child token (the leading operand). For an
@@ -765,16 +919,34 @@ impl Amount {
         first_token(self.syntax(), SyntaxKind::NUMBER).and_then(Number::cast)
     }
 
-    /// The trailing currency. For `100 USD` or `100USD` or
-    /// `(1+2) USD`, this is `USD`. For bare currency-only
-    /// `AMOUNT(CURRENCY)`, it's the same token.
+    /// The trailing currency at paren-depth 0. For `100 USD` or
+    /// `100USD` or `(1+2) USD`, this is the trailing `USD`. For
+    /// bare currency-only `AMOUNT(CURRENCY)`, it's the same
+    /// token. For malformed `AMOUNT( CURRENCY )` (no trailing
+    /// currency outside the parens), returns `None` rather than
+    /// silently picking the paren-internal token.
     pub fn currency(&self) -> Option<CurrencyName> {
-        // The currency is the LAST direct-child CURRENCY token
-        // (a paren-expression interior may contain currency-shaped
-        // tokens that we want to ignore for the typed accessor).
-        tokens_of_kind(self.syntax(), SyntaxKind::CURRENCY)
-            .last()
-            .and_then(CurrencyName::cast)
+        // Walk tokens in reverse with paren-depth tracking; the
+        // first CURRENCY we hit at depth 0 is the trailing one.
+        // emit_amount_operand keeps paren contents flat under
+        // AMOUNT (no PAREN_EXPR sub-node), so internal currency
+        // tokens are direct children too — depth tracking is
+        // the only structural disambiguator.
+        let tokens: Vec<SyntaxToken> = self
+            .syntax()
+            .children_with_tokens()
+            .filter_map(rowan::NodeOrToken::into_token)
+            .collect();
+        let mut depth: i32 = 0;
+        for t in tokens.iter().rev() {
+            match t.kind() {
+                SyntaxKind::R_PAREN => depth += 1,
+                SyntaxKind::L_PAREN => depth -= 1,
+                SyntaxKind::CURRENCY if depth == 0 => return CurrencyName::cast(t.clone()),
+                _ => {}
+            }
+        }
+        None
     }
 
     /// Returns true iff the amount contains an arithmetic operator
@@ -840,10 +1012,28 @@ impl CostSpec {
         first_token(self.syntax(), SyntaxKind::STRING).and_then(StringLit::cast)
     }
 
-    /// Returns true iff the cost spec contains a `*` merge marker.
+    /// Returns true iff the opener is immediately followed by a
+    /// `*` merge marker (e.g., `{*}` or `{* 500 USD}`). A STAR
+    /// elsewhere in the cost spec is the multiplication operator
+    /// (e.g., `{500 * 2 USD}`), NOT a merge marker; position
+    /// matters.
     #[must_use]
     pub fn is_merge(&self) -> bool {
-        first_token(self.syntax(), SyntaxKind::STAR).is_some()
+        let mut past_opener = false;
+        for el in self.syntax().children_with_tokens() {
+            if let rowan::NodeOrToken::Token(t) = el {
+                match t.kind() {
+                    SyntaxKind::L_BRACE | SyntaxKind::L_DOUBLE_BRACE | SyntaxKind::L_BRACE_HASH => {
+                        past_opener = true;
+                    }
+                    SyntaxKind::WHITESPACE if past_opener => {}
+                    SyntaxKind::STAR if past_opener => return true,
+                    _ if past_opener => return false,
+                    _ => {}
+                }
+            }
+        }
+        false
     }
 }
 

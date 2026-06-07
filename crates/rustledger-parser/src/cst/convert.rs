@@ -92,7 +92,7 @@ pub fn parse_via_cst(source: &str) -> ParseResult {
     let mut options: Vec<(String, String, Span)> = Vec::new();
     let mut includes: Vec<(String, Span)> = Vec::new();
     let mut plugins: Vec<(String, Option<String>, Span)> = Vec::new();
-    let comments: Vec<Spanned<String>> = Vec::new();
+    let comments: Vec<Spanned<String>> = extract_top_level_comments(&source_file, bom_offset);
     let errors = Vec::new();
     let warnings = Vec::new();
     let currency_occurrences = extract_currency_occurrences(&source_file, bom_offset);
@@ -846,6 +846,78 @@ fn pushmeta_value(node: &crate::SyntaxNode) -> MetaValue {
         }
     }
     MetaValue::None
+}
+
+// ---- ParseResult.comments --------------------------------------
+
+/// Comment-like syntax kinds that the legacy parser surfaces as
+/// `ParseResult.comments` entries when they appear at the top
+/// level (outside any directive's content).
+const fn is_comment_kind(kind: crate::SyntaxKind) -> bool {
+    matches!(
+        kind,
+        crate::SyntaxKind::COMMENT
+            | crate::SyntaxKind::PERCENT_COMMENT
+            | crate::SyntaxKind::SHEBANG
+            | crate::SyntaxKind::EMACS_DIRECTIVE
+    )
+}
+
+/// Walk the source file and collect every "standalone" comment
+/// line into `ParseResult.comments`, mirroring the legacy parser:
+///
+/// - Comment tokens that are direct children of `SOURCE_FILE`
+///   (file-leading and file-trailing trivia) are standalone.
+/// - Comment tokens that appear inside a directive node BEFORE
+///   the first non-trivia content token (the directive's
+///   inter-directive leading trivia from the trivia policy) are
+///   also standalone — they represent comments between
+///   directives in the source, which the legacy parser also
+///   treats as top-level.
+/// - Comments that appear AFTER the directive's content begins
+///   (e.g., trailing same-line comments on a posting) belong to
+///   the directive, not to `comments`.
+fn extract_top_level_comments(source_file: &SourceFile, bom_offset: u32) -> Vec<Spanned<String>> {
+    let mut out = Vec::new();
+    let push_token = |out: &mut Vec<Spanned<String>>, t: &crate::SyntaxToken| {
+        let range = t.text_range();
+        let start: u32 = range.start().into();
+        let end: u32 = range.end().into();
+        let span = Span::new((start + bom_offset) as usize, (end + bom_offset) as usize);
+        out.push(Spanned::new(t.text().to_string(), span));
+    };
+
+    for child in source_file.syntax().children_with_tokens() {
+        match child {
+            rowan::NodeOrToken::Token(t) if is_comment_kind(t.kind()) => {
+                push_token(&mut out, &t);
+            }
+            rowan::NodeOrToken::Node(n) if ast::Directive::can_cast(n.kind()) => {
+                // Walk the directive's direct-child tokens; any
+                // comment-like token BEFORE the first non-trivia
+                // content token is leading trivia and counts as
+                // a top-level comment.
+                for el in n.children_with_tokens() {
+                    let rowan::NodeOrToken::Token(t) = el else {
+                        // Hit a node child (POSTING / META_ENTRY /
+                        // AMOUNT / ...). Definitely past the
+                        // header; stop scanning leading trivia.
+                        break;
+                    };
+                    if is_comment_kind(t.kind()) {
+                        push_token(&mut out, &t);
+                    } else if !is_trivia_kind(t.kind()) {
+                        // First content token of the directive.
+                        // Anything after this belongs to the
+                        // directive.
+                        break;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
 // ---- ParseResult.currency_occurrences --------------------------

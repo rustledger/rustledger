@@ -104,6 +104,8 @@ pub fn parse_via_cst(source: &str) -> ParseResult {
     comments.dedup_by_key(|s| s.span.start);
     let mut errors = extract_error_node_errors(&source_file, stripped, bom_offset);
     errors.extend(extract_transaction_body_errors(&source_file, bom_offset));
+    errors.extend(extract_unclosed_cost_brace_errors(&source_file, bom_offset));
+    errors.extend(extract_inline_token_errors(&source_file, bom_offset));
     let warnings = Vec::new();
     let currency_occurrences = extract_currency_occurrences(&source_file, bom_offset);
 
@@ -126,18 +128,42 @@ pub fn parse_via_cst(source: &str) -> ParseResult {
         // alongside its CST node so the post-pass span fixup
         // can index them in parallel.
         let cst_node = directive.syntax().clone();
+        // `is_directive_producing` tracks whether THIS arm is
+        // expected to emit a `Spanned<Directive>` (the 12
+        // directive types). The catch-all below uses it to
+        // surface a `SyntaxError` when a producing converter
+        // returned `None` without emitting a more specific
+        // diagnostic — the silent-drop class of bug the integ
+        // tests caught for `2024-01-01 open` (no account),
+        // `balance Assets:X` (no amount), etc.
+        let is_directive_producing = matches!(
+            directive,
+            ast::Directive::Open(_)
+                | ast::Directive::Close(_)
+                | ast::Directive::Commodity(_)
+                | ast::Directive::Note(_)
+                | ast::Directive::Document(_)
+                | ast::Directive::Event(_)
+                | ast::Directive::Query(_)
+                | ast::Directive::Price(_)
+                | ast::Directive::Balance(_)
+                | ast::Directive::Pad(_)
+                | ast::Directive::Custom(_)
+                | ast::Directive::Transaction(_)
+        );
+        let errors_before = errors.len();
         let pushed_directive = match directive {
             ast::Directive::Open(node) => convert_open(&node, bom_offset, &mut errors),
-            ast::Directive::Close(node) => convert_close(&node, bom_offset),
-            ast::Directive::Commodity(node) => convert_commodity(&node, bom_offset),
-            ast::Directive::Note(node) => convert_note(&node, bom_offset),
-            ast::Directive::Document(node) => convert_document(&node, bom_offset),
-            ast::Directive::Event(node) => convert_event(&node, bom_offset),
-            ast::Directive::Query(node) => convert_query(&node, bom_offset),
-            ast::Directive::Price(node) => convert_price(&node, bom_offset),
-            ast::Directive::Balance(node) => convert_balance(&node, bom_offset),
-            ast::Directive::Pad(node) => convert_pad(&node, bom_offset),
-            ast::Directive::Custom(node) => convert_custom(&node, bom_offset),
+            ast::Directive::Close(node) => convert_close(&node, bom_offset, &mut errors),
+            ast::Directive::Commodity(node) => convert_commodity(&node, bom_offset, &mut errors),
+            ast::Directive::Note(node) => convert_note(&node, bom_offset, &mut errors),
+            ast::Directive::Document(node) => convert_document(&node, bom_offset, &mut errors),
+            ast::Directive::Event(node) => convert_event(&node, bom_offset, &mut errors),
+            ast::Directive::Query(node) => convert_query(&node, bom_offset, &mut errors),
+            ast::Directive::Price(node) => convert_price(&node, bom_offset, &mut errors),
+            ast::Directive::Balance(node) => convert_balance(&node, bom_offset, &mut errors),
+            ast::Directive::Pad(node) => convert_pad(&node, bom_offset, &mut errors),
+            ast::Directive::Custom(node) => convert_custom(&node, bom_offset, &mut errors),
             ast::Directive::Transaction(node) => {
                 convert_transaction(&node, bom_offset, &mut errors)
             }
@@ -210,6 +236,18 @@ pub fn parse_via_cst(source: &str) -> ParseResult {
             apply_inherited_state(&mut spanned.value, &tag_stack, &meta_stack);
             directives.push(spanned);
             directive_nodes.push(cst_node);
+        } else if is_directive_producing && errors.len() == errors_before {
+            // Producing converter silently dropped the directive
+            // (typically: a required field like an account on
+            // `open`, an amount on `balance`, or a source account
+            // on `pad` was missing). Mirror the legacy parser's
+            // top-level error-recovery path which emits a
+            // `SyntaxError("unexpected input")` for the failed
+            // span so downstream tooling sees the same shape.
+            errors.push(crate::ParseError::new(
+                crate::ParseErrorKind::SyntaxError("unexpected input".to_string()),
+                node_span(&cst_node, bom_offset),
+            ));
         }
     }
 
@@ -270,7 +308,7 @@ fn convert_open(
     bom_offset: u32,
     errors: &mut Vec<crate::ParseError>,
 ) -> Option<Spanned<Directive>> {
-    let date = parse_date_token(node.date()?.text())?;
+    let date = parse_directive_date(&node.date()?, errors, bom_offset)?;
     let account = Account::new(node.account()?.text());
     let currencies: Vec<Currency> = node.currencies().map(|c| Currency::new(c.text())).collect();
     let booking = node
@@ -298,8 +336,12 @@ fn convert_open(
     Some(Spanned::new(Directive::Open(open), span))
 }
 
-fn convert_close(node: &CloseDirective, bom_offset: u32) -> Option<Spanned<Directive>> {
-    let date = parse_date_token(node.date()?.text())?;
+fn convert_close(
+    node: &CloseDirective,
+    bom_offset: u32,
+    errors: &mut Vec<crate::ParseError>,
+) -> Option<Spanned<Directive>> {
+    let date = parse_directive_date(&node.date()?, errors, bom_offset)?;
     let account = Account::new(node.account()?.text());
     let meta = convert_meta_entries(node.syntax());
 
@@ -312,8 +354,12 @@ fn convert_close(node: &CloseDirective, bom_offset: u32) -> Option<Spanned<Direc
     Some(Spanned::new(Directive::Close(close), span))
 }
 
-fn convert_commodity(node: &CommodityDirective, bom_offset: u32) -> Option<Spanned<Directive>> {
-    let date = parse_date_token(node.date()?.text())?;
+fn convert_commodity(
+    node: &CommodityDirective,
+    bom_offset: u32,
+    errors: &mut Vec<crate::ParseError>,
+) -> Option<Spanned<Directive>> {
+    let date = parse_directive_date(&node.date()?, errors, bom_offset)?;
     let currency = Currency::new(node.currency()?.text());
     let meta = convert_meta_entries(node.syntax());
 
@@ -326,8 +372,12 @@ fn convert_commodity(node: &CommodityDirective, bom_offset: u32) -> Option<Spann
     Some(Spanned::new(Directive::Commodity(commodity), span))
 }
 
-fn convert_note(node: &NoteDirective, bom_offset: u32) -> Option<Spanned<Directive>> {
-    let date = parse_date_token(node.date()?.text())?;
+fn convert_note(
+    node: &NoteDirective,
+    bom_offset: u32,
+    errors: &mut Vec<crate::ParseError>,
+) -> Option<Spanned<Directive>> {
+    let date = parse_directive_date(&node.date()?, errors, bom_offset)?;
     let account = Account::new(node.account()?.text());
     let comment = node.text()?.text_unquoted()?.to_string();
     let meta = convert_meta_entries(node.syntax());
@@ -342,8 +392,12 @@ fn convert_note(node: &NoteDirective, bom_offset: u32) -> Option<Spanned<Directi
     Some(Spanned::new(Directive::Note(note), span))
 }
 
-fn convert_document(node: &DocumentDirective, bom_offset: u32) -> Option<Spanned<Directive>> {
-    let date = parse_date_token(node.date()?.text())?;
+fn convert_document(
+    node: &DocumentDirective,
+    bom_offset: u32,
+    errors: &mut Vec<crate::ParseError>,
+) -> Option<Spanned<Directive>> {
+    let date = parse_directive_date(&node.date()?, errors, bom_offset)?;
     let account = Account::new(node.account()?.text());
     let path = node.path()?.text_unquoted()?.to_string();
     // Trailing tags/links on the document header (legacy
@@ -383,8 +437,12 @@ fn convert_document(node: &DocumentDirective, bom_offset: u32) -> Option<Spanned
     Some(Spanned::new(Directive::Document(document), span))
 }
 
-fn convert_event(node: &EventDirective, bom_offset: u32) -> Option<Spanned<Directive>> {
-    let date = parse_date_token(node.date()?.text())?;
+fn convert_event(
+    node: &EventDirective,
+    bom_offset: u32,
+    errors: &mut Vec<crate::ParseError>,
+) -> Option<Spanned<Directive>> {
+    let date = parse_directive_date(&node.date()?, errors, bom_offset)?;
     let event_type = node.event_type()?.text_unquoted()?.to_string();
     let value = node.value()?.text_unquoted()?.to_string();
     let meta = convert_meta_entries(node.syntax());
@@ -399,8 +457,12 @@ fn convert_event(node: &EventDirective, bom_offset: u32) -> Option<Spanned<Direc
     Some(Spanned::new(Directive::Event(event), span))
 }
 
-fn convert_query(node: &QueryDirective, bom_offset: u32) -> Option<Spanned<Directive>> {
-    let date = parse_date_token(node.date()?.text())?;
+fn convert_query(
+    node: &QueryDirective,
+    bom_offset: u32,
+    errors: &mut Vec<crate::ParseError>,
+) -> Option<Spanned<Directive>> {
+    let date = parse_directive_date(&node.date()?, errors, bom_offset)?;
     let name = node.name()?.text_unquoted()?.to_string();
     let query = node.query()?.text_unquoted()?.to_string();
     let meta = convert_meta_entries(node.syntax());
@@ -415,8 +477,12 @@ fn convert_query(node: &QueryDirective, bom_offset: u32) -> Option<Spanned<Direc
     Some(Spanned::new(Directive::Query(q), span))
 }
 
-fn convert_price(node: &PriceDirective, bom_offset: u32) -> Option<Spanned<Directive>> {
-    let date = parse_date_token(node.date()?.text())?;
+fn convert_price(
+    node: &PriceDirective,
+    bom_offset: u32,
+    errors: &mut Vec<crate::ParseError>,
+) -> Option<Spanned<Directive>> {
+    let date = parse_directive_date(&node.date()?, errors, bom_offset)?;
     let base_currency = Currency::new(node.base_currency()?.text());
     let mut number = parse_decimal_token(node.number()?.text())?;
     if node_has_minus_before_number(node.syntax()) {
@@ -436,8 +502,12 @@ fn convert_price(node: &PriceDirective, bom_offset: u32) -> Option<Spanned<Direc
     Some(Spanned::new(Directive::Price(price), span))
 }
 
-fn convert_balance(node: &BalanceDirective, bom_offset: u32) -> Option<Spanned<Directive>> {
-    let date = parse_date_token(node.date()?.text())?;
+fn convert_balance(
+    node: &BalanceDirective,
+    bom_offset: u32,
+    errors: &mut Vec<crate::ParseError>,
+) -> Option<Spanned<Directive>> {
+    let date = parse_directive_date(&node.date()?, errors, bom_offset)?;
     let account = Account::new(node.account()?.text());
     let mut number = parse_decimal_token(node.number()?.text())?;
     if node_has_minus_before_number(node.syntax()) {
@@ -480,8 +550,12 @@ fn extract_balance_tolerance(node: &crate::SyntaxNode) -> Option<Decimal> {
     None
 }
 
-fn convert_pad(node: &PadDirective, bom_offset: u32) -> Option<Spanned<Directive>> {
-    let date = parse_date_token(node.date()?.text())?;
+fn convert_pad(
+    node: &PadDirective,
+    bom_offset: u32,
+    errors: &mut Vec<crate::ParseError>,
+) -> Option<Spanned<Directive>> {
+    let date = parse_directive_date(&node.date()?, errors, bom_offset)?;
     let account = Account::new(node.target_account()?.text());
     let source_account = Account::new(node.source_account()?.text());
     let meta = convert_meta_entries(node.syntax());
@@ -496,8 +570,12 @@ fn convert_pad(node: &PadDirective, bom_offset: u32) -> Option<Spanned<Directive
     Some(Spanned::new(Directive::Pad(pad), span))
 }
 
-fn convert_custom(node: &CustomDirective, bom_offset: u32) -> Option<Spanned<Directive>> {
-    let date = parse_date_token(node.date()?.text())?;
+fn convert_custom(
+    node: &CustomDirective,
+    bom_offset: u32,
+    errors: &mut Vec<crate::ParseError>,
+) -> Option<Spanned<Directive>> {
+    let date = parse_directive_date(&node.date()?, errors, bom_offset)?;
     let custom_type = node.custom_type()?.text_unquoted()?.to_string();
     let values = extract_custom_values(node.syntax());
     let meta = convert_meta_entries(node.syntax());
@@ -635,7 +713,7 @@ fn convert_transaction(
     bom_offset: u32,
     errors: &mut Vec<crate::ParseError>,
 ) -> Option<Spanned<Directive>> {
-    let date = parse_date_token(node.date()?.text())?;
+    let date = parse_directive_date(&node.date()?, errors, bom_offset)?;
 
     // Flag: explicit (TransactionFlag) or implied (leading STRING
     // with no flag token; defaults to '*').
@@ -893,11 +971,25 @@ fn convert_cost_spec(cs: &ast::CostSpec) -> CostSpec {
     let merge = cs.is_merge();
     let is_total = cs.is_total();
 
-    let number = cs.number().and_then(|n| parse_decimal_token(n.text()));
-    let cost_number = match (number, is_total) {
-        (Some(v), true) => Some(CostNumber::Total { value: v }),
-        (Some(v), false) => Some(CostNumber::PerUnit { value: v }),
-        (None, _) => None,
+    // `{N # T CCY}` form: the value AFTER the `#` is the total
+    // (per-unit `N` is informationally redundant and the booker
+    // derives it from `T / |units|`). Pin this here so the form
+    // is semantically equivalent to `{{T CCY}}` (matching Python
+    // beancount). Without this, the FIRST `NUMBER` would be
+    // surfaced as `PerUnit{N}` and the post-`#` total would be
+    // silently dropped — inverting the post-booking value of
+    // every cost-basis read of this spec form.
+    let post_hash_total = cost_total_after_hash(cs);
+
+    let cost_number = if let Some(total) = post_hash_total {
+        Some(CostNumber::Total { value: total })
+    } else {
+        let number = cs.number().and_then(|n| parse_decimal_token(n.text()));
+        match (number, is_total) {
+            (Some(v), true) => Some(CostNumber::Total { value: v }),
+            (Some(v), false) => Some(CostNumber::PerUnit { value: v }),
+            (None, _) => None,
+        }
     };
 
     let currency = cs.currency().map(|c| Currency::new(c.text()));
@@ -911,6 +1003,33 @@ fn convert_cost_spec(cs: &ast::CostSpec) -> CostSpec {
         label,
         merge,
     }
+}
+
+/// Detect the `{N # T CCY}` cost-spec shape (a `HASH` token
+/// between two `NUMBER` tokens at the cost-spec's depth) and
+/// return `T` as a `Decimal`. Returns `None` for every other
+/// shape — `{N CCY}`, `{{T CCY}}`, `{#}`, etc.
+fn cost_total_after_hash(cs: &ast::CostSpec) -> Option<Decimal> {
+    let mut seen_number = false;
+    let mut past_hash = false;
+    for el in cs.syntax().children_with_tokens() {
+        let rowan::NodeOrToken::Token(t) = el else {
+            continue;
+        };
+        match t.kind() {
+            crate::SyntaxKind::NUMBER if !seen_number => {
+                seen_number = true;
+            }
+            crate::SyntaxKind::HASH if seen_number => {
+                past_hash = true;
+            }
+            crate::SyntaxKind::NUMBER if past_hash => {
+                return parse_decimal_token(t.text());
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn convert_price_annotation(pa: &ast::PriceAnnotation) -> PriceAnnotation {
@@ -1152,6 +1271,49 @@ const fn is_comment_kind(kind: crate::SyntaxKind) -> bool {
     )
 }
 
+/// Walk every `COST_SPEC` node in the tree and emit a
+/// `SyntaxError("unclosed cost specification: missing '}'")` for
+/// any spec whose opener (`{`, `{{`, or `{#`) doesn't have a
+/// matching closer at the spec's depth-0. Mirrors the legacy
+/// parser's deferred-error emission at `parser.rs:705-707` so a
+/// `10 AAPL {150 USD\n` posting or an EOF-truncated cost block
+/// surfaces a diagnostic instead of silently producing a half-
+/// built cost spec.
+fn extract_unclosed_cost_brace_errors(
+    source_file: &SourceFile,
+    bom_offset: u32,
+) -> Vec<crate::ParseError> {
+    let mut out = Vec::new();
+    for cs in source_file.syntax().descendants() {
+        if cs.kind() != crate::SyntaxKind::COST_SPEC {
+            continue;
+        }
+        let mut has_opener = false;
+        let mut has_closer = false;
+        for el in cs.children_with_tokens() {
+            let rowan::NodeOrToken::Token(t) = el else {
+                continue;
+            };
+            match t.kind() {
+                crate::SyntaxKind::L_BRACE
+                | crate::SyntaxKind::L_DOUBLE_BRACE
+                | crate::SyntaxKind::L_BRACE_HASH => has_opener = true,
+                crate::SyntaxKind::R_BRACE | crate::SyntaxKind::R_DOUBLE_BRACE => has_closer = true,
+                _ => {}
+            }
+        }
+        if has_opener && !has_closer {
+            out.push(crate::ParseError::new(
+                crate::ParseErrorKind::SyntaxError(
+                    "unclosed cost specification: missing '}'".to_string(),
+                ),
+                node_span(&cs, bom_offset),
+            ));
+        }
+    }
+    out
+}
+
 /// Walk each `TRANSACTION` and emit a `SyntaxError` for any body
 /// line that contains flat catch-all tokens (e.g., an
 /// unrecognized identifier where a posting was expected).
@@ -1345,6 +1507,63 @@ fn classify_recovery_error(line_text: &str, span: Span) -> crate::ParseError {
     )
 }
 
+/// Walk every descendant token and emit a `ParseError` for each
+/// `ERROR_TOKEN` (or BOM-containing token) that lands inside an
+/// otherwise-valid directive node — i.e., NOT inside an
+/// `ERROR_NODE` ancestor. Catches lexer-reject bytes the
+/// outer recovery path misses:
+/// - `.` in `.50 USD` (leading-decimal in posting amount) →
+///   `SyntaxError`.
+/// - Mid-file U+FEFF byte inside a recognized directive (e.g.,
+///   `open Assets:Bank \u{FEFF}USD`) → `BomInDirectiveBody` with
+///   `BOM_REMOVAL_HINT`.
+///
+/// The leading `SyntaxKind::BOM` token is skipped (the
+/// legitimate strict-byte-0 BOM is already tracked by
+/// `has_leading_bom`). `ERROR_NODE` descendants are skipped —
+/// `extract_error_node_errors` / `classify_recovery_error`
+/// already cover those.
+fn extract_inline_token_errors(
+    source_file: &SourceFile,
+    bom_offset: u32,
+) -> Vec<crate::ParseError> {
+    let mut out = Vec::new();
+    for el in source_file.syntax().descendants_with_tokens() {
+        let rowan::NodeOrToken::Token(t) = el else {
+            continue;
+        };
+        if t.kind() == crate::SyntaxKind::BOM {
+            continue;
+        }
+        let has_bom = t.text().contains(crate::bom::BOM_CHAR);
+        let is_error_token = t.kind() == crate::SyntaxKind::ERROR_TOKEN;
+        if !has_bom && !is_error_token {
+            continue;
+        }
+        if t.parent_ancestors()
+            .any(|a| a.kind() == crate::SyntaxKind::ERROR_NODE)
+        {
+            continue;
+        }
+        let range = t.text_range();
+        let start: u32 = range.start().into();
+        let end: u32 = range.end().into();
+        let span = Span::new((start + bom_offset) as usize, (end + bom_offset) as usize);
+        if has_bom {
+            out.push(
+                crate::ParseError::new(crate::ParseErrorKind::BomInDirectiveBody, span)
+                    .with_hint(crate::parser::BOM_REMOVAL_HINT),
+            );
+        } else {
+            out.push(crate::ParseError::new(
+                crate::ParseErrorKind::SyntaxError("unexpected input".to_string()),
+                span,
+            ));
+        }
+    }
+    out
+}
+
 /// Emit empty-string comments for org-mode section-marker
 /// lines (`* Heading`, `** Subheading`) inside `ERROR_NODE`
 /// children. The legacy parser's `parse_entry` matches
@@ -1500,12 +1719,11 @@ fn extract_currency_occurrences(
 
 // ---- Token parsing helpers -------------------------------------
 
-/// Parse a canonical `YYYY-MM-DD` date token. The CST lexer
-/// produces normalized date tokens, so the slow-path
-/// (slash-separator, single-digit month) doesn't apply here —
-/// the lossless lexer keeps the original text but the typed-AST
-/// `Date` accessor surfaces the same canonical-form requirement.
-/// Returns `None` for tokens that don't parse as a valid date.
+/// Parse a date token, accepting the same shapes as the legacy
+/// parser: canonical `YYYY-MM-DD`, slash-separated `YYYY/M/D`,
+/// and single-digit month/day. Returns `None` when the token
+/// can't be turned into a real calendar date (invalid month,
+/// invalid day for the given month, etc.).
 fn parse_date_token(text: &str) -> Option<NaiveDate> {
     // Fast path: canonical "YYYY-MM-DD".
     if text.len() == 10
@@ -1519,13 +1737,39 @@ fn parse_date_token(text: &str) -> Option<NaiveDate> {
     {
         return naive_date(y, m, d);
     }
-    // Slow path: normalize and try the chrono parser.
-    let normalized = if text.contains('/') {
-        text.replace('/', "-")
-    } else {
-        text.to_string()
-    };
-    normalized.parse::<NaiveDate>().ok()
+    // Slow path: share legacy's normalizer so single-digit
+    // month/day (`2024-1-15`, `2024-01-5`) and slash separators
+    // are accepted everywhere the legacy parser accepts them.
+    crate::parser::normalize_date_str(text)
+        .parse::<NaiveDate>()
+        .ok()
+}
+
+/// Parse a directive's `DATE` token. On success returns the
+/// `NaiveDate`; on a token whose calendar values don't form a
+/// real date (`2024-13-01`, Feb 29 in a non-leap year) emits
+/// `InvalidDateValue` with the legacy parser's human-readable
+/// message and returns `None`. This mirrors
+/// `parser.rs:181-182` so the CST and legacy parsers surface the
+/// same diagnostics for malformed dates in directive position.
+fn parse_directive_date(
+    date_tok: &ast::Date,
+    errors: &mut Vec<crate::ParseError>,
+    bom_offset: u32,
+) -> Option<NaiveDate> {
+    let text = date_tok.text();
+    if let Some(d) = parse_date_token(text) {
+        return Some(d);
+    }
+    let range = date_tok.syntax().text_range();
+    let start: u32 = range.start().into();
+    let end: u32 = range.end().into();
+    let span = Span::new((start + bom_offset) as usize, (end + bom_offset) as usize);
+    errors.push(crate::ParseError::new(
+        crate::ParseErrorKind::InvalidDateValue(crate::parser::describe_invalid_date(text)),
+        span,
+    ));
+    None
 }
 
 /// Parse a numeric token. Tolerates leading sign and thousands-
@@ -1563,7 +1807,7 @@ fn node_span(node: &crate::SyntaxNode, bom_offset: u32) -> Span {
 /// `#!`/`#+` lines have the same span/header-tracking behavior
 /// as files with only `;` comments. Mirrors
 /// `SyntaxKind::is_trivia()` minus `BOM` — a mid-file BOM byte
-/// is an error to surface (`extract_inline_bom_errors` /
+/// is an error to surface (`extract_inline_token_errors` /
 /// `classify_recovery_error`), not trivia to silently skip.
 const fn is_trivia_kind(kind: crate::SyntaxKind) -> bool {
     matches!(
@@ -2399,6 +2643,200 @@ mod tests {
         );
         assert!(t.trailing_comments[0].contains("trailing one"));
         assert!(t.trailing_comments[1].contains("trailing two"));
+    }
+
+    // ---- 14 emission-gap regressions (#1281 round-3 review) ----
+
+    #[test]
+    fn date_with_single_digit_month_parses() {
+        let result = parse_via_cst("2024-1-15 open Assets:Checking\n");
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let Directive::Open(open) = &result.directives[0].value else {
+            panic!("expected Open");
+        };
+        assert_eq!(open.date, naive_date(2024, 1, 15).unwrap());
+    }
+
+    #[test]
+    fn date_with_single_digit_day_parses() {
+        let result = parse_via_cst("2024-01-5 open Assets:Cash USD\n");
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let Directive::Open(open) = &result.directives[0].value else {
+            panic!("expected Open");
+        };
+        assert_eq!(open.date, naive_date(2024, 1, 5).unwrap());
+    }
+
+    #[test]
+    fn date_with_single_digit_month_and_day_parses() {
+        let result = parse_via_cst("2024-1-1 open Assets:Cash USD\n");
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let Directive::Open(open) = &result.directives[0].value else {
+            panic!("expected Open");
+        };
+        assert_eq!(open.date, naive_date(2024, 1, 1).unwrap());
+    }
+
+    #[test]
+    fn date_with_month_out_of_range_emits_invalid_date_value() {
+        let result = parse_via_cst("2024-13-01 open Assets:Cash USD\n");
+        let invalid_date: Vec<_> = result
+            .errors
+            .iter()
+            .filter_map(|e| match &e.kind {
+                crate::ParseErrorKind::InvalidDateValue(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(invalid_date.len(), 1, "errors: {:?}", result.errors);
+        let msg = &invalid_date[0];
+        assert!(
+            msg.contains("month") && msg.contains("out of range"),
+            "msg: {msg}"
+        );
+    }
+
+    #[test]
+    fn date_with_invalid_leap_year_emits_invalid_date_value() {
+        let result = parse_via_cst("2023-02-29 open Assets:Cash USD\n");
+        let invalid_date: Vec<_> = result
+            .errors
+            .iter()
+            .filter_map(|e| match &e.kind {
+                crate::ParseErrorKind::InvalidDateValue(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(invalid_date.len(), 1, "errors: {:?}", result.errors);
+        let msg = &invalid_date[0];
+        assert!(
+            msg.contains("day") && msg.contains("out of range") && msg.contains("2023-02"),
+            "msg: {msg}"
+        );
+    }
+
+    #[test]
+    fn date_with_completely_invalid_value_still_emits_error() {
+        // `2024-13-45` has BOTH month and day out of range; any
+        // error variant satisfies the original integration test's
+        // `!result.errors.is_empty()` assertion.
+        let result = parse_via_cst("2024-13-45 open Assets:Bank\n");
+        assert!(!result.errors.is_empty(), "errors: {:?}", result.errors);
+    }
+
+    #[test]
+    fn open_directive_without_account_emits_error() {
+        // `2024-01-01 open` with no account is rejected by legacy
+        // via the top-level error-recovery path. CST emits the
+        // catch-all `SyntaxError` from `parse_via_cst`'s
+        // is_directive_producing/errors_before tracker.
+        let result = parse_via_cst("2024-01-01 open\n");
+        assert!(!result.errors.is_empty(), "errors: {:?}", result.errors);
+    }
+
+    #[test]
+    fn open_directive_with_lowercase_account_emits_error() {
+        // `lowercase:invalid` doesn't match the ACCOUNT regex
+        // (uppercase first letter required), so the open directive
+        // has no ACCOUNT child. Same catch-all path as the no-
+        // account case.
+        let result = parse_via_cst("2024-01-01 open lowercase:invalid\n");
+        assert!(!result.errors.is_empty(), "errors: {:?}", result.errors);
+    }
+
+    #[test]
+    fn incomplete_open_at_eof_emits_error() {
+        // Regression for the PR #740 "incomplete-at-EOF" finding:
+        // `2024-01-01 open` at EOF with no trailing newline must
+        // not be silently dropped.
+        let result = parse_via_cst("2024-01-01 open");
+        assert!(!result.errors.is_empty(), "errors: {:?}", result.errors);
+    }
+
+    #[test]
+    fn balance_directive_without_amount_emits_error() {
+        let result = parse_via_cst("2024-01-15 balance Assets:Checking\n");
+        assert!(!result.errors.is_empty(), "errors: {:?}", result.errors);
+    }
+
+    #[test]
+    fn pad_directive_without_source_account_emits_error() {
+        let result = parse_via_cst("2024-01-15 pad Assets:Checking\n");
+        assert!(!result.errors.is_empty(), "errors: {:?}", result.errors);
+    }
+
+    #[test]
+    fn cost_spec_n_hash_t_uses_total_form() {
+        use rust_decimal_macros::dec;
+        let src = "2024-01-01 open Assets:Stock\n\
+                   2024-01-01 open Assets:Cash USD\n\
+                   2024-01-15 *\n  \
+                   Assets:Stock  10 STK {50 # 1500 USD}\n  \
+                   Assets:Cash  -1500.00 USD\n";
+        let result = parse_via_cst(src);
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let Directive::Transaction(txn) = &result.directives[2].value else {
+            panic!("expected Transaction at index 2");
+        };
+        let cost = txn.postings[0]
+            .value
+            .cost
+            .as_ref()
+            .expect("cost spec present");
+        assert_eq!(
+            cost.number,
+            Some(CostNumber::Total { value: dec!(1500) }),
+            "the `{{N # T CCY}}` form must store the post-`#` total"
+        );
+    }
+
+    #[test]
+    fn unclosed_cost_brace_emits_error() {
+        let src = "2024-01-01 open Assets:Stock\n\
+                   2024-01-01 open Assets:Cash USD\n\
+                   2024-01-15 *\n  \
+                   Assets:Stock 10 AAPL {150 USD\n  \
+                   Assets:Cash -1500 USD\n";
+        let result = parse_via_cst(src);
+        let has_unclosed: bool = result
+            .errors
+            .iter()
+            .any(|e| e.message().contains("unclosed cost"));
+        assert!(
+            has_unclosed,
+            "expected 'unclosed cost' error, got: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn unclosed_cost_brace_at_eof_emits_error() {
+        let src = "2024-01-01 open Assets:Stock\n\
+                   2024-01-01 open Assets:Cash USD\n\
+                   2024-01-15 *\n  \
+                   Assets:Stock 10 AAPL {150 USD";
+        let result = parse_via_cst(src);
+        let has_unclosed: bool = result
+            .errors
+            .iter()
+            .any(|e| e.message().contains("unclosed cost"));
+        assert!(
+            has_unclosed,
+            "expected 'unclosed cost' error at EOF, got: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn leading_decimal_in_posting_amount_emits_error() {
+        // `.50 USD` (no integer part before the decimal) must be
+        // rejected by both parsers; valid `0.50 USD` still works
+        // (covered by other tests).
+        let src = "2024-01-15 * \"Test\"\n  \
+                   Expenses:Food  .50 USD\n  \
+                   Assets:Checking\n";
+        let result = parse_via_cst(src);
+        assert!(!result.errors.is_empty(), "errors: {:?}", result.errors);
     }
 
     #[test]

@@ -187,7 +187,7 @@ fn parse_date(stream: &mut TokenStream<'_>) -> ParseRes<NaiveDate> {
 /// Zero-pad single-digit month/day and normalize '/' separators to '-'.
 /// Returns the original string as-is when already in canonical `YYYY-MM-DD` form
 /// to avoid unnecessary allocation on the hot path.
-fn normalize_date_str(s: &str) -> Cow<'_, str> {
+pub fn normalize_date_str(s: &str) -> Cow<'_, str> {
     // Fast path: already canonical (no '/', month+day are 2 digits → length is 10).
     if !s.contains('/') && s.len() == 10 {
         return Cow::Borrowed(s);
@@ -203,7 +203,7 @@ fn normalize_date_str(s: &str) -> Cow<'_, str> {
 }
 
 /// Build a human-readable reason why a date string is invalid.
-fn describe_invalid_date(s: &str) -> String {
+pub fn describe_invalid_date(s: &str) -> String {
     let parts: Vec<&str> = s.split(['-', '/']).collect();
     if parts.len() == 3
         && let (Ok(year), Ok(month), Ok(day)) = (

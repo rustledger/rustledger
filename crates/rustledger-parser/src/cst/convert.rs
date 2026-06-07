@@ -31,9 +31,21 @@
 //! Implemented `ParseResult`-field extractors:
 //! - Option, Include, Plugin
 //!
+//! Implemented Transaction (header + postings + metadata):
+//! - Header: date, flag, payee, narration, tags, links, metadata
+//! - Postings: flag, account, units (`IncompleteAmount`), cost spec
+//!   (per-unit / total), price annotation (`@` / `@@`), metadata
+//! - Arithmetic AMOUNT expressions are NOT yet evaluated; the
+//!   converter takes the FIRST `NUMBER` child as the value.
+//!
 //! Pending:
-//! - Pushtag, Poptag, Pushmeta, Popmeta (state-only side effects)
-//! - Transaction (header + postings + metadata, most complex)
+//! - Pushtag, Poptag, Pushmeta, Popmeta (state-only side effects
+//!   that mutate subsequent transactions; deferred — most corpus
+//!   files don't use them)
+//! - Arithmetic expression evaluation (Phase 2.4 CST shape; for
+//!   now, treats `100+5 USD` as `100 USD`)
+//! - Transaction trailing comments
+//! - Posting comments / `trailing_comments`
 //!
 //! Pending lossless features (deferred):
 //! - Document tags + links (need raw-token walk; field on
@@ -44,16 +56,19 @@
 //! - Standalone `comments` field
 
 use rust_decimal::Decimal;
+use rustledger_core::cost::{CostNumber, CostSpec};
+use rustledger_core::directive::{PriceAnnotation, PriceKind};
 use rustledger_core::{
-    Account, Amount, Currency, Directive, Link, MetaValue, Metadata, NaiveDate, Span, Spanned, Tag,
-    naive_date,
+    Account, Amount, Currency, Directive, IncompleteAmount, InternedStr, Link, MetaValue, Metadata,
+    NaiveDate, Posting, Span, Spanned, Tag, naive_date,
 };
 
 use crate::ParseResult;
 use crate::cst::ast::{
     self, AstNode, AstToken, BalanceDirective, CloseDirective, CommodityDirective, CustomDirective,
     DocumentDirective, EventDirective, IncludeDirective, MetaEntry, NoteDirective, OpenDirective,
-    OptionDirective, PadDirective, PluginDirective, PriceDirective, QueryDirective, SourceFile,
+    OptionDirective, PadDirective, PluginDirective, PostingFlagKind, PriceDirective,
+    QueryDirective, SourceFile, Transaction as AstTransaction, TransactionFlagKind,
 };
 
 /// Parse Beancount source via the CST and produce the legacy
@@ -153,10 +168,15 @@ pub fn parse_via_cst(source: &str) -> ParseResult {
                     plugins.push(triple);
                 }
             }
-            // Remaining directive types fall through unconverted —
-            // they're added in subsequent commits. The differential
-            // test's allow-list pins which file classes still
-            // legitimately produce an empty result.
+            ast::Directive::Transaction(node) => {
+                if let Some(spanned) = convert_transaction(&node, bom_offset) {
+                    directives.push(spanned);
+                }
+            }
+            // Pushtag/Poptag/Pushmeta/Popmeta are state-only side
+            // effects (they don't produce Directive variants but
+            // mutate inherited tags/meta on subsequent
+            // transactions). Deferred for a later commit.
             _ => {}
         }
     }
@@ -496,6 +516,188 @@ fn convert_plugin(
     Some((module, config, node_span(node.syntax(), bom_offset)))
 }
 
+// ---- Transaction + Posting + sub-nodes -------------------------
+
+fn convert_transaction(node: &AstTransaction, bom_offset: u32) -> Option<Spanned<Directive>> {
+    let date = parse_date_token(node.date()?.text())?;
+
+    // Flag: explicit (TransactionFlag) or implied (leading STRING
+    // with no flag token; defaults to '*').
+    let flag = node.flag().map_or('*', |f| flag_char_from_transaction(&f));
+
+    // Header strings: with 2 -> payee + narration; with 1 ->
+    // narration-only; with 3+ -> ambiguous (typed-AST surface
+    // returns None for both, matching the round-2 review fix).
+    let strings: Vec<String> = node
+        .strings()
+        .filter_map(|s| s.text_unquoted().map(String::from))
+        .collect();
+    let (payee_str, narration_str) = match strings.len() {
+        0 => (None, String::new()),
+        1 => (None, strings.into_iter().next().unwrap()),
+        2 => {
+            let mut it = strings.into_iter();
+            let p = it.next().unwrap();
+            let n = it.next().unwrap();
+            (Some(p), n)
+        }
+        // 3+ strings: surface only the last as narration; the
+        // middle ones are unreachable through this typed shape
+        // (matches the round-2 docstring).
+        _ => (None, strings.last().cloned().unwrap_or_default()),
+    };
+
+    let payee = payee_str.map(InternedStr::from);
+    let narration = InternedStr::from(narration_str);
+
+    let tags: Vec<Tag> = node
+        .tags()
+        .map(|t| Tag::new(t.text().trim_start_matches('#')))
+        .collect();
+    let links: Vec<Link> = node
+        .links()
+        .map(|l| Link::new(l.text().trim_start_matches('^')))
+        .collect();
+
+    // Transaction-level metadata (META_ENTRY children directly on
+    // the TRANSACTION node, NOT on POSTING children).
+    let meta = convert_meta_entries(node.syntax());
+
+    // Postings (child POSTING nodes).
+    let postings: Vec<Spanned<Posting>> = node
+        .postings()
+        .filter_map(|p| convert_posting(&p, bom_offset))
+        .collect();
+
+    let txn = rustledger_core::directive::Transaction {
+        date,
+        flag,
+        payee,
+        narration,
+        tags,
+        links,
+        meta,
+        postings,
+        trailing_comments: Vec::new(),
+    };
+    let span = node_span(node.syntax(), bom_offset);
+    Some(Spanned::new(Directive::Transaction(txn), span))
+}
+
+fn flag_char_from_transaction(flag: &ast::TransactionFlag) -> char {
+    match flag.classify() {
+        TransactionFlagKind::Star | TransactionFlagKind::Txn => '*',
+        TransactionFlagKind::Pending => '!',
+        TransactionFlagKind::Hash => '#',
+        TransactionFlagKind::Letter | TransactionFlagKind::CurrencyLetter => {
+            flag.text().chars().next().unwrap_or('*')
+        }
+    }
+}
+
+fn convert_posting(node: &ast::Posting, bom_offset: u32) -> Option<Spanned<Posting>> {
+    let account = Account::new(node.account()?.text());
+
+    let flag = node.flag().map(|f| flag_char_from_posting(&f));
+
+    let units = node
+        .amount()
+        .and_then(|amt| convert_amount_to_incomplete(&amt));
+    let cost = node.cost_spec().map(|cs| convert_cost_spec(&cs));
+    let price = node
+        .price_annotation()
+        .map(|pa| convert_price_annotation(&pa));
+    let meta = convert_meta_entries(node.syntax());
+
+    let posting = Posting {
+        account,
+        units,
+        cost,
+        price,
+        flag,
+        meta,
+        comments: Vec::new(),
+        trailing_comments: Vec::new(),
+    };
+    let span = node_span(node.syntax(), bom_offset);
+    Some(Spanned::new(posting, span))
+}
+
+fn flag_char_from_posting(flag: &ast::PostingFlag) -> char {
+    match flag.classify() {
+        PostingFlagKind::Star => '*',
+        PostingFlagKind::Pending => '!',
+        PostingFlagKind::Hash => '#',
+        PostingFlagKind::Letter | PostingFlagKind::CurrencyLetter => {
+            flag.text().chars().next().unwrap_or('*')
+        }
+    }
+}
+
+/// Convert an AMOUNT node into an [`IncompleteAmount`]. Returns
+/// `None` if neither a number nor a currency is present (which
+/// shouldn't happen for a well-formed AMOUNT, but matches the
+/// lossless CST contract). Sign is folded into the number.
+///
+/// **Arithmetic limitation**: when the AMOUNT contains an
+/// arithmetic expression (`100+5 USD`), only the FIRST `NUMBER`
+/// is used. A proper expression evaluator is deferred — none of
+/// the directive types we currently handle outside of postings
+/// use AMOUNT shapes that the legacy parser would have evaluated
+/// differently.
+fn convert_amount_to_incomplete(amt: &ast::Amount) -> Option<IncompleteAmount> {
+    let number = amt.number().and_then(|n| {
+        let mut value = parse_decimal_token(n.text())?;
+        if let Some(sign) = amt.sign()
+            && sign.is_minus()
+        {
+            value = -value;
+        }
+        Some(value)
+    });
+    let currency = amt.currency().map(|c| Currency::new(c.text()));
+    match (number, currency) {
+        (Some(n), Some(c)) => Some(IncompleteAmount::Complete(Amount::new(n, c))),
+        (Some(n), None) => Some(IncompleteAmount::NumberOnly(n)),
+        (None, Some(c)) => Some(IncompleteAmount::CurrencyOnly(c)),
+        (None, None) => None,
+    }
+}
+
+fn convert_cost_spec(cs: &ast::CostSpec) -> CostSpec {
+    let merge = cs.is_merge();
+    let is_total = cs.is_total();
+
+    let number = cs.number().and_then(|n| parse_decimal_token(n.text()));
+    let cost_number = match (number, is_total) {
+        (Some(v), true) => Some(CostNumber::Total { value: v }),
+        (Some(v), false) => Some(CostNumber::PerUnit { value: v }),
+        (None, _) => None,
+    };
+
+    let currency = cs.currency().map(|c| Currency::new(c.text()));
+    let date = cs.date().and_then(|d| parse_date_token(d.text()));
+    let label = cs.label().and_then(|s| s.text_unquoted().map(String::from));
+
+    CostSpec {
+        number: cost_number,
+        currency,
+        date,
+        label,
+        merge,
+    }
+}
+
+fn convert_price_annotation(pa: &ast::PriceAnnotation) -> PriceAnnotation {
+    let kind = if pa.is_total() {
+        PriceKind::Total
+    } else {
+        PriceKind::Unit
+    };
+    let amount = pa.amount().and_then(|a| convert_amount_to_incomplete(&a));
+    PriceAnnotation { kind, amount }
+}
+
 // ---- Metadata extraction ---------------------------------------
 
 /// Extract the [`Metadata`] map from the directive node's
@@ -714,16 +916,6 @@ mod tests {
     }
 
     #[test]
-    fn unrecognized_directives_currently_drop_silently() {
-        // Phase 3.2 scaffolding: Transaction etc. aren't converted
-        // yet, so they're silently absent. Pin this so we notice
-        // when each converter lands.
-        let src = "2024-01-15 * \"x\"\n  Assets:Cash  -5 USD\n";
-        let result = parse_via_cst(src);
-        assert_directive_count(&result, 0);
-    }
-
-    #[test]
     fn note_directive_basic() {
         let src = "2024-01-15 note Assets:Cash \"deposit received\"\n";
         let result = parse_via_cst(src);
@@ -895,5 +1087,191 @@ mod tests {
         assert_eq!(result.plugins.len(), 1);
         assert_eq!(result.plugins[0].0, "my.plugin");
         assert!(result.plugins[0].1.is_none());
+    }
+
+    // ---- Transaction converter tests ------------------------------
+
+    #[test]
+    fn transaction_basic_two_postings() {
+        let src = "2024-01-15 * \"Coffee Shop\" \"Morning coffee\"\n  \
+                   Expenses:Food:Coffee  5.00 USD\n  \
+                   Assets:Cash\n";
+        let result = parse_via_cst(src);
+        assert_directive_count(&result, 1);
+        let Directive::Transaction(t) = &result.directives[0].value else {
+            panic!("expected Transaction");
+        };
+        assert_eq!(t.date, naive_date(2024, 1, 15).unwrap());
+        assert_eq!(t.flag, '*');
+        assert_eq!(
+            t.payee.as_ref().map(InternedStr::as_str),
+            Some("Coffee Shop")
+        );
+        assert_eq!(t.narration.as_str(), "Morning coffee");
+        assert_eq!(t.postings.len(), 2);
+
+        let p0 = &t.postings[0].value;
+        assert_eq!(p0.account.as_str(), "Expenses:Food:Coffee");
+        let Some(IncompleteAmount::Complete(amt)) = &p0.units else {
+            panic!("expected complete units, got {:?}", p0.units);
+        };
+        assert_eq!(amt.number, Decimal::new(500, 2));
+        assert_eq!(amt.currency.as_str(), "USD");
+
+        let p1 = &t.postings[1].value;
+        assert_eq!(p1.account.as_str(), "Assets:Cash");
+        assert!(p1.units.is_none(), "auto-posting has no units");
+    }
+
+    #[test]
+    fn transaction_narration_only_no_payee() {
+        let src = "2024-01-15 ! \"Pending\"\n  Assets:Cash  -5 USD\n";
+        let result = parse_via_cst(src);
+        let Directive::Transaction(t) = &result.directives[0].value else {
+            panic!("expected Transaction");
+        };
+        assert_eq!(t.flag, '!');
+        assert!(t.payee.is_none());
+        assert_eq!(t.narration.as_str(), "Pending");
+    }
+
+    #[test]
+    fn transaction_implied_flag_via_leading_string() {
+        let src = "2024-01-15 \"Implied\"\n  Assets:Cash  -5 USD\n";
+        let result = parse_via_cst(src);
+        let Directive::Transaction(t) = &result.directives[0].value else {
+            panic!("expected Transaction");
+        };
+        assert_eq!(t.flag, '*', "implied flag defaults to *");
+    }
+
+    #[test]
+    fn transaction_with_tags_and_links() {
+        let src = "2024-01-15 * \"Coffee\" #daily ^trip1\n  Assets:Cash  -5 USD\n";
+        let result = parse_via_cst(src);
+        let Directive::Transaction(t) = &result.directives[0].value else {
+            panic!("expected Transaction");
+        };
+        assert_eq!(t.tags.len(), 1);
+        assert_eq!(t.tags[0].as_str(), "daily");
+        assert_eq!(t.links.len(), 1);
+        assert_eq!(t.links[0].as_str(), "trip1");
+    }
+
+    #[test]
+    fn transaction_with_signed_amount() {
+        let src = "2024-01-15 * \"x\"\n  Assets:Cash  -5.00 USD\n";
+        let result = parse_via_cst(src);
+        let Directive::Transaction(t) = &result.directives[0].value else {
+            panic!("expected Transaction");
+        };
+        let Some(IncompleteAmount::Complete(amt)) = &t.postings[0].value.units else {
+            panic!("expected complete units");
+        };
+        assert_eq!(amt.number, Decimal::new(-500, 2));
+    }
+
+    #[test]
+    fn transaction_with_posting_flag() {
+        let src = "2024-01-15 * \"x\"\n  ! Assets:Cash  -5 USD\n";
+        let result = parse_via_cst(src);
+        let Directive::Transaction(t) = &result.directives[0].value else {
+            panic!("expected Transaction");
+        };
+        assert_eq!(t.postings[0].value.flag, Some('!'));
+    }
+
+    #[test]
+    fn transaction_with_cost_spec_per_unit() {
+        let src = "2024-01-15 * \"buy\"\n  \
+                   Assets:Inv  10 HOOL {500.00 USD}\n  \
+                   Assets:Cash\n";
+        let result = parse_via_cst(src);
+        let Directive::Transaction(t) = &result.directives[0].value else {
+            panic!("expected Transaction");
+        };
+        let cost = t.postings[0].value.cost.as_ref().expect("cost spec");
+        assert!(!cost.merge);
+        let Some(CostNumber::PerUnit { value }) = &cost.number else {
+            panic!("expected PerUnit");
+        };
+        assert_eq!(*value, Decimal::new(50000, 2));
+        assert_eq!(cost.currency.as_ref().unwrap().as_str(), "USD");
+    }
+
+    #[test]
+    fn transaction_with_cost_spec_total() {
+        let src = "2024-01-15 * \"buy\"\n  \
+                   Assets:Inv  10 HOOL {{5000 USD}}\n  \
+                   Assets:Cash\n";
+        let result = parse_via_cst(src);
+        let Directive::Transaction(t) = &result.directives[0].value else {
+            panic!("expected Transaction");
+        };
+        let cost = t.postings[0].value.cost.as_ref().expect("cost spec");
+        let Some(CostNumber::Total { value }) = &cost.number else {
+            panic!("expected Total");
+        };
+        assert_eq!(*value, Decimal::from(5000));
+    }
+
+    #[test]
+    fn transaction_with_price_annotation_unit() {
+        let src = "2024-01-15 * \"buy\"\n  \
+                   Assets:Inv  10 HOOL @ 510 USD\n  \
+                   Assets:Cash\n";
+        let result = parse_via_cst(src);
+        let Directive::Transaction(t) = &result.directives[0].value else {
+            panic!("expected Transaction");
+        };
+        let price = t.postings[0]
+            .value
+            .price
+            .as_ref()
+            .expect("price annotation");
+        assert!(price.is_unit());
+        let Some(IncompleteAmount::Complete(amt)) = &price.amount else {
+            panic!("expected complete price amount");
+        };
+        assert_eq!(amt.number, Decimal::from(510));
+        assert_eq!(amt.currency.as_str(), "USD");
+    }
+
+    #[test]
+    fn transaction_with_price_annotation_total() {
+        let src = "2024-01-15 * \"buy\"\n  \
+                   Assets:Inv  10 HOOL @@ 5100 USD\n  \
+                   Assets:Cash\n";
+        let result = parse_via_cst(src);
+        let Directive::Transaction(t) = &result.directives[0].value else {
+            panic!("expected Transaction");
+        };
+        let price = t.postings[0]
+            .value
+            .price
+            .as_ref()
+            .expect("price annotation");
+        assert!(!price.is_unit(), "@@ is total form");
+    }
+
+    #[test]
+    fn transaction_with_metadata_on_directive_and_posting() {
+        let src = "2024-01-15 * \"x\"\n  \
+                   tag1: \"hello\"\n  \
+                   Assets:Cash  -5 USD\n    \
+                       receipt: \"abc123\"\n";
+        let result = parse_via_cst(src);
+        let Directive::Transaction(t) = &result.directives[0].value else {
+            panic!("expected Transaction");
+        };
+        assert_eq!(
+            t.meta.get("tag1"),
+            Some(&MetaValue::String("hello".to_string()))
+        );
+        let p_meta = &t.postings[0].value.meta;
+        assert_eq!(
+            p_meta.get("receipt"),
+            Some(&MetaValue::String("abc123".to_string()))
+        );
     }
 }

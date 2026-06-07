@@ -1091,7 +1091,15 @@ fn extract_transaction_body_errors(
                         }
                         line_start = None;
                         line_has_content = false;
-                    } else if !is_trivia_kind(t.kind()) && !is_comment_kind(t.kind()) {
+                    } else if !is_trivia_kind(t.kind())
+                        && !is_comment_kind(t.kind())
+                        && !matches!(t.kind(), crate::SyntaxKind::TAG | crate::SyntaxKind::LINK)
+                    {
+                        // TAG / LINK on body lines is valid
+                        // Beancount syntax (tags/links after the
+                        // first line continue the transaction's
+                        // tag/link list). Don't flag as
+                        // unexpected-input.
                         line_has_content = true;
                     }
                 }

@@ -38,7 +38,7 @@ mod parser;
 
 pub use cst::{
     BeancountLanguage, SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken, lossless_kind_tokens,
-    parse_flat, parse_structured,
+    parse_flat, parse_structured, parse_via_cst,
 };
 pub use error::{ParseError, ParseErrorKind};
 pub use format::format_source;

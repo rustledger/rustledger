@@ -49,11 +49,13 @@
 //! and recursive-application notes for phase 2.1's grammar.
 
 pub mod ast;
+mod convert;
 mod lossless_tokens;
 mod parser;
 mod syntax_kind;
 mod trivia;
 
+pub use convert::parse_via_cst;
 pub use lossless_tokens::lossless_kind_tokens;
 pub use parser::{parse_flat, parse_structured};
 pub use syntax_kind::{BeancountLanguage, SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken};

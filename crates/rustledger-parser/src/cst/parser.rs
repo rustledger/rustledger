@@ -1,4 +1,4 @@
-//! CST builders: phase 1 flat ([`parse_flat`]) + phase 2.1-2.3
+//! CST builders: phase 1 flat ([`parse_flat`]) + phase 2.1-2.4
 //! structured ([`parse_structured`]).
 //!
 //! Both walk the lossless token stream and emit a `GreenNode` whose
@@ -28,9 +28,16 @@
 //!     dated and standalone-keyword directives — only the header
 //!     keyword recognition is new.
 //!
-//!   Error-recovery lines still flow through as flat `SOURCE_FILE`
-//!   children — PR 2.4 will add structural wrapping for malformed
-//!   content.
+//!   - **Phase 2.4**: error recovery — unrecognized / malformed
+//!     top-level lines are wrapped in `ERROR_NODE` (terminated by
+//!     NEWLINE or EOF per rule 5). Same trivia attachment policy
+//!     as recognized directives (rule 2): pending leading trivia
+//!     attaches inside the `ERROR_NODE` when it's not the very
+//!     first content in the file. AMOUNT now also wraps full
+//!     arithmetic expressions (`[sign] (NUMBER | PAREN_EXPR)
+//!     ([WS] op [WS] (NUMBER | PAREN_EXPR))* [WS CURRENCY]`),
+//!     closing the deferred 2.2c.1 divergence with Python
+//!     beancount on `10+5 USD`-shape amounts.
 //!
 //! Phase 2.2a adds `META_ENTRY` sub-node structure around indented
 //! `WS META_KEY ... (NEWLINE | EOF)` sub-lines inside any directive
@@ -80,11 +87,10 @@ pub fn parse_flat(source: &str) -> SyntaxNode {
 /// specific node kind. Trivia attaches per the Directive-
 /// Terminator Rule.
 ///
-/// Still-unrecognized content (error-recovery lines) passes
-/// through as a flat token run under `SOURCE_FILE` — PR 2.4 will
-/// add structural wrapping. Round-trip byte-identical for every
-/// UTF-8 input; the unrecognized-content path preserves bytes via
-/// flat-token emission, just without structural wrapping.
+/// Unrecognized / malformed top-level lines are wrapped in an
+/// `ERROR_NODE` (PR 2.4) — same trivia attachment policy as
+/// recognized directives and the same rule-5 unterminated-at-EOF
+/// behavior. Round-trip byte-identical for every UTF-8 input.
 #[must_use]
 pub fn parse_structured(source: &str) -> SyntaxNode {
     let tokens: Vec<(SyntaxKind, Range<usize>)> = lossless_kind_tokens(source);
@@ -104,54 +110,29 @@ pub fn parse_structured(source: &str) -> SyntaxNode {
         }
 
         // Non-trivia at the top level. Identify what kind of line
-        // starts here.
-        if let Some(directive_kind) = identify_directive(&tokens, i) {
-            // Per the Directive-Terminator Rule, pending trivia is
-            // FILE-LEADING (SOURCE_FILE direct child) only when NO
-            // non-trivia content has appeared yet anywhere in the
-            // file — `seen_first_content` tracks that, and it
-            // flips on the FIRST non-trivia content we encounter,
-            // recognized or unrecognized. Once any content has been
-            // seen, subsequent pending trivia is the LEADING trivia
-            // of THIS new directive (rule 2) and goes INSIDE the
-            // directive node we're about to open.
-            if seen_first_content {
-                builder.start_node(directive_kind.into());
-                emit_tokens(&mut builder, source, std::mem::take(&mut pending_leading));
-            } else {
-                emit_tokens(&mut builder, source, std::mem::take(&mut pending_leading));
-                builder.start_node(directive_kind.into());
-            }
-            seen_first_content = true;
-
-            // Consume the directive's full multi-line body. The
-            // single-line-directive path consumes only `WS META_KEY`
-            // (and gated indented comments). TRANSACTION consumes
-            // ANY indented sub-line (postings, metadata, comments)
-            // until a blank line, non-indented content, or EOF.
-            // PR 2.2a/b wrap META_ENTRY and POSTING inside
-            // TRANSACTION; PR 2.2c will wrap AMOUNT / COST_SPEC /
-            // PRICE_ANNOTATION inside POSTING.
-            i = if directive_kind == SyntaxKind::TRANSACTION {
-                emit_transaction_body(&mut builder, source, &tokens, i)
-            } else {
-                emit_directive_body(&mut builder, source, &tokens, i)
-            };
-            builder.finish_node();
-        } else {
-            // Unrecognized line. Drain pending trivia + this entire
-            // line flat under SOURCE_FILE; PR 2.4 (error recovery)
-            // will REDUCE the scope of this branch by wrapping
-            // malformed-but-recognizable content in `ERROR_NODE`,
-            // but genuinely-unknown content keeps falling here as
-            // the terminal fallback. We DO NOT open a node for
-            // this content — the current shape is "everything
-            // outside a recognized directive is flat under
-            // SOURCE_FILE."
+        // starts here. Both branches share the same trivia-
+        // attachment + node-emission shape: drain pending trivia
+        // around `start_node(kind)` per rule 2 (the FIRST
+        // non-trivia content's pending trivia attaches under
+        // SOURCE_FILE; subsequent runs attach INSIDE the new
+        // node), emit the body, then `finish_node()`.
+        let node_kind = identify_directive(&tokens, i).unwrap_or(SyntaxKind::ERROR_NODE);
+        if seen_first_content {
+            builder.start_node(node_kind.into());
             emit_tokens(&mut builder, source, std::mem::take(&mut pending_leading));
-            seen_first_content = true;
-            i = emit_through_terminator(&mut builder, source, &tokens, i);
+        } else {
+            emit_tokens(&mut builder, source, std::mem::take(&mut pending_leading));
+            builder.start_node(node_kind.into());
         }
+        seen_first_content = true;
+        i = match node_kind {
+            SyntaxKind::TRANSACTION => emit_transaction_body(&mut builder, source, &tokens, i),
+            SyntaxKind::ERROR_NODE => emit_through_terminator(&mut builder, source, &tokens, i),
+            // Recognized directive (PR 2.1a / 2.3 single-line shapes):
+            // header + optional indented META_ENTRY sub-lines.
+            _ => emit_directive_body(&mut builder, source, &tokens, i),
+        };
+        builder.finish_node();
     }
 
     // File-trailing trivia: drain any pending under SOURCE_FILE.
@@ -543,44 +524,44 @@ fn emit_posting_line(
 }
 
 /// Returns true iff `tokens[i..]` starts an AMOUNT-shape token
-/// run: `(MINUS | PLUS) NUMBER ...`, or a bare `NUMBER`, or a
-/// bare `CURRENCY`. Used by `emit_posting_line` to gate whether to
-/// open an `AMOUNT` wrapper at this position.
+/// run: an arithmetic-expression operand (`NUMBER`, `L_PAREN`, or
+/// signed variants), or a bare `CURRENCY`. Used by
+/// `emit_posting_line` to gate whether to open an `AMOUNT` wrapper.
 fn starts_amount(tokens: &[(SyntaxKind, Range<usize>)], i: usize) -> bool {
     match tokens.get(i).map(|(k, _)| *k) {
-        Some(SyntaxKind::NUMBER | SyntaxKind::CURRENCY) => true,
-        Some(SyntaxKind::MINUS | SyntaxKind::PLUS) => {
-            matches!(tokens.get(i + 1).map(|(k, _)| *k), Some(SyntaxKind::NUMBER))
-        }
+        Some(SyntaxKind::NUMBER | SyntaxKind::CURRENCY | SyntaxKind::L_PAREN) => true,
+        Some(SyntaxKind::MINUS | SyntaxKind::PLUS) => matches!(
+            tokens.get(i + 1).map(|(k, _)| *k),
+            Some(SyntaxKind::NUMBER | SyntaxKind::L_PAREN),
+        ),
         _ => false,
     }
 }
 
-/// Emit an `AMOUNT` node containing the units amount: optional
-/// sign + `NUMBER` + optional `WS` + `CURRENCY`, or a bare
-/// `CURRENCY`. Stops at the first non-amount token. Returns the
-/// new index.
+/// Returns true iff `tokens[i]` is an arithmetic operator
+/// (`PLUS` / `MINUS` / `STAR` / `SLASH`).
+const fn is_arith_op(kind: SyntaxKind) -> bool {
+    matches!(
+        kind,
+        SyntaxKind::PLUS | SyntaxKind::MINUS | SyntaxKind::STAR | SyntaxKind::SLASH,
+    )
+}
+
+/// Emit an `AMOUNT` node containing the units amount.
 ///
-/// **Known divergence from Python beancount on arithmetic
-/// expressions**: Python beancount accepts arithmetic in posting
-/// amounts (verified: `bean-check` accepts `10+5 USD`, `-10+5 USD`,
-/// and `-(10+5) USD`). Its `parse_expr` builds an expression AST.
-/// This CST helper only wraps a single `NUMBER` operand plus
-/// optional sign and currency — `10+5 USD` produces
-/// `AMOUNT(NUMBER "10")` then a flat `PLUS` then
-/// `AMOUNT(NUMBER "5" WS CURRENCY "USD")` (two sibling AMOUNT
-/// nodes with the operator between). Round-trip is byte-identical
-/// so no data is lost, but the structural shape is wrong for any
-/// downstream typed-AST consumer.
+/// Recognizes Python beancount's `parse_expr` grammar shape:
+/// `[sign] operand ([WS] op [WS] [sign] operand)* [WS CURRENCY]`,
+/// where `operand` is `NUMBER` or a parenthesized sub-expression
+/// `L_PAREN expr R_PAREN`. Also accepts a bare `CURRENCY`
+/// (currency-only amount). Closes the PR 2.2c.1 deferred
+/// divergence: `bean-check` accepts `10+5 USD`, `-10+5 USD`, and
+/// `-(10+5) USD`; this helper now wraps them as a single `AMOUNT`
+/// node containing the full expression tokens flat (sign + operands
+/// + operators + currency).
 ///
-/// Zero corpus files exercise this today; the divergence is a
-/// known limitation deferred to a future PR (likely 2.2c.1 or a
-/// phase 3 prerequisite). Full fix requires consuming
-/// `[sign] NUMBER (op [WS] [sign] NUMBER)* [WS CURRENCY]` runs,
-/// plus parenthesized sub-expressions via `L_PAREN` / `R_PAREN`
-/// recursion. Pinned by
-/// `amount_with_arithmetic_currently_produces_sibling_amounts` so
-/// the divergence is discoverable.
+/// Stops at the first token that doesn't fit the grammar (e.g.,
+/// `L_BRACE` cost-spec opener, `AT` price opener, `NEWLINE`,
+/// `COMMENT`, etc.). Returns the new index.
 fn emit_amount(
     builder: &mut GreenNodeBuilder<'_>,
     source: &str,
@@ -589,7 +570,18 @@ fn emit_amount(
 ) -> usize {
     builder.start_node(SyntaxKind::AMOUNT.into());
 
-    // Optional sign.
+    // Currency-only amount: bare `CURRENCY` and nothing more.
+    if matches!(tokens.get(i).map(|(k, _)| *k), Some(SyntaxKind::CURRENCY))
+        && !starts_amount_operand(tokens, i + 1)
+    {
+        let range = tokens[i].1.clone();
+        builder.token(SyntaxKind::CURRENCY.into(), &source[range]);
+        i += 1;
+        builder.finish_node();
+        return i;
+    }
+
+    // Optional leading sign.
     if matches!(
         tokens.get(i).map(|(k, _)| *k),
         Some(SyntaxKind::MINUS | SyntaxKind::PLUS),
@@ -599,44 +591,144 @@ fn emit_amount(
         i += 1;
     }
 
-    // NUMBER (if NUMBER-led shape).
-    if matches!(tokens.get(i).map(|(k, _)| *k), Some(SyntaxKind::NUMBER)) {
-        let range = tokens[i].1.clone();
-        builder.token(SyntaxKind::NUMBER.into(), &source[range]);
-        i += 1;
-        // Optional CURRENCY, either directly adjacent (`100USD`)
-        // or separated by WHITESPACE (`100 USD`). The lexer's
-        // NUMBER and CURRENCY regexes are exclusive — NUMBER stops
-        // at a non-digit, CURRENCY starts on an uppercase letter —
-        // so adjacent `NUMBER CURRENCY` with no WS token between
-        // them is a real corpus shape (e.g., `1USD` in some
-        // beancount-import fixtures). Both forms wrap inside
-        // AMOUNT.
-        if matches!(tokens.get(i).map(|(k, _)| *k), Some(SyntaxKind::WHITESPACE))
-            && matches!(
-                tokens.get(i + 1).map(|(k, _)| *k),
-                Some(SyntaxKind::CURRENCY),
-            )
-        {
-            let ws_range = tokens[i].1.clone();
-            builder.token(SyntaxKind::WHITESPACE.into(), &source[ws_range]);
-            i += 1;
-            let cur_range = tokens[i].1.clone();
-            builder.token(SyntaxKind::CURRENCY.into(), &source[cur_range]);
-            i += 1;
-        } else if matches!(tokens.get(i).map(|(k, _)| *k), Some(SyntaxKind::CURRENCY)) {
-            let cur_range = tokens[i].1.clone();
-            builder.token(SyntaxKind::CURRENCY.into(), &source[cur_range]);
+    // First operand.
+    i = emit_amount_operand(builder, source, tokens, i);
+
+    // Tail: zero or more `[WS] op [WS] [sign] operand` runs. Each
+    // iteration commits the WS / op / WS / sign tokens BEFORE
+    // dispatching the operand emission. Lookahead-only: do NOT
+    // consume any token until the full op-operand prefix is
+    // confirmed, so a trailing single WHITESPACE before CURRENCY
+    // (the canonical `100 USD` shape) isn't accidentally consumed
+    // as a leading op-prefix.
+    loop {
+        let mut j = i;
+        if matches!(tokens.get(j).map(|(k, _)| *k), Some(SyntaxKind::WHITESPACE)) {
+            j += 1;
+        }
+        let Some((op_kind, _)) = tokens.get(j) else {
+            break;
+        };
+        if !is_arith_op(*op_kind) {
+            break;
+        }
+        let op_kind = *op_kind;
+        j += 1;
+        if matches!(tokens.get(j).map(|(k, _)| *k), Some(SyntaxKind::WHITESPACE)) {
+            j += 1;
+        }
+        // Optional sign before next operand.
+        let signed = matches!(
+            tokens.get(j).map(|(k, _)| *k),
+            Some(SyntaxKind::MINUS | SyntaxKind::PLUS),
+        );
+        let operand_start = if signed { j + 1 } else { j };
+        if !starts_amount_operand(tokens, operand_start) {
+            break;
+        }
+        // Commit tokens [i..j) (WS? op WS?) into AMOUNT.
+        while i < j {
+            let (kind, range) = (tokens[i].0, tokens[i].1.clone());
+            // Sanity: the only non-op tokens we should be committing
+            // here are WHITESPACE. The op token itself was already
+            // verified.
+            debug_assert!(
+                kind == SyntaxKind::WHITESPACE || kind == op_kind || is_arith_op(kind),
+                "unexpected token kind {kind:?} during op-prefix commit",
+            );
+            builder.token(kind.into(), &source[range]);
             i += 1;
         }
+        if signed {
+            let (kind, range) = (tokens[i].0, tokens[i].1.clone());
+            builder.token(kind.into(), &source[range]);
+            i += 1;
+        }
+        i = emit_amount_operand(builder, source, tokens, i);
+    }
+
+    // Optional trailing CURRENCY, either directly adjacent (`100USD`,
+    // `(10+5)USD`) or separated by WHITESPACE (`100 USD`).
+    if matches!(tokens.get(i).map(|(k, _)| *k), Some(SyntaxKind::WHITESPACE))
+        && matches!(
+            tokens.get(i + 1).map(|(k, _)| *k),
+            Some(SyntaxKind::CURRENCY),
+        )
+    {
+        let ws_range = tokens[i].1.clone();
+        builder.token(SyntaxKind::WHITESPACE.into(), &source[ws_range]);
+        i += 1;
+        let cur_range = tokens[i].1.clone();
+        builder.token(SyntaxKind::CURRENCY.into(), &source[cur_range]);
+        i += 1;
     } else if matches!(tokens.get(i).map(|(k, _)| *k), Some(SyntaxKind::CURRENCY)) {
-        // Bare CURRENCY (currency-only amount).
-        let range = tokens[i].1.clone();
-        builder.token(SyntaxKind::CURRENCY.into(), &source[range]);
+        let cur_range = tokens[i].1.clone();
+        builder.token(SyntaxKind::CURRENCY.into(), &source[cur_range]);
         i += 1;
     }
 
     builder.finish_node();
+    i
+}
+
+/// Returns true iff `tokens[i]` starts an arithmetic-expression
+/// operand (a bare `NUMBER` or a parenthesized sub-expression
+/// opener `L_PAREN`). Used by `emit_amount` to gate operand
+/// emission inside the op-loop tail.
+fn starts_amount_operand(tokens: &[(SyntaxKind, Range<usize>)], i: usize) -> bool {
+    matches!(
+        tokens.get(i).map(|(k, _)| *k),
+        Some(SyntaxKind::NUMBER | SyntaxKind::L_PAREN),
+    )
+}
+
+/// Emit one operand of an arithmetic expression: either a bare
+/// `NUMBER` or a parenthesized `L_PAREN expr R_PAREN` sub-
+/// expression. The sub-expression's content tokens stay flat
+/// children of the surrounding `AMOUNT` node (no separate
+/// `EXPR` / `PAREN_GROUP` wrapping for now). Per rule 5, an
+/// unclosed paren at EOF or NEWLINE stops without emitting a
+/// closing paren — round-trip preserves bytes.
+fn emit_amount_operand(
+    builder: &mut GreenNodeBuilder<'_>,
+    source: &str,
+    tokens: &[(SyntaxKind, Range<usize>)],
+    mut i: usize,
+) -> usize {
+    match tokens.get(i).map(|(k, _)| *k) {
+        Some(SyntaxKind::NUMBER) => {
+            let range = tokens[i].1.clone();
+            builder.token(SyntaxKind::NUMBER.into(), &source[range]);
+            i += 1;
+        }
+        Some(SyntaxKind::L_PAREN) => {
+            // Emit opener.
+            let range = tokens[i].1.clone();
+            builder.token(SyntaxKind::L_PAREN.into(), &source[range]);
+            i += 1;
+            // Consume balanced content until matching R_PAREN.
+            // Track nesting depth so `((1+2))` works. Stop at
+            // NEWLINE / EOF (rule 5 unterminated case).
+            let mut depth = 1usize;
+            while depth > 0 {
+                let Some((kind, range)) = tokens.get(i) else {
+                    break;
+                };
+                let (kind, range) = (*kind, range.clone());
+                if kind == SyntaxKind::NEWLINE {
+                    break;
+                }
+                builder.token(kind.into(), &source[range]);
+                i += 1;
+                match kind {
+                    SyntaxKind::L_PAREN => depth += 1,
+                    SyntaxKind::R_PAREN => depth -= 1,
+                    _ => {}
+                }
+            }
+        }
+        _ => {}
+    }
     i
 }
 
@@ -943,9 +1035,8 @@ fn is_indented_directive_continuation(
 /// Given the token slice and the index of a non-trivia token,
 /// decide whether it starts a recognized top-level directive of
 /// any kind. Returns the directive `SyntaxKind` if yes, `None`
-/// otherwise (random content that doesn't fit a known shape;
-/// error-recovery lines fall here until PR 2.4 wraps them
-/// structurally).
+/// otherwise (random content that doesn't fit a known shape — the
+/// caller wraps such content in an `ERROR_NODE` per PR 2.4).
 ///
 /// Beancount directive line shapes recognized here:
 ///

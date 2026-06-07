@@ -1,4 +1,4 @@
-//! Source-driven tests for `parse_structured` (phase 2.1-2.3).
+//! Source-driven tests for `parse_structured` (phase 2.1-2.4).
 //!
 //! Each test feeds real Beancount source through the structured
 //! parser and asserts the resulting tree shape against the
@@ -2407,57 +2407,127 @@ fn balance_and_price_directive_header_amounts_stay_flat_not_wrapped() {
 }
 
 #[test]
-fn amount_with_arithmetic_currently_produces_sibling_amounts() {
+fn amount_wraps_arithmetic_no_spaces() {
     use SyntaxKind::*;
-    // Known divergence from Python beancount: bean-check accepts
-    // `10+5 USD` as a single arithmetic-expression amount, but our
-    // emit_amount only handles `[sign] NUMBER [WS CURRENCY]`. So
-    // `10+5 USD` produces:
-    //   AMOUNT(NUMBER "10")
-    //   AMOUNT(PLUS NUMBER "5" WS CURRENCY "USD")
-    // — two sibling AMOUNT nodes inside POSTING, where the PLUS
-    // is consumed by the SECOND AMOUNT as its sign (because
-    // starts_amount(PLUS) at position i sees NUMBER at i+1 and
-    // routes through emit_amount's sign branch).
-    //
-    // Zero corpus files use arithmetic in posting amounts today;
-    // the divergence is deferred to a future PR (likely 2.2c.1)
-    // that extends emit_amount to consume `[sign] NUMBER (op
-    // [sign] NUMBER)* [WS CURRENCY]` runs (and optionally
-    // parenthesized sub-expressions via L_PAREN / R_PAREN
-    // recursion).
-    //
-    // This test PINS the current shape so the divergence is
-    // discoverable and the fix's behavior change is visible.
-    //
-    // **TODO: When the arithmetic-expression wrapping fix lands,
-    // REWRITE this test (do NOT preserve the two-sibling shape).**
-    // The fix should produce ONE `AMOUNT(NUMBER PLUS NUMBER WS
-    // CURRENCY)` node. If you're seeing this test fail with
-    // `amts.len()` going 2 → 1, that's the correct direction —
-    // update the assertions to match the new single-AMOUNT shape
-    // rather than reverting the fix.
+    // Phase 2.4 closes the 2.2c.1 divergence: `10+5 USD` is a
+    // SINGLE AMOUNT containing the full expression run, matching
+    // Python beancount's `parse_expr` (verified: `bean-check`
+    // accepts the form). All tokens are flat children of AMOUNT;
+    // phase 3 typed-AST will surface evaluated value via inspecting
+    // the children.
     let source = "2024-01-15 * \"x\"\n\
                   \x20\x20Assets:Cash  10+5 USD\n";
     let tree = parse_structured(source);
     assert_round_trip(source, &tree);
 
     let ps = postings(&tree);
-    assert_eq!(ps.len(), 1);
-    // Two AMOUNT siblings.
     let amts: Vec<SyntaxNode> = ps[0].children().filter(|n| n.kind() == AMOUNT).collect();
+    assert_eq!(amts.len(), 1);
     assert_eq!(
-        amts.len(),
-        2,
-        "arithmetic expression currently produces sibling AMOUNTs (known divergence; \
-         deferred to a future PR)",
+        elements_of(&amts[0]),
+        tok_seq(&[NUMBER, PLUS, NUMBER, WHITESPACE, CURRENCY]),
     );
-    // First AMOUNT wraps just `10`.
-    assert_eq!(elements_of(&amts[0]), tok_seq(&[NUMBER]));
-    // Second AMOUNT wraps `+5 USD` (PLUS consumed as sign).
+}
+
+#[test]
+fn amount_wraps_arithmetic_with_spaces_around_op() {
+    use SyntaxKind::*;
+    // `100 + 5 USD` (spaces around operator) — AMOUNT consumes the
+    // whole `NUMBER WS PLUS WS NUMBER` run plus the trailing
+    // `WS CURRENCY`.
+    let source = "2024-01-15 * \"x\"\n\
+                  \x20\x20Assets:Cash  100 + 5 USD\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let ps = postings(&tree);
+    let amts: Vec<SyntaxNode> = ps[0].children().filter(|n| n.kind() == AMOUNT).collect();
+    assert_eq!(amts.len(), 1);
     assert_eq!(
-        elements_of(&amts[1]),
-        tok_seq(&[PLUS, NUMBER, WHITESPACE, CURRENCY]),
+        elements_of(&amts[0]),
+        tok_seq(&[
+            NUMBER, WHITESPACE, PLUS, WHITESPACE, NUMBER, WHITESPACE, CURRENCY
+        ]),
+    );
+}
+
+#[test]
+fn amount_wraps_signed_arithmetic_negative_outer() {
+    use SyntaxKind::*;
+    // `-10+5 USD` — leading MINUS, then NUMBER PLUS NUMBER, then
+    // CURRENCY. All inside a single AMOUNT.
+    let source = "2024-01-15 * \"x\"\n\
+                  \x20\x20Assets:Cash  -10+5 USD\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let ps = postings(&tree);
+    let amts: Vec<SyntaxNode> = ps[0].children().filter(|n| n.kind() == AMOUNT).collect();
+    assert_eq!(amts.len(), 1);
+    assert_eq!(
+        elements_of(&amts[0]),
+        tok_seq(&[MINUS, NUMBER, PLUS, NUMBER, WHITESPACE, CURRENCY]),
+    );
+}
+
+#[test]
+fn amount_wraps_parenthesized_subexpression() {
+    use SyntaxKind::*;
+    // `-(10+5) USD` — MINUS L_PAREN NUMBER PLUS NUMBER R_PAREN
+    // WS CURRENCY, all inside one AMOUNT. Phase 2.4 handles paren
+    // groups via balanced-depth scanning.
+    let source = "2024-01-15 * \"x\"\n\
+                  \x20\x20Assets:Cash  -(10+5) USD\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let ps = postings(&tree);
+    let amts: Vec<SyntaxNode> = ps[0].children().filter(|n| n.kind() == AMOUNT).collect();
+    assert_eq!(amts.len(), 1);
+    assert_eq!(
+        elements_of(&amts[0]),
+        tok_seq(&[
+            MINUS, L_PAREN, NUMBER, PLUS, NUMBER, R_PAREN, WHITESPACE, CURRENCY
+        ]),
+    );
+}
+
+#[test]
+fn amount_wraps_multiplication_and_division() {
+    use SyntaxKind::*;
+    // STAR / SLASH operators work the same as PLUS / MINUS.
+    let source = "2024-01-15 * \"x\"\n\
+                  \x20\x20Assets:Cash  10*2/4 USD\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let ps = postings(&tree);
+    let amts: Vec<SyntaxNode> = ps[0].children().filter(|n| n.kind() == AMOUNT).collect();
+    assert_eq!(amts.len(), 1);
+    assert_eq!(
+        elements_of(&amts[0]),
+        tok_seq(&[NUMBER, STAR, NUMBER, SLASH, NUMBER, WHITESPACE, CURRENCY]),
+    );
+}
+
+#[test]
+fn amount_wraps_nested_parens_via_depth_tracking() {
+    use SyntaxKind::*;
+    // `((1+2))` — nested parens. emit_amount_operand tracks depth
+    // so the inner R_PAREN doesn't prematurely close the outer.
+    let source = "2024-01-15 * \"x\"\n\
+                  \x20\x20Assets:Cash  ((1+2)) USD\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let ps = postings(&tree);
+    let amts: Vec<SyntaxNode> = ps[0].children().filter(|n| n.kind() == AMOUNT).collect();
+    assert_eq!(amts.len(), 1);
+    assert_eq!(
+        elements_of(&amts[0]),
+        tok_seq(&[
+            L_PAREN, L_PAREN, NUMBER, PLUS, NUMBER, R_PAREN, R_PAREN, WHITESPACE, CURRENCY
+        ]),
     );
 }
 
@@ -3161,6 +3231,128 @@ fn all_four_edge_directives_mixed_with_dated_directives() {
     assert_eq!(ds[3].kind(), OPEN_DIRECTIVE);
     assert_eq!(ds[4].kind(), TRANSACTION);
     assert_eq!(ds[5].kind(), CUSTOM_DIRECTIVE);
+}
+
+// ---------- Phase 2.4: ERROR_NODE wrapping ----------
+
+/// Walk all `ERROR_NODE` descendants in source order.
+fn error_nodes(node: &SyntaxNode) -> Vec<SyntaxNode> {
+    node.descendants()
+        .filter(|n| n.kind() == SyntaxKind::ERROR_NODE)
+        .collect()
+}
+
+#[test]
+fn unknown_keyword_line_wraps_in_error_node() {
+    use SyntaxKind::*;
+    // `bogus ...` is not a Beancount directive shape. PR 2.4 wraps
+    // the whole line in an ERROR_NODE so downstream consumers can
+    // identify malformed regions instead of having to scan flat
+    // SOURCE_FILE children for stray content.
+    let source = "bogus \"x\"\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let errs = error_nodes(&tree);
+    assert_eq!(errs.len(), 1);
+    // All tokens of the line live INSIDE the ERROR_NODE.
+    let kinds: Vec<SyntaxKind> = elements_of(&errs[0])
+        .iter()
+        .filter_map(|e| match e {
+            Element::Tok(k) => Some(*k),
+            Element::Node(_) => None,
+        })
+        .collect();
+    assert!(kinds.contains(&STRING));
+    assert!(kinds.contains(&NEWLINE));
+}
+
+#[test]
+fn unrecognized_dated_keyword_wraps_in_error_node() {
+    // `2024-01-01 unknown ...` — DATE is recognized but the
+    // following keyword isn't one of the dated-directive shapes
+    // (open/close/balance/... or custom). identify_directive
+    // returns None; the line wraps as ERROR_NODE.
+    let source = "2024-01-01 zzz \"data\"\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let errs = error_nodes(&tree);
+    assert_eq!(errs.len(), 1);
+    let ds = directives(&tree);
+    assert_eq!(ds.len(), 0, "no real directive recognized");
+}
+
+#[test]
+fn error_node_coexists_with_recognized_directives() {
+    use SyntaxKind::*;
+    // ERROR_NODEs sit alongside recognized directives at
+    // SOURCE_FILE level. Trivia attachment follows the same rule
+    // as recognized directives.
+    let source = "option \"title\" \"X\"\n\
+                  bogus line\n\
+                  2024-01-01 open Assets:Cash\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let errs = error_nodes(&tree);
+    assert_eq!(errs.len(), 1);
+    let ds = directives(&tree);
+    assert_eq!(ds.len(), 2);
+    assert_eq!(ds[0].kind(), OPTION_DIRECTIVE);
+    assert_eq!(ds[1].kind(), OPEN_DIRECTIVE);
+}
+
+#[test]
+fn error_node_unterminated_at_eof_still_wraps_per_rule_5() {
+    use SyntaxKind::*;
+    // Rule 5: unterminated final line at EOF still wraps; the
+    // ERROR_NODE simply has no NEWLINE child.
+    let source = "bogus content without newline";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let errs = error_nodes(&tree);
+    assert_eq!(errs.len(), 1);
+    let has_newline = elements_of(&errs[0])
+        .iter()
+        .any(|e| matches!(e, Element::Tok(NEWLINE)));
+    assert!(!has_newline);
+}
+
+#[test]
+fn multiple_consecutive_error_lines_each_get_their_own_error_node() {
+    // Two adjacent unrecognized lines produce TWO ERROR_NODE
+    // siblings (one per line), mirroring how adjacent recognized
+    // directives stay as separate sibling nodes.
+    let source = "bogus one\n\
+                  zzz two\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let errs = error_nodes(&tree);
+    assert_eq!(errs.len(), 2);
+}
+
+#[test]
+fn error_node_leading_trivia_attaches_inside_per_rule_2() {
+    use SyntaxKind::*;
+    // Per rule 2, leading trivia (the blank-line NEWLINE between
+    // two top-level items) attaches as LEADING content INSIDE the
+    // FOLLOWING node — same rule for ERROR_NODE as for recognized
+    // directives.
+    let source = "2024-01-01 open Assets:Cash\n\
+                  \n\
+                  bogus content\n";
+    let tree = parse_structured(source);
+    assert_round_trip(source, &tree);
+
+    let errs = error_nodes(&tree);
+    assert_eq!(errs.len(), 1);
+    // ERROR_NODE's first child is the blank-line NEWLINE that
+    // serves as its leading trivia.
+    let first = elements_of(&errs[0]).first().copied();
+    assert_eq!(first, Some(Element::Tok(NEWLINE)));
 }
 
 // ---------- Edge cases ----------

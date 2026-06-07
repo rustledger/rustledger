@@ -159,12 +159,15 @@ pub enum SyntaxKind {
     /// Root node — every byte of the file is reachable under this node.
     SOURCE_FILE,
 
-    /// Generic error-recovery wrapper. Phase 1 doesn't emit this
-    /// (lexer errors surface as `ERROR_TOKEN` leaves), but phase 2's
-    /// structured parser will wrap partial-directive fragments in
-    /// these. Kept here so the kind is available without a follow-up
-    /// PR adding it — error recovery is in scope for any parser that
-    /// promises to keep going past bad input.
+    /// Generic error-recovery wrapper. Phase 1 didn't emit this
+    /// (lexer errors surface as `ERROR_TOKEN` leaves). **Phase 2.4**
+    /// wraps each unrecognized / malformed top-level line in
+    /// `ERROR_NODE` so downstream consumers can identify malformed
+    /// regions structurally rather than scanning flat `SOURCE_FILE`
+    /// children for stray content. Same trivia attachment policy as
+    /// recognized directives (rule 2 of `cst::trivia`); per rule 5,
+    /// an unterminated final ERROR_NODE at EOF still wraps and
+    /// simply has no NEWLINE child.
     ERROR_NODE,
 
     /// Generic structural-directive wrapper. Phase 2.0 introduced it

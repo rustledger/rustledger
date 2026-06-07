@@ -92,22 +92,27 @@ pub fn parse_via_cst(source: &str) -> ParseResult {
     let mut options: Vec<(String, String, Span)> = Vec::new();
     let mut includes: Vec<(String, Span)> = Vec::new();
     let mut plugins: Vec<(String, Option<String>, Span)> = Vec::new();
-    let mut comments: Vec<Spanned<String>> = extract_top_level_comments(&source_file, bom_offset);
+    // Single-pass descendants walk that yields inline errors,
+    // top-level comments, and currency occurrences (replaces three
+    // separate `descendants_with_tokens` walks at 3·O(N) → 1·O(N)).
+    let DescendantsWalkResult {
+        inline_errors,
+        top_level_comments,
+        currency_occurrences,
+    } = walk_descendants_once(&source_file, bom_offset);
+
+    let mut comments: Vec<Spanned<String>> = top_level_comments;
     comments.extend(extract_section_marker_comments(&source_file, bom_offset));
-    // Merge in source order — legacy emits each line's comment
-    // entry as parse_entry consumes it, so order matches start
-    // offset. Dedup-by-start guards against the two helpers'
-    // classifiers ever overlapping on the same line (today they
-    // are disjoint — STAR-first vs COMMENT-kind-first — but
-    // collapsing duplicates here keeps the invariant local).
+    // Merge in source order; the two helpers' classifiers are
+    // disjoint today (STAR-first vs COMMENT-kind-first) but
+    // dedup-by-start keeps the invariant local.
     comments.sort_by_key(|s| s.span.start);
     comments.dedup_by_key(|s| s.span.start);
     let mut errors = extract_error_node_errors(&source_file, stripped, bom_offset);
     errors.extend(extract_transaction_body_errors(&source_file, bom_offset));
     errors.extend(extract_unclosed_cost_brace_errors(&source_file, bom_offset));
-    errors.extend(extract_inline_token_errors(&source_file, bom_offset));
+    errors.extend(inline_errors);
     let warnings = Vec::new();
-    let currency_occurrences = extract_currency_occurrences(&source_file, bom_offset);
 
     // pushtag/poptag/pushmeta/popmeta state. The legacy parser
     // maintains a stack across directives; each Transaction
@@ -767,7 +772,7 @@ fn convert_transaction(
     // content). Comments that remain in `pending` after the
     // final posting belong to the transaction itself
     // (legacy: `txn.trailing_comments = pending_comments`).
-    let (postings, trailing_comments) = collect_postings_with_comments(node, bom_offset);
+    let (postings, trailing_comments) = collect_postings_with_comments(node, bom_offset, errors);
 
     // Deprecated `|` separator between payee and narration: a
     // PIPE token in the header region. Legacy treats this as a
@@ -832,6 +837,7 @@ fn header_has_pipe(node: &AstTransaction) -> bool {
 fn collect_postings_with_comments(
     node: &AstTransaction,
     bom_offset: u32,
+    errors: &mut Vec<crate::ParseError>,
 ) -> (Vec<Spanned<Posting>>, Vec<String>) {
     let mut out = Vec::new();
     let mut pending: Vec<String> = Vec::new();
@@ -847,6 +853,16 @@ fn collect_postings_with_comments(
                 }
                 if is_comment_kind(t.kind()) {
                     pending.push(t.text().to_string());
+                } else if !is_trivia_kind(t.kind()) {
+                    // Non-trivia, non-comment token in the
+                    // transaction body that's NOT inside a
+                    // POSTING / META_ENTRY child node = malformed
+                    // body line (caught separately by
+                    // `extract_transaction_body_errors`). Treat
+                    // the same as a failed POSTING: clear pending
+                    // so the malformed line's preceding comments
+                    // don't migrate onto the next valid posting.
+                    pending.clear();
                 }
             }
             rowan::NodeOrToken::Node(n) => {
@@ -857,13 +873,22 @@ fn collect_postings_with_comments(
                     // header" if we somehow encounter one.
                     past_header = true;
                 }
-                if let Some(p) = ast::Posting::cast(n)
-                    && let Some(mut spanned) = convert_posting(&p, bom_offset)
-                {
-                    if !pending.is_empty() {
-                        spanned.value.comments = std::mem::take(&mut pending);
+                if let Some(p) = ast::Posting::cast(n) {
+                    if let Some(mut spanned) = convert_posting(&p, bom_offset, errors) {
+                        if !pending.is_empty() {
+                            spanned.value.comments = std::mem::take(&mut pending);
+                        }
+                        out.push(spanned);
+                    } else {
+                        // Failed posting consumes any pending
+                        // inter-posting comments — they belonged
+                        // to it. Without this clear, a malformed
+                        // posting's preceding comments would
+                        // migrate forward and attach to the NEXT
+                        // successful posting, misattributing them
+                        // visibly to the wrong account line.
+                        pending.clear();
                     }
-                    out.push(spanned);
                 }
                 // META_ENTRY child nodes: comments collected so
                 // far don't apply to them (they're transaction
@@ -885,18 +910,61 @@ fn flag_char_from_transaction(flag: &ast::TransactionFlag) -> char {
     }
 }
 
-fn convert_posting(node: &ast::Posting, bom_offset: u32) -> Option<Spanned<Posting>> {
+fn convert_posting(
+    node: &ast::Posting,
+    bom_offset: u32,
+    errors: &mut Vec<crate::ParseError>,
+) -> Option<Spanned<Posting>> {
     let account = Account::new(node.account()?.text());
 
     let flag = node.flag().map(|f| flag_char_from_posting(&f));
 
-    let units = node
-        .amount()
-        .and_then(|amt| convert_amount_to_incomplete(&amt));
+    // A well-formed posting has AT MOST one `AMOUNT` child node
+    // (the units). The CST builder will accept input like
+    // `Expenses:Food  5 USD + 3 USD` and produce TWO sibling
+    // `AMOUNT` nodes joined by a flat PLUS token, because the
+    // grammar doesn't enforce that PLUS between two complete
+    // amounts is invalid. `Posting::amount()` returns only the
+    // first via `first_child`, so without this guard the second
+    // amount (and the joining `+`) would be silently dropped and
+    // the user's transaction would balance against the wrong
+    // number. Emit a `SyntaxError` pointing at the trailing
+    // siblings and keep the first amount.
+    let mut amount_children = node
+        .syntax()
+        .children()
+        .filter(|n| ast::Amount::can_cast(n.kind()));
+    let first_amount = amount_children.next();
+    let mut sibling_start: Option<u32> = None;
+    let mut sibling_end: u32 = 0;
+    for extra in amount_children {
+        let range = extra.text_range();
+        let start_u32: u32 = range.start().into();
+        let end_u32: u32 = range.end().into();
+        if sibling_start.is_none() {
+            sibling_start = Some(start_u32);
+        }
+        sibling_end = end_u32;
+    }
+    if let Some(start_u32) = sibling_start {
+        let span = Span::new(
+            (start_u32 + bom_offset) as usize,
+            (sibling_end + bom_offset) as usize,
+        );
+        errors.push(crate::ParseError::new(
+            crate::ParseErrorKind::SyntaxError(
+                "unexpected trailing tokens after posting amount".to_string(),
+            ),
+            span,
+        ));
+    }
+    let units = first_amount
+        .and_then(ast::Amount::cast)
+        .and_then(|amt| convert_amount_to_incomplete(&amt, errors, bom_offset));
     let cost = node.cost_spec().map(|cs| convert_cost_spec(&cs));
     let price = node
         .price_annotation()
-        .map(|pa| convert_price_annotation(&pa));
+        .map(|pa| convert_price_annotation(&pa, errors, bom_offset));
     let meta = convert_meta_entries(node.syntax());
 
     // Trailing comments on the posting line: COMMENT direct-
@@ -948,13 +1016,39 @@ fn flag_char_from_posting(flag: &ast::PostingFlag) -> char {
 /// the directive types we currently handle outside of postings
 /// use AMOUNT shapes that the legacy parser would have evaluated
 /// differently.
-fn convert_amount_to_incomplete(amt: &ast::Amount) -> Option<IncompleteAmount> {
+fn convert_amount_to_incomplete(
+    amt: &ast::Amount,
+    errors: &mut Vec<crate::ParseError>,
+    bom_offset: u32,
+) -> Option<IncompleteAmount> {
     // Arithmetic AMOUNT expressions (`120 / 3 USD`, `(1+2) USD`):
     // run the recursive-descent evaluator on the flat token
     // stream. Fast-path plain `NUMBER CURRENCY` shapes to keep
     // the common case allocation-free.
     let number = if amt.is_arithmetic() {
-        evaluate_amount_expression(amt)
+        let evaluated = evaluate_amount_expression(amt);
+        if evaluated.is_none() {
+            // `is_arithmetic` was true but the evaluator gave up
+            // (decimal overflow, division by zero, malformed
+            // expression, unbalanced parens). Without this
+            // emission the amount silently degrades to
+            // `CurrencyOnly` and the user only sees a downstream
+            // "transaction doesn't balance" — masking the actual
+            // root cause. Pin the span to the AMOUNT node so the
+            // diagnostic underlines the offending expression.
+            let range = amt.syntax().text_range();
+            let start: u32 = range.start().into();
+            let end: u32 = range.end().into();
+            let span = Span::new((start + bom_offset) as usize, (end + bom_offset) as usize);
+            errors.push(crate::ParseError::new(
+                crate::ParseErrorKind::SyntaxError(
+                    "invalid arithmetic expression in amount (overflow, division by zero, or malformed)"
+                        .to_string(),
+                ),
+                span,
+            ));
+        }
+        evaluated
     } else {
         amt.number().and_then(|n| {
             let mut value = parse_decimal_token(n.text())?;
@@ -1179,13 +1273,19 @@ fn cost_total_after_hash(cs: &ast::CostSpec) -> Option<Decimal> {
     None
 }
 
-fn convert_price_annotation(pa: &ast::PriceAnnotation) -> PriceAnnotation {
+fn convert_price_annotation(
+    pa: &ast::PriceAnnotation,
+    errors: &mut Vec<crate::ParseError>,
+    bom_offset: u32,
+) -> PriceAnnotation {
     let kind = if pa.is_total() {
         PriceKind::Total
     } else {
         PriceKind::Unit
     };
-    let amount = pa.amount().and_then(|a| convert_amount_to_incomplete(&a));
+    let amount = pa
+        .amount()
+        .and_then(|a| convert_amount_to_incomplete(&a, errors, bom_offset));
     PriceAnnotation { kind, amount }
 }
 
@@ -1609,7 +1709,7 @@ fn extract_error_node_errors(
                     if !primary_is_bom && line_text.contains(crate::bom::BOM_CHAR) {
                         out.push(
                             crate::ParseError::new(crate::ParseErrorKind::BomInDirectiveBody, span)
-                                .with_hint(crate::parser::BOM_REMOVAL_HINT),
+                                .with_hint(crate::diagnostics::BOM_REMOVAL_HINT),
                         );
                     }
                 }
@@ -1638,7 +1738,7 @@ fn extract_error_node_errors(
 /// AND an internal BOM gets the Unicode-account diagnostic
 /// (the BOM is usually a side effect, not the root cause).
 fn classify_recovery_error(line_text: &str, span: Span) -> crate::ParseError {
-    if let Some(account) = crate::parser::find_unicode_account(line_text) {
+    if let Some(account) = crate::diagnostics::find_unicode_account(line_text) {
         return crate::ParseError::new(
             crate::ParseErrorKind::InvalidAccount(account.to_string()),
             span,
@@ -1646,7 +1746,7 @@ fn classify_recovery_error(line_text: &str, span: Span) -> crate::ParseError {
     }
     if line_text.contains(crate::bom::BOM_CHAR) {
         return crate::ParseError::new(crate::ParseErrorKind::BomInDirectiveBody, span)
-            .with_hint(crate::parser::BOM_REMOVAL_HINT);
+            .with_hint(crate::diagnostics::BOM_REMOVAL_HINT);
     }
     crate::ParseError::new(
         crate::ParseErrorKind::SyntaxError("unexpected input".to_string()),
@@ -1670,26 +1770,87 @@ fn classify_recovery_error(line_text: &str, span: Span) -> crate::ParseError {
 /// `has_leading_bom`). `ERROR_NODE` descendants are skipped —
 /// `extract_error_node_errors` / `classify_recovery_error`
 /// already cover those.
-fn extract_inline_token_errors(
-    source_file: &SourceFile,
-    bom_offset: u32,
-) -> Vec<crate::ParseError> {
-    let mut out = Vec::new();
+/// Result of the fused descendants-walk visitor that powers
+/// `walk_descendants_once`.
+struct DescendantsWalkResult {
+    inline_errors: Vec<crate::ParseError>,
+    top_level_comments: Vec<Spanned<String>>,
+    currency_occurrences: Vec<Spanned<Currency>>,
+}
+
+/// Fused single-pass visitor over `source_file`'s descendants —
+/// replaces three separate walks (`extract_inline_token_errors`,
+/// `extract_top_level_comments`, `extract_currency_occurrences`)
+/// with one traversal. Each walk had its own per-token cost; the
+/// LSP runs them on every keystroke, so collapsing 3·O(N) → 1·O(N)
+/// matters at editor-edge latencies. The state of each former
+/// walk is maintained inline below.
+fn walk_descendants_once(source_file: &SourceFile, bom_offset: u32) -> DescendantsWalkResult {
+    let mut inline_errors: Vec<crate::ParseError> = Vec::new();
+    let mut top_level_comments: Vec<Spanned<String>> = Vec::new();
+    let mut currency_occurrences: Vec<Spanned<Currency>> = Vec::new();
+
+    // `extract_top_level_comments` state: column-0 tracking.
+    let mut preceded_by_ws = false;
+
     for el in source_file.syntax().descendants_with_tokens() {
         let rowan::NodeOrToken::Token(t) = el else {
+            // `extract_top_level_comments` used the Node arm to
+            // reset preceded_by_ws when entering a recognized
+            // directive. Keep that behavior — directive leading
+            // trivia still gets column-0-classified correctly.
+            if let rowan::NodeOrToken::Node(n) = el
+                && ast::Directive::can_cast(n.kind())
+            {
+                preceded_by_ws = false;
+            }
             continue;
         };
+
+        // ---- `extract_top_level_comments` state machine -------
+        match t.kind() {
+            crate::SyntaxKind::NEWLINE => preceded_by_ws = false,
+            crate::SyntaxKind::WHITESPACE => preceded_by_ws = true,
+            k if is_comment_kind(k) => {
+                if !preceded_by_ws {
+                    let range = t.text_range();
+                    let start: u32 = range.start().into();
+                    let end: u32 = range.end().into();
+                    let span =
+                        Span::new((start + bom_offset) as usize, (end + bom_offset) as usize);
+                    top_level_comments.push(Spanned::new(t.text().to_string(), span));
+                }
+            }
+            _ => {
+                preceded_by_ws = false;
+            }
+        }
+
+        // ---- `extract_inline_token_errors` + currency walks ---
         if t.kind() == crate::SyntaxKind::BOM {
             continue;
         }
+        let in_error_node = t
+            .parent_ancestors()
+            .any(|a| a.kind() == crate::SyntaxKind::ERROR_NODE);
+
+        // CURRENCY occurrences: only outside ERROR_NODE.
+        if t.kind() == crate::SyntaxKind::CURRENCY && !in_error_node {
+            let range = t.text_range();
+            let start: u32 = range.start().into();
+            let end: u32 = range.end().into();
+            let span = Span::new((start + bom_offset) as usize, (end + bom_offset) as usize);
+            currency_occurrences.push(Spanned::new(Currency::new(t.text()), span));
+        }
+
+        // Inline errors: BOM byte in a recognized directive
+        // (-> BomInDirectiveBody + hint) or ERROR_TOKEN inside a
+        // recognized directive (-> SyntaxError). Both skip when
+        // already inside an ERROR_NODE (handled by the recovery
+        // classifier).
         let has_bom = t.text().contains(crate::bom::BOM_CHAR);
         let is_error_token = t.kind() == crate::SyntaxKind::ERROR_TOKEN;
-        if !has_bom && !is_error_token {
-            continue;
-        }
-        if t.parent_ancestors()
-            .any(|a| a.kind() == crate::SyntaxKind::ERROR_NODE)
-        {
+        if (!has_bom && !is_error_token) || in_error_node {
             continue;
         }
         let range = t.text_range();
@@ -1697,18 +1858,23 @@ fn extract_inline_token_errors(
         let end: u32 = range.end().into();
         let span = Span::new((start + bom_offset) as usize, (end + bom_offset) as usize);
         if has_bom {
-            out.push(
+            inline_errors.push(
                 crate::ParseError::new(crate::ParseErrorKind::BomInDirectiveBody, span)
-                    .with_hint(crate::parser::BOM_REMOVAL_HINT),
+                    .with_hint(crate::diagnostics::BOM_REMOVAL_HINT),
             );
         } else {
-            out.push(crate::ParseError::new(
+            inline_errors.push(crate::ParseError::new(
                 crate::ParseErrorKind::SyntaxError("unexpected input".to_string()),
                 span,
             ));
         }
     }
-    out
+
+    DescendantsWalkResult {
+        inline_errors,
+        top_level_comments,
+        currency_occurrences,
+    }
 }
 
 /// Emit empty-string comments for org-mode section-marker
@@ -1760,109 +1926,9 @@ fn extract_section_marker_comments(
     out
 }
 
-fn extract_top_level_comments(source_file: &SourceFile, bom_offset: u32) -> Vec<Spanned<String>> {
-    let mut out = Vec::new();
-
-    // Track whether a `WHITESPACE` token preceded the current
-    // token on the same line. Reset on `NEWLINE`. A `COMMENT`
-    // counts as standalone only when this is FALSE (i.e., the
-    // comment starts at column 0). Indented comments are
-    // skipped — the legacy parser's `parse_entry` fails on them.
-    //
-    // Walks ALL descendant tokens so comments inside ERROR_NODEs
-    // (which the structured parser uses for unrecognized lines)
-    // are still surfaced if they're column-0 within the line —
-    // matching how the legacy parser sees each line.
-    let mut preceded_by_ws = false;
-    let mut just_entered_directive = false;
-    for el in source_file.syntax().descendants_with_tokens() {
-        match el {
-            rowan::NodeOrToken::Node(n) => {
-                // Inside a recognized directive's CONTENT region
-                // (after its first non-trivia token), comments
-                // belong to the directive (trailing comments on
-                // postings, etc.) and are NOT standalone. Reset
-                // tracking and use just_entered_directive as a
-                // gate so we still see directive leading trivia.
-                if ast::Directive::can_cast(n.kind()) {
-                    preceded_by_ws = false;
-                    just_entered_directive = true;
-                } else {
-                    just_entered_directive = false;
-                }
-            }
-            rowan::NodeOrToken::Token(t) => match t.kind() {
-                crate::SyntaxKind::NEWLINE => preceded_by_ws = false,
-                crate::SyntaxKind::WHITESPACE => preceded_by_ws = true,
-                k if is_comment_kind(k) => {
-                    if !preceded_by_ws {
-                        let range = t.text_range();
-                        let start: u32 = range.start().into();
-                        let end: u32 = range.end().into();
-                        let span =
-                            Span::new((start + bom_offset) as usize, (end + bom_offset) as usize);
-                        out.push(Spanned::new(t.text().to_string(), span));
-                    }
-                }
-                _ => {
-                    // Hit a non-trivia content token. If this is
-                    // the FIRST content token of a recognized
-                    // directive, we crossed into the directive's
-                    // body — subsequent comments belong to it,
-                    // not to the standalone list. We approximate
-                    // this by simply continuing to track ws/nl;
-                    // trailing comments on posting lines have
-                    // preceded_by_ws=true so they're already
-                    // excluded by the column-0 rule.
-                    let _ = just_entered_directive;
-                    preceded_by_ws = false;
-                }
-            },
-        }
-    }
-    out
-}
-
-// ---- ParseResult.currency_occurrences --------------------------
-
-/// Walk every `CURRENCY` token under the source file (any
-/// depth) in source order and emit a `Spanned<Currency>` with
-/// the BOM-adjusted byte range. Mirrors the legacy parser's
-/// `currency_occurrences` field, which downstream LSP rename /
-/// references / document-highlight consumers walk to find every
-/// place a currency identifier appears.
-fn extract_currency_occurrences(
-    source_file: &SourceFile,
-    bom_offset: u32,
-) -> Vec<Spanned<Currency>> {
-    let mut out = Vec::new();
-    // CURRENCY tokens inside an ERROR_NODE are content the
-    // legacy parser couldn't classify (and so never advanced its
-    // lexer through). To match the legacy parser's
-    // currency_occurrences output we must SKIP CURRENCY tokens
-    // that have an ancestor of kind ERROR_NODE.
-    for el in source_file.syntax().descendants_with_tokens() {
-        let rowan::NodeOrToken::Token(t) = el else {
-            continue;
-        };
-        if t.kind() != crate::SyntaxKind::CURRENCY {
-            continue;
-        }
-        // Walk ancestors to check for ERROR_NODE.
-        let in_error = t
-            .parent_ancestors()
-            .any(|a| a.kind() == crate::SyntaxKind::ERROR_NODE);
-        if in_error {
-            continue;
-        }
-        let range = t.text_range();
-        let start: u32 = range.start().into();
-        let end: u32 = range.end().into();
-        let span = Span::new((start + bom_offset) as usize, (end + bom_offset) as usize);
-        out.push(Spanned::new(Currency::new(t.text()), span));
-    }
-    out
-}
+// `extract_top_level_comments` and `extract_currency_occurrences`
+// are folded into `walk_descendants_once` above — see the
+// comments there for the column-0 / ERROR_NODE-exclusion rules.
 
 // ---- Token parsing helpers -------------------------------------
 
@@ -1887,7 +1953,7 @@ fn parse_date_token(text: &str) -> Option<NaiveDate> {
     // Slow path: share legacy's normalizer so single-digit
     // month/day (`2024-1-15`, `2024-01-5`) and slash separators
     // are accepted everywhere the legacy parser accepts them.
-    crate::parser::normalize_date_str(text)
+    crate::diagnostics::normalize_date_str(text)
         .parse::<NaiveDate>()
         .ok()
 }
@@ -1913,7 +1979,7 @@ fn parse_directive_date(
     let end: u32 = range.end().into();
     let span = Span::new((start + bom_offset) as usize, (end + bom_offset) as usize);
     errors.push(crate::ParseError::new(
-        crate::ParseErrorKind::InvalidDateValue(crate::parser::describe_invalid_date(text)),
+        crate::ParseErrorKind::InvalidDateValue(crate::diagnostics::describe_invalid_date(text)),
         span,
     ));
     None
@@ -2069,18 +2135,29 @@ fn fixup_directive_spans(
     // For each converted directive, find its position in the all
     // list by raw_start (which is unique per CST node), then use
     // the NEXT all_starts content_start as its span end.
+    //
+    // INVARIANT: every node in `converted_nodes` was yielded by
+    // `source_file.directives()`, which is the same iteration
+    // `all_starts` filters from. So `position` always succeeds in
+    // well-formed input. Falling back to the node's own
+    // `text_range` rather than panicking keeps the parser usable
+    // when a future change to the typed-AST surface ever de-syncs
+    // those two enumerations — a `panic!()` reachable from user
+    // input is a `#![forbid(unsafe_code)]`-class regression for an
+    // LSP/WASM consumer.
     for (i, spanned) in directives.iter_mut().enumerate() {
         let node = &converted_nodes[i];
         let raw_start: usize = (u32::from(node.text_range().start()) + bom_offset) as usize;
-        let pos = all_starts
-            .iter()
-            .position(|(rs, _)| *rs == raw_start)
-            .expect("converted node must appear in the all-directives list");
-        let start = all_starts[pos].1;
-        let end = all_starts
-            .get(pos + 1)
-            .map_or(source_end, |(_, content)| *content);
-        spanned.span = Span::new(start, end);
+        let node_end: usize = (u32::from(node.text_range().end()) + bom_offset) as usize;
+        if let Some(pos) = all_starts.iter().position(|(rs, _)| *rs == raw_start) {
+            let start = all_starts[pos].1;
+            let end = all_starts
+                .get(pos + 1)
+                .map_or(source_end, |(_, content)| *content);
+            spanned.span = Span::new(start, end);
+        } else {
+            spanned.span = Span::new(raw_start, node_end);
+        }
     }
 }
 
@@ -2887,6 +2964,115 @@ mod tests {
             None | Some(IncompleteAmount::CurrencyOnly(_)) => {}
             other => panic!("div-by-zero leaked: {other:?}"),
         }
+    }
+
+    // ---- round-4 architecture review (#1281) -------------------
+
+    #[test]
+    fn posting_with_two_amount_siblings_emits_error_and_keeps_first() {
+        // F1: a posting like `Expenses:Food  5 USD + 3 USD` builds
+        // two sibling AMOUNT nodes in the CST. `Posting::amount()`
+        // only returns the first. Without an explicit guard the
+        // second AMOUNT plus the joining `+` would be silently
+        // dropped — the user's transaction would balance against
+        // 5 USD instead of the intended 8 USD with no diagnostic.
+        let src = "2024-01-15 * \"ambig\"\n  \
+                   Expenses:Food   5 USD + 3 USD\n  \
+                   Assets:Bank\n";
+        let result = parse_via_cst(src);
+        let trailing_count = result
+            .errors
+            .iter()
+            .filter(|e| match &e.kind {
+                crate::ParseErrorKind::SyntaxError(s) => s.contains("trailing tokens"),
+                _ => false,
+            })
+            .count();
+        assert_eq!(
+            trailing_count, 1,
+            "expected one trailing-tokens diagnostic, got: {:?}",
+            result.errors
+        );
+        // The first AMOUNT is still surfaced so partial recovery
+        // works for downstream tooling.
+        let Directive::Transaction(t) = &result.directives[0].value else {
+            panic!("expected Transaction");
+        };
+        let Some(IncompleteAmount::Complete(amt)) = &t.postings[0].value.units else {
+            panic!("expected complete units from the first AMOUNT");
+        };
+        assert_eq!(amt.number, Decimal::from(5));
+    }
+
+    #[test]
+    fn comments_dont_leak_across_failed_posting() {
+        // F2: when convert_posting returns None, the queue of
+        // pending pre-posting comments must be CLEARED so they
+        // don't migrate forward and attach to the next valid
+        // posting. Without the clear, comments labelled for the
+        // failed posting would silently re-attach to the wrong
+        // account, visibly misleading the user.
+        let src = "2024-01-15 * \"test\"\n  \
+                   Assets:A   100 USD\n  \
+                   ; comment-for-bad\n  \
+                   ; another-comment\n  \
+                   bogus_token_line_no_account\n  \
+                   ; comment-for-good\n  \
+                   Assets:B   -100 USD\n";
+        let result = parse_via_cst(src);
+        let Directive::Transaction(t) = &result.directives[0].value else {
+            panic!("expected Transaction");
+        };
+        // Assets:B is the LAST successful posting; the only
+        // comment that should attach to it is the one that
+        // immediately precedes it (`; comment-for-good`). The
+        // pre-failed-posting comments belong to the failed
+        // posting and should be DROPPED with it.
+        let b = t.postings.last().expect("at least one posting");
+        assert_eq!(b.value.account.as_str(), "Assets:B");
+        assert!(
+            !b.value
+                .comments
+                .iter()
+                .any(|c| c.contains("comment-for-bad")),
+            "comment-for-bad leaked across failed posting onto Assets:B: {:?}",
+            b.value.comments
+        );
+        assert!(
+            !b.value
+                .comments
+                .iter()
+                .any(|c| c.contains("another-comment")),
+            "another-comment leaked: {:?}",
+            b.value.comments
+        );
+    }
+
+    #[test]
+    fn arithmetic_overflow_in_amount_emits_diagnostic() {
+        // F5: when `is_arithmetic` is true but the evaluator
+        // gives up (overflow, div-by-zero), the converter used
+        // to silently produce CurrencyOnly. Now an explicit
+        // SyntaxError fires so the user sees the actual root
+        // cause instead of just a downstream "doesn't balance".
+        // Decimal max is 28 digits — `9999999999999999999999999999 *
+        // 9999999999999999999999999999` overflows.
+        let huge = "9999999999999999999999999999 * 9999999999999999999999999999";
+        let src = format!("2024-01-15 * \"big\"\n  Expenses:X   {huge} USD\n  Assets:Y\n");
+        let result = parse_via_cst(&src);
+        let arith_errs = result
+            .errors
+            .iter()
+            .filter(|e| match &e.kind {
+                crate::ParseErrorKind::SyntaxError(s) => s.contains("arithmetic"),
+                _ => false,
+            })
+            .count();
+        assert_eq!(
+            arith_errs, 1,
+            "expected one arithmetic-error diagnostic, got: {:?}",
+            result.errors
+        );
     }
 
     // ---- 14 emission-gap regressions (#1281 round-3 review) ----

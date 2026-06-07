@@ -31,6 +31,7 @@
 
 pub mod bom;
 pub mod cst;
+mod diagnostics;
 mod error;
 mod format;
 pub mod logos_lexer;

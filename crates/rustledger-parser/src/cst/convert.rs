@@ -749,14 +749,47 @@ fn convert_transaction(
     let payee = payee_str.map(InternedStr::from);
     let narration = InternedStr::from(narration_str);
 
-    let tags: Vec<Tag> = node
+    // Tags / links from the TRANSACTION node: the typed AST
+    // accessor `tags()`/`links()` is scoped to the header region.
+    // Trailing TAG / LINK tokens appearing on body lines (after
+    // the header NEWLINE, OUTSIDE any POSTING / META_ENTRY child
+    // node) are also part of the transaction's tag/link set per
+    // Beancount semantics — `extract_transaction_body_errors`
+    // already exempts them from the malformed-body diagnostic for
+    // this reason. Aggregate them here so they don't silently
+    // disappear.
+    let mut tags: Vec<Tag> = node
         .tags()
         .map(|t| Tag::new(t.text().trim_start_matches('#')))
         .collect();
-    let links: Vec<Link> = node
+    let mut links: Vec<Link> = node
         .links()
         .map(|l| Link::new(l.text().trim_start_matches('^')))
         .collect();
+    for el in node.syntax().children_with_tokens() {
+        let rowan::NodeOrToken::Token(t) = el else {
+            // Nodes (POSTING / META_ENTRY) own their own internal
+            // tokens; we don't recurse into them.
+            continue;
+        };
+        match t.kind() {
+            crate::SyntaxKind::TAG => {
+                let stripped = t.text().trim_start_matches('#');
+                let new_tag = Tag::new(stripped);
+                if !tags.contains(&new_tag) {
+                    tags.push(new_tag);
+                }
+            }
+            crate::SyntaxKind::LINK => {
+                let stripped = t.text().trim_start_matches('^');
+                let new_link = Link::new(stripped);
+                if !links.contains(&new_link) {
+                    links.push(new_link);
+                }
+            }
+            _ => {}
+        }
+    }
 
     // Transaction-level metadata (META_ENTRY children directly on
     // the TRANSACTION node, NOT on POSTING children).
@@ -853,7 +886,9 @@ fn collect_postings_with_comments(
                 }
                 if is_comment_kind(t.kind()) {
                     pending.push(t.text().to_string());
-                } else if !is_trivia_kind(t.kind()) {
+                } else if !is_trivia_kind(t.kind())
+                    && !matches!(t.kind(), crate::SyntaxKind::TAG | crate::SyntaxKind::LINK)
+                {
                     // Non-trivia, non-comment token in the
                     // transaction body that's NOT inside a
                     // POSTING / META_ENTRY child node = malformed
@@ -862,6 +897,18 @@ fn collect_postings_with_comments(
                     // the same as a failed POSTING: clear pending
                     // so the malformed line's preceding comments
                     // don't migrate onto the next valid posting.
+                    //
+                    // EXEMPT TAG / LINK: trailing tags/links on
+                    // transaction body lines (after the header)
+                    // are valid Beancount — they extend the
+                    // transaction's tag/link set without being
+                    // a new posting. Treating them as malformed
+                    // would drop legitimate preceding comments
+                    // that belong to the NEXT posting. The same
+                    // exemption appears in
+                    // `extract_transaction_body_errors`, which
+                    // does the parallel "is this a malformed
+                    // body line?" classification.
                     pending.clear();
                 }
             }
@@ -935,6 +982,7 @@ fn convert_posting(
         .children()
         .filter(|n| ast::Amount::can_cast(n.kind()));
     let first_amount = amount_children.next();
+    let first_amount_end: Option<u32> = first_amount.as_ref().map(|n| n.text_range().end().into());
     let mut sibling_start: Option<u32> = None;
     let mut sibling_end: u32 = 0;
     for extra in amount_children {
@@ -947,8 +995,15 @@ fn convert_posting(
         sibling_end = end_u32;
     }
     if let Some(start_u32) = sibling_start {
+        // Extend the span back to the end of the FIRST AMOUNT so
+        // the diagnostic underline covers any joining operator
+        // (`+`, `*`, whitespace) between the kept amount and the
+        // orphans. Without this, a user sees only `3 USD` in
+        // `5 USD + 3 USD` highlighted — and may not realize the
+        // `+ 3 USD` together is what needs to be removed.
+        let underline_start = first_amount_end.unwrap_or(start_u32);
         let span = Span::new(
-            (start_u32 + bom_offset) as usize,
+            (underline_start + bom_offset) as usize,
             (sibling_end + bom_offset) as usize,
         );
         errors.push(crate::ParseError::new(
@@ -1051,7 +1106,30 @@ fn convert_amount_to_incomplete(
         evaluated
     } else {
         amt.number().and_then(|n| {
-            let mut value = parse_decimal_token(n.text())?;
+            let parsed = parse_decimal_token(n.text());
+            if parsed.is_none() {
+                // Symmetry with the arithmetic-failure path: when
+                // a plain NUMBER token in an AMOUNT can't be
+                // turned into a Decimal (e.g., 30+ digits — the
+                // lexer's NUMBER regex has no max length but
+                // `rust_decimal`'s 28-digit ceiling rejects it),
+                // surface a diagnostic instead of silently
+                // degrading to `CurrencyOnly`. Without this the
+                // user only sees "transaction doesn't balance"
+                // and never learns the parser dropped a number.
+                let range = n.syntax().text_range();
+                let start: u32 = range.start().into();
+                let end: u32 = range.end().into();
+                let span = Span::new((start + bom_offset) as usize, (end + bom_offset) as usize);
+                errors.push(crate::ParseError::new(
+                    crate::ParseErrorKind::SyntaxError(
+                        "invalid number in amount (likely exceeds 28-digit Decimal precision)"
+                            .to_string(),
+                    ),
+                    span,
+                ));
+            }
+            let mut value = parsed?;
             if let Some(sign) = amt.sign()
                 && sign.is_minus()
             {
@@ -1830,12 +1908,26 @@ fn walk_descendants_once(source_file: &SourceFile, bom_offset: u32) -> Descendan
         if t.kind() == crate::SyntaxKind::BOM {
             continue;
         }
+        // ERROR_NODE-ancestor check is only consulted for tokens
+        // whose downstream emission depends on it (CURRENCY, BOM-
+        // text-containing, ERROR_TOKEN). For well-formed source
+        // most tokens fall into none of those buckets — gating
+        // the per-token `parent_ancestors` walk on relevance
+        // saves an O(depth) probe per WHITESPACE/NEWLINE/comment
+        // token, which dominates token counts in real ledgers.
+        let kind = t.kind();
+        let has_bom = t.text().contains(crate::bom::BOM_CHAR);
+        let is_error_token = kind == crate::SyntaxKind::ERROR_TOKEN;
+        let needs_in_error_check = kind == crate::SyntaxKind::CURRENCY || has_bom || is_error_token;
+        if !needs_in_error_check {
+            continue;
+        }
         let in_error_node = t
             .parent_ancestors()
             .any(|a| a.kind() == crate::SyntaxKind::ERROR_NODE);
 
         // CURRENCY occurrences: only outside ERROR_NODE.
-        if t.kind() == crate::SyntaxKind::CURRENCY && !in_error_node {
+        if kind == crate::SyntaxKind::CURRENCY && !in_error_node {
             let range = t.text_range();
             let start: u32 = range.start().into();
             let end: u32 = range.end().into();
@@ -1848,8 +1940,6 @@ fn walk_descendants_once(source_file: &SourceFile, bom_offset: u32) -> Descendan
         // recognized directive (-> SyntaxError). Both skip when
         // already inside an ERROR_NODE (handled by the recovery
         // classifier).
-        let has_bom = t.text().contains(crate::bom::BOM_CHAR);
-        let is_error_token = t.kind() == crate::SyntaxKind::ERROR_TOKEN;
         if (!has_bom && !is_error_token) || in_error_node {
             continue;
         }
@@ -2156,7 +2246,20 @@ fn fixup_directive_spans(
                 .map_or(source_end, |(_, content)| *content);
             spanned.span = Span::new(start, end);
         } else {
-            spanned.span = Span::new(raw_start, node_end);
+            // Defensive fallback: match the success-path
+            // convention by also trimming leading trivia. Without
+            // this trim the fallback span would underline blank
+            // lines / column-0 comments above the directive when
+            // LSP/miette renders the diagnostic, even though the
+            // directive itself starts further down.
+            let content_start = node
+                .descendants_with_tokens()
+                .filter_map(rowan::NodeOrToken::into_token)
+                .find(|t| !is_trivia_kind(t.kind()))
+                .map_or(raw_start, |t| {
+                    (u32::from(t.text_range().start()) + bom_offset) as usize
+                });
+            spanned.span = Span::new(content_start, node_end);
         }
     }
 }
@@ -2964,6 +3067,67 @@ mod tests {
             None | Some(IncompleteAmount::CurrencyOnly(_)) => {}
             other => panic!("div-by-zero leaked: {other:?}"),
         }
+    }
+
+    // ---- round-5 architecture review (#1281) -------------------
+
+    #[test]
+    fn body_line_tag_does_not_drop_following_postings_comment() {
+        // F2-bis: trailing TAG / LINK tokens on transaction body
+        // lines are valid Beancount (extend the transaction's
+        // tag/link set). Before the exemption was added, the
+        // `pending.clear()` over-fired on the TAG and silently
+        // dropped the preceding comment that semantically
+        // belonged to the next posting.
+        let src = "2024-01-01 * \"x\"\n  \
+                   Assets:A   100 USD\n  \
+                   ; comment-for-B\n  \
+                   #late-tag\n  \
+                   Assets:B   -100 USD\n";
+        let result = parse_via_cst(src);
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let Directive::Transaction(t) = &result.directives[0].value else {
+            panic!("expected Transaction");
+        };
+        // The trailing tag joins the transaction's tag set.
+        assert!(
+            t.tags.iter().any(|tag| tag.as_str() == "late-tag"),
+            "expected #late-tag in tags: {:?}",
+            t.tags,
+        );
+        // And the comment survives — attached to the next posting.
+        let b = t.postings.last().expect("at least one posting");
+        assert_eq!(b.value.account.as_str(), "Assets:B");
+        assert!(
+            b.value.comments.iter().any(|c| c.contains("comment-for-B")),
+            "expected comment-for-B to survive on Assets:B: {:?}",
+            b.value.comments,
+        );
+    }
+
+    #[test]
+    fn oversized_number_in_amount_emits_diagnostic() {
+        // F5-bis: the non-arithmetic NUMBER path is now symmetric
+        // with the arithmetic-evaluation path. A NUMBER whose
+        // text the lexer accepts but `Decimal::from_str` rejects
+        // (e.g., 30+ digits, exceeding the 28-digit precision
+        // ceiling) used to silently degrade to `CurrencyOnly`.
+        let huge = "1".to_string() + &"2345678901234567890".repeat(2); // 39 digits
+        let src = format!("2024-01-15 * \"big\"\n  Expenses:X   {huge} USD\n  Assets:Y\n");
+        let result = parse_via_cst(&src);
+        let invalid_num = result
+            .errors
+            .iter()
+            .filter(|e| match &e.kind {
+                crate::ParseErrorKind::SyntaxError(s) => s.contains("invalid number"),
+                _ => false,
+            })
+            .count();
+        assert_eq!(
+            invalid_num, 1,
+            "expected one invalid-number diagnostic, got: {:?}",
+            result.errors
+        );
     }
 
     // ---- round-4 architecture review (#1281) -------------------

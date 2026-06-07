@@ -500,12 +500,12 @@ fn strip_string_quotes(raw: &str) -> Option<&str> {
 fn convert_option(node: &OptionDirective, bom_offset: u32) -> Option<(String, String, Span)> {
     let key = node.key()?.text_unquoted()?.to_string();
     let value = node.value()?.text_unquoted()?.to_string();
-    Some((key, value, node_span(node.syntax(), bom_offset)))
+    Some((key, value, posting_span(node.syntax(), bom_offset)))
 }
 
 fn convert_include(node: &IncludeDirective, bom_offset: u32) -> Option<(String, Span)> {
     let path = node.path()?.text_unquoted()?.to_string();
-    Some((path, node_span(node.syntax(), bom_offset)))
+    Some((path, posting_span(node.syntax(), bom_offset)))
 }
 
 fn convert_plugin(
@@ -516,7 +516,7 @@ fn convert_plugin(
     let config = node
         .config()
         .and_then(|c| c.text_unquoted().map(String::from));
-    Some((module, config, node_span(node.syntax(), bom_offset)))
+    Some((module, config, posting_span(node.syntax(), bom_offset)))
 }
 
 // ---- Transaction + Posting + sub-nodes -------------------------
@@ -864,19 +864,26 @@ const fn is_comment_kind(kind: crate::SyntaxKind) -> bool {
 }
 
 /// Walk the source file and collect every "standalone" comment
-/// line into `ParseResult.comments`, mirroring the legacy parser:
+/// line into `ParseResult.comments`, mirroring the legacy parser.
 ///
-/// - Comment tokens that are direct children of `SOURCE_FILE`
-///   (file-leading and file-trailing trivia) are standalone.
-/// - Comment tokens that appear inside a directive node BEFORE
-///   the first non-trivia content token (the directive's
-///   inter-directive leading trivia from the trivia policy) are
-///   also standalone — they represent comments between
-///   directives in the source, which the legacy parser also
-///   treats as top-level.
-/// - Comments that appear AFTER the directive's content begins
-///   (e.g., trailing same-line comments on a posting) belong to
-///   the directive, not to `comments`.
+/// **Column-0 only.** The legacy parser's `parse_entry` matches
+/// `Token::Comment` only when it's the first non-newline token
+/// on its line. An indented comment (preceded by `WHITESPACE` on
+/// the same line) becomes a parse error in the legacy parser,
+/// not a comment entry. The CST trivia policy attaches indented
+/// trailing trivia as a direct `SOURCE_FILE` child too, but we
+/// must exclude those from `comments` to match.
+///
+/// **Inside directives.** Comment tokens that appear inside a
+/// directive node BEFORE the first non-trivia content token (the
+/// directive's inter-directive leading trivia from the trivia
+/// policy) are inter-directive comments and the legacy parser
+/// surfaces them as standalone. We apply the same column-0 rule
+/// there.
+///
+/// **After content.** Comments that appear AFTER the directive's
+/// first content token (e.g., trailing same-line comments on a
+/// posting) belong to the directive, not to `comments`.
 fn extract_top_level_comments(source_file: &SourceFile, bom_offset: u32) -> Vec<Spanned<String>> {
     let mut out = Vec::new();
     let push_token = |out: &mut Vec<Spanned<String>>, t: &crate::SyntaxToken| {
@@ -887,32 +894,50 @@ fn extract_top_level_comments(source_file: &SourceFile, bom_offset: u32) -> Vec<
         out.push(Spanned::new(t.text().to_string(), span));
     };
 
+    // Track whether a `WHITESPACE` token preceded the current
+    // token on the same line. Reset on `NEWLINE`. Skip a `COMMENT`
+    // when this is true (it means the comment is indented and
+    // the legacy parser bails out before reaching it).
+    let mut preceded_by_ws = false;
+
     for child in source_file.syntax().children_with_tokens() {
         match child {
-            rowan::NodeOrToken::Token(t) if is_comment_kind(t.kind()) => {
-                push_token(&mut out, &t);
+            rowan::NodeOrToken::Token(t) => {
+                match t.kind() {
+                    crate::SyntaxKind::NEWLINE => preceded_by_ws = false,
+                    crate::SyntaxKind::WHITESPACE => preceded_by_ws = true,
+                    k if is_comment_kind(k) => {
+                        if !preceded_by_ws {
+                            push_token(&mut out, &t);
+                        }
+                        // Stay false until next NEWLINE resets;
+                        // comment doesn't change preceded_by_ws.
+                    }
+                    _ => preceded_by_ws = false,
+                }
             }
             rowan::NodeOrToken::Node(n) if ast::Directive::can_cast(n.kind()) => {
-                // Walk the directive's direct-child tokens; any
-                // comment-like token BEFORE the first non-trivia
-                // content token is leading trivia and counts as
-                // a top-level comment.
+                // Walk the directive's direct-child tokens for
+                // its leading trivia (until first non-trivia
+                // content token). Apply the same column-0 rule.
+                let mut inner_preceded_by_ws = false;
                 for el in n.children_with_tokens() {
                     let rowan::NodeOrToken::Token(t) = el else {
-                        // Hit a node child (POSTING / META_ENTRY /
-                        // AMOUNT / ...). Definitely past the
-                        // header; stop scanning leading trivia.
                         break;
                     };
-                    if is_comment_kind(t.kind()) {
-                        push_token(&mut out, &t);
-                    } else if !is_trivia_kind(t.kind()) {
-                        // First content token of the directive.
-                        // Anything after this belongs to the
-                        // directive.
-                        break;
+                    match t.kind() {
+                        crate::SyntaxKind::NEWLINE => inner_preceded_by_ws = false,
+                        crate::SyntaxKind::WHITESPACE => inner_preceded_by_ws = true,
+                        k if is_comment_kind(k) => {
+                            if !inner_preceded_by_ws {
+                                push_token(&mut out, &t);
+                            }
+                        }
+                        _ => break, // first content token of the directive
                     }
                 }
+                // After a directive node, reset whitespace state.
+                preceded_by_ws = false;
             }
             _ => {}
         }

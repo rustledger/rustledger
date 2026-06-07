@@ -23,25 +23,35 @@
 //!
 //! Implemented directive converters:
 //! - Open, Close, Commodity (single-line, simple shape)
+//! - Note, Document, Event, Query, Price (single-line)
+//! - Balance (single-line + amount + optional tolerance)
+//! - Pad (single-line, two accounts)
 //!
 //! Pending directive converters:
-//! - Note, Document, Event, Query, Price (single-line)
-//! - Balance, Pad (single-line + amount)
 //! - Pushtag, Poptag, Pushmeta, Popmeta (state-only side effects)
 //! - Option, Include, Plugin (`ParseResult` fields, not directives)
 //! - Custom (heterogeneous value list)
 //! - Transaction (header + postings + metadata, most complex)
+//!
+//! Pending lossless features (deferred):
+//! - Document tags + links (need raw-token walk; field on
+//!   `Document` struct currently filled empty)
+//! - `currency_occurrences` field on `ParseResult` (downstream
+//!   LSP rename/references depends on this — filled empty until
+//!   Transaction lands)
+//! - Standalone `comments` field
 
 use rust_decimal::Decimal;
 use rustledger_core::{
-    Account, Currency, Directive, Link, MetaValue, Metadata, NaiveDate, Span, Spanned, Tag,
+    Account, Amount, Currency, Directive, Link, MetaValue, Metadata, NaiveDate, Span, Spanned, Tag,
     naive_date,
 };
 
 use crate::ParseResult;
 use crate::cst::ast::{
-    self, AstNode, AstToken, CloseDirective, CommodityDirective, MetaEntry, OpenDirective,
-    SourceFile,
+    self, AstNode, AstToken, BalanceDirective, CloseDirective, CommodityDirective,
+    DocumentDirective, EventDirective, MetaEntry, NoteDirective, OpenDirective, PadDirective,
+    PriceDirective, QueryDirective, SourceFile,
 };
 
 /// Parse Beancount source via the CST and produce the legacy
@@ -83,6 +93,41 @@ pub fn parse_via_cst(source: &str) -> ParseResult {
             }
             ast::Directive::Commodity(node) => {
                 if let Some(spanned) = convert_commodity(&node, bom_offset) {
+                    directives.push(spanned);
+                }
+            }
+            ast::Directive::Note(node) => {
+                if let Some(spanned) = convert_note(&node, bom_offset) {
+                    directives.push(spanned);
+                }
+            }
+            ast::Directive::Document(node) => {
+                if let Some(spanned) = convert_document(&node, bom_offset) {
+                    directives.push(spanned);
+                }
+            }
+            ast::Directive::Event(node) => {
+                if let Some(spanned) = convert_event(&node, bom_offset) {
+                    directives.push(spanned);
+                }
+            }
+            ast::Directive::Query(node) => {
+                if let Some(spanned) = convert_query(&node, bom_offset) {
+                    directives.push(spanned);
+                }
+            }
+            ast::Directive::Price(node) => {
+                if let Some(spanned) = convert_price(&node, bom_offset) {
+                    directives.push(spanned);
+                }
+            }
+            ast::Directive::Balance(node) => {
+                if let Some(spanned) = convert_balance(&node, bom_offset) {
+                    directives.push(spanned);
+                }
+            }
+            ast::Directive::Pad(node) => {
+                if let Some(spanned) = convert_pad(&node, bom_offset) {
                     directives.push(spanned);
                 }
             }
@@ -155,6 +200,154 @@ fn convert_commodity(node: &CommodityDirective, bom_offset: u32) -> Option<Spann
     };
     let span = node_span(node.syntax(), bom_offset);
     Some(Spanned::new(Directive::Commodity(commodity), span))
+}
+
+fn convert_note(node: &NoteDirective, bom_offset: u32) -> Option<Spanned<Directive>> {
+    let date = parse_date_token(node.date()?.text())?;
+    let account = Account::new(node.account()?.text());
+    let comment = node.text()?.text_unquoted()?.to_string();
+    let meta = convert_meta_entries(node.syntax());
+
+    let note = rustledger_core::directive::Note {
+        date,
+        account,
+        comment,
+        meta,
+    };
+    let span = node_span(node.syntax(), bom_offset);
+    Some(Spanned::new(Directive::Note(note), span))
+}
+
+fn convert_document(node: &DocumentDirective, bom_offset: u32) -> Option<Spanned<Directive>> {
+    let date = parse_date_token(node.date()?.text())?;
+    let account = Account::new(node.account()?.text());
+    let path = node.path()?.text_unquoted()?.to_string();
+    // TODO: extract tags/links from raw header tokens (the
+    // typed-AST surface doesn't yet expose accessors for these
+    // on DocumentDirective). Currently filled empty — matches
+    // the documents-without-trailing-tags-or-links case but
+    // drops information for documents that have them.
+    let tags = Vec::new();
+    let links = Vec::new();
+    let meta = convert_meta_entries(node.syntax());
+
+    let document = rustledger_core::directive::Document {
+        date,
+        account,
+        path,
+        tags,
+        links,
+        meta,
+    };
+    let span = node_span(node.syntax(), bom_offset);
+    Some(Spanned::new(Directive::Document(document), span))
+}
+
+fn convert_event(node: &EventDirective, bom_offset: u32) -> Option<Spanned<Directive>> {
+    let date = parse_date_token(node.date()?.text())?;
+    let event_type = node.event_type()?.text_unquoted()?.to_string();
+    let value = node.value()?.text_unquoted()?.to_string();
+    let meta = convert_meta_entries(node.syntax());
+
+    let event = rustledger_core::directive::Event {
+        date,
+        event_type,
+        value,
+        meta,
+    };
+    let span = node_span(node.syntax(), bom_offset);
+    Some(Spanned::new(Directive::Event(event), span))
+}
+
+fn convert_query(node: &QueryDirective, bom_offset: u32) -> Option<Spanned<Directive>> {
+    let date = parse_date_token(node.date()?.text())?;
+    let name = node.name()?.text_unquoted()?.to_string();
+    let query = node.query()?.text_unquoted()?.to_string();
+    let meta = convert_meta_entries(node.syntax());
+
+    let q = rustledger_core::directive::Query {
+        date,
+        name,
+        query,
+        meta,
+    };
+    let span = node_span(node.syntax(), bom_offset);
+    Some(Spanned::new(Directive::Query(q), span))
+}
+
+fn convert_price(node: &PriceDirective, bom_offset: u32) -> Option<Spanned<Directive>> {
+    let date = parse_date_token(node.date()?.text())?;
+    let base_currency = Currency::new(node.base_currency()?.text());
+    let number = parse_decimal_token(node.number()?.text())?;
+    let quote_currency = Currency::new(node.quote_currency()?.text());
+    let amount = Amount::new(number, quote_currency);
+    let meta = convert_meta_entries(node.syntax());
+
+    let price = rustledger_core::directive::Price {
+        date,
+        currency: base_currency,
+        amount,
+        meta,
+    };
+    let span = node_span(node.syntax(), bom_offset);
+    Some(Spanned::new(Directive::Price(price), span))
+}
+
+fn convert_balance(node: &BalanceDirective, bom_offset: u32) -> Option<Spanned<Directive>> {
+    let date = parse_date_token(node.date()?.text())?;
+    let account = Account::new(node.account()?.text());
+    let number = parse_decimal_token(node.number()?.text())?;
+    let currency = Currency::new(node.currency()?.text());
+    let amount = Amount::new(number, currency);
+    let tolerance = extract_balance_tolerance(node.syntax());
+    let meta = convert_meta_entries(node.syntax());
+
+    let balance = rustledger_core::directive::Balance {
+        date,
+        account,
+        amount,
+        tolerance,
+        meta,
+    };
+    let span = node_span(node.syntax(), bom_offset);
+    Some(Spanned::new(Directive::Balance(balance), span))
+}
+
+/// Balance directives may include an explicit tolerance via a
+/// `~` (TILDE) token followed by a NUMBER. The typed-AST surface
+/// surfaces NUMBER via `number()` (which returns the FIRST one,
+/// the asserted balance); the tolerance NUMBER comes second.
+/// Walk raw tokens until TILDE, then collect the next NUMBER.
+fn extract_balance_tolerance(node: &crate::SyntaxNode) -> Option<Decimal> {
+    let mut past_tilde = false;
+    for el in node.children_with_tokens() {
+        let rowan::NodeOrToken::Token(t) = el else {
+            continue;
+        };
+        if past_tilde && t.kind() == crate::SyntaxKind::NUMBER {
+            return parse_decimal_token(t.text());
+        }
+        if t.kind() == crate::SyntaxKind::TILDE {
+            past_tilde = true;
+        }
+    }
+    None
+}
+
+fn convert_pad(node: &PadDirective, bom_offset: u32) -> Option<Spanned<Directive>> {
+    let date = parse_date_token(node.date()?.text())?;
+    let account = Account::new(node.target_account()?.text());
+    let source_account = Account::new(node.source_account()?.text());
+    let meta = convert_meta_entries(node.syntax());
+
+    let pad = rustledger_core::directive::Pad {
+        date,
+        account,
+        source_account,
+        meta,
+    };
+    let span = node_span(node.syntax(), bom_offset);
+    Some(Spanned::new(Directive::Pad(pad), span))
 }
 
 // ---- Metadata extraction ---------------------------------------
@@ -382,5 +575,108 @@ mod tests {
         let src = "2024-01-15 * \"x\"\n  Assets:Cash  -5 USD\n";
         let result = parse_via_cst(src);
         assert_directive_count(&result, 0);
+    }
+
+    #[test]
+    fn note_directive_basic() {
+        let src = "2024-01-15 note Assets:Cash \"deposit received\"\n";
+        let result = parse_via_cst(src);
+        assert_directive_count(&result, 1);
+        let Directive::Note(note) = &result.directives[0].value else {
+            panic!("expected Note");
+        };
+        assert_eq!(note.date, naive_date(2024, 1, 15).unwrap());
+        assert_eq!(note.account.as_str(), "Assets:Cash");
+        assert_eq!(note.comment, "deposit received");
+    }
+
+    #[test]
+    fn document_directive_basic() {
+        let src = "2024-01-15 document Assets:Cash \"/path/to/file.pdf\"\n";
+        let result = parse_via_cst(src);
+        assert_directive_count(&result, 1);
+        let Directive::Document(d) = &result.directives[0].value else {
+            panic!("expected Document");
+        };
+        assert_eq!(d.account.as_str(), "Assets:Cash");
+        assert_eq!(d.path, "/path/to/file.pdf");
+        // tags/links currently unimplemented — pin as empty.
+        assert!(d.tags.is_empty());
+        assert!(d.links.is_empty());
+    }
+
+    #[test]
+    fn event_directive_basic() {
+        let src = "2024-01-15 event \"location\" \"Berlin\"\n";
+        let result = parse_via_cst(src);
+        assert_directive_count(&result, 1);
+        let Directive::Event(e) = &result.directives[0].value else {
+            panic!("expected Event");
+        };
+        assert_eq!(e.event_type, "location");
+        assert_eq!(e.value, "Berlin");
+    }
+
+    #[test]
+    fn query_directive_basic() {
+        let src = "2024-01-15 query \"income\" \"SELECT account, sum(position)\"\n";
+        let result = parse_via_cst(src);
+        assert_directive_count(&result, 1);
+        let Directive::Query(q) = &result.directives[0].value else {
+            panic!("expected Query");
+        };
+        assert_eq!(q.name, "income");
+        assert_eq!(q.query, "SELECT account, sum(position)");
+    }
+
+    #[test]
+    fn price_directive_basic() {
+        let src = "2024-01-15 price USD 1.10 EUR\n";
+        let result = parse_via_cst(src);
+        assert_directive_count(&result, 1);
+        let Directive::Price(p) = &result.directives[0].value else {
+            panic!("expected Price");
+        };
+        assert_eq!(p.currency.as_str(), "USD");
+        assert_eq!(p.amount.number, Decimal::new(110, 2));
+        assert_eq!(p.amount.currency.as_str(), "EUR");
+    }
+
+    #[test]
+    fn balance_directive_basic() {
+        let src = "2024-06-30 balance Assets:Cash 100.00 USD\n";
+        let result = parse_via_cst(src);
+        assert_directive_count(&result, 1);
+        let Directive::Balance(b) = &result.directives[0].value else {
+            panic!("expected Balance");
+        };
+        assert_eq!(b.account.as_str(), "Assets:Cash");
+        assert_eq!(b.amount.number, Decimal::new(10000, 2));
+        assert_eq!(b.amount.currency.as_str(), "USD");
+        assert!(b.tolerance.is_none());
+    }
+
+    #[test]
+    fn balance_directive_with_explicit_tolerance() {
+        let src = "2024-06-30 balance Assets:Cash 100.00 ~ 0.05 USD\n";
+        let result = parse_via_cst(src);
+        assert_directive_count(&result, 1);
+        let Directive::Balance(b) = &result.directives[0].value else {
+            panic!("expected Balance");
+        };
+        assert_eq!(b.amount.number, Decimal::new(10000, 2));
+        assert_eq!(b.tolerance, Some(Decimal::new(5, 2)));
+    }
+
+    #[test]
+    fn pad_directive_basic() {
+        let src = "2024-01-01 pad Assets:Cash Equity:Opening-Balances\n";
+        let result = parse_via_cst(src);
+        assert_directive_count(&result, 1);
+        let Directive::Pad(p) = &result.directives[0].value else {
+            panic!("expected Pad");
+        };
+        assert_eq!(p.account.as_str(), "Assets:Cash");
+        assert_eq!(p.source_account.as_str(), "Equity:Opening-Balances");
     }
 }

@@ -111,6 +111,12 @@ pub fn parse_via_cst(source: &str) -> ParseResult {
     let mut errors = extract_error_node_errors(&source_file, stripped, bom_offset);
     errors.extend(extract_transaction_body_errors(&source_file, bom_offset));
     errors.extend(extract_unclosed_cost_brace_errors(&source_file, bom_offset));
+    errors.extend(extract_indented_directive_errors(
+        &source_file,
+        stripped,
+        bom_offset,
+    ));
+    errors.extend(extract_custom_value_errors(&source_file, bom_offset));
     errors.extend(inline_errors);
     let warnings = Vec::new();
 
@@ -489,10 +495,15 @@ fn convert_price(
 ) -> Option<Spanned<Directive>> {
     let date = parse_directive_date(&node.date()?, errors, bom_offset)?;
     let base_currency = Currency::new(node.base_currency()?.text());
-    let mut number = parse_decimal_token(node.number()?.text())?;
-    if node_has_minus_before_number(node.syntax()) {
-        number = -number;
-    }
+    // Same arithmetic support as `convert_balance`: a price
+    // directive's value can use `+`, `-`, `*`, `/`, and parens.
+    let number = directive_arithmetic_value(node.syntax()).or_else(|| {
+        let mut n = parse_decimal_token(node.number()?.text())?;
+        if node_has_minus_before_number(node.syntax()) {
+            n = -n;
+        }
+        Some(n)
+    })?;
     let quote_currency = Currency::new(node.quote_currency()?.text());
     let amount = Amount::new(number, quote_currency);
     let meta = convert_meta_entries(node.syntax());
@@ -514,10 +525,17 @@ fn convert_balance(
 ) -> Option<Spanned<Directive>> {
     let date = parse_directive_date(&node.date()?, errors, bom_offset)?;
     let account = Account::new(node.account()?.text());
-    let mut number = parse_decimal_token(node.number()?.text())?;
-    if node_has_minus_before_number(node.syntax()) {
-        number = -number;
-    }
+    // Beancount accepts arithmetic in the balance assertion's
+    // value (`balance Assets:X 0.25 + 0.75 GBP` ≡ 1.00 GBP).
+    // Falls back to the first NUMBER token if the expression
+    // can't be evaluated, with the legacy sign-flip behavior.
+    let number = directive_arithmetic_value(node.syntax()).or_else(|| {
+        let mut n = parse_decimal_token(node.number()?.text())?;
+        if node_has_minus_before_number(node.syntax()) {
+            n = -n;
+        }
+        Some(n)
+    })?;
     let currency = Currency::new(node.currency()?.text());
     let amount = Amount::new(number, currency);
     let tolerance = extract_balance_tolerance(node.syntax());
@@ -1176,6 +1194,67 @@ fn evaluate_amount_expression(amt: &ast::Amount) -> Option<Decimal> {
     Some(value)
 }
 
+/// Evaluate the arithmetic expression that appears as the
+/// numeric value of a `BALANCE` / `PRICE` directive, returning
+/// the resulting decimal or `None` if not arithmetic (single
+/// NUMBER, callers fall back to `parse_decimal_token`).
+///
+/// Unlike `AMOUNT`, these directives don't wrap their value in
+/// a dedicated node — the tokens are flat under the directive
+/// node. The relevant region is from the FIRST `NUMBER` token up
+/// to (but not including) the FIRST `CURRENCY` token at paren-
+/// depth 0 (the amount currency). For BALANCE, this correctly
+/// stops before any trailing `~ NUMBER [CURRENCY]` tolerance
+/// region too.
+///
+/// Returns `Some` only when the slice contains at least one
+/// arithmetic operator (`+`, `-`, `*`, `/`) or parens — for a
+/// bare single `NUMBER`, returns `None` so the caller can use
+/// the existing fast path (which preserves the legacy sign-flip
+/// behavior).
+fn directive_arithmetic_value(node: &crate::SyntaxNode) -> Option<Decimal> {
+    let raw: Vec<crate::SyntaxToken> = node
+        .children_with_tokens()
+        .filter_map(rowan::NodeOrToken::into_token)
+        .filter(|t| !is_trivia_kind(t.kind()))
+        .skip_while(|t| t.kind() != crate::SyntaxKind::NUMBER)
+        .collect();
+    let mut depth: i32 = 0;
+    let mut first_currency_idx: Option<usize> = None;
+    for (i, t) in raw.iter().enumerate() {
+        match t.kind() {
+            crate::SyntaxKind::L_PAREN => depth += 1,
+            crate::SyntaxKind::R_PAREN => depth -= 1,
+            crate::SyntaxKind::CURRENCY if depth == 0 && first_currency_idx.is_none() => {
+                first_currency_idx = Some(i);
+            }
+            _ => {}
+        }
+    }
+    let end = first_currency_idx.unwrap_or(raw.len());
+    let tokens: Vec<crate::SyntaxToken> = raw.into_iter().take(end).collect();
+    // Fast-path: zero or one token = no arithmetic.
+    let has_op = tokens.iter().any(|t| {
+        matches!(
+            t.kind(),
+            crate::SyntaxKind::PLUS
+                | crate::SyntaxKind::MINUS
+                | crate::SyntaxKind::STAR
+                | crate::SyntaxKind::SLASH
+                | crate::SyntaxKind::L_PAREN
+        )
+    });
+    if !has_op {
+        return None;
+    }
+    let mut cursor = 0usize;
+    let value = parse_arith_expr(&tokens, &mut cursor)?;
+    if cursor != tokens.len() {
+        return None;
+    }
+    Some(value)
+}
+
 /// Collect AMOUNT's expression tokens — every non-trivia direct-
 /// child token EXCEPT the trailing `CURRENCY` at paren-depth 0
 /// (which is the amount's currency, not part of the expression).
@@ -1634,6 +1713,131 @@ fn extract_unclosed_cost_brace_errors(
                 ),
                 node_span(&cs, bom_offset),
             ));
+        }
+    }
+    out
+}
+
+/// Walk every top-level directive in `source_file` and emit a
+/// `SyntaxError("top-level directive must start at column 0")`
+/// for any whose content (first non-trivia token) starts at a
+/// non-zero column. Per the Beancount language spec, top-level
+/// directives are required to begin at column 0; indentation is
+/// reserved for postings and metadata inside a transaction body.
+///
+/// The CST grammar happily accepts an indented `open` / `balance`
+/// / etc., which is why this surfaces at converter level instead
+/// of as a lex/parse error.
+fn extract_indented_directive_errors(
+    source_file: &SourceFile,
+    stripped: &str,
+    bom_offset: u32,
+) -> Vec<crate::ParseError> {
+    let mut out = Vec::new();
+    for child in source_file.syntax().children() {
+        if !ast::Directive::can_cast(child.kind()) {
+            continue;
+        }
+        // Find the directive's content start — the first non-
+        // trivia token. Leading WHITESPACE / NEWLINE / COMMENT
+        // can land inside the directive node per the Directive-
+        // Terminator Rule's inter-directive trivia attachment.
+        let Some(content) = child
+            .children_with_tokens()
+            .filter_map(rowan::NodeOrToken::into_token)
+            .find(|t| !is_trivia_kind(t.kind()))
+        else {
+            continue;
+        };
+        let content_start: usize = u32::from(content.text_range().start()) as usize;
+        // Column = offset since the last NEWLINE in the source,
+        // or since byte 0 if this is the first line. >0 means
+        // the directive's first content token has leading WS on
+        // its own line — that's the indent error.
+        let line_start = stripped[..content_start].rfind('\n').map_or(0, |nl| nl + 1);
+        if content_start > line_start {
+            let end: u32 = content.text_range().end().into();
+            let span = Span::new(
+                (line_start as u32 + bom_offset) as usize,
+                (end + bom_offset) as usize,
+            );
+            out.push(crate::ParseError::new(
+                crate::ParseErrorKind::SyntaxError(
+                    "top-level directive must start at column 0".to_string(),
+                ),
+                span,
+            ));
+        }
+    }
+    out
+}
+
+/// Walk each `CUSTOM` directive and emit a `SyntaxError` for
+/// every bare `CURRENCY` token in the value position (a CURRENCY
+/// not paired with a preceding NUMBER as an Amount).
+///
+/// Per the Beancount language spec, custom-directive values are
+/// limited to string / date / decimal / amount / boolean —
+/// `bean-check` rejects a bare currency literal with a syntax
+/// error. Rustledger's `extract_custom_values` has historically
+/// been more lenient, accepting ACCOUNT / TAG / LINK in value
+/// position too; we keep that extension (it's covered by the
+/// existing `test_parse_custom_directive` integration test) but
+/// surface a diagnostic for the bare-CURRENCY case so the
+/// compat metric reflects bean-check's exit-code rejection on
+/// shapes like `custom "x" 10 USD "y" NZD …`.
+fn extract_custom_value_errors(
+    source_file: &SourceFile,
+    bom_offset: u32,
+) -> Vec<crate::ParseError> {
+    let mut out = Vec::new();
+    for child in source_file.syntax().children() {
+        if child.kind() != crate::SyntaxKind::CUSTOM_DIRECTIVE {
+            continue;
+        }
+        // Collect non-trivia tokens, then skip past the
+        // directive's header: DATE, CUSTOM_KW, and the first
+        // STRING (the custom-type name). Everything after that
+        // is values.
+        let raw: Vec<crate::SyntaxToken> = child
+            .children_with_tokens()
+            .filter_map(rowan::NodeOrToken::into_token)
+            .filter(|t| !is_trivia_kind(t.kind()))
+            .collect();
+        let mut seen_type_string = false;
+        let mut i = 0;
+        while i < raw.len() {
+            let t = &raw[i];
+            if !seen_type_string {
+                if t.kind() == crate::SyntaxKind::STRING {
+                    seen_type_string = true;
+                }
+                i += 1;
+                continue;
+            }
+            if t.kind() == crate::SyntaxKind::CURRENCY {
+                // Only flag BARE CURRENCY — one that doesn't
+                // follow a NUMBER (Amount-pairing). The Amount
+                // pairing is handled by `extract_custom_values`
+                // via i+1 lookahead, so a CURRENCY that's NOT
+                // preceded by a NUMBER at i-1 is bare.
+                let preceded_by_number = i > 0 && raw[i - 1].kind() == crate::SyntaxKind::NUMBER;
+                if !preceded_by_number {
+                    let range = t.text_range();
+                    let start: u32 = range.start().into();
+                    let end: u32 = range.end().into();
+                    let span =
+                        Span::new((start + bom_offset) as usize, (end + bom_offset) as usize);
+                    out.push(crate::ParseError::new(
+                        crate::ParseErrorKind::SyntaxError(
+                            "bare currency literal is not a valid custom directive value"
+                                .to_string(),
+                        ),
+                        span,
+                    ));
+                }
+            }
+            i += 1;
         }
     }
     out
@@ -3067,6 +3271,130 @@ mod tests {
             None | Some(IncompleteAmount::CurrencyOnly(_)) => {}
             other => panic!("div-by-zero leaked: {other:?}"),
         }
+    }
+
+    // ---- round-8 final compat regressions (#1282 flip) ---------
+
+    #[test]
+    fn indented_top_level_directive_emits_error() {
+        // A top-level directive that starts at column N>0 is a
+        // syntax error per the Beancount spec; the CST grammar
+        // accepts it silently, so the converter has to surface
+        // the diagnostic at directive-content-start position.
+        let src = "2020-07-28 open Assets:Foo\n  2020-07-28 open Assets:Bar\n";
+        let result = parse_via_cst(src);
+        let indent_errs = result
+            .errors
+            .iter()
+            .filter(|e| match &e.kind {
+                crate::ParseErrorKind::SyntaxError(s) => s.contains("column 0"),
+                _ => false,
+            })
+            .count();
+        assert_eq!(
+            indent_errs, 1,
+            "expected one column-0 diagnostic, got: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn indented_directive_after_blank_line_still_emits_error() {
+        // Same as above but with a blank line between the
+        // first directive and the indented one — the blank line
+        // shouldn't mask the indentation error.
+        let src = "2020-07-28 open Assets:Foo\n\n  2020-07-28 open Assets:Bar\n";
+        let result = parse_via_cst(src);
+        let indent_errs = result
+            .errors
+            .iter()
+            .filter(|e| match &e.kind {
+                crate::ParseErrorKind::SyntaxError(s) => s.contains("column 0"),
+                _ => false,
+            })
+            .count();
+        assert_eq!(indent_errs, 1, "errors: {:?}", result.errors);
+    }
+
+    #[test]
+    fn top_level_directive_at_column_0_no_diagnostic() {
+        // Sanity: well-formed top-level directives must NOT
+        // trigger the indent diagnostic.
+        let src = "2020-07-28 open Assets:Foo\n2020-07-28 open Assets:Bar\n";
+        let result = parse_via_cst(src);
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    }
+
+    #[test]
+    fn custom_directive_with_bare_currency_emits_error() {
+        // `bean-check` rejects bare currency literals in custom
+        // value position; the CST converter mirrors that.
+        let src = "2025-01-01 custom \"x\" 10 USD \"y\" NZD\n";
+        let result = parse_via_cst(src);
+        let bare_curr_errs = result
+            .errors
+            .iter()
+            .filter(|e| match &e.kind {
+                crate::ParseErrorKind::SyntaxError(s) => s.contains("bare currency"),
+                _ => false,
+            })
+            .count();
+        assert_eq!(
+            bare_curr_errs, 1,
+            "expected one bare-currency diagnostic, got: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn custom_directive_with_amount_no_error() {
+        // Sanity: `10 USD` (NUMBER + CURRENCY paired as Amount)
+        // is a valid custom value and must NOT trigger the
+        // bare-currency diagnostic.
+        let src = "2025-01-01 custom \"x\" 10 USD\n";
+        let result = parse_via_cst(src);
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    }
+
+    // ---- round-7 compat regressions (#1282 flip) ---------------
+
+    #[test]
+    fn balance_assertion_evaluates_arithmetic_value() {
+        // PR #1282 compat regression: rledger emitted a balance
+        // failure for `Assets:X  0.25+ 0.75 GBP` because only
+        // the first NUMBER (0.25) was used as the assertion
+        // target. CST converters for BALANCE/PRICE now evaluate
+        // arithmetic the same way posting AMOUNTs do.
+        let src = "2024-01-01 open Assets:X GBP\n\
+                   2024-01-01 open Equity:Open GBP\n\
+                   2024-01-02 * \"deposit\"\n  \
+                   Assets:X         1.00 GBP\n  \
+                   Equity:Open     -1.00 GBP\n\
+                   2024-01-03 balance Assets:X  0.25 + 0.75 GBP\n";
+        let result = parse_via_cst(src);
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let bal = result
+            .directives
+            .iter()
+            .find_map(|d| match &d.value {
+                Directive::Balance(b) => Some(b),
+                _ => None,
+            })
+            .expect("expected a Balance directive");
+        assert_eq!(bal.amount.number, Decimal::from(1));
+        assert_eq!(bal.amount.currency.as_str(), "GBP");
+    }
+
+    #[test]
+    fn price_directive_evaluates_arithmetic_value() {
+        let src = "2024-01-01 price USD  1/2 EUR\n";
+        let result = parse_via_cst(src);
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let Directive::Price(p) = &result.directives[0].value else {
+            panic!("expected Price");
+        };
+        assert_eq!(p.amount.number, Decimal::new(5, 1));
+        assert_eq!(p.amount.currency.as_str(), "EUR");
     }
 
     // ---- round-5 architecture review (#1281) -------------------

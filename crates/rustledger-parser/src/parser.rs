@@ -10,6 +10,18 @@
 //! ```text
 //! Source (&str) → Logos tokenize() → Vec<SpannedToken> → Manual parser → Directives
 //! ```
+//!
+//! # Status (post-#1282)
+//!
+//! Phase 3.7 of #1262 flipped `crate::parse()` to route through
+//! the CST-backed implementation. This module is no longer
+//! reached from the public API; its internal `#[cfg(test)]`
+//! suite still exercises it, but most helpers look "dead" to
+//! dead-code analysis once `parse()` stops delegating here.
+//! Phase 5 of #1262 deletes the module entirely. Until then,
+//! blanket `#![allow(dead_code)]` keeps the build clean instead
+//! of sprinkling `#[allow]` on every helper.
+#![allow(dead_code)]
 
 use std::borrow::Cow;
 

@@ -139,10 +139,14 @@ impl ParseWarning {
 
 /// Parse beancount source code.
 ///
-/// Uses a fast token-based parser: a Logos lexer feeds a hand-rolled
-/// state-machine parser. An early version targeted winnow's Stream
-/// trait but the manual approach turned out simpler and faster, so the
-/// winnow dependency was removed.
+/// Routes through the CST-backed implementation
+/// ([`parse_via_cst`]): a lossless Logos lexer feeds a structured
+/// CST builder, and the converter in `crate::cst::convert` walks
+/// the resulting tree to produce the legacy AST-shaped
+/// [`ParseResult`]. The previous hand-rolled state-machine parser
+/// in `crate::parser` remains in the crate for now — its own
+/// internal unit tests still call it directly. Phase 5 of #1262
+/// deletes it.
 ///
 /// # Arguments
 ///
@@ -151,23 +155,9 @@ impl ParseWarning {
 /// # Returns
 ///
 /// A `ParseResult` containing directives, options, includes, plugins, and errors.
-///
-/// # CST routing (phase 3.2-3.4 migration, #1262)
-///
-/// Setting `RUSTLEDGER_CST_PARSER=1` in the environment routes this
-/// function through [`parse_via_cst`] (the CST-backed implementation
-/// being incrementally built in `crate::cst::convert`) instead of the
-/// legacy state-machine parser. Used by the test suite to verify that
-/// downstream consumers (loader, booking, validate, query) behave
-/// identically under the new parser. The env-gate makes this a
-/// no-op for production callers until the gate is removed in a
-/// follow-up PR that flips the default.
 #[must_use]
 pub fn parse(source: &str) -> ParseResult {
-    if std::env::var_os("RUSTLEDGER_CST_PARSER").is_some() {
-        return parse_via_cst(source);
-    }
-    parser::parse(source)
+    parse_via_cst(source)
 }
 
 /// Parse beancount source code, returning only directives and errors.

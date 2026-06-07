@@ -141,7 +141,10 @@ pub fn parse_structured(source: &str) -> SyntaxNode {
         } else {
             // Unrecognized line. Drain pending trivia + this entire
             // line flat under SOURCE_FILE; PR 2.4 (error recovery)
-            // will replace this branch. We DO NOT open a node for
+            // will REDUCE the scope of this branch by wrapping
+            // malformed-but-recognizable content in `ERROR_NODE`,
+            // but genuinely-unknown content keeps falling here as
+            // the terminal fallback. We DO NOT open a node for
             // this content — the current shape is "everything
             // outside a recognized directive is flat under
             // SOURCE_FILE."

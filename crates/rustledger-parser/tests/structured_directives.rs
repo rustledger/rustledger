@@ -2993,11 +2993,17 @@ fn include_directive_with_metadata_wraps_multi_line() {
     let ds = directives(&tree);
     assert_eq!(ds.len(), 1);
     assert_eq!(ds[0].kind(), INCLUDE_DIRECTIVE);
-    let metas = ds[0]
+    let mes: Vec<SyntaxNode> = ds[0]
         .descendants()
         .filter(|n| n.kind() == META_ENTRY)
-        .count();
-    assert_eq!(metas, 1);
+        .collect();
+    assert_eq!(mes.len(), 1);
+    // Pin full META_ENTRY shape so a regression that produces a
+    // structurally-wrong META_ENTRY but the same count still fails.
+    assert_eq!(
+        elements_of(&mes[0]),
+        tok_seq(&[WHITESPACE, META_KEY, WHITESPACE, STRING, NEWLINE]),
+    );
 }
 
 #[test]
@@ -3011,11 +3017,15 @@ fn plugin_directive_with_metadata_wraps_multi_line() {
     let ds = directives(&tree);
     assert_eq!(ds.len(), 1);
     assert_eq!(ds[0].kind(), PLUGIN_DIRECTIVE);
-    let metas = ds[0]
+    let mes: Vec<SyntaxNode> = ds[0]
         .descendants()
         .filter(|n| n.kind() == META_ENTRY)
-        .count();
-    assert_eq!(metas, 1);
+        .collect();
+    assert_eq!(mes.len(), 1);
+    assert_eq!(
+        elements_of(&mes[0]),
+        tok_seq(&[WHITESPACE, META_KEY, WHITESPACE, STRING, NEWLINE]),
+    );
 }
 
 #[test]
@@ -3029,11 +3039,43 @@ fn custom_directive_with_metadata_wraps_multi_line() {
     let ds = directives(&tree);
     assert_eq!(ds.len(), 1);
     assert_eq!(ds[0].kind(), CUSTOM_DIRECTIVE);
-    let metas = ds[0]
+    let mes: Vec<SyntaxNode> = ds[0]
         .descendants()
         .filter(|n| n.kind() == META_ENTRY)
+        .collect();
+    assert_eq!(mes.len(), 1);
+    assert_eq!(
+        elements_of(&mes[0]),
+        tok_seq(&[WHITESPACE, META_KEY, WHITESPACE, STRING, NEWLINE]),
+    );
+}
+
+/// For trailing-inline-comment tests: assert that a directive
+/// contains exactly one COMMENT child AND that COMMENT appears
+/// BEFORE the directive's NEWLINE terminator. Catches a
+/// regression that reorders trailing tokens (e.g., closes the
+/// directive before consuming the same-line comment, putting the
+/// COMMENT logically after the terminator).
+fn assert_directive_has_trailing_comment_before_newline(directive: &SyntaxNode) {
+    use SyntaxKind::*;
+    let kids = elements_of(directive);
+    let comment_idx = kids
+        .iter()
+        .position(|e| matches!(e, Element::Tok(COMMENT)))
+        .expect("directive must contain a COMMENT child");
+    let newline_idx = kids
+        .iter()
+        .position(|e| matches!(e, Element::Tok(NEWLINE)))
+        .expect("directive must contain its NEWLINE terminator");
+    assert!(
+        comment_idx < newline_idx,
+        "trailing same-line COMMENT must precede the NEWLINE inside the directive",
+    );
+    let comment_count = kids
+        .iter()
+        .filter(|e| matches!(e, Element::Tok(COMMENT)))
         .count();
-    assert_eq!(metas, 1);
+    assert_eq!(comment_count, 1);
 }
 
 #[test]
@@ -3051,11 +3093,7 @@ fn option_directive_with_trailing_inline_comment_attaches_inside() {
     let ds = directives(&tree);
     assert_eq!(ds.len(), 1);
     assert_eq!(ds[0].kind(), OPTION_DIRECTIVE);
-    let comment_in_directive = ds[0]
-        .children_with_tokens()
-        .filter(|e| e.kind() == COMMENT)
-        .count();
-    assert_eq!(comment_in_directive, 1);
+    assert_directive_has_trailing_comment_before_newline(&ds[0]);
 }
 
 #[test]
@@ -3068,11 +3106,7 @@ fn include_directive_with_trailing_inline_comment_attaches_inside() {
     let ds = directives(&tree);
     assert_eq!(ds.len(), 1);
     assert_eq!(ds[0].kind(), INCLUDE_DIRECTIVE);
-    let comment_in_directive = ds[0]
-        .children_with_tokens()
-        .filter(|e| e.kind() == COMMENT)
-        .count();
-    assert_eq!(comment_in_directive, 1);
+    assert_directive_has_trailing_comment_before_newline(&ds[0]);
 }
 
 #[test]
@@ -3085,11 +3119,7 @@ fn plugin_directive_with_trailing_inline_comment_attaches_inside() {
     let ds = directives(&tree);
     assert_eq!(ds.len(), 1);
     assert_eq!(ds[0].kind(), PLUGIN_DIRECTIVE);
-    let comment_in_directive = ds[0]
-        .children_with_tokens()
-        .filter(|e| e.kind() == COMMENT)
-        .count();
-    assert_eq!(comment_in_directive, 1);
+    assert_directive_has_trailing_comment_before_newline(&ds[0]);
 }
 
 #[test]
@@ -3102,11 +3132,7 @@ fn custom_directive_with_trailing_inline_comment_attaches_inside() {
     let ds = directives(&tree);
     assert_eq!(ds.len(), 1);
     assert_eq!(ds[0].kind(), CUSTOM_DIRECTIVE);
-    let comment_in_directive = ds[0]
-        .children_with_tokens()
-        .filter(|e| e.kind() == COMMENT)
-        .count();
-    assert_eq!(comment_in_directive, 1);
+    assert_directive_has_trailing_comment_before_newline(&ds[0]);
 }
 
 #[test]

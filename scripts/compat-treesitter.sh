@@ -152,6 +152,7 @@ cat > "${TS_QUERY_FILE}" <<'EOF'
 (include) @directive
 (plugin) @directive
 (custom) @directive
+(transaction) @directive
 EOF
 
 # Tree-sitter query output looks like
@@ -197,8 +198,16 @@ for f in "${SAMPLE[@]}"; do
   #       capture: directive, start: (0, 0), end: (1, 0)
   # We only need the pattern index per match — it tells us which
   # directive kind (0=open, 1=close, ...) per the query file order.
+  # MUST stay aligned with the (kind) @directive lines in
+  # TS_QUERY_FILE above — array indices correspond to tree-sitter
+  # pattern indices (0=open, 1=close, ...). Also aligned with the
+  # `directive_kind_label` arms in
+  # crates/rustledger-parser/examples/dump_top_level_directives.rs;
+  # see scripts/check-compat-treesitter-sync.sh for the sync guard.
   kinds=(open close balance pad event query note document price commodity \
-         pushtag poptag pushmeta popmeta)
+         pushtag poptag pushmeta popmeta \
+         option include plugin custom \
+         transaction)
   theirs="$(mktemp)"
   (
     cd "${TREE_SITTER_BEANCOUNT}"

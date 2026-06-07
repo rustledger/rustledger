@@ -1305,7 +1305,25 @@ fn extract_error_node_errors(
                     // span_from is called).
                     let span = Span::new((ls + bom_offset) as usize, (end + bom_offset) as usize);
                     let line_text = stripped.get(ls as usize..end as usize).unwrap_or("");
-                    out.push(classify_recovery_error(line_text, span));
+                    let primary = classify_recovery_error(line_text, span);
+                    let primary_is_bom =
+                        matches!(primary.kind, crate::ParseErrorKind::BomInDirectiveBody);
+                    out.push(primary);
+                    // Additive secondary `BomInDirectiveBody` when
+                    // a different primary diagnostic (Unicode
+                    // account / generic syntax) already fired AND
+                    // the line ALSO contains a BOM byte. Matches
+                    // legacy `parser.rs:2258-2263`: without this,
+                    // a Windows-exported line with both problems
+                    // surfaces only the actionable root cause and
+                    // the user has no clue the invisible BOM byte
+                    // is also corrupting the line.
+                    if !primary_is_bom && line_text.contains(crate::bom::BOM_CHAR) {
+                        out.push(
+                            crate::ParseError::new(crate::ParseErrorKind::BomInDirectiveBody, span)
+                                .with_hint(crate::parser::BOM_REMOVAL_HINT),
+                        );
+                    }
                 }
                 line_start = None;
                 first_non_trivia = None;
@@ -2289,6 +2307,46 @@ mod tests {
             bom_errors[0].hint.is_some(),
             "BomInDirectiveBody should carry BOM_REMOVAL_HINT",
         );
+    }
+
+    #[test]
+    fn error_recovery_emits_both_invalid_account_and_bom_for_dual_line() {
+        // Round-2 finding: legacy `parser.rs:2258-2263` emits a
+        // SECONDARY `BomInDirectiveBody` whenever the line ALSO
+        // contains a BOM byte and the primary diagnostic isn't
+        // BOM itself. Without this, a Windows-exported file with
+        // a Unicode account AND an internal BOM loses the BOM
+        // hint entirely.
+        let src = "garbage Assets:Café\u{FEFF}content\n";
+        let result = parse_via_cst(src);
+        let invalid_account_count = result
+            .errors
+            .iter()
+            .filter(|e| matches!(e.kind, crate::ParseErrorKind::InvalidAccount(_)))
+            .count();
+        let bom_count = result
+            .errors
+            .iter()
+            .filter(|e| matches!(e.kind, crate::ParseErrorKind::BomInDirectiveBody))
+            .count();
+        assert_eq!(
+            invalid_account_count, 1,
+            "expected one InvalidAccount: {:?}",
+            result.errors
+        );
+        assert_eq!(
+            bom_count, 1,
+            "expected secondary BomInDirectiveBody: {:?}",
+            result.errors
+        );
+        // The secondary BOM diagnostic must carry the hint so
+        // miette renders the remediation step.
+        let bom_err = result
+            .errors
+            .iter()
+            .find(|e| matches!(e.kind, crate::ParseErrorKind::BomInDirectiveBody))
+            .unwrap();
+        assert!(bom_err.hint.is_some());
     }
 
     #[test]

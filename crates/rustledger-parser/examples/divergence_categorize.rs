@@ -1,10 +1,23 @@
 //! Categorize divergent corpus files by which missing feature
 //! is responsible. For each divergent file, examines the legacy
-//! ParseResult and reports a histogram of which feature classes
+//! `ParseResult` and reports a histogram of which feature classes
 //! appear (pre-posting comments, arithmetic AMOUNT, Document
 //! tags/links, standalone comments, etc.). The output guides
 //! which gap to attack next for maximum corpus-convergence
 //! payoff.
+//!
+//! Diagnostic example only — lint rules tightened in the production
+//! crate aren't worth enforcing for one-off probes.
+
+#![allow(
+    clippy::useless_let_if_seq,
+    clippy::single_char_pattern,
+    clippy::cast_lossless,
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::missing_panics_doc
+)]
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;

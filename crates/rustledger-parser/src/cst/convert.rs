@@ -505,12 +505,16 @@ fn strip_string_quotes(raw: &str) -> Option<&str> {
 fn convert_option(node: &OptionDirective, bom_offset: u32) -> Option<(String, String, Span)> {
     let key = node.key()?.text_unquoted()?.to_string();
     let value = node.value()?.text_unquoted()?.to_string();
-    Some((key, value, posting_span(node.syntax(), bom_offset)))
+    Some((
+        key,
+        value,
+        single_line_directive_span(node.syntax(), bom_offset),
+    ))
 }
 
 fn convert_include(node: &IncludeDirective, bom_offset: u32) -> Option<(String, Span)> {
     let path = node.path()?.text_unquoted()?.to_string();
-    Some((path, posting_span(node.syntax(), bom_offset)))
+    Some((path, single_line_directive_span(node.syntax(), bom_offset)))
 }
 
 fn convert_plugin(
@@ -521,7 +525,11 @@ fn convert_plugin(
     let config = node
         .config()
         .and_then(|c| c.text_unquoted().map(String::from));
-    Some((module, config, posting_span(node.syntax(), bom_offset)))
+    Some((
+        module,
+        config,
+        single_line_directive_span(node.syntax(), bom_offset),
+    ))
 }
 
 // ---- Transaction + Posting + sub-nodes -------------------------
@@ -1246,11 +1254,43 @@ fn posting_span(node: &crate::SyntaxNode, bom_offset: u32) -> Span {
     let range = node.text_range();
     let start: u32 = range.start().into();
     let end_raw: u32 = range.end().into();
+    // Postings have no inter-directive leading trivia: their
+    // first direct-child NEWLINE IS the terminator.
     let end = node
         .children_with_tokens()
         .filter_map(rowan::NodeOrToken::into_token)
         .find(|t| t.kind() == crate::SyntaxKind::NEWLINE)
         .map_or(end_raw, |t| u32::from(t.text_range().start()));
+    Span::new((start + bom_offset) as usize, (end + bom_offset) as usize)
+}
+
+/// Span policy for non-Directive single-line constructs that
+/// participate in inter-directive trivia attachment (Option,
+/// Include, Plugin). Unlike Posting these may have leading
+/// trivia (blank-line NEWLINEs, comments) inside the node from
+/// the Directive-Terminator Rule. Start at the first non-trivia
+/// content token; end at the first NEWLINE after that.
+fn single_line_directive_span(node: &crate::SyntaxNode, bom_offset: u32) -> Span {
+    let range = node.text_range();
+    let start_raw: u32 = range.start().into();
+    let end_raw: u32 = range.end().into();
+    let mut content_start: Option<u32> = None;
+    let mut terminator: Option<u32> = None;
+    for t in node
+        .children_with_tokens()
+        .filter_map(rowan::NodeOrToken::into_token)
+    {
+        if content_start.is_none() {
+            if !is_trivia_kind(t.kind()) {
+                content_start = Some(u32::from(t.text_range().start()));
+            }
+        } else if t.kind() == crate::SyntaxKind::NEWLINE {
+            terminator = Some(u32::from(t.text_range().start()));
+            break;
+        }
+    }
+    let start = content_start.unwrap_or(start_raw);
+    let end = terminator.unwrap_or(end_raw);
     Span::new((start + bom_offset) as usize, (end + bom_offset) as usize)
 }
 

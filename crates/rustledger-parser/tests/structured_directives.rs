@@ -2421,6 +2421,7 @@ fn amount_wraps_arithmetic_no_spaces() {
     assert_round_trip(source, &tree);
 
     let ps = postings(&tree);
+    assert_eq!(ps.len(), 1);
     let amts: Vec<SyntaxNode> = ps[0].children().filter(|n| n.kind() == AMOUNT).collect();
     assert_eq!(amts.len(), 1);
     assert_eq!(
@@ -2441,6 +2442,7 @@ fn amount_wraps_arithmetic_with_spaces_around_op() {
     assert_round_trip(source, &tree);
 
     let ps = postings(&tree);
+    assert_eq!(ps.len(), 1);
     let amts: Vec<SyntaxNode> = ps[0].children().filter(|n| n.kind() == AMOUNT).collect();
     assert_eq!(amts.len(), 1);
     assert_eq!(
@@ -2462,6 +2464,7 @@ fn amount_wraps_signed_arithmetic_negative_outer() {
     assert_round_trip(source, &tree);
 
     let ps = postings(&tree);
+    assert_eq!(ps.len(), 1);
     let amts: Vec<SyntaxNode> = ps[0].children().filter(|n| n.kind() == AMOUNT).collect();
     assert_eq!(amts.len(), 1);
     assert_eq!(
@@ -2482,6 +2485,7 @@ fn amount_wraps_parenthesized_subexpression() {
     assert_round_trip(source, &tree);
 
     let ps = postings(&tree);
+    assert_eq!(ps.len(), 1);
     let amts: Vec<SyntaxNode> = ps[0].children().filter(|n| n.kind() == AMOUNT).collect();
     assert_eq!(amts.len(), 1);
     assert_eq!(
@@ -2502,6 +2506,7 @@ fn amount_wraps_multiplication_and_division() {
     assert_round_trip(source, &tree);
 
     let ps = postings(&tree);
+    assert_eq!(ps.len(), 1);
     let amts: Vec<SyntaxNode> = ps[0].children().filter(|n| n.kind() == AMOUNT).collect();
     assert_eq!(amts.len(), 1);
     assert_eq!(
@@ -2521,6 +2526,7 @@ fn amount_wraps_nested_parens_via_depth_tracking() {
     assert_round_trip(source, &tree);
 
     let ps = postings(&tree);
+    assert_eq!(ps.len(), 1);
     let amts: Vec<SyntaxNode> = ps[0].children().filter(|n| n.kind() == AMOUNT).collect();
     assert_eq!(amts.len(), 1);
     assert_eq!(
@@ -2546,6 +2552,7 @@ fn amount_wraps_real_corpus_arithmetic_shape() {
     assert_round_trip(source, &tree);
 
     let ps = postings(&tree);
+    assert_eq!(ps.len(), 1);
     let amts: Vec<SyntaxNode> = ps[0].children().filter(|n| n.kind() == AMOUNT).collect();
     assert_eq!(amts.len(), 1);
     assert_eq!(
@@ -2600,6 +2607,7 @@ fn amount_with_unclosed_paren_at_newline_stops_per_rule_5() {
     assert_round_trip(source, &tree);
 
     let ps = postings(&tree);
+    assert_eq!(ps.len(), 1);
     let amts: Vec<SyntaxNode> = ps[0].children().filter(|n| n.kind() == AMOUNT).collect();
     assert_eq!(amts.len(), 1);
     // AMOUNT contains the open paren and its consumed-before-

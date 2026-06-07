@@ -26,11 +26,13 @@
 //! - Note, Document, Event, Query, Price (single-line)
 //! - Balance (single-line + amount + optional tolerance)
 //! - Pad (single-line, two accounts)
-//!
-//! Pending directive converters:
-//! - Pushtag, Poptag, Pushmeta, Popmeta (state-only side effects)
-//! - Option, Include, Plugin (`ParseResult` fields, not directives)
 //! - Custom (heterogeneous value list)
+//!
+//! Implemented `ParseResult`-field extractors:
+//! - Option, Include, Plugin
+//!
+//! Pending:
+//! - Pushtag, Poptag, Pushmeta, Popmeta (state-only side effects)
 //! - Transaction (header + postings + metadata, most complex)
 //!
 //! Pending lossless features (deferred):
@@ -49,9 +51,9 @@ use rustledger_core::{
 
 use crate::ParseResult;
 use crate::cst::ast::{
-    self, AstNode, AstToken, BalanceDirective, CloseDirective, CommodityDirective,
-    DocumentDirective, EventDirective, MetaEntry, NoteDirective, OpenDirective, PadDirective,
-    PriceDirective, QueryDirective, SourceFile,
+    self, AstNode, AstToken, BalanceDirective, CloseDirective, CommodityDirective, CustomDirective,
+    DocumentDirective, EventDirective, IncludeDirective, MetaEntry, NoteDirective, OpenDirective,
+    OptionDirective, PadDirective, PluginDirective, PriceDirective, QueryDirective, SourceFile,
 };
 
 /// Parse Beancount source via the CST and produce the legacy
@@ -71,9 +73,9 @@ pub fn parse_via_cst(source: &str) -> ParseResult {
     let source_file = SourceFile::parse(stripped);
 
     let mut directives: Vec<Spanned<Directive>> = Vec::new();
-    let options: Vec<(String, String, Span)> = Vec::new();
-    let includes: Vec<(String, Span)> = Vec::new();
-    let plugins: Vec<(String, Option<String>, Span)> = Vec::new();
+    let mut options: Vec<(String, String, Span)> = Vec::new();
+    let mut includes: Vec<(String, Span)> = Vec::new();
+    let mut plugins: Vec<(String, Option<String>, Span)> = Vec::new();
     let comments: Vec<Spanned<String>> = Vec::new();
     let errors = Vec::new();
     let warnings = Vec::new();
@@ -129,6 +131,26 @@ pub fn parse_via_cst(source: &str) -> ParseResult {
             ast::Directive::Pad(node) => {
                 if let Some(spanned) = convert_pad(&node, bom_offset) {
                     directives.push(spanned);
+                }
+            }
+            ast::Directive::Custom(node) => {
+                if let Some(spanned) = convert_custom(&node, bom_offset) {
+                    directives.push(spanned);
+                }
+            }
+            ast::Directive::Option(node) => {
+                if let Some(triple) = convert_option(&node, bom_offset) {
+                    options.push(triple);
+                }
+            }
+            ast::Directive::Include(node) => {
+                if let Some(pair) = convert_include(&node, bom_offset) {
+                    includes.push(pair);
+                }
+            }
+            ast::Directive::Plugin(node) => {
+                if let Some(triple) = convert_plugin(&node, bom_offset) {
+                    plugins.push(triple);
                 }
             }
             // Remaining directive types fall through unconverted —
@@ -348,6 +370,130 @@ fn convert_pad(node: &PadDirective, bom_offset: u32) -> Option<Spanned<Directive
     };
     let span = node_span(node.syntax(), bom_offset);
     Some(Spanned::new(Directive::Pad(pad), span))
+}
+
+fn convert_custom(node: &CustomDirective, bom_offset: u32) -> Option<Spanned<Directive>> {
+    let date = parse_date_token(node.date()?.text())?;
+    let custom_type = node.custom_type()?.text_unquoted()?.to_string();
+    let values = extract_custom_values(node.syntax());
+    let meta = convert_meta_entries(node.syntax());
+
+    let custom = rustledger_core::directive::Custom {
+        date,
+        custom_type,
+        values,
+        meta,
+    };
+    let span = node_span(node.syntax(), bom_offset);
+    Some(Spanned::new(Directive::Custom(custom), span))
+}
+
+/// Walk the heterogeneous value tokens after the `custom "type"`
+/// header. The legacy parser tries each value type in this order:
+/// string > account > bool > amount (NUMBER+CURRENCY) > number >
+/// date > currency. We replicate that priority on the flat token
+/// stream, with one structural pass that pairs an immediately-
+/// adjacent NUMBER+CURRENCY into an [`Amount`].
+fn extract_custom_values(node: &crate::SyntaxNode) -> Vec<MetaValue> {
+    let mut values = Vec::new();
+    let mut seen_type_string = false;
+    // Collect tokens by kind, skipping trivia. We do a two-pass:
+    // first form Amount pairs (NUMBER + CURRENCY adjacent, ignoring
+    // whitespace), then emit remaining tokens individually.
+    let raw: Vec<rowan::SyntaxToken<crate::BeancountLanguage>> = node
+        .children_with_tokens()
+        .filter_map(rowan::NodeOrToken::into_token)
+        .filter(|t| {
+            !matches!(
+                t.kind(),
+                crate::SyntaxKind::WHITESPACE
+                    | crate::SyntaxKind::NEWLINE
+                    | crate::SyntaxKind::COMMENT
+            )
+        })
+        .collect();
+
+    let mut i = 0;
+    while i < raw.len() {
+        let t = &raw[i];
+        // Skip the directive's header tokens (DATE, CUSTOM_KW, and
+        // the first STRING which is the custom-type name).
+        if !seen_type_string {
+            if t.kind() == crate::SyntaxKind::STRING {
+                seen_type_string = true;
+            }
+            i += 1;
+            continue;
+        }
+        match t.kind() {
+            crate::SyntaxKind::STRING => {
+                if let Some(s) = strip_string_quotes(t.text()) {
+                    values.push(MetaValue::String(s.to_string()));
+                }
+            }
+            crate::SyntaxKind::ACCOUNT => {
+                values.push(MetaValue::Account(Account::new(t.text())));
+            }
+            crate::SyntaxKind::BOOL_TRUE => values.push(MetaValue::Bool(true)),
+            crate::SyntaxKind::BOOL_FALSE => values.push(MetaValue::Bool(false)),
+            crate::SyntaxKind::NUMBER => {
+                // Look ahead for an adjacent CURRENCY -> Amount.
+                if let Some(next) = raw.get(i + 1)
+                    && next.kind() == crate::SyntaxKind::CURRENCY
+                    && let Some(num) = parse_decimal_token(t.text())
+                {
+                    let curr = Currency::new(next.text());
+                    values.push(MetaValue::Amount(Amount::new(num, curr)));
+                    i += 2;
+                    continue;
+                }
+                if let Some(num) = parse_decimal_token(t.text()) {
+                    values.push(MetaValue::Number(num));
+                }
+            }
+            crate::SyntaxKind::DATE => {
+                if let Some(date) = parse_date_token(t.text()) {
+                    values.push(MetaValue::Date(date));
+                }
+            }
+            crate::SyntaxKind::CURRENCY => {
+                values.push(MetaValue::Currency(Currency::new(t.text())));
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    values
+}
+
+fn strip_string_quotes(raw: &str) -> Option<&str> {
+    let bytes = raw.as_bytes();
+    if bytes.len() < 2 || bytes[0] != b'"' || bytes[bytes.len() - 1] != b'"' {
+        return None;
+    }
+    Some(&raw[1..raw.len() - 1])
+}
+
+fn convert_option(node: &OptionDirective, bom_offset: u32) -> Option<(String, String, Span)> {
+    let key = node.key()?.text_unquoted()?.to_string();
+    let value = node.value()?.text_unquoted()?.to_string();
+    Some((key, value, node_span(node.syntax(), bom_offset)))
+}
+
+fn convert_include(node: &IncludeDirective, bom_offset: u32) -> Option<(String, Span)> {
+    let path = node.path()?.text_unquoted()?.to_string();
+    Some((path, node_span(node.syntax(), bom_offset)))
+}
+
+fn convert_plugin(
+    node: &PluginDirective,
+    bom_offset: u32,
+) -> Option<(String, Option<String>, Span)> {
+    let module = node.module()?.text_unquoted()?.to_string();
+    let config = node
+        .config()
+        .and_then(|c| c.text_unquoted().map(String::from));
+    Some((module, config, node_span(node.syntax(), bom_offset)))
 }
 
 // ---- Metadata extraction ---------------------------------------
@@ -678,5 +824,76 @@ mod tests {
         };
         assert_eq!(p.account.as_str(), "Assets:Cash");
         assert_eq!(p.source_account.as_str(), "Equity:Opening-Balances");
+    }
+
+    #[test]
+    fn custom_directive_basic() {
+        let src = "2024-01-01 custom \"budget\" \"food\" 500 USD\n";
+        let result = parse_via_cst(src);
+        assert_directive_count(&result, 1);
+        let Directive::Custom(c) = &result.directives[0].value else {
+            panic!("expected Custom");
+        };
+        assert_eq!(c.custom_type, "budget");
+        assert_eq!(c.values.len(), 2);
+        assert_eq!(c.values[0], MetaValue::String("food".to_string()));
+        // 500 USD becomes an Amount (NUMBER + CURRENCY adjacent).
+        let MetaValue::Amount(amt) = &c.values[1] else {
+            panic!("expected Amount, got {:?}", c.values[1]);
+        };
+        assert_eq!(amt.number, Decimal::from(500));
+        assert_eq!(amt.currency.as_str(), "USD");
+    }
+
+    #[test]
+    fn custom_directive_heterogeneous_values() {
+        let src = "2024-01-01 custom \"test\" Assets:Cash TRUE 42 2024-06-15\n";
+        let result = parse_via_cst(src);
+        let Directive::Custom(c) = &result.directives[0].value else {
+            panic!("expected Custom");
+        };
+        assert_eq!(c.values.len(), 4);
+        assert!(matches!(c.values[0], MetaValue::Account(_)));
+        assert_eq!(c.values[1], MetaValue::Bool(true));
+        assert_eq!(c.values[2], MetaValue::Number(Decimal::from(42)));
+        assert!(matches!(c.values[3], MetaValue::Date(_)));
+    }
+
+    #[test]
+    fn option_directive_populates_options_field() {
+        let src = "option \"title\" \"My Ledger\"\n";
+        let result = parse_via_cst(src);
+        assert_directive_count(&result, 0);
+        assert_eq!(result.options.len(), 1);
+        assert_eq!(result.options[0].0, "title");
+        assert_eq!(result.options[0].1, "My Ledger");
+    }
+
+    #[test]
+    fn include_directive_populates_includes_field() {
+        let src = "include \"shared.beancount\"\n";
+        let result = parse_via_cst(src);
+        assert_directive_count(&result, 0);
+        assert_eq!(result.includes.len(), 1);
+        assert_eq!(result.includes[0].0, "shared.beancount");
+    }
+
+    #[test]
+    fn plugin_directive_with_config() {
+        let src = "plugin \"my.plugin\" \"cfg\"\n";
+        let result = parse_via_cst(src);
+        assert_directive_count(&result, 0);
+        assert_eq!(result.plugins.len(), 1);
+        assert_eq!(result.plugins[0].0, "my.plugin");
+        assert_eq!(result.plugins[0].1.as_deref(), Some("cfg"));
+    }
+
+    #[test]
+    fn plugin_directive_without_config() {
+        let src = "plugin \"my.plugin\"\n";
+        let result = parse_via_cst(src);
+        assert_eq!(result.plugins.len(), 1);
+        assert_eq!(result.plugins[0].0, "my.plugin");
+        assert!(result.plugins[0].1.is_none());
     }
 }

@@ -150,8 +150,22 @@ impl ParseWarning {
 /// # Returns
 ///
 /// A `ParseResult` containing directives, options, includes, plugins, and errors.
+///
+/// # CST routing (phase 3.2-3.4 migration, #1262)
+///
+/// Setting `RUSTLEDGER_CST_PARSER=1` in the environment routes this
+/// function through [`parse_via_cst`] (the CST-backed implementation
+/// being incrementally built in `crate::cst::convert`) instead of the
+/// legacy state-machine parser. Used by the test suite to verify that
+/// downstream consumers (loader, booking, validate, query) behave
+/// identically under the new parser. The env-gate makes this a
+/// no-op for production callers until the gate is removed in a
+/// follow-up PR that flips the default.
 #[must_use]
 pub fn parse(source: &str) -> ParseResult {
+    if std::env::var_os("RUSTLEDGER_CST_PARSER").is_some() {
+        return parse_via_cst(source);
+    }
     parser::parse(source)
 }
 

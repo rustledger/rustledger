@@ -98,7 +98,9 @@ pub fn parse_via_cst(source: &str) -> ParseResult {
     // entry as parse_entry consumes it, so order matches start
     // offset.
     comments.sort_by_key(|s| s.span.start);
-    let errors = extract_error_node_errors(&source_file, bom_offset);
+    let mut errors = extract_error_node_errors(&source_file, bom_offset);
+    errors.extend(extract_transaction_body_errors(&source_file, bom_offset));
+    errors.sort_by_key(|e| e.span.start);
     let warnings = Vec::new();
     let currency_occurrences = extract_currency_occurrences(&source_file, bom_offset);
 
@@ -328,7 +330,10 @@ fn convert_query(node: &QueryDirective, bom_offset: u32) -> Option<Spanned<Direc
 fn convert_price(node: &PriceDirective, bom_offset: u32) -> Option<Spanned<Directive>> {
     let date = parse_date_token(node.date()?.text())?;
     let base_currency = Currency::new(node.base_currency()?.text());
-    let number = parse_decimal_token(node.number()?.text())?;
+    let mut number = parse_decimal_token(node.number()?.text())?;
+    if node_has_minus_before_number(node.syntax()) {
+        number = -number;
+    }
     let quote_currency = Currency::new(node.quote_currency()?.text());
     let amount = Amount::new(number, quote_currency);
     let meta = convert_meta_entries(node.syntax());
@@ -346,7 +351,10 @@ fn convert_price(node: &PriceDirective, bom_offset: u32) -> Option<Spanned<Direc
 fn convert_balance(node: &BalanceDirective, bom_offset: u32) -> Option<Spanned<Directive>> {
     let date = parse_date_token(node.date()?.text())?;
     let account = Account::new(node.account()?.text());
-    let number = parse_decimal_token(node.number()?.text())?;
+    let mut number = parse_decimal_token(node.number()?.text())?;
+    if node_has_minus_before_number(node.syntax()) {
+        number = -number;
+    }
     let currency = Currency::new(node.currency()?.text());
     let amount = Amount::new(number, currency);
     let tolerance = extract_balance_tolerance(node.syntax());
@@ -802,6 +810,49 @@ fn convert_meta_entries(node: &crate::SyntaxNode) -> Metadata {
     meta
 }
 
+/// Returns true if a node's flat direct-child tokens contain a
+/// `MINUS` BEFORE the first `NUMBER`. Used to detect signed
+/// numeric values in directives like Balance / Price whose typed-
+/// AST accessors return the unsigned NUMBER token only.
+fn node_has_minus_before_number(node: &crate::SyntaxNode) -> bool {
+    for el in node.children_with_tokens() {
+        let rowan::NodeOrToken::Token(t) = el else {
+            continue;
+        };
+        match t.kind() {
+            crate::SyntaxKind::MINUS => return true,
+            crate::SyntaxKind::NUMBER => return false,
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Returns true if a `META_ENTRY`'s value tokens contain a `MINUS`
+/// before the first `NUMBER`. Used by `meta_value_from_entry` to
+/// detect signed-number values like `precision: -1` which the
+/// legacy parser handles via `parse_signed_number`.
+fn meta_entry_has_minus_sign(entry: &MetaEntry) -> bool {
+    let mut past_key = false;
+    for el in entry.syntax().children_with_tokens() {
+        let rowan::NodeOrToken::Token(t) = el else {
+            continue;
+        };
+        if !past_key {
+            if t.kind() == crate::SyntaxKind::META_KEY {
+                past_key = true;
+            }
+            continue;
+        }
+        match t.kind() {
+            crate::SyntaxKind::MINUS => return true,
+            crate::SyntaxKind::NUMBER => return false,
+            _ => {}
+        }
+    }
+    false
+}
+
 /// Discriminate the value tokens under a `META_ENTRY` into a
 /// typed [`MetaValue`]. Matches the legacy parser's preference
 /// order: string > number > date > account > currency > tag >
@@ -813,8 +864,21 @@ fn meta_value_from_entry(entry: &MetaEntry) -> MetaValue {
         return MetaValue::String(text.to_string());
     }
     if let Some(n) = entry.value_number()
-        && let Some(decimal) = parse_decimal_token(n.text())
+        && let Some(mut decimal) = parse_decimal_token(n.text())
     {
+        // A MINUS direct-child token (signed value) negates the
+        // number. Legacy parses `precision: -1` as Number(-1);
+        // we need the same.
+        if meta_entry_has_minus_sign(entry) {
+            decimal = -decimal;
+        }
+        // `0.50 USD` style: NUMBER + CURRENCY together → Amount.
+        // Plain NUMBER without CURRENCY → Number. Matches legacy
+        // parser priority where parse_amount runs before
+        // parse_signed_number.
+        if let Some(c) = entry.value_currency() {
+            return MetaValue::Amount(Amount::new(decimal, Currency::new(c.text())));
+        }
         return MetaValue::Number(decimal);
     }
     if let Some(d) = entry.value_date()
@@ -966,6 +1030,85 @@ const fn is_comment_kind(kind: crate::SyntaxKind) -> bool {
 /// **After content.** Comments that appear AFTER the directive's
 /// first content token (e.g., trailing same-line comments on a
 /// posting) belong to the directive, not to `comments`.
+/// Walk each `TRANSACTION` and emit a `SyntaxError` for any body
+/// line that contains flat catch-all tokens (e.g., an
+/// unrecognized identifier where a posting was expected).
+/// Matches the legacy parser, which fails its inner posting
+/// parser on such lines and recovers by skipping to the next
+/// NEWLINE while emitting a `SyntaxError`.
+fn extract_transaction_body_errors(
+    source_file: &SourceFile,
+    bom_offset: u32,
+) -> Vec<crate::ParseError> {
+    let mut out = Vec::new();
+    for child in source_file.syntax().children() {
+        if child.kind() != crate::SyntaxKind::TRANSACTION {
+            continue;
+        }
+        // Skip past the header NEWLINE, then look for catch-all
+        // tokens (non-trivia, non-comment) appearing on lines
+        // OUTSIDE POSTING / META_ENTRY child nodes.
+        // Track whether we've SEEN at least one non-trivia
+        // header token (DATE / flag / STRING / etc.); only AFTER
+        // that does the next NEWLINE count as the header
+        // terminator. Otherwise leading-trivia NEWLINEs from the
+        // Directive-Terminator Rule would falsely trip
+        // past_header on the very first iteration.
+        let mut past_header = false;
+        let mut saw_header_content = false;
+        let mut line_start: Option<u32> = None;
+        let mut line_has_content = false;
+        for el in child.children_with_tokens() {
+            match el {
+                rowan::NodeOrToken::Token(t) => {
+                    if !past_header {
+                        if t.kind() == crate::SyntaxKind::NEWLINE {
+                            if saw_header_content {
+                                past_header = true;
+                            }
+                        } else if !is_trivia_kind(t.kind()) {
+                            saw_header_content = true;
+                        }
+                        continue;
+                    }
+                    let range = t.text_range();
+                    let start: u32 = range.start().into();
+                    let end: u32 = range.end().into();
+                    if line_start.is_none() {
+                        line_start = Some(start);
+                    }
+                    if t.kind() == crate::SyntaxKind::NEWLINE {
+                        if line_has_content && let Some(ls) = line_start {
+                            // Skip leading WHITESPACE in the span.
+                            let span =
+                                Span::new((ls + bom_offset) as usize, (end + bom_offset) as usize);
+                            // Find first non-whitespace position
+                            // for a tighter span matching legacy.
+                            out.push(crate::ParseError::new(
+                                crate::ParseErrorKind::SyntaxError("unexpected input".to_string()),
+                                span,
+                            ));
+                        }
+                        line_start = None;
+                        line_has_content = false;
+                    } else if !is_trivia_kind(t.kind()) && !is_comment_kind(t.kind()) {
+                        line_has_content = true;
+                    }
+                }
+                rowan::NodeOrToken::Node(_) => {
+                    // POSTING / META_ENTRY: not catch-all. Reset.
+                    line_start = None;
+                    line_has_content = false;
+                    if !past_header {
+                        past_header = true;
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Walk `ERROR_NODE` children of `SOURCE_FILE` and emit a
 /// `SyntaxError("unexpected input")` `ParseError` for each line
 /// that is NEITHER a section marker (`*`-starting) NOR a

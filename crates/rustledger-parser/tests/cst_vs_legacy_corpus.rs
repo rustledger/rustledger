@@ -48,6 +48,9 @@ mod baseline_common;
 
 use baseline_common::{MIN_FULL_CORPUS_SIZE, discover_corpus_files, repo_root};
 
+/// Cap on per-category file paths shown in stderr in verbose mode.
+const SHOW: usize = 20;
+
 /// Per-file outcome of the differential run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Outcome {
@@ -96,14 +99,13 @@ fn cst_vs_legacy_corpus_convergence() {
     // checkout without `fetch-compat-test-files.sh` should not
     // be silently treated as a clean 100% pass.
     if files.len() < MIN_FULL_CORPUS_SIZE {
-        if strict {
-            panic!(
-                "STRICT_DIFFERENTIAL: current corpus has {} files (need at \
-                 least {MIN_FULL_CORPUS_SIZE}). Did \
-                 `fetch-compat-test-files.sh` run?",
-                files.len(),
-            );
-        }
+        assert!(
+            !strict,
+            "STRICT_DIFFERENTIAL: current corpus has {} files (need at \
+             least {MIN_FULL_CORPUS_SIZE}). Did \
+             `fetch-compat-test-files.sh` run?",
+            files.len(),
+        );
         eprintln!(
             "skipping: corpus has only {} file(s) (< {MIN_FULL_CORPUS_SIZE}); \
              run `tests/compatibility/scripts/fetch-compat-test-files.sh` to \
@@ -159,7 +161,6 @@ fn cst_vs_legacy_corpus_convergence() {
 
     if verbose || strict {
         eprintln!("{summary}");
-        const SHOW: usize = 20;
         if !divergent_paths.is_empty() {
             eprintln!(
                 "First {} divergent file(s):",

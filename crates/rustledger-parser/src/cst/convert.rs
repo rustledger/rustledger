@@ -88,98 +88,70 @@ pub fn parse_via_cst(source: &str) -> ParseResult {
     let source_file = SourceFile::parse(stripped);
 
     let mut directives: Vec<Spanned<Directive>> = Vec::new();
+    let mut directive_nodes: Vec<crate::SyntaxNode> = Vec::new();
     let mut options: Vec<(String, String, Span)> = Vec::new();
     let mut includes: Vec<(String, Span)> = Vec::new();
     let mut plugins: Vec<(String, Option<String>, Span)> = Vec::new();
     let comments: Vec<Spanned<String>> = Vec::new();
     let errors = Vec::new();
     let warnings = Vec::new();
-    let currency_occurrences = Vec::new();
+    let currency_occurrences = extract_currency_occurrences(&source_file, bom_offset);
 
     for directive in source_file.directives() {
-        match directive {
-            ast::Directive::Open(node) => {
-                if let Some(spanned) = convert_open(&node, bom_offset) {
-                    directives.push(spanned);
-                }
-            }
-            ast::Directive::Close(node) => {
-                if let Some(spanned) = convert_close(&node, bom_offset) {
-                    directives.push(spanned);
-                }
-            }
-            ast::Directive::Commodity(node) => {
-                if let Some(spanned) = convert_commodity(&node, bom_offset) {
-                    directives.push(spanned);
-                }
-            }
-            ast::Directive::Note(node) => {
-                if let Some(spanned) = convert_note(&node, bom_offset) {
-                    directives.push(spanned);
-                }
-            }
-            ast::Directive::Document(node) => {
-                if let Some(spanned) = convert_document(&node, bom_offset) {
-                    directives.push(spanned);
-                }
-            }
-            ast::Directive::Event(node) => {
-                if let Some(spanned) = convert_event(&node, bom_offset) {
-                    directives.push(spanned);
-                }
-            }
-            ast::Directive::Query(node) => {
-                if let Some(spanned) = convert_query(&node, bom_offset) {
-                    directives.push(spanned);
-                }
-            }
-            ast::Directive::Price(node) => {
-                if let Some(spanned) = convert_price(&node, bom_offset) {
-                    directives.push(spanned);
-                }
-            }
-            ast::Directive::Balance(node) => {
-                if let Some(spanned) = convert_balance(&node, bom_offset) {
-                    directives.push(spanned);
-                }
-            }
-            ast::Directive::Pad(node) => {
-                if let Some(spanned) = convert_pad(&node, bom_offset) {
-                    directives.push(spanned);
-                }
-            }
-            ast::Directive::Custom(node) => {
-                if let Some(spanned) = convert_custom(&node, bom_offset) {
-                    directives.push(spanned);
-                }
-            }
+        // Helper to push a successfully-converted directive
+        // alongside its CST node so the post-pass span fixup
+        // can index them in parallel.
+        let cst_node = directive.syntax().clone();
+        let pushed_directive = match directive {
+            ast::Directive::Open(node) => convert_open(&node, bom_offset),
+            ast::Directive::Close(node) => convert_close(&node, bom_offset),
+            ast::Directive::Commodity(node) => convert_commodity(&node, bom_offset),
+            ast::Directive::Note(node) => convert_note(&node, bom_offset),
+            ast::Directive::Document(node) => convert_document(&node, bom_offset),
+            ast::Directive::Event(node) => convert_event(&node, bom_offset),
+            ast::Directive::Query(node) => convert_query(&node, bom_offset),
+            ast::Directive::Price(node) => convert_price(&node, bom_offset),
+            ast::Directive::Balance(node) => convert_balance(&node, bom_offset),
+            ast::Directive::Pad(node) => convert_pad(&node, bom_offset),
+            ast::Directive::Custom(node) => convert_custom(&node, bom_offset),
+            ast::Directive::Transaction(node) => convert_transaction(&node, bom_offset),
             ast::Directive::Option(node) => {
                 if let Some(triple) = convert_option(&node, bom_offset) {
                     options.push(triple);
                 }
+                None
             }
             ast::Directive::Include(node) => {
                 if let Some(pair) = convert_include(&node, bom_offset) {
                     includes.push(pair);
                 }
+                None
             }
             ast::Directive::Plugin(node) => {
                 if let Some(triple) = convert_plugin(&node, bom_offset) {
                     plugins.push(triple);
                 }
-            }
-            ast::Directive::Transaction(node) => {
-                if let Some(spanned) = convert_transaction(&node, bom_offset) {
-                    directives.push(spanned);
-                }
+                None
             }
             // Pushtag/Poptag/Pushmeta/Popmeta are state-only side
             // effects (they don't produce Directive variants but
             // mutate inherited tags/meta on subsequent
             // transactions). Deferred for a later commit.
-            _ => {}
+            ast::Directive::Pushtag(_)
+            | ast::Directive::Poptag(_)
+            | ast::Directive::Pushmeta(_)
+            | ast::Directive::Popmeta(_) => None,
+        };
+        if let Some(spanned) = pushed_directive {
+            directives.push(spanned);
+            directive_nodes.push(cst_node);
         }
     }
+
+    // Post-pass: align directive spans with the legacy parser's
+    // convention (skip leading trivia, extend through inter-
+    // directive trivia to the next directive's start).
+    fixup_directive_spans(&source_file, bom_offset, &directive_nodes, &mut directives);
 
     ParseResult {
         directives,
@@ -619,7 +591,7 @@ fn convert_posting(node: &ast::Posting, bom_offset: u32) -> Option<Spanned<Posti
         comments: Vec::new(),
         trailing_comments: Vec::new(),
     };
-    let span = node_span(node.syntax(), bom_offset);
+    let span = posting_span(node.syntax(), bom_offset);
     Some(Spanned::new(posting, span))
 }
 
@@ -768,6 +740,35 @@ fn meta_value_from_entry(entry: &MetaEntry) -> MetaValue {
     MetaValue::None
 }
 
+// ---- ParseResult.currency_occurrences --------------------------
+
+/// Walk every `CURRENCY` token under the source file (any
+/// depth) in source order and emit a `Spanned<Currency>` with
+/// the BOM-adjusted byte range. Mirrors the legacy parser's
+/// `currency_occurrences` field, which downstream LSP rename /
+/// references / document-highlight consumers walk to find every
+/// place a currency identifier appears.
+fn extract_currency_occurrences(
+    source_file: &SourceFile,
+    bom_offset: u32,
+) -> Vec<Spanned<Currency>> {
+    let mut out = Vec::new();
+    for el in source_file.syntax().descendants_with_tokens() {
+        let rowan::NodeOrToken::Token(t) = el else {
+            continue;
+        };
+        if t.kind() != crate::SyntaxKind::CURRENCY {
+            continue;
+        }
+        let range = t.text_range();
+        let start: u32 = range.start().into();
+        let end: u32 = range.end().into();
+        let span = Span::new((start + bom_offset) as usize, (end + bom_offset) as usize);
+        out.push(Spanned::new(Currency::new(t.text()), span));
+    }
+    out
+}
+
 // ---- Token parsing helpers -------------------------------------
 
 /// Parse a canonical `YYYY-MM-DD` date token. The CST lexer
@@ -822,6 +823,76 @@ fn node_span(node: &crate::SyntaxNode, bom_offset: u32) -> Span {
     let start: u32 = range.start().into();
     let end: u32 = range.end().into();
     Span::new((start + bom_offset) as usize, (end + bom_offset) as usize)
+}
+
+/// Trivia kinds that don't count toward a span's start/end when
+/// matching the legacy parser's span convention.
+const fn is_trivia_kind(kind: crate::SyntaxKind) -> bool {
+    matches!(
+        kind,
+        crate::SyntaxKind::WHITESPACE | crate::SyntaxKind::NEWLINE | crate::SyntaxKind::COMMENT
+    )
+}
+
+/// Span policy for `Posting`: the legacy parser ends the posting
+/// span at the position just before the line's terminating
+/// NEWLINE. The CST node's range INCLUDES the terminator
+/// NEWLINE; trim it by using the NEWLINE token's start position.
+/// We look at the FIRST direct-child NEWLINE token because
+/// posting-attached metadata sub-lines (which have their own
+/// inner NEWLINEs) come after the line terminator and shouldn't
+/// extend the posting-line span.
+fn posting_span(node: &crate::SyntaxNode, bom_offset: u32) -> Span {
+    let range = node.text_range();
+    let start: u32 = range.start().into();
+    let end_raw: u32 = range.end().into();
+    let end = node
+        .children_with_tokens()
+        .filter_map(rowan::NodeOrToken::into_token)
+        .find(|t| t.kind() == crate::SyntaxKind::NEWLINE)
+        .map_or(end_raw, |t| u32::from(t.text_range().start()));
+    Span::new((start + bom_offset) as usize, (end + bom_offset) as usize)
+}
+
+/// Span policy for top-level directives: legacy directives start
+/// at the first content character (skipping leading trivia from
+/// the Directive-Terminator Rule) and extend through any
+/// inter-directive trivia up to where the NEXT directive begins.
+/// Computed in a post-pass since each directive's end depends on
+/// the next one's start.
+fn fixup_directive_spans(
+    source_file: &SourceFile,
+    bom_offset: u32,
+    converted_nodes: &[crate::SyntaxNode],
+    directives: &mut [Spanned<Directive>],
+) {
+    debug_assert_eq!(
+        converted_nodes.len(),
+        directives.len(),
+        "converted_nodes and directives must be parallel arrays"
+    );
+
+    let starts: Vec<usize> = converted_nodes
+        .iter()
+        .map(|n| {
+            n.descendants_with_tokens()
+                .filter_map(rowan::NodeOrToken::into_token)
+                .find(|t| !is_trivia_kind(t.kind()))
+                .map_or_else(
+                    || (u32::from(n.text_range().start()) + bom_offset) as usize,
+                    |t| (u32::from(t.text_range().start()) + bom_offset) as usize,
+                )
+        })
+        .collect();
+
+    let source_end: usize =
+        (u32::from(source_file.syntax().text_range().end()) + bom_offset) as usize;
+
+    for (i, spanned) in directives.iter_mut().enumerate() {
+        let start = starts[i];
+        let end = starts.get(i + 1).copied().unwrap_or(source_end);
+        spanned.span = Span::new(start, end);
+    }
 }
 
 #[cfg(test)]

@@ -83,9 +83,9 @@ fn main() {
     let end_l = (common + win).min(lp_s.len());
     let end_c = (common + win).min(cp_s.len());
 
-    println!("--- legacy [{}..{}] ---", start, end_l);
+    println!("--- legacy [{start}..{end_l}] ---");
     println!("{}", &lp_s[start..end_l]);
     println!();
-    println!("--- cst    [{}..{}] ---", start, end_c);
+    println!("--- cst    [{start}..{end_c}] ---");
     println!("{}", &cp_s[start..end_c]);
 }

@@ -18,10 +18,19 @@ fn dump(node: &rustledger_parser::SyntaxNode, depth: usize) {
         match child {
             rowan::NodeOrToken::Token(t) => {
                 let tr = t.text_range();
-                let text = if t.text().len() > 30 {
-                    format!("{:?}...", &t.text()[..30])
-                } else {
-                    format!("{:?}", t.text())
+                let text = {
+                    let full = t.text();
+                    if full.len() > 30 {
+                        let boundary = full
+                            .char_indices()
+                            .map(|(i, _)| i)
+                            .take_while(|i| *i <= 30)
+                            .last()
+                            .unwrap_or(0);
+                        format!("{:?}...", &full[..boundary])
+                    } else {
+                        format!("{full:?}")
+                    }
                 };
                 println!(
                     "{:indent$}  TOK {:?} {:?} {}",

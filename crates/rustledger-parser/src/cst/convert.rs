@@ -886,60 +886,62 @@ const fn is_comment_kind(kind: crate::SyntaxKind) -> bool {
 /// posting) belong to the directive, not to `comments`.
 fn extract_top_level_comments(source_file: &SourceFile, bom_offset: u32) -> Vec<Spanned<String>> {
     let mut out = Vec::new();
-    let push_token = |out: &mut Vec<Spanned<String>>, t: &crate::SyntaxToken| {
-        let range = t.text_range();
-        let start: u32 = range.start().into();
-        let end: u32 = range.end().into();
-        let span = Span::new((start + bom_offset) as usize, (end + bom_offset) as usize);
-        out.push(Spanned::new(t.text().to_string(), span));
-    };
 
     // Track whether a `WHITESPACE` token preceded the current
-    // token on the same line. Reset on `NEWLINE`. Skip a `COMMENT`
-    // when this is true (it means the comment is indented and
-    // the legacy parser bails out before reaching it).
+    // token on the same line. Reset on `NEWLINE`. A `COMMENT`
+    // counts as standalone only when this is FALSE (i.e., the
+    // comment starts at column 0). Indented comments are
+    // skipped — the legacy parser's `parse_entry` fails on them.
+    //
+    // Walks ALL descendant tokens so comments inside ERROR_NODEs
+    // (which the structured parser uses for unrecognized lines)
+    // are still surfaced if they're column-0 within the line —
+    // matching how the legacy parser sees each line.
     let mut preceded_by_ws = false;
-
-    for child in source_file.syntax().children_with_tokens() {
-        match child {
-            rowan::NodeOrToken::Token(t) => {
-                match t.kind() {
-                    crate::SyntaxKind::NEWLINE => preceded_by_ws = false,
-                    crate::SyntaxKind::WHITESPACE => preceded_by_ws = true,
-                    k if is_comment_kind(k) => {
-                        if !preceded_by_ws {
-                            push_token(&mut out, &t);
-                        }
-                        // Stay false until next NEWLINE resets;
-                        // comment doesn't change preceded_by_ws.
-                    }
-                    _ => preceded_by_ws = false,
+    let mut just_entered_directive = false;
+    for el in source_file.syntax().descendants_with_tokens() {
+        match el {
+            rowan::NodeOrToken::Node(n) => {
+                // Inside a recognized directive's CONTENT region
+                // (after its first non-trivia token), comments
+                // belong to the directive (trailing comments on
+                // postings, etc.) and are NOT standalone. Reset
+                // tracking and use just_entered_directive as a
+                // gate so we still see directive leading trivia.
+                if ast::Directive::can_cast(n.kind()) {
+                    preceded_by_ws = false;
+                    just_entered_directive = true;
+                } else {
+                    just_entered_directive = false;
                 }
             }
-            rowan::NodeOrToken::Node(n) if ast::Directive::can_cast(n.kind()) => {
-                // Walk the directive's direct-child tokens for
-                // its leading trivia (until first non-trivia
-                // content token). Apply the same column-0 rule.
-                let mut inner_preceded_by_ws = false;
-                for el in n.children_with_tokens() {
-                    let rowan::NodeOrToken::Token(t) = el else {
-                        break;
-                    };
-                    match t.kind() {
-                        crate::SyntaxKind::NEWLINE => inner_preceded_by_ws = false,
-                        crate::SyntaxKind::WHITESPACE => inner_preceded_by_ws = true,
-                        k if is_comment_kind(k) => {
-                            if !inner_preceded_by_ws {
-                                push_token(&mut out, &t);
-                            }
-                        }
-                        _ => break, // first content token of the directive
+            rowan::NodeOrToken::Token(t) => match t.kind() {
+                crate::SyntaxKind::NEWLINE => preceded_by_ws = false,
+                crate::SyntaxKind::WHITESPACE => preceded_by_ws = true,
+                k if is_comment_kind(k) => {
+                    if !preceded_by_ws {
+                        let range = t.text_range();
+                        let start: u32 = range.start().into();
+                        let end: u32 = range.end().into();
+                        let span =
+                            Span::new((start + bom_offset) as usize, (end + bom_offset) as usize);
+                        out.push(Spanned::new(t.text().to_string(), span));
                     }
                 }
-                // After a directive node, reset whitespace state.
-                preceded_by_ws = false;
-            }
-            rowan::NodeOrToken::Node(_) => {}
+                _ => {
+                    // Hit a non-trivia content token. If this is
+                    // the FIRST content token of a recognized
+                    // directive, we crossed into the directive's
+                    // body — subsequent comments belong to it,
+                    // not to the standalone list. We approximate
+                    // this by simply continuing to track ws/nl;
+                    // trailing comments on posting lines have
+                    // preceded_by_ws=true so they're already
+                    // excluded by the column-0 rule.
+                    let _ = just_entered_directive;
+                    preceded_by_ws = false;
+                }
+            },
         }
     }
     out
@@ -958,11 +960,23 @@ fn extract_currency_occurrences(
     bom_offset: u32,
 ) -> Vec<Spanned<Currency>> {
     let mut out = Vec::new();
+    // CURRENCY tokens inside an ERROR_NODE are content the
+    // legacy parser couldn't classify (and so never advanced its
+    // lexer through). To match the legacy parser's
+    // currency_occurrences output we must SKIP CURRENCY tokens
+    // that have an ancestor of kind ERROR_NODE.
     for el in source_file.syntax().descendants_with_tokens() {
         let rowan::NodeOrToken::Token(t) = el else {
             continue;
         };
         if t.kind() != crate::SyntaxKind::CURRENCY {
+            continue;
+        }
+        // Walk ancestors to check for ERROR_NODE.
+        let in_error = t
+            .parent_ancestors()
+            .any(|a| a.kind() == crate::SyntaxKind::ERROR_NODE);
+        if in_error {
             continue;
         }
         let range = t.text_range();

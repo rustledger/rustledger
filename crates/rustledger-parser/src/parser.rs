@@ -31,7 +31,7 @@ const MAX_PREALLOC_DIRECTIVES: usize = 16_384;
 /// Hint text attached via `ParseError::with_hint` to every mid-file
 /// BOM diagnostic so miette renders it on a dedicated `help:` line
 /// rather than burying it inside the primary message body.
-const BOM_REMOVAL_HINT: &str = concat!(
+pub const BOM_REMOVAL_HINT: &str = concat!(
     "remove the U+FEFF byte at this position; ",
     "if the file is a concatenation of two BOM-prefixed exports, ",
     "strip BOMs from the inner files before concatenating",
@@ -2303,7 +2303,7 @@ fn parse_inner(source: &str) -> ParseResult {
 /// Scans all whitespace-delimited tokens in the text for a pattern that looks
 /// like an account name (uppercase start + colon) but contains non-ASCII.
 /// Returns the matching token, or `None`.
-fn find_unicode_account(text: &str) -> Option<&str> {
+pub fn find_unicode_account(text: &str) -> Option<&str> {
     for token in text.split_whitespace() {
         if !token.contains(':') {
             continue;

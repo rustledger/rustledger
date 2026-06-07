@@ -96,20 +96,30 @@ pub fn parse_via_cst(source: &str) -> ParseResult {
     comments.extend(extract_section_marker_comments(&source_file, bom_offset));
     // Merge in source order — legacy emits each line's comment
     // entry as parse_entry consumes it, so order matches start
-    // offset.
+    // offset. Dedup-by-start guards against the two helpers'
+    // classifiers ever overlapping on the same line (today they
+    // are disjoint — STAR-first vs COMMENT-kind-first — but
+    // collapsing duplicates here keeps the invariant local).
     comments.sort_by_key(|s| s.span.start);
-    let mut errors = extract_error_node_errors(&source_file, bom_offset);
+    comments.dedup_by_key(|s| s.span.start);
+    let mut errors = extract_error_node_errors(&source_file, stripped, bom_offset);
     errors.extend(extract_transaction_body_errors(&source_file, bom_offset));
-    errors.sort_by_key(|e| e.span.start);
     let warnings = Vec::new();
     let currency_occurrences = extract_currency_occurrences(&source_file, bom_offset);
 
     // pushtag/poptag/pushmeta/popmeta state. The legacy parser
     // maintains a stack across directives; each Transaction
     // inherits the active pushed-tag set, and EVERY directive
-    // inherits the active pushed-meta set.
-    let mut tag_stack: Vec<Tag> = Vec::new();
-    let mut meta_stack: Metadata = Metadata::default();
+    // inherits the active pushed-meta set. We pair each entry
+    // with the originating directive's span so unclosed-at-EOF
+    // diagnostics can point at the offending push.
+    let mut tag_stack: Vec<(Tag, Span)> = Vec::new();
+    // Vec-of-tuples (NOT a `Metadata` map) so legacy semantics
+    // are preserved: `pushmeta x: 1` then `pushmeta x: 2` should
+    // shadow (peek returns 2) and `popmeta x` should pop the
+    // most recent, leaving x=1 active. A HashMap would have lost
+    // the shadowed entry on the second push.
+    let mut meta_stack: Vec<(String, MetaValue, Span)> = Vec::new();
 
     for directive in source_file.directives() {
         // Helper to push a successfully-converted directive
@@ -117,7 +127,7 @@ pub fn parse_via_cst(source: &str) -> ParseResult {
         // can index them in parallel.
         let cst_node = directive.syntax().clone();
         let pushed_directive = match directive {
-            ast::Directive::Open(node) => convert_open(&node, bom_offset),
+            ast::Directive::Open(node) => convert_open(&node, bom_offset, &mut errors),
             ast::Directive::Close(node) => convert_close(&node, bom_offset),
             ast::Directive::Commodity(node) => convert_commodity(&node, bom_offset),
             ast::Directive::Note(node) => convert_note(&node, bom_offset),
@@ -128,7 +138,9 @@ pub fn parse_via_cst(source: &str) -> ParseResult {
             ast::Directive::Balance(node) => convert_balance(&node, bom_offset),
             ast::Directive::Pad(node) => convert_pad(&node, bom_offset),
             ast::Directive::Custom(node) => convert_custom(&node, bom_offset),
-            ast::Directive::Transaction(node) => convert_transaction(&node, bom_offset),
+            ast::Directive::Transaction(node) => {
+                convert_transaction(&node, bom_offset, &mut errors)
+            }
             ast::Directive::Option(node) => {
                 if let Some(triple) = convert_option(&node, bom_offset) {
                     options.push(triple);
@@ -151,15 +163,21 @@ pub fn parse_via_cst(source: &str) -> ParseResult {
             // tag/meta sets that apply to subsequent directives.
             ast::Directive::Pushtag(node) => {
                 if let Some(tag_token) = node.tag() {
-                    tag_stack.push(Tag::new(tag_token.text().trim_start_matches('#')));
+                    let span = node_span(node.syntax(), bom_offset);
+                    tag_stack.push((Tag::new(tag_token.text().trim_start_matches('#')), span));
                 }
                 None
             }
             ast::Directive::Poptag(node) => {
                 if let Some(tag_token) = node.tag() {
                     let name = tag_token.text().trim_start_matches('#');
-                    if let Some(pos) = tag_stack.iter().rposition(|t| t.as_str() == name) {
+                    if let Some(pos) = tag_stack.iter().rposition(|(t, _)| t.as_str() == name) {
                         tag_stack.remove(pos);
+                    } else {
+                        errors.push(crate::ParseError::new(
+                            crate::ParseErrorKind::InvalidPoptag(name.to_string()),
+                            node_span(node.syntax(), bom_offset),
+                        ));
                     }
                 }
                 None
@@ -168,13 +186,22 @@ pub fn parse_via_cst(source: &str) -> ParseResult {
                 if let Some(key_token) = node.key() {
                     let key = key_token.text_without_colon().to_string();
                     let value = pushmeta_value(node.syntax());
-                    meta_stack.insert(key, value);
+                    let span = node_span(node.syntax(), bom_offset);
+                    meta_stack.push((key, value, span));
                 }
                 None
             }
             ast::Directive::Popmeta(node) => {
                 if let Some(key_token) = node.key() {
-                    meta_stack.remove(key_token.text_without_colon());
+                    let key = key_token.text_without_colon().to_string();
+                    if let Some(pos) = meta_stack.iter().rposition(|(k, _, _)| k == &key) {
+                        meta_stack.remove(pos);
+                    } else {
+                        errors.push(crate::ParseError::new(
+                            crate::ParseErrorKind::InvalidPopmeta(key),
+                            node_span(node.syntax(), bom_offset),
+                        ));
+                    }
                 }
                 None
             }
@@ -185,6 +212,23 @@ pub fn parse_via_cst(source: &str) -> ParseResult {
             directive_nodes.push(cst_node);
         }
     }
+
+    // Unclosed pushtag/pushmeta at EOF — legacy emits one error
+    // per leftover stack entry, pointing at the originating push
+    // directive's span.
+    for (tag, span) in &tag_stack {
+        errors.push(crate::ParseError::new(
+            crate::ParseErrorKind::UnclosedPushtag(tag.as_str().to_string()),
+            *span,
+        ));
+    }
+    for (key, _, span) in &meta_stack {
+        errors.push(crate::ParseError::new(
+            crate::ParseErrorKind::UnclosedPushmeta(key.clone()),
+            *span,
+        ));
+    }
+    errors.sort_by_key(|e| e.span.start);
 
     // Post-pass: align directive spans with the legacy parser's
     // convention (skip leading trivia, extend through inter-
@@ -206,13 +250,42 @@ pub fn parse_via_cst(source: &str) -> ParseResult {
 
 // ---- Directive converters --------------------------------------
 
-fn convert_open(node: &OpenDirective, bom_offset: u32) -> Option<Spanned<Directive>> {
+/// Valid booking methods per beancount v3 — must match the
+/// whitelist legacy `parser::parse_open_directive` enforces. An
+/// `open` directive whose explicit booking string isn't on this
+/// list is rejected (directive dropped, `InvalidBookingMethod`
+/// error emitted) by both the legacy parser and `convert_open`.
+const VALID_BOOKING_METHODS: &[&str] = &[
+    "FIFO",
+    "STRICT",
+    "STRICT_WITH_SIZE",
+    "LIFO",
+    "HIFO",
+    "NONE",
+    "AVERAGE",
+];
+
+fn convert_open(
+    node: &OpenDirective,
+    bom_offset: u32,
+    errors: &mut Vec<crate::ParseError>,
+) -> Option<Spanned<Directive>> {
     let date = parse_date_token(node.date()?.text())?;
     let account = Account::new(node.account()?.text());
     let currencies: Vec<Currency> = node.currencies().map(|c| Currency::new(c.text())).collect();
     let booking = node
         .booking_method()
         .and_then(|s| s.text_unquoted().map(String::from));
+    let span = node_span(node.syntax(), bom_offset);
+    if let Some(b) = &booking
+        && !VALID_BOOKING_METHODS.contains(&b.as_str())
+    {
+        errors.push(crate::ParseError::new(
+            crate::ParseErrorKind::InvalidBookingMethod(b.clone()),
+            span,
+        ));
+        return None;
+    }
     let meta = convert_meta_entries(node.syntax());
 
     let open = rustledger_core::directive::Open {
@@ -222,7 +295,6 @@ fn convert_open(node: &OpenDirective, bom_offset: u32) -> Option<Spanned<Directi
         booking,
         meta,
     };
-    let span = node_span(node.syntax(), bom_offset);
     Some(Spanned::new(Directive::Open(open), span))
 }
 
@@ -274,13 +346,29 @@ fn convert_document(node: &DocumentDirective, bom_offset: u32) -> Option<Spanned
     let date = parse_date_token(node.date()?.text())?;
     let account = Account::new(node.account()?.text());
     let path = node.path()?.text_unquoted()?.to_string();
-    // TODO: extract tags/links from raw header tokens (the
-    // typed-AST surface doesn't yet expose accessors for these
-    // on DocumentDirective). Currently filled empty — matches
-    // the documents-without-trailing-tags-or-links case but
-    // drops information for documents that have them.
-    let tags = Vec::new();
-    let links = Vec::new();
+    // Trailing tags/links on the document header (legacy
+    // `parse_document_directive` collects them in a loop after
+    // the path STRING). TAG / LINK tokens only appear in the
+    // header (not in META_ENTRY children, which are walked
+    // separately below), so a direct-child token walk that
+    // stops at the first NEWLINE captures them in source order.
+    let mut tags: Vec<Tag> = Vec::new();
+    let mut links: Vec<Link> = Vec::new();
+    for el in node.syntax().children_with_tokens() {
+        let rowan::NodeOrToken::Token(t) = el else {
+            continue;
+        };
+        match t.kind() {
+            crate::SyntaxKind::NEWLINE => break,
+            crate::SyntaxKind::TAG => {
+                tags.push(Tag::new(t.text().trim_start_matches('#')));
+            }
+            crate::SyntaxKind::LINK => {
+                links.push(Link::new(t.text().trim_start_matches('^')));
+            }
+            _ => {}
+        }
+    }
     let meta = convert_meta_entries(node.syntax());
 
     let document = rustledger_core::directive::Document {
@@ -542,7 +630,11 @@ fn convert_plugin(
 
 // ---- Transaction + Posting + sub-nodes -------------------------
 
-fn convert_transaction(node: &AstTransaction, bom_offset: u32) -> Option<Spanned<Directive>> {
+fn convert_transaction(
+    node: &AstTransaction,
+    bom_offset: u32,
+    errors: &mut Vec<crate::ParseError>,
+) -> Option<Spanned<Directive>> {
     let date = parse_date_token(node.date()?.text())?;
 
     // Flag: explicit (TransactionFlag) or implied (leading STRING
@@ -594,8 +686,21 @@ fn convert_transaction(node: &AstTransaction, bom_offset: u32) -> Option<Spanned
     // into `pending`, then attach to the next POSTING node's
     // `comments` field when we reach it. Tokens before the
     // header NEWLINE are skipped (they're transaction-header
-    // content).
-    let postings = collect_postings_with_comments(node, bom_offset);
+    // content). Comments that remain in `pending` after the
+    // final posting belong to the transaction itself
+    // (legacy: `txn.trailing_comments = pending_comments`).
+    let (postings, trailing_comments) = collect_postings_with_comments(node, bom_offset);
+
+    // Deprecated `|` separator between payee and narration: a
+    // PIPE token in the header region. Legacy treats this as a
+    // recoverable warning-shaped error (`DeprecatedPipeSymbol`)
+    // and keeps the directive, so we do the same here.
+    if header_has_pipe(node) {
+        errors.push(crate::ParseError::new(
+            crate::ParseErrorKind::DeprecatedPipeSymbol,
+            node_span(node.syntax(), bom_offset),
+        ));
+    }
 
     let txn = rustledger_core::directive::Transaction {
         date,
@@ -606,10 +711,30 @@ fn convert_transaction(node: &AstTransaction, bom_offset: u32) -> Option<Spanned
         links,
         meta,
         postings,
-        trailing_comments: Vec::new(),
+        trailing_comments,
     };
     let span = node_span(node.syntax(), bom_offset);
     Some(Spanned::new(Directive::Transaction(txn), span))
+}
+
+/// Returns true if the TRANSACTION header (direct-child tokens
+/// up to the first NEWLINE) contains a `PIPE` token. The legacy
+/// parser surfaces a `DeprecatedPipeSymbol` diagnostic for this
+/// shape; the CST lexer classifies `|` as `PIPE`, so we just
+/// scan the header directly.
+fn header_has_pipe(node: &AstTransaction) -> bool {
+    for el in node.syntax().children_with_tokens() {
+        let rowan::NodeOrToken::Token(t) = el else {
+            continue;
+        };
+        if t.kind() == crate::SyntaxKind::NEWLINE {
+            return false;
+        }
+        if t.kind() == crate::SyntaxKind::PIPE {
+            return true;
+        }
+    }
+    false
 }
 
 /// Walk a `TRANSACTION`'s children in source order, attaching any
@@ -622,7 +747,14 @@ fn convert_transaction(node: &AstTransaction, bom_offset: u32) -> Option<Spanned
 /// Tokens before the header-terminator NEWLINE belong to the
 /// transaction header (date/flag/strings/tags/links) and are
 /// skipped.
-fn collect_postings_with_comments(node: &AstTransaction, bom_offset: u32) -> Vec<Spanned<Posting>> {
+///
+/// Returns `(postings, trailing_comments)`: the second element is
+/// any pending comments left over AFTER the final posting, which
+/// legacy assigns to `Transaction::trailing_comments`.
+fn collect_postings_with_comments(
+    node: &AstTransaction,
+    bom_offset: u32,
+) -> (Vec<Spanned<Posting>>, Vec<String>) {
     let mut out = Vec::new();
     let mut pending: Vec<String> = Vec::new();
     let mut past_header = false;
@@ -661,7 +793,7 @@ fn collect_postings_with_comments(node: &AstTransaction, bom_offset: u32) -> Vec
             }
         }
     }
-    out
+    (out, pending)
 }
 
 fn flag_char_from_transaction(flag: &ast::TransactionFlag) -> char {
@@ -923,9 +1055,20 @@ fn meta_value_from_entry(entry: &MetaEntry) -> MetaValue {
 /// converted directive's value. Mirrors the legacy parser's
 /// `apply_pushed_tags` + `apply_pushed_meta`: tags apply ONLY to
 /// `Transaction`; meta applies to every directive's `meta` field.
-fn apply_inherited_state(value: &mut Directive, tag_stack: &[Tag], meta_stack: &Metadata) {
+///
+/// The meta stack is a `Vec` (not a map) to preserve shadow/pop
+/// semantics — `pushmeta x: 1; pushmeta x: 2; popmeta x` should
+/// leave `x = 1` active, which a map-replacing-on-insert can't
+/// express. Iterating in push order and inserting into the
+/// directive's meta means later entries naturally win, matching
+/// "topmost-shadow wins" behavior.
+fn apply_inherited_state(
+    value: &mut Directive,
+    tag_stack: &[(Tag, Span)],
+    meta_stack: &[(String, MetaValue, Span)],
+) {
     if let Directive::Transaction(txn) = value {
-        for tag in tag_stack {
+        for (tag, _) in tag_stack {
             if !txn.tags.contains(tag) {
                 txn.tags.push(tag.clone());
             }
@@ -948,7 +1091,7 @@ fn apply_inherited_state(value: &mut Directive, tag_stack: &[Tag], meta_stack: &
         Directive::Price(d) => &mut d.meta,
         Directive::Custom(d) => &mut d.meta,
     };
-    for (k, v) in meta_stack {
+    for (k, v, _) in meta_stack {
         meta.insert(k.clone(), v.clone());
     }
 }
@@ -1118,13 +1261,19 @@ fn extract_transaction_body_errors(
 }
 
 /// Walk `ERROR_NODE` children of `SOURCE_FILE` and emit a
-/// `SyntaxError("unexpected input")` `ParseError` for each line
-/// that is NEITHER a section marker (`*`-starting) NOR a
-/// column-0 comment. Matches the legacy parser's behavior for
-/// unrecognized content: `parse_entry`'s `_ => Err(())` arm
-/// triggers error recovery which emits a `SyntaxError` for the
-/// skipped span.
-fn extract_error_node_errors(source_file: &SourceFile, bom_offset: u32) -> Vec<crate::ParseError> {
+/// `ParseError` for each line that is NEITHER a section marker
+/// (`*`-starting) NOR a column-0 comment. The variant emitted
+/// mirrors the legacy parser's error-recovery classifier
+/// (`parser.rs:2186-2249`): BOM-in-line → `BomInDirectiveBody`
+/// (with `BOM_REMOVAL_HINT`); Unicode-character account →
+/// `InvalidAccount`; otherwise → `SyntaxError("unexpected
+/// input")`. `stripped` is the post-BOM-strip source so token
+/// `text_range` indices into it correctly.
+fn extract_error_node_errors(
+    source_file: &SourceFile,
+    stripped: &str,
+    bom_offset: u32,
+) -> Vec<crate::ParseError> {
     let mut out = Vec::new();
     for child in source_file.syntax().children() {
         if child.kind() != crate::SyntaxKind::ERROR_NODE {
@@ -1132,7 +1281,6 @@ fn extract_error_node_errors(source_file: &SourceFile, bom_offset: u32) -> Vec<c
         }
         let mut line_start: Option<u32> = None;
         let mut first_non_trivia: Option<crate::SyntaxKind> = None;
-        let mut line_end: u32 = 0;
         for el in child.children_with_tokens() {
             let rowan::NodeOrToken::Token(t) = el else {
                 continue;
@@ -1155,24 +1303,49 @@ fn extract_error_node_errors(source_file: &SourceFile, bom_offset: u32) -> Vec<c
                     // Legacy span INCLUDES the terminator NEWLINE
                     // (skip_to_newline consumes it before
                     // span_from is called).
-                    let _ = line_end;
                     let span = Span::new((ls + bom_offset) as usize, (end + bom_offset) as usize);
-                    out.push(crate::ParseError::new(
-                        crate::ParseErrorKind::SyntaxError("unexpected input".to_string()),
-                        span,
-                    ));
+                    let line_text = stripped.get(ls as usize..end as usize).unwrap_or("");
+                    out.push(classify_recovery_error(line_text, span));
                 }
                 line_start = None;
                 first_non_trivia = None;
                 continue;
             }
-            line_end = end;
             if first_non_trivia.is_none() && !is_trivia_kind(t.kind()) {
                 first_non_trivia = Some(t.kind());
             }
         }
     }
     out
+}
+
+/// Pick the most specific `ParseError` variant for an
+/// error-recovery line, mirroring the legacy parser's classifier
+/// at `parser.rs:2186-2249`:
+/// 1. A Unicode-character account (`Assets:Café:…`) → primary
+///    `InvalidAccount` — it's the actionable root cause.
+/// 2. A mid-file BOM byte (`U+FEFF`) → `BomInDirectiveBody` with
+///    `BOM_REMOVAL_HINT` so miette surfaces the remediation step.
+/// 3. Anything else → `SyntaxError("unexpected input")`.
+///
+/// Order matters: a Windows-exported file with a Unicode account
+/// AND an internal BOM gets the Unicode-account diagnostic
+/// (the BOM is usually a side effect, not the root cause).
+fn classify_recovery_error(line_text: &str, span: Span) -> crate::ParseError {
+    if let Some(account) = crate::parser::find_unicode_account(line_text) {
+        return crate::ParseError::new(
+            crate::ParseErrorKind::InvalidAccount(account.to_string()),
+            span,
+        );
+    }
+    if line_text.contains(crate::bom::BOM_CHAR) {
+        return crate::ParseError::new(crate::ParseErrorKind::BomInDirectiveBody, span)
+            .with_hint(crate::parser::BOM_REMOVAL_HINT);
+    }
+    crate::ParseError::new(
+        crate::ParseErrorKind::SyntaxError("unexpected input".to_string()),
+        span,
+    )
 }
 
 /// Emit empty-string comments for org-mode section-marker
@@ -1937,6 +2110,244 @@ mod tests {
             .as_ref()
             .expect("price annotation");
         assert!(!price.is_unit(), "@@ is total form");
+    }
+
+    // ---- regression tests for review findings (#1281) ----------
+
+    #[test]
+    fn document_directive_preserves_tags_and_links() {
+        // Finding 1: convert_document was filling tags/links empty
+        // unconditionally. Legacy parse_document_directive collects
+        // trailing `#tag` / `^link` tokens after the path STRING.
+        let src = "2024-06-01 document Assets:Bank \"stmt.pdf\" #quarter1 ^scan42 #urgent\n";
+        let result = parse_via_cst(src);
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let Directive::Document(doc) = &result.directives[0].value else {
+            panic!("expected Document");
+        };
+        let tags: Vec<&str> = doc.tags.iter().map(Tag::as_str).collect();
+        let links: Vec<&str> = doc.links.iter().map(Link::as_str).collect();
+        assert_eq!(tags, vec!["quarter1", "urgent"]);
+        assert_eq!(links, vec!["scan42"]);
+    }
+
+    #[test]
+    fn open_directive_rejects_invalid_booking_method() {
+        // Finding 2: convert_open accepted any booking string; legacy
+        // validates against [FIFO, STRICT, STRICT_WITH_SIZE, LIFO,
+        // HIFO, NONE, AVERAGE] and on mismatch drops the directive
+        // AND emits InvalidBookingMethod.
+        let src = "2024-01-01 open Assets:Bank USD \"GARBAGE\"\n";
+        let result = parse_via_cst(src);
+        assert_eq!(result.directives.len(), 0, "directive should be dropped");
+        assert_eq!(result.errors.len(), 1);
+        let err = &result.errors[0];
+        assert!(
+            matches!(
+                &err.kind,
+                crate::ParseErrorKind::InvalidBookingMethod(s) if s == "GARBAGE"
+            ),
+            "expected InvalidBookingMethod, got {:?}",
+            err.kind,
+        );
+    }
+
+    #[test]
+    fn open_directive_accepts_all_valid_booking_methods() {
+        for method in VALID_BOOKING_METHODS {
+            let src = format!("2024-01-01 open Assets:Bank USD \"{method}\"\n");
+            let result = parse_via_cst(&src);
+            assert!(
+                result.errors.is_empty(),
+                "{method} rejected: {:?}",
+                result.errors
+            );
+            let Directive::Open(open) = &result.directives[0].value else {
+                panic!("{method}: expected Open");
+            };
+            assert_eq!(open.booking.as_deref(), Some(*method));
+        }
+    }
+
+    #[test]
+    fn unclosed_pushtag_at_eof_emits_diagnostic() {
+        // Finding 3: legacy emits one UnclosedPushtag per leftover
+        // tag at EOF, pointing at the originating push directive.
+        let src = "pushtag #active\n2024-01-01 open Assets:Bank USD\n";
+        let result = parse_via_cst(src);
+        let unclosed: Vec<_> = result
+            .errors
+            .iter()
+            .filter_map(|e| match &e.kind {
+                crate::ParseErrorKind::UnclosedPushtag(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(unclosed, vec!["active".to_string()]);
+    }
+
+    #[test]
+    fn unclosed_pushmeta_at_eof_emits_diagnostic() {
+        // Finding 4: same as pushtag, for pushmeta.
+        let src = "pushmeta location: \"NYC\"\n2024-01-01 open Assets:Bank USD\n";
+        let result = parse_via_cst(src);
+        let unclosed: Vec<_> = result
+            .errors
+            .iter()
+            .filter_map(|e| match &e.kind {
+                crate::ParseErrorKind::UnclosedPushmeta(k) => Some(k.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(unclosed, vec!["location".to_string()]);
+    }
+
+    #[test]
+    fn invalid_poptag_on_mismatch_emits_diagnostic() {
+        // Finding 5: poptag for a tag never pushed should error,
+        // not silently no-op.
+        let src = "pushtag #foo\npoptag #bar\npoptag #foo\n";
+        let result = parse_via_cst(src);
+        let mismatches: Vec<_> = result
+            .errors
+            .iter()
+            .filter_map(|e| match &e.kind {
+                crate::ParseErrorKind::InvalidPoptag(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(mismatches, vec!["bar".to_string()]);
+        // and the matching #foo poptag should leave NO unclosed
+        // diagnostic — i.e. the stack is empty after the matched pop.
+        let leftover: Vec<_> = result
+            .errors
+            .iter()
+            .filter(|e| matches!(e.kind, crate::ParseErrorKind::UnclosedPushtag(_)))
+            .collect();
+        assert!(leftover.is_empty(), "unexpected leftover: {leftover:?}");
+    }
+
+    #[test]
+    fn invalid_popmeta_on_mismatch_emits_diagnostic() {
+        // Finding 6: popmeta for a key never pushed should error,
+        // not silently no-op. Also checks Vec-stack shadow semantics:
+        // pushmeta x: 1; pushmeta x: 2; popmeta x leaves x=1 active.
+        let src = "pushmeta location: \"NYC\"\npopmeta nope:\npopmeta location:\n";
+        let result = parse_via_cst(src);
+        let mismatches: Vec<_> = result
+            .errors
+            .iter()
+            .filter_map(|e| match &e.kind {
+                crate::ParseErrorKind::InvalidPopmeta(k) => Some(k.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(mismatches, vec!["nope".to_string()]);
+        let leftover: Vec<_> = result
+            .errors
+            .iter()
+            .filter(|e| matches!(e.kind, crate::ParseErrorKind::UnclosedPushmeta(_)))
+            .collect();
+        assert!(leftover.is_empty(), "unexpected leftover: {leftover:?}");
+    }
+
+    #[test]
+    fn pushmeta_shadow_pop_restores_prior_value() {
+        // Vec-stack semantics (the reason meta_stack isn't a HashMap):
+        // shadow-pop must restore the prior value, not delete the key.
+        let src = "pushmeta loc: \"NYC\"\n\
+                   pushmeta loc: \"LDN\"\n\
+                   popmeta loc:\n\
+                   2024-01-01 open Assets:Bank USD\n\
+                   popmeta loc:\n";
+        let result = parse_via_cst(src);
+        let Directive::Open(open) = &result.directives[0].value else {
+            panic!("expected Open");
+        };
+        assert_eq!(
+            open.meta.get("loc"),
+            Some(&MetaValue::String("NYC".to_string())),
+            "shadow pop should restore NYC, got {:?}",
+            open.meta.get("loc"),
+        );
+    }
+
+    #[test]
+    fn error_recovery_classifies_bom_in_directive_body() {
+        // Finding 7: error-recovery path should distinguish BOM-in-
+        // line from a generic SyntaxError so users see the
+        // BOM-removal hint instead of "unexpected input".
+        let src = "garbage\u{FEFF}content\n";
+        let result = parse_via_cst(src);
+        let bom_errors: Vec<_> = result
+            .errors
+            .iter()
+            .filter(|e| matches!(e.kind, crate::ParseErrorKind::BomInDirectiveBody))
+            .collect();
+        assert_eq!(bom_errors.len(), 1, "errors: {:?}", result.errors);
+        assert!(
+            bom_errors[0].hint.is_some(),
+            "BomInDirectiveBody should carry BOM_REMOVAL_HINT",
+        );
+    }
+
+    #[test]
+    fn error_recovery_classifies_unicode_account() {
+        // Finding 7: a Unicode-character account name (Assets:Café)
+        // should surface as InvalidAccount, not generic SyntaxError.
+        // We embed it in a malformed line so the parser routes to
+        // the error-recovery path.
+        let src = "garbage Assets:Café content\n";
+        let result = parse_via_cst(src);
+        let unicode_errors: Vec<_> = result
+            .errors
+            .iter()
+            .filter_map(|e| match &e.kind {
+                crate::ParseErrorKind::InvalidAccount(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(unicode_errors, vec!["Assets:Café".to_string()]);
+    }
+
+    #[test]
+    fn transaction_with_pipe_emits_deprecated_pipe_symbol() {
+        // Finding 7 (transaction path): legacy emits
+        // DeprecatedPipeSymbol when a `|` separates payee/narration.
+        let src = "2024-01-15 * \"Acme\" | \"invoice\"\n  Assets:Cash  -5 USD\n  Expenses:X\n";
+        let result = parse_via_cst(src);
+        let pipe_count = result
+            .errors
+            .iter()
+            .filter(|e| matches!(e.kind, crate::ParseErrorKind::DeprecatedPipeSymbol))
+            .count();
+        assert_eq!(pipe_count, 1, "errors: {:?}", result.errors);
+        // and the transaction itself is kept (legacy behavior).
+        assert_eq!(result.directives.len(), 1);
+    }
+
+    #[test]
+    fn transaction_trailing_comments_after_final_posting() {
+        // Finding 8: comments that appear AFTER the last posting
+        // but inside the transaction body belong to
+        // Transaction::trailing_comments, not lost.
+        let src = "2024-01-15 * \"x\"\n  \
+                   Assets:Cash  -5 USD\n  \
+                   Expenses:X\n  \
+                   ; trailing one\n  \
+                   ; trailing two\n";
+        let result = parse_via_cst(src);
+        let Directive::Transaction(t) = &result.directives[0].value else {
+            panic!("expected Transaction");
+        };
+        assert_eq!(
+            t.trailing_comments.len(),
+            2,
+            "got: {:?}",
+            t.trailing_comments
+        );
+        assert!(t.trailing_comments[0].contains("trailing one"));
+        assert!(t.trailing_comments[1].contains("trailing two"));
     }
 
     #[test]

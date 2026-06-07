@@ -1008,10 +1008,11 @@ fn identify_directive(tokens: &[(SyntaxKind, Range<usize>)], i: usize) -> Option
                 // Phase 2.3: CUSTOM is a dated directive with a
                 // type-name STRING followed by an arbitrary value
                 // list (STRING / ACCOUNT / amount / DATE / CURRENCY
-                // / BOOL). The header consumption is identical to
-                // the other dated single-line directives; only the
-                // value list is open-ended, which is fine for the
-                // CST since the trailing tokens stay flat.
+                // / BOOL_TRUE / BOOL_FALSE). The header consumption
+                // is identical to the other dated single-line
+                // directives; only the value list is open-ended,
+                // which is fine for the CST since the trailing
+                // tokens stay flat.
                 SyntaxKind::CUSTOM_KW => Some(SyntaxKind::CUSTOM_DIRECTIVE),
                 // Transaction triggers after the DATE. Beancount
                 // accepts:

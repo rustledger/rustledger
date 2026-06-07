@@ -2903,9 +2903,9 @@ fn custom_directive_with_string_values() {
 fn custom_directive_with_mixed_value_types() {
     use SyntaxKind::*;
     // CUSTOM accepts a heterogeneous trailing value list: STRING,
-    // ACCOUNT, NUMBER + CURRENCY (amount), DATE, BOOL. All stay
-    // flat inside CUSTOM_DIRECTIVE (no AMOUNT wrapper at the
-    // directive-header level per phase 2.2c scope).
+    // ACCOUNT, NUMBER + CURRENCY (amount), DATE, BOOL_TRUE /
+    // BOOL_FALSE. All stay flat inside CUSTOM_DIRECTIVE (no AMOUNT
+    // wrapper at the directive-header level per phase 2.2c scope).
     let source = "2024-01-01 custom \"limits\" \"cap\" Assets:Cash 500 USD 2024-12-31 TRUE\n";
     let tree = parse_structured(source);
     assert_round_trip(source, &tree);

@@ -208,7 +208,7 @@ pub enum SyntaxKind {
     // - `CUSTOM_DIRECTIVE`: dated `DATE custom "type" values...`
     //   — like the 14 single-line dated directives, with an
     //   arbitrary trailing value list (STRING / ACCOUNT /
-    //   AMOUNT-shape / DATE / CURRENCY / BOOL).
+    //   AMOUNT-shape / DATE / CURRENCY / BOOL_TRUE / BOOL_FALSE).
     //
     // All four follow the single-line directive body shape
     // (header + optional indented metadata sub-lines via

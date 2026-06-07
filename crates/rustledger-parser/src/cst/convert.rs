@@ -92,8 +92,13 @@ pub fn parse_via_cst(source: &str) -> ParseResult {
     let mut options: Vec<(String, String, Span)> = Vec::new();
     let mut includes: Vec<(String, Span)> = Vec::new();
     let mut plugins: Vec<(String, Option<String>, Span)> = Vec::new();
-    let comments: Vec<Spanned<String>> = extract_top_level_comments(&source_file, bom_offset);
-    let errors = Vec::new();
+    let mut comments: Vec<Spanned<String>> = extract_top_level_comments(&source_file, bom_offset);
+    comments.extend(extract_section_marker_comments(&source_file, bom_offset));
+    // Merge in source order — legacy emits each line's comment
+    // entry as parse_entry consumes it, so order matches start
+    // offset.
+    comments.sort_by_key(|s| s.span.start);
+    let errors = extract_error_node_errors(&source_file, bom_offset);
     let warnings = Vec::new();
     let currency_occurrences = extract_currency_occurrences(&source_file, bom_offset);
 
@@ -566,11 +571,15 @@ fn convert_transaction(node: &AstTransaction, bom_offset: u32) -> Option<Spanned
     // the TRANSACTION node, NOT on POSTING children).
     let meta = convert_meta_entries(node.syntax());
 
-    // Postings (child POSTING nodes).
-    let postings: Vec<Spanned<Posting>> = node
-        .postings()
-        .filter_map(|p| convert_posting(&p, bom_offset))
-        .collect();
+    // Postings + pre-posting comments. The CST puts inter-
+    // posting trivia (including `; comment` lines) as flat
+    // tokens DIRECT under TRANSACTION between two POSTING
+    // nodes. Walk in source order: COMMENT tokens accumulate
+    // into `pending`, then attach to the next POSTING node's
+    // `comments` field when we reach it. Tokens before the
+    // header NEWLINE are skipped (they're transaction-header
+    // content).
+    let postings = collect_postings_with_comments(node, bom_offset);
 
     let txn = rustledger_core::directive::Transaction {
         date,
@@ -585,6 +594,58 @@ fn convert_transaction(node: &AstTransaction, bom_offset: u32) -> Option<Spanned
     };
     let span = node_span(node.syntax(), bom_offset);
     Some(Spanned::new(Directive::Transaction(txn), span))
+}
+
+/// Walk a `TRANSACTION`'s children in source order, attaching any
+/// inter-posting `; comment` lines that appear as flat tokens
+/// between `POSTING` nodes to the NEXT posting's `comments`
+/// field. Matches the legacy parser, which collects
+/// `pending_comments` while reading the body and applies them to
+/// the next posting it parses.
+///
+/// Tokens before the header-terminator NEWLINE belong to the
+/// transaction header (date/flag/strings/tags/links) and are
+/// skipped.
+fn collect_postings_with_comments(node: &AstTransaction, bom_offset: u32) -> Vec<Spanned<Posting>> {
+    let mut out = Vec::new();
+    let mut pending: Vec<String> = Vec::new();
+    let mut past_header = false;
+    for el in node.syntax().children_with_tokens() {
+        match el {
+            rowan::NodeOrToken::Token(t) => {
+                if !past_header {
+                    if t.kind() == crate::SyntaxKind::NEWLINE {
+                        past_header = true;
+                    }
+                    continue;
+                }
+                if is_comment_kind(t.kind()) {
+                    pending.push(t.text().to_string());
+                }
+            }
+            rowan::NodeOrToken::Node(n) => {
+                if !past_header {
+                    // META_ENTRY or POSTING before the header
+                    // NEWLINE shouldn't happen in well-formed
+                    // input; treat any child node as "past the
+                    // header" if we somehow encounter one.
+                    past_header = true;
+                }
+                if let Some(p) = ast::Posting::cast(n)
+                    && let Some(mut spanned) = convert_posting(&p, bom_offset)
+                {
+                    if !pending.is_empty() {
+                        spanned.value.comments = std::mem::take(&mut pending);
+                    }
+                    out.push(spanned);
+                }
+                // META_ENTRY child nodes: comments collected so
+                // far don't apply to them (they're transaction
+                // metadata). Drop them.
+            }
+        }
+    }
+    out
 }
 
 fn flag_char_from_transaction(flag: &ast::TransactionFlag) -> char {
@@ -612,6 +673,19 @@ fn convert_posting(node: &ast::Posting, bom_offset: u32) -> Option<Spanned<Posti
         .map(|pa| convert_price_annotation(&pa));
     let meta = convert_meta_entries(node.syntax());
 
+    // Trailing comments on the posting line: COMMENT direct-
+    // child tokens BEFORE the terminator NEWLINE. The legacy
+    // parser collects same-line `;` content into
+    // `posting.trailing_comments`.
+    let trailing_comments: Vec<String> = node
+        .syntax()
+        .children_with_tokens()
+        .filter_map(rowan::NodeOrToken::into_token)
+        .take_while(|t| t.kind() != crate::SyntaxKind::NEWLINE)
+        .filter(|t| is_comment_kind(t.kind()))
+        .map(|t| t.text().to_string())
+        .collect();
+
     let posting = Posting {
         account,
         units,
@@ -620,7 +694,7 @@ fn convert_posting(node: &ast::Posting, bom_offset: u32) -> Option<Spanned<Posti
         flag,
         meta,
         comments: Vec::new(),
-        trailing_comments: Vec::new(),
+        trailing_comments,
     };
     let span = posting_span(node.syntax(), bom_offset);
     Some(Spanned::new(posting, span))
@@ -884,6 +958,113 @@ const fn is_comment_kind(kind: crate::SyntaxKind) -> bool {
 /// **After content.** Comments that appear AFTER the directive's
 /// first content token (e.g., trailing same-line comments on a
 /// posting) belong to the directive, not to `comments`.
+/// Walk `ERROR_NODE` children of `SOURCE_FILE` and emit a
+/// `SyntaxError("unexpected input")` `ParseError` for each line
+/// that is NEITHER a section marker (`*`-starting) NOR a
+/// column-0 comment. Matches the legacy parser's behavior for
+/// unrecognized content: `parse_entry`'s `_ => Err(())` arm
+/// triggers error recovery which emits a `SyntaxError` for the
+/// skipped span.
+fn extract_error_node_errors(source_file: &SourceFile, bom_offset: u32) -> Vec<crate::ParseError> {
+    let mut out = Vec::new();
+    for child in source_file.syntax().children() {
+        if child.kind() != crate::SyntaxKind::ERROR_NODE {
+            continue;
+        }
+        let mut line_start: Option<u32> = None;
+        let mut first_non_trivia: Option<crate::SyntaxKind> = None;
+        let mut line_end: u32 = 0;
+        for el in child.children_with_tokens() {
+            let rowan::NodeOrToken::Token(t) = el else {
+                continue;
+            };
+            let range = t.text_range();
+            let start: u32 = range.start().into();
+            let end: u32 = range.end().into();
+            if line_start.is_none() {
+                line_start = Some(start);
+            }
+            if t.kind() == crate::SyntaxKind::NEWLINE {
+                // Decide the line's classification.
+                let is_section = matches!(first_non_trivia, Some(crate::SyntaxKind::STAR));
+                let is_comment = matches!(first_non_trivia, Some(k) if is_comment_kind(k));
+                if !is_section
+                    && !is_comment
+                    && first_non_trivia.is_some()
+                    && let Some(ls) = line_start
+                {
+                    // Legacy span INCLUDES the terminator NEWLINE
+                    // (skip_to_newline consumes it before
+                    // span_from is called).
+                    let _ = line_end;
+                    let span = Span::new((ls + bom_offset) as usize, (end + bom_offset) as usize);
+                    out.push(crate::ParseError::new(
+                        crate::ParseErrorKind::SyntaxError("unexpected input".to_string()),
+                        span,
+                    ));
+                }
+                line_start = None;
+                first_non_trivia = None;
+                continue;
+            }
+            line_end = end;
+            if first_non_trivia.is_none() && !is_trivia_kind(t.kind()) {
+                first_non_trivia = Some(t.kind());
+            }
+        }
+    }
+    out
+}
+
+/// Emit empty-string comments for org-mode section-marker
+/// lines (`* Heading`, `** Subheading`) inside `ERROR_NODE`
+/// children. The legacy parser's `parse_entry` matches
+/// `Token::Star` and emits `Comment(String::new(), line_span)`;
+/// the structured CST wraps these lines in `ERROR_NODE`s so we
+/// have to walk them and synthesize the same shape.
+fn extract_section_marker_comments(
+    source_file: &SourceFile,
+    bom_offset: u32,
+) -> Vec<Spanned<String>> {
+    let mut out = Vec::new();
+    for child in source_file.syntax().children() {
+        if child.kind() != crate::SyntaxKind::ERROR_NODE {
+            continue;
+        }
+        // Walk tokens line-by-line. A line starts at the start
+        // of the first token after a NEWLINE (or at the node's
+        // start) and ends at the next NEWLINE (inclusive).
+        let mut line_start: Option<u32> = None;
+        let mut first_non_trivia: Option<crate::SyntaxKind> = None;
+        for el in child.children_with_tokens() {
+            let rowan::NodeOrToken::Token(t) = el else {
+                continue;
+            };
+            let range = t.text_range();
+            let start: u32 = range.start().into();
+            let end: u32 = range.end().into();
+            if line_start.is_none() {
+                line_start = Some(start);
+            }
+            if t.kind() == crate::SyntaxKind::NEWLINE {
+                if first_non_trivia == Some(crate::SyntaxKind::STAR)
+                    && let Some(ls) = line_start
+                {
+                    let span = Span::new((ls + bom_offset) as usize, (end + bom_offset) as usize);
+                    out.push(Spanned::new(String::new(), span));
+                }
+                line_start = None;
+                first_non_trivia = None;
+                continue;
+            }
+            if first_non_trivia.is_none() && !is_trivia_kind(t.kind()) {
+                first_non_trivia = Some(t.kind());
+            }
+        }
+    }
+    out
+}
+
 fn extract_top_level_comments(source_file: &SourceFile, bom_offset: u32) -> Vec<Spanned<String>> {
     let mut out = Vec::new();
 

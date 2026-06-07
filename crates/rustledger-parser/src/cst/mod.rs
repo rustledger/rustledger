@@ -48,6 +48,7 @@
 //! See the `trivia` module rustdoc for the full spec, rationale,
 //! and recursive-application notes for phase 2.1's grammar.
 
+pub mod ast;
 mod lossless_tokens;
 mod parser;
 mod syntax_kind;

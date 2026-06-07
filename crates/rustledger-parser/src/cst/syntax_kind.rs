@@ -198,6 +198,28 @@ pub enum SyntaxKind {
     PUSHMETA_DIRECTIVE,
     POPMETA_DIRECTIVE,
 
+    // Phase 2.3: edge directives that were previously falling
+    // through to the unrecognized-line passthrough.
+    //
+    // - `OPTION_DIRECTIVE`: top-level `option "key" "value"`.
+    // - `INCLUDE_DIRECTIVE`: top-level `include "path"`.
+    // - `PLUGIN_DIRECTIVE`: top-level `plugin "module" ["config"]`
+    //   (config string is optional).
+    // - `CUSTOM_DIRECTIVE`: dated `DATE custom "type" values...`
+    //   — like the 14 single-line dated directives, with an
+    //   arbitrary trailing value list (STRING / ACCOUNT /
+    //   AMOUNT-shape / DATE / CURRENCY / BOOL).
+    //
+    // All four follow the single-line directive body shape
+    // (header + optional indented metadata sub-lines via
+    // `emit_directive_body`). The body / metadata story is
+    // identical to PR 2.1a's 10 dated + 4 standalone-keyword
+    // directives — only the header recognition is new.
+    OPTION_DIRECTIVE,
+    INCLUDE_DIRECTIVE,
+    PLUGIN_DIRECTIVE,
+    CUSTOM_DIRECTIVE,
+
     // Phase 2.1b: TRANSACTION wrapper. Trigger is DATE followed by
     // one of: STAR (`*`) / PENDING_KW (`!`) / FLAG (P/S/T/C/U/R/M/?/&)
     // / HASH (`#` promoted to flag) / TXN_KW (`txn`) / STRING
@@ -446,6 +468,10 @@ mod tests {
             SyntaxKind::POPTAG_DIRECTIVE,
             SyntaxKind::PUSHMETA_DIRECTIVE,
             SyntaxKind::POPMETA_DIRECTIVE,
+            SyntaxKind::OPTION_DIRECTIVE,
+            SyntaxKind::INCLUDE_DIRECTIVE,
+            SyntaxKind::PLUGIN_DIRECTIVE,
+            SyntaxKind::CUSTOM_DIRECTIVE,
             SyntaxKind::TRANSACTION,
             SyntaxKind::META_ENTRY,
             SyntaxKind::POSTING,
@@ -511,6 +537,10 @@ mod tests {
             SyntaxKind::POPTAG_DIRECTIVE,
             SyntaxKind::PUSHMETA_DIRECTIVE,
             SyntaxKind::POPMETA_DIRECTIVE,
+            SyntaxKind::OPTION_DIRECTIVE,
+            SyntaxKind::INCLUDE_DIRECTIVE,
+            SyntaxKind::PLUGIN_DIRECTIVE,
+            SyntaxKind::CUSTOM_DIRECTIVE,
             SyntaxKind::TRANSACTION,
             SyntaxKind::META_ENTRY,
             SyntaxKind::POSTING,

@@ -44,7 +44,7 @@ const MIN_FULL_CORPUS_SIZE: usize = 100;
 const MANIFEST_PATH: &str = "tests/baselines/cst-corpus.manifest";
 
 const MANIFEST_HEADER: &[&str] = &[
-    "# CST baseline (#1262 phase 2.2c, parse_structured). See crates/rustledger-parser/tests/cst_baseline.rs.",
+    "# CST baseline (#1262 phase 2.3, parse_structured). See crates/rustledger-parser/tests/cst_baseline.rs.",
     "# Format: path<TAB>source_blake3<TAB>token_seq_blake3<TAB>node_shape_blake3",
     "# Regenerate: BASELINE_UPDATE=1 cargo test -p rustledger-parser --test cst_baseline",
 ];

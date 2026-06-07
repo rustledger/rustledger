@@ -1,4 +1,4 @@
-//! CST builders: phase 1 flat ([`parse_flat`]) + phase 2.1-2.2c
+//! CST builders: phase 1 flat ([`parse_flat`]) + phase 2.1-2.3
 //! structured ([`parse_structured`]).
 //!
 //! Both walk the lossless token stream and emit a `GreenNode` whose
@@ -20,9 +20,17 @@
 //!   Each wraps in its specific node kind per the Directive-
 //!   Terminator Rule (see [`crate::cst::trivia`]).
 //!
-//!   Unrecognized lines (`OPTION`/`INCLUDE`/`PLUGIN`/`CUSTOM` — PR
-//!   2.3; error-recovery lines) flow through as flat `SOURCE_FILE`
-//!   children for now.
+//!   - **Phase 2.3**: edge directives —
+//!     `OPTION_DIRECTIVE` / `INCLUDE_DIRECTIVE` /
+//!     `PLUGIN_DIRECTIVE` (top-level keyword) +
+//!     `CUSTOM_DIRECTIVE` (dated with arbitrary trailing value
+//!     list). Body / metadata shape is identical to PR 2.1a's
+//!     dated and standalone-keyword directives — only the header
+//!     keyword recognition is new.
+//!
+//!   Error-recovery lines still flow through as flat `SOURCE_FILE`
+//!   children — PR 2.4 will add structural wrapping for malformed
+//!   content.
 //!
 //! Phase 2.2a adds `META_ENTRY` sub-node structure around indented
 //! `WS META_KEY ... (NEWLINE | EOF)` sub-lines inside any directive
@@ -67,14 +75,15 @@ pub fn parse_flat(source: &str) -> SyntaxNode {
 /// Parse `source` to a structured lossless CST.
 ///
 /// Recognizes the 14 single-line directive shapes (PR 2.1a) plus
-/// `TRANSACTION` (PR 2.1b) and wraps each in its specific node
-/// kind. Trivia attaches per the Directive-Terminator Rule.
+/// `TRANSACTION` (PR 2.1b) plus the 4 edge directives `OPTION` /
+/// `INCLUDE` / `PLUGIN` / `CUSTOM` (PR 2.3), and wraps each in its
+/// specific node kind. Trivia attaches per the Directive-
+/// Terminator Rule.
 ///
-/// Still-unrecognized content (edge directives like
-/// `option`/`include`/`plugin`/`custom`, error-recovery lines)
-/// passes through as a flat token run under `SOURCE_FILE` — PR
-/// 2.3 extends this. Round-trip byte-identical for every UTF-8
-/// input; the unrecognized-content path preserves bytes via
+/// Still-unrecognized content (error-recovery lines) passes
+/// through as a flat token run under `SOURCE_FILE` — PR 2.4 will
+/// add structural wrapping. Round-trip byte-identical for every
+/// UTF-8 input; the unrecognized-content path preserves bytes via
 /// flat-token emission, just without structural wrapping.
 #[must_use]
 pub fn parse_structured(source: &str) -> SyntaxNode {
@@ -939,7 +948,7 @@ fn is_indented_directive_continuation(
 ///
 /// - `DATE WHITESPACE <KEYWORD> ...`: OPEN / CLOSE / BALANCE / PAD
 ///   / EVENT / QUERY / NOTE / DOCUMENT / PRICE / COMMODITY (PR
-///   2.1a)
+///   2.1a) + CUSTOM (PR 2.3)
 /// - `DATE WHITESPACE <txn-trigger> ...`: TRANSACTION (PR 2.1b),
 ///   where `<txn-trigger>` is one of `STAR` / `PENDING_KW` (`!`)
 ///   / `FLAG` / `HASH` / `TXN_KW` / `STRING` ("implied" txn form
@@ -947,7 +956,8 @@ fn is_indented_directive_continuation(
 ///   letters). Mirrors `parse_dated_directive` in the legacy AST
 ///   parser at parser.rs:1707-1715.
 /// - `<KEYWORD> ...` (no leading date): PUSHTAG / POPTAG /
-///   PUSHMETA / POPMETA (PR 2.1a)
+///   PUSHMETA / POPMETA (PR 2.1a) + OPTION / INCLUDE / PLUGIN
+///   (PR 2.3)
 fn identify_directive(tokens: &[(SyntaxKind, Range<usize>)], i: usize) -> Option<SyntaxKind> {
     let (head, _) = tokens.get(i)?;
     match *head {
@@ -956,6 +966,19 @@ fn identify_directive(tokens: &[(SyntaxKind, Range<usize>)], i: usize) -> Option
         SyntaxKind::POPTAG_KW => Some(SyntaxKind::POPTAG_DIRECTIVE),
         SyntaxKind::PUSHMETA_KW => Some(SyntaxKind::PUSHMETA_DIRECTIVE),
         SyntaxKind::POPMETA_KW => Some(SyntaxKind::POPMETA_DIRECTIVE),
+
+        // Phase 2.3: edge directives (option / include / plugin).
+        // These are top-level keyword directives — like
+        // pushtag/poptag/pushmeta/popmeta above — so the same
+        // single-line directive body shape applies. Their full
+        // header is consumed by `emit_through_terminator`; trailing
+        // indented metadata lines (a rare but legal Beancount idiom
+        // for option / include / plugin) are absorbed by
+        // `emit_directive_body`'s look-ahead, same as the other
+        // top-level-keyword directives.
+        SyntaxKind::OPTION_KW => Some(SyntaxKind::OPTION_DIRECTIVE),
+        SyntaxKind::INCLUDE_KW => Some(SyntaxKind::INCLUDE_DIRECTIVE),
+        SyntaxKind::PLUGIN_KW => Some(SyntaxKind::PLUGIN_DIRECTIVE),
 
         // Dated directives — peek past SAME-LINE whitespace for the
         // keyword. Only WHITESPACE separates content tokens within a
@@ -982,6 +1005,14 @@ fn identify_directive(tokens: &[(SyntaxKind, Range<usize>)], i: usize) -> Option
                 SyntaxKind::DOCUMENT_KW => Some(SyntaxKind::DOCUMENT_DIRECTIVE),
                 SyntaxKind::PRICE_KW => Some(SyntaxKind::PRICE_DIRECTIVE),
                 SyntaxKind::COMMODITY_KW => Some(SyntaxKind::COMMODITY_DIRECTIVE),
+                // Phase 2.3: CUSTOM is a dated directive with a
+                // type-name STRING followed by an arbitrary value
+                // list (STRING / ACCOUNT / amount / DATE / CURRENCY
+                // / BOOL). The header consumption is identical to
+                // the other dated single-line directives; only the
+                // value list is open-ended, which is fine for the
+                // CST since the trailing tokens stay flat.
+                SyntaxKind::CUSTOM_KW => Some(SyntaxKind::CUSTOM_DIRECTIVE),
                 // Transaction triggers after the DATE. Beancount
                 // accepts:
                 // - `*` (STAR) for completed transactions

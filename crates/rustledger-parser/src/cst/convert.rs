@@ -949,21 +949,168 @@ fn flag_char_from_posting(flag: &ast::PostingFlag) -> char {
 /// use AMOUNT shapes that the legacy parser would have evaluated
 /// differently.
 fn convert_amount_to_incomplete(amt: &ast::Amount) -> Option<IncompleteAmount> {
-    let number = amt.number().and_then(|n| {
-        let mut value = parse_decimal_token(n.text())?;
-        if let Some(sign) = amt.sign()
-            && sign.is_minus()
-        {
-            value = -value;
-        }
-        Some(value)
-    });
+    // Arithmetic AMOUNT expressions (`120 / 3 USD`, `(1+2) USD`):
+    // run the recursive-descent evaluator on the flat token
+    // stream. Fast-path plain `NUMBER CURRENCY` shapes to keep
+    // the common case allocation-free.
+    let number = if amt.is_arithmetic() {
+        evaluate_amount_expression(amt)
+    } else {
+        amt.number().and_then(|n| {
+            let mut value = parse_decimal_token(n.text())?;
+            if let Some(sign) = amt.sign()
+                && sign.is_minus()
+            {
+                value = -value;
+            }
+            Some(value)
+        })
+    };
     let currency = amt.currency().map(|c| Currency::new(c.text()));
     match (number, currency) {
         (Some(n), Some(c)) => Some(IncompleteAmount::Complete(Amount::new(n, c))),
         (Some(n), None) => Some(IncompleteAmount::NumberOnly(n)),
         (None, Some(c)) => Some(IncompleteAmount::CurrencyOnly(c)),
         (None, None) => None,
+    }
+}
+
+/// Evaluate the arithmetic expression inside an `AMOUNT` node and
+/// return the resulting decimal. Returns `None` when evaluation
+/// fails (division by zero, decimal overflow, malformed parens,
+/// missing operand).
+///
+/// AMOUNT children are flat tokens (no expression sub-tree): a
+/// sequence of `NUMBER`, `PLUS`, `MINUS`, `STAR`, `SLASH`,
+/// `L_PAREN`, `R_PAREN`, and a trailing `CURRENCY` at depth 0
+/// that's the amount's currency rather than part of the
+/// expression. The currency is stripped first; the rest goes
+/// through recursive descent mirroring legacy
+/// `parser::parse_expr` / `parse_term` / `parse_primary`.
+///
+/// Operator precedence and unary handling match Python beancount:
+/// `*` and `/` bind tighter than `+` and `-`; a leading or post-
+/// operator `-` is unary negation.
+fn evaluate_amount_expression(amt: &ast::Amount) -> Option<Decimal> {
+    let tokens = amount_expression_tokens(amt);
+    let mut cursor = 0usize;
+    let value = parse_arith_expr(&tokens, &mut cursor)?;
+    // Trailing tokens after a successful parse mean the expression
+    // is malformed (`1+2 3 USD`); refuse rather than silently
+    // dropping them.
+    if cursor != tokens.len() {
+        return None;
+    }
+    Some(value)
+}
+
+/// Collect AMOUNT's expression tokens — every non-trivia direct-
+/// child token EXCEPT the trailing `CURRENCY` at paren-depth 0
+/// (which is the amount's currency, not part of the expression).
+/// Parens at any depth are preserved so `parse_arith_primary` can
+/// recurse through them.
+fn amount_expression_tokens(amt: &ast::Amount) -> Vec<crate::SyntaxToken> {
+    let raw: Vec<crate::SyntaxToken> = amt
+        .syntax()
+        .children_with_tokens()
+        .filter_map(rowan::NodeOrToken::into_token)
+        .filter(|t| !is_trivia_kind(t.kind()))
+        .collect();
+    // Find the index of the LAST `CURRENCY` at depth 0 — same
+    // disambiguator as `Amount::currency()`. Tokens before that
+    // index form the arithmetic expression.
+    let mut depth: i32 = 0;
+    let mut trailing_currency_idx: Option<usize> = None;
+    for (i, t) in raw.iter().enumerate() {
+        match t.kind() {
+            crate::SyntaxKind::L_PAREN => depth += 1,
+            crate::SyntaxKind::R_PAREN => depth -= 1,
+            crate::SyntaxKind::CURRENCY if depth == 0 => trailing_currency_idx = Some(i),
+            _ => {}
+        }
+    }
+    let end = trailing_currency_idx.unwrap_or(raw.len());
+    raw.into_iter().take(end).collect()
+}
+
+/// `expr := term (('+' | '-') term)*` — left-associative.
+fn parse_arith_expr(tokens: &[crate::SyntaxToken], cursor: &mut usize) -> Option<Decimal> {
+    let mut result = parse_arith_term(tokens, cursor)?;
+    while let Some(op) = tokens.get(*cursor).map(crate::SyntaxToken::kind) {
+        match op {
+            crate::SyntaxKind::PLUS => {
+                *cursor += 1;
+                let rhs = parse_arith_term(tokens, cursor)?;
+                result = result.checked_add(rhs)?;
+            }
+            crate::SyntaxKind::MINUS => {
+                *cursor += 1;
+                let rhs = parse_arith_term(tokens, cursor)?;
+                result = result.checked_sub(rhs)?;
+            }
+            _ => break,
+        }
+    }
+    Some(result)
+}
+
+/// `term := primary (('*' | '/') primary)*` — left-associative.
+fn parse_arith_term(tokens: &[crate::SyntaxToken], cursor: &mut usize) -> Option<Decimal> {
+    let mut result = parse_arith_primary(tokens, cursor)?;
+    while let Some(op) = tokens.get(*cursor).map(crate::SyntaxToken::kind) {
+        match op {
+            crate::SyntaxKind::STAR => {
+                *cursor += 1;
+                let rhs = parse_arith_primary(tokens, cursor)?;
+                result = result.checked_mul(rhs)?;
+            }
+            crate::SyntaxKind::SLASH => {
+                *cursor += 1;
+                let rhs = parse_arith_primary(tokens, cursor)?;
+                if rhs.is_zero() {
+                    return None;
+                }
+                result = result.checked_div(rhs)?;
+            }
+            _ => break,
+        }
+    }
+    Some(result)
+}
+
+/// `primary := '(' expr ')' | '-' primary | '+' primary | NUMBER`.
+fn parse_arith_primary(tokens: &[crate::SyntaxToken], cursor: &mut usize) -> Option<Decimal> {
+    let t = tokens.get(*cursor)?;
+    match t.kind() {
+        crate::SyntaxKind::L_PAREN => {
+            *cursor += 1;
+            let inner = parse_arith_expr(tokens, cursor)?;
+            // Mandatory closer; bail (returning None) on unbalance
+            // — `Amount::currency()` already refuses to surface a
+            // currency for unbalanced parens, so the amount as a
+            // whole degrades cleanly to `NumberOnly`/`None`.
+            let close = tokens.get(*cursor)?;
+            if close.kind() != crate::SyntaxKind::R_PAREN {
+                return None;
+            }
+            *cursor += 1;
+            Some(inner)
+        }
+        crate::SyntaxKind::MINUS => {
+            *cursor += 1;
+            let inner = parse_arith_primary(tokens, cursor)?;
+            Some(-inner)
+        }
+        crate::SyntaxKind::PLUS => {
+            *cursor += 1;
+            parse_arith_primary(tokens, cursor)
+        }
+        crate::SyntaxKind::NUMBER => {
+            let value = parse_decimal_token(t.text())?;
+            *cursor += 1;
+            Some(value)
+        }
+        _ => None,
     }
 }
 
@@ -2643,6 +2790,103 @@ mod tests {
         );
         assert!(t.trailing_comments[0].contains("trailing one"));
         assert!(t.trailing_comments[1].contains("trailing two"));
+    }
+
+    // ---- arithmetic AMOUNT evaluation (phase 3.7 flip blocker) -
+
+    #[test]
+    fn posting_amount_evaluates_division() {
+        // Regression for `test_arithmetic_expressions_consistency`:
+        // `120 / 3 USD` must evaluate to 40 USD so the transaction
+        // balances. Without this the CST flip breaks every ledger
+        // using arithmetic split syntax.
+        let src = "2024-01-15 * \"split\"\n  \
+                   Expenses:Food   120 / 3 USD\n  \
+                   Assets:Bank    -40 USD\n";
+        let result = parse_via_cst(src);
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let Directive::Transaction(t) = &result.directives[0].value else {
+            panic!("expected Transaction");
+        };
+        let Some(IncompleteAmount::Complete(amt)) = &t.postings[0].value.units else {
+            panic!("expected complete amount on posting 0");
+        };
+        assert_eq!(amt.number, Decimal::from(40));
+        assert_eq!(amt.currency.as_str(), "USD");
+    }
+
+    #[test]
+    fn posting_amount_evaluates_addition_and_multiplication_precedence() {
+        // `2 + 3 * 4 USD` = 14 USD (standard precedence).
+        let src = "2024-01-15 * \"x\"\n  \
+                   Expenses:X   2 + 3 * 4 USD\n  \
+                   Assets:Y   -14 USD\n";
+        let result = parse_via_cst(src);
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let Directive::Transaction(t) = &result.directives[0].value else {
+            panic!("expected Transaction");
+        };
+        let Some(IncompleteAmount::Complete(amt)) = &t.postings[0].value.units else {
+            panic!("expected complete amount");
+        };
+        assert_eq!(amt.number, Decimal::from(14));
+    }
+
+    #[test]
+    fn posting_amount_evaluates_parens_override_precedence() {
+        // `(2 + 3) * 4 USD` = 20 USD.
+        let src = "2024-01-15 * \"x\"\n  \
+                   Expenses:X   (2 + 3) * 4 USD\n  \
+                   Assets:Y   -20 USD\n";
+        let result = parse_via_cst(src);
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let Directive::Transaction(t) = &result.directives[0].value else {
+            panic!("expected Transaction");
+        };
+        let Some(IncompleteAmount::Complete(amt)) = &t.postings[0].value.units else {
+            panic!("expected complete amount");
+        };
+        assert_eq!(amt.number, Decimal::from(20));
+    }
+
+    #[test]
+    fn posting_amount_evaluates_subtraction_left_associative() {
+        // `10 - 3 - 2 USD` = 5 USD (left-associative, not 9).
+        let src = "2024-01-15 * \"x\"\n  \
+                   Expenses:X   10 - 3 - 2 USD\n  \
+                   Assets:Y   -5 USD\n";
+        let result = parse_via_cst(src);
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let Directive::Transaction(t) = &result.directives[0].value else {
+            panic!("expected Transaction");
+        };
+        let Some(IncompleteAmount::Complete(amt)) = &t.postings[0].value.units else {
+            panic!("expected complete amount");
+        };
+        assert_eq!(amt.number, Decimal::from(5));
+    }
+
+    #[test]
+    fn posting_amount_division_by_zero_drops_number() {
+        // `5 / 0 USD` — legacy returns parse error; we return None
+        // from the evaluator, which degrades to CurrencyOnly here.
+        // The transaction won't balance and downstream validation
+        // surfaces that as the user-facing error.
+        let src = "2024-01-15 * \"x\"\n  \
+                   Expenses:X   5 / 0 USD\n  \
+                   Assets:Y\n";
+        let result = parse_via_cst(src);
+        let Directive::Transaction(t) = &result.directives[0].value else {
+            panic!("expected Transaction");
+        };
+        // Either the units degrade to CurrencyOnly (number lost)
+        // or to None — both are acceptable since the input is
+        // semantically invalid. The strict assertion is that we
+        // DON'T silently return 5 (the first NUMBER) as the value.
+        match &t.postings[0].value.units {
+            None | Some(IncompleteAmount::CurrencyOnly(_)) => {}
+            other => panic!("div-by-zero leaked: {other:?}"),
+        }
     }
 
     // ---- 14 emission-gap regressions (#1281 round-3 review) ----

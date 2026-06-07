@@ -97,6 +97,13 @@ pub fn parse_via_cst(source: &str) -> ParseResult {
     let warnings = Vec::new();
     let currency_occurrences = extract_currency_occurrences(&source_file, bom_offset);
 
+    // pushtag/poptag/pushmeta/popmeta state. The legacy parser
+    // maintains a stack across directives; each Transaction
+    // inherits the active pushed-tag set, and EVERY directive
+    // inherits the active pushed-meta set.
+    let mut tag_stack: Vec<Tag> = Vec::new();
+    let mut meta_stack: Metadata = Metadata::default();
+
     for directive in source_file.directives() {
         // Helper to push a successfully-converted directive
         // alongside its CST node so the post-pass span fixup
@@ -133,16 +140,40 @@ pub fn parse_via_cst(source: &str) -> ParseResult {
                 }
                 None
             }
-            // Pushtag/Poptag/Pushmeta/Popmeta are state-only side
-            // effects (they don't produce Directive variants but
-            // mutate inherited tags/meta on subsequent
-            // transactions). Deferred for a later commit.
-            ast::Directive::Pushtag(_)
-            | ast::Directive::Poptag(_)
-            | ast::Directive::Pushmeta(_)
-            | ast::Directive::Popmeta(_) => None,
+            // State-only side effects: mutate the inherited
+            // tag/meta sets that apply to subsequent directives.
+            ast::Directive::Pushtag(node) => {
+                if let Some(tag_token) = node.tag() {
+                    tag_stack.push(Tag::new(tag_token.text().trim_start_matches('#')));
+                }
+                None
+            }
+            ast::Directive::Poptag(node) => {
+                if let Some(tag_token) = node.tag() {
+                    let name = tag_token.text().trim_start_matches('#');
+                    if let Some(pos) = tag_stack.iter().rposition(|t| t.as_str() == name) {
+                        tag_stack.remove(pos);
+                    }
+                }
+                None
+            }
+            ast::Directive::Pushmeta(node) => {
+                if let Some(key_token) = node.key() {
+                    let key = key_token.text_without_colon().to_string();
+                    let value = pushmeta_value(node.syntax());
+                    meta_stack.insert(key, value);
+                }
+                None
+            }
+            ast::Directive::Popmeta(node) => {
+                if let Some(key_token) = node.key() {
+                    meta_stack.remove(key_token.text_without_colon());
+                }
+                None
+            }
         };
-        if let Some(spanned) = pushed_directive {
+        if let Some(mut spanned) = pushed_directive {
+            apply_inherited_state(&mut spanned.value, &tag_stack, &meta_stack);
             directives.push(spanned);
             directive_nodes.push(cst_node);
         }
@@ -740,6 +771,83 @@ fn meta_value_from_entry(entry: &MetaEntry) -> MetaValue {
     MetaValue::None
 }
 
+// ---- Inherited state (pushtag/poptag/pushmeta/popmeta) ---------
+
+/// Merge active pushed-tag and pushed-meta state into a freshly
+/// converted directive's value. Mirrors the legacy parser's
+/// `apply_pushed_tags` + `apply_pushed_meta`: tags apply ONLY to
+/// `Transaction`; meta applies to every directive's `meta` field.
+fn apply_inherited_state(value: &mut Directive, tag_stack: &[Tag], meta_stack: &Metadata) {
+    if let Directive::Transaction(txn) = value {
+        for tag in tag_stack {
+            if !txn.tags.contains(tag) {
+                txn.tags.push(tag.clone());
+            }
+        }
+    }
+    if meta_stack.is_empty() {
+        return;
+    }
+    let meta = match value {
+        Directive::Transaction(d) => &mut d.meta,
+        Directive::Balance(d) => &mut d.meta,
+        Directive::Open(d) => &mut d.meta,
+        Directive::Close(d) => &mut d.meta,
+        Directive::Commodity(d) => &mut d.meta,
+        Directive::Pad(d) => &mut d.meta,
+        Directive::Event(d) => &mut d.meta,
+        Directive::Query(d) => &mut d.meta,
+        Directive::Note(d) => &mut d.meta,
+        Directive::Document(d) => &mut d.meta,
+        Directive::Price(d) => &mut d.meta,
+        Directive::Custom(d) => &mut d.meta,
+    };
+    for (k, v) in meta_stack {
+        meta.insert(k.clone(), v.clone());
+    }
+}
+
+/// Extract the value tokens after the `META_KEY` of a Pushmeta
+/// directive into a typed [`MetaValue`]. Walks the directive's
+/// direct-child tokens (the directive isn't a `META_ENTRY` so the
+/// typed-AST accessors aren't reusable).
+fn pushmeta_value(node: &crate::SyntaxNode) -> MetaValue {
+    for el in node.children_with_tokens() {
+        let rowan::NodeOrToken::Token(t) = el else {
+            continue;
+        };
+        match t.kind() {
+            crate::SyntaxKind::STRING => {
+                if let Some(s) = strip_string_quotes(t.text()) {
+                    return MetaValue::String(s.to_string());
+                }
+            }
+            crate::SyntaxKind::NUMBER => {
+                if let Some(n) = parse_decimal_token(t.text()) {
+                    return MetaValue::Number(n);
+                }
+            }
+            crate::SyntaxKind::DATE => {
+                if let Some(d) = parse_date_token(t.text()) {
+                    return MetaValue::Date(d);
+                }
+            }
+            crate::SyntaxKind::ACCOUNT => return MetaValue::Account(Account::new(t.text())),
+            crate::SyntaxKind::CURRENCY => return MetaValue::Currency(Currency::new(t.text())),
+            crate::SyntaxKind::BOOL_TRUE => return MetaValue::Bool(true),
+            crate::SyntaxKind::BOOL_FALSE => return MetaValue::Bool(false),
+            crate::SyntaxKind::TAG => {
+                return MetaValue::Tag(Tag::new(t.text().trim_start_matches('#')));
+            }
+            crate::SyntaxKind::LINK => {
+                return MetaValue::Link(Link::new(t.text().trim_start_matches('^')));
+            }
+            _ => {}
+        }
+    }
+    MetaValue::None
+}
+
 // ---- ParseResult.currency_occurrences --------------------------
 
 /// Walk every `CURRENCY` token under the source file (any
@@ -872,25 +980,48 @@ fn fixup_directive_spans(
         "converted_nodes and directives must be parallel arrays"
     );
 
-    let starts: Vec<usize> = converted_nodes
-        .iter()
+    // Walk EVERY top-level Directive-castable child (including
+    // pushtag/poptag/pushmeta/popmeta that we filter out of the
+    // ParseResult) so the "next directive's start" boundary used
+    // for span end-fixup matches the legacy parser: there, each
+    // visible directive's span ends at the next /input/
+    // directive's start, regardless of whether that next
+    // directive is preserved.
+    let all_starts: Vec<(usize, usize)> = source_file
+        .syntax()
+        .children()
+        .filter(|n| ast::Directive::can_cast(n.kind()))
         .map(|n| {
-            n.descendants_with_tokens()
+            let raw_start: u32 = n.text_range().start().into();
+            let content_start = n
+                .descendants_with_tokens()
                 .filter_map(rowan::NodeOrToken::into_token)
                 .find(|t| !is_trivia_kind(t.kind()))
                 .map_or_else(
-                    || (u32::from(n.text_range().start()) + bom_offset) as usize,
+                    || (raw_start + bom_offset) as usize,
                     |t| (u32::from(t.text_range().start()) + bom_offset) as usize,
-                )
+                );
+            ((raw_start + bom_offset) as usize, content_start)
         })
         .collect();
 
     let source_end: usize =
         (u32::from(source_file.syntax().text_range().end()) + bom_offset) as usize;
 
+    // For each converted directive, find its position in the all
+    // list by raw_start (which is unique per CST node), then use
+    // the NEXT all_starts content_start as its span end.
     for (i, spanned) in directives.iter_mut().enumerate() {
-        let start = starts[i];
-        let end = starts.get(i + 1).copied().unwrap_or(source_end);
+        let node = &converted_nodes[i];
+        let raw_start: usize = (u32::from(node.text_range().start()) + bom_offset) as usize;
+        let pos = all_starts
+            .iter()
+            .position(|(rs, _)| *rs == raw_start)
+            .expect("converted node must appear in the all-directives list");
+        let start = all_starts[pos].1;
+        let end = all_starts
+            .get(pos + 1)
+            .map_or(source_end, |(_, content)| *content);
         spanned.span = Span::new(start, end);
     }
 }

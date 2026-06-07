@@ -379,7 +379,7 @@ fn error_node_surfaces_through_typed_api() {
     assert_eq!(errs[0].text(), "bogus content here\n");
     let ds: Vec<Directive> = f.directives().collect();
     assert_eq!(ds.len(), 1);
-    matches!(ds[0], Directive::Open(_));
+    assert!(matches!(ds[0], Directive::Open(_)));
 }
 
 // ---- AstNode / AstToken trait surface ----------------------------

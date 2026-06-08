@@ -94,18 +94,25 @@ pub fn format_node(node: &crate::SyntaxNode) -> String {
     // and same-line trailing comments live INSIDE the next/owning
     // directive and surface from `emit_directive`'s leading-trivia
     // pass.
-    let mut first = true;
+    //
+    // Blank-line policy at the top level: insert exactly one blank
+    // line BEFORE a directive iff the previously emitted item was
+    // also a directive. Adjacent file-level comments stay tight as
+    // a group (so a `; ====\n; HEADER\n; ====` section header keeps
+    // its visual grouping), and a comment group sitting against a
+    // directive on either side stays flush.
+    let mut prev_was_directive = false;
     for el in source_file.syntax().children_with_tokens() {
         match el {
             rowan::NodeOrToken::Node(n) => {
                 let Some(directive) = ast::Directive::cast(n) else {
                     continue;
                 };
-                if !first {
+                if prev_was_directive {
                     out.push('\n');
                 }
-                first = false;
                 emit_directive(&directive, alignment, &mut out);
+                prev_was_directive = true;
             }
             rowan::NodeOrToken::Token(t) => {
                 if matches!(
@@ -115,12 +122,9 @@ pub fn format_node(node: &crate::SyntaxNode) -> String {
                         | crate::SyntaxKind::SHEBANG
                         | crate::SyntaxKind::EMACS_DIRECTIVE
                 ) {
-                    if !first {
-                        out.push('\n');
-                    }
-                    first = false;
                     out.push_str(t.text().trim_end_matches(['\n', '\r']));
                     out.push('\n');
+                    prev_was_directive = false;
                 }
             }
         }
@@ -542,6 +546,19 @@ fn emit_custom(d: &ast::CustomDirective, out: &mut String) {
         .filter_map(rowan::NodeOrToken::into_token)
         .filter(|t| !is_trivia_kind(t.kind()))
         .collect();
+    // `seen_type` skips the leading DATE + CUSTOM_KW + type-STRING
+    // tokens (already emitted above as the directive header); once
+    // it flips true, every subsequent non-trivia token is a value
+    // argument and gets emitted with single-space separation. An
+    // adjacent NUMBER + CURRENCY pair is glued with a single space
+    // (canonical Amount shape); the CURRENCY is NOT eaten as a
+    // standalone arg next iteration.
+    //
+    // Beancount custom directives accept any mix of value kinds
+    // including DATE — a `custom "type" 2024-06-15 100.00 USD`
+    // shape has a DATE in value position. The previous version
+    // skipped every DATE after seen_type, silently dropping such
+    // user-provided date arguments.
     let mut seen_type = false;
     let mut i = 0;
     while i < tokens.len() {
@@ -553,28 +570,20 @@ fn emit_custom(d: &ast::CustomDirective, out: &mut String) {
             i += 1;
             continue;
         }
-        match t.kind() {
-            crate::SyntaxKind::DATE | crate::SyntaxKind::CUSTOM_KW => {
-                i += 1;
+        out.push(' ');
+        if t.kind() == crate::SyntaxKind::NUMBER {
+            out.push_str(&canonical_number(t.text()));
+            if matches!(
+                tokens.get(i + 1).map(rowan::SyntaxToken::kind),
+                Some(crate::SyntaxKind::CURRENCY)
+            ) {
+                out.push(' ');
+                out.push_str(tokens[i + 1].text());
+                i += 2;
                 continue;
             }
-            crate::SyntaxKind::NUMBER => {
-                out.push(' ');
-                out.push_str(&canonical_number(t.text()));
-                if matches!(
-                    tokens.get(i + 1).map(rowan::SyntaxToken::kind),
-                    Some(crate::SyntaxKind::CURRENCY)
-                ) {
-                    out.push(' ');
-                    out.push_str(tokens[i + 1].text());
-                    i += 2;
-                    continue;
-                }
-            }
-            _ => {
-                out.push(' ');
-                out.push_str(t.text());
-            }
+        } else {
+            out.push_str(t.text());
         }
         i += 1;
     }
@@ -706,12 +715,7 @@ fn emit_transaction(d: &ast::Transaction, align: Alignment, out: &mut String) {
         if let Some(p) = ast::Posting::cast(child.clone()) {
             emit_posting(&p, align, out);
         } else if let Some(m) = ast::MetaEntry::cast(child) {
-            out.push_str(INDENT);
-            let trimmed = m.syntax().text().to_string();
-            out.push_str(trimmed.trim_start());
-            if !out.ends_with('\n') {
-                out.push('\n');
-            }
+            emit_meta_entry(&m, INDENT, out);
         }
     }
     // Trailing body-line TAG / LINK tokens (direct-child tokens
@@ -822,12 +826,7 @@ fn emit_posting(p: &ast::Posting, align: Alignment, out: &mut String) {
     }
     // Posting-attached metadata: indent 4 (deeper than posting's 2).
     for m in p.meta_entries() {
-        out.push_str("    ");
-        let trimmed = m.syntax().text().to_string();
-        out.push_str(trimmed.trim_start());
-        if !out.ends_with('\n') {
-            out.push('\n');
-        }
+        emit_meta_entry(&m, "    ", out);
     }
 }
 
@@ -868,14 +867,28 @@ fn format_amount(amt: &ast::Amount) -> String {
 /// per-unit), `{{cost CCY}}` (double-brace total), `{# cost CCY}`
 /// (per-unit + total via opener), or the in-brace `{N # T CCY}`
 /// shape preserved as-is with single-space normalization.
+///
+/// Commas separating cost components (`{N CCY, DATE, "label"}`)
+/// stay tight against the preceding token; every other adjacent
+/// token pair is joined with a single space.
 fn format_cost_spec(cs: &ast::CostSpec) -> String {
     let (open, close) = if cs.is_total() {
         ("{{", "}}")
+    } else if cs.is_per_unit_plus_total() {
+        ("{#", "}")
     } else {
         ("{", "}")
     };
     let mut inner = String::new();
-    let mut prev_kind: Option<crate::SyntaxKind> = None;
+    // The `{#` opener is a two-character marker; canonical form
+    // separates it from the first inner token with a single space
+    // (matching the rendering in this function's rustdoc). `{` and
+    // `{{` don't get inner padding per the canonical-form spec.
+    let mut prev_kind: Option<crate::SyntaxKind> = if cs.is_per_unit_plus_total() {
+        Some(crate::SyntaxKind::L_BRACE_HASH)
+    } else {
+        None
+    };
     for el in cs.syntax().children_with_tokens() {
         let rowan::NodeOrToken::Token(t) = el else {
             continue;
@@ -889,7 +902,7 @@ fn format_cost_spec(cs: &ast::CostSpec) -> String {
             | crate::SyntaxKind::WHITESPACE
             | crate::SyntaxKind::NEWLINE => {}
             _ => {
-                let need_space = prev_kind.is_some();
+                let need_space = prev_kind.is_some() && t.kind() != crate::SyntaxKind::COMMA;
                 if need_space {
                     inner.push(' ');
                 }
@@ -1069,22 +1082,51 @@ fn balance_tolerance(node: &crate::SyntaxNode) -> Option<(String, Option<String>
 // ---- Metadata --------------------------------------------------
 
 /// Walk a directive's direct-child `META_ENTRY` nodes and emit
-/// each on its own indented line. Most directive types don't
-/// have a `.meta_entries()` accessor on their typed wrapper; we
-/// walk the syntax node directly to stay uniform.
+/// each on its own indented line in canonical form (`indent + KEY:
+/// value\n`). Most directive types don't have a `.meta_entries()`
+/// accessor on their typed wrapper; we walk the syntax node
+/// directly to stay uniform.
 fn emit_meta_entries_of(node: &crate::SyntaxNode, out: &mut String) {
     for entry in node.children().filter_map(MetaEntry::cast) {
-        out.push_str(INDENT);
-        // For now: passthrough the entry's source text minus its
-        // leading trivia, ensuring exactly one newline at the
-        // end. A proper canonical emit (key: <typed-value>) lands
-        // in PR 4.1b alongside meta value normalization.
-        let trimmed = entry.syntax().text().to_string();
-        out.push_str(trimmed.trim_start());
-        if !out.ends_with('\n') {
-            out.push('\n');
+        emit_meta_entry(&entry, INDENT, out);
+    }
+}
+
+/// Canonical emit for a single `META_ENTRY`. Walks non-trivia
+/// tokens, prints them with single-space separation, and
+/// normalizes numbers via [`canonical_number`]. The `META_KEY`
+/// token already includes the trailing colon (e.g. `note:`); the
+/// value side gets the same NUMBER + CURRENCY gluing rule the
+/// rest of the formatter uses elsewhere.
+///
+/// Two semantically-equivalent inputs (e.g. `foo: "bar"` and
+/// `foo:    "bar"`) produce byte-identical output — the
+/// gofmt-style invariant the file rustdoc promises.
+fn emit_meta_entry(m: &MetaEntry, indent: &str, out: &mut String) {
+    out.push_str(indent);
+    let mut first = true;
+    for el in m.syntax().children_with_tokens() {
+        let rowan::NodeOrToken::Token(t) = el else {
+            continue;
+        };
+        let kind = t.kind();
+        if matches!(
+            kind,
+            crate::SyntaxKind::WHITESPACE | crate::SyntaxKind::NEWLINE
+        ) {
+            continue;
+        }
+        if !first {
+            out.push(' ');
+        }
+        first = false;
+        if kind == crate::SyntaxKind::NUMBER {
+            out.push_str(&canonical_number(t.text()));
+        } else {
+            out.push_str(t.text());
         }
     }
+    out.push('\n');
 }
 
 #[cfg(test)]
@@ -1466,5 +1508,95 @@ mod tests {
             "2024-01-15 * \"x\"\n  Assets:Cash -5.00 USD\n    foo: \"bar\"\n  Expenses:Misc\n";
         let out = format_source(src);
         assert!(out.contains("\n    foo: \"bar\"\n"), "got: {out}");
+    }
+
+    // ---- Code-review regression tests -----------------------------
+    //
+    // Each test pins a bug surfaced by the high-effort code review of
+    // PR #1284 and verified at runtime against the unfixed formatter.
+
+    #[test]
+    fn cost_spec_per_unit_plus_total_opener_preserved() {
+        // Bug: format_cost_spec only branched on is_total() and emitted
+        // `{` for the `{#` opener too, dropping the `#` marker and
+        // changing semantics from per-unit-plus-total to plain
+        // per-unit cost.
+        let src = "2024-01-01 * \"buy\"\n  Assets:Brokerage 10 HOOL {# 500.00 USD}\n  Assets:Cash -5000.00 USD\n";
+        let out = format_source(src);
+        assert!(
+            out.contains("{# 500.00 USD}"),
+            "expected `{{#` opener preserved; got:\n{out}"
+        );
+        assert!(!out.contains("{500.00 USD}"), "got:\n{out}");
+    }
+
+    #[test]
+    fn cost_spec_comma_stays_tight_to_prev_token() {
+        // Bug: format_cost_spec's catch-all arm inserted a space
+        // before every non-trivia token including COMMA, producing
+        // `{500.00 USD , 2024-01-15}` instead of the canonical
+        // `{500.00 USD, 2024-01-15}`.
+        let src = "2024-01-01 * \"buy\"\n  Assets:Brokerage 10 HOOL {500.00 USD, 2024-01-15}\n  Assets:Cash -5000.00 USD\n";
+        let out = format_source(src);
+        assert!(
+            out.contains("{500.00 USD, 2024-01-15}"),
+            "comma must stay tight to USD; got:\n{out}"
+        );
+        assert!(
+            !out.contains("USD ,"),
+            "no space allowed before comma; got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn custom_directive_preserves_date_value_arguments() {
+        // Bug: emit_custom's post-seen_type match skipped every DATE
+        // token, silently dropping legitimate date-typed value
+        // arguments. The leading directive date is already skipped
+        // via the seen_type=false phase.
+        let src = "2024-01-01 custom \"budget\" \"name\" 2024-06-15 100.00 USD\n";
+        let out = format_source(src);
+        assert!(
+            out.contains("2024-06-15"),
+            "value-position DATE must survive; got: {out}"
+        );
+    }
+
+    #[test]
+    fn file_level_adjacent_comments_stay_tight() {
+        // Bug: format_node's top-level walk inserted a blank `\n`
+        // separator before every emitted item including comments,
+        // breaking section-header blocks like `; ====\n; HEADER\n; ====`
+        // by injecting blanks between every adjacent comment line.
+        let src = "; ====\n; HEADER\n; ====\n2024-01-01 open Assets:A\n";
+        let expected = "; ====\n; HEADER\n; ====\n2024-01-01 open Assets:A\n";
+        assert_eq!(format_source(src), expected);
+    }
+
+    #[test]
+    fn metadata_internal_whitespace_normalized() {
+        // Bug: emit_meta_entries_of passed META_ENTRY source text
+        // through verbatim, so `foo: "bar"` and `foo:    "bar"` —
+        // identical typed ASTs — produced different formatter
+        // output, violating the gofmt-style invariant the rustdoc
+        // declares.
+        let a = "2024-01-01 open Assets:Bank\n  starting: \"foo\"\n";
+        let b = "2024-01-01 open Assets:Bank\n  starting:    \"foo\"\n";
+        assert_eq!(format_source(a), format_source(b));
+    }
+
+    #[test]
+    fn metadata_number_thousands_separator_stripped() {
+        // Same invariant: numbers inside metadata values share the
+        // canonical thousands-separator policy with posting numbers
+        // (otherwise the same file would emit inconsistent numeric
+        // forms in postings vs. metadata).
+        let src = "2024-01-01 open Assets:Bank\n  starting_balance: 1,000.00 USD\n";
+        let out = format_source(src);
+        assert!(
+            out.contains("1000.00 USD"),
+            "thousands-sep should strip in metadata too; got: {out}"
+        );
+        assert!(!out.contains("1,000"), "got: {out}");
     }
 }

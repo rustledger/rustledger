@@ -248,7 +248,8 @@ fn handle_sort_transactions(
 }
 
 /// Align amounts in the document by delegating to the *canonical*
-/// document formatter ([`format_document`]).
+/// document formatter ([`format_document`]) and then keeping only
+/// the edits that actually touch a posting line.
 ///
 /// `format_document` runs the same `rustledger_parser::format_source`
 /// pipeline as `rledger format`, so the column widths this command
@@ -258,12 +259,21 @@ fn handle_sort_transactions(
 /// formatting` request nor the CLI — the duplicate-code-path class
 /// issue #1142 warned about.
 ///
+/// **Filter rationale.** The command name promises *alignment*. A
+/// canonical-format edit list also includes blank-line collapse,
+/// comment normalization, and trailing-whitespace strip — applying
+/// those under an "Align Amounts" command label silently mutates the
+/// buffer in ways the user did not invoke this command for. We
+/// classify each edit by whether the source line at the edit's start
+/// is a posting line (indented, beginning with an optional posting
+/// flag and then an account name); only those survive. If nothing
+/// survives, the user gets a clear "No amounts to align" message
+/// instead of a misleading canonical-reformat WorkspaceEdit.
+///
 /// **Parse-error semantics.** On a file with parse errors,
 /// `format_document` returns `None` and this command surfaces a
 /// dedicated "cannot align" message rather than running the surface-
-/// cleanup fallback that `handle_formatting` uses. The command's name
-/// promises alignment; emitting whitespace-only edits under it would
-/// silently mutate the buffer in ways the user did not request.
+/// cleanup fallback that `handle_formatting` uses.
 fn handle_align_amounts(
     source: &str,
     parse_result: &ParseResult,
@@ -284,13 +294,17 @@ fn handle_align_amounts(
         return ExecuteCommandResponse::warn("No amounts to align");
     };
 
-    if edits.is_empty() {
+    let posting_edits: Vec<_> = edits
+        .into_iter()
+        .filter(|e| edit_touches_posting_line(source, e))
+        .collect();
+    if posting_edits.is_empty() {
         return ExecuteCommandResponse::warn("No amounts to align");
     }
 
     #[allow(clippy::mutable_key_type)]
     let mut changes = HashMap::new();
-    changes.insert(uri.clone(), edits);
+    changes.insert(uri.clone(), posting_edits);
 
     let workspace_edit = WorkspaceEdit {
         changes: Some(changes),
@@ -302,6 +316,39 @@ fn handle_align_amounts(
         Ok(v) => ExecuteCommandResponse::json(v),
         Err(_) => ExecuteCommandResponse::none(),
     }
+}
+
+/// Heuristic for whether a `TextEdit` modifies a posting line — i.e.,
+/// a line whose alignment the `rledger.alignAmounts` command is
+/// supposed to touch.
+///
+/// A posting line starts with at least one space of indent followed
+/// (optionally) by a single-character posting flag and a space, then
+/// an account name (Beancount accounts conventionally begin with a
+/// capital ASCII letter). Top-level directives, metadata sub-lines
+/// (`  key: value` — lowercase key), comments, and blank lines all
+/// fail this test, so a canonical-form edit that only touches those
+/// is excluded from the `alignAmounts` WorkspaceEdit.
+fn edit_touches_posting_line(source: &str, edit: &TextEdit) -> bool {
+    let line_idx = edit.range.start.line as usize;
+    let Some(line) = source.lines().nth(line_idx) else {
+        return false;
+    };
+    let trimmed = line.trim_start();
+    if trimmed.is_empty() || line.len() == trimmed.len() {
+        return false; // blank line or top-level directive
+    }
+    let mut chars = trimmed.chars();
+    let first = match chars.next() {
+        Some(c) => c,
+        None => return false,
+    };
+    let account_first = if matches!(first, '!' | '*' | '#') && chars.next() == Some(' ') {
+        chars.next().unwrap_or(' ')
+    } else {
+        first
+    };
+    account_first.is_ascii_uppercase()
 }
 
 /// Show account balance.

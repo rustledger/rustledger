@@ -37,6 +37,7 @@ use parsing::{calculate_balance, parse_amount, parse_date};
 use rustledger_core::NaiveDate;
 use rustledger_core::format::{FormatConfig, format_directives};
 use rustledger_core::{Amount, Directive, Posting, Transaction};
+use rustledger_parser::format_source;
 use rustledger_parser::parse;
 use rustyline::completion::{Completer, Pair};
 use rustyline::error::ReadlineError;
@@ -278,10 +279,14 @@ fn run_quick_mode(args: &Args, file: &PathBuf, date: NaiveDate) -> Result<()> {
         txn = txn.with_synthesized_posting(posting);
     }
 
-    // Format and display
+    // Format and display. Two-pass: synthesize via the typed-
+    // directive emitter, then run it through the canonical CST
+    // formatter so the appended bytes match what `rledger format`
+    // would write on the same content (single canonical form
+    // across the toolchain).
     let config = FormatConfig::default();
     let directive = Directive::Transaction(txn);
-    let formatted = format_directives([&directive], &config);
+    let formatted = format_source(&format_directives([&directive], &config));
 
     if args.dry_run {
         println!("{formatted}");
@@ -514,10 +519,11 @@ fn run_interactive_mode(args: &Args, file: &PathBuf, date: NaiveDate) -> Result<
         txn = txn.with_synthesized_posting(posting);
     }
 
-    // Format and display preview
+    // Format and display preview (see comment in add_cmd's
+    // synthesize/format pass for why this is two-pass).
     let config = FormatConfig::default();
     let directive = Directive::Transaction(txn);
-    let formatted = format_directives([&directive], &config);
+    let formatted = format_source(&format_directives([&directive], &config));
 
     if args.dry_run {
         println!("\n{formatted}");

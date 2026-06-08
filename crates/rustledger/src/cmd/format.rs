@@ -99,7 +99,13 @@ fn format_file(file: &PathBuf, args: &Args) -> Result<ExitCode> {
     let formatted = format_source(&original_content);
 
     if args.check {
-        if formatted.trim() == original_content.trim() {
+        // Byte-exact comparison: --check must report the same diff
+        // --in-place would actually write. A trim-based comparison
+        // masks trailing-blank-line / leading-blank-line differences
+        // that the canonical form rewrites — exactly the kind of
+        // change the new formatter introduces (one trailing newline,
+        // exactly one blank between directives).
+        if formatted == original_content {
             if args.verbose {
                 eprintln!("File is already formatted: {}", file.display());
             }

@@ -586,9 +586,7 @@ fn handle_format_entry(params: &serde_json::Value) -> Result<serde_json::Value, 
     let directive = input_entry_to_directive(&params.entry)
         .map_err(|e| RpcError::invalid_params(format!("Invalid entry: {e}")))?;
 
-    let config = rustledger_core::format::FormatConfig::default();
-    let formatted = rustledger_core::format::format_directives([&directive], &config);
-
+    let formatted = canonical_format_directives(std::iter::once(&directive));
     let result = FormatResult { formatted };
     serde_json::to_value(result).map_err(|e| RpcError::internal_error(e.to_string()))
 }
@@ -597,7 +595,6 @@ fn handle_format_entries(params: &serde_json::Value) -> Result<serde_json::Value
     let params: FormatEntriesParams = serde_json::from_value(params.clone())
         .map_err(|e| RpcError::invalid_params(format!("Invalid params: {e}")))?;
 
-    let config = rustledger_core::format::FormatConfig::default();
     let mut directives: Vec<rustledger_core::Directive> = Vec::with_capacity(params.entries.len());
     for (i, entry) in params.entries.iter().enumerate() {
         directives.push(
@@ -606,10 +603,31 @@ fn handle_format_entries(params: &serde_json::Value) -> Result<serde_json::Value
             })?,
         );
     }
-    let formatted = rustledger_core::format::format_directives(directives.iter(), &config);
+    let formatted = canonical_format_directives(directives.iter());
 
     let result = FormatResult { formatted };
     serde_json::to_value(result).map_err(|e| RpcError::internal_error(e.to_string()))
+}
+
+/// Render typed directives in the same canonical form that
+/// `format.source` and `rledger format` produce.
+///
+/// Two-step pipeline: synthesize a Beancount source string with the
+/// legacy `core::format::format_directives` (which has no source to
+/// preserve so its bean-format-style output is fine as input), then
+/// run it back through the opinionated CST formatter. Net effect:
+/// `format.entry(e)` → bytes are byte-identical to `format.source(f)`
+/// where `f` is a file containing the same entry. Without this
+/// reroute, `format.entry` and `format.source` returned different
+/// canonical forms for the same logical content; the now-deleted
+/// `format_compat` test was the only place that pinned parity.
+fn canonical_format_directives<'a, I>(directives: I) -> String
+where
+    I: IntoIterator<Item = &'a rustledger_core::Directive>,
+{
+    let config = rustledger_core::format::FormatConfig::default();
+    let raw = rustledger_core::format::format_directives(directives, &config);
+    rustledger_parser::format_source(&raw)
 }
 
 // =============================================================================

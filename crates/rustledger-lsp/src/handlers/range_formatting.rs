@@ -280,22 +280,33 @@ mod tests {
         );
     }
 
-    /// CRLF EOL snap: Windows-authored files send Position(N, eol_char)
-    /// that maps to the '\r' byte (not '\n') on a CRLF line. The snap
-    /// must extend past both bytes so line-replace edits inside a
-    /// whole-document selection survive the inside-range filter even
-    /// though the canonical formatter rewrites every CRLF to LF.
-    ///
-    /// Note: range-formatting a *partial* selection of a CRLF file no
-    /// longer makes sense as a tested invariant — the canonical form
-    /// drops `\r` on every line, so a per-line selection's diff edit
-    /// is, by construction, multi-line and gets filtered out by the
-    /// "edits fully inside the selection" rule. Whole-document
-    /// selection is the supported recipe; users wanting per-line
-    /// edits on a CRLF file should normalize line endings first via
-    /// `textDocument/formatting`.
+    /// CRLF EOL snap + format_document's CRLF preservation: Windows-
+    /// authored files send Position(N, eol_char) that maps to the
+    /// `\r` byte (not `\n`) on a CRLF line. The snap must extend
+    /// past both bytes, and format_document must NOT include
+    /// `\r`→`` edits in the per-line diff (otherwise every emitted
+    /// edit on a CRLF file would be multi-line and get filtered out
+    /// by the inside-range guard).
     #[test]
     fn crlf_end_of_line_selection_keeps_line_replace_edit() {
+        // CRLF source with a misindented posting on line 1.
+        let source = "2024-01-15 * \"Coffee\"\r\n    Assets:Bank  -5.00 USD\r\n";
+        let result = parse(source);
+        let line1 = "    Assets:Bank  -5.00 USD";
+        let p = params(Range {
+            start: Position::new(1, 0),
+            end: Position::new(1, line1.encode_utf16().count() as u32),
+        });
+        let edits = handle_range_formatting(&p, source, &result, PositionEncoding::Utf16)
+            .expect("CRLF EOL selection should preserve the line-replace edit");
+        assert!(!edits.is_empty(), "got {edits:?}");
+    }
+
+    /// Whole-document selection on a CRLF file also produces edits
+    /// (the canonical reformat still fires; CRLF stays CRLF in the
+    /// emitted text per the LSP-side preservation).
+    #[test]
+    fn crlf_whole_document_selection_produces_edits() {
         let source = "2024-01-15 * \"Coffee\"\r\n    Assets:Bank  -5.00 USD\r\n";
         let result = parse(source);
         let p = params(Range {

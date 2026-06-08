@@ -731,7 +731,10 @@ pub fn run(args: &Args, file: &Path) -> Result<()> {
 
     // Render every directive together so all amount-bearing lines align
     // against shared, file-wide column widths, with a single blank line
-    // between directives.
+    // between directives. Two-pass: synthesize via the typed-directive
+    // emitter, then run it through the canonical CST formatter so the
+    // emitted bytes match what `rledger format` would write on the same
+    // content.
     let fmt_config = FormatConfig::default();
     let mut lines: Vec<FormatLine> = Vec::new();
     for (i, directive) in directives.iter().enumerate() {
@@ -740,7 +743,8 @@ pub fn run(args: &Args, file: &Path) -> Result<()> {
         }
         lines.extend(format_directive_lines(directive, &fmt_config));
     }
-    let formatted = render_lines(&lines, &fmt_config.alignment);
+    let raw = render_lines(&lines, &fmt_config.alignment);
+    let formatted = rustledger_parser::format_source(&raw);
 
     if let Some(ref output_path) = args.output {
         let mut out_file = fs::File::create(output_path)

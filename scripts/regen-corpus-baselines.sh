@@ -62,13 +62,9 @@ echo "=== Regenerating parser-output baseline ==="
 BASELINE_UPDATE=1 cargo test -p rustledger-parser --test corpus_baseline parser_output_matches_baseline
 
 echo ""
-echo "=== Regenerating formatter-output baseline ==="
-BASELINE_UPDATE=1 cargo test -p rustledger-parser --test corpus_baseline_format formatter_output_matches_baseline
-
-echo ""
 echo "Done. Review the diff:"
 echo "  git diff tests/baselines/"
 echo ""
 echo "If the diff looks correct, stage and commit:"
 echo "  git add tests/baselines/"
-echo "  git commit -m 'chore(baselines): regenerate parser+format manifests'"
+echo "  git commit -m 'chore(baselines): regenerate parser manifest'"

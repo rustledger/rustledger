@@ -62,6 +62,18 @@ pub fn handle_formatting(
 /// errors or no canonical change is needed. The caller decides whether
 /// to fall back to surface cleanup (the document-format request does,
 /// alignment-named commands do not).
+///
+/// **CRLF preservation.** `format_source` always emits LF; when the
+/// source uses CRLF, we re-inject `\r` before every emitted `\n` so
+/// the diff only fires on ACTUAL canonical-form changes (alignment,
+/// blank-line collapse, comment normalization). Without this, every
+/// line on a CRLF file would diff (because of the `\r` removal),
+/// which makes range-formatting on a single-line selection silently
+/// no-op — every emitted edit would be multi-line by construction.
+///
+/// Whole-document formatting still produces LF output if the user
+/// requests it explicitly via the CLI / FFI / WASM `format_source`
+/// entry; this preservation is local to the LSP edits path.
 pub fn format_document(
     source: &str,
     parse_result: &ParseResult,
@@ -70,7 +82,10 @@ pub fn format_document(
     if !parse_result.errors.is_empty() {
         return None;
     }
-    let formatted = format_source(source);
+    let mut formatted = format_source(source);
+    if source.contains("\r\n") {
+        formatted = formatted.replace('\n', "\r\n");
+    }
     if formatted == source {
         return None;
     }

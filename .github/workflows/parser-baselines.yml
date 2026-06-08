@@ -1,14 +1,17 @@
-# Parser + formatter output baseline gate.
+# Parser output baseline gate.
 #
 # Phase 0 of the parser-CST migration (#1262). Runs on every PR and
 # push to main; fails if `cargo test -p rustledger-parser --test
-# corpus_baseline` (or `--test corpus_baseline_format`) reports drift
-# against the committed manifests under `tests/baselines/`.
+# corpus_baseline` reports drift against the committed manifest under
+# `tests/baselines/`.
 #
-# The point: any change to the parser's or formatter's output on the
-# compat corpus is detected before merge. Intentional changes
-# regenerate the manifests via `scripts/regen-corpus-baselines.sh`
-# and commit the diff.
+# Formatter baselines moved to in-module tests in `cst::format` once
+# phase 4.1 landed the opinionated CST-backed formatter; that path
+# has its own canonical-form unit tests instead of a corpus gate.
+#
+# The point: any change to the parser's output on the compat corpus
+# is detected before merge. Intentional changes regenerate the
+# manifest via `scripts/regen-corpus-baselines.sh` and commit the diff.
 #
 # Cache key matches `compat.yml`'s so we don't re-download the corpus
 # on every push.
@@ -114,12 +117,6 @@ jobs:
         run: |
           cargo test -p rustledger-parser --test corpus_baseline \
             parser_output_matches_baseline -- --nocapture
-      - name: Formatter baseline (strict)
-        env:
-          STRICT_BASELINE: "1"
-        run: |
-          cargo test -p rustledger-parser --test corpus_baseline_format \
-            formatter_output_matches_baseline -- --nocapture
       - name: Help text on failure
         if: failure()
         run: |

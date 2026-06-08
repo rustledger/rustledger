@@ -57,7 +57,10 @@ mod syntax_kind;
 mod trivia;
 
 pub use convert::parse_via_cst;
-pub use format::{format_node, format_source};
+pub use format::{
+    CanonicalizeError, canonicalize_directives, format_node, format_source,
+    lf_to_crlf_outside_strings,
+};
 pub use lossless_tokens::lossless_kind_tokens;
 pub use parser::{parse_flat, parse_structured};
 pub use syntax_kind::{BeancountLanguage, SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken};

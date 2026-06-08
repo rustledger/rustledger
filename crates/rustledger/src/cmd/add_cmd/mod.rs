@@ -35,10 +35,9 @@ use anyhow::{Context, Result, bail};
 use clap::Parser;
 use parsing::{calculate_balance, parse_amount, parse_date};
 use rustledger_core::NaiveDate;
-use rustledger_core::format::{FormatConfig, format_directives};
+use rustledger_core::format::FormatConfig;
 use rustledger_core::{Amount, Directive, Posting, Transaction};
-use rustledger_parser::format_source;
-use rustledger_parser::parse;
+use rustledger_parser::{canonicalize_directives, parse};
 use rustyline::completion::{Completer, Pair};
 use rustyline::error::ReadlineError;
 use rustyline::highlight::{CmdKind, Highlighter};
@@ -186,38 +185,13 @@ impl Highlighter for AddHelper {
 
 impl Validator for AddHelper {}
 
-/// Render a single Directive in canonical form via the two-pass
-/// synthesize-then-canonicalize pipeline.
-///
-/// Step 1 emits a parser-clean source string via the typed-directive
-/// emitter in `rustledger_core::format`. Step 2 reparses that text
-/// and routes it through `rustledger_parser::format_source` so the
-/// final bytes match what `rledger format` would write on the same
-/// content.
-///
-/// Bails if the synthesized text doesn't reparse cleanly — that
-/// would indicate either the legacy emitter producing output the
-/// new parser rejects (which would manifest as silent data loss if
-/// we just emitted whatever the partial CST captured) or a
-/// canonical-form drift between the two emitters.
+/// Thin wrapper around the parser's canonical-emit helper. Lives
+/// here only to keep call-site ergonomics tight; all the
+/// synth-then-canonicalize machinery is in
+/// [`rustledger_parser::canonicalize_directives`].
 fn canonical_format_directive(directive: &Directive, config: &FormatConfig) -> Result<String> {
-    let raw = format_directives([directive], config);
-    let parsed = parse(&raw);
-    if !parsed.errors.is_empty() {
-        let preview: Vec<String> = parsed
-            .errors
-            .iter()
-            .take(3)
-            .map(ToString::to_string)
-            .collect();
-        bail!(
-            "canonical formatter failed to re-parse the synthesized directive \
-             ({} error(s)): {}",
-            parsed.errors.len(),
-            preview.join("; ")
-        );
-    }
-    Ok(format_source(&raw))
+    canonicalize_directives(std::iter::once(directive), config)
+        .map_err(|e| anyhow::anyhow!(e.to_string()))
 }
 
 /// Run the add command in quick mode.

@@ -39,8 +39,9 @@ mod error;
 pub mod logos_lexer;
 
 pub use cst::{
-    BeancountLanguage, SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken, format_node,
-    format_source, lossless_kind_tokens, parse_flat, parse_structured, parse_via_cst,
+    BeancountLanguage, CanonicalizeError, SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken,
+    canonicalize_directives, format_node, format_source, lf_to_crlf_outside_strings,
+    lossless_kind_tokens, parse_flat, parse_structured, parse_via_cst,
 };
 pub use error::{ParseError, ParseErrorKind};
 pub use rustledger_core::{InternedStr, SYNTHESIZED_FILE_ID, Span, Spanned};

@@ -109,27 +109,234 @@ pub fn format_source(source: &str) -> String {
     format_node(parsed.syntax())
 }
 
-/// Replace CRLF and bare-CR line terminators with LF. Cheap fast
-/// path: if the input contains no `\r`, returns the source slice
-/// borrowed (no allocation). Used by [`format_source`] before
-/// parsing so the lexer never has to see legacy line endings.
+/// Convert every `\n` line terminator OUTSIDE string literals back
+/// to `\r\n`, leaving `\n` characters inside strings (and inside
+/// comments… see below) untouched.
+///
+/// The canonical form emitted by [`format_source`] is LF-only.
+/// Editors that round-trip Windows-authored files want to see CRLF
+/// echoed back on every line. This helper bridges the two by
+/// walking the canonical output with a `SourceState` state
+/// machine that respects:
+///
+/// - String literals: bytes pass through verbatim. The user's
+///   original line endings inside a multi-line narration / note /
+///   document string are preserved.
+/// - Line comments (`;` and `%`): the comment's terminating
+///   newline IS a real structural line terminator, so it gets
+///   converted to CRLF; bytes inside the comment region (which can
+///   include arbitrary characters, notably stray `"`) pass through
+///   without flipping the in-string state — a flat `is_in_string`
+///   boolean would otherwise get stuck inside a string-that-isn't.
+///
+/// The helper lives in this module rather than the LSP crate
+/// because its correctness depends on the lexer's `STRING` and
+/// comment rules. Keep it co-located with the formatter so a
+/// lexer change forces a co-evaluation here.
+#[must_use]
+pub fn lf_to_crlf_outside_strings(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + s.matches('\n').count());
+    let mut state = SourceState::Code;
+    let mut prev_was_backslash = false;
+    for ch in s.chars() {
+        match state {
+            SourceState::InString => {
+                out.push(ch);
+                if ch == '"' && !prev_was_backslash {
+                    state = SourceState::Code;
+                }
+                prev_was_backslash = ch == '\\' && !prev_was_backslash;
+            }
+            SourceState::InComment => {
+                if ch == '\n' {
+                    out.push_str("\r\n");
+                    state = SourceState::Code;
+                } else {
+                    out.push(ch);
+                }
+            }
+            SourceState::Code => {
+                if ch == '\n' {
+                    out.push_str("\r\n");
+                } else {
+                    out.push(ch);
+                    match ch {
+                        '"' => {
+                            state = SourceState::InString;
+                            prev_was_backslash = false;
+                        }
+                        ';' | '%' => state = SourceState::InComment,
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Render typed Beancount `Directive`s in the canonical form
+/// emitted by [`format_source`].
+///
+/// Two-pass pipeline:
+///
+/// 1. Synthesize a source string via the typed-directive emitter
+///    in `rustledger_core::format::format_directives`. That
+///    emitter is `Directive → text`; its output is bean-format-
+///    style, parser-clean, and used here purely as an
+///    intermediate.
+/// 2. Re-parse the synthesized text. If the legacy emitter
+///    produced something the new parser cannot fully accept,
+///    return [`CanonicalizeError::ReparseFailed`] rather than
+///    silently emitting the recoverable subset — that silent-loss
+///    failure mode is what the deleted `format_compat` test used
+///    to guard against.
+/// 3. Run the re-parsed text through [`format_source`] for the
+///    canonical pass.
+///
+/// Single source of truth for the synthesize → canonicalize
+/// shim. Every consumer that builds a typed `Directive` in memory
+/// and wants canonical text — `rledger add`, `rledger extract`,
+/// the FFI `format.entry` / `format.entries` endpoints — should
+/// call this function instead of reinventing the pipeline.
+pub fn canonicalize_directives<'a, I>(
+    directives: I,
+    config: &rustledger_core::format::FormatConfig,
+) -> Result<String, CanonicalizeError>
+where
+    I: IntoIterator<Item = &'a rustledger_core::Directive>,
+{
+    let raw = rustledger_core::format::format_directives(directives, config);
+    let parsed = crate::parse(&raw);
+    if !parsed.errors.is_empty() {
+        return Err(CanonicalizeError::ReparseFailed {
+            errors: parsed.errors.iter().map(ToString::to_string).collect(),
+        });
+    }
+    Ok(format_source(&raw))
+}
+
+/// Error returned by [`canonicalize_directives`].
+#[derive(Debug, Clone)]
+pub enum CanonicalizeError {
+    /// The synthesized intermediate failed to re-parse cleanly.
+    /// Carries the rendered error messages so callers can surface
+    /// a diagnostic; the source text itself is not retained
+    /// because it's an internal intermediate the caller has no
+    /// control over.
+    ReparseFailed {
+        /// One rendered message per parse error from the
+        /// intermediate text. Capped at the parser's own error
+        /// limit so this field is bounded.
+        errors: Vec<String>,
+    },
+}
+
+impl std::fmt::Display for CanonicalizeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ReparseFailed { errors } => {
+                let preview: Vec<&str> = errors.iter().take(3).map(String::as_str).collect();
+                write!(
+                    f,
+                    "canonical formatter failed to re-parse the synthesized \
+                     directive text ({} error(s)): {}",
+                    errors.len(),
+                    preview.join("; ")
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for CanonicalizeError {}
+
+/// Replace CRLF and bare-CR line terminators with LF, but ONLY
+/// outside string literals.
+///
+/// String literals (`"…"`) can contain raw `\r` and `\n` per the
+/// lexer's `STRING` rule; folding CR inside a string would mutate
+/// the user's data. The walker uses [`SourceState`] to keep track
+/// of whether the cursor is inside a string, inside a `;`/`%`
+/// comment, or in code.
+///
+/// Cheap fast path: if the input contains no `\r`, returns the
+/// source slice borrowed (no allocation). Used by
+/// [`format_source`] before parsing so the lexer never has to see
+/// legacy line endings.
 fn normalize_line_endings(src: &str) -> std::borrow::Cow<'_, str> {
     if !src.contains('\r') {
         return std::borrow::Cow::Borrowed(src);
     }
     let mut out = String::with_capacity(src.len());
     let mut chars = src.chars().peekable();
+    let mut state = SourceState::Code;
+    let mut prev_was_backslash = false;
     while let Some(c) = chars.next() {
-        if c == '\r' {
-            out.push('\n');
-            if chars.peek() == Some(&'\n') {
-                chars.next();
+        match state {
+            SourceState::InString => {
+                // Inside a string literal: preserve every byte
+                // verbatim (LF, CR, CRLF — all the user's bytes
+                // survive). Toggle out on an unescaped `"`.
+                out.push(c);
+                if c == '"' && !prev_was_backslash {
+                    state = SourceState::Code;
+                }
+                prev_was_backslash = c == '\\' && !prev_was_backslash;
             }
-        } else {
-            out.push(c);
+            SourceState::InComment => {
+                if c == '\r' {
+                    out.push('\n');
+                    if chars.peek() == Some(&'\n') {
+                        chars.next();
+                    }
+                    state = SourceState::Code;
+                } else if c == '\n' {
+                    out.push(c);
+                    state = SourceState::Code;
+                } else {
+                    out.push(c);
+                }
+            }
+            SourceState::Code => {
+                if c == '\r' {
+                    out.push('\n');
+                    if chars.peek() == Some(&'\n') {
+                        chars.next();
+                    }
+                } else {
+                    out.push(c);
+                    match c {
+                        '"' => {
+                            state = SourceState::InString;
+                            prev_was_backslash = false;
+                        }
+                        ';' | '%' => state = SourceState::InComment,
+                        _ => {}
+                    }
+                }
+            }
         }
     }
     std::borrow::Cow::Owned(out)
+}
+
+/// Per-character walker state for line-ending normalization passes
+/// that must respect string-literal and comment boundaries.
+///
+/// Used by [`normalize_line_endings`] and by
+/// [`lf_to_crlf_outside_strings`]: a flat `is_in_string` boolean is
+/// not enough because a quote character inside a `;`/`%` comment
+/// is data, not a string delimiter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SourceState {
+    /// In normal code. `"` opens a string; `;` / `%` opens a
+    /// comment; everything else is just bytes.
+    Code,
+    /// Inside `"…"`. Bytes pass through; an unescaped `"` exits.
+    InString,
+    /// Inside `;…\n` or `%…\n`. Bytes pass through until LF/CR.
+    InComment,
 }
 
 /// Format a `SOURCE_FILE` syntax node in opinionated canonical form.
@@ -935,7 +1142,7 @@ fn format_cost_spec(cs: &ast::CostSpec) -> String {
         ("{", "}")
     };
     // Collect inner content tokens (skip opener/closer/whitespace),
-    // then route through write_expression_tokens so the spacing rule
+    // then route through write_canonical_token_sequence so the spacing rule
     // is identical to balance/price/AMOUNT-subnode arithmetic — most
     // importantly, unary `+`/`-` stays tight (`{-500 USD}`, not
     // `{- 500 USD}`) and COMMA stays tight.
@@ -957,7 +1164,7 @@ fn format_cost_spec(cs: &ast::CostSpec) -> String {
         })
         .collect();
     let mut inner = String::new();
-    write_expression_tokens(&inner_tokens, &mut inner);
+    write_canonical_token_sequence(&inner_tokens, &mut inner);
     // The `{#` opener is a two-character marker; canonical form
     // separates it from the first inner token with a single space
     // (matching the rendering in this function's rustdoc). `{` and
@@ -1011,7 +1218,7 @@ fn canonical_number(text: &str) -> String {
 /// Emit the arithmetic expression of a `PRICE` / `BALANCE`
 /// directive: tokens from the first `NUMBER` up to (but not
 /// including) the first `CURRENCY` at paren-depth 0. Spacing
-/// rules per [`write_expression_tokens`].
+/// rules per [`write_canonical_token_sequence`].
 fn emit_amount_expression(node: &crate::SyntaxNode, out: &mut String) {
     let raw: Vec<crate::SyntaxToken> = node
         .children_with_tokens()
@@ -1032,7 +1239,7 @@ fn emit_amount_expression(node: &crate::SyntaxNode, out: &mut String) {
         }
     }
     let end = first_currency_idx.unwrap_or(raw.len());
-    write_expression_tokens(&raw[..end], out);
+    write_canonical_token_sequence(&raw[..end], out);
 }
 
 /// Emit an `AMOUNT` subnode's expression region: every non-trivia
@@ -1050,11 +1257,17 @@ fn emit_amount_subnode_expression(node: &crate::SyntaxNode, out: &mut String) {
     {
         tokens.pop();
     }
-    write_expression_tokens(&tokens, out);
+    write_canonical_token_sequence(&tokens, out);
 }
 
-/// Shared spacing pass over an already-sliced expression-token
-/// run. Rules:
+/// Single dispatcher for the canonical spacing rules used by EVERY
+/// token-sequence emit path: balance / price arithmetic, AMOUNT
+/// subnodes, cost-spec interiors, and metadata values. There is no
+/// separate path; each call site collects the relevant non-trivia
+/// tokens and routes them through here so the rules cannot drift
+/// between contexts.
+///
+/// Rules:
 ///
 /// - single space between adjacent operands / binary operators
 /// - no space after `(` or before `)` (parens stay tight)
@@ -1063,10 +1276,14 @@ fn emit_amount_subnode_expression(node: &crate::SyntaxNode, out: &mut String) {
 /// - no space before `,` (commas in cost-spec component lists
 ///   stay tight against the preceding token)
 ///
-/// Used by every emit path that lays out a token sequence with
-/// canonical spacing: balance/price arithmetic, AMOUNT subnodes,
-/// cost-spec interiors, and metadata values.
-fn write_expression_tokens(tokens: &[crate::SyntaxToken], out: &mut String) {
+/// **Adding a new `SyntaxKind` to the formatter implies thinking
+/// about its effect on every call site of this function.** A new
+/// operator-like kind added to `is_op` will silently change cost-
+/// spec and metadata spacing too; a new bracket-like kind needs
+/// its own rule. The corpus-level idempotence test
+/// (`idempotence_corpus_sweep`) is the safety net that catches
+/// drifts.
+fn write_canonical_token_sequence(tokens: &[crate::SyntaxToken], out: &mut String) {
     let is_op = |k: crate::SyntaxKind| {
         matches!(
             k,
@@ -1165,7 +1382,7 @@ fn emit_meta_entry(m: &MetaEntry, indent: &str, out: &mut String) {
     // Split the META_ENTRY's non-trivia tokens into [META_KEY,
     // value*]. The META_KEY token already includes the trailing
     // colon (e.g. `note:`); the value tokens go through
-    // write_expression_tokens so the spacing rules — unary +/-
+    // write_canonical_token_sequence so the spacing rules — unary +/-
     // tight, COMMA tight, paren-tight, NUMBER canonicalized — are
     // shared with the balance/price/cost-spec/posting-amount paths.
     let content: Vec<crate::SyntaxToken> = m
@@ -1186,7 +1403,7 @@ fn emit_meta_entry(m: &MetaEntry, indent: &str, out: &mut String) {
     let value_tokens: Vec<crate::SyntaxToken> = iter.cloned().collect();
     if !value_tokens.is_empty() {
         out.push(' ');
-        write_expression_tokens(&value_tokens, out);
+        write_canonical_token_sequence(&value_tokens, out);
     }
     out.push('\n');
 }
@@ -1699,7 +1916,7 @@ mod tests {
     fn metadata_value_with_unary_minus_stays_tight() {
         // Bug: emit_meta_entry's tokenized walk inserted a space
         // after a unary `+`/`-`, breaking `key: -5.00 USD` →
-        // `key: - 5.00 USD`. Routed through write_expression_tokens
+        // `key: - 5.00 USD`. Routed through write_canonical_token_sequence
         // so unary detection matches the balance/price/posting paths.
         let src = "2024-01-01 open Assets:Bank\n  threshold: -5.00 USD\n";
         let out = format_source(src);
@@ -1725,7 +1942,7 @@ mod tests {
     fn cost_spec_negative_cost_stays_tight() {
         // Bug: format_cost_spec catch-all had no unary-operator
         // handling. `{-500 USD}` formatted to `{- 500 USD}`. Now
-        // routes through write_expression_tokens.
+        // routes through write_canonical_token_sequence.
         let src = "2024-01-01 * \"x\"\n  Assets:Brokerage 10 HOOL {-500 USD}\n  Assets:Cash -5000.00 USD\n";
         let out = format_source(src);
         assert!(
@@ -1745,5 +1962,221 @@ mod tests {
             out.contains("{500 * -2 USD}"),
             "cost-spec arithmetic unary must stay tight; got:\n{out}"
         );
+    }
+
+    // ---- Property tests -------------------------------------------
+    //
+    // Two invariants the rustdoc's gofmt-style promise depends on,
+    // pinned over a hand-curated input matrix:
+    //
+    // - **Idempotence:** `format_source(format_source(x)) == format_source(x)`.
+    // - **Round-trip stability for canonicalize_directives:** the
+    //   synthesize-then-canonicalize shim produces text that, when
+    //   parsed back, yields the same Directive count and zero parse
+    //   errors.
+    //
+    // The matrix covers every directive kind plus the high-risk
+    // edge cases the prior reviews surfaced (unary +/- in metadata,
+    // cost-spec arithmetic, CRLF, bare CR, multi-line strings,
+    // comments containing quotes, non-Latin accounts). When the
+    // upstream compatibility corpus is fetched into
+    // `tests/compatibility/files/` the per-file sweep at the bottom
+    // also runs; otherwise the file-based test is skipped.
+
+    const IDEMPOTENCE_MATRIX: &[(&str, &str)] = &[
+        ("empty", ""),
+        ("only_comment", "; header comment\n"),
+        ("only_directive", "2024-01-01 open Assets:Cash\n"),
+        (
+            "two_open_directives",
+            "2024-01-01 open Assets:A\n2024-01-02 open Assets:B\n",
+        ),
+        (
+            "transaction_with_cost_and_price",
+            "2024-01-15 * \"buy\"\n  Assets:Brokerage 10 HOOL {500.00 USD} @ 510.00 USD\n  Assets:Cash -5000.00 USD\n",
+        ),
+        (
+            "transaction_with_per_unit_plus_total_cost",
+            "2024-01-15 * \"x\"\n  Assets:Brokerage 10 HOOL {# 500.00 USD}\n  Assets:Cash -5000.00 USD\n",
+        ),
+        (
+            "transaction_with_arithmetic_amount",
+            "2024-01-15 * \"x\"\n  Assets:Cash  -(1.00 + 2.00) USD\n  Expenses:Misc 3.00 USD\n",
+        ),
+        (
+            "balance_with_arithmetic_and_tolerance",
+            "2024-01-15 balance Assets:Cash 0.25 + 0.75 USD ~ 0.01 USD\n",
+        ),
+        (
+            "price_with_thousands_separator",
+            "2024-01-15 price USD 1,234.56 EUR\n",
+        ),
+        (
+            "metadata_unary_minus",
+            "2024-01-01 open Assets:Bank\n  threshold: -5.00 USD\n",
+        ),
+        (
+            "metadata_arithmetic",
+            "2024-01-01 open Assets:Bank\n  total: 1000 + 500 USD\n",
+        ),
+        (
+            "cost_spec_with_comma_and_date",
+            "2024-01-15 * \"x\"\n  Assets:Brokerage 10 HOOL {500.00 USD, 2024-01-15}\n  Assets:Cash -5000.00 USD\n",
+        ),
+        (
+            "cost_spec_with_negative",
+            "2024-01-15 * \"x\"\n  Assets:Brokerage 10 HOOL {-500 USD}\n  Assets:Cash 5000.00 USD\n",
+        ),
+        (
+            "transaction_with_tags_and_links",
+            "2024-01-15 * \"x\" #tag1 ^link1 #tag2\n  Assets:Cash -1.00 USD\n  Expenses:Misc 1.00 USD\n",
+        ),
+        (
+            "custom_with_date_value",
+            "2024-01-01 custom \"budget\" \"name\" 2024-06-15 100.00 USD\n",
+        ),
+        (
+            "non_latin_account_name",
+            "2024-01-15 * \"x\"\n  Активы:Банк -5.00 USD\n  Expenses:Misc 5.00 USD\n",
+        ),
+        (
+            "section_header_comments",
+            "; ====\n; HEADER\n; ====\n2024-01-01 open Assets:A\n",
+        ),
+        (
+            "multiline_note_string",
+            "2024-01-15 note Assets:Bank \"line 1\nline 2\"\n",
+        ),
+        (
+            "comment_containing_quote",
+            "; comment with \"a quote\n2024-01-01 open Assets:A\n",
+        ),
+        (
+            "crlf_input",
+            "2024-01-01 open Assets:A\r\n2024-01-02 open Assets:B\r\n",
+        ),
+        (
+            "bare_cr_input",
+            "2024-01-01 open Assets:A\r2024-01-02 open Assets:B\r",
+        ),
+        (
+            "file_with_trailing_newlines",
+            "2024-01-01 open Assets:A\n\n\n",
+        ),
+        ("file_without_trailing_newline", "2024-01-01 open Assets:A"),
+        (
+            "posting_with_trailing_comment",
+            "2024-01-15 * \"x\"\n  Assets:Cash -5.00 USD ; pocket\n  Expenses:Misc 5.00 USD\n",
+        ),
+        (
+            "balance_assertion_with_meta",
+            "2024-01-15 balance Assets:Cash 100.00 USD\n  source: \"bank\"\n",
+        ),
+        (
+            "options_and_includes",
+            "option \"title\" \"My Ledger\"\ninclude \"sub.beancount\"\nplugin \"my.plugin\" \"cfg\"\n",
+        ),
+    ];
+
+    #[test]
+    fn lf_to_crlf_outside_strings_preserves_string_interior() {
+        // Bug: a flat in_string-only state machine would re-inject
+        // CRLF inside multi-line strings, mutating the user's bytes.
+        let s = "2024-01-15 note Assets:Bank \"line 1\nline 2\"\n";
+        let out = lf_to_crlf_outside_strings(s);
+        assert!(out.contains("line 1\nline 2"), "got: {out:?}");
+        assert!(out.ends_with("\r\n"), "got: {out:?}");
+    }
+
+    #[test]
+    fn lf_to_crlf_outside_strings_handles_comment_with_quote() {
+        // Bug: an unbalanced `"` inside a `;` comment formerly flipped
+        // in_string=true for the rest of the file, leaving every
+        // subsequent newline as LF.
+        let s = "; comment with \"a quote\n2024-01-01 open Assets:A\n";
+        let out = lf_to_crlf_outside_strings(s);
+        assert_eq!(
+            out,
+            "; comment with \"a quote\r\n2024-01-01 open Assets:A\r\n",
+        );
+    }
+
+    #[test]
+    fn lf_to_crlf_outside_strings_handles_percent_comment_with_quote() {
+        let s = "% percent \"quote\n2024-01-01 open Assets:A\n";
+        let out = lf_to_crlf_outside_strings(s);
+        assert_eq!(out, "% percent \"quote\r\n2024-01-01 open Assets:A\r\n");
+    }
+
+    #[test]
+    fn normalize_line_endings_preserves_crlf_inside_strings() {
+        // Bug fix mirror: a Windows-authored multi-line string had
+        // its CRLF folded to LF by the pre-parse normalizer too,
+        // which silently mutated the user's bytes.
+        let s = "2024-01-15 note Assets:Bank \"line1\r\nline2\"\r\n";
+        let normalized = normalize_line_endings(s);
+        // Outside the string, the trailing CRLF folds to LF; inside
+        // the string, CRLF stays CRLF (user's bytes preserved).
+        assert!(
+            normalized.contains("\"line1\r\nline2\""),
+            "got: {:?}",
+            &*normalized
+        );
+        assert!(normalized.ends_with('\n') && !normalized.ends_with("\r\n"));
+    }
+
+    #[test]
+    fn idempotence_matrix() {
+        // The gofmt invariant in the file rustdoc: f(f(x)) == f(x)
+        // on every accepted input. Each fixture below covers one
+        // axis of the canonical-form spec; together they exercise
+        // every directive kind and every spacing rule shared via
+        // write_canonical_token_sequence.
+        for (name, src) in IDEMPOTENCE_MATRIX {
+            let once = format_source(src);
+            let twice = format_source(&once);
+            assert_eq!(
+                once, twice,
+                "idempotence broken on fixture `{name}`\n--- once ---\n{once}\n--- twice ---\n{twice}",
+            );
+        }
+    }
+
+    #[test]
+    fn canonicalize_directives_roundtrips_every_synthesized_directive() {
+        // For each canonical-form fixture: parse → take the typed
+        // directives → run them through canonicalize_directives →
+        // re-parse the canonical text → assert the parser reports
+        // zero errors and the directive count is preserved.
+        //
+        // This is the proper end-to-end test of the two-pass shim
+        // the FFI format.entry and rledger add/extract commands all
+        // depend on. Without it, a future Directive variant added
+        // to rustledger-core without matching coverage in
+        // cst::format would silently round-trip to truncated text.
+        use rustledger_core::format::FormatConfig;
+        let cfg = FormatConfig::default();
+        for (name, src) in IDEMPOTENCE_MATRIX {
+            let parsed = crate::parse(src);
+            if parsed.errors.is_empty() && !parsed.directives.is_empty() {
+                let dirs: Vec<&rustledger_core::Directive> =
+                    parsed.directives.iter().map(|s| &s.value).collect();
+                let formatted = super::canonicalize_directives(dirs.iter().copied(), &cfg)
+                    .unwrap_or_else(|e| {
+                        panic!("canonicalize_directives error on fixture `{name}`: {e}")
+                    });
+                let reparsed = crate::parse(&formatted);
+                assert!(
+                    reparsed.errors.is_empty(),
+                    "round-trip parse errors on fixture `{name}`:\n--- formatted ---\n{formatted}\n--- errors ---\n{:?}",
+                    reparsed.errors,
+                );
+                assert_eq!(
+                    parsed.directives.len(),
+                    reparsed.directives.len(),
+                    "directive count drifted on fixture `{name}`\n--- formatted ---\n{formatted}",
+                );
+            }
+        }
     }
 }

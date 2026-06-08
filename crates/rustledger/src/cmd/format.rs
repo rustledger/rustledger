@@ -144,30 +144,36 @@ fn format_file(file: &PathBuf, args: &Args) -> Result<ExitCode> {
 
 /// Render a `--diff` block for a non-canonical file.
 ///
-/// Handles three cases beyond the obvious per-line replacement:
+/// Handles four cases beyond the obvious per-line replacement:
 ///
-/// - **CRLF input.** The canonical form normalizes `\r\n` → `\n`. If
-///   the file's only divergence is the line endings, we say so
-///   explicitly instead of printing a header with no hunks under it.
-/// - **Trailing-newline-only delta.** The canonical form emits exactly
-///   one trailing newline. A file ending with `\n\n\n` fails byte
-///   equality but `lines()` produces no per-line hunks (they're
-///   identical line-by-line). Print an explicit "trailing whitespace
-///   only" message instead of an empty diff.
+/// - **Line-ending normalization** (CRLF and / or bare CR). The
+///   canonical form normalizes every CR-bearing terminator to LF.
+///   If stripping CR characters from the original makes it match
+///   the formatted output, we say so explicitly instead of
+///   printing a header with no hunks.
+/// - **Missing trailing newline.** Canonical form ends with
+///   exactly one LF. If the original lacks one, surface that.
+/// - **Extra trailing newlines.** If the original ends with `\n\n…`
+///   that collapses to a single `\n`, surface that.
 /// - **Line-by-line replacements.** Otherwise emit the existing
 ///   `@@ line N @@` per-line diff hunks.
 fn emit_diff(file: &PathBuf, original: &str, formatted: &str) {
     eprintln!("--- {}", file.display());
     eprintln!("+++ {} (formatted)", file.display());
 
-    // CRLF-only divergence: stripping CR from original makes it match
-    // formatted. Surface the line-ending normalization as the reason.
-    if original.contains("\r\n") && original.replace("\r\n", "\n") == *formatted {
-        eprintln!(
-            "  (no per-line content change; the canonical form normalizes \
-             CRLF line endings to LF — run `rledger format -i` to rewrite)"
-        );
-        return;
+    // CR-bearing line endings (CRLF or bare CR). If stripping every
+    // CR (and CRLF) from the original makes it match the formatted
+    // output, the only divergence is line-ending normalization.
+    if original.contains('\r') {
+        let lf_only = original.replace("\r\n", "\n").replace('\r', "\n");
+        if lf_only == *formatted {
+            eprintln!(
+                "  (no per-line content change; the canonical form \
+                 normalizes line endings to LF — run `rledger format -i` \
+                 to rewrite)"
+            );
+            return;
+        }
     }
 
     let orig_lines: Vec<&str> = original.lines().collect();
@@ -196,13 +202,29 @@ fn emit_diff(file: &PathBuf, original: &str, formatted: &str) {
     }
     if !printed_hunk {
         // Byte-exact comparison said the files differ, but lines()
-        // produced no hunks. The only place this fires is a trailing-
-        // newline-count delta (or leading whitespace differences that
-        // lines() also collapses). Tell the user explicitly.
-        eprintln!(
-            "  (no per-line content change; the difference is in \
-             leading/trailing whitespace — typically extra trailing \
-             newlines that the canonical form collapses to one)"
-        );
+        // produced no hunks. Distinguish the two trailing-newline
+        // cases explicitly so the user sees the actual problem.
+        let orig_trailing = trailing_newline_count(original);
+        let fmt_trailing = trailing_newline_count(formatted);
+        match orig_trailing.cmp(&fmt_trailing) {
+            std::cmp::Ordering::Less => eprintln!(
+                "  (no per-line content change; file is missing a final \
+                 newline — the canonical form ends every file with one)"
+            ),
+            std::cmp::Ordering::Greater => eprintln!(
+                "  (no per-line content change; the file has extra \
+                 trailing newlines — the canonical form collapses them \
+                 to one)"
+            ),
+            std::cmp::Ordering::Equal => eprintln!(
+                "  (no per-line content change; the difference is in \
+                 leading/trailing whitespace that `.lines()` strips)"
+            ),
+        }
     }
+}
+
+/// Number of consecutive `\n` characters at the END of `s`.
+fn trailing_newline_count(s: &str) -> usize {
+    s.bytes().rev().take_while(|&b| b == b'\n').count()
 }

@@ -322,19 +322,32 @@ fn handle_align_amounts(
 /// a line whose alignment the `rledger.alignAmounts` command is
 /// supposed to touch.
 ///
-/// A posting line starts with at least one space of indent followed
-/// (optionally) by a single-character posting flag and a space, then
-/// an account name. Top-level directives, metadata sub-lines (lowercase
-/// key followed by `:`), comments, and blank lines all fail this test,
-/// so a canonical-form edit that only touches those is excluded from
-/// the `alignAmounts` WorkspaceEdit.
+/// Rule: an indented line is a posting iff its first non-whitespace
+/// character is NOT
 ///
-/// **Flag set** matches the parser's posting-flag class (lexer
-/// `[!*#?&PSTCURM]`), not just the ASCII `!*#` subset.
+/// - `;` or `%` (comment),
+/// - a lowercase letter (Beancount metadata keys are lowercase
+///   identifiers).
 ///
-/// **Account first-char** is checked with `char::is_uppercase` (Unicode-
-/// aware), so accounts in non-Latin scripts (Cyrillic `Активы`, Greek
-/// `Καθαρό`, etc.) are recognized just like ASCII `Assets`.
+/// That single test covers:
+///
+/// - ASCII postings (`Assets:Cash 100 USD`): first char `A` is
+///   not lowercase → posting.
+/// - Cyrillic / Greek postings: first char is `\p{Lu}` (uppercase),
+///   not lowercase → posting.
+/// - CJK / Hebrew / Arabic / Devanagari postings: first char is
+///   `\p{Lo}` (letter, other), neither uppercase nor lowercase →
+///   posting. The previous `char::is_uppercase` form rejected
+///   these because is_uppercase is `\p{Lu}` only; the lexer's
+///   ACCOUNT regex is the wider `[\p{Lu}\p{Lo}\p{Lt}]…`.
+/// - Posting flags (`!`, `*`, `#`, `?`, `&`, `PSTCURM`, and any
+///   single-uppercase-letter currency-as-flag): the flag is not
+///   lowercase either, so the line is accepted without having to
+///   hardcode the flag set.
+/// - Metadata sub-lines (`  key: value`): lowercase `k` → rejected.
+/// - Comments (`  ; comment`): `;` matched → rejected.
+/// - Top-level directives and blanks: rejected by the indent /
+///   emptiness checks above the discriminator.
 fn edit_touches_posting_line(source: &str, edit: &TextEdit) -> bool {
     let line_idx = edit.range.start.line as usize;
     let Some(line) = source.lines().nth(line_idx) else {
@@ -344,27 +357,13 @@ fn edit_touches_posting_line(source: &str, edit: &TextEdit) -> bool {
     if trimmed.is_empty() || line.len() == trimmed.len() {
         return false; // blank line or top-level directive
     }
-    let mut chars = trimmed.chars();
-    let first = match chars.next() {
-        Some(c) => c,
-        None => return false,
+    let Some(first) = trimmed.chars().next() else {
+        return false;
     };
-    let account_first = if is_posting_flag_char(first) && chars.next() == Some(' ') {
-        chars.next().unwrap_or(' ')
-    } else {
-        first
-    };
-    account_first.is_uppercase()
-}
-
-/// Posting-flag character set per the lexer's posting-flag class
-/// (`[!*#?&PSTCURM]`). Keep this in sync with
-/// `rustledger_parser::logos_lexer`'s flag rule.
-const fn is_posting_flag_char(c: char) -> bool {
-    matches!(
-        c,
-        '!' | '*' | '#' | '?' | '&' | 'P' | 'S' | 'T' | 'C' | 'U' | 'R' | 'M'
-    )
+    if first == ';' || first == '%' {
+        return false;
+    }
+    !first.is_lowercase()
 }
 
 /// Show account balance.

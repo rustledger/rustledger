@@ -66,9 +66,9 @@ use config::{
 };
 use duplicate::{is_duplicate, load_existing_transactions};
 use format_num_pattern::Locale;
-use rustledger_core::format::{FormatLine, format_directive_lines, render_lines};
 use rustledger_core::{Directive, FormatConfig};
 use rustledger_importer::{Importer, ImporterConfig, ImporterRegistry, csv_importer::CsvImporter};
+use rustledger_parser::canonicalize_directives;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -729,41 +729,16 @@ pub fn run(args: &Args, file: &Path) -> Result<()> {
         directives
     };
 
-    // Render every directive together so all amount-bearing lines align
-    // against shared, file-wide column widths, with a single blank line
-    // between directives. Two-pass: synthesize via the typed-directive
-    // emitter, then run it through the canonical CST formatter so the
-    // emitted bytes match what `rledger format` would write on the same
-    // content.
+    // Render every directive in the canonical form `rledger format`
+    // would write. canonicalize_directives is the single source of
+    // truth for the synthesize-then-canonicalize pipeline (legacy
+    // typed-AST emitter → parse → opinionated formatter), with a
+    // built-in parse-error guard so a divergence between the two
+    // emitters surfaces as a hard error rather than silent data
+    // loss.
     let fmt_config = FormatConfig::default();
-    let mut lines: Vec<FormatLine> = Vec::new();
-    for (i, directive) in directives.iter().enumerate() {
-        if i > 0 {
-            lines.push(FormatLine::Plain(String::new()));
-        }
-        lines.extend(format_directive_lines(directive, &fmt_config));
-    }
-    let raw = render_lines(&lines, &fmt_config.alignment);
-    // Parse-error guard: format_source is parse-then-format and
-    // would silently emit a recoverable subset if the legacy emitter
-    // produced text the new parser rejects. Surface a hard error
-    // instead so the caller knows the synthesized output is bad.
-    let parsed = rustledger_parser::parse(&raw);
-    if !parsed.errors.is_empty() {
-        let preview: Vec<String> = parsed
-            .errors
-            .iter()
-            .take(3)
-            .map(ToString::to_string)
-            .collect();
-        anyhow::bail!(
-            "canonical formatter failed to re-parse extracted directives \
-             ({} error(s)): {}",
-            parsed.errors.len(),
-            preview.join("; ")
-        );
-    }
-    let formatted = rustledger_parser::format_source(&raw);
+    let formatted = canonicalize_directives(directives.iter(), &fmt_config)
+        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
 
     if let Some(ref output_path) = args.output {
         let mut out_file = fs::File::create(output_path)

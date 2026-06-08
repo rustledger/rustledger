@@ -104,7 +104,7 @@ const INDENT: &str = "  ";
 #[must_use]
 pub fn format_source(source: &str) -> String {
     let (stripped, _had_bom) = crate::bom::strip_leading(source);
-    let normalized = normalize_line_endings(stripped);
+    let normalized = crlf_to_lf_outside_strings(stripped);
     let parsed = SourceFile::parse(&normalized);
     format_node(parsed.syntax())
 }
@@ -116,18 +116,18 @@ pub fn format_source(source: &str) -> String {
 /// The canonical form emitted by [`format_source`] is LF-only.
 /// Editors that round-trip Windows-authored files want to see CRLF
 /// echoed back on every line. This helper bridges the two by
-/// walking the canonical output with a `SourceState` state
-/// machine that respects:
+/// walking the canonical output with the shared `SourceState`
+/// state machine. The walker respects:
 ///
 /// - String literals: bytes pass through verbatim. The user's
 ///   original line endings inside a multi-line narration / note /
 ///   document string are preserved.
-/// - Line comments (`;` and `%`): the comment's terminating
-///   newline IS a real structural line terminator, so it gets
-///   converted to CRLF; bytes inside the comment region (which can
-///   include arbitrary characters, notably stray `"`) pass through
-///   without flipping the in-string state — a flat `is_in_string`
-///   boolean would otherwise get stuck inside a string-that-isn't.
+/// - Line comments (`;`, `%`, `#!` at line start, `#+` at line
+///   start): the comment's terminating newline IS a real
+///   structural line terminator, so it gets converted to CRLF;
+///   bytes inside the comment region (which can include arbitrary
+///   characters, notably stray `"`) pass through without flipping
+///   the in-string state.
 ///
 /// The helper lives in this module rather than the LSP crate
 /// because its correctness depends on the lexer's `STRING` and
@@ -136,21 +136,17 @@ pub fn format_source(source: &str) -> String {
 #[must_use]
 pub fn lf_to_crlf_outside_strings(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + s.matches('\n').count());
+    let chars: Vec<char> = s.chars().collect();
     let mut state = SourceState::Code;
     let mut prev_was_backslash = false;
-    for ch in s.chars() {
+    let mut at_line_start = true;
+    for (i, &ch) in chars.iter().enumerate() {
+        let peek = chars.get(i + 1).copied();
         match state {
-            SourceState::InString => {
-                out.push(ch);
-                if ch == '"' && !prev_was_backslash {
-                    state = SourceState::Code;
-                }
-                prev_was_backslash = ch == '\\' && !prev_was_backslash;
-            }
+            SourceState::InString => out.push(ch),
             SourceState::InComment => {
                 if ch == '\n' {
                     out.push_str("\r\n");
-                    state = SourceState::Code;
                 } else {
                     out.push(ch);
                 }
@@ -160,17 +156,11 @@ pub fn lf_to_crlf_outside_strings(s: &str) -> String {
                     out.push_str("\r\n");
                 } else {
                     out.push(ch);
-                    match ch {
-                        '"' => {
-                            state = SourceState::InString;
-                            prev_was_backslash = false;
-                        }
-                        ';' | '%' => state = SourceState::InComment,
-                        _ => {}
-                    }
                 }
             }
         }
+        state = advance_source_state(ch, peek, at_line_start, state, &mut prev_was_backslash);
+        at_line_start = ch == '\n';
     }
     out
 }
@@ -206,18 +196,39 @@ pub fn canonicalize_directives<'a, I>(
 where
     I: IntoIterator<Item = &'a rustledger_core::Directive>,
 {
+    // Materialize the iterator so we can count the input AND pass
+    // it to the legacy emitter.
+    let directives: Vec<&rustledger_core::Directive> = directives.into_iter().collect();
+    let input_count = directives.len();
     let raw = rustledger_core::format::format_directives(directives, config);
-    let parsed = crate::parse(&raw);
-    if !parsed.errors.is_empty() {
+    let parse_result = crate::parse(&raw);
+    if !parse_result.errors.is_empty() {
         return Err(CanonicalizeError::ReparseFailed {
-            errors: parsed.errors.iter().map(ToString::to_string).collect(),
+            errors: parse_result
+                .errors
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+        });
+    }
+    let reparsed_count = parse_result.directives.len();
+    if reparsed_count != input_count {
+        return Err(CanonicalizeError::DirectiveCountMismatch {
+            input: input_count,
+            reparsed: reparsed_count,
         });
     }
     Ok(format_source(&raw))
 }
 
 /// Error returned by [`canonicalize_directives`].
+///
+/// Marked `#[non_exhaustive]` so that adding a future variant
+/// (e.g. a `CanonicalizationTimeout` for an async path, or a new
+/// guard for a future canonical-form rule) does not become a
+/// SemVer-breaking change. Consumers must use a `_ => …` arm.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum CanonicalizeError {
     /// The synthesized intermediate failed to re-parse cleanly.
     /// Carries the rendered error messages so callers can surface
@@ -229,6 +240,21 @@ pub enum CanonicalizeError {
         /// intermediate text. Capped at the parser's own error
         /// limit so this field is bounded.
         errors: Vec<String>,
+    },
+    /// The synthesized intermediate parsed cleanly but produced a
+    /// different directive count than the input. This indicates
+    /// the legacy emitter and the new parser disagree on what
+    /// constitutes a directive — typically a future
+    /// `rustledger_core::Directive` variant whose legacy text the
+    /// CST parser silently swallows as comments / error-recovery
+    /// trivia. Without this guard, the call would round-trip to
+    /// truncated text with no error returned.
+    DirectiveCountMismatch {
+        /// Number of directives the caller passed in.
+        input: usize,
+        /// Number of directives the parser recovered from the
+        /// synthesized text.
+        reparsed: usize,
     },
 }
 
@@ -245,6 +271,12 @@ impl std::fmt::Display for CanonicalizeError {
                     preview.join("; ")
                 )
             }
+            Self::DirectiveCountMismatch { input, reparsed } => write!(
+                f,
+                "canonical formatter dropped directives on round-trip \
+                 ({input} in, {reparsed} out): the legacy emitter and the new \
+                 parser disagree on what constitutes a directive",
+            ),
         }
     }
 }
@@ -256,67 +288,47 @@ impl std::error::Error for CanonicalizeError {}
 ///
 /// String literals (`"…"`) can contain raw `\r` and `\n` per the
 /// lexer's `STRING` rule; folding CR inside a string would mutate
-/// the user's data. The walker uses [`SourceState`] to keep track
-/// of whether the cursor is inside a string, inside a `;`/`%`
-/// comment, or in code.
+/// the user's data. Uses the shared `SourceState` state machine
+/// to track string / comment boundaries.
 ///
 /// Cheap fast path: if the input contains no `\r`, returns the
 /// source slice borrowed (no allocation). Used by
 /// [`format_source`] before parsing so the lexer never has to see
-/// legacy line endings.
-fn normalize_line_endings(src: &str) -> std::borrow::Cow<'_, str> {
+/// legacy line endings. Exposed publicly under [`crlf_to_lf_outside_strings`]
+/// for tooling (CLI `--diff`, format-equivalence checks) that
+/// needs the same string-aware normalization.
+pub fn crlf_to_lf_outside_strings(src: &str) -> std::borrow::Cow<'_, str> {
     if !src.contains('\r') {
         return std::borrow::Cow::Borrowed(src);
     }
     let mut out = String::with_capacity(src.len());
-    let mut chars = src.chars().peekable();
+    let chars: Vec<char> = src.chars().collect();
     let mut state = SourceState::Code;
     let mut prev_was_backslash = false;
-    while let Some(c) = chars.next() {
+    let mut at_line_start = true;
+    let mut i = 0;
+    while i < chars.len() {
+        let ch = chars[i];
+        let peek = chars.get(i + 1).copied();
+        let mut consume_extra = 0;
         match state {
-            SourceState::InString => {
-                // Inside a string literal: preserve every byte
-                // verbatim (LF, CR, CRLF — all the user's bytes
-                // survive). Toggle out on an unescaped `"`.
-                out.push(c);
-                if c == '"' && !prev_was_backslash {
-                    state = SourceState::Code;
-                }
-                prev_was_backslash = c == '\\' && !prev_was_backslash;
-            }
-            SourceState::InComment => {
-                if c == '\r' {
+            SourceState::InString => out.push(ch),
+            _ => {
+                if ch == '\r' {
                     out.push('\n');
-                    if chars.peek() == Some(&'\n') {
-                        chars.next();
-                    }
-                    state = SourceState::Code;
-                } else if c == '\n' {
-                    out.push(c);
-                    state = SourceState::Code;
-                } else {
-                    out.push(c);
-                }
-            }
-            SourceState::Code => {
-                if c == '\r' {
-                    out.push('\n');
-                    if chars.peek() == Some(&'\n') {
-                        chars.next();
+                    if peek == Some('\n') {
+                        consume_extra = 1;
                     }
                 } else {
-                    out.push(c);
-                    match c {
-                        '"' => {
-                            state = SourceState::InString;
-                            prev_was_backslash = false;
-                        }
-                        ';' | '%' => state = SourceState::InComment,
-                        _ => {}
-                    }
+                    out.push(ch);
                 }
             }
         }
+        state = advance_source_state(ch, peek, at_line_start, state, &mut prev_was_backslash);
+        // CRLF and bare CR both count as a line terminator for
+        // line-start tracking outside strings.
+        at_line_start = ch == '\n' || (state == SourceState::Code && ch == '\r');
+        i += 1 + consume_extra;
     }
     std::borrow::Cow::Owned(out)
 }
@@ -324,19 +336,66 @@ fn normalize_line_endings(src: &str) -> std::borrow::Cow<'_, str> {
 /// Per-character walker state for line-ending normalization passes
 /// that must respect string-literal and comment boundaries.
 ///
-/// Used by [`normalize_line_endings`] and by
-/// [`lf_to_crlf_outside_strings`]: a flat `is_in_string` boolean is
-/// not enough because a quote character inside a `;`/`%` comment
-/// is data, not a string delimiter.
+/// Used by both line-ending helpers: a flat `is_in_string` boolean
+/// is not enough because a quote character inside a `;`/`%` /
+/// `#!` / `#+` comment is data, not a string delimiter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SourceState {
     /// In normal code. `"` opens a string; `;` / `%` opens a
-    /// comment; everything else is just bytes.
+    /// comment; `#!` or `#+` at line start opens a comment;
+    /// everything else is just bytes.
     Code,
     /// Inside `"…"`. Bytes pass through; an unescaped `"` exits.
     InString,
-    /// Inside `;…\n` or `%…\n`. Bytes pass through until LF/CR.
+    /// Inside `;…\n`, `%…\n`, `#!…\n`, or `#+…\n`. Bytes pass
+    /// through until LF/CR.
     InComment,
+}
+
+/// One-step state transition shared by both line-ending helpers.
+///
+/// Returns the state AFTER consuming `ch`. The string-escape
+/// bookkeeping (`prev_was_backslash`) updates in place. Comment
+/// opener detection covers all four line-comment lexemes:
+/// `;` and `%` anywhere, `#!` and `#+` at line start only (a `#`
+/// elsewhere is a TAG / HASH token, not a comment).
+fn advance_source_state(
+    ch: char,
+    peek: Option<char>,
+    at_line_start: bool,
+    state: SourceState,
+    prev_was_backslash: &mut bool,
+) -> SourceState {
+    match state {
+        SourceState::InString => {
+            let is_close = ch == '"' && !*prev_was_backslash;
+            *prev_was_backslash = ch == '\\' && !*prev_was_backslash;
+            if is_close {
+                SourceState::Code
+            } else {
+                SourceState::InString
+            }
+        }
+        SourceState::InComment => {
+            if matches!(ch, '\n' | '\r') {
+                SourceState::Code
+            } else {
+                SourceState::InComment
+            }
+        }
+        SourceState::Code => {
+            let is_hash_line_comment =
+                at_line_start && ch == '#' && matches!(peek, Some('!' | '+'));
+            if ch == '"' {
+                *prev_was_backslash = false;
+                SourceState::InString
+            } else if matches!(ch, ';' | '%') || is_hash_line_comment {
+                SourceState::InComment
+            } else {
+                SourceState::Code
+            }
+        }
+    }
 }
 
 /// Format a `SOURCE_FILE` syntax node in opinionated canonical form.
@@ -2076,7 +2135,35 @@ mod tests {
             "options_and_includes",
             "option \"title\" \"My Ledger\"\ninclude \"sub.beancount\"\nplugin \"my.plugin\" \"cfg\"\n",
         ),
+        // ---- per-variant coverage ---------------------------------
+        ("close_directive", "2024-12-31 close Assets:Cash\n"),
+        ("commodity_directive", "2024-01-01 commodity HOOL\n"),
+        ("note_directive", "2024-01-15 note Assets:Cash \"a note\"\n"),
+        ("event_directive", "2024-01-15 event \"location\" \"NYC\"\n"),
+        (
+            "query_directive",
+            "2024-01-15 query \"q1\" \"SELECT account\"\n",
+        ),
+        ("pad_directive", "2024-01-15 pad Assets:A Equity:Opening\n"),
+        (
+            "document_directive",
+            "2024-06-01 document Assets:Bank \"stmt.pdf\" #q1\n",
+        ),
+        ("pushtag_directive", "pushtag #active\n"),
+        ("poptag_directive", "poptag #active\n"),
+        ("pushmeta_directive", "pushmeta location: \"NYC\"\n"),
+        ("popmeta_directive", "popmeta location:\n"),
     ];
+
+    /// Minimum number of fixtures the per-fixture round-trip test
+    /// MUST actually exercise. Each new fixture added below should
+    /// raise this counter (or, if a fixture is comment-only / empty
+    /// and the round-trip can't apply, the counter stays put). The
+    /// guard catches the silent-skip class: a fixture that USED to
+    /// produce directives but stops doing so silently after a
+    /// parser regression no longer drops coverage to zero without
+    /// failing the test.
+    const ROUNDTRIP_MIN_COVERAGE: usize = 25;
 
     #[test]
     fn lf_to_crlf_outside_strings_preserves_string_interior() {
@@ -2109,12 +2196,12 @@ mod tests {
     }
 
     #[test]
-    fn normalize_line_endings_preserves_crlf_inside_strings() {
+    fn crlf_to_lf_preserves_crlf_inside_strings() {
         // Bug fix mirror: a Windows-authored multi-line string had
         // its CRLF folded to LF by the pre-parse normalizer too,
         // which silently mutated the user's bytes.
         let s = "2024-01-15 note Assets:Bank \"line1\r\nline2\"\r\n";
-        let normalized = normalize_line_endings(s);
+        let normalized = crlf_to_lf_outside_strings(s);
         // Outside the string, the trailing CRLF folds to LF; inside
         // the string, CRLF stays CRLF (user's bytes preserved).
         assert!(
@@ -2154,8 +2241,15 @@ mod tests {
         // depend on. Without it, a future Directive variant added
         // to rustledger-core without matching coverage in
         // cst::format would silently round-trip to truncated text.
+        //
+        // Counter + assertion guards against silent-skip: if the
+        // guard at the top of the loop ever filters too many
+        // fixtures (e.g. a parser regression that drops directives
+        // from previously-clean fixtures), the test fails instead
+        // of silently passing with zero coverage.
         use rustledger_core::format::FormatConfig;
         let cfg = FormatConfig::default();
+        let mut exercised = 0usize;
         for (name, src) in IDEMPOTENCE_MATRIX {
             let parsed = crate::parse(src);
             if parsed.errors.is_empty() && !parsed.directives.is_empty() {
@@ -2176,7 +2270,65 @@ mod tests {
                     reparsed.directives.len(),
                     "directive count drifted on fixture `{name}`\n--- formatted ---\n{formatted}",
                 );
+                exercised += 1;
             }
         }
+        assert!(
+            exercised >= ROUNDTRIP_MIN_COVERAGE,
+            "only {exercised} fixtures exercised the round-trip body, \
+             expected at least {ROUNDTRIP_MIN_COVERAGE}. A parser regression \
+             or a broken fixture is silently dropping coverage."
+        );
+    }
+
+    /// `SHEBANG` / `EMACS_DIRECTIVE` lines (`#!…` / `#+…` at line
+    /// start) also count as comments for the LSP-CRLF state
+    /// machine. A stray quote inside such a line used to flip
+    /// `in_string=true` for the rest of the file just like the
+    /// `;` / `%` comment case the round-3 fix covered.
+    #[test]
+    fn lf_to_crlf_outside_strings_handles_emacs_directive_with_quote() {
+        let s = "#+title: \"My Book\n2024-01-01 open Assets:A\n";
+        let out = lf_to_crlf_outside_strings(s);
+        assert_eq!(out, "#+title: \"My Book\r\n2024-01-01 open Assets:A\r\n");
+    }
+
+    #[test]
+    fn lf_to_crlf_outside_strings_handles_shebang_with_quote() {
+        let s = "#!shebang \"quote\n2024-01-01 open Assets:A\n";
+        let out = lf_to_crlf_outside_strings(s);
+        assert_eq!(out, "#!shebang \"quote\r\n2024-01-01 open Assets:A\r\n");
+    }
+
+    /// `#` NOT at line start is a TAG / HASH token; the state
+    /// machine must NOT treat it as a comment opener.
+    #[test]
+    fn lf_to_crlf_outside_strings_hash_mid_line_is_not_comment() {
+        let s = "2024-01-15 * \"x\" #tag1\n  Assets:A 1 USD\n";
+        let out = lf_to_crlf_outside_strings(s);
+        // Every LF outside strings becomes CRLF — including the
+        // one ending the tag-bearing line.
+        assert!(out.contains("#tag1\r\n"), "got: {out:?}");
+        assert!(out.ends_with("\r\n"), "got: {out:?}");
+    }
+
+    #[test]
+    fn canonicalize_directives_directive_count_mismatch_is_reported() {
+        // Drive the new DirectiveCountMismatch error variant. Today
+        // the legacy emitter and the new parser agree on every
+        // Directive variant, so we synthesize the mismatch
+        // condition manually by passing an empty iterator that
+        // claims (via the test setup) to be non-empty. Concretely:
+        // a one-directive input that emits as an empty string would
+        // trigger the variant. We don't have such an input today,
+        // so this test pins the Display rendering of the variant
+        // instead.
+        let err = super::CanonicalizeError::DirectiveCountMismatch {
+            input: 3,
+            reparsed: 2,
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("3 in, 2 out"), "got: {msg}");
+        assert!(msg.contains("dropped directives"), "got: {msg}");
     }
 }

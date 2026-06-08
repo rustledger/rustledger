@@ -38,10 +38,25 @@ mod diagnostics;
 mod error;
 pub mod logos_lexer;
 
+/// Opinionated CST-backed formatter entries.
+///
+/// Sub-module re-export so consumers can import the formatter
+/// surface without scrolling through the parser surface:
+/// `use rustledger_parser::format::{format_source, canonicalize_directives};`.
+///
+/// The flat crate-root re-exports are kept too for backwards
+/// compatibility; new code should prefer this namespace.
+pub mod format {
+    pub use crate::cst::{
+        CanonicalizeError, canonicalize_directives, crlf_to_lf_outside_strings, format_node,
+        format_source, lf_to_crlf_outside_strings,
+    };
+}
+
 pub use cst::{
     BeancountLanguage, CanonicalizeError, SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken,
-    canonicalize_directives, format_node, format_source, lf_to_crlf_outside_strings,
-    lossless_kind_tokens, parse_flat, parse_structured, parse_via_cst,
+    canonicalize_directives, crlf_to_lf_outside_strings, format_node, format_source,
+    lf_to_crlf_outside_strings, lossless_kind_tokens, parse_flat, parse_structured, parse_via_cst,
 };
 pub use error::{ParseError, ParseErrorKind};
 pub use rustledger_core::{InternedStr, SYNTHESIZED_FILE_ID, Span, Spanned};

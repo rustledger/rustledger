@@ -147,26 +147,29 @@ fn format_file(file: &PathBuf, args: &Args) -> Result<ExitCode> {
 /// Handles four cases beyond the obvious per-line replacement:
 ///
 /// - **Line-ending normalization** (CRLF and / or bare CR). The
-///   canonical form normalizes every CR-bearing terminator to LF.
-///   If stripping CR characters from the original makes it match
-///   the formatted output, we say so explicitly instead of
-///   printing a header with no hunks.
-/// - **Missing trailing newline.** Canonical form ends with
-///   exactly one LF. If the original lacks one, surface that.
-/// - **Extra trailing newlines.** If the original ends with `\n\n…`
-///   that collapses to a single `\n`, surface that.
-/// - **Line-by-line replacements.** Otherwise emit the existing
-///   `@@ line N @@` per-line diff hunks.
+///   canonical form normalizes every CR-bearing terminator to LF
+///   OUTSIDE string literals (CR inside strings is preserved). If
+///   the only divergence is line-ending normalization, we say so.
+/// - **Trailing-newline-only delta** (missing or extra). The
+///   canonical form ends with exactly one LF. We surface the
+///   direction explicitly. The check fires BEFORE the per-line
+///   loop so the trailing-blank-line case doesn't produce empty
+///   `@@ (removed) @@\n-` hunks.
+/// - **Leading-whitespace-only delta** that `.lines()` strips.
+/// - **Line-by-line replacements.** Otherwise emit `@@ line N @@`
+///   per-line diff hunks.
 fn emit_diff(file: &PathBuf, original: &str, formatted: &str) {
     eprintln!("--- {}", file.display());
     eprintln!("+++ {} (formatted)", file.display());
 
-    // CR-bearing line endings (CRLF or bare CR). If stripping every
-    // CR (and CRLF) from the original makes it match the formatted
-    // output, the only divergence is line-ending normalization.
+    // CR-bearing line endings. The string-aware normalizer mirrors
+    // what the formatter does on the inbound pre-parse pass: it
+    // folds CRLF and bare CR to LF OUTSIDE strings, leaving CR
+    // inside string literals intact. If the result matches the
+    // canonical output, the only divergence was line endings.
     if original.contains('\r') {
-        let lf_only = original.replace("\r\n", "\n").replace('\r', "\n");
-        if lf_only == *formatted {
+        let lf_only = rustledger_parser::crlf_to_lf_outside_strings(original);
+        if &*lf_only == formatted {
             eprintln!(
                 "  (no per-line content change; the canonical form \
                  normalizes line endings to LF — run `rledger format -i` \
@@ -176,36 +179,16 @@ fn emit_diff(file: &PathBuf, original: &str, formatted: &str) {
         }
     }
 
-    let orig_lines: Vec<&str> = original.lines().collect();
-    let fmt_lines: Vec<&str> = formatted.lines().collect();
-    let mut printed_hunk = false;
-    for (i, (orig, fmt)) in orig_lines.iter().zip(fmt_lines.iter()).enumerate() {
-        if orig != fmt {
-            eprintln!("@@ line {} @@", i + 1);
-            eprintln!("-{orig}");
-            eprintln!("+{fmt}");
-            printed_hunk = true;
-        }
-    }
-    if orig_lines.len() != fmt_lines.len() {
-        let min_len = orig_lines.len().min(fmt_lines.len());
-        for (i, line) in orig_lines.iter().skip(min_len).enumerate() {
-            eprintln!("@@ line {} (removed) @@", min_len + i + 1);
-            eprintln!("-{line}");
-            printed_hunk = true;
-        }
-        for (i, line) in fmt_lines.iter().skip(min_len).enumerate() {
-            eprintln!("@@ line {} (added) @@", min_len + i + 1);
-            eprintln!("+{line}");
-            printed_hunk = true;
-        }
-    }
-    if !printed_hunk {
-        // Byte-exact comparison said the files differ, but lines()
-        // produced no hunks. Distinguish the two trailing-newline
-        // cases explicitly so the user sees the actual problem.
-        let orig_trailing = trailing_newline_count(original);
-        let fmt_trailing = trailing_newline_count(formatted);
+    // Trailing-newline-only delta. Detected BEFORE the per-line
+    // loop so the `\n\n\n` → `\n` case surfaces as a clear message
+    // instead of two empty `(removed)` hunks. We compare the
+    // trim-trailing-newlines view of both sides; if equal, the only
+    // delta is the trailing-newline count.
+    let orig_body = original.trim_end_matches('\n');
+    let fmt_body = formatted.trim_end_matches('\n');
+    if orig_body == fmt_body {
+        let orig_trailing = original.len() - orig_body.len();
+        let fmt_trailing = formatted.len() - fmt_body.len();
         match orig_trailing.cmp(&fmt_trailing) {
             std::cmp::Ordering::Less => eprintln!(
                 "  (no per-line content change; file is missing a final \
@@ -221,10 +204,27 @@ fn emit_diff(file: &PathBuf, original: &str, formatted: &str) {
                  leading/trailing whitespace that `.lines()` strips)"
             ),
         }
+        return;
     }
-}
 
-/// Number of consecutive `\n` characters at the END of `s`.
-fn trailing_newline_count(s: &str) -> usize {
-    s.bytes().rev().take_while(|&b| b == b'\n').count()
+    let orig_lines: Vec<&str> = original.lines().collect();
+    let fmt_lines: Vec<&str> = formatted.lines().collect();
+    for (i, (orig, fmt)) in orig_lines.iter().zip(fmt_lines.iter()).enumerate() {
+        if orig != fmt {
+            eprintln!("@@ line {} @@", i + 1);
+            eprintln!("-{orig}");
+            eprintln!("+{fmt}");
+        }
+    }
+    if orig_lines.len() != fmt_lines.len() {
+        let min_len = orig_lines.len().min(fmt_lines.len());
+        for (i, line) in orig_lines.iter().skip(min_len).enumerate() {
+            eprintln!("@@ line {} (removed) @@", min_len + i + 1);
+            eprintln!("-{line}");
+        }
+        for (i, line) in fmt_lines.iter().skip(min_len).enumerate() {
+            eprintln!("@@ line {} (added) @@", min_len + i + 1);
+            eprintln!("+{line}");
+        }
+    }
 }

@@ -58,8 +58,8 @@ mod trivia;
 
 pub use convert::parse_via_cst;
 pub use format::{
-    CanonicalizeError, canonicalize_directives, format_node, format_source,
-    lf_to_crlf_outside_strings,
+    CanonicalizeError, canonicalize_directives, crlf_to_lf_outside_strings, format_node,
+    format_source, lf_to_crlf_outside_strings,
 };
 pub use lossless_tokens::lossless_kind_tokens;
 pub use parser::{parse_flat, parse_structured};

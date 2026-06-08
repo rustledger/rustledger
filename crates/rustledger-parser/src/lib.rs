@@ -40,14 +40,15 @@ pub mod logos_lexer;
 
 /// Opinionated CST-backed formatter entries.
 ///
-/// Sole import path for the formatter surface — `format_source`,
+/// **Sole** import path for the formatter surface — `format_source`,
 /// `format_node`, `canonicalize_directives`, `CanonicalizeError`,
 /// `lf_to_crlf_outside_strings`, `crlf_to_lf_outside_strings`. The
-/// flat crate-root re-exports were removed in round-5 of the
-/// PR #1284 reviews so the import shape is unambiguous and a
-/// future deprecation can be done in one place.
+/// flat crate-root re-exports were removed in round-5 and the
+/// duplicate `crate::cst::format` path was sealed in round-6 of
+/// the PR #1284 reviews, so a future deprecation can be done at
+/// exactly one site.
 pub mod format {
-    pub use crate::cst::{
+    pub use crate::cst::format::{
         CanonicalizeError, canonicalize_directives, crlf_to_lf_outside_strings, format_node,
         format_source, lf_to_crlf_outside_strings,
     };

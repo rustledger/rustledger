@@ -251,7 +251,7 @@ fn handle_sort_transactions(
 /// document formatter ([`format_document`]) and then keeping only
 /// the edits that actually touch a posting line.
 ///
-/// `format_document` runs the same `rustledger_parser::format_source`
+/// `format_document` runs the same `rustledger_parser::format::format_source`
 /// pipeline as `rledger format`, so the column widths this command
 /// resolves agree with the on-disk output. The previous bespoke logic
 /// here ran a regex-style line scanner with a "max-existing-column"

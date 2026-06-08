@@ -50,22 +50,19 @@
 
 pub mod ast;
 mod convert;
-pub mod format;
+pub(crate) mod format;
 mod lossless_tokens;
 mod parser;
 mod syntax_kind;
 mod trivia;
 
 pub use convert::parse_via_cst;
-// Formatter exports route through the crate-root `format` sub-
-// module (`rustledger_parser::format`). The flat crate-root
-// re-exports were removed in round-5; keep these `pub use`
-// entries here so the sub-module's `pub use crate::cst::...`
-// declarations resolve.
-pub use format::{
-    CanonicalizeError, canonicalize_directives, crlf_to_lf_outside_strings, format_node,
-    format_source, lf_to_crlf_outside_strings,
-};
+// Formatter exports do NOT re-export through `cst` — the sole
+// import path for the formatter is `rustledger_parser::format`
+// (the crate-root sub-module that re-exports the six symbols
+// directly from `crate::cst::format`). Round-6 sealed the
+// `cst::format` path so there is exactly one import shape per
+// formatter symbol from outside the crate.
 pub use lossless_tokens::lossless_kind_tokens;
 pub use parser::{parse_flat, parse_structured};
 pub use syntax_kind::{BeancountLanguage, SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken};

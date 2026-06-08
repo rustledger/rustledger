@@ -181,7 +181,18 @@ fn emit_diff(file: &PathBuf, original: &str, formatted: &str) {
         if had_bom {
             causes.push("leading BOM (dropped)");
         }
-        if original_no_bom.contains('\r') {
+        // Only report "CR folded" if the helper actually folded
+        // bytes (i.e. the returned Cow is Owned AND differs from
+        // the input). A file whose only `\r` is inside a string
+        // literal hits the `.contains('\r')` branch but
+        // crlf_to_lf_outside_strings preserves those bytes, so
+        // lf_only is byte-equal to original_no_bom and no fold
+        // happened.
+        let folded_cr = match &lf_only {
+            std::borrow::Cow::Owned(s) => s.as_str() != original_no_bom,
+            std::borrow::Cow::Borrowed(_) => false,
+        };
+        if folded_cr {
             causes.push("CR-bearing line endings (folded to LF)");
         }
         let orig_trailing = lf_only.len() - orig_body.len();

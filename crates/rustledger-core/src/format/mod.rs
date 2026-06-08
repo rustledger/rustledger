@@ -103,7 +103,7 @@ pub fn format_directive_lines(directive: &Directive, config: &FormatConfig) -> V
 /// [`Directive`]s but no surrounding source text (e.g. synthesized output,
 /// `extract`, plugin round-trips). Callers that also need to preserve
 /// comments, blank lines, and non-directive elements from original source
-/// should use `rustledger_parser::format_source` instead.
+/// should use `rustledger_parser::format::format_source` instead.
 ///
 /// Passing a single directive (`[&directive]`) formats it on its own, which is
 /// the natural degenerate case of whole-list alignment.

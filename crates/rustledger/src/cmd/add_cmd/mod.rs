@@ -37,7 +37,8 @@ use parsing::{calculate_balance, parse_amount, parse_date};
 use rustledger_core::NaiveDate;
 use rustledger_core::format::FormatConfig;
 use rustledger_core::{Amount, Directive, Posting, Transaction};
-use rustledger_parser::{canonicalize_directives, parse};
+use rustledger_parser::format::canonicalize_directives;
+use rustledger_parser::parse;
 use rustyline::completion::{Completer, Pair};
 use rustyline::error::ReadlineError;
 use rustyline::highlight::{CmdKind, Highlighter};
@@ -188,7 +189,7 @@ impl Validator for AddHelper {}
 /// Thin wrapper around the parser's canonical-emit helper. Lives
 /// here only to keep call-site ergonomics tight; all the
 /// synth-then-canonicalize machinery is in
-/// [`rustledger_parser::canonicalize_directives`].
+/// [`rustledger_parser::format::canonicalize_directives`].
 fn canonical_format_directive(directive: &Directive, config: &FormatConfig) -> Result<String> {
     canonicalize_directives(std::iter::once(directive), config)
         .map_err(|e| anyhow::anyhow!(e.to_string()))

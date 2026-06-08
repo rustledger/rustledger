@@ -1,14 +1,15 @@
 //! `rledger format` — opinionated whole-file formatter.
 //!
 //! Routes every input file through the canonical CST-backed formatter
-//! ([`rustledger_parser::format_source`]). One canonical form per AST
+//! ([`rustledger_parser::format::format_source`]). One canonical form per AST
 //! shape, no knobs: see the canonical-form spec in the formatter's
 //! rustdoc and in the PR-4 decision comment on #1262.
 
 use crate::cmd::completions::ShellType;
 use anyhow::{Context, Result};
 use clap::Parser;
-use rustledger_parser::{format_source, parse};
+use rustledger_parser::format::format_source;
+use rustledger_parser::parse;
 use std::fs;
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -146,63 +147,65 @@ fn format_file(file: &PathBuf, args: &Args) -> Result<ExitCode> {
 ///
 /// Handles four cases beyond the obvious per-line replacement:
 ///
-/// - **Line-ending normalization** (CRLF and / or bare CR). The
-///   canonical form normalizes every CR-bearing terminator to LF
-///   OUTSIDE string literals (CR inside strings is preserved). If
-///   the only divergence is line-ending normalization, we say so.
-/// - **Trailing-newline-only delta** (missing or extra). The
-///   canonical form ends with exactly one LF. We surface the
-///   direction explicitly. The check fires BEFORE the per-line
-///   loop so the trailing-blank-line case doesn't produce empty
-///   `@@ (removed) @@\n-` hunks.
-/// - **Leading-whitespace-only delta** that `.lines()` strips.
+/// - **Whitespace-only normalization.** The canonical form strips
+///   the leading BOM, folds CR-bearing line endings to LF outside
+///   strings, and emits exactly one trailing LF. If the file's
+///   delta is fully explained by one or more of those passes, we
+///   surface the cause explicitly instead of producing a per-line
+///   diff that just shows BOMs and `\r`s.
 /// - **Line-by-line replacements.** Otherwise emit `@@ line N @@`
 ///   per-line diff hunks.
 fn emit_diff(file: &PathBuf, original: &str, formatted: &str) {
     eprintln!("--- {}", file.display());
     eprintln!("+++ {} (formatted)", file.display());
 
-    // CR-bearing line endings. The string-aware normalizer mirrors
-    // what the formatter does on the inbound pre-parse pass: it
-    // folds CRLF and bare CR to LF OUTSIDE strings, leaving CR
-    // inside string literals intact. If the result matches the
-    // canonical output, the only divergence was line endings.
-    if original.contains('\r') {
-        let lf_only = rustledger_parser::crlf_to_lf_outside_strings(original);
-        if &*lf_only == formatted {
-            eprintln!(
-                "  (no per-line content change; the canonical form \
-                 normalizes line endings to LF — run `rledger format -i` \
-                 to rewrite)"
-            );
-            return;
-        }
-    }
+    // Compute the canonical-noise-stripped view of the original:
+    // drop the BOM, normalize CR-bearing line endings to LF outside
+    // strings, then trim_end_matches('\n'). The formatted side
+    // gets the same trim. If the bodies match, the file's delta is
+    // entirely explainable by canonical normalization; surface the
+    // specific cause so the user knows what to expect from
+    // `--in-place`.
+    let original_no_bom = original.strip_prefix('\u{FEFF}').unwrap_or(original);
+    let had_bom = original_no_bom.len() < original.len();
+    let lf_only: std::borrow::Cow<'_, str> = if original_no_bom.contains('\r') {
+        rustledger_parser::format::crlf_to_lf_outside_strings(original_no_bom)
+    } else {
+        std::borrow::Cow::Borrowed(original_no_bom)
+    };
 
-    // Trailing-newline-only delta. Detected BEFORE the per-line
-    // loop so the `\n\n\n` → `\n` case surfaces as a clear message
-    // instead of two empty `(removed)` hunks. We compare the
-    // trim-trailing-newlines view of both sides; if equal, the only
-    // delta is the trailing-newline count.
-    let orig_body = original.trim_end_matches('\n');
+    let orig_body = lf_only.trim_end_matches('\n');
     let fmt_body = formatted.trim_end_matches('\n');
     if orig_body == fmt_body {
-        let orig_trailing = original.len() - orig_body.len();
+        let mut causes: Vec<&'static str> = Vec::new();
+        if had_bom {
+            causes.push("leading BOM (dropped)");
+        }
+        if original_no_bom.contains('\r') {
+            causes.push("CR-bearing line endings (folded to LF)");
+        }
+        let orig_trailing = lf_only.len() - orig_body.len();
         let fmt_trailing = formatted.len() - fmt_body.len();
         match orig_trailing.cmp(&fmt_trailing) {
-            std::cmp::Ordering::Less => eprintln!(
-                "  (no per-line content change; file is missing a final \
-                 newline — the canonical form ends every file with one)"
-            ),
-            std::cmp::Ordering::Greater => eprintln!(
-                "  (no per-line content change; the file has extra \
-                 trailing newlines — the canonical form collapses them \
-                 to one)"
-            ),
-            std::cmp::Ordering::Equal => eprintln!(
+            std::cmp::Ordering::Less => causes.push("missing final newline (added)"),
+            std::cmp::Ordering::Greater => causes.push("extra trailing newlines (collapsed)"),
+            std::cmp::Ordering::Equal => {}
+        }
+        if causes.is_empty() {
+            // Bodies equal AND no whitespace-noise cause — this
+            // can only happen on byte-identical input, which the
+            // caller already gates against. Defensive message in
+            // case a future caller invokes emit_diff regardless.
+            eprintln!(
                 "  (no per-line content change; the difference is in \
                  leading/trailing whitespace that `.lines()` strips)"
-            ),
+            );
+        } else {
+            eprintln!(
+                "  (no per-line content change; canonical normalization: {} — \
+                 run `rledger format -i` to rewrite)",
+                causes.join(", "),
+            );
         }
         return;
     }

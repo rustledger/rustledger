@@ -136,22 +136,25 @@ pub fn format_source(source: &str) -> String {
 #[must_use]
 pub fn lf_to_crlf_outside_strings(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + s.matches('\n').count());
-    let chars: Vec<char> = s.chars().collect();
+    // Same BOM handling as the inverse pass: skip the BOM for
+    // `at_line_start` purposes but re-prepend it verbatim. This
+    // mirrors crlf_to_lf_outside_strings so any caller running both
+    // directions on the same source observes consistent
+    // SHEBANG / EMACS_DIRECTIVE handling at byte 0 of content.
+    let (body, bom) = match s.strip_prefix('\u{FEFF}') {
+        Some(rest) => (rest, "\u{FEFF}"),
+        None => (s, ""),
+    };
+    out.push_str(bom);
+    let mut chars = body.chars().peekable();
     let mut state = SourceState::Code;
     let mut prev_was_backslash = false;
     let mut at_line_start = true;
-    for (i, &ch) in chars.iter().enumerate() {
-        let peek = chars.get(i + 1).copied();
+    while let Some(ch) = chars.next() {
+        let peek = chars.peek().copied();
         match state {
             SourceState::InString => out.push(ch),
-            SourceState::InComment => {
-                if ch == '\n' {
-                    out.push_str("\r\n");
-                } else {
-                    out.push(ch);
-                }
-            }
-            SourceState::Code => {
+            SourceState::InComment | SourceState::Code => {
                 if ch == '\n' {
                     out.push_str("\r\n");
                 } else {
@@ -273,9 +276,9 @@ impl std::fmt::Display for CanonicalizeError {
             }
             Self::DirectiveCountMismatch { input, reparsed } => write!(
                 f,
-                "canonical formatter dropped directives on round-trip \
-                 ({input} in, {reparsed} out): the legacy emitter and the new \
-                 parser disagree on what constitutes a directive",
+                "the canonical formatter could not emit {input} directive(s) \
+                 without loss ({reparsed} survived the round-trip). This is \
+                 an rledger bug; please report it with the input directives.",
             ),
         }
     }
@@ -301,23 +304,30 @@ pub fn crlf_to_lf_outside_strings(src: &str) -> std::borrow::Cow<'_, str> {
     if !src.contains('\r') {
         return std::borrow::Cow::Borrowed(src);
     }
+    // Reserve room for any leading BOM so we can re-prepend it
+    // verbatim. `at_line_start` must apply to the FIRST CONTENT
+    // char, not to the BOM — without this, a `\u{FEFF}#+title…`
+    // file would not detect `#+` as a comment opener and a stray
+    // `\"` later on that line would trap the walker in InString.
+    let (body, bom) = match src.strip_prefix('\u{FEFF}') {
+        Some(rest) => (rest, "\u{FEFF}"),
+        None => (src, ""),
+    };
     let mut out = String::with_capacity(src.len());
-    let chars: Vec<char> = src.chars().collect();
+    out.push_str(bom);
+    let mut chars = body.chars().peekable();
     let mut state = SourceState::Code;
     let mut prev_was_backslash = false;
     let mut at_line_start = true;
-    let mut i = 0;
-    while i < chars.len() {
-        let ch = chars[i];
-        let peek = chars.get(i + 1).copied();
-        let mut consume_extra = 0;
+    while let Some(ch) = chars.next() {
+        let peek = chars.peek().copied();
         match state {
             SourceState::InString => out.push(ch),
             _ => {
                 if ch == '\r' {
                     out.push('\n');
                     if peek == Some('\n') {
-                        consume_extra = 1;
+                        chars.next();
                     }
                 } else {
                     out.push(ch);
@@ -328,7 +338,6 @@ pub fn crlf_to_lf_outside_strings(src: &str) -> std::borrow::Cow<'_, str> {
         // CRLF and bare CR both count as a line terminator for
         // line-start tracking outside strings.
         at_line_start = ch == '\n' || (state == SourceState::Code && ch == '\r');
-        i += 1 + consume_extra;
     }
     std::borrow::Cow::Owned(out)
 }
@@ -359,7 +368,7 @@ enum SourceState {
 /// opener detection covers all four line-comment lexemes:
 /// `;` and `%` anywhere, `#!` and `#+` at line start only (a `#`
 /// elsewhere is a TAG / HASH token, not a comment).
-fn advance_source_state(
+const fn advance_source_state(
     ch: char,
     peek: Option<char>,
     at_line_start: bool,
@@ -2155,15 +2164,25 @@ mod tests {
         ("popmeta_directive", "popmeta location:\n"),
     ];
 
-    /// Minimum number of fixtures the per-fixture round-trip test
-    /// MUST actually exercise. Each new fixture added below should
-    /// raise this counter (or, if a fixture is comment-only / empty
-    /// and the round-trip can't apply, the counter stays put). The
-    /// guard catches the silent-skip class: a fixture that USED to
-    /// produce directives but stops doing so silently after a
-    /// parser regression no longer drops coverage to zero without
-    /// failing the test.
-    const ROUNDTRIP_MIN_COVERAGE: usize = 25;
+    /// Number of fixtures in [`IDEMPOTENCE_MATRIX`] that legitimately
+    /// produce zero typed directives — comment-only / empty /
+    /// pragma-only inputs. The round-trip property test skips these
+    /// (they have nothing to emit), but every OTHER fixture MUST
+    /// exercise the body. Bumping this constant when adding such a
+    /// fixture is the only manual maintenance the coverage floor
+    /// needs; otherwise the floor (`IDEMPOTENCE_MATRIX.len() -
+    /// ROUNDTRIP_KNOWN_ZERO_DIRECTIVE_FIXTURES`) tracks the matrix
+    /// automatically.
+    ///
+    /// Today's zero-directive fixtures: `empty`, `only_comment`,
+    /// `comment_containing_quote`, `pushtag_directive`,
+    /// `poptag_directive`, `pushmeta_directive`, `popmeta_directive`
+    /// (pragma directives don't surface as `Directive` variants),
+    /// plus `options_and_includes` (option/include/plugin lines
+    /// don't surface as `Directive` variants either — they live on
+    /// the `ParseResult` as separate `options`, `includes`,
+    /// `plugins` collections).
+    const ROUNDTRIP_KNOWN_ZERO_DIRECTIVE_FIXTURES: usize = 8;
 
     #[test]
     fn lf_to_crlf_outside_strings_preserves_string_interior() {
@@ -2273,11 +2292,15 @@ mod tests {
                 exercised += 1;
             }
         }
+        let expected = IDEMPOTENCE_MATRIX
+            .len()
+            .saturating_sub(ROUNDTRIP_KNOWN_ZERO_DIRECTIVE_FIXTURES);
         assert!(
-            exercised >= ROUNDTRIP_MIN_COVERAGE,
+            exercised >= expected,
             "only {exercised} fixtures exercised the round-trip body, \
-             expected at least {ROUNDTRIP_MIN_COVERAGE}. A parser regression \
-             or a broken fixture is silently dropping coverage."
+             expected at least {expected} (= IDEMPOTENCE_MATRIX.len() - \
+             {ROUNDTRIP_KNOWN_ZERO_DIRECTIVE_FIXTURES}). A parser \
+             regression or a broken fixture is silently dropping coverage."
         );
     }
 
@@ -2314,21 +2337,218 @@ mod tests {
 
     #[test]
     fn canonicalize_directives_directive_count_mismatch_is_reported() {
-        // Drive the new DirectiveCountMismatch error variant. Today
-        // the legacy emitter and the new parser agree on every
-        // Directive variant, so we synthesize the mismatch
-        // condition manually by passing an empty iterator that
-        // claims (via the test setup) to be non-empty. Concretely:
-        // a one-directive input that emits as an empty string would
-        // trigger the variant. We don't have such an input today,
-        // so this test pins the Display rendering of the variant
-        // instead.
+        // Drive the new DirectiveCountMismatch error variant.
+        // Today's Directive variants all round-trip with matching
+        // counts, so this test pins the Display rendering of the
+        // variant (the user-facing message). The positive-count-
+        // match path is exercised by
+        // `canonicalize_directives_positive_count_check` below.
         let err = super::CanonicalizeError::DirectiveCountMismatch {
             input: 3,
             reparsed: 2,
         };
         let msg = format!("{err}");
-        assert!(msg.contains("3 in, 2 out"), "got: {msg}");
-        assert!(msg.contains("dropped directives"), "got: {msg}");
+        assert!(msg.contains("3 directive(s)"), "got: {msg}");
+        assert!(msg.contains("2 survived"), "got: {msg}");
+        assert!(msg.contains("rledger bug"), "got: {msg}");
+    }
+
+    /// Compile-time check that every `rustledger_core::Directive`
+    /// variant has at least one source-text fixture in
+    /// [`IDEMPOTENCE_MATRIX`] exercising its emit path. The
+    /// function NEVER runs — its body is an exhaustive `match` over
+    /// the `Directive` enum. Adding a new variant breaks
+    /// compilation unless the author adds a fixture and references
+    /// it here.
+    ///
+    /// The non-`Directive` pragma-style directives (Pushtag,
+    /// Poptag, Pushmeta, Popmeta, options, includes, plugins)
+    /// don't appear in the typed `Directive` enum; they're covered
+    /// by separate fixtures whose names map directly into
+    /// `IDEMPOTENCE_MATRIX`.
+    #[allow(dead_code)]
+    fn _directive_variant_fixture_coverage(d: &rustledger_core::Directive) -> &'static str {
+        match d {
+            rustledger_core::Directive::Transaction(_) => "transaction_with_cost_and_price",
+            rustledger_core::Directive::Balance(_) => "balance_with_arithmetic_and_tolerance",
+            rustledger_core::Directive::Open(_) => "only_directive",
+            rustledger_core::Directive::Close(_) => "close_directive",
+            rustledger_core::Directive::Commodity(_) => "commodity_directive",
+            rustledger_core::Directive::Pad(_) => "pad_directive",
+            rustledger_core::Directive::Event(_) => "event_directive",
+            rustledger_core::Directive::Query(_) => "query_directive",
+            rustledger_core::Directive::Note(_) => "note_directive",
+            rustledger_core::Directive::Document(_) => "document_directive",
+            rustledger_core::Directive::Price(_) => "price_with_thousands_separator",
+            rustledger_core::Directive::Custom(_) => "custom_with_date_value",
+        }
+    }
+
+    #[test]
+    fn directive_variant_fixture_names_resolve_in_matrix() {
+        // Runtime mirror of the compile-time match above: walk the
+        // 12 named fixtures and assert each appears in
+        // IDEMPOTENCE_MATRIX. If a fixture is renamed without
+        // updating `_directive_variant_fixture_coverage`, the
+        // compile-time match still compiles (string literals are
+        // not type-checked against the matrix) but THIS test fails.
+        let names = [
+            "transaction_with_cost_and_price",
+            "balance_with_arithmetic_and_tolerance",
+            "only_directive",
+            "close_directive",
+            "commodity_directive",
+            "pad_directive",
+            "event_directive",
+            "query_directive",
+            "note_directive",
+            "document_directive",
+            "price_with_thousands_separator",
+            "custom_with_date_value",
+        ];
+        for name in names {
+            assert!(
+                IDEMPOTENCE_MATRIX.iter().any(|(n, _)| *n == name),
+                "fixture `{name}` is named by _directive_variant_fixture_coverage \
+                 but missing from IDEMPOTENCE_MATRIX"
+            );
+        }
+    }
+
+    /// Property test: the `SourceState` classification used by the
+    /// line-ending helpers must agree with the lexer's
+    /// classification on every byte of a corpus of fixtures.
+    ///
+    /// Concretely: for every byte offset in every fixture, the
+    /// state machine's `InString` periods MUST line up with the
+    /// lexer's STRING token spans, and its `InComment` periods MUST
+    /// line up with the union of COMMENT / SHEBANG /
+    /// `EMACS_DIRECTIVE` token spans. A divergence — e.g. the lexer
+    /// gains a new comment lexeme that the state machine treats as
+    /// code — fails this test instead of silently mutating user
+    /// bytes inside the new lexeme on a line-ending round-trip.
+    #[test]
+    fn source_state_classification_agrees_with_lexer() {
+        use crate::logos_lexer::{Token, tokenize_lossless};
+
+        for (name, src) in IDEMPOTENCE_MATRIX {
+            // Run the lexer to get authoritative classification of
+            // each token. Build a per-byte map of expected state.
+            let tokens = tokenize_lossless(src);
+            let mut expected = vec![SourceState::Code; src.len()];
+            for (token, span) in &tokens {
+                let classify = match token {
+                    Token::String(_) => Some(SourceState::InString),
+                    Token::Comment(_) | Token::Shebang(_) | Token::EmacsDirective(_) => {
+                        Some(SourceState::InComment)
+                    }
+                    _ => None,
+                };
+                if let Some(state) = classify {
+                    for byte in &mut expected[span.start..span.end] {
+                        *byte = state;
+                    }
+                }
+            }
+
+            // Run the state-machine classifier (extracted into a
+            // helper) and compare. We don't compare on every byte —
+            // only on bytes the lexer claims are STRING or comment,
+            // because the state machine considers the OPENING quote
+            // / `;` / `%` byte itself as the transition trigger
+            // (still Code at that instant) while the lexer reports
+            // it as inside the resulting token. We instead check
+            // that every interior byte agrees.
+            let actual = classify_source_bytes(src);
+
+            for (i, (&want, &got)) in expected.iter().zip(actual.iter()).enumerate() {
+                // Skip the opener and closer bytes (state-machine
+                // transitions happen ON those bytes; lexer
+                // includes them in the token span).
+                // Skip the opener byte (state machine treats the
+                // quote/`;` as the transition TRIGGER and tags it
+                // as Code; the lexer includes it in the token) and
+                // line terminators (state machine extends the
+                // comment state through the LF; the lexer ends the
+                // comment regex BEFORE the LF). Both off-by-ones
+                // are by design — they don't affect any caller of
+                // the line-ending walkers because the only
+                // transformation they apply is "outside-string LF
+                // becomes CRLF" and that's correct whether the LF
+                // is tagged as Code or InComment.
+                let is_quote_or_opener = matches!(src.as_bytes().get(i), Some(b'"' | b';' | b'%'))
+                    || src.as_bytes().get(i..i + 2) == Some(b"#!")
+                    || src.as_bytes().get(i..i + 2) == Some(b"#+");
+                let is_terminator = matches!(src.as_bytes().get(i), Some(b'\n' | b'\r'));
+                if is_quote_or_opener || is_terminator {
+                    continue;
+                }
+                assert_eq!(
+                    want,
+                    got,
+                    "state-machine / lexer disagreement on fixture `{name}` \
+                     at byte {i} ({:?}): lexer said {want:?}, state machine said {got:?}",
+                    src.as_bytes()[i] as char
+                );
+            }
+        }
+    }
+
+    /// Walk `s` through the same state-machine logic the
+    /// line-ending helpers use, returning a per-byte
+    /// classification.
+    fn classify_source_bytes(s: &str) -> Vec<SourceState> {
+        // Strip the BOM exactly like the line-ending helpers do.
+        let (body, bom_len) = match s.strip_prefix('\u{FEFF}') {
+            Some(rest) => (rest, '\u{FEFF}'.len_utf8()),
+            None => (s, 0),
+        };
+        let mut out: Vec<SourceState> = vec![SourceState::Code; s.len()];
+        let mut chars = body.char_indices().peekable();
+        let mut state = SourceState::Code;
+        let mut prev_was_backslash = false;
+        let mut at_line_start = true;
+        while let Some((rel_i, ch)) = chars.next() {
+            let i = bom_len + rel_i;
+            let peek = chars.peek().map(|&(_, c)| c);
+            // Classify THIS byte under the state BEFORE advancing.
+            for byte in &mut out[i..i + ch.len_utf8()] {
+                *byte = state;
+            }
+            state = advance_source_state(ch, peek, at_line_start, state, &mut prev_was_backslash);
+            at_line_start = ch == '\n';
+        }
+        out
+    }
+
+    #[test]
+    fn canonicalize_directives_positive_count_check() {
+        // Pin the success path of the count check: pass a real
+        // multi-directive input through canonicalize_directives and
+        // assert that the output round-trips to the SAME directive
+        // count. Without this test, a regression that always
+        // returned CountMismatch (e.g. `==` instead of `!=` on the
+        // count comparison) would be caught only on production
+        // calls, not in CI. Together with the Display test above,
+        // this gives coverage of both arms of the count guard.
+        use rustledger_core::format::FormatConfig;
+        let cfg = FormatConfig::default();
+        let src = "2024-01-01 open Assets:Cash\n2024-01-02 open Assets:Bank\n2024-01-03 close Assets:Cash\n";
+        let parsed = crate::parse(src);
+        assert_eq!(
+            parsed.directives.len(),
+            3,
+            "fixture must parse to 3 directives"
+        );
+        let dirs: Vec<&rustledger_core::Directive> =
+            parsed.directives.iter().map(|s| &s.value).collect();
+        let formatted = super::canonicalize_directives(dirs.iter().copied(), &cfg)
+            .expect("canonicalize_directives should succeed on this input");
+        let reparsed = crate::parse(&formatted);
+        assert_eq!(
+            reparsed.directives.len(),
+            3,
+            "count check accepted but round-trip dropped directives: {formatted}"
+        );
     }
 }

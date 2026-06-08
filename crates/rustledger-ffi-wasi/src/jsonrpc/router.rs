@@ -573,7 +573,7 @@ fn format_source_to_response(source: &str) -> Result<serde_json::Value, RpcError
         return Err(RpcError::beancount_parse_error(message).with_data(data));
     }
 
-    let formatted = rustledger_parser::format_source(source);
+    let formatted = rustledger_parser::format::format_source(source);
 
     let result = FormatResult { formatted };
     serde_json::to_value(result).map_err(|e| RpcError::internal_error(e.to_string()))
@@ -588,7 +588,7 @@ fn handle_format_entry(params: &serde_json::Value) -> Result<serde_json::Value, 
 
     let config = rustledger_core::format::FormatConfig::default();
     let formatted =
-        rustledger_parser::canonicalize_directives(std::iter::once(&directive), &config)
+        rustledger_parser::format::canonicalize_directives(std::iter::once(&directive), &config)
             .map_err(|e| RpcError::internal_error(e.to_string()))?;
     let result = FormatResult { formatted };
     serde_json::to_value(result).map_err(|e| RpcError::internal_error(e.to_string()))
@@ -607,7 +607,7 @@ fn handle_format_entries(params: &serde_json::Value) -> Result<serde_json::Value
         );
     }
     let config = rustledger_core::format::FormatConfig::default();
-    let formatted = rustledger_parser::canonicalize_directives(directives.iter(), &config)
+    let formatted = rustledger_parser::format::canonicalize_directives(directives.iter(), &config)
         .map_err(|e| RpcError::internal_error(e.to_string()))?;
 
     let result = FormatResult { formatted };

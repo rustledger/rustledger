@@ -68,7 +68,7 @@ use duplicate::{is_duplicate, load_existing_transactions};
 use format_num_pattern::Locale;
 use rustledger_core::{Directive, FormatConfig};
 use rustledger_importer::{Importer, ImporterConfig, ImporterRegistry, csv_importer::CsvImporter};
-use rustledger_parser::canonicalize_directives;
+use rustledger_parser::format::canonicalize_directives;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};

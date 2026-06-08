@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use rustledger_loader::{LoadError, Loader};
-use rustledger_parser::{format_source, parse};
+use rustledger_parser::format::format_source;
+use rustledger_parser::parse;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 

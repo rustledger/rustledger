@@ -3,7 +3,7 @@
 //! Two independent edit pipelines live here:
 //!
 //! * [`format_document`] returns *canonical* edits — the result of running
-//!   [`rustledger_parser::format_source`] (the same path the `rledger
+//!   [`rustledger_parser::format::format_source`] (the same path the `rledger
 //!   format` CLI takes) and emitting the byte-level diff. It returns
 //!   `None` when the parse has errors or when the document is already
 //!   canonical. This is the path range-formatting, align-amounts, and the
@@ -26,7 +26,8 @@
 //! and undo granularity across unchanged blocks.
 
 use lsp_types::{DocumentFormattingParams, Position, Range, TextEdit};
-use rustledger_parser::{ParseResult, format_source, lf_to_crlf_outside_strings};
+use rustledger_parser::ParseResult;
+use rustledger_parser::format::{format_source, lf_to_crlf_outside_strings};
 
 use super::utils::{LineIndex, PositionEncoding};
 

@@ -40,12 +40,12 @@ pub mod logos_lexer;
 
 /// Opinionated CST-backed formatter entries.
 ///
-/// Sub-module re-export so consumers can import the formatter
-/// surface without scrolling through the parser surface:
-/// `use rustledger_parser::format::{format_source, canonicalize_directives};`.
-///
-/// The flat crate-root re-exports are kept too for backwards
-/// compatibility; new code should prefer this namespace.
+/// Sole import path for the formatter surface — `format_source`,
+/// `format_node`, `canonicalize_directives`, `CanonicalizeError`,
+/// `lf_to_crlf_outside_strings`, `crlf_to_lf_outside_strings`. The
+/// flat crate-root re-exports were removed in round-5 of the
+/// PR #1284 reviews so the import shape is unambiguous and a
+/// future deprecation can be done in one place.
 pub mod format {
     pub use crate::cst::{
         CanonicalizeError, canonicalize_directives, crlf_to_lf_outside_strings, format_node,
@@ -54,9 +54,8 @@ pub mod format {
 }
 
 pub use cst::{
-    BeancountLanguage, CanonicalizeError, SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken,
-    canonicalize_directives, crlf_to_lf_outside_strings, format_node, format_source,
-    lf_to_crlf_outside_strings, lossless_kind_tokens, parse_flat, parse_structured, parse_via_cst,
+    BeancountLanguage, SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken, lossless_kind_tokens,
+    parse_flat, parse_structured, parse_via_cst,
 };
 pub use error::{ParseError, ParseErrorKind};
 pub use rustledger_core::{InternedStr, SYNTHESIZED_FILE_ID, Span, Spanned};

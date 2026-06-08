@@ -573,8 +573,7 @@ fn format_source_to_response(source: &str) -> Result<serde_json::Value, RpcError
         return Err(RpcError::beancount_parse_error(message).with_data(data));
     }
 
-    let config = rustledger_core::format::FormatConfig::default();
-    let formatted = rustledger_parser::format_source(source, &parse_result, &config);
+    let formatted = rustledger_parser::format_source(source);
 
     let result = FormatResult { formatted };
     serde_json::to_value(result).map_err(|e| RpcError::internal_error(e.to_string()))

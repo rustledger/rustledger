@@ -279,7 +279,6 @@ impl ParsedLedger {
     /// non-directive content with file-wide aligned columns.
     #[wasm_bindgen]
     pub fn format(&self) -> Result<JsValue, JsError> {
-        use rustledger_core::FormatConfig;
         use rustledger_parser::format_source;
 
         if !self.parse_errors.is_empty() {
@@ -290,8 +289,7 @@ impl ParsedLedger {
             return to_js(&result);
         }
 
-        let config = FormatConfig::default();
-        let formatted = format_source(&self.source, &self.parse_result, &config);
+        let formatted = format_source(&self.source);
 
         let result = FormatResult {
             formatted: Some(formatted),

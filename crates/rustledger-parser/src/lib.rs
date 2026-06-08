@@ -36,15 +36,13 @@ pub mod bom;
 pub mod cst;
 mod diagnostics;
 mod error;
-mod format;
 pub mod logos_lexer;
 
 pub use cst::{
-    BeancountLanguage, SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken, lossless_kind_tokens,
-    parse_flat, parse_structured, parse_via_cst,
+    BeancountLanguage, SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken, format_node,
+    format_source, lossless_kind_tokens, parse_flat, parse_structured, parse_via_cst,
 };
 pub use error::{ParseError, ParseErrorKind};
-pub use format::format_source;
 pub use rustledger_core::{InternedStr, SYNTHESIZED_FILE_ID, Span, Spanned};
 
 use rustledger_core::Directive;

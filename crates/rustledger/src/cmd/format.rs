@@ -1,12 +1,11 @@
-//! Shared implementation for bean-format and rledger format commands.
+//! `rledger format` — opinionated whole-file formatter.
 //!
-//! This formatter preserves comments, blank lines, and original file structure.
-//! It uses the parser directly (not the Loader) to capture all elements with their
-//! source spans, then outputs them in order, only reformatting directive content
-//! while preserving comments and other non-directive content.
+//! Routes every input file through the canonical CST-backed formatter
+//! ([`rustledger_parser::format_source`]). One canonical form per AST
+//! shape, no knobs: see the canonical-form spec in the formatter's
+//! rustdoc and in the PR-4 decision comment on #1262.
 
 use crate::cmd::completions::ShellType;
-use crate::format::{Alignment, FormatConfig};
 use anyhow::{Context, Result};
 use clap::Parser;
 use rustledger_parser::{format_source, parse};
@@ -15,7 +14,7 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-/// Format beancount files.
+/// Format beancount files in the canonical opinionated form.
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 pub struct Args {
@@ -42,23 +41,6 @@ pub struct Args {
     /// Show diff when using --check
     #[arg(long, requires = "check")]
     pub diff: bool,
-
-    /// Align currencies to this fixed column (bean-format -c). When
-    /// omitted, widths are chosen automatically from the file contents.
-    #[arg(short = 'c', long = "currency-column", value_name = "COL")]
-    pub column: Option<usize>,
-
-    /// Force fixed prefix width (account name column width)
-    #[arg(short = 'w', long)]
-    pub prefix_width: Option<usize>,
-
-    /// Force fixed numbers width
-    #[arg(short = 'W', long)]
-    pub num_width: Option<usize>,
-
-    /// Number of spaces for posting indentation (default: 2)
-    #[arg(long)]
-    pub indent: Option<usize>,
 
     /// Show verbose output
     #[arg(short, long)]
@@ -114,21 +96,7 @@ fn format_file(file: &PathBuf, args: &Args) -> Result<ExitCode> {
         anyhow::bail!("file has parse errors, cannot format");
     }
 
-    // Resolve the alignment mode: an explicit currency column wins (and
-    // ignores -w/-W, matching bean-format); otherwise auto-size widths
-    // from the file, honoring any -w/-W overrides.
-    let config = FormatConfig {
-        alignment: match args.column {
-            Some(col) => Alignment::CurrencyColumn(col),
-            None => Alignment::Auto {
-                prefix_width: args.prefix_width,
-                num_width: args.num_width,
-            },
-        },
-        indent: " ".repeat(args.indent.unwrap_or(2)),
-    };
-
-    let formatted = format_source(&original_content, &parse_result, &config);
+    let formatted = format_source(&original_content);
 
     if args.check {
         if formatted.trim() == original_content.trim() {

@@ -309,9 +309,6 @@ pub struct CommandConfig {
 pub struct FormatCommandConfig {
     /// Create backup before formatting.
     pub backup: Option<bool>,
-
-    /// Indentation level.
-    pub indent: Option<u8>,
 }
 
 /// Information about where a config value came from.
@@ -592,9 +589,6 @@ impl CommandsConfig {
         // Merge format config
         if other.format.backup.is_some() {
             self.format.backup = other.format.backup;
-        }
-        if other.format.indent.is_some() {
-            self.format.indent = other.format.indent;
         }
 
         self
@@ -953,12 +947,12 @@ output.format = "csv"
 verbose = true
 
 [commands.format]
-indent = 4
+backup = true
 "#;
         let config: Config = toml::from_str(content).unwrap();
         assert_eq!(config.commands.query.output.format, Some("csv".to_string()));
         assert_eq!(config.commands.query.verbose, Some(true));
-        assert_eq!(config.commands.format.indent, Some(4));
+        assert_eq!(config.commands.format.backup, Some(true));
     }
 
     #[test]
@@ -1106,7 +1100,6 @@ output.format = "text"
 
 [commands.format]
 backup = true
-indent = 4
 "#;
         let config: Config = toml::from_str(content).unwrap();
 
@@ -1125,7 +1118,6 @@ indent = 4
         );
 
         assert_eq!(config.commands.format.backup, Some(true));
-        assert_eq!(config.commands.format.indent, Some(4));
     }
 
     #[test]

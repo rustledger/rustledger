@@ -26,10 +26,9 @@
 //! and undo granularity across unchanged blocks.
 
 use lsp_types::{DocumentFormattingParams, Position, Range, TextEdit};
-use rustledger_core::FormatConfig;
 use rustledger_parser::{ParseResult, format_source};
 
-use super::utils::{LineIndex, PositionEncoding, document_format_config};
+use super::utils::{LineIndex, PositionEncoding};
 
 /// Handle a `textDocument/formatting` request.
 ///
@@ -38,13 +37,12 @@ use super::utils::{LineIndex, PositionEncoding, document_format_config};
 /// format-on-save still makes mechanical progress (tabs, trailing
 /// whitespace) while the parse is broken.
 pub fn handle_formatting(
-    params: &DocumentFormattingParams,
+    _params: &DocumentFormattingParams,
     source: &str,
     parse_result: &ParseResult,
     encoding: PositionEncoding,
 ) -> Option<Vec<TextEdit>> {
-    let config = document_format_config(Some(&params.options));
-    if let Some(edits) = format_document(source, parse_result, &config, encoding) {
+    if let Some(edits) = format_document(source, parse_result, encoding) {
         return Some(edits);
     }
     // Parse error or already canonical. The "already canonical" case
@@ -59,21 +57,20 @@ pub fn handle_formatting(
 
 /// Compute the canonical document-format edits.
 ///
-/// Returns `Some(edits)` when the parse is clean and `format_source`
-/// would change the source; `None` when there are parse errors or no
-/// canonical change is needed. The caller decides whether to fall back to
-/// surface cleanup (the document-format request does, alignment-named
-/// commands do not).
+/// Returns `Some(edits)` when the parse is clean and the canonical
+/// `format_source` would change the source; `None` when there are parse
+/// errors or no canonical change is needed. The caller decides whether
+/// to fall back to surface cleanup (the document-format request does,
+/// alignment-named commands do not).
 pub fn format_document(
     source: &str,
     parse_result: &ParseResult,
-    config: &FormatConfig,
     encoding: PositionEncoding,
 ) -> Option<Vec<TextEdit>> {
     if !parse_result.errors.is_empty() {
         return None;
     }
-    let formatted = format_source(source, parse_result, config);
+    let formatted = format_source(source);
     if formatted == source {
         return None;
     }
@@ -456,7 +453,7 @@ mod tests {
             .expect("expected edits");
         assert_well_formed(&edits);
         let after = apply(source, &edits);
-        let cli = format_source(source, &result, &FormatConfig::default());
+        let cli = format_source(source);
         assert_eq!(after, cli);
     }
 
@@ -473,13 +470,17 @@ mod tests {
 
     #[test]
     fn blank_only_file_is_canonical() {
+        // Canonical form for a no-directive file is a single newline,
+        // not a run of blanks. handle_formatting returns edits to
+        // collapse the trailing blanks into one '\n'.
         let source = "\n\n\n\n";
         let result = parse(source);
-        assert_eq!(
-            format_source(source, &result, &FormatConfig::default()),
-            source
-        );
-        assert!(handle_formatting(&params(), source, &result, PositionEncoding::Utf16).is_none());
+        assert_eq!(format_source(source), "\n");
+        let edits = handle_formatting(&params(), source, &result, PositionEncoding::Utf16)
+            .expect("blanks-only file should reflow to a single newline");
+        assert_well_formed(&edits);
+        let after = apply(source, &edits);
+        assert_eq!(after, "\n");
     }
 
     #[test]
@@ -490,7 +491,7 @@ mod tests {
             .expect("expected edits");
         assert_well_formed(&edits);
         let after = apply(source, &edits);
-        let cli = format_source(source, &result, &FormatConfig::default());
+        let cli = format_source(source);
         assert_eq!(after, cli);
     }
 
@@ -514,7 +515,7 @@ mod tests {
             .expect("expected edits");
         assert_well_formed(&edits);
         let after = apply(source, &edits);
-        let cli = format_source(source, &result, &FormatConfig::default());
+        let cli = format_source(source);
         assert_eq!(after, cli);
         assert!(edits.len() >= 2, "per-hunk failed, got {edits:#?}");
         for edit in &edits {
@@ -543,15 +544,7 @@ mod tests {
         let source = "2024-01-01 not_a_directive\n";
         let result = parse(source);
         assert!(!result.errors.is_empty());
-        assert!(
-            format_document(
-                source,
-                &result,
-                &FormatConfig::default(),
-                PositionEncoding::Utf16
-            )
-            .is_none()
-        );
+        assert!(format_document(source, &result, PositionEncoding::Utf16).is_none());
     }
 
     // --- surface_cleanup_edits regression tests -----------------------

@@ -57,7 +57,7 @@ mod syntax_kind;
 mod trivia;
 
 pub use convert::parse_via_cst;
-pub use format::{format_node, format_source_v2};
+pub use format::{format_node, format_source};
 pub use lossless_tokens::lossless_kind_tokens;
 pub use parser::{parse_flat, parse_structured};
 pub use syntax_kind::{BeancountLanguage, SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken};

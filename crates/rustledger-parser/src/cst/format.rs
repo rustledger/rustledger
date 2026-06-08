@@ -1,17 +1,18 @@
 //! Opinionated CST-backed formatter (phase 4.1 of #1262).
 //!
-//! [`format_source_v2`] is a pure function `&str → String`: it
+//! [`format_source`] is a pure function `&str → String`: it
 //! reparses the input into a CST and emits text in one canonical
 //! form per AST shape. Two semantically-equivalent inputs produce
 //! byte-identical output; idempotence (`f(f(x)) == f(x)`) follows
 //! trivially.
 //!
-//! This is the gofmt-style replacement for [`crate::format_source`]
-//! (the legacy `(source, ParseResult, FormatConfig) → String`
-//! whole-file orchestrator that re-emitted via the AST-driven
-//! `rustledger_core::format` path). The legacy entry stays in
-//! place for the duration of PR 4.1; later sub-PRs sweep callers
-//! and delete it.
+//! Replaces the pre-#1262 source-level formatter that took
+//! `(source, ParseResult, FormatConfig)` and re-emitted via the
+//! AST-driven `rustledger_core::format` path. Typed-directive
+//! synthesis (`rustledger_core::format::format_directives`) still
+//! lives in `rustledger-core` for callers that build a directive
+//! from scratch (e.g., `rledger add`, importer extract) — that's
+//! a different shape of input and is out of scope here.
 //!
 //! # Canonical form (locked in the PR-decision comment on #1262)
 //!
@@ -35,24 +36,27 @@
 
 use crate::cst::ast::{self, AstNode, AstToken, MetaEntry, SourceFile};
 
-/// Pre-computed alignment data for a whole source file: where
-/// posting amounts and posting-line cost specs anchor.
+/// Pre-computed alignment data for a whole source file.
 ///
-/// One column per file: every posting's amount starts at the same
-/// `amount_col`, padded with spaces from the end of the account
-/// name. Matches the conventional Beancount layout (no per-
-/// transaction local alignment).
-#[derive(Debug, Clone, Copy)]
+/// Bean-format-style two-axis alignment. The **number field** is a
+/// fixed-width slot starting at column `number_col` and `number_width`
+/// chars wide, into which each posting's number / arithmetic
+/// expression is right-justified. Shorter numbers are left-padded
+/// with spaces, so the currency column (right after the field) is
+/// uniform across the whole file even when individual numbers have
+/// different widths or signs.
+///
+/// - `number_col`   = INDENT + max(account width with optional `flag `) + 2
+/// - `number_width` = max rendered width of any posting's number /
+///   arithmetic expression (sign included)
+#[derive(Debug, Clone, Copy, Default)]
 struct Alignment {
-    /// Column index (0-indexed) at which the amount starts.
-    amount_col: usize,
-}
-
-impl Alignment {
-    /// Fallback used when a file contains zero postings — picks
-    /// a reasonable column so a synthetic single-posting input
-    /// emits `  Account  amount` (two spaces of pad).
-    const DEFAULT_AMOUNT_COL: usize = 50;
+    /// 0-indexed column at which the right-justified number field
+    /// starts.
+    number_col: usize,
+    /// Width of the number field; shorter numbers are left-padded
+    /// with spaces so the currency column stays uniform.
+    number_width: usize,
 }
 
 /// Two-space indent for directive bodies (postings, metadata).
@@ -67,7 +71,7 @@ const INDENT: &str = "  ";
 /// trailing newline (even for an empty file, where the output is
 /// just `"\n"`).
 #[must_use]
-pub fn format_source_v2(source: &str) -> String {
+pub fn format_source(source: &str) -> String {
     let (stripped, _had_bom) = crate::bom::strip_leading(source);
     let parsed = SourceFile::parse(stripped);
     format_node(parsed.syntax())
@@ -77,34 +81,62 @@ pub fn format_source_v2(source: &str) -> String {
 ///
 /// The bare-node entry for callers that already parsed the CST
 /// (typically LSP formatting providers). Output rules are the
-/// same as [`format_source_v2`].
+/// same as [`format_source`].
 #[must_use]
 pub fn format_node(node: &crate::SyntaxNode) -> String {
     let mut out = String::new();
     let source_file =
         SourceFile::cast(node.clone()).expect("format_node called on non-SOURCE_FILE node");
     let alignment = compute_alignment(&source_file);
+    // Walk every direct child in source order so file-level comments
+    // (file-leading per phase-2.0 trivia attachment, plus file-
+    // trailing) interleave correctly with directives. Inter-directive
+    // and same-line trailing comments live INSIDE the next/owning
+    // directive and surface from `emit_directive`'s leading-trivia
+    // pass.
     let mut first = true;
-    for directive in source_file.directives() {
-        if !first {
-            out.push('\n');
+    for el in source_file.syntax().children_with_tokens() {
+        match el {
+            rowan::NodeOrToken::Node(n) => {
+                let Some(directive) = ast::Directive::cast(n) else {
+                    continue;
+                };
+                if !first {
+                    out.push('\n');
+                }
+                first = false;
+                emit_directive(&directive, alignment, &mut out);
+            }
+            rowan::NodeOrToken::Token(t) => {
+                if matches!(
+                    t.kind(),
+                    crate::SyntaxKind::COMMENT
+                        | crate::SyntaxKind::PERCENT_COMMENT
+                        | crate::SyntaxKind::SHEBANG
+                        | crate::SyntaxKind::EMACS_DIRECTIVE
+                ) {
+                    if !first {
+                        out.push('\n');
+                    }
+                    first = false;
+                    out.push_str(t.text().trim_end_matches(['\n', '\r']));
+                    out.push('\n');
+                }
+            }
         }
-        first = false;
-        emit_directive(&directive, alignment, &mut out);
     }
-    if out.is_empty() {
-        out.push('\n');
-    } else if !out.ends_with('\n') {
+    if !out.ends_with('\n') {
         out.push('\n');
     }
     out
 }
 
-/// Pre-pass: walk every `TRANSACTION` and every `POSTING` in it,
-/// take `max(indent + posting_lhs_width)` to anchor a single file-
-/// wide amount column. `posting_lhs_width` = `[flag space] account`.
+/// Pre-pass: walk every posting in the file, take max LHS width
+/// (account + optional `flag `) and max number-text width, and
+/// derive the file-wide alignment columns from them.
 fn compute_alignment(sf: &SourceFile) -> Alignment {
     let mut max_lhs: usize = 0;
+    let mut max_num: usize = 0;
     let mut any_posting = false;
     for directive in sf.directives() {
         let ast::Directive::Transaction(t) = directive else {
@@ -117,27 +149,73 @@ fn compute_alignment(sf: &SourceFile) -> Alignment {
             any_posting = true;
             let mut lhs = 0usize;
             if let Some(flag) = p.flag() {
-                lhs += flag.text().len() + 1; // `! ` etc.
+                lhs += flag.text().chars().count() + 1; // `! ` etc.
             }
             if let Some(account) = p.account() {
-                lhs += account.text().len();
+                lhs += account.text().chars().count();
             }
             max_lhs = max_lhs.max(lhs);
+
+            if let Some(amt) = p.amount() {
+                let w = amount_value_width(&amt);
+                max_num = max_num.max(w);
+            }
         }
     }
     if !any_posting {
-        return Alignment {
-            amount_col: Alignment::DEFAULT_AMOUNT_COL,
-        };
+        return Alignment::default();
     }
-    // 2 spaces between the longest account end and the amount,
-    // matching bean-format's default alignment gap.
+    // 2 spaces between the longest account end and the number field,
+    // matching the conventional Beancount layout.
     Alignment {
-        amount_col: INDENT.len() + max_lhs + 2,
+        number_col: INDENT.len() + max_lhs + 2,
+        number_width: max_num,
     }
 }
 
+/// Width of the rendered number / arithmetic-expression text of
+/// an amount, EXCLUDING the trailing currency. Sign (if any) is
+/// included. Used for the file-wide right-justify pre-pass and
+/// for the per-posting padding math in [`emit_posting`].
+fn amount_value_width(amt: &ast::Amount) -> usize {
+    amount_value_text(amt).chars().count()
+}
+
+/// Render an amount's value portion (number or arithmetic
+/// expression) as a string, EXCLUDING the trailing currency.
+/// Mirrors the value half of [`format_amount`].
+fn amount_value_text(amt: &ast::Amount) -> String {
+    let mut buf = String::new();
+    if amt.is_arithmetic() {
+        emit_amount_subnode_expression(amt.syntax(), &mut buf);
+        return buf;
+    }
+    if let Some(sign) = amt.sign()
+        && sign.is_minus()
+    {
+        buf.push('-');
+    }
+    if let Some(n) = amt.number() {
+        buf.push_str(&canonical_number(n.text()));
+    }
+    buf
+}
+
 fn emit_directive(d: &ast::Directive, align: Alignment, out: &mut String) {
+    // Leading inter-directive trivia: COMMENT tokens that sit
+    // BEFORE the directive's first content token. Per phase-2.0
+    // trivia attachment, these live inside the directive's syntax
+    // node — emit them as their own lines BEFORE the canonical
+    // content.
+    emit_leading_comments(d.syntax(), out);
+
+    // Capture an optional same-line trailing comment so we can
+    // splice it back in immediately before the directive's
+    // terminating NEWLINE — see the comment-aware emit loop at
+    // the bottom of this function.
+    let trailing = collect_trailing_comment(d.syntax());
+
+    let len_before = out.len();
     match d {
         ast::Directive::Open(d) => emit_open(d, out),
         ast::Directive::Close(d) => emit_close(d, out),
@@ -159,6 +237,95 @@ fn emit_directive(d: &ast::Directive, align: Alignment, out: &mut String) {
         ast::Directive::Popmeta(d) => emit_popmeta(d, out),
         ast::Directive::Transaction(d) => emit_transaction(d, align, out),
     }
+    // Splice the same-line trailing comment in: find the FIRST '\n'
+    // after `len_before` (= end of the directive's header line in
+    // the emitted bytes) and insert `" ; comment"` before it. For
+    // single-line directives the first '\n' is also the only one
+    // and this lands the comment on the directive line. For multi-
+    // line transactions it lands the comment on the header line
+    // (where the source had it), not after the body.
+    if let Some(c) = trailing
+        && let Some(newline_rel) = out[len_before..].find('\n')
+    {
+        let insert_at = len_before + newline_rel;
+        let mut splice = String::with_capacity(c.len() + 1);
+        splice.push(' ');
+        splice.push_str(&c);
+        out.insert_str(insert_at, &splice);
+    }
+}
+
+/// Walk the directive's direct-child tokens until the first
+/// non-trivia token, emitting each `COMMENT` (and `PERCENT_COMMENT`)
+/// on its own line. Whitespace and newlines in the leading region
+/// are ignored — the canonical form controls inter-directive
+/// blank-line spacing separately.
+fn emit_leading_comments(node: &crate::SyntaxNode, out: &mut String) {
+    for el in node.children_with_tokens() {
+        let rowan::NodeOrToken::Token(t) = el else {
+            break;
+        };
+        match t.kind() {
+            crate::SyntaxKind::COMMENT | crate::SyntaxKind::PERCENT_COMMENT => {
+                out.push_str(t.text().trim_end_matches(['\n', '\r']));
+                out.push('\n');
+            }
+            crate::SyntaxKind::WHITESPACE | crate::SyntaxKind::NEWLINE => {}
+            _ => break,
+        }
+    }
+}
+
+/// Return the directive's same-line trailing comment (if any) —
+/// the COMMENT token that appears between the LAST non-trivia
+/// content token and the directive-terminating NEWLINE on the
+/// header line. Returns the verbatim comment text (no trailing
+/// newline).
+fn collect_trailing_comment(node: &crate::SyntaxNode) -> Option<String> {
+    // Find the directive-header terminating NEWLINE: the FIRST
+    // direct-child NEWLINE that follows at least one non-trivia
+    // content token. (For single-line directives there's only one
+    // NEWLINE; for transactions the header line is the first
+    // NEWLINE, after which postings/metadata follow.)
+    let mut header_nl_idx: Option<usize> = None;
+    let mut saw_content = false;
+    let tokens: Vec<crate::SyntaxToken> = node
+        .children_with_tokens()
+        .filter_map(rowan::NodeOrToken::into_token)
+        .collect();
+    for (i, t) in tokens.iter().enumerate() {
+        let k = t.kind();
+        if k == crate::SyntaxKind::NEWLINE && saw_content {
+            header_nl_idx = Some(i);
+            break;
+        }
+        if !matches!(
+            k,
+            crate::SyntaxKind::WHITESPACE
+                | crate::SyntaxKind::NEWLINE
+                | crate::SyntaxKind::COMMENT
+                | crate::SyntaxKind::PERCENT_COMMENT
+        ) {
+            saw_content = true;
+        }
+    }
+    let nl_idx = header_nl_idx?;
+    // Scan backwards from the header NEWLINE: the trailing comment
+    // is the last COMMENT before the NEWLINE separated only by
+    // WHITESPACE.
+    for i in (0..nl_idx).rev() {
+        let k = tokens[i].kind();
+        if matches!(
+            k,
+            crate::SyntaxKind::COMMENT | crate::SyntaxKind::PERCENT_COMMENT
+        ) {
+            return Some(tokens[i].text().to_string());
+        }
+        if k != crate::SyntaxKind::WHITESPACE {
+            return None;
+        }
+    }
+    None
 }
 
 // ---- Single-line directives ------------------------------------
@@ -395,7 +562,7 @@ fn emit_custom(d: &ast::CustomDirective, out: &mut String) {
                 out.push(' ');
                 out.push_str(&canonical_number(t.text()));
                 if matches!(
-                    tokens.get(i + 1).map(|t| t.kind()),
+                    tokens.get(i + 1).map(rowan::SyntaxToken::kind),
                     Some(crate::SyntaxKind::CURRENCY)
                 ) {
                     out.push(' ');
@@ -591,48 +758,68 @@ fn transaction_flag_string(d: &ast::Transaction) -> String {
 }
 
 fn emit_posting(p: &ast::Posting, align: Alignment, out: &mut String) {
+    // Posting-trailing comment (same-line, before the posting-line
+    // NEWLINE) — capture upfront so we can splice it back in just
+    // before that NEWLINE, preserving the user's attachment intent.
+    let trailing = collect_trailing_comment(p.syntax());
+    let posting_start = out.len();
+
     out.push_str(INDENT);
     let mut col = INDENT.len();
     if let Some(flag) = p.flag() {
         out.push_str(flag.text());
         out.push(' ');
-        col += flag.text().len() + 1;
+        col += flag.text().chars().count() + 1;
     }
     let account_text = p
         .account()
         .map(|a| a.text().to_string())
         .unwrap_or_default();
     out.push_str(&account_text);
-    col += account_text.len();
+    col += account_text.chars().count();
 
-    let amount_str = p
-        .amount()
-        .as_ref()
-        .map(format_amount)
-        .filter(|s| !s.is_empty());
-    if let Some(amt) = amount_str {
-        // Pad with spaces to reach align.amount_col; fall back
-        // to 2 spaces if we've already passed the column (the
-        // posting's LHS exceeds the file's max).
-        let padding = if col < align.amount_col {
-            align.amount_col - col
-        } else {
-            2
-        };
-        for _ in 0..padding {
-            out.push(' ');
-        }
-        out.push_str(&amt);
-        if let Some(cs) = p.cost_spec() {
-            out.push(' ');
-            out.push_str(&format_cost_spec(&cs));
-        }
-        if let Some(pa) = p.price_annotation() {
-            out.push(' ');
-            out.push_str(&format_price_annotation(&pa));
+    if let Some(amt) = p.amount() {
+        let value = amount_value_text(&amt);
+        if !value.is_empty() {
+            // Two stages of padding:
+            //   1) Account end → start of number field (`number_col`).
+            //      Fall back to 2 spaces when the LHS already exceeds
+            //      the file-wide max (over-long account name).
+            //   2) Inside the number field, left-pad to right-justify
+            //      to `number_width`. Effect: the currency column
+            //      lands at a single uniform position file-wide even
+            //      when numbers have different widths or signs.
+            let field_pad = align.number_col.saturating_sub(col).max(2);
+            let justify_pad = align.number_width.saturating_sub(value.chars().count());
+            for _ in 0..(field_pad + justify_pad) {
+                out.push(' ');
+            }
+            out.push_str(&value);
+            if let Some(c) = amt.currency() {
+                out.push(' ');
+                out.push_str(c.text());
+            }
+            if let Some(cs) = p.cost_spec() {
+                out.push(' ');
+                out.push_str(&format_cost_spec(&cs));
+            }
+            if let Some(pa) = p.price_annotation() {
+                out.push(' ');
+                out.push_str(&format_price_annotation(&pa));
+            }
         }
     }
     out.push('\n');
+    // Splice the trailing comment in BEFORE the posting-line
+    // NEWLINE (the first '\n' in the emitted posting region).
+    if let Some(c) = trailing
+        && let Some(rel) = out[posting_start..].find('\n')
+    {
+        let mut splice = String::with_capacity(c.len() + 1);
+        splice.push(' ');
+        splice.push_str(&c);
+        out.insert_str(posting_start + rel, &splice);
+    }
     // Posting-attached metadata: indent 4 (deeper than posting's 2).
     for m in p.meta_entries() {
         out.push_str("    ");
@@ -733,7 +920,7 @@ fn format_price_annotation(pa: &ast::PriceAnnotation) -> String {
 /// True for tokens that don't contribute content to the canonical
 /// form: whitespace, newlines, every comment kind, and the
 /// leading-file `BOM` token.
-fn is_trivia_kind(kind: crate::SyntaxKind) -> bool {
+const fn is_trivia_kind(kind: crate::SyntaxKind) -> bool {
     matches!(
         kind,
         crate::SyntaxKind::WHITESPACE
@@ -906,20 +1093,20 @@ mod tests {
 
     #[test]
     fn empty_input_yields_single_newline() {
-        assert_eq!(format_source_v2(""), "\n");
+        assert_eq!(format_source(""), "\n");
     }
 
     #[test]
     fn open_directive_canonical() {
         let src = "2024-01-15   open    Assets:Cash\n";
-        assert_eq!(format_source_v2(src), "2024-01-15 open Assets:Cash\n");
+        assert_eq!(format_source(src), "2024-01-15 open Assets:Cash\n");
     }
 
     #[test]
     fn open_with_currencies_and_booking_canonical() {
         let src = "2024-01-15 open Assets:Brokerage USD,EUR \"STRICT\"\n";
         assert_eq!(
-            format_source_v2(src),
+            format_source(src),
             "2024-01-15 open Assets:Brokerage USD EUR \"STRICT\"\n"
         );
     }
@@ -927,20 +1114,20 @@ mod tests {
     #[test]
     fn close_directive_canonical() {
         let src = "2024-12-31 close Assets:Cash\n";
-        assert_eq!(format_source_v2(src), "2024-12-31 close Assets:Cash\n");
+        assert_eq!(format_source(src), "2024-12-31 close Assets:Cash\n");
     }
 
     #[test]
     fn commodity_directive_canonical() {
         let src = "2024-01-01 commodity HOOL\n";
-        assert_eq!(format_source_v2(src), "2024-01-01 commodity HOOL\n");
+        assert_eq!(format_source(src), "2024-01-01 commodity HOOL\n");
     }
 
     #[test]
     fn blank_line_between_directives() {
         let src = "2024-01-01 open Assets:A\n2024-01-02 open Assets:B\n";
         assert_eq!(
-            format_source_v2(src),
+            format_source(src),
             "2024-01-01 open Assets:A\n\n2024-01-02 open Assets:B\n"
         );
     }
@@ -948,7 +1135,7 @@ mod tests {
     #[test]
     fn trailing_newline_always_present() {
         let src = "2024-01-01 open Assets:A";
-        let formatted = format_source_v2(src);
+        let formatted = format_source(src);
         assert!(formatted.ends_with('\n'));
         assert!(!formatted.ends_with("\n\n"));
     }
@@ -956,8 +1143,8 @@ mod tests {
     #[test]
     fn idempotent_on_canonical_input() {
         let src = "2024-01-01 open Assets:A\n\n2024-01-02 close Assets:A\n";
-        let once = format_source_v2(src);
-        let twice = format_source_v2(&once);
+        let once = format_source(src);
+        let twice = format_source(&once);
         assert_eq!(once, twice);
     }
 
@@ -965,7 +1152,7 @@ mod tests {
     fn note_canonical() {
         let src = "2024-01-15   note   Assets:Cash   \"a note\"\n";
         assert_eq!(
-            format_source_v2(src),
+            format_source(src),
             "2024-01-15 note Assets:Cash \"a note\"\n"
         );
     }
@@ -974,7 +1161,7 @@ mod tests {
     fn event_canonical() {
         let src = "2024-01-15  event  \"location\"   \"NYC\"\n";
         assert_eq!(
-            format_source_v2(src),
+            format_source(src),
             "2024-01-15 event \"location\" \"NYC\"\n"
         );
     }
@@ -983,7 +1170,7 @@ mod tests {
     fn query_canonical() {
         let src = "2024-01-15 query \"q1\" \"SELECT account\"\n";
         assert_eq!(
-            format_source_v2(src),
+            format_source(src),
             "2024-01-15 query \"q1\" \"SELECT account\"\n"
         );
     }
@@ -992,7 +1179,7 @@ mod tests {
     fn pad_canonical() {
         let src = "2024-01-15  pad   Assets:A   Equity:Opening\n";
         assert_eq!(
-            format_source_v2(src),
+            format_source(src),
             "2024-01-15 pad Assets:A Equity:Opening\n"
         );
     }
@@ -1001,7 +1188,7 @@ mod tests {
     fn document_with_tags_and_links_canonical() {
         let src = "2024-06-01 document Assets:Bank \"stmt.pdf\" #q1 ^scan42 #urgent\n";
         assert_eq!(
-            format_source_v2(src),
+            format_source(src),
             "2024-06-01 document Assets:Bank \"stmt.pdf\" #q1 ^scan42 #urgent\n"
         );
     }
@@ -1009,20 +1196,20 @@ mod tests {
     #[test]
     fn price_canonical_strips_thousands_separators() {
         let src = "2024-01-15 price USD  1,234.56 EUR\n";
-        assert_eq!(format_source_v2(src), "2024-01-15 price USD 1234.56 EUR\n");
+        assert_eq!(format_source(src), "2024-01-15 price USD 1234.56 EUR\n");
     }
 
     #[test]
     fn price_arithmetic_canonicalizes_spacing() {
         let src = "2024-01-15 price USD 1/2 EUR\n";
-        assert_eq!(format_source_v2(src), "2024-01-15 price USD 1 / 2 EUR\n");
+        assert_eq!(format_source(src), "2024-01-15 price USD 1 / 2 EUR\n");
     }
 
     #[test]
     fn balance_canonical() {
         let src = "2024-01-15  balance  Assets:Cash   100.00  USD\n";
         assert_eq!(
-            format_source_v2(src),
+            format_source(src),
             "2024-01-15 balance Assets:Cash 100.00 USD\n"
         );
     }
@@ -1031,7 +1218,7 @@ mod tests {
     fn balance_with_tolerance_canonical() {
         let src = "2024-01-15 balance Assets:Cash 100.00 USD ~ 0.01 USD\n";
         assert_eq!(
-            format_source_v2(src),
+            format_source(src),
             "2024-01-15 balance Assets:Cash 100.00 USD ~ 0.01 USD\n"
         );
     }
@@ -1040,7 +1227,7 @@ mod tests {
     fn balance_arithmetic_canonical() {
         let src = "2024-01-15 balance Assets:Cash  0.25 + 0.75  USD\n";
         assert_eq!(
-            format_source_v2(src),
+            format_source(src),
             "2024-01-15 balance Assets:Cash 0.25 + 0.75 USD\n"
         );
     }
@@ -1049,7 +1236,7 @@ mod tests {
     fn custom_canonical() {
         let src = "2024-01-01 custom \"budget\" Expenses:Food 500.00 USD\n";
         assert_eq!(
-            format_source_v2(src),
+            format_source(src),
             "2024-01-01 custom \"budget\" Expenses:Food 500.00 USD\n"
         );
     }
@@ -1057,20 +1244,20 @@ mod tests {
     #[test]
     fn option_canonical() {
         let src = "option   \"title\"   \"My Ledger\"\n";
-        assert_eq!(format_source_v2(src), "option \"title\" \"My Ledger\"\n");
+        assert_eq!(format_source(src), "option \"title\" \"My Ledger\"\n");
     }
 
     #[test]
     fn include_canonical() {
         let src = "include  \"other.beancount\"\n";
-        assert_eq!(format_source_v2(src), "include \"other.beancount\"\n");
+        assert_eq!(format_source(src), "include \"other.beancount\"\n");
     }
 
     #[test]
     fn plugin_canonical_with_config() {
         let src = "plugin  \"beancount.plugins.unrealized\"  \"Unrealized\"\n";
         assert_eq!(
-            format_source_v2(src),
+            format_source(src),
             "plugin \"beancount.plugins.unrealized\" \"Unrealized\"\n"
         );
     }
@@ -1078,20 +1265,20 @@ mod tests {
     #[test]
     fn plugin_canonical_without_config() {
         let src = "plugin   \"my.plugin\"\n";
-        assert_eq!(format_source_v2(src), "plugin \"my.plugin\"\n");
+        assert_eq!(format_source(src), "plugin \"my.plugin\"\n");
     }
 
     #[test]
     fn pushtag_poptag_canonical() {
         let src = "pushtag  #active\npoptag  #active\n";
-        assert_eq!(format_source_v2(src), "pushtag #active\n\npoptag #active\n");
+        assert_eq!(format_source(src), "pushtag #active\n\npoptag #active\n");
     }
 
     #[test]
     fn pushmeta_popmeta_canonical() {
         let src = "pushmeta location: \"NYC\"\npopmeta location:\n";
         assert_eq!(
-            format_source_v2(src),
+            format_source(src),
             "pushmeta location: \"NYC\"\n\npopmeta location:\n"
         );
     }
@@ -1105,22 +1292,25 @@ mod tests {
   Assets:Cash       -5.00 USD
   Expenses:Coffee    5.00 USD
 ";
-        // max account width = 15 (Expenses:Coffee); amount_col = INDENT.len() + 15 + 2 = 19.
-        // 2 + Assets:Cash (11) = 13 → pad 6 → amount at col 19.
-        // 2 + Expenses:Coffee (15) = 17 → pad 2 → amount at col 19.
+        // max LHS = 15 (Expenses:Coffee); number_col = 17.
+        // max number width = 6 (`-5.00`); number_width = 6.
+        // Posting 1: account end at col 13, pad 4 → `-5.00` (width 6,
+        //   no left-pad) → currency at col 24.
+        // Posting 2: account end at col 17, pad 2 → ` 5.00` (width
+        //   5 left-padded by 1) → currency at col 24.
         let expected = "\
 2024-01-15 * \"Coffee\"
   Assets:Cash      -5.00 USD
-  Expenses:Coffee  5.00 USD
+  Expenses:Coffee   5.00 USD
 ";
-        assert_eq!(format_source_v2(src), expected);
+        assert_eq!(format_source(src), expected);
     }
 
     #[test]
     fn transaction_payee_and_narration() {
         let src =
             "2024-01-15 * \"Starbucks\" \"Coffee\"\n  Assets:Cash -5.00 USD\n  Expenses:Coffee\n";
-        let out = format_source_v2(src);
+        let out = format_source(src);
         assert!(
             out.contains("2024-01-15 * \"Starbucks\" \"Coffee\"\n"),
             "got: {out}"
@@ -1130,7 +1320,7 @@ mod tests {
     #[test]
     fn transaction_pending_flag() {
         let src = "2024-01-15 ! \"Pending\"\n  Assets:Cash -5.00 USD\n  Expenses:Misc\n";
-        let out = format_source_v2(src);
+        let out = format_source(src);
         assert!(out.starts_with("2024-01-15 ! \"Pending\"\n"), "got: {out}");
     }
 
@@ -1138,7 +1328,7 @@ mod tests {
     fn transaction_txn_keyword_normalized_to_star() {
         // The `txn` keyword form is canonical-form equivalent to `*`.
         let src = "2024-01-15 txn \"x\"\n  Assets:Cash -1.00 USD\n  Expenses:Misc\n";
-        let out = format_source_v2(src);
+        let out = format_source(src);
         assert!(out.starts_with("2024-01-15 * \"x\"\n"), "got: {out}");
     }
 
@@ -1146,7 +1336,7 @@ mod tests {
     fn transaction_header_tags_and_links() {
         let src =
             "2024-01-15 * \"x\" #tag1 ^link1 #tag2\n  Assets:Cash -1.00 USD\n  Expenses:Misc\n";
-        let out = format_source_v2(src);
+        let out = format_source(src);
         assert!(
             out.starts_with("2024-01-15 * \"x\" #tag1 ^link1 #tag2\n"),
             "got: {out}"
@@ -1156,7 +1346,7 @@ mod tests {
     #[test]
     fn transaction_auto_balance_posting_no_amount() {
         let src = "2024-01-15 * \"x\"\n  Assets:Cash  -5.00 USD\n  Expenses:Misc\n";
-        let out = format_source_v2(src);
+        let out = format_source(src);
         // The auto-balance posting has no amount; should just be
         // the indented account name.
         assert!(out.contains("\n  Expenses:Misc\n"), "got: {out}");
@@ -1165,42 +1355,42 @@ mod tests {
     #[test]
     fn transaction_posting_with_cost_spec() {
         let src = "2024-01-15 * \"buy\"\n  Assets:Brokerage  10 HOOL {500.00 USD}\n  Assets:Cash  -5000.00 USD\n";
-        let out = format_source_v2(src);
+        let out = format_source(src);
         assert!(out.contains("10 HOOL {500.00 USD}"), "got: {out}");
     }
 
     #[test]
     fn transaction_posting_with_total_cost_spec() {
         let src = "2024-01-15 * \"buy\"\n  Assets:Brokerage  10 HOOL {{5000.00 USD}}\n  Assets:Cash  -5000.00 USD\n";
-        let out = format_source_v2(src);
+        let out = format_source(src);
         assert!(out.contains("10 HOOL {{5000.00 USD}}"), "got: {out}");
     }
 
     #[test]
     fn transaction_posting_with_per_unit_price() {
         let src = "2024-01-15 * \"buy\"\n  Assets:Brokerage  10 HOOL @ 500.00 USD\n  Assets:Cash  -5000.00 USD\n";
-        let out = format_source_v2(src);
+        let out = format_source(src);
         assert!(out.contains("10 HOOL @ 500.00 USD"), "got: {out}");
     }
 
     #[test]
     fn transaction_posting_with_total_price() {
         let src = "2024-01-15 * \"buy\"\n  Assets:Brokerage  10 HOOL @@ 5000.00 USD\n  Assets:Cash  -5000.00 USD\n";
-        let out = format_source_v2(src);
+        let out = format_source(src);
         assert!(out.contains("10 HOOL @@ 5000.00 USD"), "got: {out}");
     }
 
     #[test]
     fn transaction_posting_with_flag() {
         let src = "2024-01-15 * \"x\"\n  ! Assets:Cash  -5.00 USD\n  Expenses:Misc  5.00 USD\n";
-        let out = format_source_v2(src);
+        let out = format_source(src);
         assert!(out.contains("\n  ! Assets:Cash"), "got: {out}");
     }
 
     #[test]
     fn transaction_negative_amount() {
         let src = "2024-01-15 * \"x\"\n  Assets:Cash -5.00 USD\n  Expenses:Misc 5.00 USD\n";
-        let out = format_source_v2(src);
+        let out = format_source(src);
         assert!(out.contains("-5.00 USD"), "got: {out}");
         assert!(out.contains(" 5.00 USD"), "got: {out}");
     }
@@ -1208,7 +1398,7 @@ mod tests {
     #[test]
     fn transaction_strips_thousands_separators_in_postings() {
         let src = "2024-01-15 * \"x\"\n  Assets:Cash -1,000.00 USD\n  Expenses:Misc 1,000.00 USD\n";
-        let out = format_source_v2(src);
+        let out = format_source(src);
         assert!(out.contains("-1000.00 USD"), "got: {out}");
         assert!(!out.contains("1,000"), "got: {out}");
     }
@@ -1217,7 +1407,7 @@ mod tests {
     fn transaction_arithmetic_amount() {
         let src =
             "2024-01-15 * \"x\"\n  Assets:Cash  -(1.00 + 2.00) USD\n  Expenses:Misc 3.00 USD\n";
-        let out = format_source_v2(src);
+        let out = format_source(src);
         // The arithmetic expression should render with single
         // spaces around binary ops and tight parens.
         assert!(
@@ -1233,8 +1423,8 @@ mod tests {
   Assets:Cash       -5.00 USD
   Expenses:Coffee    5.00 USD
 ";
-        let once = format_source_v2(src);
-        let twice = format_source_v2(&once);
+        let once = format_source(src);
+        let twice = format_source(&once);
         assert_eq!(once, twice);
     }
 
@@ -1249,22 +1439,24 @@ mod tests {
   Liabilities:CreditCard:Visa  -100.00 USD
   Expenses:Big  100.00 USD
 ";
-        let out = format_source_v2(src);
-        // Longest LHS = `Liabilities:CreditCard:Visa` (27) →
-        // amount_col = 2 + 27 + 2 = 31. Every amount lines up.
-        let amount_cols: Vec<usize> = out
+        let out = format_source(src);
+        // Cross-posting invariant: the currency column (USD here)
+        // lands at the same column on every posting line, even when
+        // individual numbers differ in width or sign. The number
+        // field is right-justified so the currency column is uniform.
+        let usd_cols: Vec<usize> = out
             .lines()
-            .filter(|l| l.starts_with("  ") && (l.contains(" USD") || l.contains(" EUR")))
-            .filter_map(|l| l.find(|c: char| c == '-' || c.is_ascii_digit()))
+            .filter(|l| l.starts_with("  ") && l.contains(" USD"))
+            .filter_map(|l| l.find("USD"))
             .collect();
         assert!(
-            amount_cols.len() >= 4,
-            "expected ≥4 posting lines, got {amount_cols:?} in {out}"
+            usd_cols.len() >= 4,
+            "expected ≥4 posting lines, got {usd_cols:?} in {out}"
         );
-        let first = amount_cols[0];
+        let first = usd_cols[0];
         assert!(
-            amount_cols.iter().all(|&c| c == first),
-            "expected all postings aligned at column {first}, got {amount_cols:?} in:\n{out}"
+            usd_cols.iter().all(|&c| c == first),
+            "expected USD column uniform at {first}, got {usd_cols:?} in:\n{out}"
         );
     }
 
@@ -1272,7 +1464,7 @@ mod tests {
     fn transaction_posting_metadata_indented_four() {
         let src =
             "2024-01-15 * \"x\"\n  Assets:Cash -5.00 USD\n    foo: \"bar\"\n  Expenses:Misc\n";
-        let out = format_source_v2(src);
+        let out = format_source(src);
         assert!(out.contains("\n    foo: \"bar\"\n"), "got: {out}");
     }
 }

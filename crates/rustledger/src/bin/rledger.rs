@@ -326,12 +326,6 @@ fn main() -> ExitCode {
             {
                 args.files.push(file);
             }
-            // Apply command-specific indent default from config
-            if args.indent.is_none()
-                && let Some(indent) = config.commands.format.indent
-            {
-                args.indent = Some(indent as usize);
-            }
             match rustledger::cmd::format::run(&args) {
                 Ok(code) => code,
                 Err(e) => {

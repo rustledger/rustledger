@@ -13,7 +13,7 @@ use rustledger_parser::ParseResult;
 use std::collections::HashMap;
 
 use super::formatting::format_document;
-use super::utils::{LineIndex, PositionEncoding, document_format_config};
+use super::utils::{LineIndex, PositionEncoding};
 
 /// Argument key clients can pass to suppress informational no-op
 /// notifications (the "already sorted" / "no transactions to sort"
@@ -270,15 +270,7 @@ fn handle_align_amounts(
     uri: &Uri,
     encoding: PositionEncoding,
 ) -> ExecuteCommandResponse {
-    // `workspace/executeCommand` does NOT carry the client's
-    // formatting preferences — those only travel with
-    // `textDocument/formatting`. Express that explicitly by passing
-    // `None` to `document_format_config`: when that helper grows
-    // real options handling, the executeCommand path will fall back
-    // to server defaults rather than silently mirroring an absent
-    // client value.
-    let config = document_format_config(None);
-    let Some(edits) = format_document(source, parse_result, &config, encoding) else {
+    let Some(edits) = format_document(source, parse_result, encoding) else {
         // Parse errors: surface via window/showMessage so the user
         // actually sees the failure. executeCommand responses are
         // discarded by VS Code etc.; showMessage is the spec-mandated

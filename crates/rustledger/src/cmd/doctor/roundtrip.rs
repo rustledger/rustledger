@@ -1,4 +1,3 @@
-use crate::format::FormatConfig;
 use anyhow::{Context, Result};
 use rustledger_loader::{LoadError, Loader};
 use rustledger_parser::{format_source, parse};
@@ -105,7 +104,6 @@ pub(super) fn cmd_roundtrip<W: Write>(file: &PathBuf, writer: &mut W) -> Result<
         .and_then(|c| c.parent().map(Path::to_path_buf));
     let entry_parent = entry_parent.as_deref();
 
-    let config = FormatConfig::default();
     let mut all_stable = true;
     let mut total_directives = 0usize;
 
@@ -132,7 +130,7 @@ pub(super) fn cmd_roundtrip<W: Write>(file: &PathBuf, writer: &mut W) -> Result<
             continue;
         }
 
-        let formatted = format_source(source, &parse_result, &config);
+        let formatted = format_source(source);
         let stable = formatted == source;
 
         let reparsed = parse(&formatted);
@@ -230,20 +228,14 @@ mod tests {
         assert!(report.contains("SUCCESS"), "{report}");
     }
 
-    /// BOM at the start of the file must round-trip byte-stable.
-    /// `rustledger_parser::parse` strips the BOM via
-    /// `crate::bom::strip_leading`, records the outcome in
-    /// `has_leading_bom`, and `format_source` re-prepends it via
-    /// `crate::bom::restore_leading`. The doctor command exercises the
-    /// full parse → format pipeline, so a regression in EITHER end of
-    /// the strip/restore pair would surface here as `[reflow]` or
-    /// `[MISMATCH]` rather than `[stable]`. Asserting `[stable]`
-    /// (rather than just "no parse error") pins the architectural
-    /// invariant at the CLI surface — the parser-level
-    /// `format_source_two_pass_idempotent` test covers the unit-level
-    /// invariant, this one covers the doctor's end-to-end path.
+    /// BOM at the start of the file parses transparently but does NOT
+    /// round-trip byte-stable: the canonical form drops the leading
+    /// BOM (see PR-4 decision comment on #1262 and
+    /// `rustledger_parser::cst::format`'s rustdoc). The doctor reports
+    /// `[reflow]` — same directive structure, different bytes — and
+    /// the user can run `rledger format -i` to strip the BOM.
     #[test]
-    fn bom_prefixed_file_round_trips_stable() {
+    fn bom_prefixed_file_reflows_on_format() {
         let dir = TempDir::new().unwrap();
         let with_bom = "\u{FEFF}2024-01-01 open Assets:Cash\n";
         let p = write_file(dir.path(), "ledger.beancount", with_bom);
@@ -255,8 +247,8 @@ mod tests {
             "BOM should not produce a parse error: {report}"
         );
         assert!(
-            report.contains("[stable]"),
-            "BOM-prefixed file should round-trip byte-stable; got: {report}"
+            report.contains("[reflow]"),
+            "BOM-prefixed file should reflow (canonical form drops the BOM); got: {report}"
         );
     }
 
@@ -293,10 +285,15 @@ mod tests {
     #[test]
     fn glob_no_match_continues_with_advisory() {
         let dir = TempDir::new().unwrap();
+        // Two-directive file with the canonical inter-directive blank
+        // so the per-file roundtrip is stable. (An earlier version of
+        // this test packed two directives back-to-back; the
+        // opinionated formatter would now reflow that into the
+        // canonical blank-separated form.)
         let main = write_file(
             dir.path(),
             "main.beancount",
-            "include \"nope/*.beancount\"\n2024-01-01 open Assets:Cash\n",
+            "include \"nope/*.beancount\"\n\n2024-01-01 open Assets:Cash\n",
         );
         let mut out = Vec::new();
         cmd_roundtrip(&main, &mut out).expect("GlobNoMatch should not abort");

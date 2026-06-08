@@ -744,6 +744,25 @@ pub fn run(args: &Args, file: &Path) -> Result<()> {
         lines.extend(format_directive_lines(directive, &fmt_config));
     }
     let raw = render_lines(&lines, &fmt_config.alignment);
+    // Parse-error guard: format_source is parse-then-format and
+    // would silently emit a recoverable subset if the legacy emitter
+    // produced text the new parser rejects. Surface a hard error
+    // instead so the caller knows the synthesized output is bad.
+    let parsed = rustledger_parser::parse(&raw);
+    if !parsed.errors.is_empty() {
+        let preview: Vec<String> = parsed
+            .errors
+            .iter()
+            .take(3)
+            .map(ToString::to_string)
+            .collect();
+        anyhow::bail!(
+            "canonical formatter failed to re-parse extracted directives \
+             ({} error(s)): {}",
+            parsed.errors.len(),
+            preview.join("; ")
+        );
+    }
     let formatted = rustledger_parser::format_source(&raw);
 
     if let Some(ref output_path) = args.output {

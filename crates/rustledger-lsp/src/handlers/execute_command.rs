@@ -324,11 +324,17 @@ fn handle_align_amounts(
 ///
 /// A posting line starts with at least one space of indent followed
 /// (optionally) by a single-character posting flag and a space, then
-/// an account name (Beancount accounts conventionally begin with a
-/// capital ASCII letter). Top-level directives, metadata sub-lines
-/// (`  key: value` — lowercase key), comments, and blank lines all
-/// fail this test, so a canonical-form edit that only touches those
-/// is excluded from the `alignAmounts` WorkspaceEdit.
+/// an account name. Top-level directives, metadata sub-lines (lowercase
+/// key followed by `:`), comments, and blank lines all fail this test,
+/// so a canonical-form edit that only touches those is excluded from
+/// the `alignAmounts` WorkspaceEdit.
+///
+/// **Flag set** matches the parser's posting-flag class (lexer
+/// `[!*#?&PSTCURM]`), not just the ASCII `!*#` subset.
+///
+/// **Account first-char** is checked with `char::is_uppercase` (Unicode-
+/// aware), so accounts in non-Latin scripts (Cyrillic `Активы`, Greek
+/// `Καθαρό`, etc.) are recognized just like ASCII `Assets`.
 fn edit_touches_posting_line(source: &str, edit: &TextEdit) -> bool {
     let line_idx = edit.range.start.line as usize;
     let Some(line) = source.lines().nth(line_idx) else {
@@ -343,12 +349,22 @@ fn edit_touches_posting_line(source: &str, edit: &TextEdit) -> bool {
         Some(c) => c,
         None => return false,
     };
-    let account_first = if matches!(first, '!' | '*' | '#') && chars.next() == Some(' ') {
+    let account_first = if is_posting_flag_char(first) && chars.next() == Some(' ') {
         chars.next().unwrap_or(' ')
     } else {
         first
     };
-    account_first.is_ascii_uppercase()
+    account_first.is_uppercase()
+}
+
+/// Posting-flag character set per the lexer's posting-flag class
+/// (`[!*#?&PSTCURM]`). Keep this in sync with
+/// `rustledger_parser::logos_lexer`'s flag rule.
+const fn is_posting_flag_char(c: char) -> bool {
+    matches!(
+        c,
+        '!' | '*' | '#' | '?' | '&' | 'P' | 'S' | 'T' | 'C' | 'U' | 'R' | 'M'
+    )
 }
 
 /// Show account balance.

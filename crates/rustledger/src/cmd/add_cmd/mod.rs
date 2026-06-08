@@ -186,6 +186,40 @@ impl Highlighter for AddHelper {
 
 impl Validator for AddHelper {}
 
+/// Render a single Directive in canonical form via the two-pass
+/// synthesize-then-canonicalize pipeline.
+///
+/// Step 1 emits a parser-clean source string via the typed-directive
+/// emitter in `rustledger_core::format`. Step 2 reparses that text
+/// and routes it through `rustledger_parser::format_source` so the
+/// final bytes match what `rledger format` would write on the same
+/// content.
+///
+/// Bails if the synthesized text doesn't reparse cleanly — that
+/// would indicate either the legacy emitter producing output the
+/// new parser rejects (which would manifest as silent data loss if
+/// we just emitted whatever the partial CST captured) or a
+/// canonical-form drift between the two emitters.
+fn canonical_format_directive(directive: &Directive, config: &FormatConfig) -> Result<String> {
+    let raw = format_directives([directive], config);
+    let parsed = parse(&raw);
+    if !parsed.errors.is_empty() {
+        let preview: Vec<String> = parsed
+            .errors
+            .iter()
+            .take(3)
+            .map(ToString::to_string)
+            .collect();
+        bail!(
+            "canonical formatter failed to re-parse the synthesized directive \
+             ({} error(s)): {}",
+            parsed.errors.len(),
+            preview.join("; ")
+        );
+    }
+    Ok(format_source(&raw))
+}
+
 /// Run the add command in quick mode.
 fn run_quick_mode(args: &Args, file: &PathBuf, date: NaiveDate) -> Result<()> {
     let quick_args = args.quick.as_ref().expect("quick mode args");
@@ -286,7 +320,7 @@ fn run_quick_mode(args: &Args, file: &PathBuf, date: NaiveDate) -> Result<()> {
     // across the toolchain).
     let config = FormatConfig::default();
     let directive = Directive::Transaction(txn);
-    let formatted = format_source(&format_directives([&directive], &config));
+    let formatted = canonical_format_directive(&directive, &config)?;
 
     if args.dry_run {
         println!("{formatted}");
@@ -523,7 +557,7 @@ fn run_interactive_mode(args: &Args, file: &PathBuf, date: NaiveDate) -> Result<
     // synthesize/format pass for why this is two-pass).
     let config = FormatConfig::default();
     let directive = Directive::Transaction(txn);
-    let formatted = format_source(&format_directives([&directive], &config));
+    let formatted = canonical_format_directive(&directive, &config)?;
 
     if args.dry_run {
         println!("\n{formatted}");

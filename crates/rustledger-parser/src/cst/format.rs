@@ -11,8 +11,31 @@
 //! AST-driven `rustledger_core::format` path. Typed-directive
 //! synthesis (`rustledger_core::format::format_directives`) still
 //! lives in `rustledger-core` for callers that build a directive
-//! from scratch (e.g., `rledger add`, importer extract) — that's
-//! a different shape of input and is out of scope here.
+//! from scratch (e.g., `rledger add`, importer extract, FFI
+//! `format.entry`) — that's a different shape of input and is
+//! out of scope here.
+//!
+//! # Typed-directive emit: known coupling
+//!
+//! The typed-directive path is a two-pass shim: callers run
+//! `core::format::format_directives` to get bean-format-style text,
+//! then run that text back through [`format_source`] for the
+//! canonical pass. This keeps the FINAL byte sequence single-
+//! sourced (always emitted by this module), but it means
+//! `core::format` is permanently load-bearing as a parser-clean
+//! intermediate and every canonical-form rule needs the legacy
+//! emitter to produce SOMETHING the new parser accepts.
+//!
+//! Call sites (`rustledger-ffi-wasi::router::canonical_format_directives`,
+//! `rustledger::cmd::add_cmd::canonical_format_directive`,
+//! `rustledger::cmd::extract_cmd`) all guard the round-trip with
+//! an explicit `parse(&raw)` step that bails on parse errors, so a
+//! divergence between the two emitters surfaces as a hard error
+//! instead of silently dropping content.
+//!
+//! The eventual fix is a typed-directive emit path on this module
+//! (`format_directive(&Directive) -> String`) that bypasses the
+//! source-string round-trip. Tracked in a follow-up issue.
 //!
 //! # Canonical form (locked in the PR-decision comment on #1262)
 //!
@@ -70,11 +93,43 @@ const INDENT: &str = "  ";
 /// Returns canonical text; output always ends with exactly one
 /// trailing newline (even for an empty file, where the output is
 /// just `"\n"`).
+///
+/// **Line-ending normalization runs BEFORE parsing.** The lexer
+/// does not treat bare `\r` as a line terminator, so a classic-
+/// Mac-authored `directive\r…\rdirective\r` would otherwise parse
+/// as a single broken directive and the rest of the user's ledger
+/// would be silently dropped. We normalize `\r\n` and bare `\r`
+/// to `\n` first, then parse — matching the canonical-form
+/// promise that line endings are LF-only on output.
 #[must_use]
 pub fn format_source(source: &str) -> String {
     let (stripped, _had_bom) = crate::bom::strip_leading(source);
-    let parsed = SourceFile::parse(stripped);
+    let normalized = normalize_line_endings(stripped);
+    let parsed = SourceFile::parse(&normalized);
     format_node(parsed.syntax())
+}
+
+/// Replace CRLF and bare-CR line terminators with LF. Cheap fast
+/// path: if the input contains no `\r`, returns the source slice
+/// borrowed (no allocation). Used by [`format_source`] before
+/// parsing so the lexer never has to see legacy line endings.
+fn normalize_line_endings(src: &str) -> std::borrow::Cow<'_, str> {
+    if !src.contains('\r') {
+        return std::borrow::Cow::Borrowed(src);
+    }
+    let mut out = String::with_capacity(src.len());
+    let mut chars = src.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\r' {
+            out.push('\n');
+            if chars.peek() == Some(&'\n') {
+                chars.next();
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    std::borrow::Cow::Owned(out)
 }
 
 /// Format a `SOURCE_FILE` syntax node in opinionated canonical form.
@@ -879,43 +934,39 @@ fn format_cost_spec(cs: &ast::CostSpec) -> String {
     } else {
         ("{", "}")
     };
+    // Collect inner content tokens (skip opener/closer/whitespace),
+    // then route through write_expression_tokens so the spacing rule
+    // is identical to balance/price/AMOUNT-subnode arithmetic — most
+    // importantly, unary `+`/`-` stays tight (`{-500 USD}`, not
+    // `{- 500 USD}`) and COMMA stays tight.
+    let inner_tokens: Vec<crate::SyntaxToken> = cs
+        .syntax()
+        .children_with_tokens()
+        .filter_map(rowan::NodeOrToken::into_token)
+        .filter(|t| {
+            !matches!(
+                t.kind(),
+                crate::SyntaxKind::L_BRACE
+                    | crate::SyntaxKind::R_BRACE
+                    | crate::SyntaxKind::L_DOUBLE_BRACE
+                    | crate::SyntaxKind::R_DOUBLE_BRACE
+                    | crate::SyntaxKind::L_BRACE_HASH
+                    | crate::SyntaxKind::WHITESPACE
+                    | crate::SyntaxKind::NEWLINE
+            )
+        })
+        .collect();
     let mut inner = String::new();
+    write_expression_tokens(&inner_tokens, &mut inner);
     // The `{#` opener is a two-character marker; canonical form
     // separates it from the first inner token with a single space
     // (matching the rendering in this function's rustdoc). `{` and
     // `{{` don't get inner padding per the canonical-form spec.
-    let mut prev_kind: Option<crate::SyntaxKind> = if cs.is_per_unit_plus_total() {
-        Some(crate::SyntaxKind::L_BRACE_HASH)
+    if cs.is_per_unit_plus_total() && !inner.is_empty() {
+        format!("{open} {inner}{close}")
     } else {
-        None
-    };
-    for el in cs.syntax().children_with_tokens() {
-        let rowan::NodeOrToken::Token(t) = el else {
-            continue;
-        };
-        match t.kind() {
-            crate::SyntaxKind::L_BRACE
-            | crate::SyntaxKind::R_BRACE
-            | crate::SyntaxKind::L_DOUBLE_BRACE
-            | crate::SyntaxKind::R_DOUBLE_BRACE
-            | crate::SyntaxKind::L_BRACE_HASH
-            | crate::SyntaxKind::WHITESPACE
-            | crate::SyntaxKind::NEWLINE => {}
-            _ => {
-                let need_space = prev_kind.is_some() && t.kind() != crate::SyntaxKind::COMMA;
-                if need_space {
-                    inner.push(' ');
-                }
-                if t.kind() == crate::SyntaxKind::NUMBER {
-                    inner.push_str(&canonical_number(t.text()));
-                } else {
-                    inner.push_str(t.text());
-                }
-                prev_kind = Some(t.kind());
-            }
-        }
+        format!("{open}{inner}{close}")
     }
-    format!("{open}{inner}{close}")
 }
 
 /// Canonical price annotation: `@ amount` (per-unit) or
@@ -1009,6 +1060,12 @@ fn emit_amount_subnode_expression(node: &crate::SyntaxNode, out: &mut String) {
 /// - no space after `(` or before `)` (parens stay tight)
 /// - no space after a unary `+` / `-` (one that opens the run
 ///   or follows `(` or another operator)
+/// - no space before `,` (commas in cost-spec component lists
+///   stay tight against the preceding token)
+///
+/// Used by every emit path that lays out a token sequence with
+/// canonical spacing: balance/price arithmetic, AMOUNT subnodes,
+/// cost-spec interiors, and metadata values.
 fn write_expression_tokens(tokens: &[crate::SyntaxToken], out: &mut String) {
     let is_op = |k: crate::SyntaxKind| {
         matches!(
@@ -1033,6 +1090,7 @@ fn write_expression_tokens(tokens: &[crate::SyntaxToken], out: &mut String) {
             Some(prev) => {
                 prev != crate::SyntaxKind::L_PAREN
                     && kind != crate::SyntaxKind::R_PAREN
+                    && kind != crate::SyntaxKind::COMMA
                     && !prev_was_unary
             }
         };
@@ -1104,27 +1162,31 @@ fn emit_meta_entries_of(node: &crate::SyntaxNode, out: &mut String) {
 /// gofmt-style invariant the file rustdoc promises.
 fn emit_meta_entry(m: &MetaEntry, indent: &str, out: &mut String) {
     out.push_str(indent);
-    let mut first = true;
-    for el in m.syntax().children_with_tokens() {
-        let rowan::NodeOrToken::Token(t) = el else {
-            continue;
-        };
-        let kind = t.kind();
-        if matches!(
-            kind,
-            crate::SyntaxKind::WHITESPACE | crate::SyntaxKind::NEWLINE
-        ) {
-            continue;
-        }
-        if !first {
-            out.push(' ');
-        }
-        first = false;
-        if kind == crate::SyntaxKind::NUMBER {
-            out.push_str(&canonical_number(t.text()));
-        } else {
-            out.push_str(t.text());
-        }
+    // Split the META_ENTRY's non-trivia tokens into [META_KEY,
+    // value*]. The META_KEY token already includes the trailing
+    // colon (e.g. `note:`); the value tokens go through
+    // write_expression_tokens so the spacing rules — unary +/-
+    // tight, COMMA tight, paren-tight, NUMBER canonicalized — are
+    // shared with the balance/price/cost-spec/posting-amount paths.
+    let content: Vec<crate::SyntaxToken> = m
+        .syntax()
+        .children_with_tokens()
+        .filter_map(rowan::NodeOrToken::into_token)
+        .filter(|t| {
+            !matches!(
+                t.kind(),
+                crate::SyntaxKind::WHITESPACE | crate::SyntaxKind::NEWLINE
+            )
+        })
+        .collect();
+    let mut iter = content.iter();
+    if let Some(key) = iter.next() {
+        out.push_str(key.text());
+    }
+    let value_tokens: Vec<crate::SyntaxToken> = iter.cloned().collect();
+    if !value_tokens.is_empty() {
+        out.push(' ');
+        write_expression_tokens(&value_tokens, out);
     }
     out.push('\n');
 }
@@ -1598,5 +1660,90 @@ mod tests {
             "thousands-sep should strip in metadata too; got: {out}"
         );
         assert!(!out.contains("1,000"), "got: {out}");
+    }
+
+    #[test]
+    fn bare_cr_line_endings_normalized_to_lf_before_parse() {
+        // Bug: the lexer doesn't treat bare CR as a line terminator,
+        // so a classic-Mac-authored `directive\r…\rdirective\r`
+        // parsed as one broken directive and the rest were silently
+        // dropped. format_source normalizes line endings BEFORE
+        // parsing so bare CR (and CRLF) are treated as LF.
+        let src = "2024-01-01 open Assets:A\r2024-01-02 open Assets:B\r";
+        let out = format_source(src);
+        assert!(
+            out.contains("2024-01-01 open Assets:A"),
+            "first directive lost: {out:?}"
+        );
+        assert!(
+            out.contains("2024-01-02 open Assets:B"),
+            "second directive lost on bare-CR input: {out:?}"
+        );
+    }
+
+    #[test]
+    fn crlf_input_canonicalizes_to_lf() {
+        // CRLF and bare CR both fold to LF on the way through the
+        // canonical pass (the canonical form is LF-only).
+        let src = "2024-01-01 open Assets:A\r\n2024-01-02 open Assets:B\r\n";
+        let out = format_source(src);
+        assert!(
+            !out.contains('\r'),
+            "canonical output must be LF-only: {out:?}"
+        );
+        assert!(out.contains("2024-01-01 open Assets:A\n"), "got: {out:?}");
+        assert!(out.contains("2024-01-02 open Assets:B\n"), "got: {out:?}");
+    }
+
+    #[test]
+    fn metadata_value_with_unary_minus_stays_tight() {
+        // Bug: emit_meta_entry's tokenized walk inserted a space
+        // after a unary `+`/`-`, breaking `key: -5.00 USD` →
+        // `key: - 5.00 USD`. Routed through write_expression_tokens
+        // so unary detection matches the balance/price/posting paths.
+        let src = "2024-01-01 open Assets:Bank\n  threshold: -5.00 USD\n";
+        let out = format_source(src);
+        assert!(
+            out.contains("threshold: -5.00 USD"),
+            "unary minus must stay tight in metadata; got: {out}"
+        );
+        assert!(
+            !out.contains("- 5.00"),
+            "no space after unary minus; got: {out}"
+        );
+    }
+
+    #[test]
+    fn metadata_value_with_unary_plus_stays_tight() {
+        let src = "2024-01-01 open Assets:Bank\n  min: +1.00 USD\n";
+        let out = format_source(src);
+        assert!(out.contains("min: +1.00 USD"), "got: {out}");
+        assert!(!out.contains("+ 1.00"), "got: {out}");
+    }
+
+    #[test]
+    fn cost_spec_negative_cost_stays_tight() {
+        // Bug: format_cost_spec catch-all had no unary-operator
+        // handling. `{-500 USD}` formatted to `{- 500 USD}`. Now
+        // routes through write_expression_tokens.
+        let src = "2024-01-01 * \"x\"\n  Assets:Brokerage 10 HOOL {-500 USD}\n  Assets:Cash -5000.00 USD\n";
+        let out = format_source(src);
+        assert!(
+            out.contains("{-500 USD}"),
+            "negative cost spec must stay tight; got:\n{out}"
+        );
+        assert!(!out.contains("{- "), "got:\n{out}");
+    }
+
+    #[test]
+    fn cost_spec_arithmetic_with_unary_stays_tight() {
+        // `{500 * -2 USD}` formerly emitted `{500 * - 2 USD}` because
+        // the cost-spec catch-all didn't understand unary +/-.
+        let src = "2024-01-01 * \"x\"\n  Assets:Brokerage 10 HOOL {500 * -2 USD}\n  Assets:Cash -1000.00 USD\n";
+        let out = format_source(src);
+        assert!(
+            out.contains("{500 * -2 USD}"),
+            "cost-spec arithmetic unary must stay tight; got:\n{out}"
+        );
     }
 }

@@ -84,12 +84,48 @@ pub fn format_document(
     }
     let mut formatted = format_source(source);
     if source.contains("\r\n") {
-        formatted = formatted.replace('\n', "\r\n");
+        formatted = lf_to_crlf_outside_strings(&formatted);
     }
     if formatted == source {
         return None;
     }
     Some(minimal_diff_edits(source, &formatted, encoding))
+}
+
+/// Convert `\n` to `\r\n` everywhere EXCEPT inside Beancount string
+/// literals (`"..."`). Multi-line strings are valid Beancount per the
+/// lexer's STRING regex (a narration / note value can contain a raw
+/// `\n`); a blanket `str::replace('\n', "\r\n")` would silently
+/// rewrite the user's content bytes inside the string.
+///
+/// The walker is a tiny state machine: outside a string, every `\n`
+/// becomes `\r\n`; inside a string, `\n` and every other byte goes
+/// through verbatim. Escaped quotes (`\"`) keep us inside the string;
+/// an unescaped `"` toggles state.
+fn lf_to_crlf_outside_strings(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + s.matches('\n').count());
+    let mut in_string = false;
+    let mut prev_was_backslash = false;
+    for ch in s.chars() {
+        if in_string {
+            out.push(ch);
+            if ch == '"' && !prev_was_backslash {
+                in_string = false;
+            }
+            prev_was_backslash = ch == '\\' && !prev_was_backslash;
+        } else {
+            if ch == '\n' {
+                out.push_str("\r\n");
+            } else {
+                out.push(ch);
+            }
+            if ch == '"' {
+                in_string = true;
+                prev_was_backslash = false;
+            }
+        }
+    }
+    out
 }
 
 /// Per-line cleanup pass: strip trailing space/tab from every line, and

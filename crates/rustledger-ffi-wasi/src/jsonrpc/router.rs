@@ -586,7 +586,7 @@ fn handle_format_entry(params: &serde_json::Value) -> Result<serde_json::Value, 
     let directive = input_entry_to_directive(&params.entry)
         .map_err(|e| RpcError::invalid_params(format!("Invalid entry: {e}")))?;
 
-    let formatted = canonical_format_directives(std::iter::once(&directive));
+    let formatted = canonical_format_directives(std::iter::once(&directive))?;
     let result = FormatResult { formatted };
     serde_json::to_value(result).map_err(|e| RpcError::internal_error(e.to_string()))
 }
@@ -603,7 +603,7 @@ fn handle_format_entries(params: &serde_json::Value) -> Result<serde_json::Value
             })?,
         );
     }
-    let formatted = canonical_format_directives(directives.iter());
+    let formatted = canonical_format_directives(directives.iter())?;
 
     let result = FormatResult { formatted };
     serde_json::to_value(result).map_err(|e| RpcError::internal_error(e.to_string()))
@@ -617,17 +617,39 @@ fn handle_format_entries(params: &serde_json::Value) -> Result<serde_json::Value
 /// preserve so its bean-format-style output is fine as input), then
 /// run it back through the opinionated CST formatter. Net effect:
 /// `format.entry(e)` → bytes are byte-identical to `format.source(f)`
-/// where `f` is a file containing the same entry. Without this
-/// reroute, `format.entry` and `format.source` returned different
-/// canonical forms for the same logical content; the now-deleted
-/// `format_compat` test was the only place that pinned parity.
-fn canonical_format_directives<'a, I>(directives: I) -> String
+/// where `f` is a file containing the same entry.
+///
+/// **Parse-error guard.** `format_source` is parse-then-format and
+/// would otherwise emit whatever subset of the synthesized text the
+/// CST parser could recover, silently dropping content when the
+/// legacy emitter produces output the CST parser can't fully accept
+/// (e.g., a future Directive variant not yet wired up in
+/// `cst::format::emit_directive`'s match, or an edge-case escape the
+/// lexer rejects). We re-parse explicitly before formatting and
+/// surface any parse error as an `internal_error` instead of
+/// returning truncated bytes to the caller.
+fn canonical_format_directives<'a, I>(directives: I) -> Result<String, RpcError>
 where
     I: IntoIterator<Item = &'a rustledger_core::Directive>,
 {
     let config = rustledger_core::format::FormatConfig::default();
     let raw = rustledger_core::format::format_directives(directives, &config);
-    rustledger_parser::format_source(&raw)
+    let parsed = rustledger_parser::parse(&raw);
+    if !parsed.errors.is_empty() {
+        let preview: Vec<String> = parsed
+            .errors
+            .iter()
+            .take(3)
+            .map(ToString::to_string)
+            .collect();
+        return Err(RpcError::internal_error(format!(
+            "canonical_format_directives: synthesized text failed to re-parse \
+             with {} error(s): {}",
+            parsed.errors.len(),
+            preview.join("; ")
+        )));
+    }
+    Ok(rustledger_parser::format_source(&raw))
 }
 
 // =============================================================================

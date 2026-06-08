@@ -115,29 +115,7 @@ fn format_file(file: &PathBuf, args: &Args) -> Result<ExitCode> {
                 eprintln!("File needs formatting: {}", file.display());
             }
             if args.diff {
-                eprintln!("--- {}", file.display());
-                eprintln!("+++ {} (formatted)", file.display());
-                for (i, (orig, fmt)) in original_content.lines().zip(formatted.lines()).enumerate()
-                {
-                    if orig != fmt {
-                        eprintln!("@@ line {} @@", i + 1);
-                        eprintln!("-{orig}");
-                        eprintln!("+{fmt}");
-                    }
-                }
-                let orig_lines: Vec<_> = original_content.lines().collect();
-                let fmt_lines: Vec<_> = formatted.lines().collect();
-                if orig_lines.len() != fmt_lines.len() {
-                    let min_len = orig_lines.len().min(fmt_lines.len());
-                    for (i, line) in orig_lines.iter().skip(min_len).enumerate() {
-                        eprintln!("@@ line {} (removed) @@", min_len + i + 1);
-                        eprintln!("-{line}");
-                    }
-                    for (i, line) in fmt_lines.iter().skip(min_len).enumerate() {
-                        eprintln!("@@ line {} (added) @@", min_len + i + 1);
-                        eprintln!("+{line}");
-                    }
-                }
+                emit_diff(file, &original_content, &formatted);
             }
             Ok(ExitCode::from(1))
         }
@@ -161,5 +139,70 @@ fn format_file(file: &PathBuf, args: &Args) -> Result<ExitCode> {
             .write_all(formatted.as_bytes())
             .context("failed to write to stdout")?;
         Ok(ExitCode::SUCCESS)
+    }
+}
+
+/// Render a `--diff` block for a non-canonical file.
+///
+/// Handles three cases beyond the obvious per-line replacement:
+///
+/// - **CRLF input.** The canonical form normalizes `\r\n` → `\n`. If
+///   the file's only divergence is the line endings, we say so
+///   explicitly instead of printing a header with no hunks under it.
+/// - **Trailing-newline-only delta.** The canonical form emits exactly
+///   one trailing newline. A file ending with `\n\n\n` fails byte
+///   equality but `lines()` produces no per-line hunks (they're
+///   identical line-by-line). Print an explicit "trailing whitespace
+///   only" message instead of an empty diff.
+/// - **Line-by-line replacements.** Otherwise emit the existing
+///   `@@ line N @@` per-line diff hunks.
+fn emit_diff(file: &PathBuf, original: &str, formatted: &str) {
+    eprintln!("--- {}", file.display());
+    eprintln!("+++ {} (formatted)", file.display());
+
+    // CRLF-only divergence: stripping CR from original makes it match
+    // formatted. Surface the line-ending normalization as the reason.
+    if original.contains("\r\n") && original.replace("\r\n", "\n") == *formatted {
+        eprintln!(
+            "  (no per-line content change; the canonical form normalizes \
+             CRLF line endings to LF — run `rledger format -i` to rewrite)"
+        );
+        return;
+    }
+
+    let orig_lines: Vec<&str> = original.lines().collect();
+    let fmt_lines: Vec<&str> = formatted.lines().collect();
+    let mut printed_hunk = false;
+    for (i, (orig, fmt)) in orig_lines.iter().zip(fmt_lines.iter()).enumerate() {
+        if orig != fmt {
+            eprintln!("@@ line {} @@", i + 1);
+            eprintln!("-{orig}");
+            eprintln!("+{fmt}");
+            printed_hunk = true;
+        }
+    }
+    if orig_lines.len() != fmt_lines.len() {
+        let min_len = orig_lines.len().min(fmt_lines.len());
+        for (i, line) in orig_lines.iter().skip(min_len).enumerate() {
+            eprintln!("@@ line {} (removed) @@", min_len + i + 1);
+            eprintln!("-{line}");
+            printed_hunk = true;
+        }
+        for (i, line) in fmt_lines.iter().skip(min_len).enumerate() {
+            eprintln!("@@ line {} (added) @@", min_len + i + 1);
+            eprintln!("+{line}");
+            printed_hunk = true;
+        }
+    }
+    if !printed_hunk {
+        // Byte-exact comparison said the files differ, but lines()
+        // produced no hunks. The only place this fires is a trailing-
+        // newline-count delta (or leading whitespace differences that
+        // lines() also collapses). Tell the user explicitly.
+        eprintln!(
+            "  (no per-line content change; the difference is in \
+             leading/trailing whitespace — typically extra trailing \
+             newlines that the canonical form collapses to one)"
+        );
     }
 }

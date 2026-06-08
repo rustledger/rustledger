@@ -8,8 +8,7 @@
 use crate::cmd::completions::ShellType;
 use anyhow::{Context, Result};
 use clap::Parser;
-use rustledger_parser::format::format_source;
-use rustledger_parser::parse;
+use rustledger_parser::format::{cr_outside_strings_present, try_format_source};
 use std::fs;
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -88,16 +87,15 @@ fn format_file(file: &PathBuf, args: &Args) -> Result<ExitCode> {
     let original_content =
         fs::read_to_string(file).with_context(|| format!("failed to read {}", file.display()))?;
 
-    let parse_result = parse(&original_content);
-
-    if !parse_result.errors.is_empty() {
-        for err in &parse_result.errors {
-            eprintln!("error: {err}");
+    let formatted = match try_format_source(&original_content) {
+        Ok(out) => out,
+        Err(errors) => {
+            for err in &errors {
+                eprintln!("error: {err}");
+            }
+            anyhow::bail!("file has parse errors, cannot format");
         }
-        anyhow::bail!("file has parse errors, cannot format");
-    }
-
-    let formatted = format_source(&original_content);
+    };
 
     if args.check {
         // Byte-exact comparison: --check must report the same diff
@@ -168,7 +166,8 @@ fn emit_diff(file: &PathBuf, original: &str, formatted: &str) {
     // `--in-place`.
     let original_no_bom = original.strip_prefix('\u{FEFF}').unwrap_or(original);
     let had_bom = original_no_bom.len() < original.len();
-    let lf_only: std::borrow::Cow<'_, str> = if original_no_bom.contains('\r') {
+    let folded_cr = cr_outside_strings_present(original_no_bom);
+    let lf_only: std::borrow::Cow<'_, str> = if folded_cr {
         rustledger_parser::format::crlf_to_lf_outside_strings(original_no_bom)
     } else {
         std::borrow::Cow::Borrowed(original_no_bom)
@@ -181,17 +180,11 @@ fn emit_diff(file: &PathBuf, original: &str, formatted: &str) {
         if had_bom {
             causes.push("leading BOM (dropped)");
         }
-        // Only report "CR folded" if the helper actually folded
-        // bytes (i.e. the returned Cow is Owned AND differs from
-        // the input). A file whose only `\r` is inside a string
-        // literal hits the `.contains('\r')` branch but
-        // crlf_to_lf_outside_strings preserves those bytes, so
-        // lf_only is byte-equal to original_no_bom and no fold
-        // happened.
-        let folded_cr = match &lf_only {
-            std::borrow::Cow::Owned(s) => s.as_str() != original_no_bom,
-            std::borrow::Cow::Borrowed(_) => false,
-        };
+        // `folded_cr` comes from the explicit
+        // `cr_outside_strings_present` predicate: a file whose
+        // only `\r` is inside a string literal returns false (the
+        // formatter doesn't fold those), so we don't surface a
+        // misleading "CR folded" cause for an in-string `\r`.
         if folded_cr {
             causes.push("CR-bearing line endings (folded to LF)");
         }

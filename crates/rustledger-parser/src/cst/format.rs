@@ -109,6 +109,37 @@ pub fn format_source(source: &str) -> String {
     format_node(parsed.syntax())
 }
 
+/// Like [`format_source`], but returns the parse errors instead
+/// of silently formatting around them.
+///
+/// `format_source` is intentionally infallible — the canonical
+/// formatter must still emit *something* for a file the parser
+/// could only recover from. Tooling that wants to refuse to
+/// rewrite a file with parse errors (the `rledger format` CLI,
+/// the LSP `format` handler) previously had to call `parse`
+/// out-of-band, inspect `errors`, then call `format_source` on
+/// the SAME input — a contract two functions cooperated on
+/// implicitly, and the kind of pairing a future caller could
+/// easily forget. This helper makes the contract explicit.
+///
+/// Returns `Ok(formatted)` if and only if `parse(source).errors`
+/// would be empty. Otherwise returns the parse errors verbatim,
+/// in the same order the parser emitted them.
+///
+/// # Errors
+///
+/// Returns `Err(Vec<ParseError>)` containing every parse error
+/// the underlying [`parse`](crate::parse) call would surface for
+/// `source`. The caller decides whether to abort, render the
+/// errors, or fall back to a non-canonical pass.
+pub fn try_format_source(source: &str) -> Result<String, Vec<crate::ParseError>> {
+    let result = crate::parse(source);
+    if !result.errors.is_empty() {
+        return Err(result.errors);
+    }
+    Ok(format_source(source))
+}
+
 /// Convert every `\n` line terminator OUTSIDE string literals back
 /// to `\r\n`, leaving `\n` characters inside strings (and inside
 /// comments… see below) untouched.
@@ -122,12 +153,14 @@ pub fn format_source(source: &str) -> String {
 /// - String literals: bytes pass through verbatim. The user's
 ///   original line endings inside a multi-line narration / note /
 ///   document string are preserved.
-/// - Line comments (`;`, `%`, `#!` at line start, `#+` at line
-///   start): the comment's terminating newline IS a real
-///   structural line terminator, so it gets converted to CRLF;
-///   bytes inside the comment region (which can include arbitrary
-///   characters, notably stray `"`) pass through without flipping
-///   the in-string state.
+/// - Line comments (`;`, `%`, `#!`, `#+`): the comment's
+///   terminating newline IS a real structural line terminator, so
+///   it gets converted to CRLF; bytes inside the comment region
+///   (which can include arbitrary characters, notably stray `"`)
+///   pass through without flipping the in-string state. `#!` and
+///   `#+` open a comment at any column — the lexer's
+///   `SHEBANG` / `EMACS_DIRECTIVE` regexes carry no line-start
+///   anchor, and the state machine matches that classification.
 ///
 /// The helper lives in this module rather than the LSP crate
 /// because its correctness depends on the lexer's `STRING` and
@@ -136,11 +169,10 @@ pub fn format_source(source: &str) -> String {
 #[must_use]
 pub fn lf_to_crlf_outside_strings(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + s.matches('\n').count());
-    // Same BOM handling as the inverse pass: skip the BOM for
-    // `at_line_start` purposes but re-prepend it verbatim. This
-    // mirrors crlf_to_lf_outside_strings so any caller running both
-    // directions on the same source observes consistent
-    // SHEBANG / EMACS_DIRECTIVE handling at byte 0 of content.
+    // BOM is data, not classification input. We re-prepend it
+    // verbatim and let the body start fresh in Code state. The
+    // sibling crlf_to_lf_outside_strings does the same so the two
+    // walkers handle a leading-BOM file identically.
     let (body, bom) = match s.strip_prefix('\u{FEFF}') {
         Some(rest) => (rest, "\u{FEFF}"),
         None => (s, ""),
@@ -149,7 +181,6 @@ pub fn lf_to_crlf_outside_strings(s: &str) -> String {
     let mut chars = body.chars().peekable();
     let mut state = SourceState::Code;
     let mut prev_was_backslash = false;
-    let mut at_line_start = true;
     while let Some(ch) = chars.next() {
         let peek = chars.peek().copied();
         match state {
@@ -162,8 +193,7 @@ pub fn lf_to_crlf_outside_strings(s: &str) -> String {
                 }
             }
         }
-        state = advance_source_state(ch, peek, at_line_start, state, &mut prev_was_backslash);
-        at_line_start = ch == '\n';
+        state = advance_source_state(ch, peek, state, &mut prev_was_backslash);
     }
     out
 }
@@ -198,12 +228,15 @@ pub fn canonicalize_directives<'a, I>(
 ) -> Result<String, CanonicalizeError>
 where
     I: IntoIterator<Item = &'a rustledger_core::Directive>,
+    I::IntoIter: ExactSizeIterator,
 {
-    // Materialize the iterator so we can count the input AND pass
-    // it to the legacy emitter.
-    let directives: Vec<&rustledger_core::Directive> = directives.into_iter().collect();
-    let input_count = directives.len();
-    let raw = rustledger_core::format::format_directives(directives, config);
+    // Take the count off the ExactSizeIterator without
+    // collecting — the legacy emitter only walks the iterator
+    // once, so we don't need to materialize a Vec just to know
+    // how many directives the caller passed.
+    let iter = directives.into_iter();
+    let input_count = iter.len();
+    let raw = rustledger_core::format::format_directives(iter, config);
     let parse_result = crate::parse(&raw);
     if !parse_result.errors.is_empty() {
         return Err(CanonicalizeError::ReparseFailed {
@@ -316,11 +349,11 @@ pub fn crlf_to_lf_outside_strings(src: &str) -> std::borrow::Cow<'_, str> {
     if !src.contains('\r') {
         return std::borrow::Cow::Borrowed(src);
     }
-    // Reserve room for any leading BOM so we can re-prepend it
-    // verbatim. `at_line_start` must apply to the FIRST CONTENT
-    // char, not to the BOM — without this, a `\u{FEFF}#+title…`
-    // file would not detect `#+` as a comment opener and a stray
-    // `\"` later on that line would trap the walker in InString.
+    // Re-prepend the BOM verbatim and let the body start fresh in
+    // Code state. The state machine no longer needs line-start
+    // tracking — the lexer's `SHEBANG` / `EMACS_DIRECTIVE` regexes
+    // have no line-start anchor, so `#!`/`#+` open a comment at
+    // any column, and the state machine mirrors that.
     let (body, bom) = match src.strip_prefix('\u{FEFF}') {
         Some(rest) => (rest, "\u{FEFF}"),
         None => (src, ""),
@@ -330,7 +363,6 @@ pub fn crlf_to_lf_outside_strings(src: &str) -> std::borrow::Cow<'_, str> {
     let mut chars = body.chars().peekable();
     let mut state = SourceState::Code;
     let mut prev_was_backslash = false;
-    let mut at_line_start = true;
     while let Some(ch) = chars.next() {
         let peek = chars.peek().copied();
         match state {
@@ -346,12 +378,43 @@ pub fn crlf_to_lf_outside_strings(src: &str) -> std::borrow::Cow<'_, str> {
                 }
             }
         }
-        state = advance_source_state(ch, peek, at_line_start, state, &mut prev_was_backslash);
-        // CRLF and bare CR both count as a line terminator for
-        // line-start tracking outside strings.
-        at_line_start = ch == '\n' || (state == SourceState::Code && ch == '\r');
+        state = advance_source_state(ch, peek, state, &mut prev_was_backslash);
     }
     std::borrow::Cow::Owned(out)
+}
+
+/// `true` iff `src` contains at least one `\r` byte OUTSIDE a
+/// string literal — i.e. the byte sequence the canonical
+/// formatter would fold to `\n` via
+/// [`crlf_to_lf_outside_strings`].
+///
+/// This is the explicit predicate companion to the Cow return of
+/// [`crlf_to_lf_outside_strings`]. Tooling that only needs to
+/// know whether the fold would change bytes (the CLI `--diff`
+/// "CR-bearing line endings folded" cause line, the LSP
+/// did-the-formatter-touch-this guard) should call this instead
+/// of matching on `Cow::Owned`, which conflates allocation with
+/// semantic change. A future optimization that pre-allocated the
+/// Cow even on a no-op fold would silently invert that
+/// match-on-Cow guard; this predicate keeps the question
+/// answered by the bytes, not by allocation behavior.
+#[must_use]
+pub fn cr_outside_strings_present(src: &str) -> bool {
+    if !src.contains('\r') {
+        return false;
+    }
+    let body = src.strip_prefix('\u{FEFF}').unwrap_or(src);
+    let mut chars = body.chars().peekable();
+    let mut state = SourceState::Code;
+    let mut prev_was_backslash = false;
+    while let Some(ch) = chars.next() {
+        let peek = chars.peek().copied();
+        if matches!(state, SourceState::Code | SourceState::InComment) && ch == '\r' {
+            return true;
+        }
+        state = advance_source_state(ch, peek, state, &mut prev_was_backslash);
+    }
+    false
 }
 
 /// Per-character walker state for line-ending normalization passes
@@ -362,9 +425,8 @@ pub fn crlf_to_lf_outside_strings(src: &str) -> std::borrow::Cow<'_, str> {
 /// `#!` / `#+` comment is data, not a string delimiter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SourceState {
-    /// In normal code. `"` opens a string; `;` / `%` opens a
-    /// comment; `#!` or `#+` at line start opens a comment;
-    /// everything else is just bytes.
+    /// In normal code. `"` opens a string; `;` / `%` / `#!` /
+    /// `#+` opens a comment; everything else is just bytes.
     Code,
     /// Inside `"…"`. Bytes pass through; an unescaped `"` exits.
     InString,
@@ -377,13 +439,15 @@ enum SourceState {
 ///
 /// Returns the state AFTER consuming `ch`. The string-escape
 /// bookkeeping (`prev_was_backslash`) updates in place. Comment
-/// opener detection covers all four line-comment lexemes:
-/// `;` and `%` anywhere, `#!` and `#+` at line start only (a `#`
-/// elsewhere is a TAG / HASH token, not a comment).
+/// opener detection covers all four line-comment lexemes: `;` and
+/// `%` open a comment unconditionally; `#!` and `#+` open one at
+/// any column — the lexer's `#![^\n\r]*` / `#\+[^\n\r]*` regexes
+/// have NO line-start anchor, so a mid-line `#!` or `#+` is still
+/// a `SHEBANG` / `EMACS_DIRECTIVE` token. A `#` followed by
+/// anything else is a `TAG` / `HASH` token, not a comment.
 const fn advance_source_state(
     ch: char,
     peek: Option<char>,
-    at_line_start: bool,
     state: SourceState,
     prev_was_backslash: &mut bool,
 ) -> SourceState {
@@ -405,13 +469,6 @@ const fn advance_source_state(
             }
         }
         SourceState::Code => {
-            // `#!` and `#+` open a SHEBANG / EMACS_DIRECTIVE token.
-            // The lexer's regexes (`#![^\n\r]*` / `#\+[^\n\r]*`)
-            // have NO line-start anchor; we match that here too so
-            // a mid-line `#!` or `#+` triggers the same InComment
-            // transition. The `at_line_start` parameter is kept
-            // for forward-compatibility but is not consulted today.
-            let _ = at_line_start;
             let is_hash_line_comment = ch == '#' && matches!(peek, Some('!' | '+'));
             if ch == '"' {
                 *prev_was_backslash = false;
@@ -2176,14 +2233,20 @@ mod tests {
             "document_directive",
             "2024-06-01 document Assets:Bank \"stmt.pdf\" #q1\n",
         ),
-        // Note: `#!` and `#+` anywhere on a line — not just at
-        // line start — open the lexer's SHEBANG / EMACS_DIRECTIVE
-        // tokens. This fixture pins the agreement with
-        // advance_source_state via the lexer-agreement property
-        // test.
+        // Note: `#!` and `#+` anywhere on a line, not just at
+        // line start, open the lexer's SHEBANG / EMACS_DIRECTIVE
+        // tokens. The fixture places `#+` mid-line and tails it
+        // with an unbalanced `"`: an incorrect state machine that
+        // gated the opener on `at_line_start` would stay in Code
+        // when it hit the `#+`, then flip to InString on the next
+        // `"` and trap there for the remainder of the file. The
+        // lexer-agreement property test catches that divergence,
+        // and the round-trip body runs too because the parser
+        // treats the mid-line EMACS_DIRECTIVE as same-line
+        // trailing trivia under the directive-terminator rule.
         (
-            "emacs_directive_mid_line_following_directive",
-            "2024-01-15 open Assets:A\n#+title: \"Org Mode header\"\n",
+            "emacs_directive_mid_line_with_quote",
+            "2024-01-15 open Assets:A #+stray \"q\n",
         ),
         ("pushtag_directive", "pushtag #active\n"),
         ("poptag_directive", "poptag #active\n"),
@@ -2202,9 +2265,15 @@ mod tests {
     /// automatically.
     ///
     /// Today's zero-directive fixtures (skipped by the round-trip
-    /// body):
+    /// body), verified by an exhaustive probe against the live
+    /// parser:
     ///
     /// - `empty`, `only_comment` — no directives at all.
+    /// - `bare_cr_input` — the parser does not recognize bare CR
+    ///   (without a following LF) as a directive terminator, so
+    ///   the file's two would-be directives never surface as
+    ///   structured tokens. The fixture's purpose is the
+    ///   line-ending state-machine pass, not the round-trip body.
     /// - `pushtag_directive`, `poptag_directive`,
     ///   `pushmeta_directive`, `popmeta_directive` — pragma
     ///   directives don't surface as `Directive` variants on the
@@ -2214,17 +2283,16 @@ mod tests {
     /// - `options_and_includes` — option / include / plugin lines
     ///   live on separate `ParseResult` collections, not on
     ///   `.directives`.
-    /// - `emacs_directive_mid_line_following_directive` — the
-    ///   parser surfaces the `EMACS_DIRECTIVE` token as a parse
-    ///   error today, so the skip-on-errors guard triggers even
-    ///   though the file's leading directive is valid. The
-    ///   fixture's job is to pin the state-machine / lexer
-    ///   agreement on mid-line `#+`, not the round-trip itself.
     ///
-    /// Note: `comment_containing_quote` DOES exercise the body —
-    /// the comment is followed by an `open` directive and the
-    /// fixture's purpose is the comment-with-quote state-machine
-    /// case, not the zero-directive case.
+    /// Note: `comment_containing_quote` and
+    /// `emacs_directive_mid_line_with_quote` BOTH exercise the
+    /// body — each is paired with a parseable directive on the
+    /// same line or an adjacent line, and the trivia token
+    /// (comment / `EMACS_DIRECTIVE`) attaches as same-line or
+    /// inter-directive trivia under the directive-terminator
+    /// rule. Their purpose is the state-machine / lexer agreement
+    /// property on a comment with an unbalanced `"`, not the
+    /// zero-directive case.
     const ROUNDTRIP_KNOWN_ZERO_DIRECTIVE_FIXTURES: usize = 8;
 
     #[test]
@@ -2379,6 +2447,48 @@ mod tests {
     }
 
     #[test]
+    fn try_format_source_returns_ok_on_clean_input() {
+        let src = "2024-01-15 open Assets:Cash\n";
+        let out = super::try_format_source(src).expect("clean input should format");
+        assert_eq!(out, super::format_source(src));
+    }
+
+    #[test]
+    fn try_format_source_returns_err_on_parse_error() {
+        // Bare `unparsable` text triggers parser errors. The
+        // helper must surface them instead of silently emitting
+        // canonical text around a broken file.
+        let src = "this is not a directive at all\n";
+        let err = super::try_format_source(src).expect_err("garbage should error");
+        assert!(!err.is_empty(), "errors must not be empty");
+    }
+
+    #[test]
+    fn cr_outside_strings_present_distinguishes_in_string_cr() {
+        // CR inside a multi-line string literal must NOT count —
+        // the formatter wouldn't fold it.
+        let in_string_only = "2024-01-15 note Assets:Bank \"line1\r\nline2\"\n";
+        assert!(!super::cr_outside_strings_present(in_string_only));
+
+        // CR outside any string literal (CRLF line terminator)
+        // counts — that's what crlf_to_lf_outside_strings would
+        // fold.
+        let crlf_terminator = "2024-01-01 open Assets:A\r\n";
+        assert!(super::cr_outside_strings_present(crlf_terminator));
+
+        // No `\r` at all — fast path.
+        let lf_only = "2024-01-01 open Assets:A\n";
+        assert!(!super::cr_outside_strings_present(lf_only));
+
+        // CR inside a `;` comment is outside any string and counts.
+        // (Beancount lexer's comment regex excludes the newline, so
+        // the comment region ends at `\r`; either way, the predicate
+        // says "yes, the formatter would fold this byte".)
+        let comment_with_cr = "; comment with \"quote\rstuff\n";
+        assert!(super::cr_outside_strings_present(comment_with_cr));
+    }
+
+    #[test]
     fn canonicalize_directives_directive_count_mismatch_is_reported() {
         // Drive the new DirectiveCountMismatch error variant.
         // Today's Directive variants all round-trip with matching
@@ -2396,13 +2506,75 @@ mod tests {
         assert!(msg.contains("rledger bug"), "got: {msg}");
     }
 
+    /// Single source of truth for the variant → fixture mapping
+    /// used by both the compile-time exhaustiveness check
+    /// ([`_directive_variant_fixture_coverage`]) and the runtime
+    /// semantic check
+    /// ([`directive_variant_fixture_names_resolve_in_matrix`]).
+    ///
+    /// Each tuple is `(VariantName, fixture_name)`. The
+    /// `VariantName` half is the string the runtime check uses to
+    /// confirm the fixture parses to that variant; the
+    /// `fixture_name` half is what the compile-time match returns
+    /// for the same variant. A future `Directive::Hedge` variant
+    /// only ships with canonical-form coverage if BOTH a new
+    /// arm is added to the compile-time match AND a row here
+    /// names a fixture that actually produces a `Hedge` on parse.
+    const DIRECTIVE_VARIANT_FIXTURE_MAP: &[(&str, &str)] = &[
+        ("Transaction", "transaction_with_cost_and_price"),
+        ("Balance", "balance_with_arithmetic_and_tolerance"),
+        ("Open", "only_directive"),
+        ("Close", "close_directive"),
+        ("Commodity", "commodity_directive"),
+        ("Pad", "pad_directive"),
+        ("Event", "event_directive"),
+        ("Query", "query_directive"),
+        ("Note", "note_directive"),
+        ("Document", "document_directive"),
+        ("Price", "price_with_thousands_separator"),
+        ("Custom", "custom_with_date_value"),
+    ];
+
+    /// Lookup helper: variant tag string → fixture name. Used by
+    /// the compile-time match below. Panics if the variant is not
+    /// in the map (which would be an internal-consistency bug, not
+    /// a user-facing case).
+    const fn fixture_for_variant(tag: &str) -> &'static str {
+        let mut i = 0;
+        while i < DIRECTIVE_VARIANT_FIXTURE_MAP.len() {
+            let (v, f) = DIRECTIVE_VARIANT_FIXTURE_MAP[i];
+            // const_str equality: compare byte slices.
+            let v_bytes = v.as_bytes();
+            let t_bytes = tag.as_bytes();
+            if v_bytes.len() == t_bytes.len() {
+                let mut k = 0;
+                let mut eq = true;
+                while k < v_bytes.len() {
+                    if v_bytes[k] != t_bytes[k] {
+                        eq = false;
+                        break;
+                    }
+                    k += 1;
+                }
+                if eq {
+                    return f;
+                }
+            }
+            i += 1;
+        }
+        panic!("DIRECTIVE_VARIANT_FIXTURE_MAP missing entry for variant tag");
+    }
+
     /// Compile-time check that every `rustledger_core::Directive`
     /// variant has at least one source-text fixture in
     /// [`IDEMPOTENCE_MATRIX`] exercising its emit path. The
     /// function NEVER runs — its body is an exhaustive `match` over
     /// the `Directive` enum. Adding a new variant breaks
-    /// compilation unless the author adds a fixture and references
-    /// it here.
+    /// compilation unless the author adds a match arm referencing
+    /// `fixture_for_variant("NewVariantName")`, AND adds a row to
+    /// [`DIRECTIVE_VARIANT_FIXTURE_MAP`] naming the fixture. The
+    /// runtime test then confirms the fixture parses to a directive
+    /// of that variant.
     ///
     /// The non-`Directive` pragma-style directives (Pushtag,
     /// Poptag, Pushmeta, Popmeta, options, includes, plugins)
@@ -2412,18 +2584,18 @@ mod tests {
     #[allow(dead_code)]
     fn _directive_variant_fixture_coverage(d: &rustledger_core::Directive) -> &'static str {
         match d {
-            rustledger_core::Directive::Transaction(_) => "transaction_with_cost_and_price",
-            rustledger_core::Directive::Balance(_) => "balance_with_arithmetic_and_tolerance",
-            rustledger_core::Directive::Open(_) => "only_directive",
-            rustledger_core::Directive::Close(_) => "close_directive",
-            rustledger_core::Directive::Commodity(_) => "commodity_directive",
-            rustledger_core::Directive::Pad(_) => "pad_directive",
-            rustledger_core::Directive::Event(_) => "event_directive",
-            rustledger_core::Directive::Query(_) => "query_directive",
-            rustledger_core::Directive::Note(_) => "note_directive",
-            rustledger_core::Directive::Document(_) => "document_directive",
-            rustledger_core::Directive::Price(_) => "price_with_thousands_separator",
-            rustledger_core::Directive::Custom(_) => "custom_with_date_value",
+            rustledger_core::Directive::Transaction(_) => fixture_for_variant("Transaction"),
+            rustledger_core::Directive::Balance(_) => fixture_for_variant("Balance"),
+            rustledger_core::Directive::Open(_) => fixture_for_variant("Open"),
+            rustledger_core::Directive::Close(_) => fixture_for_variant("Close"),
+            rustledger_core::Directive::Commodity(_) => fixture_for_variant("Commodity"),
+            rustledger_core::Directive::Pad(_) => fixture_for_variant("Pad"),
+            rustledger_core::Directive::Event(_) => fixture_for_variant("Event"),
+            rustledger_core::Directive::Query(_) => fixture_for_variant("Query"),
+            rustledger_core::Directive::Note(_) => fixture_for_variant("Note"),
+            rustledger_core::Directive::Document(_) => fixture_for_variant("Document"),
+            rustledger_core::Directive::Price(_) => fixture_for_variant("Price"),
+            rustledger_core::Directive::Custom(_) => fixture_for_variant("Custom"),
         }
     }
 
@@ -2433,12 +2605,12 @@ mod tests {
         //
         //   (1) every fixture name appears in IDEMPOTENCE_MATRIX;
         //   (2) parsing that fixture produces AT LEAST one
-        //       directive of the variant the match arm names.
+        //       directive of the variant the map row names.
         //
         // Without check (2) the compile-time match is satisfied by
         // any fixture-name string — a future contributor adding
-        // `Directive::Hedge(_) => "only_comment"` would compile,
-        // the name would resolve, and Hedge would ship with zero
+        // a row `("Hedge", "only_comment")` would compile, the
+        // lookup would resolve, and Hedge would ship with zero
         // canonical-form coverage. The semantic check rejects that
         // by parsing the named fixture and inspecting the
         // directive variant.
@@ -2460,28 +2632,14 @@ mod tests {
                     | (Directive::Custom(_), "Custom")
             )
         }
-        let bindings: &[(&str, &str)] = &[
-            ("transaction_with_cost_and_price", "Transaction"),
-            ("balance_with_arithmetic_and_tolerance", "Balance"),
-            ("only_directive", "Open"),
-            ("close_directive", "Close"),
-            ("commodity_directive", "Commodity"),
-            ("pad_directive", "Pad"),
-            ("event_directive", "Event"),
-            ("query_directive", "Query"),
-            ("note_directive", "Note"),
-            ("document_directive", "Document"),
-            ("price_with_thousands_separator", "Price"),
-            ("custom_with_date_value", "Custom"),
-        ];
-        for (name, variant) in bindings {
+        for (variant, name) in DIRECTIVE_VARIANT_FIXTURE_MAP {
             let (_, src) = IDEMPOTENCE_MATRIX
                 .iter()
                 .find(|(n, _)| *n == *name)
                 .unwrap_or_else(|| {
                     panic!(
                         "fixture `{name}` is named by \
-                     _directive_variant_fixture_coverage but missing from \
+                     DIRECTIVE_VARIANT_FIXTURE_MAP but missing from \
                      IDEMPOTENCE_MATRIX"
                     )
                 });
@@ -2493,7 +2651,7 @@ mod tests {
             assert!(
                 found,
                 "fixture `{name}` is mapped to `Directive::{variant}` by \
-                 _directive_variant_fixture_coverage, but parsing it produced \
+                 DIRECTIVE_VARIANT_FIXTURE_MAP, but parsing it produced \
                  no directive of that variant (got {:?}). This silently \
                  leaves the variant without canonical-form coverage.",
                 parsed
@@ -2590,7 +2748,6 @@ mod tests {
         let mut chars = body.char_indices().peekable();
         let mut state = SourceState::Code;
         let mut prev_was_backslash = false;
-        let mut at_line_start = true;
         while let Some((rel_i, ch)) = chars.next() {
             let i = bom_len + rel_i;
             let peek = chars.peek().map(|&(_, c)| c);
@@ -2598,20 +2755,43 @@ mod tests {
             for byte in &mut out[i..i + ch.len_utf8()] {
                 *byte = state;
             }
-            let next_state =
-                advance_source_state(ch, peek, at_line_start, state, &mut prev_was_backslash);
+            let prev_state = state;
+            let next_state = advance_source_state(ch, peek, state, &mut prev_was_backslash);
+            // Record only OPENING transitions and the comment-
+            // closing newline, where the state machine and lexer
+            // legitimately disagree on this single byte:
+            //   - Code → InString : opening `"` is Code-side but
+            //     the lexer puts it inside the STRING token.
+            //   - Code → InComment: opening `;` / `%` / `#!` /
+            //     `#+` is Code-side but the lexer puts it inside
+            //     the COMMENT / SHEBANG / EMACS_DIRECTIVE token.
+            //   - InComment → Code: the `\n` ending the comment is
+            //     classified InComment by the state machine but
+            //     sits OUTSIDE the comment token (the lexer's
+            //     `[^\n\r]*` excludes it).
+            // The InString → Code transition (closing `"`) is NOT
+            // a disagreement: the state machine still tags that
+            // byte as InString (pre-transition), and the lexer
+            // includes the closing `"` inside the STRING token.
+            // Skipping it would silently mask a real bug.
             if next_state != state {
-                transitions.insert(i);
-                // For a `#!` or `#+` opener the lexer's token span
-                // begins at the `#`, so the second byte (`!` / `+`)
-                // is ALSO a "before the lexer's token start" byte
-                // that the state machine tags as Code. Record it.
-                if matches!(ch, '#') && matches!(peek, Some('!' | '+')) {
-                    transitions.insert(i + 1);
+                let opening = matches!(prev_state, SourceState::Code)
+                    && matches!(next_state, SourceState::InString | SourceState::InComment);
+                let comment_close = matches!(prev_state, SourceState::InComment)
+                    && matches!(next_state, SourceState::Code);
+                if opening || comment_close {
+                    transitions.insert(i);
+                    // For a `#!` or `#+` opener the lexer's token
+                    // span begins at the `#`, so the second byte
+                    // (`!` / `+`) is also a "before the lexer's
+                    // token start" byte the state machine tags as
+                    // Code. Record it too.
+                    if matches!(ch, '#') && matches!(peek, Some('!' | '+')) {
+                        transitions.insert(i + 1);
+                    }
                 }
             }
             state = next_state;
-            at_line_start = ch == '\n';
         }
         (out, transitions)
     }

@@ -232,7 +232,7 @@ mod tests {
     /// BOM at the start of the file parses transparently but does NOT
     /// round-trip byte-stable: the canonical form drops the leading
     /// BOM (see PR-4 decision comment on #1262 and
-    /// `rustledger_parser::cst::format`'s rustdoc). The doctor reports
+    /// `rustledger_parser::format`'s rustdoc). The doctor reports
     /// `[reflow]` — same directive structure, different bytes — and
     /// the user can run `rledger format -i` to strip the BOM.
     #[test]

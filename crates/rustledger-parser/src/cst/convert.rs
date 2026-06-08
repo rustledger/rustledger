@@ -1,59 +1,37 @@
-//! CST -> `ParseResult` converter (phase 3.2-3.4 of #1262).
+//! CST -> `ParseResult` converter.
 //!
-//! [`parse_via_cst`] is a parallel implementation of the public
-//! [`crate::parse`] entry point that delegates to the CST
-//! ([`crate::parse_structured`]) and rebuilds the existing AST-shaped
-//! [`ParseResult`] by walking the typed-AST surface from
-//! [`crate::cst::ast`]. The current default code path remains the
-//! hand-rolled state-machine parser in `crate::parser`; this
-//! function is gated behind its own public export so the corpus
-//! baseline differential test can compare both paths file-by-file.
+//! [`parse_via_cst`] is the implementation behind the public
+//! [`crate::parse`] entry point. It walks the structured CST from
+//! [`crate::parse_structured`] via the typed-AST surface in
+//! [`crate::cst::ast`] and produces the legacy AST-shaped
+//! [`ParseResult`] that downstream consumers (loader, booking,
+//! validate, query, LSP) consume.
 //!
-//! ## Migration scaffolding
+//! ## Conversion scope
 //!
-//! Phase 3.2-3.4 builds out converters for each directive type
-//! incrementally. Coverage is tracked by the differential test:
-//! each converted directive type drops a corresponding file class
-//! from the test's allow-list. Once every directive type is
-//! covered and the corpus passes byte-identically, a follow-up PR
-//! flips [`crate::parse`] to call this function and a later phase
-//! deletes `crate::parser`.
+//! Per-directive converters: Open, Close, Commodity, Note,
+//! Document, Event, Query, Price, Balance, Pad, Custom, and
+//! Transaction (with its full posting / cost-spec / price-
+//! annotation / metadata / trailing-comments machinery).
 //!
-//! ## Coverage status
+//! State-only directives (Pushtag / Poptag / Pushmeta / Popmeta)
+//! mutate `tag_stack` / `meta_stack` inherited by subsequent
+//! directives; mismatched-pop and unclosed-at-EOF emit specific
+//! `ParseErrorKind` variants. Arithmetic AMOUNT expressions
+//! (`120 / 3 USD` ≡ `40 USD`) are evaluated; the same logic
+//! powers numeric values in BALANCE and PRICE directives.
 //!
-//! Implemented directive converters:
-//! - Open, Close, Commodity (single-line, simple shape)
-//! - Note, Document, Event, Query, Price (single-line)
-//! - Balance (single-line + amount + optional tolerance)
-//! - Pad (single-line, two accounts)
-//! - Custom (heterogeneous value list)
+//! Field-level extractors populate `ParseResult.options`,
+//! `.includes`, `.plugins`, `.comments`, `.currency_occurrences`.
 //!
-//! Implemented `ParseResult`-field extractors:
-//! - Option, Include, Plugin
+//! ## Error surfacing
 //!
-//! Implemented Transaction (header + postings + metadata):
-//! - Header: date, flag, payee, narration, tags, links, metadata
-//! - Postings: flag, account, units (`IncompleteAmount`), cost spec
-//!   (per-unit / total), price annotation (`@` / `@@`), metadata
-//! - Arithmetic AMOUNT expressions are NOT yet evaluated; the
-//!   converter takes the FIRST `NUMBER` child as the value.
-//!
-//! Pending:
-//! - Pushtag, Poptag, Pushmeta, Popmeta (state-only side effects
-//!   that mutate subsequent transactions; deferred — most corpus
-//!   files don't use them)
-//! - Arithmetic expression evaluation (Phase 2.4 CST shape; for
-//!   now, treats `100+5 USD` as `100 USD`)
-//! - Transaction trailing comments
-//! - Posting comments / `trailing_comments`
-//!
-//! Pending lossless features (deferred):
-//! - Document tags + links (need raw-token walk; field on
-//!   `Document` struct currently filled empty)
-//! - `currency_occurrences` field on `ParseResult` (downstream
-//!   LSP rename/references depends on this — filled empty until
-//!   Transaction lands)
-//! - Standalone `comments` field
+//! A single [`walk_descendants_once`] pass collects standalone
+//! comments, currency occurrences, and inline `ERROR_TOKEN` /
+//! mid-file-BOM errors. Specialized extractors run alongside for
+//! `ERROR_NODE` classification, transaction body errors, unclosed
+//! cost braces, indented top-level directives, and bare-currency
+//! values in custom directives.
 
 use rust_decimal::Decimal;
 use rustledger_core::cost::{CostNumber, CostSpec};
@@ -71,11 +49,11 @@ use crate::cst::ast::{
     QueryDirective, SourceFile, Transaction as AstTransaction, TransactionFlagKind,
 };
 
-/// Parse Beancount source via the CST and produce the legacy
-/// [`ParseResult`] shape. Parallel implementation of
-/// [`crate::parse`]; not yet wired as the default code path.
+/// Parse Beancount source via the CST and produce the AST-shaped
+/// [`ParseResult`]. This is the implementation behind
+/// [`crate::parse`]; the public entry delegates here unconditionally.
 ///
-/// See the module-level rustdoc for migration status.
+/// See the module-level rustdoc for the conversion scope.
 #[must_use]
 pub fn parse_via_cst(source: &str) -> ParseResult {
     // BOM detection mirrors the legacy parser's behavior: strip a

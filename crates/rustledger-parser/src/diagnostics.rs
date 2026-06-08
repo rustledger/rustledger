@@ -1,14 +1,10 @@
-//! Diagnostic helpers shared between the legacy state-machine
-//! parser ([`crate::parser`]) and the CST-backed converter
-//! ([`crate::cst::convert`]).
+//! Diagnostic helpers used by the CST-backed converter
+//! (`crate::cst::convert`).
 //!
-//! These helpers used to live in `parser.rs` (with `pub` exports
-//! threaded through `pub mod` so the CST module could reach them).
-//! Hoisted into their own module so phase 5 of #1262 can delete
-//! `crate::parser` without first having to relocate them — the
-//! CST converter doesn't depend on the legacy parser, it depends
-//! on these helpers, and that distinction should be in the module
-//! layout.
+//! Originally lived in the legacy `parser.rs` and were hoisted
+//! into their own module during the phase 3.2-3.4 architecture
+//! review (#1281) so the legacy parser could be deleted in
+//! phase 5 (#1262) without first having to relocate them.
 
 use std::borrow::Cow;
 

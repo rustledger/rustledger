@@ -1,7 +1,10 @@
-//! Beancount parser using a Logos lexer and a hand-rolled state-machine parser.
+//! Beancount parser built on a Logos lexer + structured CST.
 //!
-//! This crate provides a parser for the Beancount file format. It produces
-//! a stream of [`Directive`]s from source text, along with any parse errors.
+//! [`parse`] tokenizes via [`logos_lexer`], constructs a lossless
+//! CST through [`parse_structured`], and walks it via the
+//! converter in `cst::convert` to produce a [`ParseResult`] with
+//! the typed AST plus errors, options, includes, plugins,
+//! comments, and currency occurrences.
 //!
 //! # Features
 //!
@@ -21,9 +24,9 @@
 //!   Assets:Cash
 //! "#;
 //!
-//! let (directives, errors) = parse(source);
-//! assert!(errors.is_empty());
-//! assert_eq!(directives.len(), 1);
+//! let result = parse(source);
+//! assert!(result.errors.is_empty());
+//! assert_eq!(result.directives.len(), 1);
 //! ```
 
 #![forbid(unsafe_code)]
@@ -35,7 +38,6 @@ mod diagnostics;
 mod error;
 mod format;
 pub mod logos_lexer;
-mod parser;
 
 pub use cst::{
     BeancountLanguage, SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken, lossless_kind_tokens,
@@ -142,11 +144,7 @@ impl ParseWarning {
 /// Routes through the CST-backed implementation
 /// ([`parse_via_cst`]): a lossless Logos lexer feeds a structured
 /// CST builder, and the converter in `crate::cst::convert` walks
-/// the resulting tree to produce the legacy AST-shaped
-/// [`ParseResult`]. The previous hand-rolled state-machine parser
-/// in `crate::parser` remains in the crate for now — its own
-/// internal unit tests still call it directly. Phase 5 of #1262
-/// deletes it.
+/// the resulting tree to produce the [`ParseResult`].
 ///
 /// # Arguments
 ///

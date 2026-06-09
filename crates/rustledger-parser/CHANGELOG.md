@@ -12,14 +12,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ParseResult`, `ParseError`, and `ParseErrorKind` are now `#[non_exhaustive]`.
   Downstream consumers that pattern-match on these types must add a wildcard arm:
   ```rust
-  // Before — compiled exhaustively pre-this-release:
+  // Before - compiled exhaustively pre-this-release:
   match err.kind {
       ParseErrorKind::UnexpectedEof => ...,
       ParseErrorKind::SyntaxError(_) => ...,
       // ... every variant listed
   }
 
-  // After — wildcard arm required:
+  // After - wildcard arm required:
   match err.kind {
       ParseErrorKind::UnexpectedEof => ...,
       ParseErrorKind::SyntaxError(_) => ...,
@@ -48,7 +48,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   position is now consumed and reported as a focused single-BOM diagnostic,
   **without** consuming the following directive into the error span. Previous
   behavior silently dropped the directive immediately after a mid-file BOM
-  from `result.directives` — a regression caught by extending the
+  from `result.directives` - a regression caught by extending the
   `test_mid_file_bom_produces_error` assertion to require both directives
   surviving.
 
@@ -59,6 +59,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the parser can emit; compiler-enforced because the inner match is
   exhaustive on `&ParseErrorKind`.
 
+- `ParseResult::account_occurrences`: every `ACCOUNT` token the parser
+  consumed, paired with its interned value and source-byte range. Mirrors
+  the existing `currency_occurrences` field. Populated during the
+  `walk_descendants_once` pass (no extra parser traversal). The LSP
+  rename / references / document-highlight handlers walk this list to
+  emit exact-span edits without resorting to per-directive substring
+  search, which used to produce false positives wherever an account-name
+  fragment appeared inside a payee string, metadata value, or comment.
+  Same `#[non_exhaustive]`-safe addition pattern as previous fields.
+
 ## [0.13.0](https://github.com/rustledger/rustledger/compare/v0.12.0...v0.13.0) - 2026-04-21
 
 ### Bug Fixes
@@ -66,7 +76,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - rephrase allocation comments to be factual, not empirical
 - eliminate redundant contains check in number parsing
 - support full Unicode in account names
-- address Copilot review — tighten validator, fix Options, update docs
+- address Copilot review - tighten validator, fix Options, update docs
 - remove unused NaiveDate imports
 
 ### Performance

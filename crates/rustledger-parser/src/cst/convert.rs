@@ -77,6 +77,7 @@ pub fn parse_via_cst(source: &str) -> ParseResult {
         inline_errors,
         top_level_comments,
         currency_occurrences,
+        account_occurrences,
     } = walk_descendants_once(&source_file, bom_offset);
 
     let mut comments: Vec<Spanned<String>> = top_level_comments;
@@ -122,7 +123,7 @@ pub fn parse_via_cst(source: &str) -> ParseResult {
         // directive types). The catch-all below uses it to
         // surface a `SyntaxError` when a producing converter
         // returned `None` without emitting a more specific
-        // diagnostic — the silent-drop class of bug the integ
+        // diagnostic - the silent-drop class of bug the integ
         // tests caught for `2024-01-01 open` (no account),
         // `balance Assets:X` (no amount), etc.
         let is_directive_producing = matches!(
@@ -240,7 +241,7 @@ pub fn parse_via_cst(source: &str) -> ParseResult {
         }
     }
 
-    // Unclosed pushtag/pushmeta at EOF — legacy emits one error
+    // Unclosed pushtag/pushmeta at EOF - legacy emits one error
     // per leftover stack entry, pointing at the originating push
     // directive's span.
     for (tag, span) in &tag_stack {
@@ -271,13 +272,14 @@ pub fn parse_via_cst(source: &str) -> ParseResult {
         errors,
         warnings,
         currency_occurrences,
+        account_occurrences,
         has_leading_bom,
     }
 }
 
 // ---- Directive converters --------------------------------------
 
-/// Valid booking methods per beancount v3 — must match the
+/// Valid booking methods per beancount v3 - must match the
 /// whitelist legacy `parser::parse_open_directive` enforces. An
 /// `open` directive whose explicit booking string isn't on this
 /// list is rejected (directive dropped, `InvalidBookingMethod`
@@ -750,7 +752,7 @@ fn convert_transaction(
     // Trailing TAG / LINK tokens appearing on body lines (after
     // the header NEWLINE, OUTSIDE any POSTING / META_ENTRY child
     // node) are also part of the transaction's tag/link set per
-    // Beancount semantics — `extract_transaction_body_errors`
+    // Beancount semantics - `extract_transaction_body_errors`
     // already exempts them from the malformed-body diagnostic for
     // this reason. Aggregate them here so they don't silently
     // disappear.
@@ -896,7 +898,7 @@ fn collect_postings_with_comments(
                     //
                     // EXEMPT TAG / LINK: trailing tags/links on
                     // transaction body lines (after the header)
-                    // are valid Beancount — they extend the
+                    // are valid Beancount - they extend the
                     // transaction's tag/link set without being
                     // a new posting. Treating them as malformed
                     // would drop legitimate preceding comments
@@ -924,7 +926,7 @@ fn collect_postings_with_comments(
                         out.push(spanned);
                     } else {
                         // Failed posting consumes any pending
-                        // inter-posting comments — they belonged
+                        // inter-posting comments - they belonged
                         // to it. Without this clear, a malformed
                         // posting's preceding comments would
                         // migrate forward and attach to the NEXT
@@ -995,7 +997,7 @@ fn convert_posting(
         // the diagnostic underline covers any joining operator
         // (`+`, `*`, whitespace) between the kept amount and the
         // orphans. Without this, a user sees only `3 USD` in
-        // `5 USD + 3 USD` highlighted — and may not realize the
+        // `5 USD + 3 USD` highlighted - and may not realize the
         // `+ 3 USD` together is what needs to be removed.
         let underline_start = first_amount_end.unwrap_or(start_u32);
         let span = Span::new(
@@ -1063,7 +1065,7 @@ fn flag_char_from_posting(flag: &ast::PostingFlag) -> char {
 ///
 /// **Arithmetic limitation**: when the AMOUNT contains an
 /// arithmetic expression (`100+5 USD`), only the FIRST `NUMBER`
-/// is used. A proper expression evaluator is deferred — none of
+/// is used. A proper expression evaluator is deferred - none of
 /// the directive types we currently handle outside of postings
 /// use AMOUNT shapes that the legacy parser would have evaluated
 /// differently.
@@ -1084,7 +1086,7 @@ fn convert_amount_to_incomplete(
             // expression, unbalanced parens). Without this
             // emission the amount silently degrades to
             // `CurrencyOnly` and the user only sees a downstream
-            // "transaction doesn't balance" — masking the actual
+            // "transaction doesn't balance" - masking the actual
             // root cause. Pin the span to the AMOUNT node so the
             // diagnostic underlines the offending expression.
             let range = amt.syntax().text_range();
@@ -1106,7 +1108,7 @@ fn convert_amount_to_incomplete(
             if parsed.is_none() {
                 // Symmetry with the arithmetic-failure path: when
                 // a plain NUMBER token in an AMOUNT can't be
-                // turned into a Decimal (e.g., 30+ digits — the
+                // turned into a Decimal (e.g., 30+ digits - the
                 // lexer's NUMBER regex has no max length but
                 // `rust_decimal`'s 28-digit ceiling rejects it),
                 // surface a diagnostic instead of silently
@@ -1178,7 +1180,7 @@ fn evaluate_amount_expression(amt: &ast::Amount) -> Option<Decimal> {
 /// NUMBER, callers fall back to `parse_decimal_token`).
 ///
 /// Unlike `AMOUNT`, these directives don't wrap their value in
-/// a dedicated node — the tokens are flat under the directive
+/// a dedicated node - the tokens are flat under the directive
 /// node. The relevant region is from the FIRST `NUMBER` token up
 /// to (but not including) the FIRST `CURRENCY` token at paren-
 /// depth 0 (the amount currency). For BALANCE, this correctly
@@ -1186,7 +1188,7 @@ fn evaluate_amount_expression(amt: &ast::Amount) -> Option<Decimal> {
 /// region too.
 ///
 /// Returns `Some` only when the slice contains at least one
-/// arithmetic operator (`+`, `-`, `*`, `/`) or parens — for a
+/// arithmetic operator (`+`, `-`, `*`, `/`) or parens - for a
 /// bare single `NUMBER`, returns `None` so the caller can use
 /// the existing fast path (which preserves the legacy sign-flip
 /// behavior).
@@ -1233,7 +1235,7 @@ fn directive_arithmetic_value(node: &crate::SyntaxNode) -> Option<Decimal> {
     Some(value)
 }
 
-/// Collect AMOUNT's expression tokens — every non-trivia direct-
+/// Collect AMOUNT's expression tokens - every non-trivia direct-
 /// child token EXCEPT the trailing `CURRENCY` at paren-depth 0
 /// (which is the amount's currency, not part of the expression).
 /// Parens at any depth are preserved so `parse_arith_primary` can
@@ -1245,7 +1247,7 @@ fn amount_expression_tokens(amt: &ast::Amount) -> Vec<crate::SyntaxToken> {
         .filter_map(rowan::NodeOrToken::into_token)
         .filter(|t| !is_trivia_kind(t.kind()))
         .collect();
-    // Find the index of the LAST `CURRENCY` at depth 0 — same
+    // Find the index of the LAST `CURRENCY` at depth 0 - same
     // disambiguator as `Amount::currency()`. Tokens before that
     // index form the arithmetic expression.
     let mut depth: i32 = 0;
@@ -1262,7 +1264,7 @@ fn amount_expression_tokens(amt: &ast::Amount) -> Vec<crate::SyntaxToken> {
     raw.into_iter().take(end).collect()
 }
 
-/// `expr := term (('+' | '-') term)*` — left-associative.
+/// `expr := term (('+' | '-') term)*` - left-associative.
 fn parse_arith_expr(tokens: &[crate::SyntaxToken], cursor: &mut usize) -> Option<Decimal> {
     let mut result = parse_arith_term(tokens, cursor)?;
     while let Some(op) = tokens.get(*cursor).map(crate::SyntaxToken::kind) {
@@ -1283,7 +1285,7 @@ fn parse_arith_expr(tokens: &[crate::SyntaxToken], cursor: &mut usize) -> Option
     Some(result)
 }
 
-/// `term := primary (('*' | '/') primary)*` — left-associative.
+/// `term := primary (('*' | '/') primary)*` - left-associative.
 fn parse_arith_term(tokens: &[crate::SyntaxToken], cursor: &mut usize) -> Option<Decimal> {
     let mut result = parse_arith_primary(tokens, cursor)?;
     while let Some(op) = tokens.get(*cursor).map(crate::SyntaxToken::kind) {
@@ -1315,7 +1317,7 @@ fn parse_arith_primary(tokens: &[crate::SyntaxToken], cursor: &mut usize) -> Opt
             *cursor += 1;
             let inner = parse_arith_expr(tokens, cursor)?;
             // Mandatory closer; bail (returning None) on unbalance
-            // — `Amount::currency()` already refuses to surface a
+            // - `Amount::currency()` already refuses to surface a
             // currency for unbalanced parens, so the amount as a
             // whole degrades cleanly to `NumberOnly`/`None`.
             let close = tokens.get(*cursor)?;
@@ -1353,7 +1355,7 @@ fn convert_cost_spec(cs: &ast::CostSpec) -> CostSpec {
     // is semantically equivalent to `{{T CCY}}` (matching Python
     // beancount). Without this, the FIRST `NUMBER` would be
     // surfaced as `PerUnit{N}` and the post-`#` total would be
-    // silently dropped — inverting the post-booking value of
+    // silently dropped - inverting the post-booking value of
     // every cost-basis read of this spec form.
     let post_hash_total = cost_total_after_hash(cs);
 
@@ -1384,7 +1386,7 @@ fn convert_cost_spec(cs: &ast::CostSpec) -> CostSpec {
 /// Detect the `{N # T CCY}` cost-spec shape (a `HASH` token
 /// between two `NUMBER` tokens at the cost-spec's depth) and
 /// return `T` as a `Decimal`. Returns `None` for every other
-/// shape — `{N CCY}`, `{{T CCY}}`, `{#}`, etc.
+/// shape - `{N CCY}`, `{{T CCY}}`, `{#}`, etc.
 fn cost_total_after_hash(cs: &ast::CostSpec) -> Option<Decimal> {
     let mut seen_number = false;
     let mut past_hash = false;
@@ -1558,7 +1560,7 @@ fn meta_value_from_entry(entry: &MetaEntry) -> MetaValue {
 /// `Transaction`; meta applies to every directive's `meta` field.
 ///
 /// The meta stack is a `Vec` (not a map) to preserve shadow/pop
-/// semantics — `pushmeta x: 1; pushmeta x: 2; popmeta x` should
+/// semantics - `pushmeta x: 1; pushmeta x: 2; popmeta x` should
 /// leave `x = 1` active, which a map-replacing-on-insert can't
 /// express. Iterating in push order and inserting into the
 /// directive's meta means later entries naturally win, matching
@@ -1716,7 +1718,7 @@ fn extract_indented_directive_errors(
         if !ast::Directive::can_cast(child.kind()) {
             continue;
         }
-        // Find the directive's content start — the first non-
+        // Find the directive's content start - the first non-
         // trivia token. Leading WHITESPACE / NEWLINE / COMMENT
         // can land inside the directive node per the Directive-
         // Terminator Rule's inter-directive trivia attachment.
@@ -1731,7 +1733,7 @@ fn extract_indented_directive_errors(
         // Column = offset since the last NEWLINE in the source,
         // or since byte 0 if this is the first line. >0 means
         // the directive's first content token has leading WS on
-        // its own line — that's the indent error.
+        // its own line - that's the indent error.
         let line_start = stripped[..content_start].rfind('\n').map_or(0, |nl| nl + 1);
         if content_start > line_start {
             let end: u32 = content.text_range().end().into();
@@ -1755,7 +1757,7 @@ fn extract_indented_directive_errors(
 /// not paired with a preceding NUMBER as an Amount).
 ///
 /// Per the Beancount language spec, custom-directive values are
-/// limited to string / date / decimal / amount / boolean —
+/// limited to string / date / decimal / amount / boolean -
 /// `bean-check` rejects a bare currency literal with a syntax
 /// error. Rustledger's `extract_custom_values` has historically
 /// been more lenient, accepting ACCOUNT / TAG / LINK in value
@@ -1794,7 +1796,7 @@ fn extract_custom_value_errors(
                 continue;
             }
             if t.kind() == crate::SyntaxKind::CURRENCY {
-                // Only flag BARE CURRENCY — one that doesn't
+                // Only flag BARE CURRENCY - one that doesn't
                 // follow a NUMBER (Amount-pairing). The Amount
                 // pairing is handled by `extract_custom_values`
                 // via i+1 lookahead, so a CURRENCY that's NOT
@@ -1989,7 +1991,7 @@ fn extract_error_node_errors(
 /// error-recovery line, mirroring the legacy parser's classifier
 /// at `parser.rs:2186-2249`:
 /// 1. A Unicode-character account (`Assets:Café:…`) → primary
-///    `InvalidAccount` — it's the actionable root cause.
+///    `InvalidAccount` - it's the actionable root cause.
 /// 2. A mid-file BOM byte (`U+FEFF`) → `BomInDirectiveBody` with
 ///    `BOM_REMOVAL_HINT` so miette surfaces the remediation step.
 /// 3. Anything else → `SyntaxError("unexpected input")`.
@@ -2016,7 +2018,7 @@ fn classify_recovery_error(line_text: &str, span: Span) -> crate::ParseError {
 
 /// Walk every descendant token and emit a `ParseError` for each
 /// `ERROR_TOKEN` (or BOM-containing token) that lands inside an
-/// otherwise-valid directive node — i.e., NOT inside an
+/// otherwise-valid directive node - i.e., NOT inside an
 /// `ERROR_NODE` ancestor. Catches lexer-reject bytes the
 /// outer recovery path misses:
 /// - `.` in `.50 USD` (leading-decimal in posting amount) →
@@ -2027,7 +2029,7 @@ fn classify_recovery_error(line_text: &str, span: Span) -> crate::ParseError {
 ///
 /// The leading `SyntaxKind::BOM` token is skipped (the
 /// legitimate strict-byte-0 BOM is already tracked by
-/// `has_leading_bom`). `ERROR_NODE` descendants are skipped —
+/// `has_leading_bom`). `ERROR_NODE` descendants are skipped -
 /// `extract_error_node_errors` / `classify_recovery_error`
 /// already cover those.
 /// Result of the fused descendants-walk visitor that powers
@@ -2036,9 +2038,10 @@ struct DescendantsWalkResult {
     inline_errors: Vec<crate::ParseError>,
     top_level_comments: Vec<Spanned<String>>,
     currency_occurrences: Vec<Spanned<Currency>>,
+    account_occurrences: Vec<Spanned<rustledger_core::Account>>,
 }
 
-/// Fused single-pass visitor over `source_file`'s descendants —
+/// Fused single-pass visitor over `source_file`'s descendants -
 /// replaces three separate walks (`extract_inline_token_errors`,
 /// `extract_top_level_comments`, `extract_currency_occurrences`)
 /// with one traversal. Each walk had its own per-token cost; the
@@ -2049,6 +2052,7 @@ fn walk_descendants_once(source_file: &SourceFile, bom_offset: u32) -> Descendan
     let mut inline_errors: Vec<crate::ParseError> = Vec::new();
     let mut top_level_comments: Vec<Spanned<String>> = Vec::new();
     let mut currency_occurrences: Vec<Spanned<Currency>> = Vec::new();
+    let mut account_occurrences: Vec<Spanned<rustledger_core::Account>> = Vec::new();
 
     // `extract_top_level_comments` state: column-0 tracking.
     let mut preceded_by_ws = false;
@@ -2057,7 +2061,7 @@ fn walk_descendants_once(source_file: &SourceFile, bom_offset: u32) -> Descendan
         let rowan::NodeOrToken::Token(t) = el else {
             // `extract_top_level_comments` used the Node arm to
             // reset preceded_by_ws when entering a recognized
-            // directive. Keep that behavior — directive leading
+            // directive. Keep that behavior - directive leading
             // trivia still gets column-0-classified correctly.
             if let rowan::NodeOrToken::Node(n) = el
                 && ast::Directive::can_cast(n.kind())
@@ -2093,14 +2097,18 @@ fn walk_descendants_once(source_file: &SourceFile, bom_offset: u32) -> Descendan
         // ERROR_NODE-ancestor check is only consulted for tokens
         // whose downstream emission depends on it (CURRENCY, BOM-
         // text-containing, ERROR_TOKEN). For well-formed source
-        // most tokens fall into none of those buckets — gating
+        // most tokens fall into none of those buckets - gating
         // the per-token `parent_ancestors` walk on relevance
         // saves an O(depth) probe per WHITESPACE/NEWLINE/comment
         // token, which dominates token counts in real ledgers.
         let kind = t.kind();
         let has_bom = t.text().contains(crate::bom::BOM_CHAR);
         let is_error_token = kind == crate::SyntaxKind::ERROR_TOKEN;
-        let needs_in_error_check = kind == crate::SyntaxKind::CURRENCY || has_bom || is_error_token;
+        let needs_in_error_check = matches!(
+            kind,
+            crate::SyntaxKind::CURRENCY | crate::SyntaxKind::ACCOUNT
+        ) || has_bom
+            || is_error_token;
         if !needs_in_error_check {
             continue;
         }
@@ -2115,6 +2123,21 @@ fn walk_descendants_once(source_file: &SourceFile, bom_offset: u32) -> Descendan
             let end: u32 = range.end().into();
             let span = Span::new((start + bom_offset) as usize, (end + bom_offset) as usize);
             currency_occurrences.push(Spanned::new(Currency::new(t.text()), span));
+        }
+
+        // ACCOUNT occurrences: only outside ERROR_NODE. The same
+        // rationale as CURRENCY applies - the lexer classifies an
+        // `ACCOUNT` token by its character shape independent of
+        // whether the surrounding directive parses cleanly, and
+        // source-position-aware tooling (LSP rename / references /
+        // document-highlight) wants the token as the user typed it
+        // even during a mid-edit broken state.
+        if kind == crate::SyntaxKind::ACCOUNT && !in_error_node {
+            let range = t.text_range();
+            let start: u32 = range.start().into();
+            let end: u32 = range.end().into();
+            let span = Span::new((start + bom_offset) as usize, (end + bom_offset) as usize);
+            account_occurrences.push(Spanned::new(rustledger_core::Account::new(t.text()), span));
         }
 
         // Inline errors: BOM byte in a recognized directive
@@ -2146,6 +2169,7 @@ fn walk_descendants_once(source_file: &SourceFile, bom_offset: u32) -> Descendan
         inline_errors,
         top_level_comments,
         currency_occurrences,
+        account_occurrences,
     }
 }
 
@@ -2199,7 +2223,7 @@ fn extract_section_marker_comments(
 }
 
 // `extract_top_level_comments` and `extract_currency_occurrences`
-// are folded into `walk_descendants_once` above — see the
+// are folded into `walk_descendants_once` above - see the
 // comments there for the column-0 / ERROR_NODE-exclusion rules.
 
 // ---- Token parsing helpers -------------------------------------
@@ -2291,7 +2315,7 @@ fn node_span(node: &crate::SyntaxNode, bom_offset: u32) -> Span {
 /// so files with ledger-style `%` comments or org-mode
 /// `#!`/`#+` lines have the same span/header-tracking behavior
 /// as files with only `;` comments. Mirrors
-/// `SyntaxKind::is_trivia()` minus `BOM` — a mid-file BOM byte
+/// `SyntaxKind::is_trivia()` minus `BOM` - a mid-file BOM byte
 /// is an error to surface (`extract_inline_token_errors` /
 /// `classify_recovery_error`), not trivia to silently skip.
 const fn is_trivia_kind(kind: crate::SyntaxKind) -> bool {
@@ -2414,7 +2438,7 @@ fn fixup_directive_spans(
     // well-formed input. Falling back to the node's own
     // `text_range` rather than panicking keeps the parser usable
     // when a future change to the typed-AST surface ever de-syncs
-    // those two enumerations — a `panic!()` reachable from user
+    // those two enumerations - a `panic!()` reachable from user
     // input is a `#![forbid(unsafe_code)]`-class regression for an
     // LSP/WASM consumer.
     for (i, spanned) in directives.iter_mut().enumerate() {
@@ -2560,7 +2584,7 @@ mod tests {
         };
         assert_eq!(d.account.as_str(), "Assets:Cash");
         assert_eq!(d.path, "/path/to/file.pdf");
-        // tags/links currently unimplemented — pin as empty.
+        // tags/links currently unimplemented - pin as empty.
         assert!(d.tags.is_empty());
         assert!(d.links.is_empty());
     }
@@ -2982,7 +3006,7 @@ mod tests {
             .collect();
         assert_eq!(mismatches, vec!["bar".to_string()]);
         // and the matching #foo poptag should leave NO unclosed
-        // diagnostic — i.e. the stack is empty after the matched pop.
+        // diagnostic - i.e. the stack is empty after the matched pop.
         let leftover: Vec<_> = result
             .errors
             .iter()
@@ -3230,7 +3254,7 @@ mod tests {
 
     #[test]
     fn posting_amount_division_by_zero_drops_number() {
-        // `5 / 0 USD` — legacy returns parse error; we return None
+        // `5 / 0 USD` - legacy returns parse error; we return None
         // from the evaluator, which degrades to CurrencyOnly here.
         // The transaction won't balance and downstream validation
         // surfaces that as the user-facing error.
@@ -3242,7 +3266,7 @@ mod tests {
             panic!("expected Transaction");
         };
         // Either the units degrade to CurrencyOnly (number lost)
-        // or to None — both are acceptable since the input is
+        // or to None - both are acceptable since the input is
         // semantically invalid. The strict assertion is that we
         // DON'T silently return 5 (the first NUMBER) as the value.
         match &t.postings[0].value.units {
@@ -3279,7 +3303,7 @@ mod tests {
     #[test]
     fn indented_directive_after_blank_line_still_emits_error() {
         // Same as above but with a blank line between the
-        // first directive and the indented one — the blank line
+        // first directive and the indented one - the blank line
         // shouldn't mask the indentation error.
         let src = "2020-07-28 open Assets:Foo\n\n  2020-07-28 open Assets:Bar\n";
         let result = parse_via_cst(src);
@@ -3401,7 +3425,7 @@ mod tests {
             "expected #late-tag in tags: {:?}",
             t.tags,
         );
-        // And the comment survives — attached to the next posting.
+        // And the comment survives - attached to the next posting.
         let b = t.postings.last().expect("at least one posting");
         assert_eq!(b.value.account.as_str(), "Assets:B");
         assert!(
@@ -3444,7 +3468,7 @@ mod tests {
         // two sibling AMOUNT nodes in the CST. `Posting::amount()`
         // only returns the first. Without an explicit guard the
         // second AMOUNT plus the joining `+` would be silently
-        // dropped — the user's transaction would balance against
+        // dropped - the user's transaction would balance against
         // 5 USD instead of the intended 8 USD with no diagnostic.
         let src = "2024-01-15 * \"ambig\"\n  \
                    Expenses:Food   5 USD + 3 USD\n  \
@@ -3525,7 +3549,7 @@ mod tests {
         // to silently produce CurrencyOnly. Now an explicit
         // SyntaxError fires so the user sees the actual root
         // cause instead of just a downstream "doesn't balance".
-        // Decimal max is 28 digits — `9999999999999999999999999999 *
+        // Decimal max is 28 digits - `9999999999999999999999999999 *
         // 9999999999999999999999999999` overflows.
         let huge = "9999999999999999999999999999 * 9999999999999999999999999999";
         let src = format!("2024-01-15 * \"big\"\n  Expenses:X   {huge} USD\n  Assets:Y\n");

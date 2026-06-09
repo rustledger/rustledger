@@ -5,7 +5,6 @@
 //! - Currency names: edit all occurrences simultaneously
 
 use lsp_types::{LinkedEditingRangeParams, LinkedEditingRanges, Position, Range};
-use rustledger_core::{Directive, SYNTHESIZED_FILE_ID};
 use rustledger_parser::ParseResult;
 
 use super::utils::{
@@ -58,95 +57,43 @@ pub fn handle_linked_editing_range(
     }
 }
 
-/// Collect all ranges for an account.
+/// Collect all linked-edit ranges for an account.
+///
+/// Walks the parser's `account_occurrences` index (every `ACCOUNT`
+/// token with exact source spans) and emits one `Range` per
+/// occurrence matching `account`. Same shape as
+/// `collect_currency_ranges`. The previous shape walked the typed
+/// directives and ran a substring search inside each directive's
+/// source bytes, which produced false-positive linked-edit ranges
+/// for any account-name fragment textually present in a payee
+/// string, STRING-typed metadata value, or comment - so as the
+/// user retyped one occurrence, unrelated text in the same
+/// directive would mutate in lock-step.
 fn collect_account_ranges(
     parse_result: &ParseResult,
     line_index: &LineIndex,
     account: &str,
     ranges: &mut Vec<Range>,
 ) {
-    for spanned in &parse_result.directives {
-        let (start_line, _) = line_index.offset_to_position(spanned.span.start);
-
-        match &spanned.value {
-            Directive::Open(open) => {
-                if open.account.as_ref() == account
-                    && let Some(range) = find_in_line(line_index, start_line, account)
-                {
-                    ranges.push(range);
-                }
-            }
-            Directive::Close(close) => {
-                if close.account.as_ref() == account
-                    && let Some(range) = find_in_line(line_index, start_line, account)
-                {
-                    ranges.push(range);
-                }
-            }
-            Directive::Balance(bal) => {
-                if bal.account.as_ref() == account
-                    && let Some(range) = find_in_line(line_index, start_line, account)
-                {
-                    ranges.push(range);
-                }
-            }
-            Directive::Pad(pad) => {
-                if pad.account.as_ref() == account
-                    && let Some(range) = find_in_line(line_index, start_line, account)
-                {
-                    ranges.push(range);
-                }
-                if pad.source_account.as_ref() == account {
-                    let line_text = line_index.line_text(start_line).unwrap_or("");
-                    if let Some(first_pos) = line_text.find(account) {
-                        let after_first = first_pos + account.len();
-                        if let Some(second_pos) = line_text[after_first..].find(account)
-                            && let Some(start) = line_index
-                                .byte_in_line_to_position(start_line, after_first + second_pos)
-                            && let Some(end) = line_index.byte_in_line_to_position(
-                                start_line,
-                                after_first + second_pos + account.len(),
-                            )
-                        {
-                            ranges.push(Range { start, end });
-                        }
-                    }
-                }
-            }
-            Directive::Note(note) => {
-                if note.account.as_ref() == account
-                    && let Some(range) = find_in_line(line_index, start_line, account)
-                {
-                    ranges.push(range);
-                }
-            }
-            Directive::Document(doc) => {
-                if doc.account.as_ref() == account
-                    && let Some(range) = find_in_line(line_index, start_line, account)
-                {
-                    ranges.push(range);
-                }
-            }
-            Directive::Transaction(txn) => {
-                // Per-posting span lookup (see #1142): the prior
-                // `start_line + 1 + i` arithmetic broke whenever a
-                // transaction had interleaved posting-level metadata.
-                for spanned_posting in &txn.postings {
-                    if spanned_posting.file_id == SYNTHESIZED_FILE_ID {
-                        continue;
-                    }
-                    if spanned_posting.account.as_ref() == account {
-                        let (posting_line, _) =
-                            line_index.offset_to_position(spanned_posting.span.start);
-                        if let Some(range) = find_in_line(line_index, posting_line, account) {
-                            ranges.push(range);
-                        }
-                    }
-                }
-            }
-            _ => {}
+    for occurrence in &parse_result.account_occurrences {
+        if occurrence.value != account {
+            continue;
         }
+        let (start_line, start_col) = line_index.offset_to_position(occurrence.span.start);
+        let (end_line, end_col) = line_index.offset_to_position(occurrence.span.end);
+        ranges.push(Range {
+            start: Position::new(start_line, start_col),
+            end: Position::new(end_line, end_col),
+        });
     }
+
+    ranges.sort_by(|a, b| {
+        a.start
+            .line
+            .cmp(&b.start.line)
+            .then(a.start.character.cmp(&b.start.character))
+    });
+    ranges.dedup_by(|a, b| a == b);
 }
 
 /// Collect all ranges for a currency.
@@ -188,17 +135,6 @@ fn collect_currency_ranges(
             .then(a.start.character.cmp(&b.start.character))
     });
     ranges.dedup();
-}
-
-/// Find a string in a specific line — encoding-aware via the
-/// LineIndex. Pre-round-19 emitted raw byte offsets as columns,
-/// which broke under UTF-16 on non-ASCII content.
-fn find_in_line(line_index: &LineIndex<'_>, line_num: u32, needle: &str) -> Option<Range> {
-    let line = line_index.line_text(line_num)?;
-    let col = line.find(needle)?;
-    let start = line_index.byte_in_line_to_position(line_num, col)?;
-    let end = line_index.byte_in_line_to_position(line_num, col + needle.len())?;
-    Some(Range { start, end })
 }
 
 #[cfg(test)]
@@ -306,6 +242,51 @@ mod tests {
             ranges.ranges.len(),
             3,
             "expected 3 linked-edit ranges, got {}: {:#?}",
+            ranges.ranges.len(),
+            ranges.ranges
+        );
+    }
+
+    /// Regression test for account linked-editing false positives -
+    /// phase 5.5 of the CST migration (#1262). Linked editing
+    /// mutates each range *together* as the user types, so a
+    /// false-positive range inside a payee string or comment used
+    /// to silently corrupt that text. The CST-backed walk over
+    /// `account_occurrences` makes the corruption impossible.
+    #[test]
+    fn test_linked_editing_account_no_false_positives() {
+        let source = r#"2024-01-01 open Assets:Bank USD
+2024-01-15 * "Assets:Bank transfer note"
+  Assets:Bank  -5.00 USD
+    memo: "moved Assets:Bank balance"
+  Expenses:Food
+; rebalanced Assets:Bank yesterday
+"#;
+        let result = parse(source);
+        assert!(
+            result.errors.is_empty(),
+            "parse errors: {:?}",
+            result.errors
+        );
+        let uri: lsp_types::Uri = "file:///test.beancount".parse().unwrap();
+        let params = LinkedEditingRangeParams {
+            text_document_position_params: lsp_types::TextDocumentPositionParams {
+                text_document: lsp_types::TextDocumentIdentifier { uri },
+                position: Position::new(0, 16), // on `Assets:Bank` of the open
+            },
+            work_done_progress_params: Default::default(),
+        };
+        let ranges = handle_linked_editing_range(&params, source, &result, PositionEncoding::Utf16)
+            .expect("linked editing returns Some");
+        // Expected: 2 ranges - the open's ACCOUNT token and the
+        // posting's ACCOUNT token. The substring-search shape
+        // would have produced 5 (including 3 phantoms in payee,
+        // STRING-typed metadata value, and comment - any of which
+        // would corrupt user text as they typed).
+        assert_eq!(
+            ranges.ranges.len(),
+            2,
+            "expected 2 linked-edit ranges, got {}: {:#?}",
             ranges.ranges.len(),
             ranges.ranges
         );

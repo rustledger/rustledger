@@ -6,11 +6,11 @@
 //! - Payees (all transactions with same payee)
 
 use super::utils::{
-    LineIndex, PositionEncoding, commodity_declaration_spans, get_word_at_position,
-    is_account_like, is_currency_like,
+    LineIndex, PositionEncoding, account_declaration_spans, commodity_declaration_spans,
+    get_word_at_position, is_account_like, is_currency_like,
 };
 use lsp_types::{Location, Position, Range, ReferenceParams, Uri};
-use rustledger_core::{Directive, SYNTHESIZED_FILE_ID};
+use rustledger_core::Directive;
 use rustledger_parser::ParseResult;
 
 /// Handle a find references request.
@@ -39,7 +39,6 @@ pub fn handle_references(
     // Check if it's an account
     if is_account_like(&word) {
         collect_account_references(
-            source,
             parse_result,
             &line_index,
             &word,
@@ -79,8 +78,22 @@ pub fn handle_references(
 }
 
 /// Collect all references to an account.
+///
+/// Walks the parser's `account_occurrences` index (every `ACCOUNT`
+/// token with exact source spans) and emits one `Location` per
+/// occurrence matching `account`. The previous shape walked the
+/// typed directives and ran a substring search inside each
+/// directive's source bytes, which produced false positives in
+/// payee strings, comments, and STRING-typed metadata values
+/// containing the account name as a substring (e.g.
+/// `2024-01-15 * "Assets:Bank transfer"` with a real
+/// `Assets:Bank` posting in the same transaction).
+///
+/// To honor `include_declaration`, we look up the *declared*
+/// account token in each `Open` directive via
+/// [`account_declaration_spans`] - same shape as the
+/// currency-references path's use of `commodity_declaration_spans`.
 fn collect_account_references(
-    source: &str,
     parse_result: &ParseResult,
     line_index: &LineIndex,
     account: &str,
@@ -88,140 +101,37 @@ fn collect_account_references(
     include_declaration: bool,
     locations: &mut Vec<Location>,
 ) {
-    for spanned in &parse_result.directives {
-        match &spanned.value {
-            Directive::Open(open) => {
-                if open.account.as_ref() == account
-                    && include_declaration
-                    && let Some(loc) = find_in_directive(
-                        source,
-                        line_index,
-                        spanned.span.start,
-                        spanned.span.end,
-                        account,
-                        uri,
-                    )
-                {
-                    locations.push(loc);
-                }
-            }
-            Directive::Close(close) => {
-                if close.account.as_ref() == account
-                    && let Some(loc) = find_in_directive(
-                        source,
-                        line_index,
-                        spanned.span.start,
-                        spanned.span.end,
-                        account,
-                        uri,
-                    )
-                {
-                    locations.push(loc);
-                }
-            }
-            Directive::Balance(bal) => {
-                if bal.account.as_ref() == account
-                    && let Some(loc) = find_in_directive(
-                        source,
-                        line_index,
-                        spanned.span.start,
-                        spanned.span.end,
-                        account,
-                        uri,
-                    )
-                {
-                    locations.push(loc);
-                }
-            }
-            Directive::Pad(pad) => {
-                if pad.account.as_ref() == account
-                    && let Some(loc) = find_in_directive(
-                        source,
-                        line_index,
-                        spanned.span.start,
-                        spanned.span.end,
-                        account,
-                        uri,
-                    )
-                {
-                    locations.push(loc);
-                }
-                if pad.source_account.as_ref() == account {
-                    // Find the second account mention
-                    let directive_text = &source[spanned.span.start..spanned.span.end];
-                    if let Some(first_pos) = directive_text.find(account) {
-                        let after_first = first_pos + account.len();
-                        if let Some(second_pos) = directive_text[after_first..].find(account) {
-                            let actual_pos = after_first + second_pos;
-                            let (line, _) = line_index.offset_to_position(spanned.span.start);
-                            locations.push(Location {
-                                uri: uri.clone(),
-                                range: Range {
-                                    start: Position::new(line, actual_pos as u32),
-                                    end: Position::new(line, (actual_pos + account.len()) as u32),
-                                },
-                            });
-                        }
-                    }
-                }
-            }
-            Directive::Note(note) => {
-                if note.account.as_ref() == account
-                    && let Some(loc) = find_in_directive(
-                        source,
-                        line_index,
-                        spanned.span.start,
-                        spanned.span.end,
-                        account,
-                        uri,
-                    )
-                {
-                    locations.push(loc);
-                }
-            }
-            Directive::Document(doc) => {
-                if doc.account.as_ref() == account
-                    && let Some(loc) = find_in_directive(
-                        source,
-                        line_index,
-                        spanned.span.start,
-                        spanned.span.end,
-                        account,
-                        uri,
-                    )
-                {
-                    locations.push(loc);
-                }
-            }
-            Directive::Transaction(txn) => {
-                // Per-posting span lookup (see #1142): the prior
-                // `start_line + 1 + i` arithmetic broke whenever a
-                // transaction had interleaved posting-level metadata.
-                for spanned_posting in &txn.postings {
-                    if spanned_posting.file_id == SYNTHESIZED_FILE_ID {
-                        continue;
-                    }
-                    if spanned_posting.account.as_ref() == account {
-                        let (posting_line, _) =
-                            line_index.offset_to_position(spanned_posting.span.start);
-                        if let Some(line_text) = source.lines().nth(posting_line as usize)
-                            && let Some(col) = line_text.find(account)
-                            && let Some(start) =
-                                line_index.byte_in_line_to_position(posting_line, col)
-                            && let Some(end) = line_index
-                                .byte_in_line_to_position(posting_line, col + account.len())
-                        {
-                            locations.push(Location {
-                                uri: uri.clone(),
-                                range: Range { start, end },
-                            });
-                        }
-                    }
-                }
-            }
-            _ => {}
+    let declaration_spans = account_declaration_spans(parse_result);
+
+    for occurrence in &parse_result.account_occurrences {
+        if occurrence.value != account {
+            continue;
         }
+        let is_declaration = declaration_spans.contains(&occurrence.span);
+        if is_declaration && !include_declaration {
+            continue;
+        }
+        let (start_line, start_col) = line_index.offset_to_position(occurrence.span.start);
+        let (end_line, end_col) = line_index.offset_to_position(occurrence.span.end);
+        locations.push(Location {
+            uri: uri.clone(),
+            range: Range {
+                start: Position::new(start_line, start_col),
+                end: Position::new(end_line, end_col),
+            },
+        });
     }
+
+    // Defensive dedup, same shape as the currency path - see
+    // `collect_currency_references` for why this guard is here.
+    locations.sort_by(|a, b| {
+        a.range
+            .start
+            .line
+            .cmp(&b.range.start.line)
+            .then(a.range.start.character.cmp(&b.range.start.character))
+    });
+    locations.dedup_by(|a, b| a.range == b.range);
 }
 
 /// Collect all references to a currency.
@@ -313,54 +223,6 @@ fn collect_payee_references(
             }
         }
     }
-}
-
-/// Find a string in a directive and create a location.
-fn find_in_directive(
-    source: &str,
-    line_index: &LineIndex,
-    start_offset: usize,
-    end_offset: usize,
-    needle: &str,
-    uri: &Uri,
-) -> Option<Location> {
-    let directive_text = &source[start_offset..end_offset];
-
-    // Walk the directive's lines and emit BYTE-OFFSET-based ranges
-    // routed through the LineIndex's encoding-aware conversion.
-    // Pre-round-19 mixed encoded `start_col` (negotiated encoding)
-    // with raw `col` (byte offset within line) — broken under UTF-16
-    // negotiation on any non-ASCII content.
-    let mut byte_cursor = start_offset;
-    for line in directive_text.lines() {
-        if let Some(col) = line.find(needle) {
-            let needle_start = byte_cursor + col;
-            let needle_end = needle_start + needle.len();
-            let (sl, sc) = line_index.offset_to_position(needle_start);
-            let (el, ec) = line_index.offset_to_position(needle_end);
-            return Some(Location {
-                uri: uri.clone(),
-                range: Range {
-                    start: Position::new(sl, sc),
-                    end: Position::new(el, ec),
-                },
-            });
-        }
-        // Advance byte_cursor past this line + its terminator. `lines()`
-        // yields content without the terminator, so add the length of
-        // the terminator that follows it in source.
-        byte_cursor += line.len();
-        // Skip the line terminator (`\n` or `\r\n`); only the bytes
-        // strictly within `directive_text` are addressable here.
-        let remaining = &source[byte_cursor.min(end_offset)..end_offset];
-        if remaining.starts_with("\r\n") {
-            byte_cursor += 2;
-        } else if remaining.starts_with('\n') {
-            byte_cursor += 1;
-        }
-    }
-
-    None
 }
 
 /// Check if position is inside quotes.
@@ -513,6 +375,79 @@ mod tests {
             refs_no_decl.len(),
             2,
             "expected 2 non-declaration references, got {}: {refs_no_decl:#?}",
+            refs_no_decl.len()
+        );
+    }
+
+    /// Regression test for account-reference false positives -
+    /// phase 5.5 of the CST migration (#1262). Same shape as
+    /// `test_find_currency_references_no_false_positives` and
+    /// `rename::test_rename_account_no_false_positives`.
+    #[test]
+    fn test_find_account_references_no_false_positives() {
+        // Source carefully constructed to embed the literal string
+        // `Assets:Bank` in payee, STRING-typed metadata, and
+        // comment positions inside the same directives that
+        // legitimately reference the account. The CST-backed walk
+        // emits NO edits for these because the lexer classified
+        // them as STRING / META_VALUE / COMMENT, not ACCOUNT.
+        let source = r#"2024-01-01 open Assets:Bank USD
+2024-01-15 * "Assets:Bank transfer note"
+  Assets:Bank  -5.00 USD
+    memo: "moved Assets:Bank balance"
+  Expenses:Food
+; rebalanced Assets:Bank yesterday
+"#;
+        let result = parse(source);
+        assert!(
+            result.errors.is_empty(),
+            "parse errors: {:?}",
+            result.errors
+        );
+        let uri: Uri = "file:///test.beancount".parse().unwrap();
+        let params = ReferenceParams {
+            text_document_position: lsp_types::TextDocumentPositionParams {
+                text_document: lsp_types::TextDocumentIdentifier { uri: uri.clone() },
+                position: Position::new(0, 16), // on `Assets:Bank` of the open
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+            context: lsp_types::ReferenceContext {
+                include_declaration: true,
+            },
+        };
+        let refs = handle_references(&params, source, &result, &uri, PositionEncoding::Utf16)
+            .expect("references returns Some");
+        // Expected: 2 references - the open's ACCOUNT token and
+        // the posting's ACCOUNT token. The substring-search shape
+        // would have produced 5 (the 2 valid + payee string +
+        // STRING-typed metadata + trailing comment).
+        assert_eq!(
+            refs.len(),
+            2,
+            "expected 2 account references, got {}: {refs:#?}",
+            refs.len()
+        );
+
+        // include_declaration: false drops the open occurrence.
+        let params_no_decl = ReferenceParams {
+            context: lsp_types::ReferenceContext {
+                include_declaration: false,
+            },
+            ..params
+        };
+        let refs_no_decl = handle_references(
+            &params_no_decl,
+            source,
+            &result,
+            &uri,
+            PositionEncoding::Utf16,
+        )
+        .expect("references returns Some");
+        assert_eq!(
+            refs_no_decl.len(),
+            1,
+            "expected 1 non-declaration account reference, got {}: {refs_no_decl:#?}",
             refs_no_decl.len()
         );
     }

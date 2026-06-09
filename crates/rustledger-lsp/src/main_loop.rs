@@ -965,12 +965,12 @@ impl MainLoopState {
             serde_json::from_value(req.params).map_err(|e| e.to_string())?;
 
         let uri = &params.text_document.uri;
-        let (text, _parse_result) = self.get_document_data(uri);
+        let (text, parse_result) = self.get_document_data(uri);
 
-        // The CST-backed handler re-parses internally; parse_result
-        // is unused. Kept the destructure shape so a single-pass
-        // refactor to a shared CST cache stays a localized edit.
-        let response = handle_selection_range(&params, &text, self.position_encoding);
+        // CST handle comes from the cached ParseResult via
+        // `parse_result.syntax_root`; no per-request re-parse.
+        let response =
+            handle_selection_range(&params, &text, &parse_result, self.position_encoding);
 
         serde_json::to_value(response).map_err(|e| e.to_string())
     }

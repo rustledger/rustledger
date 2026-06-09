@@ -215,6 +215,30 @@ pub struct ParseResult {
     /// already include the 3-byte BOM offset and index directly into
     /// the caller's source.
     pub has_leading_bom: bool,
+    /// The lossless CST root the converter walked to produce
+    /// everything above. Stored as a [`rowan::GreenNode`], which
+    /// is `Send + Sync` and reference-counted internally, so an
+    /// `Arc<ParseResult>` (the shape the LSP caches per document)
+    /// shares this handle across handler invocations without
+    /// re-parsing.
+    ///
+    /// Reconstruct a walkable cursor with
+    /// `SyntaxNode::new_root(parse_result.syntax_root.clone())`.
+    /// The clone is cheap (an `Arc` bump); the resulting
+    /// `SyntaxNode` is the same tree the typed fields above were
+    /// built from.
+    ///
+    /// **Canonical-payload exclusion.** This field is deliberately
+    /// NOT fed into [`__baseline_canonical_payload`]. The green
+    /// node is a redundant cache of the source bytes; the
+    /// existing `directives` / `currency_occurrences` /
+    /// `account_occurrences` / `errors` fields already capture
+    /// everything downstream consumers track for drift detection.
+    /// Adding the green node's `Debug` output would multiply
+    /// the fingerprint size without surfacing any new drift
+    /// signal. The corresponding `assert_field_in_hash` arm is
+    /// also intentionally absent in `tests/corpus_baseline.rs`.
+    pub syntax_root: rowan::GreenNode,
 }
 
 /// A warning from the parser (non-fatal).
@@ -308,7 +332,13 @@ pub fn __baseline_canonical_payload(result: &ParseResult) -> Vec<u8> {
         currency_occurrences,
         account_occurrences,
         has_leading_bom,
+        syntax_root,
     } = result;
+    // `syntax_root` is a redundant cache of the source bytes; see
+    // its rustdoc. Bind it (so the compiler still flags future
+    // field additions on this exhaustive destructure) but discard
+    // it from the canonical payload.
+    let _ = syntax_root;
     let mut out: Vec<u8> = Vec::new();
     let directives_json = serde_json::to_value(directives)
         .map_or_else(|e| format!("serialize-error:{e}"), |v| v.to_string());

@@ -37,29 +37,26 @@
 
 use lsp_types::{Position, Range, SelectionRange, SelectionRangeParams};
 use rustledger_parser::{
-    SyntaxKind, SyntaxNode, SyntaxToken, TextRange, TextSize, TokenAtOffset, parse_structured,
+    ParseResult, SyntaxKind, SyntaxNode, SyntaxToken, TextRange, TextSize, TokenAtOffset,
 };
 
 use super::utils::{LineIndex, PositionEncoding, is_word_char};
 
 /// Handle a `textDocument/selectionRange` request.
 ///
-/// **Performance follow-up.** The handler re-parses the source on
-/// every request via [`parse_structured`]. The VFS cache already
-/// holds a `ParseResult` from `parse_via_cst`, which built and
-/// then discarded a `SyntaxNode` internally - so the document is
-/// effectively parsed twice on every selectionRange request. The
-/// architectural fix is to add an `Arc<rowan::GreenNode>` (or a
-/// thread-safe handle to the CST root) to `ParseResult` so a
-/// shared cache backs all CST-walking handlers - not just this
-/// one but the planned folding-range / range-formatter / account-
-/// rename rewrites. Tracked as a follow-up to #1262 phase 5.
+/// Consumes the cached CST root from `parse_result.syntax_root`
+/// instead of re-parsing the source. Previous shape called
+/// `parse_structured(source)` per request, doubling the parse
+/// cost (the VFS cache already parses once for the `ParseResult`).
+/// The `Arc<GreenNode>` cache landed in phase 5.5 of #1262
+/// alongside this change.
 pub fn handle_selection_range(
     params: &SelectionRangeParams,
     source: &str,
+    parse_result: &ParseResult,
     encoding: PositionEncoding,
 ) -> Option<Vec<SelectionRange>> {
-    let cst = parse_structured(source);
+    let cst = SyntaxNode::new_root(parse_result.syntax_root.clone());
     let line_index = LineIndex::new(source, encoding);
     let mut results = Vec::with_capacity(params.positions.len());
 
@@ -403,7 +400,10 @@ mod tests {
             work_done_progress_params: Default::default(),
             partial_result_params: Default::default(),
         };
-        let result = handle_selection_range(&params, source, PositionEncoding::Utf16).unwrap();
+        let parse_result = rustledger_parser::parse(source);
+        let result =
+            handle_selection_range(&params, source, &parse_result, PositionEncoding::Utf16)
+                .unwrap();
         assert_eq!(result.len(), 1);
         let mut out = Vec::new();
         let mut cur: Option<&SelectionRange> = Some(&result[0]);
@@ -655,7 +655,9 @@ mod tests {
             work_done_progress_params: Default::default(),
             partial_result_params: Default::default(),
         };
-        let result = handle_selection_range(&params, source, PositionEncoding::Utf8).expect("Some");
+        let parse_result = rustledger_parser::parse(source);
+        let result = handle_selection_range(&params, source, &parse_result, PositionEncoding::Utf8)
+            .expect("Some");
         assert_eq!(result.len(), 1);
         let mut chain = Vec::new();
         let mut cur: Option<&SelectionRange> = Some(&result[0]);

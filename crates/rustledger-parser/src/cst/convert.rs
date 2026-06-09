@@ -263,6 +263,14 @@ pub fn parse_via_cst(source: &str) -> ParseResult {
     // directive trivia to the next directive's start).
     fixup_directive_spans(&source_file, bom_offset, &directive_nodes, &mut directives);
 
+    // Capture the green root before we drop `source_file`. The
+    // `.green()` call returns a Cow so we promote to owned with
+    // `into_owned()`; the resulting `GreenNode` is reference-
+    // counted internally, cheap to clone, and `Send + Sync` -
+    // safe to stash in `Arc<ParseResult>` that the LSP shares
+    // across threads.
+    let syntax_root = source_file.syntax().green().into_owned();
+
     ParseResult {
         directives,
         options,
@@ -274,6 +282,7 @@ pub fn parse_via_cst(source: &str) -> ParseResult {
         currency_occurrences,
         account_occurrences,
         has_leading_bom,
+        syntax_root,
     }
 }
 

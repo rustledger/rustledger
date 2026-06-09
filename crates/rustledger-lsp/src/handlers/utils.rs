@@ -506,6 +506,51 @@ pub fn commodity_declaration_spans(
         .collect()
 }
 
+/// The spans of every `Open` directive's declared account token.
+///
+/// Account references in beancount come from six directive kinds
+/// (`open` / `close` / `balance` / `pad` / `note` / `document`)
+/// PLUS posting accounts in transactions PLUS ACCOUNT-typed
+/// metadata values. Of those, the "declaration" is conventionally
+/// only the `open` directive's account - matching the
+/// LSP `Find References > Include Declaration` toggle pattern.
+///
+/// The `account_occurrences` list in `ParseResult` is flat (it
+/// does not differentiate declaration sites from reference
+/// sites - see the field's `# Limitations` rustdoc). This helper
+/// builds the declaration set by walking the typed directives for
+/// `Open` and finding the first `ACCOUNT` token within each
+/// directive's source span. Same pattern as
+/// [`commodity_declaration_spans`].
+///
+/// The "first ACCOUNT inside the directive span" lookup is
+/// correct even when the `Open` carries ACCOUNT-typed metadata
+/// (e.g. `payee_account: Assets:Bank`) - the declared account
+/// always appears at the directive header position, before any
+/// metadata sub-line.
+///
+/// Returns a `HashSet` so callers can ask "is this occurrence a
+/// declaration?" in O(1).
+#[must_use]
+pub fn account_declaration_spans(
+    parse_result: &ParseResult,
+) -> std::collections::HashSet<rustledger_parser::Span> {
+    parse_result
+        .directives
+        .iter()
+        .filter_map(|d| {
+            if !matches!(&d.value, rustledger_core::Directive::Open(_)) {
+                return None;
+            }
+            parse_result
+                .account_occurrences
+                .iter()
+                .find(|o| o.span.start >= d.span.start && o.span.end <= d.span.end)
+                .map(|o| o.span)
+        })
+        .collect()
+}
+
 /// Check if a string looks like a currency, validating against known currencies.
 ///
 /// Validates the format (uppercase-and-digits, 2-24 chars) and then

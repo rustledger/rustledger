@@ -95,6 +95,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `tests/baselines/parser-corpus.manifest` was regenerated as part of
   this change.
 
+- `ParseResult::syntax_root`: a `rowan::GreenNode` handle to the
+  lossless CST root that the converter walked to produce every other
+  field. The green node is `Send + Sync` and reference-counted
+  internally, so an `Arc<ParseResult>` (the shape the LSP caches per
+  document) shares this handle across handler invocations without
+  re-parsing. CST-walking consumers reconstruct a `SyntaxNode` via
+  `SyntaxNode::new_root(parse_result.syntax_root.clone())` (the clone
+  is an `Arc` bump). Phase 5.5 of #1262; backs the
+  `selection_range` handler's cache. Deliberately excluded from
+  `__baseline_canonical_payload` since it is a redundant view of the
+  source bytes already captured by `directives` / `occurrences` /
+  `errors`. The destructure binds the field for the compiler check;
+  no `assert_field_in_hash` arm is added since mutation wouldn't
+  change the canonical hash.
+
 ## [0.13.0](https://github.com/rustledger/rustledger/compare/v0.12.0...v0.13.0) - 2026-04-21
 
 ### Bug Fixes

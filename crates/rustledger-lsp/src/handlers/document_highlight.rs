@@ -8,12 +8,12 @@
 use lsp_types::{
     DocumentHighlight, DocumentHighlightKind, DocumentHighlightParams, Position, Range,
 };
-use rustledger_core::{Directive, SYNTHESIZED_FILE_ID};
+use rustledger_core::Directive;
 use rustledger_parser::ParseResult;
 
 use super::utils::{
-    LineIndex, PositionEncoding, commodity_declaration_spans, get_word_at_position,
-    is_account_like, is_currency_like,
+    LineIndex, PositionEncoding, account_declaration_spans, commodity_declaration_spans,
+    get_word_at_position, is_account_like, is_currency_like,
 };
 
 /// Handle a document highlight request.
@@ -58,120 +58,54 @@ pub fn handle_document_highlight(
 }
 
 /// Collect all highlights for an account.
+///
+/// Walks the parser's `account_occurrences` index (every `ACCOUNT`
+/// token with exact source spans). Occurrences whose span equals
+/// an `Open` directive's declared-account span (per
+/// [`account_declaration_spans`]) surface as `WRITE`; all other
+/// occurrences (close / balance / pad / note / document /
+/// posting / ACCOUNT-typed metadata) surface as `READ`. Same
+/// shape as `collect_currency_highlights`. The previous shape
+/// walked the typed directives and ran substring searches,
+/// producing false-positive highlights for any account-name
+/// fragment appearing in a payee string, STRING-typed metadata
+/// value, or comment.
 fn collect_account_highlights(
     parse_result: &ParseResult,
     line_index: &LineIndex,
     account: &str,
     highlights: &mut Vec<DocumentHighlight>,
 ) {
-    for spanned in &parse_result.directives {
-        let (start_line, _) = line_index.offset_to_position(spanned.span.start);
+    let declaration_spans = account_declaration_spans(parse_result);
 
-        match &spanned.value {
-            Directive::Open(open) => {
-                if open.account.as_ref() == account
-                    && let Some(range) = find_in_line(line_index, start_line, account)
-                {
-                    highlights.push(DocumentHighlight {
-                        range,
-                        kind: Some(DocumentHighlightKind::WRITE), // Definition
-                    });
-                }
-            }
-            Directive::Close(close) => {
-                if close.account.as_ref() == account
-                    && let Some(range) = find_in_line(line_index, start_line, account)
-                {
-                    highlights.push(DocumentHighlight {
-                        range,
-                        kind: Some(DocumentHighlightKind::WRITE),
-                    });
-                }
-            }
-            Directive::Balance(bal) => {
-                if bal.account.as_ref() == account
-                    && let Some(range) = find_in_line(line_index, start_line, account)
-                {
-                    highlights.push(DocumentHighlight {
-                        range,
-                        kind: Some(DocumentHighlightKind::READ),
-                    });
-                }
-            }
-            Directive::Pad(pad) => {
-                if pad.account.as_ref() == account
-                    && let Some(range) = find_in_line(line_index, start_line, account)
-                {
-                    highlights.push(DocumentHighlight {
-                        range,
-                        kind: Some(DocumentHighlightKind::READ),
-                    });
-                }
-                if pad.source_account.as_ref() == account {
-                    // Find second occurrence — route both positions
-                    // through line_index for encoding correctness.
-                    let line_text = line_index.line_text(start_line).unwrap_or("");
-                    if let Some(first_pos) = line_text.find(account) {
-                        let after_first = first_pos + account.len();
-                        if let Some(second_pos) = line_text[after_first..].find(account)
-                            && let Some(start) = line_index
-                                .byte_in_line_to_position(start_line, after_first + second_pos)
-                            && let Some(end) = line_index.byte_in_line_to_position(
-                                start_line,
-                                after_first + second_pos + account.len(),
-                            )
-                        {
-                            highlights.push(DocumentHighlight {
-                                range: Range { start, end },
-                                kind: Some(DocumentHighlightKind::READ),
-                            });
-                        }
-                    }
-                }
-            }
-            Directive::Note(note) => {
-                if note.account.as_ref() == account
-                    && let Some(range) = find_in_line(line_index, start_line, account)
-                {
-                    highlights.push(DocumentHighlight {
-                        range,
-                        kind: Some(DocumentHighlightKind::READ),
-                    });
-                }
-            }
-            Directive::Document(doc) => {
-                if doc.account.as_ref() == account
-                    && let Some(range) = find_in_line(line_index, start_line, account)
-                {
-                    highlights.push(DocumentHighlight {
-                        range,
-                        kind: Some(DocumentHighlightKind::READ),
-                    });
-                }
-            }
-            Directive::Transaction(txn) => {
-                // Per-posting span lookup (see #1142): the prior
-                // `start_line + 1 + i` arithmetic broke whenever a
-                // transaction had interleaved posting-level metadata.
-                for spanned_posting in &txn.postings {
-                    if spanned_posting.file_id == SYNTHESIZED_FILE_ID {
-                        continue;
-                    }
-                    if spanned_posting.account.as_ref() == account {
-                        let (posting_line, _) =
-                            line_index.offset_to_position(spanned_posting.span.start);
-                        if let Some(range) = find_in_line(line_index, posting_line, account) {
-                            highlights.push(DocumentHighlight {
-                                range,
-                                kind: Some(DocumentHighlightKind::READ),
-                            });
-                        }
-                    }
-                }
-            }
-            _ => {}
+    for occurrence in &parse_result.account_occurrences {
+        if occurrence.value != account {
+            continue;
         }
+        let (start_line, start_col) = line_index.offset_to_position(occurrence.span.start);
+        let (end_line, end_col) = line_index.offset_to_position(occurrence.span.end);
+        let is_declaration = declaration_spans.contains(&occurrence.span);
+        highlights.push(DocumentHighlight {
+            range: Range {
+                start: Position::new(start_line, start_col),
+                end: Position::new(end_line, end_col),
+            },
+            kind: Some(if is_declaration {
+                DocumentHighlightKind::WRITE
+            } else {
+                DocumentHighlightKind::READ
+            }),
+        });
     }
+
+    highlights.sort_by(|a, b| {
+        a.range
+            .start
+            .line
+            .cmp(&b.range.start.line)
+            .then(a.range.start.character.cmp(&b.range.start.character))
+    });
+    highlights.dedup_by(|a, b| a.range == b.range);
 }
 
 /// Collect all highlights for a currency.
@@ -251,17 +185,6 @@ fn collect_payee_highlights(
             }
         }
     }
-}
-
-/// Find a string in a specific line — encoding-aware via the
-/// LineIndex. Pre-round-19 emitted raw byte offsets as columns,
-/// which broke under UTF-16 on non-ASCII content.
-fn find_in_line(line_index: &LineIndex<'_>, line_num: u32, needle: &str) -> Option<Range> {
-    let line = line_index.line_text(line_num)?;
-    let col = line.find(needle)?;
-    let start = line_index.byte_in_line_to_position(line_num, col)?;
-    let end = line_index.byte_in_line_to_position(line_num, col + needle.len())?;
-    Some(Range { start, end })
 }
 
 fn is_in_quotes(line: &str, col: usize) -> bool {
@@ -499,5 +422,53 @@ mod tests {
             highlights.iter().any(|h| h.range.start.line == 2),
             "Assets:Bank posting on line 2 should be highlighted; got {highlights:?}"
         );
+    }
+
+    /// Regression test for account-highlight false positives -
+    /// phase 5.5 of the CST migration (#1262). Same shape as
+    /// `references::test_find_account_references_no_false_positives`.
+    /// The CST-backed walk emits exactly two highlights (one WRITE
+    /// for the Open, one READ for the posting); the substring-search
+    /// shape would have produced 5 (including phantom highlights in
+    /// the payee string, STRING-typed metadata value, and comment).
+    #[test]
+    fn test_highlight_account_no_false_positives() {
+        let source = r#"2024-01-01 open Assets:Bank USD
+2024-01-15 * "Assets:Bank transfer note"
+  Assets:Bank  -5.00 USD
+    memo: "moved Assets:Bank balance"
+  Expenses:Food
+; rebalanced Assets:Bank yesterday
+"#;
+        let result = parse(source);
+        assert!(
+            result.errors.is_empty(),
+            "parse errors: {:?}",
+            result.errors
+        );
+        let uri: lsp_types::Uri = "file:///test.beancount".parse().unwrap();
+        let params = DocumentHighlightParams {
+            text_document_position_params: lsp_types::TextDocumentPositionParams {
+                text_document: lsp_types::TextDocumentIdentifier { uri },
+                position: Position::new(0, 16), // on `Assets:Bank` of the open
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        };
+        let highlights =
+            handle_document_highlight(&params, source, &result, PositionEncoding::Utf16)
+                .expect("highlights returns Some");
+        assert_eq!(
+            highlights.len(),
+            2,
+            "expected 2 account highlights, got {}: {highlights:#?}",
+            highlights.len()
+        );
+        // Exactly one WRITE (the Open declaration).
+        let write_count = highlights
+            .iter()
+            .filter(|h| h.kind == Some(DocumentHighlightKind::WRITE))
+            .count();
+        assert_eq!(write_count, 1, "{highlights:#?}");
     }
 }

@@ -500,6 +500,9 @@ fn fingerprint_covers_every_parse_result_field() {
     assert_field_in_hash(&baseline_hash, baseline_src, "currency_occurrences", |v| {
         v.currency_occurrences.clear();
     });
+    assert_field_in_hash(&baseline_hash, baseline_src, "account_occurrences", |v| {
+        v.account_occurrences.clear();
+    });
     assert_field_in_hash(&baseline_hash, baseline_src, "has_leading_bom", |v| {
         v.has_leading_bom = !v.has_leading_bom;
     });

@@ -8,15 +8,27 @@
 //! (`account_occurrences` for accounts; `currency_occurrences` for
 //! currencies). The CST migration's per-token spans give us
 //! zero-false-positive edits: an account-name fragment textually
-//! present in a payee string, metadata value, or comment is NOT
-//! emitted as a rename edit because the lexer classified those
-//! bytes as STRING / META_VALUE / COMMENT, not ACCOUNT.
+//! present in a payee string, a STRING-typed metadata value, or a
+//! comment is NOT emitted as a rename edit because the lexer
+//! classified those bytes as STRING / META_VALUE / COMMENT, not
+//! ACCOUNT. ACCOUNT-typed metadata values (e.g.
+//! `counterparty: Assets:Bank`) DO produce ACCOUNT tokens and ARE
+//! correctly renamed - the lexer classification, not the
+//! syntactic role, is what determines inclusion.
 //!
 //! Phase 5.4 of the CST migration (#1262) - the previous account
 //! shape walked the typed `parse_result.directives`, matched each
 //! directive's account field, then ran a substring search inside
 //! the directive's source bytes. That false-positive class is now
 //! structurally impossible.
+//!
+//! **Scope.** This PR migrates ONLY the rename handler. The
+//! sibling read-only handlers `references`, `document_highlight`,
+//! and `linked_editing` still walk the typed AST with substring
+//! search for accounts and inherit the original false-positive
+//! class (a `; comment with Assets:Bank` adjacent to a real
+//! Assets:Bank can produce a phantom hit). Migrating those is
+//! tracked as a phase 5.5+ follow-up.
 
 use lsp_types::{
     Position, PrepareRenameResponse, Range, RenameParams, TextDocumentPositionParams, TextEdit,
@@ -90,11 +102,36 @@ pub fn handle_rename(
     // quadratically with file size.
     let line_index = LineIndex::new(source, encoding);
 
-    if is_account_like(&old_name) {
-        // Rename account
+    // Account vs currency dispatch via the parser's occurrence
+    // indices, not the legacy is_account_like hardcoded English
+    // root-name check. The index gate works for any account the
+    // lexer produced (including Unicode-prefix names like
+    // `Vermögen:Bank` when the user has
+    // `option "name_assets" "Vermögen"`), AND it's free - we walk
+    // the same index a second time inside collect_*_rename_edits
+    // anyway. The legacy is_account_like / is_currency_like
+    // helpers stay in place for prepare_rename which has no
+    // ParseResult at hand.
+    let is_known_account = parse_result
+        .account_occurrences
+        .iter()
+        .any(|o| o.value == old_name);
+    let is_known_currency = parse_result
+        .currency_occurrences
+        .iter()
+        .any(|o| o.value == old_name);
+    if is_known_account {
+        collect_account_rename_edits(parse_result, &line_index, &old_name, new_name, &mut edits);
+    } else if is_known_currency {
+        collect_currency_rename_edits(parse_result, &line_index, &old_name, new_name, &mut edits);
+    } else if is_account_like(&old_name) {
+        // Word looks account-shaped but the parser never produced
+        // an ACCOUNT token for it - probably a typo mid-edit, or
+        // a fragment from a broken directive. Walk the (empty)
+        // index anyway so a future contributor can drop this
+        // branch when prepare_rename's gate also uses the index.
         collect_account_rename_edits(parse_result, &line_index, &old_name, new_name, &mut edits);
     } else if is_currency_like(&old_name, parse_result) {
-        // Rename currency
         collect_currency_rename_edits(parse_result, &line_index, &old_name, new_name, &mut edits);
     }
 
@@ -133,7 +170,11 @@ fn collect_account_rename_edits(
     edits: &mut Vec<TextEdit>,
 ) {
     for occurrence in &parse_result.account_occurrences {
-        if occurrence.value.as_str() != old_name {
+        // `Account` (and `Currency`) derive `PartialEq<str>` via
+        // the `domain_newtype!` macro, so this `!=` comparison
+        // against `&str` works without `.as_str()`. Mirrors the
+        // currency path's shape exactly.
+        if occurrence.value != old_name {
             continue;
         }
         let (start_line, start_col) = line_index.offset_to_position(occurrence.span.start);

@@ -60,14 +60,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exhaustive on `&ParseErrorKind`.
 
 - `ParseResult::account_occurrences`: every `ACCOUNT` token the parser
-  consumed, paired with its interned value and source-byte range. Mirrors
-  the existing `currency_occurrences` field. Populated during the
-  `walk_descendants_once` pass (no extra parser traversal). The LSP
-  rename / references / document-highlight handlers walk this list to
-  emit exact-span edits without resorting to per-directive substring
-  search, which used to produce false positives wherever an account-name
-  fragment appeared inside a payee string, metadata value, or comment.
-  Same `#[non_exhaustive]`-safe addition pattern as previous fields.
+  consumed (outside `ERROR_NODE` regions), paired with its interned
+  value and source-byte range. Mirrors the existing `currency_occurrences`
+  field. Populated during the `walk_descendants_once` pass (no extra
+  parser traversal pass; one `Account::new` interner call per ACCOUNT
+  token in the source). The LSP **rename** handler (phase 5.4) consumes
+  this index to emit exact-span edits without resorting to per-directive
+  substring search, which used to produce false positives wherever an
+  account-name fragment appeared inside a payee string, a STRING-typed
+  metadata value, or a comment. ACCOUNT-typed metadata values (e.g.
+  `counterparty: Assets:Bank`) DO produce an ACCOUNT token and ARE
+  correctly captured / renamed. The sibling LSP handlers (references,
+  document_highlight, linked_editing) still walk the typed AST with
+  substring search for accounts; migrating them is tracked as a
+  phase 5.5+ follow-up. Same `#[non_exhaustive]`-safe addition pattern
+  as previous fields.
+
+  **Operational note.** Adding the new field to
+  `__baseline_canonical_payload` changes the parser-corpus baseline hash
+  for every source containing any ACCOUNT token (i.e., essentially every
+  real Beancount file). Downstream consumers caching the canonical
+  payload bytes (rkyv archives, content-addressed parser-output caches)
+  should refresh after this release. The committed
+  `tests/baselines/parser-corpus.manifest` was regenerated as part of
+  this change.
 
 ## [0.13.0](https://github.com/rustledger/rustledger/compare/v0.12.0...v0.13.0) - 2026-04-21
 

@@ -93,8 +93,8 @@ pub struct ParseResult {
     ///
     /// Source-position-aware tooling (LSP rename / references /
     /// document-highlight) walks this list to produce edits, locations,
-    /// and highlights without resorting to string search of the source
-    /// - which produces false positives in comments, payee strings,
+    /// and highlights without resorting to string search of the source,
+    /// which produces false positives in comments, payee strings,
     /// account-name segments, etc. The order matches source order
     /// because the parser fills it as tokens are consumed (and the
     /// parser is strictly forward-advancing, including on error
@@ -123,19 +123,55 @@ pub struct ParseResult {
     ///
     /// Mirrors [`Self::currency_occurrences`] for the account
     /// shape. The CST conversion (`walk_descendants_once`) tracks
-    /// every `ACCOUNT` token outside `ERROR_NODE` regions; the
-    /// LSP rename / references / document-highlight handlers walk
+    /// every `ACCOUNT` token whose ancestors do NOT include an
+    /// `ERROR_NODE`. The LSP rename handler (phase 5.4) walks
     /// this list to emit exact-span edits without resorting to
     /// per-directive substring search, which used to produce
     /// false positives wherever an account-name fragment appeared
-    /// inside a payee string, metadata value, or comment.
+    /// inside a payee string, a STRING-typed metadata value, or a
+    /// comment. ACCOUNT-typed metadata values (e.g.
+    /// `counterparty: Assets:Bank`) DO produce an `ACCOUNT` token
+    /// at the lexer level and ARE included in this list - so a
+    /// rename of `Assets:Bank` correctly rewrites that metadata
+    /// value too.
     ///
-    /// **Error-recovery contract.** Same as
-    /// `currency_occurrences`: a token's classification as
-    /// `ACCOUNT` is independent of whether the surrounding syntax
-    /// is valid, and source-position-aware tooling wants the token
-    /// the user typed even during a mid-edit broken state. Tokens
-    /// consumed during a failing directive remain in this list.
+    /// **Migration status (#1262 phase 5.4).** Only the LSP
+    /// rename handler currently consumes this index. The sibling
+    /// handlers `references`, `document_highlight`, and
+    /// `linked_editing` still walk the typed AST with substring
+    /// search for accounts (see those modules' rustdoc); migrating
+    /// them to consume `account_occurrences` is tracked as a
+    /// phase 5.5+ follow-up.
+    ///
+    /// **Error-recovery contract.** Two notions of "failing
+    /// directive" need to be distinguished:
+    ///
+    /// - A directive that PARSES SYNTACTICALLY but whose
+    ///   typed-AST conversion errors (e.g.,
+    ///   [`crate::ParseErrorKind::InvalidBookingMethod`] on an
+    ///   `open Assets:Bank "GARBAGE"`). The ACCOUNT node is
+    ///   intact in the CST and NOT inside an `ERROR_NODE`. The
+    ///   token IS tracked - tooling can still rename it during
+    ///   the mid-edit state.
+    /// - A directive so garbled that the CST wraps the region
+    ///   in an `ERROR_NODE`. The ACCOUNT token is inside an
+    ///   `ERROR_NODE` and is NOT tracked. This is deliberate -
+    ///   the recovery boundary is fuzzy and including such
+    ///   tokens would surface as confusing rename hits inside
+    ///   garbage source.
+    ///
+    /// # Limitations
+    ///
+    /// The list is undifferentiated: declarations (from
+    /// open/close/balance/pad/note/document) and references
+    /// (from posting accounts and ACCOUNT-typed metadata) are
+    /// mixed together. There is no equivalent of the
+    /// `commodity_declaration_spans` helper used for currencies
+    /// (the account case has six declaration directive shapes vs.
+    /// the single `Commodity` shape, so no symmetric helper
+    /// exists yet). A future go-to-definition migration will need
+    /// either a re-walk over `directives` or an additional
+    /// `account_declarations: Vec<Span>` field.
     ///
     /// **`file_id` is always 0 in parser output** - same loader
     /// contract as `currency_occurrences`.

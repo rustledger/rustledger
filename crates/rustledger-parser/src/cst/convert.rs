@@ -3783,4 +3783,51 @@ mod tests {
             Some(&MetaValue::String("abc123".to_string()))
         );
     }
+
+    /// Pins the `ERROR_NODE` exclusion contract on
+    /// `account_occurrences`. The rustdoc on `ParseResult::
+    /// account_occurrences` distinguishes two failure modes:
+    ///
+    /// - **Typed-conversion failure** (e.g. `InvalidBookingMethod`
+    ///   on an `open` whose booking string is garbage): the CST is
+    ///   intact, the `ACCOUNT` node is NOT inside `ERROR_NODE`, so
+    ///   the token IS tracked. The LSP rename can still hit it
+    ///   during mid-edit.
+    /// - **CST-recovery wrap**: a directive so garbled that the
+    ///   CST wraps the region in `ERROR_NODE`. The `ACCOUNT` token
+    ///   is inside `ERROR_NODE`, NOT tracked.
+    ///
+    /// The two policies are deliberate. This test pins both.
+    #[test]
+    fn account_occurrences_policy_for_failing_directives() {
+        // Case A: typed-conversion failure. `open Assets:Bank
+        // "GARBAGE"` parses syntactically but fails the booking-
+        // method whitelist. The ACCOUNT token IS tracked.
+        let src = "2024-01-01 open Assets:Bank \"GARBAGE\"\n";
+        let r = parse_via_cst(src);
+        assert!(
+            r.account_occurrences
+                .iter()
+                .any(|o| o.value == "Assets:Bank"),
+            "typed-conversion failure should keep the ACCOUNT token in \
+             account_occurrences (got {:?}); rename mid-edit relies on this",
+            r.account_occurrences,
+        );
+
+        // Case B: CST-recovery wrap. `opn Assets:Bank USD` (typo
+        // `opn`) is unrecognized at the directive position and the
+        // recovery walker wraps it in ERROR_NODE. The ACCOUNT
+        // token is excluded.
+        let src = "2024-01-01 opn Assets:Bank USD\n";
+        let r = parse_via_cst(src);
+        assert!(
+            !r.account_occurrences
+                .iter()
+                .any(|o| o.value == "Assets:Bank"),
+            "ERROR_NODE-wrapped ACCOUNT should be EXCLUDED from \
+             account_occurrences (got {:?}); rename should not hit garbled \
+             mid-edit syntax",
+            r.account_occurrences,
+        );
+    }
 }

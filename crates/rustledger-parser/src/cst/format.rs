@@ -718,10 +718,18 @@ fn collect_trailing_comment(node: &crate::SyntaxNode) -> Option<String> {
             saw_content = true;
         }
     }
-    let nl_idx = header_nl_idx?;
-    // Scan backwards from the header NEWLINE: the trailing comment
-    // is the last COMMENT before the NEWLINE separated only by
-    // WHITESPACE.
+    // EOF-without-newline fallback: if there is no header-
+    // terminating NEWLINE, the directive runs to the end of the
+    // file. Scan from the LAST token instead. A `?` early-return
+    // here previously dropped same-line trailing comments at the
+    // final line of a file that lacked a trailing newline, e.g.
+    // `2024-01-15 open Assets:A ; trailing` (no `\n`). The
+    // canonical formatter restores the trailing newline, but the
+    // comment was already gone.
+    let nl_idx = header_nl_idx.unwrap_or(tokens.len());
+    // Scan backwards from the header NEWLINE (or EOF): the
+    // trailing comment is the last COMMENT before the NEWLINE
+    // separated only by WHITESPACE.
     for i in (0..nl_idx).rev() {
         let k = tokens[i].kind();
         if matches!(
@@ -1359,15 +1367,35 @@ fn canonical_number(text: &str) -> String {
 }
 
 /// Emit the arithmetic expression of a `PRICE` / `BALANCE`
-/// directive: tokens from the first `NUMBER` up to (but not
-/// including) the first `CURRENCY` at paren-depth 0. Spacing
-/// rules per [`write_canonical_token_sequence`].
+/// directive: tokens from the first expression-starting token
+/// (`NUMBER`, unary `+`/`-`, or `(`) up to (but not including) the
+/// first `CURRENCY` at paren-depth 0. Spacing rules per
+/// [`write_canonical_token_sequence`].
+///
+/// **Why the predicate must allow `PLUS` / `MINUS` / `L_PAREN`,
+/// not just `NUMBER`.** A previous version skipped tokens until
+/// it hit a `NUMBER`, which silently dropped leading unary signs
+/// and opening parens — flipping the sign on inputs like
+/// `2024-01-15 price USD -1.00 EUR` (formatted to `1.00 EUR`) and
+/// corrupting parenthesized expressions like
+/// `2024-01-15 balance Assets:A (1 + 2) USD` (formatted to
+/// `1 + 2) USD USD`). Sign drift in BALANCE / PRICE is silent data
+/// corruption — a balance assertion that previously asserted a
+/// debit would assert a credit after a round-trip.
 fn emit_amount_expression(node: &crate::SyntaxNode, out: &mut String) {
     let raw: Vec<crate::SyntaxToken> = node
         .children_with_tokens()
         .filter_map(rowan::NodeOrToken::into_token)
         .filter(|t| !is_trivia_kind(t.kind()))
-        .skip_while(|t| t.kind() != crate::SyntaxKind::NUMBER)
+        .skip_while(|t| {
+            !matches!(
+                t.kind(),
+                crate::SyntaxKind::NUMBER
+                    | crate::SyntaxKind::PLUS
+                    | crate::SyntaxKind::MINUS
+                    | crate::SyntaxKind::L_PAREN
+            )
+        })
         .collect();
     let mut depth: i32 = 0;
     let mut first_currency_idx: Option<usize> = None;
@@ -2150,6 +2178,24 @@ mod tests {
             "balance_with_arithmetic_and_tolerance",
             "2024-01-15 balance Assets:Cash 0.25 + 0.75 USD ~ 0.01 USD\n",
         ),
+        // Regression for Copilot #2: a previous emit_amount_expression
+        // skipped tokens until the first NUMBER, which dropped a
+        // leading unary `-` and silently flipped the sign — a
+        // balance assertion that asserted a debit would assert a
+        // credit after a round-trip. These fixtures pin the
+        // sign / paren preservation explicitly.
+        (
+            "balance_leading_unary_minus",
+            "2024-01-15 balance Assets:A -1.00 USD\n",
+        ),
+        (
+            "balance_leading_parenthesized_expression",
+            "2024-01-15 balance Assets:A (1 + 2) USD\n",
+        ),
+        (
+            "price_leading_unary_minus",
+            "2024-01-15 price USD -1.00 EUR\n",
+        ),
         (
             "price_with_thousands_separator",
             "2024-01-15 price USD 1,234.56 EUR\n",
@@ -2207,6 +2253,17 @@ mod tests {
             "2024-01-01 open Assets:A\n\n\n",
         ),
         ("file_without_trailing_newline", "2024-01-01 open Assets:A"),
+        // Regression for Copilot #1: collect_trailing_comment
+        // previously returned None for a directive with no
+        // header-terminating NEWLINE token, which silently dropped
+        // a same-line trailing comment at EOF when the file lacked
+        // a trailing newline. The canonical formatter restores the
+        // trailing newline, but the dropped comment was already
+        // gone.
+        (
+            "trailing_comment_no_final_newline",
+            "2024-01-15 open Assets:A ; trailing",
+        ),
         (
             "posting_with_trailing_comment",
             "2024-01-15 * \"x\"\n  Assets:Cash -5.00 USD ; pocket\n  Expenses:Misc 5.00 USD\n",
@@ -2444,6 +2501,56 @@ mod tests {
         // one ending the tag-bearing line.
         assert!(out.contains("#tag1\r\n"), "got: {out:?}");
         assert!(out.ends_with("\r\n"), "got: {out:?}");
+    }
+
+    /// Regression for Copilot #2 inline review on PR #1284: a
+    /// previous `emit_amount_expression` dropped leading unary
+    /// signs and parens, flipping the sign on
+    /// `2024-01-15 balance Assets:A
+    /// -1.00 USD` to `1.00 USD` — silent data corruption (a debit
+    /// asserted as a credit). Byte-exact pins on every shape.
+    #[test]
+    fn balance_price_preserve_leading_unary_and_parens() {
+        // Bare leading minus on balance.
+        let src = "2024-01-15 balance Assets:A -1.00 USD\n";
+        assert_eq!(
+            format_source(src),
+            "2024-01-15 balance Assets:A -1.00 USD\n"
+        );
+
+        // Bare leading minus on price (sign flip would change
+        // every quote on the user's commodity).
+        let src = "2024-01-15 price USD -1.00 EUR\n";
+        assert_eq!(format_source(src), "2024-01-15 price USD -1.00 EUR\n");
+
+        // Leading parenthesized expression. The previous code
+        // dropped the `(`, which made the trailing `)` unbalanced
+        // AND made the first-CURRENCY scan find the wrong token.
+        let src = "2024-01-15 balance Assets:A (1 + 2) USD\n";
+        assert_eq!(
+            format_source(src),
+            "2024-01-15 balance Assets:A (1 + 2) USD\n"
+        );
+
+        // Leading minus on a parenthesized arithmetic expression.
+        let src = "2024-01-15 balance Assets:A -(1 + 2) USD\n";
+        assert_eq!(
+            format_source(src),
+            "2024-01-15 balance Assets:A -(1 + 2) USD\n"
+        );
+    }
+
+    /// Regression for Copilot #1 inline review on PR #1284:
+    /// `collect_trailing_comment` used `?` on the header-terminating
+    /// NEWLINE, silently dropping same-line trailing comments at
+    /// EOF when the file had no final newline. The canonical
+    /// formatter restores the trailing newline, but the dropped
+    /// comment was already gone — a real-world case for editors
+    /// that don't insert a trailing newline on save.
+    #[test]
+    fn trailing_comment_preserved_at_eof_without_newline() {
+        let src = "2024-01-15 open Assets:A ; trailing";
+        assert_eq!(format_source(src), "2024-01-15 open Assets:A ; trailing\n");
     }
 
     #[test]

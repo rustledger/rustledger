@@ -290,5 +290,26 @@ mod tests {
             ranges.ranges.len(),
             ranges.ranges
         );
+        // Pin the lines + range widths so a future regression that
+        // emits two ranges on the same line, or two zero-width
+        // ranges, would still fail. Linked editing is the most
+        // safety-critical of the three handlers: a wrong-position
+        // range corrupts user text the moment they start typing.
+        let summary: Vec<(u32, u32, u32)> = ranges
+            .ranges
+            .iter()
+            .map(|r| {
+                (
+                    r.start.line,
+                    r.start.character,
+                    r.end.character - r.start.character,
+                )
+            })
+            .collect();
+        assert_eq!(
+            summary,
+            vec![(0, 16, 11), (2, 2, 11)],
+            "expected (line 0, col 16, width 11) + (line 2, col 2, width 11); got {summary:?}"
+        );
     }
 }

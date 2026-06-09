@@ -89,8 +89,9 @@ pub fn handle_references(
 /// `2024-01-15 * "Assets:Bank transfer"` with a real
 /// `Assets:Bank` posting in the same transaction).
 ///
-/// To honor `include_declaration`, we look up the *declared*
-/// account token in each `Open` directive via
+/// To honor `include_declaration`, we look up declared-account
+/// tokens (the `Open` and `Close` directive headers — both are
+/// lifecycle-boundary "declarations" in the LSP sense) via
 /// [`account_declaration_spans`] - same shape as the
 /// currency-references path's use of `commodity_declaration_spans`.
 fn collect_account_references(
@@ -428,6 +429,25 @@ mod tests {
             "expected 2 account references, got {}: {refs:#?}",
             refs.len()
         );
+        // Pin the exact source lines so a future bug that emits
+        // two zero-width ranges (or two ranges both at the Open
+        // position) still fails — count-only assertions used to
+        // miss that class.
+        let lines: Vec<u32> = refs.iter().map(|r| r.range.start.line).collect();
+        assert_eq!(
+            lines,
+            vec![0, 2],
+            "expected references on lines 0 (open) and 2 (posting), got {lines:?}"
+        );
+        // Each range must be non-zero-width and span the full
+        // 11-char `Assets:Bank`.
+        for r in &refs {
+            assert_eq!(
+                r.range.end.character - r.range.start.character,
+                "Assets:Bank".len() as u32,
+                "reference range is wrong width: {r:?}"
+            );
+        }
 
         // include_declaration: false drops the open occurrence.
         let params_no_decl = ReferenceParams {
@@ -449,6 +469,10 @@ mod tests {
             1,
             "expected 1 non-declaration account reference, got {}: {refs_no_decl:#?}",
             refs_no_decl.len()
+        );
+        assert_eq!(
+            refs_no_decl[0].range.start.line, 2,
+            "the surviving reference must be the posting on line 2"
         );
     }
 

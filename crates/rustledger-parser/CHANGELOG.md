@@ -100,15 +100,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   field. The green node is `Send + Sync` and reference-counted
   internally, so an `Arc<ParseResult>` (the shape the LSP caches per
   document) shares this handle across handler invocations without
-  re-parsing. CST-walking consumers reconstruct a `SyntaxNode` via
-  `SyntaxNode::new_root(parse_result.syntax_root.clone())` (the clone
-  is an `Arc` bump). Phase 5.5 of #1262; backs the
-  `selection_range` handler's cache. Deliberately excluded from
-  `__baseline_canonical_payload` since it is a redundant view of the
-  source bytes already captured by `directives` / `occurrences` /
-  `errors`. The destructure binds the field for the compiler check;
-  no `assert_field_in_hash` arm is added since mutation wouldn't
-  change the canonical hash.
+  re-parsing. CST-walking consumers should prefer the new
+  `ParseResult::syntax_node()` method, which returns a `SyntaxNode`
+  (cursor-API view) without naming `rowan::GreenNode` in consumer
+  code — that keeps the `rowan` dependency contained, so a future
+  rowan upgrade is internal to this crate. The field stays public
+  because the exhaustive destructure in
+  `__baseline_canonical_payload` needs to bind it. Phase 5.5 of
+  #1262; backs the `selection_range` handler's cache. Deliberately
+  excluded from `__baseline_canonical_payload` since it is a
+  redundant view of the source bytes already captured by
+  `directives` / `occurrences` / `errors`. The destructure binds
+  the field for the compiler check; no `assert_field_in_hash` arm
+  is added since mutation wouldn't change the canonical hash, and
+  the `canonical_payload_excludes_syntax_root` unit test pins the
+  exclusion executably (mutate the field, re-hash, assert
+  unchanged).
+
+- `ParseResult::syntax_node()`: the supported cursor-API entry
+  point for CST-walking consumers. Equivalent to
+  `SyntaxNode::new_root(self.syntax_root.clone())`; the `clone`
+  is an `Arc` bump (cheap enough to call per LSP request).
+  Introduced so consumer code does not need to name
+  `rowan::GreenNode`.
+
+- Compile-time `Send + Sync` assertion on `ParseResult` (a
+  zero-cost `const _: fn()` block in `lib.rs`). The LSP wraps
+  `ParseResult` in `Arc<ParseResult>` and sends the Arc to a
+  background worker thread; a future field whose type breaks
+  `Send` or `Sync` would compile fine in the parser crate and
+  fail with an inscrutable bound error buried inside the LSP
+  build. The assertion fences the invariant at the definition
+  site so the parser crate's own build fails first.
+
+#### LSP-side polish (read-only handlers, account paths)
+
+- `references` / `document_highlight` / `linked_editing` account
+  paths now consume `parse_result.account_occurrences` directly
+  (phase 5.5 of #1262). Previous shape walked the typed AST + ran
+  substring search inside each directive's source bytes, producing
+  false-positive locations / highlights / linked-edit ranges
+  whenever an account-name fragment appeared in a payee string,
+  STRING-typed metadata value, or comment. The new shape emits
+  one entry per `ACCOUNT` token. Regression tests pin both the
+  count and the exact source lines + widths.
+
+- `account_declaration_spans` LSP helper now walks the CST
+  (`syntax_root`) for `OPEN_DIRECTIVE` and `CLOSE_DIRECTIVE`
+  nodes instead of the typed-AST `directives` list. This fixes
+  a subtle regression where an `open` directive that failed
+  typed-AST conversion (e.g. `InvalidBookingMethod`) was silently
+  dropped from the declaration set — `include_declaration: false`
+  stopped filtering it exactly when the user was debugging a
+  broken directive. The CST walk also restores the legacy
+  classification of `Close` as `WRITE` in document-highlight
+  (lifecycle boundary; matches the pre-phase-5.5 substring-search
+  behavior) and reduces the helper's complexity from
+  O(N_opens × N_occurrences) to O(N_cst_nodes).
 
 ## [0.13.0](https://github.com/rustledger/rustledger/compare/v0.12.0...v0.13.0) - 2026-04-21
 

@@ -61,15 +61,17 @@ pub fn handle_document_highlight(
 ///
 /// Walks the parser's `account_occurrences` index (every `ACCOUNT`
 /// token with exact source spans). Occurrences whose span equals
-/// an `Open` directive's declared-account span (per
-/// [`account_declaration_spans`]) surface as `WRITE`; all other
-/// occurrences (close / balance / pad / note / document /
-/// posting / ACCOUNT-typed metadata) surface as `READ`. Same
-/// shape as `collect_currency_highlights`. The previous shape
-/// walked the typed directives and ran substring searches,
-/// producing false-positive highlights for any account-name
-/// fragment appearing in a payee string, STRING-typed metadata
-/// value, or comment.
+/// an `Open` or `Close` directive's declared-account span (per
+/// [`account_declaration_spans`]) surface as `WRITE` — both
+/// directives are lifecycle-boundary "declarations" in the LSP
+/// sense, matching the legacy pre-#1262-phase-5.5 substring-search
+/// implementation. All other occurrences (balance / pad / note /
+/// document / posting / ACCOUNT-typed metadata) surface as
+/// `READ`. Same shape as `collect_currency_highlights`. The
+/// previous shape walked the typed directives and ran substring
+/// searches, producing false-positive highlights for any account-
+/// name fragment appearing in a payee string, STRING-typed
+/// metadata value, or comment.
 fn collect_account_highlights(
     parse_result: &ParseResult,
     line_index: &LineIndex,
@@ -464,11 +466,75 @@ mod tests {
             "expected 2 account highlights, got {}: {highlights:#?}",
             highlights.len()
         );
-        // Exactly one WRITE (the Open declaration).
-        let write_count = highlights
+        // Pin source lines + kinds + widths so a future regression
+        // that emits two zero-width ranges, both on the same line,
+        // or with kinds swapped is caught.
+        let summary: Vec<(u32, Option<DocumentHighlightKind>, u32)> = highlights
             .iter()
-            .filter(|h| h.kind == Some(DocumentHighlightKind::WRITE))
-            .count();
-        assert_eq!(write_count, 1, "{highlights:#?}");
+            .map(|h| {
+                (
+                    h.range.start.line,
+                    h.kind,
+                    h.range.end.character - h.range.start.character,
+                )
+            })
+            .collect();
+        assert_eq!(
+            summary,
+            vec![
+                (0, Some(DocumentHighlightKind::WRITE), 11),
+                (2, Some(DocumentHighlightKind::READ), 11),
+            ],
+            "expected line 0 WRITE + line 2 READ, both 11 cols wide, got {summary:?}"
+        );
+    }
+
+    /// Phase-5.5 policy: a `Close` directive's account is a
+    /// lifecycle-boundary declaration and surfaces as `WRITE`,
+    /// matching the legacy pre-#1262-phase-5.5 substring-search
+    /// behavior. This test pins the policy so a future change that
+    /// reclassifies `Close` cannot silently flip the highlight
+    /// kind seen by editors.
+    #[test]
+    fn test_highlight_account_close_is_write() {
+        let source = "\
+2024-01-01 open Assets:Bank USD
+2024-06-15 * \"Coffee\"
+  Assets:Bank  -5.00 USD
+  Expenses:Food
+2024-12-31 close Assets:Bank
+";
+        let result = parse(source);
+        assert!(
+            result.errors.is_empty(),
+            "parse errors: {:?}",
+            result.errors
+        );
+        let uri: lsp_types::Uri = "file:///test.beancount".parse().unwrap();
+        let params = DocumentHighlightParams {
+            text_document_position_params: lsp_types::TextDocumentPositionParams {
+                text_document: lsp_types::TextDocumentIdentifier { uri },
+                position: Position::new(0, 16), // on `Assets:Bank` of the open
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        };
+        let highlights =
+            handle_document_highlight(&params, source, &result, PositionEncoding::Utf16)
+                .expect("highlights returns Some");
+
+        let by_line: Vec<(u32, Option<DocumentHighlightKind>)> = highlights
+            .iter()
+            .map(|h| (h.range.start.line, h.kind))
+            .collect();
+        assert_eq!(
+            by_line,
+            vec![
+                (0, Some(DocumentHighlightKind::WRITE)), // open
+                (2, Some(DocumentHighlightKind::READ)),  // posting
+                (4, Some(DocumentHighlightKind::WRITE)), // close
+            ],
+            "expected open=WRITE, posting=READ, close=WRITE; got {by_line:?}"
+        );
     }
 }

@@ -222,11 +222,16 @@ pub struct ParseResult {
     /// shares this handle across handler invocations without
     /// re-parsing.
     ///
-    /// Reconstruct a walkable cursor with
-    /// `SyntaxNode::new_root(parse_result.syntax_root.clone())`.
-    /// The clone is cheap (an `Arc` bump); the resulting
-    /// `SyntaxNode` is the same tree the typed fields above were
-    /// built from.
+    /// **Prefer [`Self::syntax_node`]** over reading this field
+    /// directly. The method is the supported entry point: it
+    /// returns a [`SyntaxNode`] (the cursor-API view), keeps the
+    /// `rowan::GreenNode` type name out of consumer code, and
+    /// shields callers from minor rowan upgrades that touch the
+    /// `GreenNode` shape. The field is public for two reasons —
+    /// the exhaustive destructure in
+    /// [`__baseline_canonical_payload`] needs to bind it, and
+    /// `Arc::clone`-style sharing patterns benefit from direct
+    /// access — but downstream code should reach for the method.
     ///
     /// **Canonical-payload exclusion.** This field is deliberately
     /// NOT fed into [`__baseline_canonical_payload`]. The green
@@ -238,8 +243,41 @@ pub struct ParseResult {
     /// the fingerprint size without surfacing any new drift
     /// signal. The corresponding `assert_field_in_hash` arm is
     /// also intentionally absent in `tests/corpus_baseline.rs`.
+    /// A negative-form test (`__canonical_payload_excludes_syntax_root`
+    /// in this file) pins the exclusion: it confirms that mutating
+    /// `syntax_root` while every other field is equal does NOT
+    /// change the canonical payload bytes.
     pub syntax_root: rowan::GreenNode,
 }
+
+impl ParseResult {
+    /// Cursor-API view of the lossless CST that produced this
+    /// `ParseResult`. Equivalent to
+    /// `SyntaxNode::new_root(self.syntax_root.clone())`.
+    ///
+    /// Construction is an `Arc` bump (the green node's internal
+    /// refcount); cheap enough to call per request. This is the
+    /// supported entry point for CST consumers — prefer it over
+    /// reading [`Self::syntax_root`] directly, so the `rowan`
+    /// dependency stays an implementation detail.
+    #[must_use]
+    pub fn syntax_node(&self) -> SyntaxNode {
+        SyntaxNode::new_root(self.syntax_root.clone())
+    }
+}
+
+// Compile-time assertion: `ParseResult` is shared as
+// `Arc<ParseResult>` across the LSP's main thread and its
+// background worker (see `rustledger-lsp/src/main_loop.rs`).
+// A future field whose type is not `Send + Sync` (e.g. an `Rc`,
+// a `Cell`, or a non-thread-safe handle) would silently break
+// the LSP build at the call site, far from the parser change
+// that caused it. This assertion fences the invariant at the
+// definition site so the parser crate's own build fails first.
+const _: fn() = || {
+    const fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<ParseResult>();
+};
 
 /// A warning from the parser (non-fatal).
 #[derive(Debug, Clone)]
@@ -397,6 +435,148 @@ mod canonical_payload_determinism {
              `serde_json = {{ ..., features = [\"preserve_order\"] }}` \
              and remove it, or thread an alternative canonicalization \
              through __baseline_canonical_payload.",
+        );
+    }
+}
+
+#[cfg(test)]
+mod cached_syntax_root_matches_fresh_parse {
+    //! The `selection_range` handler (and any future CST-walking
+    //! handler) consumes [`ParseResult::syntax_root`] instead of
+    //! re-invoking [`crate::parse_structured`]. The safety
+    //! argument is "the cached green root is the same tree the
+    //! converter walked, which is the same tree a fresh
+    //! `parse_structured` would return."
+    //!
+    //! Today that argument is trivially true because the cache is
+    //! populated directly from the converter's `source_file`.
+    //! But if a future change introduces post-conversion CST
+    //! mutation (span rewrites, error-recovery splicing, trivia
+    //! reattachment) the cached root would diverge from a fresh
+    //! re-parse — silently, since nothing else compares the two
+    //! trees. This test pins the invariant across a small fixture
+    //! set covering empty source, every directive kind, error
+    //! recovery, mid-file BOM, and metadata-bearing transactions.
+    use super::{cst::parse_structured, parse};
+
+    fn assert_round_trip(label: &str, source: &str) {
+        let parsed = parse(source);
+        let (stripped, _bom) = crate::bom::strip_leading(source);
+        let fresh = parse_structured(stripped).green().into_owned();
+        assert_eq!(
+            parsed.syntax_root, fresh,
+            "cached syntax_root diverged from fresh parse_structured for {label}: \n\
+             this means something is mutating the green tree between converter \
+             capture and consumer access. The two are supposed to be identical."
+        );
+    }
+
+    #[test]
+    fn empty_source() {
+        assert_round_trip("empty", "");
+    }
+
+    #[test]
+    fn simple_directive() {
+        assert_round_trip("open", "2024-01-01 open Assets:Bank USD\n");
+    }
+
+    #[test]
+    fn every_directive_shape() {
+        assert_round_trip(
+            "directive zoo",
+            r#"option "title" "Test"
+plugin "myplugin"
+include "other.beancount"
+2024-01-01 open Assets:Bank USD
+2024-01-01 commodity USD
+2024-06-15 * "Coffee"
+  Assets:Bank  -5.00 USD
+  Expenses:Food
+2024-12-31 close Assets:Bank
+2024-01-31 balance Assets:Bank 100 USD
+2024-01-15 pad Assets:Bank Equity:Opening
+2024-01-15 note Assets:Bank "deposit pending"
+2024-01-15 event "location" "SF"
+2024-01-15 price USD 1.00 EUR
+"#,
+        );
+    }
+
+    #[test]
+    fn with_parse_errors() {
+        // Trigger error recovery (unterminated string, garbled
+        // directive) to ensure the post-pass `fixup_directive_spans`
+        // and error-node wrapping don't drift between cache and
+        // fresh re-parse.
+        assert_round_trip(
+            "broken",
+            "2024-01-01 open Assets:Bank \"unterminated\n2024-01-02 garbage line here\n",
+        );
+    }
+
+    #[test]
+    fn with_metadata_and_comments() {
+        assert_round_trip(
+            "metadata",
+            r#"; standalone comment
+2024-01-01 open Assets:Bank USD
+  payee_account: Assets:Other
+2024-06-15 * "Coffee"  ; eol comment
+  memo: "morning"
+  Assets:Bank  -5.00 USD
+"#,
+        );
+    }
+}
+
+#[cfg(test)]
+mod canonical_payload_excludes_syntax_root {
+    //! Pins the deliberate exclusion of `ParseResult::syntax_root`
+    //! from [`__baseline_canonical_payload`]. The exclusion is
+    //! documented in three places (the field's rustdoc, the
+    //! destructure comment in `__baseline_canonical_payload`, and
+    //! the CHANGELOG entry under `[Unreleased] / Features`) but
+    //! none of those are executable. A future contributor
+    //! mechanically pattern-matching on "all fields get an arm"
+    //! could add a `syntax_root` feed to the canonical payload —
+    //! the corpus manifest would silently drift on every source
+    //! that touched the green tree.
+    //!
+    //! This test mutates `syntax_root` while leaving every other
+    //! field equal, and asserts the canonical payload bytes are
+    //! unchanged.
+    use super::{__baseline_canonical_payload, parse};
+
+    #[test]
+    fn mutating_syntax_root_does_not_change_canonical_payload() {
+        let src_a = "2024-01-01 open Assets:Bank USD\n";
+        // A different source produces a different green tree but
+        // we want every OTHER field equal; pick a source that
+        // produces an identical typed ParseResult on every field
+        // EXCEPT `syntax_root`. Empty source is the simplest
+        // counterexample for "syntax_root differs"; we go further
+        // and synthesize the mutation explicitly to keep the test
+        // independent of the converter's behavior.
+        let parsed_a = parse(src_a);
+        let mut mutated = parse(src_a);
+        // Replace the green tree with a freshly-parsed but
+        // structurally-different one. `parse("")` gives an empty
+        // SOURCE_FILE green root; the original has an OPEN_DIRECTIVE
+        // child. Other fields will differ for `parse("")`, so we
+        // construct the mutation by swapping ONLY the field.
+        mutated.syntax_root = parse("").syntax_root;
+
+        let payload_original = __baseline_canonical_payload(&parsed_a);
+        let payload_mutated = __baseline_canonical_payload(&mutated);
+        assert_eq!(
+            payload_original, payload_mutated,
+            "canonical payload changed after mutating only `syntax_root`. \
+             Either the destructure in `__baseline_canonical_payload` \
+             grew a `syntax_root` feed line (revert that — the field \
+             is deliberately excluded; see its rustdoc), or another \
+             field now reads from `syntax_root` indirectly. Either \
+             way the corpus manifest is about to drift."
         );
     }
 }

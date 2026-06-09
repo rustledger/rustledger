@@ -56,7 +56,11 @@ pub fn handle_selection_range(
     parse_result: &ParseResult,
     encoding: PositionEncoding,
 ) -> Option<Vec<SelectionRange>> {
-    let cst = SyntaxNode::new_root(parse_result.syntax_root.clone());
+    // Use the supported entry point rather than constructing the
+    // SyntaxNode by hand from the green root - keeps the
+    // `rowan::GreenNode` type name out of consumer code so a future
+    // rowan upgrade is contained in `rustledger-parser`.
+    let cst = parse_result.syntax_node();
     let line_index = LineIndex::new(source, encoding);
     let mut results = Vec::with_capacity(params.positions.len());
 

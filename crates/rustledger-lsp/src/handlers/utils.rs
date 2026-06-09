@@ -511,23 +511,38 @@ pub fn commodity_declaration_spans(
 /// Account references in beancount come from six directive kinds
 /// (`open` / `close` / `balance` / `pad` / `note` / `document`)
 /// PLUS posting accounts in transactions PLUS ACCOUNT-typed
-/// metadata values. Of those, the "declaration" is conventionally
-/// only the `open` directive's account - matching the
-/// LSP `Find References > Include Declaration` toggle pattern.
+/// metadata values. Of those, the two "declaration-like"
+/// directives — the ones that establish or end the account's
+/// lifecycle — are `open` and `close`. Both surface as `WRITE`
+/// in document-highlight and both honor the
+/// `Find References > Include Declaration` toggle. The remaining
+/// four directive shapes + posting accounts + ACCOUNT-typed
+/// metadata are all references (`READ`).
 ///
-/// The `account_occurrences` list in `ParseResult` is flat (it
-/// does not differentiate declaration sites from reference
-/// sites - see the field's `# Limitations` rustdoc). This helper
-/// builds the declaration set by walking the typed directives for
-/// `Open` and finding the first `ACCOUNT` token within each
-/// directive's source span. Same pattern as
-/// [`commodity_declaration_spans`].
+/// **Pre-#1262-phase-5.5 behavior, retained.** The legacy
+/// substring-search implementation marked both `Open` AND `Close`
+/// as `WRITE`. The phase-5.5 rewrite preserves that policy; only
+/// the underlying mechanism changed from per-directive substring
+/// search to per-token CST classification.
 ///
-/// The "first ACCOUNT inside the directive span" lookup is
-/// correct even when the `Open` carries ACCOUNT-typed metadata
-/// (e.g. `payee_account: Assets:Bank`) - the declared account
-/// always appears at the directive header position, before any
-/// metadata sub-line.
+/// **Why we walk the CST instead of the typed-AST `directives`.**
+/// A directive that parses *syntactically* but whose typed
+/// conversion errors — most commonly an `open` with an invalid
+/// booking method (`InvalidBookingMethod`) — is dropped from
+/// `parse_result.directives`, but its `ACCOUNT` token is still
+/// present in `parse_result.account_occurrences` (the lexer's
+/// classification is independent of typed-AST validity, per the
+/// `account_occurrences` rustdoc). If we walked `directives` we
+/// would silently re-classify the failed-Open's account as a
+/// reference, breaking the `include_declaration: false` filter
+/// exactly when the user is debugging a broken directive. The
+/// CST walk sees the `OPEN_DIRECTIVE` node regardless of typed
+/// conversion success.
+///
+/// **Performance.** O(number of CST nodes) traversal, no
+/// quadratic walk over `account_occurrences`. The previous
+/// implementation was O(N_opens × N_occurrences) because it
+/// re-scanned the full occurrences list for each Open directive.
 ///
 /// Returns a `HashSet` so callers can ask "is this occurrence a
 /// declaration?" in O(1).
@@ -535,20 +550,43 @@ pub fn commodity_declaration_spans(
 pub fn account_declaration_spans(
     parse_result: &ParseResult,
 ) -> std::collections::HashSet<rustledger_parser::Span> {
-    parse_result
-        .directives
-        .iter()
-        .filter_map(|d| {
-            if !matches!(&d.value, rustledger_core::Directive::Open(_)) {
-                return None;
-            }
-            parse_result
-                .account_occurrences
-                .iter()
-                .find(|o| o.span.start >= d.span.start && o.span.end <= d.span.end)
-                .map(|o| o.span)
-        })
-        .collect()
+    use rustledger_parser::SyntaxKind;
+    let bom_offset: usize = if parse_result.has_leading_bom { 3 } else { 0 };
+    let mut declarations = std::collections::HashSet::new();
+
+    for node in parse_result.syntax_node().descendants() {
+        let kind = node.kind();
+        if kind != SyntaxKind::OPEN_DIRECTIVE && kind != SyntaxKind::CLOSE_DIRECTIVE {
+            continue;
+        }
+        // Skip directives wrapped by error-recovery. The first
+        // ACCOUNT token inside an ERROR_NODE is also excluded
+        // from `account_occurrences` (per its rustdoc), so adding
+        // such a span here would not match any occurrence anyway
+        // — but the cleaner contract is "declarations come from
+        // recognized directives only", which the parent-ancestor
+        // check enforces.
+        if node
+            .ancestors()
+            .skip(1)
+            .any(|a| a.kind() == SyntaxKind::ERROR_NODE)
+        {
+            continue;
+        }
+        let Some(account_token) = node
+            .descendants_with_tokens()
+            .filter_map(|n| n.into_token())
+            .find(|t| t.kind() == SyntaxKind::ACCOUNT)
+        else {
+            continue;
+        };
+        let range = account_token.text_range();
+        let start = u32::from(range.start()) as usize + bom_offset;
+        let end = u32::from(range.end()) as usize + bom_offset;
+        declarations.insert(rustledger_parser::Span::new(start, end));
+    }
+
+    declarations
 }
 
 /// Check if a string looks like a currency, validating against known currencies.
@@ -909,5 +947,159 @@ mod tests {
         assert!(is_word_char('_'));
         assert!(!is_word_char(' '));
         assert!(!is_word_char('"'));
+    }
+
+    /// `account_declaration_spans` includes both `Open` and `Close`
+    /// header accounts (lifecycle boundaries) and excludes balance /
+    /// pad / note / document / posting / ACCOUNT-typed metadata.
+    #[test]
+    fn account_declaration_spans_covers_open_and_close() {
+        use rustledger_parser::parse;
+        let source = "\
+2024-01-01 open Assets:Bank USD
+2024-06-15 * \"Coffee\"
+  Assets:Bank  -5.00 USD
+2024-08-01 balance Assets:Bank 95.00 USD
+2024-12-31 close Assets:Bank
+";
+        let result = parse(source);
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        let decls = account_declaration_spans(&result);
+
+        // Two declarations expected: Open header (line 0) and
+        // Close header (line 4). The posting and balance are
+        // references, not declarations.
+        assert_eq!(decls.len(), 2, "got {decls:?}");
+
+        // Match against `account_occurrences`: occurrences whose
+        // span is in `decls` are declarations.
+        let decl_occurrences: Vec<&rustledger_parser::Spanned<rustledger_core::Account>> = result
+            .account_occurrences
+            .iter()
+            .filter(|o| decls.contains(&o.span))
+            .collect();
+        assert_eq!(decl_occurrences.len(), 2);
+        // First decl = source byte offset of Open's Assets:Bank
+        // (line 0, col 16 == byte 16); Second = Close's
+        // (line 4, col 17). The exact byte math is the contract.
+        let mut starts: Vec<usize> = decl_occurrences.iter().map(|o| o.span.start).collect();
+        starts.sort_unstable();
+        assert_eq!(
+            starts[0], 16,
+            "Open's Assets:Bank starts at byte 16 of the source",
+        );
+        // Line 4 starts after "2024-12-31 close " preceded by lines
+        // 0..3. Sanity-check the offset against the source bytes
+        // rather than hardcoding.
+        let close_offset = source.find("close Assets:Bank").unwrap() + "close ".len();
+        assert_eq!(starts[1], close_offset);
+    }
+
+    /// An `Open` directive whose typed-AST conversion fails
+    /// (`InvalidBookingMethod` here) is dropped from
+    /// `parse_result.directives`, but its ACCOUNT token IS in
+    /// `account_occurrences` and the CST node is intact (not
+    /// inside an `ERROR_NODE`). The CST walk must still classify
+    /// it as a declaration. The previous typed-AST walk silently
+    /// regressed in this case — `include_declaration: false`
+    /// stopped filtering the open, exactly when the user is
+    /// debugging a broken directive.
+    #[test]
+    fn account_declaration_spans_handles_failed_open_conversion() {
+        use rustledger_core::Directive;
+        use rustledger_parser::parse;
+        // Invalid booking method - parser emits
+        // `InvalidBookingMethod`, drops the Open from
+        // `directives`, but keeps the CST node + ACCOUNT token.
+        let source = "2024-01-01 open Assets:Bank USD \"GARBAGE\"\n";
+        let result = parse(source);
+        // The directive was dropped (no Open in typed AST):
+        assert!(
+            !result
+                .directives
+                .iter()
+                .any(|d| matches!(&d.value, Directive::Open(_))),
+            "expected the Open to be dropped from directives, got {:?}",
+            result.directives
+        );
+        // But the ACCOUNT token IS in occurrences:
+        let has_account = result
+            .account_occurrences
+            .iter()
+            .any(|o| o.value.as_str() == "Assets:Bank");
+        assert!(has_account, "{:?}", result.account_occurrences);
+        // And the CST walk classifies it as a declaration.
+        let decls = account_declaration_spans(&result);
+        assert_eq!(
+            decls.len(),
+            1,
+            "expected the failed-Open's ACCOUNT to still be a declaration; got {decls:?}",
+        );
+    }
+
+    /// An ACCOUNT-typed metadata value inside an `Open` directive
+    /// (e.g. `payee_account: Assets:Other`) tokenizes as ACCOUNT
+    /// at the lexer level, BUT it is not the directive header
+    /// account. The helper takes the FIRST ACCOUNT token in the
+    /// directive's source span, which is always the header
+    /// (parser is forward-advancing; the metadata block is parsed
+    /// after the header). This test pins that contract.
+    #[test]
+    fn account_declaration_spans_skips_metadata_account_value() {
+        use rustledger_parser::parse;
+        let source = "\
+2024-01-01 open Assets:Bank USD
+  payee_account: Assets:Other
+";
+        let result = parse(source);
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        let decls = account_declaration_spans(&result);
+        assert_eq!(decls.len(), 1, "got {decls:?}");
+
+        // The single declaration is the header (Assets:Bank), NOT
+        // the metadata value (Assets:Other). Find the occurrence
+        // whose span is in `decls` and assert its value.
+        let decl = result
+            .account_occurrences
+            .iter()
+            .find(|o| decls.contains(&o.span))
+            .expect("at least one ACCOUNT occurrence is a declaration");
+        assert_eq!(
+            decl.value.as_str(),
+            "Assets:Bank",
+            "the declared account must be the directive header, not the metadata value",
+        );
+    }
+
+    /// A bare posting account is never a declaration. Counter-test
+    /// to make sure the helper isn't trivially marking every
+    /// ACCOUNT token as a declaration.
+    #[test]
+    fn account_declaration_spans_excludes_posting_account() {
+        use rustledger_parser::parse;
+        let source = "\
+2024-01-01 open Assets:Bank USD
+2024-06-15 * \"Coffee\"
+  Assets:Bank  -5.00 USD
+  Expenses:Food
+";
+        let result = parse(source);
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        let decls = account_declaration_spans(&result);
+        // Only one declaration (the Open header).
+        assert_eq!(decls.len(), 1, "got {decls:?}");
+
+        // Neither the Assets:Bank posting nor the Expenses:Food
+        // posting is in `decls`.
+        let posting_occurrences: Vec<_> = result
+            .account_occurrences
+            .iter()
+            .filter(|o| !decls.contains(&o.span))
+            .collect();
+        assert_eq!(
+            posting_occurrences.len(),
+            2,
+            "expected 2 non-declaration occurrences (the two postings); got {posting_occurrences:?}",
+        );
     }
 }

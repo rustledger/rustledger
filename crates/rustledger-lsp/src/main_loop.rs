@@ -115,7 +115,7 @@ type BackgroundJob = Box<dyn FnOnce() + Send>;
 /// Each variant maps deterministically to an LSP `ErrorCode` via
 /// [`DispatchError::error_code`]. Round-20 introduced this enum to
 /// replace the prior error-message-prefix routing
-/// (`msg.starts_with("Unhandled request")` etc.) — that worked, but
+/// (`msg.starts_with("Unhandled request")` etc.) - that worked, but
 /// silently coupled the dispatcher's routing decisions to the exact
 /// wording of handler error strings, so a future handler whose
 /// `Err` happened to start with a reserved prefix would have been
@@ -180,7 +180,7 @@ pub struct MainLoopState {
     /// (`server.rs::start_stdio` in production) can drain the writer
     /// thread via `io_threads.join()` BEFORE `process::exit`. Without
     /// this, the production exit_action was `process::exit(code)`
-    /// directly — which terminates the process before the writer
+    /// directly - which terminates the process before the writer
     /// thread flushes the shutdown response queued in its channel.
     /// On a slow CI runner the writer can't keep up, the test
     /// observes only the initialize response on stdout, and
@@ -279,7 +279,7 @@ impl MainLoopState {
             revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             // Production used to wire this to `process::exit(code)`,
             // which terminated before `io_threads.join()` could drain
-            // the writer — losing the shutdown response on slow runners
+            // the writer - losing the shutdown response on slow runners
             // (the stdio_smoke flake). The exit notification now
             // signals via `pending_exit_code` instead, and the loop
             // breaks normally; the caller then joins io_threads and
@@ -352,7 +352,7 @@ impl MainLoopState {
 
     /// Dispatch a request handler to the background worker thread.
     ///
-    /// The handler closure receives no mutable state — it should capture
+    /// The handler closure receives no mutable state - it should capture
     /// any needed data (parse results, ledger state) before being moved.
     /// The result is sent back to the main loop as a `Task` event.
     ///
@@ -376,7 +376,7 @@ impl MainLoopState {
     /// (today: [`handle_code_lens_resolve`]'s defensive fallback,
     /// which does nothing more than fill `command` on a `None` lens)
     /// the check is pure overhead AND, critically, a correctness
-    /// hazard when multiple `MainLoopState`s share a process — the
+    /// hazard when multiple `MainLoopState`s share a process - the
     /// revision counter is a process-wide `AtomicU64`, so parallel
     /// instances (e.g., the integration test harness) clobber each
     /// other's dispatch revisions and lose stateless results that
@@ -400,7 +400,7 @@ impl MainLoopState {
         // the worker can compare without borrowing `MainLoopState`.
         // Using the per-instance counter (not the global one in
         // `snapshot.rs`) is required for correctness when multiple
-        // MainLoopStates share a process — see the `revision` field
+        // MainLoopStates share a process - see the `revision` field
         // rustdoc.
         let revision_arc = self.revision.clone();
         let dispatch_revision = if check_staleness {
@@ -412,7 +412,7 @@ impl MainLoopState {
         let _ = self.job_sender.send(Box::new(move || {
             let result = handler();
 
-            // Drop stale results — if the world changed since dispatch,
+            // Drop stale results - if the world changed since dispatch,
             // the client will have sent a new request for fresh data.
             // Skipped for unconditional dispatch (stateless handlers).
             if let Some(rev) = dispatch_revision
@@ -425,7 +425,7 @@ impl MainLoopState {
                 return;
             }
 
-            // Ignore send errors — the main loop may have shut down
+            // Ignore send errors - the main loop may have shut down
             let _ = task_sender.send(TaskResult { request_id, result });
         }));
     }
@@ -437,7 +437,7 @@ impl MainLoopState {
     ///
     /// Data is eagerly snapshotted on the main thread (while locks are
     /// cheap), then the CPU-intensive handler runs on the worker thread.
-    /// This avoids duplicating handler logic — the same handler functions
+    /// This avoids duplicating handler logic - the same handler functions
     /// are called from both sync and async paths.
     fn try_dispatch_async(&self, req: &lsp_server::Request) -> bool {
         match req.method.as_str() {
@@ -458,7 +458,7 @@ impl MainLoopState {
                     Ok(l) => l,
                     Err(e) => {
                         // Use unconditional dispatch (stateless
-                        // handler — see dispatch_async_unconditional).
+                        // handler - see dispatch_async_unconditional).
                         self.dispatch_async_unconditional(id, move || Err(e.to_string()));
                         return true;
                     }
@@ -470,7 +470,7 @@ impl MainLoopState {
                 });
                 true
             }
-            // semanticTokens/full tokenizes the entire document — CPU-bound.
+            // semanticTokens/full tokenizes the entire document - CPU-bound.
             SemanticTokensFullRequest::METHOD => {
                 let id = req.id.clone();
                 let params: SemanticTokensParams = match serde_json::from_value(req.params.clone())
@@ -526,7 +526,7 @@ impl MainLoopState {
         }
 
         // Send response, routed through the typed `DispatchError`
-        // (see the enum's rustdoc for the rationale — round-20
+        // (see the enum's rustdoc for the rationale - round-20
         // replaces the prior error-message-prefix routing).
         let response = match self.dispatch_sync(req) {
             Ok(value) => lsp_server::Response::new_ok(id, value),
@@ -965,10 +965,12 @@ impl MainLoopState {
             serde_json::from_value(req.params).map_err(|e| e.to_string())?;
 
         let uri = &params.text_document.uri;
-        let (text, parse_result) = self.get_document_data(uri);
+        let (text, _parse_result) = self.get_document_data(uri);
 
-        let response =
-            handle_selection_range(&params, &text, &parse_result, self.position_encoding);
+        // The CST-backed handler re-parses internally; parse_result
+        // is unused. Kept the destructure shape so a single-pass
+        // refactor to a shared CST cache stays a localized edit.
+        let response = handle_selection_range(&params, &text, self.position_encoding);
 
         serde_json::to_value(response).map_err(|e| e.to_string())
     }
@@ -1101,7 +1103,7 @@ impl MainLoopState {
         // evaluator; that evaluator dropped plugins (effective_date,
         // lazy_balance, ...) and silently disagreed with `rledger check`
         // on every ledger that used them. The new lens consults the
-        // diagnostic cache instead — diagnostics ARE the validator's
+        // diagnostic cache instead - diagnostics ARE the validator's
         // verdict after the full pipeline. None means cold start
         // (no `publish_diagnostics` for this URI yet); the lens renders
         // a neutral title and never claims a verdict it can't back up.
@@ -1707,7 +1709,7 @@ impl MainLoopState {
 /// notification arrived. The caller is expected to drain any IO
 /// threads (e.g., `lsp_server::Connection::stdio()`'s
 /// `io_threads.join()`) AFTER this returns and BEFORE terminating the
-/// process — otherwise the shutdown response queued in the writer
+/// process - otherwise the shutdown response queued in the writer
 /// thread's channel never reaches the client, which is the bug behind
 /// the `stdio_smoke` CI flake.
 #[must_use]
@@ -1844,7 +1846,7 @@ mod tests {
         );
     }
 
-    /// `Display` produces stable, distinguishable messages — clients
+    /// `Display` produces stable, distinguishable messages - clients
     /// (and humans tailing logs) shouldn't see the same string for
     /// two different failure modes.
     #[test]

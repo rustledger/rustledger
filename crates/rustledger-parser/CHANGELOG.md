@@ -59,6 +59,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the parser can emit; compiler-enforced because the inner match is
   exhaustive on `&ParseErrorKind`.
 
+- Crate-root re-exports for the `rowan` types CST consumers need:
+  `Direction`, `NodeOrToken`, `TextRange`, `TextSize`, `TokenAtOffset`,
+  `WalkEvent`. Downstream crates (notably `rustledger-lsp`) can walk the
+  CST through these aliases without taking a direct dependency on `rowan`,
+  keeping the dep graph anchored at this crate. `GreenNode` is deliberately
+  NOT re-exported - the cursor API is the supported way to traverse.
+  **Stability**: these aliases are versioned in lockstep with this crate,
+  not with `rowan` directly; a rowan minor bump that touches any of them
+  requires a coordinated bump here.
+
 - `ParseResult::account_occurrences`: every `ACCOUNT` token the parser
   consumed (outside `ERROR_NODE` regions), paired with its interned
   value and source-byte range. Mirrors the existing `currency_occurrences`

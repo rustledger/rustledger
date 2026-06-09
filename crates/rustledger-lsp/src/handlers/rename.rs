@@ -4,9 +4,15 @@
 //! - Account names (updates all usages in the file)
 //! - Currency names (updates all usages in the file)
 //!
-//! Both paths now go through the parser's token-occurrence indices
-//! (`account_occurrences` for accounts; `currency_occurrences` for
-//! currencies). The CST migration's per-token spans give us
+//! Both edit-collection paths (`collect_account_rename_edits` and
+//! `collect_currency_rename_edits`) now go through the parser's
+//! token-occurrence indices (`account_occurrences` for accounts;
+//! `currency_occurrences` for currencies). `handle_prepare_rename`
+//! and `handle_rename`'s dispatch consult the same indices first,
+//! falling through to the legacy `is_account_like` /
+//! `is_currency_like` heuristics only for the "word is
+//! account-shaped but the parser hasn't seen it yet" mid-edit
+//! case. The CST migration's per-token spans give us
 //! zero-false-positive edits: an account-name fragment textually
 //! present in a payee string, a STRING-typed metadata value, or a
 //! comment is NOT emitted as a rename edit because the lexer
@@ -63,8 +69,29 @@ pub fn handle_prepare_rename(
     let (word, start_col, end_col) =
         get_word_at_position(line, position.character as usize, encoding)?;
 
-    // Check if it's a valid renameable symbol
-    if is_account_like(&word) || is_currency_like(&word, parse_result) {
+    // Check if it's a valid renameable symbol. Consult the
+    // parser's token-occurrence indices first so Unicode-prefix
+    // and custom-rooted accounts (e.g. `option "name_assets"
+    // "Vermögen"` + `Vermögen:Bank`) that the hardcoded English
+    // root-name `is_account_like` would reject are still
+    // renameable. Same shape as `handle_rename`. Fall through to
+    // the legacy heuristic for the "word is account-shaped but
+    // the parser hasn't seen it yet" mid-edit case so the user
+    // doesn't lose prepare-rename support on a freshly-typed but
+    // not-yet-saved fixture.
+    let is_known_account = parse_result
+        .account_occurrences
+        .iter()
+        .any(|o| o.value == word.as_str());
+    let is_known_currency = parse_result
+        .currency_occurrences
+        .iter()
+        .any(|o| o.value == word.as_str());
+    if is_known_account
+        || is_known_currency
+        || is_account_like(&word)
+        || is_currency_like(&word, parse_result)
+    {
         Some(PrepareRenameResponse::Range(Range {
             start: Position::new(position.line, start_col as u32),
             end: Position::new(position.line, end_col as u32),

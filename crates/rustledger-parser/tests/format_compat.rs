@@ -100,9 +100,18 @@ fn format_compat_fixtures_match_expected_output() {
     // count toward the fixture set and silently absorb the
     // "missing input.bean" failure alongside a quiet coverage drop
     // elsewhere.
+    //
+    // Per-entry errors panic. Silently dropping them via
+    // `filter_map(Result::ok)` would silently shrink fixture
+    // coverage if a permission / filesystem fault hit one
+    // directory. Matches the convention in `tests/baseline_common`.
     let mut fixtures: Vec<PathBuf> = fs::read_dir(&cases_dir)
         .unwrap_or_else(|e| panic!("read_dir({}): {e}", cases_dir.display()))
-        .filter_map(Result::ok)
+        .map(|entry| {
+            entry.unwrap_or_else(|e| {
+                panic!("read_dir entry under {} failed: {e}", cases_dir.display())
+            })
+        })
         .map(|e| e.path())
         .filter(|p| p.is_dir() && p.join("input.bean").is_file())
         .collect();

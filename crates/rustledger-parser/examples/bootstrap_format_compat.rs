@@ -46,9 +46,19 @@ fn main() {
     let overwrite_all = env::var("BOOTSTRAP_OVERWRITE").as_deref() == Ok("1");
     let target_fixture = env::var("BOOTSTRAP_FIXTURE").ok();
 
+    // Per-entry errors panic. Silently dropping them via
+    // `filter_map(Result::ok)` would silently shrink the bootstrap
+    // run if a permission / filesystem fault hit one directory,
+    // and the resulting "wrote N files" summary would mislead the
+    // contributor into thinking the run was complete. Matches the
+    // convention in `tests/baseline_common`.
     let mut fixtures: Vec<PathBuf> = fs::read_dir(&cases_dir)
-        .expect("read_dir cases")
-        .filter_map(Result::ok)
+        .unwrap_or_else(|e| panic!("read_dir({}): {e}", cases_dir.display()))
+        .map(|entry| {
+            entry.unwrap_or_else(|e| {
+                panic!("read_dir entry under {} failed: {e}", cases_dir.display())
+            })
+        })
         .map(|e| e.path())
         .filter(|p| p.is_dir())
         .collect();

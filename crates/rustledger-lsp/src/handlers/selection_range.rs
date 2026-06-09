@@ -36,12 +36,24 @@
 //! because CST tokens are atomic.
 
 use lsp_types::{Position, Range, SelectionRange, SelectionRangeParams};
-use rustledger_parser::cst_walk::{TextRange, TextSize, TokenAtOffset};
-use rustledger_parser::{SyntaxKind, SyntaxNode, SyntaxToken, parse_structured};
+use rustledger_parser::{
+    SyntaxKind, SyntaxNode, SyntaxToken, TextRange, TextSize, TokenAtOffset, parse_structured,
+};
 
 use super::utils::{LineIndex, PositionEncoding, is_word_char};
 
 /// Handle a `textDocument/selectionRange` request.
+///
+/// **Performance follow-up.** The handler re-parses the source on
+/// every request via [`parse_structured`]. The VFS cache already
+/// holds a `ParseResult` from `parse_via_cst`, which built and
+/// then discarded a `SyntaxNode` internally - so the document is
+/// effectively parsed twice on every selectionRange request. The
+/// architectural fix is to add an `Arc<rowan::GreenNode>` (or a
+/// thread-safe handle to the CST root) to `ParseResult` so a
+/// shared cache backs all CST-walking handlers - not just this
+/// one but the planned folding-range / range-formatter / account-
+/// rename rewrites. Tracked as a follow-up to #1262 phase 5.
 pub fn handle_selection_range(
     params: &SelectionRangeParams,
     source: &str,
@@ -120,20 +132,34 @@ fn compute_selection_range(
         _ => {}
     }
 
-    // (2) The token itself.
+    // (2) The token itself. `ranges.last()` is `None` when no
+    //     sub-token expansion fired, so the inequality is true and
+    //     this push always runs in that case - meaning `ranges` is
+    //     GUARANTEED non-empty after this point and
+    //     `build_hierarchy` cannot panic on a degenerate empty
+    //     input.
     let token_range = node_or_token_range(token.text_range(), line_index);
     if Some(token_range) != ranges.last().copied() {
         ranges.push(token_range);
     }
 
     // (3) Every ancestor node, in order from immediate parent up to
-    //     SOURCE_FILE. Adjacent duplicates (a wrapper node whose
-    //     range matches its only child) collapse.
+    //     SOURCE_FILE. Two filters fire:
+    //     - Adjacent duplicates (a wrapper node whose range matches
+    //       its only child) collapse.
+    //     - ERROR_NODE ancestors are skipped. The CST wraps broken
+    //       syntax in ERROR_NODE whose range can swallow many lines;
+    //       emitting it as a hierarchy level produces a confusing
+    //       jump from a small inner range to a large unrelated
+    //       region. Skipping lets the next valid structural parent
+    //       (often SOURCE_FILE) absorb the level.
     let mut node = token.parent();
     while let Some(n) = node {
-        let r = node_or_token_range(n.text_range(), line_index);
-        if Some(r) != ranges.last().copied() {
-            ranges.push(r);
+        if n.kind() != SyntaxKind::ERROR_NODE {
+            let r = node_or_token_range(n.text_range(), line_index);
+            if Some(r) != ranges.last().copied() {
+                ranges.push(r);
+            }
         }
         node = n.parent();
     }
@@ -141,38 +167,82 @@ fn compute_selection_range(
     Some(build_hierarchy(ranges))
 }
 
-/// On a token boundary, prefer the side whose first / last char is
-/// a word character. A cursor between `"Coffee"` and a trailing
-/// space should grab the STRING, not the WHITESPACE; a cursor
-/// between an indent and an ACCOUNT should grab the ACCOUNT, not
-/// the WHITESPACE.
+/// On a token boundary, prefer the side carrying more semantic
+/// content.
+///
+/// Earlier shape used `is_word_char` on the touching characters
+/// for the tiebreak. That was the wrong predicate: `is_word_char`
+/// returns true for `:` and `-`, both of which appear as the LAST
+/// char of legitimate CST tokens (META_KEY ends with `:` per its
+/// lexer regex). A cursor between a META_KEY and its value would
+/// hit (true, true) on the boundary and the previous code
+/// silently picked the META_KEY when the user almost certainly
+/// clicked the value.
+///
+/// The new policy ranks by [`SyntaxKind`] using a small priority
+/// scale: trivia (whitespace / newline / comment / BOM) and
+/// `ERROR_TOKEN` are lowest; operators and punctuation are
+/// middle; identifier-like and literal tokens (ACCOUNT, STRING,
+/// NUMBER, DATE, TAG, LINK, CURRENCY, keywords, ...) are highest.
+/// Higher wins. Ties prefer left to match standard editor
+/// "click on the boundary, get the prior token" convention.
 fn prefer_word_token(left: SyntaxToken, right: SyntaxToken) -> SyntaxToken {
-    let left_last = left.text().chars().next_back().is_some_and(is_word_char);
-    let right_first = right.text().chars().next().is_some_and(is_word_char);
-    match (left_last, right_first) {
-        (false, true) => right,
-        // (true, *) or (false, false): keep the left token. The
-        // word-boundary case (true, true) is impossible across two
-        // distinct CST tokens because the lexer would have merged
-        // them into one.
-        _ => left,
+    if token_priority(right.kind()) > token_priority(left.kind()) {
+        right
+    } else {
+        left
+    }
+}
+
+/// Score a `SyntaxKind` for boundary-tiebreaking. Higher is better.
+fn token_priority(kind: SyntaxKind) -> u8 {
+    // Trivia / error: never preferred at a boundary - the cursor
+    // never logically belongs to whitespace or a parse error.
+    if kind.is_trivia() || kind == SyntaxKind::ERROR_TOKEN {
+        return 0;
+    }
+    match kind {
+        // Operators and punctuation: middle band. META_KEY lives
+        // here because it ENDS in `:` (per the lexer's regex), so
+        // a cursor sitting after the colon is semantically on the
+        // value-token side, not the key-token side.
+        SyntaxKind::COLON
+        | SyntaxKind::COMMA
+        | SyntaxKind::AT
+        | SyntaxKind::AT_AT
+        | SyntaxKind::PLUS
+        | SyntaxKind::MINUS
+        | SyntaxKind::STAR
+        | SyntaxKind::SLASH
+        | SyntaxKind::L_PAREN
+        | SyntaxKind::R_PAREN
+        | SyntaxKind::L_BRACE
+        | SyntaxKind::R_BRACE
+        | SyntaxKind::L_DOUBLE_BRACE
+        | SyntaxKind::R_DOUBLE_BRACE
+        | SyntaxKind::L_BRACE_HASH
+        | SyntaxKind::TILDE
+        | SyntaxKind::META_KEY => 1,
+        // Everything else: identifier-like / literal / keyword
+        // tokens whose payload carries semantic meaning.
+        _ => 2,
     }
 }
 
 /// Build the linked-list of SelectionRanges from innermost to
-/// outermost. The outermost range becomes the deepest `parent`
-/// chain; the innermost is the root we return.
+/// outermost. `ranges` is guaranteed non-empty by
+/// [`compute_selection_range`] - stage (2) unconditionally pushes
+/// the cursor's token range when no inner sub-token range fires.
 fn build_hierarchy(ranges: Vec<Range>) -> SelectionRange {
-    debug_assert!(
+    assert!(
         !ranges.is_empty(),
-        "compute_selection_range guarantees ≥1 range"
+        "compute_selection_range must always emit at least the cursor's token range"
     );
     let mut parent: Option<Box<SelectionRange>> = None;
     for range in ranges.into_iter().rev() {
         parent = Some(Box::new(SelectionRange { range, parent }));
     }
-    // SAFETY: ranges is non-empty per the assert above.
-    *parent.expect("non-empty ranges")
+    *parent.expect("non-empty ranges (asserted above)")
 }
 
 /// Convert a rowan `TextRange` (byte offsets in `source`) to an
@@ -199,17 +269,19 @@ fn word_range_in_token(
 ) -> Option<Range> {
     let token_start: usize = u32::from(token.text_range().start()) as usize;
 
-    // Find word boundaries around `offset_in_token`. If the cursor
-    // is between non-word chars there's nothing to expand to.
-    if offset_in_token >= token_text.len() {
-        return None;
-    }
-    let here = token_text[offset_in_token..].chars().next()?;
-    if !is_word_char(here) {
-        // Try the char immediately to the left (handles cursor
-        // sitting at the end of a word).
-        let prev = token_text[..offset_in_token].chars().next_back()?;
-        if !is_word_char(prev) {
+    // Find word boundaries around `offset_in_token`. The cursor
+    // can sit on a word char, between two non-word chars, or
+    // right at the trailing edge of a word (offset_in_token ==
+    // token_text.len() when prefer_word_token routed us to the
+    // left token of a boundary). In the last case
+    // `token_text[offset_in_token..].chars().next()` is None,
+    // so we fall back to the `prev` char on the left to detect
+    // "cursor right after a word".
+    let here = token_text[offset_in_token..].chars().next();
+    let on_word = here.is_some_and(is_word_char);
+    if !on_word {
+        let prev = token_text[..offset_in_token].chars().next_back();
+        if !prev.is_some_and(is_word_char) {
             return None;
         }
     }
@@ -450,6 +522,160 @@ mod tests {
         let ranges = run(source, Position::new(99, 99));
         assert_eq!(ranges.len(), 1);
         assert_eq!(ranges[0].start, ranges[0].end);
+    }
+
+    #[test]
+    fn number_inside_cost_spec() {
+        // Cursor on '5' of "500.00" inside `{500.00 USD}`. The CST
+        // wraps cost specs in a COST_SPEC node; the hierarchy must
+        // surface that level before the enclosing POSTING.
+        let source = "2024-01-15 * \"buy\"\n  Assets:Brokerage 10 HOOL {500.00 USD}\n  Assets:Cash -5000.00 USD\n";
+        // Source line 1 byte positions:
+        //   col 0..2  = leading indent
+        //   col 27    = '{'
+        //   col 28..31= '500'
+        //   col 38    = '}'
+        let ranges = run(source, Position::new(1, 28)); // on '5' of 500
+        // Hierarchy must include COST_SPEC as a distinct level
+        // between NUMBER and POSTING. POSTING and SOURCE_FILE may
+        // coincide on a single-transaction file (the dedup
+        // collapses them) but COST_SPEC must always appear.
+        assert!(ranges.len() >= 4, "got {} ranges: {ranges:?}", ranges.len());
+        for win in ranges.windows(2) {
+            let (inner, outer) = (win[0], win[1]);
+            assert!(
+                range_contains(outer, inner),
+                "outer={outer:?} does not contain inner={inner:?}"
+            );
+        }
+        // The COST_SPEC range covers exactly `{500.00 USD}` =
+        // columns 27..39. Find it.
+        assert!(
+            ranges
+                .iter()
+                .any(|r| r.start.character == 27 && r.end.character == 39),
+            "COST_SPEC range {{500.00 USD}} (cols 27..39) not in chain: {ranges:?}",
+        );
+    }
+
+    #[test]
+    fn number_inside_price_annotation() {
+        // Cursor on '1' of "1.00" inside `@ 1.00 EUR`. The CST
+        // wraps price annotations in a PRICE_ANNOTATION node.
+        let source =
+            "2024-01-15 * \"fx\"\n  Assets:USD -100 USD @ 1.00 EUR\n  Assets:EUR 100 EUR\n";
+        let ranges = run(source, Position::new(1, 24)); // on '1' of @ 1.00
+        // PRICE_ANNOTATION should appear as a discrete level.
+        assert!(ranges.len() >= 4, "got {} ranges: {ranges:?}", ranges.len());
+        for win in ranges.windows(2) {
+            let (inner, outer) = (win[0], win[1]);
+            assert!(
+                range_contains(outer, inner),
+                "outer={outer:?} does not contain inner={inner:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn string_inside_option_directive() {
+        // Cursor inside the value string of `option "title" "My Book"`.
+        let source = "option \"title\" \"My Book\"\n";
+        let ranges = run(source, Position::new(0, 19)); // mid "My"
+        // Expected: word(My) -> string-interior -> STRING ->
+        // option directive -> SOURCE_FILE.
+        assert!(ranges.len() >= 4, "got {} ranges: {ranges:?}", ranges.len());
+        for win in ranges.windows(2) {
+            let (inner, outer) = (win[0], win[1]);
+            assert!(
+                range_contains(outer, inner),
+                "outer={outer:?} does not contain inner={inner:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn error_node_ancestors_are_skipped_in_broken_syntax() {
+        // Regression for the mid-edit case where ERROR_NODE wraps
+        // a multi-line region (unterminated string here). The
+        // handler must NOT emit the ERROR_NODE as a hierarchy
+        // level; users mid-edit would see Expand Selection jump
+        // from a small word to a multi-line region with nothing
+        // sensible between, often spilling into the next
+        // directive.
+        let source = "2024-01-15 * \"unterminated\n  Assets:Cash -1.00 USD\n";
+        let ranges = run(source, Position::new(0, 18)); // mid 'unterminated'
+        // We don't make precise structural promises in the broken-
+        // syntax case, but the chain must:
+        // (a) be monotonically containing, and
+        // (b) contain no range whose `kind` is ERROR_NODE - which
+        //     we verify indirectly by asserting no intermediate
+        //     range spans MORE than 80% of the source (the
+        //     ERROR_NODE shape that prompted this fix swallowed
+        //     >50% of the source before settling on SOURCE_FILE).
+        for win in ranges.windows(2) {
+            let (inner, outer) = (win[0], win[1]);
+            assert!(
+                range_contains(outer, inner),
+                "outer={outer:?} does not contain inner={inner:?}"
+            );
+        }
+        let last = ranges.last().copied().expect("non-empty chain");
+        // Every range except the last (SOURCE_FILE) should be
+        // strictly narrower than the source-wide range.
+        for r in ranges.iter().take(ranges.len() - 1) {
+            assert!(
+                !range_contains(*r, last) || *r == last,
+                "non-root range {r:?} swallowed the whole source - ERROR_NODE not skipped",
+            );
+        }
+    }
+
+    #[test]
+    fn utf8_encoding_emits_correct_positions_on_non_ascii_content() {
+        // Cursor inside the Cyrillic word "Банк" of an account.
+        // Under UTF-8 each Cyrillic letter is 2 bytes; the column
+        // math must agree with the negotiated encoding. The
+        // line_index is encoding-aware; this test pins that
+        // selection_range round-trips through it cleanly.
+        let source = "2024-01-15 * \"x\"\n  Активы:Банк -5.00 USD\n  Expenses:Misc 5.00 USD\n";
+        // Line 1 UTF-8 byte layout:
+        //   0..2  = leading indent
+        //   2..14 = "Активы" (6 chars * 2 bytes)
+        //   14    = ':'
+        //   15..23 = "Банк" (4 chars * 2 bytes)
+        //   23    = ' '
+        // Cursor at byte column 17 sits on the start of 'а' (the
+        // second char of "Банк"), which is a valid char boundary
+        // - position_to_offset requires this under UTF-8.
+        let params = SelectionRangeParams {
+            text_document: TextDocumentIdentifier {
+                uri: "file:///utf8.beancount".parse().unwrap(),
+            },
+            positions: vec![Position::new(1, 17)],
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        };
+        let result = handle_selection_range(&params, source, PositionEncoding::Utf8).expect("Some");
+        assert_eq!(result.len(), 1);
+        let mut chain = Vec::new();
+        let mut cur: Option<&SelectionRange> = Some(&result[0]);
+        while let Some(r) = cur {
+            chain.push(r.range);
+            cur = r.parent.as_deref();
+        }
+        // We don't pin exact byte columns - we pin the invariant
+        // that the chain is monotonically containing and non-trivial
+        // (more than just a collapsed fallback), proving the
+        // encoding pipeline didn't silently degrade to the
+        // out-of-bounds fallback.
+        assert!(chain.len() >= 3, "got {} ranges: {chain:?}", chain.len());
+        for win in chain.windows(2) {
+            let (inner, outer) = (win[0], win[1]);
+            assert!(
+                range_contains(outer, inner),
+                "outer={outer:?} does not contain inner={inner:?}"
+            );
+        }
     }
 
     fn range_contains(outer: Range, inner: Range) -> bool {

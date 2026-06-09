@@ -61,16 +61,29 @@ pub use cst::{
     parse_flat, parse_structured, parse_via_cst,
 };
 
-/// Re-exports of rowan types CST consumers need.
-///
-/// `TextRange`, `TextSize`, `TokenAtOffset`. Downstream crates can
-/// walk the CST through these aliases without taking a direct
-/// dependency on `rowan`, keeping the dep graph anchored at this
-/// crate.
-pub mod cst_walk {
-    pub use rowan::{TextRange, TextSize, TokenAtOffset};
-}
+// Rowan types CST consumers need. Flat re-exports at the crate
+// root match the surrounding `SyntaxNode` / `SyntaxToken` shape -
+// downstream `use rustledger_parser::{SyntaxNode, TextRange};`
+// resolves both halves uniformly without a sub-module hop.
+//
+// The set covers what LSP handlers need for tree walking:
+// - `TextRange` / `TextSize`: byte-offset ranges on every node
+// - `TokenAtOffset`: cursor-position lookup
+// - `WalkEvent`: preorder / postorder traversal for folding-range
+//   and semantic-tokens implementations
+// - `NodeOrToken`: pattern-matching `SyntaxElement` children
+// - `Direction`: sibling iteration
+//
+// `GreenNode` is deliberately NOT re-exported - it's the
+// thread-safe storage backing for `SyntaxNode` but downstream
+// consumers should walk via the cursor API, not the green tree.
+//
+// **Stability.** These types are versioned in lockstep with this
+// crate, NOT with `rowan` directly. A rowan minor bump that
+// changes any of these will require a coordinated bump of this
+// crate so the re-export contract holds at THIS crate's semver.
 pub use error::{ParseError, ParseErrorKind};
+pub use rowan::{Direction, NodeOrToken, TextRange, TextSize, TokenAtOffset, WalkEvent};
 pub use rustledger_core::{InternedStr, SYNTHESIZED_FILE_ID, Span, Spanned};
 
 use rustledger_core::Directive;

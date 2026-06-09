@@ -59,6 +59,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the parser can emit; compiler-enforced because the inner match is
   exhaustive on `&ParseErrorKind`.
 
+- Crate-root re-exports for the `rowan` types CST consumers need:
+  `Direction`, `NodeOrToken`, `TextRange`, `TextSize`, `TokenAtOffset`,
+  `WalkEvent`. Downstream crates (notably `rustledger-lsp`) can walk the
+  CST through these aliases without taking a direct dependency on `rowan`,
+  keeping the dep graph anchored at this crate. `GreenNode` is deliberately
+  NOT re-exported - the cursor API is the supported way to traverse.
+  **Stability**: these aliases are versioned in lockstep with this crate,
+  not with `rowan` directly; a rowan minor bump that touches any of them
+  requires a coordinated bump here.
+
 ## [0.13.0](https://github.com/rustledger/rustledger/compare/v0.12.0...v0.13.0) - 2026-04-21
 
 ### Bug Fixes

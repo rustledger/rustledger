@@ -50,6 +50,19 @@ use super::utils::{LineIndex, PositionEncoding, is_word_char};
 /// cost (the VFS cache already parses once for the `ParseResult`).
 /// The `Arc<GreenNode>` cache landed in phase 5.5 of #1262
 /// alongside this change.
+///
+/// **BOM frame.** `parse_result.syntax_root` is built from the
+/// BOM-stripped source (the parser strips the leading BOM before
+/// tokenizing), so its `TextRange` offsets are in the *post-BOM*
+/// byte frame. The `source` argument and the `LineIndex` built
+/// from it are in the *original* source frame. We bridge the two
+/// by subtracting `BOM_LEN` (3) from LSP-derived offsets before
+/// asking the CST, and adding `BOM_LEN` back when converting CST
+/// `TextRange` offsets to LSP positions — gated on
+/// `parse_result.has_leading_bom`. The other ACCOUNT/Currency
+/// handlers don't see this because they walk
+/// `account_occurrences` / `currency_occurrences`, whose spans
+/// are pre-shifted into the original frame by the converter.
 pub fn handle_selection_range(
     params: &SelectionRangeParams,
     source: &str,
@@ -62,17 +75,20 @@ pub fn handle_selection_range(
     // rowan upgrade is contained in `rustledger-parser`.
     let cst = parse_result.syntax_node();
     let line_index = LineIndex::new(source, encoding);
+    let bom_offset: usize = if parse_result.has_leading_bom { 3 } else { 0 };
     let mut results = Vec::with_capacity(params.positions.len());
 
     for position in &params.positions {
         results.push(
-            compute_selection_range(&cst, &line_index, *position).unwrap_or(SelectionRange {
-                range: Range {
-                    start: *position,
-                    end: *position,
+            compute_selection_range(&cst, &line_index, *position, bom_offset).unwrap_or(
+                SelectionRange {
+                    range: Range {
+                        start: *position,
+                        end: *position,
+                    },
+                    parent: None,
                 },
-                parent: None,
-            }),
+            ),
         );
     }
 
@@ -80,13 +96,24 @@ pub fn handle_selection_range(
 }
 
 /// Build the nested-range chain at `position`.
+///
+/// `bom_offset` is the number of bytes the parser stripped off
+/// the front of the source (0 for BOM-less, 3 for BOM-prefixed).
+/// `position_to_offset` returns an original-source offset; we
+/// shift it down into the CST frame before walking the tree, and
+/// shift CST offsets back up before emitting LSP positions.
 fn compute_selection_range(
     cst: &SyntaxNode,
     line_index: &LineIndex<'_>,
     position: Position,
+    bom_offset: usize,
 ) -> Option<SelectionRange> {
-    let offset = line_index.position_to_offset(position.line, position.character)?;
-    let offset_ts = TextSize::try_from(offset).ok()?;
+    let orig_offset = line_index.position_to_offset(position.line, position.character)?;
+    // Cursor sits before the BOM region (only possible if the user
+    // somehow targeted a position before the file starts; defensive
+    // bound) — no valid CST token there.
+    let cst_offset = orig_offset.checked_sub(bom_offset)?;
+    let offset_ts = TextSize::try_from(cst_offset).ok()?;
 
     // Find the deepest token containing the cursor. On a boundary
     // (between two tokens) rowan returns Between(left, right); we
@@ -107,24 +134,34 @@ fn compute_selection_range(
     //     actually narrows the token's range.
     let token_text = token.text();
     let token_start_byte: usize = u32::from(token.text_range().start()) as usize;
-    let offset_in_token = offset
+    // `offset_in_token` is intra-token, so it doesn't care about
+    // the BOM shift - both sides of the subtraction are in CST
+    // frame.
+    let offset_in_token = cst_offset
         .saturating_sub(token_start_byte)
         .min(token_text.len());
 
-    if let Some(word) = word_range_in_token(&token, token_text, offset_in_token, line_index) {
+    if let Some(word) =
+        word_range_in_token(&token, token_text, offset_in_token, line_index, bom_offset)
+    {
         ranges.push(word);
     }
     match token.kind() {
         SyntaxKind::ACCOUNT => {
-            if let Some(seg) =
-                account_segment_range_in_token(&token, token_text, offset_in_token, line_index)
-                && Some(seg) != ranges.last().copied()
+            if let Some(seg) = account_segment_range_in_token(
+                &token,
+                token_text,
+                offset_in_token,
+                line_index,
+                bom_offset,
+            ) && Some(seg) != ranges.last().copied()
             {
                 ranges.push(seg);
             }
         }
         SyntaxKind::STRING => {
-            if let Some(interior) = string_interior_range_in_token(&token, token_text, line_index)
+            if let Some(interior) =
+                string_interior_range_in_token(&token, token_text, line_index, bom_offset)
                 && Some(interior) != ranges.last().copied()
             {
                 ranges.push(interior);
@@ -139,7 +176,7 @@ fn compute_selection_range(
     //     GUARANTEED non-empty after this point and
     //     `build_hierarchy` cannot panic on a degenerate empty
     //     input.
-    let token_range = node_or_token_range(token.text_range(), line_index);
+    let token_range = node_or_token_range(token.text_range(), line_index, bom_offset);
     if Some(token_range) != ranges.last().copied() {
         ranges.push(token_range);
     }
@@ -157,7 +194,7 @@ fn compute_selection_range(
     let mut node = token.parent();
     while let Some(n) = node {
         if n.kind() != SyntaxKind::ERROR_NODE {
-            let r = node_or_token_range(n.text_range(), line_index);
+            let r = node_or_token_range(n.text_range(), line_index, bom_offset);
             if Some(r) != ranges.last().copied() {
                 ranges.push(r);
             }
@@ -246,11 +283,14 @@ fn build_hierarchy(ranges: Vec<Range>) -> SelectionRange {
     *parent.expect("non-empty ranges (asserted above)")
 }
 
-/// Convert a rowan `TextRange` (byte offsets in `source`) to an
-/// LSP `Range` in the negotiated encoding.
-fn node_or_token_range(range: TextRange, line_index: &LineIndex<'_>) -> Range {
-    let start_byte: usize = u32::from(range.start()) as usize;
-    let end_byte: usize = u32::from(range.end()) as usize;
+/// Convert a rowan `TextRange` (byte offsets in the *CST* — i.e.
+/// the BOM-stripped frame) to an LSP `Range` in the negotiated
+/// encoding. `bom_offset` adds back the BOM bytes that the
+/// converter stripped, so the LSP positions land at the user's
+/// intended source coordinates.
+fn node_or_token_range(range: TextRange, line_index: &LineIndex<'_>, bom_offset: usize) -> Range {
+    let start_byte: usize = u32::from(range.start()) as usize + bom_offset;
+    let end_byte: usize = u32::from(range.end()) as usize + bom_offset;
     let (start_line, start_col) = line_index.offset_to_position(start_byte);
     let (end_line, end_col) = line_index.offset_to_position(end_byte);
     Range {
@@ -262,11 +302,15 @@ fn node_or_token_range(range: TextRange, line_index: &LineIndex<'_>) -> Range {
 /// Word-boundary expansion within a single token's text. Returns
 /// `None` if the cursor is not on a word character (no word to
 /// select) or the word equals the entire token (no narrowing).
+///
+/// `bom_offset` shifts the CST-frame absolute offsets up into
+/// the original-source frame before LSP `Position` conversion.
 fn word_range_in_token(
     token: &SyntaxToken,
     token_text: &str,
     offset_in_token: usize,
     line_index: &LineIndex<'_>,
+    bom_offset: usize,
 ) -> Option<Range> {
     let token_start: usize = u32::from(token.text_range().start()) as usize;
 
@@ -310,8 +354,8 @@ fn word_range_in_token(
         return None;
     }
 
-    let abs_start = token_start + start_byte;
-    let abs_end = token_start + end_byte;
+    let abs_start = token_start + start_byte + bom_offset;
+    let abs_end = token_start + end_byte + bom_offset;
     let (sl, sc) = line_index.offset_to_position(abs_start);
     let (el, ec) = line_index.offset_to_position(abs_end);
     Some(Range {
@@ -323,11 +367,15 @@ fn word_range_in_token(
 /// Segment expansion for an `ACCOUNT` token: the slice between
 /// adjacent `:` characters that contains the cursor. Returns
 /// `None` if the segment equals the entire token.
+///
+/// `bom_offset` shifts the CST-frame absolute offsets up into
+/// the original-source frame before LSP `Position` conversion.
 fn account_segment_range_in_token(
     token: &SyntaxToken,
     token_text: &str,
     offset_in_token: usize,
     line_index: &LineIndex<'_>,
+    bom_offset: usize,
 ) -> Option<Range> {
     let token_start: usize = u32::from(token.text_range().start()) as usize;
     let clamped = offset_in_token.min(token_text.len().saturating_sub(1));
@@ -354,8 +402,8 @@ fn account_segment_range_in_token(
         return None;
     }
 
-    let abs_start = token_start + start_byte;
-    let abs_end = token_start + end_byte;
+    let abs_start = token_start + start_byte + bom_offset;
+    let abs_end = token_start + end_byte + bom_offset;
     let (sl, sc) = line_index.offset_to_position(abs_start);
     let (el, ec) = line_index.offset_to_position(abs_end);
     Some(Range {
@@ -368,10 +416,14 @@ fn account_segment_range_in_token(
 /// between the opening and closing `"`. Returns `None` if the
 /// token isn't `"…"`-delimited (the lexer guarantees this shape,
 /// but a malformed unterminated string skips the inner range).
+///
+/// `bom_offset` shifts the CST-frame absolute offsets up into
+/// the original-source frame before LSP `Position` conversion.
 fn string_interior_range_in_token(
     token: &SyntaxToken,
     token_text: &str,
     line_index: &LineIndex<'_>,
+    bom_offset: usize,
 ) -> Option<Range> {
     if token_text.len() < 2 {
         return None;
@@ -380,8 +432,8 @@ fn string_interior_range_in_token(
         return None;
     }
     let token_start: usize = u32::from(token.text_range().start()) as usize;
-    let abs_start = token_start + 1;
-    let abs_end = token_start + token_text.len() - 1;
+    let abs_start = token_start + 1 + bom_offset;
+    let abs_end = token_start + token_text.len() - 1 + bom_offset;
     let (sl, sc) = line_index.offset_to_position(abs_start);
     let (el, ec) = line_index.offset_to_position(abs_end);
     Some(Range {
@@ -689,5 +741,108 @@ mod tests {
     }
     fn pos_le(a: Position, b: Position) -> bool {
         (a.line, a.character) <= (b.line, b.character)
+    }
+
+    /// Regression test for the BOM frame mismatch flagged by
+    /// Copilot on PR #1295: when the source begins with a UTF-8
+    /// BOM, the cached `syntax_root` is built from the
+    /// BOM-stripped source so its `TextRange` offsets are in the
+    /// post-BOM frame, but LSP positions and the `LineIndex` are
+    /// in the original-source frame. Without the `bom_offset`
+    /// adjustment, `cst.token_at_offset` would land on a token
+    /// 3 bytes past the user's cursor, and emitted LSP ranges
+    /// would be shifted to the wrong source columns.
+    ///
+    /// The fixture is identical to a routine selection-range
+    /// case except for the leading BOM. The expected hierarchy
+    /// and column math is therefore unchanged from a BOM-less
+    /// source — if any of them shifts by 3, the bug is back.
+    #[test]
+    fn bom_prefixed_source_does_not_shift_ranges() {
+        // U+FEFF as UTF-8 is `\u{FEFF}`. The first directive
+        // starts at original-byte 3 (after the BOM); LSP
+        // position (0, 0) is still the start of line 0.
+        let source = "\u{FEFF}2024-01-15 * \"Coffee\"\n  Assets:Bank -5.00 USD\n";
+        let parse_result = rustledger_parser::parse(source);
+        assert!(
+            parse_result.has_leading_bom,
+            "parser must have detected the BOM for the fix to take effect",
+        );
+        assert!(
+            parse_result.errors.is_empty(),
+            "parse errors: {:?}",
+            parse_result.errors,
+        );
+
+        // Cursor on the `A` of `Assets:Bank` (line 1, char 2
+        // after the two-space indent). Without the fix, the
+        // cursor lookup would land 3 bytes ahead — likely in
+        // the middle of "Assets" or past it — and the emitted
+        // ranges would also be shifted.
+        let params = SelectionRangeParams {
+            text_document: TextDocumentIdentifier {
+                uri: "file:///bom.beancount".parse().unwrap(),
+            },
+            positions: vec![Position::new(1, 2)],
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        };
+        let result =
+            handle_selection_range(&params, source, &parse_result, PositionEncoding::Utf16)
+                .expect("selection range returns Some");
+        assert_eq!(result.len(), 1);
+
+        let mut chain = Vec::new();
+        let mut cur: Option<&SelectionRange> = Some(&result[0]);
+        while let Some(r) = cur {
+            chain.push(r.range);
+            cur = r.parent.as_deref();
+        }
+
+        // The deepest range is the word/segment "Assets" inside
+        // the account token — columns 2..8 of line 1, regardless
+        // of the leading BOM. If `bom_offset` didn't apply, the
+        // range would either land at the wrong column or
+        // degenerate to the (position, position) fallback.
+        assert_eq!(
+            chain[0],
+            Range {
+                start: Position::new(1, 2),
+                end: Position::new(1, 8),
+            },
+            "deepest range should be the 'Assets' segment at line 1 cols 2..8; got {chain:?}",
+        );
+
+        // The full chain must be monotonically containing.
+        for win in chain.windows(2) {
+            let (inner, outer) = (win[0], win[1]);
+            assert!(
+                range_contains(outer, inner),
+                "outer={outer:?} does not contain inner={inner:?}; \
+                 a BOM-frame bug typically breaks containment when one of \
+                 the helpers forgets the bom_offset shift",
+            );
+        }
+
+        // SOURCE_FILE (the outermost range) starts at the first
+        // CST byte (post-BOM byte 0), shifted up by `BOM_LEN`
+        // into the original-source frame. In UTF-16 encoding the
+        // 3-byte UTF-8 BOM is 1 code unit, so the LSP column
+        // works out to 1. The important invariant is that
+        // SOURCE_FILE.start is *deterministic* — a residual BOM
+        // bug would either leave start at (0, 0) (forgot to
+        // shift the SOURCE_FILE range) or push it past the BOM
+        // by 3 in BOTH directions (double-counting). Pin the
+        // exact post-shift coordinates.
+        let outer = *chain.last().unwrap();
+        assert_eq!(
+            outer.start,
+            Position::new(0, 1),
+            "SOURCE_FILE range start drifted; expected (0, 1) — the post-BOM byte 0 \
+             shifted +BOM_LEN into the original-source frame and then mapped to \
+             UTF-16 column 1 — got {outer:?}. A bug in node_or_token_range that \
+             forgets the bom_offset shift would land at (0, 0); double-shifting \
+             would land somewhere wrong.",
+        );
     }
 }

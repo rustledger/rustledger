@@ -233,6 +233,29 @@ pub struct ParseResult {
     /// `Arc::clone`-style sharing patterns benefit from direct
     /// access — but downstream code should reach for the method.
     ///
+    /// **Byte-offset frame: post-BOM.** The CST is built from
+    /// the BOM-stripped source — the parser strips a strict-
+    /// byte-0 UTF-8 BOM (see [`crate::bom::strip_leading`]) and
+    /// feeds the stripped slice to `parse_structured`. So every
+    /// `TextRange` / `TextSize` reachable through this tree is
+    /// in the **post-BOM** byte frame: an offset of `0` here
+    /// corresponds to byte `BOM_LEN == 3` of the original source
+    /// when [`Self::has_leading_bom`] is `true`. This differs
+    /// from the typed-AST fields above ([`Self::directives`],
+    /// [`Self::currency_occurrences`], [`Self::account_occurrences`],
+    /// [`Self::errors`], …), whose spans the converter
+    /// pre-shifts back into the *original*-source frame so
+    /// downstream consumers can index directly into the caller's
+    /// source bytes. CST-walking consumers must apply the
+    /// equivalent shift themselves: subtract `BOM_LEN` when
+    /// translating an original-source offset down to a CST
+    /// offset (e.g., `cst.token_at_offset(orig - BOM_LEN)`), and
+    /// add `BOM_LEN` back when emitting an original-source
+    /// position from a `TextRange`. The LSP `selection_range`
+    /// handler does this — see its rustdoc and the
+    /// `bom_prefixed_source_does_not_shift_ranges` regression
+    /// test.
+    ///
     /// **Canonical-payload exclusion.** This field is deliberately
     /// NOT fed into [`__baseline_canonical_payload`]. The green
     /// node is a redundant cache of the source bytes; the

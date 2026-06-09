@@ -1,0 +1,14 @@
+; #1142 bug class: per-posting metadata interleaved between
+; postings of the same transaction. Earlier versions of the
+; formatter used `txn_start_line + 1 + posting_idx` line
+; arithmetic and wrongly-attributed indented metadata lines, which
+; either dropped them or migrated them onto the wrong posting.
+; The CST migration's per-posting span captures the metadata
+; structurally; this fixture pins that contract.
+2024-01-15 * "FX transfer with per-posting effective dates"
+  Assets:USD -100.00 USD
+    effective_date: 2024-01-16
+    rate_source: "ECB"
+  Assets:EUR 92.00 EUR
+    effective_date: 2024-01-17
+    rate_source: "ECB"

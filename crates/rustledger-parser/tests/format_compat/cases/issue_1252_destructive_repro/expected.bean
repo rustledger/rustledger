@@ -1,22 +1,14 @@
 ; This comment gets to stay
-2024-07-19 open Assets:Money ; This comment is deleted
+2024-07-19 open Assets:Money ; This trailing comment must NOT vanish
 
 ; Notably, the following comment is load-bearing for CI:
 2024-07-19 open Expenses:Thingamabobs ; cSpell: word Thingamabobs
 
-2024-07-20 * "Commas should stay"
-  Assets:Money           -1024 USD
-  Expenses:Thingamabobs
-
-2024-07-20 * "bean-format does not remove plus signs, neither should rledger format"
-  Assets:Money             0.1 USD
-  Expenses:Thingamabobs
-
-; Behold, the incredible disappearing pushtag!
+; Behold, the incredible disappearing pushtag (it does not disappear anymore):
 pushtag #taggy-mc-long-tag-name-face
 
-2024-07-20 * "We heard you like linese that are long even with addings tags"
-  Assets:Money            -0.1 USD
+2024-07-20 * "the directive inside the tag scope keeps its own header"
+  Assets:Money           -1.00 USD
   Expenses:Thingamabobs
 
 poptag #taggy-mc-long-tag-name-face

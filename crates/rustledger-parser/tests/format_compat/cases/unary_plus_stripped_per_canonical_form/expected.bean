@@ -1,0 +1,13 @@
+; Per PR-4 of #1262: the canonical form strips redundant unary
+; `+` operators from numeric literals. `+0.1` and `0.1` parse to
+; the same Decimal; the formatter emits one of them.
+;
+; This fixture documents the choice. The dispute is tracked in
+; #1252 and (if reopened) any successor - preserving the user's
+; lexical form would require extending the typed AST to carry a
+; had-plus flag, which is a #1262 phase-5+ refactor.
+2024-01-01 open Assets:Money
+
+2024-07-20 * "leading plus sign on posting amount"
+  Assets:Money           0.1 USD
+  Expenses:Thingamabobs

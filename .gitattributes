@@ -1,1 +1,12 @@
 .github/workflows/*.lock.yml linguist-generated=true
+
+# The format-compat fixture suite stores literal CR / CRLF bytes in
+# specific `input.bean` and `expected.bean` files (e.g. the
+# `crlf_outside_strings_folded` and `crlf_inside_strings_preserved`
+# cases). Marking the cases tree as `-text` disables git's
+# end-of-line conversion so a contributor with
+# `core.autocrlf=true` (the Windows default) sees the bytes
+# exactly as committed. Without this, the test would either pass
+# for the wrong reason (both sides re-normalized) or fail with a
+# whitespace diff that only reproduces on Windows.
+crates/rustledger-parser/tests/format_compat/cases/**/*.bean -text

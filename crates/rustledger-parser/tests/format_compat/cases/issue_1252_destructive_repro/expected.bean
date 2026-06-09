@@ -1,3 +1,11 @@
+; #1252 reproducer, narrowed in PR #1292 round-1 review.
+; The disputed comma/+ canonical-form cases now live in the
+; sibling fixtures commas_stripped_per_canonical_form and
+; unary_plus_stripped_per_canonical_form; this fixture pins only
+; the destructive-formatting bugs the #1284 phase-4.1 rewrite
+; fixed (trailing comments survive, pushtag/poptag survive, no
+; tag migration onto unrelated transaction headers).
+;
 ; This comment gets to stay
 2024-07-19 open Assets:Money ; This trailing comment must NOT vanish
 

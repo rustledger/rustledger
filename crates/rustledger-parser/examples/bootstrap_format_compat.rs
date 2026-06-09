@@ -64,20 +64,30 @@ fn main() {
         .collect();
     fixtures.sort();
 
-    // If a named fixture was requested, validate it exists before
-    // doing any I/O so a typo (`BOOTSTRAP_FIXTURE=issue_1242`) does
-    // not silently produce a 0-writes summary that the contributor
-    // misreads as "success".
+    // If a named fixture was requested, validate it exists AND
+    // has an input.bean before doing any I/O. A bare typo
+    // (`BOOTSTRAP_FIXTURE=issue_1242`) and an empty-dir state
+    // (`mkdir cases/new_repro` without `git add input.bean`) both
+    // produced a 0-writes-and-exit-0 summary in earlier shapes
+    // that the contributor would misread as "success".
     if let Some(name) = &target_fixture {
-        let found = fixtures
+        let dir = fixtures
             .iter()
-            .any(|p| p.file_name().is_some_and(|f| f == name.as_str()));
-        if !found {
+            .find(|p| p.file_name().is_some_and(|f| f == name.as_str()));
+        let Some(dir) = dir else {
             eprintln!(
                 "error: BOOTSTRAP_FIXTURE={name} does not match any directory in {}",
                 cases_dir.display(),
             );
             std::process::exit(2);
+        };
+        if !dir.join("input.bean").is_file() {
+            eprintln!(
+                "error: BOOTSTRAP_FIXTURE={name} resolves to {} but that directory has no input.bean. \
+                 Add the source-text fixture before bootstrapping the expected.",
+                dir.display(),
+            );
+            std::process::exit(3);
         }
     }
 
@@ -126,14 +136,19 @@ fn main() {
     eprintln!(
         "\nbootstrap summary: {wrote} written, {skipped_existing} skipped (expected.bean already present), {skipped_unselected} skipped (unselected by BOOTSTRAP_FIXTURE), {missing_input} missing input.bean",
     );
-    if overwrite_all {
+    // The more-specific scope wins the summary message. If both
+    // env vars are set, the BOOTSTRAP_FIXTURE filter takes
+    // precedence (only the named fixture is written), so naming
+    // that explicitly avoids the misleading "whole suite was
+    // rewritten" summary the previous branch order produced.
+    if target_fixture.is_some() {
+        eprintln!(
+            "(BOOTSTRAP_FIXTURE was set - only the named fixture's expected.bean was rewritten.)"
+        );
+    } else if overwrite_all {
         eprintln!(
             "(BOOTSTRAP_OVERWRITE=1 was set - existing expected.bean files were rewritten across the whole suite. \
              Review `git diff` carefully before committing.)"
-        );
-    } else if target_fixture.is_some() {
-        eprintln!(
-            "(BOOTSTRAP_FIXTURE was set - only the named fixture's expected.bean was rewritten.)"
         );
     } else if skipped_existing > 0 {
         eprintln!(

@@ -212,8 +212,13 @@ pub fn lf_to_crlf_outside_strings(s: &str) -> String {
 ///    produced something the new parser cannot fully accept,
 ///    return [`CanonicalizeError::ReparseFailed`] rather than
 ///    silently emitting the recoverable subset — that silent-loss
-///    failure mode is what the deleted `format_compat` test used
-///    to guard against.
+///    failure mode is what the older `crates/rustledger/tests/
+///    format_compat.rs` (deleted in phase 4.1, distinct from the
+///    phase 4.2 file-pair suite at `crates/rustledger-parser/
+///    tests/format_compat/`) used to guard against. The new file-
+///    pair suite exercises `format_source`, not this two-pass
+///    shim; a future change to `canonicalize_directives`'s error
+///    semantics needs its own dedicated regression test.
 /// 3. Run the re-parsed text through [`format_source`] for the
 ///    canonical pass.
 ///
@@ -2768,6 +2773,56 @@ mod tests {
                     .collect::<Vec<_>>()
             );
         }
+    }
+
+    /// Coverage-mirror check: every `matrix_name` half of the
+    /// `MIRROR_PAIRS` table in the file-pair integration test
+    /// (`crates/rustledger-parser/tests/format_compat.rs`) must
+    /// exist as an entry in [`IDEMPOTENCE_MATRIX`]. The
+    /// integration test asserts the symmetric half (every
+    /// `file_pair_name` exists as a directory under `cases/`).
+    /// Together the two checks guarantee that retiring a
+    /// bug-class fixture from EITHER side forces an edit to
+    /// `MIRROR_PAIRS` - which surfaces in review and prevents
+    /// the silent one-sided drop the README's "two audience" split
+    /// design would otherwise admit.
+    ///
+    /// Hand-maintained copy of the matrix half of the table.
+    /// Editing `MIRROR_PAIRS` in the integration test requires
+    /// editing this list too; the test below fires otherwise.
+    #[test]
+    fn idempotence_matrix_mirrors_format_compat_pairs() {
+        const MIRROR_PAIRS_MATRIX_HALF: &[&str] = &[
+            "balance_leading_unary_minus",
+            "balance_leading_parenthesized_expression",
+            "price_leading_unary_minus",
+            "cost_spec_with_negative",
+            "cost_spec_with_comma_and_date",
+            "transaction_with_per_unit_plus_total_cost",
+            "metadata_unary_minus",
+            "metadata_arithmetic",
+            "non_latin_account_name",
+            "posting_with_trailing_comment",
+            "multiline_note_string",
+            "comment_containing_quote",
+            "transaction_with_tags_and_links",
+            "custom_with_date_value",
+            "options_and_includes",
+            "balance_assertion_with_meta",
+            "crlf_input",
+        ];
+        let matrix_names: std::collections::BTreeSet<&str> =
+            IDEMPOTENCE_MATRIX.iter().map(|(name, _)| *name).collect();
+        let missing: Vec<&&str> = MIRROR_PAIRS_MATRIX_HALF
+            .iter()
+            .filter(|name| !matrix_names.contains(*name))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "IDEMPOTENCE_MATRIX is missing the matrix-half of MIRROR_PAIRS: {missing:?}. \
+             Either re-add the entry to IDEMPOTENCE_MATRIX, or edit MIRROR_PAIRS in \
+             tests/format_compat.rs to retire the pair from BOTH sides.",
+        );
     }
 
     /// Property test: the `SourceState` classification used by the

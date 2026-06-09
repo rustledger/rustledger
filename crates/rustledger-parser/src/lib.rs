@@ -60,6 +60,16 @@ pub use cst::{
     BeancountLanguage, SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken, lossless_kind_tokens,
     parse_flat, parse_structured, parse_via_cst,
 };
+
+/// Re-exports of rowan types CST consumers need.
+///
+/// `TextRange`, `TextSize`, `TokenAtOffset`. Downstream crates can
+/// walk the CST through these aliases without taking a direct
+/// dependency on `rowan`, keeping the dep graph anchored at this
+/// crate.
+pub mod cst_walk {
+    pub use rowan::{TextRange, TextSize, TokenAtOffset};
+}
 pub use error::{ParseError, ParseErrorKind};
 pub use rustledger_core::{InternedStr, SYNTHESIZED_FILE_ID, Span, Spanned};
 

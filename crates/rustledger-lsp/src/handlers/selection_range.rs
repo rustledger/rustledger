@@ -2,7 +2,7 @@
 //!
 //! Returns the nested-range hierarchy LSP clients use for smart
 //! expansion (Ctrl+Shift+Up / Cmd+Shift+Up in most editors). Each
-//! request positions yields a linked list of progressively wider
+//! requested position yields a linked list of progressively wider
 //! ranges from a word at the cursor out to the entire file.
 //!
 //! # Why the CST

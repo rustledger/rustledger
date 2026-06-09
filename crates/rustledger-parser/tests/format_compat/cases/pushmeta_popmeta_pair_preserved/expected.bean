@@ -1,0 +1,7 @@
+pushmeta location: "NYC"
+
+2024-01-15 * "lunch"
+  Expenses:Food   12.00 USD
+  Assets:Cash    -12.00 USD
+
+popmeta location:

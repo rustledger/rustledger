@@ -1,0 +1,13 @@
+; =================
+; ACCOUNTS
+; =================
+2024-01-01 open Assets:Bank
+
+2024-01-01 open Assets:Cash
+
+; =================
+; TRANSACTIONS
+; =================
+2024-01-15 * "first"
+  Assets:Cash  -1.00 USD
+  Assets:Bank   1.00 USD

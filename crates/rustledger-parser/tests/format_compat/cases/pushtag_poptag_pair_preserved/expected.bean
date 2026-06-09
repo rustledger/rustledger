@@ -1,0 +1,7 @@
+pushtag #q1-2024
+
+2024-01-15 * "transaction inside the tag scope"
+  Assets:Cash    -1.00 USD
+  Expenses:Misc   1.00 USD
+
+poptag #q1-2024

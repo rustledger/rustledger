@@ -573,22 +573,25 @@ pub fn format_node(node: &crate::SyntaxNode) -> String {
 ///
 /// - If `range` intersects no top-level Directive or standalone
 ///   COMMENT/SHEBANG/EMACS token, returns `None`. The LSP handler
-///   then returns an empty `Vec<TextEdit>` and the client is told
-///   "nothing to format".
+///   surfaces `None` directly (serialized as `null` per LSP, not
+///   as `[]`); the client treats it as "nothing to format".
+/// - If the computed snap range would cover any top-level
+///   `ERROR_NODE` byte, returns `None`. **Range formatting refuses
+///   to delete user content the parser couldn't classify.** This
+///   diverges from [`format_node`], which silently drops
+///   `ERROR_NODE` children on the whole-file path; the rationale
+///   is the per-handler asymmetry the LSP exposes — the user
+///   pressing "Format Selection" expects either a clean
+///   reformat or a no-op, never a silent partial delete of an
+///   in-progress directive. Tooling that genuinely wants to drop
+///   broken regions can still call [`format_node`] on the same
+///   node.
 /// - Otherwise returns `Some((snap, text))` where `snap` is the
 ///   union of the included children's text ranges (so it begins at
 ///   the first included child's start and ends at the last
 ///   included child's end, including each child's leading-trivia
 ///   prefix per the phase-2.0 Directive-Terminator Rule) and
 ///   `text` is the canonical-form replacement.
-/// - Top-level `ERROR_NODE` children are skipped (matches
-///   [`format_node`], which silently drops them). If the selection
-///   spans an `ERROR_NODE` between two valid directives, the snap
-///   range covers the `ERROR_NODE` bytes but the replacement text
-///   does not — i.e., the formatter deletes the error content.
-///   This is consistent with `format_source(broken_source)`'s
-///   existing behavior; tooling that wants to refuse to rewrite
-///   broken syntax should call [`try_format_source`] instead.
 /// - Cursor-only selection (`range.is_empty()`): the child at the
 ///   cursor is included if the cursor is strictly inside it OR is
 ///   exactly at the child's start. Boundary at the child's end
@@ -663,6 +666,35 @@ pub fn format_node_range(
         return None;
     }
     let snap = rowan::TextRange::new(snap_start.unwrap(), snap_end.unwrap());
+
+    // ERROR_NODE intersection bail: if the snap range covers any
+    // top-level ERROR_NODE byte, refuse to format and return None.
+    // Range formatting must not silently delete content the parser
+    // could not classify — without this guard, a selection
+    // spanning two valid directives with an ERROR_NODE between
+    // them would emit a TextEdit that replaces all three with
+    // just the two formatted directives, deleting the user's
+    // in-progress source bytes.
+    //
+    // This is the deliberate divergence from `format_node`'s
+    // whole-file policy: the whole-file path runs on the
+    // assumption that the caller (CLI / FFI / `try_format_source`)
+    // has already decided to accept content loss; the per-handler
+    // LSP path has no such opt-in. The cost is occasional
+    // "format-selection did nothing" UX while a parse error sits
+    // inside the snap; the benefit is no data loss.
+    for el in node.children_with_tokens() {
+        if !matches!(el.kind(), crate::SyntaxKind::ERROR_NODE) {
+            continue;
+        }
+        let er = el.text_range();
+        // Strict-overlap check: an ERROR_NODE whose end touches
+        // snap.start (or start touches snap.end) is adjacent, not
+        // overlapping — those are safe to emit alongside.
+        if er.end() > snap.start() && er.start() < snap.end() {
+            return None;
+        }
+    }
 
     // Second pass: emit only the children whose range falls
     // inside `snap`. We re-walk rather than caching the first
@@ -3415,14 +3447,21 @@ mod tests {
     }
 
     /// Selection straddling an `ERROR_NODE` between two valid
-    /// directives: snap covers the union (including `ERROR_NODE`
-    /// bytes), but the replacement text omits the `ERROR_NODE`
-    /// content. This MATCHES `format_source(broken_source)`'s
-    /// policy of dropping error content. Tooling that wants to
-    /// preserve broken syntax must reject the format via
-    /// `try_format_source` instead.
+    /// directives: snap range would cover the union (including
+    /// `ERROR_NODE` bytes), so `format_node_range` returns
+    /// `None` instead of silently deleting the error content.
+    ///
+    /// This is the deliberate divergence from `format_node`'s
+    /// whole-file policy. `format_source(broken_source)` does
+    /// drop `ERROR_NODE` content — but that path's callers
+    /// (`rledger format` CLI, FFI `format.entry`) opt into
+    /// content loss by invoking the canonical-form pipeline. The
+    /// per-handler LSP `textDocument/rangeFormatting` path has no
+    /// such opt-in, so it refuses to delete user content the
+    /// parser couldn't classify. See the function's rustdoc for
+    /// the per-handler asymmetry rationale.
     #[test]
-    fn format_node_range_drops_error_node_between_directives() {
+    fn format_node_range_bails_when_snap_covers_error_node() {
         let source = "\
 2024-01-01 open Assets:Bank USD
 }}}garbage{{{
@@ -3430,16 +3469,36 @@ mod tests {
 ";
         let (node, src) = parse_for_range(source);
         let sel = rowan::TextRange::new(ts(0), ts(src.len()));
-        let (snap, formatted) = format_node_range(&node, sel).expect("intersects both directives");
-        // Snap covers the whole file (first directive start to
-        // last directive end). The middle ERROR_NODE bytes are
-        // inside the snap by construction.
-        assert_eq!(snap.start(), ts(0));
-        // Output: the two canonical directives separated by a
-        // single blank line. No garbage.
-        assert_eq!(
-            formatted,
-            "2024-01-01 open Assets:Bank USD\n\n2024-01-31 close Assets:Bank\n",
+        assert!(
+            format_node_range(&node, sel).is_none(),
+            "selection covering both directives + ERROR_NODE between them must bail \
+             to avoid silently deleting the garbage line — got Some output",
         );
+    }
+
+    /// Selection that intersects only the FIRST valid directive
+    /// in a broken file (no `ERROR_NODE` byte in the snap range)
+    /// still formats. Pins that the `ERROR_NODE` bail is precisely
+    /// scoped to the snap range, not to "the file has any
+    /// `ERROR_NODE` at all".
+    #[test]
+    fn format_node_range_formats_directive_when_snap_does_not_cover_error_node() {
+        let source = "\
+2024-01-01 open Assets:Bank USD
+}}}garbage{{{
+2024-01-31 close Assets:Bank
+";
+        let (node, src) = parse_for_range(source);
+        // Selection covers ONLY the open directive (first line +
+        // its terminator). The ERROR_NODE on line 1 sits at byte
+        // offset == open_end (length of first line including \n)
+        // onward, OUTSIDE the snap range.
+        let open_end = src.find('\n').expect("first directive has newline") + 1;
+        let sel = rowan::TextRange::new(ts(0), ts(open_end));
+        let (snap, formatted) =
+            format_node_range(&node, sel).expect("selection covers only the open");
+        assert_eq!(snap.start(), ts(0));
+        assert_eq!(snap.end(), ts(open_end));
+        assert_eq!(formatted, "2024-01-01 open Assets:Bank USD\n");
     }
 }

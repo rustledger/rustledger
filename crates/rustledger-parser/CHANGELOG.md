@@ -163,18 +163,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`SOURCE_FILE`) and emits the canonical-form text for the smallest
   set of top-level directives + standalone comments whose
   `text_range` intersects `range`. The snap range is the union of
-  the included children's ranges; `ERROR_NODE` children are
-  skipped (matching `format_node`'s policy). Building block for
-  the LSP `textDocument/rangeFormatting` CST-aware fallback path:
-  when `format_document`'s minimal-diff approach declines because
-  of parse errors, the LSP handler walks `parse_result.syntax_node()`
+  the included children's ranges. Building block for the LSP
+  `textDocument/rangeFormatting` CST-aware fallback path: when
+  `format_document`'s minimal-diff approach declines because of
+  parse errors, the LSP handler walks `parse_result.syntax_node()`
   via this function and emits a single `TextEdit` covering the
   snapped range. The whole-file round-trip invariant
-  (`format_node_range(node, full_range) == format_node(node)`) is
-  pinned by `format_node_range_full_range_matches_format_node`.
-  `range` is in the *CST* byte frame; LSP consumers shift
-  `bom_offset` at the boundary (same convention as
-  `ParseResult::syntax_root` and the `selection_range` handler).
+  (`format_node_range(node, full_range) == format_node(node)` when
+  the file has no `ERROR_NODE`) is pinned by
+  `format_node_range_full_range_matches_format_node`.
+
+  **`ERROR_NODE` policy: refuse to format.** If the computed snap
+  range would cover any top-level `ERROR_NODE` byte, returns
+  `None`. This is the deliberate divergence from `format_node`'s
+  whole-file policy of silently dropping `ERROR_NODE` children —
+  the per-handler LSP path that consumes `format_node_range` has
+  no opt-in to content loss the way the CLI / FFI / `try_format_source`
+  callers do. Tooling that genuinely wants to drop broken regions
+  can still call `format_node` on the same node.
+
+  **Alignment policy: file-wide.** The function uses
+  `compute_alignment(&full_source_file)` even when emitting a
+  sub-range; the formatted output inherits the file's column
+  widths so it stays visually aligned with un-formatted postings
+  elsewhere. Per-selection alignment was rejected as it would
+  cause a jarring visual jump every time the user re-formats a
+  sub-range. On a parse-error file the file-wide alignment
+  reflects only successfully-parsed transactions; transactions
+  wrapped in `ERROR_NODE` are invisible to the pre-pass. Once
+  the parse error is fixed, a subsequent format pass may reflow
+  alignment across the file.
+
+  **Frame: CST (post-BOM).** `range` is in the *CST* byte frame;
+  LSP consumers shift `bom_offset` at the boundary (same
+  convention as `ParseResult::syntax_root` and the
+  `selection_range` handler). The two handlers differ on the
+  bridge subtraction policy — `selection_range` uses
+  `checked_sub` (position semantics: cursor inside BOM is
+  degenerate, bail), `range_formatting` uses `saturating_sub`
+  (range semantics: selection from byte 0 maps to start of CST).
+
+  **Precondition: `node.kind() == SOURCE_FILE`.** Same precondition
+  as `format_node`; panics otherwise. Callers that don't already
+  have a `SOURCE_FILE` syntax node should obtain one via
+  `ParseResult::syntax_node()`.
 
 ## [0.13.0](https://github.com/rustledger/rustledger/compare/v0.12.0...v0.13.0) - 2026-04-21
 

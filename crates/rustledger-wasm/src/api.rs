@@ -114,6 +114,7 @@ pub fn validate_source(source: &str) -> Result<JsValue, JsError> {
 /// Returns a `QueryResult` with columns, rows, and any errors.
 #[wasm_bindgen]
 pub fn query(source: &str, query_str: &str) -> Result<JsValue, JsError> {
+    use rustledger_booking::expand_pads;
     use rustledger_query::{Executor, parse as parse_query};
 
     let load = load_and_book(source);
@@ -141,7 +142,12 @@ pub fn query(source: &str, query_str: &str) -> Result<JsValue, JsError> {
         }
     };
 
-    let mut executor = Executor::new(&load.directives);
+    // Expand pads explicitly: query is a balance-computing consumer
+    // (#1288). `load_and_book` returns source-faithful directives,
+    // so we opt into the expanded view here rather than letting it
+    // happen implicitly upstream.
+    let directives = expand_pads(&load.directives);
+    let mut executor = Executor::new(&directives);
     match executor.execute(&query) {
         Ok(result) => {
             let rows: Vec<Vec<_>> = result

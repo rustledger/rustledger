@@ -39,7 +39,15 @@ fn execute_query(directives: &[Directive], query_str: &str) -> Result<JsValue, J
         }
     };
 
-    let mut executor = Executor::new(directives);
+    // BQL is a balance-computing consumer; expand pads explicitly
+    // before handing the directive list to the executor (#1288).
+    // `ParsedLedger.directives` / `Ledger.directives` are
+    // source-faithful per the architectural rule documented on
+    // `rustledger_loader::Ledger.directives`; the executor needs
+    // the expanded view to compute `sum(position)` with pad effects
+    // included.
+    let expanded = rustledger_booking::expand_pads(directives);
+    let mut executor = Executor::new(&expanded);
     match executor.execute(&query) {
         Ok(result) => {
             let rows: Vec<Vec<_>> = result

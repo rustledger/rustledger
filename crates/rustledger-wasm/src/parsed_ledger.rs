@@ -46,7 +46,7 @@ fn execute_query(directives: &[Directive], query_str: &str) -> Result<JsValue, J
     // `rustledger_loader::Ledger.directives`; the executor needs
     // the expanded view to compute `sum(position)` with pad effects
     // included.
-    let expanded = rustledger_booking::expand_pads(directives);
+    let expanded = rustledger_booking::merge_with_padding(directives);
     let mut executor = Executor::new(&expanded);
     match executor.execute(&query) {
         Ok(result) => {

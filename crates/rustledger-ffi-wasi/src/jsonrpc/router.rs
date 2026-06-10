@@ -406,7 +406,7 @@ fn handle_query(params: &serde_json::Value) -> Result<serde_json::Value, RpcErro
     // Query is a balance-computing consumer, so it must explicitly
     // opt into the expanded view here (see the architectural rule
     // documented on `Ledger.directives`).
-    let directives = rustledger_booking::expand_pads(&load.directives);
+    let directives = rustledger_booking::merge_with_padding(&load.directives);
     let output = execute_query(&directives, &params.query);
     serde_json::to_value(output).map_err(|e| RpcError::internal_error(e.to_string()))
 }
@@ -456,7 +456,7 @@ fn handle_batch(params: &serde_json::Value) -> Result<serde_json::Value, RpcErro
         // is O(directives), not O(directives × queries) — important
         // for batch consumers that fire many queries against one
         // source.
-        let directives = rustledger_booking::expand_pads(&load.directives);
+        let directives = rustledger_booking::merge_with_padding(&load.directives);
         params
             .queries
             .iter()

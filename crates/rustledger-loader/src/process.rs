@@ -143,18 +143,32 @@ pub struct Ledger {
 }
 
 impl Ledger {
-    /// Return the directive stream with pads expanded into
-    /// synthesized transactions, suitable for inventory / balance
-    /// math.
+    /// Return the directive stream merged with synthesized
+    /// pad-replacement transactions, suitable for inventory /
+    /// balance math.
     ///
-    /// Each `Pad` directive followed (in date order) by a `Balance`
-    /// assertion on the same account is replaced by a `Transaction`
-    /// with `flag = 'P'` that carries the postings needed to make
-    /// the balance match. A multi-currency pad produces one synth
-    /// transaction per currency. Unused pads (no following balance)
-    /// and shadowed pads (a later same-target pad before the next
-    /// balance) are dropped from the view; the validator
-    /// independently emits `E2003` for those cases.
+    /// For each `Pad` directive followed (in date order) by a
+    /// `Balance` assertion on the same account, a `Transaction`
+    /// with `flag = 'P'` is added to the view carrying the
+    /// postings needed to make the balance match. A multi-currency
+    /// pad produces one synth transaction per currency.
+    ///
+    /// **Original `Pad` directives are preserved in the view.**
+    /// Synth transactions are added alongside, not in place of.
+    /// This matters for two reasons:
+    ///
+    /// 1. BQL queries can still filter on `WHERE type = 'pad'`
+    ///    against the balance view (Python-compat). A
+    ///    REPLACE-style expansion would silently zero those out.
+    /// 2. Multi-pad cases (issue #1300) are correct by
+    ///    construction: `rustledger_booking::process_pads` (which
+    ///    `merge_with_padding` delegates to) produces exactly one
+    ///    synth per pad-balance pair regardless of how many same-
+    ///    target pads shadow each other before the balance.
+    ///
+    /// Inventory-walking consumers iterate `Directive::Transaction`
+    /// and ignore `Pad` directives, so the preserved Pads are
+    /// invisible to them.
     ///
     /// **When to use this vs. [`Ledger.directives`](Self::directives):**
     /// any consumer that maintains running per-account inventory
@@ -174,7 +188,7 @@ impl Ledger {
     #[must_use]
     pub fn balance_view(&self) -> Vec<Directive> {
         let booked: Vec<Directive> = self.directives.iter().map(|s| s.value.clone()).collect();
-        rustledger_booking::expand_pads(&booked)
+        rustledger_booking::merge_with_padding(&booked)
     }
 }
 

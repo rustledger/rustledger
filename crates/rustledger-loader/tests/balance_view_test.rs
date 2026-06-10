@@ -90,11 +90,17 @@ fn directives_field_keeps_pads_as_pads() {
     );
 }
 
-/// `Ledger.balance_view()` returns the pad-expanded view. The Pad
-/// is replaced by a synthesized P-flag transaction; the original
-/// `Pad` does NOT survive in this view.
+/// `Ledger.balance_view()` returns the merged view: original
+/// directives preserved verbatim, AND synthesized P-flag
+/// transactions added for each pad-balance pair.
+///
+/// Preserving Pads in the view matters for BQL queries that filter
+/// on `WHERE type = 'pad'` (Python-compat) and for the multi-pad
+/// shadowing correctness (#1300). Inventory-walking consumers
+/// iterate `Directive::Transaction` and ignore Pads, so the
+/// preserved Pads are invisible to balance math.
 #[test]
-fn balance_view_replaces_pad_with_synth_transaction() {
+fn balance_view_adds_synth_transaction_alongside_original_pad() {
     let fixture = write_fixture(PADDED_SOURCE);
     let opts = LoadOptions {
         validate: false,
@@ -108,9 +114,9 @@ fn balance_view_replaces_pad_with_synth_transaction() {
         .filter(|d| matches!(d, Directive::Pad(_)))
         .count();
     assert_eq!(
-        pad_count, 0,
-        "balance_view() must NOT contain Pad directives — they are \
-         replaced by synthesized P-flag transactions."
+        pad_count, 1,
+        "balance_view() must preserve the original Pad directive so \
+         BQL `WHERE type = 'pad'` queries continue to match it.",
     );
 
     let synth_count = view

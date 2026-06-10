@@ -17,7 +17,7 @@ mod output;
 use crate::cmd::completions::ShellType;
 use anyhow::{Context, Result};
 use clap::Parser;
-use rustledger_booking::expand_pads;
+use rustledger_booking::merge_with_padding;
 use rustledger_core::DisplayContext;
 use rustledger_loader::{LoadOptions, load};
 use std::fs;
@@ -137,8 +137,12 @@ pub fn run(args: &Args) -> Result<()> {
     // Get directives (already booked and plugins applied)
     let booked_directives: Vec<_> = ledger.directives.into_iter().map(|s| s.value).collect();
 
-    // Expand pad directives into synthetic transactions
-    let directives = expand_pads(&booked_directives);
+    // Merge pad-synthesized transactions into the directive stream
+    // (BQL is a balance-computing consumer). `merge_with_padding`
+    // preserves the original Pad directives in the output so
+    // `WHERE type = 'pad'` still matches them, AND avoids the
+    // multi-pad double-application bug `expand_pads` had (#1300).
+    let directives = merge_with_padding(&booked_directives);
 
     // Use display context from the loaded ledger
     let display_context = ledger.display_context;

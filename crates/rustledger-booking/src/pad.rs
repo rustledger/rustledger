@@ -32,7 +32,10 @@ use std::ops::Neg;
 /// Result of processing pad directives.
 #[derive(Debug, Clone)]
 pub struct PadResult {
-    /// Original directives with pads removed.
+    /// The original input directives, verbatim. Pads are NOT
+    /// removed; the field is the same slice the caller handed in.
+    /// Callers that want a Pads-removed-or-merged view should use
+    /// [`expand_pads`] (replace) or [`merge_with_padding`] (merge).
     pub directives: Vec<Directive>,
     /// Synthetic padding transactions generated.
     pub padding_transactions: Vec<Transaction>,

@@ -51,21 +51,29 @@ const PADDED_SOURCE: &str = r#"option "operating_currency" "USD"
   Assets:Wallet
 "#;
 
-fn rledger_binary() -> Option<PathBuf> {
+/// Locate the rledger binary. Panics if not found — silently
+/// skipping these tests (the pattern used in older integration
+/// suites) lets a misconfigured CI environment pass vacuously, and
+/// the whole pad-expansion regression suite would slip through.
+fn rledger_binary() -> PathBuf {
     if let Ok(p) = std::env::var("CARGO_BIN_EXE_rledger") {
-        return Some(PathBuf::from(p));
+        return PathBuf::from(p);
     }
     let project_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(|p| p.parent())
-        .map(PathBuf::from)?;
+        .map(PathBuf::from)
+        .expect("CARGO_MANIFEST_DIR has two parents (workspace root)");
     for candidate in ["target/release/rledger", "target/debug/rledger"] {
         let p = project_root.join(candidate);
         if p.exists() {
-            return Some(p);
+            return p;
         }
     }
-    None
+    panic!(
+        "rledger binary not found. Set CARGO_BIN_EXE_rledger or build it via \
+         `cargo build --bin rledger` before running these tests."
+    );
 }
 
 fn write_fixture() -> tempfile::NamedTempFile {
@@ -123,10 +131,7 @@ fn run_report(binary: &PathBuf, file: &std::path::Path, report: &str) -> String 
 
 #[test]
 fn report_holdings_applies_pad_expansion() {
-    let Some(bin) = rledger_binary() else {
-        eprintln!("skip: rledger binary not found");
-        return;
-    };
+    let bin = rledger_binary();
     let f = write_fixture();
     let stdout = run_report(&bin, f.path(), "holdings");
     let units = first_number_for_account(&stdout, "Assets:Wallet")
@@ -140,10 +145,7 @@ fn report_holdings_applies_pad_expansion() {
 
 #[test]
 fn report_balances_applies_pad_expansion() {
-    let Some(bin) = rledger_binary() else {
-        eprintln!("skip: rledger binary not found");
-        return;
-    };
+    let bin = rledger_binary();
     let f = write_fixture();
     let stdout = run_report(&bin, f.path(), "balances");
     let units = first_number_for_account(&stdout, "Assets:Wallet")
@@ -156,10 +158,7 @@ fn report_balances_applies_pad_expansion() {
 
 #[test]
 fn report_balsheet_applies_pad_expansion() {
-    let Some(bin) = rledger_binary() else {
-        eprintln!("skip: rledger binary not found");
-        return;
-    };
+    let bin = rledger_binary();
     let f = write_fixture();
     let stdout = run_report(&bin, f.path(), "balsheet");
     let units = first_number_for_account(&stdout, "Assets:Wallet")
@@ -172,10 +171,7 @@ fn report_balsheet_applies_pad_expansion() {
 
 #[test]
 fn report_networth_includes_pad_in_assets() {
-    let Some(bin) = rledger_binary() else {
-        eprintln!("skip: rledger binary not found");
-        return;
-    };
+    let bin = rledger_binary();
     let f = write_fixture();
     let stdout = run_report(&bin, f.path(), "networth");
     // networth output groups by period; find the final-period assets
@@ -195,10 +191,7 @@ fn report_income_renders_without_pad_pollution() {
     // should be unaffected by the pad. This test is the negative
     // case: pad expansion must not introduce ghost income / expense
     // entries.
-    let Some(bin) = rledger_binary() else {
-        eprintln!("skip: rledger binary not found");
-        return;
-    };
+    let bin = rledger_binary();
     let f = write_fixture();
     let stdout = run_report(&bin, f.path(), "income");
     // 20 USD total expense (2 × 10 USD). The pad does NOT affect
@@ -214,10 +207,7 @@ fn report_stats_keeps_pad_as_pad() {
     // Source-faithful report: Pads must count as Pads (= 1), not as
     // Transactions. With balance_view leakage, the synth P-flag
     // transaction would inflate Transactions to 4 and zero out Pads.
-    let Some(bin) = rledger_binary() else {
-        eprintln!("skip: rledger binary not found");
-        return;
-    };
+    let bin = rledger_binary();
     let f = write_fixture();
     let stdout = run_report(&bin, f.path(), "stats");
 
@@ -246,10 +236,7 @@ fn report_journal_does_not_include_synth_pad_transactions() {
     // Source-faithful report: only user-authored transaction rows
     // appear. If `balance_view` leaked into journal, a synth
     // "(Padding inserted for Balance of ...)" row would show up.
-    let Some(bin) = rledger_binary() else {
-        eprintln!("skip: rledger binary not found");
-        return;
-    };
+    let bin = rledger_binary();
     let f = write_fixture();
     let stdout = run_report(&bin, f.path(), "journal");
     assert!(

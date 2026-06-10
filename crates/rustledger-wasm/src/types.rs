@@ -768,11 +768,17 @@ pub struct FormatResult {
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "ts-export", ts(export, export_to = "bindings/"))]
 pub struct PadResult {
-    /// Directives with pads removed.
+    /// The original directives, verbatim. `Pad` directives are NOT
+    /// removed — consumers wanting a pads-removed view should
+    /// filter on directive type. The `padding_transactions` field
+    /// carries the synthesized P-flag transactions separately.
     pub directives: Vec<DirectiveJson>,
-    /// Generated padding transactions.
+    /// Generated padding transactions (synthesized P-flag, one per
+    /// pad-balance pair, multi-currency pads produce one per
+    /// currency).
     pub padding_transactions: Vec<DirectiveJson>,
-    /// Pad processing errors.
+    /// Pad processing errors (e.g. unused pads with no matching
+    /// balance assertion).
     pub errors: Vec<Error>,
 }
 

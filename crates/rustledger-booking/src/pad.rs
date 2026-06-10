@@ -29,6 +29,32 @@ use rustledger_core::{
 use std::collections::HashMap;
 use std::ops::Neg;
 
+/// Prefix of the narration carried by every synth pad transaction
+/// produced by this crate (the format string used inside
+/// [`create_padding_transaction`]).
+///
+/// Together with [`is_synthesized_pad`], lets consumers distinguish
+/// pad-synth transactions from user-written `P`-flag transactions
+/// (`P` is a valid user flag in beancount). The narration prefix
+/// matches Python beancount's format and is preserved end-to-end
+/// through the booking and merge steps.
+pub const SYNTH_PAD_NARRATION_PREFIX: &str = "(Padding inserted for Balance of ";
+
+/// Returns `true` iff `txn` is a pad-synth transaction produced by
+/// this crate.
+///
+/// Checks the `P` flag AND the [`SYNTH_PAD_NARRATION_PREFIX`].
+/// A bare flag check would conflate user-written `P`-flag
+/// transactions with synth pads.
+#[must_use]
+pub fn is_synthesized_pad(txn: &Transaction) -> bool {
+    txn.flag == 'P'
+        && txn
+            .narration
+            .as_str()
+            .starts_with(SYNTH_PAD_NARRATION_PREFIX)
+}
+
 /// Result of processing pad directives.
 #[derive(Debug, Clone)]
 pub struct PadResult {
@@ -243,8 +269,12 @@ fn create_padding_transaction(
     balance: &Amount,
 ) -> Transaction {
     let narration = format!(
-        "(Padding inserted for Balance of {} {} for difference {} {})",
-        balance.number, balance.currency, difference.number, difference.currency
+        "{prefix}{bal_num} {bal_cur} for difference {diff_num} {diff_cur})",
+        prefix = SYNTH_PAD_NARRATION_PREFIX,
+        bal_num = balance.number,
+        bal_cur = balance.currency,
+        diff_num = difference.number,
+        diff_cur = difference.currency,
     );
     Transaction::new(date, &narration)
         .with_flag('P')
@@ -304,19 +334,57 @@ pub fn expand_pads(directives: &[Directive]) -> Vec<Directive> {
 
 /// Merge original directives with padding transactions, maintaining date order.
 ///
-/// Unlike `expand_pads`, this keeps the original pad directives and adds
-/// the synthetic transactions alongside them.
+/// Unlike [`expand_pads`], this keeps the original pad directives and adds
+/// the synthesized transactions alongside them. Use this when downstream
+/// consumers want both views: `Pad` directives for source-faithful queries
+/// (e.g., BQL `WHERE type = 'pad'`) and the synth transactions for inventory
+/// math.
+///
+/// # Sort ordering on date ties
+///
+/// Synth transactions carry the pad's date, not the balance's date.
+/// On a same-date pad+balance pair (legal in beancount), the synth must
+/// appear BEFORE the balance so any consumer that checks balance assertions
+/// mid-stream sees the correct inventory. This is achieved by prepending
+/// the synth list to the original directives before the stable sort:
+/// synths land at the front of their date-group, originals follow.
+///
+/// # Errors are discarded
+///
+/// [`process_pads`] can emit `PadError`s (e.g., unused-pad warnings).
+/// `merge_with_padding` discards them by design: those diagnostics are the
+/// validator's responsibility (`E2003`). If you need them, call
+/// [`process_pads`] directly and inspect `result.errors`.
+///
+/// # Not idempotent
+///
+/// Re-running `merge_with_padding` on its own output double-counts pad
+/// effects because the original `Pad` directives survive and `process_pads`
+/// re-applies them against an inventory that already includes the prior
+/// synth. A `debug_assert!` guards against this in dev builds.
 pub fn merge_with_padding(directives: &[Directive]) -> Vec<Directive> {
+    debug_assert!(
+        !directives
+            .iter()
+            .any(|d| matches!(d, Directive::Transaction(t) if is_synthesized_pad(t))),
+        "merge_with_padding called on input that already contains synth pad transactions; \
+         re-running would double-count pad effects",
+    );
+
     let result = process_pads(directives);
 
-    let mut merged: Vec<Directive> = directives.to_vec();
-
-    // Add padding transactions
+    // Prepend synths so stable sort puts them BEFORE same-date originals.
+    // On a same-date pad+balance pair, the order is `[synth, pad, balance]`
+    // post-sort (synths start at the front of their date-group). This is
+    // important for any consumer that runs balance-assertion checks
+    // mid-stream against the merged view.
+    let mut merged: Vec<Directive> =
+        Vec::with_capacity(directives.len() + result.padding_transactions.len());
     for txn in result.padding_transactions {
         merged.push(Directive::Transaction(txn));
     }
+    merged.extend(directives.iter().cloned());
 
-    // Sort by date
     merged.sort_by_key(rustledger_core::Directive::date);
 
     merged
@@ -554,6 +622,96 @@ mod tests {
             .filter(|d| matches!(d, Directive::Transaction(_)))
             .count();
         assert_eq!(txn_count, 1);
+    }
+
+    #[test]
+    fn test_is_synthesized_pad_recognizes_synth() {
+        let directives = vec![
+            Directive::Open(Open::new(date(2024, 1, 1), "Assets:Bank")),
+            Directive::Open(Open::new(date(2024, 1, 1), "Equity:Opening")),
+            Directive::Pad(Pad::new(date(2024, 1, 1), "Assets:Bank", "Equity:Opening")),
+            Directive::Balance(Balance::new(
+                date(2024, 1, 2),
+                "Assets:Bank",
+                Amount::new(dec!(1000), "USD"),
+            )),
+        ];
+        let result = process_pads(&directives);
+        let synth = result.padding_transactions.into_iter().next().unwrap();
+        assert!(
+            is_synthesized_pad(&synth),
+            "synth pad transaction must be detected by is_synthesized_pad",
+        );
+    }
+
+    #[test]
+    fn test_is_synthesized_pad_rejects_user_p_flag() {
+        // A user-written `P`-flag transaction with arbitrary narration
+        // must NOT be classified as a synth pad. `P` is a valid user
+        // flag in beancount; bare flag-checking would conflate them.
+        let user_p = Transaction::new(date(2024, 1, 1), "user-authored P-flag txn")
+            .with_flag('P')
+            .with_synthesized_posting(Posting::new("Assets:Bank", Amount::new(dec!(100), "USD")));
+        assert!(
+            !is_synthesized_pad(&user_p),
+            "user-written P-flag transaction must not be classified as synth",
+        );
+    }
+
+    #[test]
+    fn test_merge_with_padding_same_date_pad_balance_synth_comes_first() {
+        // Pad and balance share the same date. The synth (which carries
+        // the pad's date) must appear BEFORE the Balance in the merged
+        // view so any mid-stream balance-assertion check sees the
+        // correct inventory.
+        let directives = vec![
+            Directive::Open(Open::new(date(2024, 1, 1), "Assets:Bank")),
+            Directive::Open(Open::new(date(2024, 1, 1), "Equity:Opening")),
+            Directive::Pad(Pad::new(date(2024, 1, 2), "Assets:Bank", "Equity:Opening")),
+            Directive::Balance(Balance::new(
+                date(2024, 1, 2),
+                "Assets:Bank",
+                Amount::new(dec!(1000), "USD"),
+            )),
+        ];
+
+        let merged = merge_with_padding(&directives);
+
+        // Find indices of the synth and the Balance.
+        let synth_idx = merged
+            .iter()
+            .position(|d| matches!(d, Directive::Transaction(t) if is_synthesized_pad(t)))
+            .expect("synth present");
+        let balance_idx = merged
+            .iter()
+            .position(|d| matches!(d, Directive::Balance(_)))
+            .expect("balance present");
+        assert!(
+            synth_idx < balance_idx,
+            "synth pad (idx {synth_idx}) must appear before Balance (idx {balance_idx}) on same date",
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "merge_with_padding called on input that already contains synth")]
+    fn test_merge_with_padding_double_apply_debug_asserts() {
+        // Calling merge_with_padding twice would double-count pad
+        // effects (original Pads survive in the output and would be
+        // re-applied against an inventory that already includes the
+        // prior synth). A debug_assert in dev builds guards against
+        // this caller mistake.
+        let directives = vec![
+            Directive::Open(Open::new(date(2024, 1, 1), "Assets:Bank")),
+            Directive::Open(Open::new(date(2024, 1, 1), "Equity:Opening")),
+            Directive::Pad(Pad::new(date(2024, 1, 1), "Assets:Bank", "Equity:Opening")),
+            Directive::Balance(Balance::new(
+                date(2024, 1, 2),
+                "Assets:Bank",
+                Amount::new(dec!(1000), "USD"),
+            )),
+        ];
+        let merged_once = merge_with_padding(&directives);
+        let _merged_twice = merge_with_padding(&merged_once); // should panic
     }
 
     #[test]

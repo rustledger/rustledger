@@ -160,11 +160,15 @@ impl Ledger {
     /// 1. BQL queries can still filter on `WHERE type = 'pad'`
     ///    against the balance view (Python-compat). A
     ///    REPLACE-style expansion would silently zero those out.
-    /// 2. Multi-pad cases (issue #1300) are correct by
-    ///    construction: `rustledger_booking::process_pads` (which
-    ///    `merge_with_padding` delegates to) produces exactly one
-    ///    synth per pad-balance pair regardless of how many same-
-    ///    target pads shadow each other before the balance.
+    /// 2. Multi-pad cases (issue #1300) produce exactly one synth
+    ///    per pad-balance pair:
+    ///    `rustledger_booking::process_pads` (which
+    ///    `merge_with_padding` delegates to) only retains the most
+    ///    recent same-account pad in its pending-pads map, so
+    ///    earlier same-account pads are silently shadowed and
+    ///    their `source_account` does NOT contribute to the synth.
+    ///    The validator emits `E2003` for shadowed pads
+    ///    independently; this view reflects only the effective pad.
     ///
     /// Inventory-walking consumers iterate `Directive::Transaction`
     /// and ignore `Pad` directives, so the preserved Pads are

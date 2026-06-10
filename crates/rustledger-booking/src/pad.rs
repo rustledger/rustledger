@@ -269,26 +269,44 @@ pub fn expand_pads(directives: &[Directive]) -> Vec<Directive> {
     let mut sorted_originals: Vec<&Directive> = directives.iter().collect();
     sorted_originals.sort_by_key(|d| d.date());
 
-    // Create a map of pad dates to padding transactions
-    let mut pad_txns_by_date: HashMap<NaiveDate, Vec<&Transaction>> = HashMap::new();
-    for txn in &result.padding_transactions {
-        pad_txns_by_date.entry(txn.date).or_default().push(txn);
-    }
+    // Track which padding transactions have already been emitted. When
+    // two `pad` directives target the same account before a single
+    // `balance` (issue #1300), `process_pads` correctly produces ONE
+    // synthetic transaction (the later pad shadows the earlier via
+    // `pending_pads.insert`), but without dedup the earlier walk pushed
+    // the same `Transaction` once per matching `Pad` — double-applying
+    // the adjustment. Beancount semantics dictate that only the most
+    // recent effective pad applies; the earlier ones are unused (the
+    // validator separately reports `E2003`). `consumed` enforces
+    // one-emit-per-synth so the directive list reflects that.
+    let mut consumed = vec![false; result.padding_transactions.len()];
 
     for directive in sorted_originals {
         match directive {
             Directive::Pad(pad) => {
-                // Replace pad with synthetic transactions if any were generated
-                // A single pad can generate multiple transactions (one per currency)
-                if let Some(txns) = pad_txns_by_date.get(&pad.date) {
-                    // Find ALL matching transactions for this pad (multiple currencies)
-                    for txn in txns {
-                        if txn.postings.iter().any(|p| p.account == pad.account) {
-                            expanded.push(Directive::Transaction((*txn).clone()));
-                        }
+                // Emit every unconsumed padding transaction whose
+                // date+target match this pad. Multi-currency case: one
+                // `Pad` can produce multiple padding transactions (one
+                // per currency); all match and all should be emitted
+                // here. Multi-pad case: only the first iteration that
+                // hits an unconsumed match consumes it; subsequent
+                // shadowed pads find none and drop silently. NB: we
+                // don't `break` — multi-currency requires multiple
+                // emissions for a single pad.
+                for (i, txn) in result.padding_transactions.iter().enumerate() {
+                    if consumed[i] || txn.date != pad.date {
+                        continue;
                     }
+                    if !txn.postings.iter().any(|p| p.account == pad.account) {
+                        continue;
+                    }
+                    expanded.push(Directive::Transaction(txn.clone()));
+                    consumed[i] = true;
                 }
-                // If no transaction was generated (difference was zero), omit the pad
+                // If no unconsumed match found, this pad was shadowed
+                // or never matched a balance — omit it from the
+                // expansion. The user-facing "unused pad" warning
+                // (E2003) is emitted by the validator independently.
             }
             other => {
                 expanded.push(other.clone());
@@ -521,6 +539,59 @@ mod tests {
             .filter(|d| matches!(d, Directive::Transaction(_)))
             .count();
         assert_eq!(txn_count, 1);
+    }
+
+    /// Regression test for #1300. Two pad directives target the same
+    /// account before a single balance assertion. `process_pads`
+    /// correctly produces ONE synthetic padding transaction (the
+    /// later pad shadows the earlier via the validator-mirrored
+    /// "most recent effective pad wins" rule), but before this fix
+    /// `expand_pads` emitted the SAME transaction once per matching
+    /// `Pad` — double-applying the adjustment.
+    ///
+    /// Concrete failure under the bug: starting balance 1000 USD,
+    /// expected after expansion = 1000 + (-100) = 900 USD. Actual
+    /// before fix = 1000 + (-100) + (-100) = 800 USD because the
+    /// single synth transaction got pushed twice.
+    #[test]
+    fn test_expand_pads_does_not_double_apply_multi_pad() {
+        let directives = vec![
+            Directive::Open(Open::new(date(2024, 1, 1), "Assets:Bank")),
+            Directive::Open(Open::new(date(2024, 1, 1), "Equity:Opening")),
+            Directive::Transaction(
+                Transaction::new(date(2024, 1, 1), "opening").with_synthesized_posting(
+                    Posting::new("Assets:Bank", Amount::new(dec!(1000.00), "USD")),
+                ),
+            ),
+            // Two pads, same date, same target. Per beancount
+            // semantics the later one is "active" and the earlier
+            // one is "unused" (validator reports E2003).
+            Directive::Pad(Pad::new(date(2024, 1, 2), "Assets:Bank", "Equity:Opening")),
+            Directive::Pad(Pad::new(date(2024, 1, 2), "Assets:Bank", "Equity:Opening")),
+            Directive::Balance(Balance::new(
+                date(2024, 1, 3),
+                "Assets:Bank",
+                Amount::new(dec!(900.00), "USD"),
+            )),
+        ];
+
+        let expanded = expand_pads(&directives);
+
+        // Exactly ONE synthetic padding transaction must be present
+        // (not two). The 2 Pad directives must both be dropped from
+        // the output (one consumed the synth, one shadowed).
+        let synth_count = expanded
+            .iter()
+            .filter(|d| matches!(d, Directive::Transaction(t) if t.flag == 'P'))
+            .count();
+        assert_eq!(
+            synth_count, 1,
+            "expected exactly one synthetic padding transaction; \
+             got {synth_count} (pre-#1300-fix bug emitted both pads' synths)",
+        );
+
+        let has_pad = expanded.iter().any(|d| matches!(d, Directive::Pad(_)));
+        assert!(!has_pad, "both pads should be removed from expansion");
     }
 
     #[test]

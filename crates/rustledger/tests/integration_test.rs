@@ -740,3 +740,166 @@ fn test_beancount_canonical_example_matches_python() {
         "Rust should match Python on example.beancount: {rs_output}"
     );
 }
+
+/// Regression test for #1288: pad+balance should affect downstream
+/// reports, not just `rledger check`. The user's reported symptom was
+/// that `rledger report holdings` showed 980 USD on this fixture when
+/// the correct answer (matching bean-query) is 965 USD.
+///
+/// Mechanism: before this fix, `rustledger_loader::process` returned
+/// directives without expanding pads, so report-side balance
+/// computation never saw the synthesized padding transaction. The
+/// `query` subcommand worked only because it remembered to call
+/// `rustledger_booking::expand_pads` itself. Now pad expansion runs
+/// inside `process` so every consumer of `Ledger.directives` is
+/// correct by default.
+#[test]
+fn test_issue_1288_report_holdings_respects_pad() {
+    let Some(binary) = rledger_binary() else {
+        eprintln!("Skipping: rledger binary not found");
+        return;
+    };
+
+    let content = r#"option "operating_currency" "USD"
+
+2026-01-01 open Assets:Wallet USD
+2026-01-01 open Equity:Void USD
+2026-01-01 open Expenses:Expense
+
+2026-01-01 * "opening balances"
+  Assets:Wallet  1000 USD
+  Equity:Void
+
+2026-06-01 * "expense"
+  Expenses:Expense  10 USD
+  Assets:Wallet
+
+2026-06-01 pad Assets:Wallet Equity:Void
+2026-06-02 balance Assets:Wallet 975 USD
+
+2026-06-02 * "expense"
+  Expenses:Expense  10 USD
+  Assets:Wallet
+"#;
+
+    let temp_dir = std::env::temp_dir();
+    let temp_file = temp_dir.join("issue-1288.beancount");
+    std::fs::write(&temp_file, content).expect("write fixture");
+
+    // 1. Check passes (validator path always worked).
+    let check_out = Command::new(&binary)
+        .args(["check", temp_file.to_str().unwrap()])
+        .output()
+        .expect("run rledger check");
+    assert!(
+        check_out.status.success(),
+        "check should pass: stdout={} stderr={}",
+        String::from_utf8_lossy(&check_out.stdout),
+        String::from_utf8_lossy(&check_out.stderr),
+    );
+
+    // 2. Report holdings must reflect the pad. Expected: Wallet =
+    // 1000 (opening) - 10 (Jun 1 expense) - 15 (pad: 990 → 975)
+    // - 10 (Jun 2 expense) = 965 USD.
+    let report_out = Command::new(&binary)
+        .args([
+            "report",
+            temp_file.to_str().unwrap(),
+            "holdings",
+            "--no-pager",
+        ])
+        .output()
+        .expect("run rledger report holdings");
+    let stdout = String::from_utf8_lossy(&report_out.stdout);
+    assert!(
+        report_out.status.success(),
+        "report should succeed: {stdout}",
+    );
+    assert!(
+        stdout.contains("965"),
+        "report holdings must show 965 USD (= 1000 - 10 - 15 - 10), got: {stdout}",
+    );
+    assert!(
+        !stdout.contains("980"),
+        "report holdings must NOT show 980 USD (= 1000 - 10 - 10, pad ignored), got: {stdout}",
+    );
+
+    // 3. Query path must continue working (no regression from the
+    // loader-side expansion — the call in `cmd/query/mod.rs` is
+    // now idempotent on already-expanded directives).
+    let query_out = Command::new(&binary)
+        .args([
+            "query",
+            temp_file.to_str().unwrap(),
+            "SELECT account, sum(position) WHERE account = 'Assets:Wallet'",
+        ])
+        .output()
+        .expect("run rledger query");
+    let qstdout = String::from_utf8_lossy(&query_out.stdout);
+    assert!(
+        query_out.status.success(),
+        "query should succeed: {qstdout}"
+    );
+    assert!(
+        qstdout.contains("965"),
+        "query must show 965 USD, got: {qstdout}",
+    );
+
+    std::fs::remove_file(&temp_file).ok();
+}
+
+/// Regression test for #1300: two `pad` directives targeting the
+/// same account before a single `balance` must not double-apply.
+///
+/// Before this fix, `expand_pads` walked sorted directives and
+/// pushed the same synthesized padding transaction once per matching
+/// `Pad` — resulting in 1000 USD → 800 USD (subtracting 100 twice)
+/// instead of the correct 900 USD that beancount produces.
+#[test]
+fn test_issue_1300_multi_pad_does_not_double_apply() {
+    let Some(binary) = rledger_binary() else {
+        eprintln!("Skipping: rledger binary not found");
+        return;
+    };
+
+    let content = r#"option "operating_currency" "USD"
+
+2026-01-01 open Assets:Wallet USD
+2026-01-01 open Equity:Void USD
+
+2026-01-01 * "opening"
+  Assets:Wallet  1000 USD
+  Equity:Void
+
+2026-06-01 pad Assets:Wallet Equity:Void
+2026-06-01 pad Assets:Wallet Equity:Void
+
+2026-06-02 balance Assets:Wallet 900 USD
+"#;
+
+    let temp_dir = std::env::temp_dir();
+    let temp_file = temp_dir.join("issue-1300.beancount");
+    std::fs::write(&temp_file, content).expect("write fixture");
+
+    let query_out = Command::new(&binary)
+        .args([
+            "query",
+            temp_file.to_str().unwrap(),
+            "SELECT account, sum(position) WHERE account = 'Assets:Wallet'",
+        ])
+        .output()
+        .expect("run rledger query");
+    let stdout = String::from_utf8_lossy(&query_out.stdout);
+    // query returns 0 status even when the file has validator errors
+    // (E2003 unused pad); just check the numeric output.
+    assert!(
+        stdout.contains("900"),
+        "query must show 900 USD (single pad applied; second pad shadowed), got: {stdout}",
+    );
+    assert!(
+        !stdout.contains("800"),
+        "query must NOT show 800 USD (double-applied pad), got: {stdout}",
+    );
+
+    std::fs::remove_file(&temp_file).ok();
+}

@@ -235,7 +235,17 @@ impl LedgerError {
 ///   7. Late validation              (balance, currency, inventory, on booked only)
 ///   8. finalize                     (unused-pad warnings)
 ///   9. re-merge                     (booked + failed → final Ledger.directives)
+///  10. expand pads                  (synthesize padding transactions, closes #1288)
 /// ```
+///
+/// **Step 10 rationale.** Pad-effect needs to reach every consumer of
+/// `Ledger.directives`, not just the few that remembered to call
+/// `rustledger_booking::expand_pads` on their own. Before this step
+/// existed, only `rledger query` and the WASM `format_html_journal`
+/// path expanded pads; `rledger report` (all 7 subcommands) and the
+/// FFI `query.execute` endpoint silently emitted balances WITHOUT
+/// padding (see #1288). Adding the expansion as the loader's final
+/// step closes the gap for every current and future consumer.
 pub fn process(raw: LoadResult, options: &LoadOptions) -> Result<Ledger, ProcessError> {
     let mut errors: Vec<LedgerError> = Vec::new();
 
@@ -332,14 +342,99 @@ pub fn process(raw: LoadResult, options: &LoadOptions) -> Result<Ledger, Process
 
     let finalized = late_validated.finalize(failed);
 
+    // Step 10: expand pads → synthesized transactions so every
+    // consumer of `Ledger.directives` (CLI report, FFI
+    // `query.execute`, future commands) sees the padding effect.
+    // Idempotent on Pad-free input; safe to call unconditionally.
+    // Closes #1288.
+    #[cfg(feature = "booking")]
+    let directives = expand_pads_preserving_spans(finalized.into_inner());
+    #[cfg(not(feature = "booking"))]
+    let directives = finalized.into_inner();
+
     Ok(Ledger {
-        directives: finalized.into_inner(),
+        directives,
         options: raw.options,
         plugins: raw.plugins,
         source_map: raw.source_map,
         errors,
         display_context: raw.display_context,
     })
+}
+
+/// Replace each `Pad` directive in `spanned` with the synthesized
+/// padding `Transaction` that `rustledger_booking::process_pads`
+/// produces for it. Non-Pad directives are passed through with
+/// their original spans intact. Pads that don't match any synth
+/// (shadowed by a later same-account Pad, or never matched a
+/// subsequent Balance) are dropped.
+///
+/// **Why we don't just call `rustledger_booking::expand_pads`.**
+/// `expand_pads` operates on `&[Directive]` and returns
+/// `Vec<Directive>` — it doesn't preserve the `Spanned<Directive>`
+/// wrappers downstream tooling (LSP diagnostics, source-mapped
+/// errors) depends on. This wrapper keeps the original spans for
+/// every directive that survives the expansion; synthesized
+/// transactions get `Spanned::synthesized` since they have no
+/// source representation. The dedup logic mirrors `expand_pads`
+/// post-#1300: a `Pad` consumes ONE matching unconsumed synth and
+/// emits it as a `Spanned::synthesized` transaction; later same-
+/// account pads find no match and drop silently.
+#[cfg(feature = "booking")]
+fn expand_pads_preserving_spans(
+    spanned: Vec<rustledger_core::Spanned<rustledger_core::Directive>>,
+) -> Vec<rustledger_core::Spanned<rustledger_core::Directive>> {
+    use rustledger_core::{Directive, Spanned};
+
+    // Strip spans so `process_pads` (which takes `&[Directive]`)
+    // can run its date+account walk. The result includes the
+    // synthesized padding transactions and the pad-side errors
+    // (the latter are user-facing only via the validator path, so
+    // we discard them here).
+    let unspanned: Vec<Directive> = spanned.iter().map(|s| s.value.clone()).collect();
+    let pad_result = rustledger_booking::process_pads(&unspanned);
+    let padding_txns = pad_result.padding_transactions;
+
+    // Fast path: no pads → no expansion needed. Avoids the
+    // per-directive walk + Vec allocation for the common case of
+    // ledger files without any `pad` directives.
+    if padding_txns.is_empty() && !spanned.iter().any(|s| matches!(s.value, Directive::Pad(_))) {
+        return spanned;
+    }
+
+    let mut consumed = vec![false; padding_txns.len()];
+    let mut out: Vec<Spanned<Directive>> = Vec::with_capacity(spanned.len());
+
+    for s in spanned {
+        match &s.value {
+            Directive::Pad(pad) => {
+                // Mirror the `expand_pads` dedup: emit every
+                // unconsumed padding txn whose date+target match
+                // this pad. Multi-currency case emits multiple
+                // transactions per pad (one per currency);
+                // multi-pad-same-target case emits exactly once
+                // total (subsequent same-target pads find no
+                // unconsumed match and drop). See #1300.
+                for (i, txn) in padding_txns.iter().enumerate() {
+                    if consumed[i] || txn.date != pad.date {
+                        continue;
+                    }
+                    if !txn.postings.iter().any(|p| p.account == pad.account) {
+                        continue;
+                    }
+                    out.push(Spanned::synthesized(Directive::Transaction(txn.clone())));
+                    consumed[i] = true;
+                }
+                // If no unconsumed match found, this pad was
+                // shadowed or never matched a balance — drop it.
+                // The user-facing "unused pad" warning (E2003) is
+                // emitted by the validator independently.
+            }
+            _ => out.push(s),
+        }
+    }
+
+    out
 }
 
 /// Resolve the booking method from `LoadOptions` + file-level option.

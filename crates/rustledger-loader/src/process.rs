@@ -109,7 +109,26 @@ pub enum ProcessError {
 /// equivalent to the tuple returned by Python's `loader.load_file()`.
 #[derive(Debug)]
 pub struct Ledger {
-    /// Processed directives (sorted, booked, plugins applied).
+    /// Processed directives in source-faithful form: sorted by date,
+    /// booked (cost specs resolved, interpolations applied), and
+    /// plugin-rewritten. **`Pad` directives remain as `Pad`**; they
+    /// are not pre-expanded into synthesized transactions.
+    ///
+    /// Consumers split into two groups:
+    ///
+    /// - **Source-faithful consumers** (stats, journal, formatter,
+    ///   LSP, BQL `WHERE type = 'pad'`, source-mapped diagnostics)
+    ///   iterate this field directly. Pads count as Pads.
+    /// - **Balance-computing consumers** (holdings, balances,
+    ///   balsheet, networth, income, FFI `query.execute`/`batch`,
+    ///   WASM `expandPads`/`query`) call [`Ledger::balance_view`]
+    ///   to get the directive stream with pads replaced by their
+    ///   synthesized P-flag transactions. This is the only way to
+    ///   get pad effects into per-account inventory math.
+    ///
+    /// The two views are derived from the same source; there is no
+    /// drift possible because [`Ledger::balance_view`] is a pure
+    /// function of `self.directives`.
     pub directives: Vec<Spanned<Directive>>,
     /// Options parsed from the file.
     pub options: Options,
@@ -121,6 +140,42 @@ pub struct Ledger {
     pub errors: Vec<LedgerError>,
     /// Display context for formatting numbers.
     pub display_context: DisplayContext,
+}
+
+impl Ledger {
+    /// Return the directive stream with pads expanded into
+    /// synthesized transactions, suitable for inventory / balance
+    /// math.
+    ///
+    /// Each `Pad` directive followed (in date order) by a `Balance`
+    /// assertion on the same account is replaced by a `Transaction`
+    /// with `flag = 'P'` that carries the postings needed to make
+    /// the balance match. A multi-currency pad produces one synth
+    /// transaction per currency. Unused pads (no following balance)
+    /// and shadowed pads (a later same-target pad before the next
+    /// balance) are dropped from the view; the validator
+    /// independently emits `E2003` for those cases.
+    ///
+    /// **When to use this vs. [`Ledger.directives`](Self::directives):**
+    /// any consumer that maintains running per-account inventory
+    /// state and asks "what is the balance" needs this view. Any
+    /// consumer that asks "what did the user write" wants the raw
+    /// `directives` field.
+    ///
+    /// # Performance
+    ///
+    /// Each call clones every directive (`O(n)` work and
+    /// allocation). For short-lived CLI invocations this is
+    /// negligible. Long-lived processes (FFI servers, LSPs) that
+    /// query the same ledger repeatedly should hoist the result
+    /// above their loop. `TODO(perf):` memoize internally once a
+    /// benchmark shows it matters.
+    #[cfg(feature = "booking")]
+    #[must_use]
+    pub fn balance_view(&self) -> Vec<Directive> {
+        let booked: Vec<Directive> = self.directives.iter().map(|s| s.value.clone()).collect();
+        rustledger_booking::expand_pads(&booked)
+    }
 }
 
 /// Unified error type for ledger processing.

@@ -6,6 +6,7 @@
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
+use rustledger_parser::format::{format_source, format_source_with_parsed};
 use rustledger_parser::logos_lexer::tokenize;
 use rustledger_parser::parse;
 
@@ -176,6 +177,54 @@ fn bench_tokenize_vs_parse(c: &mut Criterion) {
     group.finish();
 }
 
+// ===== Formatter Benchmarks =====
+//
+// `format_source` parses + computes alignment + emits. The
+// `format_source_with_parsed` path skips the parse + alignment by
+// consuming a cached `ParseResult`. These benches pin the perf
+// claim: per-call cost of the cached path should be substantially
+// lower than the bare entry on the same input.
+
+fn bench_format_source_vs_with_parsed(c: &mut Criterion) {
+    let mut group = c.benchmark_group("format_source_vs_with_parsed");
+
+    for size in [10, 100, 1000] {
+        let ledger = generate_ledger(size);
+        let parse_result = parse(&ledger);
+        group.throughput(Throughput::Bytes(ledger.len() as u64));
+
+        // Bare path: re-parses every iteration AND re-walks every
+        // posting via compute_alignment.
+        group.bench_with_input(
+            BenchmarkId::new("format_source", size),
+            &ledger,
+            |b, ledger| {
+                b.iter(|| format_source(std::hint::black_box(ledger)));
+            },
+        );
+
+        // Cached path: skips the parse + the alignment walk. The
+        // `parse_result` is set up outside the iter() closure so
+        // its construction cost is excluded from the measurement
+        // — the bench measures the per-format-call cost only,
+        // which is what the LSP / FFI / WASM consumers care about.
+        group.bench_with_input(
+            BenchmarkId::new("format_source_with_parsed", size),
+            &ledger,
+            |b, ledger| {
+                b.iter(|| {
+                    format_source_with_parsed(
+                        std::hint::black_box(&parse_result),
+                        std::hint::black_box(ledger),
+                    )
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_parse_small,
@@ -186,5 +235,6 @@ criterion_group!(
     bench_tokenize_large,
     bench_tokenize_scaling,
     bench_tokenize_vs_parse,
+    bench_format_source_vs_with_parsed,
 );
 criterion_main!(benches);

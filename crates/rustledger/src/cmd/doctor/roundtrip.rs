@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use rustledger_loader::{LoadError, Loader};
-use rustledger_parser::format::format_source;
+use rustledger_parser::format::format_source_with_parsed;
 use rustledger_parser::parse;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -131,7 +131,12 @@ pub(super) fn cmd_roundtrip<W: Write>(file: &PathBuf, writer: &mut W) -> Result<
             continue;
         }
 
-        let formatted = format_source(source);
+        // Reuse `parse_result` from the error gate above. Saves a
+        // full re-parse + `compute_alignment` walk per file — on
+        // a project of 200 included files the doctor pass roughly
+        // halves its parsing cost. Byte-identical output pinned
+        // by `format_source_with_parsed_matches_format_source`.
+        let formatted = format_source_with_parsed(&parse_result, source);
         let stable = formatted == source;
 
         let reparsed = parse(&formatted);

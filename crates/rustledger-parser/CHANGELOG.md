@@ -261,8 +261,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   **Naming.** The public type is `PostingAlignment`, not the
   bare `Alignment` — qualified by its semantic purpose so the
-  re-export path doesn't compete with future generic alignment
-  types (text justification, memory layout helpers, etc.).
+  re-export path doesn't compete with `rustledger_core::Alignment`
+  (an existing unrelated type in the workspace that the legacy
+  typed-Directive emitter `rustledger_core::format::FormatConfig`
+  uses), and to leave room for future generic alignment types
+  (text justification, memory layout helpers).
 
 ## [0.13.0](https://github.com/rustledger/rustledger/compare/v0.12.0...v0.13.0) - 2026-04-21
 

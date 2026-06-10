@@ -136,16 +136,16 @@ pub fn format_source(source: &str) -> String {
 /// redundant traversals of the file.
 ///
 /// **Output equivalence with `format_source`.** Pinned by
-/// `format_source_with_parsed_matches_format_source` across a
-/// representative fixture set (single transaction, multi-
-/// transaction varying widths, arithmetic amounts, CRLF source,
-/// BOM-prefixed source). The two paths emit byte-identical
-/// canonical text because the canonical form is independent of
-/// trivia: `format_source` normalizes CRLF → LF before parsing
-/// and `format_source_with_parsed` consumes a CST built from the
-/// non-normalized source, but the formatter rebuilds output from
-/// each directive's typed values rather than echoing trivia, so
-/// the two CSTs produce the same LF-only output.
+/// `parse_result_alignment_cache::format_source_with_parsed_matches_format_source_under_fallback`
+/// (the fallback exercises broken sources) and
+/// `cst::format::tests::format_source_with_parsed_matches_format_source`
+/// (the cache path exercises clean sources) across LF / CRLF /
+/// BOM / parse-error / mixed-line-ending fixtures. The cache-
+/// path equivalence holds because the formatter rebuilds output
+/// from each directive's typed values rather than echoing
+/// trivia, so the CRLF-vs-LF difference in the underlying CST
+/// trivia never reaches the output. The fallback path is
+/// byte-trivially equivalent (it IS `format_source`).
 ///
 /// **CRLF re-injection is still the caller's responsibility.**
 /// Same as `format_source`: this function always returns LF;
@@ -153,25 +153,72 @@ pub fn format_source(source: &str) -> String {
 /// authored files call [`lf_to_crlf_outside_strings`] on the
 /// returned text.
 ///
-/// **What if `parse_result` is stale?** Producer-side cache
-/// invariant (see [`crate::ParseResult::alignment`] rustdoc):
-/// `parse_result` is expected to be a fresh `parse(source)`
-/// result with the SAME `source`. Passing a `ParseResult` from
-/// a different document silently emits non-canonical output
-/// (alignment columns from one doc applied to the other).
+/// **Parse-error fallback.** When `parse_result.errors` is
+/// non-empty, this function delegates to `format_source(source)`
+/// — losing the cache benefit but preserving byte-identity for
+/// inputs whose CST diverges from what `format_source`'s
+/// pre-parse normalization would produce. Concretely: bare-`\r`
+/// (classic Mac) line terminators are normalized to LF by
+/// `format_source` before parsing, but `parse_via_cst` does NOT
+/// normalize them — so the cached CST treats them as broken
+/// content and `parse_result.errors` is non-empty. The fallback
+/// path keeps the byte-identity claim total instead of
+/// "holds-only-when-clean".
+///
+/// **Stale `parse_result` is the caller's responsibility.** The
+/// producer-side cache invariant (see
+/// [`crate::ParseResult::alignment`] rustdoc) says
+/// `parse_result` must come from a fresh `parse(source)` with
+/// the same `source`. A `debug_assert_eq!` compares the CST's
+/// text length against `source.len() - bom_offset` to catch the
+/// most common mismatched-pair class (different documents have
+/// different lengths) in debug builds; release builds skip the
+/// check. Identical-length mismatches still pass silently —
+/// the rustdoc-level contract remains the source of truth.
 ///
 /// # Panics
 ///
 /// Panics if `parse_result.syntax_root` is not a `SOURCE_FILE`
 /// (always true for results produced by [`crate::parse`]).
+///
+/// In debug builds, panics on a `(parse_result, source)`
+/// length-mismatch via `debug_assert_eq!`. Release builds
+/// silently emit possibly-wrong output (the producer-only
+/// invariant is the caller's responsibility).
 #[must_use]
 pub fn format_source_with_parsed(parse_result: &crate::ParseResult, source: &str) -> String {
-    let _ = source; // accepted for signature symmetry with format_source; the
-    // canonical-form output is derived entirely from the cached CST + alignment
-    // and never reads `source` bytes. The argument is kept so future canonical-
-    // form rules that genuinely need the source (e.g., preserving an opt-in
-    // comment style) can land without a breaking signature change.
+    // Parse-error fallback. See the function rustdoc for the
+    // rationale: `parse_via_cst` does not run the same input
+    // normalization `format_source` does (no CRLF/bare-CR
+    // normalize), so for sources containing bare-`\r` line
+    // terminators the cached CST is wrong-shaped and the cache
+    // path would diverge from `format_source`. Delegating
+    // preserves byte-identity unconditionally.
+    if !parse_result.errors.is_empty() {
+        return format_source(source);
+    }
     let node = parse_result.syntax_node();
+    // Defensive length check (debug-only). Catches the most
+    // common form of `(parse_result, source)` mismatched pair —
+    // different documents with different lengths. The CST's
+    // text range is BOM-stripped, so we add back the BOM bytes
+    // if the parser saw one.
+    //
+    // Computed outside the `debug_assert_eq!` to avoid clippy's
+    // `debug_assert_with_mut_call` (`syntax_node()` does an Arc
+    // bump, which clippy treats as state mutation in a debug
+    // context).
+    let cst_len =
+        usize::from(node.text_range().len()) + if parse_result.has_leading_bom { 3 } else { 0 };
+    debug_assert_eq!(
+        cst_len,
+        source.len(),
+        "format_source_with_parsed called with a `source` whose length doesn't \
+         match the CST stored in `parse_result`. The two arguments came from \
+         different documents — the cache path will emit text for the wrong \
+         buffer. See `ParseResult::alignment` rustdoc for the producer-only \
+         invariant.",
+    );
     format_node_with_alignment(&node, parse_result.alignment)
 }
 
@@ -203,7 +250,11 @@ pub fn try_format_source(source: &str) -> Result<String, Vec<crate::ParseError>>
     if !result.errors.is_empty() {
         return Err(result.errors);
     }
-    Ok(format_source(source))
+    // Reuse the parse + alignment we already produced for the
+    // error gate instead of letting `format_source` re-parse +
+    // re-walk every posting. Byte-identical output pinned by
+    // `format_source_with_parsed_matches_format_source`.
+    Ok(format_source_with_parsed(&result, source))
 }
 
 /// Convert every `\n` line terminator OUTSIDE string literals back
@@ -584,10 +635,10 @@ pub fn format_node(node: &crate::SyntaxNode) -> String {
 /// `ParseResult` pay only the per-call emit cost, not the
 /// `O(N_postings)` pre-pass.
 ///
-/// `alignment` MUST match what `compute_alignment(node)` would
+/// `alignment` MUST match what `compute_alignment(&SourceFile::cast(node).unwrap())` would
 /// return for the given `node` — passing a mismatched alignment
 /// is allowed but produces output with non-canonical column
-/// widths. Use `Alignment::default()` for files known to have no
+/// widths. Use `PostingAlignment::default()` for files known to have no
 /// postings (no transactions, or transactions with no AMOUNT).
 ///
 /// # Panics
@@ -595,13 +646,19 @@ pub fn format_node(node: &crate::SyntaxNode) -> String {
 /// Panics if `node`'s kind is not `SOURCE_FILE`.
 #[must_use]
 pub fn format_node_with_alignment(node: &crate::SyntaxNode, alignment: PostingAlignment) -> String {
-    // Precondition check. Cheaper than `SourceFile::cast(node.clone())`
-    // because it avoids the `Arc` bump for the cloned `SyntaxNode`;
-    // the cast itself is just a `kind() == SOURCE_FILE` comparison,
-    // and we get the same panic guarantee. The bare `format_node`
-    // delegate already validated the kind; for external callers (FFI,
-    // future LSP handlers) this is the panic site.
-    assert_eq!(
+    // Precondition check (debug-only). The bare `format_node`
+    // delegate already validated the kind via the
+    // `SourceFile::cast` it performs for `compute_alignment`, so
+    // for the most common call path (bare → with_alignment) the
+    // debug_assert is a redundant no-op in release. External
+    // direct callers of this entry point (FFI, future LSP
+    // handlers calling `format_node_with_alignment` with a
+    // `parse_result.alignment` cache) get the panic in debug
+    // builds; in release, a wrong-kind `node` produces empty or
+    // malformed output rather than panicking — acceptable for
+    // a precondition that's guaranteed by the call's typed
+    // contract.
+    debug_assert_eq!(
         node.kind(),
         crate::SyntaxKind::SOURCE_FILE,
         "format_node_with_alignment called on non-SOURCE_FILE node (got {:?})",
@@ -756,9 +813,9 @@ pub fn format_node_range(
 /// `O(N_postings_in_file)`; with the cache it's
 /// `O(N_cst_nodes covered by range)`.
 ///
-/// `alignment` MUST match what `compute_alignment(node)` would
+/// `alignment` MUST match what `compute_alignment(&SourceFile::cast(node).unwrap())` would
 /// return for the given `node`; pinned by
-/// `format_node_range_with_alignment_matches_uncached`. Same
+/// `format_node_range_matches_format_node_range_with_alignment`. Same
 /// `range` semantics, `ERROR_NODE` policy, snap rules, and
 /// `# Panics` precondition as [`format_node_range`].
 #[must_use]
@@ -767,14 +824,15 @@ pub fn format_node_range_with_alignment(
     range: rowan::TextRange,
     alignment: PostingAlignment,
 ) -> Option<(rowan::TextRange, String)> {
-    // Precondition check. Cheaper than `SourceFile::cast(node.clone())`
-    // because it avoids the `Arc` bump for the cloned `SyntaxNode`;
-    // the cast itself is just a `kind() == SOURCE_FILE` comparison,
-    // and we get the same panic guarantee. Bare `format_node_range`
-    // delegates already validated the kind; for external callers
-    // (LSP fallback, FFI, future format-on-type) this is the panic
-    // site.
-    assert_eq!(
+    // Precondition check (debug-only). Same rationale as
+    // `format_node_with_alignment`: the bare delegate already
+    // validated the kind, so the most common call path (bare →
+    // with_alignment) gets no release-build cost from this
+    // assert. External direct callers — the LSP range_formatting
+    // fallback, FFI, future format-on-type — get a debug-build
+    // panic; release-build wrong-kind input produces no output
+    // (rather than panicking).
+    debug_assert_eq!(
         node.kind(),
         crate::SyntaxKind::SOURCE_FILE,
         "format_node_range_with_alignment called on non-SOURCE_FILE node (got {:?})",
@@ -945,7 +1003,7 @@ fn range_intersects(child: rowan::TextRange, sel: rowan::TextRange) -> bool {
 /// **Pinning the contract.** `ParseResult::alignment` is populated
 /// by calling this function during `parse_via_cst`; the equivalence
 /// between the cached value and a fresh call is guaranteed by the
-/// `compute_alignment_matches_parseresult_cache` regression test in
+/// `parse_result_alignment_cache::*` regression tests (7 fixtures) in
 /// this module.
 #[must_use]
 pub fn compute_alignment(sf: &SourceFile) -> PostingAlignment {
@@ -3828,6 +3886,38 @@ mod tests {
                 "2024-01-15 * \"Coffee\"\r\n  Assets:Bank  -5.00 USD\r\n  Expenses:Food\r\n",
             ),
             ("BOM-prefixed", "\u{FEFF}2024-01-01 open Assets:Bank USD\n"),
+            // BOM + CRLF — Windows-authored ledger with a BOM
+            // prefix. `format_source` BOM-strips + CRLF→LF
+            // normalizes before parsing. The cache path consumes
+            // a CST that's BOM-stripped but NOT CRLF-normalized.
+            // Byte-identity holds because the formatter rebuilds
+            // canonical output from typed values (no trivia
+            // passthrough).
+            (
+                "BOM + CRLF combination",
+                "\u{FEFF}2024-01-15 * \"Coffee\"\r\n  Assets:Bank  -5.00 USD\r\n  Expenses:Food\r\n",
+            ),
+            // Parse-error file — exercises the fallback. Without
+            // the `errors.is_empty()` guard, the cache path would
+            // emit text for ERROR_NODE-wrapped content while
+            // `format_source` would drop those bytes; identity
+            // would fail. The fallback delegates to
+            // `format_source(source)` so identity holds.
+            (
+                "parse errors (exercises fallback)",
+                "2024-01-15 * \"x\"\n  Assets:Bank  -5.00 USD\n}}}garbage\n",
+            ),
+            // Bare-`\r` (classic Mac) line terminators. The
+            // `format_source` path normalizes bare-CR to LF via
+            // `crlf_to_lf_outside_strings`, then parses cleanly.
+            // `parse_via_cst` does NOT normalize bare-CR, so the
+            // CST sees broken syntax and `parse_result.errors`
+            // is non-empty — the fallback fires. Byte-identity
+            // holds via the same `format_source` delegation.
+            (
+                "bare CR line terminators (exercises fallback)",
+                "2024-01-01 open Assets:Bank USD\r2024-01-02 open Assets:Cash USD\r",
+            ),
         ];
         for (label, source) in fixtures {
             let parse_result = crate::parse(source);
@@ -3839,5 +3929,20 @@ mod tests {
                  baseline {baseline:?}, cached {cached:?}",
             );
         }
+    }
+
+    /// Mismatched-pair safety: in debug builds, passing a
+    /// length-mismatched `(parse_result, source)` pair panics via
+    /// the `debug_assert_eq!`. Release builds silently emit text
+    /// for the wrong buffer (the producer-only invariant is the
+    /// caller's responsibility, documented in
+    /// `ParseResult::alignment`).
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "source` whose length doesn't match")]
+    fn format_source_with_parsed_panics_on_length_mismatch() {
+        let parse_result = crate::parse("2024-01-01 open Assets:Bank USD\n");
+        // Different length — debug_assert fires.
+        let _ = format_source_with_parsed(&parse_result, "different");
     }
 }

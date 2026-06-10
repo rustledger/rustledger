@@ -269,7 +269,7 @@ pub fn parse_via_cst(source: &str) -> ParseResult {
     // re-walk on every format request. See
     // `ParseResult::alignment` rustdoc for the cache contract;
     // the equivalence with a fresh `compute_alignment` call is
-    // pinned by `compute_alignment_matches_parseresult_cache`.
+    // pinned by `parse_result_alignment_cache::*` (lib.rs tests).
     let alignment = crate::cst::format::compute_alignment(&source_file);
 
     // Capture the green root before we drop `source_file`. The

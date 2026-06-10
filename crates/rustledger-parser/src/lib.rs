@@ -306,9 +306,9 @@ pub struct ParseResult {
     /// case — the LSP wraps it in `Arc<ParseResult>`).
     ///
     /// **Equivalence pinned.**
-    /// `compute_alignment_matches_parseresult_cache` asserts that
-    /// `parse(s).alignment ==
-    /// compute_alignment(&parse(s).syntax_node().cast::<SourceFile>())`
+    /// `parse_result_alignment_cache::*` (7 fixtures) assert that
+    /// `parse(s).alignment` equals
+    /// `compute_alignment(&SourceFile::cast(parse(s).syntax_node()).unwrap())`
     /// across representative fixtures, so any future divergence
     /// (a converter change that forgets to refresh the cache, a
     /// `compute_alignment` change that breaks the contract)
@@ -323,7 +323,7 @@ pub struct ParseResult {
     /// non-default alignment (i.e. essentially every real
     /// Beancount file). The exclusion is pinned by
     /// `canonical_payload_excludes_alignment`.
-    pub alignment: crate::cst::format::PostingAlignment,
+    pub alignment: crate::format::PostingAlignment,
 }
 
 impl ParseResult {

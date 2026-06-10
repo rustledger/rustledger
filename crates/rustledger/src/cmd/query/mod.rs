@@ -140,8 +140,9 @@ pub fn run(args: &Args) -> Result<()> {
     // Merge pad-synthesized transactions into the directive stream
     // (BQL is a balance-computing consumer). `merge_with_padding`
     // preserves the original Pad directives in the output so
-    // `WHERE type = 'pad'` still matches them, AND avoids the
-    // multi-pad double-application bug `expand_pads` had (#1300).
+    // `FROM #entries WHERE type = 'pad'` audits still enumerate them,
+    // AND avoids the multi-pad double-application bug `expand_pads`
+    // had (#1300).
     let directives = merge_with_padding(&booked_directives);
 
     // Use display context from the loaded ledger

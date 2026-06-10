@@ -144,8 +144,9 @@ pub fn query(source: &str, query_str: &str) -> Result<JsValue, JsError> {
 
     // Merge pad-synthesized transactions: query is a balance-
     // computing consumer (#1288). `merge_with_padding` preserves
-    // Pad directives so `WHERE type = 'pad'` continues to match,
-    // and avoids the multi-pad bug `expand_pads` had (#1300).
+    // Pad directives so `FROM #entries WHERE type = 'pad'` audits
+    // continue to enumerate them, and avoids the multi-pad bug
+    // `expand_pads` had (#1300).
     let directives = merge_with_padding(&load.directives);
     let mut executor = Executor::new(&directives);
     match executor.execute(&query) {

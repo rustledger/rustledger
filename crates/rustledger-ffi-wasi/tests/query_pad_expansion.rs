@@ -10,8 +10,9 @@
 //! Ledger helper.
 //!
 //! Pre-fix these endpoints saw raw `Pad` directives and silently
-//! ignored their effect. Post-fix they expand via
-//! `rustledger_booking::expand_pads` at the boundary.
+//! ignored their effect. Post-fix they merge the synth pad
+//! transactions in via `rustledger_booking::merge_with_padding` at
+//! the boundary.
 
 use rustledger_ffi_wasi::jsonrpc::process_request;
 

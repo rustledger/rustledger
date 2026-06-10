@@ -5,7 +5,7 @@
 //! 1. `Ledger.directives` is **source-faithful**: `Pad` directives
 //!    survive the load pipeline as `Pad` directives.
 //! 2. `Ledger.balance_view()` returns a **derived view**: pads are
-//!    replaced by synthesized `P`-flag transactions suitable for
+//!    merged with synthesized `P`-flag transactions suitable for
 //!    inventory math.
 //!
 //! Together these tests pin the source-vs-derived split that the

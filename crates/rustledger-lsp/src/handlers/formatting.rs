@@ -27,7 +27,9 @@
 
 use lsp_types::{DocumentFormattingParams, Position, Range, TextEdit};
 use rustledger_parser::ParseResult;
-use rustledger_parser::format::{format_source, lf_to_crlf_outside_strings};
+#[cfg(test)]
+use rustledger_parser::format::format_source;
+use rustledger_parser::format::{format_source_with_parsed, lf_to_crlf_outside_strings};
 
 use super::utils::{LineIndex, PositionEncoding};
 
@@ -83,7 +85,16 @@ pub fn format_document(
     if !parse_result.errors.is_empty() {
         return None;
     }
-    let mut formatted = format_source(source);
+    // Reuse the cached parse + alignment via
+    // `format_source_with_parsed` instead of re-parsing `source` and
+    // walking every posting again. On the format-on-save path this
+    // saves an entire `parse_via_cst` + a full `compute_alignment`
+    // walk per request — on a large ledger those two dominate per-
+    // save latency. Output is byte-identical to
+    // `format_source(source)`; pinned by
+    // `format_source_with_parsed_matches_format_source` in the
+    // parser crate's tests.
+    let mut formatted = format_source_with_parsed(parse_result, source);
     if source.contains("\r\n") {
         formatted = lf_to_crlf_outside_strings(&formatted);
     }

@@ -73,14 +73,20 @@ use crate::cst::ast::{self, AstNode, AstToken, MetaEntry, SourceFile};
 /// - `number_width` = max rendered width of any posting's number /
 ///   arithmetic expression (sign included)
 ///
-/// `Alignment` is `Copy` and `Default` (the all-zero state); the
-/// default is the alignment used for files that contain no postings
-/// (no transactions, or transactions with no AMOUNT). Marked
-/// `#[non_exhaustive]` so that a future column-derivation rule can
-/// add fields without breaking downstream consumers.
+/// `PostingAlignment` is `Copy` and `Default` (the all-zero state);
+/// the default is the alignment used for files that contain no
+/// postings (no transactions, or transactions with no AMOUNT).
+/// Marked `#[non_exhaustive]` so that a future column-derivation
+/// rule can add fields without breaking downstream consumers.
+///
+/// **Name choice.** The type is qualified by its semantic purpose
+/// (posting layout column widths) so the public path
+/// `rustledger_parser::format::PostingAlignment` doesn't compete
+/// with future generic "alignment" types (text justification,
+/// memory layout, etc.).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
-pub struct Alignment {
+pub struct PostingAlignment {
     /// 0-indexed column at which the right-justified number field
     /// starts.
     pub number_col: usize,
@@ -114,6 +120,59 @@ pub fn format_source(source: &str) -> String {
     let normalized = crlf_to_lf_outside_strings(stripped);
     let parsed = SourceFile::parse(&normalized);
     format_node(parsed.syntax())
+}
+
+/// Like [`format_source`] but reuses the caller's
+/// [`crate::ParseResult`] instead of re-parsing `source`.
+///
+/// Skips both expensive pre-passes the bare `format_source` runs
+/// every call: the lex+parse from `SourceFile::parse(&normalized)`,
+/// and the `O(N_postings)` `compute_alignment` walk. Both pieces
+/// are already on `parse_result` (in `syntax_root` and
+/// `alignment` respectively, populated by `parse_via_cst`). For
+/// any consumer that already holds a `ParseResult` — the LSP
+/// `format_document` handler, the FFI `format.source` endpoint,
+/// the WASM `ParsedLedger::format` bridge — this entry skips two
+/// redundant traversals of the file.
+///
+/// **Output equivalence with `format_source`.** Pinned by
+/// `format_source_with_parsed_matches_format_source` across a
+/// representative fixture set (single transaction, multi-
+/// transaction varying widths, arithmetic amounts, CRLF source,
+/// BOM-prefixed source). The two paths emit byte-identical
+/// canonical text because the canonical form is independent of
+/// trivia: `format_source` normalizes CRLF → LF before parsing
+/// and `format_source_with_parsed` consumes a CST built from the
+/// non-normalized source, but the formatter rebuilds output from
+/// each directive's typed values rather than echoing trivia, so
+/// the two CSTs produce the same LF-only output.
+///
+/// **CRLF re-injection is still the caller's responsibility.**
+/// Same as `format_source`: this function always returns LF;
+/// LSP consumers that need to preserve CRLF for Windows-
+/// authored files call [`lf_to_crlf_outside_strings`] on the
+/// returned text.
+///
+/// **What if `parse_result` is stale?** Producer-side cache
+/// invariant (see [`crate::ParseResult::alignment`] rustdoc):
+/// `parse_result` is expected to be a fresh `parse(source)`
+/// result with the SAME `source`. Passing a `ParseResult` from
+/// a different document silently emits non-canonical output
+/// (alignment columns from one doc applied to the other).
+///
+/// # Panics
+///
+/// Panics if `parse_result.syntax_root` is not a `SOURCE_FILE`
+/// (always true for results produced by [`crate::parse`]).
+#[must_use]
+pub fn format_source_with_parsed(parse_result: &crate::ParseResult, source: &str) -> String {
+    let _ = source; // accepted for signature symmetry with format_source; the
+    // canonical-form output is derived entirely from the cached CST + alignment
+    // and never reads `source` bytes. The argument is kept so future canonical-
+    // form rules that genuinely need the source (e.g., preserving an opt-in
+    // comment style) can land without a breaking signature change.
+    let node = parse_result.syntax_node();
+    format_node_with_alignment(&node, parse_result.alignment)
 }
 
 /// Like [`format_source`], but returns the parse errors instead
@@ -502,7 +561,7 @@ const fn advance_source_state(
 ///
 /// Internally runs [`compute_alignment`] on `node` to derive the
 /// file-wide column targets. Hot paths that hold a precomputed
-/// `Alignment` (e.g., via [`crate::ParseResult::alignment`]) should
+/// `PostingAlignment` (e.g., via [`crate::ParseResult::alignment`]) should
 /// call [`format_node_with_alignment`] instead to skip the
 /// per-call walk. Equivalence pinned by
 /// `format_node_equals_format_node_with_alignment` in this file's
@@ -517,7 +576,7 @@ pub fn format_node(node: &crate::SyntaxNode) -> String {
 
 /// Like [`format_node`] but skips the per-call
 /// [`compute_alignment`] walk by accepting a precomputed
-/// `Alignment`.
+/// `PostingAlignment`.
 ///
 /// The cache pattern: parse → take `ParseResult::alignment` (the
 /// pre-computed file-wide alignment, populated by `parse_via_cst`)
@@ -535,11 +594,20 @@ pub fn format_node(node: &crate::SyntaxNode) -> String {
 ///
 /// Panics if `node`'s kind is not `SOURCE_FILE`.
 #[must_use]
-pub fn format_node_with_alignment(node: &crate::SyntaxNode, alignment: Alignment) -> String {
+pub fn format_node_with_alignment(node: &crate::SyntaxNode, alignment: PostingAlignment) -> String {
+    // Precondition check. Cheaper than `SourceFile::cast(node.clone())`
+    // because it avoids the `Arc` bump for the cloned `SyntaxNode`;
+    // the cast itself is just a `kind() == SOURCE_FILE` comparison,
+    // and we get the same panic guarantee. The bare `format_node`
+    // delegate already validated the kind; for external callers (FFI,
+    // future LSP handlers) this is the panic site.
+    assert_eq!(
+        node.kind(),
+        crate::SyntaxKind::SOURCE_FILE,
+        "format_node_with_alignment called on non-SOURCE_FILE node (got {:?})",
+        node.kind(),
+    );
     let mut out = String::new();
-    let source_file = SourceFile::cast(node.clone())
-        .expect("format_node_with_alignment called on non-SOURCE_FILE node");
-    let _ = source_file; // kept for the panic-on-wrong-kind precondition
     // Walk every direct child in source order so file-level comments
     // (file-leading per phase-2.0 trivia attachment, plus file-
     // trailing) interleave correctly with directives. Inter-directive
@@ -554,7 +622,7 @@ pub fn format_node_with_alignment(node: &crate::SyntaxNode, alignment: Alignment
     // its visual grouping), and a comment group sitting against a
     // directive on either side stays flush.
     let mut prev_was_directive = false;
-    for el in source_file.syntax().children_with_tokens() {
+    for el in node.children_with_tokens() {
         match el {
             rowan::NodeOrToken::Node(n) => {
                 let Some(directive) = ast::Directive::cast(n) else {
@@ -641,7 +709,7 @@ pub fn format_node_with_alignment(node: &crate::SyntaxNode, alignment: Alignment
 ///   the standard "end-of-line cursor is start-of-next-line"
 ///   convention.
 ///
-/// **Alignment.** The pre-pass uses the FULL `SourceFile`, not
+/// **Posting alignment.** The pre-pass uses the FULL `SourceFile`, not
 /// the selected subset. A selection that formats one transaction
 /// in a file with many other transactions inherits the file's
 /// alignment columns, so the formatted output stays visually
@@ -668,7 +736,7 @@ pub fn format_node_range(
         SourceFile::cast(node.clone()).expect("format_node_range called on non-SOURCE_FILE node");
     // File-wide alignment pre-pass: see rustdoc above for the
     // rationale. The selected subset always uses the full file's
-    // alignment columns. Hot paths with a precomputed `Alignment`
+    // alignment columns. Hot paths with a precomputed `PostingAlignment`
     // should call `format_node_range_with_alignment` instead.
     let alignment = compute_alignment(&source_file);
     format_node_range_with_alignment(node, range, alignment)
@@ -676,7 +744,7 @@ pub fn format_node_range(
 
 /// Like [`format_node_range`] but skips the per-call
 /// [`compute_alignment`] walk by accepting a precomputed
-/// `Alignment`.
+/// `PostingAlignment`.
 ///
 /// The cache pattern is identical to
 /// [`format_node_with_alignment`]: parse → take
@@ -697,11 +765,21 @@ pub fn format_node_range(
 pub fn format_node_range_with_alignment(
     node: &crate::SyntaxNode,
     range: rowan::TextRange,
-    alignment: Alignment,
+    alignment: PostingAlignment,
 ) -> Option<(rowan::TextRange, String)> {
-    let source_file = SourceFile::cast(node.clone())
-        .expect("format_node_range_with_alignment called on non-SOURCE_FILE node");
-    let _ = source_file; // kept for the panic-on-wrong-kind precondition
+    // Precondition check. Cheaper than `SourceFile::cast(node.clone())`
+    // because it avoids the `Arc` bump for the cloned `SyntaxNode`;
+    // the cast itself is just a `kind() == SOURCE_FILE` comparison,
+    // and we get the same panic guarantee. Bare `format_node_range`
+    // delegates already validated the kind; for external callers
+    // (LSP fallback, FFI, future format-on-type) this is the panic
+    // site.
+    assert_eq!(
+        node.kind(),
+        crate::SyntaxKind::SOURCE_FILE,
+        "format_node_range_with_alignment called on non-SOURCE_FILE node (got {:?})",
+        node.kind(),
+    );
 
     // First pass: identify the included children and the snap range.
     // We pick:
@@ -846,10 +924,23 @@ fn range_intersects(child: rowan::TextRange, sel: rowan::TextRange) -> bool {
 ///
 /// **`O(N_postings)`.** Public so consumers can pre-compute the
 /// alignment once (typically at parse time) and pass the cached
-/// `Alignment` into [`format_node_with_alignment`] or
+/// `PostingAlignment` into [`format_node_with_alignment`] or
 /// [`format_node_range_with_alignment`] — eliminates the per-call
 /// walk in hot formatting paths (LSP format-on-type through a
 /// parse error, repeat-format scripts, etc.).
+///
+/// **Tree-shape precondition.** `sf` must be a `SourceFile` whose
+/// CST was produced by `parse_structured` (directly or transitively
+/// via `parse_via_cst` / `parse`). Hand-built partial trees (e.g.,
+/// a `GreenNodeBuilder` invocation for snippet formatting) silently
+/// return `PostingAlignment::default()` because their wrapping
+/// nodes fail the `ast::Directive::Transaction::cast` check.
+/// Likewise, transactions wrapped in `ERROR_NODE` by mid-edit
+/// error recovery are excluded — see
+/// `parse_result_alignment_cache::mid_transaction_error_node` for
+/// the pinned behavior. The function never panics on a partial
+/// tree; it just returns the all-zero alignment for the no-postings
+/// case.
 ///
 /// **Pinning the contract.** `ParseResult::alignment` is populated
 /// by calling this function during `parse_via_cst`; the equivalence
@@ -857,7 +948,7 @@ fn range_intersects(child: rowan::TextRange, sel: rowan::TextRange) -> bool {
 /// `compute_alignment_matches_parseresult_cache` regression test in
 /// this module.
 #[must_use]
-pub fn compute_alignment(sf: &SourceFile) -> Alignment {
+pub fn compute_alignment(sf: &SourceFile) -> PostingAlignment {
     let mut max_lhs: usize = 0;
     let mut max_num: usize = 0;
     let mut any_posting = false;
@@ -886,11 +977,11 @@ pub fn compute_alignment(sf: &SourceFile) -> Alignment {
         }
     }
     if !any_posting {
-        return Alignment::default();
+        return PostingAlignment::default();
     }
     // 2 spaces between the longest account end and the number field,
     // matching the conventional Beancount layout.
-    Alignment {
+    PostingAlignment {
         number_col: INDENT.len() + max_lhs + 2,
         number_width: max_num,
     }
@@ -924,7 +1015,7 @@ fn amount_value_text(amt: &ast::Amount) -> String {
     buf
 }
 
-fn emit_directive(d: &ast::Directive, align: Alignment, out: &mut String) {
+fn emit_directive(d: &ast::Directive, align: PostingAlignment, out: &mut String) {
     // Leading inter-directive trivia: COMMENT tokens that sit
     // BEFORE the directive's first content token. Per phase-2.0
     // trivia attachment, these live inside the directive's syntax
@@ -1402,7 +1493,7 @@ fn emit_popmeta(d: &ast::PopmetaDirective, out: &mut String) {
 
 // ---- Transaction + Posting --------------------------------------
 
-fn emit_transaction(d: &ast::Transaction, align: Alignment, out: &mut String) {
+fn emit_transaction(d: &ast::Transaction, align: PostingAlignment, out: &mut String) {
     let date = d.date().map(|t| t.text().to_string()).unwrap_or_default();
     out.push_str(&date);
     out.push(' ');
@@ -1488,7 +1579,7 @@ fn transaction_flag_string(d: &ast::Transaction) -> String {
     }
 }
 
-fn emit_posting(p: &ast::Posting, align: Alignment, out: &mut String) {
+fn emit_posting(p: &ast::Posting, align: PostingAlignment, out: &mut String) {
     // Posting-trailing comment (same-line, before the posting-line
     // NEWLINE) — capture upfront so we can splice it back in just
     // before that NEWLINE, preserving the user's attachment intent.
@@ -3687,5 +3778,66 @@ mod tests {
             format_node_with_alignment(&node, parse_result.alignment),
             "ParseResult::alignment must drive identical format output to format_node",
         );
+    }
+
+    /// `format_source_with_parsed(parse(s), s) == format_source(s)`
+    /// byte-identical across a representative fixture set including
+    /// CRLF and BOM-prefixed sources. This is the load-bearing
+    /// equivalence for the LSP `format_document` / FFI
+    /// `format.source` / WASM `ParsedLedger::format` migrations:
+    /// they swap `format_source(source)` for
+    /// `format_source_with_parsed(parse_result, source)` on the
+    /// assumption that the two produce the same output. Without
+    /// this test, a future converter or formatter change that
+    /// silently diverged the two paths would break canonical-form
+    /// expectations in production.
+    #[test]
+    fn format_source_with_parsed_matches_format_source() {
+        let fixtures: &[(&str, &str)] = &[
+            ("empty", ""),
+            ("comment only", "; hello\n"),
+            (
+                "single transaction LF",
+                "\
+2024-01-15 * \"Coffee\"
+  Assets:Bank  -5.00 USD
+  Expenses:Food
+",
+            ),
+            (
+                "multi transaction varying widths LF",
+                "\
+2024-01-15 * \"A\"
+  Assets:Bank  -5.00 USD
+  Expenses:Food
+2024-02-15 * \"B\"
+  Assets:Investment:Long:Path  -123456.78 USD
+  Expenses:Tax  100.00 USD
+",
+            ),
+            (
+                "arithmetic amounts LF",
+                "\
+2024-01-15 * \"Split\"
+  Assets:Bank  -10.00 + 5.00 USD
+  Expenses:Misc
+",
+            ),
+            (
+                "CRLF source",
+                "2024-01-15 * \"Coffee\"\r\n  Assets:Bank  -5.00 USD\r\n  Expenses:Food\r\n",
+            ),
+            ("BOM-prefixed", "\u{FEFF}2024-01-01 open Assets:Bank USD\n"),
+        ];
+        for (label, source) in fixtures {
+            let parse_result = crate::parse(source);
+            let baseline = format_source(source);
+            let cached = format_source_with_parsed(&parse_result, source);
+            assert_eq!(
+                cached, baseline,
+                "format_source_with_parsed must match format_source for {label}: \
+                 baseline {baseline:?}, cached {cached:?}",
+            );
+        }
     }
 }

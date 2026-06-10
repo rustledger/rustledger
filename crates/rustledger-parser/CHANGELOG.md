@@ -208,26 +208,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   have a `SOURCE_FILE` syntax node should obtain one via
   `ParseResult::syntax_node()`.
 
-- `ParseResult::alignment: format::Alignment` and
-  `format::compute_alignment(&SourceFile) -> Alignment` +
-  `format::Alignment` made public. Pre-computed at parse time so
-  hot formatter paths (LSP `range_formatting` fallback, future
-  format-on-type handlers) skip the `O(N_postings)` per-call
-  walk. `Alignment` is `#[non_exhaustive]` and `Copy`; the two
-  fields (`number_col`, `number_width`) are public. New
-  `format::format_node_with_alignment(node, alignment)` and
-  `format::format_node_range_with_alignment(node, range, alignment)`
-  consume the cached value; the bare `format_node` /
-  `format_node_range` keep working unchanged (they call
-  `compute_alignment` internally, then delegate).
+- `ParseResult::alignment: format::PostingAlignment` and
+  `format::compute_alignment(&SourceFile) -> PostingAlignment` +
+  `format::PostingAlignment` made public. Pre-computed at parse
+  time so hot formatter paths skip the `O(N_postings)` per-call
+  walk. `PostingAlignment` is `#[non_exhaustive]` and `Copy`; the
+  two fields (`number_col`, `number_width`) are public.
 
-  Equivalence with the uncached path is pinned by
-  `format_node_equals_format_node_with_alignment` and
+  Three new public entry points consume the cached value:
+  - `format::format_node_with_alignment(node, alignment)`
+  - `format::format_node_range_with_alignment(node, range, alignment)`
+  - `format::format_source_with_parsed(&ParseResult, &str)`
+
+  The first two skip the `compute_alignment` walk; the third
+  skips BOTH the redundant parse AND the `compute_alignment`
+  walk — most useful when the caller already holds a
+  `ParseResult` (LSP `format_document`, FFI `format.source`,
+  WASM `ParsedLedger::format`). The bare `format_node` /
+  `format_node_range` / `format_source` keep working unchanged.
+
+  All three consumer paths (LSP / FFI / WASM) migrated to the
+  `_with_parsed` entry point in this release. Byte-identical
+  output is pinned by `format_source_with_parsed_matches_format_source`
+  across LF / CRLF / BOM-prefixed fixtures, and by the existing
+  `format_node_equals_format_node_with_alignment` /
   `format_node_range_matches_format_node_range_with_alignment`
-  (byte-identical output across representative fixtures). The
-  cache's freshness vs. `compute_alignment` is pinned by
-  `parse_result_alignment_cache::*` across 6 fixtures including
-  parse-error files (load-bearing for the LSP fallback path).
+  tests for the lower-level entries.
+
+  The cache's freshness vs. `compute_alignment` is pinned by
+  `parse_result_alignment_cache::*` across 7 fixtures including
+  parse-error files AND mid-transaction recovery cases
+  (load-bearing for the LSP format-on-type-through-error path).
 
   `alignment` is excluded from `__baseline_canonical_payload` via
   the destructure-bind-and-discard pattern (same shape as
@@ -239,14 +250,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Beancount file) without surfacing any independent drift
   signal.
 
-  **Why this matters for the LSP `range_formatting` fallback.**
-  The fallback path (CST-snap on parse-error files, shipped in
-  #1298) can be invoked per-keystroke by format-on-type clients
-  while the user edits through a typo in a 10k-directive ledger.
-  Without the cache, every keystroke walked every posting in
-  the file. With the cache, the per-keystroke cost is
-  `O(N_cst_nodes covered by the user's range)` — independent of
-  file size.
+  **Producer-only invariant.** `ParseResult::alignment` is
+  populated exactly once by `parse_via_cst`. Downstream code
+  that mutates `directives` or `syntax_root` directly (via
+  `&mut ParseResult`) must NOT then use the `_with_alignment` /
+  `_with_parsed` entry points without first refreshing
+  `alignment` via `compute_alignment`. The common case (LSP
+  `Arc<ParseResult>`) treats ParseResult as immutable after
+  construction, so this caveat is informational only.
+
+  **Naming.** The public type is `PostingAlignment`, not the
+  bare `Alignment` — qualified by its semantic purpose so the
+  re-export path doesn't compete with future generic alignment
+  types (text justification, memory layout helpers, etc.).
 
 ## [0.13.0](https://github.com/rustledger/rustledger/compare/v0.12.0...v0.13.0) - 2026-04-21
 

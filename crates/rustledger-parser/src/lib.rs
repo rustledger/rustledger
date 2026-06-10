@@ -41,9 +41,10 @@ pub mod logos_lexer;
 /// Opinionated CST-backed formatter entries.
 ///
 /// **Sole** import path for the formatter surface - `format_source`,
-/// `try_format_source`, `format_node`, `format_node_range`,
-/// `format_node_with_alignment`, `format_node_range_with_alignment`,
-/// `Alignment`, `compute_alignment`, `canonicalize_directives`,
+/// `format_source_with_parsed`, `try_format_source`, `format_node`,
+/// `format_node_range`, `format_node_with_alignment`,
+/// `format_node_range_with_alignment`, `PostingAlignment`,
+/// `compute_alignment`, `canonicalize_directives`,
 /// `CanonicalizeError`, `lf_to_crlf_outside_strings`,
 /// `crlf_to_lf_outside_strings`, `cr_outside_strings_present`. The
 /// flat crate-root re-exports were removed in round-5 and the
@@ -52,10 +53,10 @@ pub mod logos_lexer;
 /// exactly one site.
 pub mod format {
     pub use crate::cst::format::{
-        Alignment, CanonicalizeError, canonicalize_directives, compute_alignment,
+        CanonicalizeError, PostingAlignment, canonicalize_directives, compute_alignment,
         cr_outside_strings_present, crlf_to_lf_outside_strings, format_node, format_node_range,
         format_node_range_with_alignment, format_node_with_alignment, format_source,
-        lf_to_crlf_outside_strings, try_format_source,
+        format_source_with_parsed, lf_to_crlf_outside_strings, try_format_source,
     };
 }
 
@@ -278,14 +279,31 @@ pub struct ParseResult {
     /// this source — pre-computed at parse time so hot formatting
     /// paths skip the `O(N_postings)` per-call walk.
     ///
-    /// `Alignment` is `Copy`; pass it directly into the
+    /// `PostingAlignment` is `Copy`; pass it directly into the
     /// `_with_alignment` variants of the formatter
     /// ([`crate::format::format_node_with_alignment`],
-    /// [`crate::format::format_node_range_with_alignment`]) to
-    /// reuse this cached value. The LSP `range_formatting`
-    /// fallback (and any future format-on-type handler) consumes
-    /// it to make per-keystroke formatting through a parse error
-    /// cheap.
+    /// [`crate::format::format_node_range_with_alignment`],
+    /// [`crate::format::format_source_with_parsed`]) to reuse this
+    /// cached value. The LSP `format_document` /
+    /// `range_formatting` fallback handlers, the FFI `format.source`
+    /// endpoint, and the WASM `ParsedLedger::format` bridge all
+    /// consume the cache to skip both the redundant parse and the
+    /// redundant alignment walk.
+    ///
+    /// **Producer-only cache invariant.** This field is populated
+    /// exactly once by `parse_via_cst`; the value is consistent with
+    /// the `directives` / `syntax_root` fields *at parse time*.
+    /// `ParseResult` exposes every cache input (`directives`,
+    /// `syntax_root`) as `pub`, so technically a consumer with a
+    /// `&mut ParseResult` can mutate one without refreshing the
+    /// other — leaving `alignment` stale. That is OUT-OF-CONTRACT
+    /// for this cache. Callers that mutate `ParseResult` directly
+    /// must either (a) refresh `alignment` by calling
+    /// `crate::format::compute_alignment(&SourceFile::cast(self.syntax_node()))`,
+    /// (b) avoid the `_with_alignment` formatter variants and use
+    /// the bare ones (which re-compute), or (c) treat the
+    /// `ParseResult` as immutable after construction (the common
+    /// case — the LSP wraps it in `Arc<ParseResult>`).
     ///
     /// **Equivalence pinned.**
     /// `compute_alignment_matches_parseresult_cache` asserts that
@@ -305,7 +323,7 @@ pub struct ParseResult {
     /// non-default alignment (i.e. essentially every real
     /// Beancount file). The exclusion is pinned by
     /// `canonical_payload_excludes_alignment`.
-    pub alignment: crate::cst::format::Alignment,
+    pub alignment: crate::cst::format::PostingAlignment,
 }
 
 impl ParseResult {
@@ -660,7 +678,7 @@ mod canonical_payload_excludes_alignment {
     //! content (already in the payload via the typed-AST hash);
     //! it carries no independent drift signal.
     use super::{__baseline_canonical_payload, parse};
-    use crate::cst::format::Alignment;
+    use crate::cst::format::PostingAlignment;
 
     #[test]
     fn mutating_alignment_does_not_change_canonical_payload() {
@@ -671,10 +689,10 @@ mod canonical_payload_excludes_alignment {
 ";
         let parsed = parse(src);
         let mut mutated = parse(src);
-        // Synthesize a different Alignment value: bump number_col
+        // Synthesize a different PostingAlignment value: bump number_col
         // by 100. Real-world alignment would never be this wide
         // for the fixture, so we get a guaranteed-different cache.
-        mutated.alignment = Alignment {
+        mutated.alignment = PostingAlignment {
             number_col: parsed.alignment.number_col + 100,
             number_width: parsed.alignment.number_width + 7,
         };
@@ -785,6 +803,45 @@ mod parse_result_alignment_cache {
 }}}garbage
 2024-02-15 * \"y\"
   Assets:Other  100.00 USD
+",
+        );
+    }
+
+    /// Mid-transaction recovery: when the WIDEST transaction's body
+    /// breaks (becomes `ERROR_NODE` because a posting is
+    /// syntactically incomplete), its postings are EXCLUDED from
+    /// `compute_alignment` because the wrapping Transaction node
+    /// fails the `ast::Directive::Transaction::cast` check inside
+    /// the alignment walk. The cache reflects only the
+    /// successfully-parsed transactions' alignment; this is the
+    /// behavior the LSP fallback observes when format-on-type fires
+    /// during a mid-edit broken state. The test pins the
+    /// equivalence (cache matches fresh call) so the producer-side
+    /// invariant holds even in this awkward transitional state.
+    ///
+    /// Note for users: as the user keeps typing and the parser
+    /// recovers/breaks the wrapping Transaction across edits, the
+    /// alignment columns may visibly shift. This is unavoidable
+    /// without speculatively recovering wide-account information
+    /// from the broken transaction's source bytes — out of scope
+    /// for the cache.
+    #[test]
+    fn mid_transaction_error_node() {
+        // First transaction has wide accounts (Assets:Investment:Long:Path)
+        // but is broken — the posting line ends with garbage that
+        // the recovery should wrap into an ERROR_NODE around the
+        // whole transaction. Second transaction (narrow accounts)
+        // parses cleanly. The cache's alignment reflects only the
+        // narrow transaction's widths.
+        assert_equivalent(
+            "mid-transaction breakage",
+            "\
+2024-01-15 * \"wide broken\"
+  Assets:Investment:Long:Path  -123456.78 USD }}}
+  Expenses:Tax
+2024-02-15 * \"narrow clean\"
+  Assets:Bank  -5.00 USD
+  Expenses:Food
 ",
         );
     }

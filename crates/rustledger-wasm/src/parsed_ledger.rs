@@ -279,7 +279,7 @@ impl ParsedLedger {
     /// non-directive content with file-wide aligned columns.
     #[wasm_bindgen]
     pub fn format(&self) -> Result<JsValue, JsError> {
-        use rustledger_parser::format::format_source;
+        use rustledger_parser::format::format_source_with_parsed;
 
         if !self.parse_errors.is_empty() {
             let result = FormatResult {
@@ -289,7 +289,13 @@ impl ParsedLedger {
             return to_js(&result);
         }
 
-        let formatted = format_source(&self.source);
+        // Reuse the cached `ParseResult` we already own instead of
+        // re-parsing `self.source`. Byte-identical output to
+        // `format_source(&self.source)` per the parser-side
+        // `format_source_with_parsed_matches_format_source` test.
+        // On large ledgers loaded into a long-lived WASM session,
+        // this cuts the per-format cost roughly in half.
+        let formatted = format_source_with_parsed(&self.parse_result, &self.source);
 
         let result = FormatResult {
             formatted: Some(formatted),

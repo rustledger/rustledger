@@ -573,7 +573,13 @@ fn format_source_to_response(source: &str) -> Result<serde_json::Value, RpcError
         return Err(RpcError::beancount_parse_error(message).with_data(data));
     }
 
-    let formatted = rustledger_parser::format::format_source(source);
+    // Reuse the parse_result we already produced for the error gate
+    // above instead of letting `format_source` parse the same bytes
+    // a second time. Same output (byte-identical, pinned by
+    // `format_source_with_parsed_matches_format_source` in the
+    // parser tests); roughly half the per-RPC CPU cost on large
+    // inputs.
+    let formatted = rustledger_parser::format::format_source_with_parsed(&parse_result, source);
 
     let result = FormatResult { formatted };
     serde_json::to_value(result).map_err(|e| RpcError::internal_error(e.to_string()))

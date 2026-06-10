@@ -182,7 +182,7 @@ pub fn version() -> String {
 /// Returns a `FormatResult` with the formatted source or errors.
 #[wasm_bindgen]
 pub fn format(source: &str) -> Result<JsValue, JsError> {
-    use rustledger_parser::format::format_source;
+    use rustledger_parser::format::format_source_with_parsed;
 
     let parse_result = parse_beancount(source);
     let lookup = LineLookup::new(source);
@@ -199,7 +199,10 @@ pub fn format(source: &str) -> Result<JsValue, JsError> {
         return to_js(&result);
     }
 
-    let formatted = format_source(source);
+    // Reuse the `parse_result` we produced for the error gate above
+    // instead of letting `format_source` re-parse. Byte-identical
+    // output per parser-side `format_source_with_parsed_matches_format_source`.
+    let formatted = format_source_with_parsed(&parse_result, source);
 
     let result = FormatResult {
         formatted: Some(formatted),

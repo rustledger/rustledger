@@ -675,11 +675,16 @@ class PadResult(BaseModel):
     """
 
     directives: list[DirectiveJson] = Field(
-        ..., description="Directives with pads removed."
+        ...,
+        description="The original directives, verbatim. `Pad` directives are NOT\nremoved — consumers wanting a pads-removed view should\nfilter on directive type. The `padding_transactions` field\ncarries the synthesized P-flag transactions separately.",
     )
-    errors: list[BeancountError] = Field(..., description="Pad processing errors.")
+    errors: list[BeancountError] = Field(
+        ...,
+        description="Pad processing errors (e.g. unused pads with no matching\nbalance assertion).",
+    )
     padding_transactions: list[DirectiveJson] = Field(
-        ..., description="Generated padding transactions."
+        ...,
+        description="Generated padding transactions (synthesized P-flag, one per\npad-balance pair, multi-currency pads produce one per\ncurrency).",
     )
 
 

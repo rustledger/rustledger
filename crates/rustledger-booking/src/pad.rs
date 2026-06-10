@@ -30,8 +30,8 @@ use std::collections::HashMap;
 use std::ops::Neg;
 
 /// Prefix of the narration carried by every synth pad transaction
-/// produced by this crate (the format string used inside
-/// [`create_padding_transaction`]).
+/// produced by this crate (the format string used inside the
+/// private `create_padding_transaction` constructor).
 ///
 /// Together with [`is_synthesized_pad`], lets consumers distinguish
 /// pad-synth transactions from user-written `P`-flag transactions

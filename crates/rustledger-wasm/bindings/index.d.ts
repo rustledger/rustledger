@@ -549,15 +549,21 @@ export type MetaValueJson =
  */
 export type PadResult = {
   /**
-   * Directives with pads removed.
+   * The original directives, verbatim. `Pad` directives are NOT
+   * removed — consumers wanting a pads-removed view should
+   * filter on directive type. The `padding_transactions` field
+   * carries the synthesized P-flag transactions separately.
    */
   directives: Array<DirectiveJson>;
   /**
-   * Generated padding transactions.
+   * Generated padding transactions (synthesized P-flag, one per
+   * pad-balance pair, multi-currency pads produce one per
+   * currency).
    */
   padding_transactions: Array<DirectiveJson>;
   /**
-   * Pad processing errors.
+   * Pad processing errors (e.g. unused pads with no matching
+   * balance assertion).
    */
   errors: Array<BeancountError>;
 };

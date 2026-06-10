@@ -186,7 +186,21 @@ pub fn run(
         eprintln!("{}: {}", err.code, err.message);
     }
 
-    // Extract directives (already booked and plugins applied)
+    // Two views of the directive stream, chosen per-report below:
+    //
+    // - `directives` (source-faithful): pads remain as `Pad`.
+    //   Used by reports that count or list source directive kinds:
+    //   stats, journal, accounts, commodities, prices.
+    // - `balance_view` (pad-expanded): pads replaced by synthesized
+    //   P-flag transactions. Used by reports that maintain running
+    //   inventories and ask "what is the balance": balances,
+    //   balsheet, income, holdings, networth (#1288).
+    //
+    // The split mirrors the architectural rule documented on
+    // `rustledger_loader::Ledger.directives`. Compute `balance_view`
+    // BEFORE consuming `ledger.directives` so the borrow checker
+    // is happy.
+    let balance_view = ledger.balance_view();
     let directives: Vec<_> = ledger.directives.into_iter().map(|s| s.value).collect();
 
     // Create pager AFTER loading (don't spawn pager if load fails)
@@ -204,22 +218,23 @@ pub fn run(
         crate::pager::PagerWriter::Stdout(io::stdout().lock())
     };
 
-    // Generate the requested report
+    // Generate the requested report. Balance-computing reports get
+    // `&balance_view`; source-faithful reports get `&directives`.
     match report {
         Report::Balances { account } => {
-            balances::report_balances(&directives, account.as_deref(), format, &mut writer)?;
+            balances::report_balances(&balance_view, account.as_deref(), format, &mut writer)?;
         }
         Report::Balsheet => {
-            balsheet::report_balsheet(&directives, format, &mut writer)?;
+            balsheet::report_balsheet(&balance_view, format, &mut writer)?;
         }
         Report::Income => {
-            income::report_income(&directives, format, &mut writer)?;
+            income::report_income(&balance_view, format, &mut writer)?;
         }
         Report::Journal { account, limit } => {
             journal::report_journal(&directives, account.as_deref(), *limit, format, &mut writer)?;
         }
         Report::Holdings { account } => {
-            holdings::report_holdings(&directives, account.as_deref(), format, &mut writer)?;
+            holdings::report_holdings(&balance_view, account.as_deref(), format, &mut writer)?;
         }
         Report::Networth {
             period,
@@ -228,7 +243,7 @@ pub fn run(
             no_zero,
         } => {
             networth::report_networth(
-                &directives,
+                &balance_view,
                 period,
                 currency.as_deref(),
                 account.as_deref(),

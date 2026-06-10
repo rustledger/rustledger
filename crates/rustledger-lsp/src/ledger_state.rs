@@ -248,6 +248,20 @@ impl LedgerState {
                     accounts_set.insert(balance.account.to_string());
                     currencies_set.insert(balance.amount.currency.to_string());
                 }
+                // As of #1288, the loader replaces every `Pad`
+                // with a synthesized P-flag `Transaction` before
+                // building `Ledger.directives`, so this arm is
+                // typically DEAD on the normal LSP load path —
+                // the loader is invoked at `ledger_state.rs:129`.
+                // Pad-source/target accounts are still captured
+                // because the synth transaction's two postings
+                // (target then source) flow through the
+                // `Directive::Transaction` arm below.
+                //
+                // Kept for the defensive path where a caller
+                // hands the LSP a pre-expansion directive list
+                // (e.g. for raw-parser-state diagnostics that
+                // skip the loader).
                 Directive::Pad(pad) => {
                     accounts_set.insert(pad.account.to_string());
                     accounts_set.insert(pad.source_account.to_string());

@@ -69,24 +69,58 @@ fn execute_query(directives: &[Directive], query_str: &str) -> Result<JsValue, J
 fn execute_expand_pads(directives: &[Directive]) -> Result<JsValue, JsError> {
     use rustledger_booking::process_pads;
 
-    let pad_result = process_pads(directives);
+    // After #1288, the directives passed in via `self.directives`
+    // on `ParsedLedger` / `Ledger` are POST-LOADER — meaning pads
+    // have already been replaced by P-flag synth transactions
+    // upstream. Calling `process_pads` on the post-loader list
+    // finds no Pads and returns empty `padding_transactions`,
+    // which silently breaks the published JS API contract (return
+    // the synth list for a source).
+    //
+    // Path A (no Pads in input → already-expanded path): the
+    // synth transactions are present as P-flag entries in the
+    // directive list. Recover them and surface as
+    // `padding_transactions` to preserve the JS API contract.
+    // The `directives` field then includes everything EXCEPT the
+    // P-flag entries, mirroring the pre-#1288 shape (directives
+    // with pads removed).
+    //
+    // Path B (Pads present in input → pre-expansion path): run
+    // `process_pads` as before. Used when a caller hands raw
+    // parser output (e.g. an external consumer that bypasses the
+    // loader pipeline).
+    let has_pads = directives.iter().any(|d| matches!(d, Directive::Pad(_)));
 
+    if has_pads {
+        let pad_result = process_pads(directives);
+        let result = PadResult {
+            directives: pad_result
+                .directives
+                .iter()
+                .map(directive_to_json)
+                .collect(),
+            padding_transactions: pad_result
+                .padding_transactions
+                .iter()
+                .map(|txn| directive_to_json(&Directive::Transaction(txn.clone())))
+                .collect(),
+            errors: pad_result
+                .errors
+                .iter()
+                .map(|e| Error::new(e.message.clone()))
+                .collect(),
+        };
+        return to_js(&result);
+    }
+
+    // Already-expanded path. Partition into (non-synth, synth).
+    let (synth, non_synth): (Vec<_>, Vec<_>) = directives
+        .iter()
+        .partition(|d| matches!(d, Directive::Transaction(t) if t.flag == 'P'));
     let result = PadResult {
-        directives: pad_result
-            .directives
-            .iter()
-            .map(directive_to_json)
-            .collect(),
-        padding_transactions: pad_result
-            .padding_transactions
-            .iter()
-            .map(|txn| directive_to_json(&Directive::Transaction(txn.clone())))
-            .collect(),
-        errors: pad_result
-            .errors
-            .iter()
-            .map(|e| Error::new(e.message.clone()))
-            .collect(),
+        directives: non_synth.iter().copied().map(directive_to_json).collect(),
+        padding_transactions: synth.iter().map(|d| directive_to_json(d)).collect(),
+        errors: vec![],
     };
     to_js(&result)
 }

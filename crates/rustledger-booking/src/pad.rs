@@ -106,9 +106,18 @@ pub fn process_pads(directives: &[Directive]) -> PadResult {
     let mut padding_transactions = Vec::with_capacity(num_directives.min(16));
     let mut errors = Vec::with_capacity(4);
 
-    // Sort directives by date for processing
-    let mut sorted: Vec<&Directive> = directives.iter().collect();
-    sorted.sort_by_key(|d| d.date());
+    // Sort directives by date for processing. Carries the
+    // original input index as a stable secondary key so two
+    // directives sharing a date keep their input-order
+    // relationship. `sort_by_key` itself is unstable; preserving
+    // determinism via the index tiebreak matters when two pads
+    // for the same account share a date — the input order
+    // decides which one shadows the other in `pending_pads.insert`,
+    // and that decision must not vary across rustc versions or
+    // runs.
+    let mut sorted: Vec<(usize, &Directive)> = directives.iter().enumerate().collect();
+    sorted.sort_by(|(i_a, a), (i_b, b)| a.date().cmp(&b.date()).then(i_a.cmp(i_b)));
+    let sorted: Vec<&Directive> = sorted.into_iter().map(|(_, d)| d).collect();
 
     for directive in sorted {
         match directive {
@@ -281,6 +290,18 @@ pub fn expand_pads(directives: &[Directive]) -> Vec<Directive> {
     // one-emit-per-synth so the directive list reflects that.
     let mut consumed = vec![false; result.padding_transactions.len()];
 
+    // Build a per-date index over `padding_transactions` so the
+    // per-Pad lookup is O(#txns at this date), not O(total #txns).
+    // On a ledger with many pads scattered across many dates, the
+    // naive linear scan would degrade to O(#pads × #txns); the
+    // index makes it O(#pads + #txns) total. The values are
+    // indices into `padding_transactions` so `consumed[idx]` still
+    // applies.
+    let mut txns_by_date: HashMap<NaiveDate, Vec<usize>> = HashMap::new();
+    for (i, txn) in result.padding_transactions.iter().enumerate() {
+        txns_by_date.entry(txn.date).or_default().push(i);
+    }
+
     for directive in sorted_originals {
         match directive {
             Directive::Pad(pad) => {
@@ -293,11 +314,26 @@ pub fn expand_pads(directives: &[Directive]) -> Vec<Directive> {
                 // shadowed pads find none and drop silently. NB: we
                 // don't `break` — multi-currency requires multiple
                 // emissions for a single pad.
-                for (i, txn) in result.padding_transactions.iter().enumerate() {
-                    if consumed[i] || txn.date != pad.date {
+                //
+                // **Target-only match.** Synth txns have TWO
+                // postings (target and source); matching on
+                // either could wrongly associate a pad with another
+                // pad's synth in a chain like
+                // `pad A B / pad B C / balance A / balance B`.
+                // `create_padding_transaction` always puts the
+                // target posting at index 0.
+                let Some(idxs) = txns_by_date.get(&pad.date) else {
+                    continue;
+                };
+                for &i in idxs {
+                    if consumed[i] {
                         continue;
                     }
-                    if !txn.postings.iter().any(|p| p.account == pad.account) {
+                    let txn = &result.padding_transactions[i];
+                    let Some(target_posting) = txn.postings.first() else {
+                        continue;
+                    };
+                    if target_posting.account != pad.account {
                         continue;
                     }
                     expanded.push(Directive::Transaction(txn.clone()));

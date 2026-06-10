@@ -109,7 +109,21 @@ pub enum ProcessError {
 /// equivalent to the tuple returned by Python's `loader.load_file()`.
 #[derive(Debug)]
 pub struct Ledger {
-    /// Processed directives (sorted, booked, plugins applied).
+    /// Processed directives in canonical order: sorted by date,
+    /// booked (cost specs resolved, interpolations applied),
+    /// plugin-rewritten, and **pad-expanded**.
+    ///
+    /// **Pad expansion.** As of #1288, `Pad` directives are
+    /// REPLACED by `Transaction` directives with `flag = 'P'`
+    /// (synthesized via `Spanned::synthesized` since they have
+    /// no source representation). The synth transaction carries
+    /// the same date as the original pad and two postings
+    /// (target then source). Consumers that previously matched
+    /// on `Directive::Pad(_)` to render or count pads should now
+    /// match `Transaction(t) if t.flag == 'P'` instead. The
+    /// pre-expansion view (with `Pad` directives intact) is
+    /// available via `LoadResult.directives` or by re-parsing
+    /// the source.
     pub directives: Vec<Spanned<Directive>>,
     /// Options parsed from the file.
     pub options: Options,
@@ -385,6 +399,17 @@ fn expand_pads_preserving_spans(
     spanned: Vec<rustledger_core::Spanned<rustledger_core::Directive>>,
 ) -> Vec<rustledger_core::Spanned<rustledger_core::Directive>> {
     use rustledger_core::{Directive, Spanned};
+    use std::collections::HashMap;
+
+    // Fast path: no `pad` directives → no expansion needed. This
+    // check runs BEFORE the expensive clone-and-`process_pads`
+    // pass so the common-case (ledger files without any pads)
+    // pays only an O(n) scan, not an O(n) clone + sort + walk.
+    // On a 100k-directive pad-free ledger the difference is
+    // hundreds of milliseconds per load.
+    if !spanned.iter().any(|s| matches!(s.value, Directive::Pad(_))) {
+        return spanned;
+    }
 
     // Strip spans so `process_pads` (which takes `&[Directive]`)
     // can run its date+account walk. The result includes the
@@ -395,15 +420,18 @@ fn expand_pads_preserving_spans(
     let pad_result = rustledger_booking::process_pads(&unspanned);
     let padding_txns = pad_result.padding_transactions;
 
-    // Fast path: no pads → no expansion needed. Avoids the
-    // per-directive walk + Vec allocation for the common case of
-    // ledger files without any `pad` directives.
-    if padding_txns.is_empty() && !spanned.iter().any(|s| matches!(s.value, Directive::Pad(_))) {
-        return spanned;
-    }
-
     let mut consumed = vec![false; padding_txns.len()];
     let mut out: Vec<Spanned<Directive>> = Vec::with_capacity(spanned.len());
+
+    // Per-date index over `padding_txns` so per-Pad lookup is
+    // O(#txns at this date), not O(total #txns). On large ledgers
+    // with many pads this avoids the O(#pads × #txns) blowup the
+    // naive scan would have. Same shape as
+    // `rustledger_booking::expand_pads`.
+    let mut txns_by_date: HashMap<rustledger_core::NaiveDate, Vec<usize>> = HashMap::new();
+    for (i, txn) in padding_txns.iter().enumerate() {
+        txns_by_date.entry(txn.date).or_default().push(i);
+    }
 
     for s in spanned {
         match &s.value {
@@ -415,15 +443,32 @@ fn expand_pads_preserving_spans(
                 // multi-pad-same-target case emits exactly once
                 // total (subsequent same-target pads find no
                 // unconsumed match and drop). See #1300.
-                for (i, txn) in padding_txns.iter().enumerate() {
-                    if consumed[i] || txn.date != pad.date {
-                        continue;
+                //
+                // **Target-only match.** Earlier rounds matched on
+                // `txn.postings.iter().any(|p| p.account == pad.account)`
+                // — but synth txns have TWO postings (target and
+                // source), so a pad whose target happens to equal
+                // another pad's source could attach the wrong
+                // synth in a chain like
+                // `pad A B / pad B C / balance A / balance B`.
+                // `create_padding_transaction` always puts the
+                // target posting at index 0; matching `postings[0]`
+                // gives an exact 1:1 association.
+                if let Some(idxs) = txns_by_date.get(&pad.date) {
+                    for &i in idxs {
+                        if consumed[i] {
+                            continue;
+                        }
+                        let txn = &padding_txns[i];
+                        let Some(target_posting) = txn.postings.first() else {
+                            continue;
+                        };
+                        if target_posting.account != pad.account {
+                            continue;
+                        }
+                        out.push(Spanned::synthesized(Directive::Transaction(txn.clone())));
+                        consumed[i] = true;
                     }
-                    if !txn.postings.iter().any(|p| p.account == pad.account) {
-                        continue;
-                    }
-                    out.push(Spanned::synthesized(Directive::Transaction(txn.clone())));
-                    consumed[i] = true;
                 }
                 // If no unconsumed match found, this pad was
                 // shadowed or never matched a balance — drop it.

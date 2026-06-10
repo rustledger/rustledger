@@ -782,9 +782,16 @@ fn test_issue_1288_report_holdings_respects_pad() {
   Assets:Wallet
 "#;
 
-    let temp_dir = std::env::temp_dir();
-    let temp_file = temp_dir.join("issue-1288.beancount");
-    std::fs::write(&temp_file, content).expect("write fixture");
+    // Unique per-test file via tempfile — fixed paths under
+    // `std::env::temp_dir()` collide when `cargo test` runs the
+    // suite in parallel.
+    let temp_file_obj = tempfile::Builder::new()
+        .prefix("issue-1288-")
+        .suffix(".beancount")
+        .tempfile()
+        .expect("create tempfile");
+    std::fs::write(temp_file_obj.path(), content).expect("write fixture");
+    let temp_file = temp_file_obj.path().to_path_buf();
 
     // 1. Check passes (validator path always worked).
     let check_out = Command::new(&binary)
@@ -815,18 +822,23 @@ fn test_issue_1288_report_holdings_respects_pad() {
         report_out.status.success(),
         "report should succeed: {stdout}",
     );
-    assert!(
-        stdout.contains("965"),
-        "report holdings must show 965 USD (= 1000 - 10 - 15 - 10), got: {stdout}",
-    );
-    assert!(
-        !stdout.contains("980"),
-        "report holdings must NOT show 980 USD (= 1000 - 10 - 10, pad ignored), got: {stdout}",
+    // Locate the `Assets:Wallet` row and pull out its first numeric
+    // token. Substring-scanning the whole report would false-positive
+    // on `965000` or `0.980` showing up in unrelated columns; pinning
+    // the row + parsing tokens is robust against report layout
+    // changes that don't reshape this row.
+    let wallet_units = extract_first_number_for_account(&stdout, "Assets:Wallet")
+        .unwrap_or_else(|| panic!("no Assets:Wallet numeric token in report: {stdout}"));
+    assert_eq!(
+        wallet_units, "965",
+        "Assets:Wallet units must be exactly 965 USD (= 1000 - 10 - 15 - 10); \
+         the pre-fix bug emitted 980 (pad ignored)",
     );
 
     // 3. Query path must continue working (no regression from the
-    // loader-side expansion — the call in `cmd/query/mod.rs` is
-    // now idempotent on already-expanded directives).
+    // loader-side expansion — the previously-explicit
+    // `expand_pads` call in `cmd/query/mod.rs` was removed in
+    // round-2 of #1301 because the loader does it now).
     let query_out = Command::new(&binary)
         .args([
             "query",
@@ -840,12 +852,26 @@ fn test_issue_1288_report_holdings_respects_pad() {
         query_out.status.success(),
         "query should succeed: {qstdout}"
     );
-    assert!(
-        qstdout.contains("965"),
-        "query must show 965 USD, got: {qstdout}",
+    let query_units = extract_first_number_for_account(&qstdout, "Assets:Wallet")
+        .unwrap_or_else(|| panic!("no Assets:Wallet token in query output: {qstdout}"));
+    assert_eq!(
+        query_units, "965",
+        "query must show exactly 965 USD on the Assets:Wallet row",
     );
 
-    std::fs::remove_file(&temp_file).ok();
+    // `temp_file_obj` drops at end of scope, auto-cleaning the file.
+    drop(temp_file_obj);
+}
+
+/// Find the line in `output` containing `account` and return the
+/// first whitespace-separated token that parses as a number. Used
+/// by the #1288 / #1300 integration tests instead of substring-
+/// matching the whole report — that would false-positive on
+/// numeric substrings appearing in unrelated columns.
+fn extract_first_number_for_account<'a>(output: &'a str, account: &str) -> Option<&'a str> {
+    let line = output.lines().find(|l| l.contains(account))?;
+    line.split_whitespace()
+        .find(|tok| tok.parse::<f64>().is_ok())
 }
 
 /// Regression test for #1300: two `pad` directives targeting the
@@ -877,9 +903,13 @@ fn test_issue_1300_multi_pad_does_not_double_apply() {
 2026-06-02 balance Assets:Wallet 900 USD
 "#;
 
-    let temp_dir = std::env::temp_dir();
-    let temp_file = temp_dir.join("issue-1300.beancount");
-    std::fs::write(&temp_file, content).expect("write fixture");
+    let temp_file_obj = tempfile::Builder::new()
+        .prefix("issue-1300-")
+        .suffix(".beancount")
+        .tempfile()
+        .expect("create tempfile");
+    std::fs::write(temp_file_obj.path(), content).expect("write fixture");
+    let temp_file = temp_file_obj.path().to_path_buf();
 
     let query_out = Command::new(&binary)
         .args([
@@ -891,15 +921,16 @@ fn test_issue_1300_multi_pad_does_not_double_apply() {
         .expect("run rledger query");
     let stdout = String::from_utf8_lossy(&query_out.stdout);
     // query returns 0 status even when the file has validator errors
-    // (E2003 unused pad); just check the numeric output.
-    assert!(
-        stdout.contains("900"),
-        "query must show 900 USD (single pad applied; second pad shadowed), got: {stdout}",
-    );
-    assert!(
-        !stdout.contains("800"),
-        "query must NOT show 800 USD (double-applied pad), got: {stdout}",
+    // (E2003 unused pad). Pin the exact Assets:Wallet token rather
+    // than substring-matching across the whole output — see the
+    // #1288 test for the same robustness reasoning.
+    let units = extract_first_number_for_account(&stdout, "Assets:Wallet")
+        .unwrap_or_else(|| panic!("no Assets:Wallet numeric token: {stdout}"));
+    assert_eq!(
+        units, "900",
+        "query must show exactly 900 USD (single pad applied; second pad shadowed); \
+         the pre-#1300-fix bug emitted 800 (double-applied pad)",
     );
 
-    std::fs::remove_file(&temp_file).ok();
+    drop(temp_file_obj);
 }

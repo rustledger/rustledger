@@ -399,7 +399,21 @@ fn handle_query(params: &serde_json::Value) -> Result<serde_json::Value, RpcErro
         return serde_json::to_value(output).map_err(|e| RpcError::internal_error(e.to_string()));
     }
 
-    let output = execute_query(&load.directives, &params.query);
+    // Expand pads at the FFI boundary. FFI's `load_source` does
+    // NOT go through `rustledger_loader::process` (it builds
+    // directives from `parse_result.directives` directly), so the
+    // loader-side expansion that #1288 added to the CLI report
+    // path doesn't reach FFI. Mirror the validator's pad-effect
+    // here so JSON-RPC `query.execute` returns the same
+    // sum(position) numbers as the CLI on pad-using files.
+    //
+    // Architectural note: the long-term fix is to route FFI
+    // through `process()` so it picks up booking + validation +
+    // pad expansion uniformly. That's a larger refactor (touches
+    // every `handle_*` endpoint); doing it here as a one-line
+    // call is the focused fix for #1288's FFI half.
+    let expanded = rustledger_booking::expand_pads(&load.directives);
+    let output = execute_query(&expanded, &params.query);
     serde_json::to_value(output).map_err(|e| RpcError::internal_error(e.to_string()))
 }
 

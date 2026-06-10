@@ -17,7 +17,18 @@ pub(super) fn report_stats<W: Write>(
     for directive in directives {
         match directive {
             Directive::Transaction(txn) => {
-                stats.transactions += 1;
+                // Synthesized P-flag transactions are pad-expanded
+                // entries (see `Ledger.directives` rustdoc; #1288).
+                // Count them as Pads so the stats output matches
+                // the user's mental model of the source file —
+                // otherwise a file with `pad` directives would
+                // show `Pads: 0` and an inflated transaction
+                // count post-loader.
+                if txn.flag == 'P' {
+                    stats.pads += 1;
+                } else {
+                    stats.transactions += 1;
+                }
                 stats.postings += txn.postings.len();
                 if stats.first_date.is_none() || Some(txn.date) < stats.first_date {
                     stats.first_date = Some(txn.date);
@@ -30,6 +41,13 @@ pub(super) fn report_stats<W: Write>(
             Directive::Balance(_) => stats.balance_assertions += 1,
             Directive::Commodity(_) => stats.commodities += 1,
             Directive::Price(_) => stats.prices += 1,
+            // `Directive::Pad(_)` would only fire if a downstream
+            // consumer skipped loader-side expansion. The loader
+            // now replaces every Pad with a P-flag Transaction
+            // (see above), so this arm is dead in the normal
+            // pipeline — but keep it for defensive parity in case
+            // a future caller hands stats a pre-load directive
+            // list.
             Directive::Pad(_) => stats.pads += 1,
             Directive::Event(_) => stats.events += 1,
             Directive::Note(_) => stats.notes += 1,

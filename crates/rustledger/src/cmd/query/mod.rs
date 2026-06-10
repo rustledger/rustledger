@@ -17,7 +17,10 @@ mod output;
 use crate::cmd::completions::ShellType;
 use anyhow::{Context, Result};
 use clap::Parser;
-use rustledger_booking::expand_pads;
+// Loader runs `expand_pads` as step 10 of `rustledger_loader::process`
+// (see #1288), so the post-load `ledger.directives` already contains
+// the synthesized padding transactions. No explicit `expand_pads`
+// call needed here.
 use rustledger_core::DisplayContext;
 use rustledger_loader::{LoadOptions, load};
 use std::fs;
@@ -134,11 +137,11 @@ pub fn run(args: &Args) -> Result<()> {
         eprintln!();
     }
 
-    // Get directives (already booked and plugins applied)
-    let booked_directives: Vec<_> = ledger.directives.into_iter().map(|s| s.value).collect();
-
-    // Expand pad directives into synthetic transactions
-    let directives = expand_pads(&booked_directives);
+    // Get directives. As of #1288 the loader pre-expands pads into
+    // synthesized P-flag transactions; no separate `expand_pads`
+    // call is needed (and adding one would be redundant work — see
+    // the same conclusion in the round-2 review of #1301).
+    let directives: Vec<_> = ledger.directives.into_iter().map(|s| s.value).collect();
 
     // Use display context from the loaded ledger
     let display_context = ledger.display_context;

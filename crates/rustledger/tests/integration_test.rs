@@ -934,3 +934,107 @@ fn test_issue_1300_multi_pad_does_not_double_apply() {
 
     drop(temp_file_obj);
 }
+
+/// `rledger report stats` must classify synthesized pad-replacement
+/// transactions as `Pads` (not `Transactions`), and must NOT count
+/// their postings in `Postings`.
+///
+/// Round-1 fixed the classification via a bare `txn.flag == 'P'`
+/// check; round-2 switched to `rustledger_booking::is_synthesized_pad`
+/// (the bare flag check would conflate user-written `P`-flag txns
+/// with synth pads, since `P` is a valid user flag in beancount).
+///
+/// This test exercises both behaviors with a single fixture:
+/// - one user-authored `*`-flagged opening transaction
+/// - one `pad` directive → loader synthesizes one P-flag synth
+/// - one user-authored `P`-flagged transaction (testing the
+///   round-2 helper, which the bare check would have
+///   misclassified as a synth pad).
+#[test]
+fn test_report_stats_classifies_synth_pads_separately_from_user_p_flag() {
+    let Some(binary) = rledger_binary() else {
+        eprintln!("Skipping: rledger binary not found");
+        return;
+    };
+
+    let content = r#"option "operating_currency" "USD"
+
+2026-01-01 open Assets:Wallet USD
+2026-01-01 open Equity:Void USD
+2026-01-01 open Expenses:Rent USD
+
+2026-01-01 * "opening"
+  Assets:Wallet  1000 USD
+  Equity:Void
+
+2026-06-01 pad Assets:Wallet Equity:Void
+2026-06-02 balance Assets:Wallet 990 USD
+
+2026-06-03 P "user-written p-flag transaction"
+  Expenses:Rent  100 USD
+  Assets:Wallet
+"#;
+
+    let temp_file_obj = tempfile::Builder::new()
+        .prefix("stats-pflag-")
+        .suffix(".beancount")
+        .tempfile()
+        .expect("create tempfile");
+    std::fs::write(temp_file_obj.path(), content).expect("write fixture");
+    let temp_file = temp_file_obj.path().to_path_buf();
+
+    let stats_out = Command::new(&binary)
+        .args(["report", temp_file.to_str().unwrap(), "stats", "--no-pager"])
+        .output()
+        .expect("run rledger report stats");
+    let stdout = String::from_utf8_lossy(&stats_out.stdout);
+    assert!(stats_out.status.success(), "stats should succeed: {stdout}",);
+
+    // Pull the right-aligned counter for each label. The format is
+    // `"  <Label>: <count>"`; the count is the last whitespace-
+    // separated token on the line.
+    let counter_for = |label: &str| -> Option<u64> {
+        stdout
+            .lines()
+            .find(|l| l.trim_start().starts_with(label))
+            .and_then(|l| l.split_whitespace().next_back())
+            .and_then(|t| t.parse::<u64>().ok())
+    };
+
+    let pads = counter_for("Pads:")
+        .unwrap_or_else(|| panic!("no Pads: counter in stats output: {stdout}"));
+    let transactions = counter_for("Transactions:")
+        .unwrap_or_else(|| panic!("no Transactions: counter: {stdout}"));
+    let postings =
+        counter_for("Postings:").unwrap_or_else(|| panic!("no Postings: counter: {stdout}"));
+
+    // Fixture has: 1 opening txn (* flag) + 1 synth pad (P flag,
+    // narration matches `SYNTH_PAD_NARRATION_PREFIX`) + 1 user
+    // P-flag txn (arbitrary narration). The synth must be classified
+    // as a pad; the user P-flag txn must remain a transaction.
+    assert_eq!(
+        pads, 1,
+        "exactly one synth pad must be classified as Pad; got {pads}. \
+         Pre-round-1 the synth showed up as Transaction; \
+         pre-round-2 a bare `flag == 'P'` check would have ALSO \
+         classified the user P-flag txn as a pad → Pads=2.",
+    );
+    assert_eq!(
+        transactions, 2,
+        "exactly two user-authored transactions (the * opening and \
+         the P-flagged rent payment) must be counted as Transactions; \
+         got {transactions}.",
+    );
+    // Postings: 2 (opening) + 2 (user P-flag rent) = 4. The synth's
+    // 2 postings must NOT inflate this count — they're accounting-
+    // internal and the user has already seen the same logical
+    // activity counted as one Pad.
+    assert_eq!(
+        postings, 4,
+        "synth-pad postings must NOT be counted in Postings; \
+         expected 4 = 2 (opening) + 2 (user P-flag rent), got {postings}. \
+         Pre-round-2 the synth's 2 postings were also counted → 6.",
+    );
+
+    drop(temp_file_obj);
+}

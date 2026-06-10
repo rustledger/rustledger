@@ -29,6 +29,35 @@ use rustledger_core::{
 use std::collections::HashMap;
 use std::ops::Neg;
 
+/// Prefix of the narration on every synthetic padding transaction
+/// emitted by `create_padding_transaction` (private).
+///
+/// Downstream consumers (`rledger report stats`, the WASM
+/// `expandPads` API) need to distinguish a synth pad-replacement
+/// transaction from a user-written transaction that happens to use
+/// the `P` flag (which is a valid user flag per the lexer). The
+/// `Spanned::synthesized` marker is reliable when present, but is
+/// stripped before some consumers see the directive. The narration
+/// prefix is preserved end-to-end and matches Python beancount's
+/// own format, so it doubles as a stable cross-tool marker.
+pub const SYNTH_PAD_NARRATION_PREFIX: &str = "(Padding inserted for Balance of ";
+
+/// Returns `true` iff `txn` looks like a synth pad-replacement
+/// transaction (created by the booking crate's internal padding
+/// transaction constructor).
+///
+/// Matches on flag `'P'` plus the narration prefix
+/// [`SYNTH_PAD_NARRATION_PREFIX`]. The flag alone is insufficient:
+/// `P` is a valid user-written transaction flag in beancount.
+#[must_use]
+pub fn is_synthesized_pad(txn: &Transaction) -> bool {
+    txn.flag == 'P'
+        && txn
+            .narration
+            .as_str()
+            .starts_with(SYNTH_PAD_NARRATION_PREFIX)
+}
+
 /// Result of processing pad directives.
 #[derive(Debug, Clone)]
 pub struct PadResult {
@@ -249,8 +278,12 @@ fn create_padding_transaction(
     balance: &Amount,
 ) -> Transaction {
     let narration = format!(
-        "(Padding inserted for Balance of {} {} for difference {} {})",
-        balance.number, balance.currency, difference.number, difference.currency
+        "{prefix}{bal_num} {bal_cur} for difference {diff_num} {diff_cur})",
+        prefix = SYNTH_PAD_NARRATION_PREFIX,
+        bal_num = balance.number,
+        bal_cur = balance.currency,
+        diff_num = difference.number,
+        diff_cur = difference.currency,
     );
     Transaction::new(date, &narration)
         .with_flag('P')
@@ -658,6 +691,63 @@ mod tests {
             .filter(|d| matches!(d, Directive::Transaction(_)))
             .count();
         assert_eq!(txn_count, 1);
+    }
+
+    /// Pins the invariant that `expand_pads` relies on for the
+    /// target-only pad↔synth match: the TARGET posting is at index
+    /// 0 of `postings`, the source posting is at index 1. If
+    /// `create_padding_transaction` ever swaps these (or someone
+    /// reorders postings downstream), `expand_pads` would silently
+    /// misassociate pads with synth transactions in chain cases
+    /// like `pad A B / pad B C / balance A / balance B`.
+    #[test]
+    fn test_create_padding_transaction_target_posting_at_index_0() {
+        let txn = create_padding_transaction(
+            date(2024, 1, 1),
+            "Assets:Target",
+            "Equity:Source",
+            Amount::new(dec!(100), "USD"),
+            &Amount::new(dec!(100), "USD"),
+        );
+        assert_eq!(txn.postings.len(), 2);
+        assert_eq!(
+            txn.postings[0].account, "Assets:Target",
+            "target posting must be at index 0",
+        );
+        assert_eq!(
+            txn.postings[1].account, "Equity:Source",
+            "source posting must be at index 1",
+        );
+    }
+
+    #[test]
+    fn test_is_synthesized_pad_recognizes_synth_txn() {
+        let synth = create_padding_transaction(
+            date(2024, 1, 1),
+            "Assets:Bank",
+            "Equity:Opening",
+            Amount::new(dec!(100), "USD"),
+            &Amount::new(dec!(100), "USD"),
+        );
+        assert!(is_synthesized_pad(&synth));
+    }
+
+    #[test]
+    fn test_is_synthesized_pad_rejects_user_p_flag_txn() {
+        // `P` is a valid user-written transaction flag in beancount.
+        // A user-written `P`-flagged transaction with arbitrary
+        // narration must NOT be classified as a synth pad.
+        let user_txn = Transaction::new(date(2024, 1, 1), "rent")
+            .with_flag('P')
+            .with_synthesized_posting(Posting::new("Expenses:Rent", Amount::new(dec!(500), "USD")));
+        assert!(!is_synthesized_pad(&user_txn));
+    }
+
+    #[test]
+    fn test_is_synthesized_pad_rejects_non_p_flag() {
+        let txt = Transaction::new(date(2024, 1, 1), "(Padding inserted for Balance of dummy)")
+            .with_flag('*');
+        assert!(!is_synthesized_pad(&txt));
     }
 
     #[test]

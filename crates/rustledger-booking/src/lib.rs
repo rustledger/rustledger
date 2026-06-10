@@ -28,7 +28,10 @@ mod pad;
 
 pub use book::{BookedTransaction, BookingEngine, BookingError, CapitalGain, book_transactions};
 pub use interpolate::{InterpolationError, InterpolationResult, interpolate};
-pub use pad::{PadError, PadResult, expand_pads, merge_with_padding, process_pads};
+pub use pad::{
+    PadError, PadResult, SYNTH_PAD_NARRATION_PREFIX, expand_pads, is_synthesized_pad,
+    merge_with_padding, process_pads,
+};
 
 use bigdecimal::BigDecimal;
 use rust_decimal::Decimal;

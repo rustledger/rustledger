@@ -113,17 +113,44 @@ pub struct Ledger {
     /// booked (cost specs resolved, interpolations applied),
     /// plugin-rewritten, and **pad-expanded**.
     ///
-    /// **Pad expansion.** As of #1288, `Pad` directives are
-    /// REPLACED by `Transaction` directives with `flag = 'P'`
-    /// (synthesized via `Spanned::synthesized` since they have
-    /// no source representation). The synth transaction carries
-    /// the same date as the original pad and two postings
-    /// (target then source). Consumers that previously matched
-    /// on `Directive::Pad(_)` to render or count pads should now
-    /// match `Transaction(t) if t.flag == 'P'` instead. The
-    /// pre-expansion view (with `Pad` directives intact) is
-    /// available via `LoadResult.directives` or by re-parsing
-    /// the source.
+    /// **Pad expansion (when `booking` feature enabled).** As of
+    /// #1288, `Pad` directives are run through
+    /// `expand_pads_preserving_spans` and resolve to one of two
+    /// outcomes:
+    ///
+    /// 1. **REPLACED.** A pad with a matching downstream `Balance`
+    ///    that has a non-zero difference is replaced by one or
+    ///    more `Transaction` directives with `flag = 'P'`
+    ///    (synthesized via `Spanned::synthesized` since they have
+    ///    no source representation). Each synth transaction
+    ///    carries the same date as the original pad and two
+    ///    postings (target at index 0, source at index 1). A
+    ///    single multi-currency pad produces one synth per
+    ///    currency.
+    /// 2. **DROPPED.** A pad is removed without replacement when
+    ///    (a) it was shadowed by a later same-target pad before
+    ///    the next balance (issue #1300 "most recent pad wins"
+    ///    semantics), (b) it has no following balance assertion
+    ///    at all, or (c) the difference at the balance date is
+    ///    zero. The validator emits `E2003 unused pad` for cases
+    ///    (a) and (b) independently of this expansion.
+    ///
+    /// Consumers that previously matched on `Directive::Pad(_)` to
+    /// render or count pads should now use
+    /// `rustledger_booking::is_synthesized_pad(txn)` instead — a
+    /// bare `flag == 'P'` check would conflate the synth with a
+    /// user-written `P`-flag transaction (`P` is a valid user
+    /// flag in beancount).
+    ///
+    /// **Without the `booking` feature.** Step 10 is gated out;
+    /// `Pad` directives remain intact and consumers must handle
+    /// them via the `Directive::Pad(_)` arm as before. The
+    /// rustledger-lsp crate (which opts into `plugins` only)
+    /// hits this path.
+    ///
+    /// The pre-expansion view (with `Pad` directives intact
+    /// regardless of feature) is available via
+    /// `LoadResult.directives` or by re-parsing the source.
     pub directives: Vec<Spanned<Directive>>,
     /// Options parsed from the file.
     pub options: Options,

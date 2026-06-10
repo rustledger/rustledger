@@ -214,10 +214,17 @@ pub fn format(source: &str) -> Result<JsValue, JsError> {
 /// Process pad directives and expand them.
 ///
 /// Returns directives with pad-generated transactions included.
+///
+/// Note: `load_and_book` runs the full loader pipeline, which now
+/// pre-expands pads (#1288). Calling `process_pads` directly on
+/// the result would find no Pads and return empty
+/// `padding_transactions`, breaking the published JS API. Delegate
+/// to the shared helper used by `ParsedLedger.expandPads()` /
+/// `Ledger.expandPads()` so all three entry points return the
+/// same shape: directives with synth-pad transactions filtered
+/// out and surfaced as `padding_transactions`.
 #[wasm_bindgen(js_name = "expandPads")]
 pub fn expand_pads(source: &str) -> Result<JsValue, JsError> {
-    use rustledger_booking::process_pads;
-
     let load = load_and_book(source);
 
     // Return early if there were parse/interpolation errors
@@ -230,27 +237,7 @@ pub fn expand_pads(source: &str) -> Result<JsValue, JsError> {
         return to_js(&result);
     }
 
-    // Process pads
-    let pad_result = process_pads(&load.directives);
-
-    let result = PadResult {
-        directives: pad_result
-            .directives
-            .iter()
-            .map(directive_to_json)
-            .collect(),
-        padding_transactions: pad_result
-            .padding_transactions
-            .iter()
-            .map(|txn| directive_to_json(&Directive::Transaction(txn.clone())))
-            .collect(),
-        errors: pad_result
-            .errors
-            .iter()
-            .map(|e| Error::new(e.message.clone()))
-            .collect(),
-    };
-    to_js(&result)
+    crate::parsed_ledger::execute_expand_pads(&load.directives)
 }
 
 /// Run a native plugin on the source.

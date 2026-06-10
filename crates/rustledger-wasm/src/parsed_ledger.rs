@@ -66,7 +66,7 @@ fn execute_query(directives: &[Directive], query_str: &str) -> Result<JsValue, J
     }
 }
 
-fn execute_expand_pads(directives: &[Directive]) -> Result<JsValue, JsError> {
+pub fn execute_expand_pads(directives: &[Directive]) -> Result<JsValue, JsError> {
     use rustledger_booking::process_pads;
 
     // After #1288, the directives passed in via `self.directives`
@@ -113,10 +113,15 @@ fn execute_expand_pads(directives: &[Directive]) -> Result<JsValue, JsError> {
         return to_js(&result);
     }
 
-    // Already-expanded path. Partition into (non-synth, synth).
-    let (synth, non_synth): (Vec<_>, Vec<_>) = directives
-        .iter()
-        .partition(|d| matches!(d, Directive::Transaction(t) if t.flag == 'P'));
+    // Already-expanded path. Partition into (non-synth, synth)
+    // using the booking-crate helper. A bare `flag == 'P'` check
+    // would wrongly partition user-written `P`-flagged
+    // transactions (P is a valid user flag in beancount) into
+    // `padding_transactions`, breaking the JS API contract for
+    // sources that contain genuine user `P`-flag txns.
+    let (synth, non_synth): (Vec<_>, Vec<_>) = directives.iter().partition(
+        |d| matches!(d, Directive::Transaction(t) if rustledger_booking::is_synthesized_pad(t)),
+    );
     let result = PadResult {
         directives: non_synth.iter().copied().map(directive_to_json).collect(),
         padding_transactions: synth.iter().map(|d| directive_to_json(d)).collect(),

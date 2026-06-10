@@ -19,17 +19,24 @@ pub(super) fn report_stats<W: Write>(
             Directive::Transaction(txn) => {
                 // Synthesized P-flag transactions are pad-expanded
                 // entries (see `Ledger.directives` rustdoc; #1288).
-                // Count them as Pads so the stats output matches
-                // the user's mental model of the source file —
-                // otherwise a file with `pad` directives would
-                // show `Pads: 0` and an inflated transaction
-                // count post-loader.
-                if txn.flag == 'P' {
+                // Recognize them via the booking-crate helper, NOT
+                // a bare `flag == 'P'` check: `P` is a valid
+                // user-written flag in beancount, and conflating
+                // user `P`-flag transactions with synth pads
+                // would misattribute them in the stats output and
+                // suppress their postings count below.
+                if rustledger_booking::is_synthesized_pad(txn) {
                     stats.pads += 1;
+                    // Synth pads' postings are accounting-internal,
+                    // not user-authored. Counting them here would
+                    // double-count the same logical activity twice
+                    // (once via the pad row, once via the postings
+                    // row) and inflate the postings figure on every
+                    // padded ledger.
                 } else {
                     stats.transactions += 1;
+                    stats.postings += txn.postings.len();
                 }
-                stats.postings += txn.postings.len();
                 if stats.first_date.is_none() || Some(txn.date) < stats.first_date {
                     stats.first_date = Some(txn.date);
                 }

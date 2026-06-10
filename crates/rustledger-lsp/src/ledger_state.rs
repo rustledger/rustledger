@@ -248,20 +248,23 @@ impl LedgerState {
                     accounts_set.insert(balance.account.to_string());
                     currencies_set.insert(balance.amount.currency.to_string());
                 }
-                // As of #1288, the loader replaces every `Pad`
-                // with a synthesized P-flag `Transaction` before
-                // building `Ledger.directives`, so this arm is
-                // typically DEAD on the normal LSP load path —
-                // the loader is invoked at `ledger_state.rs:129`.
-                // Pad-source/target accounts are still captured
-                // because the synth transaction's two postings
-                // (target then source) flow through the
-                // `Directive::Transaction` arm below.
+                // This arm IS reachable on the LSP's load path.
+                // #1288 added a loader step that replaces `Pad`
+                // with a synthesized P-flag `Transaction`, but
+                // that step is gated on the loader's `booking`
+                // feature — and the LSP crate (Cargo.toml line
+                // 31) opts into `plugins` only, NOT `booking`.
+                // The loader therefore hands the LSP raw `Pad`
+                // directives on every padded ledger, and this
+                // arm is what captures the pad's target and
+                // source accounts for completion / hover.
                 //
-                // Kept for the defensive path where a caller
-                // hands the LSP a pre-expansion directive list
-                // (e.g. for raw-parser-state diagnostics that
-                // skip the loader).
+                // If the LSP ever enables `booking` on the
+                // loader, the synth transaction's target/source
+                // postings would flow through the
+                // `Directive::Transaction` arm below and this
+                // arm would become dead on the post-loader path.
+                // Until then, keep it active.
                 Directive::Pad(pad) => {
                     accounts_set.insert(pad.account.to_string());
                     accounts_set.insert(pad.source_account.to_string());

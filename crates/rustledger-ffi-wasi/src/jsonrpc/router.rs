@@ -457,10 +457,16 @@ fn handle_batch(params: &serde_json::Value) -> Result<serde_json::Value, RpcErro
 
     // Execute queries (only if no parse errors)
     let query_outputs: Vec<QueryOutput> = if load.errors.is_empty() {
+        // Same FFI-side pad expansion as `handle_query` — see the
+        // comment there for why `load_source` doesn't go through
+        // the loader's pad-expansion step. Expand once and reuse
+        // across every query in the batch so the per-batch cost
+        // is O(directives), not O(directives × queries).
+        let expanded = rustledger_booking::expand_pads(&load.directives);
         params
             .queries
             .iter()
-            .map(|q| execute_query(&load.directives, q))
+            .map(|q| execute_query(&expanded, q))
             .collect()
     } else {
         // Return error for each query

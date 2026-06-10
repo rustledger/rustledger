@@ -1,20 +1,45 @@
 //! Range-formatting handler for `textDocument/rangeFormatting`.
 //!
-//! Always uses the canonical whole-file formatter ([`format_document`]) so
-//! the column widths it resolves agree with what `rledger format` writes
-//! on disk. Per LSP semantics the request specifies a half-open
-//! `[range.start, range.end)` selection; this handler clips the canonical
-//! edits to the actual selected byte range so changes never spill outside
-//! the user's selection.
+//! Two-path design.
 //!
-//! On parse errors the handler returns `None` rather than degrading to a
-//! surface-cleanup pass: the CLI bails on parse errors and parity-by-
-//! construction requires this path to do the same. The
-//! `textDocument/formatting` (whole-document) path opts into surface
-//! cleanup separately; range formatting deliberately does not.
+//! **Happy path (clean parse).** Runs [`format_document`] — same code
+//! path as `textDocument/formatting` — and clips the resulting edits to
+//! the user's selection. Each emitted edit is a minimal line-or-sub-line
+//! diff produced by `similar::TextDiff::from_lines`, so cursor positions
+//! and inline decorations OUTSIDE the changed bytes survive the format.
+//! Edits that straddle the selection boundary are dropped rather than
+//! sliced: slicing the reformatter's output by source byte counts
+//! produces semantically wrong content. This is the standard LSP
+//! "format only edits fully inside the selection" policy.
+//!
+//! **Fallback path (parse errors).** When [`format_document`] declines
+//! to format because the file has parse errors, the private
+//! `fallback_cst_snap_edit` helper runs as the second-chance path: it
+//! walks the cached CST root via
+//! [`rustledger_parser::format::format_node_range`], snaps the user's
+//! selection up to the smallest set of top-level directives that
+//! intersect it, and emits a single `TextEdit` replacing the snapped
+//! range with the formatted text. `ERROR_NODE` children inside the
+//! snap are dropped (matches `format_node`'s policy); valid
+//! directives are reformatted normally. This path INTENTIONALLY
+//! extends past the user's selection — it has to, because
+//! partial-directive formatting would require inventing a partial
+//! canonical form. The result is "the user's selection has been
+//! formatted, plus we rounded outward to the directive boundaries",
+//! which is the rust-analyzer / Prettier convention for range
+//! formatting through a broken file.
+//!
+//! Both paths use the LSP's negotiated position encoding (UTF-16 by
+//! spec default, UTF-8 when modern editors negotiate). The fallback
+//! path additionally bridges the BOM frame: the cached CST root lives
+//! in post-BOM byte coordinates, so the fallback subtracts
+//! `bom_offset` when mapping LSP positions in and adds it back when
+//! emitting the edit range (same shape as the `selection_range`
+//! handler).
 
-use lsp_types::{DocumentRangeFormattingParams, TextEdit};
+use lsp_types::{DocumentRangeFormattingParams, Position, Range, TextEdit};
 use rustledger_parser::ParseResult;
+use rustledger_parser::format::format_node_range;
 
 use super::formatting::format_document;
 use super::utils::{LineIndex, PositionEncoding};
@@ -34,8 +59,39 @@ pub fn handle_range_formatting(
     parse_result: &ParseResult,
     encoding: PositionEncoding,
 ) -> Option<Vec<TextEdit>> {
-    let all_edits = format_document(source, parse_result, encoding)?;
+    // Happy path: the file parses cleanly, run the minimal-diff
+    // pipeline. The fallback below covers ONLY the case where
+    // `format_document` declines because of parse errors — a clean
+    // parse that produces an already-canonical result (i.e.
+    // `format_document` returns None for the OTHER reason: no edits
+    // needed) must still surface as None so the client sees a no-op,
+    // not a coarse CST-snap reformat over an already-canonical file.
+    if let Some(all_edits) = format_document(source, parse_result, encoding) {
+        return clip_edits_to_range(params, source, encoding, all_edits);
+    }
+    // Fallback: file has parse errors. Try the CST-snap path on the
+    // selection so users editing through a typo still get formatting
+    // on the well-formed directives in their selection. If the
+    // selection covers only broken syntax (no Directive nodes
+    // intersected) we surface None, matching the "nothing to format"
+    // shape the happy path returns on already-canonical input.
+    if !parse_result.errors.is_empty() {
+        return fallback_cst_snap_edit(params, source, parse_result, encoding);
+    }
+    None
+}
 
+/// Clip the canonical document edits to the user's selection.
+///
+/// Factored out of [`handle_range_formatting`] so the happy path stays
+/// readable and the fallback path can be a sibling instead of a nested
+/// branch. Behavior unchanged from the pre-fallback shape.
+fn clip_edits_to_range(
+    params: &DocumentRangeFormattingParams,
+    source: &str,
+    encoding: PositionEncoding,
+    all_edits: Vec<TextEdit>,
+) -> Option<Vec<TextEdit>> {
     let line_index = LineIndex::new(source, encoding);
     // Both the request range AND the returned edit ranges are in the
     // negotiated encoding; resolve them through the same index.
@@ -100,6 +156,85 @@ fn edit_inside_range(
         return false;
     };
     edit_start >= range_start && edit_end <= range_end
+}
+
+/// CST-snap fallback: format the well-formed directives intersecting
+/// the user's selection by walking the cached syntax tree, snapping
+/// the selection up to top-level directive boundaries, and emitting
+/// a single `TextEdit`.
+///
+/// Only called when the file has parse errors AND the happy path
+/// (minimal-diff via `format_document`) declined. The trade-off vs.
+/// the happy path:
+///
+/// - **Coarser edits.** One `TextEdit` covers the whole snapped
+///   range; cursor and inline-decoration positions inside the
+///   snapped range do NOT survive (the editor re-positions them at
+///   the start of the replacement). The minimal-diff path preserves
+///   sub-line positions; this path cannot, because the snapped
+///   range may contain ERROR_NODE bytes that have no analogue in
+///   the formatted output.
+/// - **Extends past the user's selection.** If the selection lands
+///   inside a transaction body, the snap rounds outward to the
+///   transaction's start and end. This violates the "edits stay
+///   strictly inside the selection" policy the happy path follows,
+///   but does it deliberately: a partial-directive canonical form
+///   would create a second truth alongside `format_source`'s
+///   whole-file canonical form. Range formatting through a parse
+///   error is rare enough that the rust-analyzer / Prettier
+///   convention (round outward to the structural unit) is the
+///   right call.
+/// - **ERROR_NODE content is dropped.** Matches
+///   [`format_node`](rustledger_parser::format::format_node). If the
+///   user wants byte-conservative editing on a broken file, they
+///   should use `textDocument/formatting` which falls back to
+///   `surface_cleanup_edits` instead.
+///
+/// Returns `None` if the selection intersects no top-level Directive
+/// or top-level standalone comment (the selection is entirely on
+/// ERROR_NODE bytes, file is empty, or the selection sits past EOF).
+fn fallback_cst_snap_edit(
+    params: &DocumentRangeFormattingParams,
+    source: &str,
+    parse_result: &ParseResult,
+    encoding: PositionEncoding,
+) -> Option<Vec<TextEdit>> {
+    let line_index = LineIndex::new(source, encoding);
+    let orig_start =
+        line_index.position_to_offset(params.range.start.line, params.range.start.character)?;
+    let orig_end =
+        line_index.position_to_offset(params.range.end.line, params.range.end.character)?;
+    if orig_end < orig_start {
+        return None;
+    }
+    // Bridge the BOM frame: the cached `syntax_root` is in post-BOM
+    // coordinates, the `LineIndex` is in original-source coordinates.
+    // Subtract `bom_offset` going in, add it back when emitting.
+    // Cursor before the BOM (orig_X < bom_offset) is degenerate —
+    // saturate to 0 in CST frame.
+    let bom_offset: usize = if parse_result.has_leading_bom { 3 } else { 0 };
+    let cst_start = orig_start.saturating_sub(bom_offset);
+    let cst_end = orig_end.saturating_sub(bom_offset);
+    let cst_start_ts = rustledger_parser::TextSize::try_from(cst_start).ok()?;
+    let cst_end_ts = rustledger_parser::TextSize::try_from(cst_end).ok()?;
+    let cst_range = rustledger_parser::TextRange::new(cst_start_ts, cst_end_ts);
+    let node = parse_result.syntax_node();
+    let (snap_cst, new_text) = format_node_range(&node, cst_range)?;
+
+    // Map the snapped CST range back to LSP positions: add
+    // `bom_offset` to translate into original-source bytes, then
+    // resolve via the line index in the negotiated encoding.
+    let snap_start_byte = u32::from(snap_cst.start()) as usize + bom_offset;
+    let snap_end_byte = u32::from(snap_cst.end()) as usize + bom_offset;
+    let (sl, sc) = line_index.offset_to_position(snap_start_byte);
+    let (el, ec) = line_index.offset_to_position(snap_end_byte);
+    Some(vec![TextEdit {
+        range: Range {
+            start: Position::new(sl, sc),
+            end: Position::new(el, ec),
+        },
+        new_text,
+    }])
 }
 
 #[cfg(test)]
@@ -318,18 +453,113 @@ mod tests {
         assert!(!edits.is_empty(), "got {edits:?}");
     }
 
-    /// Parse-error files: rangeFormatting bails like the CLI (returns
-    /// None) instead of degrading to surface cleanup. handle_formatting
-    /// remains the only surface-cleanup path.
+    /// Parse-error file + selection covers ONLY broken content:
+    /// no valid Directive in the selection → no fallback fires →
+    /// None. The bail-on-broken behavior is preserved for the
+    /// narrow case where there's nothing structural to format.
     #[test]
-    fn parse_errors_return_none() {
-        let source = "2024-01-01 open Assets:Bank   \n2024-01-02 not_a_directive\n";
+    fn parse_errors_with_only_broken_content_returns_none() {
+        // Single line of garbage; CST wraps it in ERROR_NODE.
+        let source = "}}}garbage{{{\n";
         let result = parse(source);
-        assert!(!result.errors.is_empty());
+        assert!(!result.errors.is_empty(), "expected parse error");
+        let p = params(Range {
+            start: Position::new(0, 0),
+            end: Position::new(1, 0),
+        });
+        assert!(
+            handle_range_formatting(&p, source, &result, PositionEncoding::Utf16).is_none(),
+            "selection covers only ERROR_NODE; fallback must surface None",
+        );
+    }
+
+    /// Parse-error file + selection covers a well-formed directive:
+    /// the CST-snap fallback fires and returns a single TextEdit
+    /// covering the snapped directive boundaries. This is the
+    /// behavior change phase 5.3 adds — the editor user-editing
+    /// through a typo in one part of the file can still format-
+    /// region elsewhere.
+    #[test]
+    fn parse_errors_with_valid_directive_in_selection_returns_fallback_edit() {
+        // Line 0: valid Open directive (parse-clean). Line 1:
+        // garbage (parse error). Selection covers both. Without
+        // the fallback this returned None; with the fallback it
+        // returns a single TextEdit covering line 0.
+        let source = "2024-01-01 open Assets:Bank   \n}}}not_a_directive\n";
+        let result = parse(source);
+        assert!(!result.errors.is_empty(), "expected parse error on line 1");
         let p = params(Range {
             start: Position::new(0, 0),
             end: Position::new(2, 0),
         });
-        assert!(handle_range_formatting(&p, source, &result, PositionEncoding::Utf16).is_none());
+        let edits = handle_range_formatting(&p, source, &result, PositionEncoding::Utf16)
+            .expect("CST-snap fallback must fire");
+        // Single TextEdit (the fallback is coarse-grained by design).
+        assert_eq!(edits.len(), 1, "expected one fallback edit, got {edits:?}");
+        let edit = &edits[0];
+        // The replacement text is the canonical form of the
+        // valid Open directive — trailing whitespace stripped.
+        assert_eq!(edit.new_text, "2024-01-01 open Assets:Bank\n");
+        // The replaced range starts at (0, 0) — the open
+        // directive's text_range begins at the file's start.
+        assert_eq!(edit.range.start, Position::new(0, 0));
+    }
+
+    /// Fallback path on a BOM-prefixed broken file: the snapped
+    /// edit range MUST be in the original-source frame (BOM-aware),
+    /// not the CST frame. Mirrors `selection_range`'s BOM frame
+    /// regression and pins the same fix for the range_formatting
+    /// fallback.
+    #[test]
+    fn parse_errors_with_bom_fallback_emits_original_frame_range() {
+        // Leading BOM, then a valid Open on line 0, then a parse
+        // error on line 1. Cursor selection covers both lines.
+        let source = "\u{FEFF}2024-01-01 open Assets:Bank\n}}}garbage\n";
+        let result = parse(source);
+        assert!(result.has_leading_bom, "fixture must have a BOM");
+        assert!(!result.errors.is_empty(), "expected parse error");
+        let p = params(Range {
+            start: Position::new(0, 0),
+            end: Position::new(2, 0),
+        });
+        let edits = handle_range_formatting(&p, source, &result, PositionEncoding::Utf16)
+            .expect("CST-snap fallback must fire on BOM-prefixed broken file");
+        assert_eq!(edits.len(), 1);
+        let edit = &edits[0];
+        // Edit's range.start must map to the byte AFTER the BOM:
+        // line 0, column 1 (1 UTF-16 code unit for the BOM).
+        // A bug that forgot to add `bom_offset` back when emitting
+        // would land at (0, 0); a bug that double-counted would
+        // land somewhere wrong.
+        assert_eq!(
+            edit.range.start,
+            Position::new(0, 1),
+            "fallback emit must add `bom_offset` back into the original-source frame; got {:?}",
+            edit.range.start,
+        );
+    }
+
+    /// Regression: already-canonical clean file STILL returns None.
+    /// The fallback only fires on PARSE errors — a clean file
+    /// whose format_document returns None because no edits are
+    /// needed must not be re-formatted by the fallback (that
+    /// would silently re-emit the snapped directives over an
+    /// already-canonical file).
+    #[test]
+    fn clean_file_already_canonical_returns_none_not_fallback() {
+        let source = "2024-01-01 open Assets:Cash\n";
+        let result = parse(source);
+        assert!(
+            result.errors.is_empty(),
+            "fixture must be clean for this regression check",
+        );
+        let p = params(Range {
+            start: Position::new(0, 0),
+            end: Position::new(1, 0),
+        });
+        assert!(
+            handle_range_formatting(&p, source, &result, PositionEncoding::Utf16).is_none(),
+            "clean + canonical file must return None; fallback must not fire",
+        );
     }
 }

@@ -545,6 +545,193 @@ pub fn format_node(node: &crate::SyntaxNode) -> String {
     out
 }
 
+/// Format the subset of `node`'s top-level children that intersect
+/// `range`, returning the snapped byte range and the canonical-form
+/// replacement text.
+///
+/// This is the building block for the LSP `textDocument/rangeFormatting`
+/// provider: the client sends a `Range`, the server snaps it up to
+/// the smallest set of top-level structural nodes (directives or
+/// standalone comments) that intersect the selection, formats those
+/// nodes the same way [`format_node`] formats the whole file, and
+/// returns a single `TextEdit` replacing the snapped range. The
+/// alternative — formatting a substring of the source — would have
+/// to either invent a partial canonical form (creating a second
+/// truth alongside the whole-file canonical form, the failure mode
+/// that bit #1252) or refuse to format anything that crosses a
+/// structural boundary. Snapping up to top-level boundaries is the
+/// only choice that lets the same canonical-form rules apply.
+///
+/// **Frame.** `range` is in the *CST* byte frame — the same frame
+/// the syntax node's `TextRange`s use. The LSP handler is
+/// responsible for shifting `bom_offset` at the input/output
+/// boundary (mirrors the [`super::super::SyntaxNode`] /
+/// `selection_range` handler convention; see
+/// `ParseResult::syntax_root` rustdoc for the rationale).
+///
+/// **Behavior.**
+///
+/// - If `range` intersects no top-level Directive or standalone
+///   COMMENT/SHEBANG/EMACS token, returns `None`. The LSP handler
+///   then returns an empty `Vec<TextEdit>` and the client is told
+///   "nothing to format".
+/// - Otherwise returns `Some((snap, text))` where `snap` is the
+///   union of the included children's text ranges (so it begins at
+///   the first included child's start and ends at the last
+///   included child's end, including each child's leading-trivia
+///   prefix per the phase-2.0 Directive-Terminator Rule) and
+///   `text` is the canonical-form replacement.
+/// - Top-level `ERROR_NODE` children are skipped (matches
+///   [`format_node`], which silently drops them). If the selection
+///   spans an `ERROR_NODE` between two valid directives, the snap
+///   range covers the `ERROR_NODE` bytes but the replacement text
+///   does not — i.e., the formatter deletes the error content.
+///   This is consistent with `format_source(broken_source)`'s
+///   existing behavior; tooling that wants to refuse to rewrite
+///   broken syntax should call [`try_format_source`] instead.
+/// - Cursor-only selection (`range.is_empty()`): the child at the
+///   cursor is included if the cursor is strictly inside it OR is
+///   exactly at the child's start. Boundary at the child's end
+///   belongs to the next child, not the previous one — matches
+///   the standard "end-of-line cursor is start-of-next-line"
+///   convention.
+///
+/// **Alignment.** The pre-pass uses the FULL `SourceFile`, not
+/// the selected subset. A selection that formats one transaction
+/// in a file with many other transactions inherits the file's
+/// alignment columns, so the formatted output stays visually
+/// aligned with un-formatted postings elsewhere. The opposite
+/// policy (per-selection alignment) would create a jarring
+/// visual jump every time the user re-formats a sub-range.
+///
+/// **Round-trip invariant.** For any `range` that contains every
+/// top-level child, the returned text equals the result of
+/// [`format_node`] on the same node. Pinned by
+/// `format_node_range_full_range_matches_format_node` in this
+/// file's test module.
+///
+/// # Panics
+///
+/// Panics if `node`'s kind is not `SOURCE_FILE` — same precondition
+/// as [`format_node`].
+#[must_use]
+pub fn format_node_range(
+    node: &crate::SyntaxNode,
+    range: rowan::TextRange,
+) -> Option<(rowan::TextRange, String)> {
+    let source_file =
+        SourceFile::cast(node.clone()).expect("format_node_range called on non-SOURCE_FILE node");
+    // File-wide alignment pre-pass: see rustdoc above for the
+    // rationale. The selected subset always uses the full file's
+    // alignment columns.
+    let alignment = compute_alignment(&source_file);
+
+    // First pass: identify the included children and the snap range.
+    // We pick:
+    //   - Directive nodes whose `text_range` intersects `range`
+    //   - top-level COMMENT/PERCENT_COMMENT/SHEBANG/EMACS_DIRECTIVE
+    //     tokens whose range intersects `range`
+    // ERROR_NODE and other non-Directive nodes are skipped (matches
+    // `format_node`); a selection that lands only on them returns
+    // None below.
+    let mut snap_start: Option<rowan::TextSize> = None;
+    let mut snap_end: Option<rowan::TextSize> = None;
+    let mut any_included = false;
+    for el in node.children_with_tokens() {
+        let (kind, child_range) = (el.kind(), el.text_range());
+        let is_formattable = match &el {
+            rowan::NodeOrToken::Node(n) => ast::Directive::cast(n.clone()).is_some(),
+            rowan::NodeOrToken::Token(_) => matches!(
+                kind,
+                crate::SyntaxKind::COMMENT
+                    | crate::SyntaxKind::PERCENT_COMMENT
+                    | crate::SyntaxKind::SHEBANG
+                    | crate::SyntaxKind::EMACS_DIRECTIVE
+            ),
+        };
+        if !is_formattable {
+            continue;
+        }
+        if !range_intersects(child_range, range) {
+            continue;
+        }
+        any_included = true;
+        snap_start = Some(snap_start.map_or(child_range.start(), |s| s.min(child_range.start())));
+        snap_end = Some(snap_end.map_or(child_range.end(), |e| e.max(child_range.end())));
+    }
+    if !any_included {
+        return None;
+    }
+    let snap = rowan::TextRange::new(snap_start.unwrap(), snap_end.unwrap());
+
+    // Second pass: emit only the children whose range falls
+    // inside `snap`. We re-walk rather than caching the first
+    // pass because the second pass needs to maintain the
+    // `prev_was_directive` blank-line state in source order, and
+    // the child set is small enough that the second walk is
+    // cheap. (Re-walking also keeps the data-flow obvious: snap
+    // computation and emission are two distinct concerns.)
+    let mut out = String::new();
+    let mut prev_was_directive = false;
+    for el in node.children_with_tokens() {
+        let child_range = el.text_range();
+        // Use the snap range (not the input `range`) so we emit
+        // every child WITHIN the snap, even those that the
+        // original selection didn't directly intersect but that
+        // sit between two intersecting children. Without this,
+        // ERROR_NODE-free trivia between two selected directives
+        // would be re-formatted into our output (the comment
+        // pass picks them up), which matches `format_node`.
+        if child_range.end() <= snap.start() || child_range.start() >= snap.end() {
+            continue;
+        }
+        match el {
+            rowan::NodeOrToken::Node(n) => {
+                let Some(directive) = ast::Directive::cast(n) else {
+                    continue;
+                };
+                if prev_was_directive {
+                    out.push('\n');
+                }
+                emit_directive(&directive, alignment, &mut out);
+                prev_was_directive = true;
+            }
+            rowan::NodeOrToken::Token(t) => {
+                if matches!(
+                    t.kind(),
+                    crate::SyntaxKind::COMMENT
+                        | crate::SyntaxKind::PERCENT_COMMENT
+                        | crate::SyntaxKind::SHEBANG
+                        | crate::SyntaxKind::EMACS_DIRECTIVE
+                ) {
+                    out.push_str(t.text().trim_end_matches(['\n', '\r']));
+                    out.push('\n');
+                    prev_was_directive = false;
+                }
+            }
+        }
+    }
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    Some((snap, out))
+}
+
+/// Whether `child` (a CST node's text range) intersects the
+/// caller's selection. Zero-width selections (a cursor with no
+/// extent) are handled specially: the cursor counts as "inside"
+/// a child if the cursor is strictly inside the child's range or
+/// is exactly at the child's start. Boundary at the child's end
+/// is NOT a match — it belongs to the next child, matching
+/// editors' "end-of-line cursor = start of next line" convention.
+fn range_intersects(child: rowan::TextRange, sel: rowan::TextRange) -> bool {
+    if sel.is_empty() {
+        child.contains(sel.start()) || sel.start() == child.start()
+    } else {
+        child.start() < sel.end() && sel.start() < child.end()
+    }
+}
+
 /// Pre-pass: walk every posting in the file, take max LHS width
 /// (account + optional `flag `) and max number-text width, and
 /// derive the file-wide alignment columns from them.
@@ -2986,6 +3173,273 @@ mod tests {
             reparsed.directives.len(),
             3,
             "count check accepted but round-trip dropped directives: {formatted}"
+        );
+    }
+
+    // ---- format_node_range -----------------------------------------
+
+    /// Parse `source` via the same pipeline `format_source` uses
+    /// so the resulting `SyntaxNode`'s `TextRange`s are in the
+    /// same byte frame `format_node_range`'s `range` argument
+    /// is expected to use (post-BOM-strip, post-CRLF-to-LF).
+    /// Returns the syntax node + the normalized source text so
+    /// tests can compute byte offsets by `.find()`.
+    fn parse_for_range(source: &str) -> (crate::SyntaxNode, String) {
+        let (stripped, _bom) = crate::bom::strip_leading(source);
+        let normalized = crlf_to_lf_outside_strings(stripped).to_string();
+        let sf = SourceFile::parse(&normalized);
+        (sf.syntax().clone(), normalized)
+    }
+
+    fn ts(n: usize) -> rowan::TextSize {
+        rowan::TextSize::try_from(n).expect("offset fits TextSize")
+    }
+
+    /// For any selection covering the whole file, the result text
+    /// equals `format_node(node)`. Pins the round-trip invariant
+    /// the design rests on: range formatting is the whole-file
+    /// formatter restricted to a range, not a parallel canonical
+    /// form.
+    #[test]
+    fn format_node_range_full_range_matches_format_node() {
+        let source = "\
+2024-01-01 open Assets:Bank USD
+2024-01-15 * \"Coffee\"
+  Assets:Bank  -5.00 USD
+  Expenses:Food
+2024-01-31 close Assets:Bank
+";
+        let (node, src) = parse_for_range(source);
+        let full = rowan::TextRange::new(ts(0), ts(src.len()));
+        let (snap, formatted) =
+            format_node_range(&node, full).expect("full range must include all directives");
+        assert_eq!(
+            snap,
+            rowan::TextRange::new(ts(0), ts(src.len())),
+            "snap range should be the whole file's textual span"
+        );
+        assert_eq!(formatted, format_node(&node));
+    }
+
+    /// A selection that hits only inter-directive whitespace
+    /// (no directive intersected, no top-level comment
+    /// intersected) returns `None` — the caller surfaces this
+    /// as an empty `Vec<TextEdit>`.
+    #[test]
+    fn format_node_range_trivia_only_returns_none() {
+        // The phase-2.0 Directive-Terminator Rule puts every
+        // inter-directive blank line on the next directive's
+        // leading trivia, so any byte index between two
+        // directives is INSIDE the next directive's text_range.
+        // The only way to reach a truly trivia-only selection
+        // is a source that has no directives at all (file is
+        // pure whitespace). That is the case worth pinning —
+        // the LSP handler maps `None` to an empty
+        // `Vec<TextEdit>`, which is exactly the right "nothing
+        // to format" response for a whitespace-only buffer.
+        let (empty, _) = parse_for_range("\n\n\n");
+        let sel = rowan::TextRange::new(ts(0), ts(3));
+        assert!(format_node_range(&empty, sel).is_none());
+    }
+
+    /// Selecting only the first directive's content (the
+    /// transaction) snaps to that directive and the second
+    /// directive is left out of both the snap and the output.
+    #[test]
+    fn format_node_range_single_directive() {
+        let source = "\
+2024-01-01 open Assets:Bank USD
+2024-01-15 * \"Coffee\"
+  Assets:Bank  -5.00 USD
+  Expenses:Food
+";
+        let (node, src) = parse_for_range(source);
+        // Position the selection inside the `open` line. Use
+        // the byte offset of the word `open` so the test is
+        // robust to whitespace changes in the fixture.
+        let open_byte = src.find("open").expect("fixture contains 'open'");
+        let sel = rowan::TextRange::new(ts(open_byte), ts(open_byte + "open".len()));
+        let (snap, formatted) = format_node_range(&node, sel).expect("intersects 1 directive");
+
+        // Snap should start at byte 0 (the open directive's
+        // text_range starts at the file's start) and end at
+        // the open directive's terminating newline.
+        let open_end = src.find('\n').expect("first directive has terminator") + 1;
+        assert_eq!(snap.start(), ts(0));
+        assert_eq!(snap.end(), ts(open_end));
+        // Output is exactly the open directive's canonical form
+        // + its `\n` terminator. No second-directive content.
+        assert_eq!(formatted, "2024-01-01 open Assets:Bank USD\n");
+    }
+
+    /// Multi-directive selection: snap covers both, output
+    /// includes the canonical inter-directive blank line.
+    #[test]
+    fn format_node_range_multi_directive_includes_blank_separator() {
+        let source = "\
+2024-01-01 open Assets:Bank USD
+2024-01-31 close Assets:Bank
+";
+        let (node, src) = parse_for_range(source);
+        let sel = rowan::TextRange::new(ts(0), ts(src.len()));
+        let (snap, formatted) = format_node_range(&node, sel).expect("intersects 2 directives");
+        assert_eq!(snap, rowan::TextRange::new(ts(0), ts(src.len())));
+        assert_eq!(
+            formatted, "2024-01-01 open Assets:Bank USD\n\n2024-01-31 close Assets:Bank\n",
+            "the canonical blank-line separator must appear between the two directives",
+        );
+    }
+
+    /// Cursor-only (zero-width) selection inside a directive
+    /// snaps to that directive. The cursor convention: inside
+    /// or at the directive's start byte counts as inside;
+    /// boundary at the directive's end belongs to the next
+    /// child.
+    #[test]
+    fn format_node_range_cursor_inside_directive() {
+        let source = "\
+2024-01-01 open Assets:Bank USD
+2024-01-31 close Assets:Bank
+";
+        let (node, src) = parse_for_range(source);
+        // Cursor on the `c` of `close` (line 2 of the fixture).
+        let close_byte = src.find("close").expect("fixture has 'close'");
+        let cursor = rowan::TextRange::new(ts(close_byte), ts(close_byte));
+        let (snap, formatted) = format_node_range(&node, cursor).expect("intersects close");
+        // Snap starts at the close directive's text_range start.
+        // Per Directive-Terminator Rule the second directive
+        // OWNS the leading inter-directive trivia — so snap
+        // starts immediately after the first directive's
+        // terminator newline.
+        let close_dir_start = src
+            .find("\n2024-01-31")
+            .map(|n| n + 1)
+            .expect("close directive starts on its own line");
+        assert_eq!(snap.start(), ts(close_dir_start));
+        assert_eq!(snap.end(), ts(src.len()));
+        assert_eq!(formatted, "2024-01-31 close Assets:Bank\n");
+    }
+
+    /// Cursor exactly at the start of a directive snaps to
+    /// that directive (start-boundary inclusion rule).
+    #[test]
+    fn format_node_range_cursor_at_directive_start_includes_directive() {
+        let source = "\
+2024-01-01 open Assets:Bank USD
+2024-01-31 close Assets:Bank
+";
+        let (node, _src) = parse_for_range(source);
+        // Cursor at byte 0 = start of first directive.
+        let cursor = rowan::TextRange::new(ts(0), ts(0));
+        let (_snap, formatted) = format_node_range(&node, cursor).expect("intersects open");
+        // Only the OPEN should be formatted, not the close.
+        assert!(formatted.starts_with("2024-01-01 open"));
+        assert!(!formatted.contains("close"));
+    }
+
+    /// Selection containing a top-level standalone comment
+    /// (file-leading or between-directive comment that the
+    /// trivia attachment policy puts on `SOURCE_FILE`) includes
+    /// the comment in both the snap and the output.
+    #[test]
+    fn format_node_range_includes_top_level_comments() {
+        let source = "\
+; header
+2024-01-01 open Assets:Bank USD
+";
+        let (node, src) = parse_for_range(source);
+        let sel = rowan::TextRange::new(ts(0), ts(src.len()));
+        let (snap, formatted) = format_node_range(&node, sel).expect("intersects both");
+        assert_eq!(snap, rowan::TextRange::new(ts(0), ts(src.len())));
+        // Header comment, then directive on the next line. No
+        // canonical blank between a file-level comment group
+        // and a directive (matches format_node's policy).
+        assert_eq!(formatted, "; header\n2024-01-01 open Assets:Bank USD\n");
+    }
+
+    /// A selection that lands entirely inside an `ERROR_NODE`
+    /// (no Directive intersected) returns None. Matches
+    /// `format_node`'s policy of skipping `ERROR_NODE` children
+    /// at the top level.
+    #[test]
+    fn format_node_range_error_node_only_returns_none() {
+        // `}}}` at top level isn't a directive — the parser
+        // wraps it in an ERROR_NODE.
+        let source = "}}}\n";
+        let (node, src) = parse_for_range(source);
+        let sel = rowan::TextRange::new(ts(0), ts(src.len()));
+        assert!(format_node_range(&node, sel).is_none());
+    }
+
+    /// Past-EOF selection still works: the snap clamps to the
+    /// last child that intersects within the file. (rowan's
+    /// `TextRange` is bounded by usize but `format_node_range`
+    /// doesn't validate `range` against file length — bytes past
+    /// EOF can never intersect any child, so the rule is
+    /// degenerate but well-defined.)
+    #[test]
+    fn format_node_range_past_eof_clamps() {
+        let source = "2024-01-01 open Assets:Bank USD\n";
+        let (node, src) = parse_for_range(source);
+        let past_eof = rowan::TextRange::new(ts(src.len()), ts(src.len() + 1000));
+        // The cursor / range is past EOF — no child intersects.
+        assert!(format_node_range(&node, past_eof).is_none());
+        // But a range that STRADDLES EOF still snaps to the
+        // last intersecting directive.
+        let straddle = rowan::TextRange::new(ts(0), ts(src.len() + 1000));
+        let (snap, formatted) = format_node_range(&node, straddle).expect("intersects open");
+        assert_eq!(snap, rowan::TextRange::new(ts(0), ts(src.len())));
+        assert_eq!(formatted, "2024-01-01 open Assets:Bank USD\n");
+    }
+
+    /// A cursor inside a posting (sub-directive position) snaps
+    /// up to the enclosing transaction — the design pins
+    /// "round to top-level directive boundaries, no finer."
+    #[test]
+    fn format_node_range_cursor_in_posting_snaps_to_transaction() {
+        let source = "\
+2024-01-15 * \"Coffee\"
+  Assets:Bank  -5.00 USD
+  Expenses:Food
+";
+        let (node, src) = parse_for_range(source);
+        // Position the cursor on the `B` of `Bank` in the
+        // first posting.
+        let bank_byte = src.find("Bank").expect("fixture has Bank");
+        let cursor = rowan::TextRange::new(ts(bank_byte), ts(bank_byte));
+        let (snap, _formatted) = format_node_range(&node, cursor).expect("intersects transaction");
+        // Snap covers the WHOLE transaction (start of file
+        // through final posting's newline).
+        assert_eq!(snap.start(), ts(0));
+        assert_eq!(snap.end(), ts(src.len()));
+    }
+
+    /// Selection straddling an `ERROR_NODE` between two valid
+    /// directives: snap covers the union (including `ERROR_NODE`
+    /// bytes), but the replacement text omits the `ERROR_NODE`
+    /// content. This MATCHES `format_source(broken_source)`'s
+    /// policy of dropping error content. Tooling that wants to
+    /// preserve broken syntax must reject the format via
+    /// `try_format_source` instead.
+    #[test]
+    fn format_node_range_drops_error_node_between_directives() {
+        let source = "\
+2024-01-01 open Assets:Bank USD
+}}}garbage{{{
+2024-01-31 close Assets:Bank
+";
+        let (node, src) = parse_for_range(source);
+        let sel = rowan::TextRange::new(ts(0), ts(src.len()));
+        let (snap, formatted) = format_node_range(&node, sel).expect("intersects both directives");
+        // Snap covers the whole file (first directive start to
+        // last directive end). The middle ERROR_NODE bytes are
+        // inside the snap by construction.
+        assert_eq!(snap.start(), ts(0));
+        // Output: the two canonical directives separated by a
+        // single blank line. No garbage.
+        assert_eq!(
+            formatted,
+            "2024-01-01 open Assets:Bank USD\n\n2024-01-31 close Assets:Bank\n",
         );
     }
 }

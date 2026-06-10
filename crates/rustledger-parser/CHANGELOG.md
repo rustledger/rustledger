@@ -158,6 +158,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   behavior) and reduces the helper's complexity from
   O(N_opens × N_occurrences) to O(N_cst_nodes).
 
+- `format::format_node_range(node, range) -> Option<(TextRange, String)>`:
+  CST-snap range formatter (phase 5.3 of #1262). Walks `node`
+  (`SOURCE_FILE`) and emits the canonical-form text for the smallest
+  set of top-level directives + standalone comments whose
+  `text_range` intersects `range`. The snap range is the union of
+  the included children's ranges; `ERROR_NODE` children are
+  skipped (matching `format_node`'s policy). Building block for
+  the LSP `textDocument/rangeFormatting` CST-aware fallback path:
+  when `format_document`'s minimal-diff approach declines because
+  of parse errors, the LSP handler walks `parse_result.syntax_node()`
+  via this function and emits a single `TextEdit` covering the
+  snapped range. The whole-file round-trip invariant
+  (`format_node_range(node, full_range) == format_node(node)`) is
+  pinned by `format_node_range_full_range_matches_format_node`.
+  `range` is in the *CST* byte frame; LSP consumers shift
+  `bom_offset` at the boundary (same convention as
+  `ParseResult::syntax_root` and the `selection_range` handler).
+
 ## [0.13.0](https://github.com/rustledger/rustledger/compare/v0.12.0...v0.13.0) - 2026-04-21
 
 ### Bug Fixes

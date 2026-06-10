@@ -399,7 +399,15 @@ fn handle_query(params: &serde_json::Value) -> Result<serde_json::Value, RpcErro
         return serde_json::to_value(output).map_err(|e| RpcError::internal_error(e.to_string()));
     }
 
-    let output = execute_query(&load.directives, &params.query);
+    // Expand pads at the FFI query boundary. FFI's `load_source`
+    // does NOT go through `rustledger_loader::process` (it builds
+    // directives directly from the parser/booker output), so
+    // there's no `Ledger` and no `balance_view()` to call.
+    // Query is a balance-computing consumer, so it must explicitly
+    // opt into the expanded view here (see the architectural rule
+    // documented on `Ledger.directives`).
+    let directives = rustledger_booking::expand_pads(&load.directives);
+    let output = execute_query(&directives, &params.query);
     serde_json::to_value(output).map_err(|e| RpcError::internal_error(e.to_string()))
 }
 
@@ -443,10 +451,16 @@ fn handle_batch(params: &serde_json::Value) -> Result<serde_json::Value, RpcErro
 
     // Execute queries (only if no parse errors)
     let query_outputs: Vec<QueryOutput> = if load.errors.is_empty() {
+        // Same FFI-boundary pad expansion as `handle_query`. Hoist
+        // the call above the per-query loop so the per-batch cost
+        // is O(directives), not O(directives × queries) — important
+        // for batch consumers that fire many queries against one
+        // source.
+        let directives = rustledger_booking::expand_pads(&load.directives);
         params
             .queries
             .iter()
-            .map(|q| execute_query(&load.directives, q))
+            .map(|q| execute_query(&directives, q))
             .collect()
     } else {
         // Return error for each query

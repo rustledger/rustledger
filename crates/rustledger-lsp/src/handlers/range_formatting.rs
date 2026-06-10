@@ -63,7 +63,7 @@
 
 use lsp_types::{DocumentRangeFormattingParams, Position, Range, TextEdit};
 use rustledger_parser::ParseResult;
-use rustledger_parser::format::{format_node_range, lf_to_crlf_outside_strings};
+use rustledger_parser::format::{format_node_range_with_alignment, lf_to_crlf_outside_strings};
 
 use super::formatting::format_document;
 use super::utils::{LineIndex, PositionEncoding};
@@ -269,7 +269,15 @@ fn fallback_cst_snap_edit(
     let cst_end_ts = rustledger_parser::TextSize::try_from(cst_end).ok()?;
     let cst_range = rustledger_parser::TextRange::new(cst_start_ts, cst_end_ts);
     let node = parse_result.syntax_node();
-    let (snap_cst, mut new_text) = format_node_range(&node, cst_range)?;
+    // Reuse the file-wide alignment the parser pre-computed at
+    // parse time (see `ParseResult::alignment`). This skips the
+    // O(N_postings) `compute_alignment` walk that the bare
+    // `format_node_range` would do per call — the difference
+    // matters on format-on-type clients that send a
+    // rangeFormatting request per keystroke while the user is
+    // editing through a parse error in a large ledger.
+    let (snap_cst, mut new_text) =
+        format_node_range_with_alignment(&node, cst_range, parse_result.alignment)?;
 
     // CRLF preservation: `format_node_range` always emits LF (it
     // re-uses the canonical-form pipeline, which is LF-only by

@@ -208,6 +208,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   have a `SOURCE_FILE` syntax node should obtain one via
   `ParseResult::syntax_node()`.
 
+- `ParseResult::alignment: format::Alignment` and
+  `format::compute_alignment(&SourceFile) -> Alignment` +
+  `format::Alignment` made public. Pre-computed at parse time so
+  hot formatter paths (LSP `range_formatting` fallback, future
+  format-on-type handlers) skip the `O(N_postings)` per-call
+  walk. `Alignment` is `#[non_exhaustive]` and `Copy`; the two
+  fields (`number_col`, `number_width`) are public. New
+  `format::format_node_with_alignment(node, alignment)` and
+  `format::format_node_range_with_alignment(node, range, alignment)`
+  consume the cached value; the bare `format_node` /
+  `format_node_range` keep working unchanged (they call
+  `compute_alignment` internally, then delegate).
+
+  Equivalence with the uncached path is pinned by
+  `format_node_equals_format_node_with_alignment` and
+  `format_node_range_matches_format_node_range_with_alignment`
+  (byte-identical output across representative fixtures). The
+  cache's freshness vs. `compute_alignment` is pinned by
+  `parse_result_alignment_cache::*` across 6 fixtures including
+  parse-error files (load-bearing for the LSP fallback path).
+
+  `alignment` is excluded from `__baseline_canonical_payload` via
+  the destructure-bind-and-discard pattern (same shape as
+  `syntax_root`); the exclusion is pinned executably by
+  `canonical_payload_excludes_alignment`. The field is a
+  derivation of `directives` content already in the canonical
+  payload; carrying it would shift the corpus hash for every
+  source with a non-default alignment (essentially every real
+  Beancount file) without surfacing any independent drift
+  signal.
+
+  **Why this matters for the LSP `range_formatting` fallback.**
+  The fallback path (CST-snap on parse-error files, shipped in
+  #1298) can be invoked per-keystroke by format-on-type clients
+  while the user edits through a typo in a 10k-directive ledger.
+  Without the cache, every keystroke walked every posting in
+  the file. With the cache, the per-keystroke cost is
+  `O(N_cst_nodes covered by the user's range)` — independent of
+  file size.
+
 ## [0.13.0](https://github.com/rustledger/rustledger/compare/v0.12.0...v0.13.0) - 2026-04-21
 
 ### Bug Fixes

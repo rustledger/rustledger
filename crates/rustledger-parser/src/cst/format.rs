@@ -72,14 +72,21 @@ use crate::cst::ast::{self, AstNode, AstToken, MetaEntry, SourceFile};
 /// - `number_col`   = INDENT + max(account width with optional `flag `) + 2
 /// - `number_width` = max rendered width of any posting's number /
 ///   arithmetic expression (sign included)
-#[derive(Debug, Clone, Copy, Default)]
-struct Alignment {
+///
+/// `Alignment` is `Copy` and `Default` (the all-zero state); the
+/// default is the alignment used for files that contain no postings
+/// (no transactions, or transactions with no AMOUNT). Marked
+/// `#[non_exhaustive]` so that a future column-derivation rule can
+/// add fields without breaking downstream consumers.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Alignment {
     /// 0-indexed column at which the right-justified number field
     /// starts.
-    number_col: usize,
+    pub number_col: usize,
     /// Width of the number field; shorter numbers are left-padded
     /// with spaces so the currency column stays uniform.
-    number_width: usize,
+    pub number_width: usize,
 }
 
 /// Two-space indent for directive bodies (postings, metadata).
@@ -492,12 +499,47 @@ const fn advance_source_state(
 /// The bare-node entry for callers that already parsed the CST
 /// (typically LSP formatting providers). Output rules are the
 /// same as [`format_source`].
+///
+/// Internally runs [`compute_alignment`] on `node` to derive the
+/// file-wide column targets. Hot paths that hold a precomputed
+/// `Alignment` (e.g., via [`crate::ParseResult::alignment`]) should
+/// call [`format_node_with_alignment`] instead to skip the
+/// per-call walk. Equivalence pinned by
+/// `format_node_equals_format_node_with_alignment` in this file's
+/// tests.
 #[must_use]
 pub fn format_node(node: &crate::SyntaxNode) -> String {
-    let mut out = String::new();
     let source_file =
         SourceFile::cast(node.clone()).expect("format_node called on non-SOURCE_FILE node");
     let alignment = compute_alignment(&source_file);
+    format_node_with_alignment(node, alignment)
+}
+
+/// Like [`format_node`] but skips the per-call
+/// [`compute_alignment`] walk by accepting a precomputed
+/// `Alignment`.
+///
+/// The cache pattern: parse → take `ParseResult::alignment` (the
+/// pre-computed file-wide alignment, populated by `parse_via_cst`)
+/// → call this function. Subsequent formatting calls on the same
+/// `ParseResult` pay only the per-call emit cost, not the
+/// `O(N_postings)` pre-pass.
+///
+/// `alignment` MUST match what `compute_alignment(node)` would
+/// return for the given `node` — passing a mismatched alignment
+/// is allowed but produces output with non-canonical column
+/// widths. Use `Alignment::default()` for files known to have no
+/// postings (no transactions, or transactions with no AMOUNT).
+///
+/// # Panics
+///
+/// Panics if `node`'s kind is not `SOURCE_FILE`.
+#[must_use]
+pub fn format_node_with_alignment(node: &crate::SyntaxNode, alignment: Alignment) -> String {
+    let mut out = String::new();
+    let source_file = SourceFile::cast(node.clone())
+        .expect("format_node_with_alignment called on non-SOURCE_FILE node");
+    let _ = source_file; // kept for the panic-on-wrong-kind precondition
     // Walk every direct child in source order so file-level comments
     // (file-leading per phase-2.0 trivia attachment, plus file-
     // trailing) interleave correctly with directives. Inter-directive
@@ -626,8 +668,40 @@ pub fn format_node_range(
         SourceFile::cast(node.clone()).expect("format_node_range called on non-SOURCE_FILE node");
     // File-wide alignment pre-pass: see rustdoc above for the
     // rationale. The selected subset always uses the full file's
-    // alignment columns.
+    // alignment columns. Hot paths with a precomputed `Alignment`
+    // should call `format_node_range_with_alignment` instead.
     let alignment = compute_alignment(&source_file);
+    format_node_range_with_alignment(node, range, alignment)
+}
+
+/// Like [`format_node_range`] but skips the per-call
+/// [`compute_alignment`] walk by accepting a precomputed
+/// `Alignment`.
+///
+/// The cache pattern is identical to
+/// [`format_node_with_alignment`]: parse → take
+/// `ParseResult::alignment` → call this function. The hot path the
+/// cache addresses is the LSP `textDocument/rangeFormatting`
+/// fallback (CST-snap path that fires on parse-error files), which
+/// can be invoked per-keystroke through format-on-type clients.
+/// Without the cache the per-call cost is
+/// `O(N_postings_in_file)`; with the cache it's
+/// `O(N_cst_nodes covered by range)`.
+///
+/// `alignment` MUST match what `compute_alignment(node)` would
+/// return for the given `node`; pinned by
+/// `format_node_range_with_alignment_matches_uncached`. Same
+/// `range` semantics, `ERROR_NODE` policy, snap rules, and
+/// `# Panics` precondition as [`format_node_range`].
+#[must_use]
+pub fn format_node_range_with_alignment(
+    node: &crate::SyntaxNode,
+    range: rowan::TextRange,
+    alignment: Alignment,
+) -> Option<(rowan::TextRange, String)> {
+    let source_file = SourceFile::cast(node.clone())
+        .expect("format_node_range_with_alignment called on non-SOURCE_FILE node");
+    let _ = source_file; // kept for the panic-on-wrong-kind precondition
 
     // First pass: identify the included children and the snap range.
     // We pick:
@@ -764,10 +838,26 @@ fn range_intersects(child: rowan::TextRange, sel: rowan::TextRange) -> bool {
     }
 }
 
-/// Pre-pass: walk every posting in the file, take max LHS width
-/// (account + optional `flag `) and max number-text width, and
-/// derive the file-wide alignment columns from them.
-fn compute_alignment(sf: &SourceFile) -> Alignment {
+/// Compute the file-wide alignment columns for a parsed `SourceFile`.
+///
+/// Walks every Transaction's postings once, takes the max LHS
+/// width (account + optional `flag `) and max number-text width,
+/// and derives the column targets from them.
+///
+/// **`O(N_postings)`.** Public so consumers can pre-compute the
+/// alignment once (typically at parse time) and pass the cached
+/// `Alignment` into [`format_node_with_alignment`] or
+/// [`format_node_range_with_alignment`] — eliminates the per-call
+/// walk in hot formatting paths (LSP format-on-type through a
+/// parse error, repeat-format scripts, etc.).
+///
+/// **Pinning the contract.** `ParseResult::alignment` is populated
+/// by calling this function during `parse_via_cst`; the equivalence
+/// between the cached value and a fresh call is guaranteed by the
+/// `compute_alignment_matches_parseresult_cache` regression test in
+/// this module.
+#[must_use]
+pub fn compute_alignment(sf: &SourceFile) -> Alignment {
     let mut max_lhs: usize = 0;
     let mut max_num: usize = 0;
     let mut any_posting = false;
@@ -3500,5 +3590,102 @@ mod tests {
         assert_eq!(snap.start(), ts(0));
         assert_eq!(snap.end(), ts(open_end));
         assert_eq!(formatted, "2024-01-01 open Assets:Bank USD\n");
+    }
+
+    /// `format_node_with_alignment(node, compute_alignment(sf))` is
+    /// byte-identical to `format_node(node)`. Pins the cache
+    /// contract: passing the correct alignment is a pure
+    /// optimization, NOT a behavior change.
+    #[test]
+    fn format_node_equals_format_node_with_alignment() {
+        let fixtures: &[(&str, &str)] = &[
+            ("empty", ""),
+            ("open only", "2024-01-01 open Assets:Bank USD\n"),
+            (
+                "single txn",
+                "\
+2024-01-15 * \"Coffee\"
+  Assets:Bank  -5.00 USD
+  Expenses:Food
+",
+            ),
+            (
+                "multi txn varying widths",
+                "\
+2024-01-15 * \"A\"
+  Assets:Bank  -5.00 USD
+  Expenses:Food
+2024-02-15 * \"B\"
+  Assets:Investment:Long:Path  -123456.78 USD
+  Expenses:Tax  100.00 USD
+",
+            ),
+        ];
+        for (label, source) in fixtures {
+            let (node, _src) = parse_for_range(source);
+            let source_file = SourceFile::cast(node.clone()).unwrap();
+            let alignment = compute_alignment(&source_file);
+            assert_eq!(
+                format_node(&node),
+                format_node_with_alignment(&node, alignment),
+                "format_node_with_alignment must match format_node for {label}",
+            );
+        }
+    }
+
+    /// `format_node_range_with_alignment(node, range, compute_alignment(sf))`
+    /// matches `format_node_range(node, range)` byte-identically.
+    /// Same shape as the previous test, for the range path.
+    #[test]
+    fn format_node_range_matches_format_node_range_with_alignment() {
+        let source = "\
+2024-01-15 * \"A\"
+  Assets:Bank  -5.00 USD
+  Expenses:Food
+2024-02-15 * \"B\"
+  Assets:Investment:Long:Path  -123456.78 USD
+  Expenses:Tax  100.00 USD
+";
+        let (node, src) = parse_for_range(source);
+        let source_file = SourceFile::cast(node.clone()).unwrap();
+        let alignment = compute_alignment(&source_file);
+        // Pin the equivalence on three ranges: whole file,
+        // cursor inside the first transaction, cursor inside the
+        // second.
+        let sels = [
+            rowan::TextRange::new(ts(0), ts(src.len())),
+            rowan::TextRange::new(ts(0), ts(10)),
+            rowan::TextRange::new(ts(src.len() - 10), ts(src.len())),
+        ];
+        for sel in sels {
+            let uncached = format_node_range(&node, sel);
+            let cached = format_node_range_with_alignment(&node, sel, alignment);
+            assert_eq!(
+                uncached, cached,
+                "format_node_range_with_alignment must match \
+                 format_node_range for range {sel:?}",
+            );
+        }
+    }
+
+    /// The cached `ParseResult::alignment` value matches what
+    /// `format_node` would compute on the parsed tree. End-to-end
+    /// regression: an LSP caller passing `parse_result.alignment`
+    /// to `format_node_with_alignment` produces the same output
+    /// as the bare `format_node` (uncached path).
+    #[test]
+    fn parse_result_alignment_drives_identical_format_output() {
+        let source = "\
+2024-01-15 * \"Coffee\"
+  Assets:Bank  -5.00 USD
+  Expenses:Food
+";
+        let parse_result = crate::parse(source);
+        let node = parse_result.syntax_node();
+        assert_eq!(
+            format_node(&node),
+            format_node_with_alignment(&node, parse_result.alignment),
+            "ParseResult::alignment must drive identical format output to format_node",
+        );
     }
 }

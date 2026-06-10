@@ -42,16 +42,19 @@ pub mod logos_lexer;
 ///
 /// **Sole** import path for the formatter surface - `format_source`,
 /// `try_format_source`, `format_node`, `format_node_range`,
-/// `canonicalize_directives`, `CanonicalizeError`,
-/// `lf_to_crlf_outside_strings`, `crlf_to_lf_outside_strings`,
-/// `cr_outside_strings_present`. The flat crate-root re-exports
-/// were removed in round-5 and the duplicate `crate::cst::format`
-/// path was sealed in round-6 of the PR #1284 reviews, so a
-/// future deprecation can be done at exactly one site.
+/// `format_node_with_alignment`, `format_node_range_with_alignment`,
+/// `Alignment`, `compute_alignment`, `canonicalize_directives`,
+/// `CanonicalizeError`, `lf_to_crlf_outside_strings`,
+/// `crlf_to_lf_outside_strings`, `cr_outside_strings_present`. The
+/// flat crate-root re-exports were removed in round-5 and the
+/// duplicate `crate::cst::format` path was sealed in round-6 of
+/// the PR #1284 reviews, so a future deprecation can be done at
+/// exactly one site.
 pub mod format {
     pub use crate::cst::format::{
-        CanonicalizeError, canonicalize_directives, cr_outside_strings_present,
-        crlf_to_lf_outside_strings, format_node, format_node_range, format_source,
+        Alignment, CanonicalizeError, canonicalize_directives, compute_alignment,
+        cr_outside_strings_present, crlf_to_lf_outside_strings, format_node, format_node_range,
+        format_node_range_with_alignment, format_node_with_alignment, format_source,
         lf_to_crlf_outside_strings, try_format_source,
     };
 }
@@ -271,6 +274,38 @@ pub struct ParseResult {
     /// `syntax_root` while every other field is equal does NOT
     /// change the canonical payload bytes.
     pub syntax_root: rowan::GreenNode,
+    /// File-wide alignment columns the formatter would use for
+    /// this source — pre-computed at parse time so hot formatting
+    /// paths skip the `O(N_postings)` per-call walk.
+    ///
+    /// `Alignment` is `Copy`; pass it directly into the
+    /// `_with_alignment` variants of the formatter
+    /// ([`crate::format::format_node_with_alignment`],
+    /// [`crate::format::format_node_range_with_alignment`]) to
+    /// reuse this cached value. The LSP `range_formatting`
+    /// fallback (and any future format-on-type handler) consumes
+    /// it to make per-keystroke formatting through a parse error
+    /// cheap.
+    ///
+    /// **Equivalence pinned.**
+    /// `compute_alignment_matches_parseresult_cache` asserts that
+    /// `parse(s).alignment ==
+    /// compute_alignment(&parse(s).syntax_node().cast::<SourceFile>())`
+    /// across representative fixtures, so any future divergence
+    /// (a converter change that forgets to refresh the cache, a
+    /// `compute_alignment` change that breaks the contract)
+    /// fails CI.
+    ///
+    /// **Canonical-payload exclusion.** Excluded from
+    /// [`__baseline_canonical_payload`] for the same reason as
+    /// `syntax_root`: it's a redundant derivation of `directives`
+    /// content. Mutating it without changing `directives` would
+    /// silently flip the corpus hash; including it in the
+    /// payload would change the hash for every source with a
+    /// non-default alignment (i.e. essentially every real
+    /// Beancount file). The exclusion is pinned by
+    /// `canonical_payload_excludes_alignment`.
+    pub alignment: crate::cst::format::Alignment,
 }
 
 impl ParseResult {
@@ -394,12 +429,19 @@ pub fn __baseline_canonical_payload(result: &ParseResult) -> Vec<u8> {
         account_occurrences,
         has_leading_bom,
         syntax_root,
+        alignment,
     } = result;
-    // `syntax_root` is a redundant cache of the source bytes; see
-    // its rustdoc. Bind it (so the compiler still flags future
-    // field additions on this exhaustive destructure) but discard
-    // it from the canonical payload.
+    // Both `syntax_root` and `alignment` are redundant
+    // derivations of fields already in the canonical payload
+    // (`syntax_root` of the source bytes captured by
+    // `directives`/`occurrences`/`errors`; `alignment` of the
+    // posting widths inside `directives`). Bind them so the
+    // compiler still flags future field additions on this
+    // exhaustive destructure, but discard them from the canonical
+    // payload. Pinned by `canonical_payload_excludes_syntax_root`
+    // and `canonical_payload_excludes_alignment`.
     let _ = syntax_root;
+    let _ = alignment;
     let mut out: Vec<u8> = Vec::new();
     let directives_json = serde_json::to_value(directives)
         .map_or_else(|e| format!("serialize-error:{e}"), |v| v.to_string());
@@ -600,6 +642,150 @@ mod canonical_payload_excludes_syntax_root {
              is deliberately excluded; see its rustdoc), or another \
              field now reads from `syntax_root` indirectly. Either \
              way the corpus manifest is about to drift."
+        );
+    }
+}
+
+#[cfg(test)]
+mod canonical_payload_excludes_alignment {
+    //! Pins the deliberate exclusion of `ParseResult::alignment`
+    //! from [`__baseline_canonical_payload`]. Same shape as
+    //! `canonical_payload_excludes_syntax_root`: mutate the field,
+    //! re-hash, assert unchanged.
+    //!
+    //! Including `alignment` in the canonical payload would change
+    //! the corpus hash for every source whose postings determine
+    //! non-default column widths — i.e. essentially every real
+    //! Beancount file. The field is a derivation of `directives`
+    //! content (already in the payload via the typed-AST hash);
+    //! it carries no independent drift signal.
+    use super::{__baseline_canonical_payload, parse};
+    use crate::cst::format::Alignment;
+
+    #[test]
+    fn mutating_alignment_does_not_change_canonical_payload() {
+        let src = "\
+2024-01-15 * \"Coffee\"
+  Assets:Bank  -5.00 USD
+  Expenses:Food
+";
+        let parsed = parse(src);
+        let mut mutated = parse(src);
+        // Synthesize a different Alignment value: bump number_col
+        // by 100. Real-world alignment would never be this wide
+        // for the fixture, so we get a guaranteed-different cache.
+        mutated.alignment = Alignment {
+            number_col: parsed.alignment.number_col + 100,
+            number_width: parsed.alignment.number_width + 7,
+        };
+
+        let payload_original = __baseline_canonical_payload(&parsed);
+        let payload_mutated = __baseline_canonical_payload(&mutated);
+        assert_eq!(
+            payload_original, payload_mutated,
+            "canonical payload changed after mutating only `alignment`. \
+             Either the destructure in `__baseline_canonical_payload` \
+             grew an `alignment` feed line (revert that — the field \
+             is deliberately excluded), or another field now reads \
+             from `alignment` indirectly. Either way the corpus \
+             manifest is about to drift across every source with \
+             postings.",
+        );
+    }
+}
+
+#[cfg(test)]
+mod parse_result_alignment_cache {
+    //! Pins the equivalence between `ParseResult::alignment` (the
+    //! pre-computed cache populated by `parse_via_cst`) and a
+    //! fresh `compute_alignment` call on the same syntax tree.
+    //! A converter change that forgets to refresh the cache, or a
+    //! `compute_alignment` change that breaks the cache's
+    //! semantics, fails this test before reaching the LSP.
+    use super::parse;
+    use crate::cst::ast::{AstNode, SourceFile};
+    use crate::cst::format::compute_alignment;
+
+    fn assert_equivalent(label: &str, source: &str) {
+        let result = parse(source);
+        let source_file = SourceFile::cast(result.syntax_node())
+            .expect("ParseResult::syntax_node() must be a SOURCE_FILE");
+        let fresh = compute_alignment(&source_file);
+        assert_eq!(
+            result.alignment, fresh,
+            "ParseResult::alignment cache diverged from a fresh \
+             compute_alignment call for {label}: cache = {:?}, fresh = {:?}. \
+             Either parse_via_cst forgot to call compute_alignment, or \
+             compute_alignment's semantics changed without refreshing \
+             the cache in the converter.",
+            result.alignment, fresh,
+        );
+    }
+
+    #[test]
+    fn empty_source() {
+        assert_equivalent("empty", "");
+    }
+
+    #[test]
+    fn open_only_no_postings() {
+        assert_equivalent("open only", "2024-01-01 open Assets:Bank USD\n");
+    }
+
+    #[test]
+    fn single_transaction() {
+        assert_equivalent(
+            "single txn",
+            "\
+2024-01-15 * \"Coffee\"
+  Assets:Bank  -5.00 USD
+  Expenses:Food
+",
+        );
+    }
+
+    #[test]
+    fn multi_transaction_varying_widths() {
+        assert_equivalent(
+            "varying widths",
+            "\
+2024-01-15 * \"A\"
+  Assets:Bank  -5.00 USD
+  Expenses:Food
+2024-02-15 * \"B\"
+  Assets:Investment:Long:Path  -123456.78 USD
+  Expenses:Tax  100.00 USD
+",
+        );
+    }
+
+    #[test]
+    fn arithmetic_amounts() {
+        assert_equivalent(
+            "arithmetic amounts",
+            "\
+2024-01-15 * \"Split\"
+  Assets:Bank  -10.00 + 5.00 USD
+  Expenses:Misc
+",
+        );
+    }
+
+    #[test]
+    fn parse_errors() {
+        // Even on parse-error files the cache must match a fresh
+        // call. The LSP fallback path consumes the cache through
+        // a broken file, so equivalence under error recovery is
+        // load-bearing.
+        assert_equivalent(
+            "broken",
+            "\
+2024-01-15 * \"x\"
+  Assets:Bank  -5.00 USD
+}}}garbage
+2024-02-15 * \"y\"
+  Assets:Other  100.00 USD
+",
         );
     }
 }

@@ -3,7 +3,6 @@
 //! Provides additional information when a completion item is selected:
 //! - Account completions: show current balance and transaction count
 //! - Currency completions: show price history
-//! - Payee completions: show recent transactions
 
 use lsp_types::{CompletionItem, Documentation, MarkupContent, MarkupKind};
 use rustledger_core::Decimal;
@@ -29,44 +28,19 @@ pub fn handle_completion_resolve(
 ) -> CompletionItem {
     let mut resolved = item.clone();
 
-    // Check what kind of completion this is based on data field
-    if let Some(data) = &item.data
-        && let Some(kind) = data.get("kind").and_then(|v| v.as_str())
-    {
-        match kind {
-            "account" => {
-                if let Some(account) = data.get("account").and_then(|v| v.as_str()) {
-                    resolved.documentation =
-                        Some(resolve_account_documentation(account, directives));
-                }
-            }
-            "currency" => {
-                if let Some(currency) = data.get("currency").and_then(|v| v.as_str()) {
-                    resolved.documentation =
-                        Some(resolve_currency_documentation(currency, directives));
-                }
-            }
-            "payee" => {
-                if let Some(payee) = data.get("payee").and_then(|v| v.as_str()) {
-                    resolved.documentation = Some(resolve_payee_documentation(payee, directives));
-                }
-            }
-            _ => {}
-        }
-    }
-
-    // If no data, try to infer from the label
-    if resolved.documentation.is_none() {
-        let label = &item.label;
-
-        // Check if it looks like an account
-        if is_account_like(label) {
-            resolved.documentation = Some(resolve_account_documentation(label, directives));
-        }
-        // Check if it looks like a currency (all caps, 3-4 chars)
-        else if is_currency_like_simple(label) {
-            resolved.documentation = Some(resolve_currency_documentation(label, directives));
-        }
+    // The detail is inferred from the label shape. `handle_completion`
+    // attaches only `{uri}` to each item's `data` (never a structured
+    // "kind"), so there is nothing else to dispatch on here: an
+    // account-like label gets balance/transaction detail, a
+    // currency-like label gets price history. Labels that match neither
+    // (payees, tags, links) have no detail popup — resolving those
+    // would require the producer to tag items with a kind, which it
+    // does not currently do.
+    let label = &item.label;
+    if is_account_like(label) {
+        resolved.documentation = Some(resolve_account_documentation(label, directives));
+    } else if is_currency_like_simple(label) {
+        resolved.documentation = Some(resolve_currency_documentation(label, directives));
     }
 
     resolved
@@ -178,65 +152,6 @@ fn resolve_currency_documentation(
 
         if prices.len() > 5 {
             doc.push_str(&format!("- _...and {} more_\n", prices.len() - 5));
-        }
-    }
-
-    Documentation::MarkupContent(MarkupContent {
-        kind: MarkupKind::Markdown,
-        value: doc,
-    })
-}
-
-/// Resolve documentation for a payee completion.
-fn resolve_payee_documentation(payee: &str, directives: &[Spanned<Directive>]) -> Documentation {
-    let mut transactions: Vec<(rustledger_core::NaiveDate, String)> = Vec::new();
-    let mut accounts_used: HashMap<String, usize> = HashMap::new();
-
-    for spanned in directives {
-        if let Directive::Transaction(txn) = &spanned.value
-            && txn.payee.as_ref().map(|p| p.as_ref()) == Some(payee)
-        {
-            let narration = txn.narration.to_string();
-            transactions.push((txn.date, narration));
-
-            for posting in &txn.postings {
-                *accounts_used
-                    .entry(posting.account.to_string())
-                    .or_default() += 1;
-            }
-        }
-    }
-
-    let mut doc = format!("**{}**\n\n", payee);
-
-    doc.push_str(&format!("📊 **{} transactions**\n\n", transactions.len()));
-
-    if !transactions.is_empty() {
-        // Sort by date descending
-        transactions.sort_by_key(|b| std::cmp::Reverse(b.0));
-
-        doc.push_str("**Recent:**\n");
-        for (date, narration) in transactions.iter().take(3) {
-            let short_narration = if narration.len() > 30 {
-                format!("{}...", &narration[..27])
-            } else {
-                narration.clone()
-            };
-            doc.push_str(&format!("- {} \"{}\"\n", date, short_narration));
-        }
-
-        if transactions.len() > 3 {
-            doc.push_str(&format!("- _...and {} more_\n", transactions.len() - 3));
-        }
-    }
-
-    if !accounts_used.is_empty() {
-        doc.push_str("\n**Common accounts:**\n");
-        let mut sorted: Vec<_> = accounts_used.into_iter().collect();
-        sorted.sort_by_key(|b| std::cmp::Reverse(b.1));
-
-        for (account, count) in sorted.iter().take(3) {
-            doc.push_str(&format!("- {} ({}x)\n", account, count));
         }
     }
 

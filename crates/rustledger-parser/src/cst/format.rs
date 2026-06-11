@@ -1009,7 +1009,10 @@ fn range_intersects(child: rowan::TextRange, sel: rowan::TextRange) -> bool {
 pub fn compute_alignment(sf: &SourceFile) -> PostingAlignment {
     let mut max_lhs: usize = 0;
     let mut max_num: usize = 0;
-    let mut any_posting = false;
+    // Tracks postings that actually render a number — the only ones that
+    // participate in alignment. A file whose postings render no numbers
+    // gets `PostingAlignment::default()`, matching the type docs.
+    let mut any_aligned_posting = false;
     for directive in sf.directives() {
         let ast::Directive::Transaction(t) = directive else {
             continue;
@@ -1018,7 +1021,6 @@ pub fn compute_alignment(sf: &SourceFile) -> PostingAlignment {
             let Some(p) = ast::Posting::cast(child) else {
                 continue;
             };
-            any_posting = true;
             let mut lhs = 0usize;
             if let Some(flag) = p.flag() {
                 lhs += flag.text().chars().count() + 1; // `! ` etc.
@@ -1027,21 +1029,30 @@ pub fn compute_alignment(sf: &SourceFile) -> PostingAlignment {
                 lhs += account.text().chars().count();
             }
 
-            // Only amount-bearing postings drive the alignment column.
-            // `bean-format` computes the number column from the prefixes
-            // of number-bearing lines only; an amount-less posting (the
-            // elided balancing leg, or simply a long account with no
-            // amount) must NOT push the column right. Counting it here
-            // is why `rledger format` and `bean-format` disagreed and
-            // round-tripping between them never converged (issue #1290).
+            // Only postings that render a number drive the alignment
+            // column. `bean-format` computes the number column from the
+            // prefixes of number-bearing lines only, so two kinds of
+            // posting must NOT push the column right:
+            //   - amount-less postings (the elided balancing leg, or a
+            //     long account with no amount), and
+            //   - currency-only amounts (`Assets:Cash USD`), which
+            //     `emit_posting` prints with no number at all.
+            // Counting either is why `rledger format` and `bean-format`
+            // disagreed and round-tripping never converged (issue #1290).
+            // The `w > 0` guard keeps this pre-pass in lockstep with
+            // `emit_posting`, whose rendered amount text is empty for a
+            // currency-only amount.
             if let Some(amt) = p.amount() {
-                max_lhs = max_lhs.max(lhs);
                 let w = amount_value_width(&amt);
-                max_num = max_num.max(w);
+                if w > 0 {
+                    any_aligned_posting = true;
+                    max_lhs = max_lhs.max(lhs);
+                    max_num = max_num.max(w);
+                }
             }
         }
     }
-    if !any_posting {
+    if !any_aligned_posting {
         return PostingAlignment::default();
     }
     // 2 spaces between the longest account end and the number field,
@@ -2313,6 +2324,25 @@ mod tests {
 ";
         assert_eq!(format_source(src), expected);
         assert_eq!(format_source(expected), expected);
+    }
+
+    /// Regression for the currency-only gap (#1307, found in review): a
+    /// currency-only posting (`... USD`, no number) renders no number,
+    /// so — like an elided posting — it must not widen the alignment
+    /// column even when its account is the longest. Only `Assets:Bank`
+    /// bears a number here, so the number stays two spaces after it. The
+    /// assertion checks the numbered line directly, independent of how
+    /// the currency-only line itself renders.
+    #[test]
+    fn transaction_currency_only_posting_does_not_widen_amount_column() {
+        let out = format_source(
+            "2024-01-15 * \"x\"\n  Assets:Bank  -5.00 USD\n  Assets:LongCashReserve USD\n",
+        );
+        assert!(
+            out.contains("  Assets:Bank  -5.00 USD"),
+            "number column must align to the numbered posting, not the longer \
+             currency-only one; got:\n{out}"
+        );
     }
 
     #[test]

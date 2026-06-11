@@ -141,8 +141,8 @@ pub fn run(args: &Args) -> Result<()> {
     // (BQL is a balance-computing consumer). `merge_with_padding`
     // preserves the original Pad directives in the output so
     // `FROM #entries WHERE type = 'pad'` audits still enumerate them,
-    // AND avoids the multi-pad double-application bug `expand_pads`
-    // had (#1300).
+    // AND handles multi-pad shadowing (#1300) correctly by
+    // construction via `process_pads`.
     let directives = merge_with_padding(&booked_directives);
 
     // Use display context from the loaded ledger

@@ -221,3 +221,68 @@ fn report_journal_does_not_include_synth_pad_transactions() {
         "journal must NOT include synth pad transaction rows; output: {stdout}",
     );
 }
+
+/// CI-enforced regression test for issue #1300 (multi-pad
+/// shadowing).
+///
+/// Two `pad` directives target the same account before a single
+/// `balance`. Per beancount semantics only the most recent
+/// effective pad applies; earlier same-target pads are shadowed.
+/// A buggy implementation that applies BOTH pads' synth
+/// adjustments produces 800 USD instead of the correct 900 USD
+/// (1000 opening, then a single -100 adjustment to land at 900).
+///
+/// Until this PR, multi-pad correctness was only pinned by
+/// `process_pads` unit tests and a manual end-to-end fixture
+/// sweep. Both could miss a regression in the CLI query path
+/// (e.g. someone switching `merge_with_padding` for a different
+/// helper). This test catches that class of regression by
+/// running the user-facing command end-to-end.
+const MULTI_PAD_SOURCE: &str = r#"option "operating_currency" "USD"
+
+2026-01-01 open Assets:Wallet USD
+2026-01-01 open Equity:Void USD
+
+2026-01-01 * "opening"
+  Assets:Wallet  1000 USD
+  Equity:Void
+
+2026-06-01 pad Assets:Wallet Equity:Void
+2026-06-01 pad Assets:Wallet Equity:Void
+
+2026-06-02 balance Assets:Wallet 900 USD
+"#;
+
+#[test]
+fn query_multi_pad_does_not_double_apply() {
+    let bin = require_rledger!();
+
+    let mut fixture = tempfile::Builder::new()
+        .prefix("multi-pad-")
+        .suffix(".beancount")
+        .tempfile()
+        .expect("create tempfile");
+    fixture
+        .write_all(MULTI_PAD_SOURCE.as_bytes())
+        .expect("write fixture");
+
+    let query_out = Command::new(&bin)
+        .args([
+            "query",
+            fixture.path().to_str().unwrap(),
+            "SELECT account, sum(position) WHERE account = 'Assets:Wallet'",
+        ])
+        .output()
+        .expect("run rledger query");
+    let stdout = String::from_utf8_lossy(&query_out.stdout);
+    assert!(query_out.status.success(), "query should succeed: {stdout}",);
+
+    let units = first_number_for_account(&stdout, "Assets:Wallet")
+        .unwrap_or_else(|| panic!("no Assets:Wallet token: {stdout}"));
+    assert_eq!(
+        units, "900",
+        "multi-pad shadowing: only the most recent pad applies → \
+         expected 900 USD (= 1000 - 100), got {units}. A buggy \
+         double-application would emit 800 (= 1000 - 100 - 100).",
+    );
+}

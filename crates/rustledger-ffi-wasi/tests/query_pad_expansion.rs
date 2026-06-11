@@ -110,10 +110,11 @@ fn query_execute_applies_pad_expansion() {
 }
 
 /// `query.batch` runs N queries against one load. The single
-/// `expand_pads` call is hoisted above the per-query loop so every
-/// query in the batch sees the expanded view. Pre-fix, the per-query
-/// `execute_query` saw raw Pads → Equity:Void showed exactly -1000
-/// (the opening transfer only, no pad-source adjustment).
+/// `merge_with_padding` call is hoisted above the per-query loop so
+/// every query in the batch sees the merged view. Pre-fix, the
+/// per-query `execute_query` saw raw Pads → Equity:Void showed
+/// exactly -1000 (the opening transfer only, no pad-source
+/// adjustment).
 #[test]
 fn query_batch_applies_pad_expansion_to_every_query() {
     let req = serde_json::json!({

@@ -61,7 +61,7 @@ pub struct PadResult {
     /// The original input directives, verbatim. Pads are NOT
     /// removed; the field is the same slice the caller handed in.
     /// Callers that want a Pads-removed-or-merged view should use
-    /// [`expand_pads`] (replace) or [`merge_with_padding`] (merge).
+    /// [`merge_with_padding`].
     pub directives: Vec<Directive>,
     /// Synthetic padding transactions generated.
     pub padding_transactions: Vec<Transaction>,
@@ -282,60 +282,10 @@ fn create_padding_transaction(
         .with_synthesized_posting(Posting::new(source_account, difference.neg()))
 }
 
-/// Expand a ledger by replacing pad directives with synthetic transactions.
-///
-/// This is useful for reports that need to show explicit padding transactions.
-///
-/// # Arguments
-///
-/// * `directives` - The original directives
-///
-/// # Returns
-///
-/// A new list of directives with pad directives replaced by synthetic transactions.
-pub fn expand_pads(directives: &[Directive]) -> Vec<Directive> {
-    let result = process_pads(directives);
-
-    let mut expanded: Vec<Directive> = Vec::new();
-
-    // Sort original directives by date
-    let mut sorted_originals: Vec<&Directive> = directives.iter().collect();
-    sorted_originals.sort_by_key(|d| d.date());
-
-    // Create a map of pad dates to padding transactions
-    let mut pad_txns_by_date: HashMap<NaiveDate, Vec<&Transaction>> = HashMap::new();
-    for txn in &result.padding_transactions {
-        pad_txns_by_date.entry(txn.date).or_default().push(txn);
-    }
-
-    for directive in sorted_originals {
-        match directive {
-            Directive::Pad(pad) => {
-                // Replace pad with synthetic transactions if any were generated
-                // A single pad can generate multiple transactions (one per currency)
-                if let Some(txns) = pad_txns_by_date.get(&pad.date) {
-                    // Find ALL matching transactions for this pad (multiple currencies)
-                    for txn in txns {
-                        if txn.postings.iter().any(|p| p.account == pad.account) {
-                            expanded.push(Directive::Transaction((*txn).clone()));
-                        }
-                    }
-                }
-                // If no transaction was generated (difference was zero), omit the pad
-            }
-            other => {
-                expanded.push(other.clone());
-            }
-        }
-    }
-
-    expanded
-}
-
 /// Merge original directives with padding transactions, maintaining date order.
 ///
-/// Unlike [`expand_pads`], this keeps the original pad directives and adds
-/// the synthesized transactions alongside them. Use this when downstream
+/// Keeps the original pad directives and adds the synthesized
+/// transactions alongside them. Use this when downstream
 /// consumers want both views: `Pad` directives for source-faithful queries
 /// (e.g., BQL `WHERE type = 'pad'`) and the synth transactions for inventory
 /// math.
@@ -562,36 +512,6 @@ mod tests {
                 .message
                 .contains("no corresponding balance")
         );
-    }
-
-    #[test]
-    fn test_expand_pads() {
-        let directives = vec![
-            Directive::Open(Open::new(date(2024, 1, 1), "Assets:Bank")),
-            Directive::Open(Open::new(date(2024, 1, 1), "Equity:Opening")),
-            Directive::Pad(Pad::new(date(2024, 1, 1), "Assets:Bank", "Equity:Opening")),
-            Directive::Balance(Balance::new(
-                date(2024, 1, 2),
-                "Assets:Bank",
-                Amount::new(dec!(1000.00), "USD"),
-            )),
-        ];
-
-        let expanded = expand_pads(&directives);
-
-        // Should have: 2 opens + 1 synthetic transaction + 1 balance = 4
-        assert_eq!(expanded.len(), 4);
-
-        // The pad should be replaced with a transaction
-        let has_pad = expanded.iter().any(|d| matches!(d, Directive::Pad(_)));
-        assert!(!has_pad, "Pad should be replaced");
-
-        // Should have the synthetic transaction
-        let txn_count = expanded
-            .iter()
-            .filter(|d| matches!(d, Directive::Transaction(_)))
-            .count();
-        assert_eq!(txn_count, 1);
     }
 
     #[test]

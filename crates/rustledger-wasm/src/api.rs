@@ -145,8 +145,8 @@ pub fn query(source: &str, query_str: &str) -> Result<JsValue, JsError> {
     // Merge pad-synthesized transactions: query is a balance-
     // computing consumer (#1288). `merge_with_padding` preserves
     // Pad directives so `FROM #entries WHERE type = 'pad'` audits
-    // continue to enumerate them, and avoids the multi-pad bug
-    // `expand_pads` had (#1300).
+    // continue to enumerate them, AND handles multi-pad shadowing
+    // (#1300) correctly by construction via `process_pads`.
     let directives = merge_with_padding(&load.directives);
     let mut executor = Executor::new(&directives);
     match executor.execute(&query) {
@@ -699,8 +699,8 @@ pub fn query_multi_file(
     }
 
     // Merge pad-synthesized transactions into the directive stream
-    // (matching CLI query pipeline). See `wasm::query` above for
-    // why `merge_with_padding` over `expand_pads`.
+    // (matching CLI query pipeline). See `wasm::query` above for the
+    // architectural rule.
     let booked_directives: Vec<_> = ledger.directives.into_iter().map(|s| s.value).collect();
     let directives = merge_with_padding(&booked_directives);
 

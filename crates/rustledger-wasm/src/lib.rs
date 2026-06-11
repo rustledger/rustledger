@@ -769,10 +769,11 @@ include "accounts.beancount"
         );
     }
 
-    /// Parity: pad directives produce correct padding transactions.
+    /// Parity: pad directives produce equivalent merged views on CLI
+    /// and WASM processing paths.
     #[test]
     fn test_parity_pad_expansion() {
-        use rustledger_booking::expand_pads;
+        use rustledger_booking::merge_with_padding;
 
         let source = r"
 2024-01-01 open Assets:Bank USD
@@ -784,13 +785,13 @@ include "accounts.beancount"
         let cli = cli_process(source);
         let wasm = wasm_process(source);
 
-        let cli_expanded = expand_pads(&cli);
-        let wasm_expanded = expand_pads(&wasm);
+        let cli_merged = merge_with_padding(&cli);
+        let wasm_merged = merge_with_padding(&wasm);
 
         assert_eq!(
-            cli_expanded.len(),
-            wasm_expanded.len(),
-            "expanded directive count differs"
+            cli_merged.len(),
+            wasm_merged.len(),
+            "merged directive count differs"
         );
     }
 

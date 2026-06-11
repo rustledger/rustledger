@@ -250,8 +250,6 @@ impl LedgerState {
         let mut accounts_set: HashSet<String> = HashSet::new();
         let mut currencies_set: HashSet<String> = HashSet::new();
         let mut payees_set: HashSet<String> = HashSet::new();
-        let mut tags_set: HashSet<String> = HashSet::new();
-        let mut links_set: HashSet<String> = HashSet::new();
 
         for spanned in directives {
             match &spanned.value {
@@ -275,12 +273,6 @@ impl LedgerState {
                 Directive::Transaction(txn) => {
                     if let Some(payee) = &txn.payee {
                         payees_set.insert(payee.to_string());
-                    }
-                    for tag in &txn.tags {
-                        tags_set.insert(tag.as_str().to_string());
-                    }
-                    for link in &txn.links {
-                        links_set.insert(link.as_str().to_string());
                     }
                     for posting in &txn.postings {
                         accounts_set.insert(posting.account.to_string());
@@ -321,10 +313,14 @@ impl LedgerState {
         self.currencies.sort();
         self.payees = payees_set.into_iter().collect();
         self.payees.sort();
-        self.tags = tags_set.into_iter().collect();
-        self.tags.sort();
-        self.links = links_set.into_iter().collect();
-        self.links.sort();
+
+        // Tags and links delegate to the core visitor (the canonical
+        // enumeration point) rather than a hand-rolled walk, so the
+        // ledger sees tags/links in every position they can occur
+        // (transaction/document fields, metadata, Custom values), and
+        // stays in lockstep with the LSP's per-file extraction.
+        self.tags = rustledger_core::extract_tags_iter(directives.iter().map(|s| &s.value));
+        self.links = rustledger_core::extract_links_iter(directives.iter().map(|s| &s.value));
     }
 
     /// Extract account definition locations from the ledger.

@@ -10,7 +10,6 @@ use crate::ledger_state::LedgerState;
 use lsp_types::{
     CompletionItem, CompletionItemKind, CompletionParams, CompletionResponse, Position,
 };
-use rustledger_core::Directive;
 use rustledger_parser::ParseResult;
 
 /// Standard Beancount account types.
@@ -193,16 +192,12 @@ fn detect_context(
     // Tag (`#tag`) / link (`^link`) completion. Tags and links appear
     // on transaction header lines (after the date/flag/strings) and in
     // `pushtag`/`poptag` directives. We trigger when the token directly
-    // under the cursor begins with the sigil. Guards:
-    //   - Outside a string literal — a `#` inside a narration is just
-    //     text. Even quote count before the cursor ⇒ not in a string.
-    //   - Not in a comment — a `;` before the cursor starts a comment,
-    //     where a `#` carries no tag meaning.
-    //   - The cursor sits at the end of the token (no trailing
-    //     whitespace), i.e. the user is still typing it.
-    let outside_string = before_cursor.chars().filter(|&c| c == '"').count() % 2 == 0;
-    if outside_string
-        && !before_cursor.contains(';')
+    // under the cursor begins with the sigil, but only when the cursor
+    // is in *code* position: not inside a string literal (a `#` in a
+    // narration is just text) and not after a comment marker. The
+    // cursor must also sit at the end of the token (no trailing
+    // whitespace), i.e. the user is still typing it.
+    if in_code_position(before_cursor)
         && !before_cursor.ends_with(char::is_whitespace)
         && let Some(token) = before_cursor.split_whitespace().next_back()
     {
@@ -263,6 +258,38 @@ fn detect_context(
 /// Get a specific line from source.
 fn get_line(source: &str, line_num: usize) -> &str {
     source.lines().nth(line_num).unwrap_or("")
+}
+
+/// Whether the end of `before` is in "code" position: not inside a
+/// string literal and not past a comment marker. A single forward scan
+/// tracks string state with backslash-escape handling, matching the
+/// lexer's string rule (`"([^"\\]|\\.)*"`), so a `"` or `;` that lives
+/// *inside* a narration does not flip the classification. An unescaped,
+/// unquoted `;` starts a comment, after which nothing is code.
+///
+/// This is what lets tag/link detection fire on `"a;b" #tag` (the `;`
+/// is in the string) while staying silent on `"x" ; #note` (real
+/// comment) and `"open #not-a-tag` (unterminated string).
+fn in_code_position(before: &str) -> bool {
+    let mut in_string = false;
+    let mut escaped = false;
+    for ch in before.chars() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+        } else if ch == '"' {
+            in_string = true;
+        } else if ch == ';' {
+            // Comment marker outside any string: rest of line is comment.
+            return false;
+        }
+    }
+    !in_string
 }
 
 /// Check if a string looks like a date (YYYY-MM-DD).
@@ -599,31 +626,18 @@ fn extract_payees(parse_result: &ParseResult) -> Vec<String> {
     rustledger_core::extract_payees_iter(parse_result.directives.iter().map(|s| &s.value))
 }
 
-/// Extract tags from transactions. Tag values are stored without the
-/// leading `#` (the parser strips the sigil), which is exactly the
-/// form completion inserts after the already-typed `#`. Tags pushed
-/// via `pushtag` are folded into each affected transaction's `tags`
-/// by the parser, so walking transactions captures them too.
+/// Extract tags from parse result. Tag text comes back without the
+/// leading `#`, which is exactly the form completion inserts after the
+/// already-typed sigil. Delegates to the core visitor for exhaustive
+/// position coverage (transaction/document tags, metadata, Custom).
 fn extract_tags(parse_result: &ParseResult) -> Vec<String> {
-    let mut tags = Vec::new();
-    for spanned in &parse_result.directives {
-        if let Directive::Transaction(txn) = &spanned.value {
-            tags.extend(txn.tags.iter().map(|t| t.as_str().to_string()));
-        }
-    }
-    tags
+    rustledger_core::extract_tags_iter(parse_result.directives.iter().map(|s| &s.value))
 }
 
-/// Extract links from transactions. Like tags, link values are stored
+/// Extract links from parse result. Like tags, link text comes back
 /// without the leading `^`.
 fn extract_links(parse_result: &ParseResult) -> Vec<String> {
-    let mut links = Vec::new();
-    for spanned in &parse_result.directives {
-        if let Directive::Transaction(txn) = &spanned.value {
-            links.extend(txn.links.iter().map(|l| l.as_str().to_string()));
-        }
-    }
-    links
+    rustledger_core::extract_links_iter(parse_result.directives.iter().map(|s| &s.value))
 }
 
 #[cfg(test)]
@@ -947,6 +961,39 @@ mod tests {
         let coffee = items.iter().find(|i| i.label == "#coffee").unwrap();
         assert_eq!(coffee.insert_text.as_deref(), Some("coffee"));
         assert_eq!(coffee.filter_text.as_deref(), Some("coffee"));
+    }
+
+    #[test]
+    fn test_detect_context_tag_after_semicolon_inside_string() {
+        // The `;` lives inside the narration, so it is NOT a comment
+        // marker and must not suppress tag completion (was a bug with
+        // the naive `contains(';')` guard).
+        assert_eq!(
+            ctx_at_end("2024-01-15 * \"a;b\" #tr"),
+            CompletionContext::Tag
+        );
+    }
+
+    #[test]
+    fn test_detect_context_escaped_quote_keeps_string_open() {
+        // Literal line: 2024-01-15 * "a\"b #tag
+        // The `\"` is an escaped quote, so the string is still open at
+        // the `#`; this is inside a string, not a tag. A naive
+        // quote-parity count (two `"` chars => even => "outside") would
+        // wrongly treat it as code; the escape-aware scan does not.
+        let ctx = ctx_at_end("2024-01-15 * \"a\\\"b #tag");
+        assert_ne!(ctx, CompletionContext::Tag);
+        assert_ne!(ctx, CompletionContext::Link);
+    }
+
+    #[test]
+    fn test_in_code_position() {
+        assert!(in_code_position("2024-01-15 * \"x\" #")); // after closed string
+        assert!(in_code_position("pushtag #")); // plain directive
+        assert!(!in_code_position("2024-01-15 * \"x\" ; ")); // in comment
+        assert!(!in_code_position("2024-01-15 * \"open")); // in string
+        assert!(in_code_position("2024-01-15 * \"a;b\" ")); // ; was in string
+        assert!(!in_code_position("2024-01-15 * \"a\\\"b")); // escaped quote, still open
     }
 
     #[test]

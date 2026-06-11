@@ -187,8 +187,10 @@ pub enum WasmImporterError {
     /// before the ABI handshake existed; the host can't confirm wire
     /// compatibility and refuses to run it (issue #1234).
     #[error(
-        "WASM importer does not declare an ABI version (missing `{export}` export); \
-         host requires ABI v{expected}. Rebuild against a matching rustledger-plugin-types."
+        "WASM importer has a missing or invalid `{export}` export (expected signature \
+         `() -> u32`): it was built against an incompatible rustledger-plugin-types, or the \
+         export is absent, mistyped, or traps. Host requires ABI v{expected}. Rebuild against \
+         a matching rustledger-plugin-types."
     )]
     AbiVersionMissing {
         /// The export symbol the host looked up.

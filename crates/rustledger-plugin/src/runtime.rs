@@ -240,9 +240,11 @@ impl Plugin {
         match sandbox::check_guest_abi(&instance, &mut store) {
             sandbox::AbiCheck::Match => {}
             sandbox::AbiCheck::Missing => anyhow::bail!(
-                "plugin `{name}` does not export `{export}` (built against an incompatible \
-                 rustledger-plugin-types; host requires ABI v{ver}). Rebuild it against a \
-                 matching rustledger-plugin-types.",
+                "plugin `{name}` has a missing or invalid `{export}` export (expected \
+                 signature `() -> u32`): it was built against an incompatible \
+                 rustledger-plugin-types, or the export is absent, mistyped, or traps. \
+                 Host requires ABI v{ver}. Rebuild it against a matching \
+                 rustledger-plugin-types.",
                 name = self.name,
                 export = rustledger_plugin_types::ABI_VERSION_EXPORT,
                 ver = sandbox::HOST_ABI_VERSION,
@@ -1245,7 +1247,7 @@ mod tests {
             .expect_err("execute must reject a plugin with no ABI export");
         let msg = format!("{err:#}");
         assert!(
-            msg.contains("__rustledger_abi_version") && msg.contains("does not export"),
+            msg.contains("__rustledger_abi_version") && msg.contains("missing or invalid"),
             "expected a missing-ABI error, got: {msg}"
         );
     }

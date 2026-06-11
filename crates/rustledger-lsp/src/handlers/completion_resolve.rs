@@ -8,16 +8,24 @@
 use lsp_types::{CompletionItem, Documentation, MarkupContent, MarkupKind};
 use rustledger_core::Decimal;
 use rustledger_core::Directive;
-use rustledger_parser::ParseResult;
+use rustledger_parser::Spanned;
 use std::collections::HashMap;
 
 use super::utils::{is_account_like, is_currency_like_simple};
 
 /// Handle a completion item resolve request.
 /// This adds detailed documentation to completion items.
+///
+/// `directives` is the set of directives to aggregate over. The caller
+/// passes the *full ledger* (all `include`d files, resolved via the
+/// `journalFile` setting) when one is configured, falling back to the
+/// directives of the currently edited file otherwise. Resolving against
+/// the full ledger keeps the detail popup (balances, transaction counts,
+/// price history) consistent with `hover`, instead of reflecting only
+/// the month/file the cursor happens to be in (issue #1297).
 pub fn handle_completion_resolve(
     item: CompletionItem,
-    parse_result: &ParseResult,
+    directives: &[Spanned<Directive>],
 ) -> CompletionItem {
     let mut resolved = item.clone();
 
@@ -29,18 +37,18 @@ pub fn handle_completion_resolve(
             "account" => {
                 if let Some(account) = data.get("account").and_then(|v| v.as_str()) {
                     resolved.documentation =
-                        Some(resolve_account_documentation(account, parse_result));
+                        Some(resolve_account_documentation(account, directives));
                 }
             }
             "currency" => {
                 if let Some(currency) = data.get("currency").and_then(|v| v.as_str()) {
                     resolved.documentation =
-                        Some(resolve_currency_documentation(currency, parse_result));
+                        Some(resolve_currency_documentation(currency, directives));
                 }
             }
             "payee" => {
                 if let Some(payee) = data.get("payee").and_then(|v| v.as_str()) {
-                    resolved.documentation = Some(resolve_payee_documentation(payee, parse_result));
+                    resolved.documentation = Some(resolve_payee_documentation(payee, directives));
                 }
             }
             _ => {}
@@ -53,11 +61,11 @@ pub fn handle_completion_resolve(
 
         // Check if it looks like an account
         if is_account_like(label) {
-            resolved.documentation = Some(resolve_account_documentation(label, parse_result));
+            resolved.documentation = Some(resolve_account_documentation(label, directives));
         }
         // Check if it looks like a currency (all caps, 3-4 chars)
         else if is_currency_like_simple(label) {
-            resolved.documentation = Some(resolve_currency_documentation(label, parse_result));
+            resolved.documentation = Some(resolve_currency_documentation(label, directives));
         }
     }
 
@@ -65,13 +73,16 @@ pub fn handle_completion_resolve(
 }
 
 /// Resolve documentation for an account completion.
-fn resolve_account_documentation(account: &str, parse_result: &ParseResult) -> Documentation {
+fn resolve_account_documentation(
+    account: &str,
+    directives: &[Spanned<Directive>],
+) -> Documentation {
     let mut balances: HashMap<String, Decimal> = HashMap::new();
     let mut transaction_count = 0;
     let mut first_date: Option<rustledger_core::NaiveDate> = None;
     let mut last_date: Option<rustledger_core::NaiveDate> = None;
 
-    for spanned in &parse_result.directives {
+    for spanned in directives {
         if let Directive::Transaction(txn) = &spanned.value {
             for posting in &txn.postings {
                 if posting.account.as_ref() == account {
@@ -123,11 +134,14 @@ fn resolve_account_documentation(account: &str, parse_result: &ParseResult) -> D
 }
 
 /// Resolve documentation for a currency completion.
-fn resolve_currency_documentation(currency: &str, parse_result: &ParseResult) -> Documentation {
+fn resolve_currency_documentation(
+    currency: &str,
+    directives: &[Spanned<Directive>],
+) -> Documentation {
     let mut prices: Vec<(rustledger_core::NaiveDate, Decimal, String)> = Vec::new();
     let mut usage_count = 0;
 
-    for spanned in &parse_result.directives {
+    for spanned in directives {
         match &spanned.value {
             Directive::Price(price) if price.currency.as_ref() == currency => {
                 prices.push((
@@ -174,11 +188,11 @@ fn resolve_currency_documentation(currency: &str, parse_result: &ParseResult) ->
 }
 
 /// Resolve documentation for a payee completion.
-fn resolve_payee_documentation(payee: &str, parse_result: &ParseResult) -> Documentation {
+fn resolve_payee_documentation(payee: &str, directives: &[Spanned<Directive>]) -> Documentation {
     let mut transactions: Vec<(rustledger_core::NaiveDate, String)> = Vec::new();
     let mut accounts_used: HashMap<String, usize> = HashMap::new();
 
-    for spanned in &parse_result.directives {
+    for spanned in directives {
         if let Directive::Transaction(txn) = &spanned.value
             && txn.payee.as_ref().map(|p| p.as_ref()) == Some(payee)
         {
@@ -255,7 +269,7 @@ mod tests {
             ..Default::default()
         };
 
-        let resolved = handle_completion_resolve(item, &result);
+        let resolved = handle_completion_resolve(item, &result.directives);
         assert!(resolved.documentation.is_some());
 
         if let Some(Documentation::MarkupContent(content)) = resolved.documentation {
@@ -263,6 +277,71 @@ mod tests {
             assert!(content.value.contains("2 transactions"));
             assert!(content.value.contains("95")); // 100 - 5
         }
+    }
+
+    /// Regression for #1297: the resolve detail must aggregate over
+    /// every directive it's handed, not just the current file. When a
+    /// `journalFile` is configured the caller passes the full ledger's
+    /// directives (all `include`d files merged), so a completion
+    /// resolved while editing one monthly file still reports the
+    /// whole-ledger balance and transaction count — matching `hover`.
+    ///
+    /// This simulates the multi-file case by concatenating the
+    /// directives from two "files" (two parses) into one slice, the
+    /// same shape `LedgerState::directives()` hands the call site.
+    #[test]
+    fn resolve_account_aggregates_across_full_ledger() {
+        // "Current file" the cursor is in: only January's activity.
+        let jan = parse(
+            r#"2024-01-15 * "Deposit"
+  Assets:Bank  100.00 USD
+  Income:Salary
+"#,
+        );
+        // Another included file: February's activity.
+        let feb = parse(
+            r#"2024-02-10 * "Coffee"
+  Assets:Bank  -5.00 USD
+  Expenses:Food
+2024-02-20 * "Lunch"
+  Assets:Bank  -10.00 USD
+  Expenses:Food
+"#,
+        );
+
+        // The full ledger = every file's directives merged. This is
+        // what the resolve handler receives when journalFile is set.
+        let mut full_ledger = jan.directives.clone();
+        full_ledger.extend(feb.directives.iter().cloned());
+
+        let item = CompletionItem {
+            label: "Assets:Bank".to_string(),
+            ..Default::default()
+        };
+
+        // Resolving against only the current file would report 1
+        // transaction and a 100.00 balance. Against the full ledger it
+        // must see all three postings.
+        let resolved = handle_completion_resolve(item, &full_ledger);
+        let Some(Documentation::MarkupContent(content)) = resolved.documentation else {
+            panic!("expected markdown documentation");
+        };
+        assert!(
+            content.value.contains("3 transactions"),
+            "should count postings across all files; got:\n{}",
+            content.value
+        );
+        assert!(
+            content.value.contains("85"), // 100 - 5 - 10
+            "balance should aggregate across all files; got:\n{}",
+            content.value
+        );
+        // Date range should span both files (Jan → Feb).
+        assert!(
+            content.value.contains("2024-01-15") && content.value.contains("2024-02-20"),
+            "date range should span the full ledger; got:\n{}",
+            content.value
+        );
     }
 
     #[test]
@@ -280,7 +359,7 @@ mod tests {
             ..Default::default()
         };
 
-        let resolved = handle_completion_resolve(item, &result);
+        let resolved = handle_completion_resolve(item, &result.directives);
         assert!(resolved.documentation.is_some());
 
         if let Some(Documentation::MarkupContent(content)) = resolved.documentation {

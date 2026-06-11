@@ -36,11 +36,17 @@ pub fn handle_completion_resolve(
     // (payees, tags, links) have no detail popup — resolving those
     // would require the producer to tag items with a kind, which it
     // does not currently do.
-    let label = &item.label;
-    if is_account_like(label) {
-        resolved.documentation = Some(resolve_account_documentation(label, directives));
-    } else if is_currency_like_simple(label) {
-        resolved.documentation = Some(resolve_currency_documentation(label, directives));
+    //
+    // Only fill documentation the item doesn't already carry: a resolve
+    // handler adds missing detail, it doesn't clobber what a producer
+    // (or a client round-trip) may have set eagerly.
+    if resolved.documentation.is_none() {
+        let label = &item.label;
+        if is_account_like(label) {
+            resolved.documentation = Some(resolve_account_documentation(label, directives));
+        } else if is_currency_like_simple(label) {
+            resolved.documentation = Some(resolve_currency_documentation(label, directives));
+        }
     }
 
     resolved

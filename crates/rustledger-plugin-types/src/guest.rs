@@ -451,6 +451,20 @@ macro_rules! wasm_importer_main {
             let bytes = $crate::guest::to_vec(&output).expect("extract_enriched output encode");
             $crate::guest::pack_output(bytes)
         }
+
+        /// Advertises the `plugin-types` ABI version this importer was
+        /// built against. The host checks it right after instantiation
+        /// (see `rustledger_plugin::sandbox::check_guest_abi`) and
+        /// refuses to run a version it doesn't speak, so an ABI skew
+        /// surfaces as a clear error instead of an opaque trap inside a
+        /// later `extract` call (issue #1234).
+        #[cfg_attr(
+            target_arch = "wasm32",
+            unsafe(export_name = "__rustledger_abi_version")
+        )]
+        pub extern "C" fn __wasm_importer_abi_version() -> u32 {
+            $crate::ABI_VERSION
+        }
     };
 }
 
@@ -563,6 +577,20 @@ macro_rules! wasm_plugin_main {
             let output: $crate::PluginOutput = process_fn(input);
             let bytes = $crate::guest::to_vec(&output).expect("process output encode");
             $crate::guest::pack_output(bytes)
+        }
+
+        /// Advertises the `plugin-types` ABI version this plugin was
+        /// built against. The host checks it right after instantiation
+        /// (see `rustledger_plugin::sandbox::check_guest_abi`) and
+        /// refuses to run a version it doesn't speak, so an ABI skew
+        /// surfaces as a clear error instead of an opaque trap inside
+        /// the `process` call (issue #1234).
+        #[cfg_attr(
+            target_arch = "wasm32",
+            unsafe(export_name = "__rustledger_abi_version")
+        )]
+        pub extern "C" fn __wasm_plugin_abi_version() -> u32 {
+            $crate::ABI_VERSION
         }
     };
 }

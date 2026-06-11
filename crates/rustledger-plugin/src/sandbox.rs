@@ -43,7 +43,7 @@
 
 use std::sync::{Arc, OnceLock};
 
-use wasmtime::{Config, Engine, ResourceLimiter, Store};
+use wasmtime::{Config, Engine, Instance, ResourceLimiter, Store};
 
 /// Default per-instance linear-memory cap (in bytes) for any
 /// sandboxed wasmtime [`Store`] in rustledger.
@@ -232,6 +232,60 @@ pub fn make_sandboxed_store(
     let fuel = max_time_secs.max(1).saturating_mul(1_000_000);
     store.set_fuel(fuel)?;
     Ok(store)
+}
+
+/// The `plugin-types` ABI version this host build speaks.
+///
+/// A loaded guest must advertise a matching version via its
+/// `__rustledger_abi_version` export. Re-exported from
+/// [`rustledger_plugin_types::ABI_VERSION`] so host and guest share one
+/// source of truth.
+pub const HOST_ABI_VERSION: u32 = rustledger_plugin_types::ABI_VERSION;
+
+/// Outcome of reading a freshly instantiated guest's ABI version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AbiCheck {
+    /// The guest advertises [`HOST_ABI_VERSION`]; it is safe to call.
+    Match,
+    /// The guest does not export `__rustledger_abi_version` (built
+    /// without the `wasm_*_main!` macros, or against a `plugin-types`
+    /// from before the handshake existed), or the export trapped /
+    /// has the wrong signature. Either way the host can't confirm
+    /// compatibility, so the guest is rejected.
+    Missing,
+    /// The guest advertises a different ABI version than the host.
+    Mismatch {
+        /// Version the guest reported.
+        found: u32,
+    },
+}
+
+/// Read a freshly instantiated guest's ABI version and compare it to
+/// [`HOST_ABI_VERSION`].
+///
+/// Call this immediately after [`wasmtime::Linker::instantiate`] and
+/// before invoking any guest entry point. A guest compiled against an
+/// incompatible `plugin-types` otherwise fails far from the load site
+/// with an opaque trap (a misread `PluginInput`, a bad pointer); the
+/// handshake converts that into a clear, actionable error up front
+/// (issue #1234).
+///
+/// The check is intentionally total — a missing export, a wrong
+/// signature, or a trap while calling it all collapse to
+/// [`AbiCheck::Missing`] rather than propagating a `wasmtime::Error`,
+/// because from the host's perspective they are the same condition:
+/// "this guest can't prove it speaks our ABI."
+pub fn check_guest_abi(instance: &Instance, store: &mut Store<StoreState>) -> AbiCheck {
+    let Ok(func) = instance
+        .get_typed_func::<(), u32>(&mut *store, rustledger_plugin_types::ABI_VERSION_EXPORT)
+    else {
+        return AbiCheck::Missing;
+    };
+    match func.call(&mut *store, ()) {
+        Ok(v) if v == HOST_ABI_VERSION => AbiCheck::Match,
+        Ok(found) => AbiCheck::Mismatch { found },
+        Err(_) => AbiCheck::Missing,
+    }
 }
 
 /// Build a wasmtime [`Config`] with rustledger's locked-down security

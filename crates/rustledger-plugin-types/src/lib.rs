@@ -141,6 +141,31 @@ pub mod guest;
 
 use serde::{Deserialize, Serialize};
 
+/// Version of the host/guest WASM ABI defined by this crate.
+///
+/// A WASM plugin or importer built with the `wasm_plugin_main!` /
+/// `wasm_importer_main!` macros exports this value as
+/// `__rustledger_abi_version() -> u32`. The host reads that export right
+/// after instantiating the module and refuses to run a guest whose
+/// version differs from its own — turning what used to be an opaque
+/// trap deep inside a later call (a guest built against an
+/// incompatible `plugin-types`) into a clear, actionable load-time
+/// error (issue #1234).
+///
+/// Bump this whenever a *breaking* change is made to the wire format or
+/// the export/call convention shared between host and guest (a changed
+/// `PluginInput`/`ImporterInput` shape, a renamed required export, a
+/// different packing scheme, …). It is intentionally a small standalone
+/// counter rather than the crate's `SemVer`: most `plugin-types` releases
+/// do not touch the ABI, and a guest only needs to agree with the host
+/// on the ABI, not on the exact crate version.
+pub const ABI_VERSION: u32 = 1;
+
+/// The WASM export symbol a guest uses to advertise [`ABI_VERSION`].
+/// The `wasm_*_main!` macros emit it; the host looks it up by this
+/// name. Kept here as the single source of truth shared by both sides.
+pub const ABI_VERSION_EXPORT: &str = "__rustledger_abi_version";
+
 // ============================================================================
 // Top-Level Plugin Interface
 // ============================================================================

@@ -1039,16 +1039,14 @@ pub fn compute_alignment(sf: &SourceFile) -> PostingAlignment {
             //     `emit_posting` prints with no number at all.
             // Counting either is why `rledger format` and `bean-format`
             // disagreed and round-tripping never converged (issue #1290).
-            // The `w > 0` guard keeps this pre-pass in lockstep with
-            // `emit_posting`, whose rendered amount text is empty for a
-            // currency-only amount.
-            if let Some(amt) = p.amount() {
-                let w = amount_value_width(&amt);
-                if w > 0 {
-                    any_aligned_posting = true;
-                    max_lhs = max_lhs.max(lhs);
-                    max_num = max_num.max(w);
-                }
+            // `amount_number_text` is the shared predicate that keeps
+            // this pre-pass in lockstep with `emit_posting`.
+            if let Some(amt) = p.amount()
+                && let Some(text) = amount_number_text(&amt)
+            {
+                any_aligned_posting = true;
+                max_lhs = max_lhs.max(lhs);
+                max_num = max_num.max(text.chars().count());
             }
         }
     }
@@ -1063,12 +1061,20 @@ pub fn compute_alignment(sf: &SourceFile) -> PostingAlignment {
     }
 }
 
-/// Width of the rendered number / arithmetic-expression text of
-/// an amount, EXCLUDING the trailing currency. Sign (if any) is
-/// included. Used for the file-wide right-justify pre-pass and
-/// for the per-posting padding math in [`emit_posting`].
-fn amount_value_width(amt: &ast::Amount) -> usize {
-    amount_value_text(amt).chars().count()
+/// The rendered number / arithmetic-expression text of an amount *if it
+/// renders a number*, or `None` when it renders nothing (a currency-only
+/// amount like `USD`, whose value text is empty). EXCLUDES the trailing
+/// currency; sign (if any) is included.
+///
+/// This is the single source of truth for "does this posting line have a
+/// number?". Both the file-wide alignment pre-pass ([`compute_alignment`])
+/// and the emitter ([`emit_posting`]) consult it, so they can never
+/// disagree about which postings participate in alignment — the bug
+/// class behind #1290 (amount-less postings) and its currency-only
+/// sibling.
+fn amount_number_text(amt: &ast::Amount) -> Option<String> {
+    let text = amount_value_text(amt);
+    (!text.is_empty()).then_some(text)
 }
 
 /// Render an amount's value portion (number or arithmetic
@@ -1677,8 +1683,10 @@ fn emit_posting(p: &ast::Posting, align: PostingAlignment, out: &mut String) {
     col += account_text.chars().count();
 
     if let Some(amt) = p.amount() {
-        let value = amount_value_text(&amt);
-        if !value.is_empty() {
+        // `amount_number_text` is the shared "does this render a number?"
+        // predicate (see `compute_alignment`); a currency-only amount
+        // returns `None` and prints no number.
+        if let Some(value) = amount_number_text(&amt) {
             // Two stages of padding:
             //   1) Account end → start of number field (`number_col`).
             //      Fall back to 2 spaces when the LHS already exceeds

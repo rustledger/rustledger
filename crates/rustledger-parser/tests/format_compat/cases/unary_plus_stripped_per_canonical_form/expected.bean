@@ -9,5 +9,5 @@
 2024-01-01 open Assets:Money
 
 2024-07-20 * "leading plus sign on posting amount"
-  Assets:Money           0.1 USD
+  Assets:Money  0.1 USD
   Expenses:Thingamabobs

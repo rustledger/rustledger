@@ -1026,9 +1026,16 @@ pub fn compute_alignment(sf: &SourceFile) -> PostingAlignment {
             if let Some(account) = p.account() {
                 lhs += account.text().chars().count();
             }
-            max_lhs = max_lhs.max(lhs);
 
+            // Only amount-bearing postings drive the alignment column.
+            // `bean-format` computes the number column from the prefixes
+            // of number-bearing lines only; an amount-less posting (the
+            // elided balancing leg, or simply a long account with no
+            // amount) must NOT push the column right. Counting it here
+            // is why `rledger format` and `bean-format` disagreed and
+            // round-tripping between them never converged (issue #1290).
             if let Some(amt) = p.amount() {
+                max_lhs = max_lhs.max(lhs);
                 let w = amount_value_width(&amt);
                 max_num = max_num.max(w);
             }
@@ -2259,6 +2266,53 @@ mod tests {
   Expenses:Coffee   5.00 USD
 ";
         assert_eq!(format_source(src), expected);
+    }
+
+    /// Regression for #1290: an amount-less posting (the common elided
+    /// balancing leg) must NOT widen the number column, even when its
+    /// account is longer than every amount-bearing account. `bean-format`
+    /// computes the column only from number-bearing lines, so counting
+    /// `Expenses:Food` here would make `rledger format` and `bean-format`
+    /// disagree and never converge on round-trip.
+    #[test]
+    fn transaction_elided_posting_does_not_widen_amount_column() {
+        let src = "\
+2024-01-15 * \"Coffee\"
+  Assets:Cash  -5.00 USD
+  Expenses:Food
+";
+        // Only Assets:Cash (11) bears an amount; Expenses:Food (13) is
+        // elided and is ignored for alignment. number_col = 2+11+2 = 15.
+        let expected = "\
+2024-01-15 * \"Coffee\"
+  Assets:Cash  -5.00 USD
+  Expenses:Food
+";
+        assert_eq!(format_source(src), expected);
+        // Idempotent: re-formatting the output is a no-op.
+        assert_eq!(format_source(expected), expected);
+    }
+
+    /// Regression for #1290 using the reporter's exact fixture: a long
+    /// elided account (`Expenses:Thingamabobs`) alongside a short
+    /// amount-bearing one (`Assets:Money`). Pre-fix the number was
+    /// pushed right to clear the long account; `bean-format` keeps it
+    /// two spaces after `Assets:Money`. Also confirms the thousands
+    /// separator is stripped.
+    #[test]
+    fn transaction_long_elided_account_matches_bean_format() {
+        let src = "\
+2024-07-20 * \"Commas should stay\"
+  Assets:Money  -1,024 USD
+  Expenses:Thingamabobs
+";
+        let expected = "\
+2024-07-20 * \"Commas should stay\"
+  Assets:Money  -1024 USD
+  Expenses:Thingamabobs
+";
+        assert_eq!(format_source(src), expected);
+        assert_eq!(format_source(expected), expected);
     }
 
     #[test]

@@ -275,14 +275,19 @@ fn query_multi_pad_does_not_double_apply() {
         .output()
         .expect("run rledger query");
     let stdout = String::from_utf8_lossy(&query_out.stdout);
-    assert!(query_out.status.success(), "query should succeed: {stdout}",);
+    let stderr = String::from_utf8_lossy(&query_out.stderr);
+    assert!(
+        query_out.status.success(),
+        "query should succeed:\nstdout: {stdout}\nstderr: {stderr}",
+    );
 
     let units = first_number_for_account(&stdout, "Assets:Wallet")
-        .unwrap_or_else(|| panic!("no Assets:Wallet token: {stdout}"));
+        .unwrap_or_else(|| panic!("no Assets:Wallet token:\nstdout: {stdout}\nstderr: {stderr}"));
     assert_eq!(
         units, "900",
         "multi-pad shadowing: only the most recent pad applies → \
          expected 900 USD (= 1000 - 100), got {units}. A buggy \
-         double-application would emit 800 (= 1000 - 100 - 100).",
+         double-application would emit 800 (= 1000 - 100 - 100).\n\
+         stderr: {stderr}",
     );
 }

@@ -60,7 +60,8 @@ pub fn is_synthesized_pad(txn: &Transaction) -> bool {
 pub struct PadResult {
     /// The original input directives, verbatim. Pads are NOT
     /// removed; the field is the same slice the caller handed in.
-    /// Callers that want a Pads-removed-or-merged view should use
+    /// Callers that want the source merged with synthesized pad
+    /// transactions for balance math should use
     /// [`merge_with_padding`].
     pub directives: Vec<Directive>,
     /// Synthetic padding transactions generated.

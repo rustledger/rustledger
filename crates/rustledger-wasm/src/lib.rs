@@ -769,8 +769,12 @@ include "accounts.beancount"
         );
     }
 
-    /// Parity: pad directives produce equivalent merged views on CLI
-    /// and WASM processing paths.
+    /// Parity: CLI and WASM processing paths produce identical
+    /// merged views for a single pad+balance source. Asserts the
+    /// full directive vectors match, not just length — a length-
+    /// only check would silently accept a divergence that swapped
+    /// directive shapes (e.g. WASM emitting a Pad where CLI emits
+    /// a Transaction) for the same total count.
     #[test]
     fn test_parity_pad_expansion() {
         use rustledger_booking::merge_with_padding;
@@ -789,9 +793,8 @@ include "accounts.beancount"
         let wasm_merged = merge_with_padding(&wasm);
 
         assert_eq!(
-            cli_merged.len(),
-            wasm_merged.len(),
-            "merged directive count differs"
+            cli_merged, wasm_merged,
+            "merged directive vectors differ between CLI and WASM paths",
         );
     }
 

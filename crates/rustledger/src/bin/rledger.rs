@@ -264,8 +264,24 @@ fn parse_alias_expansion(expansion: &str) -> Vec<String> {
 }
 
 fn main() -> ExitCode {
-    // Load config early (before parsing) for alias expansion
-    let config = Config::load().map(|l| l.config).unwrap_or_default();
+    // Load config early (before parsing) for alias expansion.
+    //
+    // Surface a config-load failure instead of silently falling back to
+    // defaults. `Config::load()` only errors when a config file is
+    // present but cannot be read or parsed; a missing config is `Ok`.
+    // Swallowing the error here meant a malformed config (e.g. a
+    // wrong-shaped `[price.mapping.X]` table) was discarded and the user
+    // got a misleading downstream message — `rledger price hy` reported
+    // "no price source configured" while `rledger config show` reported
+    // the real TOML parse error (issue #1306). Fail fast with the same
+    // error either path would show.
+    let config = match Config::load() {
+        Ok(loaded) => loaded.config,
+        Err(e) => {
+            eprintln!("error: {e:#}");
+            return ExitCode::from(2);
+        }
+    };
 
     // Expand aliases in command line arguments
     let args: Vec<String> = std::env::args().collect();

@@ -214,6 +214,8 @@ pub fn start_stdio() -> Result<i32, Box<dyn std::error::Error + Send + Sync>> {
                 ":".to_string(),  // Account segments
                 " ".to_string(),  // After keywords
                 "\"".to_string(), // Strings (payees, narrations)
+                "#".to_string(),  // Tags
+                "^".to_string(),  // Links
             ]),
             resolve_provider: Some(true), // Enable completion resolve for detailed info
             ..Default::default()

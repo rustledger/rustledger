@@ -96,6 +96,10 @@ pub struct LedgerState {
     currencies: Vec<String>,
     /// Payees extracted from the full ledger.
     payees: Vec<String>,
+    /// Tags extracted from the full ledger (without the `#` sigil).
+    tags: Vec<String>,
+    /// Links extracted from the full ledger (without the `^` sigil).
+    links: Vec<String>,
     /// Account to file mapping for go-to-definition.
     account_locations: HashMap<String, (PathBuf, u32)>,
 }
@@ -115,6 +119,8 @@ impl LedgerState {
             accounts: Vec::new(),
             currencies: Vec::new(),
             payees: Vec::new(),
+            tags: Vec::new(),
+            links: Vec::new(),
             account_locations: HashMap::new(),
         }
     }
@@ -203,6 +209,16 @@ impl LedgerState {
         &self.payees
     }
 
+    /// Get all tags from the full ledger (without the `#` sigil).
+    pub fn tags(&self) -> &[String] {
+        &self.tags
+    }
+
+    /// Get all links from the full ledger (without the `^` sigil).
+    pub fn links(&self) -> &[String] {
+        &self.links
+    }
+
     /// Get all directives from the full ledger.
     pub fn directives(&self) -> Option<&[Spanned<Directive>]> {
         self.ledger.as_ref().map(|l| l.directives.as_slice())
@@ -228,10 +244,14 @@ impl LedgerState {
         self.accounts.clear();
         self.currencies.clear();
         self.payees.clear();
+        self.tags.clear();
+        self.links.clear();
 
         let mut accounts_set: HashSet<String> = HashSet::new();
         let mut currencies_set: HashSet<String> = HashSet::new();
         let mut payees_set: HashSet<String> = HashSet::new();
+        let mut tags_set: HashSet<String> = HashSet::new();
+        let mut links_set: HashSet<String> = HashSet::new();
 
         for spanned in directives {
             match &spanned.value {
@@ -255,6 +275,12 @@ impl LedgerState {
                 Directive::Transaction(txn) => {
                     if let Some(payee) = &txn.payee {
                         payees_set.insert(payee.to_string());
+                    }
+                    for tag in &txn.tags {
+                        tags_set.insert(tag.as_str().to_string());
+                    }
+                    for link in &txn.links {
+                        links_set.insert(link.as_str().to_string());
                     }
                     for posting in &txn.postings {
                         accounts_set.insert(posting.account.to_string());
@@ -295,6 +321,10 @@ impl LedgerState {
         self.currencies.sort();
         self.payees = payees_set.into_iter().collect();
         self.payees.sort();
+        self.tags = tags_set.into_iter().collect();
+        self.tags.sort();
+        self.links = links_set.into_iter().collect();
+        self.links.sort();
     }
 
     /// Extract account definition locations from the ledger.

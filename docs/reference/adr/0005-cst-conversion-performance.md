@@ -2,9 +2,23 @@
 
 ## Status
 
-Proposed (June 2026). Updated with empirical findings (June 2026) - see
-[Empirical findings](#empirical-findings-june-2026); the recommendation has
-shifted away from an unconditional green-tree rewrite.
+Accepted (June 2026).
+
+**Decision:** ship the parse cache (recommendation 1) and accept the cold-parse
+CST cost (recommendation 2). The **green-tree rewrite (Phase 2) is declined** -
+the empirical findings put its ceiling at ~20-25% off cold parse for a large,
+compat-risky rewrite of `convert.rs`, which does not justify the risk while the
+parse cache recovers the cost users actually feel (repeated runs) at no risk.
+
+Shipped: parse cache for `report` (#1314) and `query` (#1315); `report` /
+`query` / `check` unified on one cache path with `--no-cache` (#1316); the two
+edge cleanups #1311 / #1312. The Phase 2 design below is retained as a record
+of what was evaluated and why it was not pursued; revisit only if cold-parse
+latency (not repeated-run latency) is later shown to matter enough to justify
+the rewrite.
+
+Original status: Proposed (June 2026), updated with
+[Empirical findings](#empirical-findings-june-2026).
 
 ## Context
 
@@ -256,7 +270,13 @@ Risk: low-medium. Pure internal refactor; output-identical; gated by baselines.
 Each converter is independent, so this can be sliced into a few small PRs
 (transaction first, then the rest).
 
-### Phase 2 - green-tree conversion (Layer A)
+### Phase 2 - green-tree conversion (Layer A) — DECLINED
+
+> **Decision:** not pursued (see [Status](#status)). ~20-25% off cold parse for
+> a large, compat-risky rewrite of `convert.rs` does not justify the risk while
+> the parse cache already recovers the repeated-run cost. Retained below as a
+> record of the evaluated approach; revisit only if cold-parse latency is later
+> shown to matter.
 
 Convert by walking the **green** tree directly, materializing red nodes only
 where genuinely needed, so the per-node `NodeData` allocation disappears.

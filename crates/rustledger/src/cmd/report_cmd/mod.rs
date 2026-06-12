@@ -187,7 +187,7 @@ pub fn run(
     // repeated `report` (or a `report` after `check`) skips the parse
     // entirely. The cached `LoadResult` is the parsed (pre-booking)
     // stream; `process` books it exactly as the uncached `load` did.
-    // Disable with `BEANCOUNT_DISABLE_LOAD_CACHE`.
+    // Disable with `--no-cache` or `BEANCOUNT_DISABLE_LOAD_CACHE`.
     let (raw, _from_cache) = crate::cmd::loadcache::load_result_cached(file, no_cache, verbose)?;
     let ledger = rustledger_loader::process(raw, &options)
         .with_context(|| format!("failed to load {}", file.display()))?;

@@ -85,12 +85,19 @@ pub fn get_completions(
 /// Detect the completion context from cursor position.
 pub fn detect_context(source: &str, line: u32, character: u32) -> CompletionContext {
     let line_text = get_line(source, line as usize);
+    // `character` is a character offset, not a byte offset. Slicing
+    // `line_text` by it directly panics when a multi-byte character
+    // (e.g. a Korean Hangul syllable) sits before the cursor, because
+    // the byte index lands mid-character — in the WASM build that
+    // surfaces as an `unreachable` trap and kills completion (#1289).
+    // Map the character offset to a char-boundary byte offset; clamp
+    // past end-of-line to the line length.
     let col = character as usize;
-    let before_cursor = if col <= line_text.len() {
-        &line_text[..col]
-    } else {
-        line_text
-    };
+    let byte_col = line_text
+        .char_indices()
+        .nth(col)
+        .map_or(line_text.len(), |(b, _)| b);
+    let before_cursor = &line_text[..byte_col];
 
     let trimmed = before_cursor.trim_start();
 
@@ -130,8 +137,11 @@ pub fn detect_context(source: &str, line: u32, character: u32) -> CompletionCont
         return CompletionContext::LineStart;
     }
 
-    // Check for date at line start (YYYY-MM-DD pattern)
-    if trimmed.len() >= 10 && is_date_like(&trimmed[..10]) {
+    // Check for date at line start (YYYY-MM-DD pattern). Guard the
+    // 10-byte split on a char boundary: a `YYYY-MM-DD` prefix is all
+    // ASCII, so if byte 10 lands mid-character the line can't be a
+    // date, and slicing there would panic on multi-byte input.
+    if trimmed.len() >= 10 && trimmed.is_char_boundary(10) && is_date_like(&trimmed[..10]) {
         let after_date = trimmed[10..].trim_start();
         if after_date.is_empty() {
             return CompletionContext::AfterDate;
@@ -324,6 +334,44 @@ mod tests {
                 prefix: "Assets:".to_string()
             }
         );
+    }
+
+    /// Regression for #1289: a partial non-ASCII (Korean) segment after
+    /// a colon must not panic. `character` is a character offset; the
+    /// "롯" is the 20th char (chars 0..18 = "  Liabilities:Card:", char
+    /// 19 = "롯"), so the cursor after it is offset 20. Before the fix
+    /// this sliced `line_text` at byte 20 — mid-"롯" — and panicked
+    /// (an `unreachable` trap in WASM).
+    #[test]
+    fn test_detect_context_korean_partial_segment_no_panic() {
+        let source = "  Liabilities:Card:롯";
+        let ctx = detect_context(source, 0, 20);
+        assert_eq!(
+            ctx,
+            CompletionContext::AccountSegment {
+                prefix: "Liabilities:Card:".to_string()
+            }
+        );
+
+        // Cursor at the colon (offset 19, before "롯") is the other
+        // boundary case and must also be safe.
+        let ctx_before = detect_context(source, 0, 19);
+        assert_eq!(
+            ctx_before,
+            CompletionContext::AccountSegment {
+                prefix: "Liabilities:Card:".to_string()
+            }
+        );
+    }
+
+    /// Regression for #1289 (sibling): a non-indented line beginning
+    /// with a multi-byte character must not panic in the date-prefix
+    /// check (`trimmed[..10]`).
+    #[test]
+    fn test_detect_context_multibyte_line_start_no_panic() {
+        // 10+ bytes, byte 10 lands mid-character.
+        let source = "롯롯롯롯 hello";
+        let _ctx = detect_context(source, 0, 4);
     }
 
     #[test]

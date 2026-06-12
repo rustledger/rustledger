@@ -27,7 +27,14 @@ python-plugin-wasm = ["rustledger-plugin/python-plugins", "rustledger-loader/was
 name = "rledger"
 path = "src/bin/rledger.rs"
 
+# Agent-native CLI (#1291). Separate binary; keeps `rledger` synchronous.
+[[bin]]
+name = "ag-rledger"
+path = "src/bin/ag-rledger.rs"
+
 [dependencies]
+agcli.workspace = true
+tokio = { workspace = true, features = ["macros", "rt"] }
 rustledger-core.workspace = true
 rustledger-parser.workspace = true
 rustledger-loader.workspace = true

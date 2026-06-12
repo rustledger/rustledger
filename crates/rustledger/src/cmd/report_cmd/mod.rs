@@ -37,7 +37,7 @@ use crate::cmd::completions::ShellType;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use rustledger_core::NaiveDate;
-use rustledger_loader::{LoadOptions, load};
+use rustledger_loader::LoadOptions;
 use std::io;
 use std::path::PathBuf;
 /// Generate reports from beancount files.
@@ -178,8 +178,15 @@ pub fn run(
         ..Default::default()
     };
 
-    let ledger =
-        load(file, &options).with_context(|| format!("failed to load {}", file.display()))?;
+    // Parse via the shared on-disk cache: `parse()` dominates load
+    // cost and is identical run-to-run for an unchanged file, so a
+    // repeated `report` (or a `report` after `check`) skips the parse
+    // entirely. The cached `LoadResult` is the parsed (pre-booking)
+    // stream; `process` books it exactly as the uncached `load` did.
+    // Disable with `BEANCOUNT_DISABLE_LOAD_CACHE`.
+    let (raw, _from_cache) = crate::cmd::loadcache::load_result_cached(file, false, verbose)?;
+    let ledger = rustledger_loader::process(raw, &options)
+        .with_context(|| format!("failed to load {}", file.display()))?;
 
     // Report any errors
     for err in &ledger.errors {

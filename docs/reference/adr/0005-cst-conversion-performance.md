@@ -31,7 +31,8 @@ the direct parser was itself a deliberate "~3x" win (`d65a62fd`,
 `winnow_parser`).
 
 Why only the report regressed while the `check` validation benchmark stayed
-flat at ~37 ms: `check` **caches parse output to disk** (`cmd/check.rs`), so its
+flat at ~37 ms: `check` **caches parse output to disk**
+(`crates/rustledger/src/cmd/check.rs`), so its
 repeated benchmark runs are cache hits that skip parsing. `report` has no cache
 and re-parses on every invocation, so it pays the full CST cost every time. The
 benchmark dashboard only tracks `balances` and `check`, so the parser slowdown
@@ -82,8 +83,8 @@ later frees it (`NodeData::new`, `cursor::free`, the `malloc`/`free` churn).
 
 `parse_via_cst` and the entire `cst::ast` + converter layer are built on the
 **red** tree: `ast_node!` wraps a `SyntaxNode` (`ast.rs:109`), and every
-converter walks `node.syntax().children_with_tokens()` (83 such call sites in
-`convert.rs`). So conversion materializes a red node for essentially every node
+converter walks `node.syntax().children_with_tokens()` (the dominant traversal
+idiom throughout `convert.rs`). So conversion materializes a red node for essentially every node
 in the file, drives the allocator hard, and chases pointers through the cursor
 API (`PreorderWithTokens`, `SyntaxElementChildren`, `first_child_or_token`,
 `to_next_sibling_or_token`).

@@ -52,15 +52,15 @@ pub struct Args {
 
     /// BQL query to execute (if not provided, enters interactive mode)
     #[arg(value_name = "QUERY", trailing_var_arg = true, num_args = 0..)]
-    query: Vec<String>,
+    pub query: Vec<String>,
 
     /// Read query from file
     #[arg(short = 'F', long = "query-file", value_name = "QUERY_FILE")]
-    query_file: Option<PathBuf>,
+    pub query_file: Option<PathBuf>,
 
     /// Output file (default: stdout)
     #[arg(short = 'o', long, value_name = "OUTPUT_FILE")]
-    output: Option<PathBuf>,
+    pub output: Option<PathBuf>,
 
     /// Output format (text, csv, json, beancount)
     #[arg(short = 'f', long)]
@@ -68,19 +68,19 @@ pub struct Args {
 
     /// Numberify output (remove currencies, output raw numbers)
     #[arg(short = 'm', long)]
-    numberify: bool,
+    pub numberify: bool,
 
     /// Do not report ledger validation errors on load
     #[arg(short = 'q', long = "no-errors")]
-    no_errors: bool,
+    pub no_errors: bool,
 
     /// Show verbose output
     #[arg(short, long)]
-    verbose: bool,
+    pub verbose: bool,
 
     /// Disable the on-disk parse cache (always re-parse)
     #[arg(long = "no-cache")]
-    no_cache: bool,
+    pub no_cache: bool,
 }
 
 /// Output format for query results.
@@ -107,8 +107,26 @@ impl std::fmt::Display for OutputFormat {
     }
 }
 
-/// Run the query command with the given arguments.
+/// Run the query command, writing results to stdout.
+///
+/// Thin wrapper over [`run_with_writer`] for the synchronous `rledger`
+/// binary. Batch queries (a query string or `--query-file`) stream their
+/// output through the writer; the interactive REPL still uses stdout
+/// directly since it has no agent-native equivalent.
 pub fn run(args: &Args) -> Result<()> {
+    let mut stdout = io::stdout();
+    run_with_writer(args, &mut stdout)
+}
+
+/// Run the query command with the given arguments, writing batch query
+/// results to `out`.
+///
+/// Behavior matches the original `run()`: a `--output` file still takes
+/// precedence over `out`, validation errors still go to stderr, and
+/// interactive mode (no query text) is unchanged. Only the default
+/// stdout sink for batch results is replaced by the injected writer, so
+/// `ag-rledger` can capture query output into a JSON envelope.
+pub fn run_with_writer<W: io::Write>(args: &Args, out: &mut W) -> Result<()> {
     // File is required (the --generate-completions flag is only for standalone bean-query)
     let Some(file) = args.file.as_ref() else {
         anyhow::bail!("FILE is required");
@@ -184,7 +202,7 @@ pub fn run(args: &Args) -> Result<()> {
             .with_context(|| format!("failed to create output file {}", output_path.display()))?;
         output::execute_query(&query_str, &directives, &settings, &mut file)
     } else {
-        output::execute_query(&query_str, &directives, &settings, &mut io::stdout())
+        output::execute_query(&query_str, &directives, &settings, out)
     }
 }
 

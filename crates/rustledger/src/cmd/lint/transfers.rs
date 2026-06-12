@@ -77,7 +77,20 @@ pub struct Args {
 /// # Errors
 /// - Fails if any input file does not exist or cannot be parsed.
 /// - Fails if `--apply` is set and a file edit can't be written.
+///
+/// Thin wrapper over [`run_with_writer`] for the synchronous `rledger`
+/// binary (writes its report to stdout); `ag-rledger` calls
+/// `run_with_writer` with a buffer.
 pub fn run(args: &Args) -> Result<ExitCode> {
+    let mut stdout = std::io::stdout().lock();
+    run_with_writer(args, &mut stdout)
+}
+
+/// Run the transfers lint, writing the text/JSON report to `out`.
+///
+/// Behavior matches the original `run()`; `--apply` still mutates source
+/// files. Only the report sink is redirected to the injected writer.
+pub fn run_with_writer<W: std::io::Write>(args: &Args, out: &mut W) -> Result<ExitCode> {
     let tolerance = Decimal::from_str(&args.amount_tolerance)
         .with_context(|| format!("invalid --amount-tolerance: {}", args.amount_tolerance))?;
     let config = TransferConfig {
@@ -127,8 +140,8 @@ pub fn run(args: &Args) -> Result<ExitCode> {
     }
 
     match args.format {
-        OutputFormat::Text => print_text_report(&matches, args.apply)?,
-        OutputFormat::Json => print_json_report(&matches, args.apply)?,
+        OutputFormat::Text => print_text_report(&matches, args.apply, out)?,
+        OutputFormat::Json => print_json_report(&matches, args.apply, out)?,
     }
 
     Ok(ExitCode::SUCCESS)
@@ -288,8 +301,11 @@ struct JsonReport<'a> {
     applied: bool,
 }
 
-fn print_json_report(matches: &[TransferMatch], applied: bool) -> Result<()> {
-    use std::io::Write;
+fn print_json_report<W: std::io::Write>(
+    matches: &[TransferMatch],
+    applied: bool,
+    out: &mut W,
+) -> Result<()> {
     let report = JsonReport {
         matches: matches
             .iter()
@@ -313,18 +329,16 @@ fn print_json_report(matches: &[TransferMatch], applied: bool) -> Result<()> {
             .collect(),
         applied,
     };
-    let stdout = std::io::stdout();
-    let mut handle = stdout.lock();
-    serde_json::to_writer_pretty(&mut handle, &report).context("write JSON report")?;
-    writeln!(handle).ok();
+    serde_json::to_writer_pretty(&mut *out, &report).context("write JSON report")?;
+    writeln!(out).ok();
     Ok(())
 }
 
-fn print_text_report(matches: &[TransferMatch], applied: bool) -> Result<()> {
-    use std::io::Write;
-    let stdout = std::io::stdout();
-    let mut out = stdout.lock();
-
+fn print_text_report<W: std::io::Write>(
+    matches: &[TransferMatch],
+    applied: bool,
+    out: &mut W,
+) -> Result<()> {
     if matches.is_empty() {
         writeln!(out, "No transfer pairs detected.").ok();
         return Ok(());

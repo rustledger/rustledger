@@ -160,6 +160,11 @@ pub enum Report {
 }
 
 /// Run the report command with the given arguments.
+///
+/// Builds a pager writer (for text output, unless `--no-pager`) or a plain
+/// stdout writer, then delegates the load + report dispatch to
+/// [`run_into`]. The agent-native `ag-rledger` binary instead calls
+/// [`run_with_writer`] with its own buffer so it can capture the report.
 pub fn run(
     file: &PathBuf,
     report: &Report,
@@ -167,6 +172,66 @@ pub fn run(
     format: &OutputFormat,
     no_pager: bool,
     no_cache: bool,
+) -> Result<()> {
+    // Check if file exists
+    if !file.exists() {
+        anyhow::bail!("file not found: {}", file.display());
+    }
+
+    // Create pager AFTER the existence check (don't spawn pager if the
+    // file is missing); load failures are still caught inside `run_into`.
+    let use_pager = !no_pager && matches!(format, OutputFormat::Text);
+    let pager_cmd = if use_pager {
+        crate::config::Config::load()
+            .ok()
+            .and_then(|l| l.config.output.pager)
+    } else {
+        None
+    };
+    let mut writer = if use_pager {
+        crate::pager::create_pager(pager_cmd.as_deref())
+    } else {
+        crate::pager::PagerWriter::Stdout(io::stdout().lock())
+    };
+
+    run_into(file, report, verbose, format, no_cache, &mut writer)?;
+    writer.finish();
+    Ok(())
+}
+
+/// Run the report command, writing report output to the injected `out`
+/// writer (no pager).
+///
+/// This is the writer-injectable entry point used by `ag-rledger`: it
+/// produces exactly the same report bytes `run()` would emit to a
+/// non-paged stdout, but routed to `out` so the caller can buffer them
+/// into a JSON envelope. Verbose progress and load errors still go to
+/// stderr. The on-disk parse cache stays enabled (pass `no_cache = false`
+/// for cache-on behavior).
+pub fn run_with_writer<W: io::Write>(
+    file: &PathBuf,
+    report: &Report,
+    verbose: bool,
+    format: &OutputFormat,
+    out: &mut W,
+) -> Result<()> {
+    if !file.exists() {
+        anyhow::bail!("file not found: {}", file.display());
+    }
+    run_into(file, report, verbose, format, false, out)
+}
+
+/// Shared load + report-dispatch core for [`run`] and [`run_with_writer`].
+///
+/// Writes the rendered report to `writer`. The caller owns writer setup
+/// (pager vs. plain stdout vs. agent buffer) and any post-write `finish()`.
+fn run_into<W: io::Write>(
+    file: &PathBuf,
+    report: &Report,
+    verbose: bool,
+    format: &OutputFormat,
+    no_cache: bool,
+    writer: &mut W,
 ) -> Result<()> {
     // Check if file exists
     if !file.exists() {
@@ -246,40 +311,25 @@ pub fn run(
     let balance_input: &[rustledger_core::Directive] =
         balance_view.as_deref().unwrap_or(&directives);
 
-    // Create pager AFTER loading (don't spawn pager if load fails)
-    let use_pager = !no_pager && matches!(format, OutputFormat::Text);
-    let pager_cmd = if use_pager {
-        crate::config::Config::load()
-            .ok()
-            .and_then(|l| l.config.output.pager)
-    } else {
-        None
-    };
-    let mut writer = if use_pager {
-        crate::pager::create_pager(pager_cmd.as_deref())
-    } else {
-        crate::pager::PagerWriter::Stdout(io::stdout().lock())
-    };
-
-    // Generate the requested report. Balance-computing reports get
-    // `balance_input` (the pad-expanded view when the ledger has pads,
-    // otherwise the borrowed source stream); source-faithful reports
-    // get `&directives`.
+    // Generate the requested report into the caller-provided writer.
+    // Balance-computing reports get `balance_input` (the pad-expanded
+    // view when the ledger has pads, otherwise the borrowed source
+    // stream); source-faithful reports get `&directives`.
     match report {
         Report::Balances { account } => {
-            balances::report_balances(balance_input, account.as_deref(), format, &mut writer)?;
+            balances::report_balances(balance_input, account.as_deref(), format, writer)?;
         }
         Report::Balsheet => {
-            balsheet::report_balsheet(balance_input, format, &mut writer)?;
+            balsheet::report_balsheet(balance_input, format, writer)?;
         }
         Report::Income => {
-            income::report_income(balance_input, format, &mut writer)?;
+            income::report_income(balance_input, format, writer)?;
         }
         Report::Journal { account, limit } => {
-            journal::report_journal(&directives, account.as_deref(), *limit, format, &mut writer)?;
+            journal::report_journal(&directives, account.as_deref(), *limit, format, writer)?;
         }
         Report::Holdings { account } => {
-            holdings::report_holdings(balance_input, account.as_deref(), format, &mut writer)?;
+            holdings::report_holdings(balance_input, account.as_deref(), format, writer)?;
         }
         Report::Networth {
             period,
@@ -294,24 +344,23 @@ pub fn run(
                 account.as_deref(),
                 *no_zero,
                 format,
-                &mut writer,
+                writer,
             )?;
         }
         Report::Accounts => {
-            accounts::report_accounts(&directives, format, &mut writer)?;
+            accounts::report_accounts(&directives, format, writer)?;
         }
         Report::Commodities => {
-            commodities::report_commodities(&directives, format, &mut writer)?;
+            commodities::report_commodities(&directives, format, writer)?;
         }
         Report::Stats => {
-            stats::report_stats(&directives, file, &mut writer)?;
+            stats::report_stats(&directives, file, writer)?;
         }
         Report::Prices { commodity } => {
-            prices::report_prices(&directives, commodity.as_deref(), format, &mut writer)?;
+            prices::report_prices(&directives, commodity.as_deref(), format, writer)?;
         }
     }
 
-    writer.finish();
     Ok(())
 }
 

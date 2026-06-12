@@ -47,8 +47,24 @@ pub struct Args {
     pub verbose: bool,
 }
 
-/// Run the format command with the given arguments.
+/// Run the format command with the given arguments, writing formatted
+/// output to stdout.
+///
+/// Thin wrapper over [`run_with_writer`] for the synchronous `rledger`
+/// binary; `ag-rledger` calls `run_with_writer` with a buffer.
 pub fn run(args: &Args) -> Result<ExitCode> {
+    let mut stdout = io::stdout().lock();
+    run_with_writer(args, &mut stdout)
+}
+
+/// Run the format command, writing any stdout-bound formatted output to
+/// `out`.
+///
+/// Only the default "print formatted file to stdout" path is redirected
+/// to `out`; `--in-place` and `--output <file>` still write to disk, and
+/// `--check`/`--diff`/verbose notes still go to stderr, exactly as in the
+/// original `run()`.
+pub fn run_with_writer<W: Write>(args: &Args, out: &mut W) -> Result<ExitCode> {
     if args.files.is_empty() {
         anyhow::bail!("FILE is required (or set default.file in config)");
     }
@@ -66,7 +82,7 @@ pub fn run(args: &Args) -> Result<ExitCode> {
     let mut any_needs_formatting = false;
 
     for file in &args.files {
-        let result = format_file(file, args)?;
+        let result = format_file(file, args, out)?;
         if result == ExitCode::from(1) {
             any_needs_formatting = true;
         }
@@ -79,7 +95,7 @@ pub fn run(args: &Args) -> Result<ExitCode> {
     }
 }
 
-fn format_file(file: &PathBuf, args: &Args) -> Result<ExitCode> {
+fn format_file<W: Write>(file: &PathBuf, args: &Args, out: &mut W) -> Result<ExitCode> {
     if !file.exists() {
         anyhow::bail!("file not found: {}", file.display());
     }
@@ -133,9 +149,7 @@ fn format_file(file: &PathBuf, args: &Args) -> Result<ExitCode> {
         }
         Ok(ExitCode::SUCCESS)
     } else {
-        let mut stdout = io::stdout().lock();
-        stdout
-            .write_all(formatted.as_bytes())
+        out.write_all(formatted.as_bytes())
             .context("failed to write to stdout")?;
         Ok(ExitCode::SUCCESS)
     }

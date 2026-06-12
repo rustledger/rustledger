@@ -209,37 +209,12 @@ pub fn run(args: &Args) -> Result<ExitCode> {
             eprintln!("Re-interned strings ({dedup_count} deduplicated)");
         }
 
-        // Rebuild source map from cached file list
-        let mut source_map = rustledger_loader::SourceMap::new();
-        for path in entry.file_paths() {
-            if let Ok(content) = std::fs::read_to_string(&path) {
-                source_map.add_file(path, content.into());
-            }
-        }
-
-        // Convert CachedPlugin -> Plugin (span/file_id are not meaningful from cache)
-        let plugins: Vec<rustledger_loader::Plugin> = entry
-            .plugins
-            .iter()
-            .map(|p| rustledger_loader::Plugin {
-                name: p.name.clone(),
-                config: p.config.clone(),
-                span: rustledger_parser::Span::ZERO,
-                file_id: 0,
-                force_python: p.force_python,
-            })
-            .collect();
-
-        let result = rustledger_loader::LoadResult {
-            directives: entry.directives,
-            options: entry.options.into(),
-            plugins,
-            source_map,
-            errors: Vec::new(),
-            // Build display context from cached directives
-            display_context: rustledger_core::DisplayContext::new(),
-        };
-        (result, true)
+        // Reconstruct an equivalent LoadResult (source map, plugins, and
+        // a rebuilt display context) from the cache entry. Previously
+        // open-coded here with an empty `DisplayContext`; the shared
+        // `CacheEntry::into_load_result` rebuilds the context so a cache
+        // hit is fully equivalent to a fresh parse.
+        (entry.into_load_result(), true)
     } else {
         // Load the file normally
         if args.verbose && !args.quiet {

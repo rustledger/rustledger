@@ -186,6 +186,66 @@ impl CacheEntry {
     pub fn file_paths(&self) -> Vec<PathBuf> {
         self.files.iter().map(PathBuf::from).collect()
     }
+
+    /// Reconstruct a [`LoadResult`](crate::LoadResult) equivalent to a
+    /// fresh parse of the cached source.
+    ///
+    /// Re-reads each cached source file for the source map (so error
+    /// reporting still has text), converts the cached plugin
+    /// declarations back (their span / `file_id` are not meaningful
+    /// from cache), and — crucially — rebuilds the display context from
+    /// the cached directives + options via the same inference a fresh
+    /// load uses, so a cache-hit `LoadResult` formats numbers
+    /// identically to an uncached one. Reconstructing it as an empty
+    /// `DisplayContext` (as the per-command CLI code used to) would
+    /// silently change per-currency display precision for any consumer
+    /// that reads it.
+    ///
+    /// `errors` is empty by construction: the cache is only written for
+    /// error-free, warning-free loads.
+    ///
+    /// Strings are NOT re-interned here; a caller that wants the memory
+    /// dedup should call [`crate::reintern_directives`] on
+    /// `self.directives` first (it needs `&mut`).
+    #[must_use]
+    pub fn into_load_result(self) -> crate::LoadResult {
+        let mut source_map = crate::SourceMap::new();
+        for path in self.file_paths() {
+            // Read bytes + lossy UTF-8 to match `DiskFileSystem::read`
+            // (the uncached loader path). `read_to_string` would error
+            // and silently skip a non-UTF8 source file, leaving the
+            // cache-hit source map missing text the uncached run has -
+            // an error-reporting parity gap.
+            if let Ok(bytes) = fs::read(&path) {
+                let content = String::from_utf8_lossy(&bytes).into_owned();
+                source_map.add_file(path, content.into());
+            }
+        }
+
+        let plugins: Vec<crate::Plugin> = self
+            .plugins
+            .iter()
+            .map(|p| crate::Plugin {
+                name: p.name.clone(),
+                config: p.config.clone(),
+                span: rustledger_parser::Span::ZERO,
+                file_id: 0,
+                force_python: p.force_python,
+            })
+            .collect();
+
+        let options: Options = self.options.into();
+        let display_context = crate::build_display_context(&self.directives, &options);
+
+        crate::LoadResult {
+            directives: self.directives,
+            options,
+            plugins,
+            source_map,
+            errors: Vec::new(),
+            display_context,
+        }
+    }
 }
 
 /// Magic bytes to identify cache files.

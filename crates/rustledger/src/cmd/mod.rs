@@ -12,6 +12,7 @@ pub mod doctor;
 pub mod extract_cmd;
 pub mod format;
 pub mod lint;
+pub mod loadcache;
 pub mod price;
 pub mod price_cmd;
 pub mod query;

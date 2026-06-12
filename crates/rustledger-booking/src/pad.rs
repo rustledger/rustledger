@@ -121,7 +121,9 @@ struct PendingPad {
 ///
 /// # Arguments
 ///
-/// * `directives` - The directives to process (should be sorted by date)
+/// * `directives` - The directives to process. Order does not matter:
+///   `process_pads` sorts a view of them by date internally before
+///   applying pad math.
 ///
 /// # Returns
 ///

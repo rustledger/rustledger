@@ -241,11 +241,10 @@ pub fn expand_pads(source: &str) -> Result<JsValue, JsError> {
     let pad_result = process_pads(&load.directives);
 
     let result = PadResult {
-        directives: pad_result
-            .directives
-            .iter()
-            .map(directive_to_json)
-            .collect(),
+        // The source stream, verbatim — `process_pads` no longer
+        // echoes its input back, so read it from the directives we
+        // already loaded instead of from the result.
+        directives: load.directives.iter().map(directive_to_json).collect(),
         padding_transactions: pad_result
             .padding_transactions
             .iter()

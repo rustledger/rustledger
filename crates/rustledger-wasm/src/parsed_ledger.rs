@@ -80,11 +80,10 @@ fn execute_expand_pads(directives: &[Directive]) -> Result<JsValue, JsError> {
     let pad_result = process_pads(directives);
 
     let result = PadResult {
-        directives: pad_result
-            .directives
-            .iter()
-            .map(directive_to_json)
-            .collect(),
+        // The source stream, verbatim — `process_pads` no longer
+        // echoes its input back, so read it from the directives we
+        // were handed instead of from the result.
+        directives: directives.iter().map(directive_to_json).collect(),
         padding_transactions: pad_result
             .padding_transactions
             .iter()

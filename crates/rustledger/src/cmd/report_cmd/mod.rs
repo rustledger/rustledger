@@ -198,10 +198,16 @@ pub fn run(
     //
     // The split mirrors the architectural rule documented on
     // `rustledger_loader::Ledger.directives`. `balance_view` is
-    // expensive (an O(n) clone + `process_pads` walk), so compute
-    // it only when the chosen report actually needs it. Run the
-    // check BEFORE consuming `ledger.directives` so the borrow
-    // checker is happy.
+    // expensive (an O(n) clone + `process_pads` walk + re-sort), so
+    // compute it only when the chosen report actually needs it AND
+    // the ledger actually has `pad` directives. With no pads there
+    // are no synth transactions to merge, so the pad-expanded view
+    // is byte-for-byte the source stream — building it would clone
+    // and re-sort the whole stream to produce an identical result.
+    // Most ledgers have no pads, so the balance reports fall through
+    // to the borrowed source directly (no clone). Run both checks
+    // BEFORE consuming `ledger.directives` so the borrow checker is
+    // happy.
     let needs_balance_view = matches!(
         report,
         Report::Balances { .. }
@@ -210,12 +216,24 @@ pub fn run(
             | Report::Holdings { .. }
             | Report::Networth { .. }
     );
-    let balance_view = if needs_balance_view {
+    let has_pads = needs_balance_view
+        && ledger
+            .directives
+            .iter()
+            .any(|s| matches!(s.value, rustledger_core::Directive::Pad(_)));
+    let balance_view = if has_pads {
         Some(ledger.balance_view())
     } else {
         None
     };
     let directives: Vec<_> = ledger.directives.into_iter().map(|s| s.value).collect();
+
+    // Balance-computing reports read the pad-expanded view when one
+    // was built (the ledger has pads), otherwise the source stream
+    // directly. `unwrap_or` makes the no-pad fast path explicit: same
+    // directives, no clone.
+    let balance_input: &[rustledger_core::Directive] =
+        balance_view.as_deref().unwrap_or(&directives);
 
     // Create pager AFTER loading (don't spawn pager if load fails)
     let use_pager = !no_pager && matches!(format, OutputFormat::Text);
@@ -236,45 +254,19 @@ pub fn run(
     // `balance_view.as_ref().expect("balance_view computed above when report needs it")`; source-faithful reports get `&directives`.
     match report {
         Report::Balances { account } => {
-            balances::report_balances(
-                balance_view
-                    .as_ref()
-                    .expect("balance_view computed above when report needs it"),
-                account.as_deref(),
-                format,
-                &mut writer,
-            )?;
+            balances::report_balances(balance_input, account.as_deref(), format, &mut writer)?;
         }
         Report::Balsheet => {
-            balsheet::report_balsheet(
-                balance_view
-                    .as_ref()
-                    .expect("balance_view computed above when report needs it"),
-                format,
-                &mut writer,
-            )?;
+            balsheet::report_balsheet(balance_input, format, &mut writer)?;
         }
         Report::Income => {
-            income::report_income(
-                balance_view
-                    .as_ref()
-                    .expect("balance_view computed above when report needs it"),
-                format,
-                &mut writer,
-            )?;
+            income::report_income(balance_input, format, &mut writer)?;
         }
         Report::Journal { account, limit } => {
             journal::report_journal(&directives, account.as_deref(), *limit, format, &mut writer)?;
         }
         Report::Holdings { account } => {
-            holdings::report_holdings(
-                balance_view
-                    .as_ref()
-                    .expect("balance_view computed above when report needs it"),
-                account.as_deref(),
-                format,
-                &mut writer,
-            )?;
+            holdings::report_holdings(balance_input, account.as_deref(), format, &mut writer)?;
         }
         Report::Networth {
             period,
@@ -283,9 +275,7 @@ pub fn run(
             no_zero,
         } => {
             networth::report_networth(
-                balance_view
-                    .as_ref()
-                    .expect("balance_view computed above when report needs it"),
+                balance_input,
                 period,
                 currency.as_deref(),
                 account.as_deref(),

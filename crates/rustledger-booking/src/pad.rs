@@ -56,14 +56,16 @@ pub fn is_synthesized_pad(txn: &Transaction) -> bool {
 }
 
 /// Result of processing pad directives.
+///
+/// This holds only what `process_pads` *derives* from the input: the
+/// synthesized padding transactions and any errors. It deliberately
+/// does NOT echo the input directives back — the caller already owns
+/// that slice, so cloning it into the result was pure waste on every
+/// call (a full deep-clone of the directive stream the caller then
+/// discarded). Callers that want the source merged with the synth
+/// transactions for balance math should use [`merge_with_padding`].
 #[derive(Debug, Clone)]
 pub struct PadResult {
-    /// The original input directives, verbatim. Pads are NOT
-    /// removed; the field is the same slice the caller handed in.
-    /// Callers that want the source merged with synthesized pad
-    /// transactions for balance math should use
-    /// [`merge_with_padding`].
-    pub directives: Vec<Directive>,
     /// Synthetic padding transactions generated.
     pub padding_transactions: Vec<Transaction>,
     /// Any errors encountered during pad processing.
@@ -116,7 +118,6 @@ struct PendingPad {
 /// 2. When a pad is encountered, stores it as pending
 /// 3. When a balance assertion is encountered for an account with a pending pad,
 ///    generates a synthetic transaction to make the balance match
-/// 4. Returns the directives with synthetic transactions inserted
 ///
 /// # Arguments
 ///
@@ -125,9 +126,12 @@ struct PendingPad {
 /// # Returns
 ///
 /// A `PadResult` containing:
-/// - The original directives (with pads preserved for reference)
-/// - Synthetic padding transactions
+/// - The synthetic padding transactions derived from the input
 /// - Any errors encountered
+///
+/// The input directives are NOT echoed back in the result; the caller
+/// already owns them. To get the source merged with the synth
+/// transactions, use [`merge_with_padding`].
 pub fn process_pads(directives: &[Directive]) -> PadResult {
     let num_directives = directives.len();
     let mut inventories: HashMap<rustledger_core::Account, Inventory> =
@@ -252,7 +256,6 @@ pub fn process_pads(directives: &[Directive]) -> PadResult {
     }
 
     PadResult {
-        directives: directives.to_vec(),
         padding_transactions,
         errors,
     }

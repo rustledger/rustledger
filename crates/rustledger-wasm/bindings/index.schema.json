@@ -187,6 +187,16 @@
           "const": "text",
           "description": "A text/string value.",
           "type": "string"
+        },
+        {
+          "const": "tag",
+          "description": "A tag (after `#`).",
+          "type": "string"
+        },
+        {
+          "const": "link",
+          "description": "A link (after `^`).",
+          "type": "string"
         }
       ]
     },

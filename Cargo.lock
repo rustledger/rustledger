@@ -3890,6 +3890,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustledger-completion"
+version = "0.15.0"
+
+[[package]]
 name = "rustledger-core"
 version = "0.15.0"
 dependencies = [
@@ -3984,6 +3988,7 @@ dependencies = [
  "ropey",
  "rust_decimal",
  "rustledger-booking",
+ "rustledger-completion",
  "rustledger-core",
  "rustledger-loader",
  "rustledger-parser",
@@ -4117,6 +4122,7 @@ dependencies = [
  "js-sys",
  "rkyv 0.8.16",
  "rustledger-booking",
+ "rustledger-completion",
  "rustledger-core",
  "rustledger-loader",
  "rustledger-parser",

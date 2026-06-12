@@ -5,47 +5,9 @@ use rustledger_parser::ParseResult;
 
 use crate::types::EditorRange;
 
-/// Standard Beancount account types.
-pub const ACCOUNT_TYPES: &[&str] = &["Assets", "Liabilities", "Equity", "Income", "Expenses"];
-
-/// Standard Beancount directives.
-pub const DIRECTIVES: &[(&str, &str)] = &[
-    ("open", "Open an account"),
-    ("close", "Close an account"),
-    ("commodity", "Define a commodity/currency"),
-    ("balance", "Assert account balance"),
-    ("pad", "Pad account to target"),
-    ("event", "Record an event"),
-    ("query", "Define a named query"),
-    ("note", "Add a note to an account"),
-    ("document", "Link a document"),
-    ("custom", "Custom directive"),
-    ("price", "Record a price"),
-    ("txn", "Transaction (complete)"),
-    ("*", "Transaction (complete)"),
-    ("!", "Transaction (incomplete)"),
-];
-
 /// Get a specific line from source.
 pub fn get_line(source: &str, line_num: usize) -> &str {
     source.lines().nth(line_num).unwrap_or("")
-}
-
-/// Check if a string looks like a date (YYYY-MM-DD).
-pub fn is_date_like(s: &str) -> bool {
-    if s.len() != 10 {
-        return false;
-    }
-    let chars: Vec<char> = s.chars().collect();
-    chars[4] == '-'
-        && chars[7] == '-'
-        && chars.iter().enumerate().all(|(i, c)| {
-            if i == 4 || i == 7 {
-                *c == '-'
-            } else {
-                c.is_ascii_digit()
-            }
-        })
 }
 
 /// Get the word at a given position in the source.
@@ -112,6 +74,19 @@ pub fn extract_currencies(parse_result: &ParseResult) -> Vec<String> {
 /// Extract payees from parse result.
 pub fn extract_payees(parse_result: &ParseResult) -> Vec<String> {
     rustledger_core::extract_payees_iter(parse_result.directives.iter().map(|s| &s.value))
+}
+
+/// Extract tags from parse result. Tag text comes back without the
+/// leading `#`, the form completion inserts after the already-typed
+/// sigil.
+pub fn extract_tags(parse_result: &ParseResult) -> Vec<String> {
+    rustledger_core::extract_tags_iter(parse_result.directives.iter().map(|s| &s.value))
+}
+
+/// Extract links from parse result. Like tags, link text comes back
+/// without the leading `^`.
+pub fn extract_links(parse_result: &ParseResult) -> Vec<String> {
+    rustledger_core::extract_links_iter(parse_result.directives.iter().map(|s| &s.value))
 }
 
 /// Count how many times an account is used in postings.
@@ -239,16 +214,6 @@ mod tests {
         let word = get_word_at_position(source, 0, 5);
         // Position 5 is 'o' in "hello", still part of word
         assert_eq!(word, Some("hello".to_string()));
-    }
-
-    #[test]
-    fn test_is_date_like() {
-        assert!(is_date_like("2024-01-15"));
-        assert!(is_date_like("1999-12-31"));
-        assert!(!is_date_like("2024-1-15")); // Wrong format (too short)
-        assert!(!is_date_like("not-a-date"));
-        // Note: is_date_like only checks format, not validity
-        assert!(is_date_like("2024-13-99")); // Pattern matches
     }
 
     #[test]

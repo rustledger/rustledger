@@ -98,7 +98,9 @@ export type CompletionKind =
   | "currency"
   | "payee"
   | "date"
-  | "text";
+  | "text"
+  | "tag"
+  | "link";
 
 /**
  * Result of BQL completion request.

@@ -3,7 +3,9 @@
 use rustledger_core::Directive;
 use rustledger_parser::ParseResult;
 
-use super::helpers::{extract_accounts, extract_currencies, extract_payees};
+use super::helpers::{
+    extract_accounts, extract_currencies, extract_links, extract_payees, extract_tags,
+};
 
 /// Cached data for editor features to avoid repeated extraction.
 ///
@@ -17,6 +19,10 @@ pub struct EditorCache {
     pub currencies: Vec<String>,
     /// All unique payees in the document.
     pub payees: Vec<String>,
+    /// All unique tags in the document (without the leading `#`).
+    pub tags: Vec<String>,
+    /// All unique links in the document (without the leading `^`).
+    pub links: Vec<String>,
     /// Line index for efficient offset-to-position conversion.
     pub line_index: LineIndex,
 }
@@ -28,6 +34,8 @@ impl EditorCache {
             accounts: extract_accounts(parse_result),
             currencies: extract_currencies(parse_result),
             payees: extract_payees(parse_result),
+            tags: extract_tags(parse_result),
+            links: extract_links(parse_result),
             line_index: LineIndex::new(source),
         }
     }
@@ -42,6 +50,8 @@ impl EditorCache {
             accounts: rustledger_core::extract_accounts(directives),
             currencies: rustledger_core::extract_currencies(directives),
             payees: rustledger_core::extract_payees(directives),
+            tags: rustledger_core::extract_tags(directives),
+            links: rustledger_core::extract_links(directives),
             line_index: LineIndex::empty(),
         }
     }

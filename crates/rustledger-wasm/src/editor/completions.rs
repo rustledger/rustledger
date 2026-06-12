@@ -1,14 +1,31 @@
 //! Completion support for the editor.
+//!
+//! Detection and candidate logic live in the editor-agnostic
+//! `rustledger-completion` crate (issue #1319). This module is a thin
+//! adapter: it maps the WASM character offset to a byte offset and
+//! classifies the context via the shared crate, then maps the neutral
+//! [`rustledger_completion::CompletionCandidate`] results into
+//! [`EditorCompletion`] items (preserving the existing WASM item shapes
+//! and gaining tag/link completion).
 
 #[cfg(test)]
 use rustledger_parser::ParseResult;
 
+use rustledger_completion::{
+    CompletionCandidate, CompletionKind as SharedKind, PositionEncoding, classify_context,
+    offset_to_byte,
+};
+
 use crate::types::{CompletionKind, EditorCompletion, EditorCompletionResult};
 
-use super::helpers::{ACCOUNT_TYPES, DIRECTIVES, get_line, is_date_like};
+use super::helpers::get_line;
 use super::line_index::EditorCache;
 
 /// Completion context detected from cursor position.
+///
+/// This mirrors [`rustledger_completion::CompletionContext`] (the shared
+/// superset) but is a local type so it can carry the editor's `Display`
+/// representation used in [`EditorCompletionResult::context`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompletionContext {
     /// At the start of a line (expecting date or directive).
@@ -26,8 +43,29 @@ pub enum CompletionContext {
     ExpectingCurrency,
     /// Inside a string (payee/narration).
     InsideString,
+    /// Typing a tag (after `#`).
+    Tag,
+    /// Typing a link (after `^`).
+    Link,
     /// Unknown context.
     Unknown,
+}
+
+impl From<rustledger_completion::CompletionContext> for CompletionContext {
+    fn from(ctx: rustledger_completion::CompletionContext) -> Self {
+        use rustledger_completion::CompletionContext as S;
+        match ctx {
+            S::LineStart => Self::LineStart,
+            S::AfterDate => Self::AfterDate,
+            S::ExpectingAccount => Self::ExpectingAccount,
+            S::AccountSegment { prefix } => Self::AccountSegment { prefix },
+            S::ExpectingCurrency => Self::ExpectingCurrency,
+            S::InsideString => Self::InsideString,
+            S::Tag => Self::Tag,
+            S::Link => Self::Link,
+            S::Unknown => Self::Unknown,
+        }
+    }
 }
 
 impl std::fmt::Display for CompletionContext {
@@ -39,8 +77,62 @@ impl std::fmt::Display for CompletionContext {
             Self::AccountSegment { prefix } => write!(f, "account_segment:{prefix}"),
             Self::ExpectingCurrency => write!(f, "expecting_currency"),
             Self::InsideString => write!(f, "inside_string"),
+            Self::Tag => write!(f, "tag"),
+            Self::Link => write!(f, "link"),
             Self::Unknown => write!(f, "unknown"),
         }
+    }
+}
+
+/// Map a shared [`SharedKind`] to the WASM [`CompletionKind`],
+/// reproducing the kinds the previous hand-written builders emitted.
+fn editor_kind(kind: SharedKind) -> CompletionKind {
+    match kind {
+        SharedKind::Date => CompletionKind::Date,
+        SharedKind::Directive => CompletionKind::Keyword,
+        // Account types and folder segments were both `AccountSegment`.
+        SharedKind::AccountType | SharedKind::AccountSegmentFolder => {
+            CompletionKind::AccountSegment
+        }
+        SharedKind::Account => CompletionKind::Account,
+        SharedKind::Currency => CompletionKind::Currency,
+        SharedKind::Payee => CompletionKind::Payee,
+        SharedKind::Tag => CompletionKind::Tag,
+        SharedKind::Link => CompletionKind::Link,
+    }
+}
+
+/// Map a neutral [`CompletionCandidate`] into an [`EditorCompletion`],
+/// reproducing the existing WASM item shapes for the prior kinds.
+fn to_completion(candidate: CompletionCandidate) -> EditorCompletion {
+    let CompletionCandidate {
+        label,
+        insert_text,
+        kind,
+        detail,
+    } = candidate;
+
+    // The previous WASM builders left `insert_text` as `None` for the
+    // account-type / known-account / currency / payee items (the label
+    // is inserted verbatim). The shared candidate sets
+    // `insert_text == label` for those, so suppress it to match.
+    let insert_text = match kind {
+        SharedKind::AccountType
+        | SharedKind::Account
+        | SharedKind::Currency
+        | SharedKind::Payee => None,
+        SharedKind::Date
+        | SharedKind::Directive
+        | SharedKind::AccountSegmentFolder
+        | SharedKind::Tag
+        | SharedKind::Link => Some(insert_text),
+    };
+
+    EditorCompletion {
+        label,
+        kind: editor_kind(kind),
+        detail,
+        insert_text,
     }
 }
 
@@ -52,17 +144,28 @@ pub fn get_completions_cached(
     cache: &EditorCache,
 ) -> EditorCompletionResult {
     let context = detect_context(source, line, character);
-    let completions = match &context {
-        CompletionContext::LineStart => complete_line_start(),
-        CompletionContext::AfterDate => complete_after_date(),
-        CompletionContext::ExpectingAccount => complete_account_start_cached(&cache.accounts),
-        CompletionContext::AccountSegment { prefix } => {
-            complete_account_segment_cached(prefix, &cache.accounts)
+    let candidates = match &context {
+        CompletionContext::LineStart => {
+            let today = jiff::Zoned::now().date().to_string();
+            rustledger_completion::line_start_candidates(&today)
         }
-        CompletionContext::ExpectingCurrency => complete_currency_cached(&cache.currencies),
-        CompletionContext::InsideString => complete_payee_cached(&cache.payees),
+        CompletionContext::AfterDate => rustledger_completion::after_date_candidates(),
+        CompletionContext::ExpectingAccount => {
+            rustledger_completion::account_start_candidates(&cache.accounts)
+        }
+        CompletionContext::AccountSegment { prefix } => {
+            rustledger_completion::account_segment_candidates(prefix, &cache.accounts)
+        }
+        CompletionContext::ExpectingCurrency => {
+            rustledger_completion::currency_candidates(&cache.currencies)
+        }
+        CompletionContext::InsideString => rustledger_completion::payee_candidates(&cache.payees),
+        CompletionContext::Tag => rustledger_completion::tag_candidates(&cache.tags),
+        CompletionContext::Link => rustledger_completion::link_candidates(&cache.links),
         CompletionContext::Unknown => Vec::new(),
     };
+
+    let completions = candidates.into_iter().map(to_completion).collect();
 
     EditorCompletionResult {
         completions,
@@ -83,219 +186,15 @@ pub fn get_completions(
 }
 
 /// Detect the completion context from cursor position.
+///
+/// `character` is a character offset (not a byte offset); the shared
+/// `offset_to_byte` maps it to a char-boundary byte offset (preserving
+/// the #1289 fix), then `classify_context` classifies the text before
+/// the cursor.
 pub fn detect_context(source: &str, line: u32, character: u32) -> CompletionContext {
     let line_text = get_line(source, line as usize);
-    // `character` is a character offset, not a byte offset. Slicing
-    // `line_text` by it directly panics when a multi-byte character
-    // (e.g. a Korean Hangul syllable) sits before the cursor, because
-    // the byte index lands mid-character — in the WASM build that
-    // surfaces as an `unreachable` trap and kills completion (#1289).
-    // Map the character offset to a char-boundary byte offset; clamp
-    // past end-of-line to the line length.
-    let col = character as usize;
-    let byte_col = line_text
-        .char_indices()
-        .nth(col)
-        .map_or(line_text.len(), |(b, _)| b);
-    let before_cursor = &line_text[..byte_col];
-
-    let trimmed = before_cursor.trim_start();
-
-    // Check if we're at the start of a posting (indented line)
-    if before_cursor.starts_with("  ") || before_cursor.starts_with('\t') {
-        if trimmed.is_empty() {
-            return CompletionContext::ExpectingAccount;
-        }
-
-        let posting_content = trimmed;
-
-        // Check if there's already an account (contains colon and space after)
-        if posting_content.contains(':') && posting_content.contains(' ') {
-            let parts: Vec<&str> = posting_content.split_whitespace().collect();
-            if parts.len() >= 2
-                && let Some(last) = parts.last()
-                && (last.parse::<f64>().is_ok() || last.ends_with('.'))
-            {
-                return CompletionContext::ExpectingCurrency;
-            }
-            return CompletionContext::Unknown;
-        }
-
-        // Check if typing an account segment
-        if let Some(colon_pos) = posting_content.rfind(':') {
-            let prefix = &posting_content[..=colon_pos];
-            return CompletionContext::AccountSegment {
-                prefix: prefix.to_string(),
-            };
-        }
-
-        return CompletionContext::ExpectingAccount;
-    }
-
-    // Empty or whitespace only at line start (not indented)
-    if trimmed.is_empty() {
-        return CompletionContext::LineStart;
-    }
-
-    // Check for date at line start (YYYY-MM-DD pattern). Guard the
-    // 10-byte split on a char boundary: a `YYYY-MM-DD` prefix is all
-    // ASCII, so if byte 10 lands mid-character the line can't be a
-    // date, and slicing there would panic on multi-byte input.
-    if trimmed.len() >= 10 && trimmed.is_char_boundary(10) && is_date_like(&trimmed[..10]) {
-        let after_date = trimmed[10..].trim_start();
-        if after_date.is_empty() {
-            return CompletionContext::AfterDate;
-        }
-
-        // Check for directive keywords
-        for (directive, _) in DIRECTIVES {
-            if let Some(rest) = after_date.strip_prefix(directive) {
-                let after_directive = rest.trim_start();
-                if after_directive.is_empty() || !after_directive.contains(' ') {
-                    match *directive {
-                        "open" | "close" | "balance" | "pad" | "note" | "document" => {
-                            if let Some(colon_pos) = after_directive.rfind(':') {
-                                return CompletionContext::AccountSegment {
-                                    prefix: after_directive[..=colon_pos].to_string(),
-                                };
-                            }
-                            return CompletionContext::ExpectingAccount;
-                        }
-                        _ => return CompletionContext::Unknown,
-                    }
-                }
-            }
-        }
-
-        return CompletionContext::AfterDate;
-    }
-
-    // Check if inside a quoted string
-    let quote_count = before_cursor.chars().filter(|&c| c == '"').count();
-    if quote_count % 2 == 1 {
-        return CompletionContext::InsideString;
-    }
-
-    CompletionContext::Unknown
-}
-
-/// Complete at line start (date template).
-pub fn complete_line_start() -> Vec<EditorCompletion> {
-    let today = jiff::Zoned::now().date().to_string();
-    vec![EditorCompletion {
-        label: today.clone(),
-        kind: CompletionKind::Date,
-        detail: Some("Today's date".to_string()),
-        insert_text: Some(format!("{today} ")),
-    }]
-}
-
-/// Complete after a date (directive keywords).
-pub fn complete_after_date() -> Vec<EditorCompletion> {
-    DIRECTIVES
-        .iter()
-        .map(|(name, description)| EditorCompletion {
-            label: (*name).to_string(),
-            kind: CompletionKind::Keyword,
-            detail: Some((*description).to_string()),
-            insert_text: Some(format!("{name} ")),
-        })
-        .collect()
-}
-
-/// Complete account name start (account types) - cached version.
-pub fn complete_account_start_cached(accounts: &[String]) -> Vec<EditorCompletion> {
-    let mut items: Vec<EditorCompletion> = ACCOUNT_TYPES
-        .iter()
-        .map(|&t| EditorCompletion {
-            label: format!("{t}:"),
-            kind: CompletionKind::AccountSegment,
-            detail: Some(format!("{t} account type")),
-            insert_text: None,
-        })
-        .collect();
-
-    // Also offer known accounts from the file
-    for account in accounts.iter().take(20) {
-        items.push(EditorCompletion {
-            label: account.clone(),
-            kind: CompletionKind::Account,
-            detail: Some("Known account".to_string()),
-            insert_text: None,
-        });
-    }
-
-    items
-}
-
-/// Complete account segment after colon - cached version.
-pub fn complete_account_segment_cached(prefix: &str, accounts: &[String]) -> Vec<EditorCompletion> {
-    let matching: Vec<_> = accounts.iter().filter(|a| a.starts_with(prefix)).collect();
-
-    let mut segments: Vec<String> = matching
-        .iter()
-        .filter_map(|a| {
-            let after_prefix = &a[prefix.len()..];
-            let next_segment = after_prefix.split(':').next()?;
-            if next_segment.is_empty() {
-                None
-            } else {
-                Some(next_segment.to_string())
-            }
-        })
-        .collect();
-
-    segments.sort();
-    segments.dedup();
-
-    segments
-        .into_iter()
-        .map(|seg| {
-            let full = format!("{prefix}{seg}");
-            let has_more = matching.iter().any(|a| a.starts_with(&format!("{full}:")));
-            EditorCompletion {
-                label: seg.clone(),
-                kind: if has_more {
-                    CompletionKind::AccountSegment
-                } else {
-                    CompletionKind::Account
-                },
-                detail: Some(if has_more {
-                    "Account segment".to_string()
-                } else {
-                    "Account".to_string()
-                }),
-                insert_text: Some(if has_more { format!("{seg}:") } else { seg }),
-            }
-        })
-        .collect()
-}
-
-/// Complete currency after amount - cached version.
-pub fn complete_currency_cached(currencies: &[String]) -> Vec<EditorCompletion> {
-    currencies
-        .iter()
-        .map(|c| EditorCompletion {
-            label: c.clone(),
-            kind: CompletionKind::Currency,
-            detail: Some("Currency".to_string()),
-            insert_text: None,
-        })
-        .collect()
-}
-
-/// Complete payee/narration inside string - cached version.
-pub fn complete_payee_cached(payees: &[String]) -> Vec<EditorCompletion> {
-    payees
-        .iter()
-        .take(20)
-        .map(|p| EditorCompletion {
-            label: p.clone(),
-            kind: CompletionKind::Payee,
-            detail: Some("Known payee".to_string()),
-            insert_text: None,
-        })
-        .collect()
+    let byte_col = offset_to_byte(line_text, character as usize, PositionEncoding::Char);
+    classify_context(&line_text[..byte_col]).into()
 }
 
 #[cfg(test)]
@@ -442,7 +341,7 @@ mod tests {
 
     #[test]
     fn test_complete_after_date_returns_all_directives() {
-        let completions = complete_after_date();
+        let completions = rustledger_completion::after_date_candidates();
         assert!(!completions.is_empty());
 
         let labels: Vec<_> = completions.iter().map(|c| c.label.as_str()).collect();
@@ -462,10 +361,80 @@ mod tests {
             "Expenses:Food".to_string(),
         ];
 
-        let completions = complete_account_segment_cached("Assets:Bank:", &accounts);
+        let completions =
+            rustledger_completion::account_segment_candidates("Assets:Bank:", &accounts);
         assert_eq!(completions.len(), 2);
         let labels: Vec<_> = completions.iter().map(|c| c.label.as_str()).collect();
         assert!(labels.contains(&"Checking"));
         assert!(labels.contains(&"Savings"));
+    }
+
+    /// WASM now offers tag completion (issue #1319): typing `#` on a
+    /// transaction header yields the known tags, with the sigil kept in
+    /// the label but dropped from the inserted text.
+    #[test]
+    fn test_tag_completion_offered() {
+        let source = "\
+2024-01-01 open Assets:Bank:Checking USD
+2024-01-01 open Expenses:Stuff USD
+
+2024-01-15 * \"Central Perk\" #coffee #morning
+  Assets:Bank:Checking  -5 USD
+  Expenses:Stuff
+";
+        let result = parse(source);
+        // Cursor right after a fresh `#` on a new transaction header.
+        let header = "2024-02-01 * \"x\" #";
+        let mut doc = String::from(source);
+        doc.push_str(header);
+        let line = doc.lines().count() as u32 - 1;
+        let character = header.chars().count() as u32;
+        let completions = get_completions(&doc, line, character, &result);
+
+        assert_eq!(completions.context, "tag");
+        let labels: Vec<_> = completions
+            .completions
+            .iter()
+            .map(|c| c.label.as_str())
+            .collect();
+        assert!(labels.contains(&"#coffee"), "labels = {labels:?}");
+        assert!(labels.contains(&"#morning"), "labels = {labels:?}");
+
+        let coffee = completions
+            .completions
+            .iter()
+            .find(|c| c.label == "#coffee")
+            .unwrap();
+        assert_eq!(coffee.kind, CompletionKind::Tag);
+        assert_eq!(coffee.insert_text.as_deref(), Some("coffee"));
+    }
+
+    /// WASM now offers link completion (issue #1319).
+    #[test]
+    fn test_link_completion_offered() {
+        let source = "\
+2024-01-01 open Assets:Bank:Checking USD
+2024-01-01 open Expenses:Stuff USD
+
+2024-01-15 * \"Flight\" ^trip-2024
+  Assets:Bank:Checking  -5 USD
+  Expenses:Stuff
+";
+        let result = parse(source);
+        let header = "2024-02-01 * \"x\" ^";
+        let mut doc = String::from(source);
+        doc.push_str(header);
+        let line = doc.lines().count() as u32 - 1;
+        let character = header.chars().count() as u32;
+        let completions = get_completions(&doc, line, character, &result);
+
+        assert_eq!(completions.context, "link");
+        let trip = completions
+            .completions
+            .iter()
+            .find(|c| c.label == "^trip-2024")
+            .expect("trip-2024 link should be offered");
+        assert_eq!(trip.kind, CompletionKind::Link);
+        assert_eq!(trip.insert_text.as_deref(), Some("trip-2024"));
     }
 }

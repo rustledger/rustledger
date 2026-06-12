@@ -1,0 +1,21 @@
+[package]
+name = "rustledger-completion"
+description = "Editor-agnostic completion logic for Beancount sources (shared by LSP and WASM)"
+version = "0.15.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+authors.workspace = true
+readme = "README.md"
+
+[lib]
+bench = false
+
+[dependencies]
+
+[lints]
+workspace = true

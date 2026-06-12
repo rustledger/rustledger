@@ -879,6 +879,10 @@ pub enum CompletionKind {
     Date,
     /// A text/string value.
     Text,
+    /// A tag (after `#`).
+    Tag,
+    /// A link (after `^`).
+    Link,
 }
 
 /// Result of a completion request.

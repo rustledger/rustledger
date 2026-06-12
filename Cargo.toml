@@ -7,6 +7,7 @@ members = [
   "crates/rustledger-booking",
   "crates/rustledger-validate",
   "crates/rustledger-query",
+  "crates/rustledger-completion",
   "crates/rustledger-plugin",
   "crates/rustledger-plugin-types",
   "crates/rustledger-importer",
@@ -25,6 +26,7 @@ default-members = [
   "crates/rustledger-booking",
   "crates/rustledger-validate",
   "crates/rustledger-query",
+  "crates/rustledger-completion",
   "crates/rustledger-plugin",
   "crates/rustledger-plugin-types",
   "crates/rustledger-importer",
@@ -187,6 +189,7 @@ rustledger-loader = { version = "0.15.0", path = "crates/rustledger-loader" }
 rustledger-booking = { version = "0.15.0", path = "crates/rustledger-booking" }
 rustledger-validate = { version = "0.15.0", path = "crates/rustledger-validate" }
 rustledger-query = { version = "0.15.0", path = "crates/rustledger-query" }
+rustledger-completion = { version = "0.15.0", path = "crates/rustledger-completion" }
 rustledger-plugin = { version = "0.15.0", path = "crates/rustledger-plugin", default-features = false }
 rustledger-plugin-types = { version = "0.15.0", path = "crates/rustledger-plugin-types" }
 rustledger-importer = { version = "0.15.0", path = "crates/rustledger-importer" }

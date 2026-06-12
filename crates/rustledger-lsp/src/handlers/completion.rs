@@ -5,60 +5,25 @@
 //! - Currencies (after amounts)
 //! - Directives (after dates)
 //! - Payees and narrations (in transaction headers)
+//! - Tags (`#`) and links (`^`) on transaction headers
+//!
+//! The detection and candidate logic lives in the editor-agnostic
+//! `rustledger-completion` crate (issue #1319). This module is a thin
+//! adapter: it gathers the live account/currency/payee/tag/link strings
+//! from the parse result and ledger state, calls the shared candidate
+//! algorithms, and maps the neutral [`CompletionCandidate`] results into
+//! `lsp_types::CompletionItem` (kind mapping + resolve `uri` data).
 
 use crate::ledger_state::LedgerState;
 use lsp_types::{
     CompletionItem, CompletionItemKind, CompletionParams, CompletionResponse, Position,
 };
+use rustledger_completion::{CompletionCandidate, CompletionKind};
 use rustledger_parser::ParseResult;
 
-/// Standard Beancount account types.
-const ACCOUNT_TYPES: &[&str] = &["Assets", "Liabilities", "Equity", "Income", "Expenses"];
-
-/// Standard Beancount directives.
-const DIRECTIVES: &[&str] = &[
-    "open",
-    "close",
-    "commodity",
-    "balance",
-    "pad",
-    "event",
-    "query",
-    "note",
-    "document",
-    "custom",
-    "price",
-    "txn",
-    "*",
-    "!",
-];
-
-/// Completion context detected from cursor position.
-#[derive(Debug, Clone, PartialEq)]
-pub enum CompletionContext {
-    /// At the start of a line (expecting date or directive)
-    LineStart,
-    /// After a date (expecting directive keyword or flag)
-    AfterDate,
-    /// After directive keyword (expecting account)
-    ExpectingAccount,
-    /// Inside an account name (after colon)
-    AccountSegment {
-        /// The prefix typed so far (e.g., "Assets:")
-        prefix: String,
-    },
-    /// After an amount (expecting currency)
-    ExpectingCurrency,
-    /// Inside a string (payee/narration)
-    InsideString,
-    /// Typing a tag (after `#`) on a transaction header or in
-    /// `pushtag`/`poptag`.
-    Tag,
-    /// Typing a link (after `^`) on a transaction header.
-    Link,
-    /// Unknown context
-    Unknown,
-}
+/// Re-export of the shared completion context so existing call sites and
+/// tests keep working against `handlers::completion::CompletionContext`.
+pub use rustledger_completion::CompletionContext;
 
 /// Handle a completion request.
 ///
@@ -106,8 +71,8 @@ pub fn handle_completion(
         // ledger", this log line tells you the response size without
         // needing to instrument from scratch. Cheap because completion
         // requests are user-driven, not hot-loop. The context is
-        // already logged above (line ~72) so the size alone here is
-        // enough to correlate.
+        // already logged above so the size alone here is enough to
+        // correlate.
         tracing::debug!("Completion response: {} items", items.len());
         Some(CompletionResponse::Array(items))
     }
@@ -116,143 +81,31 @@ pub fn handle_completion(
 /// Detect the completion context from cursor position.
 ///
 /// `position.character` is interpreted in the negotiated `encoding`
-/// — UTF-8 byte offset or UTF-16 code-unit count. Walking `chars()`
-/// once accumulates the encoded length so the conversion is correct
-/// under either negotiation.
+/// — UTF-8 byte offset or UTF-16 code-unit count. The shared
+/// `offset_to_byte` maps it to a char-boundary byte offset; the shared
+/// `classify_context` then classifies the text before the cursor.
 fn detect_context(
     source: &str,
     position: Position,
     encoding: super::utils::PositionEncoding,
 ) -> CompletionContext {
-    use super::utils::PositionEncoding;
     let line = get_line(source, position.line as usize);
+    let byte_col = rustledger_completion::offset_to_byte(
+        line,
+        position.character as usize,
+        shared_encoding(encoding),
+    );
+    rustledger_completion::classify_context(&line[..byte_col])
+}
 
-    // Map `position.character` (in the negotiated encoding) to a byte
-    // offset into `line`. Walks chars once.
-    let col = position.character as usize;
-    let mut acc = 0usize;
-    let mut byte_col = 0usize;
-    for ch in line.chars() {
-        if acc >= col {
-            break;
-        }
-        let u = match encoding {
-            PositionEncoding::Utf8 => ch.len_utf8(),
-            PositionEncoding::Utf16 => ch.len_utf16(),
-        };
-        if acc + u > col {
-            // Position lands mid-char — bail at the start of this char.
-            break;
-        }
-        acc += u;
-        byte_col += ch.len_utf8();
+/// Map the LSP's `PositionEncoding` to the shared crate's.
+fn shared_encoding(
+    encoding: super::utils::PositionEncoding,
+) -> rustledger_completion::PositionEncoding {
+    match encoding {
+        super::utils::PositionEncoding::Utf8 => rustledger_completion::PositionEncoding::Utf8,
+        super::utils::PositionEncoding::Utf16 => rustledger_completion::PositionEncoding::Utf16,
     }
-    let before_cursor = &line[..byte_col];
-
-    let trimmed = before_cursor.trim_start();
-
-    // Check if we're at the start of a posting (indented line)
-    // This must come before the empty check since an indented line
-    // with just spaces should be expecting an account.
-    if before_cursor.starts_with("  ") || before_cursor.starts_with('\t') {
-        // Empty indented line means expecting an account
-        if trimmed.is_empty() {
-            return CompletionContext::ExpectingAccount;
-        }
-        // Inside a posting - could be account or amount
-        let posting_content = trimmed;
-
-        // Check if there's already an account (contains colon and space after)
-        if posting_content.contains(':') && posting_content.contains(' ') {
-            // After account, might be expecting amount or currency
-            let parts: Vec<&str> = posting_content.split_whitespace().collect();
-            if parts.len() >= 2 {
-                // Check if last part looks like a number
-                if let Some(last) = parts.last()
-                    && (last.parse::<f64>().is_ok() || last.ends_with('.'))
-                {
-                    return CompletionContext::ExpectingCurrency;
-                }
-            }
-            return CompletionContext::Unknown;
-        }
-
-        // Check if typing an account segment
-        if let Some(colon_pos) = posting_content.rfind(':') {
-            let prefix = &posting_content[..colon_pos + 1];
-            return CompletionContext::AccountSegment {
-                prefix: prefix.to_string(),
-            };
-        }
-
-        // Starting an account name
-        return CompletionContext::ExpectingAccount;
-    }
-
-    // Tag (`#tag`) / link (`^link`) completion. Tags and links appear
-    // on transaction header lines (after the date/flag/strings) and in
-    // `pushtag`/`poptag` directives. We trigger when the token directly
-    // under the cursor begins with the sigil, but only when the cursor
-    // is in *code* position: not inside a string literal (a `#` in a
-    // narration is just text) and not after a comment marker. The
-    // cursor must also sit at the end of the token (no trailing
-    // whitespace), i.e. the user is still typing it.
-    if in_code_position(before_cursor)
-        && !before_cursor.ends_with(char::is_whitespace)
-        && let Some(token) = before_cursor.split_whitespace().next_back()
-    {
-        if token.starts_with('#') {
-            return CompletionContext::Tag;
-        }
-        if token.starts_with('^') {
-            return CompletionContext::Link;
-        }
-    }
-
-    // Empty or whitespace only at line start (not indented)
-    if trimmed.is_empty() {
-        return CompletionContext::LineStart;
-    }
-
-    // Check for date at line start (YYYY-MM-DD pattern)
-    if trimmed.len() >= 10 && is_date_like(&trimmed[..10]) {
-        let after_date = trimmed[10..].trim_start();
-        if after_date.is_empty() {
-            return CompletionContext::AfterDate;
-        }
-
-        // Check for directive keywords
-        for directive in DIRECTIVES {
-            if let Some(rest) = after_date.strip_prefix(directive) {
-                let after_directive = rest.trim_start();
-                if after_directive.is_empty() || !after_directive.contains(' ') {
-                    // After directive, expecting account for most directives
-                    match *directive {
-                        "open" | "close" | "balance" | "pad" | "note" | "document" => {
-                            if let Some(colon_pos) = after_directive.rfind(':') {
-                                return CompletionContext::AccountSegment {
-                                    prefix: after_directive[..colon_pos + 1].to_string(),
-                                };
-                            }
-                            return CompletionContext::ExpectingAccount;
-                        }
-                        _ => return CompletionContext::Unknown,
-                    }
-                }
-            }
-        }
-
-        // After date but no recognized directive yet
-        return CompletionContext::AfterDate;
-    }
-
-    // Check if inside a quoted string
-    let quote_count = before_cursor.chars().filter(|&c| c == '"').count();
-    if quote_count % 2 == 1 {
-        return CompletionContext::InsideString;
-    }
-
-    CompletionContext::Unknown
 }
 
 /// Get a specific line from source.
@@ -260,138 +113,92 @@ fn get_line(source: &str, line_num: usize) -> &str {
     source.lines().nth(line_num).unwrap_or("")
 }
 
-/// Whether the end of `before` is in "code" position: not inside a
-/// string literal and not past a comment marker. A single forward scan
-/// tracks string state with backslash-escape handling, matching the
-/// lexer's string rule (`"([^"\\]|\\.)*"`), so a `"` or `;` that lives
-/// *inside* a narration does not flip the classification. An unescaped,
-/// unquoted `;` starts a comment, after which nothing is code.
-///
-/// This is what lets tag/link detection fire on `"a;b" #tag` (the `;`
-/// is in the string) while staying silent on `"x" ; #note` (real
-/// comment) and `"open #not-a-tag` (unterminated string).
-fn in_code_position(before: &str) -> bool {
-    let mut in_string = false;
-    let mut escaped = false;
-    for ch in before.chars() {
-        if in_string {
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == '"' {
-                in_string = false;
-            }
-        } else if ch == '"' {
-            in_string = true;
-        } else if ch == ';' {
-            // Comment marker outside any string: rest of line is comment.
-            return false;
+/// Map a shared `CompletionKind` to the LSP `CompletionItemKind`,
+/// reproducing the kinds the previous hand-written builders emitted.
+fn lsp_kind(kind: CompletionKind) -> CompletionItemKind {
+    match kind {
+        CompletionKind::Date => CompletionItemKind::VALUE,
+        CompletionKind::Directive => CompletionItemKind::KEYWORD,
+        CompletionKind::AccountType | CompletionKind::AccountSegmentFolder => {
+            CompletionItemKind::FOLDER
         }
+        CompletionKind::Account => CompletionItemKind::VARIABLE,
+        CompletionKind::Currency => CompletionItemKind::UNIT,
+        CompletionKind::Payee => CompletionItemKind::TEXT,
+        CompletionKind::Tag => CompletionItemKind::CONSTANT,
+        CompletionKind::Link => CompletionItemKind::REFERENCE,
     }
-    !in_string
 }
 
-/// Check if a string looks like a date (YYYY-MM-DD).
-fn is_date_like(s: &str) -> bool {
-    if s.len() != 10 {
-        return false;
+/// Map a neutral [`CompletionCandidate`] into an `lsp_types::CompletionItem`,
+/// reproducing the exact item shapes the previous builders produced.
+fn to_item(candidate: CompletionCandidate) -> CompletionItem {
+    let CompletionCandidate {
+        label,
+        insert_text,
+        kind,
+        detail,
+    } = candidate;
+
+    let mut item = CompletionItem {
+        label,
+        kind: Some(lsp_kind(kind)),
+        detail,
+        ..Default::default()
+    };
+
+    match kind {
+        // The account-type / known-account / currency / payee items
+        // carried no explicit `insert_text` — the label is inserted
+        // verbatim. The shared candidate sets `insert_text == label`
+        // for these, so suppress it to match the original output.
+        CompletionKind::AccountType
+        | CompletionKind::Account
+        | CompletionKind::Currency
+        | CompletionKind::Payee => {}
+        // Date / directive / account-segment carried an `insert_text`
+        // distinct from (or appended to) the label.
+        CompletionKind::Date | CompletionKind::Directive | CompletionKind::AccountSegmentFolder => {
+            item.insert_text = Some(insert_text);
+        }
+        // Tags and links: the sigil is already typed, so insert/filter
+        // text drops it.
+        CompletionKind::Tag | CompletionKind::Link => {
+            item.filter_text = Some(insert_text.clone());
+            item.insert_text = Some(insert_text);
+        }
     }
-    let chars: Vec<char> = s.chars().collect();
-    chars[4] == '-'
-        && chars[7] == '-'
-        && chars.iter().enumerate().all(|(i, c)| {
-            if i == 4 || i == 7 {
-                *c == '-'
-            } else {
-                c.is_ascii_digit()
-            }
-        })
+
+    item
 }
 
 /// Complete at line start (date template).
 fn complete_line_start() -> Vec<CompletionItem> {
     let today = jiff::Zoned::now().date().to_string();
-    vec![CompletionItem {
-        label: today.clone(),
-        kind: Some(CompletionItemKind::VALUE),
-        detail: Some("Today's date".to_string()),
-        insert_text: Some(format!("{} ", today)),
-        ..Default::default()
-    }]
+    rustledger_completion::line_start_candidates(&today)
+        .into_iter()
+        .map(to_item)
+        .collect()
 }
 
 /// Complete after a date (directive keywords).
 fn complete_after_date() -> Vec<CompletionItem> {
-    DIRECTIVES
-        .iter()
-        .map(|&d| {
-            let detail = match d {
-                "open" => "Open an account",
-                "close" => "Close an account",
-                "commodity" => "Define a commodity/currency",
-                "balance" => "Assert account balance",
-                "pad" => "Pad account to target",
-                "event" => "Record an event",
-                "query" => "Define a named query",
-                "note" => "Add a note to an account",
-                "document" => "Link a document",
-                "custom" => "Custom directive",
-                "price" => "Record a price",
-                "txn" | "*" => "Transaction (complete)",
-                "!" => "Transaction (incomplete)",
-                _ => "",
-            };
-            CompletionItem {
-                label: d.to_string(),
-                kind: Some(CompletionItemKind::KEYWORD),
-                detail: Some(detail.to_string()),
-                insert_text: Some(format!("{} ", d)),
-                ..Default::default()
-            }
-        })
+    rustledger_completion::after_date_candidates()
+        .into_iter()
+        .map(to_item)
         .collect()
 }
 
-/// Complete account name start (account types).
+/// Complete account name start (account types + known accounts).
 fn complete_account_start(
     parse_result: &ParseResult,
     ledger_state: Option<&LedgerState>,
 ) -> Vec<CompletionItem> {
-    // First, offer standard account types
-    let mut items: Vec<CompletionItem> = ACCOUNT_TYPES
-        .iter()
-        .map(|&t| CompletionItem {
-            label: format!("{}:", t),
-            kind: Some(CompletionItemKind::FOLDER),
-            detail: Some(format!("{} account type", t)),
-            ..Default::default()
-        })
-        .collect();
-
-    // Collect known accounts from the current file and ledger state.
-    //
-    // Return every known account: the LSP client filters by the
-    // user's typed prefix, and capping server-side here defeats that
-    // filtering (the client never sees accounts past the cap, so any
-    // prefix that matches a later-sorted account silently fails to
-    // complete). The pre-fix `.take(20)` produced exactly issue
-    // #1183, where `Expenses:ExpenseType20` and later accounts
-    // wouldn't autocomplete because the alphabetical cut-off landed
-    // at `ExpenseType19`. If completion latency on enormous ledgers
-    // ever becomes a concern, switch to `isIncomplete: true` with
-    // server-side prefix filtering rather than a blind cap.
     let known_accounts = get_all_accounts(parse_result, ledger_state);
-    for account in &known_accounts {
-        items.push(CompletionItem {
-            label: account.clone(),
-            kind: Some(CompletionItemKind::VARIABLE),
-            detail: Some("Known account".to_string()),
-            ..Default::default()
-        });
-    }
-
-    items
+    rustledger_completion::account_start_candidates(&known_accounts)
+        .into_iter()
+        .map(to_item)
+        .collect()
 }
 
 /// Complete account segment after colon.
@@ -401,54 +208,9 @@ fn complete_account_segment(
     ledger_state: Option<&LedgerState>,
 ) -> Vec<CompletionItem> {
     let known_accounts = get_all_accounts(parse_result, ledger_state);
-
-    // Find accounts that start with this prefix
-    let matching: Vec<_> = known_accounts
-        .iter()
-        .filter(|a| a.starts_with(prefix))
-        .collect();
-
-    // Extract unique next segments
-    let mut segments: Vec<String> = matching
-        .iter()
-        .filter_map(|a| {
-            let after_prefix = &a[prefix.len()..];
-            let next_segment = after_prefix.split(':').next()?;
-            if next_segment.is_empty() {
-                None
-            } else {
-                Some(next_segment.to_string())
-            }
-        })
-        .collect();
-
-    segments.sort();
-    segments.dedup();
-
-    segments
+    rustledger_completion::account_segment_candidates(prefix, &known_accounts)
         .into_iter()
-        .map(|seg| {
-            let full = format!("{}{}", prefix, seg);
-            // Check if this is a complete account or has more segments
-            let has_more = matching
-                .iter()
-                .any(|a| a.starts_with(&format!("{}:", full)));
-            CompletionItem {
-                label: seg.clone(),
-                kind: Some(if has_more {
-                    CompletionItemKind::FOLDER
-                } else {
-                    CompletionItemKind::VARIABLE
-                }),
-                detail: Some(if has_more {
-                    "Account segment".to_string()
-                } else {
-                    "Account".to_string()
-                }),
-                insert_text: Some(if has_more { format!("{}:", seg) } else { seg }),
-                ..Default::default()
-            }
-        })
+        .map(to_item)
         .collect()
 }
 
@@ -458,15 +220,9 @@ fn complete_currency(
     ledger_state: Option<&LedgerState>,
 ) -> Vec<CompletionItem> {
     let currencies = get_all_currencies(parse_result, ledger_state);
-
-    currencies
+    rustledger_completion::currency_candidates(&currencies)
         .into_iter()
-        .map(|c| CompletionItem {
-            label: c.clone(),
-            kind: Some(CompletionItemKind::UNIT),
-            detail: Some("Currency".to_string()),
-            ..Default::default()
-        })
+        .map(to_item)
         .collect()
 }
 
@@ -476,65 +232,33 @@ fn complete_payee(
     ledger_state: Option<&LedgerState>,
 ) -> Vec<CompletionItem> {
     let payees = get_all_payees(parse_result, ledger_state);
-
-    // Same `.take(20)` trap as account completion (issue #1183):
-    // the LSP client filters by the user's typed prefix, so capping
-    // server-side silently drops payees that sort after the cap.
-    // Return all; the client handles the volume.
-    payees
+    rustledger_completion::payee_candidates(&payees)
         .into_iter()
-        .map(|p| CompletionItem {
-            label: p.clone(),
-            kind: Some(CompletionItemKind::TEXT),
-            detail: Some("Known payee".to_string()),
-            ..Default::default()
-        })
+        .map(to_item)
         .collect()
 }
 
 /// Complete a tag after `#` (issue #1268).
-///
-/// The `#` is a trigger character that the user has already typed, so
-/// `insert_text`/`filter_text` carry the tag name *without* the `#` —
-/// the client replaces the word it is completing (the text after the
-/// sigil) and leaves the `#` in place. `label` keeps the `#` for a
-/// readable popup. We return every known tag and let the client filter
-/// as the user types (the same approach as `complete_account_start`),
-/// rather than filtering server-side and risking a stale list under
-/// `isIncomplete: false`.
 fn complete_tag(
     parse_result: &ParseResult,
     ledger_state: Option<&LedgerState>,
 ) -> Vec<CompletionItem> {
-    get_all_tags(parse_result, ledger_state)
+    let tags = get_all_tags(parse_result, ledger_state);
+    rustledger_completion::tag_candidates(&tags)
         .into_iter()
-        .map(|tag| CompletionItem {
-            label: format!("#{tag}"),
-            kind: Some(CompletionItemKind::CONSTANT),
-            detail: Some("Tag".to_string()),
-            filter_text: Some(tag.clone()),
-            insert_text: Some(tag),
-            ..Default::default()
-        })
+        .map(to_item)
         .collect()
 }
 
-/// Complete a link after `^` (issue #1268). Mirrors [`complete_tag`];
-/// see its docs for the sigil/insert-text rationale.
+/// Complete a link after `^` (issue #1268).
 fn complete_link(
     parse_result: &ParseResult,
     ledger_state: Option<&LedgerState>,
 ) -> Vec<CompletionItem> {
-    get_all_links(parse_result, ledger_state)
+    let links = get_all_links(parse_result, ledger_state);
+    rustledger_completion::link_candidates(&links)
         .into_iter()
-        .map(|link| CompletionItem {
-            label: format!("^{link}"),
-            kind: Some(CompletionItemKind::REFERENCE),
-            detail: Some("Link".to_string()),
-            filter_text: Some(link.clone()),
-            insert_text: Some(link),
-            ..Default::default()
-        })
+        .map(to_item)
         .collect()
 }
 
@@ -628,8 +352,7 @@ fn extract_payees(parse_result: &ParseResult) -> Vec<String> {
 
 /// Extract tags from parse result. Tag text comes back without the
 /// leading `#`, which is exactly the form completion inserts after the
-/// already-typed sigil. Delegates to the core visitor for exhaustive
-/// position coverage (transaction/document tags, metadata, Custom).
+/// already-typed sigil.
 fn extract_tags(parse_result: &ParseResult) -> Vec<String> {
     rustledger_core::extract_tags_iter(parse_result.directives.iter().map(|s| &s.value))
 }
@@ -643,15 +366,6 @@ fn extract_links(parse_result: &ParseResult) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_is_date_like() {
-        assert!(is_date_like("2024-01-15"));
-        assert!(is_date_like("2000-12-31"));
-        assert!(!is_date_like("2024/01/15"));
-        assert!(!is_date_like("24-01-15"));
-        assert!(!is_date_like("not-a-date"));
-    }
 
     #[test]
     fn test_detect_context_line_start() {
@@ -725,7 +439,7 @@ mod tests {
     #[test]
     fn test_detect_context_emoji_narration_utf16_offset() {
         // Non-BMP emoji uses two UTF-16 code units in LSP positions.
-        // Validates surrogate-pair handling in char_offset_to_byte.
+        // Validates surrogate-pair handling in offset_to_byte.
         let source = "2024-01-15 * \"🍣\"\n";
         // UTF-16 offsets: "2024-01-15 * \"" = 14 units, "🍣" = 2 units, "\"" = 1 unit
         // Position 17 is after the closing quote
@@ -984,16 +698,6 @@ mod tests {
         let ctx = ctx_at_end("2024-01-15 * \"a\\\"b #tag");
         assert_ne!(ctx, CompletionContext::Tag);
         assert_ne!(ctx, CompletionContext::Link);
-    }
-
-    #[test]
-    fn test_in_code_position() {
-        assert!(in_code_position("2024-01-15 * \"x\" #")); // after closed string
-        assert!(in_code_position("pushtag #")); // plain directive
-        assert!(!in_code_position("2024-01-15 * \"x\" ; ")); // in comment
-        assert!(!in_code_position("2024-01-15 * \"open")); // in string
-        assert!(in_code_position("2024-01-15 * \"a;b\" ")); // ; was in string
-        assert!(!in_code_position("2024-01-15 * \"a\\\"b")); // escaped quote, still open
     }
 
     #[test]

@@ -1,0 +1,273 @@
+# ADR-0005: CST Conversion Performance (green-tree walking)
+
+## Status
+
+Proposed (June 2026)
+
+## Context
+
+ADR-0003 records the migration to a lossless CST (the `#1262` series): a Logos
+lexer feeds a rowan green-tree builder, and `cst::convert::parse_via_cst` walks
+the resulting tree to produce the typed `ParseResult`. The CST is what powers
+the opinionated formatter and the CST-backed LSP handlers (rename, selection
+range, range formatting), so it is the strategic direction and is not in
+question here.
+
+The migration carried a performance cost that became visible on the nightly
+**balance-report benchmark**, which runs `rledger report <10k-txn-file>
+balances`:
+
+| Date | rustledger balance report |
+|------|---------------------------|
+| through 2026-06-08 | ~37 ms |
+| 2026-06-09 onward | ~106-138 ms |
+
+The jump lands exactly on `#1282` (`#1262` phase 3.7), which changed
+`rustledger_parser::parse` from the fast direct parser to unconditionally call
+`parse_via_cst`; `#1283` then deleted the direct parser. Earlier history shows
+the direct parser was itself a deliberate "~3x" win (`d65a62fd`,
+`winnow_parser`).
+
+Why only the report regressed while the `check` validation benchmark stayed
+flat at ~37 ms: `check` **caches parse output to disk** (`cmd/check.rs`), so its
+repeated benchmark runs are cache hits that skip parsing. `report` has no cache
+and re-parses on every invocation, so it pays the full CST cost every time. The
+benchmark dashboard only tracks `balances` and `check`, so the parser slowdown
+was masked everywhere except the one un-cached path.
+
+Two already-merged PRs trimmed the edges:
+
+- **#1311** - skips `balance_view()` cloning for pad-free ledgers and removes a
+  redundant deep-clone from `process_pads`. ~132 -> ~116 ms.
+- **#1312** - fuses five top-level `children()` walks in `parse_via_cst` into one
+  pass. ~124 -> ~118 ms on the parse-bound `accounts` report.
+
+Neither touches the dominant cost. This ADR proposes how to reclaim the rest.
+
+## Cost model
+
+A flat `perf` profile of `rledger report <10k> accounts` (a parse-bound path;
+`accounts` does no balance math) attributes ~40% of total runtime to CST
+construction and traversal:
+
+```
+18.24%  rustledger_parser::cst::convert::parse_via_cst
+ 3.73%  rowan ... to_next_sibling_or_token
+ 3.16%  rowan NodeCache::token
+ 3.15%  rowan PreorderWithTokens::next
+ 2.96%  cst::convert::convert_transaction
+ 1.95%  rowan SyntaxNode::first_child_or_token
+ 1.73%  cst::lossless_tokens::lossless_kind_tokens
+ 1.62%  rowan SyntaxElementChildren::next
+ 1.20%  rowan cursor::free
+ 0.91%  rowan NodeCache::node
+ 0.90%  rowan NodeData::new
+ 0.88%  rowan GreenNode::new
+ ...    libc malloc / free / memmove  (~10% aggregate)
+```
+
+The cost decomposes into two distinct, separately-addressable layers.
+
+### Layer A - red-node materialization
+
+rowan has two trees. The **green tree** (`GreenNode`/`GreenToken`) is the
+compact, immutable, deduplicated representation the builder produces; nodes know
+only their own length, not their absolute position. The **red tree**
+(`SyntaxNode`/`SyntaxToken`, a.k.a. the cursor layer) is a lazily-materialized
+overlay that adds parent pointers and absolute offsets. Every time code touches
+a `SyntaxNode` child, rowan allocates a reference-counted `NodeData` for it and
+later frees it (`NodeData::new`, `cursor::free`, the `malloc`/`free` churn).
+
+`parse_via_cst` and the entire `cst::ast` + converter layer are built on the
+**red** tree: `ast_node!` wraps a `SyntaxNode` (`ast.rs:109`), and every
+converter walks `node.syntax().children_with_tokens()` (83 such call sites in
+`convert.rs`). So conversion materializes a red node for essentially every node
+in the file, drives the allocator hard, and chases pointers through the cursor
+API (`PreorderWithTokens`, `SyntaxElementChildren`, `first_child_or_token`,
+`to_next_sibling_or_token`).
+
+### Layer B - redundant per-node accessor re-walks
+
+The typed AST accessors each re-walk a node's children from scratch. `children::<N>(node)`
+(`ast.rs:103`) is `node.children().filter_map(N::cast)`. A single
+`convert_transaction` calls `.date()`, `.flag()`, `.strings()`, `.tags()`,
+`.links()`, `.postings()`, plus an explicit `children_with_tokens()` walk and a
+`convert_meta_entries()` walk - **each one re-iterates the same TRANSACTION
+node's children and re-materializes the same red nodes**. For a posting-heavy
+transaction that is roughly 8x redundant traversal of the same child list.
+
+Layer B is cheaper to fix and lower risk than Layer A. They compose: fixing B
+reduces the number of red materializations, fixing A removes the per-materialization
+allocation cost.
+
+## Goals / non-goals
+
+**Goals**
+
+- Recover the bulk of the `parse_via_cst` regression (target: back under ~60 ms
+  on the 10k balance report; stretch: near the old ~37 ms).
+- Zero change to parser output. The corpus and CST output baselines must stay
+  byte-identical at every step.
+- Keep the lossless CST and the typed-AST surface the formatter and LSP depend
+  on.
+
+**Non-goals**
+
+- Reviving the deleted direct parser or a second parse path. `#1262`
+  deliberately unified on one parser; ADR-0003 stands.
+- Changing the grammar, token set, or any diagnostic.
+- Speeding up booking/validation/report rendering (separate concerns).
+
+## Decision (proposed)
+
+Optimize the conversion in place, in phases ordered by risk, with the parser
+baselines as a hard gate between each. Land each phase as its own PR.
+
+### Phase 0 - measurement harness (prerequisite)
+
+Before touching conversion, make the win measurable in CI-comparable form:
+
+- Add a criterion bench `parse_via_cst_10k` in
+  `crates/rustledger-parser/benches/` that parses a generated 10k-directive
+  source and reports ns/iter. This isolates parse from report rendering and
+  from the disk cache, so regressions/improvements are attributable.
+- Confirm the existing `corpus_baseline` and `cst_baseline` integration tests
+  run locally (they hash `ParseResult` / CST output against a stored baseline -
+  these are the correctness gate; a behavior change fails them).
+
+No behavior change. Mergeable on its own.
+
+### Phase 1 - single-pass per-node converters (Layer B)
+
+Eliminate the redundant accessor re-walks. For each directive converter, walk
+the node's children **once** and dispatch by kind into local accumulators,
+instead of calling N accessors that each re-walk.
+
+Concretely, replace the accessor-call style:
+
+```rust
+let date  = node.date()?;          // walk children, find DATE
+let flag  = node.flag();           // walk children, find FLAG
+let strs  = node.strings()...;     // walk children, find STRING tokens
+let tags  = node.tags()...;        // walk children, find TAGs
+let links = node.links()...;       // walk children, find LINKs
+// + an explicit children_with_tokens() walk for body tags/links
+// + convert_meta_entries(node.syntax())  (another walk)
+```
+
+with one walk that classifies each child token/node as it is seen:
+
+```rust
+let mut date = None; let mut flag = None;
+let mut strings = SmallVec::new(); let mut tags = Vec::new(); ...
+for el in node.syntax().children_with_tokens() {
+    match el { Token(t) => match t.kind() { DATE => ..., FLAG => ..., STRING => ..., TAG => ..., LINK => ... },
+               Node(n) => match n.kind() { POSTING => ..., META_ENTRY => ... } }
+}
+```
+
+- Start with `convert_transaction` (the hottest converter and the one with the
+  most accessors) to validate the approach and measure, then apply the same
+  shape to the other directive converters.
+- The typed accessors in `ast.rs` stay (the formatter and LSP use them); this
+  changes only the converters' internal traversal.
+- This keeps the red tree. Expected: removes most of the *redundant*
+  materializations; does not remove the per-node materialization itself.
+
+Risk: low-medium. Pure internal refactor; output-identical; gated by baselines.
+Each converter is independent, so this can be sliced into a few small PRs
+(transaction first, then the rest).
+
+### Phase 2 - green-tree conversion (Layer A)
+
+Convert by walking the **green** tree directly, materializing red nodes only
+where genuinely needed, so the per-node `NodeData` allocation disappears.
+
+The challenge is offsets: green nodes carry only their own text length, so
+absolute spans must be computed by threading a running offset down the walk.
+rowan exposes this via `GreenNodeData::children()` (yielding
+`GreenChild`/`Cow<GreenNodeData|GreenTokenData>` with `text_len`) - accumulate
+`offset` as you iterate siblings, recurse with `offset + child_start`.
+
+Proposed shape:
+
+- Introduce a thin internal walker over `GreenNodeData` that yields
+  `(kind, absolute_text_range, &GreenTokenData|&GreenNodeData)` without touching
+  the cursor layer. `bom_offset` folds into the running offset exactly as today.
+- Re-express the Phase-1 single-pass converters against this walker. Token text
+  comes from `GreenTokenData::text()`; spans from the accumulated offset; all
+  the existing classification logic is unchanged.
+- Keep `walk_descendants_once` and the error-extraction passes on whichever
+  representation is cheaper; they can move to the green walker in the same way.
+- The public `ParseResult.syntax_root` (a `GreenNode`) and the typed-AST surface
+  are unaffected - we are changing only how `parse_via_cst` reads the tree it
+  already built, not what it stores or exposes.
+
+Risk: high. This is the large, delicate change. Mitigations:
+
+- Land it converter-by-converter behind the Phase-1 refactor, so each step is a
+  small, output-identical diff gated by the baselines.
+- Offset arithmetic is the main hazard (off-by-one against the red tree's
+  `text_range`). The CST baseline (which stores exact spans) catches any drift
+  immediately.
+- Keep a temporary debug assertion in dev builds that, for a sample of nodes,
+  compares the green-walked absolute range against the red `text_range()` of the
+  same node, and remove it once baselines + fuzz are green.
+
+### Phase 3 - lazy alignment (optional, small)
+
+`parse_via_cst` eagerly calls `compute_alignment` (`#1299`) on every parse to
+cache the formatter's column layout, but only the formatter/LSP/FFI/WASM format
+paths read `ParseResult.alignment`; `report`/`check`/`query`/`validate` never
+do. The profile shows this is <1% today, so this is low priority, but if Phase 2
+shrinks everything else it becomes proportionally visible. If so, make
+`alignment` a lazily-computed memoized value (`OnceLock`) behind an accessor so
+non-format consumers pay nothing. Deferred until measured.
+
+## Verification strategy
+
+The gate at every phase, in order:
+
+1. `cargo test -p rustledger-parser` (the full suite, ~529 tests) - includes
+   `corpus_baseline::parser_output_matches_baseline` and
+   `cst_baseline::cst_output_matches_baseline`, which fail on any output drift.
+2. The fuzz targets (`fuzz_parse`, `fuzz_booking`) for a fixed corpus run - the
+   parser must remain panic-free on malformed input (a real risk when hand-rolling
+   green-tree offset math).
+3. The compat suite (`scripts/compat-bql-test.py` / the CI compatibility job,
+   ~800 files) - end-to-end behavior against `bean-check` / `bean-query`.
+4. The Phase-0 criterion bench, before/after, reported in each PR description.
+
+A phase does not merge unless 1-3 are unchanged from main and 4 shows the
+expected improvement.
+
+## PR slicing
+
+1. `perf(parser): add parse_via_cst criterion bench` (Phase 0)
+2. `perf(parser): single-pass convert_transaction` (Phase 1, validates approach)
+3. `perf(parser): single-pass remaining directive converters` (Phase 1)
+4. `perf(parser): green-tree walker + convert_transaction on green` (Phase 2 pilot)
+5. `perf(parser): remaining converters + error passes on green` (Phase 2)
+6. (optional) `perf(parser): lazy formatter alignment` (Phase 3)
+
+Each is independently revertible and baseline-gated.
+
+## Alternatives considered
+
+- **Revert to the direct parser / keep two parse paths.** Rejected: contradicts
+  `#1262` / ADR-0003, and a second parser is the maintenance burden the migration
+  removed. The lossless CST is required for the formatter and LSP.
+- **Give `report` (and friends) the disk parse cache `check` uses.** Helps real
+  repeated invocations but not the cold benchmark, and does not address the
+  underlying parse cost - orthogonal, could be done later regardless.
+- **Accept the cost as the price of lossless parsing.** Tenable, but a ~3x parse
+  regression on the headline benchmark is worth reclaiming when the levers above
+  are output-preserving.
+
+## Open questions
+
+- Does rowan 0.16's public `GreenNodeData` API expose enough to walk children
+  with offsets without an unsafe or a vendored helper? (Needs a spike in Phase 2
+  pilot; if not, the walker may need a small `cursor`-free helper.)
+- Is Phase 1 alone enough to get under the target, making Phase 2 optional? The
+  Phase-1 + bench numbers decide whether Phase 2 is worth its risk.

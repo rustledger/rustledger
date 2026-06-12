@@ -14,6 +14,7 @@ ADRs document significant architectural decisions made during rustledger develop
 | [ADR-0002](0002-error-handling.md) | Error Handling | Accepted |
 | [ADR-0003](0003-parser-design.md) | Parser Design | Accepted |
 | [ADR-0004](0004-ts-types-from-rust-dtos.md) | Generate TypeScript types from Rust DTOs | Accepted (Phase 1 + 2) |
+| [ADR-0005](0005-cst-conversion-performance.md) | CST Conversion Performance (green-tree walking) | Proposed |
 
 ## About ADRs
 

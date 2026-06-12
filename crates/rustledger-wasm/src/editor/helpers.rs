@@ -13,13 +13,16 @@ pub fn get_line(source: &str, line_num: usize) -> &str {
 /// Get the word at a given position in the source.
 pub fn get_word_at_position(source: &str, line: u32, character: u32) -> Option<String> {
     let line_text = source.lines().nth(line as usize)?;
+    let chars: Vec<char> = line_text.chars().collect();
     let col = character as usize;
 
-    if col > line_text.len() {
+    // `character` is a character offset and is used to index `chars`, so
+    // bound it by the character count, not the byte length (they differ
+    // on multi-byte lines). Bounding by `line_text.len()` (bytes) would
+    // accept an out-of-range char offset and then index incorrectly.
+    if col > chars.len() {
         return None;
     }
-
-    let chars: Vec<char> = line_text.chars().collect();
 
     // Find start of word
     let mut start = col;
@@ -214,6 +217,17 @@ mod tests {
         let word = get_word_at_position(source, 0, 5);
         // Position 5 is 'o' in "hello", still part of word
         assert_eq!(word, Some("hello".to_string()));
+    }
+
+    #[test]
+    fn test_get_word_at_position_multibyte() {
+        // `character` is a CHARACTER offset. "롯" is 3 bytes / 1 char.
+        // Account "Assets:롯데" is 9 characters; the cursor at char 8 is
+        // inside the word. Bounding by char count (not byte length) must
+        // accept this and return the full word.
+        let source = "  Assets:롯데  100 KRW";
+        let word = get_word_at_position(source, 0, 8);
+        assert_eq!(word, Some("Assets:롯데".to_string()));
     }
 
     #[test]

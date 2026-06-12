@@ -1328,7 +1328,20 @@ impl MainLoopState {
         };
 
         let (_text, parse_result) = self.get_document_data(&uri);
-        let resolved = handle_completion_resolve(item, &parse_result);
+
+        // Resolve the detail (balances, transaction counts, price
+        // history) against the full ledger when a journalFile is
+        // configured — the loaded ledger spans every included file, so
+        // the popup reflects whole-ledger totals instead of just the
+        // file the cursor is in. Falls back to the current file's
+        // directives when no ledger is loaded. Mirrors how
+        // `handle_completion_request` consults `ledger_state`, and
+        // keeps the detail consistent with `hover` (issue #1297).
+        let ledger_guard = self.ledger_state.read();
+        let directives = ledger_guard
+            .directives()
+            .unwrap_or_else(|| parse_result.directives.as_slice());
+        let resolved = handle_completion_resolve(item, directives);
 
         serde_json::to_value(resolved).map_err(|e| e.to_string())
     }

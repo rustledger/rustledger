@@ -96,6 +96,10 @@ pub struct LedgerState {
     currencies: Vec<String>,
     /// Payees extracted from the full ledger.
     payees: Vec<String>,
+    /// Tags extracted from the full ledger (without the `#` sigil).
+    tags: Vec<String>,
+    /// Links extracted from the full ledger (without the `^` sigil).
+    links: Vec<String>,
     /// Account to file mapping for go-to-definition.
     account_locations: HashMap<String, (PathBuf, u32)>,
 }
@@ -115,6 +119,8 @@ impl LedgerState {
             accounts: Vec::new(),
             currencies: Vec::new(),
             payees: Vec::new(),
+            tags: Vec::new(),
+            links: Vec::new(),
             account_locations: HashMap::new(),
         }
     }
@@ -203,6 +209,16 @@ impl LedgerState {
         &self.payees
     }
 
+    /// Get all tags from the full ledger (without the `#` sigil).
+    pub fn tags(&self) -> &[String] {
+        &self.tags
+    }
+
+    /// Get all links from the full ledger (without the `^` sigil).
+    pub fn links(&self) -> &[String] {
+        &self.links
+    }
+
     /// Get all directives from the full ledger.
     pub fn directives(&self) -> Option<&[Spanned<Directive>]> {
         self.ledger.as_ref().map(|l| l.directives.as_slice())
@@ -228,6 +244,8 @@ impl LedgerState {
         self.accounts.clear();
         self.currencies.clear();
         self.payees.clear();
+        self.tags.clear();
+        self.links.clear();
 
         let mut accounts_set: HashSet<String> = HashSet::new();
         let mut currencies_set: HashSet<String> = HashSet::new();
@@ -295,6 +313,14 @@ impl LedgerState {
         self.currencies.sort();
         self.payees = payees_set.into_iter().collect();
         self.payees.sort();
+
+        // Tags and links delegate to the core visitor (the canonical
+        // enumeration point) rather than a hand-rolled walk, so the
+        // ledger sees tags/links in every position they can occur
+        // (transaction/document fields, metadata, Custom values), and
+        // stays in lockstep with the LSP's per-file extraction.
+        self.tags = rustledger_core::extract_tags_iter(directives.iter().map(|s| &s.value));
+        self.links = rustledger_core::extract_links_iter(directives.iter().map(|s| &s.value));
     }
 
     /// Extract account definition locations from the ledger.

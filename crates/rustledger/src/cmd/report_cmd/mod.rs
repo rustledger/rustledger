@@ -220,7 +220,7 @@ pub fn run(
         && ledger
             .directives
             .iter()
-            .any(|s| matches!(s.value, rustledger_core::Directive::Pad(_)));
+            .any(|s| matches!(&s.value, rustledger_core::Directive::Pad(_)));
     let balance_view = if has_pads {
         Some(ledger.balance_view())
     } else {
@@ -251,7 +251,9 @@ pub fn run(
     };
 
     // Generate the requested report. Balance-computing reports get
-    // `balance_view.as_ref().expect("balance_view computed above when report needs it")`; source-faithful reports get `&directives`.
+    // `balance_input` (the pad-expanded view when the ledger has pads,
+    // otherwise the borrowed source stream); source-faithful reports
+    // get `&directives`.
     match report {
         Report::Balances { account } => {
             balances::report_balances(balance_input, account.as_deref(), format, &mut writer)?;

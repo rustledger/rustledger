@@ -1359,18 +1359,26 @@ fn emit_document(d: &ast::DocumentDirective, out: &mut String) {
     out.push(' ');
     out.push_str(&path);
     // Trailing TAG / LINK tokens — typed AST has no accessor, so
-    // walk direct-child tokens until the first NEWLINE.
+    // walk direct-child tokens. Skip LEADING trivia (a blank line
+    // before a non-first directive attaches its NEWLINE inside the
+    // node) and stop at the first NEWLINE *after* the header content
+    // begins; otherwise the tags/links are dropped when reformatting
+    // any document past the first — the same bug as #1321 in the
+    // transaction path.
+    let mut seen_content = false;
     for el in d.syntax().children_with_tokens() {
         let rowan::NodeOrToken::Token(t) = el else {
-            continue;
+            break;
         };
         match t.kind() {
-            crate::SyntaxKind::NEWLINE => break,
             crate::SyntaxKind::TAG | crate::SyntaxKind::LINK => {
                 out.push(' ');
                 out.push_str(t.text());
+                seen_content = true;
             }
-            _ => {}
+            crate::SyntaxKind::NEWLINE if seen_content => break,
+            crate::SyntaxKind::WHITESPACE | crate::SyntaxKind::NEWLINE => {}
+            _ => seen_content = true,
         }
     }
     out.push('\n');
@@ -2194,6 +2202,25 @@ mod tests {
         assert_eq!(
             format_source(src),
             "2024-06-01 document Assets:Bank \"stmt.pdf\" #q1 ^scan42 #urgent\n"
+        );
+    }
+
+    #[test]
+    fn issue_1321_document_tags_links_idempotent_across_directives() {
+        // Same class as the transaction case, in `document` directives:
+        // the 2nd+ document's trailing tags/links were dropped on a
+        // reformat (found by the #1323 corpus idempotence check). Assert
+        // the fixed-point property: re-formatting must not change (and
+        // must not drop the tags/links of the second document).
+        let src = "\
+2013-05-18 document Assets:Bank \"/a.pdf\" #tag1 ^link1
+2013-05-19 document Assets:Bank \"/b.pdf\" #tag2 ^link2
+";
+        let once = format_source(src);
+        assert_eq!(format_source(&once), once, "format must be idempotent");
+        assert!(
+            once.contains("#tag2") && once.contains("^link2"),
+            "the second document's tags/links must survive formatting; got:\n{once}"
         );
     }
 

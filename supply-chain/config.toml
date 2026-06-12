@@ -31,6 +31,9 @@ audit-as-crates-io = false
 [policy.rustledger-booking]
 audit-as-crates-io = false
 
+[policy.rustledger-completion]
+audit-as-crates-io = false
+
 [policy.rustledger-core]
 audit-as-crates-io = false
 

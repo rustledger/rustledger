@@ -53,43 +53,15 @@ pub fn load_result_cached(
             eprintln!("Loaded {} directives from cache", entry.directives.len());
         }
 
-        // Re-intern strings to deduplicate memory (mirrors `check`).
+        // Re-intern strings to deduplicate memory before reconstruction.
         let dedup_count = reintern_directives(&mut entry.directives);
         if verbose {
             eprintln!("Re-interned strings ({dedup_count} deduplicated)");
         }
 
-        // Rebuild the source map from the cached file list so error
-        // reporting still has source text.
-        let mut source_map = rustledger_loader::SourceMap::new();
-        for path in entry.file_paths() {
-            if let Ok(content) = std::fs::read_to_string(&path) {
-                source_map.add_file(path, content.into());
-            }
-        }
-
-        // Cached plugins carry no meaningful span/file_id.
-        let plugins: Vec<rustledger_loader::Plugin> = entry
-            .plugins
-            .iter()
-            .map(|p| rustledger_loader::Plugin {
-                name: p.name.clone(),
-                config: p.config.clone(),
-                span: rustledger_parser::Span::ZERO,
-                file_id: 0,
-                force_python: p.force_python,
-            })
-            .collect();
-
-        let result = LoadResult {
-            directives: entry.directives,
-            options: entry.options.into(),
-            plugins,
-            source_map,
-            errors: Vec::new(),
-            display_context: rustledger_core::DisplayContext::new(),
-        };
-        return Ok((result, true));
+        // Reconstruct an equivalent `LoadResult` (source map, plugins,
+        // and a rebuilt display context) - see `CacheEntry::into_load_result`.
+        return Ok((entry.into_load_result(), true));
     }
 
     // Cache miss (or disabled): parse fresh.

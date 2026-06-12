@@ -120,6 +120,14 @@ jobs:
           bean-query --version
           ./target/release/rledger check --version
           ./target/release/rledger query --version
+      - name: Format idempotence over the corpus
+        # `rledger format` must be a fixed point on every real-world file
+        # it can format: re-formatting its own output must be byte-
+        # identical. Catches formatter bugs the small golden cases miss
+        # (e.g. #1321 / the document variant). Files that don't format
+        # cleanly are skipped. See scripts/format-idempotence.sh (#1323).
+        run: |
+          RLEDGER=./target/release/rledger ./scripts/format-idempotence.sh tests/compatibility/files
       - name: Fetch previous results for regression detection
         run: |
           mkdir -p .github/badges

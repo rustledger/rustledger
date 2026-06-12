@@ -168,11 +168,10 @@ pub fn run(
         anyhow::bail!("file not found: {}", file.display());
     }
 
-    // Load and fully process the file (parse → book → plugins)
-    if verbose {
-        eprintln!("Loading {}...", file.display());
-    }
-
+    // Load and fully process the file (parse → book → plugins).
+    // Verbose progress (incl. the "Loading ..." / cache-hit lines) is
+    // emitted by `load_result_cached`, so don't pre-log here - that
+    // would double up on a miss and mislead on a cache hit.
     let options = LoadOptions {
         validate: false, // Reports don't need validation
         ..Default::default()

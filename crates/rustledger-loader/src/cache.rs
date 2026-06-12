@@ -211,7 +211,13 @@ impl CacheEntry {
     pub fn into_load_result(self) -> crate::LoadResult {
         let mut source_map = crate::SourceMap::new();
         for path in self.file_paths() {
-            if let Ok(content) = fs::read_to_string(&path) {
+            // Read bytes + lossy UTF-8 to match `DiskFileSystem::read`
+            // (the uncached loader path). `read_to_string` would error
+            // and silently skip a non-UTF8 source file, leaving the
+            // cache-hit source map missing text the uncached run has -
+            // an error-reporting parity gap.
+            if let Ok(bytes) = fs::read(&path) {
+                let content = String::from_utf8_lossy(&bytes).into_owned();
                 source_map.add_file(path, content.into());
             }
         }

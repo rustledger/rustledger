@@ -37,7 +37,12 @@ fn report_uses_parse_cache_with_identical_output() {
         cmd.arg("report")
             .arg(&file)
             .arg("balances")
-            .arg("--no-pager");
+            .arg("--no-pager")
+            // Hermetic: ignore any cache env the developer/CI may have
+            // set, so the cache lands at the default path next to the
+            // source (`.ledger.beancount.cache`) and is actually written.
+            .env_remove("BEANCOUNT_DISABLE_LOAD_CACHE")
+            .env_remove("BEANCOUNT_LOAD_CACHE_FILENAME");
         if verbose {
             cmd.arg("--verbose");
         }

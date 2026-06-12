@@ -62,3 +62,43 @@ fn malformed_config_surfaces_parse_error_instead_of_silent_default() {
         "the real parse error must replace the misleading 'no price source configured' message.\nstdout: {stdout}\nstderr: {stderr}"
     );
 }
+
+/// A broken config must NOT block commands that don't read it. `main`
+/// loads config before clap parses (for alias expansion), so a naive
+/// fail-fast there would break `--help`/`--version` and the `config`
+/// subcommands a user runs to *fix* the file — a bootstrap deadlock.
+/// `--help` must still succeed with a malformed config present.
+#[test]
+fn malformed_config_does_not_block_help() {
+    let bin = require_rledger!();
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join(".rledger.toml"),
+        "[price.mapping.hy]\ntype = \"command\"\ncommand = [\"uv\", \"run\", \"pricedl\"]\n",
+    )
+    .expect("write config");
+
+    let output = Command::new(bin)
+        .arg("--help")
+        .current_dir(dir.path())
+        .env("HOME", dir.path())
+        .env("XDG_CONFIG_HOME", dir.path())
+        .env("APPDATA", dir.path())
+        .env("PROGRAMDATA", dir.path())
+        .env("USERPROFILE", dir.path())
+        .output()
+        .expect("run rledger --help");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "--help must succeed despite a broken config (no bootstrap deadlock); \
+         stdout: {stdout}\nstderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        stdout.contains("Usage") || stdout.contains("usage"),
+        "--help should print usage; stdout: {stdout}"
+    );
+}

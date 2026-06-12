@@ -19,7 +19,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use rustledger_booking::merge_with_padding;
 use rustledger_core::DisplayContext;
-use rustledger_loader::{LoadOptions, load};
+use rustledger_loader::LoadOptions;
 use std::fs;
 use std::io;
 use std::path::PathBuf;
@@ -115,15 +115,23 @@ pub fn run(args: &Args) -> Result<()> {
         anyhow::bail!("file not found: {}", file.display());
     }
 
-    // Load and fully process the file (parse → book → plugins)
-    // This uses the new loader API which matches Python's loader.load_file()
+    // Load and fully process the file (parse → book → plugins).
     let options = LoadOptions {
         validate: false, // Query doesn't need validation
         ..Default::default()
     };
 
-    let ledger =
-        load(file, &options).with_context(|| format!("failed to load {}", file.display()))?;
+    // Parse via the shared on-disk cache: `parse()` dominates load cost
+    // and is identical run-to-run for an unchanged file, so a repeated
+    // `query` (or a `query` after `check`/`report`) skips the parse. The
+    // cached `LoadResult` is the parsed (pre-booking) stream with a
+    // rebuilt display context (`CacheEntry::into_load_result`), so
+    // booking and the display-context-dependent BQL output below are
+    // identical to the uncached path. Disable with
+    // `BEANCOUNT_DISABLE_LOAD_CACHE`.
+    let (raw, _from_cache) = crate::cmd::loadcache::load_result_cached(file, false, args.verbose)?;
+    let ledger = rustledger_loader::process(raw, &options)
+        .with_context(|| format!("failed to load {}", file.display()))?;
 
     // Report errors to stderr (matching bean-query behavior)
     // Continue with successfully parsed directives rather than bailing

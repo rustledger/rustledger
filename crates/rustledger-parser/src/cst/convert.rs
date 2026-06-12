@@ -80,22 +80,24 @@ pub fn parse_via_cst(source: &str) -> ParseResult {
         account_occurrences,
     } = walk_descendants_once(&source_file, bom_offset);
 
+    // Fused single pass over the top-level children replaces the
+    // five former per-child traversals (error-node, transaction-body,
+    // indented-directive, custom-value diagnostics + section-marker
+    // comments). See `walk_top_level_once`.
+    let TopLevelWalkResult {
+        errors: top_level_errors,
+        section_marker_comments,
+    } = walk_top_level_once(&source_file, stripped, bom_offset);
+
     let mut comments: Vec<Spanned<String>> = top_level_comments;
-    comments.extend(extract_section_marker_comments(&source_file, bom_offset));
+    comments.extend(section_marker_comments);
     // Merge in source order; the two helpers' classifiers are
     // disjoint today (STAR-first vs COMMENT-kind-first) but
     // dedup-by-start keeps the invariant local.
     comments.sort_by_key(|s| s.span.start);
     comments.dedup_by_key(|s| s.span.start);
-    let mut errors = extract_error_node_errors(&source_file, stripped, bom_offset);
-    errors.extend(extract_transaction_body_errors(&source_file, bom_offset));
+    let mut errors = top_level_errors;
     errors.extend(extract_unclosed_cost_brace_errors(&source_file, bom_offset));
-    errors.extend(extract_indented_directive_errors(
-        &source_file,
-        stripped,
-        bom_offset,
-    ));
-    errors.extend(extract_custom_value_errors(&source_file, bom_offset));
     errors.extend(inline_errors);
     let warnings = Vec::new();
 
@@ -1674,6 +1676,56 @@ const fn is_comment_kind(kind: crate::SyntaxKind) -> bool {
     )
 }
 
+/// Output of the fused top-level pass [`walk_top_level_once`].
+struct TopLevelWalkResult {
+    errors: Vec<crate::ParseError>,
+    section_marker_comments: Vec<Spanned<String>>,
+}
+
+/// Single walk over `source_file`'s direct children that runs
+/// every per-directive diagnostic in one pass, replacing five
+/// separate `source_file.syntax().children()` traversals
+/// (`extract_error_node_errors`, `extract_transaction_body_errors`,
+/// `extract_indented_directive_errors`, `extract_custom_value_errors`,
+/// `extract_section_marker_comments`). Each former pass re-walked
+/// the top-level child list and materialized a fresh red node per
+/// directive; on a large ledger that is 5·O(N) red-node churn for
+/// work that is naturally per-child. The checks are independent and
+/// all diagnostics are span-sorted by the caller, so fusing them is
+/// order-preserving.
+fn walk_top_level_once(
+    source_file: &SourceFile,
+    stripped: &str,
+    bom_offset: u32,
+) -> TopLevelWalkResult {
+    let mut errors: Vec<crate::ParseError> = Vec::new();
+    let mut section_marker_comments: Vec<Spanned<String>> = Vec::new();
+    for child in source_file.syntax().children() {
+        let kind = child.kind();
+        // Applies to every recognized directive node (incl. CUSTOM).
+        if ast::Directive::can_cast(kind) {
+            indented_directive_check(&child, stripped, bom_offset, &mut errors);
+        }
+        match kind {
+            crate::SyntaxKind::CUSTOM_DIRECTIVE => {
+                custom_value_check(&child, bom_offset, &mut errors);
+            }
+            crate::SyntaxKind::TRANSACTION => {
+                transaction_body_check(&child, bom_offset, &mut errors);
+            }
+            crate::SyntaxKind::ERROR_NODE => {
+                error_node_check(&child, stripped, bom_offset, &mut errors);
+                section_marker_check(&child, bom_offset, &mut section_marker_comments);
+            }
+            _ => {}
+        }
+    }
+    TopLevelWalkResult {
+        errors,
+        section_marker_comments,
+    }
+}
+
 /// Walk every `COST_SPEC` node in the tree and emit a
 /// `SyntaxError("unclosed cost specification: missing '}'")` for
 /// any spec whose opener (`{`, `{{`, or `{#`) doesn't have a
@@ -1727,48 +1779,43 @@ fn extract_unclosed_cost_brace_errors(
 /// The CST grammar happily accepts an indented `open` / `balance`
 /// / etc., which is why this surfaces at converter level instead
 /// of as a lex/parse error.
-fn extract_indented_directive_errors(
-    source_file: &SourceFile,
+fn indented_directive_check(
+    child: &crate::SyntaxNode,
     stripped: &str,
     bom_offset: u32,
-) -> Vec<crate::ParseError> {
-    let mut out = Vec::new();
-    for child in source_file.syntax().children() {
-        if !ast::Directive::can_cast(child.kind()) {
-            continue;
-        }
-        // Find the directive's content start - the first non-
-        // trivia token. Leading WHITESPACE / NEWLINE / COMMENT
-        // can land inside the directive node per the Directive-
-        // Terminator Rule's inter-directive trivia attachment.
-        let Some(content) = child
-            .children_with_tokens()
-            .filter_map(rowan::NodeOrToken::into_token)
-            .find(|t| !is_trivia_kind(t.kind()))
-        else {
-            continue;
-        };
-        let content_start: usize = u32::from(content.text_range().start()) as usize;
-        // Column = offset since the last NEWLINE in the source,
-        // or since byte 0 if this is the first line. >0 means
-        // the directive's first content token has leading WS on
-        // its own line - that's the indent error.
-        let line_start = stripped[..content_start].rfind('\n').map_or(0, |nl| nl + 1);
-        if content_start > line_start {
-            let end: u32 = content.text_range().end().into();
-            let span = Span::new(
-                (line_start as u32 + bom_offset) as usize,
-                (end + bom_offset) as usize,
-            );
-            out.push(crate::ParseError::new(
-                crate::ParseErrorKind::SyntaxError(
-                    "top-level directive must start at column 0".to_string(),
-                ),
-                span,
-            ));
-        }
+    out: &mut Vec<crate::ParseError>,
+) {
+    // Caller dispatches: `child` is a recognized directive node.
+    // Find the directive's content start - the first non-
+    // trivia token. Leading WHITESPACE / NEWLINE / COMMENT
+    // can land inside the directive node per the Directive-
+    // Terminator Rule's inter-directive trivia attachment.
+    let Some(content) = child
+        .children_with_tokens()
+        .filter_map(rowan::NodeOrToken::into_token)
+        .find(|t| !is_trivia_kind(t.kind()))
+    else {
+        return;
+    };
+    let content_start: usize = u32::from(content.text_range().start()) as usize;
+    // Column = offset since the last NEWLINE in the source,
+    // or since byte 0 if this is the first line. >0 means
+    // the directive's first content token has leading WS on
+    // its own line - that's the indent error.
+    let line_start = stripped[..content_start].rfind('\n').map_or(0, |nl| nl + 1);
+    if content_start > line_start {
+        let end: u32 = content.text_range().end().into();
+        let span = Span::new(
+            (line_start as u32 + bom_offset) as usize,
+            (end + bom_offset) as usize,
+        );
+        out.push(crate::ParseError::new(
+            crate::ParseErrorKind::SyntaxError(
+                "top-level directive must start at column 0".to_string(),
+            ),
+            span,
+        ));
     }
-    out
 }
 
 /// Walk each `CUSTOM` directive and emit a `SyntaxError` for
@@ -1785,15 +1832,13 @@ fn extract_indented_directive_errors(
 /// surface a diagnostic for the bare-CURRENCY case so the
 /// compat metric reflects bean-check's exit-code rejection on
 /// shapes like `custom "x" 10 USD "y" NZD …`.
-fn extract_custom_value_errors(
-    source_file: &SourceFile,
+fn custom_value_check(
+    child: &crate::SyntaxNode,
     bom_offset: u32,
-) -> Vec<crate::ParseError> {
-    let mut out = Vec::new();
-    for child in source_file.syntax().children() {
-        if child.kind() != crate::SyntaxKind::CUSTOM_DIRECTIVE {
-            continue;
-        }
+    out: &mut Vec<crate::ParseError>,
+) {
+    // Caller dispatches: `child` is a CUSTOM_DIRECTIVE.
+    {
         // Collect non-trivia tokens, then skip past the
         // directive's header: DATE, CUSTOM_KW, and the first
         // STRING (the custom-type name). Everything after that
@@ -1839,24 +1884,21 @@ fn extract_custom_value_errors(
             i += 1;
         }
     }
-    out
 }
 
-/// Walk each `TRANSACTION` and emit a `SyntaxError` for any body
+/// Walk a `TRANSACTION` body and emit a `SyntaxError` for any body
 /// line that contains flat catch-all tokens (e.g., an
 /// unrecognized identifier where a posting was expected).
 /// Matches the legacy parser, which fails its inner posting
 /// parser on such lines and recovers by skipping to the next
 /// NEWLINE while emitting a `SyntaxError`.
-fn extract_transaction_body_errors(
-    source_file: &SourceFile,
+fn transaction_body_check(
+    child: &crate::SyntaxNode,
     bom_offset: u32,
-) -> Vec<crate::ParseError> {
-    let mut out = Vec::new();
-    for child in source_file.syntax().children() {
-        if child.kind() != crate::SyntaxKind::TRANSACTION {
-            continue;
-        }
+    out: &mut Vec<crate::ParseError>,
+) {
+    // Caller dispatches: `child` is a TRANSACTION.
+    {
         // Skip past the header NEWLINE, then look for catch-all
         // tokens (non-trivia, non-comment) appearing on lines
         // OUTSIDE POSTING / META_ENTRY child nodes.
@@ -1926,10 +1968,9 @@ fn extract_transaction_body_errors(
             }
         }
     }
-    out
 }
 
-/// Walk `ERROR_NODE` children of `SOURCE_FILE` and emit a
+/// Walk an `ERROR_NODE` and emit a
 /// `ParseError` for each line that is NEITHER a section marker
 /// (`*`-starting) NOR a column-0 comment. The variant emitted
 /// mirrors the legacy parser's error-recovery classifier
@@ -1938,16 +1979,14 @@ fn extract_transaction_body_errors(
 /// `InvalidAccount`; otherwise → `SyntaxError("unexpected
 /// input")`. `stripped` is the post-BOM-strip source so token
 /// `text_range` indices into it correctly.
-fn extract_error_node_errors(
-    source_file: &SourceFile,
+fn error_node_check(
+    child: &crate::SyntaxNode,
     stripped: &str,
     bom_offset: u32,
-) -> Vec<crate::ParseError> {
-    let mut out = Vec::new();
-    for child in source_file.syntax().children() {
-        if child.kind() != crate::SyntaxKind::ERROR_NODE {
-            continue;
-        }
+    out: &mut Vec<crate::ParseError>,
+) {
+    // Caller dispatches: `child` is an ERROR_NODE.
+    {
         let mut line_start: Option<u32> = None;
         let mut first_non_trivia: Option<crate::SyntaxKind> = None;
         for el in child.children_with_tokens() {
@@ -2003,7 +2042,6 @@ fn extract_error_node_errors(
             }
         }
     }
-    out
 }
 
 /// Pick the most specific `ParseError` variant for an
@@ -2198,47 +2236,42 @@ fn walk_descendants_once(source_file: &SourceFile, bom_offset: u32) -> Descendan
 /// `Token::Star` and emits `Comment(String::new(), line_span)`;
 /// the structured CST wraps these lines in `ERROR_NODE`s so we
 /// have to walk them and synthesize the same shape.
-fn extract_section_marker_comments(
-    source_file: &SourceFile,
+fn section_marker_check(
+    child: &crate::SyntaxNode,
     bom_offset: u32,
-) -> Vec<Spanned<String>> {
-    let mut out = Vec::new();
-    for child in source_file.syntax().children() {
-        if child.kind() != crate::SyntaxKind::ERROR_NODE {
+    out: &mut Vec<Spanned<String>>,
+) {
+    // Caller dispatches: `child` is an ERROR_NODE.
+    // Walk tokens line-by-line. A line starts at the start
+    // of the first token after a NEWLINE (or at the node's
+    // start) and ends at the next NEWLINE (inclusive).
+    let mut line_start: Option<u32> = None;
+    let mut first_non_trivia: Option<crate::SyntaxKind> = None;
+    for el in child.children_with_tokens() {
+        let rowan::NodeOrToken::Token(t) = el else {
+            continue;
+        };
+        let range = t.text_range();
+        let start: u32 = range.start().into();
+        let end: u32 = range.end().into();
+        if line_start.is_none() {
+            line_start = Some(start);
+        }
+        if t.kind() == crate::SyntaxKind::NEWLINE {
+            if first_non_trivia == Some(crate::SyntaxKind::STAR)
+                && let Some(ls) = line_start
+            {
+                let span = Span::new((ls + bom_offset) as usize, (end + bom_offset) as usize);
+                out.push(Spanned::new(String::new(), span));
+            }
+            line_start = None;
+            first_non_trivia = None;
             continue;
         }
-        // Walk tokens line-by-line. A line starts at the start
-        // of the first token after a NEWLINE (or at the node's
-        // start) and ends at the next NEWLINE (inclusive).
-        let mut line_start: Option<u32> = None;
-        let mut first_non_trivia: Option<crate::SyntaxKind> = None;
-        for el in child.children_with_tokens() {
-            let rowan::NodeOrToken::Token(t) = el else {
-                continue;
-            };
-            let range = t.text_range();
-            let start: u32 = range.start().into();
-            let end: u32 = range.end().into();
-            if line_start.is_none() {
-                line_start = Some(start);
-            }
-            if t.kind() == crate::SyntaxKind::NEWLINE {
-                if first_non_trivia == Some(crate::SyntaxKind::STAR)
-                    && let Some(ls) = line_start
-                {
-                    let span = Span::new((ls + bom_offset) as usize, (end + bom_offset) as usize);
-                    out.push(Spanned::new(String::new(), span));
-                }
-                line_start = None;
-                first_non_trivia = None;
-                continue;
-            }
-            if first_non_trivia.is_none() && !is_trivia_kind(t.kind()) {
-                first_non_trivia = Some(t.kind());
-            }
+        if first_non_trivia.is_none() && !is_trivia_kind(t.kind()) {
+            first_non_trivia = Some(t.kind());
         }
     }
-    out
 }
 
 // `extract_top_level_comments` and `extract_currency_occurrences`

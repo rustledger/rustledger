@@ -264,20 +264,51 @@ fn parse_alias_expansion(expansion: &str) -> Vec<String> {
 }
 
 fn main() -> ExitCode {
-    // Load config early (before parsing) for alias expansion
-    let config = Config::load().map(|l| l.config).unwrap_or_default();
+    // Load config early (before parsing) for alias expansion.
+    //
+    // A config file that exists but fails to parse must NOT be silently
+    // discarded: that swallowed a malformed `[price.mapping.X]` and left
+    // `rledger price hy` reporting "no price source configured" instead
+    // of the real TOML parse error (issue #1306). But it must also NOT
+    // block commands that don't read it — `--help`/`--version` and the
+    // `config` subcommands a user runs to *fix* the broken file (else a
+    // bootstrap deadlock: the command that repairs the config is blocked
+    // by the config it would repair).
+    //
+    // So: keep the load result, expand aliases with whatever loaded
+    // (defaults if it failed — a broken config just yields no aliases),
+    // let clap handle `--help`/`--version`, then surface the error only
+    // for a command that actually consumes config.
+    let config_result = Config::load();
+    let config = config_result
+        .as_ref()
+        .map(|loaded| loaded.config.clone())
+        .unwrap_or_default();
 
     // Expand aliases in command line arguments
     let args: Vec<String> = std::env::args().collect();
     let expanded_args = expand_aliases(args, &config);
 
-    // Parse the (possibly expanded) arguments
+    // Parse the (possibly expanded) arguments. clap intercepts
+    // `--help`/`--version` here via `e.exit()`, so those never reach the
+    // config-error gate below.
     let cli = match Cli::try_parse_from(&expanded_args) {
         Ok(cli) => cli,
         Err(e) => {
             e.exit();
         }
     };
+
+    // A config that failed to load is fatal for commands that consume
+    // it, but the `config` subcommands operate on the file directly
+    // (`init` creates one, `edit` opens it, `show` surfaces this very
+    // error), so they must still run when the existing config is broken.
+    if let Err(e) = &config_result
+        && !matches!(cli.command, Commands::Config { .. })
+    {
+        eprintln!("error: {e:#}");
+        return ExitCode::from(2);
+    }
 
     // Get effective profile: CLI flag takes precedence, then env var
     let profile = cli

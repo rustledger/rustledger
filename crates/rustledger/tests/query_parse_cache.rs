@@ -101,3 +101,37 @@ fn query_uses_parse_cache_with_identical_output() {
         "cache-disabled query output must match the cached run"
     );
 }
+
+/// The `--no-cache` flag must disable the cache entirely: a query run
+/// with it set must not write a cache file (and must still succeed).
+/// `--no-cache` precedes the positionals (QUERY is `trailing_var_arg`).
+#[test]
+fn query_no_cache_flag_skips_cache() {
+    let bin = require_rledger!();
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let file = dir.path().join("ledger.beancount");
+    std::fs::write(&file, SRC).expect("write ledger");
+
+    let out = std::process::Command::new(&bin)
+        .arg("query")
+        .arg("--no-cache")
+        .arg(&file)
+        .arg(QUERY)
+        .env_remove("BEANCOUNT_DISABLE_LOAD_CACHE")
+        .env_remove("BEANCOUNT_LOAD_CACHE_FILENAME")
+        .output()
+        .expect("run rledger query --no-cache");
+    assert!(
+        out.status.success(),
+        "query --no-cache failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let cache_file = dir.path().join(".ledger.beancount.cache");
+    assert!(
+        !cache_file.exists(),
+        "--no-cache must not write the parse cache, but {} exists",
+        cache_file.display()
+    );
+}

@@ -388,6 +388,7 @@ fn main() -> ExitCode {
                 args.verbose,
                 &format,
                 args.no_pager,
+                args.no_cache,
             ) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) if rustledger::pager::is_broken_pipe(&e) => ExitCode::SUCCESS,

@@ -68,6 +68,10 @@ pub struct Args {
     /// Disable pager for output
     #[arg(long, global = true)]
     pub no_pager: bool,
+
+    /// Disable the on-disk parse cache (always re-parse)
+    #[arg(long = "no-cache", global = true)]
+    pub no_cache: bool,
 }
 
 /// Output format for reports.
@@ -162,6 +166,7 @@ pub fn run(
     verbose: bool,
     format: &OutputFormat,
     no_pager: bool,
+    no_cache: bool,
 ) -> Result<()> {
     // Check if file exists
     if !file.exists() {
@@ -183,7 +188,7 @@ pub fn run(
     // entirely. The cached `LoadResult` is the parsed (pre-booking)
     // stream; `process` books it exactly as the uncached `load` did.
     // Disable with `BEANCOUNT_DISABLE_LOAD_CACHE`.
-    let (raw, _from_cache) = crate::cmd::loadcache::load_result_cached(file, false, verbose)?;
+    let (raw, _from_cache) = crate::cmd::loadcache::load_result_cached(file, no_cache, verbose)?;
     let ledger = rustledger_loader::process(raw, &options)
         .with_context(|| format!("failed to load {}", file.display()))?;
 

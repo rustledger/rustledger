@@ -5,10 +5,7 @@ use crate::report::{self, SourceCache};
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
 use rustledger_core::Directive;
-use rustledger_loader::{
-    CacheEntry, CachedOptions, CachedPlugin, LoadError, Loader, cache_disabled_by_env,
-    load_cache_entry, reintern_directives, save_cache_entry,
-};
+use rustledger_loader::LoadError;
 #[cfg(feature = "python-plugin-wasm")]
 use rustledger_plugin::PluginManager;
 #[cfg(feature = "python-plugin-wasm")]
@@ -185,92 +182,17 @@ pub fn run(args: &Args) -> Result<ExitCode> {
     // Determine if colors should be used (TTY detection + NO_COLOR)
     let use_color = !json_mode && report::should_use_color();
 
-    // Cache is disabled by --no-cache or by setting BEANCOUNT_DISABLE_LOAD_CACHE
-    // (the latter mirrors Python beancount's opt-out env var, see issue #939).
-    // The loader honors the env var on its own; this CLI-level check is a
-    // perf optimization that lets us skip building the cache entry entirely.
-    let cache_disabled = args.no_cache || cache_disabled_by_env();
-
-    // Try loading from cache first (unless disabled)
-    let cache_entry = if cache_disabled {
-        None
-    } else {
-        load_cache_entry(file)
-    };
-
-    let (load_result, from_cache) = if let Some(mut entry) = cache_entry {
-        if args.verbose && !args.quiet {
-            eprintln!("Loaded {} directives from cache", entry.directives.len());
-        }
-
-        // Re-intern strings to deduplicate memory
-        let dedup_count = reintern_directives(&mut entry.directives);
-        if args.verbose && !args.quiet {
-            eprintln!("Re-interned strings ({dedup_count} deduplicated)");
-        }
-
-        // Reconstruct an equivalent LoadResult (source map, plugins, and
-        // a rebuilt display context) from the cache entry. Previously
-        // open-coded here with an empty `DisplayContext`; the shared
-        // `CacheEntry::into_load_result` rebuilds the context so a cache
-        // hit is fully equivalent to a fresh parse.
-        (entry.into_load_result(), true)
-    } else {
-        // Load the file normally
-        if args.verbose && !args.quiet {
-            eprintln!("Loading {}...", file.display());
-        }
-
-        let mut loader = Loader::new();
-        let result = loader
-            .load(file)
-            .with_context(|| format!("failed to load {}", file.display()))?;
-
-        // Save to cache (unless disabled, parse errors, or option warnings).
-        // Option warnings (E7001-E7006) are not stored in the cache, so we must
-        // avoid caching files that have them — otherwise the warnings are silently
-        // lost on subsequent loads.
-        if !cache_disabled && result.errors.is_empty() && result.options.warnings.is_empty() {
-            // Collect all loaded file paths for cache (as strings for serialization)
-            let files: Vec<String> = result
-                .source_map
-                .files()
-                .iter()
-                .map(|f| f.path.to_string_lossy().into_owned())
-                .collect();
-            let files = if files.is_empty() {
-                vec![file.to_string_lossy().into_owned()]
-            } else {
-                files
-            };
-
-            // Create full cache entry
-            let entry = CacheEntry {
-                directives: result.directives.clone(),
-                options: CachedOptions::from(&result.options),
-                plugins: result
-                    .plugins
-                    .iter()
-                    .map(|p| CachedPlugin {
-                        name: p.name.clone(),
-                        config: p.config.clone(),
-                        force_python: p.force_python,
-                    })
-                    .collect(),
-                files,
-            };
-
-            if let Err(e) = save_cache_entry(file, &entry) {
-                if args.verbose && !args.quiet {
-                    eprintln!("Warning: failed to save cache: {e}");
-                }
-            } else if args.verbose && !args.quiet {
-                eprintln!("Saved {} directives to cache", result.directives.len());
-            }
-        }
-
-        (result, false)
-    };
+    // Load the parsed file via the shared on-disk parse cache
+    // (`cmd::loadcache::load_result_cached`): a cache hit skips the
+    // expensive parse and reconstructs an equivalent `LoadResult`,
+    // otherwise it parses and saves. `--no-cache` /
+    // `BEANCOUNT_DISABLE_LOAD_CACHE` disable it. `from_cache` drives the
+    // "(from cache)" note below.
+    let (load_result, from_cache) = crate::cmd::loadcache::load_result_cached(
+        file,
+        args.no_cache,
+        args.verbose && !args.quiet,
+    )?;
 
     // Build source cache for error reporting
     let mut cache = SourceCache::new();

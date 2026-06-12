@@ -51,6 +51,11 @@ pub enum CompletionContext {
     ExpectingCurrency,
     /// Inside a string (payee/narration)
     InsideString,
+    /// Typing a tag (after `#`) on a transaction header or in
+    /// `pushtag`/`poptag`.
+    Tag,
+    /// Typing a link (after `^`) on a transaction header.
+    Link,
     /// Unknown context
     Unknown,
 }
@@ -81,6 +86,8 @@ pub fn handle_completion(
         }
         CompletionContext::ExpectingCurrency => complete_currency(parse_result, ledger_state),
         CompletionContext::InsideString => complete_payee(parse_result, ledger_state),
+        CompletionContext::Tag => complete_tag(parse_result, ledger_state),
+        CompletionContext::Link => complete_link(parse_result, ledger_state),
         CompletionContext::Unknown => return None,
     };
 
@@ -182,6 +189,26 @@ fn detect_context(
         return CompletionContext::ExpectingAccount;
     }
 
+    // Tag (`#tag`) / link (`^link`) completion. Tags and links appear
+    // on transaction header lines (after the date/flag/strings) and in
+    // `pushtag`/`poptag` directives. We trigger when the token directly
+    // under the cursor begins with the sigil, but only when the cursor
+    // is in *code* position: not inside a string literal (a `#` in a
+    // narration is just text) and not after a comment marker. The
+    // cursor must also sit at the end of the token (no trailing
+    // whitespace), i.e. the user is still typing it.
+    if in_code_position(before_cursor)
+        && !before_cursor.ends_with(char::is_whitespace)
+        && let Some(token) = before_cursor.split_whitespace().next_back()
+    {
+        if token.starts_with('#') {
+            return CompletionContext::Tag;
+        }
+        if token.starts_with('^') {
+            return CompletionContext::Link;
+        }
+    }
+
     // Empty or whitespace only at line start (not indented)
     if trimmed.is_empty() {
         return CompletionContext::LineStart;
@@ -231,6 +258,38 @@ fn detect_context(
 /// Get a specific line from source.
 fn get_line(source: &str, line_num: usize) -> &str {
     source.lines().nth(line_num).unwrap_or("")
+}
+
+/// Whether the end of `before` is in "code" position: not inside a
+/// string literal and not past a comment marker. A single forward scan
+/// tracks string state with backslash-escape handling, matching the
+/// lexer's string rule (`"([^"\\]|\\.)*"`), so a `"` or `;` that lives
+/// *inside* a narration does not flip the classification. An unescaped,
+/// unquoted `;` starts a comment, after which nothing is code.
+///
+/// This is what lets tag/link detection fire on `"a;b" #tag` (the `;`
+/// is in the string) while staying silent on `"x" ; #note` (real
+/// comment) and `"open #not-a-tag` (unterminated string).
+fn in_code_position(before: &str) -> bool {
+    let mut in_string = false;
+    let mut escaped = false;
+    for ch in before.chars() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+        } else if ch == '"' {
+            in_string = true;
+        } else if ch == ';' {
+            // Comment marker outside any string: rest of line is comment.
+            return false;
+        }
+    }
+    !in_string
 }
 
 /// Check if a string looks like a date (YYYY-MM-DD).
@@ -433,6 +492,52 @@ fn complete_payee(
         .collect()
 }
 
+/// Complete a tag after `#` (issue #1268).
+///
+/// The `#` is a trigger character that the user has already typed, so
+/// `insert_text`/`filter_text` carry the tag name *without* the `#` —
+/// the client replaces the word it is completing (the text after the
+/// sigil) and leaves the `#` in place. `label` keeps the `#` for a
+/// readable popup. We return every known tag and let the client filter
+/// as the user types (the same approach as `complete_account_start`),
+/// rather than filtering server-side and risking a stale list under
+/// `isIncomplete: false`.
+fn complete_tag(
+    parse_result: &ParseResult,
+    ledger_state: Option<&LedgerState>,
+) -> Vec<CompletionItem> {
+    get_all_tags(parse_result, ledger_state)
+        .into_iter()
+        .map(|tag| CompletionItem {
+            label: format!("#{tag}"),
+            kind: Some(CompletionItemKind::CONSTANT),
+            detail: Some("Tag".to_string()),
+            filter_text: Some(tag.clone()),
+            insert_text: Some(tag),
+            ..Default::default()
+        })
+        .collect()
+}
+
+/// Complete a link after `^` (issue #1268). Mirrors [`complete_tag`];
+/// see its docs for the sigil/insert-text rationale.
+fn complete_link(
+    parse_result: &ParseResult,
+    ledger_state: Option<&LedgerState>,
+) -> Vec<CompletionItem> {
+    get_all_links(parse_result, ledger_state)
+        .into_iter()
+        .map(|link| CompletionItem {
+            label: format!("^{link}"),
+            kind: Some(CompletionItemKind::REFERENCE),
+            detail: Some("Link".to_string()),
+            filter_text: Some(link.clone()),
+            insert_text: Some(link),
+            ..Default::default()
+        })
+        .collect()
+}
+
 /// Get all accounts from the current file and ledger state.
 fn get_all_accounts(parse_result: &ParseResult, ledger_state: Option<&LedgerState>) -> Vec<String> {
     let mut accounts = extract_accounts(parse_result);
@@ -478,6 +583,34 @@ fn get_all_payees(parse_result: &ParseResult, ledger_state: Option<&LedgerState>
     payees
 }
 
+/// Get all tags from the current file and ledger state.
+fn get_all_tags(parse_result: &ParseResult, ledger_state: Option<&LedgerState>) -> Vec<String> {
+    let mut tags = extract_tags(parse_result);
+
+    // Merge tags from ledger state if available
+    if let Some(state) = ledger_state {
+        tags.extend(state.tags().iter().cloned());
+    }
+
+    tags.sort();
+    tags.dedup();
+    tags
+}
+
+/// Get all links from the current file and ledger state.
+fn get_all_links(parse_result: &ParseResult, ledger_state: Option<&LedgerState>) -> Vec<String> {
+    let mut links = extract_links(parse_result);
+
+    // Merge links from ledger state if available
+    if let Some(state) = ledger_state {
+        links.extend(state.links().iter().cloned());
+    }
+
+    links.sort();
+    links.dedup();
+    links
+}
+
 /// Extract all account names from parse result.
 fn extract_accounts(parse_result: &ParseResult) -> Vec<String> {
     rustledger_core::extract_accounts_iter(parse_result.directives.iter().map(|s| &s.value))
@@ -491,6 +624,20 @@ fn extract_currencies(parse_result: &ParseResult) -> Vec<String> {
 /// Extract payees from transactions.
 fn extract_payees(parse_result: &ParseResult) -> Vec<String> {
     rustledger_core::extract_payees_iter(parse_result.directives.iter().map(|s| &s.value))
+}
+
+/// Extract tags from parse result. Tag text comes back without the
+/// leading `#`, which is exactly the form completion inserts after the
+/// already-typed sigil. Delegates to the core visitor for exhaustive
+/// position coverage (transaction/document tags, metadata, Custom).
+fn extract_tags(parse_result: &ParseResult) -> Vec<String> {
+    rustledger_core::extract_tags_iter(parse_result.directives.iter().map(|s| &s.value))
+}
+
+/// Extract links from parse result. Like tags, link text comes back
+/// without the leading `^`.
+fn extract_links(parse_result: &ParseResult) -> Vec<String> {
+    rustledger_core::extract_links_iter(parse_result.directives.iter().map(|s| &s.value))
 }
 
 #[cfg(test)]
@@ -716,5 +863,163 @@ mod tests {
             labels.contains(&"Buy30"),
             "Buy30 must be reachable (pre-fix all 20+ payees were dropped); labels = {labels:?}"
         );
+    }
+
+    // ---- Tag / link completion (issue #1268) ----
+
+    /// Helper: detect context at the end of `before`, treating it as a
+    /// single line with the cursor at the final character (UTF-16).
+    fn ctx_at_end(before: &str) -> CompletionContext {
+        let char_len = before.chars().map(char::len_utf16).sum::<usize>() as u32;
+        detect_context(
+            before,
+            Position::new(0, char_len),
+            crate::handlers::utils::PositionEncoding::Utf16,
+        )
+    }
+
+    #[test]
+    fn test_detect_context_tag_on_transaction_header() {
+        // Typing a tag after the narration on a transaction header.
+        assert_eq!(
+            ctx_at_end("2024-01-15 * \"Central Perk\" #cof"),
+            CompletionContext::Tag
+        );
+        // Bare `#` (just the trigger) is also a tag context.
+        assert_eq!(
+            ctx_at_end("2024-01-15 * \"Central Perk\" #"),
+            CompletionContext::Tag
+        );
+    }
+
+    #[test]
+    fn test_detect_context_link_on_transaction_header() {
+        assert_eq!(
+            ctx_at_end("2024-01-15 * \"Central Perk\" ^trip"),
+            CompletionContext::Link
+        );
+    }
+
+    #[test]
+    fn test_detect_context_tag_on_pushtag() {
+        assert_eq!(ctx_at_end("pushtag #tr"), CompletionContext::Tag);
+        assert_eq!(ctx_at_end("poptag #tr"), CompletionContext::Tag);
+    }
+
+    #[test]
+    fn test_detect_context_hash_inside_string_is_not_tag() {
+        // A `#` inside an (unterminated) narration is part of the
+        // string, not a tag. The odd quote count suppresses the tag
+        // branch; the existing header handling then returns AfterDate.
+        let ctx = ctx_at_end("2024-01-15 * \"paid #5 invoice");
+        assert_ne!(ctx, CompletionContext::Tag);
+        assert_ne!(ctx, CompletionContext::Link);
+    }
+
+    #[test]
+    fn test_detect_context_hash_in_comment_is_not_tag() {
+        // A `#` after a `;` comment marker is not a tag.
+        let ctx = ctx_at_end("2024-01-15 * \"Lunch\" ; see #123");
+        assert_ne!(ctx, CompletionContext::Tag);
+        assert_ne!(ctx, CompletionContext::Link);
+    }
+
+    #[test]
+    fn test_detect_context_after_completed_tag_is_not_tag() {
+        // Trailing whitespace means the tag is finished; we should not
+        // still be offering tag completions.
+        assert_eq!(
+            ctx_at_end("2024-01-15 * \"Central Perk\" #coffee "),
+            CompletionContext::AfterDate
+        );
+    }
+
+    #[test]
+    fn complete_tag_returns_known_tags_without_sigil_in_insert() {
+        let source = "\
+2024-01-01 open Assets:Bank:Checking USD
+2024-01-01 open Expenses:Stuff USD
+
+2024-01-15 * \"Central Perk\" #coffee #morning
+  Assets:Bank:Checking  -5 USD
+  Expenses:Stuff
+";
+        let parsed = rustledger_parser::parse(source);
+        assert!(
+            parsed.errors.is_empty(),
+            "fixture must parse: {:?}",
+            parsed.errors
+        );
+
+        let items = complete_tag(&parsed, None);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(labels.contains(&"#coffee"), "labels = {labels:?}");
+        assert!(labels.contains(&"#morning"), "labels = {labels:?}");
+
+        // The `#` is a trigger character the user already typed, so the
+        // inserted/filtered text must NOT repeat it (else `##coffee`).
+        let coffee = items.iter().find(|i| i.label == "#coffee").unwrap();
+        assert_eq!(coffee.insert_text.as_deref(), Some("coffee"));
+        assert_eq!(coffee.filter_text.as_deref(), Some("coffee"));
+    }
+
+    #[test]
+    fn test_detect_context_tag_after_semicolon_inside_string() {
+        // The `;` lives inside the narration, so it is NOT a comment
+        // marker and must not suppress tag completion (was a bug with
+        // the naive `contains(';')` guard).
+        assert_eq!(
+            ctx_at_end("2024-01-15 * \"a;b\" #tr"),
+            CompletionContext::Tag
+        );
+    }
+
+    #[test]
+    fn test_detect_context_escaped_quote_keeps_string_open() {
+        // Literal line: 2024-01-15 * "a\"b #tag
+        // The `\"` is an escaped quote, so the string is still open at
+        // the `#`; this is inside a string, not a tag. A naive
+        // quote-parity count (two `"` chars => even => "outside") would
+        // wrongly treat it as code; the escape-aware scan does not.
+        let ctx = ctx_at_end("2024-01-15 * \"a\\\"b #tag");
+        assert_ne!(ctx, CompletionContext::Tag);
+        assert_ne!(ctx, CompletionContext::Link);
+    }
+
+    #[test]
+    fn test_in_code_position() {
+        assert!(in_code_position("2024-01-15 * \"x\" #")); // after closed string
+        assert!(in_code_position("pushtag #")); // plain directive
+        assert!(!in_code_position("2024-01-15 * \"x\" ; ")); // in comment
+        assert!(!in_code_position("2024-01-15 * \"open")); // in string
+        assert!(in_code_position("2024-01-15 * \"a;b\" ")); // ; was in string
+        assert!(!in_code_position("2024-01-15 * \"a\\\"b")); // escaped quote, still open
+    }
+
+    #[test]
+    fn complete_link_returns_known_links() {
+        let source = "\
+2024-01-01 open Assets:Bank:Checking USD
+2024-01-01 open Expenses:Stuff USD
+
+2024-01-15 * \"Flight\" ^trip-2024
+  Assets:Bank:Checking  -5 USD
+  Expenses:Stuff
+";
+        let parsed = rustledger_parser::parse(source);
+        assert!(
+            parsed.errors.is_empty(),
+            "fixture must parse: {:?}",
+            parsed.errors
+        );
+
+        let items = complete_link(&parsed, None);
+        let coffee = items.iter().find(|i| i.label == "^trip-2024");
+        assert!(
+            coffee.is_some(),
+            "labels = {:?}",
+            items.iter().map(|i| &i.label).collect::<Vec<_>>()
+        );
+        assert_eq!(coffee.unwrap().insert_text.as_deref(), Some("trip-2024"));
     }
 }

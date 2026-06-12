@@ -8,7 +8,7 @@
 //! (extract, hover, completion, …) benefits.
 
 use crate::Directive;
-use crate::visit::{visit_accounts, visit_currencies};
+use crate::visit::{visit_accounts, visit_currencies, visit_links, visit_tags};
 
 /// Common default currencies included in completions.
 pub const DEFAULT_CURRENCIES: &[&str] = &["USD", "EUR", "GBP"];
@@ -89,6 +89,48 @@ pub fn extract_payees_iter<'a>(directives: impl Iterator<Item = &'a Directive>) 
     payees.sort();
     payees.dedup();
     payees
+}
+
+/// Extract unique tags from directives (sorted, deduplicated). Tag
+/// text is returned without the `#` sigil.
+pub fn extract_tags(directives: &[Directive]) -> Vec<String> {
+    extract_tags_iter(directives.iter())
+}
+
+/// Extract unique tags from an iterator of directive references.
+///
+/// Delegates to [`visit_tags`] for exhaustive position coverage
+/// (`Transaction.tags`, `Document.tags`, `MetaValue::Tag` in metadata,
+/// `Custom.values`). See that function for the authoritative list.
+pub fn extract_tags_iter<'a>(directives: impl Iterator<Item = &'a Directive>) -> Vec<String> {
+    let mut tags = Vec::new();
+    for directive in directives {
+        visit_tags(directive, &mut |t| tags.push(t.to_string()));
+    }
+    tags.sort();
+    tags.dedup();
+    tags
+}
+
+/// Extract unique links from directives (sorted, deduplicated). Link
+/// text is returned without the `^` sigil.
+pub fn extract_links(directives: &[Directive]) -> Vec<String> {
+    extract_links_iter(directives.iter())
+}
+
+/// Extract unique links from an iterator of directive references.
+///
+/// Delegates to [`visit_links`] for exhaustive position coverage
+/// (`Transaction.links`, `Document.links`, `MetaValue::Link` in
+/// metadata, `Custom.values`). See that function for the list.
+pub fn extract_links_iter<'a>(directives: impl Iterator<Item = &'a Directive>) -> Vec<String> {
+    let mut links = Vec::new();
+    for directive in directives {
+        visit_links(directive, &mut |l| links.push(l.to_string()));
+    }
+    links.sort();
+    links.dedup();
+    links
 }
 
 #[cfg(test)]
@@ -254,6 +296,52 @@ mod tests {
         assert_eq!(
             extract_payees(&directives),
             extract_payees_iter(directives.iter())
+        );
+        assert_eq!(
+            extract_tags(&directives),
+            extract_tags_iter(directives.iter())
+        );
+        assert_eq!(
+            extract_links(&directives),
+            extract_links_iter(directives.iter())
+        );
+    }
+
+    #[test]
+    fn test_extract_tags_and_links_sorted_deduped_across_positions() {
+        use crate::{Document, Link, Tag, Transaction};
+
+        let directives = vec![
+            Directive::Transaction(Transaction {
+                date: date(2024, 1, 1),
+                flag: '*',
+                payee: None,
+                narration: "".into(),
+                // Duplicate `coffee` (also on the Document below) must
+                // dedup; tags returned without the `#`.
+                tags: vec![Tag::new("coffee"), Tag::new("morning")],
+                links: vec![Link::new("trip-2024")],
+                meta: Default::default(),
+                postings: vec![],
+                trailing_comments: vec![],
+            }),
+            Directive::Document(Document {
+                date: date(2024, 1, 2),
+                account: "Assets:Cash".into(),
+                path: "x.pdf".into(),
+                tags: vec![Tag::new("coffee")],
+                links: vec![Link::new("trip-2024"), Link::new("receipt")],
+                meta: Default::default(),
+            }),
+        ];
+
+        assert_eq!(
+            extract_tags(&directives),
+            vec!["coffee".to_string(), "morning".to_string()]
+        );
+        assert_eq!(
+            extract_links(&directives),
+            vec!["receipt".to_string(), "trip-2024".to_string()]
         );
     }
 

@@ -343,9 +343,11 @@ recovering the full parse cost on repeated invocations (~124 ms -> ~46 ms on a
 - **Revert to the direct parser / keep two parse paths.** Rejected: contradicts
   `#1262` / ADR-0003, and a second parser is the maintenance burden the migration
   removed. The lossless CST is required for the formatter and LSP.
-- **Give `report` (and friends) the disk parse cache `check` uses.** Helps real
-  repeated invocations but not the cold benchmark, and does not address the
-  underlying parse cost - orthogonal, could be done later regardless.
+- **Give `report` / `query` the disk parse cache `check` uses.** Not a rejected
+  alternative - this is recommendation 1 above and was shipped (#1314 for
+  `report`, #1315 for `query`). Listed here for completeness: it recovers the
+  full parse cost on repeated invocations but not on a cold benchmark run, and
+  is orthogonal to the underlying conversion cost.
 - **Accept the cost as the price of lossless parsing.** Tenable, but a ~3x parse
   regression on the headline benchmark is worth reclaiming when the levers above
   are output-preserving.

@@ -209,7 +209,12 @@ Before touching conversion, make the win measurable in CI-comparable form:
 
 No behavior change. Mergeable on its own.
 
-### Phase 1 - single-pass per-node converters (Layer B)
+### Phase 1 - single-pass per-node converters (Layer B) — DROPPED (proven neutral)
+
+> **Outcome:** implemented for `convert_transaction` and measured
+> performance-neutral (within ±2% noise, output byte-identical). See
+> [Empirical findings](#empirical-findings-june-2026). Retained below only to
+> document what was tried and why it does not help. Do not pursue.
 
 Eliminate the redundant accessor re-walks. For each directive converter, walk
 the node's children **once** and dispatch by kind into local accumulators,
@@ -315,14 +320,22 @@ expected improvement.
 
 ## PR slicing
 
-1. `perf(parser): add parse_via_cst criterion bench` (Phase 0)
-2. `perf(parser): single-pass convert_transaction` (Phase 1, validates approach)
-3. `perf(parser): single-pass remaining directive converters` (Phase 1)
-4. `perf(parser): green-tree walker + convert_transaction on green` (Phase 2 pilot)
-5. `perf(parser): remaining converters + error passes on green` (Phase 2)
-6. (optional) `perf(parser): lazy formatter alignment` (Phase 3)
+This is the slicing **if a green-tree rewrite is chosen**. Given the empirical
+findings it is no longer the default path; the parse-cache win was shipped
+instead (see below).
+
+- ~~Phase 0 bench, Phase 1 single-pass converters~~ — Phase 1 proven neutral; bench
+  exists via the in-tree `parser_bench`.
+1. `perf(parser): green-tree walker + convert_transaction on green` (Phase 2 pilot)
+2. `perf(parser): remaining converters + error passes on green` (Phase 2)
+3. (optional) `perf(parser): lazy formatter alignment` (Phase 3)
 
 Each is independently revertible and baseline-gated.
+
+**Shipped instead (recommendation 1):** `perf(report): reuse the on-disk parse
+cache` (PR #1314) routes `report` through the parse cache `check` already uses,
+recovering the full parse cost on repeated invocations (~124 ms -> ~46 ms on a
+10k-txn balance report) with no parser changes.
 
 ## Alternatives considered
 

@@ -2,7 +2,9 @@
 
 ## Status
 
-Proposed (June 2026)
+Proposed (June 2026). Updated with empirical findings (June 2026) - see
+[Empirical findings](#empirical-findings-june-2026); the recommendation has
+shifted away from an unconditional green-tree rewrite.
 
 ## Context
 
@@ -99,6 +101,76 @@ transaction that is roughly 8x redundant traversal of the same child list.
 Layer B is cheaper to fix and lower risk than Layer A. They compose: fixing B
 reduces the number of red materializations, fixing A removes the per-materialization
 allocation cost.
+
+## Empirical findings (June 2026)
+
+The plan below was partly validated against measurements before committing to the
+risky parts. Two results changed the recommendation.
+
+### Phase 1 (Layer B) is performance-neutral
+
+`convert_transaction`'s three full-children body walks (postings, meta entries,
+body tags/links) were fused into a single pass. Output stayed byte-identical (all
+529 parser tests + corpus + CST baselines green). The isolated parse bench
+(`parse_large/1000`, criterion) moved **within ±2% noise** across three runs
+(5.70 / 5.84 / 5.77 ms) - **no improvement**. The change was discarded.
+
+Reason: a single converter is a small slice (`convert_transaction` is 3.2% self),
+and on typical transactions the "redundant" walks find nothing to do, so removing
+them saves only iteration overhead - which is cheap. Layer B is not a lever.
+
+### A clean isolated-parse profile reshapes the cost model
+
+Profiling a tight `parse()`-only loop over a 10k-directive ledger (no report,
+booking, or I/O) attributes the cost much more broadly than "redundant walks":
+
+| Bucket | ~share | Frames |
+|--------|--------|--------|
+| `parse_via_cst` **self** | ~32% | the big inlined full-file passes (`walk_descendants_once` over every token, the directive loop, span fixup) |
+| red-cursor traversal | ~18% | `to_next_sibling_or_token`, `PreorderWithTokens::next`, `SyntaxElementChildren::next`, `first_child_or_token`, `first_child` |
+| allocator | ~15% | `malloc`/`free`/`memmove`/`_int_malloc`/`cfree`/`malloc_consolidate` |
+| red-node materialization | ~4.5% | `NodeData::new`, `cursor::free`, `Arc::drop_slow` |
+| green build + lex | ~6% | `NodeCache::token/node`, `GreenNode::new`, `parse_structured` |
+| conversion data work | ~9% | `convert_transaction`, `lossless_kind_tokens`, `Spanned<Posting>` drop, accessors |
+
+Implications:
+
+- The red-tree overhead that a green-tree rewrite (Phase 2) targets is the
+  traversal + materialization buckets, **~20-25%** combined, concentrated in the
+  full-file `walk_descendants_once` pass and the per-posting accessors - not the
+  per-directive body walks. So Phase 1 as originally scoped could never have
+  helped; a green-tree rewrite's realistic ceiling is **~20-25% off parse**, not
+  the 2-3x.
+- The 2-3x gap versus the deleted direct parser is **structural**: the CST
+  inherently builds a green tree (lex + build ~6%) and overlays a red tree to
+  walk it; the direct parser did neither (tokens -> AST directly). The old
+  ~37 ms report time is **not reachable while keeping the lossless CST**, by any
+  amount of conversion tuning.
+
+### Revised recommendation
+
+Ranked by value / risk:
+
+1. **Parse cache for `report` (and `query`).** `check` already caches parse
+   output to disk; extending that to the other un-cached CLI commands recovers
+   the *entire* parse cost on repeated invocations - the real-world common case -
+   with low risk and zero parser changes. (Does not help a cold first run, e.g.
+   the nightly benchmark, but helps users.) **Highest value/risk; recommended
+   first.**
+2. **Accept the cold-parse cost.** The lossless CST is the strategic direction
+   (it powers the formatter and LSP); ~130 ms for a 10k balance report is still
+   ~27x faster than `beancount`. A legitimate stopping point.
+3. **Green-tree walking (Phase 2 below).** ~20-25% off cold parse for a large,
+   compat-risky rewrite of `convert.rs`. Worth it only if cold-parse latency is
+   later shown to matter enough to justify the risk; if pursued, target the
+   full-file `walk_descendants_once` pass first (the biggest single red-walk),
+   measured before committing to the full converter.
+4. **Lazy `compute_alignment` (Phase 3).** ~0.7% today; do only if Phase 3's
+   other costs shrink and it becomes visible.
+
+The phased plan below stands as the *implementation* design **if** a green-tree
+rewrite is chosen, but it is no longer the default path. Phase 1 (single-pass
+converters) is dropped as proven neutral.
 
 ## Goals / non-goals
 
@@ -269,5 +341,8 @@ Each is independently revertible and baseline-gated.
 - Does rowan 0.16's public `GreenNodeData` API expose enough to walk children
   with offsets without an unsafe or a vendored helper? (Needs a spike in Phase 2
   pilot; if not, the walker may need a small `cursor`-free helper.)
-- Is Phase 1 alone enough to get under the target, making Phase 2 optional? The
-  Phase-1 + bench numbers decide whether Phase 2 is worth its risk.
+- ~~Is Phase 1 alone enough...?~~ **Answered (see Empirical findings):** Phase 1
+  is performance-neutral and has been dropped.
+- If a parse cache is added for `report`/`query`, does any consumer depend on
+  `report` re-parsing fresh each run (it should not - `check` already caches)?
+  Confirm cache-invalidation parity with `check` before reusing its mechanism.

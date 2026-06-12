@@ -169,6 +169,15 @@ fn error_response(message: &str) -> u64 {
     }
     ((ptr as u64) << 32) | (bytes.len() as u64)
 }
+
+// Required: advertise the ABI version so the host can confirm wire
+// compatibility right after instantiation. Without this export the
+// host refuses to run the plugin with a clear error rather than
+// trapping opaquely once `process` misreads its input.
+#[unsafe(no_mangle)]
+pub extern "C" fn __rustledger_abi_version() -> u32 {
+    ABI_VERSION
+}
 ```
 
 </details>
@@ -238,6 +247,7 @@ let warning = PluginError::warning("Duplicate entry")
 Plugins must export:
 
 - `alloc(size: u32) -> *mut u8` - **Required**. The host calls this to allocate memory for input data.
+- `__rustledger_abi_version() -> u32` - **Required**. Returns `ABI_VERSION`; the host checks it right after instantiation and refuses to run a guest built against an incompatible `plugin-types`. The `wasm_plugin_main!` / `wasm_importer_main!` macros emit it for you.
 
 Plugins may optionally export:
 

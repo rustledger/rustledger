@@ -1009,7 +1009,10 @@ fn range_intersects(child: rowan::TextRange, sel: rowan::TextRange) -> bool {
 pub fn compute_alignment(sf: &SourceFile) -> PostingAlignment {
     let mut max_lhs: usize = 0;
     let mut max_num: usize = 0;
-    let mut any_posting = false;
+    // Tracks postings that actually render a number — the only ones that
+    // participate in alignment. A file whose postings render no numbers
+    // gets `PostingAlignment::default()`, matching the type docs.
+    let mut any_aligned_posting = false;
     for directive in sf.directives() {
         let ast::Directive::Transaction(t) = directive else {
             continue;
@@ -1018,7 +1021,6 @@ pub fn compute_alignment(sf: &SourceFile) -> PostingAlignment {
             let Some(p) = ast::Posting::cast(child) else {
                 continue;
             };
-            any_posting = true;
             let mut lhs = 0usize;
             if let Some(flag) = p.flag() {
                 lhs += flag.text().chars().count() + 1; // `! ` etc.
@@ -1026,15 +1028,29 @@ pub fn compute_alignment(sf: &SourceFile) -> PostingAlignment {
             if let Some(account) = p.account() {
                 lhs += account.text().chars().count();
             }
-            max_lhs = max_lhs.max(lhs);
 
-            if let Some(amt) = p.amount() {
-                let w = amount_value_width(&amt);
-                max_num = max_num.max(w);
+            // Only postings that render a number drive the alignment
+            // column. `bean-format` computes the number column from the
+            // prefixes of number-bearing lines only, so two kinds of
+            // posting must NOT push the column right:
+            //   - amount-less postings (the elided balancing leg, or a
+            //     long account with no amount), and
+            //   - currency-only amounts (`Assets:Cash USD`), which
+            //     `emit_posting` prints with no number at all.
+            // Counting either is why `rledger format` and `bean-format`
+            // disagreed and round-tripping never converged (issue #1290).
+            // `amount_number_text` is the shared predicate that keeps
+            // this pre-pass in lockstep with `emit_posting`.
+            if let Some(amt) = p.amount()
+                && let Some(text) = amount_number_text(&amt)
+            {
+                any_aligned_posting = true;
+                max_lhs = max_lhs.max(lhs);
+                max_num = max_num.max(text.chars().count());
             }
         }
     }
-    if !any_posting {
+    if !any_aligned_posting {
         return PostingAlignment::default();
     }
     // 2 spaces between the longest account end and the number field,
@@ -1045,12 +1061,20 @@ pub fn compute_alignment(sf: &SourceFile) -> PostingAlignment {
     }
 }
 
-/// Width of the rendered number / arithmetic-expression text of
-/// an amount, EXCLUDING the trailing currency. Sign (if any) is
-/// included. Used for the file-wide right-justify pre-pass and
-/// for the per-posting padding math in [`emit_posting`].
-fn amount_value_width(amt: &ast::Amount) -> usize {
-    amount_value_text(amt).chars().count()
+/// The rendered number / arithmetic-expression text of an amount *if it
+/// renders a number*, or `None` when it renders nothing (a currency-only
+/// amount like `USD`, whose value text is empty). EXCLUDES the trailing
+/// currency; sign (if any) is included.
+///
+/// This is the single source of truth for "does this posting line have a
+/// number?". Both the file-wide alignment pre-pass ([`compute_alignment`])
+/// and the emitter ([`emit_posting`]) consult it, so they can never
+/// disagree about which postings participate in alignment — the bug
+/// class behind #1290 (amount-less postings) and its currency-only
+/// sibling.
+fn amount_number_text(amt: &ast::Amount) -> Option<String> {
+    let text = amount_value_text(amt);
+    (!text.is_empty()).then_some(text)
 }
 
 /// Render an amount's value portion (number or arithmetic
@@ -1659,8 +1683,10 @@ fn emit_posting(p: &ast::Posting, align: PostingAlignment, out: &mut String) {
     col += account_text.chars().count();
 
     if let Some(amt) = p.amount() {
-        let value = amount_value_text(&amt);
-        if !value.is_empty() {
+        // `amount_number_text` is the shared "does this render a number?"
+        // predicate (see `compute_alignment`); a currency-only amount
+        // returns `None` and prints no number.
+        if let Some(value) = amount_number_text(&amt) {
             // Two stages of padding:
             //   1) Account end → start of number field (`number_col`).
             //      Fall back to 2 spaces when the LHS already exceeds
@@ -2259,6 +2285,72 @@ mod tests {
   Expenses:Coffee   5.00 USD
 ";
         assert_eq!(format_source(src), expected);
+    }
+
+    /// Regression for #1290: an amount-less posting (the common elided
+    /// balancing leg) must NOT widen the number column, even when its
+    /// account is longer than every amount-bearing account. `bean-format`
+    /// computes the column only from number-bearing lines, so counting
+    /// `Expenses:Food` here would make `rledger format` and `bean-format`
+    /// disagree and never converge on round-trip.
+    #[test]
+    fn transaction_elided_posting_does_not_widen_amount_column() {
+        let src = "\
+2024-01-15 * \"Coffee\"
+  Assets:Cash  -5.00 USD
+  Expenses:Food
+";
+        // Only Assets:Cash (11) bears an amount; Expenses:Food (13) is
+        // elided and is ignored for alignment. number_col = 2+11+2 = 15.
+        let expected = "\
+2024-01-15 * \"Coffee\"
+  Assets:Cash  -5.00 USD
+  Expenses:Food
+";
+        assert_eq!(format_source(src), expected);
+        // Idempotent: re-formatting the output is a no-op.
+        assert_eq!(format_source(expected), expected);
+    }
+
+    /// Regression for #1290 using the reporter's exact fixture: a long
+    /// elided account (`Expenses:Thingamabobs`) alongside a short
+    /// amount-bearing one (`Assets:Money`). Pre-fix the number was
+    /// pushed right to clear the long account; `bean-format` keeps it
+    /// two spaces after `Assets:Money`. Also confirms the thousands
+    /// separator is stripped.
+    #[test]
+    fn transaction_long_elided_account_matches_bean_format() {
+        let src = "\
+2024-07-20 * \"Commas should stay\"
+  Assets:Money  -1,024 USD
+  Expenses:Thingamabobs
+";
+        let expected = "\
+2024-07-20 * \"Commas should stay\"
+  Assets:Money  -1024 USD
+  Expenses:Thingamabobs
+";
+        assert_eq!(format_source(src), expected);
+        assert_eq!(format_source(expected), expected);
+    }
+
+    /// Regression for the currency-only gap (#1307, found in review): a
+    /// currency-only posting (`... USD`, no number) renders no number,
+    /// so — like an elided posting — it must not widen the alignment
+    /// column even when its account is the longest. Only `Assets:Bank`
+    /// bears a number here, so the number stays two spaces after it. The
+    /// assertion checks the numbered line directly, independent of how
+    /// the currency-only line itself renders.
+    #[test]
+    fn transaction_currency_only_posting_does_not_widen_amount_column() {
+        let out = format_source(
+            "2024-01-15 * \"x\"\n  Assets:Bank  -5.00 USD\n  Assets:LongCashReserve USD\n",
+        );
+        assert!(
+            out.contains("  Assets:Bank  -5.00 USD"),
+            "number column must align to the numbered posting, not the longer \
+             currency-only one; got:\n{out}"
+        );
     }
 
     #[test]

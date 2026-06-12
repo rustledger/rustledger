@@ -181,6 +181,36 @@ pub enum WasmImporterError {
         /// Underlying wasmtime type-mismatch error.
         source: anyhow::Error,
     },
+    /// The importer does not advertise an ABI version (no
+    /// `__rustledger_abi_version` export). It was built without the
+    /// `wasm_importer_main!` macro or against a `plugin-types` from
+    /// before the ABI handshake existed; the host can't confirm wire
+    /// compatibility and refuses to run it (issue #1234).
+    #[error(
+        "WASM importer has a missing or invalid `{export}` export (expected signature \
+         `() -> u32`): it was built against an incompatible rustledger-plugin-types, or the \
+         export is absent, mistyped, or traps. Host requires ABI v{expected}. Rebuild against \
+         a matching rustledger-plugin-types."
+    )]
+    AbiVersionMissing {
+        /// The export symbol the host looked up.
+        export: &'static str,
+        /// ABI version the host speaks.
+        expected: u32,
+    },
+    /// The importer advertises a different ABI version than the host.
+    /// Running it would risk an opaque trap from a misread wire
+    /// message, so the host rejects it at load (issue #1234).
+    #[error(
+        "WASM importer ABI version mismatch: importer declares v{found}, host requires \
+         v{expected}. Rebuild against a matching rustledger-plugin-types."
+    )]
+    AbiVersionMismatch {
+        /// Version the importer reported.
+        found: u32,
+        /// Version the host requires.
+        expected: u32,
+    },
 }
 
 // `MemoryLimiter`, `StoreState`, `MAX_TABLE_ELEMENTS`, and the
@@ -489,6 +519,29 @@ fn call_metadata(
     let instance = linker
         .instantiate(&mut store, module)
         .map_err(runtime_err)?;
+
+    // ABI handshake. `metadata` is the first thing the host calls on a
+    // freshly loaded importer, so this is the natural load-time gate:
+    // an importer built against an incompatible plugin-types is
+    // rejected here with a clear error instead of trapping opaquely
+    // inside a later `extract` (issue #1234). Subsequent identify /
+    // extract calls re-instantiate the same already-verified module,
+    // so they don't repeat the check.
+    match sandbox::check_guest_abi(&instance, &mut store) {
+        sandbox::AbiCheck::Match => {}
+        sandbox::AbiCheck::Missing => {
+            return Err(WasmImporterError::AbiVersionMissing {
+                export: rustledger_plugin_types::ABI_VERSION_EXPORT,
+                expected: sandbox::HOST_ABI_VERSION,
+            });
+        }
+        sandbox::AbiCheck::Mismatch { found } => {
+            return Err(WasmImporterError::AbiVersionMismatch {
+                found,
+                expected: sandbox::HOST_ABI_VERSION,
+            });
+        }
+    }
 
     // Invariant: `validate_module` verified `memory` at load time.
     let memory = instance
@@ -1007,6 +1060,14 @@ mod tests {
             ;; extract_enriched: ptr=32, len=4 → (32<<32) | 4
             (func (export "extract_enriched") (param i32 i32) (result i64)
                 i64.const 0x20_0000_0004)
+
+            ;; ABI handshake export. Must equal sandbox::HOST_ABI_VERSION
+            ;; (rustledger_plugin_types::ABI_VERSION = 1). If the ABI
+            ;; version is ever bumped, this literal moves in lockstep —
+            ;; the deliberate test update that proves a real guest would
+            ;; need rebuilding too.
+            (func (export "__rustledger_abi_version") (result i32)
+                i32.const 1)
         )
         "#
     }
@@ -1016,6 +1077,71 @@ mod tests {
             account: "Assets:Bank:Checking".to_string(),
             currency: Some("USD".to_string()),
             importer_type: ImporterType::Csv(CsvConfig::default()),
+        }
+    }
+
+    /// A WAT importer with every required export present (so
+    /// `validate_module` passes) but a configurable
+    /// `__rustledger_abi_version`. `abi_section` is spliced in verbatim,
+    /// so a caller can omit it entirely to model a pre-handshake guest.
+    /// `metadata` returns junk on purpose — the ABI check runs before
+    /// the host ever reads it, so these fixtures never need real
+    /// `MessagePack`.
+    fn importer_wat_with_abi(abi_section: &str) -> String {
+        format!(
+            r#"
+            (module
+                (memory (export "memory") 1)
+                (func (export "alloc") (param i32) (result i32) i32.const 0)
+                (func (export "metadata") (result i64) i64.const 0)
+                (func (export "identify") (param i32 i32) (result i64) i64.const 0)
+                (func (export "extract") (param i32 i32) (result i64) i64.const 0)
+                (func (export "extract_enriched") (param i32 i32) (result i64) i64.const 0)
+                {abi_section}
+            )
+            "#
+        )
+    }
+
+    /// Issue #1234: an importer that doesn't advertise an ABI version
+    /// is rejected at load with a clear error, not an opaque trap on
+    /// the first `extract`.
+    #[test]
+    fn load_rejects_importer_missing_abi_version() {
+        let bytes = wat::parse_str(importer_wat_with_abi("")).expect("WAT parses");
+        let err = WasmImporter::load_from_bytes(
+            PathBuf::from("noabi.wasm"),
+            &bytes,
+            WasmRuntimeConfig::default(),
+        )
+        .expect_err("load must reject an importer with no ABI export");
+        assert!(
+            matches!(err, WasmImporterError::AbiVersionMissing { .. }),
+            "expected AbiVersionMissing, got: {err:?}"
+        );
+    }
+
+    /// Issue #1234: an importer built against a different ABI version
+    /// is rejected at load, naming both versions.
+    #[test]
+    fn load_rejects_importer_with_mismatched_abi_version() {
+        // 999 is deliberately not the host ABI version.
+        let wat = importer_wat_with_abi(
+            r#"(func (export "__rustledger_abi_version") (result i32) i32.const 999)"#,
+        );
+        let bytes = wat::parse_str(wat).expect("WAT parses");
+        let err = WasmImporter::load_from_bytes(
+            PathBuf::from("badabi.wasm"),
+            &bytes,
+            WasmRuntimeConfig::default(),
+        )
+        .expect_err("load must reject an ABI-mismatched importer");
+        match err {
+            WasmImporterError::AbiVersionMismatch { found, expected } => {
+                assert_eq!(found, 999);
+                assert_eq!(expected, sandbox::HOST_ABI_VERSION);
+            }
+            other => panic!("expected AbiVersionMismatch, got: {other:?}"),
         }
     }
 
@@ -1070,6 +1196,9 @@ mod tests {
                 (func (export "identify") (param i32 i32) (result i64) i64.const 0)
                 (func (export "extract") (param i32 i32) (result i64) i64.const 0)
                 (func (export "extract_enriched") (param i32 i32) (result i64) i64.const 0)
+                ;; ABI handshake passes so the oversized-metadata check
+                ;; downstream is what rejects this module (issue #1234).
+                (func (export "__rustledger_abi_version") (result i32) i32.const 1)
             )
         "#;
         let bytes = wat::parse_str(wat).expect("WAT parses");
@@ -1172,6 +1301,9 @@ mod tests {
                 (func (export "identify") (param i32 i32) (result i64) i64.const 0)
                 (func (export "extract") (param i32 i32) (result i64) i64.const 0)
                 (func (export "extract_enriched") (param i32 i32) (result i64) i64.const 0)
+                ;; Correct ABI so the check passes and the metadata
+                ;; signature mismatch is what surfaces (issue #1234).
+                (func (export "__rustledger_abi_version") (result i32) i32.const 1)
             )
         "#;
         let bytes = wat::parse_str(wat).expect("WAT parses");

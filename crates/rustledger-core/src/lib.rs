@@ -71,7 +71,8 @@ pub use directive::{
 pub use display_context::{DEFAULT_CURRENCY, DisplayContext, Precision};
 pub use extract::{
     DEFAULT_CURRENCIES, extract_accounts, extract_accounts_iter, extract_currencies,
-    extract_currencies_iter, extract_payees, extract_payees_iter,
+    extract_currencies_iter, extract_links, extract_links_iter, extract_payees,
+    extract_payees_iter, extract_tags, extract_tags_iter,
 };
 pub use format::{
     Alignment, FormatConfig, FormatLine, format_directive_lines, format_directives,

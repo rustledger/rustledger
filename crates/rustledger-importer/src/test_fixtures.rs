@@ -4,9 +4,11 @@
 //!
 //! Tests in both this crate and `rustledger` (the CLI) need tiny WASM
 //! modules that satisfy the importer ABI: `memory`, `alloc`,
-//! `metadata`, `identify`, `extract`, `extract_enriched`. Both
-//! previously hand-rolled identical WAT strings; this module is the
-//! single source of truth so an ABI change updates one place.
+//! `metadata`, `identify`, `extract`, `extract_enriched`, plus the
+//! `__rustledger_abi_version` handshake export the host now checks at
+//! load (issue #1234). Both previously hand-rolled identical WAT
+//! strings; this module is the single source of truth so an ABI change
+//! updates one place.
 //!
 //! Marked `#[doc(hidden)]` so the helpers don't show up in published
 //! docs — they're a crate-internal convenience for tests, not a
@@ -33,6 +35,10 @@
 #[must_use]
 pub fn metadata_wat(name: &str) -> String {
     assert_eq!(name.len(), 3, "test fixture only supports 3-char names");
+    // Interpolate the host ABI version so the fixture tracks
+    // `rustledger_plugin_types::ABI_VERSION` automatically when it's
+    // bumped (issue #1234).
+    let abi = rustledger_plugin_types::ABI_VERSION;
     format!(
         r#"
         (module
@@ -45,6 +51,7 @@ pub fn metadata_wat(name: &str) -> String {
             (func (export "identify") (param i32 i32) (result i64) i64.const 0)
             (func (export "extract") (param i32 i32) (result i64) i64.const 0)
             (func (export "extract_enriched") (param i32 i32) (result i64) i64.const 0)
+            (func (export "__rustledger_abi_version") (result i32) i32.const {abi})
         )
         "#
     )
@@ -63,6 +70,8 @@ pub fn metadata_wat(name: &str) -> String {
 #[must_use]
 pub fn identifying_wat(name: &str) -> String {
     assert_eq!(name.len(), 3, "test fixture only supports 3-char names");
+    // Interpolate the host ABI version (see `metadata_wat`).
+    let abi = rustledger_plugin_types::ABI_VERSION;
     format!(
         r#"
         (module
@@ -78,6 +87,7 @@ pub fn identifying_wat(name: &str) -> String {
             (func (export "identify") (param i32 i32) (result i64) i64.const 0x10_0000_0002)
             (func (export "extract") (param i32 i32) (result i64) i64.const 0)
             (func (export "extract_enriched") (param i32 i32) (result i64) i64.const 0)
+            (func (export "__rustledger_abi_version") (result i32) i32.const {abi})
         )
         "#
     )

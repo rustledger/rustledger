@@ -174,9 +174,108 @@ pub fn visit_accounts<'a>(directive: &'a Directive, visit: &mut impl FnMut(&'a s
     }
 }
 
+/// Walk every position a tag can appear in this directive, invoking
+/// `visit` once per occurrence (tag text without the `#` sigil).
+///
+/// Positions covered:
+/// - `Transaction.tags` (including tags folded in from `pushtag`)
+/// - `Document.tags`
+/// - `MetaValue::Tag` in any directive's or posting's metadata
+/// - `Custom.values` entries that are `MetaValue::Tag`
+///
+/// Visit order matches the source order of the parser-generated AST,
+/// except for metadata (unspecified iteration order).
+pub fn visit_tags<'a>(directive: &'a Directive, visit: &mut impl FnMut(&'a str)) {
+    match directive {
+        Directive::Transaction(txn) => {
+            for tag in &txn.tags {
+                visit(tag.as_str());
+            }
+            visit_meta_tags(&txn.meta, visit);
+            for posting in &txn.postings {
+                visit_meta_tags(&posting.meta, visit);
+            }
+        }
+        Directive::Document(doc) => {
+            for tag in &doc.tags {
+                visit(tag.as_str());
+            }
+            visit_meta_tags(&doc.meta, visit);
+        }
+        Directive::Custom(custom) => {
+            for v in &custom.values {
+                visit_meta_value_tag(v, visit);
+            }
+            visit_meta_tags(&custom.meta, visit);
+        }
+        Directive::Open(open) => visit_meta_tags(&open.meta, visit),
+        Directive::Close(close) => visit_meta_tags(&close.meta, visit),
+        Directive::Commodity(comm) => visit_meta_tags(&comm.meta, visit),
+        Directive::Balance(bal) => visit_meta_tags(&bal.meta, visit),
+        Directive::Pad(pad) => visit_meta_tags(&pad.meta, visit),
+        Directive::Note(note) => visit_meta_tags(&note.meta, visit),
+        Directive::Price(price) => visit_meta_tags(&price.meta, visit),
+        Directive::Event(event) => visit_meta_tags(&event.meta, visit),
+        Directive::Query(query) => visit_meta_tags(&query.meta, visit),
+    }
+}
+
+/// Walk every position a link can appear in this directive, invoking
+/// `visit` once per occurrence (link text without the `^` sigil).
+///
+/// Positions covered mirror [`visit_tags`], with `Link` in place of
+/// `Tag`: `Transaction.links`, `Document.links`, `MetaValue::Link` in
+/// metadata, and `Custom.values` link entries.
+pub fn visit_links<'a>(directive: &'a Directive, visit: &mut impl FnMut(&'a str)) {
+    match directive {
+        Directive::Transaction(txn) => {
+            for link in &txn.links {
+                visit(link.as_str());
+            }
+            visit_meta_links(&txn.meta, visit);
+            for posting in &txn.postings {
+                visit_meta_links(&posting.meta, visit);
+            }
+        }
+        Directive::Document(doc) => {
+            for link in &doc.links {
+                visit(link.as_str());
+            }
+            visit_meta_links(&doc.meta, visit);
+        }
+        Directive::Custom(custom) => {
+            for v in &custom.values {
+                visit_meta_value_link(v, visit);
+            }
+            visit_meta_links(&custom.meta, visit);
+        }
+        Directive::Open(open) => visit_meta_links(&open.meta, visit),
+        Directive::Close(close) => visit_meta_links(&close.meta, visit),
+        Directive::Commodity(comm) => visit_meta_links(&comm.meta, visit),
+        Directive::Balance(bal) => visit_meta_links(&bal.meta, visit),
+        Directive::Pad(pad) => visit_meta_links(&pad.meta, visit),
+        Directive::Note(note) => visit_meta_links(&note.meta, visit),
+        Directive::Price(price) => visit_meta_links(&price.meta, visit),
+        Directive::Event(event) => visit_meta_links(&event.meta, visit),
+        Directive::Query(query) => visit_meta_links(&query.meta, visit),
+    }
+}
+
 fn visit_meta_currencies<'a>(meta: &'a Metadata, visit: &mut impl FnMut(&'a str)) {
     for v in meta.values() {
         visit_meta_value_currency(v, visit);
+    }
+}
+
+fn visit_meta_tags<'a>(meta: &'a Metadata, visit: &mut impl FnMut(&'a str)) {
+    for v in meta.values() {
+        visit_meta_value_tag(v, visit);
+    }
+}
+
+fn visit_meta_links<'a>(meta: &'a Metadata, visit: &mut impl FnMut(&'a str)) {
+    for v in meta.values() {
+        visit_meta_value_link(v, visit);
     }
 }
 
@@ -229,6 +328,42 @@ fn visit_meta_value_account<'a>(v: &'a MetaValue, visit: &mut impl FnMut(&'a str
     }
 }
 
+/// Per-`MetaValue` tag extractor (tag text without the `#`). See
+/// `visit_meta_value_currency` for the no-`_ => {}`-catch-all rationale.
+fn visit_meta_value_tag<'a>(v: &'a MetaValue, visit: &mut impl FnMut(&'a str)) {
+    match v {
+        MetaValue::Tag(t) => visit(t.as_str()),
+        // Variants that cannot carry a tag.
+        MetaValue::String(_)
+        | MetaValue::Account(_)
+        | MetaValue::Currency(_)
+        | MetaValue::Link(_)
+        | MetaValue::Date(_)
+        | MetaValue::Number(_)
+        | MetaValue::Bool(_)
+        | MetaValue::Amount(_)
+        | MetaValue::None => {}
+    }
+}
+
+/// Per-`MetaValue` link extractor (link text without the `^`). See
+/// `visit_meta_value_currency` for the no-`_ => {}`-catch-all rationale.
+fn visit_meta_value_link<'a>(v: &'a MetaValue, visit: &mut impl FnMut(&'a str)) {
+    match v {
+        MetaValue::Link(l) => visit(l.as_str()),
+        // Variants that cannot carry a link.
+        MetaValue::String(_)
+        | MetaValue::Account(_)
+        | MetaValue::Currency(_)
+        | MetaValue::Tag(_)
+        | MetaValue::Date(_)
+        | MetaValue::Number(_)
+        | MetaValue::Bool(_)
+        | MetaValue::Amount(_)
+        | MetaValue::None => {}
+    }
+}
+
 fn visit_price_currency<'a>(price: &'a PriceAnnotation, visit: &mut impl FnMut(&'a str)) {
     // Post-#1167: PriceAnnotation factors into orthogonal kind+amount
     // axes, so the six pre-#1167 arms collapse to one inspection of
@@ -270,6 +405,22 @@ mod tests {
         let mut out = Vec::new();
         for d in directives {
             visit_accounts(d, &mut |a| out.push(a.to_string()));
+        }
+        out
+    }
+
+    fn collect_tags(directives: &[Directive]) -> Vec<String> {
+        let mut out = Vec::new();
+        for d in directives {
+            visit_tags(d, &mut |t| out.push(t.to_string()));
+        }
+        out
+    }
+
+    fn collect_links(directives: &[Directive]) -> Vec<String> {
+        let mut out = Vec::new();
+        for d in directives {
+            visit_links(d, &mut |l| out.push(l.to_string()));
         }
         out
     }
@@ -465,6 +616,71 @@ mod tests {
         assert_eq!(
             count, 11,
             "expected `Assets:X` visited 11 times; got {count} in {accounts:?}"
+        );
+    }
+
+    /// `visit_tags` / `visit_links` must surface every Tag/Link-bearing
+    /// position. Seeds `proj` (tag) and `inv-1` (link) into all four
+    /// reachable positions each and asserts the visitor reaches each.
+    #[test]
+    fn test_visit_tags_and_links_reach_every_position() {
+        use crate::{Link, Tag};
+
+        let mut txn_meta: Metadata = Default::default();
+        txn_meta.insert("ref".into(), MetaValue::Tag(Tag::new("proj")));
+        txn_meta.insert("see".into(), MetaValue::Link(Link::new("inv-1")));
+
+        let directives = vec![
+            // Transaction.tags / Transaction.links + metadata.
+            Directive::Transaction(Transaction {
+                date: date(2024, 1, 1),
+                flag: '*',
+                payee: None,
+                narration: "".into(),
+                tags: vec![Tag::new("proj")],
+                links: vec![Link::new("inv-1")],
+                meta: txn_meta,
+                postings: vec![],
+                trailing_comments: vec![],
+            }),
+            // Document.tags / Document.links.
+            Directive::Document(Document {
+                date: date(2024, 1, 2),
+                account: "Assets:Cash".into(),
+                path: "x.pdf".into(),
+                tags: vec![Tag::new("proj")],
+                links: vec![Link::new("inv-1")],
+                meta: Default::default(),
+            }),
+            // Custom.values carrying a Tag and a Link.
+            Directive::Custom(Custom {
+                date: date(2024, 1, 3),
+                custom_type: "test".into(),
+                values: vec![
+                    MetaValue::Tag(Tag::new("proj")),
+                    MetaValue::Link(Link::new("inv-1")),
+                ],
+                meta: Default::default(),
+            }),
+        ];
+
+        // Expected `proj` tag visits: Transaction.tags, Transaction.meta,
+        // Document.tags, Custom.values = 4. Same shape for `inv-1` link.
+        assert_eq!(
+            collect_tags(&directives)
+                .iter()
+                .filter(|t| *t == "proj")
+                .count(),
+            4,
+            "tag `proj` should be visited in all 4 positions"
+        );
+        assert_eq!(
+            collect_links(&directives)
+                .iter()
+                .filter(|l| *l == "inv-1")
+                .count(),
+            4,
+            "link `inv-1` should be visited in all 4 positions"
         );
     }
 

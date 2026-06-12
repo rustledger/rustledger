@@ -16,7 +16,7 @@
 pushtag #taggy-mc-long-tag-name-face
 
 2024-07-20 * "the directive inside the tag scope keeps its own header"
-  Assets:Money           -1.00 USD
+  Assets:Money  -1.00 USD
   Expenses:Thingamabobs
 
 poptag #taggy-mc-long-tag-name-face

@@ -230,6 +230,33 @@ impl Plugin {
         // Instantiate the module
         let instance = linker.instantiate(&mut store, &self.module)?;
 
+        // ABI handshake: confirm the guest was built against a
+        // compatible plugin-types before we hand it any data. A
+        // version skew otherwise manifests as an opaque trap once the
+        // guest misreads `PluginInput`; the check turns that into a
+        // clear error naming both versions (issue #1234). Plugins
+        // instantiate per-execute, so this runs here rather than at
+        // load; the cost is one extra typed-func call.
+        match sandbox::check_guest_abi(&instance, &mut store) {
+            sandbox::AbiCheck::Match => {}
+            sandbox::AbiCheck::Missing => anyhow::bail!(
+                "plugin `{name}` has a missing or invalid `{export}` export (expected \
+                 signature `() -> u32`): it was built against an incompatible \
+                 rustledger-plugin-types, or the export is absent, mistyped, or traps. \
+                 Host requires ABI v{ver}. Rebuild it against a matching \
+                 rustledger-plugin-types.",
+                name = self.name,
+                export = rustledger_plugin_types::ABI_VERSION_EXPORT,
+                ver = sandbox::HOST_ABI_VERSION,
+            ),
+            sandbox::AbiCheck::Mismatch { found } => anyhow::bail!(
+                "plugin `{name}` ABI version mismatch: plugin declares v{found}, host requires \
+                 v{ver}. Rebuild it against a matching rustledger-plugin-types.",
+                name = self.name,
+                ver = sandbox::HOST_ABI_VERSION,
+            ),
+        }
+
         // Serialize input. The serializer choice (default-mode
         // `to_vec`, not `to_vec_named`) is pinned by the
         // cross-boundary wire-format tests in
@@ -1179,6 +1206,72 @@ mod tests {
         );
     }
 
+    /// A plugin WAT with the required memory/alloc/process exports plus
+    /// a configurable `__rustledger_abi_version`. Pass `""` to model a
+    /// pre-handshake guest. `process` returns junk because the ABI
+    /// check runs right after instantiation, before it is ever called.
+    fn plugin_wat_with_abi(abi_section: &str) -> String {
+        format!(
+            r#"
+            (module
+                (memory (export "memory") 1)
+                (func (export "alloc") (param i32) (result i32) i32.const 0)
+                (func (export "process") (param i32 i32) (result i64) i64.const 0)
+                {abi_section}
+            )
+            "#
+        )
+    }
+
+    fn abi_test_plugin_input() -> PluginInput {
+        PluginInput {
+            directives: vec![],
+            options: PluginOptions {
+                operating_currencies: vec![],
+                title: None,
+            },
+            config: None,
+        }
+    }
+
+    /// Issue #1234: a plugin that doesn't advertise an ABI version is
+    /// rejected with a clear error instead of an opaque trap when the
+    /// guest misreads `PluginInput`.
+    #[test]
+    fn execute_rejects_plugin_missing_abi_version() {
+        let wasm = wat::parse_str(plugin_wat_with_abi("")).expect("WAT parses");
+        let plugin =
+            Plugin::load_bytes("noabi", &wasm, &RuntimeConfig::default()).expect("module loads");
+        let err = plugin
+            .execute(&abi_test_plugin_input(), &RuntimeConfig::default())
+            .expect_err("execute must reject a plugin with no ABI export");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("__rustledger_abi_version") && msg.contains("missing or invalid"),
+            "expected a missing-ABI error, got: {msg}"
+        );
+    }
+
+    /// Issue #1234: a plugin built against a different ABI version is
+    /// rejected, naming both versions.
+    #[test]
+    fn execute_rejects_plugin_with_mismatched_abi_version() {
+        let wasm = wat::parse_str(plugin_wat_with_abi(
+            r#"(func (export "__rustledger_abi_version") (result i32) i32.const 999)"#,
+        ))
+        .expect("WAT parses");
+        let plugin =
+            Plugin::load_bytes("badabi", &wasm, &RuntimeConfig::default()).expect("module loads");
+        let err = plugin
+            .execute(&abi_test_plugin_input(), &RuntimeConfig::default())
+            .expect_err("execute must reject an ABI-mismatched plugin");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("ABI version mismatch") && msg.contains("999"),
+            "expected an ABI-mismatch error naming v999, got: {msg}"
+        );
+    }
+
     #[test]
     fn execute_surfaces_wrong_signature_on_alloc() {
         // Plugin has `alloc(i64) -> i64` instead of the required
@@ -1193,6 +1286,9 @@ mod tests {
                 (memory (export "memory") 1)
                 (func (export "alloc") (param i64) (result i64) i64.const 0)
                 (func (export "process") (param i32 i32) (result i64) i64.const 0)
+                ;; Correct ABI so the check passes and the alloc
+                ;; signature mismatch is what surfaces (issue #1234).
+                (func (export "__rustledger_abi_version") (result i32) i32.const 1)
             )
             "#,
         )
@@ -1229,6 +1325,9 @@ mod tests {
                 (memory (export "memory") 1)
                 (func (export "alloc") (param i32) (result i32) i32.const 0)
                 (func (export "process") (param i32 i32) (result i32) i32.const 0)
+                ;; Correct ABI so the check passes and the process
+                ;; signature mismatch is what surfaces (issue #1234).
+                (func (export "__rustledger_abi_version") (result i32) i32.const 1)
             )
             "#,
         )
@@ -1262,6 +1361,9 @@ mod tests {
             (memory (export "memory") 1)
             (func (export "alloc") (param i32) (result i32) i32.const 0)
             (func (export "process") (param i32 i32) (result i64) i64.const 0)
+            ;; ABI handshake (issue #1234): matches the host so execute
+            ;; reaches the process/decode path the fuel tests exercise.
+            (func (export "__rustledger_abi_version") (result i32) i32.const 1)
         )
         "#
     }
@@ -1347,6 +1449,8 @@ mod tests {
                 (memory (export "memory") 1)
                 (func (export "alloc") (param i32) (result i32) i32.const 0)
                 (func (export "process") (param i32 i32) (result i64) i64.const 0)
+                ;; A valid plugin advertises the ABI version (issue #1234).
+                (func (export "__rustledger_abi_version") (result i32) i32.const 1)
             )
             "#,
         )

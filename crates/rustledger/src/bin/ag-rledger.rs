@@ -253,20 +253,21 @@ fn extract_command(name: &'static str, description: &'static str) -> Command {
         ))
         .handler(|req, _ctx| {
             let args = build_extract_args(req);
-            let profile = profile_from_env_or_flag(req);
             Box::pin(async move {
                 let args = args?;
-                let config = load_config();
                 if args.list_importers {
                     return run_buffered("extract list-importers", |out| {
                         rustledger::cmd::extract_cmd::list_importers_with_writer(&args, out)
                             .map(|()| 0)
                     });
                 }
+                // Do NOT fall back to `default.file`: that is the ledger
+                // path, whereas `extract` reads a *bank statement* to import.
+                // Defaulting to the ledger would try to parse it as a
+                // statement. Require an explicit input (positional or --file).
                 let file = args
                     .file
                     .clone()
-                    .or_else(|| default_file(&config, profile.as_deref()))
                     .ok_or_else(|| missing_file_error("extract"))?;
                 run_buffered("extract", |out| {
                     rustledger::cmd::extract_cmd::run_with_writer(&args, &file, out).map(|()| 0)

@@ -194,9 +194,13 @@ pub fn run(
         crate::pager::PagerWriter::Stdout(io::stdout().lock())
     };
 
-    run_into(file, report, verbose, format, no_cache, &mut writer)?;
+    // Always restore the terminal (drop the pager) even when the load or
+    // render fails inside `run_into` (e.g. a parse error on an existing but
+    // invalid file). Propagating with `?` before `finish()` would leave the
+    // terminal stuck in pager mode with no output.
+    let result = run_into(file, report, verbose, format, no_cache, &mut writer);
     writer.finish();
-    Ok(())
+    result
 }
 
 /// Run the report command, writing report output to the injected `out`
@@ -206,8 +210,9 @@ pub fn run(
 /// produces exactly the same report bytes `run()` would emit to a
 /// non-paged stdout, but routed to `out` so the caller can buffer them
 /// into a JSON envelope. Verbose progress and load errors still go to
-/// stderr. The on-disk parse cache stays enabled (pass `no_cache = false`
-/// for cache-on behavior).
+/// stderr. The on-disk parse cache stays enabled: `run_into` is always
+/// invoked with `no_cache = false` (this entry point takes no `no_cache`
+/// parameter).
 pub fn run_with_writer<W: io::Write>(
     file: &PathBuf,
     report: &Report,

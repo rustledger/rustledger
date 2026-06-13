@@ -214,7 +214,7 @@ pub fn run(
 /// produces exactly the same report bytes `run()` would emit to a
 /// non-paged stdout, but routed to `out` so the caller can buffer them
 /// into a JSON envelope. Verbose progress and load errors still go to
-/// stderr. The on-disk parse cache stays enabled: [`load`] is always
+/// stderr. The on-disk parse cache stays enabled: the load phase is always
 /// invoked with `no_cache = false` (this entry point takes no `no_cache`
 /// parameter).
 pub fn run_with_writer<W: io::Write>(

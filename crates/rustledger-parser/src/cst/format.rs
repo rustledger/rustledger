@@ -706,10 +706,17 @@ pub fn format_node_with_alignment(node: &crate::SyntaxNode, alignment: PostingAl
                     // must never delete the author's text. Org-mode `*`
                     // section headers (and any comments grouped with them)
                     // parse into ERROR_NODEs; emit them as-is rather than
-                    // dropping them. Treated like a file-level comment group
-                    // for spacing — it stays flush against its neighbors.
+                    // dropping them. Treated like a directive for spacing — an
+                    // ERROR_NODE is a top-level content block, so the author's
+                    // blank lines around it (before it, and before the next
+                    // directive) are preserved, not flushed.
+                    if prev_was_directive {
+                        for _ in 0..leading_blank_lines(&n) {
+                            out.push('\n');
+                        }
+                    }
                     emit_error_node(&n, &mut out);
-                    prev_was_directive = false;
+                    prev_was_directive = true;
                 }
                 // Any other non-directive node: nothing to emit.
             }
@@ -1207,7 +1214,11 @@ fn emit_directive(d: &ast::Directive, align: PostingAlignment, out: &mut String)
 /// the unparsable lines themselves — is preserved exactly as written.
 fn emit_error_node(node: &crate::SyntaxNode, out: &mut String) {
     let text = node.text().to_string();
-    for line in text.trim_end_matches(['\n', '\r']).split('\n') {
+    // Trim leading AND trailing blank lines: the caller emits the leading
+    // blank lines (via `leading_blank_lines`) so emitting them here too would
+    // double-count them and break idempotence. Internal blank lines and the
+    // content (org headers, grouped comments) are preserved.
+    for line in text.trim_matches(['\n', '\r']).split('\n') {
         out.push_str(line.trim_end());
         out.push('\n');
     }
@@ -2506,10 +2517,12 @@ mod tests {
 2013-01-01 open Assets:X
 ";
         let out = format_source(src);
+        // Use the exact `;;` needles: a single-`;` substring would still match
+        // `;; ...` even if one `;` were dropped, weakening the regression.
         for needle in [
             "* Section A",
-            "; comment between headers",
-            "; second line",
+            ";; comment between headers",
+            ";; second line",
             "* Section B",
             "2013-01-01 open Assets:X",
         ] {
@@ -2533,6 +2546,20 @@ mod tests {
             "org header dropped; got:\n{out}"
         );
         assert_eq!(format_source(&out), out);
+    }
+
+    #[test]
+    fn issue_1335_blank_lines_around_org_header_preserved() {
+        // An ERROR_NODE is a top-level content block: the author's blank line
+        // between an org header and the following directive is preserved (it
+        // is not flushed), and the result is idempotent.
+        let src = "* Accounts\n\n2013-01-01 open Assets:X\n";
+        assert_eq!(
+            format_source(src),
+            src,
+            "blank around org header must be kept"
+        );
+        assert_eq!(format_source(&format_source(src)), format_source(src));
     }
 
     #[test]

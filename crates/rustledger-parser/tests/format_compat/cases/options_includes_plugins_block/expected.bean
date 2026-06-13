@@ -1,11 +1,8 @@
 option "title" "My Ledger"
-
 option "operating_currency" "USD"
 
 include "sub.beancount"
-
 include "another.beancount"
 
 plugin "my.plugin"
-
 plugin "my.other.plugin" "cfg-string"

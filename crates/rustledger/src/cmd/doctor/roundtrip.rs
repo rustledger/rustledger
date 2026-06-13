@@ -291,11 +291,10 @@ mod tests {
     #[test]
     fn glob_no_match_continues_with_advisory() {
         let dir = TempDir::new().unwrap();
-        // Two-directive file with the canonical inter-directive blank
-        // so the per-file roundtrip is stable. (An earlier version of
-        // this test packed two directives back-to-back; the
-        // opinionated formatter would now reflow that into the
-        // canonical blank-separated form.)
+        // Two-directive file with a blank line between the include and
+        // the open. Since #1325 the formatter preserves the author's
+        // blank lines verbatim (grouped or separated both round-trip
+        // stably); this fixture keeps the blank purely for readability.
         let main = write_file(
             dir.path(),
             "main.beancount",

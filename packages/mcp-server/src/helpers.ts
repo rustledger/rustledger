@@ -9,8 +9,14 @@ import type {
   ToolArguments,
 } from "./types.js";
 
-// Regex to match include directives: include "path/to/file.beancount"
-const INCLUDE_REGEX = /^include\s+"([^"]+)"\s*$/gm;
+// Source for the include-directive matcher, e.g. `include "path/file.beancount"`.
+// Tolerates an optional leading BOM on the first line, and an optional trailing
+// `;` comment (`include "x" ; note`) which is valid beancount the parser treats
+// as trivia. `[ \t]*` before/after avoids crossing line boundaries. Callers
+// that need a fresh `lastIndex` (recursion) build a new RegExp from this; the
+// module-level constant is used by `.replace()`, which manages `lastIndex`.
+const INCLUDE_PATTERN = '^\\uFEFF?include\\s+"([^"]+)"[ \\t]*(?:;[^\\r\\n]*)?[ \\t\\r]*$';
+const INCLUDE_REGEX = new RegExp(INCLUDE_PATTERN, 'gm');
 
 /**
  * Load a beancount file with all its includes resolved.
@@ -55,6 +61,69 @@ function loadFileRecursive(filePath: string, visited: Set<string>): string {
   } finally {
     // Remove from visited after processing to allow same file from different branches
     visited.delete(absolutePath);
+  }
+}
+
+/**
+ * Build a whole-ledger source for the *aggregate* editor tools (hover,
+ * completions) WITHOUT shifting the edited document's line numbers.
+ *
+ * The edited document is kept verbatim and FIRST, so a `(line, character)`
+ * cursor still resolves against it. The recursively-resolved contents of
+ * every file it `include`s are appended AFTER it, so balances, transaction
+ * counts and candidate accounts reflect the whole ledger. Each included file
+ * is appended at most once (de-duplicated across the include graph), and the
+ * `include` lines in the edited document — which the parser treats as inert
+ * directives — keep it from being double-counted.
+ *
+ * This append strategy is why these tools resolve includes while
+ * `editor_definition` / `editor_references` do not: appended directives have
+ * synthetic line numbers that don't map back to any real file, which is fine
+ * for "what is this account's balance" but wrong for "where is it defined".
+ *
+ * @param editedSource - The source of the file under the cursor.
+ * @param baseDir - Directory the edited document's includes resolve against
+ *   (normally the directory of its `file_path`).
+ * @returns `editedSource` followed by the appended include contents (or
+ *   `editedSource` unchanged when it includes nothing).
+ * @throws Error if an included file cannot be read.
+ */
+export function withIncludedContext(editedSource: string, baseDir: string): string {
+  const visited = new Set<string>();
+  const appended: string[] = [];
+  appendIncludes(editedSource, baseDir, visited, appended);
+  return appended.length === 0 ? editedSource : [editedSource, ...appended].join("\n");
+}
+
+function appendIncludes(
+  source: string,
+  baseDir: string,
+  visited: Set<string>,
+  out: string[]
+): void {
+  // Fresh regex per call: a shared global regex would carry `lastIndex`
+  // state across recursive invocations.
+  const includeRe = new RegExp(INCLUDE_PATTERN, 'gm');
+  for (const match of source.matchAll(includeRe)) {
+    const includeAbsPath = path.resolve(baseDir, match[1]);
+    // A single global `visited` set, added to BEFORE recursing, both
+    // de-duplicates a diamond graph (a shared file is appended once, which is
+    // what aggregate counts want) and makes a cycle (A -> B -> A) terminate
+    // without re-appending. Unlike `loadWithIncludes`, this does NOT throw on a
+    // cycle: an aggregate lookup for hover/completions stays useful even if the
+    // ledger has an include cycle elsewhere, rather than failing the whole tool.
+    if (visited.has(includeAbsPath)) continue;
+    visited.add(includeAbsPath);
+    let content: string;
+    try {
+      content = fs.readFileSync(includeAbsPath, "utf-8");
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      throw new Error(`Failed to include "${match[1]}": ${msg}`);
+    }
+    out.push(content);
+    // Nested includes resolve relative to the included file's directory.
+    appendIncludes(content, path.dirname(includeAbsPath), visited, out);
   }
 }
 

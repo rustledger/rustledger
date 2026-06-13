@@ -6,7 +6,7 @@ import { fileURLToPath } from 'url';
 import { initSync } from '@rustledger/wasm';
 import * as rustledger from '@rustledger/wasm';
 import { handleToolCall } from '../handlers.js';
-import { validateArgs, formatErrors, formatQueryResult, textResponse, errorResponse, jsonResponse, loadWithIncludes } from '../helpers.js';
+import { validateArgs, formatErrors, formatQueryResult, textResponse, errorResponse, jsonResponse, loadWithIncludes, withIncludedContext } from '../helpers.js';
 import { TOOLS } from '../tools.js';
 import { RESOURCES, getResourceContents } from '../resources.js';
 import { PROMPTS, getPrompt } from '../prompts.js';
@@ -954,5 +954,251 @@ include "transactions.beancount"
       // Should report the missing account error
       expect(result.content[0].text).toContain('error');
     });
+  });
+});
+
+// ============================================================================
+// Editor tools: file_path + include resolution (#1328)
+// ============================================================================
+
+describe('withIncludedContext', () => {
+  let tempDir: string;
+
+  beforeAll(() => {
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-ctx-'));
+  });
+  afterAll(() => {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it('returns the source unchanged when it includes nothing', () => {
+    const src = '2024-01-01 open Assets:Bank USD\n';
+    expect(withIncludedContext(src, tempDir)).toBe(src);
+  });
+
+  it('appends included contents AFTER the edited source (line numbers preserved)', () => {
+    fs.writeFileSync(path.join(tempDir, 'journal.beancount'), '2024-01-01 open Assets:Cash USD');
+    const edited = 'include "journal.beancount"\n2024-01-01 open Assets:Bank USD\n';
+    const full = withIncludedContext(edited, tempDir);
+    // The edited document is a verbatim prefix — so a (line, character)
+    // cursor into it still resolves correctly.
+    expect(full.startsWith(edited)).toBe(true);
+    // The included account is present for aggregate lookups.
+    expect(full).toContain('Assets:Cash');
+  });
+
+  it('de-duplicates a diamond include graph', () => {
+    const d = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-diamond-'));
+    fs.writeFileSync(path.join(d, 'shared.beancount'), '2024-01-01 open Assets:Shared USD');
+    fs.writeFileSync(path.join(d, 'b.beancount'), 'include "shared.beancount"');
+    fs.writeFileSync(path.join(d, 'c.beancount'), 'include "shared.beancount"');
+    const edited = 'include "b.beancount"\ninclude "c.beancount"\n';
+    const full = withIncludedContext(edited, d);
+    const occurrences = full.split('Assets:Shared').length - 1;
+    expect(occurrences).toBe(1);
+    fs.rmSync(d, { recursive: true, force: true });
+  });
+
+  it('throws a contextual error for a missing include', () => {
+    const edited = 'include "does-not-exist.beancount"\n';
+    expect(() => withIncludedContext(edited, tempDir)).toThrow(/Failed to include "does-not-exist\.beancount"/);
+  });
+
+  it('resolves an include that has a trailing comment', () => {
+    fs.writeFileSync(path.join(tempDir, 'commented.beancount'), '2024-01-01 open Assets:Commented USD');
+    const edited = 'include "commented.beancount" ; monthly journal\n';
+    const full = withIncludedContext(edited, tempDir);
+    expect(full).toContain('Assets:Commented');
+  });
+
+  it('resolves an include on a BOM-prefixed first line', () => {
+    fs.writeFileSync(path.join(tempDir, 'bom-target.beancount'), '2024-01-01 open Assets:Bom USD');
+    const edited = '﻿include "bom-target.beancount"\n';
+    const full = withIncludedContext(edited, tempDir);
+    expect(full).toContain('Assets:Bom');
+  });
+
+  it('preserves the edited document verbatim when it lacks a trailing newline', () => {
+    fs.writeFileSync(path.join(tempDir, 'nl-target.beancount'), '2024-01-01 open Assets:NlInc USD');
+    // No trailing newline on the edited source.
+    const edited = 'include "nl-target.beancount"\n2024-01-01 open Assets:NoNl USD';
+    const full = withIncludedContext(edited, tempDir);
+    // The join inserts a separator, so the edited doc's last line stays intact
+    // (cursor coordinates into it remain valid) and both accounts are present.
+    expect(full.startsWith(edited)).toBe(true);
+    expect(full).toContain('Assets:NoNl');
+    expect(full).toContain('Assets:NlInc');
+  });
+
+  it('resolves a CRLF include line', () => {
+    fs.writeFileSync(path.join(tempDir, 'crlf-target.beancount'), '2024-01-01 open Assets:Crlf USD');
+    const edited = 'include "crlf-target.beancount"\r\n2024-01-01 open Assets:Main USD\r\n';
+    const full = withIncludedContext(edited, tempDir);
+    expect(full).toContain('Assets:Crlf');
+  });
+
+  it('is cycle-safe: a circular include graph terminates and appends each file once', () => {
+    const d = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-cycle-'));
+    fs.writeFileSync(path.join(d, 'a.beancount'), 'include "b.beancount"\n2024-01-01 open Assets:A USD');
+    fs.writeFileSync(path.join(d, 'b.beancount'), 'include "a.beancount"\n2024-01-01 open Assets:B USD');
+    // The global `visited` set is added to BEFORE recursing, so A -> B -> A
+    // terminates (no infinite loop) and each file is appended exactly once.
+    const full = withIncludedContext('include "a.beancount"\n', d);
+    expect(full.split('Assets:A').length - 1).toBe(1);
+    expect(full.split('Assets:B').length - 1).toBe(1);
+    fs.rmSync(d, { recursive: true, force: true });
+  });
+});
+
+describe('editor tools with file_path', () => {
+  let tempDir: string;
+  let mainPath: string;
+
+  beforeAll(() => {
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-editor-'));
+    // journal.beancount defines Assets:Checking and uses it in one posting.
+    fs.writeFileSync(
+      path.join(tempDir, 'journal.beancount'),
+      `2024-01-01 open Assets:Checking USD
+2024-01-01 open Income:Salary USD
+2024-01-10 * "Salary"
+  Assets:Checking  100.00 USD
+  Income:Salary   -100.00 USD
+`
+    );
+    // main.beancount includes the journal and uses Assets:Checking once more.
+    mainPath = path.join(tempDir, 'main.beancount');
+    fs.writeFileSync(
+      mainPath,
+      `include "journal.beancount"
+2024-01-01 open Expenses:Food USD
+2024-02-01 * "Coffee"
+  Assets:Checking  -5.00 USD
+  Expenses:Food     5.00 USD
+`
+    );
+  });
+  afterAll(() => {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  // The hover cursor sits on `Assets:Checking` in main.beancount
+  // (line 3 = the Coffee posting, column 5 is inside the account name).
+  const HOVER_LINE = 3;
+  const HOVER_CHAR = 5;
+
+  function hoverContents(result: { content: Array<{ text: string }> }): string {
+    return result.content[0].text;
+  }
+
+  it('editor_hover resolves includes: open is found and the posting count is whole-ledger', () => {
+    const result = handleToolCall('editor_hover', {
+      file_path: mainPath,
+      line: HOVER_LINE,
+      character: HOVER_CHAR,
+    });
+    const text = hoverContents(result);
+    // The Open lives in the included journal — found only with include resolution.
+    expect(text).toContain('Opened:');
+    // Used in 2 postings: the Coffee posting (main) + the Salary posting (journal).
+    expect(text).toContain('Used in:** 2 postings');
+  });
+
+  it('editor_hover without file_path sees only the edited file (no open, fewer postings)', () => {
+    const source = fs.readFileSync(mainPath, 'utf-8');
+    const result = handleToolCall('editor_hover', {
+      source,
+      line: HOVER_LINE,
+      character: HOVER_CHAR,
+    });
+    const text = hoverContents(result);
+    // Open is in the (unresolved) include, so it's reported as missing...
+    expect(text).toContain('No `open` directive found');
+    // ...and only the single in-file posting is counted.
+    expect(text).toContain('Used in:** 1 postings');
+  });
+
+  it('source overrides file_path contents while file_path still anchors includes', () => {
+    // Unsaved buffer adds a SECOND in-file posting of Assets:Checking.
+    const buffer = `include "journal.beancount"
+2024-01-01 open Expenses:Food USD
+2024-02-01 * "Coffee"
+  Assets:Checking  -5.00 USD
+  Expenses:Food     5.00 USD
+2024-02-02 * "Tea"
+  Assets:Checking  -3.00 USD
+  Expenses:Food     3.00 USD
+`;
+    const result = handleToolCall('editor_hover', {
+      source: buffer,
+      file_path: mainPath,
+      line: HOVER_LINE,
+      character: HOVER_CHAR,
+    });
+    const text = hoverContents(result);
+    // 2 in-buffer postings + 1 from the resolved journal = 3.
+    expect(text).toContain('Used in:** 3 postings');
+  });
+
+  it('editor_hover errors when neither source nor file_path is given', () => {
+    const result = handleToolCall('editor_hover', { line: 0, character: 0 });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toMatch(/Provide either 'source'.*'file_path'/);
+  });
+
+  it('editor_hover errors for a nonexistent file_path', () => {
+    const result = handleToolCall('editor_hover', {
+      file_path: path.join(tempDir, 'nope.beancount'),
+      line: 0,
+      character: 0,
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('Error reading file');
+  });
+
+  it('editor_completions offers accounts defined in included files', () => {
+    // Cursor at the start of an empty posting line in a fresh buffer that
+    // includes the journal; completions should surface Assets:Checking.
+    const buffer = `include "journal.beancount"
+2024-03-01 * "x"
+  Assets`;
+    const result = handleToolCall('editor_completions', {
+      source: buffer,
+      file_path: mainPath,
+      line: 2,
+      character: 8,
+    });
+    expect(result.content[0].text).toContain('Assets:Checking');
+  });
+
+  it('editor_document_symbols stays document-local (does not inline includes)', () => {
+    const result = handleToolCall('editor_document_symbols', { file_path: mainPath });
+    const symbols = JSON.parse(result.content[0].text);
+    // main.beancount has its own directives; the journal's Income:Salary open
+    // must NOT appear (includes are not inlined for the outline).
+    const text = JSON.stringify(symbols);
+    expect(text).toContain('Expenses:Food');
+    expect(text).not.toContain('Income:Salary');
+  });
+
+  it('editor_definition reads file_path from disk (document-local)', () => {
+    // Define + use an account in a single self-contained file.
+    const selfContained = path.join(tempDir, 'solo.beancount');
+    fs.writeFileSync(
+      selfContained,
+      `2024-01-01 open Assets:Solo USD
+2024-01-02 * "x"
+  Assets:Solo  1.00 USD
+  Expenses:Misc
+`
+    );
+    const result = handleToolCall('editor_definition', {
+      file_path: selfContained,
+      line: 2,
+      character: 5,
+    });
+    // Either a definition object or the "no definition" text — but never an
+    // input error, proving the file was loaded.
+    expect(result.isError).toBeFalsy();
   });
 });

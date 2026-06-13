@@ -7,7 +7,6 @@
 ; lexical form would require extending the typed AST to carry a
 ; had-comma flag, which is a #1262 phase-5+ refactor.
 2024-01-01 open Assets:Money
-
 2024-07-20 * "comma-bearing amount"
   Assets:Money  -1024 USD
   Expenses:Thingamabobs

@@ -693,16 +693,25 @@ pub fn format_node_with_alignment(node: &crate::SyntaxNode, alignment: PostingAl
     for el in node.children_with_tokens() {
         match el {
             rowan::NodeOrToken::Node(n) => {
-                let Some(directive) = ast::Directive::cast(n) else {
-                    continue;
-                };
-                if prev_was_directive {
-                    for _ in 0..leading_blank_lines(directive.syntax()) {
-                        out.push('\n');
+                if let Some(directive) = ast::Directive::cast(n.clone()) {
+                    if prev_was_directive {
+                        for _ in 0..leading_blank_lines(directive.syntax()) {
+                            out.push('\n');
+                        }
                     }
+                    emit_directive(&directive, alignment, &mut out);
+                    prev_was_directive = true;
+                } else if n.kind() == crate::SyntaxKind::ERROR_NODE {
+                    // Preserve unparsable content verbatim (#1335): `format`
+                    // must never delete the author's text. Org-mode `*`
+                    // section headers (and any comments grouped with them)
+                    // parse into ERROR_NODEs; emit them as-is rather than
+                    // dropping them. Treated like a file-level comment group
+                    // for spacing — it stays flush against its neighbors.
+                    emit_error_node(&n, &mut out);
+                    prev_was_directive = false;
                 }
-                emit_directive(&directive, alignment, &mut out);
-                prev_was_directive = true;
+                // Any other non-directive node: nothing to emit.
             }
             rowan::NodeOrToken::Token(t) => {
                 if matches!(
@@ -942,6 +951,10 @@ pub fn format_node_range_with_alignment(
         }
         match el {
             rowan::NodeOrToken::Node(n) => {
+                // ERROR_NODEs never reach here: the range path bails out
+                // above (returns None) when the snap covers one, so it
+                // refuses to format rather than risk touching unparsable
+                // content. Only the whole-file path preserves them verbatim.
                 let Some(directive) = ast::Directive::cast(n) else {
                     continue;
                 };
@@ -1183,6 +1196,20 @@ fn emit_directive(d: &ast::Directive, align: PostingAlignment, out: &mut String)
         splice.push(' ');
         splice.push_str(&c);
         out.insert_str(insert_at, &splice);
+    }
+}
+
+/// Emit an `ERROR_NODE`'s text verbatim, so `format` never deletes content it
+/// could not parse (#1335) — chiefly org-mode `*` section headers and the
+/// comments grouped with them. Only trailing whitespace per line is stripped
+/// (the formatter's no-trailing-space policy) and the node's trailing newlines
+/// are collapsed to one; everything else — including blank lines, comments and
+/// the unparsable lines themselves — is preserved exactly as written.
+fn emit_error_node(node: &crate::SyntaxNode, out: &mut String) {
+    let text = node.text().to_string();
+    for line in text.trim_end_matches(['\n', '\r']).split('\n') {
+        out.push_str(line.trim_end());
+        out.push('\n');
     }
 }
 
@@ -2463,6 +2490,49 @@ mod tests {
             "comment must stay between postings:\n{out}"
         );
         assert_eq!(format_source(&out), out, "format must be idempotent");
+    }
+
+    #[test]
+    fn issue_1335_org_headers_and_grouped_comments_preserved() {
+        // The formatter must not delete unparsable content (#1335).
+        // Org-mode `*` section headers parse into ERROR_NODEs, and comments
+        // grouped with them get swallowed into the same node — previously all
+        // dropped. They must survive, and the result must be idempotent.
+        let src = "\
+* Section A
+;; comment between headers
+;; second line
+* Section B
+2013-01-01 open Assets:X
+";
+        let out = format_source(src);
+        for needle in [
+            "* Section A",
+            "; comment between headers",
+            "; second line",
+            "* Section B",
+            "2013-01-01 open Assets:X",
+        ] {
+            assert!(
+                out.contains(needle),
+                "lost {needle:?} on format; got:\n{out}"
+            );
+        }
+        assert_eq!(format_source(&out), out, "format must be idempotent");
+    }
+
+    #[test]
+    fn issue_1335_org_header_then_directive_keeps_header() {
+        // A lone org header before a directive: the header is an ERROR_NODE
+        // and must be kept (the comment here attaches to the directive and
+        // was already preserved).
+        let src = "* Accounts\n2013-01-01 open Assets:X\n";
+        let out = format_source(src);
+        assert!(
+            out.contains("* Accounts"),
+            "org header dropped; got:\n{out}"
+        );
+        assert_eq!(format_source(&out), out);
     }
 
     #[test]

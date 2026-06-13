@@ -79,6 +79,10 @@ criteria = "safe-to-deploy"
 version = "0.9.1"
 criteria = "safe-to-deploy"
 
+[[exemptions.agcli]]
+version = "0.13.0"
+criteria = "safe-to-deploy"
+
 [[exemptions.ahash]]
 version = "0.7.8"
 criteria = "safe-to-deploy"
@@ -1059,6 +1063,10 @@ criteria = "safe-to-deploy"
 version = "1.1.1"
 criteria = "safe-to-deploy"
 
+[[exemptions.signal-hook-registry]]
+version = "1.4.8"
+criteria = "safe-to-deploy"
+
 [[exemptions.simd-adler32]]
 version = "0.3.9"
 criteria = "safe-to-deploy"
@@ -1125,6 +1133,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.tinyvec]]
 version = "1.11.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.tokio-macros]]
+version = "2.7.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.tracing]]

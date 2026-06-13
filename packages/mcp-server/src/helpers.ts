@@ -59,6 +59,63 @@ function loadFileRecursive(filePath: string, visited: Set<string>): string {
 }
 
 /**
+ * Build a whole-ledger source for the *aggregate* editor tools (hover,
+ * completions) WITHOUT shifting the edited document's line numbers.
+ *
+ * The edited document is kept verbatim and FIRST, so a `(line, character)`
+ * cursor still resolves against it. The recursively-resolved contents of
+ * every file it `include`s are appended AFTER it, so balances, transaction
+ * counts and candidate accounts reflect the whole ledger. Each included file
+ * is appended at most once (de-duplicated across the include graph), and the
+ * `include` lines in the edited document — which the parser treats as inert
+ * directives — keep it from being double-counted.
+ *
+ * This append strategy is why these tools resolve includes while
+ * `editor_definition` / `editor_references` do not: appended directives have
+ * synthetic line numbers that don't map back to any real file, which is fine
+ * for "what is this account's balance" but wrong for "where is it defined".
+ *
+ * @param editedSource - The source of the file under the cursor.
+ * @param baseDir - Directory the edited document's includes resolve against
+ *   (normally the directory of its `file_path`).
+ * @returns `editedSource` followed by the appended include contents (or
+ *   `editedSource` unchanged when it includes nothing).
+ * @throws Error if an included file cannot be read.
+ */
+export function withIncludedContext(editedSource: string, baseDir: string): string {
+  const visited = new Set<string>();
+  const appended: string[] = [];
+  appendIncludes(editedSource, baseDir, visited, appended);
+  return appended.length === 0 ? editedSource : [editedSource, ...appended].join("\n");
+}
+
+function appendIncludes(
+  source: string,
+  baseDir: string,
+  visited: Set<string>,
+  out: string[]
+): void {
+  // Fresh regex per call: a shared global regex would carry `lastIndex`
+  // state across recursive invocations.
+  const includeRe = /^include\s+"([^"]+)"\s*$/gm;
+  for (const match of source.matchAll(includeRe)) {
+    const includeAbsPath = path.resolve(baseDir, match[1]);
+    if (visited.has(includeAbsPath)) continue;
+    visited.add(includeAbsPath);
+    let content: string;
+    try {
+      content = fs.readFileSync(includeAbsPath, "utf-8");
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      throw new Error(`Failed to include "${match[1]}": ${msg}`);
+    }
+    out.push(content);
+    // Nested includes resolve relative to the included file's directory.
+    appendIncludes(content, path.dirname(includeAbsPath), visited, out);
+  }
+}
+
+/**
  * Validate that required arguments are present.
  * Returns a ToolResponse with error if validation fails, null otherwise.
  */

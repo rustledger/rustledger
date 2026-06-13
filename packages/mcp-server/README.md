@@ -71,6 +71,19 @@ Add to your Claude Code settings:
 | `editor_document_symbols` | Get document outline/structure |
 | `editor_references` | Find all references to accounts/currencies/payees |
 
+Each editor tool accepts either inline `source` **or** a `file_path` (one is
+required). With `file_path` the server reads the file from disk, so you can ask
+for hover/completions at a cursor position without inlining the whole ledger.
+If both are given, `source` is the unsaved-buffer contents and wins, while
+`file_path` still anchors include resolution.
+
+`editor_hover` and `editor_completions` additionally **resolve `include`
+directives** when `file_path` is set — so an account's balance/usage count and
+the completion candidates reflect the whole ledger, not just the edited file.
+`editor_definition`, `editor_references` and `editor_document_symbols` operate
+on the edited document only (their results are file-local locations, so
+cross-file resolution is intentionally not performed).
+
 ### Analysis Tools
 
 | Tool | Description |

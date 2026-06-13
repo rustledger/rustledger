@@ -17,6 +17,7 @@ import {
   formatErrors,
   formatQueryResult,
   loadWithIncludes,
+  withIncludedContext,
 } from "./helpers.js";
 import { getBqlTablesDocs } from "./resources.js";
 
@@ -327,21 +328,91 @@ function handleRunPlugin(args: ToolArguments | undefined): ToolResponse {
 
 // === Editor Tools ===
 
+/**
+ * Resolve the source an editor tool should operate on.
+ *
+ * Accepts inline `source`, a `file_path` to read from disk, or both (then
+ * `source` is the unsaved-buffer content and wins, while `file_path` still
+ * anchors include resolution). Returns either the resolved source string or a
+ * ToolResponse describing the error (neither input given, or a read failure).
+ *
+ * When `withContext` is true and a `file_path` is given, the edited document
+ * is augmented with the contents of every file it `include`s (appended after
+ * it, so cursor coordinates are preserved) — giving hover/completions
+ * whole-ledger balances and account names. Location-returning tools
+ * (definition/references) and the document outline pass `withContext: false`
+ * and operate on the edited document alone.
+ */
+type ResolvedEditorSource =
+  | { ok: true; source: string }
+  | { ok: false; response: ToolResponse };
+
+function resolveEditorSource(
+  args: ToolArguments | undefined,
+  withContext: boolean
+): ResolvedEditorSource {
+  const inlineSource = args?.source;
+  const filePath = args?.file_path;
+
+  if (inlineSource == null && filePath == null) {
+    return {
+      ok: false,
+      response: errorResponse(
+        "Provide either 'source' (inline ledger text) or 'file_path' (a ledger file to read)."
+      ),
+    };
+  }
+  if (filePath == null) {
+    return { ok: true, source: inlineSource! };
+  }
+
+  try {
+    const absolutePath = path.resolve(filePath);
+    const baseDir = path.dirname(absolutePath);
+    // `source` (an unsaved buffer) overrides the on-disk contents; `file_path`
+    // still anchors include resolution.
+    const editedSource = inlineSource ?? fs.readFileSync(absolutePath, "utf-8");
+    return {
+      ok: true,
+      source: withContext
+        ? withIncludedContext(editedSource, baseDir)
+        : editedSource,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      response: errorResponse(
+        `Error reading file: ${error instanceof Error ? error.message : String(error)}`
+      ),
+    };
+  }
+}
+
 function handleEditorCompletions(args: ToolArguments | undefined): ToolResponse {
-  const validation = validateArgs(args, ["source", "line", "character"]);
+  const validation = validateArgs(args, ["line", "character"]);
   if (validation) return validation;
 
-  const ledger = new rustledger.ParsedLedger(args!.source!);
+  // Whole-ledger context so completions can offer accounts/commodities
+  // defined in included files (#1328, #1297).
+  const resolved = resolveEditorSource(args, true);
+  if (!resolved.ok) return resolved.response;
+
+  const ledger = new rustledger.ParsedLedger(resolved.source);
   const result = ledger.getCompletions(args!.line!, args!.character!);
   ledger.free();
   return jsonResponse(result);
 }
 
 function handleEditorHover(args: ToolArguments | undefined): ToolResponse {
-  const validation = validateArgs(args, ["source", "line", "character"]);
+  const validation = validateArgs(args, ["line", "character"]);
   if (validation) return validation;
 
-  const ledger = new rustledger.ParsedLedger(args!.source!);
+  // Whole-ledger context so the hovered account's balance and transaction
+  // count reflect the full ledger, not just the edited file (#1328).
+  const resolved = resolveEditorSource(args, true);
+  if (!resolved.ok) return resolved.response;
+
+  const ledger = new rustledger.ParsedLedger(resolved.source);
   const result = ledger.getHoverInfo(args!.line!, args!.character!);
   ledger.free();
 
@@ -352,10 +423,16 @@ function handleEditorHover(args: ToolArguments | undefined): ToolResponse {
 }
 
 function handleEditorDefinition(args: ToolArguments | undefined): ToolResponse {
-  const validation = validateArgs(args, ["source", "line", "character"]);
+  const validation = validateArgs(args, ["line", "character"]);
   if (validation) return validation;
 
-  const ledger = new rustledger.ParsedLedger(args!.source!);
+  // Document-local: a definition returns a (line, character) location, which
+  // would be meaningless in the synthetic whole-ledger concatenation. Cross-
+  // file go-to-definition is a known limitation (see helpers.withIncludedContext).
+  const resolved = resolveEditorSource(args, false);
+  if (!resolved.ok) return resolved.response;
+
+  const ledger = new rustledger.ParsedLedger(resolved.source);
   const result = ledger.getDefinition(args!.line!, args!.character!);
   ledger.free();
 
@@ -366,20 +443,27 @@ function handleEditorDefinition(args: ToolArguments | undefined): ToolResponse {
 }
 
 function handleEditorDocumentSymbols(args: ToolArguments | undefined): ToolResponse {
-  const validation = validateArgs(args, ["source"]);
-  if (validation) return validation;
+  // Document outline of the edited file only — including other files' symbols
+  // would pollute the outline.
+  const resolved = resolveEditorSource(args, false);
+  if (!resolved.ok) return resolved.response;
 
-  const ledger = new rustledger.ParsedLedger(args!.source!);
+  const ledger = new rustledger.ParsedLedger(resolved.source);
   const result = ledger.getDocumentSymbols();
   ledger.free();
   return jsonResponse(result);
 }
 
 function handleEditorReferences(args: ToolArguments | undefined): ToolResponse {
-  const validation = validateArgs(args, ["source", "line", "character"]);
+  const validation = validateArgs(args, ["line", "character"]);
   if (validation) return validation;
 
-  const ledger = new rustledger.ParsedLedger(args!.source!);
+  // Document-local, same rationale as editor_definition: references return
+  // locations that only make sense within the edited file's coordinate space.
+  const resolved = resolveEditorSource(args, false);
+  if (!resolved.ok) return resolved.response;
+
+  const ledger = new rustledger.ParsedLedger(resolved.source);
   const result = ledger.getReferences(args!.line!, args!.character!);
   ledger.free();
 

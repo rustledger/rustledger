@@ -1,0 +1,369 @@
+{
+  "outcomes": [
+    {
+      "scenario": "Baseline",
+      "summary": "Success",
+      "log_path": "log/baseline.log",
+      "diff_path": null,
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 46.637816148,
+          "process_status": "Success",
+          "argv": [
+            "/nix/store/2zy0qfs4ps2ka57d47sjb9lvvmmrmw82-rust-mixed/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=rustledger-booking@0.15.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.502344455,
+          "process_status": "Success",
+          "argv": [
+            "/nix/store/2zy0qfs4ps2ka57d47sjb9lvvmmrmw82-rust-mixed/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=rustledger-booking@0.15.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/rustledger-booking/src/lib.rs:359:5: replace is_balanced -> bool with true",
+          "package": "rustledger-booking",
+          "file": "crates/rustledger-booking/src/lib.rs",
+          "function": {
+            "function_name": "is_balanced",
+            "return_type": "-> bool",
+            "span": {
+              "start": {
+                "line": 355,
+                "column": 1
+              },
+              "end": {
+                "line": 370,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 359,
+              "column": 5
+            },
+            "end": {
+              "line": 369,
+              "column": 9
+            }
+          },
+          "replacement": "true",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__rustledger-booking__src__lib.rs_line_359_col_5.log",
+      "diff_path": "diff/crates__rustledger-booking__src__lib.rs_line_359_col_5.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.904155315,
+          "process_status": "Success",
+          "argv": [
+            "/nix/store/2zy0qfs4ps2ka57d47sjb9lvvmmrmw82-rust-mixed/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=rustledger-booking@0.15.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.251493011,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/nix/store/2zy0qfs4ps2ka57d47sjb9lvvmmrmw82-rust-mixed/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=rustledger-booking@0.15.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/rustledger-booking/src/lib.rs:359:5: replace is_balanced -> bool with false",
+          "package": "rustledger-booking",
+          "file": "crates/rustledger-booking/src/lib.rs",
+          "function": {
+            "function_name": "is_balanced",
+            "return_type": "-> bool",
+            "span": {
+              "start": {
+                "line": 355,
+                "column": 1
+              },
+              "end": {
+                "line": 370,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 359,
+              "column": 5
+            },
+            "end": {
+              "line": 369,
+              "column": 9
+            }
+          },
+          "replacement": "false",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__rustledger-booking__src__lib.rs_line_359_col_5_001.log",
+      "diff_path": "diff/crates__rustledger-booking__src__lib.rs_line_359_col_5_001.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.755081416,
+          "process_status": "Success",
+          "argv": [
+            "/nix/store/2zy0qfs4ps2ka57d47sjb9lvvmmrmw82-rust-mixed/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=rustledger-booking@0.15.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.251725507,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/nix/store/2zy0qfs4ps2ka57d47sjb9lvvmmrmw82-rust-mixed/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=rustledger-booking@0.15.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/rustledger-booking/src/lib.rs:364:27: replace > with == in is_balanced",
+          "package": "rustledger-booking",
+          "file": "crates/rustledger-booking/src/lib.rs",
+          "function": {
+            "function_name": "is_balanced",
+            "return_type": "-> bool",
+            "span": {
+              "start": {
+                "line": 355,
+                "column": 1
+              },
+              "end": {
+                "line": 370,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 364,
+              "column": 27
+            },
+            "end": {
+              "line": 364,
+              "column": 28
+            }
+          },
+          "replacement": "==",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__rustledger-booking__src__lib.rs_line_364_col_27.log",
+      "diff_path": "diff/crates__rustledger-booking__src__lib.rs_line_364_col_27.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.953989892,
+          "process_status": "Success",
+          "argv": [
+            "/nix/store/2zy0qfs4ps2ka57d47sjb9lvvmmrmw82-rust-mixed/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=rustledger-booking@0.15.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.251972613,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/nix/store/2zy0qfs4ps2ka57d47sjb9lvvmmrmw82-rust-mixed/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=rustledger-booking@0.15.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/rustledger-booking/src/lib.rs:364:27: replace > with < in is_balanced",
+          "package": "rustledger-booking",
+          "file": "crates/rustledger-booking/src/lib.rs",
+          "function": {
+            "function_name": "is_balanced",
+            "return_type": "-> bool",
+            "span": {
+              "start": {
+                "line": 355,
+                "column": 1
+              },
+              "end": {
+                "line": 370,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 364,
+              "column": 27
+            },
+            "end": {
+              "line": 364,
+              "column": 28
+            }
+          },
+          "replacement": "<",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__rustledger-booking__src__lib.rs_line_364_col_27_001.log",
+      "diff_path": "diff/crates__rustledger-booking__src__lib.rs_line_364_col_27_001.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.752943038,
+          "process_status": "Success",
+          "argv": [
+            "/nix/store/2zy0qfs4ps2ka57d47sjb9lvvmmrmw82-rust-mixed/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=rustledger-booking@0.15.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.251862254,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/nix/store/2zy0qfs4ps2ka57d47sjb9lvvmmrmw82-rust-mixed/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=rustledger-booking@0.15.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/rustledger-booking/src/lib.rs:364:27: replace > with >= in is_balanced",
+          "package": "rustledger-booking",
+          "file": "crates/rustledger-booking/src/lib.rs",
+          "function": {
+            "function_name": "is_balanced",
+            "return_type": "-> bool",
+            "span": {
+              "start": {
+                "line": 355,
+                "column": 1
+              },
+              "end": {
+                "line": 370,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 364,
+              "column": 27
+            },
+            "end": {
+              "line": 364,
+              "column": 28
+            }
+          },
+          "replacement": ">=",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__rustledger-booking__src__lib.rs_line_364_col_27_002.log",
+      "diff_path": "diff/crates__rustledger-booking__src__lib.rs_line_364_col_27_002.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.802857718,
+          "process_status": "Success",
+          "argv": [
+            "/nix/store/2zy0qfs4ps2ka57d47sjb9lvvmmrmw82-rust-mixed/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=rustledger-booking@0.15.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.251793426,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/nix/store/2zy0qfs4ps2ka57d47sjb9lvvmmrmw82-rust-mixed/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=rustledger-booking@0.15.0"
+          ]
+        }
+      ]
+    }
+  ],
+  "total_mutants": 5,
+  "missed": 0,
+  "caught": 5,
+  "timeout": 0,
+  "unviable": 0,
+  "success": 0,
+  "start_time": "2026-06-13T13:29:50.94445665Z",
+  "end_time": "2026-06-13T13:30:43.869841779Z",
+  "cargo_mutants_version": "27.0.0"
+}

@@ -1,0 +1,162 @@
+[
+  {
+    "diff": "--- crates/rustledger-booking/src/lib.rs\n+++ replace is_balanced -> bool with true\n@@ -351,27 +351,17 @@\n \n     residuals\n }\n \n /// Check if a transaction is balanced within tolerance.\n #[must_use]\n #[allow(clippy::implicit_hasher)]\n pub fn is_balanced(transaction: &Transaction, tolerances: &HashMap<Currency, Decimal>) -> bool {\n-    let residuals = calculate_residual(transaction);\n-\n-    for (currency, residual) in residuals {\n-        let tolerance = tolerances.get(&currency).copied().unwrap_or(Decimal::ZERO); // Default 0 (exact balance for integer-only currencies)\n-\n-        if residual.abs() > tolerance {\n-            return false;\n-        }\n-    }\n-\n-    true\n+    true /* ~ changed by cargo-mutants ~ */\n }\n \n /// Normalize total prices (`@@`) to per-unit prices (`@`) on a transaction.\n ///\n /// This converts `PriceAnnotation::Total` to `PriceAnnotation::Unit` by dividing\n /// the total price by the number of units. This should be called AFTER validation\n /// (balance checking) to preserve exact total prices for precise residual calculation.\n ///\n",
+    "file": "crates/rustledger-booking/src/lib.rs",
+    "function": {
+      "function_name": "is_balanced",
+      "return_type": "-> bool",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 370
+        },
+        "start": {
+          "column": 1,
+          "line": 355
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/rustledger-booking/src/lib.rs:359:5: replace is_balanced -> bool with true",
+    "package": "rustledger-booking",
+    "replacement": "true",
+    "span": {
+      "end": {
+        "column": 9,
+        "line": 369
+      },
+      "start": {
+        "column": 5,
+        "line": 359
+      }
+    }
+  },
+  {
+    "diff": "--- crates/rustledger-booking/src/lib.rs\n+++ replace is_balanced -> bool with false\n@@ -351,27 +351,17 @@\n \n     residuals\n }\n \n /// Check if a transaction is balanced within tolerance.\n #[must_use]\n #[allow(clippy::implicit_hasher)]\n pub fn is_balanced(transaction: &Transaction, tolerances: &HashMap<Currency, Decimal>) -> bool {\n-    let residuals = calculate_residual(transaction);\n-\n-    for (currency, residual) in residuals {\n-        let tolerance = tolerances.get(&currency).copied().unwrap_or(Decimal::ZERO); // Default 0 (exact balance for integer-only currencies)\n-\n-        if residual.abs() > tolerance {\n-            return false;\n-        }\n-    }\n-\n-    true\n+    false /* ~ changed by cargo-mutants ~ */\n }\n \n /// Normalize total prices (`@@`) to per-unit prices (`@`) on a transaction.\n ///\n /// This converts `PriceAnnotation::Total` to `PriceAnnotation::Unit` by dividing\n /// the total price by the number of units. This should be called AFTER validation\n /// (balance checking) to preserve exact total prices for precise residual calculation.\n ///\n",
+    "file": "crates/rustledger-booking/src/lib.rs",
+    "function": {
+      "function_name": "is_balanced",
+      "return_type": "-> bool",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 370
+        },
+        "start": {
+          "column": 1,
+          "line": 355
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/rustledger-booking/src/lib.rs:359:5: replace is_balanced -> bool with false",
+    "package": "rustledger-booking",
+    "replacement": "false",
+    "span": {
+      "end": {
+        "column": 9,
+        "line": 369
+      },
+      "start": {
+        "column": 5,
+        "line": 359
+      }
+    }
+  },
+  {
+    "diff": "--- crates/rustledger-booking/src/lib.rs\n+++ replace > with == in is_balanced\n@@ -356,17 +356,17 @@\n #[must_use]\n #[allow(clippy::implicit_hasher)]\n pub fn is_balanced(transaction: &Transaction, tolerances: &HashMap<Currency, Decimal>) -> bool {\n     let residuals = calculate_residual(transaction);\n \n     for (currency, residual) in residuals {\n         let tolerance = tolerances.get(&currency).copied().unwrap_or(Decimal::ZERO); // Default 0 (exact balance for integer-only currencies)\n \n-        if residual.abs() > tolerance {\n+        if residual.abs() == /* ~ changed by cargo-mutants ~ */ tolerance {\n             return false;\n         }\n     }\n \n     true\n }\n \n /// Normalize total prices (`@@`) to per-unit prices (`@`) on a transaction.\n",
+    "file": "crates/rustledger-booking/src/lib.rs",
+    "function": {
+      "function_name": "is_balanced",
+      "return_type": "-> bool",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 370
+        },
+        "start": {
+          "column": 1,
+          "line": 355
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "crates/rustledger-booking/src/lib.rs:364:27: replace > with == in is_balanced",
+    "package": "rustledger-booking",
+    "replacement": "==",
+    "span": {
+      "end": {
+        "column": 28,
+        "line": 364
+      },
+      "start": {
+        "column": 27,
+        "line": 364
+      }
+    }
+  },
+  {
+    "diff": "--- crates/rustledger-booking/src/lib.rs\n+++ replace > with < in is_balanced\n@@ -356,17 +356,17 @@\n #[must_use]\n #[allow(clippy::implicit_hasher)]\n pub fn is_balanced(transaction: &Transaction, tolerances: &HashMap<Currency, Decimal>) -> bool {\n     let residuals = calculate_residual(transaction);\n \n     for (currency, residual) in residuals {\n         let tolerance = tolerances.get(&currency).copied().unwrap_or(Decimal::ZERO); // Default 0 (exact balance for integer-only currencies)\n \n-        if residual.abs() > tolerance {\n+        if residual.abs() < /* ~ changed by cargo-mutants ~ */ tolerance {\n             return false;\n         }\n     }\n \n     true\n }\n \n /// Normalize total prices (`@@`) to per-unit prices (`@`) on a transaction.\n",
+    "file": "crates/rustledger-booking/src/lib.rs",
+    "function": {
+      "function_name": "is_balanced",
+      "return_type": "-> bool",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 370
+        },
+        "start": {
+          "column": 1,
+          "line": 355
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "crates/rustledger-booking/src/lib.rs:364:27: replace > with < in is_balanced",
+    "package": "rustledger-booking",
+    "replacement": "<",
+    "span": {
+      "end": {
+        "column": 28,
+        "line": 364
+      },
+      "start": {
+        "column": 27,
+        "line": 364
+      }
+    }
+  },
+  {
+    "diff": "--- crates/rustledger-booking/src/lib.rs\n+++ replace > with >= in is_balanced\n@@ -356,17 +356,17 @@\n #[must_use]\n #[allow(clippy::implicit_hasher)]\n pub fn is_balanced(transaction: &Transaction, tolerances: &HashMap<Currency, Decimal>) -> bool {\n     let residuals = calculate_residual(transaction);\n \n     for (currency, residual) in residuals {\n         let tolerance = tolerances.get(&currency).copied().unwrap_or(Decimal::ZERO); // Default 0 (exact balance for integer-only currencies)\n \n-        if residual.abs() > tolerance {\n+        if residual.abs() >= /* ~ changed by cargo-mutants ~ */ tolerance {\n             return false;\n         }\n     }\n \n     true\n }\n \n /// Normalize total prices (`@@`) to per-unit prices (`@`) on a transaction.\n",
+    "file": "crates/rustledger-booking/src/lib.rs",
+    "function": {
+      "function_name": "is_balanced",
+      "return_type": "-> bool",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 370
+        },
+        "start": {
+          "column": 1,
+          "line": 355
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "crates/rustledger-booking/src/lib.rs:364:27: replace > with >= in is_balanced",
+    "package": "rustledger-booking",
+    "replacement": ">=",
+    "span": {
+      "end": {
+        "column": 28,
+        "line": 364
+      },
+      "start": {
+        "column": 27,
+        "line": 364
+      }
+    }
+  }
+]

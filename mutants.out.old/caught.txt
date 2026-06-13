@@ -1,0 +1,5 @@
+crates/rustledger-booking/src/lib.rs:359:5: replace is_balanced -> bool with true
+crates/rustledger-booking/src/lib.rs:359:5: replace is_balanced -> bool with false
+crates/rustledger-booking/src/lib.rs:364:27: replace > with == in is_balanced
+crates/rustledger-booking/src/lib.rs:364:27: replace > with < in is_balanced
+crates/rustledger-booking/src/lib.rs:364:27: replace > with >= in is_balanced

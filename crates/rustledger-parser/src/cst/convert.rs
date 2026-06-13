@@ -1802,7 +1802,18 @@ fn indented_directive_check(
     // or since byte 0 if this is the first line. >0 means
     // the directive's first content token has leading WS on
     // its own line - that's the indent error.
-    let line_start = stripped[..content_start].rfind('\n').map_or(0, |nl| nl + 1);
+    // Find the line start by scanning the BYTES before `content_start`, not by
+    // slicing the `str`. On malformed/error-recovered input a token's start
+    // offset can land inside a multi-byte UTF-8 char, and
+    // `stripped[..content_start]` would then panic ("not a char boundary").
+    // Byte slicing is boundary-agnostic, and a newline (`\n`) is always a single
+    // ASCII byte, so the found position is a valid offset. `.get(..)` also guards
+    // a (theoretical) out-of-bounds offset. Regression: fuzz_regressions.rs.
+    let line_start = stripped
+        .as_bytes()
+        .get(..content_start)
+        .and_then(|bytes| bytes.iter().rposition(|&b| b == b'\n'))
+        .map_or(0, |nl| nl + 1);
     if content_start > line_start {
         let end: u32 = content.text_range().end().into();
         let span = Span::new(

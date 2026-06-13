@@ -98,7 +98,7 @@
     "@types/node": "^22.0.0",
     "@types/vscode": "^1.82.0",
     "@vscode/vsce": "^3.0.0",
-    "esbuild": "^0.25.0",
+    "esbuild": "^0.28.1",
     "typescript": "^6.0.0"
   },
   "overrides": {

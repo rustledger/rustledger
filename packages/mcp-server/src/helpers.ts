@@ -9,8 +9,14 @@ import type {
   ToolArguments,
 } from "./types.js";
 
-// Regex to match include directives: include "path/to/file.beancount"
-const INCLUDE_REGEX = /^include\s+"([^"]+)"\s*$/gm;
+// Source for the include-directive matcher, e.g. `include "path/file.beancount"`.
+// Tolerates an optional leading BOM on the first line, and an optional trailing
+// `;` comment (`include "x" ; note`) which is valid beancount the parser treats
+// as trivia. `[ \t]*` before/after avoids crossing line boundaries. Callers
+// that need a fresh `lastIndex` (recursion) build a new RegExp from this; the
+// module-level constant is used by `.replace()`, which manages `lastIndex`.
+const INCLUDE_PATTERN = '^\\uFEFF?include\\s+"([^"]+)"[ \\t]*(?:;[^\\r\\n]*)?[ \\t\\r]*$';
+const INCLUDE_REGEX = new RegExp(INCLUDE_PATTERN, 'gm');
 
 /**
  * Load a beancount file with all its includes resolved.
@@ -97,7 +103,7 @@ function appendIncludes(
 ): void {
   // Fresh regex per call: a shared global regex would carry `lastIndex`
   // state across recursive invocations.
-  const includeRe = /^include\s+"([^"]+)"\s*$/gm;
+  const includeRe = new RegExp(INCLUDE_PATTERN, 'gm');
   for (const match of source.matchAll(includeRe)) {
     const includeAbsPath = path.resolve(baseDir, match[1]);
     // A single global `visited` set, added to BEFORE recursing, both

@@ -1004,6 +1004,39 @@ describe('withIncludedContext', () => {
     expect(() => withIncludedContext(edited, tempDir)).toThrow(/Failed to include "does-not-exist\.beancount"/);
   });
 
+  it('resolves an include that has a trailing comment', () => {
+    fs.writeFileSync(path.join(tempDir, 'commented.beancount'), '2024-01-01 open Assets:Commented USD');
+    const edited = 'include "commented.beancount" ; monthly journal\n';
+    const full = withIncludedContext(edited, tempDir);
+    expect(full).toContain('Assets:Commented');
+  });
+
+  it('resolves an include on a BOM-prefixed first line', () => {
+    fs.writeFileSync(path.join(tempDir, 'bom-target.beancount'), '2024-01-01 open Assets:Bom USD');
+    const edited = '﻿include "bom-target.beancount"\n';
+    const full = withIncludedContext(edited, tempDir);
+    expect(full).toContain('Assets:Bom');
+  });
+
+  it('preserves the edited document verbatim when it lacks a trailing newline', () => {
+    fs.writeFileSync(path.join(tempDir, 'nl-target.beancount'), '2024-01-01 open Assets:NlInc USD');
+    // No trailing newline on the edited source.
+    const edited = 'include "nl-target.beancount"\n2024-01-01 open Assets:NoNl USD';
+    const full = withIncludedContext(edited, tempDir);
+    // The join inserts a separator, so the edited doc's last line stays intact
+    // (cursor coordinates into it remain valid) and both accounts are present.
+    expect(full.startsWith(edited)).toBe(true);
+    expect(full).toContain('Assets:NoNl');
+    expect(full).toContain('Assets:NlInc');
+  });
+
+  it('resolves a CRLF include line', () => {
+    fs.writeFileSync(path.join(tempDir, 'crlf-target.beancount'), '2024-01-01 open Assets:Crlf USD');
+    const edited = 'include "crlf-target.beancount"\r\n2024-01-01 open Assets:Main USD\r\n';
+    const full = withIncludedContext(edited, tempDir);
+    expect(full).toContain('Assets:Crlf');
+  });
+
   it('is cycle-safe: a circular include graph terminates and appends each file once', () => {
     const d = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-cycle-'));
     fs.writeFileSync(path.join(d, 'a.beancount'), 'include "b.beancount"\n2024-01-01 open Assets:A USD');

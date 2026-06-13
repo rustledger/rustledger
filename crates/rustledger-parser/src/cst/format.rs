@@ -1700,57 +1700,57 @@ fn emit_transaction(d: &ast::Transaction, align: PostingAlignment, out: &mut Str
         }
     }
     out.push('\n');
-    // Body: walk source-order children, emitting POSTING /
-    // META_ENTRY child nodes. Trailing body-line TAG / LINK
-    // tokens (valid Beancount per the body-line exemption) emit
-    // as continuation lines.
-    for child in d.syntax().children() {
-        if let Some(p) = ast::Posting::cast(child.clone()) {
-            emit_posting(&p, align, out);
-        } else if let Some(m) = ast::MetaEntry::cast(child) {
-            emit_meta_entry(&m, INDENT, out);
-        }
-    }
-    // Trailing body-line TAG / LINK tokens (direct-child tokens
-    // after the header NEWLINE that aren't trivia and aren't
-    // already inside a POSTING / META_ENTRY child). Emit each on
-    // its own indented line — that's the canonical form for the
-    // "continuation tags" syntax.
-    // `seen_content` mirrors the header loop above: the header ends at
-    // the first NEWLINE *after* the date, so a leading blank-line
-    // NEWLINE (trivia for any directive past the first) does not flip
-    // `past_header` early and misclassify the header tags/links as
-    // trailing continuation tags (#1321).
+    // Body: a single source-order walk over the transaction's children,
+    // emitting — in the order they appear — POSTING / META_ENTRY nodes, any
+    // body-internal COMMENT lines (#1332: the formatter must not delete the
+    // author's comments), and trailing body-line TAG / LINK continuation
+    // tokens (valid Beancount per the body-line exemption).
+    //
+    // `seen_content` / `past_header` skip the header region exactly as the
+    // header loop above does, so the header-trailing comment (spliced onto
+    // the header line by `emit_directive`) and the header tags/links (already
+    // emitted inline above) are not duplicated here. A leading blank-line
+    // NEWLINE for any directive past the first is trivia and must not flip
+    // `past_header` early (#1321).
     let mut past_header = false;
     let mut seen_content = false;
     for el in d.syntax().children_with_tokens() {
-        let rowan::NodeOrToken::Token(t) = el else {
-            // POSTING / META_ENTRY node — definitively past the header.
-            past_header = true;
-            continue;
-        };
-        if !past_header {
-            match t.kind() {
-                crate::SyntaxKind::NEWLINE if seen_content => past_header = true,
-                // Leading trivia before the date, comments included (see
-                // the header loop above): a leading comment must not flip
-                // `seen_content` and push `past_header` early, which would
-                // misclassify the real header tags/links as trailing
-                // continuation tags.
-                k if k.is_trivia() => {}
-                // DATE / flag / STRING / header TAG / LINK: still header,
-                // never emitted as trailing continuation tags.
-                _ => seen_content = true,
+        match el {
+            rowan::NodeOrToken::Node(n) => {
+                // A POSTING / META_ENTRY node is definitively past the header.
+                past_header = true;
+                if let Some(p) = ast::Posting::cast(n.clone()) {
+                    emit_posting(&p, align, out);
+                } else if let Some(m) = ast::MetaEntry::cast(n) {
+                    emit_meta_entry(&m, INDENT, out);
+                }
             }
-            continue;
-        }
-        match t.kind() {
-            crate::SyntaxKind::TAG | crate::SyntaxKind::LINK => {
-                out.push_str(INDENT);
-                out.push_str(t.text());
-                out.push('\n');
+            rowan::NodeOrToken::Token(t) => {
+                if !past_header {
+                    match t.kind() {
+                        crate::SyntaxKind::NEWLINE if seen_content => past_header = true,
+                        k if k.is_trivia() => {}
+                        // DATE / flag / STRING / header TAG / LINK: still header.
+                        _ => seen_content = true,
+                    }
+                    continue;
+                }
+                // Body tokens: preserve comment-only lines and emit
+                // continuation tags/links, each on its own indented line.
+                match t.kind() {
+                    crate::SyntaxKind::COMMENT | crate::SyntaxKind::PERCENT_COMMENT => {
+                        out.push_str(INDENT);
+                        out.push_str(t.text().trim_end_matches(['\n', '\r']));
+                        out.push('\n');
+                    }
+                    crate::SyntaxKind::TAG | crate::SyntaxKind::LINK => {
+                        out.push_str(INDENT);
+                        out.push_str(t.text());
+                        out.push('\n');
+                    }
+                    _ => {}
+                }
             }
-            _ => {}
         }
     }
 }
@@ -2131,8 +2131,40 @@ fn balance_tolerance(node: &crate::SyntaxNode) -> Option<(String, Option<String>
 /// accessor on their typed wrapper; we walk the syntax node
 /// directly to stay uniform.
 fn emit_meta_entries_of(node: &crate::SyntaxNode, out: &mut String) {
-    for entry in node.children().filter_map(MetaEntry::cast) {
-        emit_meta_entry(&entry, INDENT, out);
+    // Source-order walk so body-internal COMMENT lines are preserved
+    // alongside the metadata entries (#1332). The header region (up to and
+    // including the header-terminating NEWLINE) is skipped so the
+    // header-trailing comment — spliced onto the header line by
+    // `emit_directive` — is not duplicated here.
+    let mut past_header = false;
+    let mut seen_content = false;
+    for el in node.children_with_tokens() {
+        match el {
+            rowan::NodeOrToken::Node(n) => {
+                past_header = true;
+                if let Some(entry) = MetaEntry::cast(n) {
+                    emit_meta_entry(&entry, INDENT, out);
+                }
+            }
+            rowan::NodeOrToken::Token(t) => {
+                if !past_header {
+                    match t.kind() {
+                        crate::SyntaxKind::NEWLINE if seen_content => past_header = true,
+                        k if k.is_trivia() => {}
+                        _ => seen_content = true,
+                    }
+                    continue;
+                }
+                if matches!(
+                    t.kind(),
+                    crate::SyntaxKind::COMMENT | crate::SyntaxKind::PERCENT_COMMENT
+                ) {
+                    out.push_str(INDENT);
+                    out.push_str(t.text().trim_end_matches(['\n', '\r']));
+                    out.push('\n');
+                }
+            }
+        }
     }
 }
 
@@ -2382,6 +2414,55 @@ mod tests {
             once.contains("\"/b.pdf\" #tag2 ^link2"),
             "the second document's tags/links must stay on its header line; got:\n{once}"
         );
+    }
+
+    #[test]
+    fn issue_1332_body_comments_in_metadata_preserved() {
+        // The formatter must NOT delete comment-only lines inside a
+        // directive body (#1332). Here two commented-out `; price:` lines
+        // sit between metadata entries in a `commodity` body; they must
+        // survive, interleaved in source order, and the result is idempotent.
+        let src = "\
+2023-06-04 commodity EAM-VEUR ; cSpell: word VEUR
+  name: \"Vanguard FTSE Developed Europe UCITS ETF EUR Dist\"
+  ; price: \"EUR:alphavantage/price:VEUR.AS:EUR\"
+  ; price: \"EUR:yahoo/VEUR.AS\"
+  price: \"EUR:pricehist.beanprice.yahoo/VEUR.AS\"
+";
+        assert_eq!(
+            format_source(src),
+            src,
+            "body comments must be preserved verbatim"
+        );
+        assert_eq!(format_source(&format_source(src)), format_source(src));
+    }
+
+    #[test]
+    fn issue_1332_body_comments_between_postings_preserved() {
+        // Same class, inside a transaction body: a comment-only line between
+        // postings must survive (in source order, 2-space indent). Asserted
+        // via preservation + idempotence rather than an exact match, since
+        // amount alignment is also canonicalized.
+        let src = "\
+2024-01-15 * \"Cafe\" \"Latte\"
+  Expenses:Coffee   4.50 USD
+  ; was 5.00 before the discount
+  Assets:Checking
+";
+        let out = format_source(src);
+        assert!(
+            out.contains("\n  ; was 5.00 before the discount\n"),
+            "the body comment must be preserved on its own indented line; got:\n{out}"
+        );
+        // Order: the comment stays between the two postings.
+        let coffee = out.find("Expenses:Coffee").unwrap();
+        let comment = out.find("; was 5.00").unwrap();
+        let checking = out.find("Assets:Checking").unwrap();
+        assert!(
+            coffee < comment && comment < checking,
+            "comment must stay between postings:\n{out}"
+        );
+        assert_eq!(format_source(&out), out, "format must be idempotent");
     }
 
     #[test]

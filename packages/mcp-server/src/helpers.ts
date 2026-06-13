@@ -100,6 +100,12 @@ function appendIncludes(
   const includeRe = /^include\s+"([^"]+)"\s*$/gm;
   for (const match of source.matchAll(includeRe)) {
     const includeAbsPath = path.resolve(baseDir, match[1]);
+    // A single global `visited` set, added to BEFORE recursing, both
+    // de-duplicates a diamond graph (a shared file is appended once, which is
+    // what aggregate counts want) and makes a cycle (A -> B -> A) terminate
+    // without re-appending. Unlike `loadWithIncludes`, this does NOT throw on a
+    // cycle: an aggregate lookup for hover/completions stays useful even if the
+    // ledger has an include cycle elsewhere, rather than failing the whole tool.
     if (visited.has(includeAbsPath)) continue;
     visited.add(includeAbsPath);
     let content: string;

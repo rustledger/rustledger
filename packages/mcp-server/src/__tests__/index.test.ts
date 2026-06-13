@@ -1003,6 +1003,18 @@ describe('withIncludedContext', () => {
     const edited = 'include "does-not-exist.beancount"\n';
     expect(() => withIncludedContext(edited, tempDir)).toThrow(/Failed to include "does-not-exist\.beancount"/);
   });
+
+  it('is cycle-safe: a circular include graph terminates and appends each file once', () => {
+    const d = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-cycle-'));
+    fs.writeFileSync(path.join(d, 'a.beancount'), 'include "b.beancount"\n2024-01-01 open Assets:A USD');
+    fs.writeFileSync(path.join(d, 'b.beancount'), 'include "a.beancount"\n2024-01-01 open Assets:B USD');
+    // The global `visited` set is added to BEFORE recursing, so A -> B -> A
+    // terminates (no infinite loop) and each file is appended exactly once.
+    const full = withIncludedContext('include "a.beancount"\n', d);
+    expect(full.split('Assets:A').length - 1).toBe(1);
+    expect(full.split('Assets:B').length - 1).toBe(1);
+    fs.rmSync(d, { recursive: true, force: true });
+  });
 });
 
 describe('editor tools with file_path', () => {

@@ -1873,9 +1873,47 @@ fn emit_posting(p: &ast::Posting, align: PostingAlignment, out: &mut String) {
         splice.push_str(&c);
         out.insert_str(posting_start + rel, &splice);
     }
-    // Posting-attached metadata: indent 4 (deeper than posting's 2).
-    for m in p.meta_entries() {
-        emit_meta_entry(&m, "    ", out);
+    // Posting body: emit attached metadata AND posting-internal comment
+    // lines in source order, indented 4 (deeper than the posting's 2).
+    // Comment-only lines inside a posting attach as COMMENT tokens of the
+    // POSTING node; walking children-with-tokens preserves them (#1337)
+    // instead of dropping them. The posting's own header line is skipped via
+    // the seen_content/past_header guard, so the same-line trailing comment
+    // (spliced above) is not duplicated here.
+    let mut past_header = false;
+    let mut seen_content = false;
+    for el in p.syntax().children_with_tokens() {
+        match el {
+            rowan::NodeOrToken::Node(n) => {
+                // Header child nodes (AMOUNT / COST_SPEC / PRICE_ANNOTATION)
+                // are emitted inline above and must NOT flip `past_header` —
+                // only the posting-line NEWLINE does. Otherwise the same-line
+                // trailing comment, which follows the AMOUNT node, would be
+                // re-emitted here as a body comment. META_ENTRY nodes only
+                // appear in the body, after `past_header` is already set.
+                if let Some(m) = ast::MetaEntry::cast(n) {
+                    emit_meta_entry(&m, "    ", out);
+                }
+            }
+            rowan::NodeOrToken::Token(t) => {
+                if !past_header {
+                    match t.kind() {
+                        crate::SyntaxKind::NEWLINE if seen_content => past_header = true,
+                        k if k.is_trivia() => {}
+                        _ => seen_content = true,
+                    }
+                    continue;
+                }
+                if matches!(
+                    t.kind(),
+                    crate::SyntaxKind::COMMENT | crate::SyntaxKind::PERCENT_COMMENT
+                ) {
+                    out.push_str("    ");
+                    out.push_str(t.text().trim_end_matches(['\n', '\r']));
+                    out.push('\n');
+                }
+            }
+        }
     }
 }
 
@@ -2560,6 +2598,29 @@ mod tests {
             "blank around org header must be kept"
         );
         assert_eq!(format_source(&format_source(src)), format_source(src));
+    }
+
+    #[test]
+    fn issue_1337_posting_internal_comments_preserved() {
+        // A comment on its own line inside a posting attaches as a COMMENT
+        // token of the POSTING node; it must be preserved (#1337), not
+        // dropped, and stay between its posting and the next.
+        let src = "\
+2024-01-15 * \"x\"
+  Assets:A   1.00 USD
+    ; posting-internal note
+  Assets:B
+";
+        let out = format_source(src);
+        assert!(
+            out.contains("; posting-internal note"),
+            "posting-internal comment dropped; got:\n{out}"
+        );
+        let a = out.find("Assets:A").unwrap();
+        let c = out.find("; posting-internal note").unwrap();
+        let b = out.find("Assets:B").unwrap();
+        assert!(a < c && c < b, "comment must stay between postings:\n{out}");
+        assert_eq!(format_source(&out), out, "format must be idempotent");
     }
 
     #[test]

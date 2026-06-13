@@ -139,6 +139,16 @@ jobs:
         # scripts/format-bean-format-roundtrip.sh (#1324).
         run: |
           RLEDGER=./target/release/rledger ./scripts/format-bean-format-roundtrip.sh tests/compatibility/files
+      - name: Comment preservation over the corpus
+        # `rledger format` must never DELETE the author's comments. The
+        # idempotence and bean-format-roundtrip gates both miss this class
+        # (they compare the formatter against its OWN already-stripped output,
+        # never the original input), which is why the #1332 / #1335 / #1337
+        # comment-deletion bugs went unnoticed. This input-anchored check
+        # fails if formatting drops any comment-only line.
+        # See scripts/format-preserves-comments.sh (#1337).
+        run: |
+          RLEDGER=./target/release/rledger ./scripts/format-preserves-comments.sh tests/compatibility/files
       - name: Fetch previous results for regression detection
         run: |
           mkdir -p .github/badges

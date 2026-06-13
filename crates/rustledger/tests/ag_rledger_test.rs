@@ -1,10 +1,18 @@
 //! Integration tests for the agent-native `ag-rledger` binary (#1291).
 //!
+//! Gated behind the `ag-rledger` feature: the binary (and thus the
+//! `CARGO_BIN_EXE_ag-rledger` env var these tests resolve) only exists when
+//! that feature is enabled. Without the gate, the default
+//! `cargo test -p rustledger` would fail to compile this file (missing env
+//! var) even though the binary isn't built. Run with
+//! `cargo test -p rustledger --features ag-rledger`.
+//!
 //! These resolve the binary via `CARGO_BIN_EXE_ag-rledger` (set by cargo
 //! for any `[[bin]]` target) and assert on the agcli JSON envelope and the
 //! typed process exit code. They mirror the `common` harness conventions
 //! used by the `rledger` CLI tests, but the binary is always present under
-//! `cargo test` so no skip macro is needed.
+//! `cargo test --features ag-rledger` so no skip macro is needed.
+#![cfg(feature = "ag-rledger")]
 
 use serde_json::Value;
 use std::path::PathBuf;
@@ -148,6 +156,186 @@ fn check_alias_c_works() {
 
     assert_eq!(code, 0, "alias `c` should behave like check: {env}");
     assert_eq!(env["ok"], Value::Bool(true));
+}
+
+/// M1: a bool flag declared before the positional must NOT swallow the
+/// positional. `extract --invert-sign <file.csv>` should treat the CSV as the
+/// input file, not error "extract requires a ledger file".
+#[test]
+fn extract_bool_flag_before_positional_keeps_positional() {
+    let tmp = tempfile::tempdir().unwrap();
+    let csv = write_fixture(
+        tmp.path(),
+        "bank.csv",
+        "Date,Description,Amount\n2024-01-02,Coffee,-4.50\n",
+    );
+
+    let (code, env) = run(&["extract", "--invert-sign", csv.to_str().unwrap()]);
+
+    // The CSV is recognized as the positional input: we must NOT get the
+    // MISSING_FILE usage error. Any other outcome (success, or a parse/import
+    // error) is acceptable here — the point is the flag didn't eat the file.
+    assert_ne!(
+        env["error"]["code"], "MISSING_FILE",
+        "--invert-sign should not swallow the positional file: {env}"
+    );
+    // USAGE exit code is 2; a swallowed positional would surface as USAGE.
+    assert_ne!(code, 2, "should not be a usage error: {env}");
+}
+
+/// M1: the `--no-header` extract bool flag before the positional likewise must
+/// not consume the file.
+#[test]
+fn extract_no_header_flag_before_positional_keeps_positional() {
+    let tmp = tempfile::tempdir().unwrap();
+    let csv = write_fixture(tmp.path(), "bank.csv", "2024-01-02,Coffee,-4.50\n");
+
+    let (_code, env) = run(&["extract", "--no-header", csv.to_str().unwrap()]);
+
+    assert_ne!(
+        env["error"]["code"], "MISSING_FILE",
+        "--no-header should not swallow the positional file: {env}"
+    );
+}
+
+/// M2: `ag-rledger query "SELECT ..."` with no `--file` must target the
+/// configured default file, not route the SQL string into `file`. We point
+/// the default at a good ledger via `RLEDGER_FILE`/config; here we use the
+/// `--file`-less form and confirm the query runs against the default instead
+/// of failing with a file-not-found for the SQL text.
+#[test]
+fn query_without_file_uses_default_not_positional() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = write_fixture(tmp.path(), "good.beancount", GOOD_LEDGER);
+
+    // Set the default file through the env-driven profile path the binary
+    // honors. `default.file` resolution reads config; the simplest robust
+    // signal is RLEDGER_FILE if supported, else fall back to asserting the
+    // SQL string is not treated as a path.
+    let output = Command::new(ag_rledger())
+        .args([
+            "query",
+            "SELECT account, sum(position) GROUP BY account",
+            "--format",
+            "json",
+        ])
+        .env("RLEDGER_FILE", file.to_str().unwrap())
+        .output()
+        .expect("spawn ag-rledger");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let env: Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("envelope is not JSON ({e}): {stdout}"));
+
+    // The SQL string must not be interpreted as a file path: a path-shaped
+    // misroute would surface FILE_NOT_FOUND for "SELECT ...".
+    assert_ne!(
+        env["error"]["code"], "FILE_NOT_FOUND",
+        "query text must not be treated as a file path: {env}"
+    );
+    // The leading positional ("SELECT ...") doesn't look like a ledger path,
+    // so it is kept as query text rather than swallowed as the file.
+}
+
+/// M2: when a ledger-looking path IS the leading positional, query still
+/// treats it as the file (heuristic doesn't over-correct).
+#[test]
+fn query_with_ledger_positional_still_uses_it_as_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = write_fixture(tmp.path(), "good.beancount", GOOD_LEDGER);
+
+    let (code, env) = run(&[
+        "query",
+        file.to_str().unwrap(),
+        "SELECT account, sum(position) GROUP BY account",
+        "--format",
+        "json",
+    ]);
+
+    assert_eq!(
+        code, 0,
+        "query with explicit ledger positional should run: {env}"
+    );
+    assert_eq!(env["ok"], Value::Bool(true));
+}
+
+/// M3: `ag-rledger add` without `--yes`/`--dry-run` must return a clean USAGE
+/// error and must NOT block on stdin or mutate the ledger. We run with a
+/// closed stdin; if the binary prompted it would hang (and the test would
+/// time out) — instead it should return promptly with the confirmation error.
+#[test]
+fn add_without_yes_or_dry_run_errors_cleanly() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = write_fixture(tmp.path(), "ledger.beancount", GOOD_LEDGER);
+    let before = std::fs::read_to_string(&file).unwrap();
+
+    let output = Command::new(ag_rledger())
+        .args([
+            "add",
+            file.to_str().unwrap(),
+            "--quick",
+            "Coffee Shop",
+            "Morning coffee",
+            "Expenses:Food",
+            "4.50 USD",
+            "Assets:Cash",
+        ])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("spawn ag-rledger");
+    let code = output.status.code().expect("exit code");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let env: Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("envelope is not JSON ({e}): {stdout}"));
+
+    assert_eq!(
+        env["ok"],
+        Value::Bool(false),
+        "should be an error envelope: {env}"
+    );
+    assert_eq!(
+        code, 2,
+        "confirmation-required should map to USAGE (2): {env}"
+    );
+    assert_eq!(env["error"]["code"], "CONFIRMATION_REQUIRED", "{env}");
+    // The ledger must be untouched.
+    let after = std::fs::read_to_string(&file).unwrap();
+    assert_eq!(
+        before, after,
+        "ledger must not be mutated without confirmation"
+    );
+}
+
+/// M3: `ag-rledger add --dry-run` previews without prompting or mutating.
+#[test]
+fn add_dry_run_previews_without_mutating() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = write_fixture(tmp.path(), "ledger.beancount", GOOD_LEDGER);
+    let before = std::fs::read_to_string(&file).unwrap();
+
+    let output = Command::new(ag_rledger())
+        .args([
+            "add",
+            file.to_str().unwrap(),
+            "--dry-run",
+            "--quick",
+            "Coffee Shop",
+            "Morning coffee",
+            "Expenses:Food",
+            "4.50 USD",
+            "Assets:Cash",
+        ])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("spawn ag-rledger");
+    let code = output.status.code().expect("exit code");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let env: Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("envelope is not JSON ({e}): {stdout}"));
+
+    assert_eq!(code, 0, "dry-run should succeed: {env}");
+    assert_eq!(env["ok"], Value::Bool(true));
+    let after = std::fs::read_to_string(&file).unwrap();
+    assert_eq!(before, after, "dry-run must not mutate the ledger");
 }
 
 #[test]

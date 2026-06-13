@@ -161,10 +161,17 @@ pub enum Report {
 
 /// Run the report command with the given arguments.
 ///
-/// Builds a pager writer (for text output, unless `--no-pager`) or a plain
-/// stdout writer, then delegates the load + report dispatch to
-/// [`run_into`]. The agent-native `ag-rledger` binary instead calls
-/// [`run_with_writer`] with its own buffer so it can capture the report.
+/// Loads and processes the file FIRST, then — only on a successful load —
+/// builds a pager writer (for text output, unless `--no-pager`) or a plain
+/// stdout writer and renders into it. The agent-native `ag-rledger` binary
+/// instead calls [`run_with_writer`] with its own buffer so it can capture
+/// the report.
+///
+/// Ordering matters: the load must happen before the pager is created.
+/// Creating the pager first would flash the alternate screen (and on a
+/// failed load, leave the terminal in pager mode with no output) for an
+/// existing-but-invalid ledger. By loading first we never spawn the pager
+/// unless we actually have a report to show.
 pub fn run(
     file: &PathBuf,
     report: &Report,
@@ -173,13 +180,11 @@ pub fn run(
     no_pager: bool,
     no_cache: bool,
 ) -> Result<()> {
-    // Check if file exists
-    if !file.exists() {
-        anyhow::bail!("file not found: {}", file.display());
-    }
+    // Existence check → load → (only now) create pager → render → finish.
+    // Both the load and any render error surface BEFORE the pager exists,
+    // so a bad file never flashes the alternate screen.
+    let loaded = load(file, report, verbose, no_cache)?;
 
-    // Create pager AFTER the existence check (don't spawn pager if the
-    // file is missing); load failures are still caught inside `run_into`.
     let use_pager = !no_pager && matches!(format, OutputFormat::Text);
     let pager_cmd = if use_pager {
         crate::config::Config::load()
@@ -194,11 +199,10 @@ pub fn run(
         crate::pager::PagerWriter::Stdout(io::stdout().lock())
     };
 
-    // Always restore the terminal (drop the pager) even when the load or
-    // render fails inside `run_into` (e.g. a parse error on an existing but
-    // invalid file). Propagating with `?` before `finish()` would leave the
-    // terminal stuck in pager mode with no output.
-    let result = run_into(file, report, verbose, format, no_cache, &mut writer);
+    // Always restore the terminal (drop the pager) even if rendering fails,
+    // so a write error mid-report doesn't leave the terminal stuck in pager
+    // mode.
+    let result = render(&loaded, report, file, format, &mut writer);
     writer.finish();
     result
 }
@@ -210,7 +214,7 @@ pub fn run(
 /// produces exactly the same report bytes `run()` would emit to a
 /// non-paged stdout, but routed to `out` so the caller can buffer them
 /// into a JSON envelope. Verbose progress and load errors still go to
-/// stderr. The on-disk parse cache stays enabled: `run_into` is always
+/// stderr. The on-disk parse cache stays enabled: [`load`] is always
 /// invoked with `no_cache = false` (this entry point takes no `no_cache`
 /// parameter).
 pub fn run_with_writer<W: io::Write>(
@@ -220,24 +224,35 @@ pub fn run_with_writer<W: io::Write>(
     format: &OutputFormat,
     out: &mut W,
 ) -> Result<()> {
-    if !file.exists() {
-        anyhow::bail!("file not found: {}", file.display());
-    }
-    run_into(file, report, verbose, format, false, out)
+    // Existence-check → load → render(buffer): the same two-phase split the
+    // production `run()` uses, minus the pager. Producing identical report
+    // bytes is guaranteed because both paths funnel through `load` + `render`.
+    let loaded = load(file, report, verbose, false)?;
+    render(&loaded, report, file, format, out)
 }
 
-/// Shared load + report-dispatch core for [`run`] and [`run_with_writer`].
+/// Loaded directive views, the output of the load phase of a report.
 ///
-/// Writes the rendered report to `writer`. The caller owns writer setup
-/// (pager vs. plain stdout vs. agent buffer) and any post-write `finish()`.
-fn run_into<W: io::Write>(
-    file: &PathBuf,
-    report: &Report,
-    verbose: bool,
-    format: &OutputFormat,
-    no_cache: bool,
-    writer: &mut W,
-) -> Result<()> {
+/// Splitting the report into a load phase ([`load`]) that returns this and a
+/// render phase ([`render`]) lets the production `run()` perform the load —
+/// and surface any load error — BEFORE it creates the pager, so an
+/// existing-but-invalid ledger never flashes the alternate screen.
+struct LoadedReport {
+    /// Source-faithful directive stream (pads remain `Pad`). Used by
+    /// reports that count/list source directive kinds.
+    directives: Vec<rustledger_core::Directive>,
+    /// Pad-expanded view, present only when the ledger has pads AND the
+    /// report is balance-computing. `None` means "use `directives`".
+    balance_view: Option<Vec<rustledger_core::Directive>>,
+}
+
+/// Load and fully process the file (parse → book → plugins), producing the
+/// directive views the render phase needs.
+///
+/// This is the load phase shared by [`run`] and [`run_with_writer`]. It
+/// performs the existence check, loads via the on-disk cache, processes, and
+/// computes the (optional) pad-expanded balance view — but renders nothing.
+fn load(file: &PathBuf, report: &Report, verbose: bool, no_cache: bool) -> Result<LoadedReport> {
     // Check if file exists
     if !file.exists() {
         anyhow::bail!("file not found: {}", file.display());
@@ -309,12 +324,33 @@ fn run_into<W: io::Write>(
     };
     let directives: Vec<_> = ledger.directives.into_iter().map(|s| s.value).collect();
 
+    Ok(LoadedReport {
+        directives,
+        balance_view,
+    })
+}
+
+/// Render the already-loaded report into `writer`.
+///
+/// This is the render phase shared by [`run`] and [`run_with_writer`]; it
+/// touches no files and never spawns a pager. The caller owns writer setup
+/// (pager vs. plain stdout vs. agent buffer) and any post-write `finish()`.
+/// `file` is only used by the `stats` report (for the file-size line).
+fn render<W: io::Write>(
+    loaded: &LoadedReport,
+    report: &Report,
+    file: &PathBuf,
+    format: &OutputFormat,
+    writer: &mut W,
+) -> Result<()> {
+    let directives = &loaded.directives;
+
     // Balance-computing reports read the pad-expanded view when one
     // was built (the ledger has pads), otherwise the source stream
     // directly. `unwrap_or` makes the no-pad fast path explicit: same
     // directives, no clone.
     let balance_input: &[rustledger_core::Directive] =
-        balance_view.as_deref().unwrap_or(&directives);
+        loaded.balance_view.as_deref().unwrap_or(directives);
 
     // Generate the requested report into the caller-provided writer.
     // Balance-computing reports get `balance_input` (the pad-expanded
@@ -331,7 +367,7 @@ fn run_into<W: io::Write>(
             income::report_income(balance_input, format, writer)?;
         }
         Report::Journal { account, limit } => {
-            journal::report_journal(&directives, account.as_deref(), *limit, format, writer)?;
+            journal::report_journal(directives, account.as_deref(), *limit, format, writer)?;
         }
         Report::Holdings { account } => {
             holdings::report_holdings(balance_input, account.as_deref(), format, writer)?;
@@ -353,16 +389,16 @@ fn run_into<W: io::Write>(
             )?;
         }
         Report::Accounts => {
-            accounts::report_accounts(&directives, format, writer)?;
+            accounts::report_accounts(directives, format, writer)?;
         }
         Report::Commodities => {
-            commodities::report_commodities(&directives, format, writer)?;
+            commodities::report_commodities(directives, format, writer)?;
         }
         Report::Stats => {
-            stats::report_stats(&directives, file, writer)?;
+            stats::report_stats(directives, file, writer)?;
         }
         Report::Prices { commodity } => {
-            prices::report_prices(&directives, commodity.as_deref(), format, writer)?;
+            prices::report_prices(directives, commodity.as_deref(), format, writer)?;
         }
     }
 

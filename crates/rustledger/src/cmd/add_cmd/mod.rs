@@ -204,18 +204,27 @@ fn run_quick_mode(args: &Args, file: &PathBuf, date: NaiveDate) -> Result<()> {
 /// Quick-mode entry point for the agent-native `ag-rledger` binary.
 ///
 /// Parses the date the same way [`run`] does, then runs quick mode with
-/// output written to `out`. Unlike the interactive [`run`] path it never
-/// prompts: the caller is expected to pass `--yes`/`--dry-run` (agents set
-/// `--yes` via the reserved flag), so a confirmation prompt here would
-/// block on a closed stdin. Behavior otherwise matches `run` + quick mode.
+/// output written to `out`. This path never prompts on stdin: it requires
+/// `--yes` (append) or `--dry-run` (preview) and returns an error if neither
+/// is set, rather than blocking on a TTY or silently defaulting to "yes" on
+/// EOF. The `ag-rledger` add handler enforces the same precondition before
+/// calling this, so the error here is a defensive backstop. Behavior
+/// otherwise matches `run` + quick mode.
 ///
 /// # Errors
-/// Propagates date-parse, formatting, and file-append errors.
+/// Returns an error when neither `--yes` nor `--dry-run` is set, and
+/// propagates date-parse, formatting, and file-append errors.
 pub fn run_quick_with_writer<W: std::io::Write>(
     args: &Args,
     file: &PathBuf,
     out: &mut W,
 ) -> Result<()> {
+    if !args.yes && !args.dry_run {
+        bail!(
+            "ag-rledger add requires --yes (to append) or --dry-run (to preview); \
+             the agent path never prompts interactively"
+        );
+    }
     let date = if let Some(ref d) = args.date {
         parse_date(d)?
     } else {

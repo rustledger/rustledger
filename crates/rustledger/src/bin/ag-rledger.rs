@@ -87,8 +87,8 @@ fn build_cli() -> AgentCli {
 fn check_command(name: &'static str, description: &'static str) -> Command {
     Command::new(name, description)
         .usage(
-            "ag-rledger check [<file>] [--format <format>] [--json] [--verbose] [--quiet] \
-             [--no-cache] [--auto] [--native-plugin <name>] [--lint <name>]",
+            "ag-rledger check [<file>] [--format <format>] [--json] [--verbose] [-v] [--quiet] \
+             [-q] [--no-cache] [-C] [--auto] [-a] [--native-plugin <name>] [--lint <name>]",
         )
         .allow_unknown_flags()
         .allow_extra_args()
@@ -116,7 +116,8 @@ fn query_command(name: &'static str, description: &'static str) -> Command {
     Command::new(name, description)
         .usage(
             "ag-rledger query [<file>] <query...> [--file <file>] [--query-file <file>] \
-             [--output <file>] [--format <format>] [--numberify] [--no-errors] [--verbose]",
+             [--output <file>] [--format <format>] [--numberify] [-m] [--no-errors] [-q] \
+             [--verbose] [-v]",
         )
         .allow_unknown_flags()
         .allow_extra_args()
@@ -160,8 +161,8 @@ fn query_command(name: &'static str, description: &'static str) -> Command {
 fn format_command(name: &'static str, description: &'static str) -> Command {
     Command::new(name, description)
         .usage(
-            "ag-rledger format [<file>...] [--output <file>] [--in-place] [--check] [--diff] \
-             [--verbose]",
+            "ag-rledger format [<file>...] [--output <file>] [--in-place] [-i] [--check] [--diff] \
+             [--verbose] [-v]",
         )
         .allow_unknown_flags()
         .allow_extra_args()
@@ -191,7 +192,7 @@ fn report_command(name: &'static str, description: &'static str) -> Command {
     Command::new(name, description)
         .usage(
             "ag-rledger report [<file>] <report> [--file <file>] [--format <format>] [--verbose] \
-             [--account <account>] [--limit <n>] [--period <period>] [--currency <currency>] \
+             [-v] [--account <account>] [--limit <n>] [--period <period>] [--currency <currency>] \
              [--no-zero]",
         )
         .allow_unknown_flags()
@@ -217,7 +218,7 @@ fn report_command(name: &'static str, description: &'static str) -> Command {
 fn doctor_command(name: &'static str, description: &'static str) -> Command {
     Command::new(name, description)
         .usage(
-            "ag-rledger doctor <subcommand> [args...] [--verbose] [--conversion <value>] \
+            "ag-rledger doctor <subcommand> [args...] [--verbose] [-v] [--conversion <value>] \
              [--output <dir>] [--count <n>] [--seed <n>] [--skip-validation] [--manifest] \
              [--edge-cases-only]",
         )
@@ -243,6 +244,7 @@ fn extract_command(name: &'static str, description: &'static str) -> Command {
         .usage(
             "ag-rledger extract [<file>] [--file <file>] [--list-importers] [--importer <name>] \
              [--config <file>] [--account <account>] [--currency <currency>] [--auto] \
+             [--invert-sign] [--include-zero-amounts] [--no-header] \
              [--output <file>] [--existing <file>] [--suggest-categories] [--balance <amount>]",
         )
         .allow_unknown_flags()
@@ -280,9 +282,9 @@ fn price_command(name: &'static str, description: &'static str) -> Command {
     Command::new(name, description)
         .usage(
             "ag-rledger price [<symbol>...] [--file <file>] [--currency <currency>] [--date <date>] \
-             [--beancount] [--verbose] [--mapping <from:to>] [--source <source>] \
+             [--beancount] [-b] [--verbose] [-v] [--mapping <from:to>] [--source <source>] \
              [--source-cmd <cmd>] [--list-sources] [--clear-cache] [--inactive] \
-             [--undeclared] [--clobber]",
+             [--undeclared] [--all-commodities] [-n] [--clobber] [-C]",
         )
         .allow_unknown_flags()
         .allow_extra_args()
@@ -308,7 +310,7 @@ fn config_command(name: &'static str, description: &'static str) -> Command {
     Command::new(name, description)
         .usage(
             "ag-rledger config <show|path|edit|init|aliases> [--raw] [--format <format>] \
-             [--project] [--system] [--force]",
+             [--project] [--system] [--force] [-f]",
         )
         .allow_unknown_flags()
         .allow_extra_args()
@@ -331,7 +333,7 @@ fn add_command(name: &'static str, description: &'static str) -> Command {
     Command::new(name, description)
         .usage(
             "ag-rledger add [<file>] --quick <payee> <narration> <account> <amount> <account> \
-             [--file <file>] [--date <date>] [--no-completion]",
+             [--file <file>] [--date <date>] [--no-completion] [-n] [-y]",
         )
         .allow_unknown_flags()
         .allow_extra_args()
@@ -345,6 +347,18 @@ fn add_command(name: &'static str, description: &'static str) -> Command {
             let profile = profile_from_env_or_flag(req);
             Box::pin(async move {
                 let args = args?;
+                // The agent path never prompts on stdin. Mutating the ledger
+                // without an explicit confirmation (and silently defaulting to
+                // "yes" on EOF) is unsafe, so require `--yes`/`--dry-run`
+                // up front and return a clean USAGE error otherwise (M3).
+                if !args.yes && !args.dry_run {
+                    return Err(CommandError::new(
+                        "ag-rledger add needs explicit confirmation",
+                        "CONFIRMATION_REQUIRED",
+                        "Pass --yes to append the transaction, or --dry-run to preview it without modifying the ledger.",
+                    )
+                    .exit_code(agcli::ExitCode::USAGE));
+                }
                 let config = load_config();
                 let file = args
                     .file
@@ -468,11 +482,20 @@ fn build_query_args(
 ) -> Result<rustledger::cmd::query::Args, CommandError> {
     let explicit_file = path_flag(req, "file", None);
     let mut positionals = req.positionals().to_vec();
+    // Only consume the leading positional as the file when no `--file` was
+    // given AND it looks like a ledger path (M2). `ag-rledger query "SELECT
+    // ..."` is meant to query the config default file, so a bare SQL string
+    // must NOT be swallowed as the file path — leave `file = None` so the
+    // handler falls back to `default.file`, and treat every positional as
+    // query text.
     let file = explicit_file.or_else(|| {
-        if positionals.is_empty() {
-            None
-        } else {
+        if positionals
+            .first()
+            .is_some_and(|first| looks_like_ledger_path(first))
+        {
             Some(PathBuf::from(positionals.remove(0)))
+        } else {
+            None
         }
     });
 
@@ -832,11 +855,20 @@ fn build_add_args(
     req: &agcli::CommandRequest<'_>,
 ) -> Result<rustledger::cmd::add_cmd::Args, CommandError> {
     let mut positionals = req.positionals().to_vec();
+    // Same M2 heuristic as query: only consume the leading positional as the
+    // file when no `--file` was given AND it looks like a ledger path.
+    // Otherwise leave `file = None` (the handler falls back to `default.file`)
+    // and treat every positional as a `--quick` argument. This keeps
+    // `ag-rledger add --quick <payee> <narration> ...` (no explicit file)
+    // from swallowing the payee as the ledger path.
     let file = path_flag(req, "file", None).or_else(|| {
-        if positionals.is_empty() {
-            None
-        } else {
+        if positionals
+            .first()
+            .is_some_and(|first| looks_like_ledger_path(first))
+        {
             Some(PathBuf::from(positionals.remove(0)))
+        } else {
+            None
         }
     });
     let mut quick = string_flag(req, "quick", Some("q")).map(|first| {
@@ -969,6 +1001,30 @@ fn invalid_enum(name: &str, value: &str, allowed: &[&str]) -> CommandError {
         format!("Use one of: {}.", allowed.join(", ")),
     )
     .exit_code(agcli::ExitCode::USAGE)
+}
+
+/// Heuristic: does this leading positional look like a ledger file path
+/// rather than query/transaction text? Used by `query` and `add` (M2) so that
+/// `ag-rledger query "SELECT ..."` (no `--file`) targets the config default
+/// file instead of routing the SQL string into `file`.
+///
+/// A positional is treated as a ledger path when it either exists on disk or
+/// ends in a beancount extension (`.beancount` / `.bean`). Anything else
+/// (a BQL string, a payee, a narration) leaves `file = None` so the downstream
+/// command uses the configured default.
+///
+/// Residual limitation: a *non-existent* ledger path with a non-beancount
+/// extension (e.g. `ledger.txt` that hasn't been created yet) is not
+/// recognized and would be treated as query/transaction text. Callers that
+/// need such a path should pass it explicitly via `--file`.
+fn looks_like_ledger_path(candidate: &str) -> bool {
+    let path = std::path::Path::new(candidate);
+    if path.exists() {
+        return true;
+    }
+    path.extension().is_some_and(|ext| {
+        ext.eq_ignore_ascii_case("beancount") || ext.eq_ignore_ascii_case("bean")
+    })
 }
 
 fn load_config() -> Config {

@@ -1359,18 +1359,32 @@ fn emit_document(d: &ast::DocumentDirective, out: &mut String) {
     out.push(' ');
     out.push_str(&path);
     // Trailing TAG / LINK tokens — typed AST has no accessor, so
-    // walk direct-child tokens until the first NEWLINE.
+    // walk direct-child tokens. Skip LEADING trivia (a blank line
+    // before a non-first directive attaches its NEWLINE inside the
+    // node) and stop at the first NEWLINE *after* the header content
+    // begins; otherwise the tags/links are dropped when reformatting
+    // any document past the first — the same bug as #1321 in the
+    // transaction path.
+    let mut seen_content = false;
     for el in d.syntax().children_with_tokens() {
         let rowan::NodeOrToken::Token(t) = el else {
-            continue;
+            break;
         };
         match t.kind() {
-            crate::SyntaxKind::NEWLINE => break,
             crate::SyntaxKind::TAG | crate::SyntaxKind::LINK => {
                 out.push(' ');
                 out.push_str(t.text());
+                seen_content = true;
             }
-            _ => {}
+            crate::SyntaxKind::NEWLINE if seen_content => break,
+            // Leading trivia before the date: whitespace, blank-line
+            // NEWLINEs, AND comment lines. A comment before a non-first
+            // directive attaches inside this node (Directive-Terminator
+            // Rule); skipping only WHITESPACE/NEWLINE would let it flip
+            // `seen_content`, break at the comment's NEWLINE, and drop
+            // the real header tags/links.
+            k if k.is_trivia() => {}
+            _ => seen_content = true,
         }
     }
     out.push('\n');
@@ -1593,17 +1607,34 @@ fn emit_transaction(d: &ast::Transaction, align: PostingAlignment, out: &mut Str
     // grouped, which loses interleaving like `#a ^l #b`). Walk
     // direct-child tokens, stopping at the header-terminating
     // NEWLINE.
+    //
+    // `seen_content` guards against LEADING trivia: for any directive
+    // after the first, the preceding blank line's NEWLINE attaches
+    // inside this node before the date (the Directive-Terminator Rule).
+    // The header terminator is the first NEWLINE *after* the date, not
+    // a leading one — otherwise this loop would break immediately and
+    // emit no header tags (#1321).
+    let mut seen_content = false;
     for el in d.syntax().children_with_tokens() {
         let rowan::NodeOrToken::Token(t) = el else {
-            continue;
+            break;
         };
         match t.kind() {
             crate::SyntaxKind::TAG | crate::SyntaxKind::LINK => {
                 out.push(' ');
                 out.push_str(t.text());
+                seen_content = true;
             }
-            crate::SyntaxKind::NEWLINE => break,
-            _ => {}
+            crate::SyntaxKind::NEWLINE if seen_content => break,
+            // Leading trivia before the date: whitespace, blank-line
+            // NEWLINEs, AND comment lines (a comment before a non-first
+            // directive attaches inside this node per the Directive-
+            // Terminator Rule). Skipping only WHITESPACE/NEWLINE would
+            // let a leading comment flip `seen_content`, break at the
+            // comment's NEWLINE, and drop the real header tags/links.
+            k if k.is_trivia() => {}
+            // DATE / flag / STRING etc. — header content has begun.
+            _ => seen_content = true,
         }
     }
     out.push('\n');
@@ -1623,15 +1654,31 @@ fn emit_transaction(d: &ast::Transaction, align: PostingAlignment, out: &mut Str
     // already inside a POSTING / META_ENTRY child). Emit each on
     // its own indented line — that's the canonical form for the
     // "continuation tags" syntax.
+    // `seen_content` mirrors the header loop above: the header ends at
+    // the first NEWLINE *after* the date, so a leading blank-line
+    // NEWLINE (trivia for any directive past the first) does not flip
+    // `past_header` early and misclassify the header tags/links as
+    // trailing continuation tags (#1321).
     let mut past_header = false;
+    let mut seen_content = false;
     for el in d.syntax().children_with_tokens() {
         let rowan::NodeOrToken::Token(t) = el else {
+            // POSTING / META_ENTRY node — definitively past the header.
             past_header = true;
             continue;
         };
         if !past_header {
-            if t.kind() == crate::SyntaxKind::NEWLINE {
-                past_header = true;
+            match t.kind() {
+                crate::SyntaxKind::NEWLINE if seen_content => past_header = true,
+                // Leading trivia before the date, comments included (see
+                // the header loop above): a leading comment must not flip
+                // `seen_content` and push `past_header` early, which would
+                // misclassify the real header tags/links as trailing
+                // continuation tags.
+                k if k.is_trivia() => {}
+                // DATE / flag / STRING / header TAG / LINK: still header,
+                // never emitted as trailing continuation tags.
+                _ => seen_content = true,
             }
             continue;
         }
@@ -2171,6 +2218,89 @@ mod tests {
         assert_eq!(
             format_source(src),
             "2024-06-01 document Assets:Bank \"stmt.pdf\" #q1 ^scan42 #urgent\n"
+        );
+    }
+
+    #[test]
+    fn issue_1321_document_tags_links_idempotent_across_directives() {
+        // Same class as the transaction case, in `document` directives:
+        // the 2nd+ document's trailing tags/links were dropped on a
+        // reformat (found by the #1323 corpus idempotence check). Assert
+        // the fixed-point property: re-formatting must not change (and
+        // must not drop the tags/links of the second document).
+        let src = "\
+2013-05-18 document Assets:Bank \"/a.pdf\" #tag1 ^link1
+2013-05-19 document Assets:Bank \"/b.pdf\" #tag2 ^link2
+";
+        let once = format_source(src);
+        assert_eq!(format_source(&once), once, "format must be idempotent");
+        assert!(
+            once.contains("#tag2") && once.contains("^link2"),
+            "the second document's tags/links must survive formatting; got:\n{once}"
+        );
+    }
+
+    #[test]
+    fn issue_1321_header_tags_links_idempotent_across_transactions() {
+        // Header tags/links must stay on the header line for EVERY
+        // transaction, not just the first. Regression for #1321 where
+        // the 2nd+ transaction's header tags/links got migrated to
+        // continuation lines.
+        let src = "\
+2024-01-15 * \"x\" #tag1 ^link1 #tag2 ^link2
+  Assets:Cash    -1.00 USD
+  Expenses:Misc   1.00 USD
+
+2024-01-16 * \"x\" #tag1 ^link1 #tag2 ^link2
+  Assets:Cash    -1.00 USD
+  Expenses:Misc   1.00 USD
+";
+        assert_eq!(
+            format_source(src),
+            src,
+            "format must be a no-op (idempotent)"
+        );
+    }
+
+    #[test]
+    fn issue_1321_comment_before_transaction_keeps_header_tags() {
+        // A comment line before a transaction is leading trivia attached
+        // inside the transaction node (Directive-Terminator Rule), exactly
+        // like a blank line. Skipping only WHITESPACE/NEWLINE let the
+        // comment flip `seen_content`, break at the comment's NEWLINE, and
+        // migrate the real header tags/links to continuation lines. The
+        // header tags/links must stay on the header line. (Found by the
+        // Copilot review of the #1321 fix.)
+        let src = "\
+2024-01-15 * \"first\" #h1 ^l1
+  Assets:Cash    -1.00 USD
+  Expenses:Misc   1.00 USD
+
+; a comment before the second transaction
+2024-01-16 * \"second\" #tag1 ^link1
+  Assets:Cash    -2.00 USD
+  Expenses:Misc   2.00 USD
+";
+        assert_eq!(
+            format_source(src),
+            src,
+            "a leading comment must not migrate header tags/links to continuation lines"
+        );
+    }
+
+    #[test]
+    fn issue_1321_comment_before_document_keeps_tags() {
+        // Document-directive variant of the comment-trivia case above.
+        let src = "\
+2013-05-18 document Assets:Bank \"/a.pdf\" #tag1 ^link1
+; a comment before the second document
+2013-05-19 document Assets:Bank \"/b.pdf\" #tag2 ^link2
+";
+        let once = format_source(src);
+        assert_eq!(format_source(&once), once, "format must be idempotent");
+        assert!(
+            once.contains("\"/b.pdf\" #tag2 ^link2"),
+            "the second document's tags/links must stay on its header line; got:\n{once}"
         );
     }
 

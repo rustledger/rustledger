@@ -1,0 +1,50 @@
+option "title" "Example Ledger"
+
+option "operating_currency" "USD"
+
+2020-01-01 open Assets:Checking USD
+
+2020-01-01 open Assets:Brokerage
+
+2020-01-01 open Expenses:Food
+
+2020-01-01 open Expenses:Coffee
+
+2020-01-01 open Income:Salary USD
+
+2020-01-01 open Equity:Opening-Balances
+
+2020-01-01 commodity AAPL
+  name: "Apple Inc."
+
+2020-01-02 * "Opening" #setup
+  Assets:Checking   1000.00 USD
+  Equity:Opening-Balances
+
+2020-01-15 * "Cafe" "Latte" #coffee ^receipt-15
+  Expenses:Coffee      4.50 USD
+  Assets:Checking
+
+2020-01-16 * "Grocer" "Weekly" #food ^receipt-16 #urgent
+  key: "value"
+  Expenses:Food       52.30 USD
+    note: "on sale"
+  Assets:Checking
+
+2020-02-01 * "Buy AAPL" #invest ^trade-1
+  Assets:Brokerage       10 AAPL {150.00 USD}
+  Assets:Checking
+
+2020-02-10 price AAPL 155.00 USD
+
+2020-02-15 balance Assets:Checking 943.20 USD
+
+2020-03-01 document Assets:Checking "/stmt-jan.pdf" #statement
+
+2020-03-02 document Assets:Checking "/stmt-feb.pdf" #statement ^scan-2
+
+2020-03-05 note Assets:Checking "reconciled"
+
+2020-03-10 event "location" "Office"
+
+2020-12-31 close Expenses:Coffee

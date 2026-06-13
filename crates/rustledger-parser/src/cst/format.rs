@@ -948,7 +948,24 @@ pub fn format_node_range_with_alignment(
                 // Preserve the author's inter-directive blank lines
                 // (#1325), identically to `format_node_with_alignment`,
                 // so range formatting and whole-file formatting agree.
-                if prev_was_directive {
+                //
+                // The FIRST directive emitted from the snap needs care:
+                // its predecessor may sit OUTSIDE the selection, but the
+                // blank lines between them are this directive's leading
+                // trivia (the Directive-Terminator Rule), so they fall
+                // INSIDE the snapped range. Dropping them would delete
+                // the blank line above the selection. Emit them whenever
+                // a directive precedes this one in the file — the same
+                // condition the whole-file path expresses as
+                // `prev_was_directive`. For the file's first directive
+                // (no predecessor) there is nothing to preserve.
+                let preceded_by_directive = prev_was_directive
+                    || directive
+                        .syntax()
+                        .prev_sibling()
+                        .and_then(ast::Directive::cast)
+                        .is_some();
+                if preceded_by_directive {
                     for _ in 0..leading_blank_lines(directive.syntax()) {
                         out.push('\n');
                     }
@@ -2213,6 +2230,14 @@ mod tests {
         // Two blanks are preserved as two (not collapsed).
         let two = "2024-01-01 open Assets:A\n\n\n2024-01-02 open Assets:B\n";
         assert_eq!(format_source(two), two);
+
+        // A whitespace-only "blank" line still counts as one blank line
+        // (its trailing whitespace is stripped, leaving an empty line).
+        let ws_blank = "2024-01-01 open Assets:A\n   \n2024-01-02 open Assets:B\n";
+        assert_eq!(
+            format_source(ws_blank),
+            "2024-01-01 open Assets:A\n\n2024-01-02 open Assets:B\n"
+        );
     }
 
     #[test]
@@ -3822,8 +3847,9 @@ mod tests {
         assert_eq!(formatted, "2024-01-01 open Assets:Bank USD\n");
     }
 
-    /// Multi-directive selection: snap covers both, output
-    /// includes the canonical inter-directive blank line.
+    /// Multi-directive selection: the author's inter-directive
+    /// blank lines are preserved (a blank stays a blank; grouped
+    /// stays grouped), matching whole-file formatting (#1325).
     #[test]
     fn format_node_range_multi_directive_preserves_blank_lines() {
         // #1325: range formatting preserves the author's inter-directive
@@ -3850,6 +3876,34 @@ mod tests {
         let sel2 = rowan::TextRange::new(ts(0), ts(src2.len()));
         let (_, formatted2) = format_node_range(&node2, sel2).expect("intersects 2 directives");
         assert_eq!(formatted2, grouped, "grouped directives must stay grouped");
+    }
+
+    #[test]
+    fn format_node_range_first_directive_in_snap_keeps_leading_blank() {
+        // Regression (Copilot review of #1325): when the selection
+        // covers only the SECOND directive, its predecessor sits outside
+        // the snap, but the blank line between them is the second
+        // directive's leading trivia and therefore inside the snapped
+        // range. Range formatting must re-emit it, not silently delete
+        // the blank line above the selection.
+        let source = "2024-01-01 open Assets:Bank USD\n\n2024-01-31 close Assets:Bank\n";
+        let (node, src) = parse_for_range(source);
+        // Cursor inside the second (close) directive only.
+        let close_byte = src.find("close").expect("fixture has 'close'");
+        let cursor = rowan::TextRange::new(ts(close_byte), ts(close_byte));
+        let (snap, formatted) = format_node_range(&node, cursor).expect("intersects close");
+        // The leading blank is preserved in the replacement text...
+        assert_eq!(formatted, "\n2024-01-31 close Assets:Bank\n");
+        // ...so applying the edit leaves the blank line intact.
+        let mut result = src;
+        result.replace_range(
+            usize::from(snap.start())..usize::from(snap.end()),
+            &formatted,
+        );
+        assert_eq!(
+            result, source,
+            "range-formatting the second directive must not delete the blank above it"
+        );
     }
 
     /// Cursor-only (zero-width) selection inside a directive

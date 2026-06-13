@@ -1377,7 +1377,13 @@ fn emit_document(d: &ast::DocumentDirective, out: &mut String) {
                 seen_content = true;
             }
             crate::SyntaxKind::NEWLINE if seen_content => break,
-            crate::SyntaxKind::WHITESPACE | crate::SyntaxKind::NEWLINE => {}
+            // Leading trivia before the date: whitespace, blank-line
+            // NEWLINEs, AND comment lines. A comment before a non-first
+            // directive attaches inside this node (Directive-Terminator
+            // Rule); skipping only WHITESPACE/NEWLINE would let it flip
+            // `seen_content`, break at the comment's NEWLINE, and drop
+            // the real header tags/links.
+            k if k.is_trivia() => {}
             _ => seen_content = true,
         }
     }
@@ -1620,8 +1626,13 @@ fn emit_transaction(d: &ast::Transaction, align: PostingAlignment, out: &mut Str
                 seen_content = true;
             }
             crate::SyntaxKind::NEWLINE if seen_content => break,
-            // Leading WHITESPACE / NEWLINE before the date is trivia.
-            crate::SyntaxKind::WHITESPACE | crate::SyntaxKind::NEWLINE => {}
+            // Leading trivia before the date: whitespace, blank-line
+            // NEWLINEs, AND comment lines (a comment before a non-first
+            // directive attaches inside this node per the Directive-
+            // Terminator Rule). Skipping only WHITESPACE/NEWLINE would
+            // let a leading comment flip `seen_content`, break at the
+            // comment's NEWLINE, and drop the real header tags/links.
+            k if k.is_trivia() => {}
             // DATE / flag / STRING etc. — header content has begun.
             _ => seen_content = true,
         }
@@ -1659,7 +1670,12 @@ fn emit_transaction(d: &ast::Transaction, align: PostingAlignment, out: &mut Str
         if !past_header {
             match t.kind() {
                 crate::SyntaxKind::NEWLINE if seen_content => past_header = true,
-                crate::SyntaxKind::WHITESPACE | crate::SyntaxKind::NEWLINE => {}
+                // Leading trivia before the date, comments included (see
+                // the header loop above): a leading comment must not flip
+                // `seen_content` and push `past_header` early, which would
+                // misclassify the real header tags/links as trailing
+                // continuation tags.
+                k if k.is_trivia() => {}
                 // DATE / flag / STRING / header TAG / LINK: still header,
                 // never emitted as trailing continuation tags.
                 _ => seen_content = true,
@@ -2243,6 +2259,48 @@ mod tests {
             format_source(src),
             src,
             "format must be a no-op (idempotent)"
+        );
+    }
+
+    #[test]
+    fn issue_1321_comment_before_transaction_keeps_header_tags() {
+        // A comment line before a transaction is leading trivia attached
+        // inside the transaction node (Directive-Terminator Rule), exactly
+        // like a blank line. Skipping only WHITESPACE/NEWLINE let the
+        // comment flip `seen_content`, break at the comment's NEWLINE, and
+        // migrate the real header tags/links to continuation lines. The
+        // header tags/links must stay on the header line. (Found by the
+        // Copilot review of the #1321 fix.)
+        let src = "\
+2024-01-15 * \"first\" #h1 ^l1
+  Assets:Cash    -1.00 USD
+  Expenses:Misc   1.00 USD
+
+; a comment before the second transaction
+2024-01-16 * \"second\" #tag1 ^link1
+  Assets:Cash    -2.00 USD
+  Expenses:Misc   2.00 USD
+";
+        assert_eq!(
+            format_source(src),
+            src,
+            "a leading comment must not migrate header tags/links to continuation lines"
+        );
+    }
+
+    #[test]
+    fn issue_1321_comment_before_document_keeps_tags() {
+        // Document-directive variant of the comment-trivia case above.
+        let src = "\
+2013-05-18 document Assets:Bank \"/a.pdf\" #tag1 ^link1
+; a comment before the second document
+2013-05-19 document Assets:Bank \"/b.pdf\" #tag2 ^link2
+";
+        let once = format_source(src);
+        assert_eq!(format_source(&once), once, "format must be idempotent");
+        assert!(
+            once.contains("\"/b.pdf\" #tag2 ^link2"),
+            "the second document's tags/links must stay on its header line; got:\n{once}"
         );
     }
 

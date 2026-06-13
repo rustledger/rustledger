@@ -65,8 +65,11 @@ jobs:
             # Test core + pipeline packages (skip CLI, LSP, and WASM which are slow)
             PACKAGES="rustledger-core,rustledger-parser,rustledger-booking,rustledger-validate,rustledger-loader,rustledger-plugin"
           elif [ "${{ github.event_name }}" = "schedule" ]; then
-            # Monthly: test all critical crates
-            PACKAGES="rustledger-core,rustledger-booking,rustledger-validate,rustledger-loader,rustledger-plugin"
+            # Monthly: test all critical crates. rustledger-parser is
+            # included per #1238 (core + parser are the curated audit
+            # set); it was previously only reachable via the manual
+            # "all" option.
+            PACKAGES="rustledger-core,rustledger-parser,rustledger-booking,rustledger-validate,rustledger-loader,rustledger-plugin"
           else
             PACKAGES="$INPUT"
           fi

@@ -499,6 +499,54 @@ mod tests {
     }
 
     #[test]
+    fn test_is_balanced_detects_imbalance() {
+        // Mutation guard (#1238): the existing is_balanced tests only
+        // assert the TRUE (balanced) cases, so replacing the whole body
+        // with `true` survived the suite — the balance check could be
+        // wholly broken and no test would notice. Assert the FALSE case.
+        let txn = Transaction::new(date(2024, 1, 15), "Test")
+            .with_synthesized_posting(Posting::new(
+                "Expenses:Food",
+                Amount::new(dec!(50.00), "USD"),
+            ))
+            .with_synthesized_posting(Posting::new(
+                "Assets:Cash",
+                Amount::new(dec!(-49.00), "USD"),
+            ));
+        // Residual is 1.00 USD against zero tolerance — clearly unbalanced.
+        let mut tolerances = HashMap::new();
+        tolerances.insert(Currency::from("USD"), Decimal::ZERO);
+        assert!(
+            !is_balanced(&txn, &tolerances),
+            "a 1.00 USD residual with zero tolerance must be detected as unbalanced"
+        );
+    }
+
+    #[test]
+    fn test_is_balanced_at_exact_tolerance_boundary() {
+        // Mutation guard (#1238): the comparison is `residual.abs() >
+        // tolerance`, so a residual EXACTLY at the tolerance is balanced
+        // (strict greater-than). This kills the `>`->`>=` and `>`->`==`
+        // mutants, both of which would wrongly reject the boundary case.
+        let txn = Transaction::new(date(2024, 1, 15), "Test")
+            .with_synthesized_posting(Posting::new(
+                "Expenses:Food",
+                Amount::new(dec!(50.01), "USD"),
+            ))
+            .with_synthesized_posting(Posting::new(
+                "Assets:Cash",
+                Amount::new(dec!(-50.00), "USD"),
+            ));
+        // Residual 0.01 exactly equals the tolerance: balanced under `>`.
+        let mut tolerances = HashMap::new();
+        tolerances.insert(Currency::from("USD"), dec!(0.01));
+        assert!(
+            is_balanced(&txn, &tolerances),
+            "a residual exactly at the tolerance must be treated as balanced"
+        );
+    }
+
+    #[test]
     fn test_calculate_tolerance() {
         let amounts = [
             Amount::new(dec!(100), "USD"),    // scale 0 -> tol 0.5

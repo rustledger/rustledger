@@ -35,6 +35,10 @@
 # Env:     RLEDGER     path to the rledger binary (default ./target/release/rledger)
 #          BEANFORMAT  bean-format command (default: bean-format on PATH)
 #          STRICT      if "0", report divergences but exit 0 (default: strict, exit 1 on any)
+#
+# Note: `-e` is intentionally omitted (see scripts/format-idempotence.sh) -
+# the loop must survive `diff`/per-file tool failures and report rather than
+# abort. Setup commands that must not fail silently (mktemp) are guarded.
 set -uo pipefail
 
 RLEDGER="${RLEDGER:-./target/release/rledger}"
@@ -55,10 +59,10 @@ if [ ! -d "$CORPUS" ]; then
   exit 2
 fi
 
-once=$(mktemp)
-oracle=$(mktemp)
-once_n=$(mktemp)
-oracle_n=$(mktemp)
+once=$(mktemp) || { echo "error: mktemp failed" >&2; exit 2; }
+oracle=$(mktemp) || { echo "error: mktemp failed" >&2; exit 2; }
+once_n=$(mktemp) || { echo "error: mktemp failed" >&2; exit 2; }
+oracle_n=$(mktemp) || { echo "error: mktemp failed" >&2; exit 2; }
 trap 'rm -f "$once" "$oracle" "$once_n" "$oracle_n"' EXIT
 
 # Strip alignment padding: preserve leading indentation, collapse internal

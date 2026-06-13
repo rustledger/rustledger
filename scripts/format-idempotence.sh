@@ -16,6 +16,12 @@
 # Usage:   scripts/format-idempotence.sh [CORPUS_DIR]
 # Env:     RLEDGER  path to the rledger binary (default ./target/release/rledger)
 #          STRICT   if "0", report non-idempotent files but exit 0 (default: strict, exit 1 on any)
+#
+# Note: `-e` is intentionally omitted. The loop must survive a `diff` (which
+# exits 1 on the very differences we are reporting) and per-file `rledger`
+# failures without aborting; correctness comes from explicit return-code
+# checks and the `fail` accumulator, not from `-e`. Setup commands that
+# must not fail silently (mktemp) are guarded individually below.
 set -uo pipefail
 
 RLEDGER="${RLEDGER:-./target/release/rledger}"
@@ -31,8 +37,8 @@ if [ ! -d "$CORPUS" ]; then
   exit 2
 fi
 
-once=$(mktemp)
-twice=$(mktemp)
+once=$(mktemp) || { echo "error: mktemp failed" >&2; exit 2; }
+twice=$(mktemp) || { echo "error: mktemp failed" >&2; exit 2; }
 trap 'rm -f "$once" "$twice"' EXIT
 
 checked=0

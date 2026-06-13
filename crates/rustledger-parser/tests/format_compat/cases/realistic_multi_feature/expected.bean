@@ -1,17 +1,11 @@
 option "title" "Example Ledger"
-
 option "operating_currency" "USD"
 
 2020-01-01 open Assets:Checking USD
-
 2020-01-01 open Assets:Brokerage
-
 2020-01-01 open Expenses:Food
-
 2020-01-01 open Expenses:Coffee
-
 2020-01-01 open Income:Salary USD
-
 2020-01-01 open Equity:Opening-Balances
 
 2020-01-01 commodity AAPL
@@ -40,7 +34,6 @@ option "operating_currency" "USD"
 2020-02-15 balance Assets:Checking 943.20 USD
 
 2020-03-01 document Assets:Checking "/stmt-jan.pdf" #statement
-
 2020-03-02 document Assets:Checking "/stmt-feb.pdf" #statement ^scan-2
 
 2020-03-05 note Assets:Checking "reconciled"

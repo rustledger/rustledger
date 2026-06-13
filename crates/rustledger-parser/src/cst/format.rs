@@ -40,7 +40,10 @@
 //! # Canonical form (locked in the PR-decision comment on #1262)
 //!
 //! - Indent inside a directive body: 2 spaces. Tabs converted.
-//! - Blank lines between directives: exactly 1.
+//! - Blank lines between directives: preserved from the source
+//!   (#1325). Grouped directives (consecutive `open`s, a `price`
+//!   feed) stay grouped; the formatter does not insert or collapse
+//!   blank lines, matching Python `bean-format`.
 //! - Blank lines inside a directive: 0.
 //! - Number lexical form: thousands separators dropped; user
 //!   decimal-place count preserved.
@@ -672,12 +675,20 @@ pub fn format_node_with_alignment(node: &crate::SyntaxNode, alignment: PostingAl
     // directive and surface from `emit_directive`'s leading-trivia
     // pass.
     //
-    // Blank-line policy at the top level: insert exactly one blank
-    // line BEFORE a directive iff the previously emitted item was
-    // also a directive. Adjacent file-level comments stay tight as
-    // a group (so a `; ====\n; HEADER\n; ====` section header keeps
-    // its visual grouping), and a comment group sitting against a
-    // directive on either side stays flush.
+    // Blank-line policy at the top level: PRESERVE the author's blank
+    // lines between directives rather than normalizing to exactly one.
+    // Between two directives, emit as many blank lines as the source
+    // had — including zero, so deliberately grouped runs (consecutive
+    // `open`s, a dense `price` feed) stay grouped instead of being
+    // double-spaced (#1325). This matches Python `bean-format` and the
+    // rest of the beancount formatter lineage (fava,
+    // beancount-language-server, beancount-mode), all of which leave
+    // blank-line structure untouched and only realign amounts.
+    //
+    // Adjacent file-level comments still stay tight as a group (so a
+    // `; ====\n; HEADER\n; ====` section header keeps its visual
+    // grouping), and a comment group sitting against a directive on
+    // either side stays flush.
     let mut prev_was_directive = false;
     for el in node.children_with_tokens() {
         match el {
@@ -686,7 +697,9 @@ pub fn format_node_with_alignment(node: &crate::SyntaxNode, alignment: PostingAl
                     continue;
                 };
                 if prev_was_directive {
-                    out.push('\n');
+                    for _ in 0..leading_blank_lines(directive.syntax()) {
+                        out.push('\n');
+                    }
                 }
                 emit_directive(&directive, alignment, &mut out);
                 prev_was_directive = true;
@@ -932,8 +945,13 @@ pub fn format_node_range_with_alignment(
                 let Some(directive) = ast::Directive::cast(n) else {
                     continue;
                 };
+                // Preserve the author's inter-directive blank lines
+                // (#1325), identically to `format_node_with_alignment`,
+                // so range formatting and whole-file formatting agree.
                 if prev_was_directive {
-                    out.push('\n');
+                    for _ in 0..leading_blank_lines(directive.syntax()) {
+                        out.push('\n');
+                    }
                 }
                 emit_directive(&directive, alignment, &mut out);
                 prev_was_directive = true;
@@ -1149,6 +1167,33 @@ fn emit_directive(d: &ast::Directive, align: PostingAlignment, out: &mut String)
         splice.push_str(&c);
         out.insert_str(insert_at, &splice);
     }
+}
+
+/// Number of blank lines the author left immediately before this
+/// directive's first visible line (its leading comment, if any, else
+/// its content). Each NEWLINE in the leading trivia that precedes the
+/// first comment / content token is exactly one blank line: the
+/// previous directive owns its own terminator NEWLINE (the Directive-
+/// Terminator Rule), so this node's leading NEWLINEs are purely the
+/// blank gap, with no off-by-one. WHITESPACE-only "blank" lines count
+/// too (the NEWLINE that ends them is included). Scanning stops at the
+/// first comment or content token, so a blank line sitting *between* a
+/// leading comment and the directive's content is not counted here
+/// (that gap is collapsed by `emit_leading_comments`, as before).
+fn leading_blank_lines(node: &crate::SyntaxNode) -> usize {
+    let mut blanks = 0;
+    for el in node.children_with_tokens() {
+        let rowan::NodeOrToken::Token(t) = el else {
+            break;
+        };
+        match t.kind() {
+            crate::SyntaxKind::NEWLINE => blanks += 1,
+            crate::SyntaxKind::WHITESPACE => {}
+            // First comment or content token — past the leading gap.
+            _ => break,
+        }
+    }
+    blanks
 }
 
 /// Walk the directive's direct-child tokens until the first
@@ -2152,12 +2197,22 @@ mod tests {
     }
 
     #[test]
-    fn blank_line_between_directives() {
-        let src = "2024-01-01 open Assets:A\n2024-01-02 open Assets:B\n";
-        assert_eq!(
-            format_source(src),
-            "2024-01-01 open Assets:A\n\n2024-01-02 open Assets:B\n"
-        );
+    fn blank_lines_between_directives_preserved() {
+        // #1325: the formatter preserves the author's inter-directive
+        // blank lines rather than normalizing to exactly one (matching
+        // Python bean-format and the rest of the beancount lineage).
+
+        // Grouped (no blank in source) stays grouped — not double-spaced.
+        let grouped = "2024-01-01 open Assets:A\n2024-01-02 open Assets:B\n";
+        assert_eq!(format_source(grouped), grouped);
+
+        // One blank is preserved as one.
+        let one = "2024-01-01 open Assets:A\n\n2024-01-02 open Assets:B\n";
+        assert_eq!(format_source(one), one);
+
+        // Two blanks are preserved as two (not collapsed).
+        let two = "2024-01-01 open Assets:A\n\n\n2024-01-02 open Assets:B\n";
+        assert_eq!(format_source(two), two);
     }
 
     #[test]
@@ -2381,16 +2436,18 @@ mod tests {
 
     #[test]
     fn pushtag_poptag_canonical() {
+        // No blank line in the source — preserved as grouped (#1325).
         let src = "pushtag  #active\npoptag  #active\n";
-        assert_eq!(format_source(src), "pushtag #active\n\npoptag #active\n");
+        assert_eq!(format_source(src), "pushtag #active\npoptag #active\n");
     }
 
     #[test]
     fn pushmeta_popmeta_canonical() {
+        // No blank line in the source — preserved as grouped (#1325).
         let src = "pushmeta location: \"NYC\"\npopmeta location:\n";
         assert_eq!(
             format_source(src),
-            "pushmeta location: \"NYC\"\n\npopmeta location:\n"
+            "pushmeta location: \"NYC\"\npopmeta location:\n"
         );
     }
 
@@ -3768,19 +3825,31 @@ mod tests {
     /// Multi-directive selection: snap covers both, output
     /// includes the canonical inter-directive blank line.
     #[test]
-    fn format_node_range_multi_directive_includes_blank_separator() {
-        let source = "\
+    fn format_node_range_multi_directive_preserves_blank_lines() {
+        // #1325: range formatting preserves the author's inter-directive
+        // blank lines, identically to whole-file formatting. A source
+        // with a blank between the two directives keeps it...
+        let spaced = "\
 2024-01-01 open Assets:Bank USD
+
 2024-01-31 close Assets:Bank
 ";
-        let (node, src) = parse_for_range(source);
+        let (node, src) = parse_for_range(spaced);
         let sel = rowan::TextRange::new(ts(0), ts(src.len()));
         let (snap, formatted) = format_node_range(&node, sel).expect("intersects 2 directives");
         assert_eq!(snap, rowan::TextRange::new(ts(0), ts(src.len())));
-        assert_eq!(
-            formatted, "2024-01-01 open Assets:Bank USD\n\n2024-01-31 close Assets:Bank\n",
-            "the canonical blank-line separator must appear between the two directives",
-        );
+        assert_eq!(formatted, spaced, "the blank separator must be preserved");
+
+        // ...and a grouped source (no blank) stays grouped, rather than
+        // having a separator inserted.
+        let grouped = "\
+2024-01-01 open Assets:Bank USD
+2024-01-31 close Assets:Bank
+";
+        let (node2, src2) = parse_for_range(grouped);
+        let sel2 = rowan::TextRange::new(ts(0), ts(src2.len()));
+        let (_, formatted2) = format_node_range(&node2, sel2).expect("intersects 2 directives");
+        assert_eq!(formatted2, grouped, "grouped directives must stay grouped");
     }
 
     /// Cursor-only (zero-width) selection inside a directive

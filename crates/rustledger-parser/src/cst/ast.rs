@@ -943,8 +943,8 @@ impl Transaction {
         children(self.syntax())
     }
 
-    /// Transaction-level `META_ENTRY` sub-lines (at the standard
-    /// indent, NOT the deeper posting-attached metadata).
+    /// Transaction-level `META_ENTRY` sub-lines — those not attached
+    /// to a posting (chiefly metadata preceding the first posting).
     pub fn meta_entries(&self) -> impl Iterator<Item = MetaEntry> + '_ {
         children(self.syntax())
     }
@@ -993,8 +993,8 @@ impl Posting {
         first_child(self.syntax())
     }
 
-    /// Posting-attached metadata (strictly deeper-indent
-    /// `META_ENTRY` sub-lines following the posting line).
+    /// Posting-attached metadata (`META_ENTRY` sub-lines following
+    /// the posting line at the same or deeper indent).
     pub fn meta_entries(&self) -> impl Iterator<Item = MetaEntry> + '_ {
         children(self.syntax())
     }

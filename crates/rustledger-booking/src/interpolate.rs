@@ -1723,6 +1723,7 @@ mod tests {
         let r = interpolate(&txn).expect("interpolation should succeed");
         let cash = get_amount(&r.transaction.postings[1]).expect("filled");
         assert_eq!(cash.number, dec!(-30)); // kills total-price `* signum -> +`
+        assert_eq!(cash.currency, "USD"); // right magnitude in the right currency
     }
 
     #[test]
@@ -1780,8 +1781,8 @@ mod tests {
             .with_synthesized_posting(Posting::auto("Assets:Cash"));
         let r = interpolate(&txn).expect("interpolation should succeed");
         assert_eq!(
-            r.residuals.get("USD").copied().unwrap_or(Decimal::ZERO),
-            dec!(0),
+            r.residuals.get("USD").copied(),
+            Some(dec!(0)),
             "residual must be exactly zero after the elided leg is filled"
         );
     }
@@ -1831,10 +1832,7 @@ mod tests {
         let r = interpolate(&txn).expect("interpolation should succeed");
         let cash = get_amount(&r.transaction.postings[1]).expect("filled");
         assert_eq!(cash.number, dec!(-100));
-        assert_eq!(
-            r.residuals.get("USD").copied().unwrap_or(Decimal::ZERO),
-            dec!(0)
-        );
+        assert_eq!(r.residuals.get("USD").copied(), Some(dec!(0)));
     }
 
     #[test]
@@ -1857,8 +1855,8 @@ mod tests {
             );
         let r = interpolate(&txn).expect("interpolation should succeed");
         assert_eq!(
-            r.residuals.get("USD").copied().unwrap_or(Decimal::ZERO),
-            dec!(0),
+            r.residuals.get("USD").copied(),
+            Some(dec!(0)),
             "NumberOnly leg's number must net the residual to zero"
         );
     }

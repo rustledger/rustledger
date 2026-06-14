@@ -1093,16 +1093,20 @@ fn posting_attached_meta_entry_lives_inside_posting() {
 }
 
 #[test]
-fn posting_attached_meta_entry_at_same_indent_stays_at_transaction_level() {
+fn same_indent_metadata_attaches_to_preceding_posting() {
     use SyntaxKind::*;
-    // The complementary case: a META_ENTRY at the SAME indent as
-    // the preceding POSTING is NOT posting-attached. It terminates
-    // the POSTING and becomes a direct TRANSACTION-level child
-    // (Beancount treats this as transaction-level metadata
-    // interspersed between postings).
+    // A META_ENTRY at the SAME indent as the preceding POSTING is
+    // posting-attached, matching Beancount. Beancount attributes
+    // metadata by POSITION (any `key: value` line following a posting,
+    // before the next posting, attaches to that posting) rather than
+    // by relative indent, so same-column `key: value` is POSTING
+    // metadata, not transaction metadata. (Verified against the
+    // Python beancount loader: a same-indent `key:` line lands in the
+    // preceding posting's `meta`.) This is the case that drove the
+    // last `effective_date`-example compat divergence.
     let source = "2024-01-15 * \"x\"\n\
                   \x20\x20Assets:Cash  -5.00 USD\n\
-                  \x20\x20note: \"transaction-level\"\n\
+                  \x20\x20note: \"on cash\"\n\
                   \x20\x20Expenses:Food  5.00 USD\n";
     let tree = parse_structured(source);
     assert_round_trip(source, &tree);
@@ -1112,17 +1116,23 @@ fn posting_attached_meta_entry_at_same_indent_stays_at_transaction_level() {
         .filter(|c| c.kind() == TRANSACTION)
         .collect();
     assert_eq!(txs.len(), 1);
-    // TRANSACTION direct children: TWO POSTINGs (interspersed) +
-    // ONE META_ENTRY at the SAME indent depth.
+    // TRANSACTION direct children: TWO POSTINGs and NO direct
+    // META_ENTRY (the metadata lives inside the first POSTING).
     let tx_posting_count = txs[0].children().filter(|n| n.kind() == POSTING).count();
     let tx_meta_count = txs[0].children().filter(|n| n.kind() == META_ENTRY).count();
     assert_eq!(tx_posting_count, 2);
-    assert_eq!(tx_meta_count, 1);
-    // Neither POSTING has a META_ENTRY child.
-    for p in postings(&tree) {
-        let inner_meta = p.children().filter(|n| n.kind() == META_ENTRY).count();
-        assert_eq!(inner_meta, 0);
-    }
+    assert_eq!(tx_meta_count, 0);
+    // The META_ENTRY is a child of the FIRST posting; the second has none.
+    let ps = postings(&tree);
+    assert_eq!(ps.len(), 2);
+    assert_eq!(
+        ps[0].children().filter(|n| n.kind() == META_ENTRY).count(),
+        1
+    );
+    assert_eq!(
+        ps[1].children().filter(|n| n.kind() == META_ENTRY).count(),
+        0
+    );
 }
 
 #[test]

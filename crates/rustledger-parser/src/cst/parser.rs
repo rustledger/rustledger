@@ -49,8 +49,8 @@
 //! `parse_flag` in the legacy AST parser and `identify_directive`'s
 //! transaction-trigger arm; single-char `CURRENCY` covers letters
 //! like `T`/`V`/`F`/`X` that win the lexer's priority-3 Currency-
-//! vs-Flag tie-break). Posting-attached metadata (strictly deeper-
-//! indented `META_ENTRY` sub-lines following the posting) becomes a
+//! vs-Flag tie-break). Posting-attached metadata (`META_ENTRY` sub-
+//! lines following the posting, indented `>=` the posting) becomes a
 //! child of that `POSTING`. Phase 2.2c adds `AMOUNT` / `COST_SPEC` /
 //! `PRICE_ANNOTATION` inside `POSTING`. Phase 5 deletes
 //! `parse_flat` once `parse_structured` covers every byte in
@@ -309,10 +309,13 @@ fn emit_directive_body(
 ///   primary) shape; pinned by
 ///   `postings_at_increasing_indents_produce_siblings_and_meta_attributes_to_latest`.
 /// - **Metadata sub-line** (`WS META_KEY ...`): if a POSTING is
-///   open AND this line's indent is strictly greater than the
-///   POSTING's indent, emit the `META_ENTRY` INSIDE the POSTING.
-///   Otherwise (no open POSTING, or shallower/equal indent), close
-///   any open POSTING and emit the `META_ENTRY` at TRANSACTION level.
+///   open AND this line's indent is `>=` the POSTING's indent, emit
+///   the `META_ENTRY` INSIDE the POSTING. Otherwise (no open POSTING,
+///   or strictly shallower indent), close any open POSTING and emit
+///   the `META_ENTRY` at TRANSACTION level. The `>=` (not `>`) match
+///   mirrors Beancount, which attributes metadata to the preceding
+///   posting by POSITION, so same-indent `key: value` is posting
+///   metadata.
 /// - **Indented comment line** (`WS COMMENT` / `WS PERCENT_COMMENT`):
 ///   apply the same indent-attribution rule as metadata. If the
 ///   comment is strictly more indented than the open POSTING, it
@@ -372,15 +375,28 @@ fn emit_transaction_body(
             open_posting_indent = Some(sub_line_indent);
             i = emit_posting_line(builder, source, tokens, i);
         } else if starts_meta_sub_line(tokens, i) {
-            close_open_posting_unless_attached(builder, &mut open_posting_indent, sub_line_indent);
+            // Beancount attributes metadata by POSITION: a `key: value`
+            // line following a posting attaches to that posting, even
+            // at the SAME indent (`attach_on_equal = true`).
+            close_open_posting_unless_attached(
+                builder,
+                &mut open_posting_indent,
+                sub_line_indent,
+                true,
+            );
             i = emit_body_sub_line(builder, source, tokens, i);
         } else if starts_indented_comment(tokens, i) {
-            // Same indent-attribution rule as META_ENTRY: deeper-
-            // indented comments stay INSIDE the open POSTING; same-
-            // or-shallower-indented comments close the POSTING and
-            // emit flat at TRANSACTION level. Preserves the doc-
-            // comment-for-following-posting-metadata idiom.
-            close_open_posting_unless_attached(builder, &mut open_posting_indent, sub_line_indent);
+            // Comments use the STRICT (`>`) rule: deeper-indented
+            // comments stay INSIDE the open POSTING; same-or-shallower
+            // comments close the POSTING and emit flat at TRANSACTION
+            // level. Comments are AST-invisible, so this only affects
+            // formatter emission placement.
+            close_open_posting_unless_attached(
+                builder,
+                &mut open_posting_indent,
+                sub_line_indent,
+                false,
+            );
             i = emit_through_terminator(builder, source, tokens, i);
         } else {
             // Catch-all: any other indented content (e.g., `WS
@@ -814,22 +830,47 @@ fn emit_price_annotation(
 }
 
 /// Close any currently-open POSTING node IF the next sub-line at
-/// `sub_line_indent` should NOT be attached to it (i.e., the next
-/// sub-line is not strictly more indented than the POSTING). Shared
-/// between the `META_ENTRY` and indented-comment branches of
-/// `emit_transaction_body` so the two indent-attribution rules
-/// cannot drift.
+/// `sub_line_indent` should NOT be attached to it. Shared between the
+/// `META_ENTRY` and indented-comment branches of
+/// `emit_transaction_body`, which differ ONLY in their same-indent
+/// tie-break (`attach_on_equal`).
 ///
-/// "Attached" means strictly more indented than the open POSTING.
-/// A same-indent or shallower sub-line closes the POSTING; a
-/// deeper-indented sub-line leaves it open. Called with
-/// `open_posting_indent = None` is a no-op (no POSTING to close).
+/// `attach_on_equal` selects the attachment threshold:
+///
+/// - **Metadata (`true`)**: a `key: value` sub-line attaches when it
+///   is indented `>=` the open POSTING. This matches Beancount, whose
+///   grammar attributes metadata by POSITION (any `key_value` line
+///   following a posting, before the next posting, attaches to that
+///   posting) rather than by relative indent — so the common
+///   `key: value` at the SAME column as the posting (e.g. the
+///   `effective_date:` idiom) is posting metadata, not transaction
+///   metadata. Pinned by
+///   `same_indent_metadata_attaches_to_preceding_posting`.
+/// - **Indented comment (`false`)**: a `; doc` / `% doc` sub-line
+///   attaches only when STRICTLY more indented (`>`). A same-indent
+///   comment closes the POSTING and emits as transaction-level
+///   inter-posting trivia. Comments are AST-invisible, so this
+///   threshold only affects CST/formatter emission placement; it is
+///   pinned by
+///   `posting_with_indented_comment_between_postings_terminates_posting`
+///   and must stay strict to preserve that formatter contract.
+///
+/// A sub-line below the attachment threshold closes the POSTING.
+/// Called with `open_posting_indent = None` is a no-op (no POSTING to
+/// close).
 fn close_open_posting_unless_attached(
     builder: &mut GreenNodeBuilder<'_>,
     open_posting_indent: &mut Option<usize>,
     sub_line_indent: usize,
+    attach_on_equal: bool,
 ) {
-    let attach = open_posting_indent.is_some_and(|p_indent| sub_line_indent > p_indent);
+    let attach = open_posting_indent.is_some_and(|p_indent| {
+        if attach_on_equal {
+            sub_line_indent >= p_indent
+        } else {
+            sub_line_indent > p_indent
+        }
+    });
     if !attach && open_posting_indent.is_some() {
         builder.finish_node();
         *open_posting_indent = None;

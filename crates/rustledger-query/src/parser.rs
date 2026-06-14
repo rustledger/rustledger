@@ -27,12 +27,68 @@ enum ComparisonSuffix {
     NotIn(Expr),
 }
 
+/// Maximum nesting depth of parenthesized expressions / subqueries the
+/// parser accepts. The recursive (chumsky) grammar descends one stack
+/// frame per open paren, so without a bound a deeply-nested input (e.g.
+/// `(((((…`) overflows the stack and parses in super-linear time — a
+/// denial-of-service surfaced by the query fuzzer's slow-unit corpus
+/// (a ~2 KB input of
+/// 1023 nested parens took >10 s and overflowed an 8 MB stack). Real
+/// queries nest only a handful deep; 128 is far above any legitimate
+/// query yet shallow enough to stay fast and stack-safe.
+const MAX_NESTING_DEPTH: usize = 128;
+
+/// Byte offset at which parenthesis nesting first exceeds
+/// [`MAX_NESTING_DEPTH`], or `None` if the input stays within the bound.
+///
+/// Parens inside string literals (`"..."` / `'...'`, with `\` escapes)
+/// are skipped so they don't count — matching the grammar, which treats
+/// them as opaque string bytes rather than expression delimiters.
+fn nesting_exceeds_limit(source: &str) -> Option<usize> {
+    let mut depth: usize = 0;
+    let mut chars = source.char_indices();
+    while let Some((i, c)) = chars.next() {
+        match c {
+            '"' | '\'' => {
+                // Consume the string body so its parens don't count.
+                while let Some((_, sc)) = chars.next() {
+                    if sc == '\\' {
+                        chars.next(); // skip the escaped char
+                    } else if sc == c {
+                        break;
+                    }
+                }
+            }
+            '(' => {
+                depth += 1;
+                if depth > MAX_NESTING_DEPTH {
+                    return Some(i);
+                }
+            }
+            ')' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    None
+}
+
 /// Parse a BQL query string.
 ///
 /// # Errors
 ///
-/// Returns a `ParseError` if the query string is malformed.
+/// Returns a `ParseError` if the query string is malformed, or if
+/// parenthesis nesting exceeds the internal nesting limit (rejected up
+/// front to bound parse time and stack depth).
 pub fn parse(source: &str) -> Result<Query, ParseError> {
+    if let Some(offset) = nesting_exceeds_limit(source) {
+        return Err(ParseError::new(
+            ParseErrorKind::SyntaxError(format!(
+                "expression nesting too deep (exceeds maximum of {MAX_NESTING_DEPTH})"
+            )),
+            offset,
+        ));
+    }
+
     let (result, errs) = query_parser()
         .then_ignore(ws())
         .then_ignore(end())
@@ -1769,5 +1825,49 @@ mod tests {
             }
             _ => panic!("Expected SELECT query"),
         }
+    }
+
+    /// Pathologically deep paren nesting must fail fast with a clean
+    /// error rather than overflowing the stack or parsing in
+    /// super-linear time (query-fuzzer slow-unit denial-of-service).
+    #[test]
+    fn deeply_nested_parens_rejected_without_stack_overflow() {
+        let src = format!("SELECT {}", "(".repeat(2000));
+        let err = parse(&src).expect_err("deeply nested parens should be rejected");
+        assert!(
+            matches!(err.kind, ParseErrorKind::SyntaxError(ref m) if m.contains("nesting too deep")),
+            "expected a nesting-depth error, got: {:?}",
+            err.kind
+        );
+    }
+
+    /// The guard must not reject legitimately nested queries: nesting up
+    /// to the limit still parses.
+    #[test]
+    fn moderate_nesting_still_parses() {
+        // 100 levels of real function nesting (well under the 128 cap).
+        let depth = 100usize;
+        let inner = "x".to_string();
+        let body = format!("{}{}{}", "abs(".repeat(depth), inner, ")".repeat(depth));
+        let src = format!("SELECT {body}");
+        assert!(
+            parse(&src).is_ok(),
+            "a {depth}-deep nested query within the limit should parse"
+        );
+    }
+
+    /// Parens inside string literals are opaque and must not count
+    /// toward the nesting limit.
+    #[test]
+    fn parens_inside_string_literal_dont_count() {
+        let src = format!("SELECT account WHERE narration = \"{}\"", "(".repeat(2000));
+        // Assert directly on the guard: 2000 parens inside a string
+        // literal must not register as nesting depth at all.
+        assert!(
+            nesting_exceeds_limit(&src).is_none(),
+            "parens inside a string literal must not count toward the nesting limit"
+        );
+        // And the query as a whole still parses (the string is opaque).
+        assert!(parse(&src).is_ok(), "string-literal query should parse");
     }
 }

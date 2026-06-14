@@ -109,12 +109,29 @@ jobs:
         if: steps.check.outputs.should_run == 'true'
         run: |
           cd crates/rustledger-parser
-          if [ -d "fuzz/artifacts/${{ matrix.target }}" ] && [ "$(ls -A fuzz/artifacts/${{ matrix.target }})" ]; then
-            echo "::error::Fuzzer found crashes!"
-            ls -la fuzz/artifacts/${{ matrix.target }}/
+          dir="fuzz/artifacts/${{ matrix.target }}"
+          # Fail on ANY artifact that is not a benign `slow-unit-*`. This is
+          # the safe superset of libFuzzer's real-failure prefixes
+          # (crash-/oom-/timeout-/leak-/mismatch-), so an unknown or future
+          # failure type cannot slip through. `slow-unit-*` means an input was
+          # slow but completed — surface it as a non-fatal warning rather than
+          # failing the build (#1342). `find` on a missing dir is empty under
+          # 2>/dev/null, so no separate existence/`ls` guard is needed.
+          crashes=$(find "$dir" -maxdepth 1 -type f ! -name 'slow-unit-*' 2>/dev/null)
+          slow=$(find "$dir" -maxdepth 1 -type f -name 'slow-unit-*' 2>/dev/null)
+          if [ -n "$slow" ]; then
+            echo "::warning::Fuzzer found slow units (non-fatal); investigate for super-linear behavior:"
+            echo "$slow"
+          fi
+          if [ -n "$crashes" ]; then
+            echo "::error::Fuzzer found crash artifacts!"
+            ls -la "$dir"/
             exit 1
+          fi
+          if [ -z "$slow" ]; then
+            echo "No crash artifacts found"
           else
-            echo "No crashes found"
+            echo "No crashes found (slow units are non-fatal)"
           fi
       - name: Upload crash artifacts
         if: failure()
@@ -197,12 +214,29 @@ jobs:
         if: steps.check.outputs.should_run == 'true'
         run: |
           cd crates/rustledger-query
-          if [ -d "fuzz/artifacts/fuzz_query_parse" ] && [ "$(ls -A fuzz/artifacts/fuzz_query_parse)" ]; then
-            echo "::error::Fuzzer found crashes!"
-            ls -la fuzz/artifacts/fuzz_query_parse/
+          dir="fuzz/artifacts/fuzz_query_parse"
+          # Fail on ANY artifact that is not a benign `slow-unit-*`. This is
+          # the safe superset of libFuzzer's real-failure prefixes
+          # (crash-/oom-/timeout-/leak-/mismatch-), so an unknown or future
+          # failure type cannot slip through. `slow-unit-*` means an input was
+          # slow but completed — surface it as a non-fatal warning rather than
+          # failing the build (#1342). `find` on a missing dir is empty under
+          # 2>/dev/null, so no separate existence/`ls` guard is needed.
+          crashes=$(find "$dir" -maxdepth 1 -type f ! -name 'slow-unit-*' 2>/dev/null)
+          slow=$(find "$dir" -maxdepth 1 -type f -name 'slow-unit-*' 2>/dev/null)
+          if [ -n "$slow" ]; then
+            echo "::warning::Fuzzer found slow units (non-fatal); investigate for super-linear behavior:"
+            echo "$slow"
+          fi
+          if [ -n "$crashes" ]; then
+            echo "::error::Fuzzer found crash artifacts!"
+            ls -la "$dir"/
             exit 1
+          fi
+          if [ -z "$slow" ]; then
+            echo "No crash artifacts found"
           else
-            echo "No crashes found"
+            echo "No crashes found (slow units are non-fatal)"
           fi
       - name: Upload crash artifacts
         if: failure()
@@ -285,12 +319,29 @@ jobs:
         if: steps.check.outputs.should_run == 'true'
         run: |
           cd crates/rustledger-booking
-          if [ -d "fuzz/artifacts/fuzz_booking" ] && [ "$(ls -A fuzz/artifacts/fuzz_booking)" ]; then
-            echo "::error::Fuzzer found crashes!"
-            ls -la fuzz/artifacts/fuzz_booking/
+          dir="fuzz/artifacts/fuzz_booking"
+          # Fail on ANY artifact that is not a benign `slow-unit-*`. This is
+          # the safe superset of libFuzzer's real-failure prefixes
+          # (crash-/oom-/timeout-/leak-/mismatch-), so an unknown or future
+          # failure type cannot slip through. `slow-unit-*` means an input was
+          # slow but completed — surface it as a non-fatal warning rather than
+          # failing the build (#1342). `find` on a missing dir is empty under
+          # 2>/dev/null, so no separate existence/`ls` guard is needed.
+          crashes=$(find "$dir" -maxdepth 1 -type f ! -name 'slow-unit-*' 2>/dev/null)
+          slow=$(find "$dir" -maxdepth 1 -type f -name 'slow-unit-*' 2>/dev/null)
+          if [ -n "$slow" ]; then
+            echo "::warning::Fuzzer found slow units (non-fatal); investigate for super-linear behavior:"
+            echo "$slow"
+          fi
+          if [ -n "$crashes" ]; then
+            echo "::error::Fuzzer found crash artifacts!"
+            ls -la "$dir"/
             exit 1
+          fi
+          if [ -z "$slow" ]; then
+            echo "No crash artifacts found"
           else
-            echo "No crashes found"
+            echo "No crashes found (slow units are non-fatal)"
           fi
       - name: Upload crash artifacts
         if: failure()

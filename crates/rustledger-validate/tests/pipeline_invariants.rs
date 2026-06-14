@@ -33,8 +33,8 @@ fn amount() -> impl Strategy<Value = Amount> {
 }
 
 /// Two explicit postings with independent random amounts — often
-/// unbalanced (-> TransactionUnbalanced), on random accounts (some may be
-/// unopened -> AccountNotOpen).
+/// unbalanced (`TransactionUnbalanced`), on random accounts (some may be
+/// unopened, giving `AccountNotOpen`).
 fn txn() -> impl Strategy<Value = Transaction> {
     (
         1u32..28,

@@ -1861,15 +1861,13 @@ mod tests {
     #[test]
     fn parens_inside_string_literal_dont_count() {
         let src = format!("SELECT account WHERE narration = \"{}\"", "(".repeat(2000));
-        // Whatever the grammar decides about the rest, it must NOT be the
-        // nesting-depth rejection — the parens are inside a string.
-        if let Err(e) = parse(&src)
-            && let ParseErrorKind::SyntaxError(ref m) = e.kind
-        {
-            assert!(
-                !m.contains("nesting too deep"),
-                "parens inside a string literal must not trip the nesting guard"
-            );
-        }
+        // Assert directly on the guard: 2000 parens inside a string
+        // literal must not register as nesting depth at all.
+        assert!(
+            nesting_exceeds_limit(&src).is_none(),
+            "parens inside a string literal must not count toward the nesting limit"
+        );
+        // And the query as a whole still parses (the string is opaque).
+        assert!(parse(&src).is_ok(), "string-literal query should parse");
     }
 }

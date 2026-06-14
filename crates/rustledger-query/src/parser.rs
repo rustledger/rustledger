@@ -77,8 +77,8 @@ fn nesting_exceeds_limit(source: &str) -> Option<usize> {
 /// # Errors
 ///
 /// Returns a `ParseError` if the query string is malformed, or if
-/// parenthesis nesting exceeds [`MAX_NESTING_DEPTH`] (rejected up front
-/// to bound parse time and stack depth).
+/// parenthesis nesting exceeds the internal nesting limit (rejected up
+/// front to bound parse time and stack depth).
 pub fn parse(source: &str) -> Result<Query, ParseError> {
     if let Some(offset) = nesting_exceeds_limit(source) {
         return Err(ParseError::new(

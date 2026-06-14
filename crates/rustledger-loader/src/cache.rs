@@ -51,7 +51,13 @@ pub struct CachedPlugin {
 
 /// Cached options - a serializable subset of Options.
 ///
-/// Excludes parsing-time fields like `set_options` and `warnings`.
+/// Excludes transient parsing-time fields like `warnings`, but DOES
+/// persist `set_options`: it is load-bearing downstream, because
+/// `resolve_effective_booking_method` gates on
+/// `set_options.contains("booking_method")` to decide whether the
+/// file-level `option "booking_method"` wins over the API default.
+/// Dropping it across the cache round-trip silently re-books FIFO/LIFO
+/// ledgers as STRICT on a cache hit (#1340).
 /// These fields mirror the Options struct and inherit their meaning.
 #[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 #[allow(missing_docs)]
@@ -84,6 +90,11 @@ pub struct CachedOptions {
     pub long_string_maxlines: u32,
     pub documents: Vec<String>,
     pub custom: Vec<(String, String)>,
+    /// Names of options the source explicitly set (e.g.
+    /// `"booking_method"`). Restored so downstream resolution that
+    /// distinguishes "file set this" from "inherited default" behaves
+    /// identically on a cache hit. See the struct-level note (#1340).
+    pub set_options: Vec<String>,
 }
 
 impl From<&Options> for CachedOptions {
@@ -124,6 +135,7 @@ impl From<&Options> for CachedOptions {
                 .iter()
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect(),
+            set_options: opts.set_options.iter().cloned().collect(),
         }
     }
 }
@@ -164,6 +176,7 @@ impl From<CachedOptions> for Options {
         opts.long_string_maxlines = cached.long_string_maxlines;
         opts.documents = cached.documents;
         opts.custom = cached.custom.into_iter().collect();
+        opts.set_options = cached.set_options.into_iter().collect();
         opts
     }
 }
@@ -294,8 +307,14 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 ///     positionally) — verified against rkyv 0.8.16 — so this change
 ///     does NOT require a separate version bump. If a future rkyv
 ///     version changes that encoding, OR if `CostNumber` gains
-///     additional fields, bump to v9.
-const CACHE_VERSION: u32 = 8;
+///     additional fields, bump to v10.
+/// v9: `CachedOptions` gained a `set_options: Vec<String>` field
+///     (#1340). It was previously dropped, so a cache hit lost the
+///     record of which options the file explicitly set — making
+///     `resolve_effective_booking_method` re-book FIFO/LIFO ledgers as
+///     STRICT. The new trailing field changes the archived layout, so
+///     old bytes must be regenerated.
+const CACHE_VERSION: u32 = 9;
 
 /// Cache header stored at the start of cache files.
 #[derive(Debug, Clone)]
@@ -990,13 +1009,17 @@ mod tests {
         // the developer to also update the fixtures (or remove this
         // tripwire if v9's contract is identical to v8 for CostNumber
         // — which is unusual but possible).
-        const FIXTURE_VERSION: u32 = 8;
+        // v9 (#1340) bumped CACHE_VERSION only to add a `set_options`
+        // field to `CachedOptions` — the `CostNumber` archived layout
+        // these fixtures pin is unchanged, so the byte arrays below are
+        // still valid and only FIXTURE_VERSION moves.
+        const FIXTURE_VERSION: u32 = 9;
         assert_eq!(
             CACHE_VERSION, FIXTURE_VERSION,
             "CACHE_VERSION advanced past the fixture version; regenerate \
              the byte fixtures in this test and update FIXTURE_VERSION, \
              or remove the tripwire if v{CACHE_VERSION}'s CostNumber \
-             encoding is byte-identical to v8.",
+             encoding is byte-identical to the fixtures.",
         );
 
         let cases: &[(&str, CostNumber, &[u8])] = &[
@@ -1080,6 +1103,29 @@ mod tests {
         assert_eq!(restored.title, Some("Test Ledger".to_string()));
         assert_eq!(restored.operating_currency, vec!["USD", "EUR"]);
         assert!(restored.render_commas);
+    }
+
+    /// Regression for #1340: `set_options` must survive the cache
+    /// round-trip. It gates `resolve_effective_booking_method`, so
+    /// dropping it makes a cache hit re-book FIFO/LIFO ledgers as
+    /// STRICT (the file-level `option "booking_method"` is ignored).
+    #[test]
+    fn test_cached_options_preserves_set_options_for_booking_method() {
+        let mut opts = Options::new();
+        // `set()` is what a parsed `option "booking_method" "FIFO"`
+        // calls — it records both the value AND the set-membership.
+        opts.set("booking_method", "FIFO");
+        assert!(opts.set_options.contains("booking_method"));
+
+        let cached = CachedOptions::from(&opts);
+        let restored: Options = cached.into();
+
+        assert_eq!(restored.booking_method, "FIFO");
+        assert!(
+            restored.set_options.contains("booking_method"),
+            "set_options dropped across cache round-trip — booking method \
+             resolution would fall back to the STRICT default on a cache hit"
+        );
     }
 
     #[test]

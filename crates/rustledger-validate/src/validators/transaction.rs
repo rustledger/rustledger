@@ -707,3 +707,132 @@ mod tolerance_tests {
         assert_eq!(t.len(), 1, "only the USD currency should appear");
     }
 }
+
+#[cfg(test)]
+mod validator_comparison_tests {
+    //! #1309 follow-up: kill the comparison-operator mutants in the
+    //! structure / lifecycle / balance validators (the survivors in
+    //! transaction.rs outside `calculate_tolerances`). Each test pins a
+    //! boundary case so a `<`/`>` -> `<=`/`>=`/`==` mutation flips an
+    //! observable error.
+    use super::*;
+    use crate::AccountState;
+    use rust_decimal_macros::dec;
+
+    fn d(y: i32, m: u32, day: u32) -> rustledger_core::NaiveDate {
+        rustledger_core::naive_date(y, m, day).unwrap()
+    }
+
+    fn acct(opened: rustledger_core::NaiveDate) -> AccountState {
+        AccountState {
+            opened,
+            closed: None,
+            currencies: rustc_hash::FxHashSet::default(),
+            booking: BookingMethod::default(),
+        }
+    }
+
+    fn has(errs: &[ValidationError], code: ErrorCode) -> bool {
+        errs.iter().any(|e| e.code == code)
+    }
+
+    // ---- validate_account_lifecycle: `txn.date < account_state.opened`
+
+    #[test]
+    fn lifecycle_posting_on_open_date_is_allowed() {
+        // date == opened must NOT error. Kills `<` -> `<=` and `<` -> `==`
+        // (both flag the open-date posting that the correct `<` allows).
+        let a = acct(d(2024, 1, 1));
+        let p = Posting::new("Assets:A", Amount::new(dec!(1), "USD"));
+        let txn = Transaction::new(d(2024, 1, 1), "on open date");
+        let mut errs = Vec::new();
+        validate_account_lifecycle(&txn, &p, &a, &mut errs);
+        assert!(
+            !has(&errs, ErrorCode::AccountNotOpen),
+            "a posting on the open date must be allowed: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn lifecycle_posting_before_open_errors() {
+        // date < opened must error. Kills `<` -> `==` (which would not flag
+        // a strictly-before-open date).
+        let a = acct(d(2024, 1, 10));
+        let p = Posting::new("Assets:A", Amount::new(dec!(1), "USD"));
+        let txn = Transaction::new(d(2024, 1, 1), "before open");
+        let mut errs = Vec::new();
+        validate_account_lifecycle(&txn, &p, &a, &mut errs);
+        assert!(
+            has(&errs, ErrorCode::AccountNotOpen),
+            "a posting before the open date must error: {errs:?}"
+        );
+    }
+
+    // ---- validate_transaction_balance: `residual.abs() > tolerance`
+
+    fn usd_tol(t: Decimal) -> HashMap<rustledger_core::Currency, Decimal> {
+        let mut m = HashMap::new();
+        m.insert(rustledger_core::Currency::from("USD"), t);
+        m
+    }
+
+    #[test]
+    fn balance_residual_equal_to_tolerance_is_ok() {
+        // residual exactly == tolerance must NOT error. Kills `>` -> `>=`.
+        let txn = Transaction::new(d(2024, 1, 1), "edge")
+            .with_synthesized_posting(Posting::new("Assets:A", Amount::new(dec!(0.01), "USD")));
+        let mut errs = Vec::new();
+        validate_transaction_balance(&txn, &usd_tol(dec!(0.01)), &mut errs);
+        assert!(
+            !has(&errs, ErrorCode::TransactionUnbalanced),
+            "a residual exactly at tolerance must pass: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn balance_residual_above_tolerance_errors() {
+        let txn = Transaction::new(d(2024, 1, 1), "unbalanced")
+            .with_synthesized_posting(Posting::new("Assets:A", Amount::new(dec!(0.02), "USD")));
+        let mut errs = Vec::new();
+        validate_transaction_balance(&txn, &usd_tol(dec!(0.01)), &mut errs);
+        assert!(
+            has(&errs, ErrorCode::TransactionUnbalanced),
+            "a residual above tolerance must error: {errs:?}"
+        );
+    }
+
+    // ---- validate_transaction_structure: `value < Decimal::ZERO` (cost)
+
+    fn cost_posting(cost: Decimal) -> Posting {
+        Posting::new("Assets:Stock", Amount::new(dec!(10), "STK")).with_cost(
+            rustledger_core::CostSpec::empty()
+                .with_number(rustledger_core::CostNumber::PerUnit { value: cost })
+                .with_currency("USD"),
+        )
+    }
+
+    #[test]
+    fn structure_zero_cost_is_not_negative() {
+        // A zero cost must NOT raise NegativeCost. Kills `<` -> `<=`.
+        let txn = Transaction::new(d(2024, 1, 1), "zero cost")
+            .with_synthesized_posting(cost_posting(dec!(0)));
+        let mut errs = Vec::new();
+        validate_transaction_structure(&txn, &mut errs);
+        assert!(
+            !has(&errs, ErrorCode::NegativeCost),
+            "a zero cost is not negative: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn structure_negative_cost_errors() {
+        let txn = Transaction::new(d(2024, 1, 1), "neg cost")
+            .with_synthesized_posting(cost_posting(dec!(-5)));
+        let mut errs = Vec::new();
+        validate_transaction_structure(&txn, &mut errs);
+        assert!(
+            has(&errs, ErrorCode::NegativeCost),
+            "a negative cost must error: {errs:?}"
+        );
+    }
+}

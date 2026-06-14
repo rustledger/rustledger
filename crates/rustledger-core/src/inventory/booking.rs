@@ -972,3 +972,492 @@ impl Inventory {
         })
     }
 }
+
+#[cfg(test)]
+mod reduction_tests {
+    //! Direct unit tests for the read-only `try_reduce_*` booking paths.
+    //!
+    //! These pin exact cost-basis, lot selection, and guard behavior so
+    //! the lot-reduction mutants surfaced by the #1309 audit are killed
+    //! (the public mutating `reduce_*` path was covered indirectly, but
+    //! the `try_reduce_*` preview path had no direct assertions).
+    use crate::{Amount, BookingMethod, Cost, CostSpec, Inventory, Position, naive_date};
+    use rust_decimal::Decimal;
+    use rust_decimal_macros::dec;
+
+    fn d(n: i64) -> Decimal {
+        Decimal::from(n)
+    }
+
+    /// A cost-bearing lot of `units` STK at `cost` USD, dated 2024-01-`day`.
+    fn lot(units: i64, cost: i64, day: u32) -> Position {
+        Position::with_cost(
+            Amount::new(d(units), "STK"),
+            Cost::new(d(cost), "USD").with_date(naive_date(2024, 1, day).unwrap()),
+        )
+    }
+
+    fn mk(lots: impl IntoIterator<Item = Position>) -> Inventory {
+        let mut i = Inventory::new();
+        for l in lots {
+            i.add(l);
+        }
+        i
+    }
+
+    fn sell_stk(n: i64) -> Amount {
+        Amount::new(d(-n), "STK")
+    }
+
+    fn try_reduce(inv: &Inventory, units: &Amount, method: BookingMethod) -> super::BookingResult {
+        inv.try_reduce(units, Some(&CostSpec::default()), method)
+            .expect("reduction should succeed")
+    }
+
+    fn basis(r: &super::BookingResult) -> Decimal {
+        r.cost_basis.as_ref().expect("cost basis present").number
+    }
+
+    // ---- FIFO / LIFO ordered ------------------------------------------
+
+    #[test]
+    fn fifo_partial_multilot_cost_basis_and_order() {
+        // 10 @ $100 (older), 10 @ $200 (newer); sell 15.
+        let inv = mk([lot(10, 100, 1), lot(10, 200, 2)]);
+        let r = try_reduce(&inv, &sell_stk(15), BookingMethod::Fifo);
+        // FIFO: 10@100 + 5@200 = 1000 + 1000 = 2000.
+        assert_eq!(basis(&r), dec!(2000));
+        assert_eq!(r.matched.len(), 2);
+        assert_eq!(r.matched[0].units.number.abs(), dec!(10));
+        assert_eq!(r.matched[0].cost.as_ref().unwrap().number, dec!(100));
+        assert_eq!(r.matched[1].units.number.abs(), dec!(5));
+        assert_eq!(r.matched[1].cost.as_ref().unwrap().number, dec!(200));
+    }
+
+    #[test]
+    fn lifo_takes_newest_lot_first() {
+        let inv = mk([lot(10, 100, 1), lot(10, 200, 2)]);
+        let r = try_reduce(&inv, &sell_stk(15), BookingMethod::Lifo);
+        // LIFO: 10@200 + 5@100 = 2000 + 500 = 2500 (distinguishes the
+        // `reverse` flag from FIFO's 2000).
+        assert_eq!(basis(&r), dec!(2500));
+        assert_eq!(r.matched[0].cost.as_ref().unwrap().number, dec!(200));
+    }
+
+    #[test]
+    fn fifo_single_lot_partial_cost_basis() {
+        let inv = mk([lot(10, 100, 1)]);
+        let r = try_reduce(&inv, &sell_stk(3), BookingMethod::Fifo);
+        assert_eq!(basis(&r), dec!(300)); // 3 * 100
+    }
+
+    // ---- HIFO ---------------------------------------------------------
+
+    #[test]
+    fn hifo_takes_highest_cost_lot_first() {
+        // costs 100, 300, 200 → HIFO order 300, 200, 100.
+        let inv = mk([lot(10, 100, 1), lot(10, 300, 2), lot(10, 200, 3)]);
+        let r = try_reduce(&inv, &sell_stk(15), BookingMethod::Hifo);
+        // 10@300 + 5@200 = 3000 + 1000 = 4000.
+        assert_eq!(basis(&r), dec!(4000));
+        assert_eq!(r.matched[0].cost.as_ref().unwrap().number, dec!(300));
+        assert_eq!(r.matched[1].cost.as_ref().unwrap().number, dec!(200));
+    }
+
+    // ---- AVERAGE ------------------------------------------------------
+
+    #[test]
+    fn average_cost_basis_partial() {
+        // 10 @ $100, 30 @ $200 → 40 units, $7000 total, avg $175.
+        let inv = mk([lot(10, 100, 1), lot(30, 200, 2)]);
+        let r = try_reduce(&inv, &sell_stk(20), BookingMethod::Average);
+        assert_eq!(basis(&r), dec!(3500)); // 20 * 175
+    }
+
+    #[test]
+    fn average_reduce_exact_total_succeeds() {
+        // Reducing exactly the held quantity must succeed (kills
+        // `reduction > total` → `>=`/`==`).
+        let inv = mk([lot(10, 100, 1), lot(30, 200, 2)]);
+        let r = try_reduce(&inv, &sell_stk(40), BookingMethod::Average);
+        assert_eq!(basis(&r), dec!(7000)); // 40 * 175
+    }
+
+    #[test]
+    fn average_over_reduction_errors() {
+        // Reducing more than held must error (kills `>` → `<`).
+        let inv = mk([lot(10, 100, 1)]);
+        let err = inv
+            .try_reduce(
+                &sell_stk(20),
+                Some(&CostSpec::default()),
+                BookingMethod::Average,
+            )
+            .unwrap_err();
+        assert!(matches!(err, super::BookingError::InsufficientUnits { .. }));
+    }
+
+    // ---- Filter isolation (currency / sign) ---------------------------
+    // One fixture per method: an unrelated OTH lot plus the real STK lot.
+    // A correct reducer touches ONLY the real STK lot; the currency `==`
+    // and the `&&` connecting it would pull OTH in (or drop the real
+    // one), changing the basis. (A zero-units "empty" lot is intentionally
+    // NOT added here: `Inventory::add` drops empty positions on insert, so
+    // the `!is_empty()` filter clause is unreachable for add-built
+    // inventories and can't be exercised this way.)
+
+    fn isolation_inv() -> Inventory {
+        let mut i = Inventory::new();
+        i.add(Position::with_cost(
+            Amount::new(dec!(10), "OTH"), // different currency: must be ignored
+            Cost::new(dec!(888), "USD").with_date(naive_date(2024, 1, 1).unwrap()),
+        ));
+        i.add(lot(10, 100, 2)); // the real STK lot
+        i
+    }
+
+    fn assert_isolated(method: BookingMethod) {
+        let inv = isolation_inv();
+        let r = try_reduce(&inv, &sell_stk(5), method);
+        assert_eq!(
+            basis(&r),
+            dec!(500),
+            "must reduce only the real STK lot (5 * 100)"
+        );
+        assert!(
+            r.matched.iter().all(|p| p.units.currency.as_ref() == "STK"),
+            "no non-STK lot should be matched"
+        );
+    }
+
+    #[test]
+    fn fifo_filters_currency() {
+        assert_isolated(BookingMethod::Fifo);
+    }
+
+    #[test]
+    fn hifo_filters_currency() {
+        assert_isolated(BookingMethod::Hifo);
+    }
+
+    #[test]
+    fn strict_filters_currency() {
+        assert_isolated(BookingMethod::Strict);
+    }
+
+    #[test]
+    fn average_filters_currency() {
+        // average filters by currency + non-empty (no cost-spec / sign filter).
+        let inv = isolation_inv();
+        let r = try_reduce(&inv, &sell_stk(5), BookingMethod::Average);
+        // Only the STK lot participates: 10 units @ $100 → avg $100 → 5 * 100.
+        assert_eq!(basis(&r), dec!(500));
+    }
+
+    // ---- Sign guard ---------------------------------------------------
+
+    #[test]
+    fn does_not_match_same_sign_lot() {
+        // A short (negative) STK lot must NOT satisfy a sell (negative
+        // units): same sign. Only the long lot is reducible. Kills the
+        // `signum() != signum()` → `==` mutant (== would match the short
+        // lot or nothing).
+        let mut i = Inventory::new();
+        i.add(lot(-10, 50, 1)); // short lot, same sign as a sell
+        i.add(lot(10, 100, 2)); // long lot
+        let r = try_reduce(&i, &sell_stk(5), BookingMethod::Fifo);
+        assert_eq!(basis(&r), dec!(500)); // 5 * 100 from the long lot only
+        assert!(r.matched.iter().all(|p| p.units.number.is_sign_positive()));
+    }
+
+    #[test]
+    fn strict_rejects_when_only_same_sign_lot_present() {
+        // STRICT against an inventory holding ONLY a same-sign (short)
+        // lot must return NoMatchingLot — the single reducible lot fails
+        // `can_reduce`, leaving zero matches. This pins all three `&&`
+        // connectors in `try_reduce_strict`'s filter: each `&& -> ||`
+        // mutant wrongly admits the short lot (currency==STK or the
+        // always-true `matches_cost_spec` on the default spec satisfies
+        // the disjunction), turning 0 matches into 1 and succeeding via
+        // `try_reduce_from_lot` instead of erroring.
+        let mut i = Inventory::new();
+        i.add(lot(-10, 100, 1)); // short STK only; a sell is the same sign
+        let res = i.try_reduce(
+            &sell_stk(5),
+            Some(&CostSpec::default()),
+            BookingMethod::Strict,
+        );
+        assert!(
+            matches!(res, Err(super::BookingError::NoMatchingLot { .. })),
+            "strict reduction against a same-sign-only inventory must not match; got {res:?}"
+        );
+    }
+
+    // ---- Insufficient-units accounting --------------------------------
+
+    #[test]
+    fn fifo_insufficient_reports_available() {
+        // `available = requested - remaining`; kills the `-` → `+`/`/`
+        // mutant in the insufficient branch.
+        let inv = mk([lot(10, 100, 1)]);
+        let err = inv
+            .try_reduce(
+                &sell_stk(15),
+                Some(&CostSpec::default()),
+                BookingMethod::Fifo,
+            )
+            .unwrap_err();
+        match err {
+            super::BookingError::InsufficientUnits {
+                requested,
+                available,
+                ..
+            } => {
+                assert_eq!(requested, dec!(15));
+                assert_eq!(available, dec!(10)); // 15 requested - 5 remaining
+            }
+            other => panic!("expected InsufficientUnits, got {other:?}"),
+        }
+    }
+
+    // ---- STRICT single-lot path (try_reduce_from_lot) -----------------
+
+    #[test]
+    fn strict_single_lot_partial_cost_basis() {
+        // Exactly one matching lot → try_reduce_from_lot; partial take.
+        let inv = mk([lot(10, 100, 1)]);
+        let r = try_reduce(&inv, &sell_stk(4), BookingMethod::Strict);
+        assert_eq!(basis(&r), dec!(400)); // 4 * 100
+    }
+
+    #[test]
+    fn strict_single_lot_over_reduction_errors() {
+        // from_lot `requested > available` guard.
+        let inv = mk([lot(10, 100, 1)]);
+        let err = inv
+            .try_reduce(
+                &sell_stk(11),
+                Some(&CostSpec::default()),
+                BookingMethod::Strict,
+            )
+            .unwrap_err();
+        assert!(matches!(err, super::BookingError::InsufficientUnits { .. }));
+    }
+
+    #[test]
+    fn strict_single_lot_exact_full_reduction_succeeds() {
+        // requested == available must succeed (kills from_lot `>` → `>=`).
+        let inv = mk([lot(10, 100, 1)]);
+        let r = try_reduce(&inv, &sell_stk(10), BookingMethod::Strict);
+        assert_eq!(basis(&r), dec!(1000));
+    }
+
+    // ---- HIFO matched units + insufficient accounting ----------------
+
+    #[test]
+    fn hifo_matched_units_and_insufficient_available() {
+        let inv = mk([lot(10, 100, 1), lot(10, 300, 2)]);
+        let r = try_reduce(&inv, &sell_stk(8), BookingMethod::Hifo);
+        // 8 taken from the $300 lot (kills the split `take * signum -> +`).
+        assert_eq!(r.matched[0].units.number.abs(), dec!(8));
+        let err = inv
+            .try_reduce(
+                &sell_stk(25),
+                Some(&CostSpec::default()),
+                BookingMethod::Hifo,
+            )
+            .unwrap_err();
+        match err {
+            super::BookingError::InsufficientUnits { available, .. } => {
+                assert_eq!(available, dec!(20)); // 20 held; kills `abs - remaining` mutants
+            }
+            other => panic!("expected InsufficientUnits, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn strict_from_lot_matched_units() {
+        let inv = mk([lot(10, 100, 1)]);
+        let r = try_reduce(&inv, &sell_stk(4), BookingMethod::Strict);
+        assert_eq!(r.matched[0].units.number.abs(), dec!(4)); // kills from_lot split `* -> +`
+    }
+
+    // ---- StrictWithSize ----------------------------------------------
+
+    #[test]
+    fn strict_with_size_picks_exact_size_lot() {
+        let inv = mk([lot(10, 100, 1), lot(5, 200, 2)]);
+        let r = try_reduce(&inv, &sell_stk(5), BookingMethod::StrictWithSize);
+        assert_eq!(basis(&r), dec!(1000)); // 5 @ $200, the exact-size lot
+    }
+
+    #[test]
+    fn strict_with_size_ambiguous_without_exact_or_total() {
+        let inv = mk([lot(10, 100, 1), lot(10, 200, 2)]);
+        let err = inv
+            .try_reduce(
+                &sell_stk(5),
+                Some(&CostSpec::default()),
+                BookingMethod::StrictWithSize,
+            )
+            .unwrap_err();
+        assert!(matches!(err, super::BookingError::AmbiguousMatch { .. }));
+    }
+
+    #[test]
+    fn strict_with_size_total_match_falls_back_to_fifo() {
+        let inv = mk([lot(10, 100, 1), lot(10, 200, 2)]);
+        let r = try_reduce(&inv, &sell_stk(20), BookingMethod::StrictWithSize);
+        assert_eq!(basis(&r), dec!(3000)); // total match → FIFO: 1000 + 2000
+    }
+
+    // ---- Mutating reduce() path (reduce_*) ----------------------------
+
+    #[test]
+    fn reduce_fifo_commits_and_basis() {
+        let mut inv = mk([lot(10, 100, 1), lot(10, 200, 2)]);
+        let r = inv
+            .reduce(
+                &sell_stk(15),
+                Some(&CostSpec::default()),
+                BookingMethod::Fifo,
+            )
+            .unwrap();
+        assert_eq!(r.cost_basis.unwrap().number, dec!(2000));
+        assert_eq!(inv.units("STK"), dec!(5)); // 20 - 15
+    }
+
+    #[test]
+    fn reduce_hifo_commits_basis_units_insufficient() {
+        let mut inv = mk([lot(10, 100, 1), lot(10, 300, 2)]);
+        let r = inv
+            .reduce(
+                &sell_stk(15),
+                Some(&CostSpec::default()),
+                BookingMethod::Hifo,
+            )
+            .unwrap();
+        assert_eq!(r.cost_basis.unwrap().number, dec!(3500)); // 10@300 + 5@100
+        assert_eq!(r.matched[0].units.number.abs(), dec!(10)); // kills reduce_hifo split `* -> +`
+        let mut inv2 = mk([lot(10, 100, 1)]);
+        let err = inv2
+            .reduce(
+                &sell_stk(25),
+                Some(&CostSpec::default()),
+                BookingMethod::Hifo,
+            )
+            .unwrap_err();
+        match err {
+            super::BookingError::InsufficientUnits { available, .. } => {
+                assert_eq!(available, dec!(10));
+            }
+            other => panic!("expected InsufficientUnits, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reduce_average_only_matching_currency() {
+        let mut i = Inventory::new();
+        i.add(lot(10, 100, 2));
+        i.add(Position::with_cost(
+            Amount::new(dec!(10), "OTH"),
+            Cost::new(dec!(888), "USD").with_date(naive_date(2024, 1, 1).unwrap()),
+        ));
+        let r = i
+            .reduce(
+                &sell_stk(5),
+                Some(&CostSpec::default()),
+                BookingMethod::Average,
+            )
+            .unwrap();
+        assert_eq!(r.cost_basis.unwrap().number, dec!(500)); // only the STK lot
+    }
+
+    #[test]
+    fn reduce_from_lot_matched_and_remaining_units() {
+        let mut inv = mk([lot(10, 100, 1)]);
+        let r = inv
+            .reduce(
+                &sell_stk(4),
+                Some(&CostSpec::default()),
+                BookingMethod::Strict,
+            )
+            .unwrap();
+        assert_eq!(r.matched[0].units.number.abs(), dec!(4)); // kills reduce_from_lot split `* -> +`
+        // Assert the stored POSITION units directly, not `units()` — the
+        // latter reads a separate incremental cache, so it would not catch
+        // a bug in `new_units = pos.units.number + units.number`.
+        let remaining: Vec<_> = inv.position_list();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].units.number, dec!(6)); // 10 + (-4); kills `+ -> -`/`*`
+        assert_eq!(inv.units("STK"), dec!(6)); // cache stays consistent
+    }
+
+    #[test]
+    fn reduce_merge_filters_currency_sign_and_preserves_other_lots() {
+        // Merge two long STK lots; a short STK lot (same sign as the
+        // sell) and an unrelated OTH lot must be excluded from the merge
+        // AND survive in the inventory.
+        let mut inv = Inventory::new();
+        inv.add(lot(10, 100, 1)); // long STK
+        inv.add(lot(30, 200, 2)); // long STK
+        inv.add(lot(-5, 999, 3)); // short STK — excluded by the sign filter
+        inv.add(Position::with_cost(
+            Amount::new(dec!(10), "OTH"), // different currency — excluded
+            Cost::new(dec!(888), "USD").with_date(naive_date(2024, 1, 4).unwrap()),
+        ));
+        let spec = CostSpec {
+            merge: true,
+            ..CostSpec::default()
+        };
+        let r = inv
+            .reduce(&sell_stk(20), Some(&spec), BookingMethod::Strict)
+            .unwrap();
+        // Only the two long STK lots merge: 40 units @ avg $175 → 20 * 175.
+        // Including the short (sign) or OTH (currency) lot would change this.
+        assert_eq!(r.cost_basis.unwrap().number, dec!(3500));
+        // The excluded lots must still be present (kills the retain-index mutant).
+        assert!(
+            inv.position_list()
+                .iter()
+                .any(|p| p.units.currency.as_ref() == "OTH" && p.units.number == dec!(10)),
+            "OTH lot must survive the merge"
+        );
+        assert!(
+            inv.position_list()
+                .iter()
+                .any(|p| p.units.currency.as_ref() == "STK" && p.units.number == dec!(-5)),
+            "short STK lot must survive the merge"
+        );
+    }
+
+    #[test]
+    fn reduce_none_exact_succeeds_over_reduction_errors() {
+        let mut inv = Inventory::new();
+        inv.add(Position::simple(Amount::new(dec!(10), "STK")));
+        assert!(
+            inv.reduce(&sell_stk(10), None, BookingMethod::None).is_ok(),
+            "exact NONE reduction should succeed"
+        );
+        let mut inv2 = Inventory::new();
+        inv2.add(Position::simple(Amount::new(dec!(10), "STK")));
+        let err = inv2
+            .reduce(&sell_stk(15), None, BookingMethod::None)
+            .unwrap_err();
+        assert!(matches!(err, super::BookingError::InsufficientUnits { .. }));
+    }
+
+    #[test]
+    fn reduce_merge_uses_weighted_average() {
+        let mut inv = mk([lot(10, 100, 1), lot(30, 200, 2)]);
+        let spec = CostSpec {
+            merge: true,
+            ..CostSpec::default()
+        };
+        let r = inv
+            .reduce(&sell_stk(20), Some(&spec), BookingMethod::Strict)
+            .unwrap();
+        assert_eq!(r.cost_basis.unwrap().number, dec!(3500)); // 20 @ avg $175
+        assert_eq!(inv.units("STK"), dec!(20)); // 40 - 20
+    }
+}

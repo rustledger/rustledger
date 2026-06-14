@@ -585,3 +585,115 @@ pub fn process_inventory_addition(
 
     inv.add(position);
 }
+
+#[cfg(test)]
+mod tolerance_tests {
+    //! Direct unit tests for `decimal_quantum` and `calculate_tolerances`
+    //! (#1309 cluster 3). The file had no tests, so the tolerance
+    //! arithmetic and the per-currency default/floor logic went
+    //! unasserted.
+    use super::*;
+    use rust_decimal_macros::dec;
+
+    fn cur(s: &str) -> rustledger_core::Currency {
+        rustledger_core::Currency::from(s)
+    }
+
+    fn mk_txn(postings: Vec<Posting>) -> Transaction {
+        let mut t = Transaction::new(rustledger_core::naive_date(2024, 1, 1).unwrap(), "t");
+        for p in postings {
+            t = t.with_synthesized_posting(p);
+        }
+        t
+    }
+
+    #[test]
+    fn decimal_quantum_reflects_scale() {
+        assert_eq!(decimal_quantum(dec!(100.00)), dec!(0.01)); // scale 2
+        assert_eq!(decimal_quantum(dec!(10.436)), dec!(0.001)); // scale 3
+        assert_eq!(decimal_quantum(dec!(5)), dec!(1)); // scale 0 -> ONE
+    }
+
+    #[test]
+    fn tolerance_base_is_quantum_times_multiplier_max() {
+        // 10.00 USD -> 0.01 * 0.5 = 0.005; 5.000 USD -> 0.001 * 0.5 = 0.0005;
+        // per-currency max = 0.005. An integer (scale-0) amount contributes
+        // nothing, so CAD gets no tolerance entry at all.
+        let t = calculate_tolerances(
+            &mk_txn(vec![
+                Posting::new("Assets:A", Amount::new(dec!(10.00), "USD")),
+                Posting::new("Assets:B", Amount::new(dec!(5.000), "USD")),
+                Posting::new("Assets:C", Amount::new(dec!(100), "CAD")),
+            ]),
+            &ValidationOptions::default(),
+        );
+        assert_eq!(t.get(&cur("USD")), Some(&dec!(0.005)));
+        assert!(
+            !t.contains_key(&cur("CAD")),
+            "integer-only currency gets no tolerance"
+        );
+        assert_eq!(t.len(), 1);
+    }
+
+    #[test]
+    fn tolerance_cost_inferred_is_units_quantum_times_mult_times_cost() {
+        // infer_from_cost: 10.00 STK {2.00 USD}
+        //   units_quantum 0.01 * 0.5 = 0.005; * cost_per_unit 2.00 = 0.01.
+        let opts = ValidationOptions {
+            infer_tolerance_from_cost: true,
+            ..ValidationOptions::default()
+        };
+        let p = Posting::new("Assets:Stock", Amount::new(dec!(10.00), "STK")).with_cost(
+            rustledger_core::CostSpec::empty()
+                .with_number(rustledger_core::CostNumber::PerUnit { value: dec!(2.00) })
+                .with_currency("USD"),
+        );
+        let t = calculate_tolerances(&mk_txn(vec![p]), &opts);
+        assert_eq!(t.get(&cur("USD")), Some(&dec!(0.01)));
+    }
+
+    #[test]
+    fn tolerance_price_inferred_is_units_quantum_times_mult_times_price() {
+        // infer_from_cost: 10.00 STK @ 3.00 USD -> 0.005 * 3.00 = 0.015.
+        let opts = ValidationOptions {
+            infer_tolerance_from_cost: true,
+            ..ValidationOptions::default()
+        };
+        let p = Posting::new("Assets:Stock", Amount::new(dec!(10.00), "STK")).with_price(
+            rustledger_core::PriceAnnotation::unit(Amount::new(dec!(3.00), "USD")),
+        );
+        let t = calculate_tolerances(&mk_txn(vec![p]), &opts);
+        assert_eq!(t.get(&cur("USD")), Some(&dec!(0.015)));
+    }
+
+    #[test]
+    fn tolerance_per_currency_default_acts_as_floor() {
+        // Default 0.1 for USD exceeds the computed 0.005 -> floor wins.
+        let mut opts = ValidationOptions::default();
+        opts.inferred_tolerance_default
+            .insert("USD".to_string(), dec!(0.1));
+        let t = calculate_tolerances(
+            &mk_txn(vec![Posting::new(
+                "Assets:A",
+                Amount::new(dec!(10.00), "USD"),
+            )]),
+            &opts,
+        );
+        assert_eq!(t.get(&cur("USD")), Some(&dec!(0.1)));
+    }
+
+    #[test]
+    fn tolerance_wildcard_default_applies_to_all_currencies() {
+        let mut opts = ValidationOptions::default();
+        opts.inferred_tolerance_default
+            .insert("*".to_string(), dec!(0.2));
+        let t = calculate_tolerances(
+            &mk_txn(vec![Posting::new(
+                "Assets:A",
+                Amount::new(dec!(10.00), "USD"),
+            )]),
+            &opts,
+        );
+        assert_eq!(t.get(&cur("USD")), Some(&dec!(0.2)));
+    }
+}

@@ -1349,7 +1349,7 @@ mod reduction_tests {
             .unwrap_err();
         match err {
             super::BookingError::InsufficientUnits { available, .. } => {
-                assert_eq!(available, dec!(10))
+                assert_eq!(available, dec!(10));
             }
             other => panic!("expected InsufficientUnits, got {other:?}"),
         }

@@ -149,115 +149,117 @@ export const runPluginTool: ToolDefinition = {
 
 // === Editor Tools (LSP-like) ===
 
+// Shared property fragments for the editor tools. Every editor tool accepts
+// `source` OR `file_path` (validated in the handler, since JSON Schema can't
+// express "exactly one of"). `file_path` lets a client pass a path instead of
+// inlining the whole ledger, and lets the server resolve `include` directives.
+const editorSourceProp = {
+  type: "string",
+  description:
+    "The Beancount ledger source text. Optional when `file_path` is given; if both are provided, `source` is the (unsaved) buffer contents and wins, while `file_path` still anchors include resolution.",
+} as const;
+
+const editorLineProp = {
+  type: "number",
+  description: "Line number (0-indexed)",
+} as const;
+
+const editorCharacterProp = {
+  type: "number",
+  description: "Character position in the line (0-indexed)",
+} as const;
+
+// For hover/completions: file_path additionally resolves includes for
+// whole-ledger context.
+const editorFilePathContextProp = {
+  type: "string",
+  description:
+    "Path to the ledger file under the cursor. Read from disk when `source` is omitted, and used to resolve `include` directives (relative to its directory) so the result reflects the whole ledger, not just the edited file.",
+} as const;
+
+// For definition/references/document_symbols: file_path loads the file but the
+// tool stays document-local (its result is a location/outline).
+const editorFilePathLocalProp = {
+  type: "string",
+  description:
+    "Path to the ledger file to read when `source` is omitted. This tool operates on the edited document only; `include` directives are not followed (its result is a location within this file).",
+} as const;
+
 export const editorCompletionsTool: ToolDefinition = {
   name: "editor_completions",
   description:
-    "Get context-aware completions for Beancount source at a given position. Returns account names, currencies, directives, etc.",
+    "Get context-aware completions for Beancount source at a given position. Returns account names, currencies, directives, etc. When `file_path` is given, `include` directives are resolved so completions also offer accounts/commodities defined in included files.",
   inputSchema: {
     type: "object",
     properties: {
-      source: {
-        type: "string",
-        description: "The Beancount ledger source text",
-      },
-      line: {
-        type: "number",
-        description: "Line number (0-indexed)",
-      },
-      character: {
-        type: "number",
-        description: "Character position in the line (0-indexed)",
-      },
+      source: editorSourceProp,
+      file_path: editorFilePathContextProp,
+      line: editorLineProp,
+      character: editorCharacterProp,
     },
-    required: ["source", "line", "character"],
+    required: ["line", "character"],
   },
 };
 
 export const editorHoverTool: ToolDefinition = {
   name: "editor_hover",
   description:
-    "Get hover information for a symbol at the given position. Returns documentation for accounts, currencies, and directives.",
+    "Get hover information for a symbol at the given position. Returns documentation for accounts, currencies, and directives. When `file_path` is given, `include` directives are resolved so an account's balance and transaction count reflect the whole ledger, not just the edited file.",
   inputSchema: {
     type: "object",
     properties: {
-      source: {
-        type: "string",
-        description: "The Beancount ledger source text",
-      },
-      line: {
-        type: "number",
-        description: "Line number (0-indexed)",
-      },
-      character: {
-        type: "number",
-        description: "Character position in the line (0-indexed)",
-      },
+      source: editorSourceProp,
+      file_path: editorFilePathContextProp,
+      line: editorLineProp,
+      character: editorCharacterProp,
     },
-    required: ["source", "line", "character"],
+    required: ["line", "character"],
   },
 };
 
 export const editorDefinitionTool: ToolDefinition = {
   name: "editor_definition",
   description:
-    "Get the definition location for a symbol (account or currency). Returns the location of the Open or Commodity directive.",
+    "Get the definition location for a symbol (account or currency). Returns the location of the Open or Commodity directive. Operates on the edited document only (cross-file definitions are not resolved).",
   inputSchema: {
     type: "object",
     properties: {
-      source: {
-        type: "string",
-        description: "The Beancount ledger source text",
-      },
-      line: {
-        type: "number",
-        description: "Line number (0-indexed)",
-      },
-      character: {
-        type: "number",
-        description: "Character position in the line (0-indexed)",
-      },
+      source: editorSourceProp,
+      file_path: editorFilePathLocalProp,
+      line: editorLineProp,
+      character: editorCharacterProp,
     },
-    required: ["source", "line", "character"],
+    required: ["line", "character"],
   },
 };
 
 export const editorDocumentSymbolsTool: ToolDefinition = {
   name: "editor_document_symbols",
   description:
-    "Get all symbols in the document for an outline/structure view. Returns all directives with their positions.",
+    "Get all symbols in the document for an outline/structure view. Returns all directives with their positions. Operates on the edited document only (included files are not inlined).",
   inputSchema: {
     type: "object",
     properties: {
-      source: {
-        type: "string",
-        description: "The Beancount ledger source text",
-      },
+      source: editorSourceProp,
+      file_path: editorFilePathLocalProp,
     },
-    required: ["source"],
+    required: [],
   },
 };
 
 export const editorReferencesTool: ToolDefinition = {
   name: "editor_references",
   description:
-    "Find all references to a symbol (account, currency, or payee) at the given position. Returns all locations where the symbol is used.",
+    "Find all references to a symbol (account, currency, or payee) at the given position. Returns all locations where the symbol is used. Operates on the edited document only (cross-file references are not resolved).",
   inputSchema: {
     type: "object",
     properties: {
-      source: {
-        type: "string",
-        description: "The Beancount ledger source text",
-      },
-      line: {
-        type: "number",
-        description: "Line number (0-indexed)",
-      },
-      character: {
-        type: "number",
-        description: "Character position in the line (0-indexed)",
-      },
+      source: editorSourceProp,
+      file_path: editorFilePathLocalProp,
+      line: editorLineProp,
+      character: editorCharacterProp,
     },
-    required: ["source", "line", "character"],
+    required: ["line", "character"],
   },
 };
 

@@ -8,6 +8,18 @@
 #
 # Phase 3 of the plugin-testing-quality plan (#992, #1003).
 
+# Files SKIPPED entirely. `kani_proofs.rs` is gated `#![cfg(kani)]`, so it
+# is not compiled under a normal `cargo test` / `cargo mutants` run — every
+# mutant in it is therefore "missed" by construction (no harness runs it),
+# producing ~195 false-positive survivors that drown out real gaps and
+# depress the score by ~10 points (#1238, surfaced in #1309). The proofs
+# are exercised by the separate Kani job, not by mutation testing.
+exclude_globs = [
+    # `**/` so a move within the tree doesn't silently re-expose the ~195
+    # false-positive survivors this exclusion removes.
+    "**/kani_proofs.rs",
+]
+
 # Mutations whose names match these regexes are SKIPPED (never tested).
 # Matched against the format that `cargo mutants --list` prints, e.g.:
 #   crates/foo/src/bar.rs:42:5: replace <impl Trait for Foo>::method -> ReturnType with ...

@@ -1,0 +1,31 @@
+--- crates/rustledger-booking/src/lib.rs
++++ replace is_balanced -> bool with false
+@@ -351,27 +351,17 @@
+ 
+     residuals
+ }
+ 
+ /// Check if a transaction is balanced within tolerance.
+ #[must_use]
+ #[allow(clippy::implicit_hasher)]
+ pub fn is_balanced(transaction: &Transaction, tolerances: &HashMap<Currency, Decimal>) -> bool {
+-    let residuals = calculate_residual(transaction);
+-
+-    for (currency, residual) in residuals {
+-        let tolerance = tolerances.get(&currency).copied().unwrap_or(Decimal::ZERO); // Default 0 (exact balance for integer-only currencies)
+-
+-        if residual.abs() > tolerance {
+-            return false;
+-        }
+-    }
+-
+-    true
++    false /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ /// Normalize total prices (`@@`) to per-unit prices (`@`) on a transaction.
+ ///
+ /// This converts `PriceAnnotation::Total` to `PriceAnnotation::Unit` by dividing
+ /// the total price by the number of units. This should be called AFTER validation
+ /// (balance checking) to preserve exact total prices for precise residual calculation.
+ ///

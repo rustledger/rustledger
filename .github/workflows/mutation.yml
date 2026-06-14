@@ -8,6 +8,11 @@
 # - PR changes to core crates and critical pipeline crates
 # - Manual trigger with configurable packages
 #
+# Each package is mutated in its OWN matrix job (#1238): the curated audit set
+# (core + parser + pipeline) is several thousand mutants, far more than one
+# 180-minute runner can finish — a single combined job would hit the timeout
+# and fail. Per-package jobs run in parallel, each with its own time budget.
+#
 # See: https://mutants.rs/
 #
 name: Mutation Testing
@@ -41,10 +46,43 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
 jobs:
+  # Select the package set for this run and emit it as a JSON array, so the
+  # `mutants` job can fan out one runner per package.
+  select-packages:
+    name: Select packages
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.select.outputs.matrix }}
+    steps:
+      - id: select
+        run: |
+          INPUT="${{ github.event.inputs.packages || '' }}"
+          # Curated audit set: core + parser + the critical pipeline crates
+          # (CLI, LSP and WASM are intentionally excluded — too slow / not the
+          # correctness-critical core).
+          ALL='["rustledger-core","rustledger-parser","rustledger-booking","rustledger-validate","rustledger-loader","rustledger-plugin"]'
+          if [ "$INPUT" = "all" ] || [ "${{ github.event_name }}" = "schedule" ]; then
+            MATRIX="$ALL"
+          elif [ -n "$INPUT" ]; then
+            # Manual comma-separated input -> JSON array of packages.
+            MATRIX=$(printf '%s' "$INPUT" | tr ',' '\n' | sed '/^$/d; s/^/"/; s/$/"/' | paste -sd, - | sed 's/^/[/; s/$/]/')
+          else
+            # pull_request (path-triggered): curated default.
+            MATRIX='["rustledger-core"]'
+          fi
+          echo "Selected packages: $MATRIX"
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+
   mutants:
-    name: Mutation Testing
+    name: Mutate ${{ matrix.package }}
+    needs: select-packages
     runs-on: ubuntu-latest
     timeout-minutes: 180
+    strategy:
+      # One package's timeout/failure must not cancel the others.
+      fail-fast: false
+      matrix:
+        package: ${{ fromJSON(needs.select-packages.outputs.matrix) }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # stable
@@ -52,48 +90,21 @@ jobs:
           toolchain: stable
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2
         with:
-          prefix-key: mutants
+          prefix-key: mutants-${{ matrix.package }}
       - name: Install cargo-mutants
         run: cargo install cargo-mutants --locked
-      - name: Determine packages
-        id: packages
-        run: |
-          INPUT="${{ github.event.inputs.packages || 'rustledger-core' }}"
-          TIMEOUT="${{ github.event.inputs.timeout || '300' }}"
-
-          if [ "$INPUT" = "all" ]; then
-            # Test core + pipeline packages (skip CLI, LSP, and WASM which are slow)
-            PACKAGES="rustledger-core,rustledger-parser,rustledger-booking,rustledger-validate,rustledger-loader,rustledger-plugin"
-          elif [ "${{ github.event_name }}" = "schedule" ]; then
-            # Monthly: test all critical crates
-            PACKAGES="rustledger-core,rustledger-booking,rustledger-validate,rustledger-loader,rustledger-plugin"
-          else
-            PACKAGES="$INPUT"
-          fi
-
-          echo "packages=$PACKAGES" >> $GITHUB_OUTPUT
-          echo "timeout=$TIMEOUT" >> $GITHUB_OUTPUT
       - name: Run mutation testing
         run: |
-          PACKAGES="${{ steps.packages.outputs.packages }}"
-          TIMEOUT="${{ steps.packages.outputs.timeout }}"
-
-          echo "Testing packages: $PACKAGES"
+          TIMEOUT="${{ github.event.inputs.timeout || '300' }}"
+          echo "Mutating package: ${{ matrix.package }}"
           echo "Timeout per mutant: ${TIMEOUT}s"
           echo ""
-
-          # Convert comma-separated to --package flags
-          PACKAGE_FLAGS=""
-          IFS=',' read -ra PKG_ARRAY <<< "$PACKAGES"
-          for pkg in "${PKG_ARRAY[@]}"; do
-            PACKAGE_FLAGS="$PACKAGE_FLAGS --package $pkg"
-          done
 
           # Run mutants with timeout and parallel jobs
           cargo mutants \
             --timeout "$TIMEOUT" \
             --jobs 4 \
-            $PACKAGE_FLAGS \
+            --package "${{ matrix.package }}" \
             -- --all-features \
             2>&1 | tee mutants-output.txt
       - name: Parse results
@@ -132,12 +143,9 @@ jobs:
           echo "score=$SCORE" >> $GITHUB_OUTPUT
       - name: Summary
         run: |
-          echo "## Mutation Testing Results" >> $GITHUB_STEP_SUMMARY
+          echo "## Mutation Testing Results — ${{ matrix.package }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "Mutation testing injects bugs and checks if tests catch them." >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Packages Tested" >> $GITHUB_STEP_SUMMARY
-          echo "${{ steps.packages.outputs.packages }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Results" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
@@ -159,7 +167,8 @@ jobs:
       - name: Upload mutation results
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: mutation-results
+          # Per-package name so parallel matrix jobs don't clobber each other.
+          name: mutation-results-${{ matrix.package }}
           path: |
             mutants.out/
             mutants-output.txt
@@ -177,7 +186,7 @@ jobs:
           fi
 
           if [ "$SCORE" -lt "$THRESHOLD" ]; then
-            echo "::warning::Mutation score ($SCORE%) is below threshold ($THRESHOLD%)"
+            echo "::warning::[${{ matrix.package }}] Mutation score ($SCORE%) is below threshold ($THRESHOLD%)"
             echo "Consider adding more tests for the $MISSED missed mutants."
             if [ "${{ github.event_name }}" = "pull_request" ]; then
               echo ""
@@ -186,7 +195,7 @@ jobs:
               # Don't fail the workflow, just warn
             fi
           else
-            echo "Mutation score ($SCORE%) meets threshold ($THRESHOLD%)"
+            echo "[${{ matrix.package }}] Mutation score ($SCORE%) meets threshold ($THRESHOLD%)"
           fi
       # Per-plugin floor enforcement (Phase 3 of #992 plan, closes #1003).
       #
@@ -203,7 +212,7 @@ jobs:
       # `::warning::` annotation on the PR diff, satisfying the
       # "PR inline comments for surviving mutants" criterion of #1003.
       - name: Per-plugin mutation floor check
-        if: contains(steps.packages.outputs.packages, 'rustledger-plugin')
+        if: matrix.package == 'rustledger-plugin'
         env:
           GITHUB_ANNOTATIONS: '1'
           MUTATION_FLOOR: '10'

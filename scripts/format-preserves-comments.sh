@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
 # Comment-preservation check (#1332).
 #
-# `rledger format` must never DELETE the author's comments. The format
-# idempotence and bean-format roundtrip checks both miss this class: a
-# formatter that drops comments converges on a stable, self-consistent
-# output (idempotence stays green), and bean-format applied to that
+# `rledger format` must never DELETE the author's comment-only LINES (a line
+# whose only content is a `;`/`%` comment). Same-line *trailing* comments are
+# out of scope for this count-based metric — they live on content lines, so
+# they aren't counted; #1332/#1335/#1337 were all about whole comment lines
+# vanishing, which is what this catches.
+#
+# The format idempotence and bean-format roundtrip checks both miss this
+# class: a formatter that drops comments converges on a stable, self-
+# consistent output (idempotence stays green), and bean-format applied to that
 # already-stripped output preserves the absence (the roundtrip stays green
 # too). Both compare the formatter against ITS OWN output; neither compares
 # against the original input, so content loss slips through. #1332 was

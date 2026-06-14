@@ -649,12 +649,18 @@ mod tolerance_tests {
                 .with_currency("USD"),
         );
         let t = calculate_tolerances(&mk_txn(vec![p]), &opts);
+        // USD from the cost; STK from the units-quantum base (0.01 * 0.5).
+        // Assert the whole map so an unexpected/missing entry is caught.
         assert_eq!(t.get(&cur("USD")), Some(&dec!(0.01)));
+        assert_eq!(t.get(&cur("STK")), Some(&dec!(0.005)));
+        assert_eq!(t.len(), 2);
     }
 
     #[test]
     fn tolerance_price_inferred_is_units_quantum_times_mult_times_price() {
-        // infer_from_cost: 10.00 STK @ 3.00 USD -> 0.005 * 3.00 = 0.015.
+        // Price inference (still gated by `infer_tolerance_from_cost`):
+        // 10.00 STK @ 3.00 USD -> USD 0.005 * 3.00 = 0.015; STK keeps its
+        // 0.01 * 0.5 = 0.005 units-quantum base.
         let opts = ValidationOptions {
             infer_tolerance_from_cost: true,
             ..ValidationOptions::default()
@@ -664,6 +670,8 @@ mod tolerance_tests {
         );
         let t = calculate_tolerances(&mk_txn(vec![p]), &opts);
         assert_eq!(t.get(&cur("USD")), Some(&dec!(0.015)));
+        assert_eq!(t.get(&cur("STK")), Some(&dec!(0.005)));
+        assert_eq!(t.len(), 2);
     }
 
     #[test]
@@ -680,6 +688,7 @@ mod tolerance_tests {
             &opts,
         );
         assert_eq!(t.get(&cur("USD")), Some(&dec!(0.1)));
+        assert_eq!(t.len(), 1, "only the USD currency should appear");
     }
 
     #[test]
@@ -695,5 +704,6 @@ mod tolerance_tests {
             &opts,
         );
         assert_eq!(t.get(&cur("USD")), Some(&dec!(0.2)));
+        assert_eq!(t.len(), 1, "only the USD currency should appear");
     }
 }

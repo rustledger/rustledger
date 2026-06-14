@@ -58,13 +58,19 @@ impl NativePlugin for CheckCommodityPlugin {
             }
         }
 
-        // Report undeclared commodities
-        for currency in &used_commodities {
-            if !declared_commodities.contains(currency) {
-                errors.push(PluginError::warning(format!(
-                    "commodity '{currency}' used but not declared"
-                )));
-            }
+        // Report undeclared commodities. `used_commodities` is a `HashSet`,
+        // so collect-and-sort to give a deterministic warning order
+        // (iterating the set directly leaked hash order into the output —
+        // see #1235).
+        let mut undeclared: Vec<&String> = used_commodities
+            .iter()
+            .filter(|currency| !declared_commodities.contains(*currency))
+            .collect();
+        undeclared.sort_unstable();
+        for currency in undeclared {
+            errors.push(PluginError::warning(format!(
+                "commodity '{currency}' used but not declared"
+            )));
         }
 
         PluginOutput {

@@ -876,13 +876,28 @@ fn build_add_args(
         items.extend(positionals);
         items
     });
-    if quick.as_ref().is_some_and(|items| items.len() < 4) {
-        return Err(CommandError::new(
-            "quick mode requires at least payee, narration, account, amount",
-            "INVALID_QUICK_ARGS",
-            "Use: ag-rledger add <file> --quick <payee> <narration> <account> <amount> <account>",
-        )
-        .exit_code(agcli::ExitCode::USAGE));
+    // `ag-rledger add` is quick-mode only: an agent path has no interactive
+    // prompt, so `--quick` is REQUIRED. Without it the downstream
+    // `run_quick_mode_with_writer` does `.expect("quick mode args")` and
+    // panics on agent-controlled input; return a clean USAGE error instead.
+    match quick.as_ref().map(Vec::len) {
+        None => {
+            return Err(CommandError::new(
+                "add requires --quick (agent mode has no interactive prompt)",
+                "MISSING_QUICK_ARGS",
+                "Use: ag-rledger add <file> --quick <payee> <narration> <account> <amount> <account>",
+            )
+            .exit_code(agcli::ExitCode::USAGE));
+        }
+        Some(len) if len < 4 => {
+            return Err(CommandError::new(
+                "quick mode requires at least payee, narration, account, amount",
+                "INVALID_QUICK_ARGS",
+                "Use: ag-rledger add <file> --quick <payee> <narration> <account> <amount> <account>",
+            )
+            .exit_code(agcli::ExitCode::USAGE));
+        }
+        _ => {}
     }
     Ok(rustledger::cmd::add_cmd::Args {
         file,

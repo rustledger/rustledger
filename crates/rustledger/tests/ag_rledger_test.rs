@@ -305,6 +305,45 @@ fn add_without_yes_or_dry_run_errors_cleanly() {
     );
 }
 
+/// `ag-rledger add` is quick-mode only: omitting `--quick` (even with
+/// `--yes`/`--dry-run`) must return a clean USAGE error, NOT panic. Regression
+/// for the `.expect("quick mode args")` panic on agent-controlled input.
+#[test]
+fn add_without_quick_errors_cleanly_no_panic() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = write_fixture(tmp.path(), "ledger.beancount", GOOD_LEDGER);
+    let before = std::fs::read_to_string(&file).unwrap();
+
+    for confirm in ["--yes", "--dry-run"] {
+        let output = Command::new(ag_rledger())
+            .args(["add", file.to_str().unwrap(), confirm])
+            .stdin(std::process::Stdio::null())
+            .output()
+            .expect("spawn ag-rledger");
+        let code = output.status.code().expect("exit code");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let env: Value = serde_json::from_str(stdout.trim())
+            .unwrap_or_else(|e| panic!("envelope is not JSON ({e}): {stdout}"));
+
+        assert!(
+            !stderr.contains("panicked"),
+            "{confirm}: must not panic; stderr:\n{stderr}"
+        );
+        assert_eq!(env["ok"], Value::Bool(false), "{confirm}: {env}");
+        assert_eq!(
+            code, 2,
+            "{confirm}: missing --quick should map to USAGE (2): {env}"
+        );
+        assert_eq!(
+            env["error"]["code"], "MISSING_QUICK_ARGS",
+            "{confirm}: {env}"
+        );
+    }
+    // The ledger must be untouched.
+    assert_eq!(before, std::fs::read_to_string(&file).unwrap());
+}
+
 /// M3: `ag-rledger add --dry-run` previews without prompting or mutating.
 #[test]
 fn add_dry_run_previews_without_mutating() {

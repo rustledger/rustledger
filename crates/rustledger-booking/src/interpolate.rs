@@ -1840,14 +1840,21 @@ mod tests {
     #[test]
     fn interpolate_number_only_infers_currency_and_balances() {
         // A NumberOnly leg (`-100`, currency missing) infers its currency
-        // from the sibling USD posting and contributes `number` to the
-        // residual (kills that arm's `residual += *number`).
+        // from its OWN price annotation (the arm only consults the
+        // posting's own cost/price, never siblings — a bare NumberOnly
+        // with no cost/price would route to the unassigned path instead).
+        // The `@ 1 USD` price is a currency hint with a unit multiplier,
+        // so the leg contributes `-100` to the residual via that arm's
+        // `residual += *number` — which this test kills.
         let txn = Transaction::new(date(2024, 1, 1), "number-only")
             .with_synthesized_posting(Posting::new("Expenses:X", Amount::new(dec!(100), "USD")))
-            .with_synthesized_posting(Posting::with_incomplete(
-                "Assets:Cash",
-                IncompleteAmount::NumberOnly(dec!(-100)),
-            ));
+            .with_synthesized_posting(
+                Posting::with_incomplete("Assets:Cash", IncompleteAmount::NumberOnly(dec!(-100)))
+                    .with_price(rustledger_core::PriceAnnotation::unit(Amount::new(
+                        dec!(1),
+                        "USD",
+                    ))),
+            );
         let r = interpolate(&txn).expect("interpolation should succeed");
         assert_eq!(
             r.residuals.get("USD").copied().unwrap_or(Decimal::ZERO),

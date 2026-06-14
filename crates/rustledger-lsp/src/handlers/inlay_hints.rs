@@ -664,6 +664,94 @@ mod tests {
         }
     }
 
+    /// Compose what a monospace client would actually display: splice
+    /// each hint's label into its source line at the hint's character
+    /// position. Inlay hints are virtual text, so this reconstructs the
+    /// on-screen character grid — the alignment contract the formatter
+    /// targets and the thing the user eyeballs in the screenshots.
+    ///
+    /// (A real client may style inlay text with slightly different pixel
+    /// metrics, so this verifies character-grid alignment, not
+    /// pixel-exact rendering — but the character grid is the model both
+    /// `bean-format` and `rledger format` align to.)
+    ///
+    /// Test inputs are ASCII, so character index == byte index.
+    fn render_with_hints(source: &str, hints: &[InlayHint]) -> Vec<String> {
+        let mut lines: Vec<String> = source.lines().map(str::to_string).collect();
+        let mut by_line: std::collections::BTreeMap<u32, Vec<&InlayHint>> =
+            std::collections::BTreeMap::new();
+        for h in hints {
+            by_line.entry(h.position.line).or_default().push(h);
+        }
+        for (line, mut hs) in by_line {
+            // Insert right-to-left so earlier splices don't shift the
+            // columns of later ones on the same line.
+            hs.sort_by_key(|h| std::cmp::Reverse(h.position.character));
+            let Some(text) = lines.get_mut(line as usize) else {
+                continue;
+            };
+            for h in hs {
+                let InlayHintLabel::String(label) = &h.label else {
+                    continue;
+                };
+                let col = h.position.character as usize;
+                let idx = text.char_indices().nth(col).map_or(text.len(), |(i, _)| i);
+                text.insert_str(idx, label);
+            }
+        }
+        lines
+    }
+
+    /// #1346, the actual visual check: render the hint into the line as a
+    /// client would and assert the inferred amount's currency lands in
+    /// the SAME column as the explicit amount above it.
+    #[test]
+    fn test_inlay_hint_renders_aligned_currency_column_1346() {
+        let source = "\
+2024-01-15 * \"Test\"
+  Expenses:Food:Restaurants  -50.00 USD
+  Assets:Cash
+";
+        let result = parse(source);
+        assert!(
+            result.errors.is_empty(),
+            "parse errors: {:?}",
+            result.errors
+        );
+
+        let params = InlayHintParams {
+            text_document: lsp_types::TextDocumentIdentifier {
+                uri: "file:///test.beancount".parse().unwrap(),
+            },
+            range: lsp_types::Range {
+                start: Position::new(0, 0),
+                end: Position::new(10, 0),
+            },
+            work_done_progress_params: Default::default(),
+        };
+        let hints = handle_inlay_hints(&params, source, &result, PositionEncoding::Utf16)
+            .unwrap_or_default();
+
+        let rendered = render_with_hints(source, &hints);
+        let explicit = &rendered[1]; // `  Expenses:Food:Restaurants  -50.00 USD`
+        let hinted = &rendered[2]; // `  Assets:Cash` + hint
+
+        let usd_col = |s: &str| s.find("USD").expect("a USD currency on the line");
+        assert_eq!(
+            usd_col(explicit),
+            usd_col(hinted),
+            "currency columns must line up on screen:\n  explicit: {explicit:?}\n  hinted:   {hinted:?}"
+        );
+        // The right-justified number field also ends at the same column
+        // (currency start - 1 space), so the decimals line up too.
+        let dot_col = |s: &str| s.find(".00").expect("a .00 on the line");
+        assert_eq!(
+            dot_col(explicit),
+            dot_col(hinted),
+            "decimal points must align"
+        );
+    }
+
     /// #1346: the inferred-amount hint must align with the column
     /// `rledger format` uses for explicit amounts, not sit at a fixed
     /// 2-space gap after the (short) elided account. Here the explicit

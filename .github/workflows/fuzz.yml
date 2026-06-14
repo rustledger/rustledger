@@ -109,13 +109,26 @@ jobs:
         if: steps.check.outputs.should_run == 'true'
         run: |
           cd crates/rustledger-parser
-          if [ -d "fuzz/artifacts/${{ matrix.target }}" ] && [ "$(ls -A fuzz/artifacts/${{ matrix.target }})" ]; then
-            echo "::error::Fuzzer found crashes!"
-            ls -la fuzz/artifacts/${{ matrix.target }}/
-            exit 1
-          else
-            echo "No crashes found"
+          dir="fuzz/artifacts/${{ matrix.target }}"
+          if [ ! -d "$dir" ] || [ -z "$(ls -A "$dir" 2>/dev/null)" ]; then
+            echo "No crash artifacts found"
+            exit 0
           fi
+          # Real failures are crash-/oom-/timeout-/leak- artifacts.
+          # `slow-unit-*` means an input was slow but completed — surface
+          # it as a non-fatal warning instead of failing the build (#1342).
+          crashes=$(find "$dir" -maxdepth 1 -type f ! -name 'slow-unit-*')
+          slow=$(find "$dir" -maxdepth 1 -type f -name 'slow-unit-*')
+          if [ -n "$slow" ]; then
+            echo "::warning::Fuzzer found slow units (non-fatal); investigate for super-linear behavior:"
+            echo "$slow"
+          fi
+          if [ -n "$crashes" ]; then
+            echo "::error::Fuzzer found crashes!"
+            ls -la "$dir"/
+            exit 1
+          fi
+          echo "No crashes found (slow units, if present, are non-fatal)"
       - name: Upload crash artifacts
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -197,13 +210,26 @@ jobs:
         if: steps.check.outputs.should_run == 'true'
         run: |
           cd crates/rustledger-query
-          if [ -d "fuzz/artifacts/fuzz_query_parse" ] && [ "$(ls -A fuzz/artifacts/fuzz_query_parse)" ]; then
-            echo "::error::Fuzzer found crashes!"
-            ls -la fuzz/artifacts/fuzz_query_parse/
-            exit 1
-          else
-            echo "No crashes found"
+          dir="fuzz/artifacts/fuzz_query_parse"
+          if [ ! -d "$dir" ] || [ -z "$(ls -A "$dir" 2>/dev/null)" ]; then
+            echo "No crash artifacts found"
+            exit 0
           fi
+          # Real failures are crash-/oom-/timeout-/leak- artifacts.
+          # `slow-unit-*` means an input was slow but completed — surface
+          # it as a non-fatal warning instead of failing the build (#1342).
+          crashes=$(find "$dir" -maxdepth 1 -type f ! -name 'slow-unit-*')
+          slow=$(find "$dir" -maxdepth 1 -type f -name 'slow-unit-*')
+          if [ -n "$slow" ]; then
+            echo "::warning::Fuzzer found slow units (non-fatal); investigate for super-linear behavior:"
+            echo "$slow"
+          fi
+          if [ -n "$crashes" ]; then
+            echo "::error::Fuzzer found crashes!"
+            ls -la "$dir"/
+            exit 1
+          fi
+          echo "No crashes found (slow units, if present, are non-fatal)"
       - name: Upload crash artifacts
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -285,13 +311,26 @@ jobs:
         if: steps.check.outputs.should_run == 'true'
         run: |
           cd crates/rustledger-booking
-          if [ -d "fuzz/artifacts/fuzz_booking" ] && [ "$(ls -A fuzz/artifacts/fuzz_booking)" ]; then
-            echo "::error::Fuzzer found crashes!"
-            ls -la fuzz/artifacts/fuzz_booking/
-            exit 1
-          else
-            echo "No crashes found"
+          dir="fuzz/artifacts/fuzz_booking"
+          if [ ! -d "$dir" ] || [ -z "$(ls -A "$dir" 2>/dev/null)" ]; then
+            echo "No crash artifacts found"
+            exit 0
           fi
+          # Real failures are crash-/oom-/timeout-/leak- artifacts.
+          # `slow-unit-*` means an input was slow but completed — surface
+          # it as a non-fatal warning instead of failing the build (#1342).
+          crashes=$(find "$dir" -maxdepth 1 -type f ! -name 'slow-unit-*')
+          slow=$(find "$dir" -maxdepth 1 -type f -name 'slow-unit-*')
+          if [ -n "$slow" ]; then
+            echo "::warning::Fuzzer found slow units (non-fatal); investigate for super-linear behavior:"
+            echo "$slow"
+          fi
+          if [ -n "$crashes" ]; then
+            echo "::error::Fuzzer found crashes!"
+            ls -la "$dir"/
+            exit 1
+          fi
+          echo "No crashes found (slow units, if present, are non-fatal)"
       - name: Upload crash artifacts
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7

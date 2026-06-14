@@ -166,6 +166,33 @@ pub fn handle_inlay_hints(
             let indent = line.len() - line.trim_start().len();
             let end_col = indent + trimmed.len();
 
+            // Align the greyed-out amount with the column `rledger
+            // format` uses for explicit amounts (issue #1346), instead
+            // of a fixed 2-space gap that left the hint out of line with
+            // sibling amounts. The formatter right-justifies the number
+            // in a `number_width` field starting at `number_col`
+            // (`ParseResult::alignment`, the same file-wide alignment
+            // the parser pre-computed); reproduce that so the hint sits
+            // where the real amount would.
+            let num_text = amount.number.to_string();
+            let align = parse_result.alignment;
+            let label = if align.number_col > 0 {
+                // Start column of the right-justified number text.
+                let num_start =
+                    align.number_col + align.number_width.saturating_sub(num_text.chars().count());
+                // Gap from the account end to the number, never below
+                // the conventional 2-space minimum. A long amount-less
+                // account whose end passes `num_start` can't be aligned
+                // — the formatter excludes such postings from the column
+                // for the same reason (#1346 Option 1 limitation).
+                let gap = num_start.saturating_sub(end_col).max(2);
+                format!("{}{} {}", " ".repeat(gap), num_text, amount.currency)
+            } else {
+                // No number-bearing postings to align to: fall back to
+                // the conventional 2-space gap.
+                format!("  {} {}", num_text, amount.currency)
+            };
+
             // Store data for resolve - include account for rich tooltip
             let data = serde_json::json!({
                 "kind": "inferred_amount",
@@ -176,11 +203,14 @@ pub fn handle_inlay_hints(
 
             hints.push(InlayHint {
                 position: Position::new(posting_line, end_col as u32),
-                label: InlayHintLabel::String(format!("  {} {}", amount.number, amount.currency)),
+                label: InlayHintLabel::String(label),
                 kind: Some(InlayHintKind::TYPE),
                 text_edits: None,
                 tooltip: None, // Resolved lazily
-                padding_left: Some(true),
+                // The leading gap is baked into the label so the number
+                // lands exactly at the formatter's column; no extra
+                // client-side left padding (which would shift it by 1).
+                padding_left: Some(false),
                 padding_right: None,
                 data: Some(data),
             });
@@ -625,5 +655,108 @@ mod tests {
             hints.is_none() || hints.as_ref().unwrap().is_empty(),
             "no hint expected for CurrencyOnly source posting; got {hints:?}"
         );
+    }
+
+    fn hint_label(h: &InlayHint) -> String {
+        match &h.label {
+            InlayHintLabel::String(s) => s.clone(),
+            other => panic!("expected String label; got {other:?}"),
+        }
+    }
+
+    /// #1346: the inferred-amount hint must align with the column
+    /// `rledger format` uses for explicit amounts, not sit at a fixed
+    /// 2-space gap after the (short) elided account. Here the explicit
+    /// posting has the longer account, so it drives the number column;
+    /// the hint on the shorter elided account must be padded out to it.
+    #[test]
+    fn test_inlay_hint_aligns_with_formatter_amount_column_1346() {
+        let source = "\
+2024-01-15 * \"Test\"
+  Expenses:Food:Restaurants  -50.00 USD
+  Assets:Cash
+";
+        let result = parse(source);
+        assert!(
+            result.errors.is_empty(),
+            "parse errors: {:?}",
+            result.errors
+        );
+
+        let params = InlayHintParams {
+            text_document: lsp_types::TextDocumentIdentifier {
+                uri: "file:///test.beancount".parse().unwrap(),
+            },
+            range: lsp_types::Range {
+                start: Position::new(0, 0),
+                end: Position::new(10, 0),
+            },
+            work_done_progress_params: Default::default(),
+        };
+        let hints = handle_inlay_hints(&params, source, &result, PositionEncoding::Utf16)
+            .unwrap_or_default();
+        assert_eq!(hints.len(), 1, "one inferred-amount hint expected");
+
+        let h = &hints[0];
+        // Elided `Assets:Cash` is on line 2 (0-indexed).
+        assert_eq!(h.position.line, 2);
+
+        let align = result.alignment;
+        assert!(align.number_col > 0, "file should have an alignment column");
+
+        // The number text must begin at the formatter's right-justified
+        // slot: number_col + (number_width - num_len). With explicit
+        // `-50.00` (width 6) and inferred `50.00` (len 5), that is
+        // number_col + 1 — so the number END (and the currency after it)
+        // lines up with the explicit amount above.
+        let label = hint_label(h);
+        let leading = label.len() - label.trim_start().len();
+        let num_start_col = h.position.character as usize + leading;
+        assert_eq!(
+            num_start_col,
+            align.number_col + align.number_width - 5,
+            "hint number should be right-justified at the formatter column; label={label:?}"
+        );
+        assert_eq!(label.trim_start(), "50.00 USD");
+    }
+
+    /// #1346 Option-1 limitation: when the *elided* posting has the
+    /// longest account, the formatter excludes it from the number
+    /// column, so the hint can't be aligned — it falls back to the
+    /// conventional 2-space gap rather than overlapping the account.
+    #[test]
+    fn test_inlay_hint_long_elided_account_falls_back_to_min_gap_1346() {
+        let source = "\
+2024-01-15 * \"Opening\"
+  Assets:Checking  1000.00 USD
+  Equity:Opening-Balances
+";
+        let result = parse(source);
+        assert!(
+            result.errors.is_empty(),
+            "parse errors: {:?}",
+            result.errors
+        );
+
+        let params = InlayHintParams {
+            text_document: lsp_types::TextDocumentIdentifier {
+                uri: "file:///test.beancount".parse().unwrap(),
+            },
+            range: lsp_types::Range {
+                start: Position::new(0, 0),
+                end: Position::new(10, 0),
+            },
+            work_done_progress_params: Default::default(),
+        };
+        let hints = handle_inlay_hints(&params, source, &result, PositionEncoding::Utf16)
+            .unwrap_or_default();
+        assert_eq!(hints.len(), 1);
+
+        // `Equity:Opening-Balances` ends past the number column, so the
+        // gap clamps to the 2-space minimum.
+        let label = hint_label(&hints[0]);
+        let leading = label.len() - label.trim_start().len();
+        assert_eq!(leading, 2, "expected min 2-space gap; label={label:?}");
+        assert_eq!(label.trim_start(), "-1000.00 USD");
     }
 }

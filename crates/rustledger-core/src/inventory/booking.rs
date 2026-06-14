@@ -1097,18 +1097,17 @@ mod reduction_tests {
         assert!(matches!(err, super::BookingError::InsufficientUnits { .. }));
     }
 
-    // ---- Filter isolation (currency / empty / sign) -------------------
-    // One fixture per method: an empty STK lot, an unrelated OTH lot, and
-    // the real STK lot. A correct reducer touches ONLY the real STK lot;
-    // the `&&`/`==`/`!is_empty` filter mutants would pull in OTH or the
-    // empty lot (or drop the real one), changing the basis.
+    // ---- Filter isolation (currency / sign) ---------------------------
+    // One fixture per method: an unrelated OTH lot plus the real STK lot.
+    // A correct reducer touches ONLY the real STK lot; the currency `==`
+    // and the `&&` connecting it would pull OTH in (or drop the real
+    // one), changing the basis. (A zero-units "empty" lot is intentionally
+    // NOT added here: `Inventory::add` drops empty positions on insert, so
+    // the `!is_empty()` filter clause is unreachable for add-built
+    // inventories and can't be exercised this way.)
 
     fn isolation_inv() -> Inventory {
         let mut i = Inventory::new();
-        i.add(Position::with_cost(
-            Amount::new(dec!(0), "STK"), // empty: must be skipped
-            Cost::new(dec!(999), "USD").with_date(naive_date(2024, 1, 1).unwrap()),
-        ));
         i.add(Position::with_cost(
             Amount::new(dec!(10), "OTH"), // different currency: must be ignored
             Cost::new(dec!(888), "USD").with_date(naive_date(2024, 1, 1).unwrap()),
@@ -1132,22 +1131,22 @@ mod reduction_tests {
     }
 
     #[test]
-    fn fifo_filters_currency_and_empty() {
+    fn fifo_filters_currency() {
         assert_isolated(BookingMethod::Fifo);
     }
 
     #[test]
-    fn hifo_filters_currency_and_empty() {
+    fn hifo_filters_currency() {
         assert_isolated(BookingMethod::Hifo);
     }
 
     #[test]
-    fn strict_filters_currency_and_empty() {
+    fn strict_filters_currency() {
         assert_isolated(BookingMethod::Strict);
     }
 
     #[test]
-    fn average_filters_currency_and_empty() {
+    fn average_filters_currency() {
         // average filters by currency + non-empty (no cost-spec / sign filter).
         let inv = isolation_inv();
         let r = try_reduce(&inv, &sell_stk(5), BookingMethod::Average);
@@ -1169,6 +1168,29 @@ mod reduction_tests {
         let r = try_reduce(&i, &sell_stk(5), BookingMethod::Fifo);
         assert_eq!(basis(&r), dec!(500)); // 5 * 100 from the long lot only
         assert!(r.matched.iter().all(|p| p.units.number.is_sign_positive()));
+    }
+
+    #[test]
+    fn strict_rejects_when_only_same_sign_lot_present() {
+        // STRICT against an inventory holding ONLY a same-sign (short)
+        // lot must return NoMatchingLot — the single reducible lot fails
+        // `can_reduce`, leaving zero matches. This pins all three `&&`
+        // connectors in `try_reduce_strict`'s filter: each `&& -> ||`
+        // mutant wrongly admits the short lot (currency==STK or the
+        // always-true `matches_cost_spec` on the default spec satisfies
+        // the disjunction), turning 0 matches into 1 and succeeding via
+        // `try_reduce_from_lot` instead of erroring.
+        let mut i = Inventory::new();
+        i.add(lot(-10, 100, 1)); // short STK only; a sell is the same sign
+        let res = i.try_reduce(
+            &sell_stk(5),
+            Some(&CostSpec::default()),
+            BookingMethod::Strict,
+        );
+        assert!(
+            matches!(res, Err(super::BookingError::NoMatchingLot { .. })),
+            "strict reduction against a same-sign-only inventory must not match; got {res:?}"
+        );
     }
 
     // ---- Insufficient-units accounting --------------------------------

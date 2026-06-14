@@ -184,6 +184,15 @@ pub fn handle_inlay_hints(
             // field pad to its minimum while the justify pad is nonzero.
             // `PostingAlignment::default()` (col 0, width 0) naturally
             // yields the conventional 2-space gap.
+            //
+            // Caveat: `number_col`/`number_width` are the *canonical*
+            // formatter columns (2-space indent, single inner spaces),
+            // while `end_col_chars` is measured from the raw source line.
+            // So the hint aligns perfectly with explicit amounts only
+            // when the file is already formatted (the steady state). On
+            // a non-canonically-indented or unformatted line the hint
+            // sits where `rledger format` *would* put the amount, which
+            // may differ from where the current explicit amount renders.
             let num_text = amount.number.to_string();
             let align = parse_result.alignment;
             let field_pad = align.number_col.saturating_sub(end_col_chars).max(2);

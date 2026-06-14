@@ -307,7 +307,7 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 ///     positionally) — verified against rkyv 0.8.16 — so this change
 ///     does NOT require a separate version bump. If a future rkyv
 ///     version changes that encoding, OR if `CostNumber` gains
-///     additional fields, bump to v9.
+///     additional fields, bump to v10.
 /// v9: `CachedOptions` gained a `set_options: Vec<String>` field
 ///     (#1340). It was previously dropped, so a cache hit lost the
 ///     record of which options the file explicitly set — making

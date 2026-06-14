@@ -181,8 +181,17 @@ fn query_cache_preserves_file_booking_method() {
          lost across the cache round-trip (#1340)"
     );
     assert_eq!(warm_out, nocache_out, "cached output must match --no-cache");
-    assert!(
-        warm_out.contains('2'),
+
+    // Parse the COUNT(*) value rather than substring-matching: FIFO
+    // expands the multi-lot `-15 STK {}` reduction into 2 per-lot rows,
+    // so the count of negative Assets:Stock postings must be exactly 2.
+    // (STRICT — the buggy cache path — fails to book it, yielding 1.)
+    let count: i64 = warm_out
+        .lines()
+        .find_map(|l| l.trim().parse::<i64>().ok())
+        .expect("query output should contain a numeric COUNT value");
+    assert_eq!(
+        count, 2,
         "FIFO should expand the multi-lot reduction into 2 rows; got:\n{warm_out}"
     );
 }

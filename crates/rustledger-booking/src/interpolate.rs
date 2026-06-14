@@ -1688,4 +1688,176 @@ mod tests {
              currencies (bean-check parity); got {result:?}"
         );
     }
+
+    // ---- #1309 cluster 2: residual / price arithmetic ----------------
+    // Exact-value assertions on the residual math so the surviving
+    // mutants (cost/price `*`, residual `+=`, the multi-currency split
+    // guard and index math) are killed.
+
+    #[test]
+    fn interpolate_unit_price_is_units_times_price() {
+        // 10 STK @ 3 USD → the elided cash leg is -30 USD.
+        let txn = Transaction::new(date(2024, 1, 1), "Buy")
+            .with_synthesized_posting(
+                Posting::new("Assets:Stock", Amount::new(dec!(10), "STK")).with_price(
+                    rustledger_core::PriceAnnotation::unit(Amount::new(dec!(3), "USD")),
+                ),
+            )
+            .with_synthesized_posting(Posting::auto("Assets:Cash"));
+        let r = interpolate(&txn).expect("interpolation should succeed");
+        let cash = get_amount(&r.transaction.postings[1]).expect("filled");
+        assert_eq!(cash.currency, "USD");
+        assert_eq!(cash.number, dec!(-30)); // kills `abs * price` and `* signum -> +`
+    }
+
+    #[test]
+    fn interpolate_total_price_is_total() {
+        // 10 STK @@ 30 USD → elided cash -30 USD.
+        let txn = Transaction::new(date(2024, 1, 1), "Buy")
+            .with_synthesized_posting(
+                Posting::new("Assets:Stock", Amount::new(dec!(10), "STK")).with_price(
+                    rustledger_core::PriceAnnotation::total(Amount::new(dec!(30), "USD")),
+                ),
+            )
+            .with_synthesized_posting(Posting::auto("Assets:Cash"));
+        let r = interpolate(&txn).expect("interpolation should succeed");
+        let cash = get_amount(&r.transaction.postings[1]).expect("filled");
+        assert_eq!(cash.number, dec!(-30)); // kills total-price `* signum -> +`
+        assert_eq!(cash.currency, "USD"); // right magnitude in the right currency
+    }
+
+    #[test]
+    fn interpolate_three_posting_residual_sum() {
+        // 100 USD + 25 USD + elided → cash -125 USD.
+        let txn = Transaction::new(date(2024, 1, 1), "Split")
+            .with_synthesized_posting(Posting::new("Expenses:A", Amount::new(dec!(100), "USD")))
+            .with_synthesized_posting(Posting::new("Expenses:B", Amount::new(dec!(25), "USD")))
+            .with_synthesized_posting(Posting::auto("Assets:Cash"));
+        let r = interpolate(&txn).expect("interpolation should succeed");
+        let cash = get_amount(&r.transaction.postings[2]).expect("filled");
+        assert_eq!(cash.number, dec!(-125)); // kills residual `+= -> -=`/`*=`
+    }
+
+    #[test]
+    fn interpolate_single_elided_splits_two_currencies() {
+        // One auto posting absorbs two currency residuals → two filled
+        // postings (-100 USD, -50 EUR). Exercises the multi-currency
+        // split path's guard and `len() - 1` index push.
+        let txn = Transaction::new(date(2024, 1, 1), "FX")
+            .with_synthesized_posting(Posting::new("Assets:USD", Amount::new(dec!(100), "USD")))
+            .with_synthesized_posting(Posting::new("Assets:EUR", Amount::new(dec!(50), "EUR")))
+            .with_synthesized_posting(Posting::auto("Equity:Balance"));
+        let r = interpolate(&txn).expect("interpolation should succeed");
+        let filled: Vec<Amount> = r
+            .filled_indices
+            .iter()
+            .map(|&i| {
+                get_amount(&r.transaction.postings[i])
+                    .expect("filled")
+                    .clone()
+            })
+            .collect();
+        assert_eq!(filled.len(), 2, "one elided posting should split into two");
+        assert!(
+            filled
+                .iter()
+                .any(|a| a.currency == "USD" && a.number == dec!(-100))
+        );
+        assert!(
+            filled
+                .iter()
+                .any(|a| a.currency == "EUR" && a.number == dec!(-50))
+        );
+    }
+
+    #[test]
+    fn interpolate_post_fill_residual_returns_to_zero() {
+        // After filling the elided leg, the tracked residual must return
+        // to zero (kills the post-fill `residual += interpolated` mutants:
+        // `-=` → 2R, `*=` → R·interpolated).
+        let txn = Transaction::new(date(2024, 1, 1), "Split")
+            .with_synthesized_posting(Posting::new("Expenses:A", Amount::new(dec!(100), "USD")))
+            .with_synthesized_posting(Posting::new("Expenses:B", Amount::new(dec!(25), "USD")))
+            .with_synthesized_posting(Posting::auto("Assets:Cash"));
+        let r = interpolate(&txn).expect("interpolation should succeed");
+        assert_eq!(
+            r.residuals.get("USD").copied(),
+            Some(dec!(0)),
+            "residual must be exactly zero after the elided leg is filled"
+        );
+    }
+
+    #[test]
+    fn interpolate_preserves_subcent_residual() {
+        // Explicit USD legs net to zero; a 0.001 USD per-unit price
+        // contribution leaves a sub-cent residual. The currency's tracked
+        // scale is 2 (from the 1.00 USD legs), so naively rounding the
+        // -0.001 fill to 0.00 would silently leave the txn unbalanced.
+        // `round_interpolated` must keep full precision — kills the
+        // `!residual.is_zero()` guard.
+        let txn = Transaction::new(date(2024, 1, 1), "subcent")
+            .with_synthesized_posting(Posting::new("Assets:A", Amount::new(dec!(1.00), "USD")))
+            .with_synthesized_posting(Posting::new("Assets:B", Amount::new(dec!(-1.00), "USD")))
+            .with_synthesized_posting(
+                Posting::new("Assets:Stock", Amount::new(dec!(1), "STK")).with_price(
+                    rustledger_core::PriceAnnotation::unit(Amount::new(dec!(0.001), "USD")),
+                ),
+            )
+            .with_synthesized_posting(Posting::auto("Assets:Cash"));
+        let r = interpolate(&txn).expect("interpolation should succeed");
+        let cash = r
+            .filled_indices
+            .iter()
+            .map(|&i| get_amount(&r.transaction.postings[i]).expect("filled"))
+            .find(|a| a.currency == "USD")
+            .expect("a USD fill");
+        assert_eq!(
+            cash.number,
+            dec!(-0.001),
+            "sub-cent residual must be preserved, not rounded to zero"
+        );
+    }
+
+    #[test]
+    fn interpolate_currency_only_fill_zeroes_residual() {
+        // A CurrencyOnly elided leg (`Assets:Cash USD`, number missing)
+        // is filled via the known-currency path; the post-fill residual
+        // must return to zero (kills that path's `residual += interpolated`).
+        let txn = Transaction::new(date(2024, 1, 1), "currency-only")
+            .with_synthesized_posting(Posting::new("Expenses:X", Amount::new(dec!(100), "USD")))
+            .with_synthesized_posting(Posting::with_incomplete(
+                "Assets:Cash",
+                IncompleteAmount::CurrencyOnly("USD".into()),
+            ));
+        let r = interpolate(&txn).expect("interpolation should succeed");
+        let cash = get_amount(&r.transaction.postings[1]).expect("filled");
+        assert_eq!(cash.number, dec!(-100));
+        assert_eq!(r.residuals.get("USD").copied(), Some(dec!(0)));
+    }
+
+    #[test]
+    fn interpolate_number_only_infers_currency_and_balances() {
+        // A NumberOnly leg (`-100`, currency missing) infers its currency
+        // from its OWN price annotation (the arm only consults the
+        // posting's own cost/price, never siblings — a bare NumberOnly
+        // with no cost/price would route to the unassigned path instead).
+        // The `@ 1 USD` price is a currency hint with a unit multiplier,
+        // so the leg contributes `-100` to the residual via that arm's
+        // `residual += *number` — which this test kills.
+        let txn = Transaction::new(date(2024, 1, 1), "number-only")
+            .with_synthesized_posting(Posting::new("Expenses:X", Amount::new(dec!(100), "USD")))
+            .with_synthesized_posting(
+                Posting::with_incomplete("Assets:Cash", IncompleteAmount::NumberOnly(dec!(-100)))
+                    .with_price(rustledger_core::PriceAnnotation::unit(Amount::new(
+                        dec!(1),
+                        "USD",
+                    ))),
+            );
+        let r = interpolate(&txn).expect("interpolation should succeed");
+        assert_eq!(
+            r.residuals.get("USD").copied(),
+            Some(dec!(0)),
+            "NumberOnly leg's number must net the residual to zero"
+        );
+    }
 }

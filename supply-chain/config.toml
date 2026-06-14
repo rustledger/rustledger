@@ -79,6 +79,10 @@ criteria = "safe-to-deploy"
 version = "0.9.1"
 criteria = "safe-to-deploy"
 
+[[exemptions.agcli]]
+version = "0.13.0"
+criteria = "safe-to-deploy"
+
 [[exemptions.ahash]]
 version = "0.7.8"
 criteria = "safe-to-deploy"
@@ -1057,6 +1061,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.shell-words]]
 version = "1.1.1"
+criteria = "safe-to-deploy"
+
+[[exemptions.signal-hook-registry]]
+version = "1.4.8"
 criteria = "safe-to-deploy"
 
 [[exemptions.simd-adler32]]

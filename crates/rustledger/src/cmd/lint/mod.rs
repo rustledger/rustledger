@@ -27,12 +27,25 @@ pub enum LintKind {
     Transfers(transfers::Args),
 }
 
-/// Dispatch to the requested lint.
+/// Dispatch to the requested lint, writing its report to stdout.
 ///
 /// # Errors
 /// Propagates errors from the underlying lint implementation.
 pub fn run(args: &Args) -> Result<ExitCode> {
     match &args.lint {
         LintKind::Transfers(t_args) => transfers::run(t_args),
+    }
+}
+
+/// Dispatch to the requested lint, writing its report to `out`.
+///
+/// Writer-injectable variant used by `ag-rledger`; behavior otherwise
+/// matches [`run`].
+///
+/// # Errors
+/// Propagates errors from the underlying lint implementation.
+pub fn run_with_writer<W: std::io::Write>(args: &Args, out: &mut W) -> Result<ExitCode> {
+    match &args.lint {
+        LintKind::Transfers(t_args) => transfers::run_with_writer(t_args, out),
     }
 }

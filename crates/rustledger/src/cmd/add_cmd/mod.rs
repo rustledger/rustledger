@@ -195,8 +195,52 @@ fn canonical_format_directive(directive: &Directive, config: &FormatConfig) -> R
         .map_err(|e| anyhow::anyhow!(e.to_string()))
 }
 
-/// Run the add command in quick mode.
+/// Run the add command in quick mode (writes to stdout).
 fn run_quick_mode(args: &Args, file: &PathBuf, date: NaiveDate) -> Result<()> {
+    let mut stdout = std::io::stdout().lock();
+    run_quick_mode_with_writer(args, file, date, &mut stdout)
+}
+
+/// Quick-mode entry point for the agent-native `ag-rledger` binary.
+///
+/// Parses the date the same way [`run`] does, then runs quick mode with
+/// output written to `out`. This path never prompts on stdin: it requires
+/// `--yes` (append) or `--dry-run` (preview) and returns an error if neither
+/// is set, rather than blocking on a TTY or silently defaulting to "yes" on
+/// EOF. The `ag-rledger` add handler enforces the same precondition before
+/// calling this, so the error here is a defensive backstop. Behavior
+/// otherwise matches `run` + quick mode.
+///
+/// # Errors
+/// Returns an error when neither `--yes` nor `--dry-run` is set, and
+/// propagates date-parse, formatting, and file-append errors.
+pub fn run_quick_with_writer<W: std::io::Write>(
+    args: &Args,
+    file: &PathBuf,
+    out: &mut W,
+) -> Result<()> {
+    if !args.yes && !args.dry_run {
+        bail!(
+            "ag-rledger add requires --yes (to append) or --dry-run (to preview); \
+             the agent path never prompts interactively"
+        );
+    }
+    let date = if let Some(ref d) = args.date {
+        parse_date(d)?
+    } else {
+        jiff::Zoned::now().date()
+    };
+    run_quick_mode_with_writer(args, file, date, out)
+}
+
+/// Run the add command in quick mode, writing preview/result lines to
+/// `out`.
+fn run_quick_mode_with_writer<W: std::io::Write>(
+    args: &Args,
+    file: &PathBuf,
+    date: NaiveDate,
+    out: &mut W,
+) -> Result<()> {
     let quick_args = args.quick.as_ref().expect("quick mode args");
 
     if quick_args.len() < 4 {
@@ -298,23 +342,23 @@ fn run_quick_mode(args: &Args, file: &PathBuf, date: NaiveDate) -> Result<()> {
     let formatted = canonical_format_directive(&directive, &config)?;
 
     if args.dry_run {
-        println!("{formatted}");
+        writeln!(out, "{formatted}")?;
         return Ok(());
     }
 
     // Show preview and confirm
     if !args.yes {
-        println!("Preview:");
-        println!("{formatted}");
-        print!("Append to {}? [Y/n] ", file.display());
-        std::io::stdout().flush()?;
+        writeln!(out, "Preview:")?;
+        writeln!(out, "{formatted}")?;
+        write!(out, "Append to {}? [Y/n] ", file.display())?;
+        out.flush()?;
 
         let mut response = String::new();
         std::io::stdin().read_line(&mut response)?;
         let response = response.trim().to_lowercase();
 
         if !response.is_empty() && response != "y" && response != "yes" {
-            println!("Cancelled.");
+            writeln!(out, "Cancelled.")?;
             return Ok(());
         }
     }
@@ -322,7 +366,7 @@ fn run_quick_mode(args: &Args, file: &PathBuf, date: NaiveDate) -> Result<()> {
     // Append to file
     append_transaction(file, &formatted)?;
 
-    println!("Transaction appended to {}", file.display());
+    writeln!(out, "Transaction appended to {}", file.display())?;
     Ok(())
 }
 

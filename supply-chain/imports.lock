@@ -638,6 +638,13 @@ user-id = 6741
 user-login = "Darksonn"
 user-name = "Alice Ryhl"
 
+[[publisher.tokio-macros]]
+version = "2.7.0"
+when = "2026-04-03"
+user-id = 6741
+user-login = "Darksonn"
+user-name = "Alice Ryhl"
+
 [[publisher.toml]]
 version = "0.9.12+spec-1.1.0"
 when = "2026-02-10"

@@ -52,6 +52,8 @@ authors = ["Rustledger Contributors"]
 name = "rustledger"
 
 [workspace.dependencies]
+# Agent-native CLI framework for the `agledger` binary (#1291).
+agcli = "0.13.0"
 # Core
 rust_decimal = { version = "1.42", features = ["serde"] }
 # `js` feature is wasm32-only (cfg-gated inside jiff) and pulls in

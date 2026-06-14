@@ -21,13 +21,30 @@ default = ["python-plugin-wasm"]
 # Enable Python plugin support via WASM sandbox (adds ~30s to build time)
 # This allows running existing Python beancount plugins
 python-plugin-wasm = ["rustledger-plugin/python-plugins", "rustledger-loader/wasm-plugins", "rustledger-loader/python-plugins"]
+# Agent-native CLI (#1291). Pulls in the async/agent-only dependencies
+# (`agcli`, `tokio`) so the synchronous `rledger` CLI/lib don't carry them by
+# default. Required to build the `ag-rledger` binary and to run its
+# integration test (`tests/ag_rledger_test.rs`).
+ag-rledger = ["dep:agcli", "dep:tokio"]
 
 # Primary binary - unified CLI with subcommands
 [[bin]]
 name = "rledger"
 path = "src/bin/rledger.rs"
 
+# Agent-native CLI (#1291). Separate binary; keeps `rledger` synchronous.
+# Gated behind the `ag-rledger` feature so the async deps (agcli/tokio) are
+# only pulled when this binary is actually built.
+[[bin]]
+name = "ag-rledger"
+path = "src/bin/ag-rledger.rs"
+required-features = ["ag-rledger"]
+
 [dependencies]
+# Agent-native CLI deps (#1291), enabled only by the `ag-rledger` feature so
+# the sync `rledger` CLI/lib don't carry the async runtime by default.
+agcli = { workspace = true, optional = true }
+tokio = { workspace = true, features = ["macros", "rt"], optional = true }
 rustledger-core.workspace = true
 rustledger-parser.workspace = true
 rustledger-loader.workspace = true

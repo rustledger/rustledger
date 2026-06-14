@@ -34,59 +34,59 @@ pub struct Args {
 pub struct PriceArgs {
     /// Beancount file to read commodities from (optional).
     #[arg(short, long)]
-    file: Option<PathBuf>,
+    pub file: Option<PathBuf>,
 
     /// Specific commodity symbols to fetch (e.g., AAPL, MSFT).
     #[arg(value_name = "SYMBOL")]
-    symbols: Vec<String>,
+    pub symbols: Vec<String>,
 
     /// Base currency for price quotes.
     #[arg(short = 'c', long, default_value = "USD")]
-    currency: String,
+    pub currency: String,
 
     /// Date for prices (YYYY-MM-DD, defaults to today).
     #[arg(short, long)]
-    date: Option<String>,
+    pub date: Option<String>,
 
     /// Output as beancount price directives.
     #[arg(short = 'b', long)]
-    beancount: bool,
+    pub beancount: bool,
 
     /// Show verbose output.
     #[arg(short, long)]
-    verbose: bool,
+    pub verbose: bool,
 
     /// Symbol mapping (e.g., VTI:VTI,BTC:BTC-USD).
     /// Maps commodity names to ticker symbols.
     #[arg(short = 'm', long, value_delimiter = ',')]
-    mapping: Vec<String>,
+    pub mapping: Vec<String>,
 
     /// Use specific source (overrides mapping).
     #[arg(short = 's', long)]
-    source: Option<String>,
+    pub source: Option<String>,
 
     /// Use ad-hoc external command as source.
     /// The command receives the ticker as the first argument.
     #[arg(long, value_name = "CMD")]
-    source_cmd: Option<String>,
+    pub source_cmd: Option<String>,
 
     /// List configured sources and exit.
     #[arg(long)]
-    list_sources: bool,
+    pub list_sources: bool,
 
     /// Disable the price cache for this run.
     #[arg(long)]
-    no_cache: bool,
+    pub no_cache: bool,
 
     /// Clear the price cache before fetching.
     #[arg(long)]
-    clear_cache: bool,
+    pub clear_cache: bool,
 
     /// Include commodities that aren't currently held (zero balance across
     /// all open balance-sheet accounts). Matches `bean-price --inactive`.
     /// Only meaningful with `-f`; ignored otherwise.
     #[arg(long, requires = "file")]
-    inactive: bool,
+    pub inactive: bool,
 
     /// Also discover commodities that lack `price:`/`quote_currency:`
     /// metadata if their name looks like a ticker symbol (uppercase ASCII,
@@ -97,28 +97,49 @@ pub struct PriceArgs {
     /// instead of `commodity` directives.
     /// Only meaningful with `-f`; ignored otherwise.
     #[arg(long, requires = "file")]
-    undeclared: bool,
+    pub undeclared: bool,
 
     /// Deprecated alias for `--inactive --undeclared`. Will be removed in
     /// a future release; prefer the granular flags. Hidden from help.
     #[arg(long, requires = "file", hide = true)]
-    all_commodities: bool,
+    pub all_commodities: bool,
 
     /// Print the list of symbols and resolved (source, ticker, currency)
     /// tuples that would be fetched, then exit. No network calls.
     /// Matches `bean-price --dry-run`.
     #[arg(short = 'n', long)]
-    dry_run: bool,
+    pub dry_run: bool,
 
     /// Overwrite prices already present in the input file rather than
     /// skipping them. Matches `bean-price --clobber`. Only meaningful
     /// with `-f`; ignored otherwise.
     #[arg(short = 'C', long, requires = "file")]
-    clobber: bool,
+    pub clobber: bool,
 }
 
-/// Run the price command.
+/// Run the price command, writing fetched prices to stdout.
+///
+/// Thin wrapper over [`run_with_writer`] for the synchronous `rledger`
+/// binary; `ag-rledger` calls `run_with_writer` with a buffer so the
+/// emitted `price` directives can be captured into an envelope.
 pub fn run(args: &PriceArgs, price_config: &PriceConfig) -> Result<()> {
+    let mut stdout = io::stdout().lock();
+    run_with_writer(args, price_config, &mut stdout)
+}
+
+/// Run the price command, writing fetched prices / plans / source listings
+/// to `out`.
+///
+/// Behavior matches the original `run()`: progress, warnings and fetch
+/// errors still go to stderr, the on-disk price cache still applies, and
+/// network fetches are unchanged. Only the stdout-bound output (the
+/// `price` directives, `--dry-run` plan, and `--list-sources` listing) is
+/// redirected to the injected writer.
+pub fn run_with_writer<W: Write>(
+    args: &PriceArgs,
+    price_config: &PriceConfig,
+    out: &mut W,
+) -> Result<()> {
     use crate::cmd::price::cache::{PriceCache, cache_key};
 
     // Create the registry with config
@@ -144,7 +165,7 @@ pub fn run(args: &PriceArgs, price_config: &PriceConfig) -> Result<()> {
 
     // Handle --list-sources
     if args.list_sources {
-        return list_sources(&registry);
+        return list_sources(&registry, out);
     }
 
     // Build symbol mapping from CLI args
@@ -273,10 +294,8 @@ pub fn run(args: &PriceArgs, price_config: &PriceConfig) -> Result<()> {
     let combined_mapping = build_combined_mapping(&price_config.mapping, &discovered, &cli_mapping);
 
     if args.dry_run {
-        let stdout = io::stdout();
-        let mut handle = stdout.lock();
         return dump_fetch_plan(
-            &mut handle,
+            out,
             args,
             &symbols_to_fetch,
             &discovered,
@@ -300,11 +319,9 @@ pub fn run(args: &PriceArgs, price_config: &PriceConfig) -> Result<()> {
             price_config,
             &discovered,
             &existing_prices,
+            out,
         );
     }
-
-    let stdout = io::stdout();
-    let mut handle = stdout.lock();
 
     // Fetch prices
     let source_name_for_cache = args
@@ -388,7 +405,7 @@ pub fn run(args: &PriceArgs, price_config: &PriceConfig) -> Result<()> {
                 if args.verbose {
                     eprintln!("{symbol}: cached (source: {})", cached.source);
                 }
-                write_price(&mut handle, symbol, &cached, args.beancount)?;
+                write_price(out, symbol, &cached, args.beancount)?;
                 continue;
             }
 
@@ -456,7 +473,7 @@ pub fn run(args: &PriceArgs, price_config: &PriceConfig) -> Result<()> {
                         }
                         continue;
                     }
-                    write_price(&mut handle, symbol, &response, args.beancount)?;
+                    write_price(out, symbol, &response, args.beancount)?;
                 }
                 Err(e) => {
                     if args.verbose {
@@ -736,7 +753,7 @@ fn write_price(
 }
 
 /// Run with an ad-hoc external command.
-fn run_with_external_command(
+fn run_with_external_command<W: Write>(
     args: &PriceArgs,
     cmd: &str,
     symbols: &[String],
@@ -744,6 +761,7 @@ fn run_with_external_command(
     price_config: &PriceConfig,
     discovered: &HashMap<String, DiscoveredCommodity>,
     existing_prices: &HashSet<(String, String, NaiveDate)>,
+    handle: &mut W,
 ) -> Result<()> {
     use crate::cmd::price::external::ExternalCommandSource;
 
@@ -758,9 +776,6 @@ fn run_with_external_command(
     // Use config timeout instead of hardcoded value
     let timeout = Duration::from_secs(price_config.effective_timeout());
     let source = ExternalCommandSource::new(command_parts, timeout, HashMap::new());
-
-    let stdout = io::stdout();
-    let mut handle = stdout.lock();
 
     for symbol in symbols {
         // Expand to one fetch per declared quote currency, matching the
@@ -859,9 +874,9 @@ fn run_with_external_command(
 }
 
 /// List all configured sources.
-fn list_sources(registry: &PriceSourceRegistry) -> Result<()> {
-    println!("Available price sources:");
-    println!();
+fn list_sources<W: Write>(registry: &PriceSourceRegistry, out: &mut W) -> Result<()> {
+    writeln!(out, "Available price sources:")?;
+    writeln!(out)?;
 
     let sources = registry.list_sources();
     let default_source = registry.default_source_name();
@@ -886,8 +901,8 @@ fn list_sources(registry: &PriceSourceRegistry) -> Result<()> {
             } else {
                 ""
             };
-            println!("  {name}{default_marker}{api_key_note}");
-            println!("    {}", source.description());
+            writeln!(out, "  {name}{default_marker}{api_key_note}")?;
+            writeln!(out, "    {}", source.description())?;
         }
     }
 

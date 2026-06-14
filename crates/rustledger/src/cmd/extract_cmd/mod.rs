@@ -82,7 +82,7 @@ use std::sync::Arc;
 pub struct Args {
     /// Generate shell completions and exit
     #[arg(long, value_name = "SHELL", hide = true)]
-    generate_completions: Option<ShellType>,
+    pub generate_completions: Option<ShellType>,
 
     /// The file to extract transactions from
     #[arg(value_name = "FILE")]
@@ -90,11 +90,11 @@ pub struct Args {
 
     /// Use a named importer from importers.toml
     #[arg(long, short = 'i')]
-    importer: Option<String>,
+    pub importer: Option<String>,
 
     /// Path to importers.toml configuration file
     #[arg(long, alias = "importers-config")]
-    config: Option<PathBuf>,
+    pub config: Option<PathBuf>,
 
     /// List available importers from config file and exit
     #[arg(long = "list-importers")]
@@ -102,65 +102,65 @@ pub struct Args {
 
     /// Target account for imported transactions
     #[arg(short, long, default_value = "Assets:Bank:Checking")]
-    account: String,
+    pub account: String,
 
     /// Currency for amounts (default: USD)
     #[arg(short, long, default_value = "USD")]
-    currency: String,
+    pub currency: String,
 
     /// Date column name or index
     #[arg(long, default_value = "Date")]
-    date_column: String,
+    pub date_column: String,
 
     /// Date format (strftime-style)
     #[arg(long, default_value = "%Y-%m-%d")]
-    date_format: String,
+    pub date_format: String,
 
     /// Narration/description column name or index
     #[arg(long, default_value = "Description")]
-    narration_column: String,
+    pub narration_column: String,
 
     /// Payee column name (optional)
     #[arg(long)]
-    payee_column: Option<String>,
+    pub payee_column: Option<String>,
 
     /// Amount column name or index
     #[arg(long, default_value = "Amount")]
-    amount_column: String,
+    pub amount_column: String,
 
     /// Locale used to parse amounts, e.g. `en_US`
     #[arg(long)]
-    amount_locale: Option<String>,
+    pub amount_locale: Option<String>,
 
     /// Custom formatting for parsing amounts.
     #[arg(long)]
-    amount_format: Option<String>,
+    pub amount_format: Option<String>,
 
     /// Debit column (for separate debit/credit columns)
     #[arg(long)]
-    debit_column: Option<String>,
+    pub debit_column: Option<String>,
 
     /// Credit column (for separate debit/credit columns)
     #[arg(long)]
-    credit_column: Option<String>,
+    pub credit_column: Option<String>,
 
     /// CSV delimiter
     #[arg(long, default_value = ",")]
-    delimiter: char,
+    pub delimiter: char,
 
     /// Number of header rows to skip
     #[arg(long, default_value = "0")]
-    skip_rows: usize,
+    pub skip_rows: usize,
 
     /// Invert sign of amounts
     #[arg(long)]
-    invert_sign: bool,
+    pub invert_sign: bool,
 
     /// Preserve rows whose amount is exactly zero (e.g. balance markers).
     /// Default behavior drops them, matching most banks' use of zero rows
     /// as status filler — see issue #972.
     #[arg(long)]
-    include_zero_amounts: bool,
+    pub include_zero_amounts: bool,
 
     /// Auto-detect CSV format (delimiter, columns, date format)
     #[arg(long, conflicts_with_all = [
@@ -168,19 +168,19 @@ pub struct Args {
         "delimiter", "skip_rows", "no_header", "debit_column", "credit_column",
         "payee_column",
     ])]
-    auto: bool,
+    pub auto: bool,
 
     /// CSV has no header row
     #[arg(long)]
-    no_header: bool,
+    pub no_header: bool,
 
     /// Write output to a file instead of stdout
     #[arg(short, long, value_name = "FILE")]
-    output: Option<PathBuf>,
+    pub output: Option<PathBuf>,
 
     /// Existing ledger file for duplicate detection
     #[arg(long, value_name = "FILE")]
-    existing: Option<PathBuf>,
+    pub existing: Option<PathBuf>,
 
     /// Use ML to suggest accounts for transactions the rules engine didn't
     /// categorize. Trains a Naive Bayes model on the `--existing` ledger and
@@ -189,15 +189,15 @@ pub struct Args {
     /// `Expenses:Unknown` / `Income:Unknown`) with the prediction.
     /// Requires `--existing`.
     #[arg(long, requires = "existing")]
-    suggest_categories: bool,
+    pub suggest_categories: bool,
 
     /// Append a balance assertion with the given amount (e.g., "1234.56")
     #[arg(long, value_name = "AMOUNT")]
-    balance: Option<String>,
+    pub balance: Option<String>,
 
     /// Date for the balance assertion (defaults to today)
     #[arg(long, value_name = "DATE")]
-    balance_date: Option<String>,
+    pub balance_date: Option<String>,
 
     /// Register a specific WASM importer module ahead of the built-in
     /// CSV/OFX importers. May be specified multiple times. Each
@@ -205,7 +205,7 @@ pub struct Args {
     /// precedence over discovered ones and over built-ins — this is
     /// the right flag for ad-hoc one-off usage.
     #[arg(long, value_name = "PATH")]
-    wasm_importer: Vec<PathBuf>,
+    pub wasm_importer: Vec<PathBuf>,
 
     /// Scan a directory for `*.wasm` importer modules at startup. May
     /// be specified multiple times for multi-dir setups. Overrides
@@ -213,7 +213,7 @@ pub struct Args {
     /// `--wasm-importer-dir` flag is present. Non-`.wasm` files are
     /// silently skipped; subdirectories are not recursed into.
     #[arg(long, value_name = "DIR")]
-    wasm_importer_dir: Vec<PathBuf>,
+    pub wasm_importer_dir: Vec<PathBuf>,
 }
 
 /// List available importers — both TOML profiles and engines.
@@ -224,6 +224,15 @@ pub struct Args {
 /// [`ImporterConfig`] driven by `CsvImporter`; an engine is the actual
 /// trait implementation that consumes a config.
 pub fn list_importers(args: &Args) -> Result<()> {
+    let mut stdout = io::stdout().lock();
+    list_importers_with_writer(args, &mut stdout)
+}
+
+/// List available importers, writing the listing to `out`.
+///
+/// Writer-injectable variant of [`list_importers`] used by `ag-rledger`.
+/// Behavior is otherwise identical.
+pub fn list_importers_with_writer<W: Write>(args: &Args, out: &mut W) -> Result<()> {
     // ===== TOML profiles =====
     //
     // Optional: if no config file is present we still want to list
@@ -232,30 +241,35 @@ pub fn list_importers(args: &Args) -> Result<()> {
     if let Some(config_path) = find_importers_config(args.config.as_deref())? {
         let config = load_importers_config(&config_path)?;
         if config.importers.is_empty() {
-            println!("No TOML profiles in {}", config_path.display());
+            writeln!(out, "No TOML profiles in {}", config_path.display())?;
         } else {
-            println!("TOML profiles in {}:", config_path.display());
+            writeln!(out, "TOML profiles in {}:", config_path.display())?;
             for imp in &config.importers {
                 if let Some(pattern) = &imp.filename_pattern {
-                    println!(
+                    writeln!(
+                        out,
                         "  {} (pattern: {}) -> {}",
                         imp.name,
                         pattern,
                         imp.account.as_deref().unwrap_or("(default)")
-                    );
+                    )?;
                 } else {
-                    println!(
+                    writeln!(
+                        out,
                         "  {} -> {}",
                         imp.name,
                         imp.account.as_deref().unwrap_or("(default)")
-                    );
+                    )?;
                 }
             }
         }
     } else {
-        println!("(no importers.toml found — listing registered engines only)");
+        writeln!(
+            out,
+            "(no importers.toml found — listing registered engines only)"
+        )?;
     }
-    println!();
+    writeln!(out)?;
 
     // ===== Registered importer engines =====
     //
@@ -263,9 +277,9 @@ pub fn list_importers(args: &Args) -> Result<()> {
     // modules. Build a fresh registry from args so users see exactly
     // what this invocation would dispatch through.
     let registry = build_registry(args)?;
-    println!("Registered importer engines:");
+    writeln!(out, "Registered importer engines:")?;
     for (name, description) in registry.list_importers() {
-        println!("  {name} - {description}");
+        writeln!(out, "  {name} - {description}")?;
     }
 
     Ok(())
@@ -420,8 +434,24 @@ fn build_registry(args: &Args) -> Result<ImporterRegistry> {
     Ok(registry)
 }
 
-/// Run the extract command with the given arguments.
+/// Run the extract command with the given arguments, writing extracted
+/// directives to stdout.
+///
+/// Thin wrapper over [`run_with_writer`] for the synchronous `rledger`
+/// binary; `ag-rledger` calls `run_with_writer` with a buffer.
 pub fn run(args: &Args, file: &Path) -> Result<()> {
+    let mut stdout = io::stdout().lock();
+    run_with_writer(args, file, &mut stdout)
+}
+
+/// Run the extract command, writing extracted directives to `out`.
+///
+/// Behavior matches the original `run()`: a `--output <file>` flag still
+/// writes to disk (and the "Wrote output to ..." note still goes to
+/// stderr), and progress/warning lines still go to stderr. Only the
+/// default stdout sink for the formatted directives is redirected to the
+/// injected writer.
+pub fn run_with_writer<W: Write>(args: &Args, file: &Path, out: &mut W) -> Result<()> {
     let registry = build_registry(args)?;
 
     // Pick the dispatcher BEFORE building config: only `CsvImporter`
@@ -746,8 +776,7 @@ pub fn run(args: &Args, file: &Path) -> Result<()> {
         out_file.write_all(formatted.as_bytes())?;
         eprintln!("Wrote output to {}", output_path.display());
     } else {
-        let mut stdout = io::stdout().lock();
-        stdout.write_all(formatted.as_bytes())?;
+        out.write_all(formatted.as_bytes())?;
     }
 
     eprintln!(

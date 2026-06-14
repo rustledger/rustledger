@@ -5,6 +5,7 @@
 //! Python beancount's `bean-*` commands.
 
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -67,8 +68,18 @@ fn is_rledger_wrapper(path: &Path) -> bool {
     fs::read_to_string(path).is_ok_and(|contents| contents.contains("rledger"))
 }
 
-/// Install bean-* compatibility wrapper scripts.
+/// Install bean-* compatibility wrapper scripts, logging progress to stdout.
+///
+/// Thin wrapper over [`install_with_writer`] for the synchronous `rledger`
+/// binary; `ag-rledger` calls `install_with_writer` with a buffer.
 pub fn install(prefix: Option<&Path>) -> Result<()> {
+    let mut stdout = std::io::stdout().lock();
+    install_with_writer(prefix, &mut stdout)
+}
+
+/// Install bean-* compatibility wrapper scripts, writing progress lines to
+/// `out`. Skip notices for non-rledger files still go to stderr.
+pub fn install_with_writer<W: Write>(prefix: Option<&Path>, out: &mut W) -> Result<()> {
     let dir = resolve_target_dir(prefix)?;
 
     if !dir.exists() {
@@ -103,27 +114,40 @@ pub fn install(prefix: Option<&Path>) -> Result<()> {
                 .with_context(|| format!("failed to set permissions on {}", path.display()))?;
         }
 
-        println!("  installed: {}", path.display());
+        writeln!(out, "  installed: {}", path.display())?;
         installed += 1;
     }
 
     if installed > 0 {
-        println!("\n{installed} wrapper(s) installed to {}", dir.display());
+        writeln!(
+            out,
+            "\n{installed} wrapper(s) installed to {}",
+            dir.display()
+        )?;
         // Check if the directory is on PATH
         if let Ok(path_var) = std::env::var("PATH")
             && !std::env::split_paths(&path_var).any(|p| p == dir)
         {
-            println!("  note: {} may not be on your PATH", dir.display());
+            writeln!(out, "  note: {} may not be on your PATH", dir.display())?;
         }
     } else {
-        println!("nothing to install (all wrappers already exist)");
+        writeln!(out, "nothing to install (all wrappers already exist)")?;
     }
 
     Ok(())
 }
 
-/// Uninstall bean-* compatibility wrapper scripts.
+/// Uninstall bean-* compatibility wrapper scripts, logging to stdout.
+///
+/// Thin wrapper over [`uninstall_with_writer`].
 pub fn uninstall(prefix: Option<&Path>) -> Result<()> {
+    let mut stdout = std::io::stdout().lock();
+    uninstall_with_writer(prefix, &mut stdout)
+}
+
+/// Uninstall bean-* compatibility wrapper scripts, writing progress lines
+/// to `out`. Skip notices for non-rledger files still go to stderr.
+pub fn uninstall_with_writer<W: Write>(prefix: Option<&Path>, out: &mut W) -> Result<()> {
     let dir = resolve_target_dir(prefix)?;
     let mut removed = 0;
 
@@ -142,14 +166,14 @@ pub fn uninstall(prefix: Option<&Path>) -> Result<()> {
         }
 
         fs::remove_file(&path).with_context(|| format!("failed to remove {}", path.display()))?;
-        println!("  removed: {}", path.display());
+        writeln!(out, "  removed: {}", path.display())?;
         removed += 1;
     }
 
     if removed > 0 {
-        println!("\n{removed} wrapper(s) removed from {}", dir.display());
+        writeln!(out, "\n{removed} wrapper(s) removed from {}", dir.display())?;
     } else {
-        println!("nothing to remove");
+        writeln!(out, "nothing to remove")?;
     }
 
     Ok(())

@@ -158,20 +158,25 @@ fuzz target duration="60":
     cargo +nightly fuzz run {{target}} -- -max_total_time={{duration}}
 
 # ============================================================================
-# MUTANTS (mutation-testing audit — slow, NOT a CI gate; see issue #1238)
+# MUTANTS (local mutation-testing audit — slow; CI runs mutation.yml monthly)
 # ============================================================================
+#
+# These recipes are the local counterpart to the scheduled `Mutation
+# Testing` workflow (.github/workflows/mutation.yml); see issue #1238.
+# `--all-features` mirrors that job so local results match CI (e.g. the
+# `fuzz`-gated constructors in rustledger-core are mutated). Filtering
+# config lives in .cargo/mutants.toml.
 
 # Mutation-testing audit on the curated crates (rustledger-core +
 # rustledger-parser). Slow: ~10-60 min/crate. Surviving ("missed") mutants
-# are reviewed by hand — add a test, or annotate why un-killable. Filtering
-# config lives in .cargo/mutants.toml. Pass extra args through, e.g.
-# `just mutants --file src/inventory/booking.rs`.
+# are reviewed by hand — add a test, or annotate why un-killable. Pass extra
+# cargo-mutants args through, e.g. `just mutants --file src/inventory/booking.rs`.
 mutants *ARGS:
-    cargo mutants --package rustledger-core --package rustledger-parser {{ARGS}}
+    cargo mutants --package rustledger-core --package rustledger-parser {{ARGS}} -- --all-features
 
 # Same audit scoped to a single crate, e.g. `just mutants-crate rustledger-core`.
 mutants-crate package *ARGS:
-    cargo mutants --package {{package}} {{ARGS}}
+    cargo mutants --package {{package}} {{ARGS}} -- --all-features
 
 # ============================================================================
 # TLA+

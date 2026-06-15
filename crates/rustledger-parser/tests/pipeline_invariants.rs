@@ -3,9 +3,10 @@
 //! The canonical-form contract: `format_source` is a fixed point
 //! (`format(format(x)) == format(x)`) and its output always re-parses
 //! cleanly. This is the proptest complement to the corpus-based fixtures
-//! in `format_compat.rs` — random amounts, account lengths, payees, and
-//! (deliberately non-canonical) inner spacing exercise the alignment /
-//! normalization paths far more widely than fixed cases. A formatter that
+//! in `format_compat.rs` — random amounts, accounts of differing length
+//! (drawn from a fixed set), payees, and (deliberately non-canonical)
+//! inner spacing exercise the alignment / normalization paths far more
+//! widely than fixed cases. A formatter that
 //! emits text the parser rejects (e.g. a `format_posting` drift) or that
 //! isn't idempotent fails here.
 
@@ -43,7 +44,7 @@ fn txn_block() -> impl Strategy<Value = String> {
     (
         2000i32..2100,
         1u32..13,
-        1u32..28,
+        1u32..=28,
         "[A-Za-z ]{0,12}",
         prop::collection::vec(posting_line(), 2..5),
     )

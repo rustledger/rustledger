@@ -8,8 +8,8 @@
 
 use rustc_hash::FxHashMap;
 use rustledger_core::{
-    AccountedBookingError, Amount, BookingMethod, Cost, CostSpec, IncompleteAmount, Inventory,
-    Position, Posting, ReductionScope, Transaction,
+    AccountedBookingError, Amount, BookingMethod, Cost, CostSpec, Directive, IncompleteAmount,
+    Inventory, Position, Posting, ReductionScope, Transaction,
 };
 use thiserror::Error;
 
@@ -572,6 +572,82 @@ pub fn book_transactions(
     }
 
     results
+}
+
+/// Outcome of booking an entire ledger in one shot — see [`book`].
+#[derive(Debug, Clone)]
+pub struct LedgerBookResult {
+    /// Successfully booked directives, in the **original input order**.
+    /// Every `Transaction` has its cost specs filled and elided amounts
+    /// interpolated; all other directive kinds pass through unchanged.
+    pub booked: Vec<Directive>,
+    /// Directives whose `Transaction` failed to book, in original input
+    /// order, paired with the error. They are left in their pre-booking
+    /// shape so a caller can still surface the user's original input.
+    pub failed: Vec<(Directive, BookingError)>,
+}
+
+/// Book and interpolate every transaction in a ledger in one shot.
+///
+/// This is the standalone equivalent of the loader's internal booking
+/// pass. Transactions are processed in **booking order** — sorted by
+/// `(date, priority, has_cost_reduction)` — so lot matching and
+/// capital-gains tracking observe inventory in the correct sequence, while
+/// the returned [`LedgerBookResult::booked`] / [`LedgerBookResult::failed`]
+/// vectors preserve the caller's **original input order**. Non-transaction
+/// directives pass through untouched. Per-account booking methods declared
+/// via `Open ... "METHOD"` are honored; `method` is the fallback for
+/// accounts that declare none.
+///
+/// Booking is a pure function of its inputs, so calling it twice on the
+/// same `(directives, method)` yields equal results — this is the booking
+/// half of the #1235 pipeline-boundary invariants.
+#[must_use]
+pub fn book(directives: &[Directive], method: BookingMethod) -> LedgerBookResult {
+    let mut engine = BookingEngine::with_method(method);
+    engine.register_account_methods(directives.iter());
+
+    // Stable sort into booking order. Display order — `(date, priority,
+    // file position)` — is already encoded in the input's positional order,
+    // and a stable sort keeps that as the tiebreak.
+    let mut order: Vec<usize> = (0..directives.len()).collect();
+    order.sort_by_key(|&i| {
+        let d = &directives[i];
+        (d.date(), d.priority(), d.has_cost_reduction())
+    });
+
+    // Book in booking order, recording each transaction's outcome against
+    // its original index so the result can be reassembled in input order.
+    let mut booked_txns: Vec<Option<Transaction>> = directives.iter().map(|_| None).collect();
+    let mut booking_errors: Vec<Option<BookingError>> = directives.iter().map(|_| None).collect();
+    for &i in &order {
+        if let Directive::Transaction(txn) = &directives[i] {
+            match engine.book_and_interpolate(txn) {
+                Ok(result) => {
+                    // Apply the booked transaction (filled-in costs), not
+                    // the original, so subsequent lot matching is correct.
+                    engine.apply(&result.transaction);
+                    booked_txns[i] = Some(result.transaction);
+                }
+                Err(e) => booking_errors[i] = Some(e),
+            }
+        }
+    }
+
+    // Reassemble in original input order, partitioning failures out.
+    let mut booked = Vec::with_capacity(directives.len());
+    let mut failed = Vec::new();
+    for (i, directive) in directives.iter().enumerate() {
+        if let Some(e) = booking_errors[i].take() {
+            failed.push((directive.clone(), e));
+        } else if let Some(txn) = booked_txns[i].take() {
+            booked.push(Directive::Transaction(txn));
+        } else {
+            booked.push(directive.clone());
+        }
+    }
+
+    LedgerBookResult { booked, failed }
 }
 
 #[cfg(test)]
@@ -1300,6 +1376,129 @@ mod tests {
         assert!(
             rendered.contains("15") && rendered.contains("10"),
             "InsufficientUnits Display must include requested and available amounts. Got: {rendered}"
+        );
+    }
+
+    /// Helper: does any posting still have an unfilled (elided) amount?
+    fn has_elided_posting(txn: &Transaction) -> bool {
+        txn.postings.iter().any(|p| p.units.is_none())
+    }
+
+    #[test]
+    fn book_interpolates_elided_posting_and_preserves_order() {
+        use rustledger_core::Open;
+
+        let directives = vec![
+            Directive::Open(Open::new(date(2024, 1, 1), "Assets:Cash")),
+            Directive::Open(Open::new(date(2024, 1, 1), "Expenses:Food")),
+            Directive::Transaction(
+                Transaction::new(date(2024, 1, 15), "Lunch")
+                    .with_synthesized_posting(Posting::new(
+                        "Expenses:Food",
+                        Amount::new(dec!(50.00), "USD"),
+                    ))
+                    .with_synthesized_posting(Posting::auto("Assets:Cash")),
+            ),
+        ];
+
+        let result = book(&directives, BookingMethod::Strict);
+        assert!(result.failed.is_empty(), "nothing should fail to book");
+        assert_eq!(result.booked.len(), 3, "all directives preserved");
+
+        // Order preserved: the two Opens come first, unchanged.
+        assert_eq!(result.booked[0], directives[0]);
+        assert_eq!(result.booked[1], directives[1]);
+
+        // The transaction's elided posting got filled in.
+        let Directive::Transaction(booked_txn) = &result.booked[2] else {
+            panic!("third directive should still be a transaction");
+        };
+        assert!(
+            !has_elided_posting(booked_txn),
+            "the auto posting should have been interpolated"
+        );
+    }
+
+    #[test]
+    fn book_is_deterministic() {
+        use rustledger_core::Open;
+
+        let directives = vec![
+            Directive::Open(Open::new(date(2024, 1, 1), "Assets:Stock")),
+            Directive::Open(Open::new(date(2024, 1, 1), "Assets:Cash")),
+            Directive::Transaction(
+                Transaction::new(date(2024, 1, 15), "Buy")
+                    .with_synthesized_posting(
+                        Posting::new("Assets:Stock", Amount::new(dec!(10), "AAPL"))
+                            .with_price(PriceAnnotation::unit(Amount::new(dec!(150.00), "USD"))),
+                    )
+                    .with_synthesized_posting(Posting::auto("Assets:Cash")),
+            ),
+        ];
+
+        let first = book(&directives, BookingMethod::Strict);
+        let second = book(&directives, BookingMethod::Strict);
+        assert_eq!(
+            first.booked, second.booked,
+            "booking the same ledger twice must produce identical output"
+        );
+    }
+
+    #[test]
+    fn book_partitions_failed_transaction() {
+        use rustledger_core::Open;
+
+        // Buy a lot at $150, then sell against a cost basis ($200) that
+        // matches no existing lot. Under Strict this is a no-matching-lot
+        // error, so the sell is partitioned into `failed`.
+        let buy_cost = CostSpec::empty()
+            .with_number(rustledger_core::CostNumber::PerUnit {
+                value: dec!(150.00),
+            })
+            .with_currency("USD");
+        let sell_cost = CostSpec::empty()
+            .with_number(rustledger_core::CostNumber::PerUnit {
+                value: dec!(200.00),
+            })
+            .with_currency("USD");
+
+        let directives = vec![
+            Directive::Open(Open::new(date(2024, 1, 1), "Assets:Stock")),
+            Directive::Open(Open::new(date(2024, 1, 1), "Assets:Cash")),
+            Directive::Transaction(
+                Transaction::new(date(2024, 1, 10), "Buy")
+                    .with_synthesized_posting(
+                        Posting::new("Assets:Stock", Amount::new(dec!(10), "AAPL"))
+                            .with_cost(buy_cost),
+                    )
+                    .with_synthesized_posting(Posting::new(
+                        "Assets:Cash",
+                        Amount::new(dec!(-1500.00), "USD"),
+                    )),
+            ),
+            Directive::Transaction(
+                Transaction::new(date(2024, 1, 15), "Sell at phantom cost basis")
+                    .with_synthesized_posting(
+                        Posting::new("Assets:Stock", Amount::new(dec!(-5), "AAPL"))
+                            .with_cost(sell_cost),
+                    )
+                    .with_synthesized_posting(Posting::new(
+                        "Assets:Cash",
+                        Amount::new(dec!(1000.00), "USD"),
+                    )),
+            ),
+        ];
+
+        let result = book(&directives, BookingMethod::Strict);
+        assert_eq!(result.failed.len(), 1, "the mismatched sell should fail");
+        // The two Opens and the successful buy survive; the sell is dropped.
+        assert_eq!(result.booked.len(), 3, "Opens + buy remain in booked");
+        assert!(
+            !result.booked.iter().any(|d| matches!(
+                d,
+                Directive::Transaction(t) if t.narration.as_ref() == "Sell at phantom cost basis"
+            )),
+            "failed sell must not appear in booked"
         );
     }
 }

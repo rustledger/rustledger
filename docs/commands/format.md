@@ -27,10 +27,6 @@ rledger format [OPTIONS] [FILE]...
 | `-i, --in-place` | Format file(s) in place |
 | `--check` | Check if file is formatted (exit 1 if not) |
 | `--diff` | Show diff when using --check |
-| `-c, --currency-column <COLUMN>` | Column for aligning currencies [default: 60] |
-| `-w, --prefix-width <WIDTH>` | Force fixed prefix width (account name column) |
-| `-W, --num-width <WIDTH>` | Force fixed numbers width |
-| `--indent <INDENT>` | Number of spaces for posting indentation [default: 2] |
 | `-v, --verbose` | Show verbose output |
 
 ## Examples
@@ -62,16 +58,6 @@ rledger format --check ledger.beancount
 
 # Show diff of what would change
 rledger format --check --diff ledger.beancount
-```
-
-### Custom Alignment
-
-```bash
-# Align currencies at column 80
-rledger format -c 80 ledger.beancount
-
-# Fixed account column width
-rledger format -w 40 ledger.beancount
 ```
 
 ### Pre-commit Hook

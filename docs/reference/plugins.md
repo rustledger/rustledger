@@ -29,7 +29,7 @@ rustledger supports three types of plugins:
 │  ┌─────────────┐ ┌─────────────┐ ┌─────────────┐       │
 │  │   Native    │ │    WASM     │ │   Python    │       │
 │  │  Registry   │ │   Runtime   │ │   Runtime   │       │
-│  │  (30 plugins)│ │ (Wasmtime)  │ │(CPython-WASI)│      │
+│  │  (31 plugins)│ │ (Wasmtime)  │ │(CPython-WASI)│      │
 │  └─────────────┘ └─────────────┘ └─────────────┘       │
 └─────────────────────────────────────────────────────────┘
                           │
@@ -126,7 +126,7 @@ plugin "beancount.plugins.implicit_prices"
 
 ## Built-in Plugins
 
-rustledger includes 30 native plugins. Here are the most commonly used:
+rustledger includes 31 native plugins. Here are the most commonly used:
 
 ### Validation Plugins
 
@@ -172,7 +172,7 @@ rustledger includes 30 native plugins. Here are the most commonly used:
 ### All Built-in Plugins
 
 <details>
-<summary>Complete list of 30 native plugins</summary>
+<summary>Complete list of 31 native plugins</summary>
 
 | Plugin | Description |
 |--------|-------------|
@@ -189,6 +189,7 @@ rustledger includes 30 native plugins. Here are the most commonly used:
 | `coherent_cost` | Enforce cost OR price (not both) |
 | `commodity_attr` | Validate commodity attributes |
 | `currency_accounts` | Auto-generate currency trading postings |
+| `document_discovery` | Auto-discover documents from directories |
 | `effective_date` | Override posting date via metadata |
 | `forecast` | Generate recurring transactions |
 | `generate_base_ccy_prices` | Create base currency price entries |

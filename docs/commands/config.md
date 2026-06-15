@@ -39,13 +39,13 @@ rledger config show
 Output:
 
 ```toml
+# Merged configuration (highest priority wins)
+# Sources: user > system
+
 [default]
 file = "/home/user/finances/main.beancount"
 
-[check]
-auto = true
-
-[query]
+[output]
 format = "text"
 ```
 
@@ -58,13 +58,17 @@ rledger config path
 Output:
 
 ```
-Searching for config in:
-  1. ./rledger.toml
-  2. ./.rledger.toml
-  3. /home/user/.config/rledger/config.toml
-  4. /home/user/.rledger.toml
+Configuration file search paths:
 
-Found: /home/user/.config/rledger/config.toml
+  project  (not found)  /home/user/finances/.rledger.toml
+  user     (found)      /home/user/.config/rledger/config.toml
+  system   (not found)  /etc/rledger/config.toml
+
+Environment variables:
+  RLEDGER_FILE     Default beancount file
+  RLEDGER_FORMAT   Output format (text, csv, json)
+  RLEDGER_PROFILE  Active profile name
+  NO_COLOR         Disable colored output
 ```
 
 ### Create Default Config
@@ -81,7 +85,7 @@ Creates `~/.config/rledger/config.toml` with default settings.
 rledger config edit
 ```
 
-Opens config file in `$EDITOR` (or `vi` if not set).
+Opens the config file in the editor configured via `default.editor` in the config, or the `$VISUAL`/`$EDITOR` environment variables.
 
 ### List Aliases
 
@@ -93,8 +97,11 @@ Output:
 
 ```
 Configured aliases:
-  bal     -> query "BALANCES"
-  recent  -> query "SELECT date, payee, narration ORDER BY date DESC LIMIT 20"
+
+  bal = "report balances"
+  inc = "report income"
+
+Usage: rledger <alias> [additional args]
 ```
 
 ## Config File Format

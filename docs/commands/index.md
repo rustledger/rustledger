@@ -17,14 +17,20 @@ rustledger provides several commands for working with beancount ledgers.
 | [extract](extract.md) | Import from bank statements |
 | [price](price.md) | Fetch commodity prices |
 | [doctor](doctor.md) | Debugging and diagnostic tools |
+| [config](config.md) | Manage configuration |
+| [add](add.md) | Add transactions to beancount files |
+| compat | Install or uninstall bean-* compatibility wrapper scripts |
+| lint | Non-fatal advisory passes (e.g. detect inter-account transfer pairs) |
+| completions | Generate shell completions |
 
 ## Global Options
 
 These options work with all commands:
 
 ```
--h, --help       Print help information
--V, --version    Print version information
+-P, --profile <PROFILE>  Use a specific profile from config
+-h, --help               Print help information
+-V, --version            Print version information
 ```
 
 ## Specifying the Ledger File
@@ -66,6 +72,7 @@ rledger compat uninstall        # removes them
 | `bean-check` | `rledger check` |
 | `bean-query` | `rledger query` |
 | `bean-format` | `rledger format` |
+| `bean-report` | `rledger report` |
 | `bean-doctor` | `rledger doctor` |
 | `bean-extract` | `rledger extract` |
 | `bean-price` | `rledger price` |

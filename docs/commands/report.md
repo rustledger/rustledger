@@ -9,7 +9,7 @@ Generate standard financial reports from your ledger.
 ## Usage
 
 ```bash
-rledger report [OPTIONS] [FILE] <SUBCOMMAND>
+rledger report [OPTIONS] [FILE] [COMMAND]
 ```
 
 ## Subcommands
@@ -34,28 +34,30 @@ rledger report [OPTIONS] [FILE] <SUBCOMMAND>
 | `-P, --profile <PROFILE>` | Use a profile from config |
 | `-f, --format <FORMAT>` | Output: `text`, `csv`, `json` |
 | `-v, --verbose` | Show verbose output |
+| `--no-pager` | Disable pager for output |
+| `--no-cache` | Disable the on-disk parse cache (always re-parse) |
 
 ## Examples
 
 ### Account Balances
 
 ```bash
-rledger report balances ledger.beancount
+rledger report ledger.beancount balances
 ```
 
 Filter by account:
 
 ```bash
-rledger report balances -a Expenses ledger.beancount
-rledger report balances -a Assets:Bank ledger.beancount
+rledger report ledger.beancount balances -a Expenses
+rledger report ledger.beancount balances -a Assets:Bank
 ```
 
 ### Balance Sheet
 
 ```bash
-rledger report balsheet ledger.beancount
+rledger report ledger.beancount balsheet
 # or
-rledger report bal ledger.beancount
+rledger report ledger.beancount bal
 ```
 
 Output:
@@ -79,28 +81,28 @@ Net Worth              25,284.00 USD
 ### Income Statement
 
 ```bash
-rledger report income ledger.beancount
+rledger report ledger.beancount income
 # or
-rledger report is ledger.beancount
+rledger report ledger.beancount is
 ```
 
 ### Transaction Journal
 
 ```bash
 # All transactions
-rledger report journal ledger.beancount
+rledger report ledger.beancount journal
 
 # Filter by account
-rledger report journal -a Expenses:Food ledger.beancount
+rledger report ledger.beancount journal -a Expenses:Food
 
 # Limit entries
-rledger report journal -l 20 ledger.beancount
+rledger report ledger.beancount journal -l 20
 ```
 
 ### Holdings
 
 ```bash
-rledger report holdings ledger.beancount
+rledger report ledger.beancount holdings
 ```
 
 Output:
@@ -115,13 +117,13 @@ Assets:Brokerage:GOOGL     5.00     2,000.00 USD   2,100.00 USD   +100.00 USD
 ### Net Worth Over Time
 
 ```bash
-rledger report networth ledger.beancount
+rledger report ledger.beancount networth
 ```
 
 ### Statistics
 
 ```bash
-rledger report stats ledger.beancount
+rledger report ledger.beancount stats
 ```
 
 Output:
@@ -140,10 +142,10 @@ Date range:       2020-01-01 to 2024-03-15
 
 ```bash
 # CSV for spreadsheets
-rledger report balances -f csv ledger.beancount > balances.csv
+rledger report -f csv ledger.beancount balances > balances.csv
 
 # JSON for scripts
-rledger report balances -f json ledger.beancount | jq '.'
+rledger report -f json ledger.beancount balances | jq '.'
 ```
 
 ## See Also

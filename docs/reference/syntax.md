@@ -50,7 +50,7 @@ Declare an account before using it.
 Syntax: `DATE open ACCOUNT [CURRENCIES] [BOOKING]`
 
 - **CURRENCIES**: Optional comma-separated list of allowed currencies
-- **BOOKING**: Optional booking method (`"STRICT"`, `"FIFO"`, `"LIFO"`, `"AVERAGE"`, `"NONE"`)
+- **BOOKING**: Optional booking method (`"STRICT"`, `"STRICT_WITH_SIZE"`, `"FIFO"`, `"LIFO"`, `"HIFO"`, `"AVERAGE"`, `"NONE"`)
 
 ### Close
 

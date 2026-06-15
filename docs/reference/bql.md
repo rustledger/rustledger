@@ -228,6 +228,7 @@ Note: PIVOT BY must reference a SELECT output column, either by name or by its 1
 | `last(x)` | Last value |
 | `min(x)` | Minimum value |
 | `max(x)` | Maximum value |
+| `avg(x)` | Average value |
 
 ### Examples
 
@@ -255,7 +256,7 @@ SELECT min(date), max(date)
 | Function | Description |
 |----------|-------------|
 | `cost(position)` | Convert to cost basis |
-| `units(position)` | Get units (number) |
+| `units(position)` | Get units (number + currency) |
 | `currency(position)` | Get currency |
 | `number(amount)` | Extract number from amount |
 
@@ -339,7 +340,7 @@ BQL distinguishes between:
 -- Get cost in operating currency
 SELECT sum(cost(position))
 
--- Get units (ignoring currency)
+-- Get units (number + currency)
 SELECT sum(units(position))
 
 -- Get currency
@@ -372,7 +373,12 @@ WHERE "trip-2024" IN links
 
 ## Subqueries
 
-Not currently supported. Use multiple queries or shell piping.
+A subquery can be used as the source of a `FROM` clause:
+
+```sql
+SELECT account, total
+FROM (SELECT account, sum(position) AS total GROUP BY account)
+```
 
 ## Examples
 

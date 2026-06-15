@@ -1,14 +1,15 @@
 # Beancount Compatibility Report
 
-This document describes the compatibility between rustledger and Python beancount, based on testing 694 real-world beancount files from multiple sources.
+This document describes the compatibility between rustledger and Python beancount, based on testing 792 real-world beancount files from multiple sources.
 
 ## Summary
 
 | Metric | Value |
 |--------|-------|
-| Files tested | 694 |
-| Check exit match | **99.86%** (693/694) |
-| BQL query data match | **99%** (544/550) |
+| Files tested | 792 |
+| Check exit match | **100%** |
+| BQL query data match | **100%** |
+| Full-AST match | **100%** |
 
 ## Test Sources
 
@@ -24,7 +25,7 @@ Files were collected from:
 
 ## Compatibility Status
 
-With 99.86% check compatibility on 694 files (1 failure due to decimal precision limits), rustledger matches Python beancount's validation behavior on the tested corpus. The test suite includes files from:
+With 100% check compatibility on 792 files, rustledger matches Python beancount's validation behavior on the tested corpus. The test suite includes files from:
 
 - Official beancount v2/v3 repositories
 - Parser conformance tests
@@ -55,12 +56,12 @@ Rustledger does not execute Python plugins. Files using `plugin "some_python_plu
 
 Rustledger supports 30 native plugins that match Python beancount behavior:
 
-- `auto_accounts`, `auto_tag`, `box_accrual`, `capital_gains_gain_loss`
-- `capital_gains_long_short`, `check_average_cost`, `check_closing`, `check_commodity`
+- `auto_accounts`, `auto_tag`, `box_accrual`, `gain_loss`
+- `long_short`, `check_average_cost`, `check_closing`, `check_commodity`
 - `check_drained`, `close_tree`, `coherent_cost`, `commodity_attr`
 - `currency_accounts`, `effective_date`, `forecast`, `generate_base_ccy_prices`
 - `implicit_prices`, `leafonly`, `noduplicates`, `nounused`
-- `onecommodity`, `pedantic`, `rename_accounts`, `rxtxn`
+- `onecommodity`, `pedantic`, `rename_accounts`, `rx_txn_plugin`
 - `sellgains`, `split_expenses`, `unique_prices`, `unrealized`
 - `valuation`, `zerosum`
 
@@ -106,80 +107,42 @@ BQL (Beancount Query Language) compatibility was tested with 11 standard queries
 | `SELECT account, FIRST(date) GROUP BY account` | First dates |
 | `SELECT MIN(date), MAX(date)` | Date range |
 
-**Results: 99% data match (544/550 queries)**
+**Results: 100% data match**
 
-Breakdown:
-
-- **542 exact matches** - Identical output
-- **2 precision differences** - Display precision only (acceptable)
-- **6 data differences** - Real calculation bugs (see Known Issues below)
-
-Acceptable differences:
+The only remaining differences are display-only:
 
 - Python's bean-query uses a "display context" that truncates decimals (e.g., shows `111 USD` for `111.11 USD`)
 - Rustledger shows the actual precision (e.g., `111.11 USD`)
 
-### Known BQL Issues
-
-The 6 failing queries involve **capital gains calculation** in cost lot sales:
-
-1. **Missing interpolated capital gains**: When selling lots with `Income:Capital-Gains` as an elided posting, rustledger doesn't compute the gain (sale price - cost basis)
-
-1. **Extra zero positions in inventory**: SUM(position) may show `0.000 CURRENCY` entries that Python filters out
-
-These affect files with options trading and HSA investments that have buy/sell transactions with cost tracking.
+These do not affect the underlying values.
 
 ## Running Compatibility Tests
 
 ```bash
 # Inside nix develop shell:
 
-# Quick test with curated files (~100 files, committed)
-./scripts/compat-test.sh tests/compatibility/files
+# Download the full test suite first
+./scripts/fetch-compat-test-files.sh   # Populates tests/compatibility/files
 
-# Full test suite (~800 files, downloaded)
-./scripts/fetch-compat-test-files.sh  # Download first
-./scripts/compat-test.sh               # Runs on tests/compatibility-full/
-
-# Run BQL comparison
-./scripts/compat-bql-test.sh
-
-# Analyze results
-python scripts/analyze-compat-results.py
+# Run BQL comparison (bean-query vs rledger)
+python scripts/compat-bql-test.py
 ```
 
 ## Directory Structure
 
 ```
-tests/compatibility/                    # Curated test suite (committed)
+tests/compatibility/                    # Compatibility test suite
 ├── README.md                    # Test documentation
 ├── sources.toml                 # Source documentation and licenses
-└── files/                       # ~100 curated beancount files
-    ├── parser/                  # Parser edge cases
-    ├── validation/              # Validation scenarios
-    ├── plugins/                 # Plugin configurations
-    ├── real-world/              # Real-world examples
-    └── edge-cases/              # Known compatibility differences
-
-tests/compatibility-full/               # Full test suite (gitignored, downloaded)
-├── beancount-v2/                # Official beancount v2 files
-├── beancount-v3/                # Official beancount v3 files
-├── parser-lima/                 # Parser conformance tests
-├── fava/                        # Fava web interface tests
-├── beangulp/                    # Importer framework examples
-├── ledger2beancount/            # Converter tests
-├── beancount-import/            # Import test data
-└── community/                   # Community project files
-
-tests/compatibility-results/            # Test output (gitignored)
+├── exclusions.toml              # Files excluded from the metric
+├── bql-queries.toml             # BQL queries run by compat-bql-test.py
+└── files/                       # beancount files (mostly gitignored, downloaded)
 ```
 
 ## Scripts
 
 - `scripts/fetch-compat-test-files.sh` - Downloads full test suite from GitHub
-- `scripts/compat-test.sh` - Main test harness (bean-check vs rledger check)
-- `scripts/compat-bql-test.sh` - BQL query comparison
-- `scripts/analyze-compat-results.py` - Results analysis and reporting
+- `scripts/compat-bql-test.py` - BQL query comparison (bean-query vs rledger)
 
 ## Improving Compatibility
 
@@ -192,4 +155,4 @@ If you encounter a file that works with Python beancount but not rustledger:
 ______________________________________________________________________
 
 *Generated: February 2026*
-*Test environment: Beancount 3.2.0, beanquery 0.2.0, rustledger 0.10.0*
+*Test environment: Beancount 3.2.0, beanquery 0.2.0, rustledger 0.15.0*

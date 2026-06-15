@@ -48,9 +48,9 @@ This document describes rustledger's crate structure and data flow.
     │ (JS/TS bindings)│   │ (JSON-RPC/WASI)   │   │    (CSV/OFX)      │
     └────────┬────────┘   └────────┬──────────┘   └────────┬──────────┘
               │                     │                       │
-              │                     └──► core, booking, validate, plugin, query
-              └────────────────────────► core, parser, booking, validate, loader, query
-                                                            └──► core, ops
+              │                     └──► core, parser, loader, booking, validate, plugin, query
+              └────────────────────────► core, parser, booking, validate, loader, query, completion
+                                                            └──► core, ops, plugin, plugin-types
 
     ┌─────────────────────┐
     │   rustledger-ops    │
@@ -276,7 +276,7 @@ After the regular pass, **Late validation** runs (balance assertions, commodity 
 
 Parsed ledgers are cached to disk in a binary format (rkyv) so subsequent runs can skip parsing entirely. The cache is stored as a hidden dotfile alongside the source — `ledger.beancount` → `.ledger.beancount.cache` — matching Python beancount's `.{filename}.picklecache` convention.
 
-The cache header stores a SHA-256 hash over every source file's path, modification time, and size (the main ledger and all transitively-`include`d files). On load, the hash is recomputed from the cached file list; any mismatch rejects the cache and the ledger is re-parsed. File contents themselves are not hashed — content-based invalidation is a possible future improvement but isn't currently implemented.
+The cache header stores a BLAKE3 hash over every source file's path, modification time, and size (the main ledger and all transitively-`include`d files). On load, the hash is recomputed from the cached file list; any mismatch rejects the cache and the ledger is re-parsed. File contents themselves are not hashed — content-based invalidation is a possible future improvement but isn't currently implemented.
 
 Two environment variables, both compatible with Python beancount, control the cache: `BEANCOUNT_DISABLE_LOAD_CACHE` to opt out entirely, and `BEANCOUNT_LOAD_CACHE_FILENAME` to redirect to a custom path (with `{filename}` substitution). See [`rledger check`](../commands/check.md#cache-file) for usage details.
 

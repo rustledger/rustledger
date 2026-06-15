@@ -30,6 +30,8 @@ rledger check [OPTIONS] [FILE]
 | `--plugin <WASM_FILE>` | Load a WASM plugin (can be repeated) |
 | `--native-plugin <PLUGIN>` | Enable a native plugin (can be repeated) |
 | `-f, --format <FORMAT>` | Output format: `text`, `json` |
+| `--lint <NAME>` | Run non-fatal advisory lints alongside validation (can be repeated). Available: `transfers` |
+| `--lint-min-confidence <VALUE>` | Minimum confidence (0.0 - 1.0) for `--lint transfers` matches to be reported (default: 0.8) |
 
 ## Examples
 
@@ -77,16 +79,24 @@ rledger check -f json ledger.beancount
 
 ```json
 {
-  "valid": false,
-  "errors": [
+  "diagnostics": [
     {
-      "code": "E3001",
-      "message": "Transaction does not balance",
       "file": "ledger.beancount",
       "line": 42,
-      "help": "Expenses:Food has 5.00 USD, Assets:Bank has -4.99 USD"
+      "column": 1,
+      "end_line": 42,
+      "end_column": 26,
+      "severity": "error",
+      "phase": "validate",
+      "code": "E3001",
+      "message": "Transaction does not balance",
+      "hint": "Expenses:Food has 5.00 USD, Assets:Bank has -4.99 USD"
     }
-  ]
+  ],
+  "error_count": 1,
+  "warning_count": 0,
+  "parse_error_count": 0,
+  "validate_error_count": 1
 }
 ```
 
@@ -135,11 +145,12 @@ Common validation errors:
 
 | Code | Description |
 |------|-------------|
-| E1001 | Syntax error |
-| E2001 | Account not opened |
-| E2002 | Account already opened |
+| E1001 | Account not opened |
+| E1002 | Account already opened |
+| E2001 | Balance assertion failed |
+| E2002 | Balance exceeds explicit tolerance |
 | E3001 | Transaction does not balance |
-| E3002 | Invalid balance assertion |
+| E3002 | Multiple postings missing amounts for same currency |
 
 See [Error Reference](../reference/errors.md) for all error codes.
 

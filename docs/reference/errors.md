@@ -75,7 +75,7 @@ Or use `rledger doctor missing-open` to generate them.
 
 **Fix**: Use correct account or adjust close date.
 
-### E1004: Account Close With Non-Zero Balance
+### E1004: Account Close With Non-Zero Balance (Warning)
 
 **Cause**: Closing an account that still has a balance.
 
@@ -230,6 +230,12 @@ Or use `rledger doctor missing-open` to generate them.
 ```
 
 **Fix**: Use allowed currency or update account declaration.
+
+### E5003: Invalid Precision Metadata (Warning)
+
+**Cause**: A `commodity` directive has invalid `precision` metadata.
+
+**Fix**: Correct the `precision` metadata value on the commodity directive.
 
 ## Option Errors (E7xxx)
 

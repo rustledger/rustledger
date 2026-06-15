@@ -30,6 +30,7 @@ rledger query [OPTIONS] [FILE] [QUERY]
 | `-m, --numberify` | Remove currencies, output raw numbers |
 | `-q, --no-errors` | Suppress ledger validation errors on load |
 | `-v, --verbose` | Show verbose output |
+| `--no-cache` | Disable the on-disk parse cache (always re-parse) |
 
 ## Examples
 

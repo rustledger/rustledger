@@ -122,10 +122,10 @@ option "inferred_tolerance_default" "*:0.005"
 
 ### inferred_tolerance_multiplier
 
-Multiplier for inferred tolerances.
+Multiplier for inferred tolerances. This name is deprecated (warning `E7004`); use `tolerance_multiplier` instead.
 
 ```beancount
-option "inferred_tolerance_multiplier" "1.1"
+option "tolerance_multiplier" "1.1"
 ```
 
 ## Plugin Options
@@ -175,10 +175,17 @@ option "documents" "/home/user/finances/documents"
 | `account_rounding` | string | - | Rounding errors account |
 | `conversion_currency` | string | - | Currency for conversions |
 | `inferred_tolerance_default` | string | - | Balance tolerance |
-| `inferred_tolerance_multiplier` | decimal | 0.5 | Tolerance multiplier |
+| `inferred_tolerance_multiplier` | decimal | 0.5 | Tolerance multiplier (deprecated; renamed to `tolerance_multiplier`) |
+| `tolerance_multiplier` | decimal | 0.5 | Tolerance multiplier |
 | `infer_tolerance_from_cost` | bool | FALSE | Infer tolerance from cost |
+| `use_legacy_fixed_tolerances` | bool | FALSE | Use legacy fixed tolerances |
+| `experiment_explicit_tolerances` | bool | FALSE | Enable experimental explicit tolerances |
+| `display_precision` | string | - | Per-currency display precision (e.g. `USD:0.01`) |
+| `allow_pipe_separator` | bool | FALSE | Allow pipe separator (deprecated) |
 | `documents` | string | - | Documents root directory |
 | `plugin_processing_mode` | string | default | Plugin mode |
+| `plugin` | string | - | Plugin (deprecated; use the `plugin` directive) |
+| `filename` | string | - | Source filename (read-only, auto-set) |
 | `long_string_maxlines` | int | 64 | Max lines for long strings |
 
 ## Example Configuration

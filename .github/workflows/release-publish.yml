@@ -318,14 +318,22 @@ jobs:
       - name: Wait for release-build to upload platform tarballs
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }} # gh resolves the repo from this (no checkout)
           TAG: ${{ env.RELEASE_TAG }}
         run: |
-          expected=(
-            "rustledger-${TAG}-x86_64-unknown-linux-gnu.tar.gz"
-            "rustledger-${TAG}-x86_64-unknown-linux-musl.tar.gz"
-            "rustledger-${TAG}-aarch64-unknown-linux-gnu.tar.gz"
-            "rustledger-${TAG}-aarch64-unknown-linux-musl.tar.gz"
+          # Wait for both the tarballs AND their .sha256 sidecars:
+          # update-aur-bin curls the .sha256 files (`curl -f`), and those
+          # can lag the tarball uploads.
+          targets=(
+            x86_64-unknown-linux-gnu
+            x86_64-unknown-linux-musl
+            aarch64-unknown-linux-gnu
+            aarch64-unknown-linux-musl
           )
+          expected=()
+          for t in "${targets[@]}"; do
+            expected+=("rustledger-${TAG}-${t}.tar.gz" "rustledger-${TAG}-${t}.tar.gz.sha256")
+          done
           deadline=$(( $(date +%s) + 1800 ))   # 30 min
           while :; do
             assets=$(gh release view "$TAG" --json assets --jq '.assets[].name' 2>/dev/null || true)

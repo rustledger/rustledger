@@ -24,20 +24,58 @@ fn account() -> impl Strategy<Value = &'static str> {
     ]
 }
 
-fn amount_str() -> impl Strategy<Value = String> {
-    (
-        -1_000_000i64..1_000_000,
-        0u32..4,
-        prop_oneof![Just("USD"), Just("EUR")],
-    )
-        .prop_map(|(n, scale, ccy)| format!("{} {}", Decimal::new(n, scale), ccy))
+fn currency() -> impl Strategy<Value = &'static str> {
+    prop_oneof![Just("USD"), Just("EUR")]
 }
 
-/// A posting line with a deliberately-random gap between account and
-/// amount, so the formatter's alignment normalization is exercised.
+fn amount_str() -> impl Strategy<Value = String> {
+    prop_oneof![
+        // Plain number, scales 0..4.
+        (-1_000_000i64..1_000_000, 0u32..4, currency()).prop_map(|(n, scale, ccy)| format!(
+            "{} {}",
+            Decimal::new(n, scale),
+            ccy
+        )),
+        // Thousands-separated literals, so the formatter's comma-stripping
+        // normalization is exercised (and asserted not to change the value).
+        (
+            prop_oneof![
+                Just("1,234.56"),
+                Just("12,345.00"),
+                Just("1,000"),
+                Just("9,999.99")
+            ],
+            currency()
+        )
+            .prop_map(|(num, ccy)| format!("{num} {ccy}")),
+    ]
+}
+
+/// A posting line — plain, cost-bearing (`{N CCY}`), or priced (`@ N CCY`) —
+/// with a deliberately-random gap so the formatter's alignment and
+/// cost/price normalization are exercised.
 fn posting_line() -> impl Strategy<Value = String> {
-    (account(), amount_str(), 1usize..8)
-        .prop_map(|(acct, amt, gap)| format!("  {}{}{}", acct, " ".repeat(gap), amt))
+    prop_oneof![
+        (account(), amount_str(), 1usize..8).prop_map(|(acct, amt, gap)| format!(
+            "  {}{}{}",
+            acct,
+            " ".repeat(gap),
+            amt
+        )),
+        (account(), "1[0-9]{0,3} HOOL", amount_str())
+            .prop_map(|(acct, units, cost)| format!("  {acct}  {units} {{{cost}}}")),
+        (account(), "1[0-9]{0,3} HOOL", amount_str())
+            .prop_map(|(acct, units, price)| format!("  {acct}  {units} @ {price}")),
+    ]
+}
+
+/// Transaction header after the date: narration-only, or payee + narration
+/// (two strings), so the formatter's payee handling is actually exercised.
+fn header() -> impl Strategy<Value = String> {
+    prop_oneof![
+        "[A-Za-z ]{0,12}".prop_map(|n| format!("\"{n}\"")),
+        ("[A-Za-z ]{1,10}", "[A-Za-z ]{0,12}").prop_map(|(p, n)| format!("\"{p}\" \"{n}\"")),
+    ]
 }
 
 fn txn_block() -> impl Strategy<Value = String> {
@@ -45,11 +83,11 @@ fn txn_block() -> impl Strategy<Value = String> {
         2000i32..2100,
         1u32..13,
         1u32..=28,
-        "[A-Za-z ]{0,12}",
+        header(),
         prop::collection::vec(posting_line(), 2..5),
     )
-        .prop_map(|(y, m, d, payee, lines)| {
-            format!("{y:04}-{m:02}-{d:02} * \"{payee}\"\n{}\n", lines.join("\n"))
+        .prop_map(|(y, m, d, head, lines)| {
+            format!("{y:04}-{m:02}-{d:02} * {head}\n{}\n", lines.join("\n"))
         })
 }
 

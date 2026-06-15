@@ -245,12 +245,13 @@ pub fn default_enriched_from(out: ImporterOutput) -> EnrichedImporterOutput {
 ///
 /// # Invocation constraint
 ///
-/// **Invoke at most once per crate.** Each call generates Rust
-/// items named `__wasm_importer_alloc`/`metadata`/`identify`/
-/// `extract`/`extract_enriched`/`abi_version` and (on `wasm32`) wasm
-/// exports named `alloc`/`metadata`/etc. — two invocations in one crate
-/// collide on both. Each WASM importer should be its own
-/// `cdylib` crate.
+/// **Invoke at most once per crate.** Each call generates Rust items
+/// named `__wasm_importer_alloc`, `__wasm_importer_metadata`,
+/// `__wasm_importer_identify`, `__wasm_importer_extract`,
+/// `__wasm_importer_extract_enriched`, and `__wasm_importer_abi_version`
+/// (every name carries the `__wasm_importer_` prefix), plus — on `wasm32` —
+/// wasm exports named `alloc`/`metadata`/etc. Two invocations in one crate
+/// collide on both. Each WASM importer should be its own `cdylib` crate.
 ///
 /// # Native vs `wasm32` symbol names
 ///

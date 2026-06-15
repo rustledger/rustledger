@@ -21,7 +21,8 @@ pub fn validate_account_name(account: &str, account_types: &[String]) -> Option<
     }
     if !account_types.iter().any(|t| t == root) {
         return Some(format!(
-            "account must start with one of: {}",
+            "account must start with one of: {}. To use a different root name, \
+             rename a type via an option, e.g. `option \"name_income\" \"Revenue\"`",
             account_types.join(", ")
         ));
     }

@@ -177,7 +177,8 @@ impl BookingEngine {
 
         let mut result = txn.clone();
         let mut gains = Vec::new();
-        let mut booked_indices: FxHashSet<usize> = FxHashSet::default();
+        let mut booked_indices: FxHashSet<usize> =
+            FxHashSet::with_capacity_and_hasher(txn.postings.len(), Default::default());
         // Track posting expansions: (original_idx, expanded_postings)
         let mut expansions: Vec<(usize, Vec<rustledger_core::Spanned<Posting>>)> =
             Vec::with_capacity(txn.postings.len());

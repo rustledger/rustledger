@@ -97,14 +97,15 @@ jobs:
   publish-list:
     name: Publish list in sync
     runs-on: ubuntu-latest
-    # Only runs `cargo metadata` (no compilation), so disable the workflow-level
-    # sccache wrapper — it isn't installed here, and rustc's version probe would
-    # otherwise fail with "could not execute process sccache".
+    # Only runs `cargo metadata` (no compilation), so the workflow-level sccache
+    # wrapper isn't needed (and isn't installed in this job).
     env:
       RUSTC_WRAPPER: ""
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # stable
+        with:
+          toolchain: stable
       - name: Verify release-publish CRATES array matches publishable crates
         run: python3 scripts/check-publish-crates.py
   # Wire-format bindings freshness gate (ADR-0004, #1218 + #1232).

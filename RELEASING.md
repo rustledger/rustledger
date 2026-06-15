@@ -44,7 +44,7 @@ The version surface is:
   - `BuildRequires: rust >= X.Y` must match `[workspace.package].rust-version` in the root `Cargo.toml`. Since Edition 2024 stabilized in 1.85, an out-of-date pin makes COPR fail at parse time on edition2024 syntax — caught in v0.14.1 (#927) where the pin was still `1.75` long after MSRV moved to `1.95`.
 - `Cargo.lock`: refreshed by `cargo check` after the Cargo.toml edits.
 
-`packages/vscode/package.json` is *not* bumped here — the VS Code extension version is synced from the release tag at build time. The AUR `PKGBUILD`s under `packaging/arch/` also don't need manual edits — `release-publish.yml` `sed`-bumps them at release time. The Homebrew formula at `packaging/homebrew/rustledger.rb` is bumped automatically by `dawidd6/action-homebrew-bump-formula` during release-publish.
+`packages/vscode/package.json` is *not* bumped here — the VS Code extension version is synced from the release tag at build time. The AUR `PKGBUILD`s under `packaging/arch/` also don't need manual edits — `release-publish.yml` `sed`-bumps them at release time. The Homebrew formula needs no action either — homebrew-core **autobumps** rustledger: BrewTestBot detects each GitHub release and opens the version-bump PR itself (~every 3 hours).
 
 ### 3. Pre-flight smoke check
 
@@ -90,7 +90,7 @@ gh release create v0.14.0 --target "$(git rev-parse HEAD)" --generate-notes
 This creates the `v0.14.0` tag and triggers two workflows:
 
 - `release-build.yml` — builds binaries for all 8 platforms, the WASM package, the FFI-WASI binary, and the VS Code extension; attaches them to the release.
-- `release-publish.yml` — distributes to crates.io, npm, Docker, Homebrew, Scoop, COPR, AUR.
+- `release-publish.yml` — distributes to crates.io, npm, Docker, Scoop, COPR, AUR (Homebrew autobumps separately).
 
 The full release takes ~30–45 minutes.
 
@@ -154,7 +154,7 @@ Trusted-publish tokens are publish-scoped only — they cannot run `npm dist-tag
 | File | Purpose |
 |------|---------|
 | `release-build.yml` | Builds binaries, WASM, FFI-WASI, VSCode extension; attaches to GitHub Release |
-| `release-publish.yml` | Distributes to crates.io, npm, Docker, Homebrew, Scoop, COPR, AUR |
+| `release-publish.yml` | Distributes to crates.io, npm, Docker, Scoop, COPR, AUR (Homebrew autobumps separately) |
 
 ## Adding a new workspace crate
 
@@ -195,15 +195,15 @@ gh run view <release-publish-run-id> --json jobs --jq '.jobs[] | select(.conclus
 gh run rerun --failed --job=<job-id>
 ```
 
-### `Bump Homebrew formula` exits 1 with "Whoops, the rustledger formula has its version update"
+### Homebrew formula didn't update
 
-Misleading error from `dawidd6/action-homebrew-bump-formula` — it fires when the formula in `homebrew-core` master is **already** at the target version (typically because a prior re-run of release-publish merged the bump PR). Verify with:
+There's nothing to do — homebrew-core **autobumps** rustledger. BrewTestBot detects each GitHub release and opens the `rustledger <version>` PR itself (~every 3 hours); it merges after Homebrew CI passes. Check progress:
 
 ```bash
-curl -s https://raw.githubusercontent.com/Homebrew/homebrew-core/master/Formula/r/rustledger.rb | grep -E '^\s*url\s+"'
+gh search prs --repo Homebrew/homebrew-core "rustledger" --json title,state,url
 ```
 
-If the URL is at the target version, the failure is a no-op and can be ignored.
+(There is no Homebrew job in `release-publish.yml` — a manual `brew bump-formula-pr` is rejected for autobump formulae. To opt out of autobump, add `no_autobump!` or a `livecheck`/`skip` to the formula.)
 
 ### Need to redrive `Release Publish` after a workflow fix
 

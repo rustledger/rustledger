@@ -14,7 +14,6 @@
 # | npm (wasm)   | @rustledger/wasm                       |
 # | npm (mcp)    | @rustledger/mcp-server                 |
 # | Docker       | ghcr.io/rustledger/rustledger          |
-# | Homebrew     | homebrew-core (official)               |
 # | Scoop        | rustledger/scoop-rustledger            |
 # | COPR         | copr.fedorainfracloud.org/rustledger   |
 # | AUR          | aur.archlinux.org (rustledger*)        |
@@ -23,7 +22,6 @@
 # SECRETS REQUIRED
 # ----------------
 # - BOT_CLIENT_ID / BOT_PRIVATE_KEY: GitHub App for cross-repo dispatches (Scoop, website)
-# - HOMEBREW_GITHUB_API_TOKEN: PAT with public_repo scope for homebrew-core PRs
 # - COPR_LOGIN / COPR_TOKEN: COPR build trigger
 # - AUR_SSH_PRIVATE_KEY: SSH key for pushing to AUR (aur.archlinux.org)
 # - (crates.io and npm use OIDC trusted publishing, no tokens needed)
@@ -365,21 +363,12 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-  # Submit PR to homebrew-core
-  update-homebrew:
-    name: Bump Homebrew formula
-    runs-on: ubuntu-latest
-    steps:
-      - name: Bump rustledger formula in homebrew-core
-        uses: dawidd6/action-homebrew-bump-formula@1446dca236b0440c6f02723a3f14f13be2c04ab0 # v7
-        with:
-          token: ${{ secrets.HOMEBREW_GITHUB_API_TOKEN }}
-          formula: rustledger
-          tag: ${{ env.RELEASE_TAG }}
-          # If this fails with "PR already exists" on a re-run, re-run only
-          # the other jobs (`gh run rerun --failed --job <ids>`). We intentionally
-          # do NOT use continue-on-error — silently swallowing this step has
-          # masked credential and network failures in the past.
+  # NOTE: there is no Homebrew bump job. homebrew-core now autobumps
+  # rustledger by default — BrewTestBot detects each GitHub release and
+  # opens the version-bump PR itself (~every 3h). A manual
+  # `brew bump-formula-pr` is rejected for autobump formulae, so the old
+  # job only ever failed red. To opt back out, add `no_autobump!` (or a
+  # `livecheck` `skip`) to the formula in homebrew-core.
   # Update Scoop bucket
   update-scoop:
     name: Update Scoop bucket

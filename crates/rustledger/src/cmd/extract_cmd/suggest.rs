@@ -89,9 +89,9 @@ pub(super) fn apply_ml_suggestions(
         let predictions = model.predict(narration, payee);
 
         if let Some((predicted, _conf)) = predictions.into_iter().next() {
-            // `predict` returns at most one prediction with non-zero
-            // confidence; if the predicted account differs from the
-            // fallback, rewrite it.
+            // `predict` returns every category ranked by posterior
+            // (highest first); take the top one. If it differs from the
+            // fallback, rewrite the account.
             if predicted != contra.account.as_str() {
                 txn.postings[1].account = rustledger_core::Account::from(predicted);
                 stats.modified += 1;

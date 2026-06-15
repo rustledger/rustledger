@@ -523,4 +523,26 @@ mod tests {
         assert!(tokens.contains(&"market".to_string()));
         assert!(tokens.contains(&"1234".to_string()));
     }
+
+    #[test]
+    fn naive_bayes_known_values() {
+        // Two classes, two features: class 0 sees feature 0, class 1 sees
+        // feature 1. With Laplace alpha = 1.0 and equal priors:
+        //   feature_log_prob[0] = ln([3/4, 1/4]),  [1] = ln([1/4, 3/4])
+        //   class_log_prior      = ln([1/2, 1/2])
+        // For x = [1, 0]: jll = ln(3/8) vs ln(1/8) → softmax = [0.75, 0.25].
+        let nb = MultinomialNB::fit(&[vec![2.0, 0.0], vec![0.0, 2.0]], &[0, 1], 2);
+
+        let p = nb.predict_proba(&[1.0, 0.0]);
+        assert!((p[0] - 0.75).abs() < 1e-9, "p[0] = {}", p[0]);
+        assert!((p[1] - 0.25).abs() < 1e-9, "p[1] = {}", p[1]);
+        assert!(
+            (p.iter().sum::<f64>() - 1.0).abs() < 1e-12,
+            "posteriors must sum to 1.0"
+        );
+
+        // The symmetric input flips the posteriors.
+        let q = nb.predict_proba(&[0.0, 1.0]);
+        assert!((q[0] - 0.25).abs() < 1e-9 && (q[1] - 0.75).abs() < 1e-9);
+    }
 }

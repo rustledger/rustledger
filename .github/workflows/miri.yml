@@ -32,24 +32,28 @@ jobs:
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2
         with:
           prefix-key: miri
+      # `+nightly` is required: the repo's rust-toolchain.toml pins `stable`,
+      # which otherwise overrides the nightly installed above, and miri only
+      # exists on nightly (bare `cargo miri` resolves to stable and fails with
+      # "the 'miri' component ... is not available for the 'stable' toolchain").
       - name: Setup Miri
-        run: cargo miri setup
+        run: cargo +nightly miri setup
       - name: Run Miri on core crates
         run: |
           echo "::group::rustledger-core"
-          cargo miri test --package rustledger-core --all-features
+          cargo +nightly miri test --package rustledger-core --all-features
           echo "::endgroup::"
 
           echo "::group::rustledger-parser"
-          cargo miri test --package rustledger-parser --all-features
+          cargo +nightly miri test --package rustledger-parser --all-features
           echo "::endgroup::"
 
           echo "::group::rustledger-booking"
-          cargo miri test --package rustledger-booking --all-features
+          cargo +nightly miri test --package rustledger-booking --all-features
           echo "::endgroup::"
 
           echo "::group::rustledger-query"
-          cargo miri test --package rustledger-query --all-features
+          cargo +nightly miri test --package rustledger-query --all-features
           echo "::endgroup::"
         env:
           MIRIFLAGS: -Zmiri-tree-borrows -Zmiri-symbolic-alignment-check -Zmiri-strict-provenance

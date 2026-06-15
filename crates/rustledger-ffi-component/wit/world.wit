@@ -1,0 +1,277 @@
+// rustledger embedding interface — typed WIT contract.
+//
+// Phase 1 of the WASI-p1 (JSON-RPC) -> p2 (Component Model) migration (#1384).
+// This is the single source of truth for the embedding wire shape, replacing
+// the hand-mirrored DTOs in `crates/rustledger-ffi-wasi/src/types`. Generated
+// bindings (wit-bindgen guest / wasmtime::component::bindgen! host) enforce the
+// shapes that are currently kept consistent by hand + review (e.g. the cost
+// shape footgun in #1399).
+//
+// Scope (this iteration): the read surface rustfava actually consumes —
+// version / load / validate / query (+ `-file` variants). The directive
+// construction surface (entry.create/clamp/filter) and util helpers
+// (getAccountType/isEncrypted/types) are tracked as remaining Phase 1 work.
+
+package rustledger:ledger@2.1.0;
+
+/// Shared data types, translated 1:1 from `types/output.rs`.
+interface types {
+  /// An amount: decimal number (string, to preserve full precision) + currency.
+  record amount {
+    number: string,
+    currency: string,
+  }
+
+  /// The numeric component of a cost. Mirrors `rustledger_core::CostNumber`;
+  /// the case IS the `kind` discriminator the JSON form tags by hand. Defined
+  /// once and reused for BOTH posting cost and position cost — the consistency
+  /// that #1399 had to enforce manually.
+  variant cost-number {
+    /// Per-unit cost, e.g. `{100 USD}`.
+    per-unit(string),
+    /// Total cost as written, e.g. `{{1000 USD}}` (pre-booking).
+    total(string),
+    /// Post-booking: (derived-per-unit, preserved-original-total).
+    per-unit-from-total(tuple<string, string>),
+  }
+
+  /// A cost: number + currency + optional acquisition date and lot label.
+  /// Every field optional to match the lean `PostingCost` JSON (bare `{USD}`
+  /// lot matches carry no `number`).
+  record cost {
+    number: option<cost-number>,
+    currency: option<string>,
+    date: option<string>,
+    label: option<string>,
+  }
+
+  /// A metadata value. The JSON DTO types this as arbitrary `serde_json::Value`,
+  /// but it is produced solely from `MetaValue`, a closed, non-recursive set:
+  /// string/account/currency/tag/link/date all render as text; number is a
+  /// decimal string; plus bool, amount, and absent.
+  variant meta-value {
+    text(string),
+    number(string),
+    boolean(bool),
+    amount(amount),
+    null,
+  }
+
+  /// One user metadata entry (preserves source order, unlike a map).
+  type meta-entry = tuple<string, meta-value>;
+
+  /// Directive metadata: source location + user key/values.
+  record meta {
+    filename: string,
+    lineno: u32,
+    hash: string,
+    user: list<meta-entry>,
+  }
+
+  /// A transaction posting.
+  record posting {
+    account: string,
+    units: option<amount>,
+    cost: option<cost>,
+    price: option<amount>,
+    flag: option<string>,
+    meta: list<meta-entry>,
+  }
+
+  // Per-kind directive payloads (WIT variant cases each carry one type).
+  record transaction {
+    date: string,
+    flag: string,
+    payee: option<string>,
+    narration: option<string>,
+    tags: list<string>,
+    links: list<string>,
+    postings: list<posting>,
+    meta: meta,
+  }
+  record open-dir {
+    date: string,
+    account: string,
+    currencies: list<string>,
+    booking: option<string>,
+    meta: meta,
+  }
+  record close-dir { date: string, account: string, meta: meta }
+  record balance-dir {
+    date: string,
+    account: string,
+    amount: amount,
+    tolerance: option<string>,
+    meta: meta,
+  }
+  record pad-dir {
+    date: string,
+    account: string,
+    source-account: string,
+    meta: meta,
+  }
+  record commodity-dir { date: string, currency: string, meta: meta }
+  record price-dir { date: string, currency: string, amount: amount, meta: meta }
+  record event-dir { date: string, event-type: string, value: string, meta: meta }
+  record note-dir { date: string, account: string, comment: string, meta: meta }
+  record document-dir {
+    date: string,
+    account: string,
+    path: string,
+    tags: list<string>,
+    links: list<string>,
+    meta: meta,
+  }
+  record query-dir { date: string, name: string, query-string: string, meta: meta }
+  record custom-dir {
+    date: string,
+    custom-type: string,
+    // `TypedValue`s; same closed shape as meta-value.
+    values: list<meta-value>,
+    meta: meta,
+  }
+
+  /// A loaded directive. Replaces the `type`-tagged `DirectiveJson` enum.
+  variant directive {
+    transaction(transaction),
+    open(open-dir),
+    close(close-dir),
+    balance(balance-dir),
+    pad(pad-dir),
+    commodity(commodity-dir),
+    price(price-dir),
+    event(event-dir),
+    note(note-dir),
+    document(document-dir),
+    query(query-dir),
+    custom(custom-dir),
+  }
+
+  /// A load / validate / query error.
+  record error {
+    message: string,
+    line: option<u32>,
+    column: option<u32>,
+    field: option<string>,
+    entry-index: option<u32>,
+    severity: string,
+    phase: string,
+  }
+
+  record plugin { name: string, config: option<string> }
+  record source-include { path: string, lineno: u32 }
+
+  /// Ledger options (resolved). Maps become ordered key/value lists.
+  record ledger-options {
+    title: option<string>,
+    operating-currency: list<string>,
+    name-assets: string,
+    name-liabilities: string,
+    name-equity: string,
+    name-income: string,
+    name-expenses: string,
+    documents: list<string>,
+    commodities: list<string>,
+    booking-method: string,
+    display-precision: list<tuple<string, u32>>,
+    render-commas: bool,
+    inferred-tolerance-default: list<tuple<string, string>>,
+    inferred-tolerance-multiplier: string,
+    infer-tolerance-from-cost: bool,
+    account-rounding: option<string>,
+    account-previous-balances: string,
+    account-previous-earnings: string,
+    account-previous-conversions: string,
+    account-current-earnings: string,
+    account-current-conversions: option<string>,
+    account-unrealized-gains: option<string>,
+    conversion-currency: option<string>,
+  }
+
+  /// A booked inventory position: units + optional realized cost (#1399).
+  record position { units: amount, cost: option<cost> }
+
+  /// An interval bucket (GROUP BY date functions).
+  record interval { unit: string }
+
+  /// A query result cell. Mirrors `rustledger_query::Value` as projected by
+  /// `value_to_json`.
+  ///
+  /// The Component Model forbids recursive types (verified: `wasm-tools`
+  /// rejects a `query-value` that contains itself, even through a `list`). The
+  /// two self-referential BQL cells — `object` (a map of cells) and `set` (a
+  /// list of cells) — are therefore carried in the `json` case as a serialized
+  /// JSON string rather than awkwardly flattened. Every other cell is fully
+  /// typed; `object`/`set` are rare in real query output. `metadata` is kept
+  /// typed because its values are already flat strings (not recursive).
+  variant query-value {
+    null,
+    boolean(bool),
+    integer(s64),
+    text(string),
+    date(string),
+    number(string),
+    amount(amount),
+    position(position),
+    inventory(list<position>),
+    string-set(list<string>),
+    metadata(list<tuple<string, string>>),
+    interval(interval),
+    json(string),
+  }
+
+  record column-info { name: string, datatype: string }
+}
+
+/// The embedding entrypoints. Replaces the JSON-RPC methods
+/// (ledger.load/loadFile, ledger.validate, query.execute, util.version).
+interface ledger {
+  use types.{directive, error, ledger-options, plugin, source-include, column-info, query-value};
+
+  record load-result {
+    entries: list<directive>,
+    errors: list<error>,
+    options: ledger-options,
+    plugins: list<plugin>,
+    includes: list<source-include>,
+  }
+
+  record validate-result {
+    valid: bool,
+    errors: list<error>,
+    parse-error-count: u32,
+    validate-error-count: u32,
+  }
+
+  record query-result {
+    columns: list<column-info>,
+    rows: list<list<query-value>>,
+    errors: list<error>,
+  }
+
+  /// The api-version string this component implements (e.g. "2.1"). The WIT
+  /// contract is itself the versioned wire shape; this exists for runtime
+  /// negotiation, replacing the `api_version` field formerly stamped onto every
+  /// JSON-RPC response.
+  version: func() -> string;
+
+  /// Parse + book a ledger from source text.
+  load: func(source: string) -> load-result;
+  /// Like `load`, but from a file path (the host grants filesystem access).
+  load-file: func(path: string) -> load-result;
+
+  /// Validate source text (parse + semantic checks).
+  validate: func(source: string) -> validate-result;
+  /// Like `validate`, but from a file path.
+  validate-file: func(path: string) -> validate-result;
+
+  /// Run a BQL query against source text.
+  query: func(source: string, query: string) -> query-result;
+  /// Like `query`, but the ledger is loaded from a file path.
+  query-file: func(path: string, query: string) -> query-result;
+}
+
+/// The component a host instantiates.
+world rustledger {
+  export ledger;
+}

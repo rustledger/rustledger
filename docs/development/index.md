@@ -27,9 +27,9 @@ See [CONTRIBUTING.md](https://github.com/rustledger/rustledger/blob/main/CONTRIB
 
 | Roadmap | Description |
 |---------|-------------|
-| [Testing Roadmap](testing-roadmap.md) | Test infrastructure improvements |
-| [Import Roadmap](import-roadmap.md) | Bank import feature development |
-| [Performance Roadmap](performance-roadmap.md) | Optimization phases |
+| [Testing & Quality Roadmap](../roadmap/testing-and-quality.md) | Test depth, fuzzing, API stability |
+| [Importing Roadmap](../roadmap/importing.md) | Imports, categorization (design: [import-architecture.md](import-architecture.md)) |
+| [Performance Roadmap](../roadmap/performance.md) | Speed, memory, caching |
 
 ## Quick Commands
 

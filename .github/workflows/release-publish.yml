@@ -307,9 +307,44 @@ jobs:
               exit 1
               ;;
           esac
+  # Gate: release-publish (trigger: release published) runs in parallel with
+  # release-build (trigger: tag push), so binary-consuming jobs can race the
+  # binary upload and fail with "no assets to download". Block them until the
+  # platform tarballs actually exist on the release.
+  wait-for-assets:
+    name: Wait for release binaries
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wait for release-build to upload platform tarballs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ env.RELEASE_TAG }}
+        run: |
+          expected=(
+            "rustledger-${TAG}-x86_64-unknown-linux-gnu.tar.gz"
+            "rustledger-${TAG}-x86_64-unknown-linux-musl.tar.gz"
+            "rustledger-${TAG}-aarch64-unknown-linux-gnu.tar.gz"
+            "rustledger-${TAG}-aarch64-unknown-linux-musl.tar.gz"
+          )
+          deadline=$(( $(date +%s) + 1800 ))   # 30 min
+          while :; do
+            assets=$(gh release view "$TAG" --json assets --jq '.assets[].name' 2>/dev/null || true)
+            missing=()
+            for a in "${expected[@]}"; do
+              grep -qxF "$a" <<<"$assets" || missing+=("$a")
+            done
+            if [ ${#missing[@]} -eq 0 ]; then echo "✓ all platform tarballs present"; exit 0; fi
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "::error::timed out waiting for release binaries:"
+              printf '  - %s\n' "${missing[@]}"; exit 1
+            fi
+            echo "waiting for ${#missing[@]} asset(s) (e.g. ${missing[0]})..."
+            sleep 20
+          done
   # Build and push Docker images
   publish-docker:
     name: Build Docker images
+    needs: wait-for-assets
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
@@ -424,7 +459,10 @@ jobs:
   # Trigger Rustfava WASM update
   update-rustfava:
     name: Update Rustfava WASM version
-    needs: [publish-npm-wasm]
+    # Also wait for binaries: rustfava's bump-PR CI downloads rustledger
+    # release tarballs, so dispatching before they exist gives that PR a
+    # red "no assets to download" run (as happened on the v0.16.0 bump).
+    needs: [publish-npm-wasm, wait-for-assets]
     runs-on: ubuntu-latest
     steps:
       - name: Generate GitHub App token
@@ -485,6 +523,7 @@ jobs:
           commit_message: "Update to ${{ env.RELEASE_TAG }}"
   update-aur-bin:
     name: Update AUR (rustledger-bin)
+    needs: wait-for-assets
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6

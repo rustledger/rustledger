@@ -5,7 +5,7 @@
 //! payee and narration text.
 //!
 //! Uses TF-IDF vectorization plus a small, self-contained Multinomial
-//! Naive Bayes classifier (see [`MultinomialNB`]) implemented in pure
+//! Naive Bayes classifier (see `MultinomialNB`) implemented in pure
 //! `std` — no external ML or linear-algebra crates. Earlier versions
 //! delegated to `linfa-bayes` and then `ferrolearn-bayes`, but both
 //! dragged heavy, occasionally wasm-incompatible dependencies in for an
@@ -187,8 +187,8 @@ impl CategorizationModel {
     ///
     /// Returns predictions sorted by confidence (highest first). Each
     /// prediction is an `(account, probability)` pair. The probabilities
-    /// are the class-conditional posteriors from
-    /// [`MultinomialNB::predict_proba`] (they sum to 1.0 across all
+    /// are the class-conditional posteriors from the underlying
+    /// Multinomial Naive Bayes model (they sum to 1.0 across all
     /// classes), so callers can treat them as honest scores.
     #[must_use]
     pub fn predict(&self, narration: &str, payee: Option<&str>) -> Vec<(String, f64)> {

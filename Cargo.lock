@@ -264,6 +264,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "bindgen"
+version = "0.72.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "993776b509cfb49c750f11b8f07a46fa23e0a1386ffc01fb1e7d343efc387895"
+dependencies = [
+ "bitflags 2.11.1",
+ "cexpr",
+ "clang-sys",
+ "itertools 0.13.0",
+ "log",
+ "prettyplease",
+ "proc-macro2",
+ "quote",
+ "regex",
+ "rustc-hash 2.1.2",
+ "shlex",
+ "syn 2.0.117",
+]
+
+[[package]]
 name = "bit-set"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -545,6 +565,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "37b2a672a2cb129a2e41c10b1224bb368f9f37a2b16b612598138befd7b37eb5"
 
 [[package]]
+name = "cblas-sys"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7211d558677a4f41a6c0815295cff14d798209b631d8390586efc2f6b98b0f16"
+
+[[package]]
 name = "cc"
 version = "1.2.62"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -554,6 +580,15 @@ dependencies = [
  "jobserver",
  "libc",
  "shlex",
+]
+
+[[package]]
+name = "cexpr"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6fac387a98bb7c37292057cffc56d62ecb629900026402633ae9160df93a8766"
+dependencies = [
+ "nom",
 ]
 
 [[package]]
@@ -642,6 +677,17 @@ checksum = "e8cf2a2c93cd704877c0858356ed03480ff301ee950b43f1cbe4573b088bfa6c"
 dependencies = [
  "crypto-common 0.2.2",
  "inout",
+]
+
+[[package]]
+name = "clang-sys"
+version = "1.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0b023947811758c97c59bf9d1c188fd619ad4718dcaa767947df1cadb14f39f4"
+dependencies = [
+ "glob",
+ "libc",
+ "libloading",
 ]
 
 [[package]]
@@ -800,6 +846,27 @@ name = "core-foundation-sys"
 version = "0.8.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
+
+[[package]]
+name = "core-math"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "91882903a40278e07da9aff73abf7039b0051dcda0d9bad0e5526b91c669e129"
+dependencies = [
+ "core-math-sys",
+]
+
+[[package]]
+name = "core-math-sys"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "37841fcacbd5931ff4b2c7fb92301b72df92c4a7e9f3adf81843d0c04c3c1ffd"
+dependencies = [
+ "anyhow",
+ "bindgen",
+ "cc",
+ "glob",
+]
 
 [[package]]
 name = "countme"
@@ -1462,12 +1529,118 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f1f227452a390804cdb637b74a86990f2a7d7ba4b7d5693aac9b4dd6defd8d6"
 
 [[package]]
+name = "ferray"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d55df320b682902d33e60d844fb87e013b6c1d24d221d4d5bacfeb54ccdfaeed"
+dependencies = [
+ "ferray-core",
+ "ferray-linalg",
+ "ferray-numpy-interop",
+ "ferray-random",
+ "ferray-stats",
+ "ferray-ufunc",
+ "num-complex",
+ "rayon",
+]
+
+[[package]]
+name = "ferray-core"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7cdc2f24be12b23dfc371e0d788142221cb12ea9175b46abbb55f272f267f2f9"
+dependencies = [
+ "ferray-core-macros",
+ "ndarray",
+ "num-complex",
+ "num-traits",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "ferray-core-macros"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c85ca2c102d1fb2733d26c793ec15cb009457db19b4b6bc3b5fc4ea7a1db391f"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
+
+[[package]]
+name = "ferray-linalg"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69d9f894baaff0abeaf4ad6f44077a76c81d2f563b19186d37f3c2f9d299b2e2"
+dependencies = [
+ "cblas-sys",
+ "faer",
+ "faer-traits",
+ "ferray-core",
+ "ferray-ufunc",
+ "num-complex",
+ "num-traits",
+ "openblas-src",
+ "rayon",
+]
+
+[[package]]
+name = "ferray-numpy-interop"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bca4ad7147c989ce2b29bfb5d9c47a7678204b8e16b57d994a0c11d86c1705bc"
+dependencies = [
+ "ferray-core",
+]
+
+[[package]]
+name = "ferray-random"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f8ba530e59d9a3ec7b6a138687bb579d68850532a961ac923055c5c83cdc838f"
+dependencies = [
+ "ferray-core",
+ "ferray-linalg",
+ "getrandom 0.4.2",
+ "rayon",
+]
+
+[[package]]
+name = "ferray-stats"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0b017b32fd9678c2fca96a1fca9953f7248ae49263ee30e031af6b99069a9eca"
+dependencies = [
+ "ferray-core",
+ "ferray-ufunc",
+ "num-complex",
+ "num-traits",
+ "pulp",
+ "rayon",
+]
+
+[[package]]
+name = "ferray-ufunc"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "722b19d2eb654fe8e1768998a7295ff167eb581c7cd7a60ea668e68e3b1d5bad"
+dependencies = [
+ "core-math",
+ "ferray-core",
+ "num-complex",
+ "num-traits",
+ "pulp",
+ "rayon",
+]
+
+[[package]]
 name = "ferrolearn-bayes"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ddd68e8885dc40175b3f1de2b72680a646c45909fde2654b77139005a53f4b6a"
 dependencies = [
- "ferrolearn-core",
+ "ferrolearn-core 0.4.0",
  "ndarray",
  "num-traits",
 ]
@@ -1482,6 +1655,29 @@ dependencies = [
  "ndarray",
  "num-traits",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "ferrolearn-core"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72f01d39ad91b3966c9c312c122753195f7cd8683c54632b804ac8bcdcf52b94"
+dependencies = [
+ "faer",
+ "ferray",
+ "ndarray",
+ "num-traits",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "filetime"
+version = "0.2.29"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c287a33c7f0a620c38e641e7f60827713987b3c0f26e8ddc9462cc69cf75759"
+dependencies = [
+ "cfg-if",
+ "libc",
 ]
 
 [[package]]
@@ -2366,6 +2562,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 
 [[package]]
+name = "libloading"
+version = "0.8.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d7c4b02199fee7c5d21a5ae7d8cfa79a6ef5bb2fc834d6e9058e89c825efdc55"
+dependencies = [
+ "cfg-if",
+ "windows-link",
+]
+
+[[package]]
 name = "libm"
 version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2902,6 +3108,32 @@ name = "oorandom"
 version = "11.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6790f58c7ff633d8771f42965289203411a5e5c68388703c06e14f24770b41e"
+
+[[package]]
+name = "openblas-build"
+version = "0.10.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bb9c85e9e7dd5acdc67b9f3f0c99656b550df716bc63540c6a224a920754a5c2"
+dependencies = [
+ "anyhow",
+ "cc",
+ "flate2",
+ "tar",
+ "thiserror 2.0.18",
+ "ureq",
+]
+
+[[package]]
+name = "openblas-src"
+version = "0.10.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f1a81a5e467f1861ad6ac32d5ec1690ad097d19854753b7424250fe27da46b98"
+dependencies = [
+ "dirs",
+ "openblas-build",
+ "pkg-config",
+ "vcpkg",
+]
 
 [[package]]
 name = "option-ext"
@@ -4021,7 +4253,7 @@ version = "0.15.0"
 dependencies = [
  "blake3",
  "ferrolearn-bayes",
- "ferrolearn-core",
+ "ferrolearn-core 0.5.0",
  "jiff",
  "ndarray",
  "proptest",
@@ -4678,6 +4910,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "55937e1799185b12863d447f42597ed69d9928686b8d88a1df17376a097d8369"
 
 [[package]]
+name = "tar"
+version = "0.4.46"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f6221d9a6003c78398e3b239969f352578258df48c8eb051caadae0015bc840"
+dependencies = [
+ "filetime",
+ "libc",
+ "xattr",
+]
+
+[[package]]
 name = "target-lexicon"
 version = "0.13.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5176,6 +5419,12 @@ name = "valuable"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
+
+[[package]]
+name = "vcpkg"
+version = "0.2.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 
 [[package]]
 name = "version_check"
@@ -6259,6 +6508,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "05f360fc0b24296329c78fda852a1e9ae82de9cf7b27dae4b7f62f118f77b9ed"
 dependencies = [
  "tap",
+]
+
+[[package]]
+name = "xattr"
+version = "1.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32e45ad4206f6d2479085147f02bc2ef834ac85886624a23575ae137c8aa8156"
+dependencies = [
+ "libc",
+ "rustix 1.1.4",
 ]
 
 [[package]]

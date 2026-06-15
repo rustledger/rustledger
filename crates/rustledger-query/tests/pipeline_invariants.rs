@@ -2,23 +2,32 @@
 //!
 //! Query result determinism: the same query over the same ledger must
 //! produce the same rows every time — including stable row ordering and the
-//! per-row GROUP BY key sidecar (`group_key`) — even for
-//! aggregations/grouping where the engine hashes or evaluates in parallel
-//! internally. This is exactly the invariant the `row_group_keys` parallel
-//! non-DISTINCT bug (#1177) violated.
+//! per-row GROUP BY key sidecar (`group_key`). This is the invariant the
+//! `row_group_keys` non-DISTINCT bug (#1177) violated.
+//!
+//! Two paths in `executor::execution` matter here, and they are NOT the
+//! same path:
+//! - **Aggregation / GROUP BY runs sequentially** (`group_postings`), using
+//!   a `std::HashMap` for buckets plus an explicit `key_order` vec to keep
+//!   emission deterministic despite the map's random seed. The GROUP BY
+//!   queries below exercise this path and the `group_key` sidecar.
+//! - **Parallel evaluation** (`use_parallel`, rayon `par_iter`) is reached
+//!   ONLY in the non-aggregate branch, when posting count >=
+//!   `PARALLEL_THRESHOLD` (1000) and there are no window functions. So the
+//!   plain-projection / DISTINCT queries — not GROUP BY — are what hit it.
 //!
 //! Two tests, deliberately split by scale:
 //! - [`query_execution_is_deterministic`] runs many *small* generated
-//!   ledgers through a spread of query shapes — broad shape coverage, but
-//!   below the executor's parallel threshold.
+//!   ledgers through a spread of query shapes — broad shape coverage below
+//!   the parallel threshold, including the sequential GROUP BY path.
 //! - [`large_ledger_query_is_deterministic`] drives a ledger past
-//!   `PARALLEL_THRESHOLD` (1000 postings) so the **parallel** grouping path
-//!   — the actual #1177 risk — is exercised.
+//!   `PARALLEL_THRESHOLD` so the non-aggregate **parallel** evaluation
+//!   branch runs (via the projection / DISTINCT queries). rayon's `par_iter`
+//!   preserves input order by contract, so this guards against a future
+//!   refactor that loses that ordering (e.g. an unordered `par_extend`).
 //!
-//! The executor's maps use `rustc_hash` (deterministic) and grouping
-//! preserves insertion order, so what these tests guard against is
-//! accidental dependence on hash-map iteration order or parallel
-//! scheduling, not a per-run hashing seed.
+//! Net: these guard against accidental dependence on hash-map iteration
+//! order or parallel scheduling, not a per-run hashing seed.
 
 use proptest::prelude::*;
 use rust_decimal::Decimal;
@@ -111,7 +120,7 @@ fn large_ledger(txn_count: usize) -> Vec<Directive> {
         .collect();
     for i in 0..txn_count {
         // Rotate the leg account so GROUP BY has multiple non-trivial
-        // buckets to populate (and so parallel grouping has real work).
+        // buckets to populate (sequential path) and DISTINCT has >1 value.
         let acct = ACCOUNTS[i % ACCOUNTS.len()];
         let amt = Decimal::new(i64::try_from(i).unwrap() + 1, 2);
         let day = u32::try_from(i % 27).unwrap() + 1;
@@ -124,10 +133,14 @@ fn large_ledger(txn_count: usize) -> Vec<Directive> {
     ds
 }
 
-/// The parallel grouping path (#1177) must be deterministic too. 1200
-/// postings clears `PARALLEL_THRESHOLD`, so the GROUP BY queries here run
-/// through the parallel branch; we execute each many times with fresh
-/// executors and assert every run matches the first.
+/// Determinism at scale, across both executor paths. 1200 postings clears
+/// `PARALLEL_THRESHOLD`, so the non-aggregate queries (`SELECT date,
+/// account, number` and `SELECT DISTINCT account`) run through the
+/// rayon `par_iter` branch, while the GROUP BY queries run through the
+/// sequential `group_postings` path (aggregation never goes parallel). We
+/// execute each query many times with fresh executors and assert every run
+/// matches the first — guarding both the parallel evaluation ordering and
+/// the sequential grouping/`group_key` emission order.
 #[test]
 fn large_ledger_query_is_deterministic() {
     let ledger = large_ledger(600);

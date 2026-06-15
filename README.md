@@ -33,7 +33,7 @@ ______________________________________________________________________
 | **AI-ready** | MCP server for Claude, Cursor, and other AI assistants |
 | **Runs anywhere** | WebAssembly support for browser and Node.js |
 | **Better errors** | Detailed error messages with source locations |
-| **30 built-in plugins** | Plus Python plugin compatibility via WASI sandbox |
+| **31 built-in plugins** | Plus Python plugin compatibility via WASI sandbox |
 | **Bank import** | CSV/OFX import with auto-detection, dedup, and categorization |
 
 <details>
@@ -87,7 +87,7 @@ ______________________________________________________________________
 
 <sub>Missing your platform? [Open an issue](https://github.com/rustledger/rustledger/issues/new) to request it.</sub>
 
-**Coming from Python beancount?** See the [Migration Guide](docs/MIGRATION.md) for command equivalents and plugin mapping.
+**Coming from Python beancount?** See the [Migration Guide](docs/migration/index.md) for command equivalents and plugin mapping.
 
 ## Quick Start
 
@@ -277,7 +277,7 @@ WASM importers implement the same `Importer` trait as the built-ins via the [`wa
 | `rustledger-booking` | Interpolation and 7 booking methods |
 | `rustledger-validate` | 26 validation error codes |
 | `rustledger-query` | BQL query engine |
-| `rustledger-plugin` | 30 built-in plugins + Python plugin support |
+| `rustledger-plugin` | 31 built-in plugins + Python plugin support |
 | `rustledger-plugin-types` | Shared plugin type definitions |
 | `rustledger-importer` | Import framework: built-in CSV/OFX, plus a `WasmImporter` host loader for third-party `.wasm` importers |
 | `rustledger-ops` | Pure operations — ML categorization, LLM prompts, dedup, transfer detection, balance reconciliation, merchant dictionary |
@@ -301,15 +301,15 @@ WASM importers implement the same `Importer` trait as the built-ins via the [`wa
 </details>
 
 <details>
-<summary><strong>Built-in plugins (30)</strong></summary>
+<summary><strong>Built-in plugins (31)</strong></summary>
 
 | Plugin | Description |
 |--------|-------------|
 | `auto_accounts` | Auto-generate Open directives |
 | `auto_tag` | Automatically tag transactions |
 | `box_accrual` | Accrual accounting for boxed periods |
-| `capital_gains_gain_loss` | Split capital gains into gain/loss accounts |
-| `capital_gains_long_short` | Split capital gains by holding period |
+| `gain_loss` | Split capital gains into gain/loss accounts |
+| `long_short` | Split capital gains by holding period |
 | `check_average_cost` | Validate average cost bookings |
 | `check_closing` | Zero balance assertion on account close |
 | `check_commodity` | Validate commodity declarations |
@@ -328,7 +328,7 @@ WASM importers implement the same `Importer` trait as the built-ins via the [`wa
 | `onecommodity` | Single commodity per account |
 | `pedantic` | Enable all strict validations |
 | `rename_accounts` | Rename accounts via metadata |
-| `rxtxn` | Link related transactions |
+| `rx_txn_plugin` | Link related transactions |
 | `sellgains` | Cross-check capital gains against sales |
 | `split_expenses` | Split expenses across accounts |
 | `unique_prices` | One price per day per commodity pair |
@@ -438,7 +438,7 @@ cargo bench -p rustledger-core
 cargo bench -p rustledger-parser
 ```
 
-See [BENCHMARKING.md](docs/BENCHMARKING.md) for detailed benchmark documentation.
+See [benchmarking.md](docs/development/benchmarking.md) for detailed benchmark documentation.
 
 </details>
 

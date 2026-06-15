@@ -201,7 +201,7 @@ ORDER BY account
 Create shell aliases for frequently used queries:
 
 ```bash
-alias expenses='rledger query ledger.beancount "SELECT root(account, 2), sum(cost(position)) WHERE account ~ \"Expenses\" GROUP BY 1 ORDER BY 2 DESC"'
+alias expenses='rledger query ledger.beancount "SELECT root(account, 2) AS category, sum(cost(position)) AS total WHERE account ~ \"Expenses\" GROUP BY category ORDER BY total DESC"'
 ```
 
 ### Output to CSV

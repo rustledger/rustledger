@@ -162,15 +162,15 @@ Recreate hledger-style commands:
 # ~/.bashrc
 export LEDGER_FILE="$HOME/finances/ledger.beancount"
 
-alias bal='rledger report balances "$LEDGER_FILE"'
-alias bs='rledger report balsheet "$LEDGER_FILE"'
-alias is='rledger report income "$LEDGER_FILE"'
+alias bal='rledger report "$LEDGER_FILE" balances'
+alias bs='rledger report "$LEDGER_FILE" balsheet'
+alias is='rledger report "$LEDGER_FILE" income'
 
 reg() {
   if [ -n "$1" ]; then
-    rledger report journal -a "$1" "$LEDGER_FILE"
+    rledger report "$LEDGER_FILE" journal -a "$1"
   else
-    rledger report journal "$LEDGER_FILE"
+    rledger report "$LEDGER_FILE" journal
   fi
 }
 ```

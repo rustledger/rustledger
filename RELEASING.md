@@ -36,12 +36,12 @@ The version surface is:
 
 - Workspace `Cargo.toml`:
   - `[workspace.package].version`.
-  - All 10 entries under `[workspace.dependencies]` that path-depend on a sibling crate (`rustledger-core`, `rustledger-parser`, `rustledger-loader`, `rustledger-booking`, `rustledger-validate`, `rustledger-query`, `rustledger-plugin`, `rustledger-plugin-types`, `rustledger-importer`, `rustledger-ops`). Their pinned `version = "X.Y.Z"` must match — `cargo publish` rejects a crate whose dep version doesn't match what's on crates.io.
-- All 14 crate `Cargo.toml` files under `crates/` (each currently hardcodes its own `version = "X.Y.Z"` rather than inheriting from the workspace).
+  - All 13 entries under `[workspace.dependencies]` that path-depend on a sibling crate (`rustledger-core`, `rustledger-parser`, `rustledger-loader`, `rustledger-booking`, `rustledger-validate`, `rustledger-query`, `rustledger-completion`, `rustledger-plugin`, `rustledger-plugin-types`, `rustledger-importer`, `rustledger-ops`, `rustledger-ffi-wasi`, `rustledger-wasm`). Their pinned `version = "X.Y.Z"` must match — `cargo publish` rejects a crate whose dep version doesn't match what's on crates.io.
+- All 16 crate `Cargo.toml` files under `crates/` (each currently hardcodes its own `version = "X.Y.Z"` rather than inheriting from the workspace).
 - `packages/mcp-server/package.json`: both `version` and the `@rustledger/wasm` entry under `dependencies`. **Don't try to update `package-lock.json`** — `@rustledger/wasm@X.Y.Z` doesn't exist on npm yet during the bump PR, so `npm install` fails with `ETARGET`. The publish workflow regenerates the lockfile after wasm is published.
 - `packaging/rpm/rustledger.spec`:
   - `Version`, `Source0` URL, and the `%setup -n rustledger-X.Y.Z` directory all hardcode the version. COPR pulls this file from the release tag via SCM integration, so missing this means COPR keeps building the old version.
-  - `BuildRequires: rust >= X.Y` must match `[workspace.package].rust-version` in the root `Cargo.toml`. Since Edition 2024 stabilized in 1.85, an out-of-date pin makes COPR fail at parse time on edition2024 syntax — caught in v0.14.1 (#927) where the pin was still `1.75` long after MSRV moved to `1.94`.
+  - `BuildRequires: rust >= X.Y` must match `[workspace.package].rust-version` in the root `Cargo.toml`. Since Edition 2024 stabilized in 1.85, an out-of-date pin makes COPR fail at parse time on edition2024 syntax — caught in v0.14.1 (#927) where the pin was still `1.75` long after MSRV moved to `1.95`.
 - `Cargo.lock`: refreshed by `cargo check` after the Cargo.toml edits.
 
 `packages/vscode/package.json` is *not* bumped here — the VS Code extension version is synced from the release tag at build time. The AUR `PKGBUILD`s under `packaging/arch/` also don't need manual edits — `release-publish.yml` `sed`-bumps them at release time. The Homebrew formula at `packaging/homebrew/rustledger.rb` is bumped automatically by `dawidd6/action-homebrew-bump-formula` during release-publish.
@@ -137,7 +137,7 @@ Distributed via GitHub Releases only (not the VS Code Marketplace). Users downlo
 | Docker | `ghcr.io/rustledger/rustledger` |
 | Homebrew | `homebrew-core` (official) |
 | Scoop | `rustledger/scoop-rustledger` |
-| COPR | `copr.fedoraproject.org/rustledger` |
+| COPR | `copr.fedorainfracloud.org/rustledger` |
 | AUR | `rustledger`, `rustledger-bin` |
 
 ## Trusted Publishing

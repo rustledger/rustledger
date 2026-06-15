@@ -303,11 +303,11 @@ Install "Beancount" package from Package Control.
 
 ### LSP Not Starting
 
-Check that `rledger` is in your PATH:
+Check that `rledger-lsp` is in your PATH:
 
 ```bash
-which rledger
-rledger --version
+which rledger-lsp
+rledger-lsp --version
 ```
 
 Test LSP manually:

@@ -264,6 +264,14 @@ pub extern "C" fn alloc(size: u32) -> *mut u8 {
     unsafe { std::alloc::alloc(layout) }
 }
 
+// ABI version export. The host checks this right after instantiation and
+// refuses to run a plugin built against an incompatible rustledger-plugin-types.
+// Must return the host's current ABI version (1).
+#[no_mangle]
+pub extern "C" fn __rustledger_abi_version() -> u32 {
+    1
+}
+
 // Main plugin entry point
 #[no_mangle]
 pub extern "C" fn process(input_ptr: u32, input_len: u32) -> u64 {
@@ -400,7 +408,6 @@ Output:
 
 ```
 warning: Large transaction: 25000.00 USD in Expenses:Transport
-  --> ledger.beancount:10
 ```
 
 ## Examples
@@ -447,11 +454,11 @@ fn process_directives(input: PluginInput) -> PluginOutput {
     for (i, mut directive) in input.directives.into_iter().enumerate() {
         if let Directive::Transaction(ref mut txn) = directive {
             // Add review-status metadata if not present
-            if !txn.meta.contains_key("review-status") {
-                txn.meta.insert(
+            if !txn.metadata.iter().any(|(k, _)| k == "review-status") {
+                txn.metadata.push((
                     "review-status".to_string(),
-                    "pending".to_string(),
-                );
+                    MetaValue::String("pending".to_string()),
+                ));
                 ops.push(PluginOp::Modify(i, directive));
                 continue;
             }
@@ -555,13 +562,12 @@ mod tests {
                 narration: "Test".to_string(),
                 tags: vec![],
                 links: vec![],
-                meta: Default::default(),
+                metadata: vec![],
                 postings: vec![],
-                source: None,
             })],
             options: Options {
                 title: None,
-                operating_currency: vec![],
+                operating_currencies: vec![],
             },
             config: None,
         };

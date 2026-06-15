@@ -79,7 +79,7 @@ bean-check ledger.beancount
 
 ```bash
 # Balance report
-rledger report balances ledger.beancount
+rledger report ledger.beancount balances
 
 # Compare with
 bean-report ledger.beancount balances

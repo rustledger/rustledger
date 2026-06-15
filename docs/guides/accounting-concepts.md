@@ -251,7 +251,7 @@ Shows your financial position at a point in time:
 - **Net Worth**: The difference
 
 ```bash
-rledger report balsheet ledger.beancount
+rledger report ledger.beancount balsheet
 ```
 
 ### Income Statement
@@ -263,7 +263,7 @@ Shows financial activity over a period:
 - **Net Income**: The difference
 
 ```bash
-rledger report income ledger.beancount
+rledger report ledger.beancount income
 ```
 
 ## Account Hierarchy

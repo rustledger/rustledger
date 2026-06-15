@@ -48,12 +48,12 @@ echo "Budget vs Actual for $MONTH"
 echo "============================"
 
 # Food:Groceries - Budget $400
-actual=$(rledger query "$LEDGER" "
+actual=$(rledger query "$LEDGER" -f csv "
   SELECT sum(cost(position))
   WHERE account ~ 'Expenses:Food:Groceries'
     AND year(date) = year(today())
     AND month(date) = month(today())
-" -f csv | tail -1)
+" | tail -1)
 
 echo "Groceries:    \$${actual} / \$400"
 
@@ -312,11 +312,11 @@ Instead of fixed budgets, track 3-month averages:
 ```sql
 -- Get last 3 months of expenses (adjust date range as needed)
 SELECT root(account, 2),
-       sum(cost(position)) / 3 AS monthly_avg
+       sum(number(cost(position))) / 3 AS monthly_avg
 WHERE account ~ "Expenses"
   AND date >= 2024-01-01 AND date < 2024-04-01
 GROUP BY 1
-ORDER BY 2 DESC
+ORDER BY monthly_avg DESC
 ```
 
 ### 5. Separate Needs vs Wants

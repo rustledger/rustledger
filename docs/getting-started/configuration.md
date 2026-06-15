@@ -100,7 +100,7 @@ option "booking_method" "FIFO"
 | `booking_method` | FIFO, LIFO, AVERAGE, etc. | STRICT |
 | `account_previous_balances` | Retained earnings account | `Equity:Opening-Balances` |
 | `account_current_earnings` | Current earnings account | `Equity:Earnings:Current` |
-| `inferred_tolerance_default` | Balance tolerance | `0.005` |
+| `inferred_tolerance_default` | Per-currency balance tolerance (e.g. `USD:0.005`) | (none) |
 
 ### Booking Methods
 
@@ -145,20 +145,34 @@ alias ris='rledger report income'
 
 ### VS Code
 
-Install the [Beancount extension](https://marketplace.visualstudio.com/items?itemName=Lencerf.beancount) and configure it to use rustledger:
+Install the rustledger VS Code extension (a thin LSP client around `rledger-lsp`). Point it at the LSP binary if it is not already on your `PATH`:
 
 ```json
 {
-  "beancount.lspPath": "rledger-lsp"
+  "rustledger.server.path": "rledger-lsp"
 }
 ```
 
 ### Neovim
 
-Using nvim-lspconfig:
+Using nvim-lspconfig (register the server manually, since it is not built in):
 
 ```lua
-require('lspconfig').rledger_lsp.setup{}
+local lspconfig = require('lspconfig')
+local configs = require('lspconfig.configs')
+
+if not configs.rledger then
+  configs.rledger = {
+    default_config = {
+      cmd = { 'rledger-lsp' },
+      filetypes = { 'beancount' },
+      root_dir = lspconfig.util.root_pattern('.git', '*.beancount'),
+      settings = {},
+    },
+  }
+end
+
+lspconfig.rledger.setup {}
 ```
 
 ### Helix
@@ -168,7 +182,7 @@ Add to `~/.config/helix/languages.toml`:
 ```toml
 [[language]]
 name = "beancount"
-language-server = { command = "rledger-lsp" }
+language-servers = ["rledger-lsp"]
 ```
 
 See [Editor Integration](../guides/editor-integration.md) for detailed setup instructions.

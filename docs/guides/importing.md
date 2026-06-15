@@ -170,7 +170,7 @@ The import pipeline can automatically enrich transactions beyond basic CSV/OFX
 extraction:
 
 - **Auto-inference**: Automatically detect CSV delimiter, date format, and column roles
-- **Merchant dictionary**: ~150 built-in merchant patterns (grocery, dining, transport, subscriptions, etc.) for automatic account categorization
+- **Merchant dictionary**: ~75 built-in merchant patterns (grocery, dining, transport, subscriptions, etc.) for automatic account categorization
 - **Transaction fingerprinting**: Stable structural hashes for deduplication against existing ledger entries
 - **Confidence scores**: Every enrichment decision carries a confidence value
 

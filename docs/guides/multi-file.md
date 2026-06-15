@@ -147,7 +147,7 @@ Have a single `main.beancount` that includes everything:
 ```bash
 # Always use the same entry point
 rledger check main.beancount
-rledger report balances main.beancount
+rledger report main.beancount balances
 ```
 
 ### 2. Accounts in One Place

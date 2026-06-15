@@ -28,7 +28,9 @@ Most commands support `--format json` for machine-readable output:
 
 ```bash
 # Get balances as JSON
-rledger query ledger.beancount "BALANCES" --format json
+# Note: --format must precede the FILE/QUERY arguments, otherwise the
+# variadic QUERY argument swallows the flag.
+rledger query --format json ledger.beancount "BALANCES"
 
 # Check for errors
 rledger check ledger.beancount --format json
@@ -45,7 +47,7 @@ import json
 
 def get_balances(ledger_path):
     result = subprocess.run(
-        ["rledger", "query", ledger_path, "BALANCES", "--format", "json"],
+        ["rledger", "query", "--format", "json", ledger_path, "BALANCES"],
         capture_output=True, text=True
     )
     if result.returncode != 0:
@@ -113,7 +115,11 @@ let mut loader = Loader::new();
 let result = loader.load(Path::new("ledger.beancount"))?;
 
 let query = parse_query("SELECT account, sum(position) GROUP BY account")?;
-let executor = Executor::new(&result.directives);
+
+// Strip spans: the executor takes `&[Directive]`, while the loader
+// returns `Vec<Spanned<Directive>>`.
+let directives: Vec<_> = result.directives.into_iter().map(|s| s.value).collect();
+let mut executor = Executor::new(&directives);
 let query_result = executor.execute(&query)?;
 
 for row in &query_result.rows {

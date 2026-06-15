@@ -22,10 +22,10 @@ export LEDGER_FILE="$HOME/finances/ledger.beancount"
 alias rl='rledger'
 
 # Common reports
-alias bal='rledger report balances "$LEDGER_FILE"'
-alias balsheet='rledger report balsheet "$LEDGER_FILE"'
-alias is='rledger report income "$LEDGER_FILE"'
-alias reg='rledger report journal "$LEDGER_FILE"'
+alias bal='rledger report "$LEDGER_FILE" balances'
+alias balsheet='rledger report "$LEDGER_FILE" balsheet'
+alias is='rledger report "$LEDGER_FILE" income'
+alias reg='rledger report "$LEDGER_FILE" journal'
 
 # Validation
 alias check='rledger check "$LEDGER_FILE"'
@@ -42,7 +42,7 @@ After setting up aliases:
 # Check your ledger
 check
 
-# View balance sheet
+# View account balances
 bal
 
 # View recent transactions
@@ -62,18 +62,18 @@ Create functions for more flexibility:
 # Balance for specific account
 bal() {
   if [ -n "$1" ]; then
-    rledger report balances -a "$1" "$LEDGER_FILE"
+    rledger report "$LEDGER_FILE" balances -a "$1"
   else
-    rledger report balances "$LEDGER_FILE"
+    rledger report "$LEDGER_FILE" balances
   fi
 }
 
 # Register filtered by account
 reg() {
   if [ -n "$1" ]; then
-    rledger report journal -a "$1" "$LEDGER_FILE"
+    rledger report "$LEDGER_FILE" journal -a "$1"
   else
-    rledger report journal "$LEDGER_FILE"
+    rledger report "$LEDGER_FILE" journal
   fi
 }
 
@@ -87,7 +87,7 @@ reg() {
 
 ```bash
 # Monthly expenses summary
-alias expenses='rledger query "$LEDGER_FILE" "SELECT root(account, 2), sum(cost(position)) WHERE account ~ \"Expenses\" GROUP BY 1 ORDER BY 2 DESC"'
+alias expenses='rledger query "$LEDGER_FILE" "SELECT root(account, 2), sum(cost(position)) WHERE account ~ \"Expenses\" GROUP BY 1 ORDER BY sum(cost(position)) DESC"'
 
 # Net worth
 alias networth='rledger query "$LEDGER_FILE" "SELECT sum(cost(position)) WHERE account ~ \"Assets\" OR account ~ \"Liabilities\""'
@@ -101,7 +101,7 @@ alias thismonth='rledger query "$LEDGER_FILE" "SELECT root(account, 2), sum(cost
 ```bash
 # Transactions from specific period
 period() {
-  rledger report journal "$LEDGER_FILE" --begin "$1" --end "$2"
+  rledger query "$LEDGER_FILE" "SELECT date, account, position WHERE date >= $1 AND date <= $2"
 }
 
 # Usage: period 2024-01-01 2024-03-31
@@ -111,10 +111,10 @@ period() {
 
 ```bash
 # CSV export
-alias bal-csv='rledger report balances -f csv "$LEDGER_FILE"'
+alias bal-csv='rledger report "$LEDGER_FILE" balances -f csv'
 
 # JSON for scripting
-alias bal-json='rledger report balances -f json "$LEDGER_FILE"'
+alias bal-json='rledger report "$LEDGER_FILE" balances -f json'
 ```
 
 ## Per-Project Aliases
@@ -164,16 +164,16 @@ alias rl='rledger'
 alias check='rledger check "$LEDGER_FILE"'
 
 # Reports
-alias bal='rledger report balances "$LEDGER_FILE"'
-alias balsheet='rledger report balsheet "$LEDGER_FILE"'
-alias is='rledger report income "$LEDGER_FILE"'
+alias bal='rledger report "$LEDGER_FILE" balances'
+alias balsheet='rledger report "$LEDGER_FILE" balsheet'
+alias is='rledger report "$LEDGER_FILE" income'
 
 # Journal/register with optional account filter
 reg() {
   if [ -n "$1" ]; then
-    rledger report journal -a "$1" "$LEDGER_FILE"
+    rledger report "$LEDGER_FILE" journal -a "$1"
   else
-    rledger report journal "$LEDGER_FILE"
+    rledger report "$LEDGER_FILE" journal
   fi
 }
 
@@ -183,7 +183,7 @@ q() {
 }
 
 # Common reports
-alias expenses='q "SELECT root(account, 2), sum(cost(position)) WHERE account ~ \"Expenses\" GROUP BY 1 ORDER BY 2 DESC"'
+alias expenses='q "SELECT root(account, 2), sum(cost(position)) WHERE account ~ \"Expenses\" GROUP BY 1 ORDER BY sum(cost(position)) DESC"'
 alias networth='q "SELECT sum(cost(position)) WHERE account ~ \"Assets\" OR account ~ \"Liabilities\""'
 
 # Format in-place
@@ -204,14 +204,14 @@ set -x LEDGER_FILE "$HOME/finances/ledger.beancount"
 
 alias rl='rledger'
 alias check='rledger check $LEDGER_FILE'
-alias bal='rledger report balances $LEDGER_FILE'
-alias balsheet='rledger report balsheet $LEDGER_FILE'
+alias bal='rledger report $LEDGER_FILE balances'
+alias balsheet='rledger report $LEDGER_FILE balsheet'
 
 function reg
     if test -n "$argv[1]"
-        rledger report journal -a $argv[1] $LEDGER_FILE
+        rledger report $LEDGER_FILE journal -a $argv[1]
     else
-        rledger report journal $LEDGER_FILE
+        rledger report $LEDGER_FILE journal
     end
 end
 

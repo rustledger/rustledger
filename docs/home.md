@@ -13,7 +13,7 @@ Welcome to rustledger, a high-performance Rust implementation of [Beancount](htt
 - **No dependencies** - single binary, no Python runtime needed
 - **Full BQL support** - 100% query language compatibility
 - **LSP support** - IDE integration for VS Code, Neovim, Helix
-- **30 built-in plugins** - plus Python plugin compatibility
+- **29 built-in plugins** - plus Python plugin compatibility
 
 ## Quick Start
 
@@ -29,7 +29,7 @@ rledger check ledger.beancount
 rledger query ledger.beancount "SELECT account, sum(position) GROUP BY account"
 
 # Generate reports
-rledger report balances ledger.beancount
+rledger report ledger.beancount balances
 ```
 
 ## Documentation Sections

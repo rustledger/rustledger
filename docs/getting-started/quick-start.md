@@ -57,18 +57,27 @@ If everything is correct, you'll see:
 See all account balances:
 
 ```bash
-rledger report balances ledger.beancount
+rledger report ledger.beancount balances
 ```
 
 Output:
 
 ```
-Assets:Bank:Checking      3850.00 USD
-Assets:Cash                -50.00 USD
-Equity:Opening-Balances  -1000.00 USD
-Expenses:Food              150.00 USD
-Expenses:Transport          50.00 USD
-Income:Salary            -3000.00 USD
+Account Balances
+============================================================
+
+Assets:Bank:Checking
+          3850.00 USD
+Assets:Cash
+           -50.00 USD
+Equity:Opening-Balances
+         -1000.00 USD
+Expenses:Food
+           150.00 USD
+Expenses:Transport
+            50.00 USD
+Income:Salary
+         -3000.00 USD
 ```
 
 ## Run Queries
@@ -95,13 +104,13 @@ rledger query ledger.beancount "
 
 ```bash
 # Balance sheet
-rledger report balsheet ledger.beancount
+rledger report ledger.beancount balsheet
 
 # Income statement
-rledger report income ledger.beancount
+rledger report ledger.beancount income
 
 # Transaction register
-rledger report journal ledger.beancount
+rledger report ledger.beancount journal
 ```
 
 ## Format Your Ledger

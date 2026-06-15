@@ -176,16 +176,16 @@ Recreate familiar commands:
 # ~/.bashrc
 export LEDGER_FILE="$HOME/finances/ledger.beancount"
 
-alias bal='rledger report balances "$LEDGER_FILE"'
-alias reg='rledger report journal "$LEDGER_FILE"'
+alias bal='rledger report "$LEDGER_FILE" balances'
+alias reg='rledger report "$LEDGER_FILE" journal'
 
 # With account filter
 bal() {
-  rledger report balances ${1:+-a "$1"} "$LEDGER_FILE"
+  rledger report "$LEDGER_FILE" balances ${1:+-a "$1"}
 }
 
 reg() {
-  rledger report journal ${1:+-a "$1"} "$LEDGER_FILE"
+  rledger report "$LEDGER_FILE" journal ${1:+-a "$1"}
 }
 ```
 

@@ -72,7 +72,7 @@ Download from [GitHub Releases](https://github.com/rustledger/rustledger/release
 | macOS ARM64 | `rustledger-v<VERSION>-aarch64-apple-darwin.tar.gz` |
 | Windows x86_64 | `rustledger-v<VERSION>-x86_64-pc-windows-msvc.zip` |
 
-Replace `<VERSION>` with the release version (e.g., `0.10.1`).
+Replace `<VERSION>` with the release version (e.g., `0.15.0`).
 
 ## Verify Installation
 
@@ -83,7 +83,7 @@ rledger --version
 You should see output like:
 
 ```
-rledger 0.10.1
+rledger 0.15.0
 ```
 
 ## Shell Completions

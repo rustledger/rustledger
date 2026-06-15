@@ -2,7 +2,7 @@
 # Produces a minimal image with static musl binaries
 
 # Build stage
-FROM rust:1.95-alpine AS builder
+FROM rust:1.96-alpine AS builder
 
 RUN apk add --no-cache musl-dev
 

@@ -90,6 +90,18 @@ jobs:
           toolchain: stable
           components: rustfmt
       - run: cargo fmt --all -- --check
+  # Release hygiene: the crates.io publish list in release-publish.yml must
+  # match the set of publishable workspace crates. A new crate missing from
+  # the array silently breaks `cargo publish` for its dependents mid-release
+  # (this is what broke v0.16.0 — rustledger-completion was never added).
+  publish-list:
+    name: Publish list in sync
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # stable
+      - name: Verify release-publish CRATES array matches publishable crates
+        run: bash scripts/check-publish-crates.sh
   # Wire-format bindings freshness gate (ADR-0004, #1218 + #1232).
   # Regenerates all three artifacts from the Rust DTOs and fails if any
   # differs from the checked-in version:

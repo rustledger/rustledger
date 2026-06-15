@@ -5,11 +5,13 @@
 //! every run. Validators emit into per-currency/-account maps internally,
 //! so this guards against nondeterministic error emission (e.g. a future
 //! refactor that surfaces errors in hash-map order). Generated ledgers mix
-//! valid, unbalanced, and unopened-account transactions so a variety of
-//! codes are exercised.
+//! valid (balanced), unbalanced, and unopened-account transactions across
+//! several currencies — including transactions balanced in two currencies
+//! at once — so a variety of codes and the per-currency map ordering are
+//! all exercised.
 //!
-//! (The booking-coupled early-vs-late equivalence from #1235 needs a
-//! one-shot `book` helper that isn't public today; left as a follow-up.)
+//! (The booking-coupled early-vs-late equivalence from #1235 is handled
+//! separately on top of the public one-shot `book` helper added in #1362.)
 
 use proptest::prelude::*;
 use rust_decimal::Decimal;
@@ -27,27 +29,85 @@ const ACCOUNTS: &[&str] = &[
     "Liabilities:Card",
 ];
 
-fn amount() -> impl Strategy<Value = Amount> {
-    (-1_000_000i64..1_000_000, 0u32..3)
-        .prop_map(|(n, scale)| Amount::new(Decimal::new(n, scale), "USD"))
+/// A small static currency set so transactions span multiple currencies —
+/// validators bucket residuals/errors per currency, so multiple currencies
+/// are needed to exercise cross-currency map-ordering determinism.
+const CURRENCIES: &[&str] = &["USD", "EUR", "CAD"];
+
+fn amt(n: i64, scale: u32, ccy: usize) -> Amount {
+    Amount::new(Decimal::new(n, scale), CURRENCIES[ccy])
 }
 
-/// Two explicit postings with independent random amounts — often
-/// unbalanced (`TransactionUnbalanced`), on random accounts (some may be
-/// unopened, giving `AccountNotOpen`).
+/// A spread of transaction shapes so a variety of error codes — and the
+/// valid path — are all exercised:
+/// - **unbalanced**: two independent random postings (random currencies),
+///   usually `TransactionUnbalanced`, on random (sometimes unopened)
+///   accounts.
+/// - **balanced single-currency**: a posting and its exact negation — the
+///   valid path.
+/// - **balanced multi-currency**: a balanced USD leg plus a balanced EUR
+///   leg, so the per-currency residual map holds two buckets at once.
 fn txn() -> impl Strategy<Value = Transaction> {
-    (
-        1u32..28,
-        0usize..ACCOUNTS.len(),
-        0usize..ACCOUNTS.len(),
-        amount(),
-        amount(),
-    )
-        .prop_map(|(day, a, b, amt_a, amt_b)| {
-            Transaction::new(date(day), "t")
-                .with_synthesized_posting(Posting::new(ACCOUNTS[a], amt_a))
-                .with_synthesized_posting(Posting::new(ACCOUNTS[b], amt_b))
-        })
+    prop_oneof![
+        // Unbalanced / random.
+        (
+            1u32..28,
+            0usize..ACCOUNTS.len(),
+            0usize..ACCOUNTS.len(),
+            0usize..CURRENCIES.len(),
+            -1_000_000i64..1_000_000,
+            0u32..3,
+            0usize..CURRENCIES.len(),
+            -1_000_000i64..1_000_000,
+            0u32..3,
+        )
+            .prop_map(|(day, a, b, c1, n1, s1, c2, n2, s2)| {
+                Transaction::new(date(day), "u")
+                    .with_synthesized_posting(Posting::new(ACCOUNTS[a], amt(n1, s1, c1)))
+                    .with_synthesized_posting(Posting::new(ACCOUNTS[b], amt(n2, s2, c2)))
+            }),
+        // Balanced, single currency (valid path).
+        (
+            1u32..28,
+            0usize..ACCOUNTS.len(),
+            0usize..ACCOUNTS.len(),
+            0usize..CURRENCIES.len(),
+            1i64..1_000_000,
+            0u32..3,
+        )
+            .prop_map(|(day, a, b, c, n, s)| {
+                let x = amt(n, s, c);
+                let neg = Amount::new(-x.number, x.currency.clone());
+                Transaction::new(date(day), "b")
+                    .with_synthesized_posting(Posting::new(ACCOUNTS[a], x))
+                    .with_synthesized_posting(Posting::new(ACCOUNTS[b], neg))
+            }),
+        // Balanced across two currencies at once.
+        (
+            1u32..28,
+            0usize..ACCOUNTS.len(),
+            0usize..ACCOUNTS.len(),
+            1i64..1_000_000,
+            0u32..3,
+            1i64..1_000_000,
+            0u32..3,
+        )
+            .prop_map(|(day, a, b, n1, s1, n2, s2)| {
+                let usd = Amount::new(Decimal::new(n1, s1), "USD");
+                let eur = Amount::new(Decimal::new(n2, s2), "EUR");
+                Transaction::new(date(day), "m")
+                    .with_synthesized_posting(Posting::new(ACCOUNTS[a], usd.clone()))
+                    .with_synthesized_posting(Posting::new(
+                        ACCOUNTS[a],
+                        Amount::new(-usd.number, "USD"),
+                    ))
+                    .with_synthesized_posting(Posting::new(ACCOUNTS[b], eur.clone()))
+                    .with_synthesized_posting(Posting::new(
+                        ACCOUNTS[b],
+                        Amount::new(-eur.number, "EUR"),
+                    ))
+            }),
+    ]
 }
 
 fn ledger() -> impl Strategy<Value = Vec<Directive>> {

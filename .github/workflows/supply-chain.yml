@@ -60,6 +60,7 @@ jobs:
   #
   # License Policy:
   # - Permissive licenses (MIT, Apache-2.0, BSD-*, ISC, Zlib, 0BSD): Always allowed
+  # - BlueOak-1.0.0: Permissive (Blue Oak Model License; used by minimatch/glob dev tooling), allowed
   # - Apache-2.0 WITH LLVM-exception: Permissive (used by Wasmtime/Cranelift), allowed
   # - Unicode-3.0, CDLA-Permissive-2.0: Data/content licenses, allowed
   # - MPL-2.0: Weak copyleft (file-level), allowed for dependencies
@@ -79,7 +80,7 @@ jobs:
           fail-on-severity: high
           # See License Policy comment above before adding new licenses
           allow-licenses: >-
-            MIT, Apache-2.0, Apache-2.0 WITH LLVM-exception, BSD-2-Clause, BSD-3-Clause, ISC, GPL-3.0-only, MPL-2.0, Zlib, 0BSD, Unicode-3.0, CDLA-Permissive-2.0, LGPL-3.0, CC0-1.0, MIT-0, NCSA, bzip2-1.0.6
+            MIT, Apache-2.0, Apache-2.0 WITH LLVM-exception, BSD-2-Clause, BSD-3-Clause, ISC, GPL-3.0-only, MPL-2.0, Zlib, 0BSD, Unicode-3.0, CDLA-Permissive-2.0, LGPL-3.0, CC0-1.0, MIT-0, NCSA, bzip2-1.0.6, BlueOak-1.0.0
           # These packages use non-SPDX "MIT/Apache-2.0" license field that
           # the dependency review action can't parse. Both MIT and Apache-2.0
           # are in our allow list; exempt these packages from the license check.

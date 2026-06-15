@@ -68,19 +68,30 @@ const ACCOUNTS: &[&str] = &[
     "Assets:Cash",
 ];
 
+/// Several commodities (none declared via a `commodity` directive) so
+/// `check_commodity` collects multiple undeclared-commodity warnings — the
+/// case whose hash-set emission order was the bug this PR fixes.
+const COMMODITIES: &[&str] = &["HOOL", "GOOG", "AAPL", "TSLA"];
+
 fn amount(currency: &'static str) -> impl Strategy<Value = Amount> {
     (1i64..1_000_000, 0u32..3)
         .prop_map(move |(n, scale)| Amount::new(Decimal::new(n, scale), currency))
 }
 
+fn commodity_amount() -> impl Strategy<Value = Amount> {
+    (1i64..1_000_000, 0u32..3, 0usize..COMMODITIES.len())
+        .prop_map(|(n, scale, c)| Amount::new(Decimal::new(n, scale), COMMODITIES[c]))
+}
+
 /// A transaction with a priced posting (so `implicit_prices` has work to
-/// do) plus a plain balancing posting.
+/// do) plus a plain balancing posting. The stock leg's commodity varies so
+/// a ledger references several undeclared commodities at once.
 fn txn() -> impl Strategy<Value = Transaction> {
     (
         1u32..28,
         0usize..ACCOUNTS.len(),
         0usize..ACCOUNTS.len(),
-        amount("HOOL"),
+        commodity_amount(),
         amount("USD"),
         amount("USD"),
     )
@@ -128,10 +139,16 @@ proptest! {
         let registry = NativePluginRegistry::global();
         let input = make_input(&directives);
 
-        let mut resolved = 0usize;
+        // Track names that fail to resolve and assert NONE do, so registry
+        // churn (a renamed/removed plugin) fails loudly rather than silently
+        // shrinking coverage — `resolved > 0` would have masked 21 of 22
+        // names going stale.
+        let mut unresolved: Vec<&str> = Vec::new();
         for &name in PLUGINS {
-            let Some(plugin) = registry.find_regular(name) else { continue };
-            resolved += 1;
+            let Some(plugin) = registry.find_regular(name) else {
+                unresolved.push(name);
+                continue;
+            };
 
             let first = fingerprint(&plugin.process(input.clone()));
             let second = fingerprint(&plugin.process(input.clone()));
@@ -143,6 +160,10 @@ proptest! {
             );
         }
 
-        prop_assert!(resolved > 0, "no candidate plugins resolved from the registry");
+        prop_assert!(
+            unresolved.is_empty(),
+            "these candidate plugins no longer resolve from the registry: {:?}",
+            unresolved
+        );
     }
 }

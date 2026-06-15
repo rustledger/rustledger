@@ -1,15 +1,14 @@
 {
   "compilerOptions": {
     "target": "ES2020",
-    "module": "commonjs",
-    // Explicit `node10` (the historical default for `module: commonjs`).
-    // TS 6 deprecates this name but still accepts it under
-    // `ignoreDeprecations: "6.0"` — kept here because VS Code's extension
-    // publisher tooling (`@vscode/vsce`) hasn't sanctioned the
-    // `nodenext`/`bundler` migration path for extensions yet. Revisit
-    // before adopting TS 7.
-    "moduleResolution": "node10",
-    "ignoreDeprecations": "6.0",
+    "module": "esnext",
+    // `bundler` resolution mirrors how esbuild (our actual bundler — see
+    // the `build` script) resolves imports, and is required to read
+    // vscode-languageclient v10's `exports` map (e.g. the
+    // `vscode-languageclient/node` subpath, which `node10` can't resolve).
+    // tsc here is typecheck-only: the shipped artifact is esbuild's
+    // `--format=cjs` bundle, so this doesn't change extension output.
+    "moduleResolution": "bundler",
     "lib": ["ES2020"],
     "outDir": "./out",
     "rootDir": "./src",

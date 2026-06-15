@@ -35,9 +35,9 @@
     "@rustledger/wasm": "^0.15.0"
   },
   "devDependencies": {
-    "@types/node": "^24.0.0",
+    "@types/node": "^25.9.3",
     "typescript": "^6.0.0",
-    "vitest": "^4.0.17"
+    "vitest": "^4.1.9"
   },
   "engines": {
     "node": ">=24"

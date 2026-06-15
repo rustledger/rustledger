@@ -54,7 +54,7 @@ Rustledger does not execute Python plugins. Files using `plugin "some_python_plu
 - Report error E8001 "Plugin not found" for unknown plugins
 - This matches Python beancount's behavior of failing on missing plugins
 
-Rustledger supports 30 native plugins that match Python beancount behavior:
+Rustledger supports 31 native plugins that match Python beancount behavior:
 
 - `auto_accounts`, `auto_tag`, `box_accrual`, `gain_loss`
 - `long_short`, `check_average_cost`, `check_closing`, `check_commodity`

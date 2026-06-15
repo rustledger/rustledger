@@ -12,6 +12,8 @@ Generate standard financial reports from your ledger.
 rledger report [OPTIONS] [FILE] [COMMAND]
 ```
 
+A report subcommand (e.g. `balances`, `journal`) is required — running `rledger report FILE` with no subcommand errors. `FILE` precedes the subcommand.
+
 ## Subcommands
 
 | Command | Alias | Description |

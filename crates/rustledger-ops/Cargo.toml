@@ -31,7 +31,7 @@ regex.workspace = true
 # (#1194), with a real `predict_proba`. `ferrolearn-core` brings the
 # `Fit` trait into scope for `MultinomialNB::fit`.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-ferrolearn-bayes = "0.4"
+ferrolearn-bayes = "0.5"
 ferrolearn-core = "0.4"
 ndarray = "0.17"
 

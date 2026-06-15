@@ -61,7 +61,18 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
 
     #[test]
-    fn format_is_idempotent_and_output_parses(src in source()) {
+    fn format_is_idempotent_and_preserves_ast(src in source()) {
+        // The generator only emits well-formed ledgers; assert that so a
+        // generator bug can't silently turn the content check below into a
+        // comparison of error-recovery output.
+        let original = parse(&src);
+        prop_assert!(
+            original.errors.is_empty(),
+            "generator produced unparsable source: {:?}\n{}",
+            original.errors,
+            src
+        );
+
         let once = format_source(&src);
         let twice = format_source(&once);
         prop_assert_eq!(&once, &twice, "format_source is not idempotent");
@@ -71,6 +82,18 @@ proptest! {
             reparsed.errors.is_empty(),
             "formatted output failed to re-parse: {:?}",
             reparsed.errors
+        );
+
+        // The real round-trip contract: formatting changes layout, never
+        // content. `Spanned`'s PartialEq compares values only (ignoring byte
+        // offsets), so this asserts the parsed AST is unchanged — catching a
+        // formatter drift (dropped/reordered posting, mangled amount, lost
+        // payee) that still emits syntactically valid output and would slip
+        // past the "re-parses cleanly" check above.
+        prop_assert_eq!(
+            reparsed.directives,
+            original.directives,
+            "formatting changed the parsed AST (content drift, not just layout)"
         );
     }
 }

@@ -13,7 +13,7 @@ Welcome to rustledger, a high-performance Rust implementation of [Beancount](htt
 - **No dependencies** - single binary, no Python runtime needed
 - **Full BQL support** - 100% query language compatibility
 - **LSP support** - IDE integration for VS Code, Neovim, Helix
-- **29 built-in plugins** - plus Python plugin compatibility
+- **31 built-in plugins** - plus Python plugin compatibility
 
 ## Quick Start
 

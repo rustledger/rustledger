@@ -182,7 +182,10 @@ Add to `~/.config/helix/languages.toml`:
 ```toml
 [[language]]
 name = "beancount"
-language-servers = ["rledger-lsp"]
+language-servers = ["rustledger"]
+
+[language-server.rustledger]
+command = "rledger-lsp"
 ```
 
 See [Editor Integration](../guides/editor-integration.md) for detailed setup instructions.

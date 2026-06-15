@@ -61,6 +61,12 @@ pub use types::{Amount, CostNumber, DirectiveJson, Meta, Posting, PostingCost, T
 ///
 /// # Version history
 ///
+/// * **2.1** — `Inventory`/`Position` query values now include an optional
+///   `cost` object per position when the holding was booked at cost, using the
+///   same wire shape as a directive `PostingCost` (`number` is a tagged
+///   `CostNumber`, always `per_unit` for a booked position). Additive and
+///   backward compatible — units-only consumers ignore the new field — hence a
+///   minor bump per the policy above.
 /// * **2.0** — `error.data.errors` on `beancount_parse_error` (-32000)
 ///   responses is now `ParseErrorEntry[]` (per-error object with
 ///   `message`, `kind_code`, `hint`, `span`) instead of the previous
@@ -72,4 +78,4 @@ pub use types::{Amount, CostNumber, DirectiveJson, Meta, Posting, PostingCost, T
 ///   should refuse to talk to a v2.x server. See `README.md` for the
 ///   migration recipe.
 /// * **1.0** — initial API.
-pub const API_VERSION: &str = "2.0";
+pub const API_VERSION: &str = "2.1";

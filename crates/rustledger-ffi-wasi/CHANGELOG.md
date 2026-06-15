@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
+- `Inventory` and `Position` query result values now include an optional
+  per-position `cost` object when the holding was booked at cost, using the
+  same wire shape as a directive `PostingCost` (`number` is a tagged
+  `CostNumber`, always `per_unit` for a booked position; absent `date`/`label`
+  omitted). Additive and backward compatible — units-only consumers ignore it
+  — so `api_version` is bumped to `2.1` (minor). Enables embedders to build
+  cost-/lot-aware views from query output. (#1398)
 - `ParseErrorEntry.kind_code` exposes the stable numeric discriminant
   from `rustledger_parser::ParseError::kind_code()`. Codes 1-26
   documented in `openrpc.json`'s `ParseErrorEntry` schema. Notably,

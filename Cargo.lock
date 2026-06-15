@@ -4093,6 +4093,7 @@ dependencies = [
  "criterion",
  "insta",
  "jiff",
+ "parking_lot",
  "proptest",
  "rayon",
  "regex",

@@ -11,7 +11,7 @@ pub use types::{
     WindowContext,
 };
 
-use std::sync::RwLock;
+use parking_lot::RwLock;
 
 use rustc_hash::FxHashMap;
 
@@ -258,12 +258,10 @@ impl<'a> Executor<'a> {
     fn get_or_compile_regex(&self, pattern: &str) -> Option<Regex> {
         // Fast path: check read lock first
         {
-            // Handle lock poisoning gracefully - if another thread panicked while holding
-            // the lock, we can still recover the cached data via into_inner()
-            let cache = match self.regex_cache.read() {
-                Ok(guard) => guard,
-                Err(poisoned) => poisoned.into_inner(),
-            };
+            // parking_lot's RwLock does not poison, so the read guard is
+            // returned directly (this matches the previous std behavior,
+            // which recovered from poisoning via into_inner()).
+            let cache = self.regex_cache.read();
             if let Some(cached) = cache.get(pattern) {
                 return cached.clone();
             }
@@ -274,10 +272,7 @@ impl<'a> Executor<'a> {
             .case_insensitive(true)
             .build()
             .ok();
-        let mut cache = match self.regex_cache.write() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let mut cache = self.regex_cache.write();
         // Double-check in case another thread inserted while we waited
         if let Some(cached) = cache.get(pattern) {
             return cached.clone();

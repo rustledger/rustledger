@@ -153,6 +153,20 @@ jobs:
       - name: Verify forbid-unsafe-code invariant
         run: ./scripts/check-unsafe-invariant.sh
 
+  # Ratchet for the parking_lot adoption (#1076): forbid std::sync Mutex/RwLock
+  # in library code so the perf decision can't silently regress. Same
+  # lightweight named-status pattern as the unsafe invariant; no extra
+  # toolchain required (deliberately a grep ratchet rather than a dylint lint).
+  sync-primitives:
+    name: Sync Primitives
+    needs: [changes]
+    if: needs.changes.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - name: Forbid std::sync Mutex/RwLock in library code
+        run: ./scripts/check-sync-primitives.sh
+
   # Plugin-test policies (Phase 5 of plugin-testing-quality plan, see #992).
   # Catches weak count assertions and `(partial)` test ports that tend to
   # silently mask plugin bugs.

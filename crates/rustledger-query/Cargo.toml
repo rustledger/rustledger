@@ -26,6 +26,7 @@ thiserror.workspace = true
 regex = "1"
 rustc-hash.workspace = true
 rayon.workspace = true
+parking_lot.workspace = true
 
 [dev-dependencies]
 rust_decimal_macros.workspace = true

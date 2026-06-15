@@ -84,11 +84,11 @@ proptest! {
                 IncompleteAmount::CurrencyOnly("EUR".into()),
             ));
 
-        // Some random shapes may be structurally unfillable; those are out
-        // of scope for the idempotence property, so skip them.
-        let Ok(once) = interpolate(&txn) else {
-            return Ok(());
-        };
+        // This shape — one complete posting plus one `CurrencyOnly` elided
+        // leg per currency — is always structurally fillable, so a failure
+        // here is a real regression, not an out-of-scope input. Assert
+        // success rather than skipping (which would mask such a break).
+        let once = interpolate(&txn).expect("one-elided-leg-per-currency is always fillable");
         let twice = interpolate(&once.transaction).expect("re-interpolation succeeds");
 
         prop_assert_eq!(&twice.transaction, &once.transaction);

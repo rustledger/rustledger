@@ -2,18 +2,37 @@
 
 ## Current Working Specifications
 
-All specifications listed below have been verified with TLC model checker:
+The repository contains 18 `.tla` specs. The 16 specs below are model-checked
+on every CI run (see `.github/workflows/tla.yml`):
 
-| Specification | States | Key Invariants |
-|---------------|--------|----------------|
-| `Conservation.tla` | 679 | ConservationInvariant, NonNegativeInventory |
-| `DoubleEntry.tla` | 259 | TransactionsBalance, NoSelfTransfer |
-| `LotSelection.tla` | 415 | FIFOCorrect, LIFOCorrect, HIFOCorrect |
-| `AccountStateMachine.tla` | 16,223 | ClosedHaveZeroBalance, TypeOK |
-| `Interpolation.tla` | 481 | AtMostOneNull, CompleteImpliesBalanced |
-| `FIFOCheck.tla` | 132 | FIFOSelectsOldest |
-| `SimpleInventory.tla` | demo | Basic add/reduce example |
-| `BuggyInventory.tla` | demo | Shows TLC catching bugs |
+| Specification | Key Invariants |
+|---------------|----------------|
+| `Conservation.tla` | ConservationInvariant, NonNegativeInventory |
+| `DoubleEntry.tla` | TransactionsBalance, NoSelfTransfer |
+| `AccountStateMachine.tla` | ClosedHaveZeroBalance, TypeOK |
+| `Interpolation.tla` | AtMostOneNull, CompleteImpliesBalanced |
+| `FIFOCorrect.tla` | FIFO selects oldest lot |
+| `LIFOCorrect.tla` | LIFO selects newest lot |
+| `HIFOCorrect.tla` | HIFO selects highest-cost lot |
+| `STRICTCorrect.tla` | STRICT requires exactly one matching lot |
+| `AVERAGECorrect.tla` | AVERAGE weighted cost basis |
+| `NONECorrect.tla` | NONE allows any reduction |
+| `MultiCurrency.tla` | Multi-currency conservation |
+| `PriceDB.tla` | Price database consistency |
+| `ValidationCorrect.tla` | Balance assertion validation |
+| `PluginCorrect.tla` | Plugin execution ordering |
+| `ConcurrentAccess.tla` | Concurrent read/write safety |
+| `QueryExecution.tla` | BQL query execution invariants |
+
+The remaining two specs are illustrative demos, not run in CI:
+
+| Specification | Purpose |
+|---------------|---------|
+| `SimpleInventory.tla` | Basic add/reduce example |
+| `BuggyInventory.tla` | Shows TLC catching bugs |
+
+`FIFOCheck.tla` also remains in the tree for historical reference (it found the
+original FIFO bug, see below) but has been superseded in CI by `FIFOCorrect.tla`.
 
 ## Real Bug Found
 
@@ -27,15 +46,18 @@ These specs are designed to **actually run and find bugs**:
 
 1. **Conservation.tla** - Catches bugs where units appear from nothing or disappear
 1. **DoubleEntry.tla** - Catches broken transaction balancing
-1. **LotSelection.tla** - Catches wrong lot selection in FIFO/LIFO/HIFO
+1. **FIFOCorrect.tla / LIFOCorrect.tla / HIFOCorrect.tla** - Catch wrong lot selection per method
+1. **STRICTCorrect.tla / AVERAGECorrect.tla / NONECorrect.tla** - Catch booking-method violations
 1. **AccountStateMachine.tla** - Catches invalid state transitions
 1. **Interpolation.tla** - Catches NULL posting interpolation bugs
 
 ## Running the Specs
 
 ```bash
-# Run all specs
-for spec in Conservation DoubleEntry LotSelection AccountStateMachine Interpolation FIFOCheck; do
+# Run all CI-checked specs
+for spec in Conservation DoubleEntry AccountStateMachine Interpolation \
+            FIFOCorrect LIFOCorrect HIFOCorrect STRICTCorrect AVERAGECorrect NONECorrect \
+            MultiCurrency PriceDB ValidationCorrect PluginCorrect ConcurrentAccess QueryExecution; do
     java -jar tools/tla2tools.jar -config spec/tla/$spec.cfg spec/tla/$spec.tla
 done
 
@@ -50,10 +72,7 @@ java -XX:+UseParallelGC -Xmx1g -jar tools/tla2tools.jar \
 
 Potential specs that could be added:
 
-1. **Multi-currency conservation** - Track units per currency
-1. **Price database** - Price lookups and triangulation
 1. **Pad directive** - Balance padding algorithm
-1. **Query execution** - BQL query correctness
 
 ## Design Principles
 

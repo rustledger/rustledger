@@ -10,20 +10,22 @@ rustledger has **best-in-class** testing infrastructure:
 |----------|--------|---------|
 | Unit/Integration Tests | ✅ | 99 files with `#[test]`, 14 integration test files |
 | Property Testing | ✅ | proptest with TLA+ invariant verification |
-| Fuzzing | ✅ | CI fuzzing (`fuzz.yml`), parser + query targets |
+| Pipeline-Boundary Property Tests | ✅ | `pipeline_invariants.rs` across parser/booking/validate/query/plugin (#1235) |
+| Fuzzing | ✅ | CI fuzzing (`fuzz.yml`), parser + query + booking targets |
 | TLA+ Model Checking | ✅ | 19 specifications + trace-to-test automation |
 | Compatibility Testing | ✅ | 694 files, 3 dimensions (check/BQL/AST) |
 | Performance Testing | ✅ | Cross-tool benchmarks + Criterion in CI |
 | Security Scanning | ✅ | gitleaks, cargo-deny, cargo-vet, CodeQL |
+| Grep Ratchets | ✅ | unsafe-invariant + sync-primitives (#1237) + hot-path-collections in CI gate |
+| SemVer / API Stability | ✅ | cargo-semver-checks on `rustledger-plugin-types` (#1233) |
 | Snapshot Testing | ✅ | insta for parser output |
 | Miri | ✅ | `miri.yml` - weekly UB detection |
 | Nextest | ✅ | Fast parallel test execution in CI |
 | Coverage | ✅ | Codecov integration in `quality.yml` |
-| Mutation Testing | ✅ | `mutation.yml` - monthly mutation analysis |
+| Mutation Testing | ✅ | `mutation.yml` - per-package matrix jobs (#1238) |
 | Kani | ✅ | `kani.yml` - formal verification of invariants |
 | WASM Testing | ✅ | `wasm.yml` - Node.js + browser tests |
-| BQL Testing | ✅ | 40+ queries, 100 files (configurable) |
-| Error Quality | ✅ | `compat-error-quality.py` script |
+| BQL Testing | ✅ | ~17 queries (`bql-queries.toml`), up to `MAX_FILES = 30` files |
 
 **Current grade: A+** (top 1% of Rust projects)
 
@@ -35,8 +37,29 @@ All originally planned phases have been implemented:
 - ✅ Phase 2: Fuzzing Infrastructure (CI fuzzing, query fuzzing)
 - ✅ Phase 3: Compatibility Enhancements (error quality, expanded BQL)
 - ✅ Phase 4: Formal Verification Bridge (Kani, TLA+ trace automation)
-- ✅ Phase 5: Mutation Testing (monthly cargo-mutants)
+- ✅ Phase 5: Mutation Testing (per-package cargo-mutants matrix)
 - ✅ Phase 6: WASM Testing (wasm-pack tests)
+
+### Additional Shipped Work (post-roadmap)
+
+Work delivered after the original six phases, beyond the initial plan:
+
+- ✅ **Pipeline-boundary property tests (#1235)** — `pipeline_invariants.rs` in
+  `rustledger-parser`, `-booking`, `-validate`, `-query`, and `-plugin`, plus
+  `booking_phase_invariants.rs` (validate) and `tla_proptest.rs` /
+  `plugin_determinism.rs` (plugin). They pin the contracts at each pipeline
+  boundary: parse/format roundtrip + idempotence (parser), booking idempotence
+  (booking), validation determinism (validate), plugin wire-format roundtrip
+  (plugin), and query-result determinism (query).
+- ✅ **Grep ratchets** — `scripts/check-sync-primitives.sh` (forbids
+  `std::sync::Mutex`/`RwLock` in library code, #1237) and
+  `scripts/check-hot-path-collections.sh` (forbids SipHash `HashMap`/`HashSet`
+  in modules marked `// ratchet: fxhash-only`), wired into `ci.yml` as the
+  `sync-primitives` and `hot-path-collections` jobs in the required gate.
+  These join the existing `check-unsafe-invariant.sh` (`unsafe-invariant` job).
+- ✅ **SemVer / API-stability gate (#1233)** — `ci.yml` job `semver-plugin-types`
+  runs `cargo-semver-checks` against `rustledger-plugin-types` on every PR,
+  catching accidental breaking changes to the published plugin DTOs.
 
 ## Remaining Gaps
 
@@ -53,14 +76,13 @@ ______________________________________________________________________
 
 **Why**: Detects undefined behavior in unsafe code that sanitizers miss.
 
-**File**: `.github/workflows/ci.yml`
+**File**: `.github/workflows/miri.yml` (own workflow — Miri lives outside `ci.yml`)
 
 ```yaml
 miri:
   name: Miri
   runs-on: ubuntu-latest
   # Run weekly - Miri is slow and nightly-only
-  if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
   steps:
     - uses: actions/checkout@v6
     - uses: dtolnay/rust-toolchain@nightly
@@ -71,6 +93,9 @@ miri:
       env:
         MIRIFLAGS: -Zmiri-symbolic-alignment-check -Zmiri-strict-provenance
 ```
+
+> The workflow triggers on `schedule` (weekly, `cron: '0 5 * * 0'`) and
+> `workflow_dispatch`.
 
 **Effort**: 1 hour
 
@@ -201,7 +226,10 @@ cp fuzz/target/x86_64-unknown-linux-gnu/release/fuzz_parse_line $OUT/
 
 **Why**: BQL parser/executor could have bugs not covered by current targets.
 
-**File**: `crates/rustledger-query/fuzz/fuzz_targets/fuzz_query.rs`
+The `fuzz.yml` matrix covers `fuzz_parse`, `fuzz_parse_line`, `fuzz_query_parse`
+(query engine), and `fuzz_booking`.
+
+**File**: `crates/rustledger-query/fuzz/fuzz_targets/fuzz_query_parse.rs`
 
 ```rust
 #![no_main]
@@ -223,18 +251,22 @@ ______________________________________________________________________
 
 Address gaps in the compatibility testing suite.
 
-### 3.1 Error Message Quality Testing ✅
+### 3.1 Error Message Quality Testing 🔮 FUTURE
 
-**Why**: Currently only counts errors, doesn't verify messages are helpful.
+**Why**: The compatibility suite counts errors but does not yet verify that
+messages are helpful (correct location, type, and actionable wording) versus
+`bean-check`.
 
-**File**: `scripts/compat-error-quality.py`
+> Note: an earlier draft of this roadmap referenced a
+> `scripts/compat-error-quality.py` script. **That script does not exist** —
+> error-quality comparison remains unimplemented. The sketch below is the
+> intended approach, not shipped code.
 
 ```python
 #!/usr/bin/env python3
-"""Compare error message quality between bean-check and rledger check."""
+"""(Proposed) Compare error message quality between bean-check and rledger check."""
 
 import subprocess
-import json
 from pathlib import Path
 
 # Known-bad inputs with expected error patterns
@@ -254,14 +286,10 @@ def compare_errors(file: Path):
         ["rledger", "check", str(file)],
         capture_output=True, text=True
     )
-
-    # Compare error locations, types, and helpfulness
     return {
         "file": str(file),
         "python_stderr": bean_result.stderr,
         "rust_stderr": rust_result.stderr,
-        "location_match": compare_locations(bean_result.stderr, rust_result.stderr),
-        "type_match": compare_error_types(bean_result.stderr, rust_result.stderr),
     }
 ```
 
@@ -269,29 +297,28 @@ def compare_errors(file: Path):
 
 ### 3.2 Expand BQL Test Coverage ✅
 
-**Why**: Only 11 queries tested; query engine has 100+ functions.
+**Why**: Only a handful of queries were tested originally; the query engine has
+100+ functions.
 
-**File**: `scripts/compat-bql-comprehensive.sh`
+**Files**: `scripts/compat-bql-test.py`, corpus in
+`tests/compatibility/bql-queries.toml`
 
-Add tests for:
-
-- All aggregate functions (SUM, COUNT, FIRST, LAST, MIN, MAX, etc.)
-- Date functions (YEAR, MONTH, DAY, etc.)
-- String functions
-- Type conversion functions
-- Edge cases (NULL, empty results, large results)
+The corpus currently holds **~17 queries** (`bql-queries.toml`), each run against
+every sampled file. It exercises aggregates, date/string functions, and edge
+cases. (This is real, useful breadth — but note it is ~17 curated queries, not
+the "40+" an earlier draft claimed.)
 
 **Effort**: 1 day
 
-### 3.3 Remove BQL 50-File Limit ✅
+### 3.3 BQL File Sampling 🔮 FUTURE
 
-**Why**: "Due to test execution time" comment suggests scaling problem.
+**Why**: BQL runs cap the file set for execution-time reasons.
 
-**Solution**:
-
-- Run BQL tests in parallel
-- Use sampling for nightly (all files) vs PR (subset)
-- Cache query results
+`compat-bql-test.py` samples up to **`MAX_FILES = 30`** files (plugin-fixture
+files are prioritized so they always make the cut), overridable via CLI. The
+limit has **not** been removed — an earlier draft's "100 files / limit removed"
+claim was incorrect. Lifting it (parallel execution / nightly-vs-PR sampling)
+remains a possible future improvement.
 
 **Effort**: 4 hours
 
@@ -385,11 +412,16 @@ ______________________________________________________________________
 
 Find undertested code paths.
 
-### 5.1 Monthly Mutation Testing ✅
+### 5.1 Per-Package Mutation Testing ✅
 
 **Why**: Coverage metrics lie. Mutation testing shows if tests actually verify behavior.
 
 **File**: `.github/workflows/mutation.yml`
+
+Each curated package is mutated in its **own matrix job** (#1238) so one
+package's timeout or failure doesn't cancel the others, and each gets its own
+time budget. A `select-packages` job emits the package set as a JSON array and
+the `mutants` job fans out one runner per package.
 
 ```yaml
 name: Mutation Testing
@@ -400,34 +432,30 @@ on:
   workflow_dispatch:
 
 jobs:
-  mutants:
+  select-packages:
+    name: Select packages
     runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.select.outputs.matrix }}
+    # ... emits a JSON array of packages
+
+  mutants:
+    name: Mutate ${{ matrix.package }}
+    needs: select-packages
+    strategy:
+      fail-fast: false  # one package's failure must not cancel the others
+      matrix:
+        package: ${{ fromJSON(needs.select-packages.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
-      - name: Install cargo-mutants
-        run: cargo install cargo-mutants
-
       - name: Run mutation testing
-        run: |
-          cargo mutants --timeout 300 --jobs 4 \
-            --package rustledger-core \
-            --package rustledger-parser \
-            --package rustledger-booking \
-            -- --all-features
-
+        run: cargo mutants --package "${{ matrix.package }}" ...
       - name: Upload report
         uses: actions/upload-artifact@v4
         with:
-          name: mutation-report
+          name: mutation-results-${{ matrix.package }}  # per-package, no clobber
           path: mutants.out/
-
-      - name: Check mutation score
-        run: |
-          SCORE=$(cargo mutants --timeout 300 --jobs 4 --package rustledger-core -- --all-features 2>&1 | grep -oP '\d+(?=% killed)')
-          if [ "$SCORE" -lt 70 ]; then
-            echo "::warning::Mutation score below 70%: $SCORE%"
-          fi
 ```
 
 **Effort**: 2 hours
@@ -450,7 +478,7 @@ fn test_parse_simple() {
 }
 ```
 
-**File**: `.github/workflows/ci.yml` (add job)
+**File**: `.github/workflows/wasm.yml` (own workflow — WASM lives outside `ci.yml`)
 
 ```yaml
 wasm:
@@ -479,9 +507,9 @@ ______________________________________________________________________
 |-------|--------|--------|
 | Phase 1: Quick Wins | ✅ Done | Miri, nextest, Codecov, Criterion in CI |
 | Phase 2: Fuzzing | ✅ Done | CI fuzzing, query fuzzing (OSS-Fuzz remaining) |
-| Phase 3: Compat Enhancements | ✅ Done | Error quality, 40+ BQL queries, 100 files |
+| Phase 3: Compat Enhancements | ✅ Done | Expanded BQL corpus (~17 queries, `MAX_FILES = 30`) |
 | Phase 4: Formal Verification | ✅ Done | Kani proofs, TLA+ trace automation |
-| Phase 5: Mutation Testing | ✅ Done | Monthly cargo-mutants in CI |
+| Phase 5: Mutation Testing | ✅ Done | Per-package cargo-mutants matrix in CI |
 | Phase 6: WASM Testing | ✅ Done | wasm-pack tests in CI |
 
 **All original phases completed.**
@@ -495,9 +523,9 @@ ______________________________________________________________________
 | Test types | 8 | **16** ✅ |
 | Fuzzing frequency | Manual | **Nightly CI** (OSS-Fuzz pending) |
 | UB detection | None | **Miri weekly** ✅ |
-| Mutation score | Unknown | **Monthly analysis** ✅ |
+| Mutation score | Unknown | **Per-package matrix analysis** ✅ |
 | CI time | ~15 min | **~10 min (nextest)** ✅ |
-| BQL test coverage | 11 queries | **40+ queries** ✅ |
+| BQL test coverage | 11 queries | **~17 queries** ✅ |
 | WASM tests | 0 | **Full coverage** ✅ |
 | Formal verification | TLA+ only | **TLA+ + Kani** ✅ |
 
@@ -568,11 +596,14 @@ ______________________________________________________________________
    - Memory profiling under load
    - Detect memory leaks with long-running processes
 
-1. **API Stability Testing**
+1. **API Stability Testing** ✅ DONE (#1233)
 
    - Track public API surface
    - Detect accidental breaking changes
-   - Use `cargo public-api` or similar
+   - Shipped as the `semver-plugin-types` CI job: `cargo-semver-checks`
+     runs against `rustledger-plugin-types` on every PR (Tier 1 — the DTOs
+     every plugin author compiles against). Expanding to core/parser is a
+     possible follow-up.
 
 ______________________________________________________________________
 
@@ -580,19 +611,25 @@ ______________________________________________________________________
 
 ### New Files
 
-- `.github/workflows/fuzz.yml`
+- `.github/workflows/fuzz.yml` (`fuzz_parse`, `fuzz_parse_line`, `fuzz_query_parse`, `fuzz_booking`)
 - `.github/workflows/kani.yml`
-- `.github/workflows/mutation.yml`
-- `crates/rustledger-query/fuzz/` (new fuzz target)
+- `.github/workflows/mutation.yml` (per-package matrix, #1238)
+- `.github/workflows/miri.yml` (Miri moved out of `ci.yml`)
+- `.github/workflows/wasm.yml` (WASM moved out of `ci.yml`)
+- `crates/rustledger-query/fuzz/fuzz_targets/fuzz_query_parse.rs`
+- `crates/rustledger-booking/fuzz/fuzz_targets/fuzz_booking.rs`
 - `crates/rustledger-core/src/kani_proofs.rs`
-- `scripts/compat-error-quality.py`
+- `crates/*/tests/pipeline_invariants.rs` (parser/booking/validate/query/plugin, #1235)
+- `crates/rustledger-validate/tests/booking_phase_invariants.rs`
+- `crates/rustledger-plugin/tests/plugin_determinism.rs`
+- `scripts/check-sync-primitives.sh` (#1237), `scripts/check-hot-path-collections.sh`
 
 ### Modified Files
 
-- `.github/workflows/ci.yml` (Miri, nextest, coverage, WASM)
+- `.github/workflows/ci.yml` (nextest, coverage; grep-ratchet and `semver-plugin-types` gate jobs)
 - `.github/workflows/bench-pr.yml` (Criterion)
 - `.github/workflows/tla.yml` (trace automation)
-- `scripts/compat-bql-test.py` (expanded queries)
+- `scripts/compat-bql-test.py` (expanded queries, `MAX_FILES = 30`)
 
 ### External PRs
 

@@ -1,5 +1,21 @@
 # Rustledger Import System Roadmap
 
+> **⚠️ Implemented interface vs. aspirational design**
+>
+> The **shipped** import interface is the `rledger extract` command
+> (`crates/rustledger/src/cmd/extract_cmd/`) configured via **`importers.toml`**
+> profiles (selected with `--importer`), plus sandboxed WASM importers. ML
+> account suggestion (`--suggest-categories`) and balance-assertion generation
+> (`--balance` / `--balance-date`) are part of this shipped interface.
+>
+> Much of this document describes an **aspirational design** that has **not been
+> built**. In particular, the `rledger import add/sync/status/validate/review`
+> command family, the `rledger sources …` and `rledger import log …` commands,
+> and the `import.yaml` / `institutions/*.yaml` / `sources.yaml` / `parsers/*.yaml`
+> config formats are **design sketches, not implemented**. They are preserved
+> here as planned/future work — treat any `rledger import …` invocation or YAML
+> config below as not-yet-implemented unless this note says otherwise.
+
 ## Current Status
 
 | Component | Status | Details |
@@ -10,15 +26,15 @@
 | CSV Auto-Inference | ✅ Done | Delimiter, date format, column role detection (`--auto` flag) |
 | Ops Crate (`rustledger-ops`) | ✅ Done | Pure operations: dedup, categorize, fingerprint, reconcile, merchants, transfer |
 | Rules Engine | ✅ Done | Substring, regex, and exact match rules with priority ordering |
-| Merchant Dictionary | ✅ Done | ~75 built-in patterns (groceries, dining, transport, subscriptions, etc.) |
+| Merchant Dictionary | ✅ Done | ~230 built-in patterns (groceries, dining, transport, subscriptions, etc.) |
 | Transaction Fingerprinting | ✅ Done | Structural hashing via blake3 for stable dedup |
 | Enriched Import Results | ✅ Done | `EnrichedImportResult` with confidence scores and categorization method |
 | Institution Profiles | 🔮 Future | YAML-based bank definitions |
-| Balance Validation | 🔮 Future | Statement balance assertions |
+| Balance Validation | 🟡 Partial | `--balance`/`--balance-date` generate a `balance` directive via `rustledger-ops::reconcile` (amount is **user-supplied**); automatic balance *extraction from the statement* is still future |
 | Multi-Source Matching | 🔮 Future | Cross-validate sources |
 | PDF Extraction | 🔮 Future | Document AI / local OCR |
 | API Integration | 🔮 Future | SimpleFIN, Plaid |
-| ML Categorization | 🔮 Future | Learn from user's existing ledger |
+| ML Categorization | ✅ Done | Naive Bayes model (`rustledger-ops::ml::CategorizationModel`) trained on the user's existing ledger, wired into `rledger extract --suggest-categories` |
 | LLM/MCP Categorization | 🔮 Future | LLM-assisted via MCP |
 | WASM Import Plugins | ✅ Done | Third-party importers as sandboxed `.wasm` modules ([`WasmImporter`][wasm-importer], [`wasm_importer_main!`][wasm-macro], [example][wasm-csv-example]) |
 | Source Archive | 🔮 Future | SQLite append-only store |
@@ -105,6 +121,17 @@ ______________________________________________________________________
 ______________________________________________________________________
 
 ## Design Principles
+
+> **⚠️ Aspirational design.** The remaining sections of this document
+> (Design Principles, Architecture, Core Concepts, Data Model, User Experience,
+> and the later Implementation Phases) describe planned/future work. The YAML
+> config files (`import.yaml`, `institutions/*.yaml`, `sources.yaml`,
+> `parsers/*.yaml`) and the `rledger import …` / `rledger sources …` command
+> surfaces shown below are **not implemented** — the shipped interface is
+> `rledger extract` + `importers.toml`. See the note at the top of this document.
+> Genuinely-planned future items (PDF/OCR extraction, SimpleFIN/Plaid API
+> integration, LLM/MCP categorization, the SQLite source archive, and compliance
+> tooling) remain valid roadmap targets.
 
 ### 1. Privacy-First with User Choice
 
@@ -1498,12 +1525,18 @@ pub struct TransactionFingerprint {
 
 - [ ] Extract ending balance from CSV/statement
 - [ ] Compare against ledger computed balance
-- [ ] Generate `balance` directives automatically
+- [x] Generate `balance` directives ✅ — `rledger extract --balance <AMOUNT> [--balance-date <DATE>]` appends a `balance` directive via `rustledger-ops::reconcile::create_balance_directive`. **Note:** the amount is user-supplied; automatic extraction from the statement is still future.
 - [ ] Flag mismatches with diagnostic info
 
 #### 1.4 CLI Commands
 
+> **⚠️ Not implemented — aspirational design.** The `rledger import add/sync/status/validate`
+> command family below was never built. The shipped interface is a single
+> `rledger extract` command driven by `importers.toml` profiles (`--importer`)
+> and WASM importers. See the note at the top of this document.
+
 ```bash
+# Aspirational design (NOT implemented):
 rledger import add <account>           # Configure new account
 rledger import sync [account]          # Sync from configured sources
 rledger import status                  # Show import status per account
@@ -1635,18 +1668,24 @@ Implemented in `rustledger-ops::categorize::RulesEngine`:
 - Regex patterns (compiled, case-insensitive)
 - Exact matching
 - Priority ordering (user rules > merchant dictionary)
-- Built-in merchant dictionary with ~75 common patterns (`rustledger-ops::merchants`)
+- Built-in merchant dictionary with ~230 common patterns (`rustledger-ops::merchants`)
 
 The importer integrates the rules engine via `CsvConfigBuilder::use_merchant_dict()` and
 `CsvConfigBuilder::regex_mappings()`. User-defined `[importers.mappings]` in TOML config
 are loaded as substring rules at priority 0, while merchant dictionary entries use
 priority -1000 (always lower than user rules).
 
-#### 4.2 ML-Assisted Categorization
+#### 4.2 ML-Assisted Categorization ✅ IMPLEMENTED
 
-- [ ] Learn from user's existing ledger
-- [ ] Suggest categories for new merchants
-- [ ] Improve with corrections
+Implemented as a Naive Bayes classifier in `rustledger-ops::ml::CategorizationModel`
+(`train` / `predict`), wired into the CLI via `rledger extract --suggest-categories`
+(`crates/rustledger/src/cmd/extract_cmd/suggest.rs`). The model trains on the
+`--existing` ledger and replaces fallback contra-accounts with its prediction for
+transactions the rules engine left uncategorized.
+
+- [x] Learn from user's existing ledger ✅
+- [x] Suggest categories for new merchants ✅
+- [ ] Improve with corrections (online learning) — still future
 
 #### 4.3 Expected Transactions
 

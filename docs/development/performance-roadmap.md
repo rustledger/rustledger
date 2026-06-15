@@ -69,6 +69,16 @@ source_map.add_file(path, Arc::clone(&source));  // Cheap refcount
 - **Change**: Build release binaries with PGO data from benchmarks
 - **Impact**: 5-15% overall speedup (free optimization)
 
+### 0.3 Link-Time Optimization (LTO) Release Profiles ✅ DONE
+
+- **File**: `Cargo.toml` (workspace `[profile.*]`)
+- **Change**: Dedicated full-LTO profiles for the platforms where it is safe
+  - `[profile.release]` uses `lto = "thin"` (full LTO triggers an Apple linker crash on long symbol names)
+  - `[profile.release-linux]` (`inherits = "release"`) sets `lto = "fat"` for native Linux release builds
+  - `[profile.wasm-release]` (`inherits = "release"`) sets `lto = "fat"`, `opt-level = 3`, `panic = "abort"` — WASM doesn't hit the Apple linker bug
+- Both also keep `codegen-units = 1` and `strip = true` from the base `release` profile
+- **Impact**: Cross-crate inlining and dead-code elimination in shipped binaries (free optimization)
+
 ______________________________________________________________________
 
 ## Phase 1: Parser Allocation Fixes (Week 1)
@@ -135,6 +145,22 @@ pub postings: SmallVec<[Posting; 4]>,    // was Vec<Posting>
 - Add `.with_capacity()` calls in validation and query execution
 - **Files**: `rustledger-validate/src/lib.rs`, `rustledger-query/src/executor.rs`
 
+### 2.4 Fast Non-Cryptographic Hashing (FxHashMap / rustc-hash) ✅ DONE
+
+- **Dependency**: `rustc-hash = "2"` in workspace `Cargo.toml`, consumed by `rustledger-core`, `rustledger-validate`, `rustledger-booking`, `rustledger-query`, `rustledger-loader` (and `rustledger-ffi-wasi`)
+- **Change**: Replace std `HashMap`/`HashSet` (SipHash) with `FxHashMap`/`FxHashSet` on hot paths — Fx is a non-cryptographic hash that is much faster for the short interned-string and currency keys used here
+- **Examples**: `core/src/inventory/mod.rs` (`simple_index`, `units_cache`), `core/src/intern.rs`, `validate/src/validators/balance.rs`, `booking/src/book.rs`, `query/src/executor/aggregation.rs`
+- The inventory hot path is ratcheted to fxhash-only (no std SipHash collections) — see issue #1237
+- **Impact**: Faster lookups/inserts on validation, booking, and query aggregation maps (DoS resistance not needed for local ledger data)
+
+### 2.5 Persistent Data Structures (imbl) ✅ DONE
+
+- **Dependency**: `imbl = { version = "7", features = ["serde"] }` (workspace), used by `rustledger-core` (`core/Cargo.toml`)
+- **Change**: `Inventory.positions` uses `imbl::Vector<Position>` (was `Vec<Position>`) for O(1) clone via structural sharing — JOURNAL-style row-per-snapshot patterns become O(N log N) instead of O(N²). See issue #1086.
+- `imbl` is the maintained fork of the dormant `im` crate; the swap also removes a transitive `getrandom 0.2` pin
+- **File**: `crates/rustledger-core/src/inventory/mod.rs`
+- **Impact**: Removes quadratic blow-up when cloning inventories across many snapshots
+
 ______________________________________________________________________
 
 ## Phase 3: String Interning (Week 3-4) ✅ DONE
@@ -185,6 +211,20 @@ rayon = "1.8"
 - Interpolate transactions in parallel
 - Validate independent checks in parallel
 - Keep sorting single-threaded (required for correctness)
+
+### 4.3 Parallel Query Execution ✅ DONE
+
+- **File**: `crates/rustledger-query/src/executor/execution.rs`
+- **Change**: Simple (one-row-per-posting) query evaluation runs `postings.par_iter()` via rayon when the posting count is above `PARALLEL_THRESHOLD` and no window contexts are involved; each posting's row is evaluated independently, then collected
+- Deduplication for `DISTINCT` stays sequential after the parallel map (correctness)
+- **Impact**: Multi-core row evaluation for large result sets (complements Phase 4.2's validation parallelism)
+
+### 4.4 parking_lot Locks ✅ DONE
+
+- **Dependency**: `parking_lot = "0.12"` (workspace `Cargo.toml`)
+- **Change**: Use `parking_lot::RwLock`/`Mutex` instead of std locks — smaller, faster, and non-poisoning
+- **Files**: `crates/rustledger-query/src/executor/mod.rs` (`RwLock`; relies on parking_lot's no-poison read guards) and `rustledger-lsp` (`ledger_state.rs`, `main_loop.rs`)
+- **Impact**: Lower lock overhead and simpler error handling (no poison recovery) in the query executor and LSP state
 
 ______________________________________________________________________
 
@@ -287,10 +327,15 @@ ______________________________________________________________________
 | Phase | Work | Status | Result |
 |-------|------|--------|--------|
 | 0 | Quick wins (Arc, PGO) | ✅ Done | +29% (16% + 13%) |
+| 0.3 | LTO release profiles (fat on Linux/WASM) | ✅ Done | Cross-crate inlining |
 | 1 | Zero-copy parsing | ✅ Done | +7% |
 | 2 | SmallVec | ❌ Reverted | -27% (slower) |
+| 2.4 | FxHashMap / rustc-hash | ✅ Done | Faster hot-path hashing |
+| 2.5 | imbl persistent collections | ✅ Done | O(1) inventory clone (#1086) |
 | 3 | Full interning | ✅ Done | +6% |
-| 4 | Parallelization (rayon) | ✅ Done | +5% |
+| 4 | Validation parallelization (rayon) | ✅ Done | +5% |
+| 4.3 | Parallel query execution (rayon) | ✅ Done | Multi-core row eval |
+| 4.4 | parking_lot locks | ✅ Done | Lower lock overhead |
 | 5 | Binary cache (rkyv) | ✅ Done | 2.3x on cache hit |
 | 6.1 | Logos + structured CST parser | ✅ Done | Replaced Chumsky |
 | 6.2 | Bumpalo arena | 🔮 Future | +20% projected |

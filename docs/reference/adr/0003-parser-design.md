@@ -4,6 +4,11 @@
 
 Accepted (Updated June 2026)
 
+> **Note (June 2026):** The Winnow-based parser described below was subsequently
+> replaced by a hand-written Rowan-based lossless CST parser (`cst/parser.rs`);
+> Logos is retained for lexing. The Winnow design is preserved here as the
+> historical record — see the Changelog at the end.
+
 ## Context
 
 The Beancount language has a relatively simple grammar but with some complexities:

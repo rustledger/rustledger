@@ -42,10 +42,16 @@ Additionally, `document_discovery` is available for auto-discovering document fi
 ## Example
 
 ```rust
-use rustledger_plugin::{NativePluginRegistry, PluginInput};
+use rustledger_plugin::{NativePluginRegistry, PluginInput, PluginOptions};
 
 let registry = NativePluginRegistry::global();
 let plugin = registry.find_synth("auto_accounts").unwrap();
+
+let input = PluginInput {
+    directives: vec![],
+    options: PluginOptions { operating_currencies: vec![], title: None },
+    config: None,
+};
 let output = plugin.process(input);
 ```
 

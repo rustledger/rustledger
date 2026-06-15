@@ -200,6 +200,40 @@ jobs:
       - name: Forbid std SipHash collections in fxhash-only modules
         run: ./scripts/check-hot-path-collections.sh
 
+  # Public-API SemVer ratchet for the plugin DTOs (#1233, Tier 1).
+  # `rustledger-plugin-types` is what every plugin author compiles against —
+  # an accidental breaking change (a renamed pub field, a changed trait
+  # signature, a pub enum variant added without `#[non_exhaustive]`) would
+  # ship in the published crate and break every plugin. cargo-semver-checks
+  # compares the current public API against the last crates.io release (the
+  # crate is published by release-publish.yml) and fails on an unmarked
+  # SemVer-major break. The action manages the nightly toolchain rustdoc
+  # JSON needs, so no nightly is added to the flake.
+  #
+  # ADVISORY for now: this job is deliberately NOT part of the `build` merge
+  # gate, so it surfaces breaks without blocking. Promote it to required
+  # (add to the `build` aggregator or branch protection) once it has proven
+  # stable on real PRs. Tier 1 = plugin-types only; expand to core/parser
+  # later.
+  #
+  # RUSTC_WRAPPER is cleared for this job because the workflow sets it to
+  # sccache globally (line ~21) and this job does not install the
+  # sccache-action, so cargo would otherwise fail with "could not execute
+  # process sccache" when the action builds rustdoc.
+  semver-plugin-types:
+    name: SemVer (plugin-types)
+    needs: [changes]
+    if: needs.changes.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    env:
+      RUSTC_WRAPPER: ''
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - name: Check rustledger-plugin-types public API for SemVer breaks
+        uses: obi1kenobi/cargo-semver-checks-action@5b298c9520f7096a4683c0bd981a7ac5a7e249ae # v2.8
+        with:
+          package: rustledger-plugin-types
+
   # Main CI matrix - check, clippy, test, doc (only on code changes)
   ci:
     name: ${{ matrix.name }}

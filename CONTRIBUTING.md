@@ -6,7 +6,7 @@ Thank you for your interest in contributing to Rustledger!
 
 ### Prerequisites
 
-- Rust 1.95+ (`rustup update stable`) - Rust 2024 edition
+- Rust 1.96+ (`rustup update stable`) - Rust 2024 edition
 - Node.js 24+ (for MCP server)
 - wasm-pack (for WASM builds): `cargo install wasm-pack`
 

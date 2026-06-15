@@ -14,7 +14,7 @@
   },
   "icon": "icon.png",
   "engines": {
-    "vscode": "^1.82.0"
+    "vscode": "^1.91.0"
   },
   "categories": [
     "Programming Languages",
@@ -92,11 +92,11 @@
     "package": "npm run build && vsce package --no-dependencies -o rustledger-vscode.vsix"
   },
   "dependencies": {
-    "vscode-languageclient": "^9.0.1"
+    "vscode-languageclient": "^10.0.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
-    "@types/vscode": "^1.82.0",
+    "@types/vscode": "1.91.0",
     "@vscode/vsce": "^3.0.0",
     "esbuild": "^0.28.1",
     "typescript": "^6.0.0"

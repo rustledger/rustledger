@@ -17,7 +17,10 @@ const GITHUB_API_URL =
 const VSIX_ASSET_NAME = "rustledger-vscode.vsix";
 
 let client: LanguageClient | undefined;
-let outputChannel: vscode.OutputChannel | undefined;
+// Created with `{ log: true }` below, so it's a LogOutputChannel — which is
+// also what vscode-languageclient v10's LanguageClientOptions.outputChannel
+// requires (v9 accepted a plain OutputChannel).
+let outputChannel: vscode.LogOutputChannel | undefined;
 
 function findBinary(command: string): boolean {
   try {

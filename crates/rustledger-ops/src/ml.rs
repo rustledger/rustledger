@@ -4,11 +4,12 @@
 //! to predict the expense/income account for new transactions based on their
 //! payee and narration text.
 //!
-//! Uses TF-IDF vectorization with `ferrolearn-bayes` for classification.
-//! (Previously `linfa-bayes`, but that crate pinned ndarray 0.16 and was
-//! blocking the workspace's ndarray + getrandom upgrades; `ferrolearn-bayes`
-//! gives us the same `MultinomialNB` plus a real `predict_proba` for
-//! honest confidence scores.)
+//! Uses TF-IDF vectorization plus a small, self-contained Multinomial
+//! Naive Bayes classifier (see [`MultinomialNB`]) implemented in pure
+//! `std` — no external ML or linear-algebra crates. Earlier versions
+//! delegated to `linfa-bayes` and then `ferrolearn-bayes`, but both
+//! dragged heavy, occasionally wasm-incompatible dependencies in for an
+//! algorithm that is ~80 lines of textbook arithmetic.
 //!
 //! # Example
 //!
@@ -18,9 +19,6 @@
 //! // → [("Expenses:Groceries", 0.92), ("Expenses:Dining", 0.05), ...]
 //! ```
 
-use ferrolearn_bayes::multinomial::{FittedMultinomialNB, MultinomialNB};
-use ferrolearn_core::traits::Fit;
-use ndarray::{Array1, Array2};
 use rustledger_plugin_types::{DirectiveData, DirectiveWrapper};
 use std::collections::HashMap;
 
@@ -30,7 +28,7 @@ use std::collections::HashMap;
 /// extracted from transaction payee/narration text.
 pub struct CategorizationModel {
     /// The trained classifier.
-    model: FittedMultinomialNB<f64>,
+    model: MultinomialNB,
     /// Vocabulary: word → column index in the feature matrix.
     vocabulary: HashMap<String, usize>,
     /// IDF weights for each word in the vocabulary.
@@ -157,13 +155,13 @@ impl CategorizationModel {
             .map(|&df| (n_docs / (1.0 + f64::from(df))).ln() + 1.0)
             .collect();
 
-        // Build TF-IDF feature matrix
-        let n_samples = samples.len();
+        // Build the dense TF-IDF feature matrix (one row per sample) and
+        // the parallel class-index targets.
         let n_features = vocab.len();
-        let mut features = Array2::<f64>::zeros((n_samples, n_features));
-        let mut targets = Array1::<usize>::zeros(n_samples);
+        let mut features: Vec<Vec<f64>> = Vec::with_capacity(samples.len());
+        let mut targets: Vec<usize> = Vec::with_capacity(samples.len());
 
-        for (i, (tokens, (_, account))) in tokenized.iter().zip(samples.iter()).enumerate() {
+        for (tokens, (_, account)) in tokenized.iter().zip(samples.iter()) {
             // Term frequency
             let mut tf = vec![0u32; n_features];
             for token in tokens {
@@ -171,21 +169,19 @@ impl CategorizationModel {
                     tf[idx] += 1;
                 }
             }
-            // TF-IDF
-            for (j, &count) in tf.iter().enumerate() {
-                features[[i, j]] = f64::from(count) * idf[j];
-            }
-            targets[i] = label_to_idx[account.as_str()];
+            // TF-IDF row
+            features.push(
+                tf.iter()
+                    .enumerate()
+                    .map(|(j, &count)| f64::from(count) * idf[j])
+                    .collect(),
+            );
+            targets.push(label_to_idx[account.as_str()]);
         }
 
-        // Train Multinomial Naive Bayes. ferrolearn-bayes takes
-        // features + targets directly (no Dataset wrapper) — the
-        // unfitted MultinomialNB::new() carries hyperparameters
-        // (alpha defaults to 1.0 = Laplace smoothing, matching the
-        // previous linfa-bayes default).
-        let model = MultinomialNB::new()
-            .fit(&features, &targets)
-            .map_err(|e| MlError::TrainingFailed(format!("{e}")))?;
+        // Train the classifier. Laplace smoothing (alpha = 1.0) matches
+        // the linfa-bayes / ferrolearn defaults this replaced.
+        let model = MultinomialNB::fit(&features, &targets, label_set.len());
 
         Ok(Self {
             model,
@@ -198,15 +194,10 @@ impl CategorizationModel {
     /// Predict the account for a transaction.
     ///
     /// Returns predictions sorted by confidence (highest first). Each
-    /// prediction is an `(account, probability)` pair. Probabilities
-    /// come from `predict_proba` (calibrated class-conditional
-    /// posteriors that sum to 1.0 across all classes), so callers can
-    /// use them as honest scores — pre-ferrolearn-bayes this was
-    /// faked (0.8 for predicted class, 0.0 otherwise).
-    ///
-    /// Predict failures (which only happen on shape mismatches inside
-    /// the classifier — impossible here, since we built `features` to
-    /// match the trained vocabulary) collapse to an empty result.
+    /// prediction is an `(account, probability)` pair. The probabilities
+    /// are the class-conditional posteriors from
+    /// [`MultinomialNB::predict_proba`] (they sum to 1.0 across all
+    /// classes), so callers can treat them as honest scores.
     #[must_use]
     pub fn predict(&self, narration: &str, payee: Option<&str>) -> Vec<(String, f64)> {
         let mut text = String::new();
@@ -217,32 +208,25 @@ impl CategorizationModel {
         text.push_str(narration);
 
         let features = self.vectorize(&text.to_lowercase());
-        let features_2d = features.insert_axis(ndarray::Axis(0));
 
-        // `predict_proba` returns shape (n_samples=1, n_classes); take
-        // row 0 and pair each probability with its label. Sort
-        // descending; drop zero-probability entries to keep the output
-        // compact for callers that only care about top-k.
-        let Ok(probas) = self.model.predict_proba(&features_2d) else {
-            return Vec::new();
-        };
+        // Pair each class posterior with its label, then sort descending;
+        // callers take the top-k. Softmax posteriors are all > 0, so
+        // every known category is returned.
         let mut results: Vec<(String, f64)> = self
             .labels
             .iter()
-            .enumerate()
-            .map(|(i, label)| (label.clone(), probas[[0, i]]))
-            .filter(|(_, p)| *p > 0.0)
+            .cloned()
+            .zip(self.model.predict_proba(&features))
             .collect();
 
         results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         results
     }
 
-    /// Vectorize text into a TF-IDF feature array.
-    fn vectorize(&self, text: &str) -> Array1<f64> {
+    /// Vectorize text into a dense TF-IDF feature vector.
+    fn vectorize(&self, text: &str) -> Vec<f64> {
         let tokens = tokenize(text);
-        let n_features = self.vocabulary.len();
-        let mut tf = vec![0u32; n_features];
+        let mut tf = vec![0u32; self.vocabulary.len()];
 
         for token in &tokens {
             if let Some(&idx) = self.vocabulary.get(token) {
@@ -250,11 +234,10 @@ impl CategorizationModel {
             }
         }
 
-        let mut features = Array1::<f64>::zeros(n_features);
-        for (j, &count) in tf.iter().enumerate() {
-            features[j] = f64::from(count) * self.idf[j];
-        }
-        features
+        tf.iter()
+            .enumerate()
+            .map(|(j, &count)| f64::from(count) * self.idf[j])
+            .collect()
     }
 
     /// Number of distinct categories the model was trained on.
@@ -267,6 +250,98 @@ impl CategorizationModel {
     #[must_use]
     pub fn vocab_size(&self) -> usize {
         self.vocabulary.len()
+    }
+}
+
+/// A Multinomial Naive Bayes classifier with Laplace (add-α) smoothing.
+///
+/// This is the standard multinomial NB used for text classification —
+/// equivalent to scikit-learn's `MultinomialNB` with `alpha = 1.0`, and
+/// to the `linfa-bayes` / `ferrolearn-bayes` implementations this
+/// replaced. Feature values are treated as fractional counts, so the
+/// TF-IDF weights produced above are valid inputs directly.
+///
+/// `fit` computes, per class `c`: a log prior `ln(n_c / n)` and smoothed
+/// feature log-probabilities `ln((Σᵢ xᵢⱼ + α) / (Σⱼ Σᵢ xᵢⱼ + α·n_features))`.
+/// `predict_proba` forms the joint log-likelihood
+/// `log_prior[c] + Σⱼ xⱼ · feature_log_prob[c][j]` per class and
+/// normalizes it with a numerically-stable softmax (log-sum-exp).
+struct MultinomialNB {
+    /// `ln P(class)` for each class — indexed `[class]`.
+    class_log_prior: Vec<f64>,
+    /// `ln P(feature | class)` — indexed `[class][feature]`.
+    feature_log_prob: Vec<Vec<f64>>,
+}
+
+impl MultinomialNB {
+    /// Laplace / additive smoothing parameter (the sklearn / linfa /
+    /// ferrolearn default).
+    const ALPHA: f64 = 1.0;
+
+    /// Fit on dense feature rows and their class-index targets.
+    ///
+    /// `features[i]` is the feature vector for sample `i` and `targets[i]`
+    /// its class in `0..n_classes`. Every class is assumed to occur at
+    /// least once (the caller derives the label set from the samples), so
+    /// no class prior is `-inf`.
+    fn fit(features: &[Vec<f64>], targets: &[usize], n_classes: usize) -> Self {
+        let n_features = features.first().map_or(0, Vec::len);
+        let n_samples = features.len() as f64;
+
+        // Per-class sample counts and summed feature weights.
+        let mut class_count = vec![0.0_f64; n_classes];
+        let mut feature_count = vec![vec![0.0_f64; n_features]; n_classes];
+        for (row, &class) in features.iter().zip(targets) {
+            class_count[class] += 1.0;
+            let counts = &mut feature_count[class];
+            for (j, &value) in row.iter().enumerate() {
+                counts[j] += value;
+            }
+        }
+
+        let class_log_prior = class_count.iter().map(|&n| (n / n_samples).ln()).collect();
+
+        let feature_log_prob = feature_count
+            .iter()
+            .map(|counts| {
+                let denom: f64 = Self::ALPHA.mul_add(n_features as f64, counts.iter().sum::<f64>());
+                counts
+                    .iter()
+                    .map(|&count| ((count + Self::ALPHA) / denom).ln())
+                    .collect()
+            })
+            .collect();
+
+        Self {
+            class_log_prior,
+            feature_log_prob,
+        }
+    }
+
+    /// Posterior class probabilities for one sample, summing to 1.0.
+    ///
+    /// The returned vector is indexed by class, in the order the model
+    /// was trained with.
+    fn predict_proba(&self, x: &[f64]) -> Vec<f64> {
+        // Joint log-likelihood per class.
+        let jll: Vec<f64> = self
+            .class_log_prior
+            .iter()
+            .zip(&self.feature_log_prob)
+            .map(|(&prior, log_prob)| {
+                prior
+                    + x.iter()
+                        .zip(log_prob)
+                        .map(|(&xj, &lp)| xj * lp)
+                        .sum::<f64>()
+            })
+            .collect();
+
+        // Stable softmax: subtract the max before exponentiating.
+        let max = jll.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let exps: Vec<f64> = jll.iter().map(|&v| (v - max).exp()).collect();
+        let total: f64 = exps.iter().sum();
+        exps.iter().map(|&e| e / total).collect()
     }
 }
 

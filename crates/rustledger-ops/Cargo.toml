@@ -22,18 +22,13 @@ jiff.workspace = true
 blake3.workspace = true
 regex.workspace = true
 
-# ML stack — host-only. `ferrolearn-bayes` pulls `faer` → `spindle` →
-# `atomic-wait`, which doesn't compile on `wasm32-unknown-unknown`
-# (no `platform::wake_*` impl for the wasm target). The ML
-# categorizer doesn't run in browsers/WASI today — gate the deps off
-# wasm targets and gate the `ml` module body the same way. Same
-# MultinomialNB classifier as the linfa-bayes predecessor it replaced
-# (#1194), with a real `predict_proba`. `ferrolearn-core` brings the
-# `Fit` trait into scope for `MultinomialNB::fit`.
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-ferrolearn-bayes = "0.4"
-ferrolearn-core = "0.4"
-ndarray = "0.17"
+# Note: the ML categorizer (`ml` module) implements its own Multinomial
+# Naive Bayes in pure Rust (std only) — no external ML/array crates. It
+# previously used `ferrolearn-bayes` + `ndarray` (and `linfa-bayes`
+# before that), which dragged in native deps (`atomic-wait`, then
+# OpenBLAS via `ferray` in ferrolearn 0.5) that broke `wasm32` and
+# ballooned the tree for a textbook classifier. The in-house version
+# works on every target.
 
 [dev-dependencies]
 proptest.workspace = true

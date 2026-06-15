@@ -56,7 +56,13 @@ jobs:
           cargo +nightly miri test --package rustledger-query --all-features
           echo "::endgroup::"
         env:
-          MIRIFLAGS: -Zmiri-tree-borrows -Zmiri-symbolic-alignment-check -Zmiri-strict-provenance
+          # -Zmiri-disable-isolation: some tests read the realtime clock
+          # (e.g. "today"-based date helpers), which miri rejects under its
+          # default isolation ("clock_gettime ... not available when isolation
+          # is enabled"). Disabling isolation lets those tests run; it only
+          # permits host clock/entropy access and does not weaken miri's
+          # UB/aliasing checks, which is what this job is for.
+          MIRIFLAGS: -Zmiri-tree-borrows -Zmiri-symbolic-alignment-check -Zmiri-strict-provenance -Zmiri-disable-isolation
       - name: Summary
         run: |
           echo "## Miri Results" >> $GITHUB_STEP_SUMMARY

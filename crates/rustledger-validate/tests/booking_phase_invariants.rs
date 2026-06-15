@@ -46,14 +46,19 @@ fn amount(currency: &'static str) -> impl Strategy<Value = Amount> {
 /// Transactions that exercise the booker:
 /// - `Elided`: one explicit posting + one auto posting interpolation fills.
 /// - `Priced`: a priced stock posting + an auto cash posting.
-/// - `Cost`: a stock buy carrying an explicit `{N USD}` cost spec + an auto
-///   cash posting. This drives `BookingEngine::book` past its no-cost-spec
+/// - `Cost`: a stock buy carrying an explicit per-unit `{N USD}` cost spec +
+///   an auto cash posting. Drives `BookingEngine::book` past its no-cost-spec
 ///   fast path into the real cost-filling / position-accumulation machinery
-///   (an augmentation — no prior inventory, so it always books). Lot
-///   *reductions* (sells that must match a lot) are covered by the
-///   `book_partitions_failed_transaction` unit test rather than here, since
-///   generating a sell that matches a prior buy under Strict is awkward in
-///   a property strategy.
+///   (an augmentation — no prior inventory, so it always books).
+/// - `TotalCost`: a buy with a `{{ T USD }}` total cost. Booking rewrites
+///   `Total` into `PerUnitFromTotal`, so re-booking exercises a cost
+///   representation that genuinely changes during the first book — this is
+///   where the idempotence assertion has teeth.
+///
+/// Lot *reductions* (sells that must match a lot) are covered by the
+/// `book_partitions_failed_transaction` unit test rather than here, since
+/// generating a sell that matches a prior buy under Strict is awkward in a
+/// property strategy.
 ///
 /// Random accounts mean some postings hit unopened accounts.
 fn txn() -> impl Strategy<Value = Transaction> {
@@ -83,6 +88,22 @@ fn txn() -> impl Strategy<Value = Transaction> {
                 })
                 .with_currency("USD");
             Transaction::new(date(day), "cost")
+                .with_synthesized_posting(Posting::new("Assets:Stock", units).with_cost(cost))
+                .with_synthesized_posting(Posting::auto("Assets:Cash"))
+        }),
+        // Total-cost buy (`{{ T USD }}`). Booking rewrites `Total` into
+        // `PerUnitFromTotal` (per-unit = total / units) — the cost
+        // representation that actually *changes* during booking, so this is
+        // where the `late(book(book(L))) == late(book(L))` fixed-point
+        // assertion has real teeth (the `PerUnit` shape above is stable by
+        // construction and can't exercise that rewrite).
+        (1u32..28, amount("HOOL"), 1i64..1_000_000, 0u32..2).prop_map(|(day, units, n, scale)| {
+            let cost = CostSpec::empty()
+                .with_number(CostNumber::Total {
+                    value: Decimal::new(n, scale),
+                })
+                .with_currency("USD");
+            Transaction::new(date(day), "total_cost")
                 .with_synthesized_posting(Posting::new("Assets:Stock", units).with_cost(cost))
                 .with_synthesized_posting(Posting::auto("Assets:Cash"))
         }),

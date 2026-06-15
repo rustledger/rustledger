@@ -458,7 +458,7 @@ By submitting a pull request, you agree to the [Contributor License Agreement](C
 
 ## License
 
-[GPL-3.0](LICENSE)
+[GPL-3.0-only](LICENSE)
 
 **Commercial licensing available** - [contact us](https://rustledger.github.io/#contact) for proprietary license options.
 

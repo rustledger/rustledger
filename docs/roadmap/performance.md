@@ -2,7 +2,7 @@
 
 > Part of the [rustledger roadmap](./index.md).
 
-Forward-looking performance work. rustledger is already 10-30x faster than Python beancount on typical ledgers; this tracks the remaining optimizations and ideas, not what has already shipped.
+Forward-looking performance work. rustledger is already 10-30x faster than Python Beancount on typical ledgers; this tracks the remaining optimizations and ideas, not what has already shipped.
 
 ## Now / In progress
 

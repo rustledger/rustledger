@@ -3,11 +3,11 @@
 > Part of the [rustledger roadmap](./index.md). This is the engine room of
 > [bet #2 — make ingestion painless](./index.md#2-make-ingestion-painless--the-real-adoption-barrier).
 
-For plain-text accounting the ledger format is the easy part; the friction is
+For plain-text accounting, the ledger format is the easy part; the friction is
 getting bank data *in* and trusting that it's complete and correct. The shipped
 baseline already covers the mechanics — `rledger extract` with `importers.toml`
 profiles, sandboxed WASM importers, rule-based + Naive-Bayes categorization, and
-balance-assertion generation. What's left is making it **work out of the box**
+balance-directive generation. What's left is making it **work out of the box**
 for common cases and **earn trust** that nothing was missed.
 
 Guiding principles: **local-first** (no data leaves the machine unless the user

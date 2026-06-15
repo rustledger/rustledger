@@ -8,7 +8,7 @@ work lives in the [CHANGELOG](https://github.com/rustledger/rustledger/blob/main
 
 Rustledger is a fast, Rust-native, Beancount-compatible plain-text accounting
 engine: 100% check / BQL / full-AST parity on the compatibility corpus, ~10–30×
-faster than Python beancount, with a property-tested pipeline, formal specs in
+faster than Python Beancount, with a property-tested pipeline, formal specs in
 CI, and a stable plugin ABI. The foundation is solid. That changes what the
 roadmap is *for*: the leverage now is less in raw speed and more in **removing
 the reasons someone wouldn't switch** and **making the engine a platform**.

@@ -47,10 +47,24 @@ fn main() -> Result<()> {
     );
 
     let ffi = Ffi::instantiate(&mut store, &component, &linker)?;
-    let version = ffi.rustledger_ffi_ledger().call_version(&mut store)?;
+    let ledger = ffi.rustledger_ffi_ledger();
 
+    let version = ledger.call_version(&mut store)?;
     println!("component reports api_version = {version:?}");
     assert_eq!(version, "2.0");
-    println!("\u{2713} WIT host <-> wasip2 component round-trip works");
+
+    // Exercise the tagged variant across the boundary — the risky type-modeling
+    // part. The host gets a generated Rust enum, not a JSON object to inspect.
+    use exports::rustledger::ffi::ledger::CostNumber;
+    for kind in 0u8..3 {
+        let cost = ledger.call_sample_cost(&mut store, kind)?;
+        println!("cost kind {kind} = {cost:?}");
+    }
+    assert!(matches!(
+        ledger.call_sample_cost(&mut store, 2)?,
+        CostNumber::PerUnitFromTotal((ref pu, ref t)) if pu == "100" && t == "1500"
+    ));
+
+    println!("\u{2713} WIT host <-> wasip2 component round-trip works (string + variant)");
     Ok(())
 }

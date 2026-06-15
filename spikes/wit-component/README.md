@@ -1,12 +1,17 @@
 # FFI-WASI → Component Model (WIT) spike
 
-Spike for [#1384](https://github.com/rustledger/rustledger/issues/1384). **Result: it works.** A minimal slice of the embedding surface, defined once in [`wit/world.wit`](wit/world.wit), is built as a **WASI-Preview-2 component** and called from a **wasmtime host** through generated, type-checked bindings — no hand-rolled JSON-RPC.
+Spike for [#1384](https://github.com/rustledger/rustledger/issues/1384). **Result: it works.** A minimal slice of the embedding surface, defined once in [`wit/world.wit`](wit/world.wit), is built as a **WASI-Preview-2 component** and called from a **wasmtime host** through generated, type-checked bindings — no hand-rolled JSON-RPC. It exercises a `string` *and* a real tagged **variant** (`cost-number`, the exact shape that broke rustfava on v0.16), so the risky part of a real migration — type modeling — is de-risked, not just the plumbing.
 
 ```
 $ host/.../rustledger-ffi-wit-host guest/.../rustledger_ffi_wit_guest.wasm
 component reports api_version = "2.0"
-✓ WIT host <-> wasip2 component round-trip works
+cost kind 0 = CostNumber::PerUnit("100")
+cost kind 1 = CostNumber::Total("1500")
+cost kind 2 = CostNumber::PerUnitFromTotal(("100", "1500"))
+✓ WIT host <-> wasip2 component round-trip works (string + variant)
 ```
+
+> **Status: a point-in-time artifact, not a maintained crate.** It is *not* part of the workspace and *not* built in CI, so it can bitrot as `wit-bindgen` / `wasmtime` evolve. The committed `Cargo.lock`s pin the exact versions it was proven with (`wit-bindgen` 0.58, `wasmtime` 45). Treat it as evidence for the #1384 decision, to be deleted or promoted once that decision is made.
 
 ## What's here
 
@@ -16,7 +21,11 @@ component reports api_version = "2.0"
 
 ## Reproduce
 
+The wasip2 target lives in a dedicated dev shell (it's kept out of the default
+toolchain so contributors don't build the wasip2 `rust-std` for nothing):
+
 ```bash
+nix develop .#spike      # wasm32-wasip2 + wasmtime
 # guest → wasip2 component
 (cd guest && cargo build --target wasm32-wasip2 --release)
 # host → native
@@ -45,8 +54,8 @@ So:
 
 **Effort estimate**
 
-- *Spike (done):* ~half a day — mechanism proven.
-- *Full WIT:* model the real embedding surface in `.wit` (directives, `amount`, the `cost-number` variant, options, errors). The DTOs in `crates/rustledger-ffi-wasi/src/types` are already an enumerated shape to translate — ~1–2 days.
+- *Spike (done):* ~half a day — mechanism + one real tagged variant proven.
+- *Full WIT:* model the real embedding surface in `.wit` (directives, `amount`, options, errors). The spike proves a flat variant round-trips; the **remaining unknown is the *full* directive graph** — deeply nested records, recursive `meta-value`s, lists of variants — and whether it maps to WIT without awkward flattening. That's the part that could push this past ~1–2 days. The DTOs in `crates/rustledger-ffi-wasi/src/types` are the enumerated shape to translate.
 - *Guest impl:* wire the exports to the real loader/query (the logic already exists; this is plumbing) — ~1–2 days.
 - *rustfava migration:* swap `engine.py`'s JSON-RPC client for a component client — ~1–2 days, and it deletes hand-written parsing.
 

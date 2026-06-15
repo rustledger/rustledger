@@ -9,6 +9,20 @@ interface ledger {
     /// The API version this component implements (mirrors the JSON-RPC
     /// `api_version` field). Proves the host <-> component round-trip.
     version: func() -> string;
+
+    /// A cost number, mirroring rustledger's `CostNumber` enum — the exact
+    /// tagged shape whose JSON form (`{"kind": "...", ...}`) broke rustfava on
+    /// v0.16. Modeling it here proves WIT *variants* (the risky part of a real
+    /// migration) round-trip cleanly, not just a flat string.
+    variant cost-number {
+        per-unit(string),
+        total(string),
+        per-unit-from-total(tuple<string, string>),
+    }
+
+    /// Return a sample cost number for `kind` (0 = per-unit, 1 = total,
+    /// 2 = per-unit-from-total) — exercises the variant across the boundary.
+    sample-cost: func(kind: u8) -> cost-number;
 }
 
 world ffi {

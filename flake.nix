@@ -80,7 +80,9 @@
           # WASI target (for wasmtime/Python)
           rustWasi = inputs'.fenix.packages.targets.wasm32-wasip1.stable.rust-std;
 
-          # WASI Preview 2 / Component Model target (FFI WIT spike, #1384)
+          # WASI Preview 2 / Component Model target. Kept OUT of the default
+          # toolchain — only the #1384 WIT spike needs it, so contributors don't
+          # pay to build the wasip2 rust-std on every `nix develop`.
           rustWasi2 = inputs'.fenix.packages.targets.wasm32-wasip2.stable.rust-std;
 
           # Combined toolchain with WASM + WASI
@@ -88,6 +90,12 @@
             rustToolchain
             rustWasm
             rustWasi
+          ];
+
+          # Default toolchain + the wasip2 target, used only by `devShells.spike`
+          # (spikes/wit-component, #1384).
+          rustToolchainSpike = inputs'.fenix.packages.combine [
+            rustToolchainWithWasm
             rustWasi2
           ];
 
@@ -460,6 +468,19 @@
             shellHook = ''
               echo "🔬 Nightly shell for fuzzing"
               echo "Run: cargo +nightly fuzz run <target>"
+            '';
+          };
+
+          # WIT / Component-Model spike shell (#1384). Carries the wasm32-wasip2
+          # target + wasmtime so `spikes/wit-component` builds; kept separate so
+          # the default shell doesn't build the wasip2 rust-std for everyone.
+          devShells.spike = pkgs.mkShell {
+            packages = [
+              rustToolchainSpike
+              pkgs.wasmtime
+            ];
+            shellHook = ''
+              echo "🧪 WIT/Component-Model spike shell (wasm32-wasip2). See spikes/wit-component/README.md"
             '';
           };
 

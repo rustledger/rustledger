@@ -171,6 +171,10 @@ criteria = "safe-to-deploy"
 version = "0.6.1"
 criteria = "safe-to-deploy"
 
+[[exemptions.cblas-sys]]
+version = "0.3.0"
+criteria = "safe-to-deploy"
+
 [[exemptions.cc]]
 version = "1.2.62"
 criteria = "safe-to-deploy"
@@ -185,6 +189,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.cipher]]
 version = "0.5.2"
+criteria = "safe-to-deploy"
+
+[[exemptions.clang-sys]]
+version = "1.8.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.clap_complete_nushell]]
@@ -221,6 +229,14 @@ criteria = "safe-to-deploy"
 
 [[exemptions.cookie_store]]
 version = "0.22.1"
+criteria = "safe-to-deploy"
+
+[[exemptions.core-math]]
+version = "1.1.1"
+criteria = "safe-to-deploy"
+
+[[exemptions.core-math-sys]]
+version = "1.1.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.countme]]
@@ -383,12 +399,52 @@ criteria = "safe-to-deploy"
 version = "2.4.1"
 criteria = "safe-to-deploy"
 
+[[exemptions.ferray]]
+version = "0.5.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.ferray-core]]
+version = "0.5.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.ferray-core-macros]]
+version = "0.5.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.ferray-linalg]]
+version = "0.5.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.ferray-numpy-interop]]
+version = "0.5.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.ferray-random]]
+version = "0.5.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.ferray-stats]]
+version = "0.5.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.ferray-ufunc]]
+version = "0.5.0"
+criteria = "safe-to-deploy"
+
 [[exemptions.ferrolearn-bayes]]
-version = "0.4.0"
+version = "0.5.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.ferrolearn-core]]
 version = "0.4.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.ferrolearn-core]]
+version = "0.5.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.filetime]]
+version = "0.2.29"
 criteria = "safe-to-deploy"
 
 [[exemptions.find-msvc-tools]]
@@ -564,6 +620,10 @@ version = "2.4.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.itertools]]
+version = "0.13.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.itertools]]
 version = "0.14.0"
 criteria = "safe-to-deploy"
 
@@ -581,6 +641,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.libbz2-rs-sys]]
 version = "0.2.5"
+criteria = "safe-to-deploy"
+
+[[exemptions.libloading]]
+version = "0.8.9"
 criteria = "safe-to-deploy"
 
 [[exemptions.libredox]]
@@ -741,6 +805,14 @@ criteria = "safe-to-deploy"
 
 [[exemptions.once_cell]]
 version = "1.21.3"
+criteria = "safe-to-deploy"
+
+[[exemptions.openblas-build]]
+version = "0.10.16"
+criteria = "safe-to-deploy"
+
+[[exemptions.openblas-src]]
+version = "0.10.16"
 criteria = "safe-to-deploy"
 
 [[exemptions.owo-colors]]
@@ -1109,6 +1181,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.sysctl]]
 version = "0.6.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.tar]]
+version = "0.4.45"
 criteria = "safe-to-deploy"
 
 [[exemptions.tempfile]]

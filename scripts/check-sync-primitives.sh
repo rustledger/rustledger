@@ -9,8 +9,10 @@
 # named-CI-status pattern as `check-unsafe-invariant.sh`, deliberately chosen
 # over a `dylint` lint so it needs no extra (nightly) toolchain.
 #
-# Scope: `crates/*/src/` only (library code). Tests, benches, and examples are
-# not checked — std locks there are harmless.
+# Scope: `crates/*/src/` only, and within those files only non-test code —
+# `#[cfg(test)] mod ...` blocks are skipped (std locks in unit tests are
+# harmless, matching #1237's "excluding #[cfg(test)]" intent). Integration
+# tests / benches / examples live outside `src/` and aren't scanned.
 #
 # Escape hatch: append `// ratchet-allow: std-sync <reason>` to the offending
 # line for a legitimate exception (none exist today).
@@ -19,7 +21,6 @@
 # ----------
 #   0  no forbidden std::sync locks found
 #   1  one or more forbidden usages found
-#   2  invocation error
 #
 # Usage
 # -----
@@ -30,28 +31,42 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
-# Matches `std::sync::Mutex`, `std::sync::RwLock`, and the brace-import form
-# `std::sync::{... Mutex ...}` / `{... RwLock ...}`.
-pattern='std::sync::(\{[^}]*)?(Mutex|RwLock)'
+# Matches `std::sync::Mutex`/`RwLock` and the brace-import form
+# `std::sync::{... Mutex ...}`. The trailing `\b` excludes the guard types
+# (`MutexGuard`, `RwLockReadGuard`, `RwLockWriteGuard`), which are type
+# references, not lock constructions.
+forbidden='std::sync::(\{[^}]*)?(Mutex|RwLock)\b'
 
-if ! command -v rg >/dev/null 2>&1; then
-    grep_cmd() { grep -rnE "$pattern" crates/*/src --include='*.rs' 2>/dev/null || true; }
-else
-    grep_cmd() { rg -n --no-heading -e "$pattern" -g 'crates/*/src/**/*.rs' 2>/dev/null || true; }
-fi
+# Print a file's non-test code: everything up to the trailing
+# `#[cfg(test)]`-attributed `mod`. A `#[cfg(test)]` that precedes anything
+# other than a module (e.g. a test-only `use`/`fn` near the top) does NOT
+# truncate scanning — only the conventional trailing test module does.
+strip_test_module() {
+    awk '
+        /#\[cfg\(test\)\]/ { pending = 1; print; next }
+        pending && /^[[:space:]]*$/ { print; next }              # blank lines between attr and mod
+        pending && /^[[:space:]]*(pub[[:space:]]+)?mod[[:space:]]/ { exit }
+        { pending = 0; print }
+    ' "$1"
+}
 
-# Collect hits, dropping any line that carries the explicit allow marker.
-hits="$(grep_cmd | grep -v 'ratchet-allow: std-sync' || true)"
+violations=""
+while IFS= read -r f; do
+    hits="$(strip_test_module "$f" | grep -nE "$forbidden" | grep -v 'ratchet-allow: std-sync' || true)"
+    if [ -n "$hits" ]; then
+        violations+="$f:"$'\n'"$(printf '%s\n' "$hits" | sed 's/^/    /')"$'\n'
+    fi
+done < <(grep -rlE "$forbidden" crates/*/src --include='*.rs' 2>/dev/null | sort)
 
-if [ -n "$hits" ]; then
-    echo "error: forbidden std::sync lock(s) found in library code." >&2
+if [ -n "$violations" ]; then
+    echo "error: forbidden std::sync lock(s) found in non-test library code." >&2
     echo "       Use parking_lot::Mutex / parking_lot::RwLock instead (see #1076)." >&2
     echo "       If a std lock is genuinely required, append" >&2
     echo "         // ratchet-allow: std-sync <reason>" >&2
     echo "       to the line." >&2
     echo >&2
-    echo "$hits" >&2
+    printf '%s' "$violations" >&2
     exit 1
 fi
 
-echo "ok: no std::sync::Mutex / RwLock in library source."
+echo "ok: no std::sync::Mutex / RwLock in non-test library source."

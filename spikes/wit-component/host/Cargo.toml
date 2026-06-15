@@ -1,0 +1,14 @@
+# wasmtime host that loads the wasip2 component and calls a typed WIT export.
+# Standalone (own [workspace]); native build.
+[package]
+name = "rustledger-ffi-wit-host"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+wasmtime = { version = "45", features = ["component-model"] }
+wasmtime-wasi = "45"
+anyhow = "1"
+
+[workspace]

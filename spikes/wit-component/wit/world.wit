@@ -1,0 +1,16 @@
+package rustledger:ffi@0.1.0;
+
+/// A minimal slice of the rustledger embedding surface, expressed as a typed
+/// WIT contract — spike for #1384. Today `rustledger-ffi-wasi` exposes this as
+/// a hand-rolled JSON-RPC-over-stdio protocol on a wasip1 core module; here the
+/// same surface is a WASI-Preview-2 Component Model interface with generated,
+/// type-checked bindings on both sides.
+interface ledger {
+    /// The API version this component implements (mirrors the JSON-RPC
+    /// `api_version` field). Proves the host <-> component round-trip.
+    version: func() -> string;
+}
+
+world ffi {
+    export ledger;
+}

@@ -1,0 +1,16 @@
+# wasip2 component implementing rustledger:ffi/ledger (spike for #1384).
+# Standalone (own [workspace]) so it builds for wasm32-wasip2 independently
+# of the main workspace.
+[package]
+name = "rustledger-ffi-wit-guest"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = "0.58"
+
+[workspace]

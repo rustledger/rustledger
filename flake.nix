@@ -80,11 +80,15 @@
           # WASI target (for wasmtime/Python)
           rustWasi = inputs'.fenix.packages.targets.wasm32-wasip1.stable.rust-std;
 
+          # WASI Preview 2 / Component Model target (FFI WIT spike, #1384)
+          rustWasi2 = inputs'.fenix.packages.targets.wasm32-wasip2.stable.rust-std;
+
           # Combined toolchain with WASM + WASI
           rustToolchainWithWasm = inputs'.fenix.packages.combine [
             rustToolchain
             rustWasm
             rustWasi
+            rustWasi2
           ];
 
           # Crane lib with our toolchain

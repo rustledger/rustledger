@@ -38,20 +38,23 @@ pub struct CategorizationModel {
 }
 
 /// Error type for ML operations.
+///
+/// Training is the only fallible step, and it fails only when there's too
+/// little data to build a useful model — fitting itself is infallible.
+///
+/// Marked `#[non_exhaustive]` so future failure modes can be added without
+/// breaking downstream matches.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum MlError {
-    /// Not enough training data.
+    /// Not enough training data (too few transactions or categories).
     InsufficientData(String),
-    /// Model training failed.
-    TrainingFailed(String),
 }
 
 impl std::fmt::Display for MlError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::InsufficientData(msg) => write!(f, "insufficient training data: {msg}"),
-            Self::TrainingFailed(msg) => write!(f, "training failed: {msg}"),
-        }
+        let Self::InsufficientData(msg) = self;
+        write!(f, "insufficient training data: {msg}")
     }
 }
 
@@ -155,33 +158,22 @@ impl CategorizationModel {
             .map(|&df| (n_docs / (1.0 + f64::from(df))).ln() + 1.0)
             .collect();
 
-        // Build the dense TF-IDF feature matrix (one row per sample) and
-        // the parallel class-index targets.
+        // Build sparse TF-IDF rows — only the non-zero `(vocab index,
+        // weight)` entries, sorted by index for deterministic summation.
+        // TF-IDF vectors are mostly zero, so a dense matrix would cost
+        // O(n_samples × vocab); sparse rows cost O(total tokens).
         let n_features = vocab.len();
-        let mut features: Vec<Vec<f64>> = Vec::with_capacity(samples.len());
+        let mut features: Vec<Vec<(usize, f64)>> = Vec::with_capacity(samples.len());
         let mut targets: Vec<usize> = Vec::with_capacity(samples.len());
 
         for (tokens, (_, account)) in tokenized.iter().zip(samples.iter()) {
-            // Term frequency
-            let mut tf = vec![0u32; n_features];
-            for token in tokens {
-                if let Some(&idx) = vocab.get(token) {
-                    tf[idx] += 1;
-                }
-            }
-            // TF-IDF row
-            features.push(
-                tf.iter()
-                    .enumerate()
-                    .map(|(j, &count)| f64::from(count) * idf[j])
-                    .collect(),
-            );
+            features.push(tfidf_row(tokens, &vocab, &idf));
             targets.push(label_to_idx[account.as_str()]);
         }
 
         // Train the classifier. Laplace smoothing (alpha = 1.0) matches
         // the linfa-bayes / ferrolearn defaults this replaced.
-        let model = MultinomialNB::fit(&features, &targets, label_set.len());
+        let model = MultinomialNB::fit(&features, &targets, label_set.len(), n_features);
 
         Ok(Self {
             model,
@@ -223,21 +215,10 @@ impl CategorizationModel {
         results
     }
 
-    /// Vectorize text into a dense TF-IDF feature vector.
-    fn vectorize(&self, text: &str) -> Vec<f64> {
-        let tokens = tokenize(text);
-        let mut tf = vec![0u32; self.vocabulary.len()];
-
-        for token in &tokens {
-            if let Some(&idx) = self.vocabulary.get(token) {
-                tf[idx] += 1;
-            }
-        }
-
-        tf.iter()
-            .enumerate()
-            .map(|(j, &count)| f64::from(count) * self.idf[j])
-            .collect()
+    /// Vectorize text into a sparse TF-IDF feature vector (the non-zero
+    /// `(vocab index, weight)` entries).
+    fn vectorize(&self, text: &str) -> Vec<(usize, f64)> {
+        tfidf_row(&tokenize(text), &self.vocabulary, &self.idf)
     }
 
     /// Number of distinct categories the model was trained on.
@@ -258,8 +239,9 @@ impl CategorizationModel {
 /// This is the standard multinomial NB used for text classification —
 /// equivalent to scikit-learn's `MultinomialNB` with `alpha = 1.0`, and
 /// to the `linfa-bayes` / `ferrolearn-bayes` implementations this
-/// replaced. Feature values are treated as fractional counts, so the
-/// TF-IDF weights produced above are valid inputs directly.
+/// replaced. Samples are passed as **sparse** `(feature index, value)`
+/// rows; values are treated as fractional counts, so TF-IDF weights are
+/// valid inputs directly.
 ///
 /// `fit` computes, per class `c`: a log prior `ln(n_c / n)` and smoothed
 /// feature log-probabilities `ln((Σᵢ xᵢⱼ + α) / (Σⱼ Σᵢ xᵢⱼ + α·n_features))`.
@@ -278,14 +260,25 @@ impl MultinomialNB {
     /// ferrolearn default).
     const ALPHA: f64 = 1.0;
 
-    /// Fit on dense feature rows and their class-index targets.
+    /// Fit on sparse feature rows and their class-index targets.
     ///
-    /// `features[i]` is the feature vector for sample `i` and `targets[i]`
-    /// its class in `0..n_classes`. Every class is assumed to occur at
-    /// least once (the caller derives the label set from the samples), so
-    /// no class prior is `-inf`.
-    fn fit(features: &[Vec<f64>], targets: &[usize], n_classes: usize) -> Self {
-        let n_features = features.first().map_or(0, Vec::len);
+    /// `features[i]` is sample `i` as `(feature index, value)` pairs and
+    /// `targets[i]` is its class. Preconditions, all guaranteed by the
+    /// caller (which builds both from the same sample set):
+    /// `features.len() == targets.len()`; every feature index is
+    /// `< n_features`; every class index is `< n_classes`; and every
+    /// class occurs at least once, so no class prior is `-inf`.
+    fn fit(
+        features: &[Vec<(usize, f64)>],
+        targets: &[usize],
+        n_classes: usize,
+        n_features: usize,
+    ) -> Self {
+        debug_assert_eq!(
+            features.len(),
+            targets.len(),
+            "features and targets must be parallel"
+        );
         let n_samples = features.len() as f64;
 
         // Per-class sample counts and summed feature weights.
@@ -294,7 +287,7 @@ impl MultinomialNB {
         for (row, &class) in features.iter().zip(targets) {
             class_count[class] += 1.0;
             let counts = &mut feature_count[class];
-            for (j, &value) in row.iter().enumerate() {
+            for &(j, value) in row {
                 counts[j] += value;
             }
         }
@@ -318,23 +311,17 @@ impl MultinomialNB {
         }
     }
 
-    /// Posterior class probabilities for one sample, summing to 1.0.
+    /// Posterior class probabilities for one sparse sample, summing to 1.0.
     ///
-    /// The returned vector is indexed by class, in the order the model
-    /// was trained with.
-    fn predict_proba(&self, x: &[f64]) -> Vec<f64> {
+    /// `x` is the sample as `(feature index, value)` pairs. The returned
+    /// vector is indexed by class, in the order the model was trained with.
+    fn predict_proba(&self, x: &[(usize, f64)]) -> Vec<f64> {
         // Joint log-likelihood per class.
         let jll: Vec<f64> = self
             .class_log_prior
             .iter()
             .zip(&self.feature_log_prob)
-            .map(|(&prior, log_prob)| {
-                prior
-                    + x.iter()
-                        .zip(log_prob)
-                        .map(|(&xj, &lp)| xj * lp)
-                        .sum::<f64>()
-            })
+            .map(|(&prior, log_prob)| prior + x.iter().map(|&(j, v)| v * log_prob[j]).sum::<f64>())
             .collect();
 
         // Stable softmax: subtract the max before exponentiating.
@@ -351,6 +338,25 @@ fn tokenize(text: &str) -> Vec<String> {
         .filter(|s| s.len() >= 2)
         .map(str::to_lowercase)
         .collect()
+}
+
+/// Build a sparse TF-IDF row: the non-zero `(vocab index, weight)` entries
+/// for `tokens`, sorted by index. Tokens absent from `vocab` are ignored.
+/// Sorting makes the row order (and thus the downstream summation)
+/// deterministic, independent of `HashMap` iteration order.
+fn tfidf_row(tokens: &[String], vocab: &HashMap<String, usize>, idf: &[f64]) -> Vec<(usize, f64)> {
+    let mut tf: HashMap<usize, u32> = HashMap::new();
+    for token in tokens {
+        if let Some(&idx) = vocab.get(token) {
+            *tf.entry(idx).or_insert(0) += 1;
+        }
+    }
+    let mut row: Vec<(usize, f64)> = tf
+        .into_iter()
+        .map(|(idx, count)| (idx, f64::from(count) * idf[idx]))
+        .collect();
+    row.sort_unstable_by_key(|&(idx, _)| idx);
+    row
 }
 
 #[cfg(test)]
@@ -531,9 +537,11 @@ mod tests {
         //   feature_log_prob[0] = ln([3/4, 1/4]),  [1] = ln([1/4, 3/4])
         //   class_log_prior      = ln([1/2, 1/2])
         // For x = [1, 0]: jll = ln(3/8) vs ln(1/8) → softmax = [0.75, 0.25].
-        let nb = MultinomialNB::fit(&[vec![2.0, 0.0], vec![0.0, 2.0]], &[0, 1], 2);
+        // Sparse rows: class 0's sample is feature 0 = 2.0, class 1's is
+        // feature 1 = 2.0; two features total.
+        let nb = MultinomialNB::fit(&[vec![(0, 2.0)], vec![(1, 2.0)]], &[0, 1], 2, 2);
 
-        let p = nb.predict_proba(&[1.0, 0.0]);
+        let p = nb.predict_proba(&[(0, 1.0)]);
         assert!((p[0] - 0.75).abs() < 1e-9, "p[0] = {}", p[0]);
         assert!((p[1] - 0.25).abs() < 1e-9, "p[1] = {}", p[1]);
         assert!(
@@ -542,7 +550,7 @@ mod tests {
         );
 
         // The symmetric input flips the posteriors.
-        let q = nb.predict_proba(&[0.0, 1.0]);
+        let q = nb.predict_proba(&[(1, 1.0)]);
         assert!((q[0] - 0.25).abs() < 1e-9 && (q[1] - 0.75).abs() < 1e-9);
     }
 }

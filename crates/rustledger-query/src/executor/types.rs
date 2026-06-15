@@ -1,5 +1,6 @@
 //! Types used by the BQL query executor.
 
+// ratchet: fxhash-only — hot path; use FxHashMap/FxHashSet, not std SipHash collections (#1237).
 use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
 

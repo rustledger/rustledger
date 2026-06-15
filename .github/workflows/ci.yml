@@ -186,6 +186,20 @@ jobs:
       - name: Self-test the per-plugin mutation report script
         run: ./scripts/test-per-plugin-mutation-report.sh
 
+  # Ratchet for the FxHasher adoption on hot paths (#1076): modules marked
+  # `// ratchet: fxhash-only` must not use std SipHash HashMap/HashSet, which
+  # would silently regress the perf decision. Grep ratchet, no extra toolchain
+  # (#1237). Same lightweight named-status pattern as the unsafe invariant.
+  hot-path-collections:
+    name: Hot-path Collections
+    needs: [changes]
+    if: needs.changes.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - name: Forbid std SipHash collections in fxhash-only modules
+        run: ./scripts/check-hot-path-collections.sh
+
   # Main CI matrix - check, clippy, test, doc (only on code changes)
   ci:
     name: ${{ matrix.name }}

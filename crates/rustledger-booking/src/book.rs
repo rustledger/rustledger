@@ -6,7 +6,8 @@
 //! - Calculating capital gains/losses
 //! - Filling in cost specs for lot reductions
 
-use rustc_hash::FxHashMap;
+// ratchet: fxhash-only — hot path; use FxHashMap/FxHashSet, not std SipHash collections (#1237).
+use rustc_hash::{FxHashMap, FxHashSet};
 use rustledger_core::{
     AccountedBookingError, Amount, BookingMethod, Cost, CostSpec, Directive, IncompleteAmount,
     Inventory, Position, Posting, ReductionScope, Transaction,
@@ -176,7 +177,7 @@ impl BookingEngine {
 
         let mut result = txn.clone();
         let mut gains = Vec::new();
-        let mut booked_indices = std::collections::HashSet::with_capacity(txn.postings.len());
+        let mut booked_indices: FxHashSet<usize> = FxHashSet::default();
         // Track posting expansions: (original_idx, expanded_postings)
         let mut expansions: Vec<(usize, Vec<rustledger_core::Spanned<Posting>>)> =
             Vec::with_capacity(txn.postings.len());

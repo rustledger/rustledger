@@ -1,5 +1,6 @@
 //! Balance and pad validation.
 
+// ratchet: fxhash-only — hot path; use FxHashMap/FxHashSet, not std SipHash collections (#1237).
 use rust_decimal::{Decimal, MathematicalOps};
 use rustledger_core::{Amount, Balance, Pad, Position, is_subaccount_or_equal};
 

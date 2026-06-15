@@ -3,6 +3,7 @@
 //! This module orchestrates the full processing pipeline for a beancount ledger,
 //! equivalent to Python's `loader.load_file()` function.
 
+// ratchet: fxhash-only — hot path; use FxHashMap/FxHashSet, not std SipHash collections (#1237).
 use crate::{LoadError, LoadResult, Options, Plugin, SourceMap};
 use rustledger_core::{BookingMethod, Directive, DisplayContext};
 use rustledger_parser::Spanned;

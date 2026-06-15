@@ -4,6 +4,7 @@
 //! [`Position`]s. It provides methods for adding and reducing positions
 //! using different booking methods (FIFO, LIFO, STRICT, NONE).
 
+// ratchet: fxhash-only — hot path; use FxHashMap/FxHashSet, not std SipHash collections (#1237).
 use imbl::Vector;
 use rust_decimal::Decimal;
 use rustc_hash::FxHashMap;

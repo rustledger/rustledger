@@ -29,6 +29,8 @@ println!("Processed {} directives", ledger.directives.len());
 ## Cargo Features
 
 - `cache` (default) - Enable rkyv-based binary caching for faster loads
+- `full` (default) - Full processing pipeline (booking + plugins + validation); required for the `load` / `process` API used in the example above
+- `booking` / `plugins` / `validation` - Individual processing features (enabled together by `full`)
 
 ## License
 

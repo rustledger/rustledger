@@ -13,6 +13,11 @@ Drop-in replacement for Beancount CLI tools. Pure Rust, 10-30x faster.
 | `rledger doctor` | Debug ledger issues |
 | `rledger extract` | Import from CSV/OFX |
 | `rledger price` | Fetch commodity prices |
+| `rledger add` | Add transactions to beancount files |
+| `rledger lint` | Non-fatal advisory passes (e.g. detect transfer pairs) |
+| `rledger config` | Manage configuration |
+| `rledger compat` | Install/uninstall bean-* wrapper scripts |
+| `rledger completions` | Generate shell completions |
 
 ## Compatibility
 

@@ -9,8 +9,8 @@ Beancount plugin system with 30 native plugins and WASM support.
 | `auto_accounts` | Auto-generate Open directives |
 | `auto_tag` | Automatically tag transactions |
 | `box_accrual` | Accrual accounting for boxed periods |
-| `capital_gains_gain_loss` | Split capital gains into gain/loss accounts |
-| `capital_gains_long_short` | Split capital gains by holding period |
+| `gain_loss` | Split capital gains into gain/loss accounts |
+| `long_short` | Split capital gains by holding period |
 | `check_average_cost` | Validate average cost bookings |
 | `check_closing` | Zero balance on account close |
 | `check_commodity` | Validate commodity declarations |
@@ -29,7 +29,7 @@ Beancount plugin system with 30 native plugins and WASM support.
 | `onecommodity` | Single commodity per account |
 | `pedantic` | Enable all strict validations |
 | `rename_accounts` | Rename accounts via metadata |
-| `rxtxn` | Link related transactions |
+| `rx_txn_plugin` | Link related transactions |
 | `sellgains` | Cross-check capital gains |
 | `split_expenses` | Split expenses across accounts |
 | `unique_prices` | One price per day per pair |
@@ -42,11 +42,11 @@ Additionally, `document_discovery` is available for auto-discovering document fi
 ## Example
 
 ```rust
-use rustledger_plugin::{NativePluginRegistry, run_plugin};
+use rustledger_plugin::{NativePluginRegistry, PluginInput};
 
-let registry = NativePluginRegistry::new();
-let plugin = registry.get("auto_accounts")?;
-let result = run_plugin(plugin, &directives)?;
+let registry = NativePluginRegistry::global();
+let plugin = registry.find_synth("auto_accounts").unwrap();
+let output = plugin.process(input);
 ```
 
 ## Cargo Features

@@ -305,7 +305,7 @@ Connect TLA+ specs to Rust implementation.
 
 **Why**: Verify Rust code satisfies TLA+ invariants directly.
 
-**File**: `crates/rustledger-core/src/inventory_proofs.rs`
+**File**: `crates/rustledger-core/src/kani_proofs.rs`
 
 ```rust
 #[cfg(kani)]
@@ -584,7 +584,7 @@ ______________________________________________________________________
 - `.github/workflows/kani.yml`
 - `.github/workflows/mutation.yml`
 - `crates/rustledger-query/fuzz/` (new fuzz target)
-- `crates/rustledger-core/src/inventory_proofs.rs`
+- `crates/rustledger-core/src/kani_proofs.rs`
 - `scripts/compat-error-quality.py`
 
 ### Modified Files
@@ -592,7 +592,7 @@ ______________________________________________________________________
 - `.github/workflows/ci.yml` (Miri, nextest, coverage, WASM)
 - `.github/workflows/bench-pr.yml` (Criterion)
 - `.github/workflows/tla.yml` (trace automation)
-- `scripts/compat-bql-test.sh` (expanded queries)
+- `scripts/compat-bql-test.py` (expanded queries)
 
 ### External PRs
 

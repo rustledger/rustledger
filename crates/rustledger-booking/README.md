@@ -24,7 +24,8 @@ Beancount booking engine with 7 lot matching methods and amount interpolation.
 ## Example
 
 ```rust
-use rustledger_booking::{BookingEngine, BookingMethod};
+use rustledger_booking::BookingEngine;
+use rustledger_core::BookingMethod;
 
 // Using the booking engine for a single transaction
 let mut engine = BookingEngine::with_method(BookingMethod::Fifo);

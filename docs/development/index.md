@@ -58,18 +58,21 @@ cargo deny check
 ```
 rustledger/
 ├── crates/
-│   ├── rustledger-core/      # Core types
-│   ├── rustledger-parser/    # Lexer and parser
-│   ├── rustledger-loader/    # File loading
-│   ├── rustledger-booking/   # Booking engine
-│   ├── rustledger-validate/  # Validation
-│   ├── rustledger-query/     # BQL engine
-│   ├── rustledger-plugin/    # Plugin system
-│   ├── rustledger-importer/  # Import framework
-│   ├── rustledger-lsp/       # LSP server
-│   ├── rustledger-wasm/      # WASM target
-│   ├── rustledger-ffi-wasi/  # WASI FFI
-│   └── rustledger/           # CLI binary
+│   ├── rustledger-core/         # Core types
+│   ├── rustledger-parser/       # Lexer and parser
+│   ├── rustledger-loader/       # File loading
+│   ├── rustledger-booking/      # Booking engine
+│   ├── rustledger-validate/     # Validation
+│   ├── rustledger-query/        # BQL engine
+│   ├── rustledger-completion/   # Shared completion logic
+│   ├── rustledger-plugin/       # Plugin system
+│   ├── rustledger-plugin-types/ # Shared plugin types
+│   ├── rustledger-importer/     # Import framework
+│   ├── rustledger-ops/          # Pure directive operations
+│   ├── rustledger-lsp/          # LSP server
+│   ├── rustledger-wasm/         # WASM target
+│   ├── rustledger-ffi-wasi/     # WASI FFI
+│   └── rustledger/              # CLI binary
 ├── spec/                     # Specifications
 └── tests/                    # Integration tests
 ```

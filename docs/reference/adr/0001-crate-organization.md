@@ -28,6 +28,8 @@ Organize the codebase as a workspace with multiple focused crates:
 - **rustledger-plugin**: Native + WASM + Python plugin system (30+ plugins), depends on core
 - **rustledger-plugin-types**: Shared WASM plugin interface types (minimal, no internal deps)
 - **rustledger-importer**: Bank statement import framework (CSV, OFX)
+- **rustledger-ops**: Pure operations on directives (dedup, categorize, reconcile), depends on core
+- **rustledger-completion**: Editor-agnostic completion logic, shared by LSP and WASM
 - **rustledger**: CLI binary (`rledger`, `bean-*` commands)
 - **rustledger-wasm**: WebAssembly bindings for JS/TS
 - **rustledger-lsp**: Language Server Protocol for editor integration

@@ -426,8 +426,8 @@ fn process(&self, input: PluginInput) -> PluginOutput {
 // Good: Filter first, then process
 let transactions: Vec<_> = input.directives
     .iter()
-    .filter_map(|d| match d {
-        Directive::Transaction(t) => Some(t),
+    .filter_map(|d| match &d.data {
+        DirectiveData::Transaction(t) => Some(t),
         _ => None,
     })
     .collect();

@@ -10,8 +10,7 @@ Beancount validation with 26 error codes for ledger correctness.
 | E2xxx | Balance/pad errors |
 | E3xxx | Transaction errors (unbalanced, no postings) |
 | E4xxx | Inventory/lot errors |
-| E5xxx | Currency errors |
-| E6xxx | Metadata errors |
+| E5xxx | Currency/commodity-metadata errors |
 | E7xxx | Option errors |
 | E8xxx | Document errors |
 | E10xxx | Date warnings |
@@ -24,19 +23,20 @@ Validation is run through a `ValidationSession`. Standalone callers
 phases.
 
 ```rust
-use rustledger_validate::{Phase, ValidationOptions, ValidationSession};
+use rustledger_validate::{ValidationOptions, ValidationSession};
 use rustledger_core::{Directive, naive_date};
 
 let directives: Vec<Directive> = vec![/* parsed + booked input */];
 let today = naive_date(2030, 1, 1).unwrap();
 
-let mut session = ValidationSession::new(ValidationOptions::default());
-let mut errors = session.run_phase(&directives, Phase::Early, today);
-errors.extend(session.run_phase(&directives, Phase::Late, today));
+let session = ValidationSession::new(ValidationOptions::default());
+let (session, mut errors) = session.run_early(&directives, today);
+let (session, late_errors) = session.run_late(&directives, today);
+errors.extend(late_errors);
 errors.extend(session.finalize());
 
 for error in errors {
-    eprintln!("{}: {}", error.code(), error.message());
+    eprintln!("{}: {}", error.code, error.message);
 }
 ```
 

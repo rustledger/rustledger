@@ -84,25 +84,29 @@ rustledger/
 │           ├── integration_test.rs
 │           └── fixture_tests.rs
 ├── tests/
-│   ├── compat/
-│   │   ├── files/                  # 93 curated compatibility files
-│   │   ├── README.md
-│   │   └── sources.toml
-│   ├── compat-full/                # ~800 files (gitignored, fetched on demand)
-│   └── compat-results/             # Test results (gitignored)
-├── spec/
 │   ├── fixtures/                   # Parser and example fixtures
 │   │   ├── booking-scenarios.beancount
 │   │   ├── validation-errors.beancount
+│   │   ├── syntax-edge-cases.beancount
 │   │   ├── examples/
-│   │   └── lima-tests/
+│   │   ├── lima-tests/
+│   │   └── python-plugins/
+│   ├── compatibility/
+│   │   ├── files/                  # ~800 files (gitignored, fetched on demand;
+│   │   │                           #   only files/plugins/ is committed)
+│   │   ├── README.md
+│   │   ├── sources.toml
+│   │   ├── bql-queries.toml
+│   │   └── exclusions.toml
+│   ├── baselines/
+│   └── regressions/
+├── spec/
 │   └── tla/                        # TLA+ specifications (19 specs)
 │       ├── FIFOCorrect.tla
 │       ├── Conservation.tla
 │       └── ...
 └── scripts/
-    ├── compat-test.sh              # Run compatibility tests
-    ├── compat-bql-test.sh          # BQL compatibility tests
+    ├── compat-bql-test.py          # BQL compatibility tests
     └── fetch-compat-test-files.sh  # Download full test suite
 ```
 
@@ -111,12 +115,12 @@ rustledger/
 | Crate | Unit | Integration | Property | TLA+ |
 |-------|:----:|:-----------:|:--------:|:----:|
 | rustledger-core | Yes | - | Yes | Yes |
-| rustledger-parser | Yes | Yes | - | - |
-| rustledger-query | Yes | Yes | - | - |
+| rustledger-parser | Yes | Yes | Yes | - |
+| rustledger-query | Yes | Yes | Yes | Yes |
 | rustledger-validate | Yes | Yes | Yes | Yes |
 | rustledger-loader | Yes | Yes | - | - |
-| rustledger-plugin | Yes | Yes | - | - |
-| rustledger-booking | Yes | - | - | - |
+| rustledger-plugin | Yes | Yes | Yes | Yes |
+| rustledger-booking | Yes | Yes | Yes | Yes |
 | rustledger | Yes | Yes | - | - |
 
 ## Test Systems in Detail
@@ -174,6 +178,9 @@ Located in:
 - `crates/rustledger-core/tests/property_tests.rs`
 - `crates/rustledger-core/tests/tla_proptest.rs`
 - `crates/rustledger-validate/tests/tla_proptest.rs`
+- `crates/*/tests/pipeline_invariants.rs` — pipeline invariant property suites
+  (parser, query, validate, booking, plugin)
+- `crates/{rustledger-query,rustledger-plugin,rustledger-booking}/tests/tla_proptest.rs`
 
 **Example:**
 
@@ -235,24 +242,24 @@ cargo test -p rustledger-core tla_proptest
 
 Compare rustledger against Python beancount to ensure identical behavior.
 
-**Curated files (93 files):** Committed to `tests/compatibility/files/`
+**Test corpus (~800 files):** Most files are downloaded on demand; only
+`tests/compatibility/files/plugins/` is committed in-tree.
 
 ```bash
-./scripts/compat-test.sh tests/compatibility/files
-```
-
-**Full suite (~800 files):** Downloaded on demand
-
-```bash
-# Inside nix develop
+# Inside nix develop — download the corpus first
 ./scripts/fetch-compat-test-files.sh
-./scripts/compat-test.sh
 ```
+
+The compat suite itself is driven by the `compat.yml` workflow, which builds
+`rledger` and compares its output against Python beancount over the fetched
+corpus.
 
 **BQL compatibility:**
 
 ```bash
-./scripts/compat-bql-test.sh
+python3 scripts/compat-bql-test.py \
+  --corpus tests/compatibility/bql-queries.toml \
+  --rledger ./target/release/rledger
 ```
 
 **CI:** Runs nightly at 3 AM UTC via `.github/workflows/compat.yml`
@@ -268,6 +275,7 @@ Compare rustledger against Python beancount to ensure identical behavior.
 | `syntax-edge-cases.beancount` | Parser edge cases |
 | `examples/` | Complete example ledgers |
 | `lima-tests/` | beancount-parser-lima test cases |
+| `python-plugins/` | Python plugin compatibility fixtures |
 
 ### Crate Fixtures (`crates/*/tests/fixtures/`)
 
@@ -278,21 +286,25 @@ Per-crate test data:
 
 ### Compatibility Fixtures (`tests/compatibility/files/`)
 
-Organized by category:
+Most of the corpus is downloaded on demand and gitignored. The only category
+committed in-tree is:
 
-- `parser/` - Parser edge cases (~25 files)
-- `validation/` - Validation scenarios (~20 files)
-- `plugins/` - Plugin configurations (~5 files)
-- `real-world/` - Community examples (~35 files)
-- `edge-cases/` - Known differences (~10 files)
+- `plugins/` - Plugin configuration fixtures
+
+The downloaded corpus (~800 files) is organized by upstream source under
+`files/` (e.g. `beancount-v2/`, `beancount-v3/`, `fava/`).
 
 ## CI Workflows
 
 | Workflow | Trigger | Tests Run |
 |----------|---------|-----------|
-| `ci.yml` | Push, PR | `cargo test --all-features` |
-| `compat.yml` | Nightly | Full compatibility suite |
-| `tla.yml` | Changes to TLA+/inventory/booking | TLA+ model checking |
+| `ci.yml` | Push, PR | `cargo nextest run --all-features` (plus `cargo test --doc`) |
+| `compat.yml` | Nightly (3 AM UTC) | Full compatibility suite |
+| `tla.yml` | Changes to TLA+/`inventory.rs`/booking | TLA+ model checking |
+| `mutation.yml` | Monthly / PR to verified modules | Mutation testing (`cargo-mutants`) |
+| `fuzz.yml` | Nightly / PR to parser, query, booking | Fuzzing |
+| `miri.yml` | Weekly | Miri (undefined-behavior checks) |
+| `kani.yml` | Weekly / PR to core, booking | Kani model checking |
 
 ## Adding New Tests
 
@@ -345,7 +357,7 @@ proptest! {
 1. Determine the appropriate location:
 
    - Parser/syntax: `tests/fixtures/`
-   - Compatibility: `tests/compatibility/files/<category>/`
+   - Committed compatibility plugin fixtures: `tests/compatibility/files/plugins/`
    - Crate-specific: `crates/<crate>/tests/fixtures/`
 
 1. Create a minimal `.beancount` file that reproduces the case

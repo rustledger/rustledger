@@ -10,7 +10,7 @@
 | CSV Auto-Inference | ✅ Done | Delimiter, date format, column role detection (`--auto` flag) |
 | Ops Crate (`rustledger-ops`) | ✅ Done | Pure operations: dedup, categorize, fingerprint, reconcile, merchants, transfer |
 | Rules Engine | ✅ Done | Substring, regex, and exact match rules with priority ordering |
-| Merchant Dictionary | ✅ Done | ~150 built-in patterns (groceries, dining, transport, subscriptions, etc.) |
+| Merchant Dictionary | ✅ Done | ~75 built-in patterns (groceries, dining, transport, subscriptions, etc.) |
 | Transaction Fingerprinting | ✅ Done | Structural hashing via blake3 for stable dedup |
 | Enriched Import Results | ✅ Done | `EnrichedImportResult` with confidence scores and categorization method |
 | Institution Profiles | 🔮 Future | YAML-based bank definitions |
@@ -1635,7 +1635,7 @@ Implemented in `rustledger-ops::categorize::RulesEngine`:
 - Regex patterns (compiled, case-insensitive)
 - Exact matching
 - Priority ordering (user rules > merchant dictionary)
-- Built-in merchant dictionary with ~60 common patterns (`rustledger-ops::merchants`)
+- Built-in merchant dictionary with ~75 common patterns (`rustledger-ops::merchants`)
 
 The importer integrates the rules engine via `CsvConfigBuilder::use_merchant_dict()` and
 `CsvConfigBuilder::regex_mappings()`. User-defined `[importers.mappings]` in TOML config

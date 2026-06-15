@@ -1,6 +1,6 @@
 # rustledger-parser
 
-Fast Beancount parser using Logos lexer and Chumsky parser combinators.
+Fast Beancount parser built on a Logos lexer and a lossless Rowan CST.
 
 ## Features
 
@@ -12,7 +12,7 @@ Fast Beancount parser using Logos lexer and Chumsky parser combinators.
 ## Architecture
 
 ```
-Source (&str) → Logos tokenize() → Vec<SpannedToken> → Chumsky parser → Directives
+Source (&str) → Logos lexer → lossless CST (Rowan) → CST converter → Directives
 ```
 
 ## Example

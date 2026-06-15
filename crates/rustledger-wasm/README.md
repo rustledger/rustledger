@@ -102,4 +102,4 @@ wasm-pack build --target web crates/rustledger-wasm
 
 ## License
 
-GPL-3.0
+GPL-3.0-only

@@ -17,6 +17,7 @@ Analogous to Python beancount's `ops/` module.
 | `categorize` | Rule-based and pattern-based account categorization |
 | `merchants` | Merchant name normalization and lookup dictionary |
 | `enrichment` | Shared types for operation results (confidence, method, alternatives) |
+| `ml` | ML-based categorization (TF-IDF + Naive Bayes); host-only, absent on wasm targets |
 | `transfer` | Transfer detection between own accounts |
 | `reconcile` | Reconciliation of imported vs. existing directives |
 
@@ -35,7 +36,7 @@ let hash = structural_hash("2024-01-15", &transaction_data);
 
 ## Design
 
-Operations in this crate depend only on `rustledger-plugin-types` (for `DirectiveWrapper` and related types) and `rust_decimal`. They know nothing about the plugin runtime, CLI, LSP, or import system.
+Operations in this crate depend on `rustledger-plugin-types` (for `DirectiveWrapper` and related types) plus utility crates (`rust_decimal`, `jiff`, `blake3`, `regex`, and a host-only ML stack for the `ml` module). They know nothing about the plugin runtime, CLI, LSP, or import system.
 
 This separation allows the same operations to be used by:
 - The plugin system (via thin `NativePlugin` wrappers)

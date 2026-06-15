@@ -197,7 +197,7 @@ ______________________________________________________________________
 
 - **File**: `crates/rustledger-loader/src/cache.rs`
 - **Format**: [rkyv](https://github.com/rkyv/rkyv) for zero-copy deserialization
-- **Cache key**: SHA256 hash of file mtime + size
+- **Cache key**: BLAKE3 hash of file path + mtime + size
 - **Location**: `ledger.beancount` → `.ledger.beancount.cache` (hidden dotfile, matches Python beancount; see issue #939). Override via `BEANCOUNT_LOAD_CACHE_FILENAME`.
 
 Custom rkyv wrappers for non-rkyv types:
@@ -227,13 +227,13 @@ ______________________________________________________________________
 **Goal**: Replace parser combinators with fast lexer, use arena for AST
 **Expected Impact**: 30-50% faster parsing
 
-### 6.1 Logos Lexer + Winnow Parser ✅ DONE
+### 6.1 Logos Lexer + Structured CST ✅ DONE
 
 - Using [Logos](https://github.com/maciejhirsz/logos) for SIMD-accelerated tokenization
-- Using [Winnow](https://github.com/winnow-rs/winnow) for manual recursive descent parsing
+- Using a [rowan](https://github.com/rust-analyzer/rowan)-based lossless CST built by hand-written structured parsing (`parse_structured`)
 - Replaced Chumsky parser combinators (legacy parser removed)
 - Zero-copy token stream - no allocations during lexing
-- Implemented in `logos_lexer.rs` and `winnow_parser.rs`
+- Implemented in `logos_lexer.rs` and the `cst/` module (`cst/parser.rs`)
 
 ### 6.2 Bumpalo Arena for AST Nodes 🔮 FUTURE
 
@@ -253,14 +253,14 @@ ______________________________________________________________________
 - **Cow strings** — `parse_string` returns `Cow<str>`, zero-alloc for no-escape strings
 - **Result**: Parser 1K txns: 1,204μs → 700μs (**-42%**)
 
-### 6.4 Validation Fast Paths (April 2026, PR #814)
+### 6.4 Validation Fast Paths ✅ DONE (April 2026, PR #814)
 
 - **Compute tolerances once** — pass pre-computed tolerances to balance checker
 - **Fast-path BigDecimal bypass** — skip expensive arbitrary-precision when Decimal residual is zero
 - **Remove Vec allocation** in `validate_account_name` — iterate without collecting
 - **Result**: Validation 1K txns: 210μs → 90μs (**-57%**)
 
-### 6.5 Parallel File Loading (April 2026, PR #813)
+### 6.5 Parallel File Loading ✅ DONE (April 2026, PR #813)
 
 - When multiple sibling includes are found, read + parse files in parallel via rayon
 - Sequential merge preserves include order and handles nested includes
@@ -292,11 +292,11 @@ ______________________________________________________________________
 | 3 | Full interning | ✅ Done | +6% |
 | 4 | Parallelization (rayon) | ✅ Done | +5% |
 | 5 | Binary cache (rkyv) | ✅ Done | 2.3x on cache hit |
-| 6.1 | Logos + Winnow parser | ✅ Done | Replaced Chumsky |
+| 6.1 | Logos + structured CST parser | ✅ Done | Replaced Chumsky |
 | 6.2 | Bumpalo arena | 🔮 Future | +20% projected |
 | 6.3 | Parser fast paths | ✅ Done | +42% parser (Apr 2026, PR #812) |
-| 6.4 | Validation fast paths | 🔄 PR #814 | +57% validation (Apr 2026) |
-| 6.5 | Parallel file loading | 🔄 PR #813 | Multi-file I/O parallelized |
+| 6.4 | Validation fast paths | ✅ Done | +57% validation (Apr 2026, PR #814) |
+| 6.5 | Parallel file loading | ✅ Done | Multi-file I/O parallelized (PR #813) |
 | 7 | Memory-mapped files | 🔮 Future | Large files only |
 
 ## Actual Performance
@@ -421,8 +421,8 @@ ______________________________________________________________________
 ### Parser Performance
 
 - [Logos](https://github.com/maciejhirsz/logos) - current lexer, SIMD-accelerated DFA
-- [Winnow](https://github.com/winnow-rs/winnow) - current parser, manual recursive descent
-- [Chumsky](https://github.com/zesterer/chumsky) - former parser, replaced by Winnow (removed)
+- [rowan](https://github.com/rust-analyzer/rowan) - current lossless CST library, hand-written structured parsing
+- [Chumsky](https://github.com/zesterer/chumsky) - former parser, replaced by the structured CST parser (removed)
 
 ### Serialization
 

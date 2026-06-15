@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted (Updated February 2026)
+Accepted (Updated June 2026)
 
 ## Context
 
@@ -30,7 +30,7 @@ The lexer (`logos_lexer.rs`) uses Logos, a SIMD-accelerated lexer generator:
 
 - Declarative token definitions via derive macros
 - ~54x faster than hand-written character iteration
-- Produces `Vec<SpannedToken>` with byte offset spans
+- Produces `Vec<(Token, Span)>` with byte offset spans
 
 Tokens include:
 
@@ -40,7 +40,7 @@ Tokens include:
 
 ### Parser (Winnow)
 
-The parser (`winnow_parser.rs`) uses a manual token stream with winnow-style parsing:
+The parser (`cst/parser.rs`) uses a manual token stream with winnow-style parsing:
 
 - Composable parsers for each directive type
 - Manual token stream for simplicity and performance
@@ -50,7 +50,7 @@ The parser (`winnow_parser.rs`) uses a manual token stream with winnow-style par
 Architecture:
 
 ```text
-Source (&str) → Logos tokenize() → Vec<SpannedToken> → Winnow parser → Directives
+Source (&str) → Logos tokenize() → Vec<(Token, Span)> → CST parser → Directives
 ```
 
 ## Consequences
@@ -90,3 +90,4 @@ The parser is organized into sections:
 - **Original decision**: Hand-written recursive descent parser
 - **January 2026**: Migrated to Logos + Chumsky for better performance
 - **February 2026**: Migrated from Chumsky to Winnow for faster compile times and simpler code
+- **June 2026**: Replaced Winnow with a hand-written Rowan-based lossless CST parser (`cst/parser.rs`); Logos is retained for lexing

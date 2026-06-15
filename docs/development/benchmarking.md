@@ -135,7 +135,7 @@ Located in `crates/*/benches/`. Each crate has focused benchmarks:
 **Commands used:**
 
 - Validation: `rledger check` (rustledger), `bean-check` (beancount), `ledger accounts` (ledger), `hledger check` (hledger)
-- Balance: `rledger report balances` (rustledger), `bean-query BALANCES` (beancount), `ledger balance` (ledger), `hledger balance` (hledger)
+- Balance: `rledger report <file> balances` (rustledger), `bean-query BALANCES` (beancount), `ledger balance` (ledger), `hledger balance` (hledger)
 
 ### 3. PR Benchmarks
 
@@ -150,7 +150,7 @@ Located in `crates/*/benches/`. Each crate has focused benchmarks:
 
 **What it measures:**
 
-- Quick validation benchmark (1K transactions for speed)
+- Quick validation benchmark (10K transactions, 5 runs / 2 warmup for speed)
 - Memory usage (Peak RSS)
 - Comparison against baseline from main branch
 
@@ -162,11 +162,9 @@ Located in `crates/*/benches/`. Each crate has focused benchmarks:
 
 - Posts/updates a PR comment with results
 - Shows speedup factor and memory comparison
-- Indicates change vs main branch baseline (with emoji: 🚀 faster, ✅ stable, ⚠️ slower)
+- Indicates change vs main branch baseline (with emoji: 🟢 faster, ✅ unchanged, 🟡 slower, 🔴 regression)
 
-**Also runs:**
-
-- Criterion benchmarks for `rustledger-core` and `rustledger-parser`
+(Criterion benchmarks are not run here; they are tracked separately on main branch pushes.)
 
 ### 4. Scaling Benchmarks
 
@@ -227,13 +225,8 @@ nix develop .#bench
 The script:
 
 1. Generates test ledgers (`.beancount` and `.ledger` formats)
-1. Runs hyperfine with 10 iterations, 3 warmups
-1. Outputs JSON and formatted summary
-
-**Additional scripts:**
-
-- `scripts/bench-compare.py` - Compare benchmark results and detect regressions
-- `scripts/generate-bench-charts.py` - Generate Vega chart specs from history
+1. Runs hyperfine with 10 runs, 3 warmups (validation and balance benchmarks)
+1. Outputs JSON and a formatted summary
 
 ## Input Size Guidelines
 
@@ -341,18 +334,9 @@ View the benchmark charts on the `benchmarks` branch:
 - `validation-chart.vega.json` - Vega spec (editable)
 - `balance-chart.vega.json` - Vega spec (editable)
 
-**Local chart generation:**
-
-```bash
-# Generate Vega specs from history
-./scripts/generate-bench-charts.py
-
-# Generate with custom values
-./scripts/generate-bench-charts.py --rustledger 32 --ledger 65 --hledger 540 --beancount 880
-
-# Render to SVG (requires: npm install -g vega vega-cli)
-./scripts/generate-bench-charts.py --render
-```
+The Vega specs and SVGs are generated and committed automatically by the
+`bench.yml` workflow (which renders them with `vg2svg` from the `vega`/`vega-lite`/`vega-cli`
+npm packages); there is no standalone local chart-generation script.
 
 ## Performance Regression Detection
 
@@ -366,7 +350,7 @@ To investigate a regression:
 
 1. Check the benchmark history charts
 1. Run local Criterion benchmarks to isolate the component
-1. Use `cargo flamegraph` for profiling (requires nightly shell)
+1. Use `cargo flamegraph` for profiling (install separately via `cargo install flamegraph`)
 
 ## Nix Development Shells
 
@@ -380,8 +364,8 @@ Includes:
 
 - All comparison tools (beancount, ledger, hledger)
 - hyperfine for timing
-- Python with matplotlib for charts
-- Build dependencies for ledger
+- Python with beancount/beanquery (for bean-check and bean-query)
+- Build dependencies for ledger (cmake, boost, gmp)
 
 ### Nightly Shell (`nix develop .#nightly`)
 

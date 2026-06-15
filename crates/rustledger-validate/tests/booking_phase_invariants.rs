@@ -6,7 +6,9 @@
 //! (`pipeline_invariants.rs`) used only explicit postings, so booking was a
 //! no-op there — this test closes that gap with the public
 //! [`rustledger_booking::book`] one-shot helper, generating ledgers whose
-//! transactions genuinely need interpolation and lot matching.
+//! transactions need interpolation and cost-spec booking (augmentations
+//! that drive `book` past its no-cost-spec fast path). Lot *reduction*
+//! matching is covered by `rustledger-booking`'s own unit tests, not here.
 //!
 //! Two invariants:
 //! 1. **Determinism** — the full early->book->late sequence yields the same
@@ -20,7 +22,8 @@ use proptest::prelude::*;
 use rust_decimal::Decimal;
 use rustledger_booking::book;
 use rustledger_core::{
-    Amount, BookingMethod, Directive, NaiveDate, Open, Posting, PriceAnnotation, Transaction,
+    Amount, BookingMethod, CostNumber, CostSpec, Directive, NaiveDate, Open, Posting,
+    PriceAnnotation, Transaction,
 };
 use rustledger_validate::{ErrorCode, ValidationOptions, ValidationSession};
 
@@ -43,6 +46,14 @@ fn amount(currency: &'static str) -> impl Strategy<Value = Amount> {
 /// Transactions that exercise the booker:
 /// - `Elided`: one explicit posting + one auto posting interpolation fills.
 /// - `Priced`: a priced stock posting + an auto cash posting.
+/// - `Cost`: a stock buy carrying an explicit `{N USD}` cost spec + an auto
+///   cash posting. This drives `BookingEngine::book` past its no-cost-spec
+///   fast path into the real cost-filling / position-accumulation machinery
+///   (an augmentation — no prior inventory, so it always books). Lot
+///   *reductions* (sells that must match a lot) are covered by the
+///   `book_partitions_failed_transaction` unit test rather than here, since
+///   generating a sell that matches a prior buy under Strict is awkward in
+///   a property strategy.
 ///
 /// Random accounts mean some postings hit unopened accounts.
 fn txn() -> impl Strategy<Value = Transaction> {
@@ -63,6 +74,16 @@ fn txn() -> impl Strategy<Value = Transaction> {
                 .with_synthesized_posting(
                     Posting::new("Assets:Stock", units).with_price(PriceAnnotation::unit(price)),
                 )
+                .with_synthesized_posting(Posting::auto("Assets:Cash"))
+        }),
+        (1u32..28, amount("HOOL"), 1i64..100_000, 0u32..3).prop_map(|(day, units, n, scale)| {
+            let cost = CostSpec::empty()
+                .with_number(CostNumber::PerUnit {
+                    value: Decimal::new(n, scale),
+                })
+                .with_currency("USD");
+            Transaction::new(date(day), "cost")
+                .with_synthesized_posting(Posting::new("Assets:Stock", units).with_cost(cost))
                 .with_synthesized_posting(Posting::auto("Assets:Cash"))
         }),
     ]

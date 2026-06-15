@@ -40,7 +40,7 @@
 //!
 //! ## Utility Operations
 //! - `util.version` - Get API and package version
-//! - `util.types` - Get TypeScript type definitions
+//! - `util.types` - Get directive types, booking methods, and account types
 //! - `util.isEncrypted` - Check if file is encrypted
 //! - `util.getAccountType` - Get account type from name
 

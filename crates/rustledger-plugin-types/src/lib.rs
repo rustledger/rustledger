@@ -974,7 +974,7 @@ pub struct ImporterInput {
 /// gets file content.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IdentifyInput {
-    /// Source file path. Same lossy-utf8 caveat as
+    /// Source file path. Informational only, same as
     /// [`ImporterInput::path`].
     pub path: String,
 }

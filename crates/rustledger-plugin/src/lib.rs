@@ -14,7 +14,7 @@
 //! - **WASM Plugins**: Sandboxed plugins loaded from `.wasm` files
 //! - **Native Plugins**: Built-in plugins implemented in Rust
 //!
-//! # Built-in Plugins (30)
+//! # Built-in Plugins (31)
 //!
 //! See the [plugin reference](https://rustledger.github.io/docs/reference/plugins) for the full list.
 //!

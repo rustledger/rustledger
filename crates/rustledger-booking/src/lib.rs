@@ -374,7 +374,8 @@ pub fn is_balanced(transaction: &Transaction, tolerances: &HashMap<Currency, Dec
 
 /// Normalize total prices (`@@`) to per-unit prices (`@`) on a transaction.
 ///
-/// This converts `PriceAnnotation::Total` to `PriceAnnotation::Unit` by dividing
+/// This converts a `PriceAnnotation` with `PriceKind::Total` to one with
+/// `PriceKind::Unit` by dividing
 /// the total price by the number of units. This should be called AFTER validation
 /// (balance checking) to preserve exact total prices for precise residual calculation.
 ///

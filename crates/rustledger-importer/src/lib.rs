@@ -165,8 +165,8 @@ impl From<EnrichedImportResult> for ImportResult {
 
 impl From<ImportResult> for EnrichedImportResult {
     /// Promote an [`ImportResult`] into an [`EnrichedImportResult`] by
-    /// attaching a default (uncategorized, no-fingerprint) [`Enrichment`]
-    /// to each directive. This is the cheap-default impl used by
+    /// attaching a default (uncategorized) [`Enrichment`] — with a
+    /// computed fingerprint — to each directive. This is the cheap-default impl used by
     /// [`Importer::extract_enriched`] when an importer does not provide
     /// a custom enrichment path; format-specific importers should
     /// override `extract_enriched` to produce real metadata.

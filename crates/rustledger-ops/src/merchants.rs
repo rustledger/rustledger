@@ -1,6 +1,6 @@
 //! Built-in merchant dictionary for transaction categorization.
 //!
-//! Contains ~150 common merchant patterns covering groceries, dining,
+//! Contains ~75 common merchant patterns covering groceries, dining,
 //! transport, shopping, subscriptions, utilities, health, and more.
 //! These are compiled into the binary and serve as a low-priority
 //! fallback when user rules don't match.

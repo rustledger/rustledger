@@ -22,13 +22,14 @@
 //! powers numeric values in BALANCE and PRICE directives.
 //!
 //! Field-level extractors populate `ParseResult.options`,
-//! `.includes`, `.plugins`, `.comments`, `.currency_occurrences`.
+//! `.includes`, `.plugins`, `.comments`, `.currency_occurrences`,
+//! `.account_occurrences`.
 //!
 //! ## Error surfacing
 //!
 //! A single [`walk_descendants_once`] pass collects standalone
-//! comments, currency occurrences, and inline `ERROR_TOKEN` /
-//! mid-file-BOM errors. Specialized extractors run alongside for
+//! comments, currency occurrences, account occurrences, and inline
+//! `ERROR_TOKEN` / mid-file-BOM errors. Specialized extractors run alongside for
 //! `ERROR_NODE` classification, transaction body errors, unclosed
 //! cost braces, indented top-level directives, and bare-currency
 //! values in custom directives.

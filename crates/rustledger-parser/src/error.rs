@@ -198,7 +198,7 @@ impl std::error::Error for ParseError {}
 /// Kinds of parse errors.
 ///
 /// Marked `#[non_exhaustive]` because new variants land routinely
-/// (the most recent was `InvalidBookingMethod` — variant 25). Without
+/// (the most recent was `BomInDirectiveBody` — variant 26). Without
 /// the attribute, every new variant would be a `SemVer`-breaking change
 /// for external consumers that `match err.kind { ... }` exhaustively
 /// without a wildcard arm.

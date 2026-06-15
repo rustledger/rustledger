@@ -104,6 +104,7 @@
 //! | `identify`         | `fn (u32, u32) -> u64`             | Packed `(ptr, len)` of msgpack `IdentifyOutput` |
 //! | `extract`          | `fn (u32, u32) -> u64`             | Packed `(ptr, len)` of msgpack `ImporterOutput` |
 //! | `extract_enriched` | `fn (u32, u32) -> u64`             | Packed `(ptr, len)` of msgpack `EnrichedImporterOutput` |
+//! | `__rustledger_abi_version` | `fn () -> u32`             | ABI version the host checks at load time |
 //!
 //! `(ptr << 32) | len` packs the return so the host can unpack both
 //! halves from a single u64 (wasmtime's typed-func ergonomics don't
@@ -239,15 +240,15 @@ pub fn default_enriched_from(out: ImporterOutput) -> EnrichedImporterOutput {
     }
 }
 
-/// Emit the five `#[no_mangle] pub extern "C"` exports that a
+/// Emit the six `#[no_mangle] pub extern "C"` exports that a
 /// rustledger-host-loaded `.wasm` importer must provide.
 ///
 /// # Invocation constraint
 ///
 /// **Invoke at most once per crate.** Each call generates Rust
 /// items named `__wasm_importer_alloc`/`metadata`/`identify`/
-/// `extract`/`extract_enriched` and (on `wasm32`) wasm exports
-/// named `alloc`/`metadata`/etc. — two invocations in one crate
+/// `extract`/`extract_enriched`/`abi_version` and (on `wasm32`) wasm
+/// exports named `alloc`/`metadata`/etc. — two invocations in one crate
 /// collide on both. Each WASM importer should be its own
 /// `cdylib` crate.
 ///

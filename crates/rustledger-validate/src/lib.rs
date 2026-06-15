@@ -375,7 +375,7 @@ impl LedgerState {
     }
 }
 
-/// Internal trait that lets [`validate_inner`] operate over both plain
+/// Internal trait that lets [`validate_phase_inner`] operate over both plain
 /// `Directive`s and `Spanned<Directive>`s without duplicating the loop
 /// body. The two inputs differ only in whether errors get a span/file
 /// stamp at the end of each iteration — encoded here as the return of

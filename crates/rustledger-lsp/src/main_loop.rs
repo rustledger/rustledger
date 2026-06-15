@@ -299,9 +299,10 @@ impl MainLoopState {
     }
 
     /// Replace the exit action. Returns `self` for chaining. The
-    /// default action is [`std::process::exit`]; tests pass a no-op
-    /// (or a flag-set closure) to avoid terminating the test process
-    /// when the `exit` notification arrives.
+    /// default action is a no-op (process termination, if any, is the
+    /// caller's responsibility after `io_threads.join()`); tests pass a
+    /// no-op (or a flag-set closure) to avoid terminating the test
+    /// process when the `exit` notification arrives.
     #[must_use]
     pub fn with_exit_action<F>(mut self, action: F) -> Self
     where
@@ -1748,8 +1749,9 @@ pub fn run_main_loop(
 /// Same as [`run_main_loop`] but with a caller-supplied `exit_action`
 /// invoked when the `exit` notification arrives.
 ///
-/// Production calls [`run_main_loop`] which wires the action to
-/// [`std::process::exit`]. The in-process integration test harness
+/// Production calls [`run_main_loop`], which wires the action to a
+/// no-op (process termination, if any, is the caller's responsibility
+/// AFTER `io_threads.join()`). The in-process integration test harness
 /// calls this entry point with a no-op so receipt of `exit` does NOT
 /// terminate the cargo-test process. After the no-op returns, the
 /// main loop continues running until the connection is closed; the

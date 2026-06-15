@@ -54,7 +54,7 @@ const READONLY_OPTIONS: &[&str] = &["filename"];
 /// Option validation warning.
 #[derive(Debug, Clone)]
 pub struct OptionWarning {
-    /// Warning code (E7001, E7002, E7003).
+    /// Warning code (E7001 through E7006).
     pub code: &'static str,
     /// Warning message.
     pub message: String,

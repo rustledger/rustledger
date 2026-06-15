@@ -1,7 +1,8 @@
 //! Booking method implementations for Inventory.
 //!
-//! This module contains the implementation of all booking methods (STRICT, FIFO,
-//! LIFO, HIFO, AVERAGE, NONE) used to reduce positions from an inventory.
+//! This module contains the implementation of all booking methods (STRICT,
+//! STRICT_WITH_SIZE, FIFO, LIFO, HIFO, AVERAGE, NONE) used to reduce positions
+//! from an inventory.
 
 use rust_decimal::Decimal;
 use rust_decimal::prelude::Signed;

@@ -259,9 +259,6 @@ pub fn expand_pads(source: &str) -> Result<JsValue, JsError> {
     to_js(&result)
 }
 
-/// Run a native plugin on the source.
-///
-/// Available plugins can be listed with `listPlugins()`.
 /// Materialize a plugin's `ops` against its input wrapper list,
 /// producing the resulting flat wrapper list. Used by WASM entry
 /// points that need to round-trip a plugin's output back to

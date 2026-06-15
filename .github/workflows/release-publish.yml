@@ -80,6 +80,9 @@ jobs:
           # crate path-depends on ops, so cargo publish refuses to push
           # a plugin version whose `ops` requirement isn't on crates.io
           # yet.
+          # rustledger-completion MUST come before rustledger-wasm and
+          # rustledger-lsp, which path-depend on it. (Its omission here
+          # broke the v0.16.0 crates.io publish for wasm + lsp.)
           CRATES=(
             rustledger-core
             rustledger-parser
@@ -92,6 +95,7 @@ jobs:
             rustledger-query
             rustledger-importer
             rustledger
+            rustledger-completion
             rustledger-wasm
             rustledger-ffi-wasi
             rustledger-lsp

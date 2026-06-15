@@ -29,9 +29,9 @@ use rustledger_plugin::{
 /// Regular plugins exercised for determinism — a broad slice of the
 /// registry spanning synthesizers, validators, and mutators, weighted
 /// toward those that fold internal `HashSet`/`HashMap` state into their
-/// output (the nondeterminism risk this test targets). Names that fail to
-/// resolve are skipped (so the list survives registry churn), but at least
-/// one must resolve or the test fails as vacuous.
+/// output (the nondeterminism risk this test targets). Every name here must
+/// resolve in the registry; a stale name (rename/removal) fails the test
+/// loudly rather than silently shrinking coverage.
 const PLUGINS: &[&str] = &[
     "implicit_prices",
     "check_commodity",

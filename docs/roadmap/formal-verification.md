@@ -7,6 +7,13 @@ model-checked in CI, Kani proofs over the Rust core, and the tooling that ties
 counterexamples back to executable tests. Items here are not-yet-done; shipped
 work lives in the changelog.
 
+This is part of the [substrate](./index.md#the-substrate-keep-raising-the-floor):
+the value isn't proofs for their own sake, it's that the engine's core invariants
+— balance, conservation, non-negative inventory — stay machine-checked as the code
+evolves, and that every counterexample TLC finds becomes a pinned Rust regression
+test. The bar for adding a spec is therefore practical: it has to catch a class of
+bug that property tests and types don't already rule out.
+
 ## Now / In progress
 
 | Item | Notes |

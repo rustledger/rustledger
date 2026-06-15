@@ -1,53 +1,57 @@
 # Importing & Ingestion
 
-Forward-looking roadmap for getting transactions into rustledger: parsing, multi-source validation, extraction, API sync, and the source archive.
+> Part of the [rustledger roadmap](./index.md). This is the engine room of
+> [bet #2 — make ingestion painless](./index.md#2-make-ingestion-painless--the-real-adoption-barrier).
 
-> Part of the [rustledger roadmap](./index.md).
+For plain-text accounting the ledger format is the easy part; the friction is
+getting bank data *in* and trusting that it's complete and correct. The shipped
+baseline already covers the mechanics — `rledger extract` with `importers.toml`
+profiles, sandboxed WASM importers, rule-based + Naive-Bayes categorization, and
+balance-assertion generation. What's left is making it **work out of the box**
+for common cases and **earn trust** that nothing was missed.
 
-The shipped baseline is `rledger extract` driven by `importers.toml` profiles, sandboxed WASM importers, rule-based + Naive Bayes categorization, and user-supplied balance-assertion generation. Everything below is **not yet built**.
+Guiding principles: **local-first** (no data leaves the machine unless the user
+opts in), **declarative** (banks described by data, not code), and
+**trust-building** (surface uncertainty rather than silently importing).
 
 ## Now / In progress
 
-Work that is partially done or is the clear next thing to pick up.
+The clear next steps, building directly on the shipped pipeline.
 
-| Item | Notes |
-|------|-------|
-| Automatic balance extraction | `--balance` exists but the amount is user-supplied; extract opening/closing balance from the statement and compare against the computed ledger balance, flagging mismatches with diagnostics. |
-| Institution profile loader | Load declarative bank profiles (CSV/PDF/API source definitions + categorization rules) so common banks work without per-user column mapping. |
-| Top-20 US bank profiles | Ship built-in profiles for the most common institutions on top of the loader. |
-| Online-learning categorization | The Naive Bayes model trains on the existing ledger; feed user corrections back in to improve over time. |
+| Item | Why it matters | Approach |
+|------|----------------|----------|
+| **Declarative institution profiles** | Per-user CSV column-mapping is the #1 setup friction. | A profile loader: a bank described by its source format (CSV/OFX layout), date/amount conventions, and default categorization rules — so a known bank "just works". Ships with built-in profiles for the most common US institutions on top of the loader. |
+| **Automatic balance extraction** | `--balance` exists but the amount is hand-typed, so the assertion only catches *your* typos, not import gaps. | Pull the statement's opening/closing balance during extraction and compare it against the computed ledger balance; emit a diagnostic on mismatch. This is what turns importing from "hope it's complete" into "proven complete". |
+| **Online-learning categorization** | The model trains once on the existing ledger and never improves from use. | Feed accept/correct decisions back into the Naive-Bayes model so suggestions get better the more you import. |
 
 ## Next
 
-Committed, well-scoped future items.
+Well-scoped, but sequenced behind the items above.
 
-| Item | Notes |
-|------|-------|
-| Multi-source matching engine | Probabilistic (Fellegi-Sunter-style) matching: blocking on amount + date window, field scoring, confidence output, and match groups instead of binary yes/no. |
-| Confidence scoring & trust ladder | Score transactions by source agreement (single source → corroborated → reconciled); route low-confidence items to a review queue. |
-| SimpleFIN API integration | Open-protocol bank sync; candidate default given low cost. |
-| Plaid API integration (issue ref) | Optional, user-supplied key; transaction enrichment + merchant normalization. |
-| Teller API integration | Optional direct bank API. |
-| IBKR importer (#923) | Interactive Brokers activity/statement importer. |
-| Recurring / expected-transaction detection | Declare expected recurring transactions (rent, salary) and alert on missing bills or anomalies. |
-| Reconciliation / review UX | Per-account period view showing opening/closing balances, per-source agreement, and a queue to resolve mismatches. |
-| PDF statement extraction | Local-first pipeline (text/OCR → layout → table detection → parse), with a declarative parser registry per statement format. |
-| Cloud/LLM extraction fallback | Optional cloud Document AI or vision-LLM extraction for low-confidence pages; privacy/accuracy is a user-chosen tradeoff (local-only vs. local+cloud). |
-| Source archive (audit trail) | Append-only SQLite store of original source documents keyed by content hash, with extraction history and integrity verification. Compliance design (SEC 17a-4 / GoBD / GDPR audit trail) is captured separately. |
+| Item | Why it matters | Approach |
+|------|----------------|----------|
+| **Reconciliation / review UX** | Imports need a confirmation step, not blind trust. | A per-account, per-period view: opening/closing balances, what each source agrees on, and a queue to resolve mismatches before they hit the ledger. Pairs with balance extraction. |
+| **Bank-API sync (SimpleFIN first)** | CSV/PDF is manual and lossy; an API is the difference between weekly chores and continuous. | Start with **SimpleFIN** (open protocol, low cost, no per-bank engineering). Plaid/Teller as optional, user-keyed backends behind the same interface later. Strictly opt-in. |
+| **Recurring / expected-transaction detection** | Plain-text accounting silently *omits* what's missing; nobody notices a skipped paycheck import. | Let users declare expected recurring entries (rent, salary) and alert when an expected transaction doesn't show up — catches gaps the balance check can't. |
+| **Multi-source matching** | Once there are two sources (CSV + API, or statement + export), naive dedup produces doubles or drops. | Match on amount + a date window with field-level scoring and a confidence output, producing match *groups* rather than binary yes/no. Feeds the review queue rather than auto-resolving. |
+| **Community importer registry** | Every user re-deriving the same bank profile is wasted effort. | A shareable registry of `importers.toml` profiles, with automated tests against sample data so a contributed profile is verifiably correct before others rely on it. |
+| **PDF statement extraction** | Many institutions only provide PDFs. | A local-first pipeline (text or OCR → layout/table detection → parse) with a declarative parser registry keyed by statement format. Local OCR by default; see below for the cloud escape hatch. |
 
 ## Exploring / Later
 
-Aspirational / brainstorm — not committed.
+Genuinely uncertain — pursued only if the simpler items above prove insufficient
+and there's real demand.
 
-| Item | Notes |
-|------|-------|
-| Community importer registry (NEW) | A shareable, community-maintained `importers.toml` / institution-profile registry so users can pull and contribute bank importers with automated testing against sample data. |
-| OCR ensemble | Multi-engine OCR (Tesseract / PaddleOCR / ONNX-exported models) with consensus voting to cut extraction errors; ONNX (`ort`) as the pure-Rust escape hatch. |
-| LLM/MCP-assisted categorization | LLM-assisted account suggestion via MCP for transactions rules + ML leave uncategorized. |
-| Compliance / audit attestation | Multi-jurisdiction compliance modes, transparency-log (Sigstore-style) attestation, and a path to third-party SEC 17a-4 assessment for regulated users. |
-| Background sync daemon | Scheduled API sync with push notifications and anomaly detection for new transactions. |
-| Statement-from-photo import | Import statements captured from a phone photo (mobile/HITL workflow). |
+| Item | Open question |
+|------|---------------|
+| **Opt-in cloud / LLM extraction fallback** | For PDF pages local extraction can't parse confidently, a user-chosen cloud Document-AI or vision-LLM pass. The whole point is local-first, so this stays strictly opt-in and per-document — is the accuracy gain worth introducing a network dependency at all? |
+| **LLM-assisted categorization** | An MCP-driven account suggestion for what rules + ML leave uncategorized. Useful, but only if it beats the (free, local, private) statistical model often enough to justify the dependency. |
+| **Long-term source archive** | An append-only, content-hash-keyed store of original statements with extraction history — valuable for audit and re-extraction. The detailed design (storage, integrity, any regulatory framing) lives in [import-architecture.md](../development/import-architecture.md); it's deliberately *not* committed roadmap until there's a concrete user need. |
 
 ---
 
-Shipped import features (trait system, CSV/OFX importers, auto-inference, ops crate, rules engine + merchant dictionary, fingerprinting/dedup, ML categorization, WASM plugins, user-supplied balance generation): see CHANGELOG.
+Shipped import features (trait system, CSV/OFX importers, auto-inference, the
+`rustledger-ops` crate, rules engine + merchant dictionary, fingerprinting/dedup,
+ML categorization, WASM plugins, balance-directive generation): see the
+[CHANGELOG](https://github.com/rustledger/rustledger/blob/main/CHANGELOG.md).
+Detailed design notes: [import-architecture.md](../development/import-architecture.md).

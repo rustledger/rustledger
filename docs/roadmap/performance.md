@@ -10,7 +10,7 @@ Items that are partially done or the most valuable next steps.
 
 | Item | Notes |
 |------|-------|
-| Bumpalo arena for AST nodes | Phase 6 (lexer + arena) is partial: the Logos lexer and structured CST parser shipped, but AST allocation still uses the global allocator. Move AST nodes into a [bumpalo](https://github.com/fitzgen/bumpalo) arena (~11 instructions/alloc, mass-reset on discard) for phase-oriented parse → use → discard. Projected ~+20% parsing. |
+| Bumpalo arena for AST nodes | Phase 6 (lexer + arena) is partial: the Logos lexer and structured CST parser shipped, but AST allocation still uses the global allocator. Move AST nodes into a [bumpalo](https://github.com/fitzgen/bumpalo) arena (~11 instructions/alloc, mass-reset on discard), which fits the parse → use → discard lifecycle exactly. The win depends on how alloc-bound parsing actually is — measure with `pipeline_bench` before and after rather than committing to a number up front. |
 | Pre-allocate hot HashMaps | Add `.with_capacity()` in validation and query execution to avoid rehashing on known-size maps (`rustledger-validate`, `rustledger-query/src/executor.rs`). |
 
 ## Next
@@ -19,7 +19,7 @@ Committed, well-scoped future work.
 
 | Item | Notes |
 |------|-------|
-| Memory-mapped files for large ledgers | Optional `mmap` (via `memmap2`) above a size threshold (e.g. 50MB), with fallback to standard read for smaller files. Zero-copy load; projected 10-20% for files >100MB. Cross-platform. |
+| Memory-mapped files for large ledgers | Optional `mmap` (via `memmap2`) above a size threshold (e.g. 50MB), with fallback to standard read for smaller files. Zero-copy load avoids one full read into a buffer; the payoff is concentrated in the largest files, where I/O dominates parse time. Gate on a benchmark with a representative large ledger before shipping. |
 | Incremental LSP reparse | Re-parse only the edited region instead of the whole document on each keystroke. The Logos lexer + lossless rowan CST already give us the structure to support range-based reparsing in `rustledger-lsp`; this keeps editor latency flat as ledgers grow. |
 | Remaining parser/validation micro-optimizations | Continue the fast-path approach (zero-alloc collections, SIMD escape/scan, hand-rolled numeric parsing) for any hot spots profiling still surfaces. |
 

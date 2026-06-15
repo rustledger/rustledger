@@ -52,10 +52,16 @@ fi
 
 violations=""
 for f in "${marked[@]}"; do
-    # Drop everything from the first top-level `#[cfg(test)]` onward: std maps
-    # in unit-test modules are harmless. (Test modules sit at file end by
-    # convention here.)
-    code="$(awk '/#\[cfg\(test\)\]/{exit} {print}' "$f")"
+    # Drop the trailing `#[cfg(test)] mod ...` block: std maps in unit-test
+    # modules are harmless. Only a `#[cfg(test)]` that precedes a `mod`
+    # truncates scanning — a test-only `use`/`fn` near the top must NOT
+    # disable the rest of the file (that would silently defeat the ratchet).
+    code="$(awk '
+        /#\[cfg\(test\)\]/ { pending = 1; print; next }
+        pending && /^[[:space:]]*$/ { print; next }
+        pending && /^[[:space:]]*(pub[[:space:]]+)?mod[[:space:]]/ { exit }
+        { pending = 0; print }
+    ' "$f")"
     hits="$(printf '%s\n' "$code" | grep -nE "$forbidden" | grep -v 'ratchet-allow: std-collections' || true)"
     if [ -n "$hits" ]; then
         violations+="$f:"$'\n'"$(printf '%s\n' "$hits" | sed 's/^/    /')"$'\n'

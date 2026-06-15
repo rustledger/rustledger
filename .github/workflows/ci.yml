@@ -303,7 +303,7 @@ jobs:
     name: build
     if: always()
     runs-on: ubuntu-latest
-    needs: [changes, fmt, unsafe-invariant, sync-primitives, plugin-test-quality, ci, doctest, regressions, bindings-fresh]
+    needs: [changes, fmt, unsafe-invariant, sync-primitives, hot-path-collections, plugin-test-quality, ci, doctest, regressions, bindings-fresh]
     steps:
       - name: Check results
         run: |
@@ -326,7 +326,7 @@ jobs:
           # part of the gate (ADR-0004 Phase 3 / #1232): wire-format
           # drift in the generated TS / JSON Schema / Python artifacts
           # blocks merge just like any other failure.
-          results="${{ needs.fmt.result }} ${{ needs.unsafe-invariant.result }} ${{ needs.sync-primitives.result }} ${{ needs.ci.result }} ${{ needs.doctest.result }} ${{ needs.regressions.result }} ${{ needs.bindings-fresh.result }}"
+          results="${{ needs.fmt.result }} ${{ needs.unsafe-invariant.result }} ${{ needs.sync-primitives.result }} ${{ needs.hot-path-collections.result }} ${{ needs.ci.result }} ${{ needs.doctest.result }} ${{ needs.regressions.result }} ${{ needs.bindings-fresh.result }}"
           echo "Job results: $results"
 
           if echo "$results" | grep -qE '(failure|cancelled)'; then

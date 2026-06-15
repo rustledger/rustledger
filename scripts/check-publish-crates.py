@@ -31,7 +31,8 @@ def publishable_crates() -> set[str]:
 
 
 def listed_crates() -> set[str]:
-    text = open(WORKFLOW, encoding="utf-8").read()
+    with open(WORKFLOW, encoding="utf-8") as f:
+        text = f.read()
     m = re.search(r"CRATES=\((.*?)\)", text, re.DOTALL)
     if not m:
         sys.exit(f"::error::could not find a CRATES=( ... ) array in {WORKFLOW}")

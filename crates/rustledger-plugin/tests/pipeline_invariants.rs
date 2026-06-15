@@ -14,7 +14,9 @@ use rustledger_plugin::{directive_to_wrapper, wrapper_to_directive};
 use rustledger_plugin_types::DirectiveWrapper;
 
 fn arb_date() -> impl Strategy<Value = NaiveDate> {
-    (2000i32..2100, 1u32..13, 1u32..28)
+    // 1..=28 so every month is valid (February included) while still
+    // covering day 28.
+    (2000i32..2100, 1u32..13, 1u32..=28)
         .prop_map(|(y, m, d)| rustledger_core::naive_date(y, m, d).unwrap())
 }
 
@@ -75,10 +77,16 @@ proptest! {
 
     #[test]
     fn directive_survives_json_wire_roundtrip(d in arb_directive()) {
+        // Convert fallible steps into TestCaseError (rather than panicking
+        // via `expect`) so proptest keeps shrinking and the failure carries
+        // the underlying error.
         let wrapper = directive_to_wrapper(&d);
-        let json = serde_json::to_string(&wrapper).expect("serialize DTO");
-        let wrapper2: DirectiveWrapper = serde_json::from_str(&json).expect("deserialize DTO");
-        let d2 = wrapper_to_directive(&wrapper2).expect("convert DTO back to core");
+        let json = serde_json::to_string(&wrapper)
+            .map_err(|e| TestCaseError::fail(format!("serialize DTO: {e}")))?;
+        let wrapper2: DirectiveWrapper = serde_json::from_str(&json)
+            .map_err(|e| TestCaseError::fail(format!("deserialize DTO: {e}")))?;
+        let d2 = wrapper_to_directive(&wrapper2)
+            .map_err(|e| TestCaseError::fail(format!("convert DTO back to core: {e}")))?;
         prop_assert_eq!(d2, d, "directive changed across the JSON wire roundtrip");
     }
 }

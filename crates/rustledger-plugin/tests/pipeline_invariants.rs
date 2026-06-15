@@ -4,11 +4,20 @@
 //! (`DirectiveWrapper`, the JSON shape plugins see), a JSON
 //! serialize/deserialize, and conversion back — unchanged. This catches
 //! serialization/DTO drift one layer below the cross-binding harness.
+//!
+//! The generators cover all constructor-reachable directive variants and
+//! the drift-prone fields that have regressed before — e.g. Document tags
+//! and links (#1214), and posting cost specs / price annotations. Metadata,
+//! posting flags/comments, and `Custom` value lists are deliberately left
+//! out: several have known-lossy or sentinel-based conversions, so they
+//! belong in their own focused tests rather than silently weakening this
+//! equality check.
 
 use proptest::prelude::*;
 use rust_decimal::Decimal;
 use rustledger_core::{
-    Amount, Balance, Close, Directive, NaiveDate, Open, Posting, Price, Transaction,
+    Amount, Balance, Close, Commodity, CostNumber, CostSpec, Directive, Document, Event, NaiveDate,
+    Note, Open, Pad, Posting, Price, PriceAnnotation, Query, Transaction,
 };
 use rustledger_plugin::{directive_to_wrapper, wrapper_to_directive};
 use rustledger_plugin_types::DirectiveWrapper;
@@ -38,8 +47,42 @@ fn arb_amount() -> impl Strategy<Value = Amount> {
         .prop_map(|(n, scale, c)| Amount::new(Decimal::new(n, scale), c))
 }
 
+fn arb_tags() -> impl Strategy<Value = Vec<&'static str>> {
+    let tag = prop_oneof![Just("trip"), Just("tax"), Just("reimb"), Just("2024")];
+    prop::collection::vec(tag, 0..3)
+}
+
+fn arb_links() -> impl Strategy<Value = Vec<&'static str>> {
+    let link = prop_oneof![Just("inv-1"), Just("doc-2"), Just("ref-3")];
+    prop::collection::vec(link, 0..3)
+}
+
+/// Postings in three flavors: plain, cost-bearing (`{N CCY}`), and priced
+/// (`@ N CCY`) — the cost-spec and price-annotation conversions are among
+/// the most drift-prone in the DTO layer.
 fn arb_posting() -> impl Strategy<Value = Posting> {
-    (arb_account(), arb_amount()).prop_map(|(a, amt)| Posting::new(a, amt))
+    prop_oneof![
+        (arb_account(), arb_amount()).prop_map(|(a, amt)| Posting::new(a, amt)),
+        (
+            arb_account(),
+            arb_amount(),
+            1i64..100_000,
+            0u32..3,
+            arb_currency()
+        )
+            .prop_map(|(a, amt, n, scale, c)| {
+                let cost = CostSpec::empty()
+                    .with_number(CostNumber::PerUnit {
+                        value: Decimal::new(n, scale),
+                    })
+                    .with_currency(c);
+                Posting::new(a, amt).with_cost(cost)
+            }),
+        (arb_account(), arb_amount(), arb_amount())
+            .prop_map(
+                |(a, amt, price)| Posting::new(a, amt).with_price(PriceAnnotation::unit(price))
+            ),
+    ]
 }
 
 fn arb_transaction() -> impl Strategy<Value = Transaction> {
@@ -47,9 +90,21 @@ fn arb_transaction() -> impl Strategy<Value = Transaction> {
         arb_date(),
         prop::collection::vec(arb_posting(), 1..4),
         "[A-Za-z ]{0,12}",
+        prop::option::of("[A-Za-z ]{1,10}"),
+        arb_tags(),
+        arb_links(),
     )
-        .prop_map(|(d, postings, narration)| {
+        .prop_map(|(d, postings, narration, payee, tags, links)| {
             let mut t = Transaction::new(d, narration);
+            if let Some(p) = payee {
+                t = t.with_payee(p);
+            }
+            for tag in tags {
+                t = t.with_tag(tag);
+            }
+            for link in links {
+                t = t.with_link(link);
+            }
             for p in postings {
                 t = t.with_synthesized_posting(p);
             }
@@ -57,9 +112,27 @@ fn arb_transaction() -> impl Strategy<Value = Transaction> {
         })
 }
 
-/// Directives built from constructors only (no metadata/flags/comments),
-/// so the DTO roundtrip is value-preserving — any inequality is genuine
-/// wire-format drift, not an un-serialized side field.
+/// Document directives with tags and links — the field family that
+/// regressed in #1214 (both halves of the conversion dropped them).
+fn arb_document() -> impl Strategy<Value = Document> {
+    (
+        arb_date(),
+        arb_account(),
+        "[a-z/.]{1,16}",
+        arb_tags(),
+        arb_links(),
+    )
+        .prop_map(|(d, a, path, tags, links)| {
+            let mut doc = Document::new(d, a, path);
+            doc.tags = tags.into_iter().map(Into::into).collect();
+            doc.links = links.into_iter().map(Into::into).collect();
+            doc
+        })
+}
+
+/// All constructor-reachable directive variants. Equality via `Directive`'s
+/// derived `PartialEq` covers every field (`Spanned` compares values only),
+/// so any inequality is genuine wire-format drift.
 fn arb_directive() -> impl Strategy<Value = Directive> {
     prop_oneof![
         arb_transaction().prop_map(Directive::Transaction),
@@ -69,6 +142,16 @@ fn arb_directive() -> impl Strategy<Value = Directive> {
             .prop_map(|(d, a, amt)| Directive::Balance(Balance::new(d, a, amt))),
         (arb_date(), arb_currency(), arb_amount())
             .prop_map(|(d, c, amt)| Directive::Price(Price::new(d, c, amt))),
+        (arb_date(), arb_currency()).prop_map(|(d, c)| Directive::Commodity(Commodity::new(d, c))),
+        (arb_date(), arb_account(), arb_account())
+            .prop_map(|(d, a, src)| Directive::Pad(Pad::new(d, a, src))),
+        (arb_date(), "[A-Za-z]{1,8}", "[A-Za-z ]{0,12}")
+            .prop_map(|(d, ty, val)| Directive::Event(Event::new(d, ty, val))),
+        (arb_date(), "[A-Za-z]{1,8}", "[A-Za-z ]{0,16}")
+            .prop_map(|(d, name, q)| Directive::Query(Query::new(d, name, q))),
+        (arb_date(), arb_account(), "[A-Za-z ]{0,16}")
+            .prop_map(|(d, a, c)| Directive::Note(Note::new(d, a, c))),
+        arb_document().prop_map(Directive::Document),
     ]
 }
 

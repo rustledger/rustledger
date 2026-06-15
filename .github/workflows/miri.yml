@@ -6,8 +6,12 @@
 # are miri-compatible; WASM/FFI crates and fs/wasmtime-heavy crates are
 # excluded because miri can't run their targets.
 #
-# Memory model: Tree Borrows (#1239 Q2) — the direction the language is moving
-# and fewer false positives than the default Stacked Borrows.
+# Memory model: Stacked Borrows (miri's default). #1239 Q2 originally chose
+# Tree Borrows, but the *experimental* Tree-Borrows ruleset false-positives on
+# the `rowan` dependency's `ThinArc::clone` (a "write through Frozen" report
+# that miri itself flags as experimental), which the parser reaches via CST
+# conversion. `rowan` is clean under Stacked Borrows (as it is for
+# rust-analyzer), so we use the default model.
 name: Miri
 on:
   schedule:
@@ -62,14 +66,14 @@ jobs:
           # is enabled"). Disabling isolation lets those tests run; it only
           # permits host clock/entropy access and does not weaken miri's
           # UB/aliasing checks, which is what this job is for.
-          MIRIFLAGS: -Zmiri-tree-borrows -Zmiri-symbolic-alignment-check -Zmiri-strict-provenance -Zmiri-disable-isolation
+          MIRIFLAGS: -Zmiri-symbolic-alignment-check -Zmiri-strict-provenance -Zmiri-disable-isolation
       - name: Summary
         run: |
           echo "## Miri Results" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "Miri checks for undefined behavior in unsafe Rust code." >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Memory model: Tree Borrows (-Zmiri-tree-borrows)." >> $GITHUB_STEP_SUMMARY
+          echo "Memory model: Stacked Borrows (miri default)." >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "Checked crates:" >> $GITHUB_STEP_SUMMARY
           echo "- rustledger-core" >> $GITHUB_STEP_SUMMARY

@@ -56,7 +56,7 @@ dependencies = [
 
 [[package]]
 name = "rustledger-plugin-types"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "rmp-serde",
  "serde",

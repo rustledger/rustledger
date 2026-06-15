@@ -1,5 +1,13 @@
 # Miri - detect undefined behavior in unsafe code
-# Runs weekly (too slow for every PR)
+#
+# First-party crates are all #![forbid(unsafe_code)], so this targets UB hit
+# through transitive deps (rayon, parking_lot, rkyv, ...) by our call patterns
+# (#1239). Runs weekly (too slow for every PR) on the pure-logic crates that
+# are miri-compatible; WASM/FFI crates and fs/wasmtime-heavy crates are
+# excluded because miri can't run their targets.
+#
+# Memory model: Tree Borrows (#1239 Q2) — the direction the language is moving
+# and fewer false positives than the default Stacked Borrows.
 name: Miri
 on:
   schedule:
@@ -39,15 +47,22 @@ jobs:
           echo "::group::rustledger-booking"
           cargo miri test --package rustledger-booking --all-features
           echo "::endgroup::"
+
+          echo "::group::rustledger-query"
+          cargo miri test --package rustledger-query --all-features
+          echo "::endgroup::"
         env:
-          MIRIFLAGS: -Zmiri-symbolic-alignment-check -Zmiri-strict-provenance
+          MIRIFLAGS: -Zmiri-tree-borrows -Zmiri-symbolic-alignment-check -Zmiri-strict-provenance
       - name: Summary
         run: |
           echo "## Miri Results" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "Miri checks for undefined behavior in unsafe Rust code." >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Memory model: Tree Borrows (-Zmiri-tree-borrows)." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
           echo "Checked crates:" >> $GITHUB_STEP_SUMMARY
           echo "- rustledger-core" >> $GITHUB_STEP_SUMMARY
           echo "- rustledger-parser" >> $GITHUB_STEP_SUMMARY
           echo "- rustledger-booking" >> $GITHUB_STEP_SUMMARY
+          echo "- rustledger-query" >> $GITHUB_STEP_SUMMARY

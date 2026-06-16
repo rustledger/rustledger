@@ -354,12 +354,34 @@ jobs:
             issue=$(basename "$f" .beancount | sed 's/issue-//')
             echo "- [#$issue](https://github.com/rustledger/rustledger/issues/$issue)" >> $GITHUB_STEP_SUMMARY
           done
+  # WIT/Component-Model parity (#1384/#1402). The `rustledger-ffi-component-tests`
+  # tests SKIP unless the wasip2 artifact exists, and the `Test` job above never
+  # builds it — so without this job the entire component surface is unverified by
+  # CI. Build the component for wasm32-wasip2 first, then run the parity harness
+  # so the tests actually execute.
+  component-parity:
+    name: Component Parity (wasip2)
+    needs: [changes]
+    if: needs.changes.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # stable
+        with:
+          toolchain: stable
+          targets: wasm32-wasip2
+      - uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2
+      - name: Build the wasip2 component
+        run: cargo build -p rustledger-ffi-component --target wasm32-wasip2
+      - name: Run parity tests
+        run: cargo test -p rustledger-ffi-component-tests
   # Gate job - all core checks must pass (or be skipped on non-code PRs)
   build:
     name: build
     if: always()
     runs-on: ubuntu-latest
-    needs: [changes, fmt, unsafe-invariant, sync-primitives, hot-path-collections, plugin-test-quality, ci, doctest, regressions, bindings-fresh]
+    needs: [changes, fmt, unsafe-invariant, sync-primitives, hot-path-collections, plugin-test-quality, ci, doctest, regressions, bindings-fresh, component-parity]
     steps:
       - name: Check results
         run: |
@@ -382,7 +404,7 @@ jobs:
           # part of the gate (ADR-0004 Phase 3 / #1232): wire-format
           # drift in the generated TS / JSON Schema / Python artifacts
           # blocks merge just like any other failure.
-          results="${{ needs.fmt.result }} ${{ needs.unsafe-invariant.result }} ${{ needs.sync-primitives.result }} ${{ needs.hot-path-collections.result }} ${{ needs.ci.result }} ${{ needs.doctest.result }} ${{ needs.regressions.result }} ${{ needs.bindings-fresh.result }}"
+          results="${{ needs.fmt.result }} ${{ needs.unsafe-invariant.result }} ${{ needs.sync-primitives.result }} ${{ needs.hot-path-collections.result }} ${{ needs.ci.result }} ${{ needs.doctest.result }} ${{ needs.regressions.result }} ${{ needs.bindings-fresh.result }} ${{ needs.component-parity.result }}"
           echo "Job results: $results"
 
           if echo "$results" | grep -qE '(failure|cancelled)'; then

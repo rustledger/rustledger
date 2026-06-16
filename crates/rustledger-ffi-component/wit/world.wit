@@ -400,8 +400,12 @@ interface ledger {
   /// `true` only when cross-tree includes are needed. The flag is phrased so
   /// the safe behavior is the `false`/zero default — WIT has no field defaults,
   /// so an under-specified caller stays confined rather than escaping the
-  /// sandbox. `plugins` names the regular (post-booking) plugins to run, e.g.
-  /// `["auto_accounts"]`.
+  /// sandbox. `plugins` names *additional* regular (post-booking) plugins to run
+  /// beyond those the ledger declares, e.g. `["auto_accounts"]`; they run by
+  /// name with no config. The ledger's own `plugin "name" "config"` directives
+  /// already run (with their config) during the load — a plugin that needs
+  /// configuration must be declared in the ledger, since this list carries only
+  /// names.
   load-file: func(path: string, allow-unrestricted-includes: bool, plugins: list<string>) -> load-result;
 
   /// Validate source text (parse + semantic checks).

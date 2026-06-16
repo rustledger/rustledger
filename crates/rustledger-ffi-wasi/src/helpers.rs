@@ -411,6 +411,13 @@ pub fn load_file(path: &std::path::Path, path_security: bool) -> Result<FileLoad
 /// Run the named regular (post-booking) plugins over loaded directives, shared
 /// by the JSON-RPC `ledger.loadFile` handler and the WIT component (#1384).
 ///
+/// These are *additional*, caller-requested plugins, run by name with no
+/// config. The ledger's own `plugin "name" "config"` directives have already
+/// run (with their config) inside the loader during `load_file`, so this is for
+/// plugins a host wants beyond the ones the ledger declares. A plugin that needs
+/// configuration must be declared in the ledger — the by-name request surface
+/// (the WIT `plugins: list<string>` / JSON-RPC `plugins`) cannot carry config.
+///
 /// Returns the (possibly rewritten) directives + their line numbers/files;
 /// plugin errors and unknown-plugin errors are pushed onto `errors`. No-ops if
 /// `plugin_names` is empty or `errors` is already non-empty (don't run plugins

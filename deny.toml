@@ -111,7 +111,9 @@ skip = [
   { crate = "toml_datetime" },    # paired with toml
   { crate = "unicode-width" },    # transitive skew
   { crate = "wasm-encoder" },     # wasmtime stack versioning
+  { crate = "wasmparser" },       # wit-bindgen 0.239 (ffi-component #1384) vs wasmtime 0.248
   { crate = "wast" },             # wasmtime stack versioning
+  { crate = "wit-parser" },       # wit-bindgen 0.239 (ffi-component #1384) vs wasmtime 0.248
   { crate = "winnow" },           # toml parser version skew
 ]
 

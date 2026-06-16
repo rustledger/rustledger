@@ -16,6 +16,7 @@ readme = "README.md"
 bench = false
 
 [dependencies]
+rustledger-core.workspace = true
 rustledger-plugin-types.workspace = true
 rust_decimal.workspace = true
 jiff.workspace = true
@@ -32,6 +33,7 @@ regex.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
+rustledger-parser.workspace = true
 
 [lints]
 workspace = true

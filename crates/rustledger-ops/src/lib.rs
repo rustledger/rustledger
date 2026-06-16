@@ -22,6 +22,7 @@
 #![warn(missing_docs)]
 
 pub mod categorize;
+pub mod clamp;
 pub mod dedup;
 pub mod enrichment;
 pub mod fingerprint;

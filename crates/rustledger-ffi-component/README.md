@@ -7,10 +7,10 @@ the WASI-p1 → p2 migration ([#1384](https://github.com/rustledger/rustledger/i
 `wit/world.wit` is the single source of truth for the wire shape; `src/lib.rs`
 implements the `rustledger` world's exports.
 
-**Status: Phase 1 done (the contract); Phase 2 in progress (the guest).** The
-crate **builds as a real wasip2 component** today — `version` is wired
-end-to-end; the remaining exports are honest `unimplemented!()` stubs being
-filled in against the existing loader/query logic, one interface at a time.
+**Status: Phase 1 done (the contract); Phase 2 — all 20 exports wired.** The
+crate **builds as a real wasip2 component** and every export
+(`ledger`/`builder`/`util`/`format`) is implemented against the reused
+loader/query/ops logic and exercised by the parity harness.
 
 ```bash
 # the wasip2 target lives in the default dev shell (flake.nix)
@@ -115,11 +115,9 @@ map). The contract validates with `wasm-tools` and generates ~35k lines via
       run the source path, matching the handlers (single file, no includes).
 - [x] `builder`: `create` / `create-batch` (WIT input → `input_entry_to_directive`
       → core → WIT) and `filter` (date-range `[begin, end)` over WIT directives).
-- [ ] `builder`: `clamp` — **deferred to rustledger/rustledger#1401.** It
-      synthesizes directives via the JSON-based `clamp_entries`; wiring it here
-      cleanly needs a *typed* `clamp` on core directives in `rustledger-ops`,
-      rather than ~250 lines of `DirectiveJson` `Deserialize` + reverse-conversion
-      glue to bridge an algorithm that shouldn't be JSON-based.
+- [x] `builder`: `clamp` — wired via the typed `rustledger_ops::clamp` (#1401):
+      WIT loaded-directive → `InputEntry` → core → `ops::clamp` → WIT. **All 20
+      exports are now implemented** and parity-tested.
 - [x] `util` (`types` / `is-encrypted` / `get-account-type`) and `format`
       (`format-source` / `-file` / `-entry` / `-entries`) wired. `format-*-entry`
       reuse the builder input conversion + `canonicalize_directives`.

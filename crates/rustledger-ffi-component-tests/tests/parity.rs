@@ -241,3 +241,39 @@ fn filter_keeps_pre_begin_open_and_drops_commodity() -> Result<()> {
     );
     Ok(())
 }
+
+#[test]
+fn custom_directive_values_keep_their_type_tag() -> Result<()> {
+    if !component_path().exists() {
+        return Ok(());
+    }
+    use rustledger::ledger::types::Directive;
+    let (mut store, inst) = instantiate()?;
+    // A `custom` directive whose args have distinct types: an account and a
+    // string. `meta-value` alone would flatten both to `text`; `typed-value`
+    // must preserve `value-type` ("account" vs "string").
+    let src = "2024-01-01 custom \"budget\" Assets:Cash \"monthly\"\n";
+    let loaded = inst.rustledger_ledger_ledger().call_load(&mut store, src)?;
+    let custom = loaded
+        .entries
+        .iter()
+        .find_map(|d| match d {
+            Directive::Custom(c) => Some(c),
+            _ => None,
+        })
+        .expect("expected a custom directive");
+    let types: Vec<&str> = custom
+        .values
+        .iter()
+        .map(|tv| tv.value_type.as_str())
+        .collect();
+    assert!(
+        types.contains(&"account"),
+        "account arg must keep value-type \"account\", got {types:?}",
+    );
+    assert!(
+        types.contains(&"string"),
+        "quoted arg must keep value-type \"string\", got {types:?}",
+    );
+    Ok(())
+}

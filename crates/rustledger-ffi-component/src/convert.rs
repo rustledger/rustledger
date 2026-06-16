@@ -5,11 +5,13 @@
 //! (`directive_to_json`) are reused wholesale; this module is the mechanical
 //! DTO→WIT shuffle, since the WIT types were authored 1:1 with the DTOs.
 //!
-//! Known fidelity gap: directive/posting metadata is reused from the DTO, which
-//! flattens `MetaValue` to JSON and stringifies numbers — so a numeric metadata
-//! value currently surfaces as `meta-value::text`. Faithful typing requires
-//! reading the core `MetaValue` directly; tracked as a follow-up. (Custom
-//! directive values keep their type via `TypedValue`, so they are unaffected.)
+//! Known fidelity gap: directive/posting *metadata* (`meta.user`) is reused from
+//! the DTO, which flattens `MetaValue` to JSON and stringifies numbers — so a
+//! numeric metadata value currently surfaces as `meta-value::text`. Faithful
+//! typing requires reading the core `MetaValue` directly; tracked as a
+//! follow-up. (Custom-directive arguments are *not* affected: they carry their
+//! `value-type` tag via the WIT `typed-value` record, so account/currency/tag/…
+//! stay distinguishable.)
 
 use rustledger_ffi_wasi as ffi;
 use rustledger_query::{Executor, IntervalUnit, Value, parse as parse_query};
@@ -239,7 +241,15 @@ fn directive(d: ffi::DirectiveJson) -> wit::Directive {
         } => wit::Directive::Custom(wit::CustomDir {
             date,
             custom_type,
-            values: values.into_iter().map(|tv| meta_value(tv.value)).collect(),
+            // Carry the `value-type` tag (account/currency/tag/…) alongside the
+            // value, which `meta-value` alone would flatten to `text`.
+            values: values
+                .into_iter()
+                .map(|tv| wit::TypedValue {
+                    value_type: tv.value_type.to_string(),
+                    value: meta_value(tv.value),
+                })
+                .collect(),
             meta: meta(m),
         }),
     }
@@ -1071,7 +1081,13 @@ fn loaded_directive_to_input(d: &wit::Directive) -> ffi::InputEntry {
         D::Custom(c) => E::Custom {
             date: c.date.clone(),
             custom_type: c.custom_type.clone(),
-            values: c.values.iter().map(json_from_meta_value).collect(),
+            // `values` are now `typed-value`; the input DTO re-derives the type
+            // from the value, so unwrap to the inner `meta-value`.
+            values: c
+                .values
+                .iter()
+                .map(|tv| json_from_meta_value(&tv.value))
+                .collect(),
             meta: loaded_meta(&c.meta),
         },
     }

@@ -58,6 +58,16 @@ interface types {
     null,
   }
 
+  /// A `custom` directive argument. `meta-value` collapses
+  /// string/account/currency/tag/link/date to `text`, so the original
+  /// `value-type` tag (`"account"`, `"currency"`, `"tag"`, `"link"`, `"date"`,
+  /// `"string"`, `"number"`, `"bool"`, `"amount"`, `"null"`) is carried
+  /// alongside the value to preserve the distinction the JSON-RPC surface emits.
+  record typed-value {
+    value-type: string,
+    value: meta-value,
+  }
+
   /// One user metadata entry (preserves source order, unlike a map).
   type meta-entry = tuple<string, meta-value>;
 
@@ -127,8 +137,9 @@ interface types {
   record custom-dir {
     date: string,
     custom-type: string,
-    // `TypedValue`s; same closed shape as meta-value.
-    values: list<meta-value>,
+    // Typed `custom` arguments — each keeps its `value-type` tag (account vs
+    // currency vs plain string, etc.), which a bare `meta-value` would lose.
+    values: list<typed-value>,
     meta: meta,
   }
 
@@ -319,6 +330,9 @@ interface types {
   record input-custom {
     date: string,
     custom-type: string,
+    // Stays `meta-value` (not `typed-value`): the input DTO reconstructs the
+    // value type from the value on load, so a caller-supplied tag would be
+    // dropped anyway. Output `custom-dir` carries the tag via `typed-value`.
     values: list<meta-value>,
     meta: list<meta-entry>,
   }

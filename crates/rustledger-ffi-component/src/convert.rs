@@ -592,3 +592,196 @@ pub fn batch_file(path: &str, queries: &[String]) -> out::BatchResult {
         },
     }
 }
+
+// ---- builder: WIT input -> core directive (reverse of the output path) ----
+
+fn json_from_meta_value(v: &wit::MetaValue) -> Json {
+    match v {
+        wit::MetaValue::Text(s) => Json::String(s.clone()),
+        // A numeric string round-trips to MetaValue::Number via json_to_meta_value.
+        wit::MetaValue::Number(s) => {
+            serde_json::from_str(s).unwrap_or_else(|_| Json::String(s.clone()))
+        }
+        wit::MetaValue::Boolean(b) => Json::Bool(*b),
+        wit::MetaValue::Amount(a) => {
+            serde_json::json!({"number": a.number, "currency": a.currency})
+        }
+        wit::MetaValue::Null => Json::Null,
+    }
+}
+
+fn input_meta(entries: &[(String, wit::MetaValue)]) -> std::collections::HashMap<String, Json> {
+    entries
+        .iter()
+        .map(|(k, v)| (k.clone(), json_from_meta_value(v)))
+        .collect()
+}
+
+fn input_amount(a: &wit::Amount) -> ffi::InputAmount {
+    ffi::InputAmount {
+        number: a.number.clone(),
+        currency: a.currency.clone(),
+    }
+}
+
+fn input_cost_number(n: &wit::CostNumber) -> ffi::InputCostNumber {
+    match n {
+        wit::CostNumber::PerUnit(v) => ffi::InputCostNumber::PerUnit { value: v.clone() },
+        wit::CostNumber::Total(v) => ffi::InputCostNumber::Total { value: v.clone() },
+        wit::CostNumber::PerUnitFromTotal((per_unit, total)) => {
+            ffi::InputCostNumber::PerUnitFromTotal {
+                per_unit: per_unit.clone(),
+                total: total.clone(),
+            }
+        }
+    }
+}
+
+fn input_cost(c: &wit::InputCost) -> ffi::InputCost {
+    ffi::InputCost {
+        number: c.number.as_ref().map(input_cost_number),
+        currency: c.currency.clone(),
+        date: c.date.clone(),
+        label: c.label.clone(),
+        merge: c.merge,
+    }
+}
+
+fn input_posting(p: &wit::InputPosting) -> ffi::InputPosting {
+    ffi::InputPosting {
+        account: p.account.clone(),
+        units: p.units.as_ref().map(input_amount),
+        cost: p.cost.as_ref().map(input_cost),
+        price: p.price.as_ref().map(input_amount),
+        meta: input_meta(&p.meta),
+    }
+}
+
+fn input_entry(d: &wit::InputDirective) -> ffi::InputEntry {
+    use ffi::InputEntry as E;
+    use wit::InputDirective as I;
+    match d {
+        I::Transaction(t) => E::Transaction {
+            date: t.date.clone(),
+            flag: t.flag.clone(),
+            payee: t.payee.clone(),
+            narration: t.narration.clone(),
+            tags: t.tags.clone(),
+            links: t.links.clone(),
+            postings: t.postings.iter().map(input_posting).collect(),
+            meta: input_meta(&t.meta),
+        },
+        I::Open(o) => E::Open {
+            date: o.date.clone(),
+            account: o.account.clone(),
+            currencies: o.currencies.clone(),
+            booking: o.booking.clone(),
+            meta: input_meta(&o.meta),
+        },
+        I::Close(c) => E::Close {
+            date: c.date.clone(),
+            account: c.account.clone(),
+            meta: input_meta(&c.meta),
+        },
+        I::Balance(b) => E::Balance {
+            date: b.date.clone(),
+            account: b.account.clone(),
+            amount: input_amount(&b.amount),
+            meta: input_meta(&b.meta),
+        },
+        I::Pad(p) => E::Pad {
+            date: p.date.clone(),
+            account: p.account.clone(),
+            source_account: p.source_account.clone(),
+            meta: input_meta(&p.meta),
+        },
+        I::Commodity(c) => E::Commodity {
+            date: c.date.clone(),
+            currency: c.currency.clone(),
+            meta: input_meta(&c.meta),
+        },
+        I::Price(p) => E::Price {
+            date: p.date.clone(),
+            currency: p.currency.clone(),
+            amount: input_amount(&p.amount),
+            meta: input_meta(&p.meta),
+        },
+        I::Event(e) => E::Event {
+            date: e.date.clone(),
+            event_type: e.event_type.clone(),
+            value: e.value.clone(),
+            meta: input_meta(&e.meta),
+        },
+        I::Note(n) => E::Note {
+            date: n.date.clone(),
+            account: n.account.clone(),
+            comment: n.comment.clone(),
+            meta: input_meta(&n.meta),
+        },
+        I::Document(doc) => E::Document {
+            date: doc.date.clone(),
+            account: doc.account.clone(),
+            path: doc.path.clone(),
+            tags: doc.tags.clone(),
+            links: doc.links.clone(),
+            meta: input_meta(&doc.meta),
+        },
+        I::Query(q) => E::Query {
+            date: q.date.clone(),
+            name: q.name.clone(),
+            query_string: q.query_string.clone(),
+            meta: input_meta(&q.meta),
+        },
+        I::Custom(c) => E::Custom {
+            date: c.date.clone(),
+            custom_type: c.custom_type.clone(),
+            values: c.values.iter().map(json_from_meta_value).collect(),
+            meta: input_meta(&c.meta),
+        },
+    }
+}
+
+/// `entry.create` — build one directive from typed input.
+pub fn create(entry: &wit::InputDirective) -> Result<wit::Directive, String> {
+    let core = ffi::input_entry_to_directive(&input_entry(entry))?;
+    Ok(directive(ffi::convert::directive_to_json(&core, 0, "<created>")))
+}
+
+/// `entry.createBatch` — all-or-nothing (first failure fails the call).
+pub fn create_batch(entries: &[wit::InputDirective]) -> Result<Vec<wit::Directive>, String> {
+    entries.iter().map(create).collect()
+}
+
+fn directive_date(d: &wit::Directive) -> &str {
+    use wit::Directive as D;
+    match d {
+        D::Transaction(t) => &t.date,
+        D::Open(o) => &o.date,
+        D::Close(c) => &c.date,
+        D::Balance(b) => &b.date,
+        D::Pad(p) => &p.date,
+        D::Commodity(c) => &c.date,
+        D::Price(p) => &p.date,
+        D::Event(e) => &e.date,
+        D::Note(n) => &n.date,
+        D::Document(doc) => &doc.date,
+        D::Query(q) => &q.date,
+        D::Custom(c) => &c.date,
+    }
+}
+
+/// `entry.filter` — keep directives within `[begin, end)` (ISO dates compare
+/// lexically, i.e. chronologically).
+pub fn filter(
+    entries: Vec<wit::Directive>,
+    begin: &str,
+    end: &str,
+) -> Vec<wit::Directive> {
+    entries
+        .into_iter()
+        .filter(|d| {
+            let date = directive_date(d);
+            date >= begin && date < end
+        })
+        .collect()
+}

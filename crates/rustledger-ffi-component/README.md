@@ -113,7 +113,13 @@ map). The contract validates with `wasm-tools` and generates ~35k lines via
       `handle_load_file` handler, which now calls it too (DRY; all `ffi-wasi`
       tests green). `validate-file`/`query-file`/`batch-file` read the file and
       run the source path, matching the handlers (single file, no includes).
-- [ ] Wire `builder` (`input_entry_to_directive`), `util`, `format`.
+- [x] `builder`: `create` / `create-batch` (WIT input → `input_entry_to_directive`
+      → core → WIT) and `filter` (date-range `[begin, end)` over WIT directives).
+- [ ] `builder`: `clamp` — synthesizes opening-balance/summary directives via the
+      JSON-based `clamp_entries`, but `DirectiveJson` is serialize-only, so there
+      is no clean WIT↔JSON round-trip. Needs a typed clamp (on core directives)
+      or a bidirectional conversion; deferred.
+- [ ] Wire `util`, `format`.
 - [ ] Close the metadata fidelity gap: numeric metadata currently surfaces as
       `meta-value::text` because the reused DTO stringifies it — faithful typing
       needs the core `MetaValue` (`directive_to_json` flattens it).

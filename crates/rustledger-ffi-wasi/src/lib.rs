@@ -43,6 +43,10 @@ pub use types::{
     Amount, CostNumber, DirectiveJson, Error, Include, LedgerOptions, Meta, Plugin, Posting,
     PostingCost, TypedValue,
 };
+// Input/construction types + converter the component crate maps WIT input into
+// (`entry.create`).
+pub use types::input::{InputAmount, InputCost, InputCostNumber, InputEntry, InputPosting};
+pub use types::input_entry_to_directive;
 
 /// API version this server compiled against. Reported as the
 /// `api_version` field on every method's response (`util.version`,

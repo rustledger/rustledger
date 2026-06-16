@@ -71,14 +71,14 @@ impl LedgerGuest for Component {
 }
 
 impl BuilderGuest for Component {
-    fn create(_entry: InputDirective) -> Result<Directive, String> {
-        unimplemented!("{TODO}")
+    fn create(entry: InputDirective) -> Result<Directive, String> {
+        convert::create(&entry)
     }
-    fn create_batch(_entries: Vec<InputDirective>) -> Result<Vec<Directive>, String> {
-        unimplemented!("{TODO}")
+    fn create_batch(entries: Vec<InputDirective>) -> Result<Vec<Directive>, String> {
+        convert::create_batch(&entries)
     }
-    fn filter(_entries: Vec<Directive>, _begin_date: String, _end_date: String) -> Vec<Directive> {
-        unimplemented!("{TODO}")
+    fn filter(entries: Vec<Directive>, begin_date: String, end_date: String) -> Vec<Directive> {
+        convert::filter(entries, &begin_date, &end_date)
     }
     fn clamp(_entries: Vec<Directive>, _begin_date: String, _end_date: String) -> Vec<Directive> {
         unimplemented!("{TODO}")

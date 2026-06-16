@@ -48,6 +48,7 @@ Shipped work, by area. Forward-looking plans live in [docs/roadmap/](docs/roadma
 - **Pipeline-boundary property tests (#1235):** `pipeline_invariants.rs` across parser/booking/validate/query/plugin, plus `booking_phase_invariants.rs`, `tla_proptest.rs`, and `plugin_determinism.rs` — pinning parse/format roundtrip + idempotence, booking idempotence, validation determinism, plugin wire-format roundtrip, and query-result determinism.
 - **Grep ratchets (#1237):** `check-sync-primitives.sh` (forbids `std::sync::Mutex`/`RwLock` in library code) and `check-hot-path-collections.sh` (forbids SipHash `HashMap`/`HashSet` in `fxhash-only` modules), wired into `ci.yml` alongside the existing `check-unsafe-invariant.sh` gate.
 - **SemVer / API-stability gate (#1233):** `semver-plugin-types` CI job runs `cargo-semver-checks` against `rustledger-plugin-types` (Tier-1 plugin DTOs) on every PR.
+- **FFI synth-pass parity (#1404):** `rustledger-ffi-wasi`'s `load_file`/`load_source` route loading through the canonical `process::load` pipeline instead of a duplicated partial loader, so the pre-booking synth pass (`auto_accounts`, `document_discovery`) runs through the JSON-RPC and WIT/component surfaces — previously it ran only natively. Added `load_synth_plugins.rs` (ffi-wasi) and component parity tests pinning generated-`Open` output, closing the coverage gap that let the divergence ship.
 
 ### Formal Verification
 

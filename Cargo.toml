@@ -39,7 +39,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.16.0"
+version = "0.16.1"
 edition = "2024"
 rust-version = "1.96"
 license = "GPL-3.0-only"
@@ -189,19 +189,19 @@ crossbeam-channel = "0.5"
 parking_lot = "0.12"
 
 # Internal crates
-rustledger-core = { version = "0.16.0", path = "crates/rustledger-core" }
-rustledger-parser = { version = "0.16.0", path = "crates/rustledger-parser" }
-rustledger-loader = { version = "0.16.0", path = "crates/rustledger-loader" }
-rustledger-booking = { version = "0.16.0", path = "crates/rustledger-booking" }
-rustledger-validate = { version = "0.16.0", path = "crates/rustledger-validate" }
-rustledger-query = { version = "0.16.0", path = "crates/rustledger-query" }
-rustledger-completion = { version = "0.16.0", path = "crates/rustledger-completion" }
-rustledger-plugin = { version = "0.16.0", path = "crates/rustledger-plugin", default-features = false }
-rustledger-plugin-types = { version = "0.16.0", path = "crates/rustledger-plugin-types" }
-rustledger-importer = { version = "0.16.0", path = "crates/rustledger-importer" }
-rustledger-ops = { version = "0.16.0", path = "crates/rustledger-ops" }
-rustledger-ffi-wasi = { version = "0.16.0", path = "crates/rustledger-ffi-wasi" }
-rustledger-wasm = { version = "0.16.0", path = "crates/rustledger-wasm" }
+rustledger-core = { version = "0.16.1", path = "crates/rustledger-core" }
+rustledger-parser = { version = "0.16.1", path = "crates/rustledger-parser" }
+rustledger-loader = { version = "0.16.1", path = "crates/rustledger-loader" }
+rustledger-booking = { version = "0.16.1", path = "crates/rustledger-booking" }
+rustledger-validate = { version = "0.16.1", path = "crates/rustledger-validate" }
+rustledger-query = { version = "0.16.1", path = "crates/rustledger-query" }
+rustledger-completion = { version = "0.16.1", path = "crates/rustledger-completion" }
+rustledger-plugin = { version = "0.16.1", path = "crates/rustledger-plugin", default-features = false }
+rustledger-plugin-types = { version = "0.16.1", path = "crates/rustledger-plugin-types" }
+rustledger-importer = { version = "0.16.1", path = "crates/rustledger-importer" }
+rustledger-ops = { version = "0.16.1", path = "crates/rustledger-ops" }
+rustledger-ffi-wasi = { version = "0.16.1", path = "crates/rustledger-ffi-wasi" }
+rustledger-wasm = { version = "0.16.1", path = "crates/rustledger-wasm" }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

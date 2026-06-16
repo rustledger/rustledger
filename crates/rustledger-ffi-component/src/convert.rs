@@ -300,7 +300,12 @@ fn options(o: ffi::LedgerOptions) -> wit::LedgerOptions {
 
 /// `ledger.load` — parse + book `source`, returning a typed load result.
 pub fn load(source: &str, filename: &str) -> out::LoadResult {
-    let loaded = ffi::helpers::load_source(source);
+    load_result(ffi::helpers::load_source(source), filename)
+}
+
+/// Build a WIT load-result from a consumed `ffi-wasi` load result (shared by
+/// `load` and `batch`).
+fn load_result(loaded: ffi::helpers::LoadResult, filename: &str) -> out::LoadResult {
     let entries = loaded
         .directives
         .iter()
@@ -429,7 +434,11 @@ pub fn validate(source: &str) -> out::ValidateResult {
 
 /// `query.execute` — run a BQL query against `source`.
 pub fn query(source: &str, query_str: &str) -> out::QueryResult {
-    let loaded = ffi::helpers::load_source(source);
+    run_query(&ffi::helpers::load_source(source).directives, query_str)
+}
+
+/// Run one query against already-loaded directives (shared by `query`/`batch`).
+fn run_query(directives: &[rustledger_core::Directive], query_str: &str) -> out::QueryResult {
     let parsed = match parse_query(query_str) {
         Ok(q) => q,
         Err(e) => {
@@ -440,7 +449,7 @@ pub fn query(source: &str, query_str: &str) -> out::QueryResult {
             };
         }
     };
-    let mut executor = Executor::new(&loaded.directives);
+    let mut executor = Executor::new(directives);
     match executor.execute(&parsed) {
         Ok(result) => {
             // Infer column datatypes from the first row (reusing value_datatype).
@@ -476,5 +485,17 @@ pub fn query(source: &str, query_str: &str) -> out::QueryResult {
             rows: vec![],
             errors: vec![simple_error(format!("Query error: {e}"))],
         },
+    }
+}
+
+/// `query.batch` — load `source` once, then run several queries against it.
+pub fn batch(source: &str, queries: &[String]) -> out::BatchResult {
+    let loaded = ffi::helpers::load_source(source);
+    // Collect query results (owned) before consuming `loaded` for the load.
+    let query_results: Vec<out::QueryResult> =
+        queries.iter().map(|q| run_query(&loaded.directives, q)).collect();
+    out::BatchResult {
+        load: load_result(loaded, "<stdin>"),
+        queries: query_results,
     }
 }

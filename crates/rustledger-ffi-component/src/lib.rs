@@ -62,8 +62,8 @@ impl LedgerGuest for Component {
     fn query_file(_path: String, _query: String) -> QueryResult {
         unimplemented!("{TODO}")
     }
-    fn batch(_source: String, _queries: Vec<String>) -> BatchResult {
-        unimplemented!("{TODO}")
+    fn batch(source: String, queries: Vec<String>) -> BatchResult {
+        convert::batch(&source, &queries)
     }
     fn batch_file(_path: String, _queries: Vec<String>) -> BatchResult {
         unimplemented!("{TODO}")

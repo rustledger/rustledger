@@ -107,8 +107,12 @@ map). The contract validates with `wasm-tools` and generates ~35k lines via
 - [x] `query` wired — runs the executor directly for typed rows and projects
       `rustledger_query::Value` → WIT `query-value`; `object`/`set` cells use the
       `json` escape hatch (WIT can't type them recursively).
-- [ ] Wire `load-file` / `validate-file` / `query-file` / `batch` (the file +
-      multi-query variants).
+- [x] `batch` wired (source-based: `load_source` once, run N queries).
+- [ ] Wire the file variants (`load-file`/`validate-file`/`query-file`/
+      `batch-file`): these need the full `Loader` orchestration (include
+      resolution, multi-file line numbers via `source_map`, manual booking,
+      `build_ledger_options`), unlike the thin `load_source`. Cleanest as a
+      reusable `helpers::load_file` extraction in `ffi-wasi`.
 - [ ] Wire `builder` (`input_entry_to_directive`), `util`, `format`.
 - [ ] Close the metadata fidelity gap: numeric metadata currently surfaces as
       `meta-value::text` because the reused DTO stringifies it — faithful typing

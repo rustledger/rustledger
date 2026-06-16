@@ -221,6 +221,119 @@ interface types {
   }
 
   record column-info { name: string, datatype: string }
+
+  // ---- input / construction side (entry.create), from types/input.rs ----
+  //
+  // Reuses `amount`, `cost-number`, and `meta-value` (the closed set
+  // `json_to_meta_value` produces). The input records differ from the loaded
+  // `directive` records in two ways: metadata is user key/values only — no
+  // filename/lineno/hash, which the loader assigns — and costs carry the
+  // `merge` average-cost marker that the output cost lacks.
+
+  /// Input cost spec. Like `cost`, plus `merge` (the `*` on a cost spec that
+  /// triggers average-cost booking).
+  record input-cost {
+    number: option<cost-number>,
+    currency: option<string>,
+    date: option<string>,
+    label: option<string>,
+    merge: bool,
+  }
+
+  /// Input posting; metadata supplied as typed `meta-value`s.
+  record input-posting {
+    account: string,
+    units: option<amount>,
+    cost: option<input-cost>,
+    price: option<amount>,
+    meta: list<meta-entry>,
+  }
+
+  record input-transaction {
+    date: string,
+    flag: string,
+    payee: option<string>,
+    narration: option<string>,
+    tags: list<string>,
+    links: list<string>,
+    postings: list<input-posting>,
+    meta: list<meta-entry>,
+  }
+  record input-open {
+    date: string,
+    account: string,
+    currencies: list<string>,
+    booking: option<string>,
+    meta: list<meta-entry>,
+  }
+  record input-close { date: string, account: string, meta: list<meta-entry> }
+  record input-balance {
+    date: string,
+    account: string,
+    amount: amount,
+    meta: list<meta-entry>,
+  }
+  record input-pad {
+    date: string,
+    account: string,
+    source-account: string,
+    meta: list<meta-entry>,
+  }
+  record input-commodity { date: string, currency: string, meta: list<meta-entry> }
+  record input-price {
+    date: string,
+    currency: string,
+    amount: amount,
+    meta: list<meta-entry>,
+  }
+  record input-event {
+    date: string,
+    event-type: string,
+    value: string,
+    meta: list<meta-entry>,
+  }
+  record input-note {
+    date: string,
+    account: string,
+    comment: string,
+    meta: list<meta-entry>,
+  }
+  record input-document {
+    date: string,
+    account: string,
+    path: string,
+    tags: list<string>,
+    links: list<string>,
+    meta: list<meta-entry>,
+  }
+  record input-query {
+    date: string,
+    name: string,
+    query-string: string,
+    meta: list<meta-entry>,
+  }
+  record input-custom {
+    date: string,
+    custom-type: string,
+    values: list<meta-value>,
+    meta: list<meta-entry>,
+  }
+
+  /// A directive to construct (the `type`-tagged `InputEntry`).
+  variant input-directive {
+    transaction(input-transaction),
+    open(input-open),
+    close(input-close),
+    balance(input-balance),
+    pad(input-pad),
+    commodity(input-commodity),
+    price(input-price),
+    event(input-event),
+    note(input-note),
+    document(input-document),
+    query(input-query),
+    custom(input-custom),
+  }
 }
 
 /// The embedding entrypoints. Replaces the JSON-RPC methods
@@ -271,7 +384,22 @@ interface ledger {
   query-file: func(path: string, query: string) -> query-result;
 }
 
+/// Directive construction — replaces `entry.create` / `entry.createBatch`.
+/// Each input is validated and round-tripped through core, so the result is a
+/// loaded `directive`. Both calls are fallible; the batch is all-or-nothing
+/// (the first invalid entry fails the whole call), matching the JSON-RPC
+/// handler's `?`-propagation.
+interface builder {
+  use types.{input-directive, directive};
+
+  /// Construct one directive. `err` carries the validation message.
+  create: func(entry: input-directive) -> result<directive, string>;
+  /// Construct many; the first failure fails the whole call.
+  create-batch: func(entries: list<input-directive>) -> result<list<directive>, string>;
+}
+
 /// The component a host instantiates.
 world rustledger {
   export ledger;
+  export builder;
 }

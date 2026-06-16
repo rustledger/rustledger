@@ -25,12 +25,19 @@ wit-bindgen rust crates/rustledger-ffi-component/wit/world.wit --out-dir /tmp/g 
 
 ## Scope covered
 
-The **read surface rustfava actually consumes** — `version`, `load`,
-`validate`, `query`, and their `-file` variants — translated 1:1 from the DTOs
-in `crates/rustledger-ffi-wasi/src/types/output.rs`: `amount`, `cost-number`,
-`cost`, `meta`/`meta-value`, `posting`, all 12 `directive` cases, `error`,
-`plugin`, `source-include`, `ledger-options`, `position`, `column-info`,
-`query-value`, and the load/validate/query result records.
+**Read surface** (`interface ledger`) — `version`, `load`, `validate`, `query`,
+and their `-file` variants — translated 1:1 from `types/output.rs`: `amount`,
+`cost-number`, `cost`, `meta`/`meta-value`, `posting`, all 12 `directive` cases,
+`error`, `plugin`, `source-include`, `ledger-options`, `position`,
+`column-info`, `query-value`, and the load/validate/query result records.
+
+**Construction surface** (`interface builder`) — `create` / `create-batch`
+(replacing `entry.create` / `entry.createBatch`) — translated from
+`types/input.rs`: `input-cost` (= `cost` + the `merge` average-cost marker),
+`input-posting`, all 12 `input-directive` cases. Reuses `amount`,
+`cost-number`, and `meta-value`; input metadata is user key/values only (no
+source location — assigned on load). Both calls are fallible; the batch is
+all-or-nothing, matching the handler's `?`-propagation.
 
 ## Modeling decisions (and what the translation surfaced)
 
@@ -64,11 +71,9 @@ in `crates/rustledger-ffi-wasi/src/types/output.rs`: `amount`, `cost-number`,
 
 ## Remaining Phase 1 work
 
-- **Directive *construction* surface** (`entry.create` / `entry.createBatch`):
-  translate `types/input.rs` (`InputEntry`, `InputCostNumber`, …) into an input
-  side of the contract.
-- **Util + ops methods**: `util.getAccountType`, `util.isEncrypted`,
-  `util.types`, `entry.clamp`, `entry.filter`, and the `query.batch` result.
+- **Ops methods**: `entry.clamp`, `entry.filter`, and the `query.batch` /
+  `query.batchFile` result envelope.
+- **Util helpers**: `util.getAccountType`, `util.isEncrypted`, `util.types`.
 - **Verify a few cell shapes** against `convert.rs::value_to_json` — notably the
   exact `interval` fields and the `metadata` debug-string projection.
 

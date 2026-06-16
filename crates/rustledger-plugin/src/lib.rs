@@ -67,5 +67,5 @@ pub use runtime::{
 };
 pub use types::{
     DirectiveWrapper, PluginError, PluginErrorSeverity, PluginInput, PluginOp, PluginOptions,
-    PluginOutput,
+    PluginOutput, validate_op_coverage,
 };

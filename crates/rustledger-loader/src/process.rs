@@ -1302,54 +1302,12 @@ fn apply_plugin_ops(
     use rustledger_plugin::PluginOp;
     use rustledger_plugin::wrapper_to_directive;
 
-    let n = directives.len();
-
-    // Validate: every input index in {Keep, Modify, Delete} exactly once.
-    let mut seen = vec![false; n];
-    for op in &ops {
-        let idx = match op {
-            PluginOp::Keep(i) | PluginOp::Modify(i, _) | PluginOp::Delete(i) => Some(*i),
-            PluginOp::Insert(_) => None,
-        };
-        if let Some(i) = idx {
-            if i >= n {
-                errors.push(
-                    LedgerError::error(
-                        "PLUGIN",
-                        format!(
-                            "plugin op references out-of-bounds input index {i} (input has {n} directives)"
-                        ),
-                    )
-                    .with_phase("plugin"),
-                );
-                return Ok(());
-            }
-            if seen[i] {
-                errors.push(
-                    LedgerError::error(
-                        "PLUGIN",
-                        format!("plugin op references input index {i} more than once"),
-                    )
-                    .with_phase("plugin"),
-                );
-                return Ok(());
-            }
-            seen[i] = true;
-        }
-    }
-    for (i, was_seen) in seen.iter().enumerate() {
-        if !was_seen {
-            errors.push(
-                LedgerError::error(
-                    "PLUGIN",
-                    format!(
-                        "plugin omitted input directive {i} (must appear in exactly one of Keep/Modify/Delete)"
-                    ),
-                )
-                .with_phase("plugin"),
-            );
-            return Ok(());
-        }
+    // Validate the op set forms a complete cover of the input — the contract is
+    // single-sourced in `rustledger-plugin` so the loader and FFI surfaces stay
+    // in lock-step. On violation, surface the error and leave directives as-is.
+    if let Err(msg) = rustledger_plugin::validate_op_coverage(directives.len(), &ops) {
+        errors.push(LedgerError::error("PLUGIN", msg).with_phase("plugin"));
+        return Ok(());
     }
 
     // Materialize new directives, preserving spans for Keep/Modify.

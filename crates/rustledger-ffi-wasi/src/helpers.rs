@@ -474,6 +474,14 @@ pub fn apply_plugins(
             errors.push(Error::new(err.message));
         }
 
+        // Validate the op set against the shared contract (same check the loader
+        // pipeline runs). On violation, record it and keep the directives as-is
+        // for this plugin rather than materializing a malformed op set.
+        if let Err(msg) = rustledger_plugin::validate_op_coverage(directives.len(), &output.ops) {
+            errors.push(Error::new(msg));
+            continue;
+        }
+
         let mut new_directives = Vec::new();
         let mut new_lines = Vec::new();
         let mut new_files = Vec::new();

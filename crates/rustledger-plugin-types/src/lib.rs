@@ -249,6 +249,54 @@ pub enum PluginOp {
     Delete(usize),
 }
 
+/// Validate that `ops` form a complete, non-overlapping cover of the input.
+///
+/// Every one of the `n` input directives must appear in exactly one of
+/// `Keep`/`Modify`/`Delete`, with no out-of-bounds or duplicate references.
+/// [`PluginOp::Insert`] adds new directives and references no input index.
+///
+/// This is the single source of truth for the plugin-op contract, shared by the
+/// loader's in-pipeline pass (`rustledger_loader::process::apply_plugin_ops`)
+/// and the FFI's requested-plugin pass (`rustledger_ffi_wasi::helpers`), so the
+/// two surfaces cannot drift on what a well-formed op set is. The
+/// representation-specific materialization (span preservation, posting-span
+/// sanitization) stays with each caller.
+///
+/// # Errors
+/// Returns a human-readable message describing the first violation found
+/// (out-of-bounds index, an index referenced more than once, or an input
+/// directive omitted from every `Keep`/`Modify`/`Delete`).
+pub fn validate_op_coverage(n: usize, ops: &[PluginOp]) -> Result<(), String> {
+    let mut seen = vec![false; n];
+    for op in ops {
+        let idx = match op {
+            PluginOp::Keep(i) | PluginOp::Modify(i, _) | PluginOp::Delete(i) => Some(*i),
+            PluginOp::Insert(_) => None,
+        };
+        if let Some(i) = idx {
+            if i >= n {
+                return Err(format!(
+                    "plugin op references out-of-bounds input index {i} (input has {n} directives)"
+                ));
+            }
+            if seen[i] {
+                return Err(format!(
+                    "plugin op references input index {i} more than once"
+                ));
+            }
+            seen[i] = true;
+        }
+    }
+    for (i, was_seen) in seen.iter().enumerate() {
+        if !was_seen {
+            return Err(format!(
+                "plugin omitted input directive {i} (must appear in exactly one of Keep/Modify/Delete)"
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Ledger options passed to plugins.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PluginOptions {
@@ -1108,6 +1156,33 @@ pub fn sort_directives(directives: &mut [DirectiveWrapper]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn op_coverage_accepts_complete_cover_and_rejects_violations() {
+        use PluginOp::{Delete, Keep};
+        // Every input index covered exactly once.
+        assert!(validate_op_coverage(3, &[Keep(0), Delete(1), Keep(2)]).is_ok());
+        // No input, no ops: trivially complete.
+        assert!(validate_op_coverage(0, &[]).is_ok());
+        // Out-of-bounds index.
+        assert!(
+            validate_op_coverage(2, &[Keep(0), Keep(2)])
+                .unwrap_err()
+                .contains("out-of-bounds")
+        );
+        // Same index referenced twice.
+        assert!(
+            validate_op_coverage(2, &[Keep(0), Delete(0)])
+                .unwrap_err()
+                .contains("more than once")
+        );
+        // An input directive omitted entirely.
+        assert!(
+            validate_op_coverage(2, &[Keep(0)])
+                .unwrap_err()
+                .contains("omitted")
+        );
+    }
 
     #[test]
     fn test_plugin_error_builder() {

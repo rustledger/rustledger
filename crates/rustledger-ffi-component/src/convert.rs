@@ -785,3 +785,89 @@ pub fn filter(
         })
         .collect()
 }
+
+// ---- util ----
+
+use crate::exports::rustledger::ledger::util as out_util;
+
+/// `util.types` — static type metadata about this build.
+pub fn types_info() -> out_util::TypesInfo {
+    let strs = |xs: &[&str]| xs.iter().map(|s| (*s).to_string()).collect();
+    out_util::TypesInfo {
+        all_directives: strs(&[
+            "transaction", "balance", "open", "close", "commodity", "pad", "event", "note",
+            "document", "price", "query", "custom",
+        ]),
+        booking_methods: strs(&[
+            "STRICT", "STRICT_WITH_SIZE", "NONE", "AVERAGE", "FIFO", "LIFO", "HIFO",
+        ]),
+        missing: out_util::MissingSentinel {
+            description: "Represents a missing/interpolated amount in a posting".to_string(),
+            json_representation: "null or {currency_only: string}".to_string(),
+        },
+        account_types: strs(&["Assets", "Liabilities", "Equity", "Income", "Expenses"]),
+    }
+}
+
+/// `util.isEncrypted` — true for `.gpg` / `.asc` files (by extension).
+#[must_use]
+pub fn is_encrypted(path: &str) -> bool {
+    std::path::Path::new(path)
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("gpg") || ext.eq_ignore_ascii_case("asc"))
+}
+
+/// `util.getAccountType` — the (lowercased) type root of an account name.
+#[must_use]
+pub fn get_account_type(account: &str) -> String {
+    match account.split(':').next() {
+        Some("Assets") => "assets",
+        Some("Liabilities") => "liabilities",
+        Some("Equity") => "equity",
+        Some("Income") => "income",
+        Some("Expenses") => "expenses",
+        _ => "unknown",
+    }
+    .to_string()
+}
+
+// ---- format ----
+
+/// `format.source` — canonically reformat beancount source (best-effort; parse
+/// errors don't abort, since the WIT signature has no error channel).
+#[must_use]
+pub fn format_source(source: &str) -> String {
+    let parsed = rustledger_parser::parse(source);
+    rustledger_parser::format::format_source_with_parsed(&parsed, source)
+}
+
+/// `format.file` — reformat the file at `path`. On read error the message is
+/// returned as the body (the WIT signature has no error channel).
+#[must_use]
+pub fn format_file(path: &str) -> String {
+    match read_file(path) {
+        Ok(src) => format_source(&src),
+        Err(e) => e,
+    }
+}
+
+fn format_directives(dirs: &[rustledger_core::Directive]) -> Result<String, String> {
+    let config = rustledger_core::format::FormatConfig::default();
+    rustledger_parser::format::canonicalize_directives(dirs.iter(), &config)
+        .map_err(|e| e.to_string())
+}
+
+/// `format.entry` — render one constructed directive to canonical text.
+pub fn format_entry(entry: &wit::InputDirective) -> Result<String, String> {
+    let dir = ffi::input_entry_to_directive(&input_entry(entry))?;
+    format_directives(std::slice::from_ref(&dir))
+}
+
+/// `format.entries` — render constructed directives to canonical text.
+pub fn format_entries(entries: &[wit::InputDirective]) -> Result<String, String> {
+    let mut dirs = Vec::with_capacity(entries.len());
+    for e in entries {
+        dirs.push(ffi::input_entry_to_directive(&input_entry(e))?);
+    }
+    format_directives(&dirs)
+}

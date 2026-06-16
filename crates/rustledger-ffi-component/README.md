@@ -119,7 +119,9 @@ map). The contract validates with `wasm-tools` and generates ~35k lines via
       JSON-based `clamp_entries`, but `DirectiveJson` is serialize-only, so there
       is no clean WIT↔JSON round-trip. Needs a typed clamp (on core directives)
       or a bidirectional conversion; deferred.
-- [ ] Wire `util`, `format`.
+- [x] `util` (`types` / `is-encrypted` / `get-account-type`) and `format`
+      (`format-source` / `-file` / `-entry` / `-entries`) wired. `format-*-entry`
+      reuse the builder input conversion + `canonicalize_directives`.
 - [ ] Close the metadata fidelity gap: numeric metadata currently surfaces as
       `meta-value::text` because the reused DTO stringifies it — faithful typing
       needs the core `MetaValue` (`directive_to_json` flattens it).

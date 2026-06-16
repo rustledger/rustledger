@@ -87,28 +87,28 @@ impl BuilderGuest for Component {
 
 impl UtilGuest for Component {
     fn types() -> TypesInfo {
-        unimplemented!("{TODO}")
+        convert::types_info()
     }
-    fn is_encrypted(_path: String) -> bool {
-        unimplemented!("{TODO}")
+    fn is_encrypted(path: String) -> bool {
+        convert::is_encrypted(&path)
     }
-    fn get_account_type(_account: String) -> String {
-        unimplemented!("{TODO}")
+    fn get_account_type(account: String) -> String {
+        convert::get_account_type(&account)
     }
 }
 
 impl FormatGuest for Component {
-    fn format_source(_source: String) -> String {
-        unimplemented!("{TODO}")
+    fn format_source(source: String) -> String {
+        convert::format_source(&source)
     }
-    fn format_file(_path: String) -> String {
-        unimplemented!("{TODO}")
+    fn format_file(path: String) -> String {
+        convert::format_file(&path)
     }
-    fn format_entry(_entry: InputDirective) -> Result<String, String> {
-        unimplemented!("{TODO}")
+    fn format_entry(entry: InputDirective) -> Result<String, String> {
+        convert::format_entry(&entry)
     }
-    fn format_entries(_entries: Vec<InputDirective>) -> Result<String, String> {
-        unimplemented!("{TODO}")
+    fn format_entries(entries: Vec<InputDirective>) -> Result<String, String> {
+        convert::format_entries(&entries)
     }
 }
 

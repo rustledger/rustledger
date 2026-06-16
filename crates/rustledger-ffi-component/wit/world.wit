@@ -380,10 +380,14 @@ interface ledger {
   /// Parse + book a ledger from source text.
   load: func(source: string) -> load-result;
   /// Like `load`, but from a file path (the host grants filesystem access).
-  /// `path-security` confines the include graph to the entry file's directory
-  /// tree (pass `true` unless cross-tree includes are needed). `plugins` names
-  /// the regular (post-booking) plugins to run, e.g. `["auto_accounts"]`.
-  load-file: func(path: string, path-security: bool, plugins: list<string>) -> load-result;
+  /// By default the include graph is confined to the entry file's directory
+  /// tree (path-traversal protection); set `allow-unrestricted-includes` to
+  /// `true` only when cross-tree includes are needed. The flag is phrased so
+  /// the safe behavior is the `false`/zero default — WIT has no field defaults,
+  /// so an under-specified caller stays confined rather than escaping the
+  /// sandbox. `plugins` names the regular (post-booking) plugins to run, e.g.
+  /// `["auto_accounts"]`.
+  load-file: func(path: string, allow-unrestricted-includes: bool, plugins: list<string>) -> load-result;
 
   /// Validate source text (parse + semantic checks).
   validate: func(source: string) -> validate-result;

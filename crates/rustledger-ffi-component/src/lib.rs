@@ -44,8 +44,12 @@ impl LedgerGuest for Component {
     fn load(source: String) -> LoadResult {
         convert::load(&source, "<stdin>")
     }
-    fn load_file(path: String, path_security: bool, plugins: Vec<String>) -> LoadResult {
-        convert::load_file(&path, path_security, &plugins)
+    fn load_file(
+        path: String,
+        allow_unrestricted_includes: bool,
+        plugins: Vec<String>,
+    ) -> LoadResult {
+        convert::load_file(&path, allow_unrestricted_includes, &plugins)
     }
     fn validate(source: String) -> ValidateResult {
         convert::validate(&source)

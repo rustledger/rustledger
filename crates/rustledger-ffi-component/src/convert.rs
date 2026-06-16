@@ -539,7 +539,14 @@ fn read_file(path: &str) -> Result<String, String> {
 
 /// `ledger.loadFile` — load from a path, resolving `include` directives, with
 /// optional path-security confinement and a post-booking plugin pass.
-pub fn load_file(path: &str, path_security: bool, plugins: &[String]) -> out::LoadResult {
+pub fn load_file(
+    path: &str,
+    allow_unrestricted_includes: bool,
+    plugins: &[String],
+) -> out::LoadResult {
+    // The loader takes `path_security` (true = confine includes); the WIT flag
+    // is inverted so the safe state is the `false`/zero default.
+    let path_security = !allow_unrestricted_includes;
     match ffi::helpers::load_file(std::path::Path::new(path), path_security) {
         Ok(fl) => {
             let mut errors = fl.errors;
@@ -974,11 +981,7 @@ fn loaded_posting_to_input(p: &wit::Posting) -> ffi::InputPosting {
         units: p.units.as_ref().map(input_amount),
         cost: p.cost.as_ref().map(loaded_cost_to_input),
         price: p.price.as_ref().map(input_amount),
-        meta: p
-            .meta
-            .iter()
-            .map(|(k, v)| (k.clone(), json_from_meta_value(v)))
-            .collect(),
+        meta: input_meta(&p.meta),
     }
 }
 

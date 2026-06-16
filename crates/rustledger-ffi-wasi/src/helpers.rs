@@ -264,3 +264,149 @@ pub fn load_source(source: &str) -> LoadResult {
         includes,
     }
 }
+
+/// Convert loader `Options` into the wire DTO `LedgerOptions`. Moved here from
+/// the JSON-RPC router so both the router and the WIT component crate (#1384)
+/// can build options from a file load.
+#[must_use]
+pub fn build_ledger_options(options: &rustledger_loader::Options) -> LedgerOptions {
+    LedgerOptions {
+        title: options.title.clone(),
+        operating_currency: options.operating_currency.clone(),
+        name_assets: options.name_assets.clone(),
+        name_liabilities: options.name_liabilities.clone(),
+        name_equity: options.name_equity.clone(),
+        name_income: options.name_income.clone(),
+        name_expenses: options.name_expenses.clone(),
+        documents: options.documents.clone(),
+        commodities: Vec::new(),
+        booking_method: options.booking_method.clone(),
+        display_precision: options
+            .display_precision
+            .iter()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect(),
+        render_commas: options.render_commas,
+        inferred_tolerance_default: options
+            .inferred_tolerance_default
+            .iter()
+            .map(|(k, v)| (k.clone(), v.to_string()))
+            .collect(),
+        inferred_tolerance_multiplier: options.inferred_tolerance_multiplier.to_string(),
+        infer_tolerance_from_cost: options.infer_tolerance_from_cost,
+        account_rounding: options.account_rounding.clone(),
+        account_previous_balances: options.account_previous_balances.clone(),
+        account_previous_earnings: options.account_previous_earnings.clone(),
+        account_previous_conversions: options.account_previous_conversions.clone(),
+        account_current_earnings: options.account_current_earnings.clone(),
+        account_current_conversions: options.account_current_conversions.clone(),
+        account_unrealized_gains: options.account_unrealized_gains.clone(),
+        conversion_currency: options.conversion_currency.clone(),
+    }
+}
+
+/// Result of loading a file through the full loader (include graph resolved).
+///
+/// Unlike [`LoadResult`] (single-source), directives may come from several
+/// files, so each carries its own line number and originating file. The
+/// optional external-plugin pass is *not* run here — that is a JSON-RPC
+/// handler concern gated on a request field, and the WIT surface does not
+/// expose it.
+pub struct FileLoad {
+    pub directives: Vec<Directive>,
+    pub directive_lines: Vec<u32>,
+    pub directive_files: Vec<String>,
+    pub errors: Vec<Error>,
+    pub options: LedgerOptions,
+    pub plugins: Vec<Plugin>,
+    pub loaded_files: Vec<String>,
+}
+
+/// Load a ledger from a file path, resolving `include` directives and booking
+/// transactions. Shared by the JSON-RPC `ledger.loadFile` handler and the WIT
+/// component (#1384).
+///
+/// # Errors
+///
+/// Returns the loader error string if the entry file cannot be read/parsed.
+pub fn load_file(
+    path: &std::path::Path,
+    path_security: bool,
+) -> Result<FileLoad, String> {
+    let mut loader = rustledger_loader::Loader::new().with_path_security(path_security);
+    let load_result = loader
+        .load(path)
+        .map_err(|e| format!("Failed to load file: {e}"))?;
+
+    let mut errors: Vec<Error> = load_result
+        .errors
+        .iter()
+        .map(|e| Error::new(e.to_string()))
+        .collect();
+
+    // Directives + their line numbers / originating files (multi-file).
+    let mut directives: Vec<Directive> = Vec::new();
+    let mut directive_lines: Vec<u32> = Vec::new();
+    let mut directive_files: Vec<String> = Vec::new();
+    for spanned in &load_result.directives {
+        directives.push(spanned.value.clone());
+        let file_id = spanned.file_id as usize;
+        if let Some(sf) = load_result.source_map.get(file_id) {
+            let (line, _col) = sf.line_col(spanned.span.start);
+            directive_lines.push(line as u32);
+            directive_files.push(sf.path.display().to_string());
+        } else {
+            directive_lines.push(0);
+            directive_files.push("<unknown>".to_string());
+        }
+    }
+
+    // Booking + interpolation (loader does not book).
+    let booking_method = load_result
+        .options
+        .booking_method
+        .parse()
+        .unwrap_or(rustledger_core::BookingMethod::Strict);
+    let mut booking_engine = BookingEngine::with_method(booking_method);
+    booking_engine.register_account_methods(directives.iter());
+    for (i, directive) in directives.iter_mut().enumerate() {
+        if let Directive::Transaction(txn) = directive {
+            match booking_engine.book_and_interpolate(txn) {
+                Ok(result) => {
+                    booking_engine.apply(&result.transaction);
+                    *txn = result.transaction;
+                    rustledger_booking::normalize_prices(txn);
+                }
+                Err(e) => {
+                    errors.push(Error::new(e.to_string()).with_line(directive_lines[i]));
+                }
+            }
+        }
+    }
+
+    let options = build_ledger_options(&load_result.options);
+    let plugins: Vec<Plugin> = load_result
+        .plugins
+        .iter()
+        .map(|p| Plugin {
+            name: p.name.clone(),
+            config: p.config.clone(),
+        })
+        .collect();
+    let loaded_files: Vec<String> = load_result
+        .source_map
+        .files()
+        .iter()
+        .map(|sf| sf.path.display().to_string())
+        .collect();
+
+    Ok(FileLoad {
+        directives,
+        directive_lines,
+        directive_files,
+        errors,
+        options,
+        plugins,
+        loaded_files,
+    })
+}

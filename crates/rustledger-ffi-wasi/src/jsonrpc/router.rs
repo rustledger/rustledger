@@ -5,9 +5,7 @@
 use std::fs;
 use std::path::Path;
 
-use rustledger_booking::BookingEngine;
-use rustledger_core::{Directive, NaiveDate};
-use rustledger_loader::Loader;
+use rustledger_core::NaiveDate;
 use rustledger_plugin::{
     NativePluginRegistry, PluginInput, PluginOptions, directive_to_wrapper, wrapper_to_directive,
 };
@@ -31,8 +29,8 @@ use crate::commands::query::execute_query;
 use crate::convert::directive_to_json;
 use crate::helpers::load_source;
 use crate::types::{
-    BatchOutput, DirectiveJson, Error, LedgerOptions, LoadOutput, Plugin, QueryOutput,
-    ValidateOutput, input_entry_to_directive,
+    BatchOutput, DirectiveJson, Error, LoadOutput, QueryOutput, ValidateOutput,
+    input_entry_to_directive,
 };
 
 /// Route a JSON-RPC request to the appropriate handler.
@@ -126,66 +124,19 @@ fn handle_load_file(params: &serde_json::Value) -> Result<serde_json::Value, Rpc
 
     let path = Path::new(&params.path);
 
-    // Load using the full loader. `with_path_security` defaults to
-    // `true` (confines the include graph to the entry file's directory
-    // tree) — FFI is the most security-sensitive surface, so safe-by-
-    // default matters. Callers that legitimately need cross-tree
-    // includes (e.g., `include "../shared/accounts.bean"`) can opt out
-    // via the request's `path_security: false` field.
-    let mut loader = Loader::new().with_path_security(params.path_security);
-    let load_result = loader
-        .load(path)
-        .map_err(|e| RpcError::file_error(format!("Failed to load file: {e}")))?;
-
-    // Collect errors from loader
-    let mut errors: Vec<Error> = load_result
-        .errors
-        .iter()
-        .map(|e| Error::new(e.to_string()))
-        .collect();
-
-    // Convert directives and get line numbers/filenames
-    let mut directives: Vec<Directive> = Vec::new();
-    let mut directive_lines: Vec<u32> = Vec::new();
-    let mut directive_files: Vec<String> = Vec::new();
-
-    for spanned in &load_result.directives {
-        directives.push(spanned.value.clone());
-
-        let file_id = spanned.file_id as usize;
-        if let Some(source_file) = load_result.source_map.get(file_id) {
-            let (line, _col) = source_file.line_col(spanned.span.start);
-            directive_lines.push(line as u32);
-            directive_files.push(source_file.path.display().to_string());
-        } else {
-            directive_lines.push(0);
-            directive_files.push("<unknown>".to_string());
-        }
-    }
-
-    // Run booking and interpolation
-    let booking_method = load_result
-        .options
-        .booking_method
-        .parse()
-        .unwrap_or(rustledger_core::BookingMethod::Strict);
-    let mut booking_engine = BookingEngine::with_method(booking_method);
-    booking_engine.register_account_methods(directives.iter());
-
-    for (i, directive) in directives.iter_mut().enumerate() {
-        if let Directive::Transaction(txn) = directive {
-            match booking_engine.book_and_interpolate(txn) {
-                Ok(result) => {
-                    booking_engine.apply(&result.transaction);
-                    *txn = result.transaction;
-                    rustledger_booking::normalize_prices(txn);
-                }
-                Err(e) => {
-                    errors.push(Error::new(e.to_string()).with_line(directive_lines[i]));
-                }
-            }
-        }
-    }
+    // Resolve the include graph + book via the shared helper. `path_security`
+    // defaults to `true` (confines includes to the entry file's directory
+    // tree) — FFI is the most security-sensitive surface. Callers needing
+    // cross-tree includes opt out via the request's `path_security: false`.
+    let fl = crate::helpers::load_file(path, params.path_security)
+        .map_err(|e| RpcError::file_error(e))?;
+    let mut directives = fl.directives;
+    let mut directive_lines = fl.directive_lines;
+    let mut directive_files = fl.directive_files;
+    let mut errors = fl.errors;
+    let options = fl.options;
+    let plugins = fl.plugins;
+    let loaded_files = fl.loaded_files;
 
     // Run plugins if requested
     let run_plugins: Vec<&str> = params.plugins.iter().map(String::as_str).collect();
@@ -216,8 +167,8 @@ fn handle_load_file(params: &serde_json::Value) -> Result<serde_json::Value, Rpc
                 let input = PluginInput {
                     directives: wrappers,
                     options: PluginOptions {
-                        operating_currencies: load_result.options.operating_currency.clone(),
-                        title: load_result.options.title.clone(),
+                        operating_currencies: options.operating_currency.clone(),
+                        title: options.title.clone(),
                     },
                     config: None,
                 };
@@ -274,26 +225,7 @@ fn handle_load_file(params: &serde_json::Value) -> Result<serde_json::Value, Rpc
         }
     }
 
-    // Convert options
-    let options = build_ledger_options(&load_result.options);
-
-    // Convert plugins from loader result
-    let plugins: Vec<Plugin> = load_result
-        .plugins
-        .iter()
-        .map(|p| Plugin {
-            name: p.name.clone(),
-            config: p.config.clone(),
-        })
-        .collect();
-
-    // Get list of loaded files
-    let loaded_files: Vec<String> = load_result
-        .source_map
-        .files()
-        .iter()
-        .map(|sf| sf.path.display().to_string())
-        .collect();
+    // `options`, `plugins`, `loaded_files` come from `helpers::load_file` above.
 
     // Build entries
     let entries: Vec<DirectiveJson> = directives
@@ -801,38 +733,5 @@ fn handle_get_account_type(params: &serde_json::Value) -> Result<serde_json::Val
 // Helper functions
 // =============================================================================
 
-fn build_ledger_options(options: &rustledger_loader::Options) -> LedgerOptions {
-    LedgerOptions {
-        title: options.title.clone(),
-        operating_currency: options.operating_currency.clone(),
-        name_assets: options.name_assets.clone(),
-        name_liabilities: options.name_liabilities.clone(),
-        name_equity: options.name_equity.clone(),
-        name_income: options.name_income.clone(),
-        name_expenses: options.name_expenses.clone(),
-        documents: options.documents.clone(),
-        commodities: Vec::new(),
-        booking_method: options.booking_method.clone(),
-        display_precision: options
-            .display_precision
-            .iter()
-            .map(|(k, v)| (k.clone(), *v))
-            .collect(),
-        render_commas: options.render_commas,
-        inferred_tolerance_default: options
-            .inferred_tolerance_default
-            .iter()
-            .map(|(k, v)| (k.clone(), v.to_string()))
-            .collect(),
-        inferred_tolerance_multiplier: options.inferred_tolerance_multiplier.to_string(),
-        infer_tolerance_from_cost: options.infer_tolerance_from_cost,
-        account_rounding: options.account_rounding.clone(),
-        account_previous_balances: options.account_previous_balances.clone(),
-        account_previous_earnings: options.account_previous_earnings.clone(),
-        account_previous_conversions: options.account_previous_conversions.clone(),
-        account_current_earnings: options.account_current_earnings.clone(),
-        account_current_conversions: options.account_current_conversions.clone(),
-        account_unrealized_gains: options.account_unrealized_gains.clone(),
-        conversion_currency: options.conversion_currency.clone(),
-    }
-}
+// `build_ledger_options` moved to `crate::helpers` so the WIT component
+// crate (#1384) can reuse it via `helpers::load_file`.

@@ -499,3 +499,96 @@ pub fn batch(source: &str, queries: &[String]) -> out::BatchResult {
         queries: query_results,
     }
 }
+
+// ---- file variants ----
+
+fn read_file(path: &str) -> Result<String, String> {
+    std::fs::read_to_string(path).map_err(|e| format!("Failed to read file '{path}': {e}"))
+}
+
+/// `ledger.loadFile` — load from a path, resolving `include` directives.
+pub fn load_file(path: &str) -> out::LoadResult {
+    match ffi::helpers::load_file(std::path::Path::new(path), true) {
+        Ok(fl) => {
+            let entries = fl
+                .directives
+                .iter()
+                .enumerate()
+                .map(|(i, d)| {
+                    let line = fl.directive_lines.get(i).copied().unwrap_or(0);
+                    let file = fl.directive_files.get(i).map_or("<unknown>", String::as_str);
+                    directive(ffi::convert::directive_to_json(d, line, file))
+                })
+                .collect();
+            out::LoadResult {
+                entries,
+                errors: fl.errors.into_iter().map(error).collect(),
+                options: options(fl.options),
+                plugins: fl
+                    .plugins
+                    .into_iter()
+                    .map(|p| wit::Plugin {
+                        name: p.name,
+                        config: p.config,
+                    })
+                    .collect(),
+                // File load reports the resolved file set (no per-include line),
+                // carried in `includes` with lineno 0.
+                includes: fl
+                    .loaded_files
+                    .into_iter()
+                    .map(|p| wit::SourceInclude { path: p, lineno: 0 })
+                    .collect(),
+            }
+        }
+        Err(e) => out::LoadResult {
+            entries: vec![],
+            errors: vec![simple_error(e)],
+            options: options(ffi::LedgerOptions::default()),
+            plugins: vec![],
+            includes: vec![],
+        },
+    }
+}
+
+// validate/query/batch over a file match the JSON-RPC handlers: read the file
+// and run the single-source path (these do not resolve includes).
+
+pub fn validate_file(path: &str) -> out::ValidateResult {
+    match read_file(path) {
+        Ok(src) => validate(&src),
+        Err(e) => out::ValidateResult {
+            valid: false,
+            errors: vec![simple_error(e)],
+            parse_error_count: 0,
+            validate_error_count: 0,
+        },
+    }
+}
+
+pub fn query_file(path: &str, query_str: &str) -> out::QueryResult {
+    match read_file(path) {
+        Ok(src) => query(&src, query_str),
+        Err(e) => out::QueryResult {
+            columns: vec![],
+            rows: vec![],
+            errors: vec![simple_error(e)],
+        },
+    }
+}
+
+pub fn batch_file(path: &str, queries: &[String]) -> out::BatchResult {
+    match read_file(path) {
+        Ok(src) => batch(&src, queries),
+        Err(e) => out::BatchResult {
+            load: out::LoadResult {
+                entries: vec![],
+                errors: vec![simple_error(e)],
+                options: options(ffi::LedgerOptions::default()),
+                plugins: vec![],
+                includes: vec![],
+            },
+            queries: vec![],
+        },
+    }
+}

@@ -47,26 +47,26 @@ impl LedgerGuest for Component {
     fn load(source: String) -> LoadResult {
         convert::load(&source, "<stdin>")
     }
-    fn load_file(_path: String) -> LoadResult {
-        unimplemented!("{TODO}")
+    fn load_file(path: String) -> LoadResult {
+        convert::load_file(&path)
     }
     fn validate(source: String) -> ValidateResult {
         convert::validate(&source)
     }
-    fn validate_file(_path: String) -> ValidateResult {
-        unimplemented!("{TODO}")
+    fn validate_file(path: String) -> ValidateResult {
+        convert::validate_file(&path)
     }
     fn query(source: String, query: String) -> QueryResult {
         convert::query(&source, &query)
     }
-    fn query_file(_path: String, _query: String) -> QueryResult {
-        unimplemented!("{TODO}")
+    fn query_file(path: String, query: String) -> QueryResult {
+        convert::query_file(&path, &query)
     }
     fn batch(source: String, queries: Vec<String>) -> BatchResult {
         convert::batch(&source, &queries)
     }
-    fn batch_file(_path: String, _queries: Vec<String>) -> BatchResult {
-        unimplemented!("{TODO}")
+    fn batch_file(path: String, queries: Vec<String>) -> BatchResult {
+        convert::batch_file(&path, &queries)
     }
 }
 

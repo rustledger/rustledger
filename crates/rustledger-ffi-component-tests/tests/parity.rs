@@ -18,7 +18,7 @@
 use anyhow::Result;
 use wasmtime::component::{Component, Linker, ResourceTable};
 use wasmtime::{Engine, Store};
-use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
+use wasmtime_wasi::{DirPerms, FilePerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 wasmtime::component::bindgen!({
     world: "rustledger",
@@ -54,6 +54,27 @@ fn instantiate() -> Result<(Store<Host>, Rustledger)> {
         Host {
             table: ResourceTable::new(),
             wasi: WasiCtxBuilder::new().build(),
+        },
+    );
+    let inst = Rustledger::instantiate(&mut store, &component, &linker)?;
+    Ok((store, inst))
+}
+
+/// Like [`instantiate`], but grants the guest read access to `host_dir`,
+/// mounted at `/work`, so `load-file` can read files through WASI.
+fn instantiate_in(host_dir: &std::path::Path) -> Result<(Store<Host>, Rustledger)> {
+    let engine = Engine::default();
+    let component = Component::from_file(&engine, component_path())?;
+    let mut linker = Linker::<Host>::new(&engine);
+    wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
+    let wasi = WasiCtxBuilder::new()
+        .preopened_dir(host_dir, "/work", DirPerms::READ, FilePerms::READ)?
+        .build();
+    let mut store = Store::new(
+        &engine,
+        Host {
+            table: ResourceTable::new(),
+            wasi,
         },
     );
     let inst = Rustledger::instantiate(&mut store, &component, &linker)?;
@@ -274,6 +295,126 @@ fn custom_directive_values_keep_their_type_tag() -> Result<()> {
     assert!(
         types.contains(&"string"),
         "quoted arg must keep value-type \"string\", got {types:?}",
+    );
+    Ok(())
+}
+
+// End-to-end `load-file` tests (#1402). These exercise the file path through
+// WASI: the host preopens a temp dir at `/work`, the guest reads `.bean` files
+// from it. This is the only coverage of the `load-file` export and its
+// `allow-unrestricted-includes` / `plugins` parameters.
+
+#[test]
+fn load_file_reads_and_resolves_includes() -> Result<()> {
+    if !component_path().exists() {
+        return Ok(());
+    }
+    let dir = tempfile::tempdir()?;
+    std::fs::write(
+        dir.path().join("sub.bean"),
+        "2024-01-01 open Assets:Cash USD\n",
+    )?;
+    std::fs::write(
+        dir.path().join("main.bean"),
+        "include \"sub.bean\"\n2024-01-02 open Expenses:Food USD\n",
+    )?;
+    let (mut store, inst) = instantiate_in(dir.path())?;
+    let r =
+        inst.rustledger_ledger_ledger()
+            .call_load_file(&mut store, "/work/main.bean", true, &[])?;
+    assert!(r.errors.is_empty(), "load_file errored: {:?}", r.errors);
+    // Opens from both the entry file and the included file.
+    assert!(
+        r.entries.len() >= 2,
+        "expected entries from main + included file, got {}",
+        r.entries.len(),
+    );
+    Ok(())
+}
+
+#[test]
+fn load_file_path_security_confines_cross_tree_includes() -> Result<()> {
+    if !component_path().exists() {
+        return Ok(());
+    }
+    let dir = tempfile::tempdir()?;
+    std::fs::create_dir(dir.path().join("entry"))?;
+    std::fs::create_dir(dir.path().join("sibling"))?;
+    std::fs::write(
+        dir.path().join("sibling/data.bean"),
+        "2024-01-01 open Assets:Cash USD\n",
+    )?;
+    std::fs::write(
+        dir.path().join("entry/main.bean"),
+        "include \"../sibling/data.bean\"\n2024-01-02 open Expenses:Food USD\n",
+    )?;
+    let (mut store, inst) = instantiate_in(dir.path())?;
+    // Confined (allow-unrestricted-includes = false): the `../sibling` include
+    // escapes the entry file's directory tree and must be rejected.
+    let confined = inst.rustledger_ledger_ledger().call_load_file(
+        &mut store,
+        "/work/entry/main.bean",
+        false,
+        &[],
+    )?;
+    assert!(
+        !confined.errors.is_empty(),
+        "cross-tree include must error when confined (path security on)",
+    );
+    // Unrestricted (true): the same include resolves cleanly.
+    let open = inst.rustledger_ledger_ledger().call_load_file(
+        &mut store,
+        "/work/entry/main.bean",
+        true,
+        &[],
+    )?;
+    assert!(
+        open.errors.is_empty(),
+        "cross-tree include should resolve when unrestricted: {:?}",
+        open.errors,
+    );
+    Ok(())
+}
+
+#[test]
+fn load_file_runs_requested_plugin() -> Result<()> {
+    if !component_path().exists() {
+        return Ok(());
+    }
+    use rustledger::ledger::types::Directive;
+    let dir = tempfile::tempdir()?;
+    // A lot purchased at cost; `implicit_prices` synthesizes a Price directive.
+    std::fs::write(
+        dir.path().join("main.bean"),
+        "\
+2024-01-01 open Assets:Cash USD
+2024-01-01 open Assets:Stock STOCK
+2024-01-02 * \"buy\"
+  Assets:Stock  10 STOCK {5 USD}
+  Assets:Cash  -50 USD
+",
+    )?;
+    let (mut store, inst) = instantiate_in(dir.path())?;
+    let without =
+        inst.rustledger_ledger_ledger()
+            .call_load_file(&mut store, "/work/main.bean", true, &[])?;
+    let with = inst.rustledger_ledger_ledger().call_load_file(
+        &mut store,
+        "/work/main.bean",
+        true,
+        &["implicit_prices".to_string()],
+    )?;
+    let count_prices = |entries: &[Directive]| {
+        entries
+            .iter()
+            .filter(|d| matches!(d, Directive::Price(_)))
+            .count()
+    };
+    assert!(
+        count_prices(&with.entries) > count_prices(&without.entries),
+        "implicit_prices should synthesize a Price directive: without={} with={}",
+        count_prices(&without.entries),
+        count_prices(&with.entries),
     );
     Ok(())
 }

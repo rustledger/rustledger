@@ -13,6 +13,7 @@ publish = false
 wasmtime = { version = "45", features = ["component-model"] }
 wasmtime-wasi = "45"
 anyhow = "1"
+tempfile.workspace = true
 rustledger-ffi-wasi.workspace = true
 
 [lints]

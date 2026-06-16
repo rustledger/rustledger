@@ -3316,6 +3316,7 @@ version = "0.16.0"
 dependencies = [
  "anyhow",
  "rustledger-ffi-wasi",
+ "tempfile",
  "wasmtime",
  "wasmtime-wasi",
 ]
